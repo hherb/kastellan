@@ -9,9 +9,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// Covers loopback, RFC1918 private, link-local, unique-local, CGNAT,
 /// multicast, unspecified, class-E reserved, and the fixed-prefix IPv4-in-IPv6
 /// transition encodings (IPv4-mapped, IPv4-compatible, IPv4-translated,
-/// well-known NAT64 `64:ff9b::/96`, 6to4) — each unwrapped + re-checked as v4.
-/// See [`embedded_transition_v4`] for the residual gap (site-specific NAT64
-/// prefixes, Teredo, ISATAP), tracked as a follow-up issue.
+/// NAT64 `64:ff9b::/96` well-known + `64:ff9b:1::/48` RFC 8215 local-use, 6to4)
+/// — each unwrapped + re-checked as v4. See [`embedded_transition_v4`] for the
+/// residual gap (site-specific NAT64 prefixes, Teredo, ISATAP).
 pub fn is_denied_range(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_denied_v4(v4),
@@ -43,22 +43,26 @@ pub fn is_denied_range(ip: IpAddr) -> bool {
 /// allowlisted hostname could resolve to an embedded private/loopback v4 and
 /// bypass the v4 deny list entirely (audit finding #4).
 ///
-/// **Not covered (documented residual, tracked as a follow-up issue):**
+/// The two *fixed* NAT64 prefixes are both covered: the well-known
+/// `64:ff9b::/96` (which dominates real DNS64 deployments) and RFC 8215's
+/// `64:ff9b:1::/48` local-use prefix (the /48 split-embed unwrapped per RFC
+/// 6052 §2.2, issue #393).
+///
+/// **Not covered (documented residual):**
 /// - *Site-specific NAT64 prefixes* (RFC 6052 Network-Specific Prefixes at
-///   /32../64, and RFC 8215's `64:ff9b:1::/48` local-use prefix). The proxy
-///   cannot know a host's configured NAT64 prefix, and for prefixes shorter
-///   than /96 the embedded v4 is split around the reserved bits 64..71, so it
-///   cannot be extracted soundly without that config. The well-known
-///   `64:ff9b::/96` prefix — which dominates real DNS64 deployments — *is*
-///   covered above.
+///   /32../64). The proxy cannot know a host's configured NAT64 prefix, and for
+///   these variable prefixes the embedded v4 is split around the reserved bits
+///   64..71 at a position that depends on the (unknown) prefix length, so it
+///   cannot be extracted soundly.
 /// - *Teredo* (`2001::/32`) and *ISATAP* (`::0:5efe:a.b.c.d`) embed a v4 in
 ///   positions other than the trailing 32 bits; resolvers do not synthesise
 ///   these for allowlisted hostnames, so they are a weaker vector.
 ///
-/// These are unreachable on the common well-known-prefix deployment; a
-/// belt-and-braces fix (or a connect-time re-check against the actual peer
-/// address) is tracked separately rather than inviting a subtle split-embed
-/// bug in this security-critical predicate.
+/// The uniform structural fix for the site-specific-NSP residual is a
+/// connect-time re-check of the *actual* peer address through
+/// [`is_denied_range`] (which also closes any future resolver-synthesis
+/// surprise); it is tracked on #393 rather than inviting a config-dependent
+/// split-embed guess in this security-critical predicate.
 fn embedded_transition_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let s = ip.segments();
     let trailing_v4 = || {
@@ -83,6 +87,21 @@ fn embedded_transition_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     // NAT64 well-known 64:ff9b::/96 (RFC 6052): [0x0064,0xff9b,0,0,0,0,v4].
     if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
         return Some(trailing_v4());
+    }
+    // NAT64 RFC 8215 local-use prefix 64:ff9b:1::/48. Unlike a *site-specific*
+    // NSP (whose prefix the proxy cannot know), this one is FIXED, so the
+    // embedded v4 is extractable. Per RFC 6052 §2.2 a /48 prefix splits the v4
+    // around the reserved u-octet (bits 64..71): v4 = [s3.hi, s3.lo, s4.lo,
+    // s5.hi]. We ignore the u-octet's value rather than requiring it be zero —
+    // fail-closed, so a non-conformant `u` cannot smuggle a private v4 past the
+    // check and fall through to `is_denied_v6` (which would allow it).
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0x0001 {
+        return Some(Ipv4Addr::new(
+            (s[3] >> 8) as u8,
+            (s[3] & 0xff) as u8,
+            (s[4] & 0xff) as u8,
+            (s[5] >> 8) as u8,
+        ));
     }
     // 6to4 2002::/16 (RFC 3056): embeds the v4 in bits 16..48 (segs[1],[2]).
     if s[0] == 0x2002 {
@@ -224,6 +243,29 @@ mod tests {
         // NAT64-embedded *public* v4 (8.8.8.8) is still routable → allowed.
         let pub64 = IpAddr::V6(Ipv6Addr::new(0x0064, 0xff9b, 0, 0, 0, 0, 0x0808, 0x0808));
         assert!(!is_denied_range(pub64), "NAT64-embedded 8.8.8.8 must be allowed");
+    }
+
+    #[test]
+    fn nat64_rfc8215_local_use_prefix_embedded_private_is_denied() {
+        // RFC 8215 local-use NAT64 prefix 64:ff9b:1::/48 (issue #393). Per RFC
+        // 6052 §2.2 the v4 splits around the reserved u-octet:
+        // v4 = [s3.hi, s3.lo, s4.lo, s5.hi].
+        // 127.0.0.1  → s3=0x7f00, s4=0x0000, s5=0x0100 → 64:ff9b:1:7f00:0:100::
+        let loop48 = IpAddr::V6(Ipv6Addr::new(0x0064, 0xff9b, 0x0001, 0x7f00, 0, 0x0100, 0, 0));
+        assert!(is_denied_range(loop48), "RFC 8215 NAT64-embedded 127.0.0.1 must be denied");
+        // 169.254.169.254 → s3=0xa9fe, s4=0x00a9, s5=0xfe00 → 64:ff9b:1:a9fe:a9:fe00::
+        let meta48 = IpAddr::V6(Ipv6Addr::new(0x0064, 0xff9b, 0x0001, 0xa9fe, 0x00a9, 0xfe00, 0, 0));
+        assert!(is_denied_range(meta48), "RFC 8215 NAT64-embedded 169.254.169.254 must be denied");
+        // A non-zero reserved u-octet (bits 64..71, the high byte of s4) must NOT
+        // let a private v4 slip past: we ignore u rather than requiring it be
+        // zero, so this still denies 127.0.0.1.
+        let loop48_dirty =
+            IpAddr::V6(Ipv6Addr::new(0x0064, 0xff9b, 0x0001, 0x7f00, 0xff00, 0x0100, 0, 0));
+        assert!(is_denied_range(loop48_dirty), "malformed-u NAT64 127.0.0.1 must still be denied");
+        // Embedding a public v4 (8.8.8.8 → s3=0x0808, s4=0x0008, s5=0x0800) stays
+        // routable → allowed.
+        let pub48 = IpAddr::V6(Ipv6Addr::new(0x0064, 0xff9b, 0x0001, 0x0808, 0x0008, 0x0800, 0, 0));
+        assert!(!is_denied_range(pub48), "RFC 8215 NAT64-embedded 8.8.8.8 must be allowed");
     }
 
     #[test]
