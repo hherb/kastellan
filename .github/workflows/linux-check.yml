@@ -73,6 +73,14 @@ jobs:
   # job closes the gap by compiling + linting just that one crate with the
   # feature on. It is a separate job (not a step in `check`) so the fast default
   # gate stays light and hermetic; the two run in parallel.
+  #
+  # `--all-targets` mirrors the `check` job above for the same reason: it also
+  # type-checks + lints the crate's `#[cfg(test)]` code, including the
+  # feature-gated test modules in `sdk_live.rs` (and its `#[cfg(all(test,
+  # feature = "live-matrix"))]` sibling wired in at `main.rs`). Without it those
+  # test modules are compiled by NO CI job — the default `check` excludes them
+  # (feature off) and a bare `cargo check` here excludes them (test cfg off) —
+  # so a regression there would still ship silently to the DGX, defeating #331.
   matrix-live-check:
     name: cargo check + clippy (matrix worker, live-matrix)
     runs-on: ubuntu-latest
@@ -87,8 +95,8 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo check (matrix worker, live-matrix feature)
-        run: cargo check -p kastellan-worker-matrix --features live-matrix --locked
+      - name: cargo check (matrix worker, all targets, live-matrix feature)
+        run: cargo check -p kastellan-worker-matrix --all-targets --features live-matrix --locked
 
-      - name: cargo clippy (matrix worker, live-matrix feature, deny warnings)
-        run: cargo clippy -p kastellan-worker-matrix --features live-matrix --locked -- -D warnings
+      - name: cargo clippy (matrix worker, all targets, live-matrix feature, deny warnings)
+        run: cargo clippy -p kastellan-worker-matrix --all-targets --features live-matrix --locked -- -D warnings
