@@ -1,11 +1,15 @@
 use anyhow::{anyhow, Context, Result};
-use kastellan_core::audit_mirror::{self, MirrorHandle};
-use kastellan_db::conn::ConnectSpec;
-use kastellan_db::default_data_dir;
-use sqlx::PgPool;
-use tokio::signal::unix::{signal, SignalKind};
-use tracing::{error, info};
 use std::sync::Arc;
+use tracing::info;
+
+// Daemon bring-up + shutdown helpers and the Matrix channel bring-up live in
+// sibling files under `main/` to keep this binary entrypoint under the 500-LOC
+// cap (Item 9b). `#[path]` is required because `main.rs` is a crate root — a
+// bare `mod bootstrap;` would resolve to `src/bootstrap.rs`, not `src/main/`.
+#[path = "main/bootstrap.rs"]
+mod bootstrap;
+#[path = "main/matrix_boot.rs"]
+mod matrix_boot;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,7 +33,7 @@ async fn main() -> Result<()> {
     // half-bootstrapped database would silently lose audit-log rows
     // and corrupt memory writes — a much worse failure mode than a
     // restart loop, which at least surfaces in logs.
-    let spec = bring_up_database().await?;
+    let spec = bootstrap::bring_up_database().await?;
 
     // Open the daemon-scoped pool and start the audit-log JSONL
     // mirror task. The pool's `after_connect` hook drops privilege to
@@ -44,7 +48,7 @@ async fn main() -> Result<()> {
     let pool = kastellan_db::pool::connect_runtime_pool(&spec)
         .await
         .context("opening daemon-scoped Postgres pool")?;
-    let mirror = start_audit_mirror(pool.clone()).await;
+    let mirror = bootstrap::start_audit_mirror(pool.clone()).await;
 
     // Crash sweep: any task left in 'running' from a previous daemon
     // instance whose lease has elapsed gets marked 'crashed'. Each
@@ -162,7 +166,7 @@ async fn main() -> Result<()> {
     let tool_registry = Arc::new(registry);
     // Best-effort audit row (was previously written inside build_tool_registry;
     // moved here now that the builder is side-effect-free).
-    if let Err(e) = write_registry_loaded_row(&pool, &loaded_tool_records).await {
+    if let Err(e) = bootstrap::write_registry_loaded_row(&pool, &loaded_tool_records).await {
         tracing::warn!(error = %e, "registry.loaded audit row insert failed");
     }
 
@@ -276,7 +280,7 @@ async fn main() -> Result<()> {
         // Best-effort audit row: a transient DB failure here must not
         // block daemon bring-up. The L0 rows themselves are already
         // committed; mirrors `write_registry_loaded_row` posture.
-        if let Err(e) = write_l0_seeded_row(&pool, &report).await {
+        if let Err(e) = bootstrap::write_l0_seeded_row(&pool, &report).await {
             tracing::warn!(error = %e, "l0.seeded audit row insert failed");
         }
         info!(
@@ -315,7 +319,7 @@ async fn main() -> Result<()> {
     // Vault::materialize calls.
     let vault = std::sync::Arc::new(kastellan_core::secrets::Vault::new());
     if let Ok(names_csv) = std::env::var("KASTELLAN_BOOTSTRAP_SECRETS") {
-        let names = parse_bootstrap_secrets_csv(&names_csv);
+        let names = bootstrap::parse_bootstrap_secrets_csv(&names_csv);
         if !names.is_empty() {
             let key_provider = kastellan_db::secrets::OsKeyringProvider::ensure_initialized()
                 .context("KASTELLAN_BOOTSTRAP_SECRETS: failed to initialize OS keyring provider")?;
@@ -347,7 +351,7 @@ async fn main() -> Result<()> {
     // read this env var or bind a caller-known plaintext to a known ref.
     #[cfg(debug_assertions)]
     if let Ok(spec) = std::env::var("KASTELLAN_TEST_VAULT_SEED") {
-        if let Some((ref_hex, plaintext)) = parse_test_vault_seed(&spec) {
+        if let Some((ref_hex, plaintext)) = bootstrap::parse_test_vault_seed(&spec) {
             vault
                 .seed_known_ref_for_test(ref_hex, plaintext.as_bytes())
                 .context("KASTELLAN_TEST_VAULT_SEED: seed_known_ref_for_test failed")?;
@@ -377,95 +381,15 @@ async fn main() -> Result<()> {
     info!("scheduler spawned (lane_fast + lane_long)");
 
     // ── Channel bus (comms slice #2 — Matrix). ──
-    // Gated on KASTELLAN_MATRIX_HOMESERVER_URL: unset ⇒ no channel, daemon is
-    // byte-identical to a Matrix-less build. When set, spawn the sandboxed live
-    // worker (restores its persisted session — do the one-time initial login
-    // with `kastellan-cli matrix probe`) and run a ChannelBus over the DB-backed
-    // pairing/authorizer + the tasks-queue event/completion seams. Authorization
-    // is fail-closed at the bus: only DB-paired peers' messages are enqueued.
-    let mut matrix_bus: Option<kastellan_core::channel::ChannelBus> = None;
-    if let Some(spawn_cfg) = kastellan_core::channel::matrix::daemon_spawn_config_from_env(
-        std::env::current_exe().ok().as_deref().and_then(|p| p.parent()),
-    ) {
-        // The worker's login is blocking (matrix.init waits for the SDK's login +
-        // first sync), so run it on a blocking thread under a bounded timeout: an
-        // unreachable homeserver fails-soft (channel not started) instead of
-        // hanging daemon startup, and it doesn't block an async worker thread. On
-        // timeout the blocking task is left to drain against the SDK's own HTTP
-        // timeouts (a blocking task can't be force-cancelled).
-        // Worker backend: Firecracker VM when the operator opted in
-        // (KASTELLAN_MATRIX_USE_MICROVM=1, Linux); else the host jail. The SIDECAR
-        // backend always stays the host bwrap/Seatbelt (5c invariant — the egress
-        // proxy needs a real network route; a VM here would boot a proxy with none).
-        #[cfg(target_os = "linux")]
-        let sidecar_backend: Arc<dyn kastellan_sandbox::SandboxBackend> =
-            Arc::clone(&sandboxes.bwrap);
-        #[cfg(target_os = "linux")]
-        let backend: Arc<dyn kastellan_sandbox::SandboxBackend> = if spawn_cfg.use_microvm {
-            Arc::clone(&sandboxes.firecracker)
-        } else {
-            Arc::clone(&sandboxes.bwrap)
-        };
-        #[cfg(target_os = "macos")]
-        let sidecar_backend: Arc<dyn kastellan_sandbox::SandboxBackend> =
-            Arc::clone(&sandboxes.seatbelt);
-        #[cfg(target_os = "macos")]
-        let backend: Arc<dyn kastellan_sandbox::SandboxBackend> = Arc::clone(&sandboxes.seatbelt);
+    // Gated on KASTELLAN_MATRIX_HOMESERVER_URL (checked inside): unset ⇒ `None`,
+    // and the daemon is byte-identical to a Matrix-less build. When set, spawns
+    // the sandboxed live worker and runs a ChannelBus over the DB-backed
+    // pairing/authorizer + the tasks-queue event/completion seams. Fail-soft:
+    // any spawn/login/connect failure logs and yields `None`. See
+    // `main/matrix_boot.rs`.
+    let matrix_bus = matrix_boot::spawn_matrix_channel(&pool, &sandboxes, &force_routing).await;
 
-        let egress = force_routing.as_ref().map(|fr| {
-            kastellan_core::channel::matrix::MatrixEgress {
-                sidecar_backend: Arc::clone(&sidecar_backend),
-                routing: Arc::clone(fr),
-            }
-        });
-        let spawn = tokio::task::spawn_blocking(move || {
-            kastellan_core::channel::matrix::spawn_matrix_worker(
-                backend,
-                kastellan_core::channel::ChannelId("matrix".to_string()),
-                &spawn_cfg,
-                egress,
-            )
-        });
-        const MATRIX_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-        match tokio::time::timeout(MATRIX_LOGIN_TIMEOUT, spawn).await {
-            Ok(Ok(Ok(worker))) => {
-                info!(identity = %worker.identity, "matrix worker logged in; starting channel bus");
-                let authorizer = Arc::new(
-                    kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()),
-                );
-                let pairing = Arc::new(
-                    kastellan_core::channel::pairing::DbPairingService::new(pool.clone()),
-                );
-                let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(pool.clone()));
-                match kastellan_core::channel::bus::PgCompletedTasks::connect(pool.clone()).await {
-                    Ok(completed) => {
-                        matrix_bus = Some(kastellan_core::channel::ChannelBus::spawn(
-                            vec![Box::new(worker.channel)],
-                            authorizer,
-                            Some(pairing),
-                            events,
-                            Box::new(completed),
-                        ));
-                        info!("matrix channel bus running");
-                    }
-                    Err(e) => {
-                        error!(error = %e, "matrix: PgCompletedTasks::connect failed; channel not started");
-                    }
-                }
-            }
-            Ok(Ok(Err(e))) => {
-                error!(error = %format!("{e:#}"), "matrix worker spawn/login failed; channel not started");
-            }
-            Ok(Err(join_err)) => {
-                error!(error = %join_err, "matrix worker spawn task panicked; channel not started");
-            }
-            Err(_elapsed) => {
-                error!("matrix worker login timed out (60s); channel not started");
-            }
-        }
-    }
-
-    wait_for_shutdown().await?;
+    bootstrap::wait_for_shutdown().await?;
 
     // Stop the channel bus first so no further inbound messages are enqueued and
     // the worker's stdin closes (clean worker exit).
@@ -488,186 +412,3 @@ async fn main() -> Result<()> {
     info!("kastellan core shutting down");
     Ok(())
 }
-
-/// Resolve cluster connection params from the environment, run the
-/// `kastellan-db` probe, emit the bring-up `audit_log` row, and return
-/// the resolved [`ConnectSpec`] for downstream pool/mirror setup.
-///
-/// Knobs:
-///   * `KASTELLAN_DATA_DIR` (optional) — absolute path to the cluster
-///     data dir. The probe assumes
-///     `default_socket_dir(data_dir) = <data_dir>/sockets`. Used by
-///     integration tests (`core/tests/supervisor_e2e.rs`) to point
-///     a test build of `kastellan` at a per-test temp cluster instead
-///     of the user's installed one. Production deployments leave
-///     this unset and rely on the `$HOME` default below.
-///   * `$HOME` — used by `default_data_dir()` when
-///     `KASTELLAN_DATA_DIR` is unset.
-///   * `$USER` — peer-auth role identity (read by
-///     `ConnectSpec::default_for`). systemd's `--user` manager and
-///     macOS launchd both inherit it from the operator's login
-///     record; the probe fails closed if it's missing.
-async fn bring_up_database() -> Result<ConnectSpec> {
-    let data_dir = match std::env::var_os("KASTELLAN_DATA_DIR") {
-        Some(p) => std::path::PathBuf::from(p),
-        None => default_data_dir()
-            .ok_or_else(|| anyhow!("$HOME unset; cannot resolve cluster data dir"))?,
-    };
-    let spec = ConnectSpec::default_for(&data_dir)
-        .context("resolving Postgres connection from environment")?;
-
-    info!(
-        data_dir = %data_dir.display(),
-        socket_dir = %spec.socket_dir.display(),
-        user = %spec.user,
-        database = %spec.database,
-        "running database probe"
-    );
-
-    kastellan_db::probe::run(
-        &spec,
-        "core",
-        "startup",
-        serde_json::json!({
-            "version": kastellan_core::VERSION,
-        }),
-    )
-    .await
-    .context("kastellan_db::probe::run failed")?;
-
-    info!("{}", kastellan_core::STARTUP_READY_MSG);
-    Ok(spec)
-}
-
-/// Spawn the audit-log JSONL mirror task.
-///
-/// Uses [`audit_mirror::ENV_STATE_DIR`] when set (test seam, mirroring
-/// `KASTELLAN_DATA_DIR` for the cluster path), otherwise
-/// [`audit_mirror::default_state_dir`] = `$HOME/.local/state/kastellan`.
-///
-/// Returns `None` if the mirror task could not be spawned. We log the
-/// error and continue rather than aborting daemon startup: the audit
-/// row in Postgres is the source of truth, and missing JSONL output
-/// is an operator-visibility regression, not a correctness one. A
-/// future hardening pass could promote this to fail-closed if the
-/// JSONL stream becomes a contractual signal for any consumer.
-async fn start_audit_mirror(pool: PgPool) -> Option<MirrorHandle> {
-    let state_dir = match std::env::var_os(audit_mirror::ENV_STATE_DIR) {
-        Some(p) => std::path::PathBuf::from(p),
-        None => match audit_mirror::default_state_dir() {
-            Some(p) => p,
-            None => {
-                tracing::warn!(
-                    "$HOME unset; audit_mirror disabled (operator visibility \
-                     reduced — DB row is still the source of truth)"
-                );
-                return None;
-            }
-        },
-    };
-    match audit_mirror::spawn_mirror(pool, state_dir.clone()).await {
-        Ok(h) => {
-            info!(state_dir = %state_dir.display(), "audit_mirror spawned");
-            Some(h)
-        }
-        Err(e) => {
-            tracing::error!(
-                state_dir = %state_dir.display(),
-                error = %e,
-                "audit_mirror spawn failed; continuing without on-disk JSONL"
-            );
-            None
-        }
-    }
-}
-
-/// Block until the supervisor (or an interactive operator) tells us
-/// to stop. systemd's `systemctl --user stop` sends SIGTERM by default;
-/// macOS launchd's `bootout` sends SIGTERM too. SIGINT is the Ctrl-C
-/// path for `cargo run` in dev. Either signal returns Ok and lets
-/// `main` log a clean shutdown line and exit 0 — exactly what
-/// `Restart=on-failure` (systemd's translation of `keep_alive=true`)
-/// treats as success, so a stop-induced exit doesn't trip the restart
-/// policy and trigger an unwanted respawn.
-async fn wait_for_shutdown() -> Result<()> {
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
-    tokio::select! {
-        _ = sigterm.recv() => {}
-        _ = sigint.recv() => {}
-    }
-    Ok(())
-}
-
-async fn write_registry_loaded_row(
-    pool: &sqlx::PgPool,
-    tools: &[kastellan_core::registry_build::LoadedToolRecord],
-) -> Result<(), kastellan_db::DbError> {
-    let payload = kastellan_core::registry_build::build_registry_loaded_payload(tools);
-    kastellan_db::audit::insert(
-        pool,
-        "core",
-        kastellan_core::scheduler::audit::ACTION_REGISTRY_LOADED,
-        payload,
-    )
-    .await
-    .map(|_| ())
-}
-
-async fn write_l0_seeded_row(
-    pool: &sqlx::PgPool,
-    report: &kastellan_core::memory::l0_seed::L0SeedReport,
-) -> Result<(), kastellan_db::DbError> {
-    let payload = serde_json::json!({
-        "rules_loaded": report.rules_loaded,
-        "new_rows_written": report.new_rows_written,
-        "unchanged_skipped": report.unchanged_skipped,
-        "source_path": report.source_path.to_string_lossy(),
-        "source_sha256": report.source_sha256,
-        "entities_linked": report.entities_linked,
-        "link_failures": report.link_failures,
-    });
-    kastellan_db::audit::insert(
-        pool,
-        "core",
-        kastellan_core::scheduler::audit::ACTION_L0_SEEDED,
-        payload,
-    )
-    .await
-    .map(|_| ())
-}
-
-/// Parses the `KASTELLAN_BOOTSTRAP_SECRETS` CSV value into a list of
-/// trimmed, non-empty secret names. Handles leading/trailing commas,
-/// internal whitespace, and all-whitespace entries.
-///
-/// Pure function — no I/O, no side effects.
-fn parse_bootstrap_secrets_csv(csv: &str) -> Vec<&str> {
-    csv.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Parses the **test-only** `KASTELLAN_TEST_VAULT_SEED` value (`<ref_hex>=<plaintext>`)
-/// into its `(ref_hex, plaintext)` halves, splitting on the **first** `=` only
-/// (a secret may itself contain `=`). Returns `None` when no `=` is present.
-///
-/// Pure function — no I/O, no side effects, no trimming (the plaintext is taken
-/// verbatim; trimming a secret could corrupt it). The ref tail's own format is
-/// validated by [`kastellan_core::secrets::Vault::seed_known_ref_for_test`].
-///
-/// `#[cfg(debug_assertions)]`: the only caller is the debug-only seed block, so
-/// this helper does not exist in a release build (keeps it off the production
-/// surface and clippy-`dead_code`-clean).
-#[cfg(debug_assertions)]
-fn parse_test_vault_seed(spec: &str) -> Option<(&str, &str)> {
-    spec.split_once('=')
-}
-
-// Tests for the pure parse helpers live in a sibling file to keep `main.rs`
-// nearer the 500-LOC cap (the binary's `async fn main` already dominates it).
-#[cfg(test)]
-#[path = "main_tests.rs"]
-mod tests;
-

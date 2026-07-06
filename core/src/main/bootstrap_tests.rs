@@ -1,7 +1,7 @@
-//! Unit tests for `main.rs`'s pure parse helpers (`parse_bootstrap_secrets_csv`
-//! and the debug-only `parse_test_vault_seed`). Lifted out of `main.rs` to keep
-//! the binary entrypoint nearer the 500-LOC cap; `super::` resolves to the
-//! `kastellan` binary crate root.
+//! Unit tests for `bootstrap.rs`'s pure parse helpers
+//! (`parse_bootstrap_secrets_csv` and the debug-only `parse_test_vault_seed`).
+//! Colocated with the code under test after the `main.rs` prod-split (Item 9b);
+//! `super::` resolves to the `bootstrap` module.
 
 use super::parse_bootstrap_secrets_csv;
 
