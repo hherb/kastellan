@@ -118,8 +118,8 @@ pub fn landlock_disabled_by_profile(profile: Option<&str>) -> bool {
     profile == Some("none")
 }
 
-/// Read [`LANDLOCK_PROFILE_ENV`], [`KASTELLAN_LANDLOCK_RW`], and
-/// [`KASTELLAN_LANDLOCK_RO`] from the environment and apply the ruleset — or
+/// Read [`LANDLOCK_PROFILE_ENV`], `KASTELLAN_LANDLOCK_RW`, and
+/// `KASTELLAN_LANDLOCK_RO` from the environment and apply the ruleset — or
 /// return [`LandlockReport::Disabled`] when the profile is `"none"`. Used by
 /// [`crate::lock_down`].
 pub fn apply_from_env() -> Result<LandlockReport, LockdownError> {
