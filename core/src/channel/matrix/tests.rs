@@ -1,5 +1,10 @@
 use super::*;
-use crate::channel::ConversationId;
+// Internal helpers not part of the public surface (so not re-exported by the
+// parent) are imported from their sibling modules directly.
+use super::config::parse_daemon_spawn_config;
+use super::policy::matrix_vm_password_path;
+use crate::channel::{ConversationId, PeerId};
+use kastellan_sandbox::{Net, Profile};
 
 #[test]
 fn parse_matrix_poll_decodes_wire_events() {
@@ -199,7 +204,7 @@ fn policy_builder_omits_ca_when_not_force_routed() {
 
 #[test]
 fn vm_password_path_is_pid_scoped_under_tmp_anchor() {
-    let p = super::matrix_vm_password_path(4242);
+    let p = matrix_vm_password_path(4242);
     assert_eq!(
         p,
         std::path::PathBuf::from("/tmp/kastellan-matrix-4242/.login-password")
@@ -210,7 +215,6 @@ fn vm_password_path_is_pid_scoped_under_tmp_anchor() {
 
 #[test]
 fn vm_policy_has_persistent_store_at_data_and_microvm_env() {
-    use kastellan_sandbox::{Net, Profile};
     let store_image = std::path::PathBuf::from("/var/lib/kastellan/microvm/matrix-state.ext4");
     let p = super::build_matrix_vm_policy(
         "matrix.kastellan.dev",
