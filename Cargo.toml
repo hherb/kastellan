@@ -14,6 +14,7 @@ members = [
     "workers/shell-exec",
     "workers/web-common",
     "workers/web-fetch",
+    "workers/web-research",
     "workers/web-search",
     "workers/egress-proxy",
     "workers/matrix-wire",

@@ -2452,6 +2452,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kastellan-worker-web-research"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "kastellan-worker-web-common",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "kastellan-worker-web-search"
 version = "0.1.0"
 dependencies = [
