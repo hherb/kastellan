@@ -63,8 +63,10 @@ pub enum ResearchError {
 
 fn short_fetch_reason(e: &FetchError) -> String {
     match e {
-        FetchError::HostDenied(h) => format!("fetch-failed: redirect host {h} off-allowlist"),
-        FetchError::NonHttps(s) => format!("fetch-failed: redirect scheme {s} not https"),
+        // HostDenied/NonHttps can fire on the initial hit URL (hop 0) as well as
+        // on a redirect target, so the reason says "target", not "redirect".
+        FetchError::HostDenied(h) => format!("fetch-failed: target host {h} off-allowlist"),
+        FetchError::NonHttps(s) => format!("fetch-failed: target scheme {s} not https"),
         FetchError::TooManyRedirects => "fetch-failed: too many redirects".to_string(),
         FetchError::MissingLocation => "fetch-failed: redirect without Location".to_string(),
         FetchError::BadUrl(m) => format!("fetch-failed: bad url: {m}"),
