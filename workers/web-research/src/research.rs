@@ -20,22 +20,15 @@ use crate::chunk::chunk_passages;
 use crate::rank::{PassageRanker, ScoredPassage};
 
 /// Default / max number of pages fetched per research call.
-// Consumed by the Task 2.4 handler as the tool schema default; not yet read
-// from within this crate.
-#[allow(dead_code)]
 pub const DEFAULT_MAX_SOURCES: usize = 3;
 pub const MAX_MAX_SOURCES: usize = 8;
 /// Default / max passages kept per source.
-#[allow(dead_code)]
 pub const DEFAULT_MAX_PASSAGES: usize = 3;
 pub const MAX_MAX_PASSAGES: usize = 10;
 /// How many search hits to consider (before allowlist filtering).
 pub const SEARCH_COUNT: usize = 10;
 
 /// A fetched source with its top-ranked passages.
-// `title`/`snippet` are surfaced to the caller via the Task 2.4 handler's JSON
-// response; not read from within this crate yet.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct SourcePassages {
     pub url: String,
@@ -45,7 +38,6 @@ pub struct SourcePassages {
 }
 
 /// A hit that was not turned into passages, with the reason (never dropped).
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct UnfetchedSource {
     pub url: String,
@@ -66,9 +58,6 @@ pub struct ResearchOutcome {
 #[derive(Debug)]
 pub enum ResearchError {
     EmptyQuery,
-    // Inner value surfaced via Debug/Task 2.4 error mapping; not read as data
-    // within this crate yet.
-    #[allow(dead_code)]
     Search(SearchError),
 }
 
