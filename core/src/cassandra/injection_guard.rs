@@ -135,7 +135,7 @@ impl GuardProfile {
     /// fetching workers because they carry an arbitrary-content channel.
     pub fn for_tool(tool: &str) -> GuardProfile {
         match tool {
-            "web-fetch" | "web-search" | "browser-driver" => GuardProfile::Relaxed,
+            "web-fetch" | "web-search" | "web-research" | "browser-driver" => GuardProfile::Relaxed,
             _ => GuardProfile::Strict,
         }
     }

@@ -23,6 +23,7 @@ pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] = &[
     &crate::workers::python_exec::PythonExecManifest,
     &crate::workers::web_fetch::WebFetchManifest,
     &crate::workers::web_search::WebSearchManifest,
+    &crate::workers::web_research::WebResearchManifest,
     &crate::workers::browser_driver::BrowserDriverManifest,
 ];
 
