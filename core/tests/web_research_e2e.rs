@@ -261,6 +261,11 @@ fn real_research_with_hybrid_ranking() {
         // `research::research` — the effective embedder is `None` on query-embed
         // failure). If this is "lexical", the embed endpoint was unreachable from
         // inside the jail or the response failed to decode — inspect `embed_note`.
+        //
+        // Scope: this flag proves the *transport* executed — real `post()` bytes
+        // crossed the jail and the response decoded. The RRF *fusion order* (that
+        // the embedding lane actually reorders passages) is covered hermetically
+        // by the `rank`/`research` unit tests; this e2e closes only the wire gap.
         assert_eq!(
             result["ranking"], "hybrid",
             "expected hybrid ranking (query embedded via the live endpoint); embed_note: {:?}",
