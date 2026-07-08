@@ -15,7 +15,6 @@ use kastellan_worker_web_common::allowlist::HostAllowlist;
 use kastellan_worker_web_common::http::{make_get, HttpGet};
 use kastellan_worker_web_common::search::{validate_endpoint, SearchError};
 
-use crate::rank::LexicalRanker;
 use crate::research::{
     research, ResearchError, ResearchOutcome, DEFAULT_MAX_PASSAGES, DEFAULT_MAX_SOURCES,
 };
@@ -103,7 +102,6 @@ pub struct WebResearchHandler<T: HttpGet> {
     endpoint: Url,
     allowlist: HostAllowlist,
     transport: T,
-    ranker: LexicalRanker,
 }
 
 impl WebResearchHandler<Box<dyn HttpGet>> {
@@ -119,14 +117,14 @@ impl WebResearchHandler<Box<dyn HttpGet>> {
         let endpoint = validate_endpoint(&endpoint_raw, &allowlist)
             .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
         let transport = make_get("kastellan-web-research/0")?;
-        Ok(Self { endpoint, allowlist, transport, ranker: LexicalRanker })
+        Ok(Self { endpoint, allowlist, transport })
     }
 }
 
 impl<T: HttpGet> WebResearchHandler<T> {
     #[cfg(test)]
     fn with_parts(endpoint: Url, allowlist: HostAllowlist, transport: T) -> Self {
-        Self { endpoint, allowlist, transport, ranker: LexicalRanker }
+        Self { endpoint, allowlist, transport }
     }
 }
 
@@ -143,7 +141,7 @@ impl<T: HttpGet> Handler for WebResearchHandler<T> {
         let max_passages = p.max_passages.unwrap_or(DEFAULT_MAX_PASSAGES);
 
         let out = research(
-            &self.transport, &self.endpoint, &self.allowlist, &self.ranker,
+            &self.transport, &self.endpoint, &self.allowlist, None,
             &p.query, max_sources, max_passages,
         ).map_err(research_err_to_rpc)?;
 

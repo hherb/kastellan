@@ -1,9 +1,9 @@
 //! Rank passages by relevance to the query.
 //!
-//! [`PassageRanker`] is the seam: v1 ships [`LexicalRanker`] (pure BM25, no
-//! model). A future `EmbeddingRanker` (semantic, via an embedding endpoint) and
-//! a `HybridRanker` (RRF-fused, mirroring `core::memory::recall`) implement the
-//! same trait and drop in without touching `research.rs`. See the design spec's
+//! Pure ranking primitives, fused by the caller (`research()`): [`bm25`] is the
+//! lexical lane (no model), [`cosine`] is the semantic lane over embedding
+//! vectors, and [`rrf_fuse`] combines both lanes' rankings via Reciprocal Rank
+//! Fusion (mirroring `core::memory::recall`). See the design spec's
 //! "Extensibility" section.
 
 /// A passage with its relevance score (higher = more relevant).
@@ -13,19 +13,9 @@ pub struct ScoredPassage {
     pub score: f64,
 }
 
-/// Rank passages against a query, best-first. Implementations omit passages
-/// with no relevance signal (score <= 0).
-pub trait PassageRanker {
-    fn rank(&self, query: &str, passages: &[String]) -> Vec<ScoredPassage>;
-}
-
 /// BM25 free-parameters (Robertson/Sparck-Jones defaults).
 const K1: f64 = 1.5;
 const B: f64 = 0.75;
-
-/// Lexical BM25 ranker. Treats the passage set as the corpus (each passage a
-/// document) and scores each against the query terms. Pure + deterministic.
-pub struct LexicalRanker;
 
 /// Lowercase unicode-word tokens (alphanumeric runs). Punctuation is a separator.
 fn tokenize(s: &str) -> Vec<String> {
@@ -77,17 +67,7 @@ pub fn bm25(query: &str, passages: &[String]) -> Vec<ScoredPassage> {
     scored
 }
 
-impl PassageRanker for LexicalRanker {
-    fn rank(&self, query: &str, passages: &[String]) -> Vec<ScoredPassage> {
-        bm25(query, passages)
-    }
-}
-
 /// L2 norm of a vector.
-// Not yet wired into a caller outside `cosine`'s tests — `EmbeddingRanker`/
-// `HybridRanker` (a later task) will call `cosine` from production code, at
-// which point this stops being dead code from clippy's point of view.
-#[allow(dead_code)]
 fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
@@ -97,8 +77,6 @@ fn l2_norm(v: &[f32]) -> f32 {
 /// than the query embedding, or yields a non-positive similarity are omitted
 /// (mirrors `bm25`'s "no signal -> omit"). `passage_embs[i]` pairs with
 /// `passages[i]`; a length mismatch between the two slices yields an empty result.
-// Not yet called outside tests; a later task wires this into `EmbeddingRanker`.
-#[allow(dead_code)]
 pub fn cosine(query_emb: &[f32], passages: &[String], passage_embs: &[Vec<f32>])
     -> Vec<ScoredPassage>
 {
@@ -129,7 +107,6 @@ pub fn cosine(query_emb: &[f32], passages: &[String], passage_embs: &[Vec<f32>])
 }
 
 /// RRF damping constant (classical k = 60, matching `core::memory::recall`).
-#[allow(dead_code)]
 pub const RRF_K: f64 = 60.0;
 
 /// Fuse two best-first ranked lists via parameter-free Reciprocal Rank Fusion.
@@ -137,8 +114,6 @@ pub const RRF_K: f64 = 60.0;
 /// is 1-based position in that lane. Keyed by passage text (both lanes rank the
 /// same passage set). Best-first; stable tie-break by first-seen order (a passage
 /// appearing in only one lane still surfaces — the union is deliberate recall).
-// Not yet called outside tests; a later task wires this into `HybridRanker`.
-#[allow(dead_code)]
 pub fn rrf_fuse(lexical: &[ScoredPassage], semantic: &[ScoredPassage])
     -> Vec<ScoredPassage>
 {
@@ -192,7 +167,7 @@ mod tests {
             "The cat sat on the mat and slept all afternoon.".to_string(),
             "Rust uses bwrap to create unprivileged user namespaces for sandboxing.".to_string(),
         ];
-        let r = LexicalRanker.rank("bwrap user namespaces sandbox", &passages);
+        let r = bm25("bwrap user namespaces sandbox", &passages);
         assert_eq!(r.len(), 1, "off-topic passage should score 0 and be omitted");
         assert!(r[0].text.contains("bwrap"));
         assert!(r[0].score > 0.0);
@@ -204,27 +179,27 @@ mod tests {
             "namespaces are mentioned once here.".to_string(),
             "user namespaces user namespaces user namespaces everywhere.".to_string(),
         ];
-        let r = LexicalRanker.rank("user namespaces", &passages);
+        let r = bm25("user namespaces", &passages);
         assert_eq!(r.len(), 2);
         assert!(r[0].text.starts_with("user namespaces user"), "denser match should rank first");
     }
 
     #[test]
     fn empty_query_or_passages_yields_empty() {
-        assert!(LexicalRanker.rank("", &["anything".to_string()]).is_empty());
-        assert!(LexicalRanker.rank("q", &[]).is_empty());
+        assert!(bm25("", &["anything".to_string()]).is_empty());
+        assert!(bm25("q", &[]).is_empty());
     }
 
     #[test]
     fn no_shared_terms_yields_empty() {
         let passages = vec!["completely unrelated content".to_string()];
-        assert!(LexicalRanker.rank("xyzzy plugh", &passages).is_empty());
+        assert!(bm25("xyzzy plugh", &passages).is_empty());
     }
 
     #[test]
     fn tokenization_is_case_and_punctuation_insensitive() {
         let passages = vec!["BWRAP, the sandbox!".to_string()];
-        let r = LexicalRanker.rank("bwrap", &passages);
+        let r = bm25("bwrap", &passages);
         assert_eq!(texts(&r), vec!["BWRAP, the sandbox!"]);
     }
 
