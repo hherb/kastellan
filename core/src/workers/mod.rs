@@ -12,4 +12,5 @@ pub mod interpreter_deps;
 pub mod python_exec;
 pub mod shell_exec;
 pub mod web_fetch;
+pub mod web_research;
 pub mod web_search;

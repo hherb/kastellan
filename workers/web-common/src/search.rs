@@ -6,8 +6,8 @@ use std::net::IpAddr;
 
 use url::Url;
 
-use kastellan_worker_web_common::allowlist::HostAllowlist;
-use kastellan_worker_web_common::http::HttpGet;
+use crate::allowlist::HostAllowlist;
+use crate::http::HttpGet;
 
 use crate::parse::{parse_results, Hit};
 
@@ -127,7 +127,7 @@ pub fn search<T: HttpGet>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kastellan_worker_web_common::testing::al;
+    use crate::testing::al;
 
     #[test]
     fn loopback_recognises_localhost_and_loopback_ips() {
@@ -192,8 +192,8 @@ mod tests {
         assert!(pairs.contains(&("format".into(), "json".into())));
     }
 
-    use kastellan_worker_web_common::http::RawResponse;
-    use kastellan_worker_web_common::testing::{json_resp, redirect_to, FakeGet};
+    use crate::http::RawResponse;
+    use crate::testing::{json_resp, redirect_to, FakeGet};
 
     fn endpoint() -> Url {
         Url::parse("https://searx.example.org/search").unwrap()

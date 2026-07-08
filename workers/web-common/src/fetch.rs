@@ -7,8 +7,8 @@
 
 use url::Url;
 
-use kastellan_worker_web_common::allowlist::HostAllowlist;
-use kastellan_worker_web_common::http::HttpGet;
+use crate::allowlist::HostAllowlist;
+use crate::http::HttpGet;
 
 /// Max redirect hops followed before giving up.
 pub const MAX_REDIRECTS: usize = 5;
@@ -77,8 +77,8 @@ pub fn drive<T: HttpGet>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kastellan_worker_web_common::http::RawResponse;
-    use kastellan_worker_web_common::testing::{al, ok_resp, redirect_to, FakeGet};
+    use crate::http::RawResponse;
+    use crate::testing::{al, ok_resp, redirect_to, FakeGet};
 
     #[test]
     fn terminal_response_is_returned() {

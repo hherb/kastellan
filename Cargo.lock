@@ -2422,9 +2422,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "dom_smoothie",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "pdf-extract",
  "reqwest 0.12.28",
  "rustls",
  "rustls-pki-types",
@@ -2441,11 +2443,22 @@ name = "kastellan-worker-web-fetch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dom_smoothie",
  "kastellan-protocol",
  "kastellan-worker-prelude",
  "kastellan-worker-web-common",
- "pdf-extract",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "kastellan-worker-web-research"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "kastellan-worker-web-common",
  "serde",
  "serde_json",
  "url",

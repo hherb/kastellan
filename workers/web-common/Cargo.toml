@@ -13,6 +13,16 @@ readme      = "../../README.md"
 # Pulls in the FakeGet test transport + helpers. Enable from a consumer's
 # [dev-dependencies] so unit tests across workers share one fake.
 testing = []
+# Pure SearxNG query logic (validate_endpoint / build_query_url / search / parse).
+# No extra deps — uses url + serde + the always-present allowlist/http modules.
+# Its own #[cfg(test)] block uses crate::testing, so web-common's test command
+# must enable both "search" and "testing" together.
+search  = []
+# Redirect-following drive loop (re-checks allowlist+https per hop). No extra deps.
+fetch   = []
+# Readable-text extraction (HTML readability / PDF / text). Pulls the parsers
+# ONLY when enabled, so `search`-only consumers (web-search) stay lean.
+extract = ["dep:pdf-extract", "dep:readable_html"]
 
 [dependencies]
 serde      = { workspace = true }
@@ -29,3 +39,5 @@ rustls          = { version = "0.23", default-features = false, features = ["rin
 rustls-pki-types = "1"
 webpki-roots    = "1"
 bytes           = "1"
+pdf-extract   = { workspace = true, optional = true }
+readable_html = { workspace = true, optional = true }

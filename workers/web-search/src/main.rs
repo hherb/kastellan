@@ -4,8 +4,6 @@
 //! docs/superpowers/specs/2026-06-09-web-search-worker-design.md
 
 mod handler;
-mod parse;
-mod search;
 
 use kastellan_worker_prelude::serve_stdio;
 

@@ -12,7 +12,7 @@ use url::Url;
 use kastellan_worker_web_common::allowlist::HostAllowlist;
 use kastellan_worker_web_common::http::{make_get, HttpGet};
 
-use crate::search::{search, validate_endpoint, SearchError, DEFAULT_COUNT};
+use kastellan_worker_web_common::search::{search, validate_endpoint, SearchError, DEFAULT_COUNT};
 
 #[derive(Deserialize)]
 struct SearchParams {

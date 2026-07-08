@@ -13,8 +13,8 @@ use url::Url;
 use kastellan_worker_web_common::allowlist::HostAllowlist;
 use kastellan_worker_web_common::http::{make_get, HttpGet};
 
-use crate::extract::{extract, main_type};
-use crate::fetch::{drive, FetchError};
+use kastellan_worker_web_common::extract::{extract, main_type};
+use kastellan_worker_web_common::fetch::{drive, FetchError};
 
 #[derive(Deserialize)]
 struct FetchParams {

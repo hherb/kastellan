@@ -3,8 +3,6 @@
 //! headers/body. Design:
 //! docs/superpowers/specs/2026-06-08-web-fetch-worker-design.md
 
-mod extract;
-mod fetch;
 mod handler;
 
 use kastellan_worker_prelude::serve_stdio;

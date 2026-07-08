@@ -421,6 +421,12 @@ fn for_tool_relaxes_doc_fetching_net_workers() {
 }
 
 #[test]
+fn web_research_uses_relaxed_profile() {
+    // web-research returns fetched document content, like web-fetch/web-search.
+    assert!(matches!(GuardProfile::for_tool("web-research"), GuardProfile::Relaxed));
+}
+
+#[test]
 fn for_tool_defaults_to_strict_fail_closed() {
     // shell-exec, every unrecognised worker, and the empty string all
     // stay Strict — a new worker is strict-by-default until listed.
