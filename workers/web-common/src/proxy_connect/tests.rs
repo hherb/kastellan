@@ -198,3 +198,64 @@ fn proxy_refused_403_is_an_error() {
     );
     let _ = std::fs::remove_file(&uds);
 }
+
+/// Like `spawn_stub_proxy` but serves `n` sequential connections, each in its own
+/// thread so multiple clients are handled concurrently. Every connection gets the
+/// same `origin_response` after the CONNECT handshake.
+fn spawn_stub_proxy_multi(
+    path: std::path::PathBuf,
+    origin_response: &'static [u8],
+    n: usize,
+) {
+    let listener = UnixListener::bind(&path).unwrap();
+    thread::spawn(move || {
+        for _ in 0..n {
+            let (mut conn, _) = listener.accept().unwrap();
+            thread::spawn(move || {
+                let mut buf = [0u8; 1024];
+                let mut acc = Vec::new();
+                loop {
+                    let n = conn.read(&mut buf).unwrap();
+                    acc.extend_from_slice(&buf[..n]);
+                    if acc.windows(4).any(|w| w == b"\r\n\r\n") || n == 0 {
+                        break;
+                    }
+                }
+                conn.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").unwrap();
+                let mut req = [0u8; 1024];
+                let _ = conn.read(&mut req).unwrap();
+                conn.write_all(origin_response).unwrap();
+            });
+        }
+    });
+}
+
+#[test]
+fn concurrent_gets_share_one_transport() {
+    // One ProxyConnectGet (one multi-thread runtime) driven by several threads at
+    // once. Guards the runtime-flavour change: a current-thread runtime would
+    // serialise/deadlock here.
+    let dir = std::env::temp_dir().join(format!("kastellan-pc-conc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let uds = dir.join("egress.sock");
+    let _ = std::fs::remove_file(&uds);
+    let n = 4;
+    spawn_stub_proxy_multi(
+        uds.clone(),
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        n,
+    );
+
+    let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
+    let url = Url::parse("http://127.0.0.1:8888/search").unwrap();
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..n)
+            .map(|_| scope.spawn(|| get.get(&url).map(|r| r.status)))
+            .collect();
+        for h in handles {
+            assert_eq!(h.join().unwrap().expect("round trip"), 200);
+        }
+    });
+    let _ = std::fs::remove_file(&uds);
+}

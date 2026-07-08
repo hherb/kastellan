@@ -1,13 +1,22 @@
 //! Compose search + fetch + rank into one research pass, pure over the
 //! [`HttpGet`] seam so the whole flow is hermetic-testable with `FakeGet`.
 //!
-//! Flow: reject empty query → `search()` the SearxNG endpoint → for each hit in
-//! rank order, if its host is on the content allowlist attempt a fetch; on a
-//! 2xx that yields at least one relevant passage extract → chunk → rank; any
-//! other outcome (off-allowlist, transport/redirect failure, non-2xx status, or
-//! zero relevant passages) is recorded in `unfetched` with a reason, never
-//! dropped silently and never a source slot. Stops once `max_sources` pages have
-//! been successfully gathered.
+//! Flow: reject empty query → `search()` the SearxNG endpoint → fetch every
+//! allowlisted hit concurrently in bounded waves (`fetch_candidates`,
+//! `MAX_CONCURRENT_FETCHES`) → classify + rank the fetched pages in rank order.
+//! On a 2xx that yields at least one relevant passage the page becomes a source;
+//! any other outcome (off-allowlist, transport/redirect failure, non-2xx status,
+//! or zero relevant passages) is recorded in `unfetched` with a reason, never
+//! dropped silently and never a source slot. The parallel fetch is
+//! output-identical to a sequential pass: `sources`/`unfetched` contents and
+//! order (including the `max_sources` break) are preserved. The trade-off is
+//! *more* GETs — unlike the old lazy pass that stopped fetching at the
+//! `max_sources` break, phase 1 fetches EVERY allowlisted candidate
+//! (≤ `SEARCH_COUNT`), so surplus pages past the break are fetched then
+//! discarded: extra GETs against origins/proxy, but never ranked/embedded (zero
+//! extra embed POSTs).
+
+use std::collections::HashMap;
 
 use url::Url;
 
@@ -47,6 +56,15 @@ pub const SEARCH_COUNT: usize = 10;
 ///
 /// [`MAX_BODY_BYTES`]: kastellan_worker_web_common::http::MAX_BODY_BYTES
 pub const MAX_EMBED_PASSAGES: usize = 128;
+/// Max page fetches in flight at once during the parallel fetch phase.
+///
+/// Allowlisted candidates are bounded by `SEARCH_COUNT` (10), so this caps the
+/// burst on the egress proxy / origin servers to a handful while collapsing the
+/// common case (≤ this many candidates) into a single wave. At the 10-candidate
+/// ceiling the fetch runs in ⌈10 / N⌉ waves ⇒ ~⌈10 / N⌉ × 20 s worst case — under
+/// the worker budget and far below the old sequential Σ. Separate from the
+/// `ProxyConnectGet` runtime worker-thread count (an unrelated internal knob).
+pub const MAX_CONCURRENT_FETCHES: usize = 6;
 
 /// A fetched source with its top-ranked passages.
 #[derive(Debug)]
@@ -152,40 +170,96 @@ fn rank_page(
     }
 }
 
-/// Try to turn one allowlisted hit into a `SourcePassages`. `Err(reason)` on any
-/// fetch/parse/extract failure, a non-2xx terminal status, or when ranking
-/// yields no relevant passage — the caller records the reason in `unfetched` so
-/// a dead/irrelevant page never occupies a source slot.
-fn gather_source<T: HttpGet>(
+/// One fetched + chunked page, not yet ranked. Phase-1 output of the fetch driver.
+#[derive(Debug)]
+struct FetchedPage {
+    final_url: String,
+    passages: Vec<String>,
+}
+
+/// Is this hit's host on the content allowlist? (Shared by the candidate filter and
+/// the classify walk so the two can never drift — a hit fetched in phase 1 must be
+/// the same set the classify phase expects.)
+fn hit_allowed(allowlist: &HostAllowlist, hit: &Hit) -> bool {
+    Url::parse(&hit.url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .map(|h| allowlist.is_allowed(&h))
+        .unwrap_or(false)
+}
+
+/// Phase 1: fetch one allowlisted hit and chunk it into passages. `Err(reason)` on
+/// any fetch/redirect/extract failure or a non-2xx terminal status — the exact
+/// reason strings the caller records in `unfetched`. Pure over the transport seam.
+fn fetch_and_chunk<T: HttpGet>(
     transport: &T,
     allowlist: &HostAllowlist,
-    embedder: Option<&dyn Embedder>,
-    query_emb: Option<&[f32]>,
-    query: &str,
-    hit: &Hit,
-    max_passages: usize,
-) -> Result<(SourcePassages, Option<String>), String> {
-    let url = Url::parse(&hit.url).map_err(|e| format!("fetch-failed: bad url: {e}"))?;
+    url: &str,
+) -> Result<FetchedPage, String> {
+    let url = Url::parse(url).map_err(|e| format!("fetch-failed: bad url: {e}"))?;
     let outcome = drive(transport, allowlist, url).map_err(|e| short_fetch_reason(&e))?;
     // `drive` returns any non-3xx terminal response, including 4xx/5xx. An error
-    // page (a 403 bot-challenge, a 404, a 500) is not a usable source — record it
-    // rather than extracting its error HTML into bogus passages.
+    // page (403 bot-challenge, 404, 500) is not a usable source — record it rather
+    // than extracting its error HTML into bogus passages.
     if !(200..300).contains(&outcome.status) {
         return Err(format!("fetch-failed: status {}", outcome.status));
     }
     let extracted = extract(&outcome.content_type, &outcome.body)
         .map_err(|e| format!("fetch-failed: extraction: {e}"))?;
     let passages = chunk_passages(&extracted.text);
-    let (mut ranked, note) = rank_page(embedder, query_emb, query, &passages);
+    Ok(FetchedPage { final_url: outcome.final_url, passages })
+}
+
+/// Phase-1 driver: fetch + chunk every allowlisted candidate concurrently, in
+/// bounded waves of `MAX_CONCURRENT_FETCHES`, sharing one `&transport` across
+/// scoped threads. Returns a map from each candidate's hit index to its result so
+/// the sequential classify phase can consult it in rank order (completion order
+/// never leaks into the output).
+fn fetch_candidates<T: HttpGet>(
+    transport: &T,
+    allowlist: &HostAllowlist,
+    candidates: &[(usize, &Hit)],
+) -> HashMap<usize, Result<FetchedPage, String>> {
+    let mut results = HashMap::with_capacity(candidates.len());
+    for wave in candidates.chunks(MAX_CONCURRENT_FETCHES) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = wave
+                .iter()
+                .map(|(idx, hit)| {
+                    let idx = *idx;
+                    let url = hit.url.clone();
+                    scope.spawn(move || (idx, fetch_and_chunk(transport, allowlist, &url)))
+                })
+                .collect();
+            for h in handles {
+                let (idx, res) = h.join().expect("fetch thread panicked");
+                results.insert(idx, res);
+            }
+        });
+    }
+    results
+}
+
+/// Phase 2: rank one fetched page against the query, truncate to `max_passages`,
+/// and apply the empty ⇒ `no-relevant-passages` rule. `Err(reason)` when the page
+/// shares no relevant passage with the query (don't consume a source slot).
+/// Returns the built source and an optional per-page degrade/cap note.
+fn rank_fetched_page(
+    embedder: Option<&dyn Embedder>,
+    query_emb: Option<&[f32]>,
+    query: &str,
+    hit: &Hit,
+    page: &FetchedPage,
+    max_passages: usize,
+) -> Result<(SourcePassages, Option<String>), String> {
+    let (mut ranked, note) = rank_page(embedder, query_emb, query, &page.passages);
     ranked.truncate(max_passages);
-    // A page that fetched fine but shares no terms with the query yields nothing.
-    // Record it (don't consume a source slot) so a later hit can be fetched.
     if ranked.is_empty() {
         return Err("no-relevant-passages".to_string());
     }
     Ok((
         SourcePassages {
-            url: outcome.final_url,
+            url: page.final_url.clone(),
             title: hit.title.clone(),
             snippet: hit.snippet.clone(),
             passages: ranked,
@@ -238,15 +312,23 @@ pub fn research<T: HttpGet>(
     let hits = search(transport, endpoint, allowlist, query, SEARCH_COUNT)
         .map_err(ResearchError::Search)?;
 
+    // Phase 1: fetch+chunk every allowlisted candidate concurrently.
+    let candidates: Vec<(usize, &Hit)> = hits
+        .iter()
+        .enumerate()
+        .filter(|(_, hit)| hit_allowed(allowlist, hit))
+        .collect();
+    let fetched = fetch_candidates(transport, allowlist, &candidates);
+
+    // Phase 2: classify + rank in rank order — output-identical to the sequential
+    // loop, including the max_sources-successes break and unfetched ordering.
     let mut sources = Vec::new();
     let mut unfetched = Vec::new();
-    for hit in &hits {
+    for (idx, hit) in hits.iter().enumerate() {
         if sources.len() >= max_sources {
             break;
         }
-        let host = Url::parse(&hit.url).ok().and_then(|u| u.host_str().map(str::to_string));
-        let allowed = host.as_deref().map(|h| allowlist.is_allowed(h)).unwrap_or(false);
-        if !allowed {
+        if !hit_allowed(allowlist, hit) {
             unfetched.push(UnfetchedSource {
                 url: hit.url.clone(),
                 title: hit.title.clone(),
@@ -255,13 +337,20 @@ pub fn research<T: HttpGet>(
             });
             continue;
         }
-        match gather_source(
-            transport, allowlist, eff_embedder, query_emb.as_deref(),
-            query, hit, max_passages,
-        ) {
+        // Every allowlisted hit was fetched in phase 1.
+        let fetch_result = fetched
+            .get(&idx)
+            .expect("allowlisted candidate must have a phase-1 result");
+        let classified = match fetch_result {
+            Ok(page) => rank_fetched_page(
+                eff_embedder, query_emb.as_deref(), query, hit, page, max_passages,
+            ),
+            Err(reason) => Err(reason.clone()),
+        };
+        match classified {
             Ok((src, note)) => {
                 if embed_note.is_none() {
-                    embed_note = note; // first page-level degrade reason wins
+                    embed_note = note; // first page-level degrade reason wins (rank order)
                 }
                 sources.push(src);
             }
@@ -280,11 +369,18 @@ pub fn research<T: HttpGet>(
 mod tests {
     use super::*;
     use kastellan_worker_web_common::http::RawResponse;
-    use kastellan_worker_web_common::testing::{al, json_resp, ok_resp, FakeGet};
+    use kastellan_worker_web_common::testing::{al, json_resp, ok_resp, redirect_to, FakeGet, KeyedFakeGet};
     use crate::embed::FakeEmbedder;
 
     fn endpoint() -> Url {
         Url::parse("https://searx.example.org/search").unwrap()
+    }
+
+    /// Build a KeyedFakeGet with the search endpoint + a set of page responses.
+    fn keyed(search: &str, pages: Vec<(&str, RawResponse)>) -> KeyedFakeGet {
+        let mut pairs = vec![("https://searx.example.org/search", json_resp(search))];
+        pairs.extend(pages);
+        KeyedFakeGet::new(pairs)
     }
 
     // Search JSON returning the given (title, url) pairs with a fixed snippet.
@@ -333,26 +429,16 @@ mod tests {
 
     #[test]
     fn one_fetch_failure_is_recorded_others_returned() {
-        // hit A fetch → 500 (non-3xx terminal, extract of empty body still ok →
-        // ranks to nothing) ; use a hit that 200s with content and one that errors.
-        // Serve: search, then A=200 with content, then B=transport is simulated
-        // by a redirect-loop -> TooManyRedirects.
-        let page = "user namespaces sandbox bwrap details here.";
-        let mut resps = vec![
-            json_resp(&search_json(&[
-                ("A", "https://docs.example.org/a"),
-                ("B", "https://docs.example.org/b"),
-            ])),
-            RawResponse { status: 200, location: None,
-                content_type: "text/plain".into(), body: page.as_bytes().to_vec() },
-        ];
-        // B: 6+ redirects to the same allowlisted host → TooManyRedirects.
-        for _ in 0..(kastellan_worker_web_common::fetch::MAX_REDIRECTS + 2) {
-            resps.push(RawResponse { status: 302,
-                location: Some("https://docs.example.org/loop".into()),
-                content_type: String::new(), body: Vec::new() });
-        }
-        let t = FakeGet::new(resps);
+        // A succeeds; B self-redirects until TooManyRedirects. Order-independent.
+        let search = search_json(&[
+            ("A", "https://docs.example.org/a"),
+            ("B", "https://docs.example.org/b"),
+        ]);
+        let t = keyed(&search, vec![
+            ("https://docs.example.org/a", ok_resp("user namespaces sandbox bwrap details")),
+            // 302 → itself: drive re-fetches the same host+path until MAX_REDIRECTS.
+            ("https://docs.example.org/b", redirect_to("https://docs.example.org/b")),
+        ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
         let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
         assert_eq!(out.sources.len(), 1, "A should succeed");
@@ -392,22 +478,99 @@ mod tests {
     }
 
     #[test]
-    fn max_sources_caps_fetches() {
-        let hits: Vec<(&str, &str)> = vec![
+    fn max_sources_caps_result_not_fetches() {
+        // Under fetch-all, all three allowlisted candidates are fetched concurrently;
+        // max_sources caps the RESULT to 2 (rank order A, B; C never classified).
+        let search = search_json(&[
             ("A", "https://docs.example.org/a"),
             ("B", "https://docs.example.org/b"),
             ("C", "https://docs.example.org/c"),
-        ];
-        let t = FakeGet::new(vec![
-            json_resp(&search_json(&hits)),
-            ok_resp("bwrap namespaces one"),
-            ok_resp("bwrap namespaces two"),
-            // no third fetch response — the max_sources cap must stop before a
-            // 3rd fetch (else FakeGet returns Err "no more canned responses").
+        ]);
+        let t = keyed(&search, vec![
+            ("https://docs.example.org/a", ok_resp("bwrap namespaces one")),
+            ("https://docs.example.org/b", ok_resp("bwrap namespaces two")),
+            ("https://docs.example.org/c", ok_resp("bwrap namespaces three")),
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
         let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 2, 3).unwrap();
         assert_eq!(out.sources.len(), 2);
+        let urls: Vec<&str> = out.sources.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://docs.example.org/a", "https://docs.example.org/b"]);
+        assert!(out.unfetched.is_empty(), "C is never classified (break at max_sources)");
+    }
+
+    #[test]
+    fn parallel_fetch_returns_rank_ordered_sources() {
+        // Three allowlisted candidates, all relevant → sources in rank order A,B,C
+        // regardless of fetch completion order.
+        let search = search_json(&[
+            ("A", "https://docs.example.org/a"),
+            ("B", "https://docs.example.org/b"),
+            ("C", "https://docs.example.org/c"),
+        ]);
+        let t = keyed(&search, vec![
+            ("https://docs.example.org/a", ok_resp("bwrap namespaces alpha content")),
+            ("https://docs.example.org/b", ok_resp("bwrap namespaces bravo content")),
+            ("https://docs.example.org/c", ok_resp("bwrap namespaces charlie content")),
+        ]);
+        let a = al(&["searx.example.org", "docs.example.org"]);
+        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
+        let urls: Vec<&str> = out.sources.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, vec![
+            "https://docs.example.org/a",
+            "https://docs.example.org/b",
+            "https://docs.example.org/c",
+        ]);
+        assert!(out.unfetched.is_empty());
+    }
+
+    #[test]
+    fn mid_list_fetch_failure_still_surfaces_later_successes() {
+        // B 404s; A and C succeed → sources == [A, C], B recorded in unfetched.
+        let search = search_json(&[
+            ("A", "https://docs.example.org/a"),
+            ("B", "https://docs.example.org/b"),
+            ("C", "https://docs.example.org/c"),
+        ]);
+        let t = keyed(&search, vec![
+            ("https://docs.example.org/a", ok_resp("bwrap namespaces alpha")),
+            ("https://docs.example.org/b", RawResponse { status: 404, location: None,
+                content_type: "text/plain".into(), body: b"nope".to_vec() }),
+            ("https://docs.example.org/c", ok_resp("bwrap namespaces charlie")),
+        ]);
+        let a = al(&["searx.example.org", "docs.example.org"]);
+        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
+        let urls: Vec<&str> = out.sources.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://docs.example.org/a", "https://docs.example.org/c"]);
+        assert_eq!(out.unfetched.len(), 1);
+        assert_eq!(out.unfetched[0].url, "https://docs.example.org/b");
+        assert_eq!(out.unfetched[0].reason, "fetch-failed: status 404");
+    }
+
+    #[test]
+    fn parallel_result_is_deterministic() {
+        // Same scenario run repeatedly must yield identical source ordering — the
+        // classify phase is rank-ordered, so completion order must not leak out.
+        let search = search_json(&[
+            ("A", "https://docs.example.org/a"),
+            ("B", "https://docs.example.org/b"),
+            ("C", "https://docs.example.org/c"),
+        ]);
+        let a = al(&["searx.example.org", "docs.example.org"]);
+        let mut seen: Option<Vec<String>> = None;
+        for _ in 0..5 {
+            let t = keyed(&search, vec![
+                ("https://docs.example.org/a", ok_resp("bwrap namespaces alpha")),
+                ("https://docs.example.org/b", ok_resp("bwrap namespaces bravo")),
+                ("https://docs.example.org/c", ok_resp("bwrap namespaces charlie")),
+            ]);
+            let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
+            let urls: Vec<String> = out.sources.iter().map(|s| s.url.clone()).collect();
+            match &seen {
+                None => seen = Some(urls),
+                Some(prev) => assert_eq!(prev, &urls, "source order must be stable across runs"),
+            }
+        }
     }
 
     #[test]

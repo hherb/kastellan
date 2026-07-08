@@ -59,15 +59,18 @@ fn net_entries(endpoint: &str, embed_endpoint: Option<&str>, allowlist: &[String
 
 /// Build the [`ToolEntry`] for the web-research worker. Defaults mirror web-fetch
 /// (HTML/PDF parsing over several pages): `Profile::WorkerNetClient`,
-/// `cpu_ms = 15_000`, `mem_mb = 512`, `wall_clock_ms = Some(60_000)` (search + N
-/// sequential fetches), `SingleUse`. Resolver files in `fs_read` for DNS under
-/// `--unshare-all`.
+/// `cpu_ms = 15_000`, `mem_mb = 512`, `wall_clock_ms = Some(60_000)` (search +
+/// bounded-parallel fetches), `SingleUse`. Resolver files in `fs_read` for DNS
+/// under `--unshare-all`.
 ///
-/// Note the wall-clock/fetch-budget interaction: fetches run sequentially with a
-/// 20s per-request transport timeout, so a handful of slow/hung hosts can burn
-/// the 60s budget before the worker returns even partial results. Parallel fetch
-/// (which would decouple the two) is a deferred follow-up; until then the
-/// `max_sources` clamp (≤ 8) keeps the worst case bounded.
+/// Fetches are now bounded-parallel (web-research `MAX_CONCURRENT_FETCHES`
+/// scoped-thread waves), so every allowlisted candidate page (up to the search
+/// count, not just the `max_sources` kept) is fetched concurrently rather than
+/// serially — wall-clock is ~⌈candidates / cap⌉ × the 20s per-request transport
+/// timeout, not the sum, so a handful of slow/hung hosts burn much less of the
+/// 60s budget than under the old sequential pass. The result is byte-identical
+/// to the old sequential pass; the `max_sources` clamp (≤ 8) still keeps the
+/// worst case bounded.
 pub fn web_research_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -> ToolEntry {
     web_research_entry_with_embed(binary, endpoint, None, None, allowlist)
 }
