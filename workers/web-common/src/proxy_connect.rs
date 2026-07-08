@@ -135,7 +135,13 @@ impl ProxyConnectGet {
         Ok(Self { user_agent: user_agent.to_string(), uds, tls, rt })
     }
 
-    async fn get_async(&self, url: &Url) -> Result<RawResponse, String> {
+    async fn request_async(
+        &self,
+        url: &Url,
+        method: &str,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> Result<RawResponse, String> {
         let host = url.host_str().ok_or("url has no host")?;
         let port = url
             .port_or_known_default()
@@ -157,13 +163,13 @@ impl ProxyConnectGet {
             return Err(format!("proxy refused CONNECT: {status}"));
         }
 
-        // 3. Layer transport and run one GET.
+        // 3. Layer transport and run one request.
         match url.scheme() {
             "https" => {
                 let tls = tls_connect(stream, url, Arc::clone(&self.tls)).await?;
-                run_get(tls, url, host, &self.user_agent).await
+                run_request(tls, url, host, &self.user_agent, method, content_type, body).await
             }
-            "http" => run_get(stream, url, host, &self.user_agent).await,
+            "http" => run_request(stream, url, host, &self.user_agent, method, content_type, body).await,
             other => Err(format!("unsupported scheme: {other}")),
         }
     }
@@ -172,8 +178,24 @@ impl ProxyConnectGet {
 impl HttpGet for ProxyConnectGet {
     fn get(&self, url: &Url) -> Result<RawResponse, String> {
         self.rt.block_on(async {
-            match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), self.get_async(url)).await
-            {
+            match tokio::time::timeout(
+                Duration::from_secs(TIMEOUT_SECS),
+                self.request_async(url, "GET", None, Vec::new()),
+            ).await {
+                Ok(r) => r,
+                Err(_) => Err(format!("request exceeded {TIMEOUT_SECS}s")),
+            }
+        })
+    }
+
+    fn post(&self, url: &Url, content_type: &str, body: &[u8]) -> Result<RawResponse, String> {
+        let ct = content_type.to_string();
+        let body = body.to_vec();
+        self.rt.block_on(async {
+            match tokio::time::timeout(
+                Duration::from_secs(TIMEOUT_SECS),
+                self.request_async(url, "POST", Some(&ct), body),
+            ).await {
                 Ok(r) => r,
                 Err(_) => Err(format!("request exceeded {TIMEOUT_SECS}s")),
             }
@@ -261,9 +283,17 @@ async fn tls_connect(
         .map_err(|e| format!("TLS handshake failed: {e}"))
 }
 
-/// Drive a single HTTP/1.1 GET over `io` (raw or TLS stream), return `RawResponse`.
+/// Drive a single HTTP/1.1 request over `io` (raw or TLS stream), return `RawResponse`.
 /// The body is capped at `MAX_BODY_BYTES`; exceeding that returns `Err`.
-async fn run_get<IO>(io: IO, url: &Url, host: &str, user_agent: &str) -> Result<RawResponse, String>
+async fn run_request<IO>(
+    io: IO,
+    url: &Url,
+    host: &str,
+    user_agent: &str,
+    method: &str,
+    content_type: Option<&str>,
+    body: Vec<u8>,
+) -> Result<RawResponse, String>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -283,14 +313,18 @@ where
         None => url.path().to_string(),
     };
 
-    let req = Request::builder()
-        .method("GET")
+    let mut builder = Request::builder()
+        .method(method)
         .uri(&path_and_query)
         .header(hyper::header::HOST, host)
         .header(hyper::header::USER_AGENT, user_agent)
         .header(hyper::header::ACCEPT_ENCODING, "identity")
-        .header(hyper::header::CONNECTION, "close")
-        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .header(hyper::header::CONNECTION, "close");
+    if let Some(ct) = content_type {
+        builder = builder.header(hyper::header::CONTENT_TYPE, ct);
+    }
+    let req = builder
+        .body(http_body_util::Full::<bytes::Bytes>::new(bytes::Bytes::from(body)))
         .map_err(|e| format!("build request: {e}"))?;
 
     let resp = sender

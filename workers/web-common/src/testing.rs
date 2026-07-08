@@ -32,6 +32,15 @@ impl HttpGet for FakeGet {
     fn transport_kind(&self) -> &'static str {
         "fake"
     }
+
+    fn post(&self, _url: &Url, _content_type: &str, _body: &[u8])
+        -> Result<RawResponse, String>
+    {
+        self.responses
+            .borrow_mut()
+            .pop_front()
+            .ok_or_else(|| "no more canned responses".to_string())
+    }
 }
 
 /// Build a [`HostAllowlist`] from bare string entries.
@@ -67,5 +76,18 @@ pub fn json_resp(json: &str) -> RawResponse {
         location: None,
         content_type: "application/json".to_string(),
         body: json.as_bytes().to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod post_fake_tests {
+    use super::*;
+    #[test]
+    fn fake_post_pops_next_response() {
+        let f = FakeGet::new(vec![ok_resp("embedded")]);
+        let r = f.post(&url::Url::parse("http://e.test/embeddings").unwrap(),
+                       "application/json", b"{}").unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, b"embedded");
     }
 }
