@@ -5,7 +5,9 @@
 //! configured endpoint over the shared [`HttpGet`] transport (the same proxy path
 //! content fetches use) and decodes `{data:[{index, embedding:[...]}]}`. Cosine
 //! ranking is dimension-agnostic, so no Matryoshka truncation happens here — only
-//! a count check (one vector per input) and a shared-length check.
+//! a count check (one vector per input). A per-vector length check is unnecessary:
+//! the downstream `cosine` ranker skips any passage whose embedding length differs
+//! from the query's, so a mixed-dimension response degrades gracefully there.
 //!
 //! TRANSIENT: these items are exercised by this module's `#[cfg(test)]` tests but
 //! not yet by production code (`research()`/`handler` wire them in Tasks 4–5). The
@@ -168,6 +170,25 @@ mod tests {
         let e = HttpEmbedder::new(t, endpoint(), "embeddinggemma".into());
         let out = e.embed(&["a".into(), "b".into()]).unwrap();
         assert_eq!(out, vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+    }
+
+    #[test]
+    fn reorders_out_of_order_rows_back_to_input_order() {
+        // A batched backend may return rows in a different order than requested.
+        // Rows arrive index:1 first, index:0 second — the result MUST still pair
+        // each vector with its input position (sort_by_key on `index`).
+        let body = r#"{"data":[
+            {"index":1,"embedding":[3.0,4.0]},
+            {"index":0,"embedding":[1.0,2.0]}
+        ]}"#;
+        let t = FakeGet::new(vec![RawResponse {
+            status: 200, location: None,
+            content_type: "application/json".into(), body: body.as_bytes().to_vec(),
+        }]);
+        let e = HttpEmbedder::new(t, endpoint(), "m".into());
+        let out = e.embed(&["a".into(), "b".into()]).unwrap();
+        assert_eq!(out, vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            "index:0 vector must come first regardless of wire order");
     }
 
     #[test]
