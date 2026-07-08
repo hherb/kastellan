@@ -16,8 +16,9 @@ use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerMani
 /// Map the operator domain allowlist to `Net::Allowlist` `host:443` entries:
 /// a wildcard `.domain` maps to its bare `domain:443` (the egress proxy refines
 /// wildcard semantics). HTTPS-only, so port 443. Pure — shared by the host and
-/// micro-VM entries.
-fn allowlist_to_net_entries(allowlist: &[String]) -> Vec<String> {
+/// micro-VM entries here, and reused by the web-research manifest's content-host
+/// half of its union allowlist.
+pub(crate) fn allowlist_to_net_entries(allowlist: &[String]) -> Vec<String> {
     allowlist
         .iter()
         .map(|d| {

@@ -32,19 +32,13 @@ fn endpoint_net_entry(endpoint: &str) -> Vec<String> {
     }
 }
 
-/// Map the content-domain allowlist to `host:443` entries (wildcard `.d` → `d:443`).
-fn content_net_entries(allowlist: &[String]) -> Vec<String> {
-    allowlist
-        .iter()
-        .map(|d| format!("{}:443", d.strip_prefix('.').unwrap_or(d)))
-        .collect()
-}
-
 /// Union of the endpoint host:port and the content host:443 entries, de-duped
-/// (order-preserving: endpoint first).
+/// (order-preserving: endpoint first). The content half reuses web-fetch's
+/// canonical domain→`host:443` mapping (wildcard `.d` → `d:443`) so both fetching
+/// workers share one wildcard-flattening rule.
 fn net_entries(endpoint: &str, allowlist: &[String]) -> Vec<String> {
     let mut entries = endpoint_net_entry(endpoint);
-    for e in content_net_entries(allowlist) {
+    for e in crate::workers::web_fetch::allowlist_to_net_entries(allowlist) {
         if !entries.contains(&e) {
             entries.push(e);
         }
@@ -57,6 +51,12 @@ fn net_entries(endpoint: &str, allowlist: &[String]) -> Vec<String> {
 /// `cpu_ms = 15_000`, `mem_mb = 512`, `wall_clock_ms = Some(60_000)` (search + N
 /// sequential fetches), `SingleUse`. Resolver files in `fs_read` for DNS under
 /// `--unshare-all`.
+///
+/// Note the wall-clock/fetch-budget interaction: fetches run sequentially with a
+/// 20s per-request transport timeout, so a handful of slow/hung hosts can burn
+/// the 60s budget before the worker returns even partial results. Parallel fetch
+/// (which would decouple the two) is a deferred follow-up; until then the
+/// `max_sources` clamp (≤ 8) keeps the worst case bounded.
 pub fn web_research_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -> ToolEntry {
     let allow_json = serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
     let policy = SandboxPolicy {

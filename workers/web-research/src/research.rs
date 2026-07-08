@@ -2,10 +2,12 @@
 //! [`HttpGet`] seam so the whole flow is hermetic-testable with `FakeGet`.
 //!
 //! Flow: reject empty query → `search()` the SearxNG endpoint → for each hit in
-//! rank order, if its host is on the content allowlist attempt a fetch; on
-//! success extract → chunk → rank passages; on failure record the source in
-//! `unfetched` (never drop silently). Off-allowlist hits are recorded too. Stops
-//! once `max_sources` pages have been successfully gathered.
+//! rank order, if its host is on the content allowlist attempt a fetch; on a
+//! 2xx that yields at least one relevant passage extract → chunk → rank; any
+//! other outcome (off-allowlist, transport/redirect failure, non-2xx status, or
+//! zero relevant passages) is recorded in `unfetched` with a reason, never
+//! dropped silently and never a source slot. Stops once `max_sources` pages have
+//! been successfully gathered.
 
 use url::Url;
 
@@ -75,7 +77,9 @@ fn short_fetch_reason(e: &FetchError) -> String {
 }
 
 /// Try to turn one allowlisted hit into a `SourcePassages`. `Err(reason)` on any
-/// fetch/parse/extract failure — the caller records it in `unfetched`.
+/// fetch/parse/extract failure, a non-2xx terminal status, or when ranking
+/// yields no relevant passage — the caller records the reason in `unfetched` so
+/// a dead/irrelevant page never occupies a source slot.
 fn gather_source<T: HttpGet, R: PassageRanker>(
     transport: &T,
     allowlist: &HostAllowlist,
@@ -86,11 +90,22 @@ fn gather_source<T: HttpGet, R: PassageRanker>(
 ) -> Result<SourcePassages, String> {
     let url = Url::parse(&hit.url).map_err(|e| format!("fetch-failed: bad url: {e}"))?;
     let outcome = drive(transport, allowlist, url).map_err(|e| short_fetch_reason(&e))?;
+    // `drive` returns any non-3xx terminal response, including 4xx/5xx. An error
+    // page (a 403 bot-challenge, a 404, a 500) is not a usable source — record it
+    // rather than extracting its error HTML into bogus passages.
+    if !(200..300).contains(&outcome.status) {
+        return Err(format!("fetch-failed: status {}", outcome.status));
+    }
     let extracted = extract(&outcome.content_type, &outcome.body)
         .map_err(|e| format!("fetch-failed: extraction: {e}"))?;
     let passages = chunk_passages(&extracted.text);
     let mut ranked = ranker.rank(query, &passages);
     ranked.truncate(max_passages);
+    // A page that fetched fine but shares no terms with the query yields nothing.
+    // Record it (don't consume a source slot) so a later hit can be fetched.
+    if ranked.is_empty() {
+        return Err("no-relevant-passages".to_string());
+    }
     Ok(SourcePassages {
         url: outcome.final_url,
         title: hit.title.clone(),
@@ -229,6 +244,36 @@ mod tests {
         assert_eq!(out.sources[0].url, "https://docs.example.org/a");
         assert_eq!(out.unfetched.len(), 1, "B should be recorded as failed");
         assert!(out.unfetched[0].reason.starts_with("fetch-failed:"), "{}", out.unfetched[0].reason);
+    }
+
+    #[test]
+    fn non_2xx_fetch_is_recorded_not_a_source() {
+        // A 404 terminal response must not become a source with error-page text.
+        let t = FakeGet::new(vec![
+            json_resp(&search_json(&[("A", "https://docs.example.org/a")])),
+            RawResponse { status: 404, location: None,
+                content_type: "text/plain".into(), body: b"not found".to_vec() },
+        ]);
+        let a = al(&["searx.example.org", "docs.example.org"]);
+        let out = research(&t, &endpoint(), &a, &LexicalRanker, "bwrap namespaces", 3, 3).unwrap();
+        assert!(out.sources.is_empty());
+        assert_eq!(out.unfetched.len(), 1);
+        assert_eq!(out.unfetched[0].reason, "fetch-failed: status 404");
+    }
+
+    #[test]
+    fn fetched_page_with_no_relevant_passages_is_recorded_not_a_source() {
+        // 200 page whose content shares no terms with the query → BM25 scores
+        // nothing → recorded in `unfetched`, does not consume a source slot.
+        let t = FakeGet::new(vec![
+            json_resp(&search_json(&[("A", "https://docs.example.org/a")])),
+            ok_resp("completely unrelated cooking recipe content"),
+        ]);
+        let a = al(&["searx.example.org", "docs.example.org"]);
+        let out = research(&t, &endpoint(), &a, &LexicalRanker, "bwrap namespaces sandbox", 3, 3).unwrap();
+        assert!(out.sources.is_empty());
+        assert_eq!(out.unfetched.len(), 1);
+        assert_eq!(out.unfetched[0].reason, "no-relevant-passages");
     }
 
     #[test]

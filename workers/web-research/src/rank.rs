@@ -37,7 +37,8 @@ fn tokenize(s: &str) -> Vec<String> {
 
 impl PassageRanker for LexicalRanker {
     fn rank(&self, query: &str, passages: &[String]) -> Vec<ScoredPassage> {
-        let q_terms = tokenize(query);
+        // Unique query terms (BM25 sums each term once regardless of repeats).
+        let q_terms = unique(&tokenize(query));
         if q_terms.is_empty() || passages.is_empty() {
             return Vec::new();
         }
@@ -47,17 +48,22 @@ impl PassageRanker for LexicalRanker {
         let avg_len: f64 =
             docs.iter().map(|d| d.len()).sum::<usize>() as f64 / n.max(1.0);
 
-        // Document frequency per unique query term.
+        // Document frequency per query term — depends only on the corpus, so
+        // compute it once (not per document × term).
+        let dfs: Vec<f64> = q_terms
+            .iter()
+            .map(|term| docs.iter().filter(|d| d.contains(term)).count() as f64)
+            .collect();
+
         let mut scored: Vec<ScoredPassage> = Vec::new();
         for (doc, passage) in docs.iter().zip(passages.iter()) {
             let dl = doc.len() as f64;
             let mut score = 0.0_f64;
-            for term in unique(&q_terms) {
-                let tf = doc.iter().filter(|t| *t == &term).count() as f64;
+            for (term, &df) in q_terms.iter().zip(dfs.iter()) {
+                let tf = doc.iter().filter(|t| *t == term).count() as f64;
                 if tf == 0.0 {
                     continue;
                 }
-                let df = docs.iter().filter(|d| d.contains(&term)).count() as f64;
                 // BM25 idf with the +1 floor so it is never negative.
                 let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
                 let denom = tf + K1 * (1.0 - B + B * dl / avg_len.max(1.0));
