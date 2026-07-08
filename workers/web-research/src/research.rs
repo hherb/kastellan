@@ -1,13 +1,17 @@
 //! Compose search + fetch + rank into one research pass, pure over the
 //! [`HttpGet`] seam so the whole flow is hermetic-testable with `FakeGet`.
 //!
-//! Flow: reject empty query → `search()` the SearxNG endpoint → for each hit in
-//! rank order, if its host is on the content allowlist attempt a fetch; on a
-//! 2xx that yields at least one relevant passage extract → chunk → rank; any
-//! other outcome (off-allowlist, transport/redirect failure, non-2xx status, or
-//! zero relevant passages) is recorded in `unfetched` with a reason, never
-//! dropped silently and never a source slot. Stops once `max_sources` pages have
-//! been successfully gathered.
+//! Flow: reject empty query → `search()` the SearxNG endpoint → fetch every
+//! allowlisted hit concurrently in bounded waves (`fetch_candidates`,
+//! `MAX_CONCURRENT_FETCHES`) → classify + rank the fetched pages in rank order.
+//! On a 2xx that yields at least one relevant passage the page becomes a source;
+//! any other outcome (off-allowlist, transport/redirect failure, non-2xx status,
+//! or zero relevant passages) is recorded in `unfetched` with a reason, never
+//! dropped silently and never a source slot. The parallel fetch is
+//! output-identical to a sequential pass — only the network fetch pattern
+//! changes; `sources`/`unfetched` contents and order (including the `max_sources`
+//! break) are preserved, so surplus pages fetched past the break are discarded
+//! and never ranked/embedded.
 
 use std::collections::HashMap;
 
