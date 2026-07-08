@@ -30,6 +30,19 @@ pub const DEFAULT_MAX_PASSAGES: usize = 3;
 pub const MAX_MAX_PASSAGES: usize = 10;
 /// How many search hits to consider (before allowlist filtering).
 pub const SEARCH_COUNT: usize = 10;
+/// Max passages embedded in a single per-page embed POST.
+///
+/// A pathological page can chunk into thousands of passages; embedding them all
+/// makes one embed *response* that can exceed the transport's [`MAX_BODY_BYTES`]
+/// record cap, forcing the whole page to lexical. We instead embed only the
+/// first `MAX_EMBED_PASSAGES` chunks (document order — web content is
+/// front-loaded, and BM25-scoring chunks past the cap still surface through the
+/// lexical lane, which runs over ALL passages with no network, so nothing is
+/// dropped — a late chunk is only ranked lexically, not semantically). Sized so
+/// a 128 × 1024-dim JSON response stays comfortably under the 5 MiB cap.
+///
+/// [`MAX_BODY_BYTES`]: kastellan_worker_web_common::http::MAX_BODY_BYTES
+pub const MAX_EMBED_PASSAGES: usize = 128;
 
 /// A fetched source with its top-ranked passages.
 #[derive(Debug)]
@@ -63,8 +76,10 @@ pub struct ResearchOutcome {
     pub unfetched: Vec<UnfetchedSource>,
     /// `Hybrid` iff an embedder was configured AND the query embedded OK.
     pub ranking: RankMode,
-    /// `Some(reason)` iff a configured semantic lane fell back to lexical for the
-    /// whole call (query embed failed) or for at least one page (first reason wins).
+    /// `Some(reason)` (first reason wins) iff a configured semantic lane, for at
+    /// least one page or the whole call, either fell back to lexical (query or
+    /// passage embed failed) or embedded only a capped prefix of an oversized
+    /// page (see [`MAX_EMBED_PASSAGES`]) — never silent.
     pub embed_note: Option<String>,
 }
 
@@ -100,21 +115,35 @@ fn rank_page(
 ) -> (Vec<ScoredPassage>, Option<String>) {
     let lexical = bm25(query, passages);
     match (embedder, query_emb) {
-        (Some(e), Some(qe)) => match e.embed(passages) {
-            Ok(pe) if pe.len() == passages.len() => {
-                let semantic = cosine(qe, passages, &pe);
-                (rrf_fuse(&lexical, &semantic), None)
+        (Some(e), Some(qe)) => {
+            // Bound the embed POST: a huge page would otherwise embed thousands of
+            // chunks in one request whose response can exceed the transport record
+            // cap. Embed only the first `MAX_EMBED_PASSAGES` (document order); the
+            // full lexical lane above still ranks the rest. See the const's doc.
+            let candidates = &passages[..passages.len().min(MAX_EMBED_PASSAGES)];
+            let cap_note = (passages.len() > candidates.len()).then(|| {
+                format!(
+                    "embed: page has {} chunks; embedded first {} (cap)",
+                    passages.len(),
+                    candidates.len()
+                )
+            });
+            match e.embed(candidates) {
+                Ok(pe) if pe.len() == candidates.len() => {
+                    let semantic = cosine(qe, candidates, &pe);
+                    (rrf_fuse(&lexical, &semantic), cap_note)
+                }
+                Ok(pe) => (
+                    lexical,
+                    Some(format!(
+                        "embed: passage vector count mismatch (got {}, want {})",
+                        pe.len(),
+                        candidates.len()
+                    )),
+                ),
+                Err(err) => (lexical, Some(format!("embed: passage embedding failed: {err}"))),
             }
-            Ok(pe) => (
-                lexical,
-                Some(format!(
-                    "embed: passage vector count mismatch (got {}, want {})",
-                    pe.len(),
-                    passages.len()
-                )),
-            ),
-            Err(err) => (lexical, Some(format!("embed: passage embedding failed: {err}"))),
-        },
+        }
         _ => (lexical, None),
     }
 }
@@ -434,6 +463,41 @@ mod tests {
         assert!(out.embed_note.is_none());
         assert_eq!(out.sources.len(), 1);
         assert!(out.sources[0].passages.iter().any(|p| p.text.contains("Containers isolate")));
+    }
+
+    #[test]
+    fn rank_page_caps_embed_input_to_max_and_signals() {
+        // A page with more chunks than the cap must embed only the first
+        // MAX_EMBED_PASSAGES (document order) and record a degrade note, so one
+        // embed response can never blow the transport's 5 MiB record cap.
+        let n = MAX_EMBED_PASSAGES + 5;
+        let passages: Vec<String> =
+            (0..n).map(|i| format!("sandbox namespaces passage {i}")).collect();
+        let emb = FakeEmbedder::new(&[]); // returns one (empty) vector per input
+        let qe = [1.0_f32, 0.0];
+        let (_ranked, note) = rank_page(Some(&emb), Some(&qe), "sandbox namespaces", &passages);
+        assert_eq!(
+            emb.last_input_len.get(),
+            MAX_EMBED_PASSAGES,
+            "only the first {MAX_EMBED_PASSAGES} chunks are embedded"
+        );
+        let note = note.expect("capping must be signalled, never silent");
+        assert!(
+            note.contains(&n.to_string()) && note.contains(&MAX_EMBED_PASSAGES.to_string()),
+            "note should name both the chunk count and the cap: {note}"
+        );
+    }
+
+    #[test]
+    fn rank_page_under_cap_embeds_all_and_no_cap_note() {
+        // A page at or below the cap embeds every chunk and sets no cap note.
+        let passages: Vec<String> =
+            (0..4).map(|i| format!("sandbox passage {i}")).collect();
+        let emb = FakeEmbedder::new(&[]);
+        let qe = [1.0_f32, 0.0];
+        let (_ranked, note) = rank_page(Some(&emb), Some(&qe), "sandbox", &passages);
+        assert_eq!(emb.last_input_len.get(), 4, "all chunks embedded under the cap");
+        assert!(note.is_none(), "no cap note under the cap: {note:?}");
     }
 
     #[test]
