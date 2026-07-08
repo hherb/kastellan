@@ -76,10 +76,19 @@ impl ProxyConnectGet {
         uds: PathBuf,
         ca_path: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        // Multi-thread (not current-thread): `web-research`'s parallel fetch phase
+        // calls `get()`/`post()` on ONE shared transport from several scoped threads
+        // at once, so `self.rt.block_on(..)` runs concurrently. A current-thread
+        // runtime serialises (or deadlocks) under concurrent block_on; a multi-thread
+        // runtime services them via its shared I/O driver. `worker_threads(4)` is the
+        // shared driver pool — a separate knob from the fetch concurrency cap; each
+        // concurrent block_on drives its own future on its calling thread. Workers
+        // that issue one request at a time (web-fetch/web-search) are unaffected.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
             .enable_all()
             .build()
-            .expect("current-thread runtime");
+            .expect("multi-thread runtime");
 
         // Build the trust anchors once — cloning the root set on every HTTPS
         // call is measurably expensive; the resulting config lives behind an Arc.
@@ -117,10 +126,19 @@ impl ProxyConnectGet {
         uds: PathBuf,
         extra_ca: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        // Multi-thread (not current-thread): `web-research`'s parallel fetch phase
+        // calls `get()`/`post()` on ONE shared transport from several scoped threads
+        // at once, so `self.rt.block_on(..)` runs concurrently. A current-thread
+        // runtime serialises (or deadlocks) under concurrent block_on; a multi-thread
+        // runtime services them via its shared I/O driver. `worker_threads(4)` is the
+        // shared driver pool — a separate knob from the fetch concurrency cap; each
+        // concurrent block_on drives its own future on its calling thread. Workers
+        // that issue one request at a time (web-fetch/web-search) are unaffected.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
             .enable_all()
             .build()
-            .expect("current-thread runtime");
+            .expect("multi-thread runtime");
 
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
