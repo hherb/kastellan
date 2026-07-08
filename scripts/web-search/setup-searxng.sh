@@ -66,6 +66,14 @@ Export these for the kastellan daemon / web-search worker:
   export KASTELLAN_WEB_SEARCH_ENDPOINT='http://127.0.0.1:${PORT}/search'
   export KASTELLAN_WEB_SEARCH_ALLOWLIST='["127.0.0.1"]'
 
+The same instance backs the web-research worker's live e2e
+(core/tests/web_research_e2e.rs::real_research_against_searxng). That test
+reads KASTELLAN_WEB_RESEARCH_ENDPOINT (default http://127.0.0.1:${PORT}/search)
+and allowlists en.wikipedia.org as the content host itself:
+
+  export KASTELLAN_WEB_RESEARCH_ENDPOINT='http://127.0.0.1:${PORT}/search'
+  cargo test -p kastellan-core --test web_research_e2e -- --ignored --nocapture
+
 Smoke test the JSON API:
 
   curl -s 'http://127.0.0.1:${PORT}/search?q=rust&format=json' | head -c 400
