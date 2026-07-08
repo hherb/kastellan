@@ -8,10 +8,13 @@
 //! any other outcome (off-allowlist, transport/redirect failure, non-2xx status,
 //! or zero relevant passages) is recorded in `unfetched` with a reason, never
 //! dropped silently and never a source slot. The parallel fetch is
-//! output-identical to a sequential pass — only the network fetch pattern
-//! changes; `sources`/`unfetched` contents and order (including the `max_sources`
-//! break) are preserved, so surplus pages fetched past the break are discarded
-//! and never ranked/embedded.
+//! output-identical to a sequential pass: `sources`/`unfetched` contents and
+//! order (including the `max_sources` break) are preserved. The trade-off is
+//! *more* GETs — unlike the old lazy pass that stopped fetching at the
+//! `max_sources` break, phase 1 fetches EVERY allowlisted candidate
+//! (≤ `SEARCH_COUNT`), so surplus pages past the break are fetched then
+//! discarded: extra GETs against origins/proxy, but never ranked/embedded (zero
+//! extra embed POSTs).
 
 use std::collections::HashMap;
 
