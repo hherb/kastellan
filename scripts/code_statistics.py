@@ -8,6 +8,12 @@ sections:
   1. Per-language summary table (files / code / comments / docs / blank / total).
   2. Overall totals.
   3. The longest files in the tree, so refactoring candidates are easy to spot.
+  4. Documentation length per file (doc-comment / docstring lines, plus prose
+     files like Markdown), sorted most-documented first.
+
+"Code" excludes blank lines, comments, and inline docs. The scan skips build
+output and, by relative path, `.claude/worktrees` (sibling checkouts) and
+`docs/superpowers` (vendored content).
 
 Standard-library only. Run from anywhere:
 
@@ -210,6 +216,20 @@ DEFAULT_SKIP_FILES = frozenset({
     "Pipfile.lock",
 })
 
+# Directories excluded by their path *relative to the scan root* (POSIX form),
+# not just by basename. Use this for "docs/superpowers" so we don't
+# accidentally skip an unrelated directory that merely shares a basename.
+#
+#   - ".claude/worktrees": sibling checkouts under this repo — analysing them
+#     would double-count the whole tree. (Also pruned implicitly by the
+#     dot-directory filter, but we name it here so it's excluded even with
+#     --include-hidden.)
+#   - "docs/superpowers": vendored skill content, not our code or docs.
+DEFAULT_SKIP_REL_DIRS = frozenset({
+    ".claude/worktrees",
+    "docs/superpowers",
+})
+
 
 def detect_language(path: Path) -> LangDef | None:
     name = path.name
@@ -405,10 +425,27 @@ def analyze_file(path: Path) -> FileStats | None:
 # Walking
 # ---------------------------------------------------------------------------
 
-def iter_source_files(root: Path, skip_dirs: frozenset[str], skip_files: frozenset[str]) -> Iterable[Path]:
+def _rel_posix(root: Path, dirpath: str, name: str) -> str:
+    """Path of `dirpath/name` relative to `root`, in POSIX form."""
+    return (Path(dirpath) / name).relative_to(root).as_posix()
+
+
+def iter_source_files(
+    root: Path,
+    skip_dirs: frozenset[str],
+    skip_files: frozenset[str],
+    skip_rel_dirs: frozenset[str] = DEFAULT_SKIP_REL_DIRS,
+) -> Iterable[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
-        # Prune in-place so os.walk doesn't recurse into skipped dirs.
-        dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.startswith(".")]
+        # Prune in-place so os.walk doesn't recurse into skipped dirs. A dir is
+        # skipped if its basename is in skip_dirs, it is hidden, or its path
+        # relative to the root matches an entry in skip_rel_dirs.
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in skip_dirs
+            and not d.startswith(".")
+            and _rel_posix(root, dirpath, d) not in skip_rel_dirs
+        ]
         for fname in filenames:
             if fname in skip_files:
                 continue
@@ -523,6 +560,38 @@ def report_text(
         )
     else:
         print("No files matched the longest-files filter.")
+    print()
+
+    # --- Documentation length per file ----------------------------------
+    # "Documentation" = doc-comment / docstring lines in source files, plus
+    # every non-blank line of prose files (Markdown, rST, text). Sorted so the
+    # most-documented files surface first.
+    documented = sorted(
+        (f for f in files if f.doc > 0),
+        key=lambda f: f.doc,
+        reverse=True,
+    )
+    if top > 0:
+        documented = documented[:top]
+
+    if documented:
+        print(f"Documentation length per file (top {len(documented)} by doc lines):")
+        rows = [
+            [
+                str(fs.path.relative_to(root)) if fs.path.is_absolute() else str(fs.path),
+                fs.language,
+                f"{fs.doc:,}",
+                f"{fs.total:,}",
+                f"{(fs.doc / fs.total * 100):.0f}%" if fs.total else "-",
+            ]
+            for fs in documented
+        ]
+        print_table(
+            ["File", "Language", "Doc lines", "Total", "Doc %"],
+            rows,
+        )
+    else:
+        print("No documentation lines found.")
 
 
 def report_json(
@@ -622,7 +691,11 @@ def main(argv: list[str] | None = None) -> int:
         # the function with a thin wrapper that keeps hidden entries.
         def walker():
             for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in skip_dirs
+                    and _rel_posix(root, dirpath, d) not in DEFAULT_SKIP_REL_DIRS
+                ]
                 for fname in filenames:
                     if fname in DEFAULT_SKIP_FILES:
                         continue
