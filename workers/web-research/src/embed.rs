@@ -111,6 +111,9 @@ pub(crate) struct FakeEmbedder {
     pub fail: bool,
     /// Number of times `embed` was invoked (interior-mutable for assertions).
     pub calls: std::cell::Cell<usize>,
+    /// Number of texts passed to the most recent `embed` call (lets a test assert
+    /// how many passages a per-page embed actually requested — e.g. the cap).
+    pub last_input_len: std::cell::Cell<usize>,
 }
 
 #[cfg(test)]
@@ -120,10 +123,16 @@ impl FakeEmbedder {
             map: pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
             fail: false,
             calls: std::cell::Cell::new(0),
+            last_input_len: std::cell::Cell::new(0),
         }
     }
     pub fn failing() -> Self {
-        Self { map: Default::default(), fail: true, calls: std::cell::Cell::new(0) }
+        Self {
+            map: Default::default(),
+            fail: true,
+            calls: std::cell::Cell::new(0),
+            last_input_len: std::cell::Cell::new(0),
+        }
     }
 }
 
@@ -131,6 +140,7 @@ impl FakeEmbedder {
 impl Embedder for FakeEmbedder {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
         self.calls.set(self.calls.get() + 1);
+        self.last_input_len.set(texts.len());
         if self.fail {
             return Err(EmbedError::Transport("fake endpoint down".into()));
         }
