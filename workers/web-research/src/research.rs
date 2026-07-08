@@ -39,7 +39,11 @@ pub const SEARCH_COUNT: usize = 10;
 /// front-loaded, and BM25-scoring chunks past the cap still surface through the
 /// lexical lane, which runs over ALL passages with no network, so nothing is
 /// dropped — a late chunk is only ranked lexically, not semantically). Sized so
-/// a 128 × 1024-dim JSON response stays comfortably under the 5 MiB cap.
+/// a 128 × 1024-dim JSON response stays comfortably under the 5 MiB cap — a
+/// bound on the passage *count*; the response-size headroom assumes an
+/// embedding dimension in the usual range (the default `embeddinggemma` is
+/// 768-d, well within budget). A model with an unusually large dimension would
+/// need a smaller cap.
 ///
 /// [`MAX_BODY_BYTES`]: kastellan_worker_web_common::http::MAX_BODY_BYTES
 pub const MAX_EMBED_PASSAGES: usize = 128;
@@ -475,7 +479,7 @@ mod tests {
             (0..n).map(|i| format!("sandbox namespaces passage {i}")).collect();
         let emb = FakeEmbedder::new(&[]); // returns one (empty) vector per input
         let qe = [1.0_f32, 0.0];
-        let (_ranked, note) = rank_page(Some(&emb), Some(&qe), "sandbox namespaces", &passages);
+        let (ranked, note) = rank_page(Some(&emb), Some(&qe), "sandbox namespaces", &passages);
         assert_eq!(
             emb.last_input_len.get(),
             MAX_EMBED_PASSAGES,
@@ -485,6 +489,14 @@ mod tests {
         assert!(
             note.contains(&n.to_string()) && note.contains(&MAX_EMBED_PASSAGES.to_string()),
             "note should name both the chunk count and the cap: {note}"
+        );
+        // The linchpin invariant: a chunk PAST the embed cap is un-boosted
+        // semantically but never dropped — it still surfaces via the lexical
+        // lane (which ranks all passages). Pin it directly here.
+        let past_cap = format!("sandbox namespaces passage {}", n - 1);
+        assert!(
+            ranked.iter().any(|p| p.text == past_cap),
+            "a chunk past the embed cap must still surface via the lexical lane"
         );
     }
 
