@@ -2,6 +2,7 @@
 //! allowlist/response builders, behind the `testing` cargo feature so each
 //! worker's unit suite shares one canned-response transport.
 
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
@@ -44,6 +45,51 @@ impl HttpGet for FakeGet {
             .expect("FakeGet mutex poisoned")
             .pop_front()
             .ok_or_else(|| "no more canned responses".to_string())
+    }
+}
+
+/// URL host+path → response. Unlike `FakeGet`'s FIFO queue, lookups are
+/// order-independent, so a test can drive concurrent fetches and assert results
+/// deterministically. The query string is ignored (search requests carry `?q=…`).
+/// Immutable after construction ⇒ `Send + Sync`.
+pub struct KeyedFakeGet {
+    responses: HashMap<String, RawResponse>,
+}
+
+fn keyed_url(url: &Url) -> String {
+    format!("{}{}", url.host_str().unwrap_or(""), url.path())
+}
+
+impl KeyedFakeGet {
+    /// Build from `(url, response)` pairs. Each URL is reduced to its host+path key.
+    pub fn new(pairs: Vec<(&str, RawResponse)>) -> Self {
+        let responses = pairs
+            .into_iter()
+            .map(|(u, r)| (keyed_url(&Url::parse(u).expect("valid test url")), r))
+            .collect();
+        Self { responses }
+    }
+
+    fn lookup(&self, url: &Url) -> Result<RawResponse, String> {
+        let key = keyed_url(url);
+        self.responses
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| format!("no canned response for {key}"))
+    }
+}
+
+impl HttpGet for KeyedFakeGet {
+    fn get(&self, url: &Url) -> Result<RawResponse, String> {
+        self.lookup(url)
+    }
+
+    fn transport_kind(&self) -> &'static str {
+        "keyed-fake"
+    }
+
+    fn post(&self, url: &Url, _content_type: &str, _body: &[u8]) -> Result<RawResponse, String> {
+        self.lookup(url)
     }
 }
 
@@ -106,5 +152,29 @@ mod send_sync_tests {
     fn transport_seam_is_thread_shareable() {
         _assert_send_sync::<super::FakeGet>();
         _assert_send_sync::<Box<dyn HttpGet>>();
+        _assert_send_sync::<super::KeyedFakeGet>();
+    }
+}
+
+#[cfg(test)]
+mod keyed_fake_tests {
+    use super::*;
+    use url::Url;
+
+    #[test]
+    fn matches_by_host_and_path_ignoring_query() {
+        let t = KeyedFakeGet::new(vec![
+            ("https://searx.example.org/search", json_resp(r#"{"results":[]}"#)),
+            ("https://docs.example.org/a", ok_resp("page a")),
+        ]);
+        // Search request carries a ?q=... query — must still match by host+path.
+        let s = t.get(&Url::parse("https://searx.example.org/search?q=hello&format=json").unwrap())
+            .unwrap();
+        assert_eq!(s.status, 200);
+        let a = t.get(&Url::parse("https://docs.example.org/a").unwrap()).unwrap();
+        assert_eq!(a.body, b"page a");
+        // Unregistered URL is an explicit error.
+        let miss = t.get(&Url::parse("https://docs.example.org/missing").unwrap());
+        assert!(miss.is_err());
     }
 }
