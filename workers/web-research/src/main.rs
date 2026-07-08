@@ -5,6 +5,7 @@
 //! docs/superpowers/specs/2026-07-07-web-research-composite-worker-design.md
 
 mod chunk;
+mod embed;
 mod handler;
 mod rank;
 mod research;
