@@ -16,7 +16,7 @@ pub const TIMEOUT_SECS: u64 = 20;
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
 /// A single raw HTTP response, transport-agnostic.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RawResponse {
     pub status: u16,
     pub location: Option<String>,
@@ -25,7 +25,12 @@ pub struct RawResponse {
 }
 
 /// The transport seam. One GET, no redirect following.
-pub trait HttpGet {
+///
+/// `Send + Sync` so a single transport can be shared by reference across the
+/// scoped fetch threads in `web-research`'s parallel fetch phase. Every concrete
+/// impl (reqwest / proxy-connect) is already thread-safe; test doubles must be
+/// too (see `FakeGet`).
+pub trait HttpGet: Send + Sync {
     fn get(&self, url: &Url) -> Result<RawResponse, String>;
     /// Stable identifier of the concrete transport (for tests + diagnostics).
     fn transport_kind(&self) -> &'static str;

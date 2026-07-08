@@ -2,29 +2,32 @@
 //! allowlist/response builders, behind the `testing` cargo feature so each
 //! worker's unit suite shares one canned-response transport.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 use url::Url;
 
 use crate::allowlist::HostAllowlist;
 use crate::http::{HttpGet, RawResponse};
 
-/// Fake transport returning canned responses in FIFO order.
+/// Fake transport returning canned responses in FIFO order. `Mutex`-backed so it
+/// is `Sync` (the `HttpGet` seam now requires it); FIFO order is fine for
+/// single-fetch tests — use `KeyedFakeGet` when a test issues concurrent fetches.
 pub struct FakeGet {
-    responses: RefCell<VecDeque<RawResponse>>,
+    responses: Mutex<VecDeque<RawResponse>>,
 }
 
 impl FakeGet {
     pub fn new(responses: Vec<RawResponse>) -> Self {
-        Self { responses: RefCell::new(responses.into_iter().collect()) }
+        Self { responses: Mutex::new(responses.into_iter().collect()) }
     }
 }
 
 impl HttpGet for FakeGet {
     fn get(&self, _url: &Url) -> Result<RawResponse, String> {
         self.responses
-            .borrow_mut()
+            .lock()
+            .expect("FakeGet mutex poisoned")
             .pop_front()
             .ok_or_else(|| "no more canned responses".to_string())
     }
@@ -37,7 +40,8 @@ impl HttpGet for FakeGet {
         -> Result<RawResponse, String>
     {
         self.responses
-            .borrow_mut()
+            .lock()
+            .expect("FakeGet mutex poisoned")
             .pop_front()
             .ok_or_else(|| "no more canned responses".to_string())
     }
@@ -89,5 +93,18 @@ mod post_fake_tests {
                        "application/json", b"{}").unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.body, b"embedded");
+    }
+}
+
+#[cfg(test)]
+mod send_sync_tests {
+    use crate::http::HttpGet;
+
+    fn _assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn transport_seam_is_thread_shareable() {
+        _assert_send_sync::<super::FakeGet>();
+        _assert_send_sync::<Box<dyn HttpGet>>();
     }
 }
