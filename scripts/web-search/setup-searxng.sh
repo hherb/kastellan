@@ -74,6 +74,15 @@ and allowlists en.wikipedia.org as the content host itself:
   export KASTELLAN_WEB_RESEARCH_ENDPOINT='http://127.0.0.1:${PORT}/search'
   cargo test -p kastellan-core --test web_research_e2e -- --ignored --nocapture
 
+For the hybrid-ranking live e2e (real_research_with_hybrid_ranking) you also
+need an embedding endpoint. The default is a local Ollama with embeddinggemma:
+
+  ollama serve &                       # OpenAI-compat /v1/embeddings on :11434
+  ollama pull embeddinggemma
+  export KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT='http://127.0.0.1:11434/v1/embeddings'
+  # (KASTELLAN_WEB_RESEARCH_EMBED_MODEL defaults to embeddinggemma)
+  cargo test -p kastellan-core --test web_research_e2e real_research_with_hybrid_ranking -- --ignored --nocapture
+
 Smoke test the JSON API:
 
   curl -s 'http://127.0.0.1:${PORT}/search?q=rust&format=json' | head -c 400

@@ -21,6 +21,16 @@
 //! `KASTELLAN_WEB_RESEARCH_ENDPOINT`. It validates DNS/TLS (or loopback) inside
 //! the sandbox jail for both the search endpoint and the fetched content host.
 //!
+//! Ignored test (`real_research_with_hybrid_ranking`): the same composite but
+//! with an embedding-only endpoint configured
+//! (`KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT`, default a local Ollama
+//! `/v1/embeddings`). This is the ONLY test that drives real `HttpEmbedder::post`
+//! bytes over the worker's egress transport against a real embedding backend —
+//! the hermetic `FakeEmbedder`/`FakeGet` unit tests never touch the wire. It
+//! asserts `ranking == "hybrid"`, which only holds when the query embedded
+//! successfully through the jail. Run with `--ignored` after standing up both
+//! SearxNG and an embedding endpoint (e.g. `ollama serve` with `embeddinggemma`).
+//!
 //! `[SKIP]`s cleanly when PG, the supervisor, the worker binary, or a working
 //! sandbox is missing — same posture as `web_search_e2e.rs`.
 
@@ -30,7 +40,7 @@ use std::path::PathBuf;
 
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
-use kastellan_core::workers::web_research::web_research_entry;
+use kastellan_core::workers::web_research::{web_research_entry, web_research_entry_with_embed};
 use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
@@ -181,74 +191,160 @@ fn real_research_against_searxng() {
         .await
         .expect("web.research round trip (search + fetch + DNS/TLS in jail)");
 
-        // The query is echoed back verbatim.
-        assert_eq!(result["query"], "rust programming language");
-
-        let sources = result["sources"].as_array().expect("sources array");
-        let unfetched = result["unfetched"].as_array().expect("unfetched array");
-
-        // Search half: at least one hit came back (either fetched into a source or
-        // recorded in `unfetched`). No hits ⇒ SearxNG returned nothing → the live
-        // search path is broken (or the instance has no engines configured).
-        assert!(
-            !sources.is_empty() || !unfetched.is_empty(),
-            "expected SearxNG to return at least one hit; got zero sources and zero unfetched"
-        );
-
-        // `sources_fetched` is the count of successfully-gathered sources.
-        assert_eq!(
-            result["sources_fetched"].as_u64().unwrap_or(u64::MAX),
-            sources.len() as u64,
-            "sources_fetched must equal sources.len()"
-        );
-
-        // Composite (fetch + rank) half: at least one allowlisted hit was fetched
-        // and produced a ranked passage. Depends on `en.wikipedia.org` surfacing
-        // for the query and being fetchable over HTTPS from inside the jail — the
-        // whole point of this end-to-end test. If this fails while the assertion
-        // above passed, inspect `unfetched` reasons (off-allowlist vs fetch-failed).
-        assert!(
-            !sources.is_empty(),
-            "expected at least one fetched source with passages; unfetched reasons: {:?}",
-            unfetched
-                .iter()
-                .map(|u| u["reason"].as_str().unwrap_or("?"))
-                .collect::<Vec<_>>()
-        );
-
-        let first = &sources[0];
-        assert!(
-            first["url"].as_str().unwrap_or("").starts_with("http"),
-            "source url should be an absolute http(s) URL, got: {}",
-            first["url"]
-        );
-        assert_eq!(first["fetched"], true);
-        let passages = first["passages"].as_array().expect("passages array");
-        assert!(!passages.is_empty(), "a fetched source must carry ≥1 passage");
-        assert!(
-            !passages[0]["text"].as_str().unwrap_or("").is_empty(),
-            "passage text must be non-empty"
-        );
-        assert!(
-            passages[0]["score"].is_number(),
-            "passage must carry a numeric relevance score, got: {}",
-            passages[0]["score"]
-        );
-
-        // `passage_count` is the total passages across all sources.
-        let counted: usize = sources
-            .iter()
-            .map(|s| s["passages"].as_array().map(|p| p.len()).unwrap_or(0))
-            .sum();
-        assert_eq!(
-            result["passage_count"].as_u64().unwrap_or(u64::MAX),
-            counted as u64,
-            "passage_count must equal the summed passage arrays"
-        );
+        assert_composite_result_shape(&result, "rust programming language");
 
         let _ = sworker.close();
         pool.close().await;
     });
+}
+
+#[test]
+#[ignore = "hits a live SearxNG + a real content host + a real embedding endpoint; \
+            run scripts/web-search/setup-searxng.sh and an embedding backend (e.g. \
+            ollama serve with embeddinggemma) first; drives real HttpEmbedder::post \
+            bytes over the worker's egress transport and asserts hybrid ranking"]
+fn real_research_with_hybrid_ranking() {
+    let endpoint = std::env::var("KASTELLAN_WEB_RESEARCH_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:8888/search".to_string());
+    // Default to a local Ollama OpenAI-compatible embeddings endpoint. Loopback
+    // http is accepted by `validate_endpoint`; any override must be on-allowlist.
+    let embed_endpoint = std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:11434/v1/embeddings".to_string());
+
+    // Allowlist the SearxNG endpoint host, the content host we expect the search
+    // to surface, AND the embed endpoint host — the worker's fail-closed
+    // `from_env` validates the embed endpoint against this same allowlist.
+    let endpoint_host = url_host(&endpoint);
+    let embed_host = url_host(&embed_endpoint);
+    let env = match ready_or_skip(&endpoint, &[&endpoint_host, "en.wikipedia.org", &embed_host]) {
+        Some(e) => e,
+        None => return,
+    };
+    dispatch_runtime().block_on(async {
+        let pool = probe_and_pool(&env.cluster.conn_spec).await;
+        // `..._with_embed` unions the embed host:port into the egress allowlist and
+        // injects the embed endpoint + model env, so the jailed worker builds an
+        // `HttpEmbedder` and ranks hybrid.
+        let policy = web_research_entry_with_embed(
+            env.worker_path.clone(),
+            &env.endpoint,
+            Some(&embed_endpoint),
+            None, // default model (embeddinggemma)
+            &env.allowlist,
+        )
+        .policy;
+        let backend = backend();
+        let worker_str = env.worker_path.to_string_lossy().into_owned();
+        let spec = WorkerSpec {
+            policy: &policy,
+            program: &worker_str,
+            args: &[],
+            wall_clock_ms: Some(60_000),
+        };
+        let mut sworker = spawn_worker(&*backend, &spec).expect("spawn web-research under sandbox");
+
+        let result = dispatch(
+            &pool,
+            &Vault::new(),
+            &mut sworker,
+            "web-research",
+            "web.research",
+            serde_json::json!({"query": "rust programming language", "max_sources": 2}),
+        )
+        .await
+        .expect("web.research round trip (search + fetch + embed in jail)");
+
+        assert_composite_result_shape(&result, "rust programming language");
+
+        // The core new coverage: `ranking == "hybrid"` holds ONLY when the query
+        // was embedded successfully by the real backend through the jail (see
+        // `research::research` — the effective embedder is `None` on query-embed
+        // failure). If this is "lexical", the embed endpoint was unreachable from
+        // inside the jail or the response failed to decode — inspect `embed_note`.
+        assert_eq!(
+            result["ranking"], "hybrid",
+            "expected hybrid ranking (query embedded via the live endpoint); embed_note: {:?}",
+            result.get("embed_note")
+        );
+        // A per-page passage embed MAY still degrade (e.g. a huge page bumping the
+        // response cap — the deferred passages-per-POST cap), which sets a
+        // page-level `embed_note` while keeping the overall ranking hybrid. So we
+        // don't require `embed_note` to be absent; the hybrid flag above is the gate.
+
+        let _ = sworker.close();
+        pool.close().await;
+    });
+}
+
+/// Assert the shared shape of a successful composite `web.research` result: the
+/// query is echoed, search returned ≥1 hit, `sources_fetched`/`passage_count` are
+/// internally consistent, and the first fetched source carries a non-empty,
+/// numerically-scored passage. Used by both live tests (lexical + hybrid).
+fn assert_composite_result_shape(result: &serde_json::Value, expected_query: &str) {
+    // The query is echoed back verbatim.
+    assert_eq!(result["query"], expected_query);
+
+    let sources = result["sources"].as_array().expect("sources array");
+    let unfetched = result["unfetched"].as_array().expect("unfetched array");
+
+    // Search half: at least one hit came back (either fetched into a source or
+    // recorded in `unfetched`). No hits ⇒ SearxNG returned nothing → the live
+    // search path is broken (or the instance has no engines configured).
+    assert!(
+        !sources.is_empty() || !unfetched.is_empty(),
+        "expected SearxNG to return at least one hit; got zero sources and zero unfetched"
+    );
+
+    // `sources_fetched` is the count of successfully-gathered sources.
+    assert_eq!(
+        result["sources_fetched"].as_u64().unwrap_or(u64::MAX),
+        sources.len() as u64,
+        "sources_fetched must equal sources.len()"
+    );
+
+    // Composite (fetch + rank) half: at least one allowlisted hit was fetched
+    // and produced a ranked passage. Depends on `en.wikipedia.org` surfacing
+    // for the query and being fetchable over HTTPS from inside the jail — the
+    // whole point of this end-to-end test. If this fails while the assertion
+    // above passed, inspect `unfetched` reasons (off-allowlist vs fetch-failed).
+    assert!(
+        !sources.is_empty(),
+        "expected at least one fetched source with passages; unfetched reasons: {:?}",
+        unfetched
+            .iter()
+            .map(|u| u["reason"].as_str().unwrap_or("?"))
+            .collect::<Vec<_>>()
+    );
+
+    let first = &sources[0];
+    assert!(
+        first["url"].as_str().unwrap_or("").starts_with("http"),
+        "source url should be an absolute http(s) URL, got: {}",
+        first["url"]
+    );
+    assert_eq!(first["fetched"], true);
+    let passages = first["passages"].as_array().expect("passages array");
+    assert!(!passages.is_empty(), "a fetched source must carry ≥1 passage");
+    assert!(
+        !passages[0]["text"].as_str().unwrap_or("").is_empty(),
+        "passage text must be non-empty"
+    );
+    assert!(
+        passages[0]["score"].is_number(),
+        "passage must carry a numeric relevance score, got: {}",
+        passages[0]["score"]
+    );
+
+    // `passage_count` is the total passages across all sources.
+    let counted: usize = sources
+        .iter()
+        .map(|s| s["passages"].as_array().map(|p| p.len()).unwrap_or(0))
+        .sum();
+    assert_eq!(
+        result["passage_count"].as_u64().unwrap_or(u64::MAX),
+        counted as u64,
+        "passage_count must equal the summed passage arrays"
+    );
 }
 
 /// Extract the host from a URL string for the ignored test's allowlist.
