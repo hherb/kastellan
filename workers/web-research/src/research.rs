@@ -152,40 +152,66 @@ fn rank_page(
     }
 }
 
-/// Try to turn one allowlisted hit into a `SourcePassages`. `Err(reason)` on any
-/// fetch/parse/extract failure, a non-2xx terminal status, or when ranking
-/// yields no relevant passage — the caller records the reason in `unfetched` so
-/// a dead/irrelevant page never occupies a source slot.
-fn gather_source<T: HttpGet>(
+/// One fetched + chunked page, not yet ranked. Phase-1 output of the fetch driver.
+#[derive(Debug)]
+struct FetchedPage {
+    final_url: String,
+    passages: Vec<String>,
+}
+
+/// Is this hit's host on the content allowlist? (Shared by the candidate filter and
+/// the classify walk so the two can never drift — a hit fetched in phase 1 must be
+/// the same set the classify phase expects.)
+fn hit_allowed(allowlist: &HostAllowlist, hit: &Hit) -> bool {
+    Url::parse(&hit.url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .map(|h| allowlist.is_allowed(&h))
+        .unwrap_or(false)
+}
+
+/// Phase 1: fetch one allowlisted hit and chunk it into passages. `Err(reason)` on
+/// any fetch/redirect/extract failure or a non-2xx terminal status — the exact
+/// reason strings the caller records in `unfetched`. Pure over the transport seam.
+fn fetch_and_chunk<T: HttpGet>(
     transport: &T,
     allowlist: &HostAllowlist,
-    embedder: Option<&dyn Embedder>,
-    query_emb: Option<&[f32]>,
-    query: &str,
-    hit: &Hit,
-    max_passages: usize,
-) -> Result<(SourcePassages, Option<String>), String> {
-    let url = Url::parse(&hit.url).map_err(|e| format!("fetch-failed: bad url: {e}"))?;
+    url: &str,
+) -> Result<FetchedPage, String> {
+    let url = Url::parse(url).map_err(|e| format!("fetch-failed: bad url: {e}"))?;
     let outcome = drive(transport, allowlist, url).map_err(|e| short_fetch_reason(&e))?;
     // `drive` returns any non-3xx terminal response, including 4xx/5xx. An error
-    // page (a 403 bot-challenge, a 404, a 500) is not a usable source — record it
-    // rather than extracting its error HTML into bogus passages.
+    // page (403 bot-challenge, 404, 500) is not a usable source — record it rather
+    // than extracting its error HTML into bogus passages.
     if !(200..300).contains(&outcome.status) {
         return Err(format!("fetch-failed: status {}", outcome.status));
     }
     let extracted = extract(&outcome.content_type, &outcome.body)
         .map_err(|e| format!("fetch-failed: extraction: {e}"))?;
     let passages = chunk_passages(&extracted.text);
-    let (mut ranked, note) = rank_page(embedder, query_emb, query, &passages);
+    Ok(FetchedPage { final_url: outcome.final_url, passages })
+}
+
+/// Phase 2: rank one fetched page against the query, truncate to `max_passages`,
+/// and apply the empty ⇒ `no-relevant-passages` rule. `Err(reason)` when the page
+/// shares no relevant passage with the query (don't consume a source slot).
+/// Returns the built source and an optional per-page degrade/cap note.
+fn rank_fetched_page(
+    embedder: Option<&dyn Embedder>,
+    query_emb: Option<&[f32]>,
+    query: &str,
+    hit: &Hit,
+    page: &FetchedPage,
+    max_passages: usize,
+) -> Result<(SourcePassages, Option<String>), String> {
+    let (mut ranked, note) = rank_page(embedder, query_emb, query, &page.passages);
     ranked.truncate(max_passages);
-    // A page that fetched fine but shares no terms with the query yields nothing.
-    // Record it (don't consume a source slot) so a later hit can be fetched.
     if ranked.is_empty() {
         return Err("no-relevant-passages".to_string());
     }
     Ok((
         SourcePassages {
-            url: outcome.final_url,
+            url: page.final_url.clone(),
             title: hit.title.clone(),
             snippet: hit.snippet.clone(),
             passages: ranked,
@@ -244,9 +270,7 @@ pub fn research<T: HttpGet>(
         if sources.len() >= max_sources {
             break;
         }
-        let host = Url::parse(&hit.url).ok().and_then(|u| u.host_str().map(str::to_string));
-        let allowed = host.as_deref().map(|h| allowlist.is_allowed(h)).unwrap_or(false);
-        if !allowed {
+        if !hit_allowed(allowlist, hit) {
             unfetched.push(UnfetchedSource {
                 url: hit.url.clone(),
                 title: hit.title.clone(),
@@ -255,10 +279,12 @@ pub fn research<T: HttpGet>(
             });
             continue;
         }
-        match gather_source(
-            transport, allowlist, eff_embedder, query_emb.as_deref(),
-            query, hit, max_passages,
-        ) {
+        let result = fetch_and_chunk(transport, allowlist, &hit.url).and_then(|page| {
+            rank_fetched_page(
+                eff_embedder, query_emb.as_deref(), query, hit, &page, max_passages,
+            )
+        });
+        match result {
             Ok((src, note)) => {
                 if embed_note.is_none() {
                     embed_note = note; // first page-level degrade reason wins
