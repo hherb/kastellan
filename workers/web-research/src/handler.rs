@@ -15,7 +15,7 @@ use kastellan_worker_web_common::allowlist::HostAllowlist;
 use kastellan_worker_web_common::http::{make_get, HttpGet};
 use kastellan_worker_web_common::search::{validate_endpoint, SearchError};
 
-use crate::rank::LexicalRanker;
+use crate::embed::{Embedder, HttpEmbedder};
 use crate::research::{
     research, ResearchError, ResearchOutcome, DEFAULT_MAX_PASSAGES, DEFAULT_MAX_SOURCES,
 };
@@ -89,13 +89,22 @@ fn outcome_to_json(query: &str, out: ResearchOutcome) -> serde_json::Value {
         .map(|u| json!({ "url": u.url, "title": u.title, "snippet": u.snippet, "reason": u.reason }))
         .collect();
     let passage_count: usize = out.sources.iter().map(|s| s.passages.len()).sum();
-    json!({
+    let ranking = match out.ranking {
+        crate::research::RankMode::Hybrid => "hybrid",
+        crate::research::RankMode::Lexical => "lexical",
+    };
+    let mut obj = json!({
         "query": query,
         "sources": sources,
         "unfetched": unfetched,
         "sources_fetched": out.sources.len(),
         "passage_count": passage_count,
-    })
+        "ranking": ranking,
+    });
+    if let Some(note) = &out.embed_note {
+        obj["embed_note"] = json!(note);
+    }
+    obj
 }
 
 /// The worker handler, generic over the transport so tests inject a fake.
@@ -103,7 +112,7 @@ pub struct WebResearchHandler<T: HttpGet> {
     endpoint: Url,
     allowlist: HostAllowlist,
     transport: T,
-    ranker: LexicalRanker,
+    embedder: Option<Box<dyn Embedder>>,
 }
 
 impl WebResearchHandler<Box<dyn HttpGet>> {
@@ -119,14 +128,29 @@ impl WebResearchHandler<Box<dyn HttpGet>> {
         let endpoint = validate_endpoint(&endpoint_raw, &allowlist)
             .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
         let transport = make_get("kastellan-web-research/0")?;
-        Ok(Self { endpoint, allowlist, transport, ranker: LexicalRanker })
+        let embedder = match std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT") {
+            Ok(raw) if !raw.trim().is_empty() => {
+                // The embed endpoint host must be on the same allowlist (fail closed
+                // if the operator forgot to allow it).
+                let embed_endpoint = validate_endpoint(&raw, &allowlist)
+                    .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
+                let model = std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_MODEL")
+                    .unwrap_or_else(|_| "embeddinggemma".to_string());
+                let embed_transport = make_get("kastellan-web-research/0")?;
+                let e: Box<dyn Embedder> =
+                    Box::new(HttpEmbedder::new(embed_transport, embed_endpoint, model));
+                Some(e)
+            }
+            _ => None,
+        };
+        Ok(Self { endpoint, allowlist, transport, embedder })
     }
 }
 
 impl<T: HttpGet> WebResearchHandler<T> {
     #[cfg(test)]
     fn with_parts(endpoint: Url, allowlist: HostAllowlist, transport: T) -> Self {
-        Self { endpoint, allowlist, transport, ranker: LexicalRanker }
+        Self { endpoint, allowlist, transport, embedder: None }
     }
 }
 
@@ -143,8 +167,8 @@ impl<T: HttpGet> Handler for WebResearchHandler<T> {
         let max_passages = p.max_passages.unwrap_or(DEFAULT_MAX_PASSAGES);
 
         let out = research(
-            &self.transport, &self.endpoint, &self.allowlist, &self.ranker,
-            &p.query, max_sources, max_passages,
+            &self.transport, &self.endpoint, &self.allowlist,
+            self.embedder.as_deref(), &p.query, max_sources, max_passages,
         ).map_err(research_err_to_rpc)?;
 
         Ok(outcome_to_json(&p.query, out))
@@ -223,5 +247,68 @@ mod tests {
         let out = h.call("web.research", json!({"query": "q term"})).unwrap();
         assert_eq!(out["sources_fetched"], 0);
         assert_eq!(out["unfetched"][0]["reason"], "off-allowlist");
+    }
+
+    fn handler_with_embedder(
+        responses: Vec<RawResponse>,
+        embedder: Option<Box<dyn crate::embed::Embedder>>,
+    ) -> WebResearchHandler<FakeGet> {
+        let mut h = WebResearchHandler::with_parts(
+            Url::parse("https://searx.example.org/search").unwrap(),
+            al(&["searx.example.org", "docs.example.org"]),
+            FakeGet::new(responses),
+        );
+        h.embedder = embedder;
+        h
+    }
+
+    #[test]
+    fn lexical_result_reports_ranking_lexical() {
+        let page = "bwrap creates user namespaces.";
+        let mut h = handler(vec![
+            json_resp(&search_json("Doc", "https://docs.example.org/bwrap")),
+            RawResponse { status: 200, location: None, content_type: "text/plain".into(),
+                body: page.as_bytes().to_vec() },
+        ]);
+        let out = h.call("web.research", json!({"query": "bwrap user namespaces"})).unwrap();
+        assert_eq!(out["ranking"], "lexical");
+        assert!(out.get("embed_note").is_none() || out["embed_note"].is_null());
+    }
+
+    #[test]
+    fn hybrid_result_reports_ranking_hybrid() {
+        use crate::embed::FakeEmbedder;
+        let page = "bwrap creates user namespaces.";
+        let emb = FakeEmbedder::new(&[
+            ("bwrap user namespaces", vec![1.0_f32, 0.0]),
+            ("bwrap creates user namespaces.", vec![1.0_f32, 0.0]),
+        ]);
+        let mut h = handler_with_embedder(
+            vec![
+                json_resp(&search_json("Doc", "https://docs.example.org/bwrap")),
+                RawResponse { status: 200, location: None, content_type: "text/plain".into(),
+                    body: page.as_bytes().to_vec() },
+            ],
+            Some(Box::new(emb)),
+        );
+        let out = h.call("web.research", json!({"query": "bwrap user namespaces"})).unwrap();
+        assert_eq!(out["ranking"], "hybrid");
+    }
+
+    #[test]
+    fn degraded_result_carries_embed_note() {
+        use crate::embed::FakeEmbedder;
+        let page = "bwrap creates user namespaces.";
+        let mut h = handler_with_embedder(
+            vec![
+                json_resp(&search_json("Doc", "https://docs.example.org/bwrap")),
+                RawResponse { status: 200, location: None, content_type: "text/plain".into(),
+                    body: page.as_bytes().to_vec() },
+            ],
+            Some(Box::new(FakeEmbedder::failing())),
+        );
+        let out = h.call("web.research", json!({"query": "bwrap user namespaces"})).unwrap();
+        assert_eq!(out["ranking"], "lexical");
+        assert!(out["embed_note"].as_str().unwrap().contains("embed"));
     }
 }

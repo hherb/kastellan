@@ -16,6 +16,7 @@ pub const TIMEOUT_SECS: u64 = 20;
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
 /// A single raw HTTP response, transport-agnostic.
+#[derive(Debug)]
 pub struct RawResponse {
     pub status: u16,
     pub location: Option<String>,
@@ -28,6 +29,15 @@ pub trait HttpGet {
     fn get(&self, url: &Url) -> Result<RawResponse, String>;
     /// Stable identifier of the concrete transport (for tests + diagnostics).
     fn transport_kind(&self) -> &'static str;
+
+    /// POST `body` with `content_type` to `url`, no redirect following.
+    /// Default: unsupported — only transports that need it (the embedding POST)
+    /// override this, so GET-only siblings (web-search, web-fetch) are untouched.
+    fn post(&self, _url: &Url, _content_type: &str, _body: &[u8])
+        -> Result<RawResponse, String>
+    {
+        Err("post: unsupported by this transport".to_string())
+    }
 }
 
 impl HttpGet for Box<dyn HttpGet> {
@@ -37,6 +47,12 @@ impl HttpGet for Box<dyn HttpGet> {
 
     fn transport_kind(&self) -> &'static str {
         (**self).transport_kind()
+    }
+
+    fn post(&self, url: &Url, content_type: &str, body: &[u8])
+        -> Result<RawResponse, String>
+    {
+        (**self).post(url, content_type, body)
     }
 }
 
@@ -93,6 +109,31 @@ impl HttpGet for ReqwestGet {
         }
 
         Ok(RawResponse { status, location, content_type, body })
+    }
+
+    fn post(&self, url: &Url, content_type: &str, body: &[u8])
+        -> Result<RawResponse, String>
+    {
+        use std::io::Read;
+        let resp = self
+            .client
+            .post(url.clone())
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body.to_vec())
+            .send()
+            .map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let header = |name: reqwest::header::HeaderName| -> Option<String> {
+            resp.headers().get(&name).and_then(|v| v.to_str().ok()).map(|s| s.to_string())
+        };
+        let location = header(reqwest::header::LOCATION);
+        let content_type = header(reqwest::header::CONTENT_TYPE).unwrap_or_default();
+        let mut out = Vec::new();
+        resp.take((MAX_BODY_BYTES as u64) + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+        if out.len() > MAX_BODY_BYTES {
+            return Err(format!("response body exceeds {MAX_BODY_BYTES} bytes"));
+        }
+        Ok(RawResponse { status, location, content_type, body: out })
     }
 }
 
@@ -189,5 +230,25 @@ mod tests {
         );
         assert!(g.is_ok());
         assert_eq!(g.unwrap().transport_kind(), "proxy-connect");
+    }
+}
+
+#[cfg(test)]
+mod post_tests {
+    use super::*;
+
+    struct GetOnly;
+    impl HttpGet for GetOnly {
+        fn get(&self, _url: &Url) -> Result<RawResponse, String> { unreachable!() }
+        fn transport_kind(&self) -> &'static str { "get-only" }
+        // deliberately does NOT override post -> exercises the default
+    }
+
+    #[test]
+    fn default_post_is_unsupported() {
+        let t = GetOnly;
+        let err = t.post(&Url::parse("https://x.test/e").unwrap(), "application/json", b"{}")
+            .unwrap_err();
+        assert!(err.contains("unsupported"), "got: {err}");
     }
 }

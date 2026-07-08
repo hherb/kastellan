@@ -20,6 +20,9 @@ const TOOL_NAME: &str = "web-research";
 const BIN_ENV: &str = "KASTELLAN_WEB_RESEARCH_BIN";
 const DEFAULT_BIN_NAME: &str = "kastellan-worker-web-research";
 const ENDPOINT_ENV: &str = "KASTELLAN_WEB_RESEARCH_ENDPOINT";
+const EMBED_ENDPOINT_ENV: &str = "KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT";
+const EMBED_MODEL_ENV: &str = "KASTELLAN_WEB_RESEARCH_EMBED_MODEL";
+const DEFAULT_EMBED_MODEL: &str = "embeddinggemma";
 
 /// `host:port` for the SearxNG endpoint (port defaults: 443 https / from URL).
 fn endpoint_net_entry(endpoint: &str) -> Vec<String> {
@@ -32,12 +35,20 @@ fn endpoint_net_entry(endpoint: &str) -> Vec<String> {
     }
 }
 
-/// Union of the endpoint host:port and the content host:443 entries, de-duped
-/// (order-preserving: endpoint first). The content half reuses web-fetch's
-/// canonical domain→`host:443` mapping (wildcard `.d` → `d:443`) so both fetching
-/// workers share one wildcard-flattening rule.
-fn net_entries(endpoint: &str, allowlist: &[String]) -> Vec<String> {
+/// Union of the endpoint host:port, the optional embed-endpoint host:port, and
+/// the content host:443 entries, de-duped (order-preserving: SearxNG endpoint
+/// first, embed endpoint second, content hosts last). The content half reuses
+/// web-fetch's canonical domain→`host:443` mapping (wildcard `.d` → `d:443`) so
+/// both fetching workers share one wildcard-flattening rule.
+fn net_entries(endpoint: &str, embed_endpoint: Option<&str>, allowlist: &[String]) -> Vec<String> {
     let mut entries = endpoint_net_entry(endpoint);
+    if let Some(embed) = embed_endpoint {
+        for e in endpoint_net_entry(embed) {
+            if !entries.contains(&e) {
+                entries.push(e);
+            }
+        }
+    }
     for e in crate::workers::web_fetch::allowlist_to_net_entries(allowlist) {
         if !entries.contains(&e) {
             entries.push(e);
@@ -58,7 +69,34 @@ fn net_entries(endpoint: &str, allowlist: &[String]) -> Vec<String> {
 /// (which would decouple the two) is a deferred follow-up; until then the
 /// `max_sources` clamp (≤ 8) keeps the worst case bounded.
 pub fn web_research_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -> ToolEntry {
+    web_research_entry_with_embed(binary, endpoint, None, None, allowlist)
+}
+
+/// Like [`web_research_entry`] but also, when `embed_endpoint` is set, unions that
+/// host:port into the egress allowlist and injects the embed endpoint + model env
+/// so the jailed worker may reach an embedding-only endpoint for hybrid ranking.
+/// When `embed_endpoint` is `None` the result is identical to the lexical-only
+/// worker (no extra net entry, no extra env). `embed_model` defaults to
+/// [`DEFAULT_EMBED_MODEL`] when `None`.
+pub fn web_research_entry_with_embed(
+    binary: PathBuf,
+    endpoint: &str,
+    embed_endpoint: Option<&str>,
+    embed_model: Option<&str>,
+    allowlist: &[String],
+) -> ToolEntry {
     let allow_json = serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
+    let mut env = vec![
+        (ENDPOINT_ENV.to_string(), endpoint.to_string()),
+        ("KASTELLAN_WEB_RESEARCH_ALLOWLIST".to_string(), allow_json),
+    ];
+    if let Some(embed) = embed_endpoint {
+        env.push((EMBED_ENDPOINT_ENV.to_string(), embed.to_string()));
+        env.push((
+            EMBED_MODEL_ENV.to_string(),
+            embed_model.unwrap_or(DEFAULT_EMBED_MODEL).to_string(),
+        ));
+    }
     let policy = SandboxPolicy {
         fs_read: vec![
             binary.clone(),
@@ -67,14 +105,11 @@ pub fn web_research_entry(binary: PathBuf, endpoint: &str, allowlist: &[String])
             PathBuf::from("/etc/nsswitch.conf"),
         ],
         fs_write: vec![],
-        net: Net::Allowlist(net_entries(endpoint, allowlist)),
+        net: Net::Allowlist(net_entries(endpoint, embed_endpoint, allowlist)),
         cpu_ms: 15_000,
         mem_mb: 512,
         profile: Profile::WorkerNetClient,
-        env: vec![
-            (ENDPOINT_ENV.to_string(), endpoint.to_string()),
-            ("KASTELLAN_WEB_RESEARCH_ALLOWLIST".to_string(), allow_json),
-        ],
+        env,
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
@@ -115,8 +150,16 @@ impl WorkerManifest for WebResearchManifest {
             }
         };
         let endpoint = (ctx.get_env)(ENDPOINT_ENV).unwrap_or_default();
+        let embed_endpoint = (ctx.get_env)(EMBED_ENDPOINT_ENV).filter(|s| !s.trim().is_empty());
+        let embed_model = (ctx.get_env)(EMBED_MODEL_ENV).filter(|s| !s.trim().is_empty());
         let allowlist = (ctx.allowlist)(TOOL_NAME);
-        Resolution::Register(web_research_entry(binary, &endpoint, &allowlist))
+        Resolution::Register(web_research_entry_with_embed(
+            binary,
+            &endpoint,
+            embed_endpoint.as_deref(),
+            embed_model.as_deref(),
+            &allowlist,
+        ))
     }
 }
 
@@ -171,6 +214,39 @@ mod tests {
                 assert_eq!(entry.policy.env[0].1, "https://searx.example.org/search");
                 assert_eq!(entry.policy.env[1].0, "KASTELLAN_WEB_RESEARCH_ALLOWLIST");
                 assert_eq!(entry.policy.env[1].1, r#"["searx.example.org",".docs.example.org"]"#);
+                assert_eq!(entry.policy.env.len(), 2, "no embed env when endpoint unset");
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_unions_embed_endpoint_into_net_and_injects_env() {
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+            EMBED_ENDPOINT_ENV => Some("http://embed.example.org:11434/v1/embeddings".to_string()),
+            _ => None, // EMBED_MODEL_ENV unset -> default model
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec![
+            "searx.example.org".to_string(),
+            "embed.example.org".to_string(),
+            ".docs.example.org".to_string(),
+        ];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                match &entry.policy.net {
+                    Net::Allowlist(hosts) => {
+                        assert!(hosts.iter().any(|h| h == "embed.example.org:11434"),
+                            "embed host:port missing from net: {hosts:?}");
+                    }
+                    other => panic!("expected Net::Allowlist, got {other:?}"),
+                }
+                let has = |k: &str, v: &str| entry.policy.env.iter().any(|(ek, ev)| ek == k && ev == v);
+                assert!(has(EMBED_ENDPOINT_ENV, "http://embed.example.org:11434/v1/embeddings"));
+                assert!(has(EMBED_MODEL_ENV, "embeddinggemma"), "default model injected");
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
         }
