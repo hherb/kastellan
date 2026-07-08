@@ -8,12 +8,6 @@
 //! a count check (one vector per input). A per-vector length check is unnecessary:
 //! the downstream `cosine` ranker skips any passage whose embedding length differs
 //! from the query's, so a mixed-dimension response degrades gracefully there.
-//!
-//! TRANSIENT: these items are exercised by this module's `#[cfg(test)]` tests but
-//! not yet by production code (`research()`/`handler` wire them in Tasks 4–5). The
-//! module-scoped `allow(dead_code)` below is removed once they are wired — the
-//! plan's transient-allow hard bar requires zero such allows after Task 5.
-#![allow(dead_code)]
 
 use serde::Deserialize;
 use url::Url;

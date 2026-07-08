@@ -62,14 +62,9 @@ pub struct ResearchOutcome {
     pub sources: Vec<SourcePassages>,
     pub unfetched: Vec<UnfetchedSource>,
     /// `Hybrid` iff an embedder was configured AND the query embedded OK.
-    // TRANSIENT: only inspected by this module's tests today; Task 5 wires it
-    // into handler.rs's JSON surface, at which point this allow is removed.
-    #[allow(dead_code)]
     pub ranking: RankMode,
     /// `Some(reason)` iff a configured semantic lane fell back to lexical for the
     /// whole call (query embed failed) or for at least one page (first reason wins).
-    // TRANSIENT: see `ranking` above — same Task 5 wiring removes this allow.
-    #[allow(dead_code)]
     pub embed_note: Option<String>,
 }
 
