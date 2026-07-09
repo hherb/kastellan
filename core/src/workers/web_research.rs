@@ -175,7 +175,8 @@ pub fn web_research_entry_with_embed(
 /// (local Ollama `127.0.0.1:11434`) is unreachable → the query embed fails and the
 /// worker degrades to lexical ranking with an `embed_note` (never silent). For
 /// hybrid ranking in VM mode, point `KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT` at a
-/// **routable** embed host. Host mode is unaffected.
+/// **routable** embed host. Host mode is unaffected. A resolve-time operator
+/// warning for this loopback+VM misconfiguration is tracked in issue #429.
 ///
 /// Linux-only: emits the `FirecrackerVm` backend variant.
 #[cfg(target_os = "linux")]
