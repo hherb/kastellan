@@ -39,9 +39,150 @@ pub struct EmbedResult {
     pub data: Vec<EmbedData>,
 }
 
+use kastellan_protocol::{codes, RpcError};
+use kastellan_worker_web_common::http::HttpGet;
+use url::Url;
+
+/// The OpenAI-compatible request body sent to the backend.
+#[derive(Serialize)]
+struct BackendReq<'a> {
+    model: &'a str,
+    input: &'a [String],
+}
+
+/// One row of the backend's OpenAI-compatible response.
+#[derive(Deserialize)]
+struct BackendRow {
+    #[serde(default)]
+    index: usize,
+    embedding: Vec<f32>,
+}
+
+/// The backend's OpenAI-compatible response envelope.
+#[derive(Deserialize)]
+struct BackendResp {
+    data: Vec<BackendRow>,
+}
+
+/// Forward one `embed` request to the backend and normalise the response.
+///
+/// POSTs `{model, input}` (OpenAI-compatible) to `endpoint` over `transport`,
+/// decodes `{data:[{index,embedding}]}`, reorders rows by `index` so each vector
+/// pairs with its input position, and count-checks (one vector per input). Any
+/// transport error, non-2xx status, decode failure, or count mismatch becomes an
+/// `OPERATION_FAILED` [`RpcError`] — the broker never partially succeeds.
+pub fn forward_embed<T: HttpGet>(
+    transport: &T,
+    endpoint: &Url,
+    params: &EmbedParams,
+) -> Result<EmbedResult, RpcError> {
+    if params.input.is_empty() {
+        return Ok(EmbedResult { data: Vec::new() });
+    }
+    let body = serde_json::to_vec(&BackendReq { model: &params.model, input: &params.input })
+        .map_err(|e| RpcError::new(codes::INTERNAL_ERROR, format!("request encode: {e}")))?;
+    let resp = transport
+        .post(endpoint, "application/json", &body)
+        .map_err(|e| RpcError::new(codes::OPERATION_FAILED, format!("backend transport: {e}")))?;
+    if !(200..300).contains(&resp.status) {
+        return Err(RpcError::new(
+            codes::OPERATION_FAILED,
+            format!("backend status {}", resp.status),
+        ));
+    }
+    let decoded: BackendResp = serde_json::from_slice(&resp.body)
+        .map_err(|e| RpcError::new(codes::OPERATION_FAILED, format!("backend decode: {e}")))?;
+    if decoded.data.len() != params.input.len() {
+        return Err(RpcError::new(
+            codes::OPERATION_FAILED,
+            format!(
+                "vector count mismatch: requested {}, returned {}",
+                params.input.len(),
+                decoded.data.len()
+            ),
+        ));
+    }
+    let mut rows = decoded.data;
+    rows.sort_by_key(|d| d.index);
+    let data = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, d)| EmbedData { index: i, embedding: d.embedding })
+        .collect();
+    Ok(EmbedResult { data })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::testing::FakeGet;
+    use url::Url;
+
+    fn endpoint() -> Url { Url::parse("http://127.0.0.1:11434/v1/embeddings").unwrap() }
+
+    fn ok_body(rows: &[(usize, &[f32])]) -> Vec<u8> {
+        let data: Vec<String> = rows.iter().map(|(i, v)| {
+            let nums: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+            format!(r#"{{"index":{i},"embedding":[{}]}}"#, nums.join(","))
+        }).collect();
+        format!(r#"{{"data":[{}]}}"#, data.join(",")).into_bytes()
+    }
+
+    fn resp(status: u16, body: Vec<u8>) -> RawResponse {
+        RawResponse { status, location: None, content_type: "application/json".into(), body }
+    }
+
+    fn params(model: &str, input: &[&str]) -> EmbedParams {
+        EmbedParams { model: model.into(), input: input.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn forward_returns_vectors_in_input_order() {
+        let t = FakeGet::new(vec![resp(200, ok_body(&[(0, &[1.0, 2.0]), (1, &[3.0, 4.0])]))]);
+        let out = forward_embed(&t, &endpoint(), &params("m", &["a", "b"])).unwrap();
+        assert_eq!(out, EmbedResult { data: vec![
+            EmbedData { index: 0, embedding: vec![1.0, 2.0] },
+            EmbedData { index: 1, embedding: vec![3.0, 4.0] },
+        ]});
+    }
+
+    #[test]
+    fn forward_reorders_out_of_order_backend_rows() {
+        // Backend returns index:1 first, index:0 second — result must be input-ordered.
+        let t = FakeGet::new(vec![resp(200, ok_body(&[(1, &[3.0, 4.0]), (0, &[1.0, 2.0])]))]);
+        let out = forward_embed(&t, &endpoint(), &params("m", &["a", "b"])).unwrap();
+        assert_eq!(out.data[0].embedding, vec![1.0, 2.0]);
+        assert_eq!(out.data[1].embedding, vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn forward_count_mismatch_is_error() {
+        let t = FakeGet::new(vec![resp(200, ok_body(&[(0, &[1.0])]))]); // 1 row for 2 inputs
+        let err = forward_embed(&t, &endpoint(), &params("m", &["a", "b"])).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::OPERATION_FAILED);
+    }
+
+    #[test]
+    fn forward_non_2xx_is_error() {
+        let t = FakeGet::new(vec![resp(503, b"upstream down".to_vec())]);
+        let err = forward_embed(&t, &endpoint(), &params("m", &["a"])).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::OPERATION_FAILED);
+    }
+
+    #[test]
+    fn forward_transport_failure_is_error() {
+        let t = FakeGet::new(vec![]); // empty queue -> post() errors "no more canned responses"
+        let err = forward_embed(&t, &endpoint(), &params("m", &["a"])).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::OPERATION_FAILED);
+    }
+
+    #[test]
+    fn forward_empty_input_makes_no_call() {
+        let t = FakeGet::new(vec![]); // would error if called
+        let out = forward_embed(&t, &endpoint(), &params("m", &[])).unwrap();
+        assert!(out.data.is_empty());
+    }
 
     #[test]
     fn embed_params_parse_from_json() {
