@@ -112,6 +112,58 @@ pub fn forward_embed<T: HttpGet>(
     Ok(EmbedResult { data })
 }
 
+use kastellan_protocol::server::Handler;
+
+/// JSON-RPC handler for the broker's single `embed` method.
+///
+/// Enforces the batch caps ([`MAX_INPUTS`], [`MAX_REQUEST_BYTES`]) fail-closed
+/// *before* any backend call, then delegates to [`forward_embed`]. Generic over
+/// the transport so tests inject a `FakeGet`.
+pub struct EmbedHandler<T: HttpGet> {
+    transport: T,
+    endpoint: Url,
+}
+
+impl<T: HttpGet> EmbedHandler<T> {
+    /// Build a handler that forwards `embed` calls to `endpoint` over `transport`.
+    pub fn new(transport: T, endpoint: Url) -> Self {
+        Self { transport, endpoint }
+    }
+}
+
+impl<T: HttpGet> Handler for EmbedHandler<T> {
+    fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        if method != "embed" {
+            return Err(RpcError::new(
+                codes::METHOD_NOT_FOUND,
+                format!("unknown method: {method}"),
+            ));
+        }
+        let p: EmbedParams = serde_json::from_value(params)
+            .map_err(|e| RpcError::new(codes::INVALID_PARAMS, format!("params: {e}")))?;
+        if p.input.len() > MAX_INPUTS {
+            return Err(RpcError::new(
+                codes::INVALID_PARAMS,
+                format!("too many inputs: {} > {}", p.input.len(), MAX_INPUTS),
+            ));
+        }
+        let total: usize = p.input.iter().map(|s| s.len()).sum();
+        if total > MAX_REQUEST_BYTES {
+            return Err(RpcError::new(
+                codes::INVALID_PARAMS,
+                format!("request too large: {total} > {MAX_REQUEST_BYTES} bytes"),
+            ));
+        }
+        let result = forward_embed(&self.transport, &self.endpoint, &p)?;
+        serde_json::to_value(result)
+            .map_err(|e| RpcError::new(codes::INTERNAL_ERROR, format!("result encode: {e}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +249,51 @@ mod tests {
         let r = EmbedResult { data: vec![EmbedData { index: 0, embedding: vec![1.0, 2.0] }] };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v, serde_json::json!({ "data": [{ "index": 0, "embedding": [1.0, 2.0] }] }));
+    }
+
+    use kastellan_protocol::server::Handler;
+
+    fn handler(responses: Vec<RawResponse>) -> EmbedHandler<FakeGet> {
+        EmbedHandler::new(FakeGet::new(responses), endpoint())
+    }
+
+    #[test]
+    fn call_embed_returns_result_value() {
+        let mut h = handler(vec![resp(200, ok_body(&[(0, &[1.0, 2.0])]))]);
+        let out = h.call("embed", serde_json::json!({ "model": "m", "input": ["a"] })).unwrap();
+        assert_eq!(out, serde_json::json!({ "data": [{ "index": 0, "embedding": [1.0, 2.0] }] }));
+    }
+
+    #[test]
+    fn call_unknown_method_is_method_not_found() {
+        let mut h = handler(vec![]);
+        let err = h.call("bogus", serde_json::json!({})).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn call_bad_params_is_invalid_params() {
+        let mut h = handler(vec![]);
+        let err = h.call("embed", serde_json::json!({ "model": 5 })).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn call_too_many_inputs_rejected_before_backend() {
+        // Empty response queue: if the cap did NOT fire first, forward_embed would
+        // error OPERATION_FAILED. Asserting INVALID_PARAMS proves the cap fired
+        // before any backend call.
+        let big: Vec<String> = (0..(MAX_INPUTS + 1)).map(|i| i.to_string()).collect();
+        let mut h = handler(vec![]);
+        let err = h.call("embed", serde_json::json!({ "model": "m", "input": big })).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn call_oversized_request_rejected_before_backend() {
+        let huge = "x".repeat(MAX_REQUEST_BYTES + 1);
+        let mut h = handler(vec![]);
+        let err = h.call("embed", serde_json::json!({ "model": "m", "input": [huge] })).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::INVALID_PARAMS);
     }
 }
