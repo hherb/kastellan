@@ -9,6 +9,10 @@
 //! the downstream `cosine` ranker skips any passage whose embedding length differs
 //! from the query's, so a mixed-dimension response degrades gracefully there.
 
+use std::io::{BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+
 use serde::Deserialize;
 use url::Url;
 
@@ -17,6 +21,34 @@ use kastellan_worker_web_common::http::HttpGet;
 /// Turn texts into embedding vectors. Batches all inputs into one request.
 pub trait Embedder {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;
+}
+
+/// Which embedder `from_env` should build, decided purely from two env values.
+/// Kept separate from the (I/O-bound) construction so the precedence rule is
+/// unit-testable without touching env or sockets.
+#[derive(Debug, PartialEq)]
+pub enum EmbedderChoice<'a> {
+    /// No embedder configured → lexical-only ranking.
+    None,
+    /// Use the broker sidecar at this UDS path (takes precedence).
+    Broker { uds: &'a str },
+    /// Use a direct embedding endpoint (validated + built by the caller).
+    Endpoint { endpoint: &'a str },
+}
+
+/// Pick the embedder source. The broker UDS wins over a direct endpoint when both
+/// are set; blank/whitespace values count as unset.
+pub fn choose_embedder<'a>(
+    broker_uds: Option<&'a str>,
+    embed_endpoint: Option<&'a str>,
+) -> EmbedderChoice<'a> {
+    let broker = broker_uds.map(str::trim).filter(|s| !s.is_empty());
+    let endpoint = embed_endpoint.map(str::trim).filter(|s| !s.is_empty());
+    match (broker, endpoint) {
+        (Some(uds), _) => EmbedderChoice::Broker { uds },
+        (None, Some(endpoint)) => EmbedderChoice::Endpoint { endpoint },
+        (None, None) => EmbedderChoice::None,
+    }
 }
 
 /// Why an embedding call failed.
@@ -96,6 +128,98 @@ impl<T: HttpGet> Embedder for HttpEmbedder<T> {
         }
         // Order by `index` so the result pairs with `texts[i]` even if the
         // backend returns rows out of order.
+        let mut rows = decoded.data;
+        rows.sort_by_key(|d| d.index);
+        Ok(rows.into_iter().map(|d| d.embedding).collect())
+    }
+}
+
+/// The broker's `embed` result envelope (mirrors `kastellan-worker-embed-broker`
+/// `EmbedResult`). Kept local so web-research does not depend on the broker crate.
+#[derive(serde::Deserialize)]
+struct BrokerEmbedRow {
+    #[serde(default)]
+    index: usize,
+    embedding: Vec<f32>,
+}
+
+#[derive(serde::Deserialize)]
+struct BrokerEmbedResult {
+    data: Vec<BrokerEmbedRow>,
+}
+
+/// Embed via the trusted embedding-broker sidecar over a Unix socket.
+///
+/// Sends a JSON-RPC `embed{model,input}` request to the broker (whose UDS core
+/// bind-mounts into this worker's jail) and decodes the returned vectors. The
+/// worker needs no embed egress — the broker holds the only route to the backend.
+/// Selected by [`WebResearchHandler::from_env`] when `KASTELLAN_EMBED_BROKER_UDS`
+/// is set.
+pub struct BrokeredEmbedder {
+    uds: PathBuf,
+    model: String,
+}
+
+impl BrokeredEmbedder {
+    /// Build an embedder that talks to the broker at `uds`, requesting `model`.
+    pub fn new(uds: PathBuf, model: String) -> Self {
+        Self { uds, model }
+    }
+}
+
+impl Embedder for BrokeredEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stream = UnixStream::connect(&self.uds)
+            .map_err(|e| EmbedError::Transport(format!("connect broker {:?}: {e}", self.uds)))?;
+
+        let req = kastellan_protocol::Request {
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(1),
+            method: "embed".into(),
+            params: serde_json::json!({ "model": self.model, "input": texts }),
+        };
+        let mut line = serde_json::to_vec(&req)
+            .map_err(|e| EmbedError::Decode(format!("request encode: {e}")))?;
+        line.push(b'\n');
+        stream
+            .write_all(&line)
+            .map_err(|e| EmbedError::Transport(format!("write broker request: {e}")))?;
+        stream.flush().ok();
+
+        let mut br = BufReader::new(&stream);
+        let buf = match kastellan_protocol::read_capped_record(&mut br, kastellan_protocol::MAX_RECORD_BYTES)
+            .map_err(|e| EmbedError::Transport(format!("read broker response: {e}")))?
+        {
+            kastellan_protocol::Record::Line(b) => b,
+            kastellan_protocol::Record::Eof => {
+                return Err(EmbedError::Transport("broker closed without responding".into()))
+            }
+            kastellan_protocol::Record::TooLarge => {
+                return Err(EmbedError::Decode("broker response exceeded record cap".into()))
+            }
+        };
+        let resp: kastellan_protocol::Response = serde_json::from_slice(&buf)
+            .map_err(|e| EmbedError::Decode(format!("broker response: {e}")))?;
+        if let Some(err) = resp.error {
+            return Err(EmbedError::Transport(format!(
+                "broker error {}: {}",
+                err.code, err.message
+            )));
+        }
+        let result = resp
+            .result
+            .ok_or_else(|| EmbedError::Decode("broker response missing result".into()))?;
+        let decoded: BrokerEmbedResult = serde_json::from_value(result)
+            .map_err(|e| EmbedError::Decode(format!("result decode: {e}")))?;
+        if decoded.data.len() != texts.len() {
+            return Err(EmbedError::CountMismatch {
+                requested: texts.len(),
+                returned: decoded.data.len(),
+            });
+        }
         let mut rows = decoded.data;
         rows.sort_by_key(|d| d.index);
         Ok(rows.into_iter().map(|d| d.embedding).collect())
@@ -237,5 +361,101 @@ mod tests {
                    vec![vec![1.0, 0.0], vec![]]); // absent text -> empty vec
         assert_eq!(e.calls.get(), 1);
         assert!(FakeEmbedder::failing().embed(&["x".into()]).is_err());
+    }
+
+    use std::io::{BufReader as StdBufReader, Write as StdWrite};
+    use std::os::unix::net::UnixListener;
+
+    /// Spawn a one-shot stub broker on `sock` that reads one request line and
+    /// writes `response_json` back. Returns the join handle.
+    fn stub_broker(sock: std::path::PathBuf, response_json: String) -> std::thread::JoinHandle<()> {
+        let listener = UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            // Drain the request line (we don't assert on it here).
+            let mut br = StdBufReader::new(conn.try_clone().unwrap());
+            let _ = kastellan_protocol::read_capped_record(&mut br, 1_000_000).unwrap();
+            conn.write_all(response_json.as_bytes()).unwrap();
+            conn.write_all(b"\n").unwrap();
+            conn.flush().unwrap();
+        })
+    }
+
+    #[test]
+    fn brokered_embedder_round_trip_returns_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("embed.sock");
+        // Single line: the JSON-RPC framing is line-delimited (`read_capped_record`
+        // reads to the first `\n`), so the response must not contain embedded newlines.
+        let h = stub_broker(
+            sock.clone(),
+            r#"{"jsonrpc":"2.0","id":1,"result":{"data":[{"index":1,"embedding":[3.0,4.0]},{"index":0,"embedding":[1.0,2.0]}]}}"#.to_string(),
+        );
+        let e = BrokeredEmbedder::new(sock, "m".into());
+        let out = e.embed(&["a".into(), "b".into()]).unwrap();
+        // Reordered by index back to input order.
+        assert_eq!(out, vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn brokered_embedder_maps_broker_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("embed.sock");
+        let h = stub_broker(
+            sock.clone(),
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32002,"message":"backend down"}}"#.to_string(),
+        );
+        let e = BrokeredEmbedder::new(sock, "m".into());
+        let err = e.embed(&["a".into()]).unwrap_err();
+        assert!(matches!(err, EmbedError::Transport(_)), "got {err:?}");
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn brokered_embedder_absent_socket_is_transport_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("nope.sock"); // never bound
+        let e = BrokeredEmbedder::new(sock, "m".into());
+        let err = e.embed(&["a".into()]).unwrap_err();
+        assert!(matches!(err, EmbedError::Transport(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn brokered_embedder_empty_input_makes_no_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("nope.sock"); // never bound; must not be dialed
+        let e = BrokeredEmbedder::new(sock, "m".into());
+        assert!(e.embed(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn choose_broker_wins_when_both_set() {
+        match choose_embedder(Some("/run/embed.sock"), Some("http://x/embed")) {
+            EmbedderChoice::Broker { uds } => assert_eq!(uds, "/run/embed.sock"),
+            other => panic!("expected Broker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_endpoint_when_only_endpoint_set() {
+        match choose_embedder(None, Some("http://x/embed")) {
+            EmbedderChoice::Endpoint { endpoint } => assert_eq!(endpoint, "http://x/embed"),
+            other => panic!("expected Endpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_none_when_neither_set() {
+        assert!(matches!(choose_embedder(None, None), EmbedderChoice::None));
+    }
+
+    #[test]
+    fn choose_treats_blank_as_unset() {
+        assert!(matches!(choose_embedder(Some("  "), Some("  ")), EmbedderChoice::None));
+        match choose_embedder(Some("   "), Some("http://x/embed")) {
+            EmbedderChoice::Endpoint { .. } => {}
+            other => panic!("blank broker uds must fall through to endpoint, got {other:?}"),
+        }
     }
 }
