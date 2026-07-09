@@ -721,12 +721,11 @@ Add to the `tests` module in `workers/web-research/src/embed.rs` (a stub broker 
     fn brokered_embedder_round_trip_returns_vectors() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("embed.sock");
+        // Single line: the JSON-RPC framing is line-delimited (`read_capped_record`
+        // reads to the first `\n`), so the response must NOT contain embedded newlines.
         let h = stub_broker(
             sock.clone(),
-            r#"{"jsonrpc":"2.0","id":1,"result":{"data":[
-                {"index":1,"embedding":[3.0,4.0]},
-                {"index":0,"embedding":[1.0,2.0]}
-            ]}}"#.to_string(),
+            r#"{"jsonrpc":"2.0","id":1,"result":{"data":[{"index":1,"embedding":[3.0,4.0]},{"index":0,"embedding":[1.0,2.0]}]}}"#.to_string(),
         );
         let e = BrokeredEmbedder::new(sock, "m".into());
         let out = e.embed(&["a".into(), "b".into()]).unwrap();
