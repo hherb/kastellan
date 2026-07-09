@@ -164,6 +164,23 @@ impl<T: HttpGet> Handler for EmbedHandler<T> {
     }
 }
 
+use std::os::unix::net::UnixStream;
+
+/// Serve one accepted UDS connection: run the JSON-RPC loop until the peer
+/// closes the socket (EOF). Reuses the transport-generic
+/// [`kastellan_protocol::server::serve`] over the two cloned halves of the stream.
+///
+/// A client connects, sends one or more `embed` requests, and reads each
+/// response; when it drops the socket the loop returns `Ok`.
+pub fn serve_connection<T: HttpGet>(
+    handler: &mut EmbedHandler<T>,
+    stream: UnixStream,
+) -> std::io::Result<()> {
+    let mut reader = stream.try_clone()?;
+    let mut writer = stream;
+    kastellan_protocol::server::serve(handler, &mut reader, &mut writer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,8 +268,6 @@ mod tests {
         assert_eq!(v, serde_json::json!({ "data": [{ "index": 0, "embedding": [1.0, 2.0] }] }));
     }
 
-    use kastellan_protocol::server::Handler;
-
     fn handler(responses: Vec<RawResponse>) -> EmbedHandler<FakeGet> {
         EmbedHandler::new(FakeGet::new(responses), endpoint())
     }
@@ -295,5 +310,55 @@ mod tests {
         let mut h = handler(vec![]);
         let err = h.call("embed", serde_json::json!({ "model": "m", "input": [huge] })).unwrap_err();
         assert_eq!(err.code, kastellan_protocol::codes::INVALID_PARAMS);
+    }
+
+    use std::io::{BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    /// Drive the broker's serve loop over a real UDS with a fake backend, from a
+    /// client that speaks the JSON-RPC `embed` protocol. Proves the on-wire path
+    /// end to end (framing + dispatch + response), not just the in-process call.
+    #[test]
+    fn uds_round_trip_embeds_over_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("embed.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        // Broker side: accept ONE connection, serve it with a fake backend.
+        let server = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut h = EmbedHandler::new(
+                FakeGet::new(vec![resp(200, ok_body(&[(0, &[7.0, 8.0])]))]),
+                endpoint(),
+            );
+            serve_connection(&mut h, conn).unwrap();
+        });
+
+        // Client side: send one embed request, read the response.
+        let mut client = UnixStream::connect(&sock).unwrap();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "embed",
+            "params": { "model": "m", "input": ["hello"] }
+        });
+        let mut line = serde_json::to_vec(&req).unwrap();
+        line.push(b'\n');
+        client.write_all(&line).unwrap();
+        client.flush().unwrap();
+
+        let mut br = BufReader::new(&client);
+        let rec = kastellan_protocol::read_capped_record(&mut br, kastellan_protocol::MAX_RECORD_BYTES).unwrap();
+        let buf = match rec {
+            kastellan_protocol::Record::Line(b) => b,
+            other => panic!("expected a response line, got {other:?}"),
+        };
+        let resp: kastellan_protocol::Response = serde_json::from_slice(&buf).unwrap();
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        assert_eq!(
+            resp.result.unwrap(),
+            serde_json::json!({ "data": [{ "index": 0, "embedding": [7.0, 8.0] }] })
+        );
+
+        drop(client); // let the serve loop see EOF and return
+        server.join().unwrap();
     }
 }
