@@ -15,7 +15,7 @@ use kastellan_worker_web_common::allowlist::HostAllowlist;
 use kastellan_worker_web_common::http::{make_get, HttpGet};
 use kastellan_worker_web_common::search::{validate_endpoint, SearchError};
 
-use crate::embed::{Embedder, HttpEmbedder};
+use crate::embed::{choose_embedder, BrokeredEmbedder, Embedder, EmbedderChoice, HttpEmbedder};
 use crate::research::{
     research, ResearchError, ResearchOutcome, DEFAULT_MAX_PASSAGES, DEFAULT_MAX_SOURCES,
 };
@@ -128,21 +128,29 @@ impl WebResearchHandler<Box<dyn HttpGet>> {
         let endpoint = validate_endpoint(&endpoint_raw, &allowlist)
             .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
         let transport = make_get("kastellan-web-research/0")?;
-        let embedder = match std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT") {
-            Ok(raw) if !raw.trim().is_empty() => {
-                // The embed endpoint host must be on the same allowlist (fail closed
-                // if the operator forgot to allow it).
-                let embed_endpoint = validate_endpoint(&raw, &allowlist)
-                    .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
-                let model = std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_MODEL")
-                    .unwrap_or_else(|_| "embeddinggemma".to_string());
-                let embed_transport = make_get("kastellan-web-research/0")?;
-                let e: Box<dyn Embedder> =
-                    Box::new(HttpEmbedder::new(embed_transport, embed_endpoint, model));
-                Some(e)
-            }
-            _ => None,
-        };
+        // Embedder selection: the broker UDS (KASTELLAN_EMBED_BROKER_UDS) wins
+        // over a direct endpoint (KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT). The
+        // model is shared by both paths.
+        let broker_uds = std::env::var("KASTELLAN_EMBED_BROKER_UDS").ok();
+        let embed_endpoint_raw = std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT").ok();
+        let model = std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_MODEL")
+            .unwrap_or_else(|_| "embeddinggemma".to_string());
+        let embedder: Option<Box<dyn Embedder>> =
+            match choose_embedder(broker_uds.as_deref(), embed_endpoint_raw.as_deref()) {
+                EmbedderChoice::Broker { uds } => {
+                    // No allowlist check: the broker path has no worker egress.
+                    Some(Box::new(BrokeredEmbedder::new(std::path::PathBuf::from(uds), model)))
+                }
+                EmbedderChoice::Endpoint { endpoint } => {
+                    // The embed endpoint host must be on the same allowlist (fail
+                    // closed if the operator forgot to allow it).
+                    let embed_endpoint = validate_endpoint(endpoint, &allowlist)
+                        .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
+                    let embed_transport = make_get("kastellan-web-research/0")?;
+                    Some(Box::new(HttpEmbedder::new(embed_transport, embed_endpoint, model)))
+                }
+                EmbedderChoice::None => None,
+            };
         Ok(Self { endpoint, allowlist, transport, embedder })
     }
 }

@@ -2475,6 +2475,7 @@ dependencies = [
  "kastellan-worker-web-common",
  "serde",
  "serde_json",
+ "tempfile",
  "url",
 ]
 
