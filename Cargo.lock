@@ -2339,6 +2339,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kastellan-worker-embed-broker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "kastellan-worker-web-common",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
+]
+
+[[package]]
 name = "kastellan-worker-kv-demo"
 version = "0.1.0"
 dependencies = [

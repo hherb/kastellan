@@ -1,0 +1,27 @@
+[package]
+name        = "kastellan-worker-embed-broker"
+description = "Trusted embedding broker sidecar: bridges a jailed worker's UDS to the operator's embedding backend (text -> vector), so the worker needs no embed egress."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme      = "../../README.md"
+
+[[bin]]
+name = "kastellan-worker-embed-broker"
+path = "src/main.rs"
+
+[dependencies]
+kastellan-protocol          = { path = "../../protocol", version = "0.1.0" }
+kastellan-worker-prelude    = { path = "../prelude", version = "0.1.0" }
+kastellan-worker-web-common = { path = "../web-common", version = "0.1.0" }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+url        = { workspace = true }
+
+[dev-dependencies]
+kastellan-worker-web-common = { path = "../web-common", features = ["testing"] }
+tempfile = "3"
