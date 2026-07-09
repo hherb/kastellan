@@ -496,7 +496,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify: `workers/embed-broker/src/lib.rs`
 
 **Interfaces:**
-- Consumes: `EmbedHandler` (Task 3); `kastellan_protocol::serve`; `std::os::unix::net::UnixStream`.
+- Consumes: `EmbedHandler` (Task 3); `kastellan_protocol::server::serve` (NOT re-exported at the crate root — `Handler`/`serve` live in the `server` module, as `web-research`/`web-fetch` import them); `std::os::unix::net::UnixStream`.
 - Produces: `pub fn serve_connection<T: HttpGet>(handler: &mut EmbedHandler<T>, stream: std::os::unix::net::UnixStream) -> std::io::Result<()>`
 
 - [ ] **Step 1: Write the failing test**
@@ -579,7 +579,7 @@ pub fn serve_connection<T: HttpGet>(
 ) -> std::io::Result<()> {
     let mut reader = stream.try_clone()?;
     let mut writer = stream;
-    kastellan_protocol::serve(handler, &mut reader, &mut writer)
+    kastellan_protocol::server::serve(handler, &mut reader, &mut writer)
 }
 ```
 
