@@ -104,6 +104,18 @@ pub fn forward_embed<T: HttpGet>(
     }
     let mut rows = decoded.data;
     rows.sort_by_key(|d| d.index);
+    // A compliant backend returns exactly one row per input position, so after
+    // sorting, row `i` carries `index == i`. Reject duplicate or gapped indices
+    // (e.g. `[0, 0]` or `[0, 2]` for two inputs): those pass the count check
+    // above yet would silently pair a vector with the wrong input position.
+    // The broker is the trusted boundary — it fails closed rather than forward a
+    // mispaired batch.
+    if let Some((i, d)) = rows.iter().enumerate().find(|(i, d)| d.index != *i) {
+        return Err(RpcError::new(
+            codes::OPERATION_FAILED,
+            format!("backend returned non-contiguous embedding indices (row {i} has index {})", d.index),
+        ));
+    }
     let data = rows
         .into_iter()
         .enumerate()
@@ -228,6 +240,24 @@ mod tests {
     #[test]
     fn forward_count_mismatch_is_error() {
         let t = FakeGet::new(vec![resp(200, ok_body(&[(0, &[1.0])]))]); // 1 row for 2 inputs
+        let err = forward_embed(&t, &endpoint(), &params("m", &["a", "b"])).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::OPERATION_FAILED);
+    }
+
+    #[test]
+    fn forward_duplicate_index_is_error() {
+        // Count matches (2 rows for 2 inputs) but both claim index 0 — the
+        // contiguity check must reject rather than silently mispair.
+        let t = FakeGet::new(vec![resp(200, ok_body(&[(0, &[1.0]), (0, &[2.0])]))]);
+        let err = forward_embed(&t, &endpoint(), &params("m", &["a", "b"])).unwrap_err();
+        assert_eq!(err.code, kastellan_protocol::codes::OPERATION_FAILED);
+    }
+
+    #[test]
+    fn forward_gapped_index_is_error() {
+        // Count matches (2 rows for 2 inputs) but indices are {0, 2} — position 1
+        // is unfilled; reject rather than pair input[1] with the index-2 vector.
+        let t = FakeGet::new(vec![resp(200, ok_body(&[(0, &[1.0]), (2, &[2.0])]))]);
         let err = forward_embed(&t, &endpoint(), &params("m", &["a", "b"])).unwrap_err();
         assert_eq!(err.code, kastellan_protocol::codes::OPERATION_FAILED);
     }
