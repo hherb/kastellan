@@ -24,6 +24,12 @@
 //! * `spawn` (Slice B, Task 3) — `spawn_embed_broker`, mirroring
 //!   `egress::net_worker::spawn_forced_net_worker`.
 
+pub mod config;
+pub mod spawn;
+
+pub use config::EmbedBrokerConfig;
+pub use spawn::{spawn_embed_broker, EmbedBrokerSidecar};
+
 /// Per-worker declaration that a worker wants a trusted embed-broker sidecar,
 /// carrying the backend the broker forwards to.
 ///

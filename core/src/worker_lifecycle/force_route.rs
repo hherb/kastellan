@@ -338,7 +338,11 @@ pub fn from_env(
 /// `/tmp` on macOS instead (operators can still override with
 /// `KASTELLAN_EGRESS_SCRATCH_DIR`). On Linux `temp_dir()` is already `/tmp`, so
 /// the default is unchanged there.
-fn default_egress_scratch_root() -> PathBuf {
+///
+/// `pub(crate)` so the embed-broker config ([`crate::embed_broker::config`])
+/// shares the *same* default root — that keeps `embed-<pid>-<seq>` sidecar husks
+/// under the root the force-routing startup sweep (#251) already reclaims.
+pub(crate) fn default_egress_scratch_root() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         PathBuf::from("/tmp")
