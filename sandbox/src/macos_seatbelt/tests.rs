@@ -280,6 +280,41 @@ fn embed_broker_uds_path_with_injection_chars_is_rejected() {
     );
 }
 
+/// The broker allow is emitted regardless of the net policy — under the legacy
+/// broad-allow posture (`Net::Allowlist` without a proxy UDS ⇒ `(allow
+/// network*)`) it is redundant-but-harmless. Pins that the grant is unconditional
+/// after the net `match`, so a future net-policy change can't silently drop it.
+#[test]
+fn embed_broker_uds_is_allowed_under_legacy_broad_allow() {
+    let p = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["api.example.com:443".into()]),
+        embed_broker_uds: Some(std::path::PathBuf::from("/scratch/embed.sock")),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(prof.contains("(allow network*)"),
+        "legacy allowlist keeps the broad allow; got:\n{prof}");
+    assert!(prof.contains("(allow network-outbound (remote unix-socket (path-literal \"/scratch/embed.sock\")))"),
+        "broker UDS must be allowed even under the broad-allow posture; got:\n{prof}");
+}
+
+/// Even under `Net::Deny` (no network rules at all) a set `embed_broker_uds`
+/// still grants exactly the one broker socket — the additional-trusted-socket
+/// grant is orthogonal to whether any other network is permitted.
+#[test]
+fn embed_broker_uds_is_allowed_under_net_deny() {
+    let p = SandboxPolicy {
+        net: crate::Net::Deny,
+        embed_broker_uds: Some(std::path::PathBuf::from("/scratch/embed.sock")),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(!prof.contains("(allow network*)"),
+        "Net::Deny must NOT broadly allow network; got:\n{prof}");
+    assert!(prof.contains("(allow network-outbound (remote unix-socket (path-literal \"/scratch/embed.sock\")))"),
+        "broker UDS must be allowed even under Net::Deny; got:\n{prof}");
+}
+
 /// Legacy `Net::Allowlist` without a proxy UDS keeps the old broad
 /// `(allow network*)` rule — no regression on the slice #1 posture.
 #[test]

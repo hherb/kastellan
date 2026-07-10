@@ -464,6 +464,41 @@ mod tests {
     }
 
     #[test]
+    fn embed_broker_uds_relative_path_is_rejected() {
+        // The bind-path validation must fire for embed_broker_uds too (a relative
+        // dest mis-binds against the jail cwd, issue #387). Pins that
+        // spawn_under_policy actually calls the validator for this field with the
+        // right `kind` label — a refactor that drops the call would regress here
+        // before ever reaching bwrap.
+        let mut policy = strict_policy();
+        policy.embed_broker_uds = Some(PathBuf::from("relative/embed.sock"));
+        let err = LinuxBwrap
+            .spawn_under_policy(&policy, "/bin/true", &[])
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("embed_broker_uds") && msg.contains("absolute"),
+            "relative embed_broker_uds must be rejected with the field label: {msg}"
+        );
+    }
+
+    #[test]
+    fn embed_broker_uds_parent_dir_component_is_rejected() {
+        // The no-`..` rule (issue #387) applies to embed_broker_uds too: a
+        // traversal component must be rejected up front.
+        let mut policy = strict_policy();
+        policy.embed_broker_uds = Some(PathBuf::from("/scratch/../etc/embed.sock"));
+        let err = LinuxBwrap
+            .spawn_under_policy(&policy, "/bin/true", &[])
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("embed_broker_uds") && msg.contains(".."),
+            "embed_broker_uds with a '..' component must be rejected: {msg}"
+        );
+    }
+
+    #[test]
     fn separator_then_program_then_args() {
         let argv = build_argv(&strict_policy(), "/bin/echo", &["hello", "world"]);
         let i = argv.iter().position(|s| s == "--").expect("missing --");
