@@ -15,6 +15,25 @@ pub trait Handler {
     fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, RpcError>;
 }
 
+/// What [`serve_capped`] does after a per-record *protocol fault* — an over-cap
+/// record or a malformed JSON frame (a valid request the handler merely rejects
+/// is a normal error response, never a protocol fault, and keeps the connection
+/// open regardless).
+///
+/// This concerns only the transport framing/parse layer, not application errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnProtocolError {
+    /// Write the error response and keep reading further records. The stdio
+    /// default: one malformed line from the trusted parent should not tear down
+    /// a worker's whole stdin loop.
+    Continue,
+    /// Write the error response, then return `Err` so the caller drops the
+    /// connection. Fail-closed posture for a boundary serving a less-trusted
+    /// peer (the embed broker: a worker that violates framing/JSON is buggy, so
+    /// stop trusting the rest of that connection).
+    Close,
+}
+
 /// Run a request/response loop over [`io::stdin`] / [`io::stdout`].
 /// Returns when stdin reaches EOF (i.e. the parent closed the pipe).
 pub fn serve_stdio<H: Handler>(handler: &mut H) -> io::Result<()> {
@@ -31,23 +50,38 @@ where
     R: Read,
     W: Write,
 {
-    serve_capped(handler, reader, writer, MAX_RECORD_BYTES)
+    serve_capped(handler, reader, writer, MAX_RECORD_BYTES, OnProtocolError::Continue)
 }
 
-/// [`serve`] with an explicit per-record byte cap. Separated out so the OOM
-/// guard (audit finding #2) can be unit-tested with a small cap instead of a
-/// 64 MiB flood.
-fn serve_capped<H, R, W>(
+/// [`serve`] with an explicit per-record byte cap and a protocol-fault policy.
+///
+/// Separated out so the OOM guard (audit finding #2) can be unit-tested with a
+/// small cap instead of a 64 MiB flood, and so a worker whose application-level
+/// request cap is far below [`MAX_RECORD_BYTES`] (e.g. the embed broker's 1 MB
+/// input cap) can frame at a *tighter* bound — rejecting an oversized request at
+/// the framing layer instead of buffering + JSON-parsing up to 64 MiB first.
+///
+/// `on_error` chooses whether a protocol fault (over-cap or malformed frame)
+/// keeps the connection alive ([`OnProtocolError::Continue`], the stdio default)
+/// or tears it down after replying ([`OnProtocolError::Close`], the broker's
+/// fail-closed posture). Application errors from the [`Handler`] are always
+/// normal responses and never close the connection.
+pub fn serve_capped<H, R, W>(
     handler: &mut H,
     reader: &mut R,
     writer: &mut W,
     cap: usize,
+    on_error: OnProtocolError,
 ) -> io::Result<()>
 where
     H: Handler,
     R: Read,
     W: Write,
 {
+    // A protocol fault that must close the connection: reply already written,
+    // now return an error so the caller drops the socket.
+    let fault = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
+
     let mut br = BufReader::new(reader);
     loop {
         // Bounded read, shared with the client: a single record is never
@@ -60,10 +94,11 @@ where
                     serde_json::Value::Null,
                     RpcError::new(codes::INVALID_REQUEST, "request exceeded record cap"),
                 );
-                serde_json::to_writer(&mut *writer, &response)?;
-                writer.write_all(b"\n")?;
-                writer.flush()?;
-                return Ok(());
+                write_response(writer, &response)?;
+                return match on_error {
+                    OnProtocolError::Continue => Ok(()),
+                    OnProtocolError::Close => Err(fault("request exceeded record cap")),
+                };
             }
             Record::Line(buf) => buf,
         };
@@ -71,20 +106,33 @@ where
             continue; // blank line (incl. the trailing newline of an empty record)
         }
         // serde_json tolerates the trailing `\n` (surrounding whitespace is skipped).
-        let response = match serde_json::from_slice::<Request>(&buf) {
-            Ok(req) => match handler.call(&req.method, req.params) {
-                Ok(result) => ok_response(req.id, result),
-                Err(e) => err_response(req.id, e),
-            },
-            Err(e) => err_response(
-                serde_json::Value::Null,
-                RpcError::new(codes::PARSE_ERROR, format!("parse error: {e}")),
-            ),
+        let req = match serde_json::from_slice::<Request>(&buf) {
+            Ok(req) => req,
+            Err(e) => {
+                let response = err_response(
+                    serde_json::Value::Null,
+                    RpcError::new(codes::PARSE_ERROR, format!("parse error: {e}")),
+                );
+                write_response(writer, &response)?;
+                match on_error {
+                    OnProtocolError::Continue => continue,
+                    OnProtocolError::Close => return Err(fault("malformed request frame")),
+                }
+            }
         };
-        serde_json::to_writer(&mut *writer, &response)?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
+        let response = match handler.call(&req.method, req.params) {
+            Ok(result) => ok_response(req.id, result),
+            Err(e) => err_response(req.id, e),
+        };
+        write_response(writer, &response)?;
     }
+}
+
+/// Write one JSON-RPC response line (object + `\n`) and flush.
+fn write_response<W: Write>(writer: &mut W, response: &crate::Response) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, response)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
 }
 
 #[cfg(test)]
@@ -149,7 +197,7 @@ mod tests {
         let mut input: &[u8] = &flood;
         let mut output: Vec<u8> = Vec::new();
         let mut h = Echo;
-        super::serve_capped(&mut h, &mut input, &mut output, 16).unwrap();
+        super::serve_capped(&mut h, &mut input, &mut output, 16, OnProtocolError::Continue).unwrap();
         let line = String::from_utf8(output).unwrap();
         assert!(line.contains("-32600"), "expected INVALID_REQUEST, got {line}");
     }
@@ -160,8 +208,49 @@ mod tests {
         let mut output: Vec<u8> = Vec::new();
         let mut h = Echo;
         // Cap comfortably above the record length.
-        super::serve_capped(&mut h, &mut input, &mut output, 4096).unwrap();
+        super::serve_capped(&mut h, &mut input, &mut output, 4096, OnProtocolError::Continue).unwrap();
         let line = String::from_utf8(output).unwrap();
         assert!(line.contains("\"result\":42"), "expected echoed result, got {line}");
+    }
+
+    #[test]
+    fn close_policy_returns_err_after_over_cap() {
+        // Under `Close`, an over-cap record still writes the -32600 reply but then
+        // returns Err so the caller drops the connection (the broker's fail-closed
+        // posture) instead of the `Continue` default's clean `Ok`.
+        let flood = vec![b'x'; 4096];
+        let mut input: &[u8] = &flood;
+        let mut output: Vec<u8> = Vec::new();
+        let mut h = Echo;
+        let r = super::serve_capped(&mut h, &mut input, &mut output, 16, OnProtocolError::Close);
+        assert!(r.is_err(), "expected fail-closed Err under Close");
+        assert!(String::from_utf8(output).unwrap().contains("-32600"), "reply still written");
+    }
+
+    #[test]
+    fn close_policy_returns_err_after_malformed_frame() {
+        // Under `Close`, a malformed JSON frame writes the -32700 parse error and
+        // then closes; the second (valid) record is never served.
+        let mut input: &[u8] = b"not json\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"echo\",\"params\":1}\n";
+        let mut output: Vec<u8> = Vec::new();
+        let mut h = Echo;
+        let r = super::serve_capped(&mut h, &mut input, &mut output, 4096, OnProtocolError::Close);
+        assert!(r.is_err(), "expected fail-closed Err under Close");
+        let out = String::from_utf8(output).unwrap();
+        assert!(out.contains("-32700"), "expected PARSE_ERROR, got {out}");
+        assert!(!out.contains("\"result\""), "must not serve the record after the fault");
+    }
+
+    #[test]
+    fn continue_policy_keeps_serving_after_malformed_frame() {
+        // The stdio default: a malformed line is answered with -32700 and the
+        // loop keeps going, so the following valid record is still served.
+        let mut input: &[u8] = b"not json\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"echo\",\"params\":7}\n";
+        let mut output: Vec<u8> = Vec::new();
+        let mut h = Echo;
+        super::serve_capped(&mut h, &mut input, &mut output, 4096, OnProtocolError::Continue).unwrap();
+        let out = String::from_utf8(output).unwrap();
+        assert!(out.contains("-32700"), "expected parse error for line 1");
+        assert!(out.contains("\"result\":7"), "expected line 2 still served");
     }
 }

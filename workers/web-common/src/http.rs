@@ -10,6 +10,19 @@ use std::time::Duration;
 
 use url::Url;
 
+/// Idempotently install the rustls `ring` crypto provider as the process
+/// default, if none is set yet.
+///
+/// rustls 0.23 requires a process-default `CryptoProvider` before any
+/// `ClientConfig::builder()` runs (the proxy-connect transport builds one
+/// directly). A worker that reaches an `https://` backend must call this at
+/// startup — `let _ =` swallows the "already installed" error so a second call
+/// (or a transport that already installed one) is harmless. No-op for a
+/// loopback-`http://` backend that never constructs a TLS config.
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Per-request timeout.
 pub const TIMEOUT_SECS: u64 = 20;
 /// Response body byte cap (5 MiB).
@@ -255,5 +268,15 @@ mod post_tests {
         let err = t.post(&Url::parse("https://x.test/e").unwrap(), "application/json", b"{}")
             .unwrap_err();
         assert!(err.contains("unsupported"), "got: {err}");
+    }
+
+    #[test]
+    fn ensure_crypto_provider_is_idempotent() {
+        // First call installs (or finds one already installed by another test in
+        // this process); a second call must not panic — `install_default`'s
+        // "already set" error is swallowed. Proves it is safe to call at startup
+        // regardless of process state.
+        super::ensure_crypto_provider();
+        super::ensure_crypto_provider();
     }
 }

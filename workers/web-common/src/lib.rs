@@ -2,12 +2,14 @@
 //!
 //! - [`allowlist`] — host allowlist matcher (exact + `.domain` wildcard).
 //! - [`http`] — the `HttpGet` transport seam + the real `ReqwestGet`.
+//! - [`embed_rows`] — shared reorder/count/contiguity check for embedding responses.
 //! - [`testing`] (feature `testing`) — a fake transport + builders for unit tests.
 //! - [`search`] / [`parse`] (feature `search`) — pure SearxNG query logic.
 //! - [`fetch`] (feature `fetch`) — redirect-following drive loop.
 //! - [`extract`] (feature `extract`) — HTML/PDF/text readable-text extraction.
 
 pub mod allowlist;
+pub mod embed_rows;
 pub mod http;
 #[cfg(feature = "search")]
 pub mod parse;

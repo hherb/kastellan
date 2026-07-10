@@ -40,6 +40,7 @@ pub struct EmbedResult {
 }
 
 use kastellan_protocol::{codes, RpcError};
+use kastellan_worker_web_common::embed_rows::reorder_embeddings;
 use kastellan_worker_web_common::http::HttpGet;
 use url::Url;
 
@@ -92,34 +93,16 @@ pub fn forward_embed<T: HttpGet>(
     }
     let decoded: BackendResp = serde_json::from_slice(&resp.body)
         .map_err(|e| RpcError::new(codes::OPERATION_FAILED, format!("backend decode: {e}")))?;
-    if decoded.data.len() != params.input.len() {
-        return Err(RpcError::new(
-            codes::OPERATION_FAILED,
-            format!(
-                "vector count mismatch: requested {}, returned {}",
-                params.input.len(),
-                decoded.data.len()
-            ),
-        ));
-    }
-    let mut rows = decoded.data;
-    rows.sort_by_key(|d| d.index);
-    // A compliant backend returns exactly one row per input position, so after
-    // sorting, row `i` carries `index == i`. Reject duplicate or gapped indices
-    // (e.g. `[0, 0]` or `[0, 2]` for two inputs): those pass the count check
-    // above yet would silently pair a vector with the wrong input position.
-    // The broker is the trusted boundary — it fails closed rather than forward a
-    // mispaired batch.
-    if let Some((i, d)) = rows.iter().enumerate().find(|(i, d)| d.index != *i) {
-        return Err(RpcError::new(
-            codes::OPERATION_FAILED,
-            format!("backend returned non-contiguous embedding indices (row {i} has index {})", d.index),
-        ));
-    }
-    let data = rows
+    // Reorder + count-check + contiguity via the shared helper (the same rule the
+    // web-research client embedders apply). The broker is the trusted boundary —
+    // any mismatch fails closed rather than forward a mispaired batch.
+    let rows = decoded.data.into_iter().map(|d| (d.index, d.embedding)).collect();
+    let ordered = reorder_embeddings(rows, params.input.len())
+        .map_err(|e| RpcError::new(codes::OPERATION_FAILED, format!("backend {e}")))?;
+    let data = ordered
         .into_iter()
         .enumerate()
-        .map(|(i, d)| EmbedData { index: i, embedding: d.embedding })
+        .map(|(index, embedding)| EmbedData { index, embedding })
         .collect();
     Ok(EmbedResult { data })
 }
@@ -177,20 +160,84 @@ impl<T: HttpGet> Handler for EmbedHandler<T> {
 }
 
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
+
+/// Framing byte-cap for one JSON-RPC request record on the broker's socket.
+///
+/// The application cap [`MAX_REQUEST_BYTES`] (1 MB) bounds the *input text*; the
+/// JSON envelope adds array/quote framing and escaping on top (worst case, a
+/// byte escaped as `\u00XX` is 6×). 16 MiB leaves ample headroom over that yet is
+/// far below the protocol default of 64 MiB ([`kastellan_protocol::MAX_RECORD_BYTES`]),
+/// so an oversized request is rejected at the framing layer rather than buffered
+/// and JSON-parsed up to 64 MiB before [`EmbedHandler`]'s 1 MB cap can reject it.
+pub const BROKER_MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Idle read timeout for one broker connection.
+///
+/// The serve loop is serial (one connection at a time), so a worker that opens
+/// the socket and then never sends the next request line would block it forever.
+/// One web-research worker per broker with sequential embeds makes 30 s generous
+/// between requests; on timeout the read errors and the connection is dropped
+/// (the caller logs it and accepts the next connection).
+pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Write timeout for one broker connection.
+///
+/// A buggy (not necessarily malicious) worker that sends a request but then
+/// stops reading its response would leave the broker's `write_all`/`flush`
+/// blocked once the socket send buffer fills — the read timeout does not cover
+/// writes, so the serial serve loop would hang indefinitely. 30 s is far longer
+/// than any real embed response takes to drain; on timeout the write errors and
+/// the connection is dropped.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Serve one accepted UDS connection: run the JSON-RPC loop until the peer
-/// closes the socket (EOF). Reuses the transport-generic
-/// [`kastellan_protocol::server::serve`] over the two cloned halves of the stream.
+/// closes the socket (EOF), an idle read exceeds [`READ_TIMEOUT`], a stuck write
+/// exceeds [`WRITE_TIMEOUT`], or the peer commits a protocol fault (an over-cap
+/// or malformed frame → the reply is written, then the connection is closed
+/// fail-closed via [`kastellan_protocol::server::OnProtocolError::Close`]).
+/// Reuses the transport-generic [`kastellan_protocol::server::serve_capped`] at
+/// [`BROKER_MAX_RECORD_BYTES`] over the two cloned halves of the stream.
 ///
-/// A client connects, sends one or more `embed` requests, and reads each
-/// response; when it drops the socket the loop returns `Ok`.
+/// A well-behaved client connects, sends one or more `embed` requests, and reads
+/// each response; when it drops the socket the loop returns `Ok`.
 pub fn serve_connection<T: HttpGet>(
     handler: &mut EmbedHandler<T>,
     stream: UnixStream,
 ) -> std::io::Result<()> {
+    serve_connection_capped(
+        handler,
+        stream,
+        Some(READ_TIMEOUT),
+        Some(WRITE_TIMEOUT),
+        BROKER_MAX_RECORD_BYTES,
+    )
+}
+
+/// [`serve_connection`] with explicit read/write timeouts and framing cap, so
+/// unit tests can drive short timeouts or a tiny cap (the production values are
+/// too large to exercise directly). The timeouts are applied to the socket
+/// before the loop; the cloned read half shares the same socket, so they cover
+/// both halves. Protocol faults are fail-closed
+/// ([`kastellan_protocol::server::OnProtocolError::Close`]).
+fn serve_connection_capped<T: HttpGet>(
+    handler: &mut EmbedHandler<T>,
+    stream: UnixStream,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+    cap: usize,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(read_timeout)?;
+    stream.set_write_timeout(write_timeout)?;
     let mut reader = stream.try_clone()?;
     let mut writer = stream;
-    kastellan_protocol::server::serve(handler, &mut reader, &mut writer)
+    kastellan_protocol::server::serve_capped(
+        handler,
+        &mut reader,
+        &mut writer,
+        cap,
+        kastellan_protocol::server::OnProtocolError::Close,
+    )
 }
 
 #[cfg(test)]
@@ -390,5 +437,152 @@ mod tests {
 
         drop(client); // let the serve loop see EOF and return
         server.join().unwrap();
+    }
+
+    #[test]
+    fn serve_connection_times_out_on_idle_client() {
+        // A client that connects but never sends a request must not block the
+        // serial serve loop forever: with a short read timeout the socket read
+        // errors and serve_connection returns Err instead of hanging.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("embed.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut h = EmbedHandler::new(FakeGet::new(vec![]), endpoint());
+            serve_connection_capped(
+                &mut h,
+                conn,
+                Some(Duration::from_millis(150)),
+                None,
+                BROKER_MAX_RECORD_BYTES,
+            )
+        });
+
+        // Connect and hold the socket open, sending nothing (kept alive until join).
+        let _client = UnixStream::connect(&sock).unwrap();
+        let result = server.join().unwrap();
+        assert!(result.is_err(), "expected an idle-read timeout error, got {result:?}");
+    }
+
+    #[test]
+    fn serve_connection_rejects_request_over_cap() {
+        // A request line larger than the framing cap is rejected at the framing
+        // layer (INVALID_REQUEST, -32600) before EmbedHandler ever runs — the
+        // tightened antechamber. Under the broker's fail-closed policy the reply
+        // is written and then the connection is torn down (serve returns Err). A
+        // tiny cap avoids sending 16 MiB.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("embed.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut h = EmbedHandler::new(FakeGet::new(vec![]), endpoint());
+            // 64-byte cap; the 512-byte request line below overflows it.
+            serve_connection_capped(&mut h, conn, None, None, 64)
+        });
+
+        let mut client = UnixStream::connect(&sock).unwrap();
+        client.write_all(&vec![b'x'; 512]).unwrap(); // no newline before the cap
+        client.flush().unwrap();
+
+        let mut br = BufReader::new(&client);
+        let rec = kastellan_protocol::read_capped_record(&mut br, 1_000_000).unwrap();
+        let buf = match rec {
+            kastellan_protocol::Record::Line(b) => b,
+            other => panic!("expected an error line, got {other:?}"),
+        };
+        let text = String::from_utf8_lossy(&buf);
+        assert!(text.contains("-32600"), "expected INVALID_REQUEST, got {text}");
+        drop(client);
+        assert!(server.join().unwrap().is_err(), "over-cap must be fail-closed (Err)");
+    }
+
+    #[test]
+    fn serve_connection_closes_after_malformed_frame() {
+        // A worker that sends a malformed JSON frame is buggy; the broker replies
+        // with a parse error (-32700) and then CLOSES the connection (fail-closed)
+        // rather than continuing to serve it. BrokeredEmbedder opens a fresh
+        // connection per embed, so a clean close has no downside. Uses the real
+        // serve_connection entrypoint (production timeouts + Close policy).
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("embed.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut h = EmbedHandler::new(FakeGet::new(vec![]), endpoint());
+            serve_connection(&mut h, conn)
+        });
+
+        let mut client = UnixStream::connect(&sock).unwrap();
+        client.write_all(b"not json at all\n").unwrap();
+        client.flush().unwrap();
+
+        let mut br = BufReader::new(&client);
+        let rec = kastellan_protocol::read_capped_record(&mut br, 1_000_000).unwrap();
+        let buf = match rec {
+            kastellan_protocol::Record::Line(b) => b,
+            other => panic!("expected a parse-error line, got {other:?}"),
+        };
+        assert!(
+            String::from_utf8_lossy(&buf).contains("-32700"),
+            "expected PARSE_ERROR, got {}",
+            String::from_utf8_lossy(&buf)
+        );
+        // The broker has torn the connection down: the next record is EOF.
+        let next = kastellan_protocol::read_capped_record(&mut br, 1_000_000).unwrap();
+        assert!(
+            matches!(next, kastellan_protocol::Record::Eof),
+            "expected EOF after fail-closed teardown, got {next:?}"
+        );
+        assert!(server.join().unwrap().is_err(), "malformed frame must be fail-closed (Err)");
+    }
+
+    #[test]
+    fn serve_connection_times_out_on_stuck_write() {
+        // A buggy worker that sends a valid request but never reads the response
+        // must not block the broker's write forever. A large embedding overflows
+        // the socket send buffer while the client refuses to read; with a short
+        // write timeout the write errors and serve_connection returns Err instead
+        // of hanging the serial serve loop.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("embed.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        // ~1M floats → a multi-MB response, far above any socket send buffer.
+        let big: Vec<f32> = vec![0.0; 1_000_000];
+        let body = ok_body(&[(0, &big)]);
+
+        let server = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut h = EmbedHandler::new(FakeGet::new(vec![resp(200, body)]), endpoint());
+            // Generous read timeout (the request read must succeed); short write
+            // timeout so only the unread response write can trip it.
+            serve_connection_capped(
+                &mut h,
+                conn,
+                Some(Duration::from_secs(5)),
+                Some(Duration::from_millis(200)),
+                BROKER_MAX_RECORD_BYTES,
+            )
+        });
+
+        let mut client = UnixStream::connect(&sock).unwrap();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "embed",
+            "params": { "model": "m", "input": ["hello"] }
+        });
+        let mut line = serde_json::to_vec(&req).unwrap();
+        line.push(b'\n');
+        client.write_all(&line).unwrap();
+        client.flush().unwrap();
+        // Deliberately never read the response: the broker's write must time out.
+
+        let result = server.join().unwrap();
+        assert!(result.is_err(), "expected a write-timeout error, got {result:?}");
+        drop(client);
     }
 }
