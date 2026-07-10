@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use url::Url;
 
+use kastellan_worker_web_common::embed_rows::{reorder_embeddings, ReorderError};
 use kastellan_worker_web_common::http::HttpGet;
 
 /// Turn texts into embedding vectors. Batches all inputs into one request.
@@ -58,6 +59,13 @@ pub enum EmbedError {
     Status(u16),
     Decode(String),
     CountMismatch { requested: usize, returned: usize },
+    /// After sorting by `index`, the rows were not contiguous (a duplicate or
+    /// gapped index) — the batch could not be safely paired with its inputs.
+    NonContiguous { row: usize, index: usize },
+    /// The broker returned a JSON-RPC error. Carries the code + message so a
+    /// client-class error (e.g. `INVALID_PARAMS` from exceeding the caps) is not
+    /// mislabelled as a transport failure.
+    Broker { code: i32, message: String },
 }
 
 impl std::fmt::Display for EmbedError {
@@ -68,6 +76,21 @@ impl std::fmt::Display for EmbedError {
             EmbedError::Decode(m) => write!(f, "decode: {m}"),
             EmbedError::CountMismatch { requested, returned } =>
                 write!(f, "vector count mismatch: requested {requested}, returned {returned}"),
+            EmbedError::NonContiguous { row, index } =>
+                write!(f, "non-contiguous embedding indices (row {row} has index {index})"),
+            EmbedError::Broker { code, message } =>
+                write!(f, "broker error {code}: {message}"),
+        }
+    }
+}
+
+impl From<ReorderError> for EmbedError {
+    fn from(e: ReorderError) -> Self {
+        match e {
+            ReorderError::CountMismatch { requested, returned } =>
+                EmbedError::CountMismatch { requested, returned },
+            ReorderError::NonContiguous { row, index } =>
+                EmbedError::NonContiguous { row, index },
         }
     }
 }
@@ -120,17 +143,11 @@ impl<T: HttpGet> Embedder for HttpEmbedder<T> {
         }
         let decoded: EmbeddingResponse = serde_json::from_slice(&resp.body)
             .map_err(|e| EmbedError::Decode(e.to_string()))?;
-        if decoded.data.len() != texts.len() {
-            return Err(EmbedError::CountMismatch {
-                requested: texts.len(),
-                returned: decoded.data.len(),
-            });
-        }
-        // Order by `index` so the result pairs with `texts[i]` even if the
-        // backend returns rows out of order.
-        let mut rows = decoded.data;
-        rows.sort_by_key(|d| d.index);
-        Ok(rows.into_iter().map(|d| d.embedding).collect())
+        // Reorder + count-check + contiguity via the shared helper, so this path
+        // pairs each vector with `texts[i]` and fails closed on a duplicate/gapped
+        // index exactly like the broker's trusted boundary.
+        let rows = decoded.data.into_iter().map(|d| (d.index, d.embedding)).collect();
+        reorder_embeddings(rows, texts.len()).map_err(EmbedError::from)
     }
 }
 
@@ -204,25 +221,19 @@ impl Embedder for BrokeredEmbedder {
         let resp: kastellan_protocol::Response = serde_json::from_slice(&buf)
             .map_err(|e| EmbedError::Decode(format!("broker response: {e}")))?;
         if let Some(err) = resp.error {
-            return Err(EmbedError::Transport(format!(
-                "broker error {}: {}",
-                err.code, err.message
-            )));
+            // Carry the broker's JSON-RPC code + message rather than flattening a
+            // client-class error (e.g. INVALID_PARAMS from exceeding the caps)
+            // into a transport failure.
+            return Err(EmbedError::Broker { code: err.code, message: err.message });
         }
         let result = resp
             .result
             .ok_or_else(|| EmbedError::Decode("broker response missing result".into()))?;
         let decoded: BrokerEmbedResult = serde_json::from_value(result)
             .map_err(|e| EmbedError::Decode(format!("result decode: {e}")))?;
-        if decoded.data.len() != texts.len() {
-            return Err(EmbedError::CountMismatch {
-                requested: texts.len(),
-                returned: decoded.data.len(),
-            });
-        }
-        let mut rows = decoded.data;
-        rows.sort_by_key(|d| d.index);
-        Ok(rows.into_iter().map(|d| d.embedding).collect())
+        // Reconcile via the shared helper (reorder + count-check + contiguity).
+        let rows = decoded.data.into_iter().map(|d| (d.index, d.embedding)).collect();
+        reorder_embeddings(rows, texts.len()).map_err(EmbedError::from)
     }
 }
 
@@ -408,8 +419,41 @@ mod tests {
         );
         let e = BrokeredEmbedder::new(sock, "m".into());
         let err = e.embed(&["a".into()]).unwrap_err();
-        assert!(matches!(err, EmbedError::Transport(_)), "got {err:?}");
+        // A broker JSON-RPC error keeps its code — not mislabelled as Transport.
+        assert!(matches!(err, EmbedError::Broker { code: -32002, .. }), "got {err:?}");
         h.join().unwrap();
+    }
+
+    #[test]
+    fn brokered_embedder_rejects_non_contiguous_rows() {
+        // Two result rows, both index 0: count matches but the shared contiguity
+        // guard must reject (the client path now enforces it too, matching the
+        // broker's trusted boundary).
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("embed.sock");
+        let h = stub_broker(
+            sock.clone(),
+            r#"{"jsonrpc":"2.0","id":1,"result":{"data":[{"index":0,"embedding":[1.0]},{"index":0,"embedding":[2.0]}]}}"#.to_string(),
+        );
+        let e = BrokeredEmbedder::new(sock, "m".into());
+        let err = e.embed(&["a".into(), "b".into()]).unwrap_err();
+        assert!(matches!(err, EmbedError::NonContiguous { .. }), "got {err:?}");
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn http_embedder_rejects_non_contiguous_rows() {
+        // Two rows, both index 0 (a duplicate): count matches but contiguity fails.
+        let body = r#"{"data":[{"index":0,"embedding":[1.0]},{"index":0,"embedding":[2.0]}]}"#;
+        let t = FakeGet::new(vec![RawResponse {
+            status: 200, location: None, content_type: "application/json".into(),
+            body: body.as_bytes().to_vec(),
+        }]);
+        let e = HttpEmbedder::new(t, endpoint(), "m".into());
+        assert!(matches!(
+            e.embed(&["a".into(), "b".into()]),
+            Err(EmbedError::NonContiguous { .. })
+        ));
     }
 
     #[test]

@@ -34,10 +34,14 @@ where
     serve_capped(handler, reader, writer, MAX_RECORD_BYTES)
 }
 
-/// [`serve`] with an explicit per-record byte cap. Separated out so the OOM
-/// guard (audit finding #2) can be unit-tested with a small cap instead of a
-/// 64 MiB flood.
-fn serve_capped<H, R, W>(
+/// [`serve`] with an explicit per-record byte cap.
+///
+/// Separated out so the OOM guard (audit finding #2) can be unit-tested with a
+/// small cap instead of a 64 MiB flood, and so a worker whose application-level
+/// request cap is far below [`MAX_RECORD_BYTES`] (e.g. the embed broker's 1 MB
+/// input cap) can frame at a *tighter* bound — rejecting an oversized request at
+/// the framing layer instead of buffering + JSON-parsing up to 64 MiB first.
+pub fn serve_capped<H, R, W>(
     handler: &mut H,
     reader: &mut R,
     writer: &mut W,

@@ -18,6 +18,14 @@ fn main() -> anyhow::Result<()> {
     let endpoint = url::Url::parse(&endpoint_raw)
         .map_err(|e| anyhow::anyhow!("KASTELLAN_EMBED_BROKER_ENDPOINT is not a URL: {e}"))?;
 
+    // A remote/TLS backend needs a process-default rustls crypto provider before
+    // any `ClientConfig::builder()` runs (the proxy-connect transport builds one
+    // directly). Install it up front for `https://`; a loopback-`http://` backend
+    // (v1) never constructs a TLS config, so this is a no-op there.
+    if endpoint.scheme() == "https" {
+        kastellan_worker_web_common::http::ensure_crypto_provider();
+    }
+
     // The backend transport: direct (loopback Ollama/vLLM) in v1. `make_get`
     // returns a proxy-connect transport only if KASTELLAN_EGRESS_PROXY_UDS is set
     // (a remote backend force-routed through the egress proxy — out of scope here).
