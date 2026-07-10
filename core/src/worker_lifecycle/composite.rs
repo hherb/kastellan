@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::embed_broker::EmbedBrokerConfig;
 use crate::scheduler::ToolEntry;
 use crate::tool_host::ToolHostError;
 use crate::worker_lifecycle::{
@@ -65,26 +66,28 @@ impl CompositeLifecycle {
         sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
     ) -> Self {
-        Self::with_backoff_and_force_routing(sandboxes, backoff, None)
+        Self::with_backoff_and_force_routing(sandboxes, backoff, None, None)
     }
 
-    /// Build with operator-supplied restart backoff and an optional egress
-    /// force-routing config (slice #2 Task 4.4). The same `Arc` config is shared
-    /// by both inner managers, so every `Net::Allowlist` worker is force-routed
-    /// regardless of which lifecycle it declares. `None` force is equivalent to
-    /// [`Self::with_backoff`].
+    /// Build with operator-supplied restart backoff and optional egress
+    /// force-routing + embed-broker configs. The same `Arc`s are shared by both
+    /// inner managers, so every `Net::Allowlist` worker is force-routed and every
+    /// broker-declaring worker gets a broker regardless of which lifecycle it
+    /// declares. Both `None` is equivalent to [`Self::with_backoff`].
     pub fn with_backoff_and_force_routing(
         sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
         force: Option<Arc<ForceRoutingConfig>>,
+        embed_broker: Option<Arc<EmbedBrokerConfig>>,
     ) -> Self {
         Self {
             single_use: SingleUseLifecycle::with_force_routing(
                 Arc::clone(&sandboxes),
                 force.clone(),
+                embed_broker.clone(),
             ),
             idle_timeout: IdleTimeoutLifecycle::with_backoff_and_force_routing(
-                sandboxes, backoff, force,
+                sandboxes, backoff, force, embed_broker,
             ),
         }
     }

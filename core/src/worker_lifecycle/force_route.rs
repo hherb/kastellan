@@ -19,11 +19,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kastellan_sandbox::{Net, SandboxBackend};
+use kastellan_sandbox::{Net, SandboxBackend, SandboxPolicy};
 
 use crate::egress::audit::EgressAuditRow;
 use crate::egress::cert_pins::{parse_cert_pins, select_pins_for_allowlist, CertPinError, CertPinMap};
 use crate::egress::net_worker::{pg_decision_sink, spawn_forced_net_worker};
+use crate::embed_broker::{spawn_embed_broker, EmbedBrokerConfig, EmbedBrokerSpec, EMBED_BROKER_UDS_ENV};
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
 use crate::worker_manifest::{discover_binary, ResolveCtx};
 
@@ -260,6 +261,85 @@ pub(crate) fn spawn_worker_maybe_forced(
             spawn_forced_net_worker(&params, &cfg.scratch_root, (cfg.make_sink)())
         }
     }
+}
+
+/// Spawn `spec`'s worker, first attaching a per-worker embed-broker sidecar when
+/// the entry declares one (`embed_broker: Some`), then routing through
+/// [`spawn_worker_maybe_forced`] as usual. This is the single cold-spawn
+/// chokepoint both lifecycle managers call.
+///
+/// **Ordering (a worker may be BOTH broker-backed AND force-routed):**
+/// 1. Spawn the broker first (fail-closed — no broker ⇒ no worker), giving its
+///    bound UDS.
+/// 2. Rewrite the worker's policy onto that UDS ([`rewrite_policy_for_broker`]):
+///    set `embed_broker_uds` (Slice B1 binds it into the jail) and inject
+///    [`EMBED_BROKER_UDS_ENV`] so the worker's `choose_embedder` picks the broker.
+/// 3. Route through `spawn_worker_maybe_forced`. If force-routing is *also*
+///    active, its `rewrite_worker_policy` clones this already-brokered policy, so
+///    `embed_broker_uds` + the injected env survive (a struct clone preserves
+///    them; force-routing only mutates the egress fields — orthogonal per B1).
+/// 4. Attach the broker sidecar to the returned worker (1:1 RAII teardown).
+///
+/// **Fail-closed:** a worker with `embed_broker: Some` but no daemon
+/// [`EmbedBrokerConfig`] (broker binary absent) is **refused** — the manifest
+/// already dropped the embed host from the allowlist, so a silent fallback would
+/// leave the worker with no embed route at all *and* skip the containment intent.
+///
+/// When `embed_broker` is `None` this is a **byte-identical** pass-through to
+/// [`spawn_worker_maybe_forced`].
+#[allow(clippy::too_many_arguments)] // mirrors spawn_worker_maybe_forced + the two sidecar configs
+pub(crate) fn spawn_worker_with_optional_broker(
+    force: Option<&ForceRoutingConfig>,
+    embed_cfg: Option<&EmbedBrokerConfig>,
+    backend: &dyn SandboxBackend,
+    spec: &WorkerSpec<'_>,
+    embed_broker: Option<&EmbedBrokerSpec>,
+    worker_name: &str,
+) -> Result<SupervisedWorker, ToolHostError> {
+    let Some(broker_spec) = embed_broker else {
+        // No broker requested → legacy path, byte-identical.
+        return spawn_worker_maybe_forced(force, backend, spec, worker_name);
+    };
+    // Fail-closed: a broker-wanting worker must not spawn without a config.
+    let cfg = embed_cfg.ok_or_else(|| {
+        ToolHostError::Io(std::io::Error::other(format!(
+            "worker {worker_name:?} requests an embed-broker but the daemon has no \
+             embed-broker config (kastellan-worker-embed-broker not found); refusing \
+             to spawn — the manifest already dropped the embed host from egress"
+        )))
+    })?;
+    // 1. Broker first (fail-closed on its Err — its scratch is cleaned there).
+    let (sidecar, uds) = spawn_embed_broker(cfg, broker_spec, backend)?;
+    // 2. Rewrite the policy onto the broker UDS. If spawning the worker below
+    //    fails, `sidecar` drops here → its Drop kills the broker + removes its
+    //    scratch (fail-closed, no orphan).
+    let brokered = rewrite_policy_for_broker(spec.policy.clone(), &uds);
+    let brokered_spec = WorkerSpec {
+        policy: &brokered,
+        program: spec.program,
+        args: spec.args,
+        wall_clock_ms: spec.wall_clock_ms,
+    };
+    // 3. Route as usual (force-routing may also apply; it preserves our fields).
+    let mut worker = spawn_worker_maybe_forced(force, backend, &brokered_spec, worker_name)?;
+    // 4. Attach the broker so teardown is 1:1 with the worker.
+    worker.embed_broker = Some(sidecar);
+    Ok(worker)
+}
+
+/// Pure: rewrite a worker policy onto its embed-broker's UDS. Binds the socket
+/// into the jail ([`SandboxPolicy::embed_broker_uds`], Slice B1) and injects
+/// [`EMBED_BROKER_UDS_ENV`] so the worker's `choose_embedder` selects
+/// `BrokeredEmbedder`. The jail path equals the host path (B1 binds identically),
+/// so the injected value is `uds` verbatim. Any stale env value is dropped first
+/// (mirrors `rewrite_worker_policy`'s env handling).
+pub(crate) fn rewrite_policy_for_broker(mut policy: SandboxPolicy, uds: &std::path::Path) -> SandboxPolicy {
+    policy.embed_broker_uds = Some(uds.to_path_buf());
+    policy.env.retain(|(k, _)| k != EMBED_BROKER_UDS_ENV);
+    policy
+        .env
+        .push((EMBED_BROKER_UDS_ENV.to_string(), uds.to_string_lossy().into_owned()));
+    policy
 }
 
 /// Resolve the daemon's force-routing configuration from its inputs.

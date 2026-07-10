@@ -30,6 +30,14 @@ pub mod spawn;
 pub use config::EmbedBrokerConfig;
 pub use spawn::{spawn_embed_broker, EmbedBrokerSidecar};
 
+/// Env var carrying the embed-broker UDS path. Single source of truth for both
+/// ends: the **broker** binary reads it as the socket path it `bind()`s
+/// (`kastellan-worker-embed-broker::main`), and core injects the **same** path
+/// into the consuming **worker** so its `choose_embedder` selects
+/// `BrokeredEmbedder`. The two values are identical because Slice B1 binds the
+/// socket at an identical host↔jail path (`SandboxPolicy::embed_broker_uds`).
+pub const EMBED_BROKER_UDS_ENV: &str = "KASTELLAN_EMBED_BROKER_UDS";
+
 /// Per-worker declaration that a worker wants a trusted embed-broker sidecar,
 /// carrying the backend the broker forwards to.
 ///

@@ -23,14 +23,13 @@ use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 use url::Url;
 
 use super::config::EmbedBrokerConfig;
-use super::EmbedBrokerSpec;
+use super::{EmbedBrokerSpec, EMBED_BROKER_UDS_ENV};
 use crate::egress::scratch_sweep::EMBED_SCRATCH_DIR_PREFIX;
 use crate::tool_host::{derive_lockdown_env, ToolHostError};
 
-/// Env key the broker binary reads for the socket path it `bind()`s. Must match
-/// the read in `kastellan-worker-embed-broker::main` and the worker-side jail
-/// path core injects as `KASTELLAN_EMBED_BROKER_UDS` (Task 4).
-const ENV_BROKER_UDS: &str = "KASTELLAN_EMBED_BROKER_UDS";
+/// Env key the broker binary reads for the socket path it `bind()`s — the shared
+/// [`EMBED_BROKER_UDS_ENV`] contract (same value core injects into the worker).
+const ENV_BROKER_UDS: &str = EMBED_BROKER_UDS_ENV;
 /// Env key the broker binary reads for the backend embeddings URL to forward to.
 const ENV_BROKER_ENDPOINT: &str = "KASTELLAN_EMBED_BROKER_ENDPOINT";
 
