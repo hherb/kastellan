@@ -46,6 +46,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
 }
 

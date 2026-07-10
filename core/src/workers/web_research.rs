@@ -154,6 +154,7 @@ pub fn web_research_entry_with_embed(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
 }
 
@@ -218,6 +219,7 @@ pub fn web_research_firecracker_entry(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
 }
 

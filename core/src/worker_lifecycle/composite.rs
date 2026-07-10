@@ -144,6 +144,7 @@ mod tests {
             container_image: None,
             lockdown_shim: None,
             ephemeral_scratch: false,
+            embed_broker: None,
         }
     }
 
@@ -165,6 +166,7 @@ mod tests {
             container_image: None,
             lockdown_shim: None,
             ephemeral_scratch: false,
+            embed_broker: None,
         }
     }
 

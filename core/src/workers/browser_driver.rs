@@ -315,6 +315,7 @@ pub fn browser_driver_entry(
         // macOS the host mints a unique dir, grants it via fs_write, and exposes
         // it as KASTELLAN_WORKER_SCRATCH — replacing the shared /tmp grant.
         ephemeral_scratch: true,
+        embed_broker: None,
     }
 }
 
