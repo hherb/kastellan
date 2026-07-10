@@ -15,7 +15,7 @@
 //!      removes the scratch dir 1:1 with the consuming worker.
 
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -174,17 +174,40 @@ fn make_broker_scratch_dir(scratch_root: &Path) -> Result<PathBuf, ToolHostError
     Ok(dir)
 }
 
-/// Poll for `uds` to exist, up to `timeout`. Returns `true` once it appears,
-/// `false` on timeout. Extracted so the readiness contract is unit-testable with
-/// a short deadline (the live bind is DGX-gated).
-fn wait_for_socket(uds: &Path, timeout: Duration) -> bool {
+/// Outcome of waiting for the broker to bind its UDS. Distinguishes a clean bind
+/// from an early process exit (so the caller can surface the real exit status
+/// instead of a misleading bind-timeout) and from a genuine timeout.
+enum BrokerReady {
+    /// The UDS appeared — the broker is (about to be) serving.
+    Bound,
+    /// The broker process exited before binding — fail fast with its status.
+    Exited(ExitStatus),
+    /// Neither happened within the deadline.
+    TimedOut,
+}
+
+/// Poll for `uds` to exist, up to `timeout`, while also watching for the broker
+/// to exit early (via the injected `exited` probe). Returns as soon as either the
+/// socket appears or the broker dies, so a broker that fails at startup (bad
+/// endpoint, panic during bind) surfaces its exit status immediately rather than
+/// blocking the full `timeout`. `exited` is a closure (not a `&mut Child`
+/// directly) so the readiness contract stays hermetically unit-testable without a
+/// real process (the live bind is DGX-gated).
+fn wait_for_broker_ready(
+    uds: &Path,
+    timeout: Duration,
+    mut exited: impl FnMut() -> Option<ExitStatus>,
+) -> BrokerReady {
     let deadline = Instant::now() + timeout;
     loop {
         if uds.exists() {
-            return true;
+            return BrokerReady::Bound;
+        }
+        if let Some(status) = exited() {
+            return BrokerReady::Exited(status);
         }
         if Instant::now() >= deadline {
-            return false;
+            return BrokerReady::TimedOut;
         }
         std::thread::sleep(READY_POLL);
     }
@@ -208,6 +231,19 @@ pub fn spawn_embed_broker(
     spec: &EmbedBrokerSpec,
     backend: &dyn SandboxBackend,
 ) -> Result<(EmbedBrokerSidecar, PathBuf), ToolHostError> {
+    // Fail fast on a malformed endpoint: an unparseable/hostless URL yields an
+    // empty broker allowlist, so the broker would spawn with no reachable backend
+    // and only surface as a 5s bind-timeout. Reject it up front, before minting
+    // scratch or spawning, with an error that names the bad endpoint.
+    if broker_allowlist_from_endpoint(&spec.endpoint).is_empty() {
+        return Err(ToolHostError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "embed-broker endpoint {:?} has no parseable host:port — refusing to spawn",
+                spec.endpoint
+            ),
+        )));
+    }
     let scratch = make_broker_scratch_dir(&cfg.scratch_root)?;
     match spawn_broker_in(cfg, spec, backend, &scratch) {
         Ok(sidecar) => {
@@ -242,27 +278,42 @@ fn spawn_broker_in(
     let program = cfg.broker_bin.to_string_lossy();
     let mut child = backend.spawn_under_policy(&derived, &program, &[])?;
 
-    // Drain the broker's stderr so a chatty error path can't fill the pipe and
-    // deadlock it (the broker serves over the UDS, not stdio; its stderr is the
-    // only pipe that could back up).
+    // Drain BOTH of the broker's stdio pipes so neither can fill (~64 KiB) and
+    // deadlock it. The broker serves over the UDS, not stdio, so core never reads
+    // either pipe: today it writes only to stderr, but draining stdout too makes
+    // the no-deadlock guarantee independent of that (a future stdout write, or a
+    // prelude diagnostic, can't stall the broker).
     let pid = child.id();
     if let Some(stderr) = child.stderr.take() {
         crate::worker_stderr::spawn_drain(pid, stderr);
     }
-
-    if !wait_for_socket(&uds_path, READY_TIMEOUT) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(ToolHostError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("embed-broker did not bind {uds_path:?} within {READY_TIMEOUT:?}"),
-        )));
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || crate::worker_stderr::drain_reader(pid, stdout, None));
     }
-    Ok(EmbedBrokerSidecar {
-        child,
-        uds_path,
-        scratch: scratch.to_path_buf(),
-    })
+
+    match wait_for_broker_ready(&uds_path, READY_TIMEOUT, || child.try_wait().ok().flatten()) {
+        BrokerReady::Bound => Ok(EmbedBrokerSidecar {
+            child,
+            uds_path,
+            scratch: scratch.to_path_buf(),
+        }),
+        // Broker died before binding — reap it and surface its real exit status
+        // (not a misleading bind-timeout).
+        BrokerReady::Exited(status) => {
+            let _ = child.wait();
+            Err(ToolHostError::Io(std::io::Error::other(format!(
+                "embed-broker exited before binding {uds_path:?} (status: {status})"
+            ))))
+        }
+        BrokerReady::TimedOut => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(ToolHostError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("embed-broker did not bind {uds_path:?} within {READY_TIMEOUT:?}"),
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -353,11 +404,71 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_socket_times_out_when_absent() {
-        // Hermetic readiness-timeout pin: a socket that never appears → false
-        // quickly (the live bind path is DGX-gated).
+    fn wait_for_broker_ready_times_out_when_absent_and_alive() {
+        // Hermetic readiness pin: a socket that never appears AND a broker that
+        // never exits → TimedOut quickly (the live bind path is DGX-gated).
         let missing = PathBuf::from("/tmp/kastellan-embed-broker-nonexistent-xyz.sock");
         let _ = std::fs::remove_file(&missing);
-        assert!(!wait_for_socket(&missing, Duration::from_millis(60)));
+        let ready = wait_for_broker_ready(&missing, Duration::from_millis(60), || None);
+        assert!(matches!(ready, BrokerReady::TimedOut));
+    }
+
+    #[test]
+    fn wait_for_broker_ready_reports_early_exit_without_waiting_full_timeout() {
+        // A broker that exits before binding is reported as `Exited` immediately,
+        // NOT after the (here 10s) timeout — the whole point of watching liveness.
+        let missing = PathBuf::from("/tmp/kastellan-embed-broker-early-exit-xyz.sock");
+        let _ = std::fs::remove_file(&missing);
+        // Spawn a real short-lived process just to obtain a genuine ExitStatus.
+        let status = std::process::Command::new("true")
+            .status()
+            .expect("run `true`");
+        let start = Instant::now();
+        let ready = wait_for_broker_ready(&missing, Duration::from_secs(10), || Some(status));
+        assert!(matches!(ready, BrokerReady::Exited(_)));
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "must return on early exit, not block the full timeout"
+        );
+    }
+
+    /// Backend whose spawn always fails — proves the endpoint check runs *before*
+    /// any spawn (a passing test means the backend was never reached).
+    struct FailBackend;
+    impl SandboxBackend for FailBackend {
+        fn spawn_under_policy(
+            &self,
+            _policy: &SandboxPolicy,
+            _program: &str,
+            _args: &[&str],
+        ) -> Result<Child, kastellan_sandbox::SandboxError> {
+            Err(kastellan_sandbox::SandboxError::Backend("test: spawn refused".into()))
+        }
+    }
+
+    #[test]
+    fn spawn_rejects_malformed_endpoint_before_touching_the_backend() {
+        // A hostless/unparseable endpoint is refused up front (fail-fast, clear
+        // error) rather than surfacing as a 5s bind-timeout. The check runs before
+        // scratch is minted or the backend is spawned — `FailBackend` (which would
+        // error if reached) is never invoked, so the `InvalidInput` error proves
+        // the early rejection.
+        let cfg = EmbedBrokerConfig::new(
+            PathBuf::from("/nonexistent/kastellan-worker-embed-broker"),
+            PathBuf::from("/tmp"),
+        );
+        let spec = EmbedBrokerSpec::new("not a url", "test-model");
+        // `EmbedBrokerSidecar` isn't `Debug`, so match rather than `expect_err`.
+        match spawn_embed_broker(&cfg, &spec, &FailBackend) {
+            Err(ToolHostError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+                assert!(
+                    e.to_string().contains("no parseable host:port"),
+                    "error should name the malformed endpoint, got: {e}"
+                );
+            }
+            Err(other) => panic!("expected Io(InvalidInput), got {other:?}"),
+            Ok(_) => panic!("expected malformed endpoint to be rejected, but a broker spawned"),
+        }
     }
 }
