@@ -127,6 +127,7 @@ fn idle_timeout_entry(worker: PathBuf, caps: IdleTimeoutCaps) -> ToolEntry {
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
 }
 

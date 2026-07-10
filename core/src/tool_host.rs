@@ -422,6 +422,7 @@ where
         client,
         watchdog,
         egress: None,
+        embed_broker: None,
         scratch: None,
     })
 }
@@ -435,6 +436,9 @@ where
 /// net worker (slice #2) it kills the egress-proxy sidecar *after* the
 /// worker's pipes have closed, so the worker stops talking to the proxy
 /// before the proxy dies. Plain (`Net::Deny` / legacy) workers leave it `None`.
+/// `embed_broker` drops fourth: same reasoning as `egress` — the worker stops
+/// talking to its embed-broker sidecar (over the bound UDS) before the broker
+/// dies. `None` for every worker except web-research in broker mode.
 /// `scratch` drops last: for a macOS per-spawn scratch worker its RAII guard
 /// removes the host dir after both the worker's pipes and the egress sidecar
 /// are gone. `None` on Linux and for any non-scratch worker.
@@ -449,6 +453,12 @@ pub struct SupervisedWorker {
     /// `crate::egress::net_worker::spawn_net_worker`. Additive — its `Drop`
     /// tears the coupled egress-proxy sidecar down 1:1 with this worker.
     pub(crate) egress: Option<crate::egress::net_worker::EgressSidecar>,
+    /// `Some` only for a worker spawned in embed-broker mode; set by
+    /// `crate::worker_lifecycle::force_route::spawn_worker_with_optional_broker`.
+    /// Additive — its `Drop` kills the coupled embed-broker sidecar (and removes
+    /// its scratch) 1:1 with this worker. Independent of `egress` (a worker may
+    /// carry both).
+    pub(crate) embed_broker: Option<crate::embed_broker::EmbedBrokerSidecar>,
     /// `Some` only for a worker that requested per-spawn scratch
     /// (`ToolEntry.ephemeral_scratch`, macOS). Set post-spawn via
     /// [`SupervisedWorker::with_scratch`], mirroring how `egress` is attached.
@@ -495,6 +505,7 @@ impl SupervisedWorker {
             client,
             watchdog,
             egress,
+            embed_broker,
             scratch,
         } = self;
         // `client.close()` runs first (waits for the worker to exit, closing
@@ -509,6 +520,7 @@ impl SupervisedWorker {
         let status = client.close();
         drop(watchdog);
         drop(egress);
+        drop(embed_broker);
         drop(scratch);
         status
     }

@@ -42,11 +42,17 @@ pub(crate) const EGRESS_SCRATCH_DIR_PREFIX: &str = "egress-";
 /// `"{MATRIX_SCRATCH_DIR_PREFIX}{pid}-{seq}"` under the same `scratch_root`.
 pub(crate) const MATRIX_SCRATCH_DIR_PREFIX: &str = "matrix-";
 
+/// Name prefix of the per-worker embed-broker sidecar scratch dir (Slice B).
+/// Kept in sync with the producer in `crate::embed_broker::spawn`, which formats
+/// `"{EMBED_SCRATCH_DIR_PREFIX}{pid}-{seq}"` under the same `scratch_root` to hold
+/// the broker's `embed.sock`. Same crash-leak class as the egress sidecar.
+pub(crate) const EMBED_SCRATCH_DIR_PREFIX: &str = "embed-";
+
 /// Every per-worker scratch-dir prefix the startup sweep reclaims. Add a new
 /// producer's prefix here (and a round-trip test below) when a new worker
 /// family gets its own scratch dirs under `scratch_root`.
 pub(crate) const SCRATCH_DIR_PREFIXES: &[&str] =
-    &[EGRESS_SCRATCH_DIR_PREFIX, MATRIX_SCRATCH_DIR_PREFIX];
+    &[EGRESS_SCRATCH_DIR_PREFIX, MATRIX_SCRATCH_DIR_PREFIX, EMBED_SCRATCH_DIR_PREFIX];
 
 /// Parse the creating-daemon pid out of a `<prefix><pid>-<seq>` dir name.
 ///

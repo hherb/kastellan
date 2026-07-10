@@ -140,7 +140,27 @@ fn fake_entry() -> ToolEntry {
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
+}
+
+#[test]
+fn tool_entry_embed_broker_defaults_none_and_round_trips() {
+    // Every shipping tool leaves `embed_broker` at `None` (direct/no embedding).
+    let entry = fake_entry();
+    assert!(entry.embed_broker.is_none(), "default is None");
+
+    // A broker-mode entry carries the backend the broker forwards to; the field
+    // survives a `ToolEntry` clone (the per-dispatch policy clone path).
+    let mut broker_entry = fake_entry();
+    broker_entry.embed_broker = Some(crate::embed_broker::EmbedBrokerSpec::new(
+        "http://127.0.0.1:11434/v1/embeddings",
+        "embeddinggemma",
+    ));
+    let cloned = broker_entry.clone();
+    let spec = cloned.embed_broker.expect("Some after clone");
+    assert_eq!(spec.endpoint, "http://127.0.0.1:11434/v1/embeddings");
+    assert_eq!(spec.model, "embeddinggemma");
 }
 
 #[test]

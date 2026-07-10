@@ -144,6 +144,17 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Embed-broker config (Slice B) — the trusted embedding-broker sidecar. No
+    // daemon enable gate: the *manifest* opts a worker in (web-research's
+    // KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER), so we always try to discover the
+    // broker binary and hold a config iff it resolves. `None` (binary absent) is
+    // fine unless a worker actually requests a broker — then the spawn chokepoint
+    // fails closed. Built here for exe_dir (broker-binary discovery).
+    let embed_broker_cfg = kastellan_core::embed_broker::config::from_env(exe_dir.as_deref());
+    if embed_broker_cfg.is_some() {
+        info!("embed-broker AVAILABLE — broker-declaring workers get a trusted embedding sidecar");
+    }
+
     let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
         kastellan_core::worker_lifecycle::CompositeLifecycle::with_backoff_and_force_routing(
             Arc::clone(&sandboxes),
@@ -152,6 +163,7 @@ async fn main() -> Result<()> {
             // block below also needs the resolved config to build its own
             // `MatrixEgress`, after `force_routing` is moved in here.
             force_routing.clone(),
+            embed_broker_cfg,
         ),
     );
 

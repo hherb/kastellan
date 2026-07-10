@@ -17,6 +17,7 @@ pub mod channel;
 pub mod classification_inference;
 pub mod cli_audit;
 pub mod egress;
+pub mod embed_broker;
 pub mod entity_extraction;
 pub mod handoff;
 pub mod install;

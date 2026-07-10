@@ -126,6 +126,7 @@ pub fn python_exec_entry(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: true,
+        embed_broker: None,
     }
 }
 
@@ -231,6 +232,7 @@ pub fn container_mode_entry(
         container_image: Some(image),
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
 }
 
@@ -302,6 +304,7 @@ pub fn firecracker_mode_entry(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
 }
 

@@ -19,7 +19,8 @@ use tokio::time::sleep;
 
 use crate::scheduler::tool_dispatch::ToolEntry;
 use crate::tool_host::{SupervisedWorker, ToolHostError, WorkerSpec};
-use crate::worker_lifecycle::force_route::{spawn_worker_maybe_forced, ForceRoutingConfig};
+use crate::embed_broker::EmbedBrokerConfig;
+use crate::worker_lifecycle::force_route::{spawn_worker_with_optional_broker, ForceRoutingConfig};
 use crate::worker_lifecycle::manager::WorkerHandle;
 use crate::worker_lifecycle::types::Lifecycle;
 
@@ -376,6 +377,7 @@ pub(crate) async fn acquire_impl(
     tool_name: &str,
     entry: &ToolEntry,
     force: Option<&ForceRoutingConfig>,
+    embed_broker: Option<&EmbedBrokerConfig>,
 ) -> Result<WorkerHandle, ToolHostError> {
     let caps = match &entry.lifecycle {
         Lifecycle::IdleTimeout { caps, contract: _ } => caps.clone(),
@@ -489,7 +491,15 @@ pub(crate) async fn acquire_impl(
     // configured; otherwise byte-identical to the legacy `spawn_worker`. A
     // warm-reused worker (above) keeps the sidecar it was first spawned with —
     // only this cold-spawn path attaches one.
-    let worker = spawn_worker_maybe_forced(force, sandbox, &spec, tool_name)?.with_scratch(scratch);
+    let worker = spawn_worker_with_optional_broker(
+        force,
+        embed_broker,
+        sandbox,
+        &spec,
+        entry.embed_broker.as_ref(),
+        tool_name,
+    )?
+    .with_scratch(scratch);
     let spawned_at = Instant::now();
     Ok(WorkerHandle::idle_timeout(
         worker,

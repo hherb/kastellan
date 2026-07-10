@@ -87,6 +87,7 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
 }
 

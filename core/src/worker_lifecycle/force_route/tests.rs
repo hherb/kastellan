@@ -358,3 +358,117 @@ fn resolve_force_routing_stores_cert_pins() {
     .expect("some");
     assert_eq!(cfg.cert_pins, pins);
 }
+
+// ----- Embed-broker (Slice B, Task 4) -----
+
+/// `rewrite_policy_for_broker` binds the broker UDS into the jail
+/// (`embed_broker_uds`) and injects the worker-read env so `choose_embedder`
+/// selects the brokered path. The jail path equals the host path (B1).
+#[test]
+fn rewrite_policy_for_broker_sets_uds_and_injects_env() {
+    let policy = SandboxPolicy {
+        net: Net::Allowlist(vec!["searx.example.org:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let uds = PathBuf::from("/tmp/embed-1-0/embed.sock");
+    let brokered = rewrite_policy_for_broker(policy, &uds);
+    assert_eq!(brokered.embed_broker_uds.as_deref(), Some(uds.as_path()));
+    assert!(
+        brokered
+            .env
+            .iter()
+            .any(|(k, v)| k == EMBED_BROKER_UDS_ENV && v == "/tmp/embed-1-0/embed.sock"),
+        "worker must get the broker UDS env: {:?}",
+        brokered.env
+    );
+}
+
+/// The critical composition pin: force-routing's `rewrite_worker_policy` clones
+/// the (already brokered) policy and mutates only the egress fields, so the
+/// broker UDS + injected env **survive** for a worker that is BOTH broker-backed
+/// AND force-routed. (Slice B1 made the two orthogonal; this pins it end-to-end.)
+#[test]
+fn broker_uds_and_env_survive_force_route_policy_rewrite() {
+    let base = SandboxPolicy {
+        net: Net::Allowlist(vec!["searx.example.org:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let broker_uds = PathBuf::from("/tmp/embed-1-0/embed.sock");
+    let brokered = rewrite_policy_for_broker(base, &broker_uds);
+    // Now apply force-routing's policy rewrite (proxy UDS, no CA).
+    let proxy_uds = PathBuf::from("/tmp/egress-1-0/egress.sock");
+    let forced = crate::egress::net_worker::rewrite_worker_policy(brokered, &proxy_uds, None);
+    // Broker fields preserved through the egress rewrite.
+    assert_eq!(
+        forced.embed_broker_uds.as_deref(),
+        Some(broker_uds.as_path()),
+        "embed_broker_uds must survive the egress policy rewrite"
+    );
+    assert!(
+        forced
+            .env
+            .iter()
+            .any(|(k, v)| k == EMBED_BROKER_UDS_ENV && v == "/tmp/embed-1-0/embed.sock"),
+        "broker env must survive the egress policy rewrite: {:?}",
+        forced.env
+    );
+    // And the egress rewrite still did its own job (proxy UDS set).
+    assert_eq!(forced.proxy_uds.as_deref(), Some(proxy_uds.as_path()));
+}
+
+/// Fail-closed: a worker that requests a broker (`embed_broker: Some`) but has no
+/// daemon `EmbedBrokerConfig` must be **refused** before any spawn — the backend
+/// is never touched, and the error names the missing config (not a Sandbox spawn
+/// error).
+#[test]
+fn broker_requested_without_config_fails_closed_before_spawn() {
+    let policy = SandboxPolicy {
+        net: Net::Allowlist(vec!["searx.example.org:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let spec = spec_for(&policy);
+    let broker_spec = crate::embed_broker::EmbedBrokerSpec::new(
+        "http://127.0.0.1:11434/v1/embeddings",
+        "embeddinggemma",
+    );
+    let res = spawn_worker_with_optional_broker(
+        None,             // no force-routing
+        None,             // no embed-broker config → fail closed
+        &FailBackend,
+        &spec,
+        Some(&broker_spec),
+        "web-research",
+    );
+    match res {
+        Err(ToolHostError::Io(e)) => {
+            assert!(
+                e.to_string().contains("embed-broker config"),
+                "error should name the missing embed-broker config, got: {e}"
+            );
+        }
+        Err(other) => panic!("expected fail-closed Io error, got a different error: {other:?}"),
+        Ok(_) => panic!("expected fail-closed Io error, but a worker was spawned"),
+    }
+}
+
+/// No broker requested → byte-identical pass-through to the legacy path
+/// (Sandbox error for an allowlist worker with no force-routing).
+#[test]
+fn no_broker_requested_is_passthrough() {
+    let policy = SandboxPolicy {
+        net: Net::Allowlist(vec!["api.example.com:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let res = spawn_worker_with_optional_broker(
+        None,
+        None,
+        &FailBackend,
+        &spec_for(&policy),
+        None, // no broker
+        "web-fetch",
+    );
+    assert!(
+        matches!(res, Err(ToolHostError::Sandbox(_))),
+        "no-broker path must be byte-identical to spawn_worker_maybe_forced"
+    );
+}

@@ -24,6 +24,13 @@ const EMBED_ENDPOINT_ENV: &str = "KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT";
 const EMBED_MODEL_ENV: &str = "KASTELLAN_WEB_RESEARCH_EMBED_MODEL";
 const DEFAULT_EMBED_MODEL: &str = "embeddinggemma";
 
+/// Opt into the trusted embed-broker sidecar (Slice B). When set to `1` AND an
+/// embed endpoint is configured, the worker reaches the embedding backend only
+/// through a core-spawned broker over a bound UDS — the embed host is dropped
+/// from the worker's `Net::Allowlist` and the direct embed-endpoint env is not
+/// injected. See [`crate::embed_broker`].
+const USE_EMBED_BROKER_ENV: &str = "KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER";
+
 /// Opt into the Linux Firecracker micro-VM backend for web-research. Linux-only;
 /// on macOS the flag is never read (the `FirecrackerVm` variant doesn't exist),
 /// so the const is `cfg`-gated out there (issue-#144 rule).
@@ -154,6 +161,79 @@ pub fn web_research_entry_with_embed(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
+    }
+}
+
+/// Env pairs for **broker mode**: like [`base_env`] with no embed endpoint, but
+/// still carrying the embed *model* — the worker's `BrokeredEmbedder` sends the
+/// model per request, so it needs `KASTELLAN_WEB_RESEARCH_EMBED_MODEL`, but must
+/// NOT get `KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT` (in broker mode the worker
+/// reaches the backend only through the bound UDS, whose path core injects as
+/// `KASTELLAN_EMBED_BROKER_UDS` at spawn). Order: endpoint, allowlist, embed
+/// model. Pure.
+fn broker_env(endpoint: &str, embed_model: Option<&str>, allowlist: &[String]) -> Vec<(String, String)> {
+    // base_env with embed_endpoint=None gives just [endpoint, allowlist].
+    let mut env = base_env(endpoint, None, None, allowlist);
+    env.push((
+        EMBED_MODEL_ENV.to_string(),
+        embed_model.unwrap_or(DEFAULT_EMBED_MODEL).to_string(),
+    ));
+    env
+}
+
+/// Build the [`ToolEntry`] for web-research in **broker mode** (Slice B): the
+/// worker embeds through a core-spawned trusted broker sidecar, so the embed
+/// backend host is dropped from `Net::Allowlist` and the direct embed-endpoint
+/// env is omitted. `embed_broker` carries the backend the broker forwards to;
+/// core's spawn chokepoint spawns the broker, binds its UDS into the jail, and
+/// injects `KASTELLAN_EMBED_BROKER_UDS`. The SearxNG endpoint + content
+/// allowlist are unchanged from the direct entry. `embed_model` defaults to
+/// [`DEFAULT_EMBED_MODEL`] when `None`.
+pub fn web_research_broker_entry(
+    binary: PathBuf,
+    endpoint: &str,
+    embed_endpoint: &str,
+    embed_model: Option<&str>,
+    allowlist: &[String],
+) -> ToolEntry {
+    let env = broker_env(endpoint, embed_model, allowlist);
+    let policy = SandboxPolicy {
+        fs_read: vec![
+            binary.clone(),
+            PathBuf::from("/etc/resolv.conf"),
+            PathBuf::from("/etc/hosts"),
+            PathBuf::from("/etc/nsswitch.conf"),
+        ],
+        fs_write: vec![],
+        // NO embed host in the allowlist — the worker never reaches the backend
+        // directly; it goes through the broker's UDS.
+        net: Net::Allowlist(net_entries(endpoint, None, allowlist)),
+        cpu_ms: 15_000,
+        mem_mb: 512,
+        profile: Profile::WorkerNetClient,
+        env,
+        cpu_quota_pct: None,
+        tasks_max: None,
+        proxy_uds: None,
+        // Set at spawn time by core (spawn_embed_broker binds the socket and
+        // core binds it into the jail); the manifest leaves it None.
+        embed_broker_uds: None,
+        persistent_store: None,
+    };
+    ToolEntry {
+        binary,
+        policy,
+        wall_clock_ms: Some(60_000),
+        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+        sandbox_backend: None,
+        container_image: None,
+        lockdown_shim: None,
+        ephemeral_scratch: false,
+        embed_broker: Some(crate::embed_broker::EmbedBrokerSpec::new(
+            embed_endpoint,
+            embed_model.unwrap_or(DEFAULT_EMBED_MODEL),
+        )),
     }
 }
 
@@ -218,6 +298,7 @@ pub fn web_research_firecracker_entry(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
+        embed_broker: None,
     }
 }
 
@@ -237,6 +318,12 @@ impl WorkerManifest for WebResearchManifest {
         let embed_model = (ctx.get_env)(EMBED_MODEL_ENV).filter(|s| !s.trim().is_empty());
         let allowlist = (ctx.allowlist)(TOOL_NAME);
 
+        // Broker mode (Slice B): only active when the operator opts in AND an
+        // embed endpoint is configured (nothing to broker otherwise → falls
+        // through to the direct/lexical entry, byte-identical to today).
+        let use_broker = (ctx.get_env)(USE_EMBED_BROKER_ENV).unwrap_or_default().trim() == "1"
+            && embed_endpoint.is_some();
+
         // Firecracker micro-VM mode (Linux) short-circuits host binary discovery:
         // the worker binary lives inside the rootfs image, not on the host.
         // Linux-only — on macOS USE_MICROVM is never read so the `FirecrackerVm`
@@ -245,6 +332,18 @@ impl WorkerManifest for WebResearchManifest {
         {
             let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
             if use_microvm {
+                // VM × broker is deferred to Slice C (the broker runs host-side;
+                // a VM worker would reach it via the slice-4a vsock UDS bound as
+                // `embed_broker_uds`). In v1 the VM path wins and the broker gate
+                // is ignored with a warning — the VM entry keeps its documented
+                // direct-embed behaviour (degrade-to-lexical for loopback).
+                if use_broker {
+                    tracing::warn!(
+                        "web-research: {USE_EMBED_BROKER_ENV}=1 ignored because \
+                         {USE_MICROVM_ENV}=1 (VM × broker unsupported in v1; \
+                         broker runs host-side only)"
+                    );
+                }
                 let binary = PathBuf::from(MICROVM_WORKER_BIN);
                 let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
                     .filter(|v| !v.trim().is_empty())
@@ -271,6 +370,17 @@ impl WorkerManifest for WebResearchManifest {
                 };
             }
         };
+        if use_broker {
+            // `embed_endpoint.is_some()` is guaranteed by `use_broker`.
+            let embed_endpoint = embed_endpoint.as_deref().expect("use_broker implies Some");
+            return Resolution::Register(web_research_broker_entry(
+                binary,
+                &endpoint,
+                embed_endpoint,
+                embed_model.as_deref(),
+                &allowlist,
+            ));
+        }
         Resolution::Register(web_research_entry_with_embed(
             binary,
             &endpoint,
@@ -365,6 +475,86 @@ mod tests {
                 let has = |k: &str, v: &str| entry.policy.env.iter().any(|(ek, ev)| ek == k && ev == v);
                 assert!(has(EMBED_ENDPOINT_ENV, "http://embed.example.org:11434/v1/embeddings"));
                 assert!(has(EMBED_MODEL_ENV, "embeddinggemma"), "default model injected");
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_broker_mode_drops_embed_host_sets_spec_and_omits_endpoint_env() {
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+            EMBED_ENDPOINT_ENV => Some("http://127.0.0.1:11434/v1/embeddings".to_string()),
+            USE_EMBED_BROKER_ENV => Some("1".to_string()),
+            _ => None, // EMBED_MODEL_ENV unset -> default model
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| {
+            vec![
+                "searx.example.org".to_string(),
+                ".docs.example.org".to_string(),
+            ]
+        };
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                // Broker declaration carries the backend + model.
+                let spec = entry.embed_broker.as_ref().expect("embed_broker set in broker mode");
+                assert_eq!(spec.endpoint, "http://127.0.0.1:11434/v1/embeddings");
+                assert_eq!(spec.model, "embeddinggemma", "default model");
+                // Embed host is NOT in the net allowlist (the backend is loopback,
+                // but even a routable embed host must be absent — it leaves egress).
+                match &entry.policy.net {
+                    Net::Allowlist(hosts) => {
+                        assert!(
+                            hosts.iter().all(|h| !h.starts_with("127.0.0.1")),
+                            "embed host must be absent from net: {hosts:?}"
+                        );
+                        assert_eq!(
+                            hosts,
+                            &vec![
+                                "searx.example.org:443".to_string(),
+                                "docs.example.org:443".to_string(),
+                            ]
+                        );
+                    }
+                    other => panic!("expected Net::Allowlist, got {other:?}"),
+                }
+                // The direct embed-endpoint env is NOT injected; the model IS.
+                let has_key = |k: &str| entry.policy.env.iter().any(|(ek, _)| ek == k);
+                assert!(!has_key(EMBED_ENDPOINT_ENV), "no direct embed endpoint env in broker mode");
+                assert!(
+                    entry
+                        .policy
+                        .env
+                        .iter()
+                        .any(|(k, v)| k == EMBED_MODEL_ENV && v == "embeddinggemma"),
+                    "embed model env injected for the worker's BrokeredEmbedder"
+                );
+                // embed_broker_uds is set at spawn, not the manifest.
+                assert!(entry.policy.embed_broker_uds.is_none());
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_broker_gate_without_embed_endpoint_is_direct() {
+        // Gate on but no embed endpoint => nothing to broker => byte-identical to
+        // the lexical-only direct entry (embed_broker None, no broker net drop).
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+            USE_EMBED_BROKER_ENV => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["searx.example.org".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert!(entry.embed_broker.is_none(), "no broker without an embed endpoint");
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
         }
