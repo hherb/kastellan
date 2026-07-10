@@ -26,9 +26,10 @@
 //! * `brokered_policy_has_broker_uds_and_zero_embed_egress` (hermetic, always
 //!   runs): pins the exact post-rewrite worker policy the live e2e depends on —
 //!   the broker UDS is bound + injected, the direct-embed env is omitted, and the
-//!   embed host is absent from `Net::Allowlist`. `core/tests/` cannot call the
-//!   `pub(crate)` `rewrite_policy_for_broker`, so this test inlines the same two
-//!   mutations and guards them, keeping the live test's setup honest.
+//!   embed host is absent from `Net::Allowlist`. It drives the **real**
+//!   `worker_lifecycle::force_route::rewrite_policy_for_broker` (exposed
+//!   `#[doc(hidden)] pub` for this e2e), so it genuinely guards the production
+//!   manifest + rewrite pair against drift rather than a local replica.
 //! * `brokered_worker_ranks_hybrid_with_zero_embed_egress` (`#[ignore]`, live):
 //!   the real wire. Needs a live SearxNG *and* a live embedding backend (e.g.
 //!   `ollama serve` with `embeddinggemma`). Run with `--ignored` after standing
@@ -53,8 +54,9 @@ use kastellan_core::embed_broker::{
 };
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::worker_lifecycle::force_route::rewrite_policy_for_broker;
 use kastellan_core::workers::web_research::web_research_broker_entry;
-use kastellan_sandbox::{Net, SandboxPolicy};
+use kastellan_sandbox::Net;
 use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary, PgCluster,
@@ -65,20 +67,6 @@ use kastellan_tests_common::{
 const DEFAULT_EMBED_ENDPOINT: &str = "http://127.0.0.1:11434/v1/embeddings";
 /// SearxNG search endpoint. Loopback http is accepted by `validate_endpoint`.
 const DEFAULT_SEARX_ENDPOINT: &str = "http://127.0.0.1:8888/search";
-
-/// Inline the two mutations `worker_lifecycle::force_route::rewrite_policy_for_broker`
-/// performs (it is `pub(crate)`, so an integration test replicates it): bind the
-/// broker socket into the jail and inject the env the worker's `choose_embedder`
-/// reads to pick `BrokeredEmbedder`. Keeping this local guards the live test's
-/// setup against drift in the real rewrite.
-fn rewrite_policy_for_broker(mut policy: SandboxPolicy, uds: &std::path::Path) -> SandboxPolicy {
-    policy.embed_broker_uds = Some(uds.to_path_buf());
-    policy.env.push((
-        EMBED_BROKER_UDS_ENV.to_string(),
-        uds.to_string_lossy().into_owned(),
-    ));
-    policy
-}
 
 /// Extract the `host:port` authority from a URL, matching how `net_entries`
 /// records allowlist entries (so the "embed host absent" check compares like
@@ -290,12 +278,15 @@ fn brokered_worker_ranks_hybrid_with_zero_embed_egress() {
         // host is not reachable directly. If this held only hermetically we could
         // not claim the live hybrid result came through the broker.
         let embed_authority = url_authority(&env.embed_endpoint);
-        if let Net::Allowlist(entries) = &policy.net {
-            assert!(
+        match &policy.net {
+            Net::Allowlist(entries) => assert!(
                 !entries.iter().any(|e| e == &embed_authority),
                 "embed host {embed_authority:?} must be absent from the live worker's \
                  egress allowlist; got {entries:?}"
-            );
+            ),
+            // Fail closed, matching the hermetic pin: broker mode must stay on an
+            // allowlist. A different variant would silently skip the egress check.
+            other => panic!("expected Net::Allowlist in broker mode, got {other:?}"),
         }
 
         let worker_str = env.worker_path.to_string_lossy().into_owned();

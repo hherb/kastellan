@@ -333,7 +333,13 @@ pub(crate) fn spawn_worker_with_optional_broker(
 /// `BrokeredEmbedder`. The jail path equals the host path (B1 binds identically),
 /// so the injected value is `uds` verbatim. Any stale env value is dropped first
 /// (mirrors `rewrite_worker_policy`'s env handling).
-pub(crate) fn rewrite_policy_for_broker(mut policy: SandboxPolicy, uds: &std::path::Path) -> SandboxPolicy {
+///
+/// `#[doc(hidden)] pub` (not stable API): exposed only so the Slice-C egress e2e
+/// (`core/tests/embed_broker_egress_e2e.rs`) drives the real production rewrite
+/// instead of a divergence-prone replica. In-crate this is the sole path that
+/// puts a worker onto its broker UDS.
+#[doc(hidden)]
+pub fn rewrite_policy_for_broker(mut policy: SandboxPolicy, uds: &std::path::Path) -> SandboxPolicy {
     policy.embed_broker_uds = Some(uds.to_path_buf());
     policy.env.retain(|(k, _)| k != EMBED_BROKER_UDS_ENV);
     policy
