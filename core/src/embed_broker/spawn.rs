@@ -46,6 +46,15 @@ const READY_POLL: Duration = Duration::from_millis(25);
 /// short-lived — a bounded `RLIMIT_CPU` is defense-in-depth (the only per-process
 /// CPU primitive on macOS). Embedding forwarding is I/O-bound, so 10s of CPU is
 /// generous. Matches the egress short-lived sidecar cap (issue #395).
+///
+/// **Revisit before the first broker-backed `IdleTimeout` worker.** This cap is
+/// sized for one SingleUse dispatch. A warm `IdleTimeout` worker keeps the broker
+/// it was cold-spawned with across many dispatches, so its cumulative CPU could
+/// eventually hit this cap and RLIMIT_CPU would SIGKILL the broker — silently
+/// breaking that worker's embed route while it stays warm. Every broker-backed
+/// worker today is SingleUse, so this is latent; the fix (mirroring the egress
+/// sidecar's `long_lived` split — `cpu_ms: 0` for a long-lived broker, bounded
+/// otherwise) lands with the first such worker.
 const BROKER_CPU_MS: u64 = 10_000;
 
 /// Max byte length of a `sockaddr_un.sun_path` (104 macOS / 108 Linux, incl. the
