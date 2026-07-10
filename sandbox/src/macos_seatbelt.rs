@@ -133,6 +133,7 @@ impl SandboxBackend for MacosSeatbelt {
             .iter()
             .chain(policy.fs_write.iter())
             .chain(policy.proxy_uds.iter())
+            .chain(policy.embed_broker_uds.iter())
             .chain(persistent_paths.iter().copied())
         {
             if !p.is_absolute() {
@@ -310,6 +311,9 @@ fn canonicalize_policy_paths(policy: &SandboxPolicy) -> Result<SandboxPolicy, Sa
     out.fs_write = canon_list(&policy.fs_write)?;
     if let Some(uds) = &policy.proxy_uds {
         out.proxy_uds = Some(canonicalize_one(uds)?);
+    }
+    if let Some(uds) = &policy.embed_broker_uds {
+        out.embed_broker_uds = Some(canonicalize_one(uds)?);
     }
     if let Some(ps) = &policy.persistent_store {
         out.persistent_store = Some(crate::PersistentStore {
@@ -492,6 +496,18 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
             out.push_str("(allow network*)\n");
         }
         (crate::Net::Deny, _) => { /* no network rules */ }
+    }
+
+    // The embed-broker UDS is an additional trusted-socket grant, orthogonal to
+    // the net policy above: emit its allow whenever set, so the worker can reach
+    // the broker even under the force-routed `(deny network-outbound)` posture
+    // (and harmlessly redundantly when the broad `(allow network*)` is present).
+    // Same debug-quoting rationale as proxy_uds; the disallowed-char guard in
+    // `spawn_under_policy` already foreclosed structural characters.
+    if let Some(uds) = &policy.embed_broker_uds {
+        out.push_str(&format!(
+            "(allow network-outbound (remote unix-socket (path-literal {uds:?})))\n",
+        ));
     }
 
     out

@@ -75,6 +75,7 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
+        embed_broker_uds: None,
         persistent_store: None,
     };
     ToolEntry {

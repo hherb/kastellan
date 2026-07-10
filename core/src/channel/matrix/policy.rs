@@ -96,6 +96,7 @@ pub fn build_matrix_policy(
         tasks_max: None,
         env: Vec::new(), // spawn fills env (homeserver/user/secret refs) at Phase D
         proxy_uds,
+        embed_broker_uds: None,
         persistent_store: None,
     }
 }
@@ -128,6 +129,7 @@ pub fn build_matrix_vm_policy(
             ("KASTELLAN_MICROVM_ROOTFS".to_string(), "matrix.ext4".to_string()),
         ],
         proxy_uds: None,
+        embed_broker_uds: None,
         persistent_store: Some(PersistentStore {
             host_backing: store_image,
             guest_mount: PathBuf::from("/data"),

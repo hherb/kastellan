@@ -84,6 +84,7 @@ pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
+        embed_broker_uds: None,
         persistent_store: None,
     };
     ToolEntry {
@@ -140,6 +141,7 @@ pub fn web_fetch_firecracker_entry(
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
+        embed_broker_uds: None,
         persistent_store: None,
     };
     ToolEntry {

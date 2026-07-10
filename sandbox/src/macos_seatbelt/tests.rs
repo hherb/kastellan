@@ -238,6 +238,83 @@ fn allowlist_with_proxy_uds_denies_outbound_except_uds() {
         "must NOT broadly allow network; got:\n{prof}");
 }
 
+/// The embed-broker UDS is an *additional* trusted socket grant, orthogonal to
+/// the net policy: whenever `embed_broker_uds` is set the profile must
+/// explicitly allow that unix-socket, even under the force-routed deny-outbound
+/// posture (where the broad `(allow network*)` is absent, so the broker socket
+/// would otherwise be blocked).
+#[test]
+fn embed_broker_uds_is_allowed_under_force_routing() {
+    let p = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["searx.example.org:443".into()]),
+        proxy_uds: Some(std::path::PathBuf::from("/scratch/egress.sock")),
+        embed_broker_uds: Some(std::path::PathBuf::from("/scratch/embed.sock")),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(prof.contains("(deny network-outbound)"),
+        "force-routed worker must still deny outbound; got:\n{prof}");
+    assert!(prof.contains("(allow network-outbound (remote unix-socket (path-literal \"/scratch/egress.sock\")))"),
+        "proxy UDS must still be allowed; got:\n{prof}");
+    assert!(prof.contains("(allow network-outbound (remote unix-socket (path-literal \"/scratch/embed.sock\")))"),
+        "broker UDS must be allowed even under force-routing; got:\n{prof}");
+    assert!(!prof.contains("(allow network*)"),
+        "must NOT broadly allow network; got:\n{prof}");
+}
+
+/// The broker socket is rejected by the injection-foreclosing path guard just
+/// like `proxy_uds`, so a crafted path can't rewrite the TinyScheme profile.
+#[test]
+fn embed_broker_uds_path_with_injection_chars_is_rejected() {
+    let backend = super::MacosSeatbelt;
+    let mut p = strict_policy();
+    p.embed_broker_uds =
+        Some(std::path::PathBuf::from("/tmp/embed\")(allow network*)(literal \"/x.sock"));
+    let err = backend
+        .spawn_under_policy(&p, "/usr/bin/true", &[])
+        .expect_err("embed_broker_uds path with injection chars must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("disallowed character"),
+        "expected 'disallowed character' error for embed_broker_uds, got: {msg}"
+    );
+}
+
+/// The broker allow is emitted regardless of the net policy — under the legacy
+/// broad-allow posture (`Net::Allowlist` without a proxy UDS ⇒ `(allow
+/// network*)`) it is redundant-but-harmless. Pins that the grant is unconditional
+/// after the net `match`, so a future net-policy change can't silently drop it.
+#[test]
+fn embed_broker_uds_is_allowed_under_legacy_broad_allow() {
+    let p = SandboxPolicy {
+        net: crate::Net::Allowlist(vec!["api.example.com:443".into()]),
+        embed_broker_uds: Some(std::path::PathBuf::from("/scratch/embed.sock")),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(prof.contains("(allow network*)"),
+        "legacy allowlist keeps the broad allow; got:\n{prof}");
+    assert!(prof.contains("(allow network-outbound (remote unix-socket (path-literal \"/scratch/embed.sock\")))"),
+        "broker UDS must be allowed even under the broad-allow posture; got:\n{prof}");
+}
+
+/// Even under `Net::Deny` (no network rules at all) a set `embed_broker_uds`
+/// still grants exactly the one broker socket — the additional-trusted-socket
+/// grant is orthogonal to whether any other network is permitted.
+#[test]
+fn embed_broker_uds_is_allowed_under_net_deny() {
+    let p = SandboxPolicy {
+        net: crate::Net::Deny,
+        embed_broker_uds: Some(std::path::PathBuf::from("/scratch/embed.sock")),
+        ..SandboxPolicy::default()
+    };
+    let prof = build_profile(&p);
+    assert!(!prof.contains("(allow network*)"),
+        "Net::Deny must NOT broadly allow network; got:\n{prof}");
+    assert!(prof.contains("(allow network-outbound (remote unix-socket (path-literal \"/scratch/embed.sock\")))"),
+        "broker UDS must be allowed even under Net::Deny; got:\n{prof}");
+}
+
 /// Legacy `Net::Allowlist` without a proxy UDS keeps the old broad
 /// `(allow network*)` rule — no regression on the slice #1 posture.
 #[test]
