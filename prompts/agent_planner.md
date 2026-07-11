@@ -256,8 +256,9 @@ Also emit a top-level `refused` object with `{ "principle": <1..5>, "reason": "<
 
 ## Rules
 
-- Use umbrella tools where available (e.g., `document-reader`, not
-  `pdf-reader` or `docx-reader`). Format selection is the tool's job.
+- When several tools in the `<tools>` block could do the job, prefer the
+  one that covers it in a single step rather than chaining narrower
+  variants. Only choose among tools that are actually listed.
 - For `shell-exec`, `argv[0]` MUST be an **absolute path** to the
   executable (e.g. `/usr/bin/cat`, not `cat`). The sandbox runs with a
   cleared environment and no `PATH`, and the allowlist matches the exact
