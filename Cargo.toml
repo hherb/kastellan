@@ -18,6 +18,7 @@ members = [
     "workers/web-search",
     "workers/egress-proxy",
     "workers/embed-broker",
+    "workers/search-broker",
     "workers/matrix-wire",
     "workers/matrix",
     "workers/kv-demo",
