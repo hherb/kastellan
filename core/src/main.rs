@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
     // the per-tool argv allowlist, which lives in the `tool_allowlists` DB
     // table). A worker whose binary/preconditions are absent is simply not
     // registered — `dispatch_step` then returns `UNKNOWN_TOOL`.
-    let (registry, loaded_tool_records) =
+    let (registry, loaded_tool_records, _tool_docs) =
         kastellan_core::registry_build::build_tool_registry(&pool, exe_dir).await?;
     let tool_registry = Arc::new(registry);
     // Best-effort audit row (was previously written inside build_tool_registry;

@@ -12,7 +12,7 @@
 
 use crate::scheduler::tool_dispatch::HANDOFF_TOOL;
 use crate::scheduler::ToolRegistry;
-use crate::worker_manifest::{ResolveCtx, Resolution, WorkerManifest};
+use crate::worker_manifest::{ResolveCtx, Resolution, ToolDoc, WorkerManifest};
 
 /// Every worker the daemon may register. Adding a worker = add its
 /// `WorkerManifest` impl + one line here. Order is irrelevant (the registry
@@ -77,7 +77,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 pub async fn build_tool_registry(
     pool: &sqlx::PgPool,
     exe_dir: Option<std::path::PathBuf>,
-) -> Result<(ToolRegistry, Vec<LoadedToolRecord>), kastellan_db::DbError> {
+) -> Result<(ToolRegistry, Vec<LoadedToolRecord>, Vec<ToolDoc>), kastellan_db::DbError> {
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -136,9 +136,13 @@ pub fn build_registry_loaded_payload(tools: &[LoadedToolRecord]) -> serde_json::
 pub fn assemble_registry(
     manifests: &[&dyn WorkerManifest],
     ctx: &ResolveCtx<'_>,
-) -> (ToolRegistry, Vec<LoadedToolRecord>) {
+) -> (ToolRegistry, Vec<LoadedToolRecord>, Vec<ToolDoc>) {
     let mut reg = ToolRegistry::new();
     let mut loaded: Vec<LoadedToolRecord> = Vec::new();
+    // Planner-facing tool descriptions, collected ONLY for tools that register
+    // (the `Register` arm below) — a disabled/misconfigured worker is never
+    // advertised, so the planner is never told of a tool it can't dispatch.
+    let mut docs: Vec<ToolDoc> = Vec::new();
     for m in manifests {
         if m.name() == HANDOFF_TOOL {
             tracing::warn!(
@@ -164,6 +168,9 @@ pub fn assemble_registry(
                     allowlist_sha256: sha256_argv0_list(&allowlist),
                 });
                 reg.insert(name, entry);
+                if let Some(doc) = m.tool_doc() {
+                    docs.push(doc);
+                }
             }
             Resolution::Disabled { detail } => {
                 tracing::info!(tool = m.name(), %detail, "worker disabled; skipping");
@@ -173,7 +180,7 @@ pub fn assemble_registry(
             }
         }
     }
-    (reg, loaded)
+    (reg, loaded, docs)
 }
 
 #[cfg(test)]
@@ -246,7 +253,7 @@ mod tests {
         };
         let manifests: &[&dyn WorkerManifest] = &[&m_alpha];
 
-        let (reg, loaded) = assemble_registry(manifests, &ctx);
+        let (reg, loaded, _docs) = assemble_registry(manifests, &ctx);
 
         assert!(reg.lookup("alpha").is_some(), "alpha should be registered");
         assert_eq!(loaded.len(), 1);
@@ -272,7 +279,7 @@ mod tests {
         };
         let manifests: &[&dyn WorkerManifest] = &[&m_off, &m_bad];
 
-        let (reg, loaded) = assemble_registry(manifests, &ctx);
+        let (reg, loaded, _docs) = assemble_registry(manifests, &ctx);
 
         assert!(reg.lookup("off").is_none());
         assert!(reg.lookup("bad").is_none());
@@ -313,7 +320,7 @@ mod tests {
             outcome: FakeOutcome::Register,
             allowlist_name: None,
         };
-        let (reg, loaded) = assemble_registry(&[&reserved], &ctx);
+        let (reg, loaded, _docs) = assemble_registry(&[&reserved], &ctx);
         assert!(reg.lookup("handoff").is_none(), "reserved name must not register");
         assert!(loaded.is_empty(), "reserved name must not appear in loaded records");
     }
@@ -339,7 +346,7 @@ mod tests {
         };
 
         // Real manifest list. gliner is Disabled (no enable flag) and skipped.
-        let (reg, loaded) = assemble_registry(WORKER_MANIFESTS, &ctx);
+        let (reg, loaded, _docs) = assemble_registry(WORKER_MANIFESTS, &ctx);
 
         let entry = reg
             .lookup("shell-exec")
@@ -378,5 +385,34 @@ mod tests {
         assert_eq!(by_name("python-exec").expect("python-exec doc").method, "python.exec");
         assert_eq!(by_name("browser-driver").expect("browser-driver doc").method, "browser.render");
         assert_eq!(by_name("gliner-relex").expect("gliner-relex doc").method, "extract");
+    }
+
+    #[test]
+    fn assemble_collects_docs_only_for_registered_tools() {
+        // Register a real worker (shell-exec has a ToolDoc) via the exe-sibling
+        // path, alongside the other workers which are Disabled in this ctx. Only
+        // the registered one's doc is collected.
+        let exe_dir = PathBuf::from("/install/bin");
+        let sibling = exe_dir.join("kastellan-worker-shell-exec");
+        let get_env = |_k: &str| None;
+        let exists = {
+            let s = sibling.clone();
+            move |p: &Path| p == s.as_path()
+        };
+        let allowlist = |_t: &str| Vec::new();
+        let ctx = ResolveCtx {
+            get_env: &get_env,
+            exists: &exists,
+            is_dir: &|_p: &Path| false,
+            exe_dir: Some(exe_dir.as_path()),
+            canonicalize: &|_p| None,
+            allowlist: &allowlist,
+        };
+        let (_reg, _loaded, docs) = assemble_registry(WORKER_MANIFESTS, &ctx);
+        assert!(docs.iter().any(|d| d.name == "shell-exec"), "shell-exec doc collected");
+        assert!(
+            !docs.iter().any(|d| d.name == "web-search"),
+            "disabled web-search must not be advertised"
+        );
     }
 }
