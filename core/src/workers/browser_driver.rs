@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
-use crate::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
+use crate::worker_manifest::{Resolution, ResolveCtx, ToolDoc, ToolParam, WorkerManifest};
 
 /// Tool name the registry/planner keys browser-driver on.
 const TOOL_NAME: &str = "browser-driver";
@@ -325,6 +325,29 @@ pub fn browser_driver_entry(
 pub struct BrowserDriverManifest;
 
 impl WorkerManifest for BrowserDriverManifest {
+    fn tool_doc(&self) -> Option<ToolDoc> {
+        Some(ToolDoc {
+            name: TOOL_NAME,
+            method: "browser.render",
+            summary: "Render a URL in a headless browser (executes JavaScript) and return \
+                      the resulting page text. Use for pages that need JS; web.fetch is \
+                      cheaper for static pages.",
+            params: &[
+                ToolParam { name: "url", description: "absolute https URL to render", required: true },
+                ToolParam {
+                    name: "timeout_ms",
+                    description: "render timeout in ms (optional, clamped)",
+                    required: false,
+                },
+                ToolParam {
+                    name: "wait_until",
+                    description: "load condition, e.g. \"networkidle\" (optional)",
+                    required: false,
+                },
+            ],
+        })
+    }
+
     fn name(&self) -> &'static str {
         TOOL_NAME
     }

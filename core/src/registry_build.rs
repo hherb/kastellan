@@ -349,4 +349,34 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "shell-exec");
     }
+
+    #[test]
+    fn every_registered_worker_docs_name_matches_registry_key() {
+        // A ToolDoc's name must equal its manifest's name(), else the planner is
+        // told a tool name it can't dispatch. Guards against copy-paste drift.
+        for m in WORKER_MANIFESTS {
+            if let Some(doc) = m.tool_doc() {
+                assert_eq!(doc.name, m.name(), "tool_doc name drift for {}", m.name());
+                assert!(!doc.method.is_empty(), "{} has empty method", m.name());
+                assert!(!doc.summary.is_empty(), "{} has empty summary", m.name());
+            }
+        }
+    }
+
+    #[test]
+    fn core_web_and_shell_workers_advertise_a_tool_doc() {
+        let by_name = |want: &str| {
+            WORKER_MANIFESTS
+                .iter()
+                .find(|m| m.name() == want)
+                .and_then(|m| m.tool_doc())
+        };
+        assert_eq!(by_name("web-search").expect("web-search doc").method, "web.search");
+        assert_eq!(by_name("web-research").expect("web-research doc").method, "web.research");
+        assert_eq!(by_name("web-fetch").expect("web-fetch doc").method, "web.fetch");
+        assert_eq!(by_name("shell-exec").expect("shell-exec doc").method, "shell.exec");
+        assert_eq!(by_name("python-exec").expect("python-exec doc").method, "python.exec");
+        assert_eq!(by_name("browser-driver").expect("browser-driver doc").method, "browser.render");
+        assert_eq!(by_name("gliner-relex").expect("gliner-relex doc").method, "extract");
+    }
 }

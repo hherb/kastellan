@@ -31,7 +31,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::worker_manifest::{discover_binary, Resolution, ResolveCtx, WorkerManifest};
+use crate::worker_manifest::{
+    discover_binary, Resolution, ResolveCtx, ToolDoc, ToolParam, WorkerManifest,
+};
 
 mod entries;
 // Re-export the entry builders + helpers so external call sites (the e2e suites)
@@ -156,6 +158,23 @@ where
 pub struct PythonExecManifest;
 
 impl WorkerManifest for PythonExecManifest {
+    fn tool_doc(&self) -> Option<ToolDoc> {
+        Some(ToolDoc {
+            name: TOOL_NAME,
+            method: "python.exec",
+            summary: "Execute a short Python program in a sandboxed interpreter and \
+                      capture stdout/stderr/exit code.",
+            params: &[
+                ToolParam { name: "code", description: "the Python source to run", required: true },
+                ToolParam {
+                    name: "params",
+                    description: "optional JSON object exposed to the program",
+                    required: false,
+                },
+            ],
+        })
+    }
+
     fn name(&self) -> &'static str {
         TOOL_NAME
     }
