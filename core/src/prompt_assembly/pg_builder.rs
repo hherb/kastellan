@@ -7,11 +7,14 @@
 //!   `(l0_count, l1_count) = (0, 0)` — tests that need non-zero
 //!   counts use the prod builder against a per-test PG cluster.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sqlx::PgPool;
 
 use crate::memory::l0_seed::load_l0_active_default;
 use crate::memory::layers::load_l1_default;
+use crate::worker_manifest::ToolDoc;
 
 use super::{
     assemble::assemble_system_prompt, AssembledPrompt, PromptAssemblyError, SystemPromptBuilder,
@@ -31,12 +34,28 @@ use super::{
 /// `core::scheduler::tool_dispatch::ToolHostStepDispatcher::new`).
 pub struct PgSystemPromptBuilder {
     pool: PgPool,
+    /// Advertised tool set rendered into the `<tools>` block. Empty until set
+    /// via [`with_tool_docs`](Self::with_tool_docs); the daemon builds it once
+    /// from the live registry at startup.
+    tool_docs: Arc<[ToolDoc]>,
 }
 
 impl PgSystemPromptBuilder {
-    /// Construct a builder pinned to the supplied pool.
+    /// Construct a builder pinned to the supplied pool, advertising no tools.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, tool_docs: Arc::from(Vec::new()) }
+    }
+
+    /// Attach the advertised tool set (rendered into the `<tools>` block).
+    /// Threaded from `build_tool_registry` so only registered tools appear.
+    pub fn with_tool_docs(mut self, tool_docs: Arc<[ToolDoc]>) -> Self {
+        self.tool_docs = tool_docs;
+        self
+    }
+
+    #[cfg(test)]
+    fn tool_docs_for_test(&self) -> &[ToolDoc] {
+        &self.tool_docs
     }
 }
 
@@ -56,7 +75,8 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
         let l0 = load_l0_active_default(&self.pool).await?;
         let l1 = load_l1_default(&self.pool).await?;
         let skills = crate::memory::l3_surface::load_l3_skills_default(&self.pool).await?;
-        let system_prompt = assemble_system_prompt(&l0, &l1, &skills, recalled, base);
+        let system_prompt =
+            assemble_system_prompt(&l0, &l1, &skills, recalled, base, &self.tool_docs);
         Ok(AssembledPrompt {
             system_prompt,
             l0_count: l0.len(),
@@ -116,6 +136,22 @@ impl SystemPromptBuilder for StaticSystemPromptBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pg_builder_retains_tool_docs() {
+        // A lazily-connected pool that is never queried in this unit test.
+        // `connect_lazy` needs a Tokio context, hence `#[tokio::test]`.
+        let pool = PgPool::connect_lazy("postgres://unused").expect("lazy pool");
+        let docs: Arc<[ToolDoc]> = Arc::from(vec![ToolDoc {
+            name: "web-search",
+            method: "web.search",
+            summary: "s",
+            params: &[],
+        }]);
+        let b = PgSystemPromptBuilder::new(pool).with_tool_docs(docs);
+        assert_eq!(b.tool_docs_for_test().len(), 1);
+        assert_eq!(b.tool_docs_for_test()[0].name, "web-search");
+    }
 
     #[tokio::test]
     async fn static_builder_returns_fixed_string_ignoring_base() {

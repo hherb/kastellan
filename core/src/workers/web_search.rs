@@ -13,7 +13,9 @@ use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 use url::Url;
 
 use crate::scheduler::ToolEntry;
-use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
+use crate::worker_manifest::{
+    discover_binary, ResolveCtx, Resolution, ToolDoc, ToolParam, WorkerManifest,
+};
 
 /// Tool name the registry keys web-search on.
 const TOOL_NAME: &str = "web-search";
@@ -99,6 +101,24 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
 pub struct WebSearchManifest;
 
 impl WorkerManifest for WebSearchManifest {
+    fn tool_doc(&self) -> Option<ToolDoc> {
+        Some(ToolDoc {
+            name: TOOL_NAME,
+            method: "web.search",
+            summary: "Search the web via a SearxNG backend; returns a list of result \
+                      titles, URLs, and snippets. Use for questions needing current or \
+                      external facts.",
+            params: &[
+                ToolParam { name: "query", description: "the search query", required: true },
+                ToolParam {
+                    name: "count",
+                    description: "max results, default 10 (cap 20)",
+                    required: false,
+                },
+            ],
+        })
+    }
+
     fn name(&self) -> &'static str {
         TOOL_NAME
     }

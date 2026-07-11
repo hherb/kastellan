@@ -25,6 +25,39 @@ impl crate::worker_manifest::WorkerManifest for GlinerRelexManifest {
         Client::TOOL_NAME
     }
 
+    fn tool_doc(&self) -> Option<crate::worker_manifest::ToolDoc> {
+        use crate::worker_manifest::{ToolDoc, ToolParam};
+        Some(ToolDoc {
+            name: Client::TOOL_NAME,
+            method: "extract",
+            summary: "Extract named entities and relations from text against caller-supplied \
+                      label sets (zero-shot GLiNER).",
+            params: &[
+                ToolParam { name: "text", description: "the text to analyse", required: true },
+                ToolParam {
+                    name: "entity_labels",
+                    description: "non-empty array of entity types to find",
+                    required: true,
+                },
+                ToolParam {
+                    name: "relation_labels",
+                    description: "array of relation types (may be empty)",
+                    required: true,
+                },
+                ToolParam {
+                    name: "threshold",
+                    description: "entity confidence in [0,1], default 0.5 (optional)",
+                    required: false,
+                },
+                ToolParam {
+                    name: "relation_threshold",
+                    description: "relation confidence in [0,1] (optional)",
+                    required: false,
+                },
+            ],
+        })
+    }
+
     // No argv allowlist: gliner-relex is a single stateless inference service,
     // not an argv-dispatch worker. (allowlist_tool defaults to None.)
 

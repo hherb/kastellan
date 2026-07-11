@@ -11,6 +11,29 @@ use std::path::{Path, PathBuf};
 
 use crate::scheduler::ToolEntry;
 
+/// A worker's planner-facing self-description (name + JSON-RPC method + params).
+/// Rendered into the `<tools>` block by the prompt assembler so the planner
+/// knows the tool exists and how to call it. All-`'static` so each worker
+/// declares it as a `const`-style literal. Compiled-in ⇒ trusted (no escaping
+/// at the render site).
+pub struct ToolDoc {
+    /// Tool name; MUST equal [`WorkerManifest::name`] (drift-guarded by a test).
+    pub name: &'static str,
+    /// JSON-RPC method the planner emits for this tool (e.g. `"web.search"`).
+    pub method: &'static str,
+    /// One line: what the tool does and when to reach for it.
+    pub summary: &'static str,
+    /// Ordered parameter descriptions.
+    pub params: &'static [ToolParam],
+}
+
+/// One parameter of a [`ToolDoc`].
+pub struct ToolParam {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub required: bool,
+}
+
 /// A worker's self-description. One impl per worker, living in that worker's
 /// host-side module. `resolve` is **pure** — every input arrives via
 /// [`ResolveCtx`], so each impl is unit-testable with fakes (no `std::env`,
@@ -24,6 +47,15 @@ pub trait WorkerManifest: Sync {
     /// `== name()`). `None` ⇒ no allowlist. The async fetch stays in the
     /// builder; the result is threaded into [`ResolveCtx::allowlist`].
     fn allowlist_tool(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Optional planner-facing description used to advertise this tool in the
+    /// `<tools>` prompt block. `None` (the default) ⇒ dispatchable but not
+    /// advertised. Only collected for workers that reach
+    /// [`Resolution::Register`], so a disabled/misconfigured worker is never
+    /// advertised. Static compiled-in text ⇒ trusted (no escaping at render).
+    fn tool_doc(&self) -> Option<ToolDoc> {
         None
     }
 
@@ -244,5 +276,52 @@ mod tests {
         let get_env2 = |_k: &str| None;
         let c2 = ctx(&get_env2, &exists, None);
         assert_eq!(discover_binary(&c2, "OVERRIDE", "worker"), None);
+    }
+}
+
+#[cfg(test)]
+mod tool_doc_tests {
+    use super::*;
+
+    struct BareManifest;
+    impl WorkerManifest for BareManifest {
+        fn name(&self) -> &'static str {
+            "bare"
+        }
+        fn resolve(&self, _ctx: &ResolveCtx<'_>) -> Resolution {
+            Resolution::Disabled { detail: "n/a".into() }
+        }
+    }
+
+    struct DocManifest;
+    impl WorkerManifest for DocManifest {
+        fn name(&self) -> &'static str {
+            "documented"
+        }
+        fn resolve(&self, _ctx: &ResolveCtx<'_>) -> Resolution {
+            Resolution::Disabled { detail: "n/a".into() }
+        }
+        fn tool_doc(&self) -> Option<ToolDoc> {
+            Some(ToolDoc {
+                name: "documented",
+                method: "doc.run",
+                summary: "does a thing",
+                params: &[ToolParam { name: "q", description: "the query", required: true }],
+            })
+        }
+    }
+
+    #[test]
+    fn default_tool_doc_is_none() {
+        assert!(BareManifest.tool_doc().is_none());
+    }
+
+    #[test]
+    fn overridden_tool_doc_carries_fields() {
+        let d = DocManifest.tool_doc().expect("Some");
+        assert_eq!(d.name, "documented");
+        assert_eq!(d.method, "doc.run");
+        assert_eq!(d.params.len(), 1);
+        assert!(d.params[0].required);
     }
 }

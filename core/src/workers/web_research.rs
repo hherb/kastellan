@@ -14,7 +14,9 @@ use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 use url::Url;
 
 use crate::scheduler::ToolEntry;
-use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
+use crate::worker_manifest::{
+    discover_binary, ResolveCtx, Resolution, ToolDoc, ToolParam, WorkerManifest,
+};
 
 const TOOL_NAME: &str = "web-research";
 const BIN_ENV: &str = "KASTELLAN_WEB_RESEARCH_BIN";
@@ -306,6 +308,29 @@ pub fn web_research_firecracker_entry(
 pub struct WebResearchManifest;
 
 impl WorkerManifest for WebResearchManifest {
+    fn tool_doc(&self) -> Option<ToolDoc> {
+        Some(ToolDoc {
+            name: TOOL_NAME,
+            method: "web.research",
+            summary: "Search the web, fetch the top results, and return the passages \
+                      most relevant to the query (ranked). Prefer this over web.search \
+                      when you need the answer content, not just links.",
+            params: &[
+                ToolParam { name: "query", description: "the research question", required: true },
+                ToolParam {
+                    name: "max_sources",
+                    description: "max pages to fetch (optional)",
+                    required: false,
+                },
+                ToolParam {
+                    name: "max_passages",
+                    description: "max ranked passages to return (optional)",
+                    required: false,
+                },
+            ],
+        })
+    }
+
     fn name(&self) -> &'static str {
         TOOL_NAME
     }

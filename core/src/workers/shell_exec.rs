@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
-use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
+use crate::worker_manifest::{
+    discover_binary, ResolveCtx, Resolution, ToolDoc, ToolParam, WorkerManifest,
+};
 
 /// Tool name the registry keys shell-exec on.
 const TOOL_NAME: &str = "shell-exec";
@@ -57,6 +59,20 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
 pub struct ShellExecManifest;
 
 impl WorkerManifest for ShellExecManifest {
+    fn tool_doc(&self) -> Option<ToolDoc> {
+        Some(ToolDoc {
+            name: TOOL_NAME,
+            method: "shell.exec",
+            summary: "Run one allowlisted command and capture stdout/stderr/exit code. \
+                      No shell interpretation; argv[0] MUST be an absolute path.",
+            params: &[ToolParam {
+                name: "argv",
+                description: "command and arguments as a JSON array; argv[0] an absolute path",
+                required: true,
+            }],
+        })
+    }
+
     fn name(&self) -> &'static str {
         TOOL_NAME
     }

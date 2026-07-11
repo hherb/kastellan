@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
-use crate::worker_manifest::{discover_binary, ResolveCtx, Resolution, WorkerManifest};
+use crate::worker_manifest::{
+    discover_binary, ResolveCtx, Resolution, ToolDoc, ToolParam, WorkerManifest,
+};
 
 /// Map the operator domain allowlist to `Net::Allowlist` `host:443` entries:
 /// a wildcard `.domain` maps to its bare `domain:443` (the egress proxy refines
@@ -165,6 +167,21 @@ pub fn web_fetch_firecracker_entry(
 pub struct WebFetchManifest;
 
 impl WorkerManifest for WebFetchManifest {
+    fn tool_doc(&self) -> Option<ToolDoc> {
+        Some(ToolDoc {
+            name: TOOL_NAME,
+            method: "web.fetch",
+            summary: "Fetch one known https URL and return its readable extracted text. \
+                      Use when you already have the exact URL; use web.search/web.research \
+                      to discover URLs.",
+            params: &[ToolParam {
+                name: "url",
+                description: "absolute https URL (http allowed only for loopback)",
+                required: true,
+            }],
+        })
+    }
+
     fn name(&self) -> &'static str {
         TOOL_NAME
     }
