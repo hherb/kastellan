@@ -215,7 +215,7 @@ mod tests {
             container_image: container_image.map(String::from),
             lockdown_shim: None,
             ephemeral_scratch: false,
-            embed_broker: None,
+            broker: None,
         }
     }
 

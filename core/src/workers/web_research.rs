@@ -30,7 +30,7 @@ const DEFAULT_EMBED_MODEL: &str = "embeddinggemma";
 /// embed endpoint is configured, the worker reaches the embedding backend only
 /// through a core-spawned broker over a bound UDS — the embed host is dropped
 /// from the worker's `Net::Allowlist` and the direct embed-endpoint env is not
-/// injected. See [`crate::embed_broker`].
+/// injected. See [`crate::broker`].
 const USE_EMBED_BROKER_ENV: &str = "KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER";
 
 /// Opt into the Linux Firecracker micro-VM backend for web-research. Linux-only;
@@ -163,7 +163,7 @@ pub fn web_research_entry_with_embed(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
-        embed_broker: None,
+        broker: None,
     }
 }
 
@@ -187,7 +187,7 @@ fn broker_env(endpoint: &str, embed_model: Option<&str>, allowlist: &[String]) -
 /// Build the [`ToolEntry`] for web-research in **broker mode** (Slice B): the
 /// worker embeds through a core-spawned trusted broker sidecar, so the embed
 /// backend host is dropped from `Net::Allowlist` and the direct embed-endpoint
-/// env is omitted. `embed_broker` carries the backend the broker forwards to;
+/// env is omitted. The `broker` field carries the backend the broker forwards to;
 /// core's spawn chokepoint spawns the broker, binds its UDS into the jail, and
 /// injects `KASTELLAN_EMBED_BROKER_UDS`. The SearxNG endpoint + content
 /// allowlist are unchanged from the direct entry. `embed_model` defaults to
@@ -218,7 +218,7 @@ pub fn web_research_broker_entry(
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
-        // Set at spawn time by core (spawn_embed_broker binds the socket and
+        // Set at spawn time by core (spawn_broker binds the socket and
         // core binds it into the jail); the manifest leaves it None.
         broker_uds: None,
         persistent_store: None,
@@ -232,10 +232,7 @@ pub fn web_research_broker_entry(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
-        embed_broker: Some(crate::embed_broker::EmbedBrokerSpec::new(
-            embed_endpoint,
-            embed_model.unwrap_or(DEFAULT_EMBED_MODEL),
-        )),
+        broker: Some(crate::broker::BrokerSpec::embed(embed_endpoint)),
     }
 }
 
@@ -300,7 +297,7 @@ pub fn web_research_firecracker_entry(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
-        embed_broker: None,
+        broker: None,
     }
 }
 
@@ -524,10 +521,10 @@ mod tests {
         let c = ctx(&get_env, &exists, &allowlist);
         match WebResearchManifest.resolve(&c) {
             Resolution::Register(entry) => {
-                // Broker declaration carries the backend + model.
-                let spec = entry.embed_broker.as_ref().expect("embed_broker set in broker mode");
+                // Broker declaration carries the kind + backend endpoint.
+                let spec = entry.broker.as_ref().expect("broker set in broker mode");
+                assert_eq!(spec.kind, crate::broker::BrokerKind::Embed);
                 assert_eq!(spec.endpoint, "http://127.0.0.1:11434/v1/embeddings");
-                assert_eq!(spec.model, "embeddinggemma", "default model");
                 // Embed host is NOT in the net allowlist (the backend is loopback,
                 // but even a routable embed host must be absent — it leaves egress).
                 match &entry.policy.net {
@@ -567,7 +564,7 @@ mod tests {
     #[test]
     fn resolve_broker_gate_without_embed_endpoint_is_direct() {
         // Gate on but no embed endpoint => nothing to broker => byte-identical to
-        // the lexical-only direct entry (embed_broker None, no broker net drop).
+        // the lexical-only direct entry (broker None, no broker net drop).
         let get_env = |k: &str| match k {
             BIN_ENV => Some("/opt/web-research".to_string()),
             ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
@@ -579,7 +576,7 @@ mod tests {
         let c = ctx(&get_env, &exists, &allowlist);
         match WebResearchManifest.resolve(&c) {
             Resolution::Register(entry) => {
-                assert!(entry.embed_broker.is_none(), "no broker without an embed endpoint");
+                assert!(entry.broker.is_none(), "no broker without an embed endpoint");
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
         }

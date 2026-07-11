@@ -24,7 +24,7 @@ use kastellan_sandbox::{Net, SandboxBackend, SandboxPolicy};
 use crate::egress::audit::EgressAuditRow;
 use crate::egress::cert_pins::{parse_cert_pins, select_pins_for_allowlist, CertPinError, CertPinMap};
 use crate::egress::net_worker::{pg_decision_sink, spawn_forced_net_worker};
-use crate::embed_broker::{spawn_embed_broker, EmbedBrokerConfig, EmbedBrokerSpec, EMBED_BROKER_UDS_ENV};
+use crate::broker::{spawn_broker, BrokerConfigs, BrokerKind, BrokerSpec};
 use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec};
 use crate::worker_manifest::{discover_binary, ResolveCtx};
 
@@ -263,8 +263,8 @@ pub(crate) fn spawn_worker_maybe_forced(
     }
 }
 
-/// Spawn `spec`'s worker, first attaching a per-worker embed-broker sidecar when
-/// the entry declares one (`embed_broker: Some`), then routing through
+/// Spawn `spec`'s worker, first attaching a per-worker broker sidecar when the
+/// entry declares one (`broker: Some`), then routing through
 /// [`spawn_worker_maybe_forced`] as usual. This is the single cold-spawn
 /// chokepoint both lifecycle managers call.
 ///
@@ -272,48 +272,50 @@ pub(crate) fn spawn_worker_maybe_forced(
 /// 1. Spawn the broker first (fail-closed — no broker ⇒ no worker), giving its
 ///    bound UDS.
 /// 2. Rewrite the worker's policy onto that UDS ([`rewrite_policy_for_broker`]):
-///    set `broker_uds` (Slice B1 binds it into the jail) and inject
-///    [`EMBED_BROKER_UDS_ENV`] so the worker's `choose_embedder` picks the broker.
+///    set `broker_uds` (Slice B1 binds it into the jail) and inject the kind's
+///    `uds_env()` so the worker's backend client picks the brokered path.
 /// 3. Route through `spawn_worker_maybe_forced`. If force-routing is *also*
 ///    active, its `rewrite_worker_policy` clones this already-brokered policy, so
 ///    `broker_uds` + the injected env survive (a struct clone preserves
 ///    them; force-routing only mutates the egress fields — orthogonal per B1).
 /// 4. Attach the broker sidecar to the returned worker (1:1 RAII teardown).
 ///
-/// **Fail-closed:** a worker with `embed_broker: Some` but no daemon
-/// [`EmbedBrokerConfig`] (broker binary absent) is **refused** — the manifest
-/// already dropped the embed host from the allowlist, so a silent fallback would
-/// leave the worker with no embed route at all *and* skip the containment intent.
+/// **Fail-closed:** a worker with `broker: Some` but no daemon
+/// `BrokerConfig` for that kind (broker binary absent) is **refused** — the
+/// manifest already dropped the backend host from the allowlist, so a silent
+/// fallback would leave the worker with no backend route at all *and* skip the
+/// containment intent.
 ///
-/// When `embed_broker` is `None` this is a **byte-identical** pass-through to
+/// When `broker` is `None` this is a **byte-identical** pass-through to
 /// [`spawn_worker_maybe_forced`].
-#[allow(clippy::too_many_arguments)] // mirrors spawn_worker_maybe_forced + the two sidecar configs
+#[allow(clippy::too_many_arguments)] // mirrors spawn_worker_maybe_forced + the broker configs
 pub(crate) fn spawn_worker_with_optional_broker(
     force: Option<&ForceRoutingConfig>,
-    embed_cfg: Option<&EmbedBrokerConfig>,
+    broker_configs: &BrokerConfigs,
     backend: &dyn SandboxBackend,
     spec: &WorkerSpec<'_>,
-    embed_broker: Option<&EmbedBrokerSpec>,
+    broker: Option<&BrokerSpec>,
     worker_name: &str,
 ) -> Result<SupervisedWorker, ToolHostError> {
-    let Some(broker_spec) = embed_broker else {
+    let Some(broker_spec) = broker else {
         // No broker requested → legacy path, byte-identical.
         return spawn_worker_maybe_forced(force, backend, spec, worker_name);
     };
-    // Fail-closed: a broker-wanting worker must not spawn without a config.
-    let cfg = embed_cfg.ok_or_else(|| {
+    // Fail-closed: a broker-wanting worker must not spawn without a matching config.
+    let cfg = broker_configs.for_kind(broker_spec.kind).ok_or_else(|| {
         ToolHostError::Io(std::io::Error::other(format!(
-            "worker {worker_name:?} requests an embed-broker but the daemon has no \
-             embed-broker config (kastellan-worker-embed-broker not found); refusing \
-             to spawn — the manifest already dropped the embed host from egress"
+            "worker {worker_name:?} requests a {:?} broker but the daemon has no \
+             matching broker config (binary not found); refusing to spawn — the \
+             manifest already dropped the backend host from egress",
+            broker_spec.kind
         )))
     })?;
     // 1. Broker first (fail-closed on its Err — its scratch is cleaned there).
-    let (sidecar, uds) = spawn_embed_broker(cfg, broker_spec, backend)?;
+    let (sidecar, uds) = spawn_broker(cfg, broker_spec, backend)?;
     // 2. Rewrite the policy onto the broker UDS. If spawning the worker below
     //    fails, `sidecar` drops here → its Drop kills the broker + removes its
     //    scratch (fail-closed, no orphan).
-    let brokered = rewrite_policy_for_broker(spec.policy.clone(), &uds);
+    let brokered = rewrite_policy_for_broker(spec.policy.clone(), &uds, broker_spec.kind);
     let brokered_spec = WorkerSpec {
         policy: &brokered,
         program: spec.program,
@@ -323,28 +325,33 @@ pub(crate) fn spawn_worker_with_optional_broker(
     // 3. Route as usual (force-routing may also apply; it preserves our fields).
     let mut worker = spawn_worker_maybe_forced(force, backend, &brokered_spec, worker_name)?;
     // 4. Attach the broker so teardown is 1:1 with the worker.
-    worker.embed_broker = Some(sidecar);
+    worker.broker = Some(sidecar);
     Ok(worker)
 }
 
-/// Pure: rewrite a worker policy onto its embed-broker's UDS. Binds the socket
-/// into the jail ([`SandboxPolicy::broker_uds`], Slice B1) and injects
-/// [`EMBED_BROKER_UDS_ENV`] so the worker's `choose_embedder` selects
-/// `BrokeredEmbedder`. The jail path equals the host path (B1 binds identically),
-/// so the injected value is `uds` verbatim. Any stale env value is dropped first
-/// (mirrors `rewrite_worker_policy`'s env handling).
+/// Pure: rewrite a worker policy onto its broker's UDS. Binds the socket into the
+/// jail ([`SandboxPolicy::broker_uds`], Slice B1) and injects the kind's
+/// `uds_env()` so the worker's backend client selects the brokered path. The jail
+/// path equals the host path (B1 binds identically), so the injected value is
+/// `uds` verbatim. Any stale env value for that key is dropped first (mirrors
+/// `rewrite_worker_policy`'s env handling).
 ///
 /// `#[doc(hidden)] pub` (not stable API): exposed only so the Slice-C egress e2e
 /// (`core/tests/embed_broker_egress_e2e.rs`) drives the real production rewrite
 /// instead of a divergence-prone replica. In-crate this is the sole path that
 /// puts a worker onto its broker UDS.
 #[doc(hidden)]
-pub fn rewrite_policy_for_broker(mut policy: SandboxPolicy, uds: &std::path::Path) -> SandboxPolicy {
+pub fn rewrite_policy_for_broker(
+    mut policy: SandboxPolicy,
+    uds: &std::path::Path,
+    kind: BrokerKind,
+) -> SandboxPolicy {
+    let uds_env = kind.uds_env();
     policy.broker_uds = Some(uds.to_path_buf());
-    policy.env.retain(|(k, _)| k != EMBED_BROKER_UDS_ENV);
+    policy.env.retain(|(k, _)| k != uds_env);
     policy
         .env
-        .push((EMBED_BROKER_UDS_ENV.to_string(), uds.to_string_lossy().into_owned()));
+        .push((uds_env.to_string(), uds.to_string_lossy().into_owned()));
     policy
 }
 
@@ -425,8 +432,8 @@ pub fn from_env(
 /// `KASTELLAN_EGRESS_SCRATCH_DIR`). On Linux `temp_dir()` is already `/tmp`, so
 /// the default is unchanged there.
 ///
-/// `pub(crate)` so the embed-broker config ([`crate::embed_broker::config`])
-/// shares the *same* default root — that keeps `embed-<pid>-<seq>` sidecar husks
+/// `pub(crate)` so the broker config ([`crate::broker::config`]) shares the
+/// *same* default root — that keeps `<prefix><pid>-<seq>` broker sidecar husks
 /// under the root the force-routing startup sweep (#251) already reclaims.
 pub(crate) fn default_egress_scratch_root() -> PathBuf {
     #[cfg(target_os = "macos")]

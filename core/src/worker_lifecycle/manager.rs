@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::embed_broker::EmbedBrokerConfig;
+use crate::broker::BrokerConfigs;
 use crate::scheduler::tool_dispatch::ToolEntry;
 use crate::tool_host::{SupervisedWorker, ToolHostError, WorkerSpec};
 use crate::worker_lifecycle::force_route::{spawn_worker_with_optional_broker, ForceRoutingConfig};
@@ -194,10 +194,11 @@ pub struct SingleUseLifecycle {
     /// path is byte-identical to pre-4.4; `Some` ⇒ `Net::Allowlist` workers are
     /// routed through a per-worker egress-proxy sidecar.
     force: Option<Arc<ForceRoutingConfig>>,
-    /// Embed-broker config (Slice B). `None` ⇒ no worker can use a broker (a
-    /// broker-requesting entry fails closed at spawn); `Some` ⇒ an entry with
-    /// `embed_broker: Some` gets a per-worker broker sidecar.
-    embed_broker: Option<Arc<EmbedBrokerConfig>>,
+    /// Broker-config registry (Slice B). An empty registry ⇒ no worker can use a
+    /// broker (a broker-requesting entry fails closed at spawn); a populated slot
+    /// ⇒ an entry with `broker: Some` of that kind gets a per-worker broker
+    /// sidecar.
+    broker_configs: BrokerConfigs,
 }
 
 impl SingleUseLifecycle {
@@ -206,18 +207,18 @@ impl SingleUseLifecycle {
         Self {
             sandboxes,
             force: None,
-            embed_broker: None,
+            broker_configs: BrokerConfigs::default(),
         }
     }
 
-    /// Construct with optional egress force-routing + embed-broker configs. Both
-    /// `None` is equivalent to [`Self::new`].
+    /// Construct with optional egress force-routing + the broker-config registry.
+    /// `None` force + an empty [`BrokerConfigs`] is equivalent to [`Self::new`].
     pub fn with_force_routing(
         sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         force: Option<Arc<ForceRoutingConfig>>,
-        embed_broker: Option<Arc<EmbedBrokerConfig>>,
+        broker_configs: BrokerConfigs,
     ) -> Self {
-        Self { sandboxes, force, embed_broker }
+        Self { sandboxes, force, broker_configs }
     }
 }
 
@@ -272,10 +273,10 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
         // sidecar when configured; otherwise byte-identical to `spawn_worker`.
         let worker = spawn_worker_with_optional_broker(
             self.force.as_deref(),
-            self.embed_broker.as_deref(),
+            &self.broker_configs,
             backend.as_ref(),
             &spec,
-            entry.embed_broker.as_ref(),
+            entry.broker.as_ref(),
             tool_name,
         )?;
         Ok(WorkerHandle::single_use(worker.with_scratch(scratch)))
@@ -301,9 +302,10 @@ pub struct IdleTimeoutLifecycle {
     /// cold-spawn path only; a warm-reused worker keeps the sidecar it was
     /// spawned with. `None` ⇒ byte-identical to pre-4.4.
     force: Option<Arc<ForceRoutingConfig>>,
-    /// Embed-broker config (Slice B). Applied on the cold-spawn path only, like
-    /// `force`. `None` ⇒ no worker can use a broker (fail-closed at spawn).
-    embed_broker: Option<Arc<EmbedBrokerConfig>>,
+    /// Broker-config registry (Slice B). Applied on the cold-spawn path only, like
+    /// `force`. An empty registry ⇒ no worker can use a broker (fail-closed at
+    /// spawn).
+    broker_configs: BrokerConfigs,
 }
 
 impl IdleTimeoutLifecycle {
@@ -317,24 +319,24 @@ impl IdleTimeoutLifecycle {
         sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
     ) -> Self {
-        Self::with_backoff_and_force_routing(sandboxes, backoff, None, None)
+        Self::with_backoff_and_force_routing(sandboxes, backoff, None, BrokerConfigs::default())
     }
 
     /// Construct with operator-supplied backoff and optional egress
-    /// force-routing + embed-broker configs. Both `None` is equivalent to
-    /// [`Self::with_backoff`].
+    /// force-routing + the broker-config registry. `None` force + an empty
+    /// [`BrokerConfigs`] is equivalent to [`Self::with_backoff`].
     pub fn with_backoff_and_force_routing(
         sandboxes: Arc<kastellan_sandbox::SandboxBackends>,
         backoff: super::idle_timeout::RestartBackoff,
         force: Option<Arc<ForceRoutingConfig>>,
-        embed_broker: Option<Arc<EmbedBrokerConfig>>,
+        broker_configs: BrokerConfigs,
     ) -> Self {
         Self {
             sandboxes,
             backoff,
             registry: super::idle_timeout::empty_registry(),
             force,
-            embed_broker,
+            broker_configs,
         }
     }
 
@@ -440,7 +442,7 @@ impl WorkerLifecycleManager for IdleTimeoutLifecycle {
             tool_name,
             entry,
             self.force.as_deref(),
-            self.embed_broker.as_deref(),
+            &self.broker_configs,
         )
         .await
     }

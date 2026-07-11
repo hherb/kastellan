@@ -208,7 +208,7 @@ fn host_mode_entry(env: &GlinerRelexEnv, lockdown_shim: Option<PathBuf>) -> Tool
         container_image: None,
         lockdown_shim,
         ephemeral_scratch: false,
-        embed_broker: None,
+        broker: None,
     }
 }
 
@@ -273,7 +273,7 @@ fn container_mode_entry(env: &GlinerRelexEnv) -> ToolEntry {
         container_image: Some(image),
         lockdown_shim: None,
         ephemeral_scratch: false,
-        embed_broker: None,
+        broker: None,
     }
 }
 

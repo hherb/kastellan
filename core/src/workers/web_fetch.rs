@@ -98,7 +98,7 @@ pub fn web_fetch_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
-        embed_broker: None,
+        broker: None,
     }
 }
 
@@ -156,7 +156,7 @@ pub fn web_fetch_firecracker_entry(
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
-        embed_broker: None,
+        broker: None,
     }
 }
 

@@ -1,18 +1,20 @@
-//! Spawn a per-worker embed-broker sidecar and wait for it to bind its UDS.
+//! Spawn a per-worker broker sidecar and wait for it to bind its UDS.
 //!
 //! Mirrors [`crate::egress::spawn::spawn_sidecar`] but is simpler: the broker is
-//! a plain sandboxed `Child` that serves JSON-RPC `embed` over its UDS (not over
-//! stdio, so there is no `Client` handshake), forwarding to the operator's
-//! embedding backend. There is no MITM CA, no decision stream, and no cert-pin
-//! config — just:
-//!   1. mint a short scratch dir (`embed-<pid>-<seq>`),
+//! a plain sandboxed `Child` that serves JSON-RPC over its UDS (not over stdio,
+//! so there is no `Client` handshake), forwarding to the operator's backend.
+//! There is no MITM CA, no decision stream, and no cert-pin config — just:
+//!   1. mint a short scratch dir (`<prefix><pid>-<seq>`),
 //!   2. spawn the broker under `Net::Allowlist([backend host:port])` with the
 //!      broker's UDS + endpoint env, deriving the worker-prelude lockdown env
 //!      exactly like every other spawn (the `e70174b` lesson — without it the
 //!      broker's own Landlock would block its DNS),
-//!   3. wait (bounded) for `embed.sock`, and
-//!   4. hand back an [`EmbedBrokerSidecar`] whose `Drop` kills the broker and
-//!      removes the scratch dir 1:1 with the consuming worker.
+//!   3. wait (bounded) for the socket, and
+//!   4. hand back a [`BrokerSidecar`] whose `Drop` kills the broker and removes
+//!      the scratch dir 1:1 with the consuming worker.
+//!
+//! Every per-kind string (env keys, socket basename, scratch prefix) comes from
+//! [`BrokerKind`] via `spec.kind`, so a second broker kind reuses this path.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
@@ -22,43 +24,33 @@ use std::time::{Duration, Instant};
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 use url::Url;
 
-use super::config::EmbedBrokerConfig;
-use super::{EmbedBrokerSpec, EMBED_BROKER_UDS_ENV};
-use crate::egress::scratch_sweep::EMBED_SCRATCH_DIR_PREFIX;
+use super::config::BrokerConfig;
+use super::kind::BrokerKind;
+use super::BrokerSpec;
 use crate::tool_host::{derive_lockdown_env, ToolHostError};
 
-/// Env key the broker binary reads for the socket path it `bind()`s — the shared
-/// [`EMBED_BROKER_UDS_ENV`] contract (same value core injects into the worker).
-const ENV_BROKER_UDS: &str = EMBED_BROKER_UDS_ENV;
-/// Env key the broker binary reads for the backend embeddings URL to forward to.
-const ENV_BROKER_ENDPOINT: &str = "KASTELLAN_EMBED_BROKER_ENDPOINT";
-
-/// Basename of the broker's UDS under its scratch dir. The broker `bind()`s
-/// `<scratch>/embed.sock`; core binds the same path into the worker's jail.
-const UDS_FILE_NAME: &str = "embed.sock";
-
-/// How long [`spawn_embed_broker`] waits for the broker to `bind()` its UDS.
+/// How long [`spawn_broker`] waits for the broker to `bind()` its UDS.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(25);
 
 /// Cumulative CPU budget (ms → RLIMIT_CPU seconds) for the broker. It lives 1:1
 /// with a single web-research dispatch (SingleUse, 60s wall-clock), so it is
 /// short-lived — a bounded `RLIMIT_CPU` is defense-in-depth (the only per-process
-/// CPU primitive on macOS). Embedding forwarding is I/O-bound, so 10s of CPU is
+/// CPU primitive on macOS). Backend forwarding is I/O-bound, so 10s of CPU is
 /// generous. Matches the egress short-lived sidecar cap (issue #395).
 ///
 /// **Revisit before the first broker-backed `IdleTimeout` worker.** This cap is
 /// sized for one SingleUse dispatch. A warm `IdleTimeout` worker keeps the broker
 /// it was cold-spawned with across many dispatches, so its cumulative CPU could
 /// eventually hit this cap and RLIMIT_CPU would SIGKILL the broker — silently
-/// breaking that worker's embed route while it stays warm. Every broker-backed
+/// breaking that worker's backend route while it stays warm. Every broker-backed
 /// worker today is SingleUse, so this is latent; the fix (mirroring the egress
 /// sidecar's `long_lived` split — `cpu_ms: 0` for a long-lived broker, bounded
 /// otherwise) lands with the first such worker.
 const BROKER_CPU_MS: u64 = 10_000;
 
 /// Max byte length of a `sockaddr_un.sun_path` (104 macOS / 108 Linux, incl. the
-/// NUL). The broker binds `<scratch>/embed.sock`, so the scratch dir must be
+/// NUL). The broker binds `<scratch>/<uds_file>`, so the scratch dir must be
 /// short enough that the projected socket path still fits — see
 /// [`make_broker_scratch_dir`]. Mirrors the egress `SUN_PATH_MAX`.
 #[cfg(target_os = "macos")]
@@ -67,16 +59,16 @@ const SUN_PATH_MAX: usize = 104;
 const SUN_PATH_MAX: usize = 108;
 
 /// A running broker sidecar, held on [`crate::tool_host::SupervisedWorker`]'s
-/// additive `embed_broker` field. Its [`Drop`] kills + reaps the broker (removing
-/// the UDS) and removes the owned scratch dir, so teardown is 1:1 with the worker.
-pub struct EmbedBrokerSidecar {
+/// additive `broker` field. Its [`Drop`] kills + reaps the broker (removing the
+/// UDS) and removes the owned scratch dir, so teardown is 1:1 with the worker.
+pub struct BrokerSidecar {
     child: Child,
     uds_path: PathBuf,
-    /// Per-worker scratch dir holding `embed.sock`, owned for RAII cleanup.
+    /// Per-worker scratch dir holding the broker's UDS, owned for RAII cleanup.
     scratch: PathBuf,
 }
 
-impl Drop for EmbedBrokerSidecar {
+impl Drop for BrokerSidecar {
     fn drop(&mut self) {
         // Kill + reap the broker, then remove its socket + scratch dir.
         // Best-effort — a left-behind scratch dir is a leak, never a safety
@@ -88,10 +80,10 @@ impl Drop for EmbedBrokerSidecar {
     }
 }
 
-impl EmbedBrokerSidecar {
+impl BrokerSidecar {
     /// The bound UDS path. Core binds this into the worker's jail via
-    /// [`kastellan_sandbox::SandboxPolicy::broker_uds`] and injects it as
-    /// `KASTELLAN_EMBED_BROKER_UDS` (Task 4).
+    /// [`kastellan_sandbox::SandboxPolicy::broker_uds`] and injects it as the
+    /// kind's `uds_env()` (the spawn chokepoint).
     pub fn uds_path(&self) -> &Path {
         &self.uds_path
     }
@@ -113,12 +105,12 @@ fn broker_allowlist_from_endpoint(endpoint: &str) -> Vec<String> {
 }
 
 /// Pure: the sandbox policy for the broker. `Net::Allowlist([backend host:port])`
-/// (its only egress is the operator's embedding backend), `WorkerNetClient` (must
-/// permit AF_UNIX accept + AF_INET connect — DGX-verify), fs_read for the DNS
-/// resolver files + the binary, fs_write for the scratch dir (to `bind()` the
-/// UDS), and the broker's UDS + endpoint env.
-fn broker_policy(binary: &Path, endpoint: &str, scratch: &Path) -> SandboxPolicy {
-    let uds = scratch.join(UDS_FILE_NAME);
+/// (its only egress is the operator's backend), `WorkerNetClient` (must permit
+/// AF_UNIX accept + AF_INET connect — DGX-verify), fs_read for the DNS resolver
+/// files + the binary, fs_write for the scratch dir (to `bind()` the UDS), and the
+/// broker's UDS + endpoint env (keyed off `kind`).
+fn broker_policy(binary: &Path, endpoint: &str, scratch: &Path, kind: BrokerKind) -> SandboxPolicy {
+    let uds = scratch.join(kind.uds_file());
     SandboxPolicy {
         fs_read: vec![
             binary.to_path_buf(),
@@ -134,8 +126,8 @@ fn broker_policy(binary: &Path, endpoint: &str, scratch: &Path) -> SandboxPolicy
         cpu_quota_pct: None,
         tasks_max: None,
         env: vec![
-            (ENV_BROKER_UDS.to_string(), uds.to_string_lossy().into_owned()),
-            (ENV_BROKER_ENDPOINT.to_string(), endpoint.to_string()),
+            (kind.uds_env().to_string(), uds.to_string_lossy().into_owned()),
+            (kind.endpoint_env().to_string(), endpoint.to_string()),
         ],
         proxy_uds: None,
         broker_uds: None,
@@ -144,28 +136,30 @@ fn broker_policy(binary: &Path, endpoint: &str, scratch: &Path) -> SandboxPolicy
 }
 
 /// Mint a unique scratch subdir under `scratch_root` for one broker's UDS. Name
-/// is `embed-<pid>-<seq>` — `pid` scopes it to this daemon, `seq` (a
-/// process-lifetime atomic) guarantees uniqueness across concurrent spawns. Kept
-/// in sync with [`EMBED_SCRATCH_DIR_PREFIX`] so the #251 startup sweep reclaims
-/// husks. Rejects up front if `<dir>/embed.sock` would overflow `sun_path`.
-fn make_broker_scratch_dir(scratch_root: &Path) -> Result<PathBuf, ToolHostError> {
+/// is `<prefix><pid>-<seq>` — `pid` scopes it to this daemon, `seq` (a
+/// process-lifetime atomic) guarantees uniqueness across concurrent spawns. The
+/// prefix (`kind.scratch_prefix()`) is kept in sync with the #251 startup sweep
+/// (`crate::egress::scratch_sweep`) so it reclaims husks. Rejects up front if
+/// `<dir>/<uds_file>` would overflow `sun_path`.
+fn make_broker_scratch_dir(scratch_root: &Path, kind: BrokerKind) -> Result<PathBuf, ToolHostError> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = scratch_root.join(format!(
         "{}{}-{}",
-        EMBED_SCRATCH_DIR_PREFIX,
+        kind.scratch_prefix(),
         std::process::id(),
         seq
     ));
-    let projected_uds = dir.join(UDS_FILE_NAME);
+    let projected_uds = dir.join(kind.uds_file());
     let uds_len = projected_uds.as_os_str().len();
     if uds_len + 1 > SUN_PATH_MAX {
         return Err(ToolHostError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "embed-broker socket path is {uds_len} bytes (+NUL), over the \
+                "broker socket path is {uds_len} bytes (+NUL), over the \
                  {SUN_PATH_MAX}-byte sockaddr_un.sun_path limit — shorten \
-                 KASTELLAN_EMBED_BROKER_SCRATCH_DIR (projected: {})",
+                 {} (projected: {})",
+                kind.scratch_dir_env(),
                 projected_uds.display()
             ),
         )));
@@ -213,24 +207,27 @@ fn wait_for_broker_ready(
     }
 }
 
-/// Spawn the embed-broker sidecar for one broker-backed worker and wait (bounded)
-/// for it to bind its UDS. Fail-closed: on spawn failure or bind timeout the
-/// scratch dir is removed and the broker killed, and an `Err` is returned (no
+/// Spawn the broker sidecar for one broker-backed worker and wait (bounded) for
+/// it to bind its UDS. Fail-closed: on spawn failure or bind timeout the scratch
+/// dir is removed and the broker killed, and an `Err` is returned (no
 /// half-spawned broker, no orphan worker).
 ///
-/// Returns the [`EmbedBrokerSidecar`] (RAII bundle for the worker to own) and the
-/// bound UDS path (which core binds into the worker's jail + injects as
-/// `KASTELLAN_EMBED_BROKER_UDS`).
+/// Returns the [`BrokerSidecar`] (RAII bundle for the worker to own) and the
+/// bound UDS path (which core binds into the worker's jail + injects as the
+/// kind's `uds_env()`).
 ///
 /// `backend` must be a **host** sandbox backend (Seatbelt/Bwrap) — v1 broker mode
 /// is host-only (VM × broker is deferred; the manifest ignores the broker gate
 /// under `USE_MICROVM`), so the worker's backend is the host default and is passed
 /// through here.
-pub fn spawn_embed_broker(
-    cfg: &EmbedBrokerConfig,
-    spec: &EmbedBrokerSpec,
+pub fn spawn_broker(
+    cfg: &BrokerConfig,
+    spec: &BrokerSpec,
     backend: &dyn SandboxBackend,
-) -> Result<(EmbedBrokerSidecar, PathBuf), ToolHostError> {
+) -> Result<(BrokerSidecar, PathBuf), ToolHostError> {
+    // The chokepoint resolves `cfg` via `BrokerConfigs::for_kind(spec.kind)`, so
+    // the config and spec kinds are the same by construction. Pin that invariant.
+    debug_assert_eq!(cfg.kind, spec.kind, "broker config/spec kind mismatch at spawn");
     // Fail fast on a malformed endpoint: an unparseable/hostless URL yields an
     // empty broker allowlist, so the broker would spawn with no reachable backend
     // and only surface as a 5s bind-timeout. Reject it up front, before minting
@@ -239,12 +236,12 @@ pub fn spawn_embed_broker(
         return Err(ToolHostError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "embed-broker endpoint {:?} has no parseable host:port — refusing to spawn",
+                "broker endpoint {:?} has no parseable host:port — refusing to spawn",
                 spec.endpoint
             ),
         )));
     }
-    let scratch = make_broker_scratch_dir(&cfg.scratch_root)?;
+    let scratch = make_broker_scratch_dir(&cfg.scratch_root, spec.kind)?;
     match spawn_broker_in(cfg, spec, backend, &scratch) {
         Ok(sidecar) => {
             let uds = sidecar.uds_path().to_path_buf();
@@ -259,17 +256,17 @@ pub fn spawn_embed_broker(
 }
 
 /// Inner spawn against an already-minted `scratch` dir. Split out so the scratch
-/// dir has a single fail-closed cleanup owner in [`spawn_embed_broker`].
+/// dir has a single fail-closed cleanup owner in [`spawn_broker`].
 fn spawn_broker_in(
-    cfg: &EmbedBrokerConfig,
-    spec: &EmbedBrokerSpec,
+    cfg: &BrokerConfig,
+    spec: &BrokerSpec,
     backend: &dyn SandboxBackend,
     scratch: &Path,
-) -> Result<EmbedBrokerSidecar, ToolHostError> {
-    let uds_path = scratch.join(UDS_FILE_NAME);
+) -> Result<BrokerSidecar, ToolHostError> {
+    let uds_path = scratch.join(spec.kind.uds_file());
     let _ = std::fs::remove_file(&uds_path);
 
-    let policy = broker_policy(&cfg.broker_bin, &spec.endpoint, scratch);
+    let policy = broker_policy(&cfg.broker_bin, &spec.endpoint, scratch, spec.kind);
     // Derive the worker-prelude lockdown env (seccomp + Landlock RO/RW) exactly
     // like every other spawn. Without it the broker's in-process lock_down would
     // run without its fs_read grants and DNS would fail post-lockdown — the
@@ -292,7 +289,7 @@ fn spawn_broker_in(
     }
 
     match wait_for_broker_ready(&uds_path, READY_TIMEOUT, || child.try_wait().ok().flatten()) {
-        BrokerReady::Bound => Ok(EmbedBrokerSidecar {
+        BrokerReady::Bound => Ok(BrokerSidecar {
             child,
             uds_path,
             scratch: scratch.to_path_buf(),
@@ -302,7 +299,7 @@ fn spawn_broker_in(
         BrokerReady::Exited(status) => {
             let _ = child.wait();
             Err(ToolHostError::Io(std::io::Error::other(format!(
-                "embed-broker exited before binding {uds_path:?} (status: {status})"
+                "broker exited before binding {uds_path:?} (status: {status})"
             ))))
         }
         BrokerReady::TimedOut => {
@@ -310,7 +307,7 @@ fn spawn_broker_in(
             let _ = child.wait();
             Err(ToolHostError::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("embed-broker did not bind {uds_path:?} within {READY_TIMEOUT:?}"),
+                format!("broker did not bind {uds_path:?} within {READY_TIMEOUT:?}"),
             )))
         }
     }
@@ -347,6 +344,7 @@ mod tests {
             Path::new("/opt/embed-broker"),
             "http://127.0.0.1:11434/v1/embeddings",
             Path::new("/scratch"),
+            BrokerKind::Embed,
         );
         assert!(matches!(p.profile, Profile::WorkerNetClient));
         match &p.net {
@@ -358,8 +356,11 @@ mod tests {
         assert!(p.broker_uds.is_none(), "the broker itself has no upstream broker");
         assert!(p.proxy_uds.is_none());
         let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
-        assert_eq!(env[ENV_BROKER_UDS], "/scratch/embed.sock");
-        assert_eq!(env[ENV_BROKER_ENDPOINT], "http://127.0.0.1:11434/v1/embeddings");
+        assert_eq!(env[BrokerKind::Embed.uds_env()], "/scratch/embed.sock");
+        assert_eq!(
+            env[BrokerKind::Embed.endpoint_env()],
+            "http://127.0.0.1:11434/v1/embeddings"
+        );
     }
 
     #[test]
@@ -372,6 +373,7 @@ mod tests {
             Path::new("/opt/embed-broker"),
             "http://127.0.0.1:11434/v1/embeddings",
             Path::new("/scratch"),
+            BrokerKind::Embed,
         );
         let d = derive_lockdown_env(&p);
         let env: std::collections::HashMap<_, _> = d.env.into_iter().collect();
@@ -383,20 +385,24 @@ mod tests {
     }
 
     #[test]
-    fn scratch_dir_name_uses_embed_prefix() {
-        let dir = make_broker_scratch_dir(Path::new("/tmp")).expect("mint under /tmp");
+    fn scratch_dir_name_uses_kind_prefix() {
+        let dir = make_broker_scratch_dir(Path::new("/tmp"), BrokerKind::Embed).expect("mint under /tmp");
         let name = dir.file_name().unwrap().to_string_lossy();
-        assert!(name.starts_with(EMBED_SCRATCH_DIR_PREFIX), "unexpected name: {name}");
+        assert!(
+            name.starts_with(BrokerKind::Embed.scratch_prefix()),
+            "unexpected name: {name}"
+        );
         // Clean up the real dir this created.
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn scratch_dir_rejects_overlong_sun_path() {
-        // A pathological scratch root whose projected embed.sock overflows sun_path
+        // A pathological scratch root whose projected socket overflows sun_path
         // must fail-closed BEFORE creating the dir.
         let long_root = PathBuf::from(format!("/tmp/{}", "x".repeat(SUN_PATH_MAX)));
-        let err = make_broker_scratch_dir(&long_root).expect_err("must reject overlong path");
+        let err = make_broker_scratch_dir(&long_root, BrokerKind::Embed)
+            .expect_err("must reject overlong path");
         match err {
             ToolHostError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
             other => panic!("expected Io(InvalidInput), got {other:?}"),
@@ -407,7 +413,7 @@ mod tests {
     fn wait_for_broker_ready_times_out_when_absent_and_alive() {
         // Hermetic readiness pin: a socket that never appears AND a broker that
         // never exits → TimedOut quickly (the live bind path is DGX-gated).
-        let missing = PathBuf::from("/tmp/kastellan-embed-broker-nonexistent-xyz.sock");
+        let missing = PathBuf::from("/tmp/kastellan-broker-nonexistent-xyz.sock");
         let _ = std::fs::remove_file(&missing);
         let ready = wait_for_broker_ready(&missing, Duration::from_millis(60), || None);
         assert!(matches!(ready, BrokerReady::TimedOut));
@@ -417,7 +423,7 @@ mod tests {
     fn wait_for_broker_ready_reports_early_exit_without_waiting_full_timeout() {
         // A broker that exits before binding is reported as `Exited` immediately,
         // NOT after the (here 10s) timeout — the whole point of watching liveness.
-        let missing = PathBuf::from("/tmp/kastellan-embed-broker-early-exit-xyz.sock");
+        let missing = PathBuf::from("/tmp/kastellan-broker-early-exit-xyz.sock");
         let _ = std::fs::remove_file(&missing);
         // Spawn a real short-lived process just to obtain a genuine ExitStatus.
         let status = std::process::Command::new("true")
@@ -453,13 +459,14 @@ mod tests {
         // scratch is minted or the backend is spawned — `FailBackend` (which would
         // error if reached) is never invoked, so the `InvalidInput` error proves
         // the early rejection.
-        let cfg = EmbedBrokerConfig::new(
+        let cfg = BrokerConfig::new(
+            BrokerKind::Embed,
             PathBuf::from("/nonexistent/kastellan-worker-embed-broker"),
             PathBuf::from("/tmp"),
         );
-        let spec = EmbedBrokerSpec::new("not a url", "test-model");
-        // `EmbedBrokerSidecar` isn't `Debug`, so match rather than `expect_err`.
-        match spawn_embed_broker(&cfg, &spec, &FailBackend) {
+        let spec = BrokerSpec::embed("not a url");
+        // `BrokerSidecar` isn't `Debug`, so match rather than `expect_err`.
+        match spawn_broker(&cfg, &spec, &FailBackend) {
             Err(ToolHostError::Io(e)) => {
                 assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
                 assert!(

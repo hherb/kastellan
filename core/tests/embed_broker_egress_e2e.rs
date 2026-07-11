@@ -49,9 +49,7 @@
 
 use std::path::PathBuf;
 
-use kastellan_core::embed_broker::{
-    spawn_embed_broker, EmbedBrokerConfig, EMBED_BROKER_UDS_ENV,
-};
+use kastellan_core::broker::{spawn_broker, BrokerConfig, BrokerKind};
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
 use kastellan_core::worker_lifecycle::force_route::rewrite_policy_for_broker;
@@ -103,7 +101,7 @@ fn brokered_policy_has_broker_uds_and_zero_embed_egress() {
     // The manifest declares the broker backend but leaves the UDS unset — core
     // fills it at spawn time. Simulate that rewrite with a placeholder socket.
     let uds = PathBuf::from("/tmp/embed-brokered-test/embed.sock");
-    let policy = rewrite_policy_for_broker(entry.policy, &uds);
+    let policy = rewrite_policy_for_broker(entry.policy, &uds, BrokerKind::Embed);
 
     // (1) The broker socket is bound into the jail (Slice B1) …
     assert_eq!(
@@ -116,7 +114,7 @@ fn brokered_policy_has_broker_uds_and_zero_embed_egress() {
     let injected = policy
         .env
         .iter()
-        .find(|(k, _)| k == EMBED_BROKER_UDS_ENV)
+        .find(|(k, _)| k == BrokerKind::Embed.uds_env())
         .map(|(_, v)| v.as_str());
     assert_eq!(
         injected,
@@ -247,7 +245,7 @@ fn brokered_worker_ranks_hybrid_with_zero_embed_egress() {
     dispatch_runtime().block_on(async {
         let pool = probe_and_pool(&env.cluster.conn_spec).await;
 
-        // Broker-mode entry: embed host dropped from the allowlist, `embed_broker`
+        // Broker-mode entry: embed host dropped from the allowlist, `broker`
         // carries the backend the broker forwards to.
         let entry = web_research_broker_entry(
             env.worker_path.clone(),
@@ -257,22 +255,22 @@ fn brokered_worker_ranks_hybrid_with_zero_embed_egress() {
             &env.allowlist,
         );
         let broker_spec = entry
-            .embed_broker
+            .broker
             .as_ref()
-            .expect("broker-mode entry declares an embed_broker spec");
+            .expect("broker-mode entry declares a broker spec");
 
         // Spawn the real broker under the sandbox, pointed at the live backend.
         // Short scratch root so `<scratch>/embed.sock` fits sun_path on macOS.
         let backend = backend();
-        let cfg = EmbedBrokerConfig::new(env.broker_path.clone(), std::env::temp_dir());
-        let (sidecar, uds) = spawn_embed_broker(&cfg, broker_spec, &*backend)
+        let cfg = BrokerConfig::new(BrokerKind::Embed, env.broker_path.clone(), std::env::temp_dir());
+        let (sidecar, uds) = spawn_broker(&cfg, broker_spec, &*backend)
             .expect("spawn embed-broker sidecar under sandbox");
         assert!(uds.exists(), "broker must have bound its UDS at {uds:?}");
 
         // Rewrite the worker policy onto the bound broker UDS (what core's
         // chokepoint does). This is where the worker gains its ONLY path to a
         // vector — over the UDS, not the network.
-        let policy = rewrite_policy_for_broker(entry.policy, &uds);
+        let policy = rewrite_policy_for_broker(entry.policy, &uds, BrokerKind::Embed);
 
         // Zero-embed-egress invariant, re-asserted on the live policy: the embed
         // host is not reachable directly. If this held only hermetically we could

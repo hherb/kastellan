@@ -4,7 +4,7 @@
 //! JSON-RPC client gets the vectors back.
 //!
 //! This exercises the security-critical spawn path added in Slice B Tasks 3+4:
-//! `spawn_embed_broker` (scratch mint, sandboxed spawn, lockdown-env derivation,
+//! `spawn_broker` (scratch mint, sandboxed spawn, lockdown-env derivation,
 //! UDS readiness) and the broker's own `Net::Allowlist([backend host:port])` with
 //! the `WorkerNetClient` seccomp profile (which must permit AF_UNIX accept and
 //! AF_INET connect). No real Ollama needed — the stub stands in for the embedding
@@ -20,7 +20,7 @@ use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::thread;
 
-use kastellan_core::embed_broker::{spawn_embed_broker, EmbedBrokerConfig, EmbedBrokerSpec};
+use kastellan_core::broker::{spawn_broker, BrokerConfig, BrokerKind, BrokerSpec};
 use kastellan_tests_common::{backend, skip_if_sandbox_unavailable, workspace_target_binary};
 
 /// A one-shot loopback HTTP stub that answers any request with a canned
@@ -86,12 +86,12 @@ fn broker_spawns_binds_and_forwards_embed() {
 
     // Short scratch root so `<scratch>/embed.sock` fits sun_path on macOS.
     let scratch_root = std::env::temp_dir();
-    let cfg = EmbedBrokerConfig::new(broker_bin, scratch_root);
-    let spec = EmbedBrokerSpec::new(&endpoint, "test-model");
+    let cfg = BrokerConfig::new(BrokerKind::Embed, broker_bin, scratch_root);
+    let spec = BrokerSpec::embed(&endpoint);
     let be = backend();
 
     let (sidecar, uds) =
-        spawn_embed_broker(&cfg, &spec, &*be).expect("spawn embed-broker under sandbox");
+        spawn_broker(&cfg, &spec, &*be).expect("spawn embed-broker under sandbox");
     assert!(uds.exists(), "broker must have bound its UDS at {uds:?}");
 
     // Talk the same JSON-RPC line protocol BrokeredEmbedder uses.

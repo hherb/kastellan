@@ -371,13 +371,13 @@ fn rewrite_policy_for_broker_sets_uds_and_injects_env() {
         ..SandboxPolicy::default()
     };
     let uds = PathBuf::from("/tmp/embed-1-0/embed.sock");
-    let brokered = rewrite_policy_for_broker(policy, &uds);
+    let brokered = rewrite_policy_for_broker(policy, &uds, BrokerKind::Embed);
     assert_eq!(brokered.broker_uds.as_deref(), Some(uds.as_path()));
     assert!(
         brokered
             .env
             .iter()
-            .any(|(k, v)| k == EMBED_BROKER_UDS_ENV && v == "/tmp/embed-1-0/embed.sock"),
+            .any(|(k, v)| k == BrokerKind::Embed.uds_env() && v == "/tmp/embed-1-0/embed.sock"),
         "worker must get the broker UDS env: {:?}",
         brokered.env
     );
@@ -394,7 +394,7 @@ fn broker_uds_and_env_survive_force_route_policy_rewrite() {
         ..SandboxPolicy::default()
     };
     let broker_uds = PathBuf::from("/tmp/embed-1-0/embed.sock");
-    let brokered = rewrite_policy_for_broker(base, &broker_uds);
+    let brokered = rewrite_policy_for_broker(base, &broker_uds, BrokerKind::Embed);
     // Now apply force-routing's policy rewrite (proxy UDS, no CA).
     let proxy_uds = PathBuf::from("/tmp/egress-1-0/egress.sock");
     let forced = crate::egress::net_worker::rewrite_worker_policy(brokered, &proxy_uds, None);
@@ -408,7 +408,7 @@ fn broker_uds_and_env_survive_force_route_policy_rewrite() {
         forced
             .env
             .iter()
-            .any(|(k, v)| k == EMBED_BROKER_UDS_ENV && v == "/tmp/embed-1-0/embed.sock"),
+            .any(|(k, v)| k == BrokerKind::Embed.uds_env() && v == "/tmp/embed-1-0/embed.sock"),
         "broker env must survive the egress policy rewrite: {:?}",
         forced.env
     );
@@ -416,8 +416,8 @@ fn broker_uds_and_env_survive_force_route_policy_rewrite() {
     assert_eq!(forced.proxy_uds.as_deref(), Some(proxy_uds.as_path()));
 }
 
-/// Fail-closed: a worker that requests a broker (`embed_broker: Some`) but has no
-/// daemon `EmbedBrokerConfig` must be **refused** before any spawn — the backend
+/// Fail-closed: a worker that requests a broker (`broker: Some`) but has no daemon
+/// `BrokerConfig` for that kind must be **refused** before any spawn — the backend
 /// is never touched, and the error names the missing config (not a Sandbox spawn
 /// error).
 #[test]
@@ -427,13 +427,10 @@ fn broker_requested_without_config_fails_closed_before_spawn() {
         ..SandboxPolicy::default()
     };
     let spec = spec_for(&policy);
-    let broker_spec = crate::embed_broker::EmbedBrokerSpec::new(
-        "http://127.0.0.1:11434/v1/embeddings",
-        "embeddinggemma",
-    );
+    let broker_spec = BrokerSpec::embed("http://127.0.0.1:11434/v1/embeddings");
     let res = spawn_worker_with_optional_broker(
-        None,             // no force-routing
-        None,             // no embed-broker config → fail closed
+        None,                     // no force-routing
+        &BrokerConfigs::default(), // no broker config for any kind → fail closed
         &FailBackend,
         &spec,
         Some(&broker_spec),
@@ -442,8 +439,8 @@ fn broker_requested_without_config_fails_closed_before_spawn() {
     match res {
         Err(ToolHostError::Io(e)) => {
             assert!(
-                e.to_string().contains("embed-broker config"),
-                "error should name the missing embed-broker config, got: {e}"
+                e.to_string().contains("broker config"),
+                "error should name the missing broker config, got: {e}"
             );
         }
         Err(other) => panic!("expected fail-closed Io error, got a different error: {other:?}"),
@@ -461,7 +458,7 @@ fn no_broker_requested_is_passthrough() {
     };
     let res = spawn_worker_with_optional_broker(
         None,
-        None,
+        &BrokerConfigs::default(),
         &FailBackend,
         &spec_for(&policy),
         None, // no broker
