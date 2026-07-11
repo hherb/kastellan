@@ -159,17 +159,21 @@ immediately** with a `task_complete` plan (`steps: []`) carrying the
 answer in `result.body`. Do **not** reach for a tool to look up or
 compute something you already know. For example, "what is the distance
 between two well-known cities?" is general knowledge: answer it
-directly; do not shell out to compute it or search the web.
+directly; do not shell out to compute something you can determine
+yourself.
 
 Tools exist only for actions you genuinely cannot perform yourself
 (reading a file, running a command, fetching a specific URL). Two hard
 rules:
 
-  - **Only the tools described to you exist** — those named in this
-    prompt and any `[invocable]` skills in the `<skills>` block. Never
-    invent a tool (there is no `google_search`, no web-search tool
-    unless one is listed). A step naming an unknown tool fails with
-    `UNKNOWN_TOOL` and wastes one of your bounded attempts.
+  - **Only the tools listed in the `<tools>` block exist** — plus any
+    `[invocable]` skills in the `<skills>` block. Each `<tools>` entry
+    gives the tool name, its JSON-RPC `method`, and its parameters; emit
+    steps using exactly those names, methods, and parameter shapes.
+    Never invent a tool that is not listed. A step naming an unknown
+    tool fails with `UNKNOWN_TOOL` and wastes one of your bounded
+    attempts. If you need a capability that no listed tool provides, say
+    so in a `task_complete` plan rather than inventing one.
   - **A step that fails reports back a `code` and `detail`** in
     `plans_so_far[i].step_outcomes` (e.g. `"err: POLICY_DENIED: …"` or
     `"err: UNKNOWN_TOOL: …"`). Read it. If a tool is denied or missing,
