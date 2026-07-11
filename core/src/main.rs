@@ -173,8 +173,10 @@ async fn main() -> Result<()> {
     // the per-tool argv allowlist, which lives in the `tool_allowlists` DB
     // table). A worker whose binary/preconditions are absent is simply not
     // registered — `dispatch_step` then returns `UNKNOWN_TOOL`.
-    let (registry, loaded_tool_records, _tool_docs) =
+    let (registry, loaded_tool_records, tool_docs) =
         kastellan_core::registry_build::build_tool_registry(&pool, exe_dir).await?;
+    let tool_docs: std::sync::Arc<[kastellan_core::worker_manifest::ToolDoc]> =
+        std::sync::Arc::from(tool_docs);
     let tool_registry = Arc::new(registry);
     // Best-effort audit row (was previously written inside build_tool_registry;
     // moved here now that the builder is side-effect-free).
@@ -313,7 +315,10 @@ async fn main() -> Result<()> {
         Arc::new(kastellan_core::scheduler::agent::RouterAgent::new(
             router.clone(),
             prompts.clone(),
-            Arc::new(kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())),
+            Arc::new(
+                kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())
+                    .with_tool_docs(tool_docs.clone()),
+            ),
             Arc::new(kastellan_core::recall_assembly::PgRecallBuilder::new(
                 pool.clone(),
                 router.clone(),
