@@ -165,16 +165,6 @@ fn escape_untrusted_body(body: &str) -> String {
     out
 }
 
-/// Render the supplied memory slices, surfaced skills, recall context, and
-/// base prompt into a single LLM-ready system message.
-///
-/// See the module-level docstring for the framing rules. Surfaced skills are
-/// operator-approved (high-trust) so the `<skills>` block sits after L1 and
-/// before the unverified `recalled` output; an empty `skills` slice omits
-/// the block entirely, as does an empty [`RecalledContext`] for `<recalled>`.
-/// The `<handoff>` and `<base>` blocks are always emitted, so even with every
-/// memory slice empty the output is `<handoff>…</handoff>` followed by
-/// `<base>…</base>` (not the bare `<base>` block of the pre-handoff assembler).
 /// Render the `<tools>` block: one entry per advertised tool. Trusted
 /// compiled-in text (authored in each worker's `tool_doc()`), so — unlike the
 /// L1/recalled blocks — bodies are NOT escaped. Emitted only when non-empty.
@@ -210,10 +200,20 @@ fn render_tools_block(tools: &[ToolDoc]) -> String {
     out
 }
 
-/// Assemble the planner system prompt. `tools` is appended LAST (after `base`)
-/// so existing call sites update with a pure append; the render position is
-/// unchanged by param order — the `<tools>` block is emitted between
-/// `<recalled>` and `<handoff>`.
+/// Render the supplied memory slices, surfaced skills, recall context, and
+/// base prompt into a single LLM-ready system message.
+///
+/// See the module-level docstring for the framing rules. Surfaced skills are
+/// operator-approved (high-trust) so the `<skills>` block sits after L1 and
+/// before the unverified `recalled` output; an empty `skills` slice omits
+/// the block entirely, as does an empty [`RecalledContext`] for `<recalled>`.
+/// The `<handoff>` and `<base>` blocks are always emitted, so even with every
+/// memory slice empty the output is `<handoff>…</handoff>` followed by
+/// `<base>…</base>` (not the bare `<base>` block of the pre-handoff assembler).
+///
+/// `tools` is appended LAST (after `base`) so existing call sites update with
+/// a pure append; the render position is unchanged by param order — the
+/// `<tools>` block is emitted between `<recalled>` and `<handoff>`.
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
