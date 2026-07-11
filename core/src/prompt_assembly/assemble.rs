@@ -1,6 +1,6 @@
 //! Pure prompt assembler. No I/O, no async, no errors.
 //!
-//! Output framing (always L0 → L1 → skills → recalled → handoff → base in this order):
+//! Output framing (always L0 → L1 → skills → recalled → tools → handoff → base in this order):
 //!
 //! ```text
 //! <l0_meta_rules>
@@ -22,6 +22,11 @@
 //! - {body of recall row #2}
 //! </recalled>
 //!
+//! <tools>
+//! - {name} (method: {method}): {summary}
+//!   params: {p0.name} ({p0.description}) [required|optional], ...
+//! </tools>
+//!
 //! <handoff>
 //! {protocol for expanding a stashed oversized tool result via the
 //!  reserved `handoff`/`fetch` built-in — always present}
@@ -39,6 +44,11 @@
 //!    always present (`<handoff>` is constant compiled-in text).
 //! 2. One blank line between sections.
 //! 3. Each row renders as `- {body}` (one row per line).
+//!    **Note for `<tools>` bodies:** Tool descriptions are compiled-in
+//!    Rust literals (each worker's `tool_doc()`), so they are trusted
+//!    like L0 — rendered verbatim, no escaping. The `<tools>` block sits
+//!    with `<handoff>` (both describe callable mechanisms) and is omitted
+//!    entirely when no tool is registered.
 //! 4. L0/skills bodies pass through verbatim (no HTML-style escaping
 //!    of `<` `>`); **L1 and `<recalled>` bodies are escaped** via
 //!    [`escape_untrusted_body`] — see the note below. L0 and surfaced
@@ -82,6 +92,7 @@ use crate::handoff::{MAX_FETCH_BYTES, SUMMARY_HEAD_BYTES};
 use crate::memory::l3_surface::{render_skill_entry, SurfacedSkill};
 use crate::recall_assembly::RecalledContext;
 use crate::scheduler::tool_dispatch::{HANDOFF_METHOD_FETCH, HANDOFF_TOOL};
+use crate::worker_manifest::ToolDoc;
 use kastellan_db::memories::Memory;
 
 /// Render the always-present `<handoff>` block.
@@ -164,12 +175,52 @@ fn escape_untrusted_body(body: &str) -> String {
 /// The `<handoff>` and `<base>` blocks are always emitted, so even with every
 /// memory slice empty the output is `<handoff>…</handoff>` followed by
 /// `<base>…</base>` (not the bare `<base>` block of the pre-handoff assembler).
+/// Render the `<tools>` block: one entry per advertised tool. Trusted
+/// compiled-in text (authored in each worker's `tool_doc()`), so — unlike the
+/// L1/recalled blocks — bodies are NOT escaped. Emitted only when non-empty.
+fn render_tools_block(tools: &[ToolDoc]) -> String {
+    let mut out = String::from("<tools>\n");
+    for t in tools {
+        out.push_str("- ");
+        out.push_str(t.name);
+        out.push_str(" (method: ");
+        out.push_str(t.method);
+        out.push_str("): ");
+        out.push_str(t.summary);
+        out.push('\n');
+        if !t.params.is_empty() {
+            out.push_str("  params: ");
+            let rendered: Vec<String> = t
+                .params
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{} ({}) [{}]",
+                        p.name,
+                        p.description,
+                        if p.required { "required" } else { "optional" }
+                    )
+                })
+                .collect();
+            out.push_str(&rendered.join(", "));
+            out.push('\n');
+        }
+    }
+    out.push_str("</tools>\n\n");
+    out
+}
+
+/// Assemble the planner system prompt. `tools` is appended LAST (after `base`)
+/// so existing call sites update with a pure append; the render position is
+/// unchanged by param order — the `<tools>` block is emitted between
+/// `<recalled>` and `<handoff>`.
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
     skills: &[SurfacedSkill],
     recalled: &RecalledContext,
     base: &str,
+    tools: &[ToolDoc],
 ) -> String {
     let mut out = String::new();
 
@@ -211,6 +262,12 @@ pub fn assemble_system_prompt(
             out.push('\n');
         }
         out.push_str("</recalled>\n\n");
+    }
+
+    // Advertised tools (trusted, compiled-in). Grouped with <handoff> as the
+    // two capability-describing blocks; omitted entirely when nothing registered.
+    if !tools.is_empty() {
+        out.push_str(&render_tools_block(tools));
     }
 
     // Always-present capability instruction for the reserved `handoff` built-in.
