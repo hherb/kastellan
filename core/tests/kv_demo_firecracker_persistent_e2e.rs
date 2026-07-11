@@ -125,7 +125,7 @@ fn kv_demo_vm_policy(image_dir: String) -> SandboxPolicy {
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     }
 }

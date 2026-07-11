@@ -15,7 +15,7 @@
 //! Slice C removes that direct reach: in **broker mode**
 //! ([`web_research_broker_entry`]) the embed host is dropped from the worker's
 //! allowlist, and the query only embeds because core bound the broker's
-//! `embed.sock` into the jail (`embed_broker_uds` + `KASTELLAN_EMBED_BROKER_UDS`)
+//! `embed.sock` into the jail (`broker_uds` + `KASTELLAN_EMBED_BROKER_UDS`)
 //! and the broker — running host-side on its own `Net::Allowlist([embed host])` —
 //! forwarded the POST to the real backend. So `ranking == "hybrid"` here is a
 //! strictly stronger claim than the direct e2e: it holds **despite the worker
@@ -40,9 +40,9 @@
 //!
 //! **Deferred (documented, not covered here):** force-routed × broker (the embed
 //! rides the broker while SearxNG/content ride the egress proxy — the
-//! `embed_broker_uds`-survives-force-route composition is unit-tested in
+//! `broker_uds`-survives-force-route composition is unit-tested in
 //! `worker_lifecycle::force_route`) and VM × broker (the broker runs host-side,
-//! reached via the slice-4a vsock UDS bound as `embed_broker_uds`). Both are
+//! reached via the slice-4a vsock UDS bound as `broker_uds`). Both are
 //! orthogonal plumbing on top of the property this test establishes.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
@@ -107,7 +107,7 @@ fn brokered_policy_has_broker_uds_and_zero_embed_egress() {
 
     // (1) The broker socket is bound into the jail (Slice B1) …
     assert_eq!(
-        policy.embed_broker_uds.as_deref(),
+        policy.broker_uds.as_deref(),
         Some(uds.as_path()),
         "broker UDS must be bound into the jail"
     );

@@ -151,7 +151,7 @@ pub fn web_research_entry_with_embed(
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     };
     ToolEntry {
@@ -220,7 +220,7 @@ pub fn web_research_broker_entry(
         proxy_uds: None,
         // Set at spawn time by core (spawn_embed_broker binds the socket and
         // core binds it into the jail); the manifest leaves it None.
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     };
     ToolEntry {
@@ -288,7 +288,7 @@ pub fn web_research_firecracker_entry(
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     };
     ToolEntry {
@@ -359,7 +359,7 @@ impl WorkerManifest for WebResearchManifest {
             if use_microvm {
                 // VM × broker is deferred to Slice C (the broker runs host-side;
                 // a VM worker would reach it via the slice-4a vsock UDS bound as
-                // `embed_broker_uds`). In v1 the VM path wins and the broker gate
+                // `broker_uds`). In v1 the VM path wins and the broker gate
                 // is ignored with a warning — the VM entry keeps its documented
                 // direct-embed behaviour (degrade-to-lexical for loopback).
                 if use_broker {
@@ -557,8 +557,8 @@ mod tests {
                         .any(|(k, v)| k == EMBED_MODEL_ENV && v == "embeddinggemma"),
                     "embed model env injected for the worker's BrokeredEmbedder"
                 );
-                // embed_broker_uds is set at spawn, not the manifest.
-                assert!(entry.policy.embed_broker_uds.is_none());
+                // broker_uds is set at spawn, not the manifest.
+                assert!(entry.policy.broker_uds.is_none());
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
         }

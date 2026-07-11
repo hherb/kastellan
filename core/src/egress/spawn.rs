@@ -130,7 +130,7 @@ pub fn proxy_policy(
         tasks_max: None,
         env,
         proxy_uds: None,
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     }
 }

@@ -90,7 +90,7 @@ impl Drop for EmbedBrokerSidecar {
 
 impl EmbedBrokerSidecar {
     /// The bound UDS path. Core binds this into the worker's jail via
-    /// [`kastellan_sandbox::SandboxPolicy::embed_broker_uds`] and injects it as
+    /// [`kastellan_sandbox::SandboxPolicy::broker_uds`] and injects it as
     /// `KASTELLAN_EMBED_BROKER_UDS` (Task 4).
     pub fn uds_path(&self) -> &Path {
         &self.uds_path
@@ -138,7 +138,7 @@ fn broker_policy(binary: &Path, endpoint: &str, scratch: &Path) -> SandboxPolicy
             (ENV_BROKER_ENDPOINT.to_string(), endpoint.to_string()),
         ],
         proxy_uds: None,
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     }
 }
@@ -355,7 +355,7 @@ mod tests {
         }
         assert!(p.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
         assert!(p.fs_write.contains(&PathBuf::from("/scratch")));
-        assert!(p.embed_broker_uds.is_none(), "the broker itself has no upstream broker");
+        assert!(p.broker_uds.is_none(), "the broker itself has no upstream broker");
         assert!(p.proxy_uds.is_none());
         let env: std::collections::HashMap<_, _> = p.env.into_iter().collect();
         assert_eq!(env[ENV_BROKER_UDS], "/scratch/embed.sock");

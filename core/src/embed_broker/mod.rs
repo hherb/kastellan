@@ -7,7 +7,7 @@
 //! worker, core spawns a single-purpose **embed-broker sidecar** per consuming
 //! worker (1:1, mirroring the egress force-routing sidecar). The broker binds a
 //! UDS, which core binds into the worker's jail via
-//! [`kastellan_sandbox::SandboxPolicy::embed_broker_uds`] (Slice B1); the worker
+//! [`kastellan_sandbox::SandboxPolicy::broker_uds`] (Slice B1); the worker
 //! reaches the backend *only* through that socket, so the embed host leaves the
 //! worker's `Net::Allowlist` entirely.
 //!
@@ -35,7 +35,7 @@ pub use spawn::{spawn_embed_broker, EmbedBrokerSidecar};
 /// (`kastellan-worker-embed-broker::main`), and core injects the **same** path
 /// into the consuming **worker** so its `choose_embedder` selects
 /// `BrokeredEmbedder`. The two values are identical because Slice B1 binds the
-/// socket at an identical host↔jail path (`SandboxPolicy::embed_broker_uds`).
+/// socket at an identical host↔jail path (`SandboxPolicy::broker_uds`).
 pub const EMBED_BROKER_UDS_ENV: &str = "KASTELLAN_EMBED_BROKER_UDS";
 
 /// Per-worker declaration that a worker wants a trusted embed-broker sidecar,

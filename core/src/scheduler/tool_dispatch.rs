@@ -163,7 +163,7 @@ pub struct ToolEntry {
     /// directly (or not at all). `Some(spec)` requests a per-worker embed-broker
     /// sidecar: core's cold-spawn chokepoint spawns a
     /// `kastellan-worker-embed-broker` forwarding to `spec.endpoint`, binds its
-    /// UDS into the jail via `SandboxPolicy::embed_broker_uds`, and injects
+    /// UDS into the jail via `SandboxPolicy::broker_uds`, and injects
     /// `KASTELLAN_EMBED_BROKER_UDS` so the worker's `choose_embedder` selects the
     /// brokered path — so the embed backend host leaves the worker's
     /// `Net::Allowlist` entirely. See [`crate::embed_broker`]. Byte-identical

@@ -272,11 +272,11 @@ pub(crate) fn spawn_worker_maybe_forced(
 /// 1. Spawn the broker first (fail-closed — no broker ⇒ no worker), giving its
 ///    bound UDS.
 /// 2. Rewrite the worker's policy onto that UDS ([`rewrite_policy_for_broker`]):
-///    set `embed_broker_uds` (Slice B1 binds it into the jail) and inject
+///    set `broker_uds` (Slice B1 binds it into the jail) and inject
 ///    [`EMBED_BROKER_UDS_ENV`] so the worker's `choose_embedder` picks the broker.
 /// 3. Route through `spawn_worker_maybe_forced`. If force-routing is *also*
 ///    active, its `rewrite_worker_policy` clones this already-brokered policy, so
-///    `embed_broker_uds` + the injected env survive (a struct clone preserves
+///    `broker_uds` + the injected env survive (a struct clone preserves
 ///    them; force-routing only mutates the egress fields — orthogonal per B1).
 /// 4. Attach the broker sidecar to the returned worker (1:1 RAII teardown).
 ///
@@ -328,7 +328,7 @@ pub(crate) fn spawn_worker_with_optional_broker(
 }
 
 /// Pure: rewrite a worker policy onto its embed-broker's UDS. Binds the socket
-/// into the jail ([`SandboxPolicy::embed_broker_uds`], Slice B1) and injects
+/// into the jail ([`SandboxPolicy::broker_uds`], Slice B1) and injects
 /// [`EMBED_BROKER_UDS_ENV`] so the worker's `choose_embedder` selects
 /// `BrokeredEmbedder`. The jail path equals the host path (B1 binds identically),
 /// so the injected value is `uds` verbatim. Any stale env value is dropped first
@@ -340,7 +340,7 @@ pub(crate) fn spawn_worker_with_optional_broker(
 /// puts a worker onto its broker UDS.
 #[doc(hidden)]
 pub fn rewrite_policy_for_broker(mut policy: SandboxPolicy, uds: &std::path::Path) -> SandboxPolicy {
-    policy.embed_broker_uds = Some(uds.to_path_buf());
+    policy.broker_uds = Some(uds.to_path_buf());
     policy.env.retain(|(k, _)| k != EMBED_BROKER_UDS_ENV);
     policy
         .env

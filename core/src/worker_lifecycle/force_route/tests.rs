@@ -362,7 +362,7 @@ fn resolve_force_routing_stores_cert_pins() {
 // ----- Embed-broker (Slice B, Task 4) -----
 
 /// `rewrite_policy_for_broker` binds the broker UDS into the jail
-/// (`embed_broker_uds`) and injects the worker-read env so `choose_embedder`
+/// (`broker_uds`) and injects the worker-read env so `choose_embedder`
 /// selects the brokered path. The jail path equals the host path (B1).
 #[test]
 fn rewrite_policy_for_broker_sets_uds_and_injects_env() {
@@ -372,7 +372,7 @@ fn rewrite_policy_for_broker_sets_uds_and_injects_env() {
     };
     let uds = PathBuf::from("/tmp/embed-1-0/embed.sock");
     let brokered = rewrite_policy_for_broker(policy, &uds);
-    assert_eq!(brokered.embed_broker_uds.as_deref(), Some(uds.as_path()));
+    assert_eq!(brokered.broker_uds.as_deref(), Some(uds.as_path()));
     assert!(
         brokered
             .env
@@ -400,9 +400,9 @@ fn broker_uds_and_env_survive_force_route_policy_rewrite() {
     let forced = crate::egress::net_worker::rewrite_worker_policy(brokered, &proxy_uds, None);
     // Broker fields preserved through the egress rewrite.
     assert_eq!(
-        forced.embed_broker_uds.as_deref(),
+        forced.broker_uds.as_deref(),
         Some(broker_uds.as_path()),
-        "embed_broker_uds must survive the egress policy rewrite"
+        "broker_uds must survive the egress policy rewrite"
     );
     assert!(
         forced

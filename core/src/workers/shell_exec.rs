@@ -36,7 +36,7 @@ pub fn shell_exec_entry(binary: PathBuf, allowlist: &[String]) -> ToolEntry {
         cpu_quota_pct: None,
         tasks_max: None,
         proxy_uds: None,
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     };
     ToolEntry {
