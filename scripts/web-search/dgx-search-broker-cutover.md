@@ -66,6 +66,12 @@ SearxNG. No public SearxNG, no SSRF exemption.
      `web.search`) — if it's missing, the worker binary or endpoint is
      misconfigured (fail-closed).
 
+   **Registered ≠ functional.** web-search registers in broker mode regardless of
+   whether the broker binary resolved; if `search-broker AVAILABLE` is absent, the
+   worker is registered but every dispatch fail-closes (a broker-declaring worker
+   with no discovered `BrokerConfig` is refused at spawn). The `AVAILABLE` line is
+   the real gate — do not rely on `web.search` merely appearing in `<tools>`.
+
 6. **Test over Matrix.** From your Matrix client, DM `@kastellan`:
    > what happened in Germany yesterday?
 

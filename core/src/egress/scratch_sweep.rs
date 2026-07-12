@@ -173,6 +173,17 @@ mod tests {
         assert_eq!(parse_daemon_pid("search-12345-0"), Some(12345));
     }
 
+    /// The sweep's prefix consts are a second copy of the producer's
+    /// `BrokerKind::scratch_prefix()`. Pin them equal so a change on one side that
+    /// is not mirrored on the other is caught here rather than silently leaking
+    /// husks past the sweep (which matches names by prefix).
+    #[test]
+    fn sweep_prefixes_match_broker_kind_producers() {
+        use crate::broker::BrokerKind;
+        assert_eq!(EMBED_SCRATCH_DIR_PREFIX, BrokerKind::Embed.scratch_prefix());
+        assert_eq!(SEARCH_SCRATCH_DIR_PREFIX, BrokerKind::Search.scratch_prefix());
+    }
+
     /// The parser must accept exactly what the producers emit — pin the
     /// round-trip against the same `"{prefix}{pid}-{seq}"` grammar
     /// `make_worker_scratch_dir` and the matrix spawn use.

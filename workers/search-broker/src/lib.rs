@@ -95,8 +95,7 @@ impl<T: HttpGet> Handler for SearchHandler<T> {
         let count = p.count.unwrap_or(DEFAULT_COUNT);
         let hits = search(&self.transport, &self.endpoint, &self.allowlist, &p.query, count)
             .map_err(search_err_to_rpc)?;
-        serde_json::to_value(serde_json::json!({ "results": hits }))
-            .map_err(|e| RpcError::new(codes::INTERNAL_ERROR, format!("result encode: {e}")))
+        Ok(serde_json::json!({ "results": hits }))
     }
 }
 
