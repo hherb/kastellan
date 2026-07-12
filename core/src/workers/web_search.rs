@@ -35,6 +35,13 @@ const USE_BROKER_ENV: &str = "KASTELLAN_WEB_SEARCH_USE_BROKER";
 /// core, so the lib can't import it; the two are pinned equal by the
 /// `web_search_batch_cap_env_matches_worker_contract` integration test instead.
 pub const MAX_BATCH_QUERIES_ENV: &str = "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES";
+/// JSON-RPC method the web-search worker exposes for batched search
+/// (`web.search_batch`). One source of truth for the string: the `tool_docs()`
+/// advertisement below and the planner-summary cap
+/// (`scheduler::inner_loop::summary::ok_summary_cap`) both reference it, so a
+/// rename can't silently desync the advertised method from the cap that keys on
+/// it. `pub(crate)` because `summary.rs` (same crate) consumes it.
+pub(crate) const WEB_SEARCH_BATCH_METHOD: &str = "web.search_batch";
 
 /// Derive the `Net::Allowlist` `host:port` entry from the endpoint URL. Returns
 /// an empty list if the endpoint is unset or unparseable — the worker fails
@@ -215,7 +222,7 @@ impl WorkerManifest for WebSearchManifest {
         let mut docs: Vec<ToolDoc> = self.tool_doc().into_iter().collect();
         docs.push(ToolDoc {
             name: TOOL_NAME,
-            method: "web.search_batch",
+            method: WEB_SEARCH_BATCH_METHOD,
             summary: "Run several INDEPENDENT web searches in one call; returns a \
                       per-query result group for each. Prefer this over multiple \
                       web.search steps when the queries do not depend on each other.",
