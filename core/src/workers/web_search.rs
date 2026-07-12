@@ -177,6 +177,36 @@ impl WorkerManifest for WebSearchManifest {
         })
     }
 
+    fn tool_docs(&self) -> Vec<ToolDoc> {
+        // Reuse the single-query doc, then append the batch method. Both docs
+        // carry `name == TOOL_NAME` so the drift guard (doc.name == name())
+        // still holds — same worker, two methods. No numeric ceiling is
+        // advertised: the batch size is an operator-tunable runtime value
+        // (KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES); an over-cap batch is rejected
+        // fail-closed with INVALID_PARAMS and surfaced to the planner.
+        let mut docs: Vec<ToolDoc> = self.tool_doc().into_iter().collect();
+        docs.push(ToolDoc {
+            name: TOOL_NAME,
+            method: "web.search_batch",
+            summary: "Run several INDEPENDENT web searches in one call; returns a \
+                      per-query result group for each. Prefer this over multiple \
+                      web.search steps when the queries do not depend on each other.",
+            params: &[
+                ToolParam {
+                    name: "queries",
+                    description: "list of independent search queries to run in one batch",
+                    required: true,
+                },
+                ToolParam {
+                    name: "count",
+                    description: "max results per query, default 10 (cap 20)",
+                    required: false,
+                },
+            ],
+        });
+        docs
+    }
+
     fn name(&self) -> &'static str {
         TOOL_NAME
     }
