@@ -1,6 +1,6 @@
 //! Pure prompt assembler. No I/O, no async, no errors.
 //!
-//! Output framing (always now → L0 → L1 → skills → recalled → tools → handoff → base in this order):
+//! Output framing (now [only when present] → L0 → L1 → skills → recalled → tools → handoff → base in this order):
 //!
 //! ```text
 //! <now>

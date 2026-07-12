@@ -322,7 +322,15 @@ async fn main() -> Result<()> {
     let (planner_tz, tz_source) = kastellan_core::prompt_assembly::resolve_timezone(
         std::env::var("KASTELLAN_TIMEZONE").ok().as_deref(),
     );
-    info!(?tz_source, "planner <now> timezone resolved");
+    // Log the EFFECTIVE zone, not just the source: `TzSource::System` can
+    // silently degrade to UTC when jiff can't resolve the host zone, and an
+    // IANA-less fixed-offset zone yields `None`. Surfacing the resolved name
+    // makes "System" vs. a silent UTC fallback distinguishable in the log.
+    info!(
+        ?tz_source,
+        zone = planner_tz.iana_name().unwrap_or("<fixed-offset>"),
+        "planner <now> timezone resolved"
+    );
 
     // PlanFormulator — takes the extractor as 5th arg (Task 14 widened
     // the signature; Task 15 supplies the constructed extractor).
