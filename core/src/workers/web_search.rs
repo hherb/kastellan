@@ -25,6 +25,9 @@ const BIN_ENV: &str = "KASTELLAN_WEB_SEARCH_BIN";
 const DEFAULT_BIN_NAME: &str = "kastellan-worker-web-search";
 /// Operator-configured SearxNG endpoint, read from the daemon's own env.
 const ENDPOINT_ENV: &str = "KASTELLAN_WEB_SEARCH_ENDPOINT";
+/// Operator opt-in: route web-search through a trusted search-broker sidecar (so a
+/// force-routed worker can reach a loopback SearxNG). `=1` enables broker mode.
+const USE_BROKER_ENV: &str = "KASTELLAN_WEB_SEARCH_USE_BROKER";
 
 /// Derive the `Net::Allowlist` `host:port` entry from the endpoint URL. Returns
 /// an empty list if the endpoint is unset or unparseable — the worker fails
@@ -106,6 +109,48 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
     }
 }
 
+/// Build the web-search [`ToolEntry`] in **broker mode**: the worker reaches
+/// SearxNG only through a core-spawned trusted search-broker, so its
+/// `Net::Allowlist` is empty and the direct endpoint/allowlist env is omitted.
+/// `entry.broker` carries the SearxNG endpoint the broker forwards to; core's
+/// cold-spawn chokepoint spawns the broker, binds its UDS into the jail via
+/// `SandboxPolicy::broker_uds`, and injects `KASTELLAN_SEARCH_BROKER_UDS` so the
+/// worker's `choose_search_provider` selects `BrokeredSearchProvider`.
+pub fn web_search_broker_entry(binary: PathBuf, endpoint: &str) -> ToolEntry {
+    let policy = SandboxPolicy {
+        fs_read: vec![
+            binary.clone(),
+            PathBuf::from("/etc/resolv.conf"),
+            PathBuf::from("/etc/hosts"),
+            PathBuf::from("/etc/nsswitch.conf"),
+        ],
+        fs_write: vec![],
+        // No direct egress — the broker holds the only route to SearxNG.
+        net: Net::Allowlist(vec![]),
+        cpu_ms: 5_000,
+        mem_mb: 256,
+        profile: Profile::WorkerNetClient,
+        // No direct endpoint/allowlist env: the worker never reaches SearxNG itself.
+        env: vec![],
+        cpu_quota_pct: None,
+        tasks_max: None,
+        proxy_uds: None,
+        broker_uds: None,
+        persistent_store: None,
+    };
+    ToolEntry {
+        binary,
+        policy,
+        wall_clock_ms: Some(30_000),
+        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+        sandbox_backend: None,
+        container_image: None,
+        lockdown_shim: None,
+        ephemeral_scratch: false,
+        broker: Some(crate::broker::BrokerSpec::search(endpoint)),
+    }
+}
+
 /// web-search's manifest. Discovery mirrors web-fetch: a set
 /// `KASTELLAN_WEB_SEARCH_BIN` override is authoritative (honoured iff it names a
 /// runnable file, else fails closed); only when unset do we fall back to the
@@ -154,6 +199,13 @@ impl WorkerManifest for WebSearchManifest {
             }
         };
         let endpoint = (ctx.get_env)(ENDPOINT_ENV).unwrap_or_default();
+        // Broker mode: the worker reaches SearxNG only through a trusted
+        // search-broker sidecar (so a force-routed worker can use a loopback
+        // SearxNG). The broker owns the SearxNG allowlist; the worker gets none.
+        let use_broker = (ctx.get_env)(USE_BROKER_ENV).unwrap_or_default().trim() == "1";
+        if use_broker {
+            return Resolution::Register(web_search_broker_entry(binary, &endpoint));
+        }
         let allowlist = host_allowlist_from_endpoint(&endpoint);
         Resolution::Register(web_search_entry(binary, &endpoint, &allowlist))
     }
@@ -293,6 +345,67 @@ mod tests {
                 assert!(detail.contains("kastellan-worker-web-search"), "detail: {detail}");
             }
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_broker_mode_drops_egress_and_declares_search_broker() {
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-search".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            "KASTELLAN_WEB_SEARCH_USE_BROKER" => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| Vec::<String>::new();
+        let c = ctx(&get_env, &exists, &allowlist);
+
+        match WebSearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                // Broker declared, carrying the SearxNG endpoint it forwards to.
+                let spec = entry.broker.as_ref().expect("broker set in broker mode");
+                assert_eq!(spec.kind, crate::broker::BrokerKind::Search);
+                assert_eq!(spec.endpoint, "http://127.0.0.1:8888/search");
+                // Worker has NO direct egress — empty allowlist.
+                match &entry.policy.net {
+                    Net::Allowlist(hosts) => {
+                        assert!(hosts.is_empty(), "broker-mode worker must have no egress: {hosts:?}")
+                    }
+                    other => panic!("expected empty Net::Allowlist, got {other:?}"),
+                }
+                // No direct-endpoint env leaked to the worker in broker mode.
+                assert!(
+                    entry.policy.env.iter().all(|(k, _)| k != ENDPOINT_ENV),
+                    "broker-mode worker must not carry the direct endpoint env"
+                );
+                // broker_uds is set at spawn, not by the manifest.
+                assert!(entry.policy.broker_uds.is_none());
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_direct_mode_unchanged_when_use_broker_unset() {
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-search".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| Vec::<String>::new();
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebSearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert!(entry.broker.is_none());
+                match &entry.policy.net {
+                    Net::Allowlist(hosts) => {
+                        assert_eq!(hosts, &vec!["127.0.0.1:8888".to_string()])
+                    }
+                    other => panic!("got {other:?}"),
+                }
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
         }
     }
 

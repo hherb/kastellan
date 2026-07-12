@@ -24,3 +24,4 @@ url                       = { workspace = true }
 
 [dev-dependencies]
 kastellan-worker-web-common = { path = "../web-common", features = ["testing"] }
+tempfile = "3"
