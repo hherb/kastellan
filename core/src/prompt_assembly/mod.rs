@@ -35,9 +35,11 @@ use kastellan_db::DbError;
 use thiserror::Error;
 
 pub mod assemble;
+mod now;
 pub mod pg_builder;
 
 pub use assemble::assemble_system_prompt;
+pub use now::{resolve_timezone, TzSource};
 pub use pg_builder::{PgSystemPromptBuilder, StaticSystemPromptBuilder};
 
 /// Error returned by [`SystemPromptBuilder::build`] when the underlying

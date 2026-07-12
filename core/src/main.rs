@@ -315,6 +315,23 @@ async fn main() -> Result<()> {
         info!(path = ?l0_path, "no L0 rules file found, skipping seed");
     }
 
+    // Planner "now" timezone — feeds the trusted <now> block so date-relative
+    // questions stop web-searching for the current date (the root cause of the
+    // plan_iteration_cap loop). KASTELLAN_TIMEZONE = IANA name; unset → host
+    // system tz; invalid → UTC (fail-safe).
+    let (planner_tz, tz_source) = kastellan_core::prompt_assembly::resolve_timezone(
+        std::env::var("KASTELLAN_TIMEZONE").ok().as_deref(),
+    );
+    // Log the EFFECTIVE zone, not just the source: `TzSource::System` can
+    // silently degrade to UTC when jiff can't resolve the host zone, and an
+    // IANA-less fixed-offset zone yields `None`. Surfacing the resolved name
+    // makes "System" vs. a silent UTC fallback distinguishable in the log.
+    info!(
+        ?tz_source,
+        zone = planner_tz.iana_name().unwrap_or("<fixed-offset>"),
+        "planner <now> timezone resolved"
+    );
+
     // PlanFormulator — takes the extractor as 5th arg (Task 14 widened
     // the signature; Task 15 supplies the constructed extractor).
     let formulator: Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> =
@@ -323,7 +340,8 @@ async fn main() -> Result<()> {
             prompts.clone(),
             Arc::new(
                 kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())
-                    .with_tool_docs(tool_docs.clone()),
+                    .with_tool_docs(tool_docs.clone())
+                    .with_timezone(planner_tz),
             ),
             Arc::new(kastellan_core::recall_assembly::PgRecallBuilder::new(
                 pool.clone(),

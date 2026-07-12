@@ -38,12 +38,17 @@ pub struct PgSystemPromptBuilder {
     /// via [`with_tool_docs`](Self::with_tool_docs); the daemon builds it once
     /// from the live registry at startup.
     tool_docs: Arc<[ToolDoc]>,
+    /// Configured planner timezone. `None` (the `new()` default) → no `<now>`
+    /// block, keeping output byte-identical to the pre-`<now>` builder. Set by
+    /// the daemon via [`with_timezone`](Self::with_timezone).
+    timezone: Option<jiff::tz::TimeZone>,
 }
 
 impl PgSystemPromptBuilder {
-    /// Construct a builder pinned to the supplied pool, advertising no tools.
+    /// Construct a builder pinned to the supplied pool, advertising no tools
+    /// and injecting no `<now>` block.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool, tool_docs: Arc::from(Vec::new()) }
+        Self { pool, tool_docs: Arc::from(Vec::new()), timezone: None }
     }
 
     /// Attach the advertised tool set (rendered into the `<tools>` block).
@@ -53,9 +58,22 @@ impl PgSystemPromptBuilder {
         self
     }
 
+    /// Attach the planner timezone (enables the `<now>` block). Threaded from
+    /// `resolve_timezone(KASTELLAN_TIMEZONE)` at daemon startup; the instant is
+    /// captured fresh on every [`build_with_recalled`](Self::build_with_recalled).
+    pub fn with_timezone(mut self, tz: jiff::tz::TimeZone) -> Self {
+        self.timezone = Some(tz);
+        self
+    }
+
     #[cfg(test)]
     fn tool_docs_for_test(&self) -> &[ToolDoc] {
         &self.tool_docs
+    }
+
+    #[cfg(test)]
+    fn timezone_for_test(&self) -> Option<&jiff::tz::TimeZone> {
+        self.timezone.as_ref()
     }
 }
 
@@ -75,8 +93,16 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
         let l0 = load_l0_active_default(&self.pool).await?;
         let l1 = load_l1_default(&self.pool).await?;
         let skills = crate::memory::l3_surface::load_l3_skills_default(&self.pool).await?;
-        let system_prompt =
-            assemble_system_prompt(&l0, &l1, &skills, recalled, base, &self.tool_docs);
+        let now_block = self.timezone.as_ref().map(super::now::current_now_block);
+        let system_prompt = assemble_system_prompt(
+            &l0,
+            &l1,
+            &skills,
+            recalled,
+            base,
+            &self.tool_docs,
+            now_block.as_deref(),
+        );
         Ok(AssembledPrompt {
             system_prompt,
             l0_count: l0.len(),
@@ -151,6 +177,24 @@ mod tests {
         let b = PgSystemPromptBuilder::new(pool).with_tool_docs(docs);
         assert_eq!(b.tool_docs_for_test().len(), 1);
         assert_eq!(b.tool_docs_for_test()[0].name, "web-search");
+    }
+
+    #[tokio::test]
+    async fn builder_defaults_to_no_timezone() {
+        let pool = PgPool::connect_lazy("postgres://unused").expect("lazy pool");
+        let b = PgSystemPromptBuilder::new(pool);
+        assert!(b.timezone_for_test().is_none(), "new() must not inject <now>");
+    }
+
+    #[tokio::test]
+    async fn with_timezone_sets_the_zone() {
+        let pool = PgPool::connect_lazy("postgres://unused").expect("lazy pool");
+        let (tz, _src) = crate::prompt_assembly::resolve_timezone(Some("Australia/Sydney"));
+        let b = PgSystemPromptBuilder::new(pool).with_timezone(tz);
+        // The block the builder would inject is well-formed and current-year.
+        let block = super::super::now::current_now_block(b.timezone_for_test().unwrap());
+        assert!(block.starts_with("<now>\n") && block.trim_end().ends_with("</now>"), "got: {block}");
+        assert!(block.contains("202"), "renders a plausible year; got: {block}");
     }
 
     #[tokio::test]
