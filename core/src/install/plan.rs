@@ -133,6 +133,10 @@ pub fn render_env_file(args: &InstallArgs, layout: &Layout) -> String {
     // date-relative questions from web-searching for the current date. Unset →
     // host system tz; invalid → UTC. Commented by default so the host tz is used.
     s.push_str("# KASTELLAN_TIMEZONE=Australia/Sydney\n");
+    // web.search_batch size cap (queries per batch). Commented → the worker
+    // default (8) applies; raise/lower to tune how many independent searches the
+    // planner may issue in one dispatch. Clamped by the worker to [1, 32].
+    s.push_str("# KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES=8\n");
     if let (Some(hs), Some(user)) =
         (args.matrix_homeserver_url.as_deref(), args.matrix_user.as_deref())
     {
@@ -415,6 +419,11 @@ mod tests {
         assert!(s.contains("KASTELLAN_DATA_DIR=/home/u/.local/share/kastellan/pg/data\n"));
         // Planner timezone documented (commented — unset uses the host tz).
         assert!(s.contains("# KASTELLAN_TIMEZONE=Australia/Sydney\n"), "{s}");
+        // web.search_batch size cap documented (commented — worker default 8).
+        assert!(
+            s.contains("# KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES=8\n"),
+            "{s}"
+        );
         // No matrix block unless configured.
         assert!(!s.contains("KASTELLAN_MATRIX_HOMESERVER_URL"));
     }
