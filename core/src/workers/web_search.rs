@@ -42,14 +42,27 @@ fn net_entries_from_endpoint(endpoint: &str) -> Vec<String> {
     }
 }
 
+/// Derive the worker's host allowlist (`["<host>"]`) from the endpoint URL. The
+/// worker's `from_env` re-checks `endpoint host ∈ allowlist`, and there is only
+/// ever one endpoint, so the allowlist *is* the endpoint host — deriving it here
+/// keeps the two from drifting and needs no separate operator config. Empty when
+/// the endpoint is unset or unparseable (the worker then fails closed — correct,
+/// web-search is disabled without an endpoint).
+fn host_allowlist_from_endpoint(endpoint: &str) -> Vec<String> {
+    match Url::parse(endpoint) {
+        Ok(u) => u.host_str().map(|h| vec![h.to_string()]).unwrap_or_default(),
+        Err(_) => vec![],
+    }
+}
+
 /// Build the [`ToolEntry`] for the web-search worker.
 ///
-/// The administrator controls both the endpoint (`KASTELLAN_WEB_SEARCH_ENDPOINT`
-/// on the daemon) and the host allowlist (`tool_allowlists` keyed
-/// `"web-search"`); the LLM-supplied params carry only the query string and
-/// cannot influence the URL. `Net::Allowlist` derives from the endpoint's
-/// host:port; the allowlist gates which host the endpoint may name (the worker
-/// re-checks `endpoint host ∈ allowlist` at startup).
+/// The administrator controls the endpoint (`KASTELLAN_WEB_SEARCH_ENDPOINT` on
+/// the daemon); the LLM-supplied params carry only the query string and cannot
+/// influence the URL. Both `Net::Allowlist` (host:port) and the worker's host
+/// allowlist derive from that endpoint (see [`net_entries_from_endpoint`] /
+/// [`host_allowlist_from_endpoint`]) — there is one endpoint, so the allowlist
+/// is its host, and the worker re-checks `endpoint host ∈ allowlist` at startup.
 ///
 /// Defaults: `Net::Allowlist`, `Profile::WorkerNetClient`, `cpu_ms = 5_000`,
 /// `mem_mb = 256` (JSON parsing only — lighter than web-fetch's HTML/PDF),
@@ -123,9 +136,10 @@ impl WorkerManifest for WebSearchManifest {
         TOOL_NAME
     }
 
-    fn allowlist_tool(&self) -> Option<&'static str> {
-        Some(TOOL_NAME)
-    }
+    // No `allowlist_tool`: web-search has a single operator-configured endpoint,
+    // so its host allowlist is the endpoint's own host — derived below, not read
+    // from the argv0-path `tool_allowlists` DB table (which cannot hold a
+    // hostname: the CLI and a DB CHECK both require a leading '/').
 
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
         let binary = match discover_binary(ctx, BIN_ENV, DEFAULT_BIN_NAME) {
@@ -140,7 +154,7 @@ impl WorkerManifest for WebSearchManifest {
             }
         };
         let endpoint = (ctx.get_env)(ENDPOINT_ENV).unwrap_or_default();
-        let allowlist = (ctx.allowlist)(TOOL_NAME);
+        let allowlist = host_allowlist_from_endpoint(&endpoint);
         Resolution::Register(web_search_entry(binary, &endpoint, &allowlist))
     }
 }
@@ -219,6 +233,50 @@ mod tests {
                 }
                 other => panic!("expected Net::Allowlist, got {other:?}"),
             },
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn web_search_has_no_db_argv0_allowlist() {
+        // web-search's host allowlist derives from its single endpoint, not the
+        // argv0-path `tool_allowlists` DB table (which structurally cannot hold a
+        // hostname — CLI + DB CHECK both require a leading '/').
+        assert!(
+            WebSearchManifest.allowlist_tool().is_none(),
+            "web-search must not claim an argv0 DB allowlist"
+        );
+    }
+
+    #[test]
+    fn resolve_derives_worker_allowlist_from_endpoint_not_db() {
+        // In the daemon the prefetched DB allowlist is ALWAYS empty for web-search
+        // (the table can't hold a host), so the worker allowlist must come from the
+        // endpoint host — otherwise `from_env` fails closed on an empty allowlist and
+        // web-search never registers. Simulate the daemon: empty ctx.allowlist.
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-search".to_string()),
+            ENDPOINT_ENV => Some("https://searx.kastellan.dev/search".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| Vec::<String>::new();
+        let c = ctx(&get_env, &exists, &allowlist);
+
+        match WebSearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                let al = entry
+                    .policy
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == "KASTELLAN_WEB_SEARCH_ALLOWLIST")
+                    .map(|(_, v)| v.clone())
+                    .expect("allowlist env present");
+                assert_eq!(
+                    al, r#"["searx.kastellan.dev"]"#,
+                    "worker allowlist must derive from the endpoint host, not the empty DB allowlist"
+                );
+            }
             other => panic!("expected Register, got {}", outcome_label(&other)),
         }
     }
