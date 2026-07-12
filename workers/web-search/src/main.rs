@@ -3,6 +3,7 @@
 //! query string. Design:
 //! docs/superpowers/specs/2026-06-09-web-search-worker-design.md
 
+mod batch;
 mod handler;
 
 use kastellan_worker_prelude::serve_stdio;

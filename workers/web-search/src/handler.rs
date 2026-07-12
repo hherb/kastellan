@@ -23,7 +23,7 @@ struct SearchParams {
 }
 
 /// Map a [`SearchError`] to a JSON-RPC error.
-fn search_err_to_rpc(e: SearchError) -> RpcError {
+pub(crate) fn search_err_to_rpc(e: SearchError) -> RpcError {
     match e {
         SearchError::EmptyQuery => {
             RpcError::new(codes::INVALID_PARAMS, "query is empty".to_string())
@@ -186,6 +186,9 @@ impl SearchProvider for BrokeredSearchProvider {
 /// picks one at startup.
 pub struct WebSearchHandler {
     provider: Box<dyn SearchProvider>,
+    /// Max queries accepted by `web.search_batch` (operator-tunable via
+    /// `KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES`; default 8).
+    max_batch: usize,
 }
 
 impl WebSearchHandler {
@@ -220,7 +223,10 @@ impl WebSearchHandler {
                      KASTELLAN_WEB_SEARCH_ENDPOINT set"
                 ),
             };
-        Ok(Self { provider })
+        let max_batch = crate::batch::resolve_max_batch(
+            std::env::var(crate::batch::MAX_BATCH_QUERIES_ENV).ok().as_deref(),
+        );
+        Ok(Self { provider, max_batch })
     }
 
     #[cfg(test)]
@@ -229,7 +235,23 @@ impl WebSearchHandler {
         allowlist: HostAllowlist,
         transport: T,
     ) -> Self {
-        Self { provider: Box::new(DirectSearchProvider::new(endpoint, allowlist, transport)) }
+        Self {
+            provider: Box::new(DirectSearchProvider::new(endpoint, allowlist, transport)),
+            max_batch: crate::batch::DEFAULT_MAX_BATCH_QUERIES,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_parts_and_max_batch<T: HttpGet + 'static>(
+        endpoint: Url,
+        allowlist: HostAllowlist,
+        transport: T,
+        max_batch: usize,
+    ) -> Self {
+        Self {
+            provider: Box::new(DirectSearchProvider::new(endpoint, allowlist, transport)),
+            max_batch,
+        }
     }
 }
 
@@ -239,24 +261,29 @@ impl Handler for WebSearchHandler {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcError> {
-        if method != "web.search" {
-            return Err(RpcError::new(
+        match method {
+            "web.search" => {
+                let p: SearchParams = serde_json::from_value(params)
+                    .map_err(|e| RpcError::new(codes::INVALID_PARAMS, format!("bad params: {e}")))?;
+                let count = p.count.unwrap_or(DEFAULT_COUNT);
+                let hits = self.provider.search(&p.query, count).map_err(search_err_to_rpc)?;
+                let hit_count = hits.len();
+                Ok(serde_json::json!({ "query": p.query, "results": hits, "count": hit_count }))
+            }
+            "web.search_batch" => {
+                let p: crate::batch::BatchParams = serde_json::from_value(params)
+                    .map_err(|e| RpcError::new(codes::INVALID_PARAMS, format!("bad params: {e}")))?;
+                crate::batch::validate_batch(&p.queries, self.max_batch)
+                    .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
+                let count = p.count.unwrap_or(DEFAULT_COUNT);
+                let elements = crate::batch::run_batch(&*self.provider, &p.queries, count);
+                Ok(serde_json::json!({ "results": elements }))
+            }
+            other => Err(RpcError::new(
                 codes::METHOD_NOT_FOUND,
-                format!("unknown method {method}"),
-            ));
+                format!("unknown method {other}"),
+            )),
         }
-        let p: SearchParams = serde_json::from_value(params)
-            .map_err(|e| RpcError::new(codes::INVALID_PARAMS, format!("bad params: {e}")))?;
-        let count = p.count.unwrap_or(DEFAULT_COUNT);
-
-        let hits = self.provider.search(&p.query, count).map_err(search_err_to_rpc)?;
-
-        let hit_count = hits.len();
-        Ok(serde_json::json!({
-            "query": p.query,
-            "results": hits,
-            "count": hit_count,
-        }))
     }
 }
 
@@ -322,6 +349,70 @@ mod tests {
             .call("web.search", serde_json::json!({"query": "rust"}))
             .unwrap_err();
         assert_eq!(err.code, codes::OPERATION_FAILED);
+    }
+
+    #[test]
+    fn batch_returns_per_query_results_in_order() {
+        let good = r#"{"results":[{"title":"T","url":"https://x.test","content":"c","engine":"e"}]}"#;
+        let mut h = handler(vec![json_resp(good), json_resp(good)]);
+        let out = h
+            .call("web.search_batch", serde_json::json!({"queries": ["a", "b"]}))
+            .unwrap();
+        let arr = out["results"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["query"], "a");
+        assert_eq!(arr[0]["results"][0]["url"], "https://x.test");
+        assert_eq!(arr[1]["query"], "b");
+    }
+
+    #[test]
+    fn batch_one_bad_query_is_error_element_not_whole_failure() {
+        let good = r#"{"results":[{"title":"T","url":"https://x.test","content":"c","engine":"e"}]}"#;
+        let mut h = handler(vec![
+            json_resp(good),
+            RawResponse { status: 500, location: None, content_type: "text/plain".into(), body: Vec::new() },
+        ]);
+        let out = h
+            .call("web.search_batch", serde_json::json!({"queries": ["a", "b"]}))
+            .unwrap();
+        let arr = out["results"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["results"][0]["url"], "https://x.test");
+        assert!(arr[1]["error"].is_string(), "b should be an error element: {out}");
+    }
+
+    #[test]
+    fn batch_empty_queries_is_invalid_params() {
+        let mut h = handler(vec![]);
+        let err = h
+            .call("web.search_batch", serde_json::json!({"queries": []}))
+            .unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn batch_over_cap_is_invalid_params() {
+        let mut h = WebSearchHandler::with_parts_and_max_batch(
+            Url::parse("https://searx.example.org/search").unwrap(),
+            al(&["searx.example.org"]),
+            FakeGet::new(vec![]),
+            2,
+        );
+        let err = h
+            .call("web.search_batch", serde_json::json!({"queries": ["a", "b", "c"]}))
+            .unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn single_search_still_byte_identical() {
+        // Regression pin: web.search is unchanged by the batch arm.
+        let json = r#"{"results":[{"title":"T","url":"https://x.test","content":"c","engine":"e"}]}"#;
+        let mut h = handler(vec![json_resp(json)]);
+        let out = h.call("web.search", serde_json::json!({"query": "rust"})).unwrap();
+        assert_eq!(out["query"], "rust");
+        assert_eq!(out["count"], 1);
+        assert_eq!(out["results"][0]["snippet"], "c");
     }
 
     #[test]
