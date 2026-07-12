@@ -75,7 +75,7 @@ Output (verbatim, **not** escaped — system-generated, not adversary-influenced
 
 ```
 <now>
-Current date and time: Saturday, 12 July 2026, 14:05 (AEST, UTC+10:00).
+Current date and time: Sunday, 12 July 2026, 14:05 (AEST, UTC+10:00).
 </now>
 ```
 
