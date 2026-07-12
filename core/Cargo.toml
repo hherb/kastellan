@@ -42,6 +42,7 @@ thiserror          = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 time               = { workspace = true }
+jiff               = { workspace = true }
 libc               = { workspace = true }
 sha2               = { workspace = true }
 sqlx               = { workspace = true }

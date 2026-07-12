@@ -58,6 +58,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Time
 time        = { version = "0.3", features = ["serde", "macros"] }
+# Timezone-aware datetime with automatic DST + IANA tz DB. Used to inject a
+# trusted current-date/time block into the planner prompt (and, later, travel /
+# timezone features). License: Unlicense OR MIT — AGPL-compatible. Safe in
+# multithreaded processes (unlike time::now_local()).
+jiff        = "0.2"
 
 # Linux defence-in-depth (worker-side, applied from inside the worker process,
 # layered on top of bwrap from the parent side). Both AGPL-compatible:
