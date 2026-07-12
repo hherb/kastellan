@@ -6,6 +6,7 @@
 //! it can trust. Pure renderer + pure timezone resolver; the instant is
 //! captured by the caller so the render is deterministic and testable.
 
+use jiff::tz::TimeZone;
 use jiff::Zoned;
 
 /// Render the trusted `<now>` grounding block. Pure — the caller supplies the
@@ -21,6 +22,32 @@ pub(crate) fn render_now_block(now: &Zoned) -> String {
     // %Z tz abbreviation (e.g. AEST), %:z offset with colon (e.g. +10:00).
     let stamp = now.strftime("%A, %-d %B %Y, %H:%M (%Z, UTC%:z)").to_string();
     format!("<now>\nCurrent date and time: {stamp}.\n</now>\n")
+}
+
+/// Where the planner's timezone came from — logged once at startup so a
+/// misconfigured `KASTELLAN_TIMEZONE` is visible rather than silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TzSource {
+    /// A valid `KASTELLAN_TIMEZONE` IANA name.
+    Configured,
+    /// Unset/blank → the host system timezone.
+    System,
+    /// A set-but-unresolvable name → UTC (fail-safe: the block still renders).
+    UtcFallback,
+}
+
+/// Resolve the operator's configured timezone. `configured` is the
+/// `KASTELLAN_TIMEZONE` value: an IANA name (e.g. "Australia/Sydney"); unset or
+/// blank → the host system zone; a set-but-invalid name → UTC. DST is handled
+/// automatically by `jiff` at render time.
+pub fn resolve_timezone(configured: Option<&str>) -> (TimeZone, TzSource) {
+    match configured.map(str::trim) {
+        Some(name) if !name.is_empty() => match TimeZone::get(name) {
+            Ok(tz) => (tz, TzSource::Configured),
+            Err(_) => (TimeZone::UTC, TzSource::UtcFallback),
+        },
+        _ => (TimeZone::system(), TzSource::System),
+    }
 }
 
 #[cfg(test)]
@@ -59,5 +86,32 @@ mod tests {
         let block = render_now_block(&with_secs);
         assert!(block.contains("14:05"), "minute resolution only");
         assert!(!block.contains(":59"), "seconds must not appear");
+    }
+
+    #[test]
+    fn configured_iana_name_resolves() {
+        let (_tz, src) = resolve_timezone(Some("Australia/Sydney"));
+        assert_eq!(src, TzSource::Configured);
+    }
+
+    #[test]
+    fn unset_uses_system_zone() {
+        let (_tz, src) = resolve_timezone(None);
+        assert_eq!(src, TzSource::System);
+    }
+
+    #[test]
+    fn blank_is_treated_as_unset() {
+        let (_tz, src) = resolve_timezone(Some("   "));
+        assert_eq!(src, TzSource::System);
+    }
+
+    #[test]
+    fn invalid_name_falls_back_to_utc() {
+        let (tz, src) = resolve_timezone(Some("Not/AZone"));
+        assert_eq!(src, TzSource::UtcFallback);
+        // The UTC fallback must still render a valid block, not panic.
+        let z = date(2026, 1, 1).at(0, 0, 0, 0).to_zoned(tz).unwrap();
+        assert!(render_now_block(&z).contains("UTC+00:00"));
     }
 }
