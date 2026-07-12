@@ -129,6 +129,10 @@ pub fn render_env_file(args: &InstallArgs, layout: &Layout) -> String {
     s.push_str(&format!("KASTELLAN_PROMPTS_DIR={}\n", layout.prompts_dir.display()));
     s.push_str(&format!("KASTELLAN_L0_RULES_FILE={}\n", layout.l0_rules_file.display()));
     s.push_str(&format!("KASTELLAN_DATA_DIR={}\n", layout.data_dir.display()));
+    // Planner "now" timezone (IANA name) for the trusted <now> block that stops
+    // date-relative questions from web-searching for the current date. Unset →
+    // host system tz; invalid → UTC. Commented by default so the host tz is used.
+    s.push_str("# KASTELLAN_TIMEZONE=Australia/Sydney\n");
     if let (Some(hs), Some(user)) =
         (args.matrix_homeserver_url.as_deref(), args.matrix_user.as_deref())
     {
@@ -409,6 +413,8 @@ mod tests {
         assert!(s.contains("KASTELLAN_PROMPTS_DIR=/home/u/.local/share/kastellan/prompts\n"));
         assert!(s.contains("KASTELLAN_L0_RULES_FILE=/home/u/.local/share/kastellan/seeds/memory/l0_meta_rules.toml\n"));
         assert!(s.contains("KASTELLAN_DATA_DIR=/home/u/.local/share/kastellan/pg/data\n"));
+        // Planner timezone documented (commented — unset uses the host tz).
+        assert!(s.contains("# KASTELLAN_TIMEZONE=Australia/Sydney\n"), "{s}");
         // No matrix block unless configured.
         assert!(!s.contains("KASTELLAN_MATRIX_HOMESERVER_URL"));
     }
