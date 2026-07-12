@@ -14,14 +14,20 @@ use jiff::Zoned;
 /// and its `system_prompt_sha256` — stable within a plan iteration so the local
 /// model's KV-cache prefix is not churned each second. Verbatim, NOT escaped:
 /// system-generated, not adversary-influenced.
-// `dead_code` allow is transient: the first non-test caller lands in the Task-4
-// builder wiring (`current_now_block`); remove the attribute there.
-#[allow(dead_code)]
 pub(crate) fn render_now_block(now: &Zoned) -> String {
     // %A weekday, %-d no-pad day, %B month, %Y year, %H:%M 24h minute,
     // %Z tz abbreviation (e.g. AEST), %:z offset with colon (e.g. +10:00).
     let stamp = now.strftime("%A, %-d %B %Y, %H:%M (%Z, UTC%:z)").to_string();
     format!("<now>\nCurrent date and time: {stamp}.\n</now>\n")
+}
+
+/// Capture the current instant in `tz` and render the `<now>` block. The one
+/// impure hop (`Timestamp::now()`); the formatting it delegates to is the pure,
+/// tested [`render_now_block`]. Called per plan formulation by the builder so
+/// the block is always current.
+pub(crate) fn current_now_block(tz: &TimeZone) -> String {
+    let now = jiff::Timestamp::now().to_zoned(tz.clone());
+    render_now_block(&now)
 }
 
 /// Where the planner's timezone came from — logged once at startup so a
