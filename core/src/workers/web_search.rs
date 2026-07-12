@@ -29,9 +29,12 @@ const ENDPOINT_ENV: &str = "KASTELLAN_WEB_SEARCH_ENDPOINT";
 /// force-routed worker can reach a loopback SearxNG). `=1` enables broker mode.
 const USE_BROKER_ENV: &str = "KASTELLAN_WEB_SEARCH_USE_BROKER";
 /// Operator override for the `web.search_batch` size cap, read from the daemon
-/// env and injected into the jail only when set. Kept in sync with the same-named
-/// const in `workers/web-search/src/batch.rs`.
-const MAX_BATCH_QUERIES_ENV: &str = "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES";
+/// env and injected into the jail only when set. This is the same env-var name
+/// the web-search worker reads (`kastellan_worker_web_common::
+/// WEB_SEARCH_MAX_BATCH_QUERIES_ENV`) — `web-common` is only a dev-dependency of
+/// core, so the lib can't import it; the two are pinned equal by the
+/// `web_search_batch_cap_env_matches_worker_contract` integration test instead.
+pub const MAX_BATCH_QUERIES_ENV: &str = "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES";
 
 /// Derive the `Net::Allowlist` `host:port` entry from the endpoint URL. Returns
 /// an empty list if the endpoint is unset or unparseable — the worker fails
@@ -73,8 +76,14 @@ fn host_allowlist_from_endpoint(endpoint: &str) -> Vec<String> {
 ///
 /// Defaults: `Net::Allowlist`, `Profile::WorkerNetClient`, `cpu_ms = 5_000`,
 /// `mem_mb = 256` (JSON parsing only — lighter than web-fetch's HTML/PDF),
-/// `wall_clock_ms = Some(30_000)`, `SingleUse`. `fs_read` includes the resolver
+/// `wall_clock_ms = Some(60_000)`, `SingleUse`. `fs_read` includes the resolver
 /// config files so DNS works under the `--unshare-all` jail.
+///
+/// The 60 s wall (matching the sibling multi-op `web-research` worker, not the
+/// 30 s of a single-request worker) gives `web.search_batch` headroom for
+/// several sequential searches; the worker itself soft-bounds a batch below this
+/// wall (`batch::BATCH_SOFT_DEADLINE`) so it returns per-query results rather
+/// than being SIGKILLed mid-batch.
 pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -> ToolEntry {
     let allow_json =
         serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
@@ -103,7 +112,7 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
     ToolEntry {
         binary,
         policy,
-        wall_clock_ms: Some(30_000),
+        wall_clock_ms: Some(60_000),
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
@@ -145,7 +154,7 @@ pub fn web_search_broker_entry(binary: PathBuf, endpoint: &str) -> ToolEntry {
     ToolEntry {
         binary,
         policy,
-        wall_clock_ms: Some(30_000),
+        wall_clock_ms: Some(60_000),
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
@@ -300,7 +309,7 @@ mod tests {
                 assert!(matches!(entry.policy.profile, Profile::WorkerNetClient));
                 assert_eq!(entry.policy.cpu_ms, 5_000);
                 assert_eq!(entry.policy.mem_mb, 256);
-                assert_eq!(entry.wall_clock_ms, Some(30_000));
+                assert_eq!(entry.wall_clock_ms, Some(60_000));
                 assert!(entry.policy.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
                 // Net::Allowlist carries the endpoint host:port (loopback :8888).
                 match &entry.policy.net {

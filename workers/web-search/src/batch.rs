@@ -7,6 +7,8 @@
 //! `unfetched[]`). Design:
 //! docs/superpowers/specs/2026-07-12-batch-web-search-design.md
 
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 
 use kastellan_worker_web_common::parse::Hit;
@@ -14,16 +16,29 @@ use kastellan_worker_web_common::parse::Hit;
 use crate::handler::{search_err_to_rpc, SearchProvider};
 
 /// Env var (set on the daemon, injected into the jail only when set) that
-/// overrides the batch-size cap. Kept in sync with the same-named const in
-/// `core/src/workers/web_search.rs`.
-pub const MAX_BATCH_QUERIES_ENV: &str = "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES";
+/// overrides the batch-size cap. Defined once in `web-common` so core (which
+/// injects it into the jail) and this worker (which reads it) share a single
+/// definition rather than two "kept in sync" string literals.
+pub use kastellan_worker_web_common::WEB_SEARCH_MAX_BATCH_QUERIES_ENV as MAX_BATCH_QUERIES_ENV;
 
 /// Default max queries per batch when the operator sets no override.
 pub const DEFAULT_MAX_BATCH_QUERIES: usize = 8;
 
 /// Hard upper bound on the configurable cap — a backstop against a pathological
-/// operator value (the 30 s worker wall watchdog is the ultimate guard).
+/// operator value (the soft batch deadline + 60 s worker wall watchdog are the
+/// ultimate guards).
 pub const HARD_MAX_BATCH_QUERIES: usize = 32;
+
+/// Soft wall-clock budget for a whole batch. The queries run sequentially, each
+/// bounded by the transport's 20 s per-request timeout; the worker's overall
+/// wall-clock watchdog (`wall_clock_ms`, 60 s) SIGKILLs the process — and with
+/// it the *entire* batch, including already-completed queries — if it trips. To
+/// keep that from silently discarding good results, [`run_batch`] stops issuing
+/// NEW queries once this budget is reached and returns a per-query error for the
+/// remainder (upholding the "one failing query never sinks the batch" contract
+/// under load). Set to `wall − transport` so the last in-flight query still
+/// finishes within the wall.
+pub const BATCH_SOFT_DEADLINE: Duration = Duration::from_secs(40);
 
 /// Request params for `web.search_batch`.
 #[derive(Deserialize)]
@@ -71,21 +86,38 @@ pub fn validate_batch(queries: &[String], max_batch: usize) -> Result<(), String
 
 /// Run each query in order through the provider, one element per query. A
 /// per-query `SearchError` becomes an `Err` element (never aborts the batch).
-/// The `query` field always echoes the input query at that position. Pure with
-/// respect to the injected provider — unit-testable with a fake.
+/// The `query` field always echoes the input query at that position.
+///
+/// `deadline` is a soft wall-clock budget (see [`BATCH_SOFT_DEADLINE`]): once it
+/// is reached, the remaining queries are NOT issued and each yields a "budget
+/// reached" `Err` element instead. This bounds the total time so the worker's
+/// hard wall-clock watchdog cannot SIGKILL the process mid-batch and discard the
+/// already-completed queries. `None` disables the budget (used by the pure unit
+/// tests). Pure with respect to the injected provider and clock.
 pub fn run_batch(
     provider: &dyn SearchProvider,
     queries: &[String],
     count: usize,
+    deadline: Option<Instant>,
 ) -> Vec<BatchElement> {
     queries
         .iter()
-        .map(|q| match provider.search(q, count) {
-            Ok(hits) => {
-                let n = hits.len();
-                BatchElement::Ok { query: q.clone(), results: hits, count: n }
+        .map(|q| {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return BatchElement::Err {
+                    query: q.clone(),
+                    error: "batch wall-clock budget reached before this query ran".to_string(),
+                };
             }
-            Err(e) => BatchElement::Err { query: q.clone(), error: search_err_to_rpc(e).message },
+            match provider.search(q, count) {
+                Ok(hits) => {
+                    let n = hits.len();
+                    BatchElement::Ok { query: q.clone(), results: hits, count: n }
+                }
+                Err(e) => {
+                    BatchElement::Err { query: q.clone(), error: search_err_to_rpc(e).message }
+                }
+            }
         })
         .collect()
 }
@@ -116,7 +148,7 @@ mod tests {
     #[test]
     fn run_batch_preserves_order_and_query_fields() {
         let qs = vec!["a".to_string(), "b".to_string()];
-        let v = serde_json::to_value(run_batch(&FakeProvider, &qs, 10)).unwrap();
+        let v = serde_json::to_value(run_batch(&FakeProvider, &qs, 10, None)).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 2);
         assert_eq!(v[0]["query"], "a");
         assert_eq!(v[0]["count"], 1);
@@ -127,13 +159,30 @@ mod tests {
     #[test]
     fn run_batch_one_failure_does_not_sink_batch() {
         let qs = vec!["a".to_string(), "bad".to_string(), "c".to_string()];
-        let v = serde_json::to_value(run_batch(&FakeProvider, &qs, 10)).unwrap();
+        let v = serde_json::to_value(run_batch(&FakeProvider, &qs, 10, None)).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 3);
         assert!(v[0].get("error").is_none());
         assert_eq!(v[1]["query"], "bad");
         assert!(v[1]["error"].is_string(), "element 2 should be an error: {v}");
         assert!(v[1].get("results").is_none());
         assert!(v[2]["results"].is_array());
+    }
+
+    #[test]
+    fn run_batch_past_deadline_marks_remaining_queries_without_sinking_batch() {
+        // A deadline already reached (captured now; the per-query check calls
+        // `Instant::now()` again, which is `>=` it on the monotonic clock) → no
+        // query is issued, but every input still gets its own error element with
+        // its `query` echoed. The whole batch is never lost.
+        let qs = vec!["a".to_string(), "b".to_string()];
+        let v =
+            serde_json::to_value(run_batch(&FakeProvider, &qs, 10, Some(Instant::now()))).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 2);
+        assert_eq!(v[0]["query"], "a");
+        assert!(v[0]["error"].as_str().unwrap().contains("budget"), "{v}");
+        assert!(v[0].get("results").is_none());
+        assert_eq!(v[1]["query"], "b");
+        assert!(v[1]["error"].is_string());
     }
 
     #[test]

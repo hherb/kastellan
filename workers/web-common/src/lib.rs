@@ -11,6 +11,14 @@
 pub mod allowlist;
 pub mod embed_rows;
 pub mod http;
+
+/// Env-var name that overrides the `web.search_batch` size cap. A cross-crate
+/// contract between `kastellan-core` (which injects it into the web-search jail
+/// when the operator sets it) and the web-search worker (which reads it at
+/// startup). Defined here — always compiled, unlike the feature-gated `search`
+/// module — so both sides share one definition rather than two literals that
+/// must be "kept in sync".
+pub const WEB_SEARCH_MAX_BATCH_QUERIES_ENV: &str = "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES";
 #[cfg(feature = "search")]
 pub mod parse;
 #[cfg(feature = "search")]

@@ -276,7 +276,11 @@ impl Handler for WebSearchHandler {
                 crate::batch::validate_batch(&p.queries, self.max_batch)
                     .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
                 let count = p.count.unwrap_or(DEFAULT_COUNT);
-                let elements = crate::batch::run_batch(&*self.provider, &p.queries, count);
+                // Soft-bound the sequential batch so it cannot outrun the worker's
+                // hard wall-clock watchdog and lose already-completed queries.
+                let deadline = std::time::Instant::now() + crate::batch::BATCH_SOFT_DEADLINE;
+                let elements =
+                    crate::batch::run_batch(&*self.provider, &p.queries, count, Some(deadline));
                 Ok(serde_json::json!({ "results": elements }))
             }
             other => Err(RpcError::new(
