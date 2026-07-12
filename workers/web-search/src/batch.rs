@@ -171,7 +171,9 @@ mod tests {
         assert!(validate_batch(&[], 8).is_err());
         let three = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         assert!(validate_batch(&three, 8).is_ok());
+        // Boundary: exactly at the cap succeeds (`>` not `>=`).
+        assert!(validate_batch(&three, 3).is_ok());
         let msg = validate_batch(&three, 2).unwrap_err();
-        assert!(msg.contains('2'), "message should name the cap: {msg}");
+        assert!(msg.contains("max 2"), "message should name the cap: {msg}");
     }
 }

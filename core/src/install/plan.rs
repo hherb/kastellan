@@ -135,7 +135,9 @@ pub fn render_env_file(args: &InstallArgs, layout: &Layout) -> String {
     s.push_str("# KASTELLAN_TIMEZONE=Australia/Sydney\n");
     // web.search_batch size cap (queries per batch). Commented → the worker
     // default (8) applies; raise/lower to tune how many independent searches the
-    // planner may issue in one dispatch. Clamped by the worker to [1, 32].
+    // planner may issue in one dispatch. Clamped by the worker to [1, 32]. The
+    // searches run sequentially, so a value near the ceiling (~32 × ~1.7 s) can
+    // exceed the worker's 30 s wall and lose the whole batch; 8 (~14 s) is safe.
     s.push_str("# KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES=8\n");
     if let (Some(hs), Some(user)) =
         (args.matrix_homeserver_url.as_deref(), args.matrix_user.as_deref())
