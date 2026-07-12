@@ -28,6 +28,13 @@ const ENDPOINT_ENV: &str = "KASTELLAN_WEB_SEARCH_ENDPOINT";
 /// Operator opt-in: route web-search through a trusted search-broker sidecar (so a
 /// force-routed worker can reach a loopback SearxNG). `=1` enables broker mode.
 const USE_BROKER_ENV: &str = "KASTELLAN_WEB_SEARCH_USE_BROKER";
+/// Operator override for the `web.search_batch` size cap, read from the daemon
+/// env and injected into the jail only when set. This is the same env-var name
+/// the web-search worker reads (`kastellan_worker_web_common::
+/// WEB_SEARCH_MAX_BATCH_QUERIES_ENV`) — `web-common` is only a dev-dependency of
+/// core, so the lib can't import it; the two are pinned equal by the
+/// `web_search_batch_cap_env_matches_worker_contract` integration test instead.
+pub const MAX_BATCH_QUERIES_ENV: &str = "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES";
 
 /// Derive the `Net::Allowlist` `host:port` entry from the endpoint URL. Returns
 /// an empty list if the endpoint is unset or unparseable — the worker fails
@@ -69,8 +76,14 @@ fn host_allowlist_from_endpoint(endpoint: &str) -> Vec<String> {
 ///
 /// Defaults: `Net::Allowlist`, `Profile::WorkerNetClient`, `cpu_ms = 5_000`,
 /// `mem_mb = 256` (JSON parsing only — lighter than web-fetch's HTML/PDF),
-/// `wall_clock_ms = Some(30_000)`, `SingleUse`. `fs_read` includes the resolver
+/// `wall_clock_ms = Some(60_000)`, `SingleUse`. `fs_read` includes the resolver
 /// config files so DNS works under the `--unshare-all` jail.
+///
+/// The 60 s wall (matching the sibling multi-op `web-research` worker, not the
+/// 30 s of a single-request worker) gives `web.search_batch` headroom for
+/// several sequential searches; the worker itself soft-bounds a batch below this
+/// wall (`batch::BATCH_SOFT_DEADLINE`) so it returns per-query results rather
+/// than being SIGKILLed mid-batch.
 pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -> ToolEntry {
     let allow_json =
         serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
@@ -99,7 +112,7 @@ pub fn web_search_entry(binary: PathBuf, endpoint: &str, allowlist: &[String]) -
     ToolEntry {
         binary,
         policy,
-        wall_clock_ms: Some(30_000),
+        wall_clock_ms: Some(60_000),
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
@@ -141,7 +154,7 @@ pub fn web_search_broker_entry(binary: PathBuf, endpoint: &str) -> ToolEntry {
     ToolEntry {
         binary,
         policy,
-        wall_clock_ms: Some(30_000),
+        wall_clock_ms: Some(60_000),
         lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
         sandbox_backend: None,
         container_image: None,
@@ -149,6 +162,21 @@ pub fn web_search_broker_entry(binary: PathBuf, endpoint: &str) -> ToolEntry {
         ephemeral_scratch: false,
         broker: Some(crate::broker::BrokerSpec::search(endpoint)),
     }
+}
+
+/// Append the operator's `web.search_batch` size-cap override to a worker
+/// entry's env, but only when it is present and non-blank. Leaving it off keeps
+/// the worker on its built-in default (8) and the entry's env byte-identical to
+/// the pre-batch behaviour. The worker (`batch::resolve_max_batch`) is the
+/// authoritative parser/clamper — core passes the raw trimmed value through.
+fn maybe_inject_max_batch(mut entry: ToolEntry, val: Option<String>) -> ToolEntry {
+    if let Some(v) = val {
+        let v = v.trim();
+        if !v.is_empty() {
+            entry.policy.env.push((MAX_BATCH_QUERIES_ENV.to_string(), v.to_string()));
+        }
+    }
+    entry
 }
 
 /// web-search's manifest. Discovery mirrors web-fetch: a set
@@ -177,6 +205,36 @@ impl WorkerManifest for WebSearchManifest {
         })
     }
 
+    fn tool_docs(&self) -> Vec<ToolDoc> {
+        // Reuse the single-query doc, then append the batch method. Both docs
+        // carry `name == TOOL_NAME` so the drift guard (doc.name == name())
+        // still holds — same worker, two methods. No numeric ceiling is
+        // advertised: the batch size is an operator-tunable runtime value
+        // (KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES); an over-cap batch is rejected
+        // fail-closed with INVALID_PARAMS and surfaced to the planner.
+        let mut docs: Vec<ToolDoc> = self.tool_doc().into_iter().collect();
+        docs.push(ToolDoc {
+            name: TOOL_NAME,
+            method: "web.search_batch",
+            summary: "Run several INDEPENDENT web searches in one call; returns a \
+                      per-query result group for each. Prefer this over multiple \
+                      web.search steps when the queries do not depend on each other.",
+            params: &[
+                ToolParam {
+                    name: "queries",
+                    description: "list of independent search queries to run in one batch",
+                    required: true,
+                },
+                ToolParam {
+                    name: "count",
+                    description: "max results per query, default 10 (cap 20)",
+                    required: false,
+                },
+            ],
+        });
+        docs
+    }
+
     fn name(&self) -> &'static str {
         TOOL_NAME
     }
@@ -203,11 +261,14 @@ impl WorkerManifest for WebSearchManifest {
         // search-broker sidecar (so a force-routed worker can use a loopback
         // SearxNG). The broker owns the SearxNG allowlist; the worker gets none.
         let use_broker = (ctx.get_env)(USE_BROKER_ENV).unwrap_or_default().trim() == "1";
-        if use_broker {
-            return Resolution::Register(web_search_broker_entry(binary, &endpoint));
-        }
-        let allowlist = host_allowlist_from_endpoint(&endpoint);
-        Resolution::Register(web_search_entry(binary, &endpoint, &allowlist))
+        let entry = if use_broker {
+            web_search_broker_entry(binary, &endpoint)
+        } else {
+            let allowlist = host_allowlist_from_endpoint(&endpoint);
+            web_search_entry(binary, &endpoint, &allowlist)
+        };
+        let entry = maybe_inject_max_batch(entry, (ctx.get_env)(MAX_BATCH_QUERIES_ENV));
+        Resolution::Register(entry)
     }
 }
 
@@ -248,7 +309,7 @@ mod tests {
                 assert!(matches!(entry.policy.profile, Profile::WorkerNetClient));
                 assert_eq!(entry.policy.cpu_ms, 5_000);
                 assert_eq!(entry.policy.mem_mb, 256);
-                assert_eq!(entry.wall_clock_ms, Some(30_000));
+                assert_eq!(entry.wall_clock_ms, Some(60_000));
                 assert!(entry.policy.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
                 // Net::Allowlist carries the endpoint host:port (loopback :8888).
                 match &entry.policy.net {
@@ -404,6 +465,68 @@ mod tests {
                     }
                     other => panic!("got {other:?}"),
                 }
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_injects_max_batch_env_when_set() {
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-search".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES" => Some("5".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebSearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert!(
+                    entry.policy.env.iter().any(|(k, v)| k == MAX_BATCH_QUERIES_ENV && v == "5"),
+                    "cap env must be injected when set: {:?}",
+                    entry.policy.env
+                );
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_omits_max_batch_env_when_unset() {
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-search".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebSearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                // Byte-identical direct-mode env: endpoint + allowlist only.
+                assert_eq!(entry.policy.env.len(), 2);
+                assert!(entry.policy.env.iter().all(|(k, _)| k != MAX_BATCH_QUERIES_ENV));
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_skips_blank_max_batch_env() {
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-search".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES" => Some("   ".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebSearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert!(entry.policy.env.iter().all(|(k, _)| k != MAX_BATCH_QUERIES_ENV));
             }
             other => panic!("expected Register, got {}", outcome_label(&other)),
         }

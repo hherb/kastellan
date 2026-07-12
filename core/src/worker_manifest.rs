@@ -59,6 +59,16 @@ pub trait WorkerManifest: Sync {
         None
     }
 
+    /// All planner-facing tool docs for this worker. Defaults to wrapping the
+    /// single [`WorkerManifest::tool_doc`], so single-method workers need no
+    /// change. A worker that serves several JSON-RPC methods (e.g. web-search:
+    /// `web.search` + `web.search_batch`) overrides this to advertise each. Every
+    /// returned doc's `name` must still equal [`WorkerManifest::name`]
+    /// (drift-guarded).
+    fn tool_docs(&self) -> Vec<ToolDoc> {
+        self.tool_doc().into_iter().collect()
+    }
+
     /// Pure resolution: host env + fs probes + pre-fetched allowlist → outcome.
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution;
 }
@@ -323,5 +333,13 @@ mod tool_doc_tests {
         assert_eq!(d.method, "doc.run");
         assert_eq!(d.params.len(), 1);
         assert!(d.params[0].required);
+    }
+
+    #[test]
+    fn default_tool_docs_wraps_single_doc() {
+        assert!(BareManifest.tool_docs().is_empty());
+        let docs = DocManifest.tool_docs();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].method, "doc.run");
     }
 }

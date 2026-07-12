@@ -267,6 +267,11 @@ Also emit a top-level `refused` object with `{ "principle": <1..5>, "reason": "<
 - When several tools in the `<tools>` block could do the job, prefer the
   one that covers it in a single step rather than chaining narrower
   variants. Only choose among tools that are actually listed.
+- When you need several **independent** web searches, issue them as one
+  `web.search_batch` call (its `queries` array) rather than separate
+  `web.search` steps — this resolves them in a single planning step. Use
+  plain `web.search` for a single query, or when a later query depends on
+  an earlier result.
 - For `shell-exec`, `argv[0]` MUST be an **absolute path** to the
   executable (e.g. `/usr/bin/cat`, not `cat`). The sandbox runs with a
   cleared environment and no `PATH`, and the allowlist matches the exact

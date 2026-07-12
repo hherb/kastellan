@@ -168,7 +168,7 @@ pub fn assemble_registry(
                     allowlist_sha256: sha256_argv0_list(&allowlist),
                 });
                 reg.insert(name, entry);
-                if let Some(doc) = m.tool_doc() {
+                for doc in m.tool_docs() {
                     docs.push(doc);
                 }
             }
@@ -362,7 +362,7 @@ mod tests {
         // A ToolDoc's name must equal its manifest's name(), else the planner is
         // told a tool name it can't dispatch. Guards against copy-paste drift.
         for m in WORKER_MANIFESTS {
-            if let Some(doc) = m.tool_doc() {
+            for doc in m.tool_docs() {
                 assert_eq!(doc.name, m.name(), "tool_doc name drift for {}", m.name());
                 assert!(!doc.method.is_empty(), "{} has empty method", m.name());
                 assert!(!doc.summary.is_empty(), "{} has empty summary", m.name());
@@ -385,6 +385,22 @@ mod tests {
         assert_eq!(by_name("python-exec").expect("python-exec doc").method, "python.exec");
         assert_eq!(by_name("browser-driver").expect("browser-driver doc").method, "browser.render");
         assert_eq!(by_name("gliner-relex").expect("gliner-relex doc").method, "extract");
+    }
+
+    #[test]
+    fn web_search_advertises_the_batch_method() {
+        let m = WORKER_MANIFESTS
+            .iter()
+            .find(|m| m.name() == "web-search")
+            .expect("web-search manifest");
+        let docs = m.tool_docs();
+        assert!(docs.iter().any(|d| d.method == "web.search"), "web.search missing");
+        let batch = docs
+            .iter()
+            .find(|d| d.method == "web.search_batch")
+            .expect("web.search_batch advertised");
+        assert_eq!(batch.name, "web-search");
+        assert!(batch.params.iter().any(|p| p.name == "queries" && p.required));
     }
 
     #[test]
