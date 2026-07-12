@@ -23,6 +23,40 @@ pub(crate) const STEP_ERR_DETAIL_MAX: usize = 200;
 /// across iterations. A truncated head gets a trailing `…`.
 pub(crate) const STEP_OK_SUMMARY_MAX: usize = 4 * 1024;
 
+/// Per-query byte budget contributed by each element of a `web.search_batch`
+/// head. A batch is ONE step but carries N independent queries; scaling the head
+/// cap by the query count (see [`ok_summary_cap`]) lets the planner see more than
+/// the single query that a flat [`STEP_OK_SUMMARY_MAX`] head would surface.
+const BATCH_PER_QUERY_SUMMARY_BYTES: usize = 3 * 1024;
+
+/// Hard ceiling on a `web.search_batch` step's head, so a large batch cannot
+/// claim the entire [`PLANS_SUMMARY_BUDGET`]. 24 KiB = 8 (the default
+/// `KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES`) × [`BATCH_PER_QUERY_SUMMARY_BYTES`],
+/// i.e. 3/4 of the 32 KiB total — leaving headroom for other steps, which the
+/// oldest-first [`apply_summary_budget`] elides if the accumulated total is
+/// exceeded.
+const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
+
+/// Byte cap for a successful step's surfaced head, given its `method` and the
+/// result `value`. A `web.search_batch` result is
+/// `{results:[{query,results,count}|{query,error}]}` — one element per query — so
+/// its cap scales with the element count, clamped to
+/// `[STEP_OK_SUMMARY_MAX, STEP_OK_BATCH_SUMMARY_MAX]`; every other method keeps
+/// the flat single-step cap. A malformed/absent `results` array counts as zero
+/// elements and clamps up to the flat floor (never larger than a real batch would
+/// earn). Pure — no I/O, deterministic in `(method, value)`.
+fn ok_summary_cap(method: &str, value: &serde_json::Value) -> usize {
+    if method == crate::workers::web_search::WEB_SEARCH_BATCH_METHOD {
+        let n = value
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        (n * BATCH_PER_QUERY_SUMMARY_BYTES).clamp(STEP_OK_SUMMARY_MAX, STEP_OK_BATCH_SUMMARY_MAX)
+    } else {
+        STEP_OK_SUMMARY_MAX
+    }
+}
+
 /// Marker rendered in place of step text that the sink screen blocked. A clear,
 /// structured signal to the planner that content was withheld — never raw
 /// blocked content.
@@ -92,8 +126,12 @@ impl PlanRecord {
             .iter()
             .enumerate()
             .map(|(i, o)| {
-                let tool = plan.steps.get(i).map(|s| s.tool.as_str()).unwrap_or("");
-                render_step_outcome(tool, o)
+                let (tool, method) = plan
+                    .steps
+                    .get(i)
+                    .map(|s| (s.tool.as_str(), s.method.as_str()))
+                    .unwrap_or(("", ""));
+                render_step_outcome(tool, method, o)
             })
             .collect();
         Self { plan, rendered }
@@ -151,11 +189,16 @@ fn sink_screen_blocks(tool: &str, text: &str) -> bool {
 /// `Err` surfaces `"err: <CODE>: <detail>"` (#337). On a Block the
 /// worker-influenced text (the `Ok` head, or the `Err` `detail` — the `code`
 /// is an internal constant, always kept) is replaced by [`WITHHELD_MARKER`].
-fn render_step_outcome(tool: &str, o: &StepOutcome) -> RenderedStep {
+///
+/// The `Ok` head length is bounded by [`ok_summary_cap`] (`method`-selected: a
+/// `web.search_batch` step earns a larger, query-count-scaled head). `tool` still
+/// selects the injection guard profile; `method` selects only the cap.
+fn render_step_outcome(tool: &str, method: &str, o: &StepOutcome) -> RenderedStep {
     match o {
         StepOutcome::Ok(v) => {
+            let cap = ok_summary_cap(method, v);
             let (head, truncated) =
-                crate::cassandra::injection_guard::extract_scannable_text(v, STEP_OK_SUMMARY_MAX);
+                crate::cassandra::injection_guard::extract_scannable_text(v, cap);
             if sink_screen_blocks(tool, &head) {
                 // Already-tiny withheld signal: load-bearing, never elide.
                 RenderedStep { text: format!("ok: {WITHHELD_MARKER}"), elidable: false }
@@ -318,15 +361,109 @@ mod tests {
 
     #[test]
     fn render_step_outcome_marks_ok_elidable_and_err_not() {
-        let ok_step = render_step_outcome("shell-exec", &StepOutcome::Ok(serde_json::json!("hello")));
+        let ok_step =
+            render_step_outcome("shell-exec", "shell.exec", &StepOutcome::Ok(serde_json::json!("hello")));
         assert_eq!(ok_step.text, "ok: hello");
         assert!(ok_step.elidable);
 
         let err_step = render_step_outcome(
             "shell-exec",
+            "shell.exec",
             &StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "no".into() },
         );
         assert_eq!(err_step.text, "err: POLICY_DENIED: no");
         assert!(!err_step.elidable);
+    }
+
+    use crate::workers::web_search::WEB_SEARCH_BATCH_METHOD;
+
+    /// A `web.search_batch`-shaped Ok value with `n` per-query elements.
+    fn batch_value(n: usize) -> serde_json::Value {
+        let elements: Vec<serde_json::Value> = (0..n)
+            .map(|i| serde_json::json!({ "query": format!("q{i}"), "results": [], "count": 0 }))
+            .collect();
+        serde_json::json!({ "results": elements })
+    }
+
+    #[test]
+    fn ok_summary_cap_is_flat_for_non_batch_methods() {
+        let v = batch_value(8); // shape is irrelevant for a non-batch method
+        assert_eq!(ok_summary_cap("web.search", &v), STEP_OK_SUMMARY_MAX);
+        assert_eq!(ok_summary_cap("shell.exec", &v), STEP_OK_SUMMARY_MAX);
+        assert_eq!(ok_summary_cap("", &v), STEP_OK_SUMMARY_MAX);
+    }
+
+    #[test]
+    fn ok_summary_cap_scales_with_query_count() {
+        assert_eq!(
+            ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &batch_value(2)),
+            2 * BATCH_PER_QUERY_SUMMARY_BYTES
+        );
+        assert_eq!(
+            ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &batch_value(8)),
+            STEP_OK_BATCH_SUMMARY_MAX // 8 * 3 KiB == 24 KiB
+        );
+    }
+
+    #[test]
+    fn ok_summary_cap_clamps_low_and_high() {
+        // 1 query → 3 KiB < 4 KiB → clamped up to the single-step floor.
+        assert_eq!(ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &batch_value(1)), STEP_OK_SUMMARY_MAX);
+        // 16 queries → 48 KiB → clamped down to the hard ceiling.
+        assert_eq!(ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &batch_value(16)), STEP_OK_BATCH_SUMMARY_MAX);
+    }
+
+    #[test]
+    fn ok_summary_cap_degrades_to_flat_on_malformed_results() {
+        // Missing `results` → 0 elements → floor.
+        assert_eq!(ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &serde_json::json!({})), STEP_OK_SUMMARY_MAX);
+        // Non-array `results` → 0 → floor.
+        assert_eq!(
+            ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &serde_json::json!({ "results": "nope" })),
+            STEP_OK_SUMMARY_MAX
+        );
+    }
+
+    #[test]
+    fn batch_step_surfaces_more_than_a_single_search_head() {
+        // An 8-query × 10-hit batch whose scannable text far exceeds 4 KiB.
+        let hit = |i: usize| {
+            serde_json::json!({
+                "title": format!("title number {i} about a topic"),
+                "url": format!("https://example.com/results/{i}"),
+                "snippet": "s".repeat(300),
+                "engine": "google",
+            })
+        };
+        let elements: Vec<serde_json::Value> = (0..8)
+            .map(|q| {
+                serde_json::json!({
+                    "query": format!("query number {q}"),
+                    "results": (0..10).map(hit).collect::<Vec<_>>(),
+                    "count": 10,
+                })
+            })
+            .collect();
+        let val = serde_json::json!({ "results": elements });
+
+        let batch =
+            render_step_outcome("web-search", WEB_SEARCH_BATCH_METHOD, &StepOutcome::Ok(val.clone()));
+        let single = render_step_outcome("web-search", "web.search", &StepOutcome::Ok(val));
+
+        // Batch surfaces well over the flat 4 KiB; a single web.search of the
+        // SAME value stays at the flat cap (regression pin: single search
+        // untouched). Framing = "ok: " (4) + "…" (3 bytes) ≤ 8.
+        assert!(
+            batch.text.len() > STEP_OK_SUMMARY_MAX,
+            "batch head {} should exceed 4 KiB",
+            batch.text.len()
+        );
+        assert!(
+            single.text.len() <= STEP_OK_SUMMARY_MAX + 8,
+            "single-search head {} should stay ~4 KiB",
+            single.text.len()
+        );
+        // Batch head is bounded by the hard ceiling (+ framing).
+        assert!(batch.text.len() <= STEP_OK_BATCH_SUMMARY_MAX + 8);
     }
 }
