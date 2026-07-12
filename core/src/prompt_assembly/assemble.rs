@@ -1,8 +1,12 @@
 //! Pure prompt assembler. No I/O, no async, no errors.
 //!
-//! Output framing (always L0 → L1 → skills → recalled → tools → handoff → base in this order):
+//! Output framing (always now → L0 → L1 → skills → recalled → tools → handoff → base in this order):
 //!
 //! ```text
+//! <now>
+//! Current date and time: {weekday, date, minute, tz abbrev + offset}
+//! </now>
+//!
 //! <l0_meta_rules>
 //! - {body of newest L0 row per l0_rule_id}
 //! - {next L0 row body}
@@ -211,9 +215,10 @@ fn render_tools_block(tools: &[ToolDoc]) -> String {
 /// memory slice empty the output is `<handoff>…</handoff>` followed by
 /// `<base>…</base>` (not the bare `<base>` block of the pre-handoff assembler).
 ///
-/// `tools` is appended LAST (after `base`) so existing call sites update with
-/// a pure append; the render position is unchanged by param order — the
-/// `<tools>` block is emitted between `<recalled>` and `<handoff>`.
+/// `tools` and `now` are appended LAST in the parameter list so existing call
+/// sites update with a pure append; render position is decoupled from param
+/// order — the `<tools>` block is emitted between `<recalled>` and `<handoff>`,
+/// and the trusted `<now>` block (when `Some`) is emitted FIRST, before `<l0>`.
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
@@ -221,8 +226,20 @@ pub fn assemble_system_prompt(
     recalled: &RecalledContext,
     base: &str,
     tools: &[ToolDoc],
+    now: Option<&str>,
 ) -> String {
     let mut out = String::new();
+
+    // Trusted, system-generated grounding fact (the current date/time) — emitted
+    // FIRST, verbatim (NOT escaped: not adversary-influenced). Omitted entirely
+    // when `None`, so the output is byte-identical to the pre-`<now>` assembler.
+    // `now` carries its own `<now>…</now>` framing (see `now::render_now_block`).
+    if let Some(block) = now {
+        if !block.is_empty() {
+            out.push_str(block);
+            out.push('\n');
+        }
+    }
 
     if !l0.is_empty() {
         out.push_str("<l0_meta_rules>\n");

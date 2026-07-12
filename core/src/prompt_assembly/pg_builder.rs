@@ -76,7 +76,7 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
         let l1 = load_l1_default(&self.pool).await?;
         let skills = crate::memory::l3_surface::load_l3_skills_default(&self.pool).await?;
         let system_prompt =
-            assemble_system_prompt(&l0, &l1, &skills, recalled, base, &self.tool_docs);
+            assemble_system_prompt(&l0, &l1, &skills, recalled, base, &self.tool_docs, None);
         Ok(AssembledPrompt {
             system_prompt,
             l0_count: l0.len(),
