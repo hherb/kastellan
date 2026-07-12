@@ -163,19 +163,13 @@ pub struct SandboxPolicy {
     /// behaviour (slice #1 posture). Additive.
     #[serde(default)]
     pub proxy_uds: Option<PathBuf>,
-    /// When `Some(path)`, one additional trusted UDS is bind-mounted into the jail
-    /// at `path`: the embedding-broker sidecar's socket (a jailed worker's only
-    /// route to the operator's embedding backend — see the embed-broker sidecar
-    /// design). Unlike [`proxy_uds`](Self::proxy_uds) this is **orthogonal to the
-    /// net policy**: it changes no netns decision (AF_UNIX is mount-ns-scoped, not
-    /// net-ns), it only grants access to one more socket. Linux binds it with
-    /// `--bind`; macOS Seatbelt emits an explicit `(allow network-outbound (remote
-    /// unix-socket …))` so it works even under the force-routed deny-outbound
-    /// posture. A dedicated field (not a `Vec` generalization of `proxy_uds`) keeps
-    /// the change to this security-critical struct minimal. `None` ⇒ byte-identical
-    /// to prior behaviour. Additive.
+    /// When `Some`, a trusted broker sidecar's UDS is bound into the jail at this
+    /// exact path (host path == jail path) and the worker reaches its backend only
+    /// through it. Set by core's spawn chokepoint (never a manifest). `None` for
+    /// every non-broker worker — then this field has zero effect on the argv and
+    /// the netns decision. See `kastellan_core::broker`.
     #[serde(default)]
-    pub embed_broker_uds: Option<PathBuf>,
+    pub broker_uds: Option<PathBuf>,
     /// A persistent writable store that survives a respawn (long-lived workers).
     /// `None` ⇒ no store, byte-identical to prior behaviour. See [`PersistentStore`].
     #[serde(default)]
@@ -200,7 +194,7 @@ impl Default for SandboxPolicy {
             tasks_max: None,
             env: Vec::new(),
             proxy_uds: None,
-            embed_broker_uds: None,
+            broker_uds: None,
             persistent_store: None,
         }
     }
@@ -658,12 +652,12 @@ mod tests {
     }
 
     #[test]
-    fn embed_broker_uds_defaults_none_and_is_settable() {
+    fn broker_uds_defaults_none_and_is_settable() {
         let mut p = SandboxPolicy::default();
-        assert!(p.embed_broker_uds.is_none());
-        p.embed_broker_uds = Some(std::path::PathBuf::from("/scratch/embed.sock"));
+        assert!(p.broker_uds.is_none());
+        p.broker_uds = Some(std::path::PathBuf::from("/scratch/embed.sock"));
         assert_eq!(
-            p.embed_broker_uds.as_deref(),
+            p.broker_uds.as_deref(),
             Some(std::path::Path::new("/scratch/embed.sock"))
         );
     }

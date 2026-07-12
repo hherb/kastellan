@@ -43,16 +43,25 @@ pub(crate) const EGRESS_SCRATCH_DIR_PREFIX: &str = "egress-";
 pub(crate) const MATRIX_SCRATCH_DIR_PREFIX: &str = "matrix-";
 
 /// Name prefix of the per-worker embed-broker sidecar scratch dir (Slice B).
-/// Kept in sync with the producer in `crate::embed_broker::spawn`, which formats
-/// `"{EMBED_SCRATCH_DIR_PREFIX}{pid}-{seq}"` under the same `scratch_root` to hold
-/// the broker's `embed.sock`. Same crash-leak class as the egress sidecar.
+/// Kept in sync with `BrokerKind::Embed.scratch_prefix()` (the producer in
+/// `crate::broker::spawn`), which formats `"{EMBED_SCRATCH_DIR_PREFIX}{pid}-{seq}"`
+/// under the same `scratch_root` to hold the broker's `embed.sock`. Same
+/// crash-leak class as the egress sidecar.
 pub(crate) const EMBED_SCRATCH_DIR_PREFIX: &str = "embed-";
+
+/// Name prefix of the per-worker search-broker sidecar scratch dir. Kept in sync
+/// with `BrokerKind::Search.scratch_prefix()`; holds the broker's `search.sock`.
+pub(crate) const SEARCH_SCRATCH_DIR_PREFIX: &str = "search-";
 
 /// Every per-worker scratch-dir prefix the startup sweep reclaims. Add a new
 /// producer's prefix here (and a round-trip test below) when a new worker
 /// family gets its own scratch dirs under `scratch_root`.
-pub(crate) const SCRATCH_DIR_PREFIXES: &[&str] =
-    &[EGRESS_SCRATCH_DIR_PREFIX, MATRIX_SCRATCH_DIR_PREFIX, EMBED_SCRATCH_DIR_PREFIX];
+pub(crate) const SCRATCH_DIR_PREFIXES: &[&str] = &[
+    EGRESS_SCRATCH_DIR_PREFIX,
+    MATRIX_SCRATCH_DIR_PREFIX,
+    EMBED_SCRATCH_DIR_PREFIX,
+    SEARCH_SCRATCH_DIR_PREFIX,
+];
 
 /// Parse the creating-daemon pid out of a `<prefix><pid>-<seq>` dir name.
 ///
@@ -154,6 +163,25 @@ mod tests {
         assert_eq!(parse_daemon_pid("egress-12345-0"), Some(12345));
         assert_eq!(parse_daemon_pid("egress-1-9999"), Some(1));
         assert_eq!(parse_daemon_pid("matrix-12345-0"), Some(12345));
+    }
+
+    /// Both broker kinds' scratch dirs are swept — an `embed-<pid>-<seq>` and a
+    /// `search-<pid>-<seq>` husk each round-trip to their creating-daemon pid.
+    #[test]
+    fn parses_pid_from_broker_scratch_names() {
+        assert_eq!(parse_daemon_pid("embed-12345-0"), Some(12345));
+        assert_eq!(parse_daemon_pid("search-12345-0"), Some(12345));
+    }
+
+    /// The sweep's prefix consts are a second copy of the producer's
+    /// `BrokerKind::scratch_prefix()`. Pin them equal so a change on one side that
+    /// is not mirrored on the other is caught here rather than silently leaking
+    /// husks past the sweep (which matches names by prefix).
+    #[test]
+    fn sweep_prefixes_match_broker_kind_producers() {
+        use crate::broker::BrokerKind;
+        assert_eq!(EMBED_SCRATCH_DIR_PREFIX, BrokerKind::Embed.scratch_prefix());
+        assert_eq!(SEARCH_SCRATCH_DIR_PREFIX, BrokerKind::Search.scratch_prefix());
     }
 
     /// The parser must accept exactly what the producers emit — pin the

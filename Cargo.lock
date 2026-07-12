@@ -2420,6 +2420,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kastellan-worker-search-broker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "kastellan-worker-web-common",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "kastellan-worker-shell-exec"
 version = "0.1.0"
 dependencies = [
@@ -2489,6 +2502,7 @@ dependencies = [
  "kastellan-worker-web-common",
  "serde",
  "serde_json",
+ "tempfile",
  "url",
 ]
 

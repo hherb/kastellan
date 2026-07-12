@@ -144,15 +144,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Embed-broker config (Slice B) — the trusted embedding-broker sidecar. No
-    // daemon enable gate: the *manifest* opts a worker in (web-research's
-    // KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER), so we always try to discover the
-    // broker binary and hold a config iff it resolves. `None` (binary absent) is
-    // fine unless a worker actually requests a broker — then the spawn chokepoint
-    // fails closed. Built here for exe_dir (broker-binary discovery).
-    let embed_broker_cfg = kastellan_core::embed_broker::config::from_env(exe_dir.as_deref());
-    if embed_broker_cfg.is_some() {
-        info!("embed-broker AVAILABLE — broker-declaring workers get a trusted embedding sidecar");
+    // Broker configs (unified): discover each kind's sidecar binary. No daemon
+    // enable gate — a manifest opts a worker in; the daemon holds a config iff the
+    // binary resolves, and the spawn chokepoint fails closed if a declaring worker
+    // has none.
+    let broker_configs = kastellan_core::broker::BrokerConfigs {
+        embed: kastellan_core::broker::config::from_env(
+            kastellan_core::broker::BrokerKind::Embed, exe_dir.as_deref()),
+        search: kastellan_core::broker::config::from_env(
+            kastellan_core::broker::BrokerKind::Search, exe_dir.as_deref()),
+    };
+    if broker_configs.embed.is_some() {
+        info!("embed-broker AVAILABLE — embed-declaring workers get a trusted embedding sidecar");
+    }
+    if broker_configs.search.is_some() {
+        info!("search-broker AVAILABLE — search-declaring workers get a trusted search sidecar");
     }
 
     let lifecycle: Arc<dyn kastellan_core::worker_lifecycle::WorkerLifecycleManager> = Arc::new(
@@ -163,7 +169,7 @@ async fn main() -> Result<()> {
             // block below also needs the resolved config to build its own
             // `MatrixEgress`, after `force_routing` is moved in here.
             force_routing.clone(),
-            embed_broker_cfg,
+            broker_configs,
         ),
     );
 

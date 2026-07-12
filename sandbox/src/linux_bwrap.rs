@@ -128,8 +128,8 @@ impl SandboxBackend for LinuxBwrap {
         }
         // The embed-broker UDS is bound into the jail the same way; same absolute
         // + no-`..` rule (issue #387).
-        if let Some(uds) = &policy.embed_broker_uds {
-            crate::validate_linux_bind_path(uds, "embed_broker_uds")?;
+        if let Some(uds) = &policy.broker_uds {
+            crate::validate_linux_bind_path(uds, "broker_uds")?;
         }
         // Slice 5b-2: the persistent store is a separate field, so it bypasses the
         // loop above. Its paths must be absolute (a relative dest mis-binds against
@@ -238,7 +238,7 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
         // the path identical so no path rewrite is needed inside the jail.
         push_bind(&mut argv, "--bind", uds);
     }
-    if let Some(uds) = &policy.embed_broker_uds {
+    if let Some(uds) = &policy.broker_uds {
         // Bind the embed-broker UDS rw at an identical host↔jail path — same
         // rationale as proxy_uds above (AF_UNIX connect needs write on the
         // inode). Independent of the netns match: the worker may or may not be
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn embed_broker_uds_is_bound_without_touching_netns() {
+    fn broker_uds_is_bound_without_touching_netns() {
         // The embed-broker UDS is an *additional* bound socket, orthogonal to the
         // egress netns decision: a worker in the legacy `--share-net` Allowlist mode
         // (no proxy_uds) still keeps `--share-net`, and the broker socket is bound in
@@ -366,14 +366,14 @@ mod tests {
         // works regardless of the net policy.
         let p = SandboxPolicy {
             net: Net::Allowlist(vec!["searx.example.org:443".into()]),
-            embed_broker_uds: Some(PathBuf::from("/scratch/embed.sock")),
+            broker_uds: Some(PathBuf::from("/scratch/embed.sock")),
             ..SandboxPolicy::default()
         };
         let argv = build_argv(&p, "/bin/worker", &[]);
-        // Broker UDS present ⇒ still legacy share-net (embed_broker_uds must NOT
+        // Broker UDS present ⇒ still legacy share-net (broker_uds must NOT
         // flip the netns like proxy_uds does).
         assert!(argv.contains(&"--share-net".to_string()),
-            "embed_broker_uds must not change the netns decision; got: {argv:?}");
+            "broker_uds must not change the netns decision; got: {argv:?}");
         let has_uds_bind = argv.windows(3).any(|w| {
             w[0] == "--bind" && w[1] == "/scratch/embed.sock" && w[2] == "/scratch/embed.sock"
         });
@@ -382,13 +382,13 @@ mod tests {
     }
 
     #[test]
-    fn embed_broker_uds_binds_under_force_routed_private_netns() {
+    fn broker_uds_binds_under_force_routed_private_netns() {
         // A force-routed worker (Net::Allowlist + proxy_uds ⇒ private netns) that
         // also reaches a broker must bind BOTH sockets and keep the private netns.
         let p = SandboxPolicy {
             net: Net::Allowlist(vec!["searx.example.org:443".into()]),
             proxy_uds: Some(PathBuf::from("/scratch/egress.sock")),
-            embed_broker_uds: Some(PathBuf::from("/scratch/embed.sock")),
+            broker_uds: Some(PathBuf::from("/scratch/embed.sock")),
             ..SandboxPolicy::default()
         };
         let argv = build_argv(&p, "/bin/worker", &[]);
@@ -464,37 +464,37 @@ mod tests {
     }
 
     #[test]
-    fn embed_broker_uds_relative_path_is_rejected() {
-        // The bind-path validation must fire for embed_broker_uds too (a relative
+    fn broker_uds_relative_path_is_rejected() {
+        // The bind-path validation must fire for broker_uds too (a relative
         // dest mis-binds against the jail cwd, issue #387). Pins that
         // spawn_under_policy actually calls the validator for this field with the
         // right `kind` label — a refactor that drops the call would regress here
         // before ever reaching bwrap.
         let mut policy = strict_policy();
-        policy.embed_broker_uds = Some(PathBuf::from("relative/embed.sock"));
+        policy.broker_uds = Some(PathBuf::from("relative/embed.sock"));
         let err = LinuxBwrap
             .spawn_under_policy(&policy, "/bin/true", &[])
             .unwrap_err();
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("embed_broker_uds") && msg.contains("absolute"),
-            "relative embed_broker_uds must be rejected with the field label: {msg}"
+            msg.contains("broker_uds") && msg.contains("absolute"),
+            "relative broker_uds must be rejected with the field label: {msg}"
         );
     }
 
     #[test]
-    fn embed_broker_uds_parent_dir_component_is_rejected() {
-        // The no-`..` rule (issue #387) applies to embed_broker_uds too: a
+    fn broker_uds_parent_dir_component_is_rejected() {
+        // The no-`..` rule (issue #387) applies to broker_uds too: a
         // traversal component must be rejected up front.
         let mut policy = strict_policy();
-        policy.embed_broker_uds = Some(PathBuf::from("/scratch/../etc/embed.sock"));
+        policy.broker_uds = Some(PathBuf::from("/scratch/../etc/embed.sock"));
         let err = LinuxBwrap
             .spawn_under_policy(&policy, "/bin/true", &[])
             .unwrap_err();
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("embed_broker_uds") && msg.contains(".."),
-            "embed_broker_uds with a '..' component must be rejected: {msg}"
+            msg.contains("broker_uds") && msg.contains(".."),
+            "broker_uds with a '..' component must be rejected: {msg}"
         );
     }
 

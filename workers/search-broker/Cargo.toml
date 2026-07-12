@@ -1,6 +1,6 @@
 [package]
-name        = "kastellan-worker-web-search"
-description = "Tool worker: query an operator-configured SearxNG instance and return ranked structured hits. GET-only."
+name        = "kastellan-worker-search-broker"
+description = "Trusted search broker sidecar: bridges a jailed worker's UDS to a SearxNG backend (query -> results), so the force-routed worker needs no search egress."
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -10,18 +10,17 @@ repository.workspace   = true
 readme      = "../../README.md"
 
 [[bin]]
-name = "kastellan-worker-web-search"
+name = "kastellan-worker-search-broker"
 path = "src/main.rs"
 
 [dependencies]
 kastellan-protocol          = { path = "../../protocol", version = "0.1.0" }
 kastellan-worker-prelude    = { path = "../prelude", version = "0.1.0" }
 kastellan-worker-web-common = { path = "../web-common", version = "0.1.0", features = ["search"] }
-serde                     = { workspace = true }
-serde_json                = { workspace = true }
-anyhow                    = { workspace = true }
-url                       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+url        = { workspace = true }
 
 [dev-dependencies]
 kastellan-worker-web-common = { path = "../web-common", features = ["testing"] }
-tempfile = "3"

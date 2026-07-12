@@ -75,7 +75,7 @@ fn minimal_policy() -> SandboxPolicy {
         tasks_max: None,
         env: vec![],
         proxy_uds: None,
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     }
 }
@@ -102,7 +102,7 @@ async fn single_use_lifecycle_routes_through_container_when_entry_opts_in() {
         container_image: None,
         lockdown_shim: None,
         ephemeral_scratch: false,
-        embed_broker: None,
+        broker: None,
     };
 
     let result = mgr.acquire("apk-routing-positive", &entry).await;

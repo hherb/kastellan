@@ -5,7 +5,7 @@
 //! `title`/`content`/`engine` default to empty strings.
 
 /// One search result surfaced to the planner.
-#[derive(serde::Serialize, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
 pub struct Hit {
     pub title: String,
     pub url: String,
@@ -104,5 +104,20 @@ mod tests {
     #[test]
     fn malformed_json_is_an_error() {
         assert!(parse_results(b"not json").is_err());
+    }
+
+    #[test]
+    fn hit_round_trips_through_json() {
+        // A Hit must survive serialize→deserialize so it can cross the
+        // search-broker's JSON-RPC boundary (broker serializes, worker decodes).
+        let h = Hit {
+            title: "T".into(),
+            url: "https://x.test".into(),
+            snippet: "c".into(),
+            engine: "e".into(),
+        };
+        let json = serde_json::to_string(&h).unwrap();
+        let back: Hit = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, h);
     }
 }

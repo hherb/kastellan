@@ -158,17 +158,15 @@ pub struct ToolEntry {
     /// the same warm worker would share scratch. No warm-reusable worker opts
     /// in today; revisit this guarantee before the first one does.
     pub ephemeral_scratch: bool,
-    /// Trusted embed-broker declaration. `None` (every worker except
-    /// web-research in broker mode) — the worker reaches any embedding backend
-    /// directly (or not at all). `Some(spec)` requests a per-worker embed-broker
-    /// sidecar: core's cold-spawn chokepoint spawns a
-    /// `kastellan-worker-embed-broker` forwarding to `spec.endpoint`, binds its
-    /// UDS into the jail via `SandboxPolicy::embed_broker_uds`, and injects
-    /// `KASTELLAN_EMBED_BROKER_UDS` so the worker's `choose_embedder` selects the
-    /// brokered path — so the embed backend host leaves the worker's
-    /// `Net::Allowlist` entirely. See [`crate::embed_broker`]. Byte-identical
-    /// behaviour when `None`.
-    pub embed_broker: Option<crate::embed_broker::EmbedBrokerSpec>,
+    /// Trusted broker declaration. `None` (every worker except web-research in
+    /// broker mode today) — the worker reaches any backend directly (or not at
+    /// all). `Some(spec)` requests a per-worker broker sidecar of `spec.kind`:
+    /// core's cold-spawn chokepoint spawns the kind's broker binary forwarding to
+    /// `spec.endpoint`, binds its UDS into the jail via `SandboxPolicy::broker_uds`,
+    /// and injects the kind's `uds_env()` so the worker's backend client selects
+    /// the brokered path — so the backend host leaves the worker's `Net::Allowlist`
+    /// entirely. See [`crate::broker`]. Byte-identical behaviour when `None`.
+    pub broker: Option<crate::broker::BrokerSpec>,
 }
 
 /// Look-up table from logical tool name (as it appears in

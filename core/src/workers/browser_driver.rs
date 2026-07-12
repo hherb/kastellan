@@ -300,7 +300,7 @@ pub fn browser_driver_entry(
         // renders). 512 is generous headroom for a single-page render.
         tasks_max: Some(512),
         proxy_uds: None, // set at spawn by force-routing (rewrite_worker_policy); same as web-fetch
-        embed_broker_uds: None,
+        broker_uds: None,
         persistent_store: None,
     };
     ToolEntry {
@@ -315,7 +315,7 @@ pub fn browser_driver_entry(
         // macOS the host mints a unique dir, grants it via fs_write, and exposes
         // it as KASTELLAN_WORKER_SCRATCH — replacing the shared /tmp grant.
         ephemeral_scratch: true,
-        embed_broker: None,
+        broker: None,
     }
 }
 

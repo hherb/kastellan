@@ -133,7 +133,7 @@ impl SandboxBackend for MacosSeatbelt {
             .iter()
             .chain(policy.fs_write.iter())
             .chain(policy.proxy_uds.iter())
-            .chain(policy.embed_broker_uds.iter())
+            .chain(policy.broker_uds.iter())
             .chain(persistent_paths.iter().copied())
         {
             if !p.is_absolute() {
@@ -312,8 +312,8 @@ fn canonicalize_policy_paths(policy: &SandboxPolicy) -> Result<SandboxPolicy, Sa
     if let Some(uds) = &policy.proxy_uds {
         out.proxy_uds = Some(canonicalize_one(uds)?);
     }
-    if let Some(uds) = &policy.embed_broker_uds {
-        out.embed_broker_uds = Some(canonicalize_one(uds)?);
+    if let Some(uds) = &policy.broker_uds {
+        out.broker_uds = Some(canonicalize_one(uds)?);
     }
     if let Some(ps) = &policy.persistent_store {
         out.persistent_store = Some(crate::PersistentStore {
@@ -504,7 +504,7 @@ pub fn build_profile(policy: &SandboxPolicy) -> String {
     // (and harmlessly redundantly when the broad `(allow network*)` is present).
     // Same debug-quoting rationale as proxy_uds; the disallowed-char guard in
     // `spawn_under_policy` already foreclosed structural characters.
-    if let Some(uds) = &policy.embed_broker_uds {
+    if let Some(uds) = &policy.broker_uds {
         out.push_str(&format!(
             "(allow network-outbound (remote unix-socket (path-literal {uds:?})))\n",
         ));
