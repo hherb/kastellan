@@ -193,6 +193,39 @@ pub(crate) fn parse_egress_config(cmdline: &str) -> EgressConfig {
     c
 }
 
+/// Broker vsock port (VM × broker). Shared with the sandbox crate's
+/// `BROKER_VSOCK_PORT` (kept in sync manually; this crate must not depend on the
+/// sandbox crate). Distinct from the egress port so both channels coexist on the
+/// one vsock device.
+#[allow(dead_code)]
+pub(crate) const BROKER_VSOCK_PORT: u32 = 1026;
+/// In-guest UDS the worker dials for its broker and the relay binds. One generic
+/// path suffices (a worker binds at most one broker socket). Shared with the
+/// sandbox crate's `GUEST_BROKER_UDS`.
+#[allow(dead_code)]
+pub(crate) const GUEST_BROKER_UDS: &str = "/run/kastellan-broker.sock";
+
+/// Broker channel config parsed from the kernel cmdline (VM × broker). Pure →
+/// unit-testable on any platform.
+#[allow(dead_code)]
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct BrokerConfig {
+    pub(crate) enabled: bool,
+}
+
+/// Parse the broker token out of the kernel cmdline: `enabled` from
+/// `kastellan.broker=1`. Pure.
+#[allow(dead_code)]
+pub(crate) fn parse_broker_config(cmdline: &str) -> BrokerConfig {
+    let mut c = BrokerConfig::default();
+    for t in cmdline.split_whitespace() {
+        if t == "kastellan.broker=1" {
+            c.enabled = true;
+        }
+    }
+    c
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct MountManifest {

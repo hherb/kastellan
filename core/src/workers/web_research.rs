@@ -250,13 +250,18 @@ pub fn web_research_broker_entry(
 /// * `env` forwards the host env ([`base_env`]) plus `KASTELLAN_MICROVM_DIR` and
 ///   `KASTELLAN_MICROVM_ROOTFS=web-research.ext4` so the backend boots the right rootfs.
 ///
-/// **Loopback-embed caveat:** in VM mode all egress tunnels through the host-side
-/// proxy, which SSRF-blocks loopback/private IPs. So the *default* embed endpoint
-/// (local Ollama `127.0.0.1:11434`) is unreachable → the query embed fails and the
-/// worker degrades to lexical ranking with an `embed_note` (never silent). For
-/// hybrid ranking in VM mode, point `KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT` at a
-/// **routable** embed host. Host mode is unaffected. A resolve-time operator
-/// warning for this loopback+VM misconfiguration is tracked in issue #429.
+/// **Loopback-embed caveat (this DIRECT VM entry only):** in VM mode all egress
+/// tunnels through the host-side proxy, which SSRF-blocks loopback/private IPs. So
+/// the *default* embed endpoint (local Ollama `127.0.0.1:11434`) is unreachable →
+/// the query embed fails and the worker degrades to lexical ranking with an
+/// `embed_note` (never silent). For hybrid ranking with this direct entry, point
+/// `KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT` at a **routable** embed host. Host mode
+/// is unaffected. A resolve-time operator warning for this loopback+VM
+/// misconfiguration is tracked in issue #429. **Remedy:** set
+/// `KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER=1` — the VM × broker entry
+/// ([`web_research_firecracker_broker_entry`]) reaches a **loopback** embed backend
+/// through the host-side broker (a second vsock channel), so hybrid ranking works
+/// in VM mode even against local Ollama.
 ///
 /// Linux-only: emits the `FirecrackerVm` backend variant.
 #[cfg(target_os = "linux")]
@@ -298,6 +303,62 @@ pub fn web_research_firecracker_entry(
         lockdown_shim: None,
         ephemeral_scratch: false,
         broker: None,
+    }
+}
+
+/// Build the [`ToolEntry`] for web-research running inside a Firecracker micro-VM
+/// **AND** reaching a host-side embed broker (VM × broker; opt-in via
+/// `USE_MICROVM=1` + `USE_EMBED_BROKER=1` + an embed endpoint). Combines the VM
+/// entry (empty `fs_read`, `FirecrackerVm` backend, force-routable) with broker
+/// mode: the embed host is **dropped** from `Net::Allowlist`, only the embed model
+/// env is injected (not the endpoint), and `broker: Some(Embed)` tells core's
+/// chokepoint to spawn the broker + bind its UDS. In the VM the broker rides a
+/// second vsock channel (port 1026); the FC plan rewrites the injected
+/// `KASTELLAN_EMBED_BROKER_UDS` to the in-guest relay path.
+///
+/// Because the broker runs host-side, this is the ONLY way a VM worker reaches a
+/// *loopback/local* embed backend for hybrid ranking (the egress proxy SSRF-blocks
+/// loopback). Linux-only.
+#[cfg(target_os = "linux")]
+pub fn web_research_firecracker_broker_entry(
+    binary: PathBuf,
+    image_dir: String,
+    endpoint: &str,
+    embed_endpoint: &str,
+    embed_model: Option<&str>,
+    allowlist: &[String],
+) -> ToolEntry {
+    let mut env = broker_env(endpoint, embed_model, allowlist);
+    env.push(("KASTELLAN_MICROVM_DIR".to_string(), image_dir));
+    env.push((
+        "KASTELLAN_MICROVM_ROOTFS".to_string(),
+        "web-research.ext4".to_string(),
+    ));
+    let policy = SandboxPolicy {
+        fs_read: vec![],
+        fs_write: vec![],
+        // NO embed host — the worker reaches the backend only through the broker.
+        net: Net::Allowlist(net_entries(endpoint, None, allowlist)),
+        cpu_ms: 15_000,
+        mem_mb: 512,
+        profile: Profile::WorkerNetClient,
+        env,
+        cpu_quota_pct: None,
+        tasks_max: None,
+        proxy_uds: None,  // set at spawn (force-routing)
+        broker_uds: None, // set at spawn (rewrite_policy_for_broker)
+        persistent_store: None,
+    };
+    ToolEntry {
+        binary,
+        policy,
+        wall_clock_ms: Some(60_000),
+        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+        sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm),
+        container_image: None,
+        lockdown_shim: None,
+        ephemeral_scratch: false,
+        broker: Some(crate::broker::BrokerSpec::embed(embed_endpoint)),
     }
 }
 
@@ -354,22 +415,24 @@ impl WorkerManifest for WebResearchManifest {
         {
             let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
             if use_microvm {
-                // VM × broker is deferred to Slice C (the broker runs host-side;
-                // a VM worker would reach it via the slice-4a vsock UDS bound as
-                // `broker_uds`). In v1 the VM path wins and the broker gate
-                // is ignored with a warning — the VM entry keeps its documented
-                // direct-embed behaviour (degrade-to-lexical for loopback).
-                if use_broker {
-                    tracing::warn!(
-                        "web-research: {USE_EMBED_BROKER_ENV}=1 ignored because \
-                         {USE_MICROVM_ENV}=1 (VM × broker unsupported in v1; \
-                         broker runs host-side only)"
-                    );
-                }
                 let binary = PathBuf::from(MICROVM_WORKER_BIN);
                 let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
                     .filter(|v| !v.trim().is_empty())
                     .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
+                // VM × broker: the broker runs host-side and the VM worker reaches it
+                // over the slice-4a vsock UDS (port 1026), so a loopback embed backend
+                // works in VM mode. `use_broker` guarantees an embed endpoint.
+                if use_broker {
+                    let embed_endpoint = embed_endpoint.as_deref().expect("use_broker implies Some");
+                    return Resolution::Register(web_research_firecracker_broker_entry(
+                        binary,
+                        image_dir,
+                        &endpoint,
+                        embed_endpoint,
+                        embed_model.as_deref(),
+                        &allowlist,
+                    ));
+                }
                 return Resolution::Register(web_research_firecracker_entry(
                     binary,
                     image_dir,
@@ -601,6 +664,76 @@ mod tests {
             Resolution::Register(_) => "Register",
             Resolution::Disabled { .. } => "Disabled",
             Resolution::Misconfigured { .. } => "Misconfigured",
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_vm_broker_drops_embed_host_sets_vm_backend_and_broker_spec() {
+        let get_env = |k: &str| match k {
+            "KASTELLAN_WEB_RESEARCH_USE_MICROVM" => Some("1".to_string()),
+            USE_EMBED_BROKER_ENV => Some("1".to_string()),
+            ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+            EMBED_ENDPOINT_ENV => Some("http://127.0.0.1:11434/v1/embeddings".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist =
+            |_t: &str| vec!["searx.example.org".to_string(), ".docs.example.org".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                // VM backend AND a broker spec (the two combined).
+                assert!(matches!(
+                    entry.sandbox_backend,
+                    Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+                ));
+                let spec = entry.broker.as_ref().expect("VM broker mode declares a broker spec");
+                assert_eq!(spec.kind, crate::broker::BrokerKind::Embed);
+                assert_eq!(spec.endpoint, "http://127.0.0.1:11434/v1/embeddings");
+                // Embed host ABSENT from egress; VM fs_read empty.
+                assert!(entry.policy.fs_read.is_empty(), "VM fs_read must be empty");
+                match &entry.policy.net {
+                    Net::Allowlist(hosts) => assert!(
+                        hosts.iter().all(|h| !h.starts_with("127.0.0.1")),
+                        "embed host must be absent from net: {hosts:?}"
+                    ),
+                    other => panic!("expected Net::Allowlist, got {other:?}"),
+                }
+                // Direct embed-endpoint env omitted; model present; broker_uds set at spawn.
+                assert!(!entry.policy.env.iter().any(|(k, _)| k == EMBED_ENDPOINT_ENV));
+                assert!(entry
+                    .policy
+                    .env
+                    .iter()
+                    .any(|(k, v)| k == EMBED_MODEL_ENV && v == "embeddinggemma"));
+                assert!(entry.policy.broker_uds.is_none());
+            }
+            other => panic!("expected Register(VM broker entry), got {}", outcome_label(&other)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_vm_without_broker_stays_direct_vm_entry() {
+        // USE_MICROVM without the broker gate => the existing direct/degrade VM entry.
+        let get_env = |k: &str| match k {
+            "KASTELLAN_WEB_RESEARCH_USE_MICROVM" => Some("1".to_string()),
+            ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["searx.example.org".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert!(matches!(
+                    entry.sandbox_backend,
+                    Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+                ));
+                assert!(entry.broker.is_none(), "no broker without the gate + endpoint");
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
         }
     }
 

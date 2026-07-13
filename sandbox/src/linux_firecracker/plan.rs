@@ -49,6 +49,13 @@ pub struct FirecrackerLaunchPlan {
     /// Slice 4a: the **host** egress-proxy UDS (from `policy.proxy_uds`) the
     /// launcher relays the guest's egress connections to. `Some` iff force-routed.
     pub egress_host_uds: Option<std::path::PathBuf>,
+    /// VM × broker: the guest-initiated broker vsock port, `Some(BROKER_VSOCK_PORT)`
+    /// iff the worker declares a broker (`policy.broker_uds` set). Drives the
+    /// ` kastellan.broker=1` cmdline token and the launcher's second reverse-relay.
+    pub broker_vsock_port: Option<u32>,
+    /// VM × broker: the **host** broker UDS (from `policy.broker_uds`) the launcher
+    /// relays the guest's broker connections to. `Some` iff broker-backed.
+    pub broker_host_uds: Option<std::path::PathBuf>,
     /// Slice 5b: the `PersistentStore` from the policy, if any. Copied here so
     /// the spawn can use `host_backing` when building or reusing the ext4 image.
     pub persistent_store: Option<crate::PersistentStore>,
@@ -81,6 +88,16 @@ pub const EGRESS_VSOCK_PORT: u32 = 1025;
 /// In-guest path the worker dials for egress (its `KASTELLAN_EGRESS_PROXY_UDS`)
 /// and the init binds the relay listener at. Shared with `kastellan-microvm-init`.
 const GUEST_EGRESS_UDS: &str = "/run/kastellan-egress.sock";
+/// Fixed vsock port for the guest→host embed-broker channel (VM × broker). A
+/// broker-backed VM worker (`policy.broker_uds` set) reaches its host-side broker
+/// over this THIRD guest-initiated vsock port; egress keeps `EGRESS_VSOCK_PORT`
+/// (1025) and the JSON-RPC bridge keeps `WORKER_VSOCK_PORT` (1024). Shared with
+/// `kastellan-microvm-init` (manual cross-crate contract, same as the others).
+pub const BROKER_VSOCK_PORT: u32 = 1026;
+/// In-guest path the worker dials for its broker and the init binds the broker
+/// relay listener at. One generic path suffices (a worker binds at most one broker
+/// socket). Shared with `kastellan-microvm-init`.
+const GUEST_BROKER_UDS: &str = "/run/kastellan-broker.sock";
 /// Kernel cmdline: serial console for *kernel* logs only (the launcher routes
 /// it to a log fd, never stdout); JSON-RPC rides vsock, not the console.
 const BASE_BOOT_ARGS: &str =
@@ -249,6 +266,16 @@ pub fn build_launch_plan(
         (Net::ProxyEgress, _) => (true, None, None),
     };
 
+    // VM × broker: a broker-backed worker (`broker_uds` set) reaches its host-side
+    // broker over a THIRD guest-initiated vsock port (1026). Independent of egress
+    // (proxy_uds / port 1025) and of the net/NIC decision — the broker UDS never
+    // changes the netns (mirrors bwrap's `broker_uds_is_bound_without_touching_netns`).
+    // Both channels can be present at once.
+    let (broker_vsock_port, broker_host_uds) = match &policy.broker_uds {
+        Some(uds) => (Some(BROKER_VSOCK_PORT), Some(uds.clone())),
+        None => (None, None),
+    };
+
     // Placeholder vsock UDS next to the rootfs image dir. Like `vsock_cid`, this
     // is a stand-in: `spawn_under_policy` ALWAYS replaces it with a per-spawn
     // unique path inside the spawn's private run dir before boot (the pure plan
@@ -343,6 +370,21 @@ pub fn build_launch_plan(
             None => env.push((K.to_string(), GUEST_EGRESS_UDS.to_string())),
         }
     }
+    // VM × broker: the worker's `*_BROKER_UDS` env carries the HOST broker UDS path
+    // (injected by core's `rewrite_policy_for_broker`), which is unreachable from
+    // inside the VM. Rewrite it to the in-guest relay path. KIND-AGNOSTIC: match by
+    // VALUE (the unique per-worker host UDS path) rather than a hardcoded broker-kind
+    // env key, so this crate stays broker-kind-agnostic and a future search-broker VM
+    // is free plumbing. `rewrite_policy_for_broker` guarantees exactly one env entry
+    // whose value equals `broker_uds` (a unique `<scratch>/<sock>` path — no collision).
+    if let Some(host_uds) = &broker_host_uds {
+        let host_str = host_uds.to_string_lossy();
+        for (_, v) in env.iter_mut() {
+            if *v == host_str {
+                *v = GUEST_BROKER_UDS.to_string();
+            }
+        }
+    }
     // Backend-only config — consumed host-side by resolve_image (this fn already
     // receives the resolved `image`), never by the worker. Don't forward into the
     // guest: it's noise there and costs scarce cmdline budget.
@@ -360,6 +402,9 @@ pub fn build_launch_plan(
         if policy.env.iter().any(|(k, v)| k == "KASTELLAN_MICROVM_EGRESS_SELFTEST" && v == "1") {
             boot_args.push_str(" kastellan.egress.selftest=1");
         }
+    }
+    if broker_vsock_port.is_some() {
+        boot_args.push_str(" kastellan.broker=1");
     }
     // Forward the worker program path so the guest init execs the right binary
     // (slice 4b: python-exec and web-fetch share one init). Hex-encoded so any
@@ -402,6 +447,8 @@ pub fn build_launch_plan(
         rw_image_path,
         egress_proxy_vsock_port,
         egress_host_uds,
+        broker_vsock_port,
+        broker_host_uds,
         persistent_store: policy.persistent_store.clone(),
         persistent_image_path: None,
         persistent_mount,
@@ -954,6 +1001,58 @@ mod tests {
         policy.env = vec![("KASTELLAN_MICROVM_EGRESS_SELFTEST".into(), "1".into())];
         let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
         assert!(plan.boot_args.contains(" kastellan.egress.selftest=1"));
+    }
+
+    /// A force-routed worker that ALSO declares a broker (`broker_uds` set) plus the
+    /// env `rewrite_policy_for_broker` would inject (the host UDS path under the
+    /// broker's kind-specific env key). Mirrors `forced_policy` + broker fields.
+    fn forced_broker_policy(egress_uds: &str, broker_uds: &str) -> SandboxPolicy {
+        let mut p = forced_policy(egress_uds);
+        p.broker_uds = Some(PathBuf::from(broker_uds));
+        p.env = vec![
+            ("KASTELLAN_EMBED_BROKER_UDS".into(), broker_uds.to_string()),
+            ("KASTELLAN_WEB_RESEARCH_EMBED_MODEL".into(), "embeddinggemma".into()),
+        ];
+        p
+    }
+
+    #[test]
+    fn broker_uds_sets_broker_channel_fields_and_cmdline() {
+        let policy = forced_broker_policy("/scratch/egress.sock", "/tmp/embed-77-0/embed.sock");
+        let plan = build_launch_plan(&policy, &img(), "/usr/local/bin/w", &[]).unwrap();
+        // Channel fields set from broker_uds.
+        assert_eq!(plan.broker_vsock_port, Some(BROKER_VSOCK_PORT));
+        assert_eq!(
+            plan.broker_host_uds.as_deref(),
+            Some(std::path::Path::new("/tmp/embed-77-0/embed.sock"))
+        );
+        // Cmdline token present.
+        assert!(plan.boot_args.contains(" kastellan.broker=1"), "boot_args: {}", plan.boot_args);
+        // Value-match override -> the worker sees the GUEST path, not the host path.
+        let uds = plan.env.iter().find(|(k, _)| k == "KASTELLAN_EMBED_BROKER_UDS").map(|(_, v)| v.as_str());
+        assert_eq!(uds, Some("/run/kastellan-broker.sock"));
+        // The unrelated env var is untouched.
+        assert!(plan
+            .env
+            .iter()
+            .any(|(k, v)| k == "KASTELLAN_WEB_RESEARCH_EMBED_MODEL" && v == "embeddinggemma"));
+    }
+
+    #[test]
+    fn no_broker_uds_leaves_broker_channel_unset() {
+        let plan = build_launch_plan(&forced_policy("/scratch/egress.sock"), &img(), "/w", &[]).unwrap();
+        assert_eq!(plan.broker_vsock_port, None);
+        assert_eq!(plan.broker_host_uds, None);
+        assert!(!plan.boot_args.contains("kastellan.broker"));
+    }
+
+    #[test]
+    fn broker_uds_does_not_change_net_or_nic_decision() {
+        // broker_uds must not flip net_enabled or the egress fields (orthogonal channel).
+        let policy = forced_broker_policy("/scratch/egress.sock", "/tmp/embed-77-0/embed.sock");
+        let plan = build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+        assert!(!plan.net_enabled, "force-routed net worker still has no NIC");
+        assert_eq!(plan.egress_proxy_vsock_port, Some(EGRESS_VSOCK_PORT));
     }
 
     #[test]
