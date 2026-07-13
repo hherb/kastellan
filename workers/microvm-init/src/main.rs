@@ -28,11 +28,14 @@ mod cmdline;
 mod guest;
 
 #[cfg(target_os = "linux")]
-use cmdline::{parse_egress_config, parse_mount_manifest};
+use cmdline::{
+    parse_broker_config, parse_egress_config, parse_mount_manifest, BROKER_VSOCK_PORT,
+    EGRESS_VSOCK_PORT, GUEST_BROKER_UDS, GUEST_EGRESS_UDS,
+};
 #[cfg(target_os = "linux")]
 use guest::{
     accept_host_bridge, apply_host_mounts, bring_loopback_up, egress_selftest, exec_worker,
-    mount_pseudo_fs, setup_egress_relay,
+    mount_pseudo_fs, mount_run_tmpfs, setup_relay,
 };
 
 // ── Entry points ──────────────────────────────────────────────────────────────
@@ -46,11 +49,20 @@ fn main() {
     let cmdline_for_mounts = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     apply_host_mounts(&parse_mount_manifest(&cmdline_for_mounts));
     let egress = parse_egress_config(&cmdline_for_mounts);
+    let broker = parse_broker_config(&cmdline_for_mounts);
+    // `/run` must be a writable tmpfs before ANY relay binds its UDS there — mount
+    // it exactly once (a second tmpfs mount would hide the first relay's socket).
+    if egress.enabled || broker.enabled {
+        mount_run_tmpfs();
+    }
     if egress.enabled {
-        setup_egress_relay();
+        setup_relay(GUEST_EGRESS_UDS, EGRESS_VSOCK_PORT);
         if egress.selftest {
             egress_selftest();
         }
+    }
+    if broker.enabled {
+        setup_relay(GUEST_BROKER_UDS, BROKER_VSOCK_PORT);
     }
     let conn_fd = accept_host_bridge();
     // Redirect the worker's stdio onto the vsock connection. A silent dup2

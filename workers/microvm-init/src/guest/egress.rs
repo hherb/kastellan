@@ -13,7 +13,7 @@
 //! `pub(crate)` (their sole caller is `crate::main`); the socket helpers stay
 //! module-private.
 
-use crate::cmdline::{EGRESS_VSOCK_PORT, GUEST_EGRESS_UDS, VMADDR_CID_HOST};
+use crate::cmdline::{GUEST_EGRESS_UDS, VMADDR_CID_HOST};
 use std::os::unix::io::RawFd;
 
 /// Slice 4a: stand up the in-guest egress relay. Mount a writable `/run` tmpfs,
@@ -24,8 +24,12 @@ use std::os::unix::io::RawFd;
 /// happens in the parent BEFORE `exec`, so the worker can never dial before the
 /// listener exists. Best-effort: a failure logs and returns (the worker then
 /// fails its first dial, surfaced as a normal error — PID1 is never aborted).
-pub(crate) fn setup_egress_relay() {
-    // `/run` must be a writable tmpfs (the rootfs is a read-only superblock).
+/// Mount a writable `/run` tmpfs (the rootfs is a read-only superblock). Call
+/// EXACTLY ONCE before binding any relay UDS: mounting tmpfs on `/run` twice
+/// stacks a second tmpfs over the first and hides the earlier relay's bound
+/// socket. Best-effort; a mount failure logs nothing here and the first UDS bind
+/// then fails loudly.
+pub(crate) fn mount_run_tmpfs() {
     let _ = std::fs::create_dir_all("/run");
     if let (Ok(src), Ok(tgt), Ok(fst)) = (
         std::ffi::CString::new("tmpfs"),
@@ -34,22 +38,34 @@ pub(crate) fn setup_egress_relay() {
     ) {
         unsafe { libc::mount(src.as_ptr(), tgt.as_ptr(), fst.as_ptr(), 0, std::ptr::null()) };
     }
-    let listener = match bind_unix_listener(GUEST_EGRESS_UDS) {
+}
+
+/// Stand up one in-guest reverse relay: bind the in-guest UDS the worker dials
+/// (`guest_uds`) and fork a child that pipes every accepted UDS connection to the
+/// host over `AF_VSOCK(VMADDR_CID_HOST, vsock_port)` (firecracker forwards that to
+/// the launcher's reverse-relay listener at `<base>_<vsock_port>`). Bind happens
+/// in the parent BEFORE `exec`, so the worker can never dial before the listener
+/// exists. Requires `/run` already mounted (see [`mount_run_tmpfs`]). Best-effort:
+/// a failure logs and returns (the worker then fails its first dial as a normal
+/// error — PID1 is never aborted). Generic over the port so egress (1025) and the
+/// embed broker (1026) share one implementation.
+pub(crate) fn setup_relay(guest_uds: &str, vsock_port: u32) {
+    let listener = match bind_unix_listener(guest_uds) {
         Some(fd) => fd,
         None => {
-            eprintln!("microvm-init: egress UDS bind failed; worker egress disabled");
+            eprintln!("microvm-init: relay UDS bind failed for {guest_uds}; channel disabled");
             return;
         }
     };
     // SAFETY: single-threaded PID1 here; fork is safe (no other threads to race).
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        eprintln!("microvm-init: fork for egress relay failed; worker egress disabled");
+        eprintln!("microvm-init: fork for relay {guest_uds} failed; channel disabled");
         unsafe { libc::close(listener) };
         return;
     }
     if pid == 0 {
-        egress_relay_loop(listener); // never returns
+        relay_loop(listener, vsock_port); // never returns
         unsafe { libc::_exit(0) };
     }
     // Parent: drop its copy of the listener fd so the exec'd worker can't inherit
@@ -135,9 +151,9 @@ fn connect_unix(path: &str) -> Option<RawFd> {
     }
 }
 
-/// Accept loop for the in-guest relay child: each UDS connection gets its own
-/// vsock connection to the host and a bidirectional byte pump.
-fn egress_relay_loop(listener: RawFd) {
+/// Accept loop for an in-guest relay child: each UDS connection gets its own
+/// vsock connection to the host on `vsock_port` and a bidirectional byte pump.
+fn relay_loop(listener: RawFd, vsock_port: u32) {
     loop {
         let conn = unsafe { libc::accept(listener, std::ptr::null_mut(), std::ptr::null_mut()) };
         if conn < 0 {
@@ -145,22 +161,22 @@ fn egress_relay_loop(listener: RawFd) {
             if err == libc::EINTR {
                 continue;
             }
-            eprintln!("microvm-init: egress relay accept failed (errno {err}); relay exiting");
+            eprintln!("microvm-init: relay accept failed (errno {err}); relay exiting");
             break;
         }
         // Service each accepted connection on its own thread so concurrent worker
-        // egress connections don't serialize behind one another (mirrors the
-        // host-side reverse-relay in `microvm-run::egress_relay`). A worker that
-        // opens two simultaneous proxy connections would otherwise hang the second
-        // in the listen backlog until the first closed.
-        std::thread::spawn(move || relay_one_connection(conn));
+        // connections don't serialize behind one another (mirrors the host-side
+        // reverse-relay in `microvm-run::egress_relay`). A worker that opens two
+        // simultaneous connections would otherwise hang the second in the listen
+        // backlog until the first closed.
+        std::thread::spawn(move || relay_one_connection(conn, vsock_port));
     }
 }
 
 /// Pump one accepted in-guest UDS connection to the host over vsock and back.
 /// Takes ownership of `conn` (closes it on return).
-fn relay_one_connection(conn: RawFd) {
-    match connect_host_vsock(VMADDR_CID_HOST, EGRESS_VSOCK_PORT) {
+fn relay_one_connection(conn: RawFd, vsock_port: u32) {
+    match connect_host_vsock(VMADDR_CID_HOST, vsock_port) {
         Some(vfd) => {
             // conn/vfd are RawFd (Copy); both directions run concurrently on
             // the same full-duplex sockets.

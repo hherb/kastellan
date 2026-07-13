@@ -13,7 +13,7 @@
 //! [`egress`].
 
 mod egress;
-pub(crate) use egress::{egress_selftest, setup_egress_relay};
+pub(crate) use egress::{egress_selftest, mount_run_tmpfs, setup_relay};
 
 use crate::cmdline::{
     anchor_of, bind_prep, parse_env_cmdline, parse_worker_args_cmdline, parse_worker_cmdline,
