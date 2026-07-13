@@ -270,7 +270,7 @@ impl Handler for WebSearchHandler {
                 let hit_count = hits.len();
                 Ok(serde_json::json!({ "query": p.query, "results": hits, "count": hit_count }))
             }
-            "web.search_batch" => {
+            kastellan_worker_web_common::WEB_SEARCH_BATCH_METHOD => {
                 let p: crate::batch::BatchParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::new(codes::INVALID_PARAMS, format!("bad params: {e}")))?;
                 crate::batch::validate_batch(&p.queries, self.max_batch)
