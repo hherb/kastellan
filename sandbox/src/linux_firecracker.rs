@@ -12,7 +12,7 @@
 mod plan;
 pub use plan::{
     build_launch_plan, render_firecracker_config, FirecrackerImage, FirecrackerLaunchPlan,
-    EGRESS_VSOCK_PORT, WORKER_VSOCK_PORT,
+    BROKER_VSOCK_PORT, EGRESS_VSOCK_PORT, WORKER_VSOCK_PORT,
 };
 
 mod mounts;
@@ -87,6 +87,15 @@ pub fn launcher_argv(
         argv.push("--egress-uds".into());
         argv.push(uds.to_string_lossy().into_owned());
         argv.push("--egress-vsock-port".into());
+        argv.push(port.to_string());
+    }
+    // VM × broker: when the worker declares a broker, the launcher also runs the
+    // broker reverse-relay (listen on `<vsock_uds>_<broker_port>`, forward to the
+    // host broker UDS).
+    if let (Some(uds), Some(port)) = (&plan.broker_host_uds, plan.broker_vsock_port) {
+        argv.push("--broker-uds".into());
+        argv.push(uds.to_string_lossy().into_owned());
+        argv.push("--broker-vsock-port".into());
         argv.push(port.to_string());
     }
     // Slice 5b-2: when a persistent store image is present (mkfs-once, stable
@@ -300,6 +309,36 @@ mod spawn_tests {
             argv.windows(2).any(|w| w[0] == "--egress-vsock-port" && w[1] == EGRESS_VSOCK_PORT.to_string()),
             "argv must pass --egress-vsock-port: {argv:?}"
         );
+    }
+
+    #[test]
+    fn launcher_argv_passes_broker_flags_when_broker_backed() {
+        // A force-routed worker that also declares a broker: the launcher argv must
+        // carry BOTH the egress pair and the broker pair (independent channels).
+        let policy = SandboxPolicy {
+            net: crate::Net::Allowlist(vec!["h:443".into()]),
+            proxy_uds: Some("/scratch/egress.sock".into()),
+            broker_uds: Some("/scratch/embed.sock".into()),
+            ..Default::default()
+        };
+        let plan = plan::build_launch_plan(
+            &policy,
+            &FirecrackerImage { kernel_path: "/k".into(), rootfs_path: "/var/r.ext4".into() },
+            "/w",
+            &[],
+        )
+        .unwrap();
+        let argv = launcher_argv(&plan, "/run/fc.json", "/run/fc.log", "/run");
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--broker-uds" && w[1] == "/scratch/embed.sock"),
+            "argv must pass --broker-uds <host broker path>: {argv:?}"
+        );
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--broker-vsock-port" && w[1] == BROKER_VSOCK_PORT.to_string()),
+            "argv must pass --broker-vsock-port: {argv:?}"
+        );
+        // Egress channel still present alongside the broker channel.
+        assert!(argv.windows(2).any(|w| w[0] == "--egress-uds" && w[1] == "/scratch/egress.sock"));
     }
 
     #[test]

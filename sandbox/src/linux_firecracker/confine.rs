@@ -119,6 +119,14 @@ pub fn build_vmm_jail_argv(
         a.extend(["--bind".into(), s.clone(), s]);
     }
 
+    // VM × broker: bind the host broker UDS rw so the confined launcher's broker
+    // reverse-relay can reach it (same as the egress-proxy UDS above). The broker
+    // rides its own vsock port, so --unshare-all's private netns is unaffected.
+    if let Some(uds) = &plan.broker_host_uds {
+        let s = uds.display().to_string();
+        a.extend(["--bind".into(), s.clone(), s]);
+    }
+
     // Slice 5b-2: the persistent-store ext4 image lives at a STABLE host path
     // OUTSIDE run_dir (unlike the slice-3 share images), so the run_dir bind does
     // not cover it. Bind it rw so the confined firecracker can open the drive.
@@ -265,6 +273,27 @@ mod tests {
             "/w", &[],
         ).unwrap();
         assert!(jail(&plan).join(" ").contains("--bind /scratch/egress.sock /scratch/egress.sock"));
+    }
+
+    #[test]
+    fn jail_binds_broker_uds_when_broker_backed() {
+        // No broker → no broker bind.
+        assert!(!jail(&deny_plan()).iter().any(|s| s == "/scratch/embed.sock"));
+        // A force-routed worker that also declares a broker → bind BOTH host UDSes rw.
+        let policy = SandboxPolicy {
+            net: Net::Allowlist(vec!["h:443".into()]),
+            proxy_uds: Some("/scratch/egress.sock".into()),
+            broker_uds: Some("/scratch/embed.sock".into()),
+            ..Default::default()
+        };
+        let plan = build_launch_plan(
+            &policy,
+            &FirecrackerImage { kernel_path: "/img/vmlinux".into(), rootfs_path: "/img/python-exec.ext4".into() },
+            "/w", &[],
+        ).unwrap();
+        let j = jail(&plan).join(" ");
+        assert!(j.contains("--bind /scratch/embed.sock /scratch/embed.sock"), "broker UDS bind: {j}");
+        assert!(j.contains("--bind /scratch/egress.sock /scratch/egress.sock"), "egress UDS still bound: {j}");
     }
 
     #[test]
