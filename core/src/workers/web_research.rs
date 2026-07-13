@@ -250,13 +250,18 @@ pub fn web_research_broker_entry(
 /// * `env` forwards the host env ([`base_env`]) plus `KASTELLAN_MICROVM_DIR` and
 ///   `KASTELLAN_MICROVM_ROOTFS=web-research.ext4` so the backend boots the right rootfs.
 ///
-/// **Loopback-embed caveat:** in VM mode all egress tunnels through the host-side
-/// proxy, which SSRF-blocks loopback/private IPs. So the *default* embed endpoint
-/// (local Ollama `127.0.0.1:11434`) is unreachable → the query embed fails and the
-/// worker degrades to lexical ranking with an `embed_note` (never silent). For
-/// hybrid ranking in VM mode, point `KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT` at a
-/// **routable** embed host. Host mode is unaffected. A resolve-time operator
-/// warning for this loopback+VM misconfiguration is tracked in issue #429.
+/// **Loopback-embed caveat (this DIRECT VM entry only):** in VM mode all egress
+/// tunnels through the host-side proxy, which SSRF-blocks loopback/private IPs. So
+/// the *default* embed endpoint (local Ollama `127.0.0.1:11434`) is unreachable →
+/// the query embed fails and the worker degrades to lexical ranking with an
+/// `embed_note` (never silent). For hybrid ranking with this direct entry, point
+/// `KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT` at a **routable** embed host. Host mode
+/// is unaffected. A resolve-time operator warning for this loopback+VM
+/// misconfiguration is tracked in issue #429. **Remedy:** set
+/// `KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER=1` — the VM × broker entry
+/// ([`web_research_firecracker_broker_entry`]) reaches a **loopback** embed backend
+/// through the host-side broker (a second vsock channel), so hybrid ranking works
+/// in VM mode even against local Ollama.
 ///
 /// Linux-only: emits the `FirecrackerVm` backend variant.
 #[cfg(target_os = "linux")]

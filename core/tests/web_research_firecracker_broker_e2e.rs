@@ -24,6 +24,12 @@
 //!   web-research VM) + `net_demo_firecracker_egress_e2e.rs` (real egress proxy over
 //!   vsock) + `embed_broker_egress_e2e.rs` (spawn_broker + hybrid assertion). Kept
 //!   out of this file until it is verified live so no unverified VM e2e body ships.
+//!   **DEFERRED to issue #445** (blocker: web-research needs a MITM egress proxy, but
+//!   the reusable `spawn_net_transport` is transparent-tunnel-only and the MITM
+//!   force-route spawn is `pub(crate)` — the live tier needs a production test-seam).
+//!   The refactored guest relay itself IS live-verified on real KVM: the existing
+//!   `web_research_firecracker_egress_e2e` boots a VM through it and the egress
+//!   channel delivers the CONNECT (`/run`-mount-once + relay generalization intact).
 
 use std::path::PathBuf;
 

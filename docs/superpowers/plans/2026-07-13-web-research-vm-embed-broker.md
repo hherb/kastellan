@@ -844,7 +844,23 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ### Task 7: DGX gate — build, compile the Linux code, run everything
 
-**Files:** none (verification only). Push the branch first so the DGX can fetch it.
+**Files:** `core/tests/web_research_firecracker_broker_e2e.rs` (author the live `#[ignore]`
+tier here — see below). Push the branch first so the DGX can fetch it.
+
+> **Reconciliation (Task-6 review follow-up):** Task 6 committed only the *hermetic* tier of
+> `web_research_firecracker_broker_e2e.rs` and deferred authoring the live
+> `vm_broker_ranks_hybrid_with_zero_embed_egress` tier to here, so it is written against the
+> real force-routing/broker/live-service APIs and verified on the DGX rather than guessed (the
+> repo's "no unverified VM e2e body" lesson). So Task 7 has a **Step 3.5: author the live tier**
+> before "run everything": compose it from `net_demo_firecracker_egress_e2e.rs` (real
+> egress-proxy sidecar via `spawn_net_transport`/`PersistentWorker` — it clones `base_policy` and
+> only rewrites egress fields, so a `broker_uds` set on the base survives) + `embed_broker_egress_e2e.rs`
+> (`spawn_broker` + `rewrite_policy_for_broker` + hybrid assertion). Assembly: `spawn_broker` →
+> `rewrite_policy_for_broker(web_research_firecracker_broker_entry(...).policy, uds, Embed)` as the
+> `NetTransportSpawn.base_policy` → `PersistentWorker::spawn` → `.call("web.research", …)` → assert
+> `ranking == "hybrid"` with the embed host absent from egress. If the live services (SearxNG +
+> Ollama) or the assembly don't converge, file it as a tracked follow-up issue (the egress-VM boot
+> regression check in Step 4 already proves the refactored guest relay boots a VM).
 
 - [ ] **Step 1: Push the branch + fetch on the DGX**
 
