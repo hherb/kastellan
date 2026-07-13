@@ -1,29 +1,23 @@
-//! Slice-4a in-guest egress relay: the guest→host reverse tunnel that lets a
-//! sandboxed worker reach the host egress proxy without a direct route. The
-//! worker dials the in-guest UDS ([`GUEST_EGRESS_UDS`]); this relay pipes every
-//! accepted connection to the host over `AF_VSOCK(VMADDR_CID_HOST,
-//! EGRESS_VSOCK_PORT)`, which firecracker forwards to the launcher's
-//! reverse-relay listener.
+//! In-guest reverse relays (slice 4a + VM × broker): guest→host tunnels that let
+//! a sandboxed worker reach host-side services without a direct route. A worker
+//! dials an in-guest UDS; the relay pipes every accepted connection to the host
+//! over `AF_VSOCK(VMADDR_CID_HOST, <port>)`, which firecracker forwards to the
+//! launcher's reverse-relay listener. Two channels ride this: egress
+//! ([`GUEST_EGRESS_UDS`] → the host egress proxy, port 1025) and the embed broker
+//! (the broker UDS → the host broker, port 1026); both share the generic
+//! [`setup_relay`].
 //!
 //! Provenance: lifted verbatim from the former single `main.rs` during the
 //! Item 9b prod-split (2026-07-06). The per-fn `#[cfg(target_os = "linux")]`
 //! gates were dropped — this whole module is reached only through
 //! `#[cfg(target_os = "linux")] mod guest;` in the crate root, so they were
-//! redundant. Only [`setup_egress_relay`] and [`egress_selftest`] are widened to
-//! `pub(crate)` (their sole caller is `crate::main`); the socket helpers stay
-//! module-private.
+//! redundant. Only [`mount_run_tmpfs`], [`setup_relay`], and [`egress_selftest`]
+//! are widened to `pub(crate)` (their sole caller is `crate::main`); the socket
+//! helpers stay module-private.
 
 use crate::cmdline::{GUEST_EGRESS_UDS, VMADDR_CID_HOST};
 use std::os::unix::io::RawFd;
 
-/// Slice 4a: stand up the in-guest egress relay. Mount a writable `/run` tmpfs,
-/// bind the in-guest UDS the worker dials, and fork a child that pipes every
-/// accepted UDS connection to the host over `AF_VSOCK(VMADDR_CID_HOST,
-/// EGRESS_VSOCK_PORT)` (firecracker forwards that to the launcher's reverse-relay
-/// listener at `<base>_<port>`, which dials the real host egress proxy). Bind
-/// happens in the parent BEFORE `exec`, so the worker can never dial before the
-/// listener exists. Best-effort: a failure logs and returns (the worker then
-/// fails its first dial, surfaced as a normal error — PID1 is never aborted).
 /// Mount a writable `/run` tmpfs (the rootfs is a read-only superblock). Call
 /// EXACTLY ONCE before binding any relay UDS: mounting tmpfs on `/run` twice
 /// stacks a second tmpfs over the first and hides the earlier relay's bound
