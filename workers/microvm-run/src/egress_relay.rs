@@ -138,4 +138,32 @@ mod tests {
         assert_eq!(&buf, b"PONG\n", "relay forwarded PING to the proxy and PONG back");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn two_relays_bind_distinct_suffix_paths() {
+        // Egress (1025) and broker (1026) reverse-relays share the vsock base UDS
+        // but must bind DISTINCT host listener paths (`<base>_<port>`), so neither
+        // hides the other. Proves the generic relay supports a second channel.
+        let dir = std::env::temp_dir().join(format!("kastellan-tworelay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("vsock.sock");
+        let egress_target = dir.join("egress-proxy.sock");
+        let broker_target = dir.join("broker.sock");
+        let e = spawn_egress_relay(
+            &base.to_string_lossy(),
+            1025,
+            egress_target.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let b = spawn_egress_relay(
+            &base.to_string_lossy(),
+            1026,
+            broker_target.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert_eq!(e, format!("{}_1025", base.to_string_lossy()));
+        assert_eq!(b, format!("{}_1026", base.to_string_lossy()));
+        assert_ne!(e, b, "the two channels must bind distinct listener paths");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

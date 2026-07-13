@@ -65,6 +65,16 @@ fn main() -> std::io::Result<()> {
         egress_relay::spawn_egress_relay(&vsock_uds, egress_port, proxy_uds)?;
     }
 
+    // VM × broker: start a SECOND reverse-relay for the embed-broker channel
+    // (port 1026), forwarding guest-initiated connections to the host broker UDS.
+    // Same generic relay as egress; started before boot so its listener exists
+    // before the guest dials. Independent of egress (different port + target).
+    if let Some((broker_uds, broker_port)) =
+        egress_relay::parse_egress_relay_args(arg("--broker-uds"), arg("--broker-vsock-port"))
+    {
+        egress_relay::spawn_egress_relay(&vsock_uds, broker_port, broker_uds)?;
+    }
+
     // Boot firecracker as our child; it creates the base vsock UDS once it is
     // up. Its stdout/stderr go to the log path via --log-path, so we keep our
     // own stdout pristine for JSON-RPC.
