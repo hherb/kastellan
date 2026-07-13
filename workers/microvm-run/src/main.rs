@@ -4,8 +4,8 @@
 
 mod boot;
 mod bridge;
-mod egress_relay;
 mod persistent_lock;
+mod reverse_relay;
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -60,9 +60,9 @@ fn main() -> std::io::Result<()> {
     // connection on that port). The detached accept loop relays each connection
     // to the host egress-proxy UDS.
     if let Some((proxy_uds, egress_port)) =
-        egress_relay::parse_egress_relay_args(arg("--egress-uds"), arg("--egress-vsock-port"))
+        reverse_relay::parse_reverse_relay_args(arg("--egress-uds"), arg("--egress-vsock-port"))
     {
-        egress_relay::spawn_egress_relay(&vsock_uds, egress_port, proxy_uds)?;
+        reverse_relay::spawn_reverse_relay(&vsock_uds, egress_port, proxy_uds)?;
     }
 
     // VM × broker: start a SECOND reverse-relay for the embed-broker channel
@@ -70,9 +70,9 @@ fn main() -> std::io::Result<()> {
     // Same generic relay as egress; started before boot so its listener exists
     // before the guest dials. Independent of egress (different port + target).
     if let Some((broker_uds, broker_port)) =
-        egress_relay::parse_egress_relay_args(arg("--broker-uds"), arg("--broker-vsock-port"))
+        reverse_relay::parse_reverse_relay_args(arg("--broker-uds"), arg("--broker-vsock-port"))
     {
-        egress_relay::spawn_egress_relay(&vsock_uds, broker_port, broker_uds)?;
+        reverse_relay::spawn_reverse_relay(&vsock_uds, broker_port, broker_uds)?;
     }
 
     // Boot firecracker as our child; it creates the base vsock UDS once it is

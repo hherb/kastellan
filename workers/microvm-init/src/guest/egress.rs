@@ -160,7 +160,7 @@ fn relay_loop(listener: RawFd, vsock_port: u32) {
         }
         // Service each accepted connection on its own thread so concurrent worker
         // connections don't serialize behind one another (mirrors the host-side
-        // reverse-relay in `microvm-run::egress_relay`). A worker that opens two
+        // reverse-relay in `microvm-run::reverse_relay`). A worker that opens two
         // simultaneous connections would otherwise hang the second in the listen
         // backlog until the first closed.
         std::thread::spawn(move || relay_one_connection(conn, vsock_port));
