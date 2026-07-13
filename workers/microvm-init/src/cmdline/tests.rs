@@ -174,6 +174,18 @@ fn parse_egress_config_reads_tokens() {
 }
 
 #[test]
+fn parse_broker_config_enabled_from_token() {
+    let c = parse_broker_config("console=ttyS0 kastellan.broker=1 kastellan.egress=1");
+    assert!(c.enabled, "kastellan.broker=1 must enable the broker channel");
+}
+
+#[test]
+fn parse_broker_config_disabled_when_token_absent() {
+    let c = parse_broker_config("console=ttyS0 kastellan.egress=1");
+    assert!(!c.enabled, "no kastellan.broker token => disabled");
+}
+
+#[test]
 fn bind_prep_directory_source() {
     assert_eq!(super::bind_prep(true, false), super::BindPrep::Dir);
 }
