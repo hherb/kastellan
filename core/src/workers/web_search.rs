@@ -36,12 +36,16 @@ const USE_BROKER_ENV: &str = "KASTELLAN_WEB_SEARCH_USE_BROKER";
 /// `web_search_batch_cap_env_matches_worker_contract` integration test instead.
 pub const MAX_BATCH_QUERIES_ENV: &str = "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES";
 /// JSON-RPC method the web-search worker exposes for batched search
-/// (`web.search_batch`). One source of truth for the string: the `tool_docs()`
+/// (`web.search_batch`). One source of truth within core: the `tool_docs()`
 /// advertisement below and the planner-summary cap
 /// (`scheduler::inner_loop::summary::ok_summary_cap`) both reference it, so a
 /// rename can't silently desync the advertised method from the cap that keys on
-/// it. `pub(crate)` because `summary.rs` (same crate) consumes it.
-pub(crate) const WEB_SEARCH_BATCH_METHOD: &str = "web.search_batch";
+/// it. The worker (a separate crate core can't import in its lib) matches on
+/// `web-common`'s `WEB_SEARCH_BATCH_METHOD`; the two are pinned equal by the
+/// `web_search_batch_method_matches_worker_contract` integration test, so a
+/// rename can't route every batch call to `METHOD_NOT_FOUND` either. `pub` for
+/// that cross-crate test to observe it.
+pub const WEB_SEARCH_BATCH_METHOD: &str = "web.search_batch";
 
 /// Derive the `Net::Allowlist` `host:port` entry from the endpoint URL. Returns
 /// an empty list if the endpoint is unset or unparseable — the worker fails

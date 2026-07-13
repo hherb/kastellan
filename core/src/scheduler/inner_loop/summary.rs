@@ -35,6 +35,13 @@ const BATCH_PER_QUERY_SUMMARY_BYTES: usize = 3 * 1024;
 /// i.e. 3/4 of the 32 KiB total — leaving headroom for other steps, which the
 /// oldest-first [`apply_summary_budget`] elides if the accumulated total is
 /// exceeded.
+///
+/// The ceiling is deliberately **independent** of the operator's batch-query cap
+/// (`KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES`, tunable up to 32): it bounds the
+/// planner-prompt cost regardless of how large a batch the operator allows. So
+/// raising the cap above 8 does not grow this head — instead per-query head
+/// visibility scales *down* (the front-loading trade-off documented on
+/// [`ok_summary_cap`]), which is the intended cost/coverage balance.
 const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
 
 /// Byte cap for a successful step's surfaced head, given its `method` and the
