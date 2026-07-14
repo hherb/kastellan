@@ -242,6 +242,13 @@ fn skip_if_no_microvm() -> bool {
     }
     match locate_microvm_run() {
         Some(bin) => {
+            // The Firecracker backend spawns the `kastellan-microvm-run` VMM
+            // launcher by bare name via a PATH lookup, so prepend its build dir
+            // to PATH (it is off the default SSH PATH — see the memory note
+            // `firecracker-e2e-stale-release-launcher`). This is a process-global
+            // mutation, but each integration-test binary is its own process and
+            // this is the sole test in the file, so there is no cross-test race;
+            // the `Once` also makes repeated calls idempotent.
             use std::sync::Once;
             static PATH_ONCE: Once = Once::new();
             PATH_ONCE.call_once(|| {
