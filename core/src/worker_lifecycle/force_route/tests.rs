@@ -11,10 +11,31 @@
 use super::*;
 use crate::tool_host::{ToolHostError, WorkerSpec};
 use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
+use std::sync::{Arc, Mutex};
 
 /// A no-op sink factory — proves the routing decision without a live pool.
 fn noop_sink_factory() -> DecisionSinkFactory {
     Box::new(|| Box::new(|_row| {}))
+}
+
+/// A backend that records the label of each spawn attempt and always fails
+/// (so no real child process is created). Two instances with distinct labels
+/// let a test assert *which* backend a given spawn hit. Shared by the
+/// egress-sidecar (#448 Task 1) and broker (#448 Task 2) seam tests.
+struct RecordingBackend {
+    label: &'static str,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+impl SandboxBackend for RecordingBackend {
+    fn spawn_under_policy(
+        &self,
+        _policy: &SandboxPolicy,
+        _program: &str,
+        _args: &[&str],
+    ) -> Result<std::process::Child, SandboxError> {
+        self.calls.lock().expect("recording mutex poisoned").push(self.label);
+        Err(SandboxError::Backend(self.label.into()))
+    }
 }
 
 /// Backend whose spawn always fails. The point of these tests is *which*
@@ -58,7 +79,7 @@ fn none_config_uses_plain_spawn_worker_even_for_allowlist() {
         net: Net::Allowlist(vec!["api.example.com:443".into()]),
         ..SandboxPolicy::default()
     };
-    let res = spawn_worker_maybe_forced(None, &FailBackend, &spec_for(&policy), "web-fetch");
+    let res = spawn_worker_maybe_forced(None, &FailBackend, &FailBackend, &spec_for(&policy), "web-fetch");
     // Plain spawn_worker surfaces the backend error as Sandbox.
     assert!(
         matches!(res, Err(ToolHostError::Sandbox(_))),
@@ -75,11 +96,46 @@ fn some_config_allowlist_routes_through_forced_spawn() {
     let scratch = tempfile::tempdir().expect("scratch root");
     let cfg = config_with(scratch.path().to_path_buf());
     let res =
-        spawn_worker_maybe_forced(Some(&cfg), &FailBackend, &spec_for(&policy), "web-fetch");
+        spawn_worker_maybe_forced(Some(&cfg), &FailBackend, &FailBackend, &spec_for(&policy), "web-fetch");
     // The forced path maps the sidecar-spawn failure to Io (fail-closed).
     assert!(
         matches!(res, Err(ToolHostError::Io(_))),
         "Some config + Allowlist must force-route (Io fail-closed error)"
+    );
+}
+
+/// #448: on the Sidecar path the egress-proxy sidecar spawns on
+/// `sidecar_backend` (the host default), NOT the worker `backend` (which may be
+/// a VM). Proven with two recording backends: the sidecar spawn is attempted
+/// first and fails, so only the host recorder is hit — the worker backend is
+/// never reached.
+#[test]
+fn forced_egress_sidecar_spawns_on_sidecar_backend_not_worker_backend() {
+    let policy = SandboxPolicy {
+        net: Net::Allowlist(vec!["api.example.com:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let scratch = tempfile::tempdir().expect("scratch root");
+    let cfg = config_with(scratch.path().to_path_buf());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker_backend = RecordingBackend { label: "vm-worker", calls: Arc::clone(&calls) };
+    let sidecar_backend = RecordingBackend { label: "host-sidecar", calls: Arc::clone(&calls) };
+
+    let res = spawn_worker_maybe_forced(
+        Some(&cfg),
+        &worker_backend,
+        &sidecar_backend,
+        &spec_for(&policy),
+        "web-fetch",
+    );
+
+    // Force-route path fails at the (recording) sidecar spawn → Io.
+    assert!(matches!(res, Err(ToolHostError::Io(_))), "forced path maps sidecar failure to Io");
+    let hit = calls.lock().unwrap().clone();
+    assert_eq!(
+        hit,
+        vec!["host-sidecar"],
+        "the egress sidecar must spawn on sidecar_backend (host); the worker backend must not be reached"
     );
 }
 
@@ -91,7 +147,7 @@ fn some_config_deny_net_uses_plain_spawn_worker() {
     };
     let scratch = tempfile::tempdir().expect("scratch root");
     let cfg = config_with(scratch.path().to_path_buf());
-    let res = spawn_worker_maybe_forced(Some(&cfg), &FailBackend, &spec_for(&policy), "shell");
+    let res = spawn_worker_maybe_forced(Some(&cfg), &FailBackend, &FailBackend, &spec_for(&policy), "shell");
     // Net::Deny is not force-routable → legacy spawn_worker (Sandbox error).
     assert!(
         matches!(res, Err(ToolHostError::Sandbox(_))),
@@ -136,7 +192,7 @@ fn browser_driver_force_routed_takes_sidecar_path() {
     let scratch = tempfile::tempdir().expect("scratch root");
     let cfg = config_with(scratch.path().to_path_buf());
     let res = spawn_worker_maybe_forced(
-        Some(&cfg), &FailBackend, &spec_for(&policy), BROWSER_DRIVER_TOOL);
+        Some(&cfg), &FailBackend, &FailBackend, &spec_for(&policy), BROWSER_DRIVER_TOOL);
     // Sidecar path maps the (failing) sidecar spawn to Io — proving it tried
     // to force-route the browser rather than refuse or run direct.
     assert!(matches!(res, Err(ToolHostError::Io(_))),

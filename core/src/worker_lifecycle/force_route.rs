@@ -224,9 +224,15 @@ pub(crate) fn force_route_action(
 ///
 /// `worker_name` is the logical tool name; it labels the sidecar's audit rows
 /// and (via the proxy's `KASTELLAN_EGRESS_PROXY_WORKER` env) its decision lines.
+///
+/// `sidecar_backend` is the host backend the egress-proxy sidecar runs under; it
+/// equals `backend` for host workers (byte-identical), but differs for a VM
+/// worker — the sidecar is the real-network egress boundary and always runs on
+/// the host while the worker boots in the VM (#448).
 pub(crate) fn spawn_worker_maybe_forced(
     force: Option<&ForceRoutingConfig>,
     backend: &dyn SandboxBackend,
+    sidecar_backend: &dyn SandboxBackend,
     spec: &WorkerSpec<'_>,
     worker_name: &str,
 ) -> Result<SupervisedWorker, ToolHostError> {
@@ -248,10 +254,11 @@ pub(crate) fn spawn_worker_maybe_forced(
             let pins_json = cfg.pins_for(&allowlist);
             let params = crate::egress::net_worker::NetWorkerSpawn {
                 backend,
-                // Host workers: the sidecar and worker share the same backend
-                // (there is no VM). VM force-routing passes a distinct host
-                // `sidecar_backend` at the call site (see the VM×broker e2e).
-                sidecar_backend: backend,
+                // The egress-proxy sidecar is the real-network egress boundary,
+                // so it ALWAYS runs on the host default backend even when
+                // `backend` is a VM. For host workers the caller passes the same
+                // backend for both (byte-identical). (#448)
+                sidecar_backend,
                 proxy_bin: &cfg.proxy_bin,
                 spec,
                 allowlist: &allowlist,
@@ -302,8 +309,10 @@ pub(crate) fn spawn_worker_with_optional_broker(
     worker_name: &str,
 ) -> Result<SupervisedWorker, ToolHostError> {
     let Some(broker_spec) = broker else {
-        // No broker requested → legacy path, byte-identical.
-        return spawn_worker_maybe_forced(force, backend, spec, worker_name);
+        // No broker requested → legacy path, byte-identical. (#448 Task 2 makes
+        // the broker + egress sidecar run on a distinct host `sidecar_backend`;
+        // until then this forwards `backend` for both.)
+        return spawn_worker_maybe_forced(force, backend, backend, spec, worker_name);
     };
     // Fail-closed: a broker-wanting worker must not spawn without a matching config.
     let cfg = broker_configs.for_kind(broker_spec.kind).ok_or_else(|| {
@@ -327,7 +336,7 @@ pub(crate) fn spawn_worker_with_optional_broker(
         wall_clock_ms: spec.wall_clock_ms,
     };
     // 3. Route as usual (force-routing may also apply; it preserves our fields).
-    let mut worker = spawn_worker_maybe_forced(force, backend, &brokered_spec, worker_name)?;
+    let mut worker = spawn_worker_maybe_forced(force, backend, backend, &brokered_spec, worker_name)?;
     // 4. Attach the broker so teardown is 1:1 with the worker.
     worker.broker = Some(sidecar);
     Ok(worker)
