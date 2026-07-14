@@ -79,24 +79,11 @@ fn main() -> std::io::Result<()> {
     // up. Its stdout/stderr go to the log path via --log-path, so we keep our
     // own stdout pristine for JSON-RPC.
     let fc_argv = boot::firecracker_argv(&firecracker_bin, &config, &log);
-    // DEBUG(#445, TEMPORARY — revert before merge): capture the guest serial
-    // console (ttyS0: microvm-init eprintln + worker stderr + kernel) instead of
-    // discarding it, so a VM×broker hang is diagnosable. Route to a run-dir file.
-    let (dbg_out, dbg_err) = match run_dir
-        .as_deref()
-        .and_then(|d| std::fs::File::create(format!("{d}/guest-console.log")).ok())
-    {
-        Some(f) => match f.try_clone() {
-            Ok(f2) => (Stdio::from(f), Stdio::from(f2)),
-            Err(_) => (Stdio::null(), Stdio::null()),
-        },
-        None => (Stdio::null(), Stdio::null()),
-    };
     let mut fc = Command::new(&fc_argv[0])
         .args(&fc_argv[1..])
         .stdin(Stdio::null())
-        .stdout(dbg_out)
-        .stderr(dbg_err)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()?;
 
     // Build the teardown guard BEFORE connecting so a panic (or early return) in
