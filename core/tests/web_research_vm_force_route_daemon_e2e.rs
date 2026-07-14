@@ -251,18 +251,28 @@ async fn daemon_force_routes_vm_web_research_through_host_sidecar_and_broker() {
         "expected hybrid ranking via the host broker over vsock 1026 (embed host absent from egress)"
     );
 
-    // Zero embed egress: the embed host must never appear in an egress decision.
-    let embed_host = url_host(&embed_endpoint);
+    // Zero embed egress: the embed backend's host:port must never appear in an
+    // egress decision. Match host AND port — on the loopback DGX setup SearxNG
+    // (127.0.0.1:8888) shares the embed host (127.0.0.1:11434), so a bare-host
+    // check would false-positive on SearxNG; only the embed PORT distinguishes it.
+    let embed_url = url::Url::parse(&embed_endpoint).ok();
+    let embed_host = embed_url
+        .as_ref()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let embed_port = embed_url.as_ref().and_then(url::Url::port).unwrap_or(11434);
+    let host_needle = format!("\"host\":\"{embed_host}\"");
+    let port_needle = format!("\"port\":{embed_port}");
     let leaked: Vec<_> = decisions
         .lock()
         .unwrap()
         .iter()
-        .filter(|d| d.contains(&embed_host))
+        .filter(|d| d.contains(&host_needle) && d.contains(&port_needle))
         .cloned()
         .collect();
     assert!(
         leaked.is_empty(),
-        "embed host {embed_host} must be absent from egress decisions; leaked: {leaked:?}"
+        "embed backend {embed_host}:{embed_port} must be absent from egress decisions; leaked: {leaked:?}"
     );
 
     let _ = handle.worker_mut().kill();
