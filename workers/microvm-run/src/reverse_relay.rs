@@ -19,6 +19,16 @@ pub fn guest_initiated_uds_path(base_uds: &str, port: u32) -> String {
     format!("{base_uds}_{port}")
 }
 
+/// DEBUG(#445, TEMPORARY — revert before merge): append a diagnostic line to a
+/// run-dir file (microvm-run's stderr is piped by the backend, so a file is the
+/// only reliably-readable channel).
+fn dbg_log(path: &str, msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
 /// Parse the optional reverse-relay args (a `--*-uds` + `--*-vsock-port` pair);
 /// `Some((target_uds, port))` only when both a UDS and a parseable port are
 /// present. Shared by the egress and broker channels.
@@ -40,13 +50,25 @@ pub fn spawn_reverse_relay(
     let path = guest_initiated_uds_path(base_uds, port);
     let _ = std::fs::remove_file(&path); // clear a stale socket so bind() succeeds
     let listener = UnixListener::bind(&path)?;
+    // DEBUG(#445, TEMPORARY — revert before merge): trace each accepted
+    // guest-initiated connection + its target dial, per port, to a run-dir file.
+    let dbg = format!("{path}.dbg");
+    dbg_log(&dbg, &format!("reverse-relay listening port={port} target={target_uds}"));
     thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(guest) = conn else { continue };
+            dbg_log(&dbg, &format!("ACCEPT port={port}"));
             let target_uds = target_uds.clone();
+            let dbg = dbg.clone();
             thread::spawn(move || match UnixStream::connect(&target_uds) {
-                Ok(target) => relay_bidirectional(guest, target),
-                Err(e) => eprintln!("microvm-run relay: dial target {target_uds} failed: {e}"),
+                Ok(target) => {
+                    dbg_log(&dbg, &format!("CONNECTED target={target_uds}"));
+                    relay_bidirectional(guest, target)
+                }
+                Err(e) => {
+                    dbg_log(&dbg, &format!("DIAL-FAIL target={target_uds}: {e}"));
+                    eprintln!("microvm-run relay: dial target {target_uds} failed: {e}")
+                }
             });
         }
     });
