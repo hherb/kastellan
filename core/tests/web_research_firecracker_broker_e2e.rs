@@ -393,15 +393,24 @@ async fn brokered_vm_worker_ranks_hybrid_over_vsock_with_zero_embed_egress() {
     // injects KASTELLAN_EMBED_BROKER_UDS).
     let policy = rewrite_policy_for_broker(entry.policy, &broker_uds, BrokerKind::Embed);
 
-    // Zero-embed-egress, re-asserted on the live policy (fail-closed on a
-    // non-Allowlist variant — matches the hermetic pin).
-    match &policy.net {
-        Net::Allowlist(entries) => assert!(
-            entries.iter().all(|e| !e.starts_with("127.0.0.1:11434")),
-            "embed host must be absent from egress; got {entries:?}"
-        ),
+    // The egress-proxy allowlist mirrors production: `spawn_worker_maybe_forced`
+    // derives it from the worker's `policy.net`, so `net_entries` put the
+    // SearxNG endpoint authority (`127.0.0.1:8888` — the literal the proxy's
+    // loopback carve-out needs) and the content host here, with the embed host
+    // already dropped. Passing a hand-built bare-host allowlist instead would
+    // diverge from production AND miss the port the carve-out matches on. Also
+    // re-assert zero-embed-egress here (fail-closed on a non-Allowlist variant
+    // — matches the hermetic pin).
+    let proxy_allowlist: Vec<String> = match &policy.net {
+        Net::Allowlist(entries) => {
+            assert!(
+                entries.iter().all(|e| !e.starts_with("127.0.0.1:11434")),
+                "embed host must be absent from egress; got {entries:?}"
+            );
+            entries.clone()
+        }
         other => panic!("expected Net::Allowlist in broker mode, got {other:?}"),
-    }
+    };
 
     // Force-route the VM worker onto a HOST MITM egress sidecar. broker_uds
     // survives the force-route clone, so both vsock channels (1025 egress, 1026
