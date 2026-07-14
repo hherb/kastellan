@@ -421,21 +421,28 @@ async fn brokered_vm_worker_ranks_hybrid_over_vsock_with_zero_embed_egress() {
         policy: &policy,
         program: &worker_str,
         args: &[],
-        wall_clock_ms: Some(60_000),
+        // VM mode is slower than host mode (boot + vsock + MITM proxy + a
+        // multi-page fetch + a brokered embed), so give the dispatch generous
+        // headroom over the host-mode 60s.
+        wall_clock_ms: Some(120_000),
     };
     let params = NetWorkerSpawn {
         backend: &*vm_backend,           // worker → VM
         sidecar_backend: &*host_backend, // egress proxy → host
         proxy_bin: &proxy_bin,
         spec: &spec,
-        allowlist: &allowlist,
+        allowlist: &proxy_allowlist,
         worker_name: "web-research",
         secret_fingerprints: &[],
         cert_pins_json: None,
         disable_mitm: false, // MITM: deliver the per-instance CA into the VM
     };
-    let mut worker = spawn_forced_net_worker(&params, std::path::Path::new("/tmp"), |_row| {})
-        .expect("force-route the VM web-research worker onto a host MITM egress sidecar");
+    // Print each egress decision (allow/deny + host) so a live-tier failure is
+    // diagnosable — which CONNECTs the proxy saw and whether any were blocked.
+    let mut worker = spawn_forced_net_worker(&params, std::path::Path::new("/tmp"), |row| {
+        eprintln!("[egress-decision] {} {}", row.action, row.payload);
+    })
+    .expect("force-route the VM web-research worker onto a host MITM egress sidecar");
 
     let result = dispatch(
         &pool,
