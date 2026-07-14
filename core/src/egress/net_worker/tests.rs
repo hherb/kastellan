@@ -117,6 +117,7 @@ fn spawn_net_worker_fails_closed_when_sidecar_unavailable() {
     let allowlist = ["api.example.com:443".to_string()];
     let params = NetWorkerSpawn {
         backend: &backend,
+        sidecar_backend: &backend,
         proxy_bin: Path::new("/nonexistent/egress-proxy"),
         spec: &spec,
         allowlist: &allowlist,
@@ -150,6 +151,7 @@ fn spawn_forced_net_worker_fails_closed_when_sidecar_unavailable() {
     let allowlist = ["api.example.com:443".to_string()];
     let params = NetWorkerSpawn {
         backend: &backend,
+        sidecar_backend: &backend,
         proxy_bin: Path::new("/nonexistent/egress-proxy"),
         spec: &spec,
         allowlist: &allowlist,
@@ -191,6 +193,7 @@ fn spawn_forced_net_worker_cleans_scratch_on_failure() {
     let allowlist = ["api.example.com:443".to_string()];
     let params = NetWorkerSpawn {
         backend: &backend,
+        sidecar_backend: &backend,
         proxy_bin: Path::new("/nonexistent/egress-proxy"),
         spec: &spec,
         allowlist: &allowlist,
@@ -221,6 +224,7 @@ fn net_worker_spawn_struct_carries_pins_field() {
     let allowlist = ["example.com".to_string()];
     let params = NetWorkerSpawn {
         backend: &backend,
+        sidecar_backend: &backend,
         proxy_bin: Path::new("/nonexistent/proxy-bin"),
         spec: &spec,
         allowlist: &allowlist,
@@ -251,4 +255,72 @@ fn provision_empty_writes_empty_list() {
     provision_secret_hashes(dir.path(), &[]).expect("write");
     let s = std::fs::read_to_string(dir.path().join("secret_hashes.json")).unwrap();
     assert!(parse_hashes(&s).is_empty());
+}
+
+/// A backend that records each spawn attempt and then refuses. Lets a test
+/// observe WHICH backend `spawn_net_worker` used for the sidecar vs the worker
+/// without a real sandbox — the refusal stops the flow cheaply.
+struct RecordingBackend {
+    calls: std::sync::atomic::AtomicUsize,
+}
+impl RecordingBackend {
+    fn new() -> Self {
+        Self { calls: std::sync::atomic::AtomicUsize::new(0) }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+impl SandboxBackend for RecordingBackend {
+    fn spawn_under_policy(
+        &self,
+        _policy: &SandboxPolicy,
+        _program: &str,
+        _args: &[&str],
+    ) -> Result<std::process::Child, SandboxError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(SandboxError::Backend("test: spawn refused (recorded)".into()))
+    }
+}
+
+#[test]
+fn spawn_net_worker_spawns_sidecar_under_sidecar_backend() {
+    // The egress-proxy sidecar must spawn under `sidecar_backend` (the host),
+    // NOT `backend` (which may be a VM). The sidecar is spawned first; refused
+    // here, it fails closed before the worker backend is ever touched — so
+    // `sidecar_backend` sees exactly one spawn (the sidecar) and the worker
+    // `backend` sees none. This pins the host-sidecar / VM-worker split the live
+    // VM×broker e2e depends on.
+    let sidecar_backend = RecordingBackend::new();
+    let worker_backend = RecordingBackend::new();
+    let policy = SandboxPolicy {
+        net: Net::Allowlist(vec!["api.example.com:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let spec = allowlist_spec(&policy);
+    let allowlist = ["api.example.com:443".to_string()];
+    let params = NetWorkerSpawn {
+        backend: &worker_backend,
+        sidecar_backend: &sidecar_backend,
+        proxy_bin: Path::new("/nonexistent/egress-proxy"),
+        spec: &spec,
+        allowlist: &allowlist,
+        worker_name: "web-research",
+        secret_fingerprints: &[],
+        cert_pins_json: None,
+        disable_mitm: false,
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let res = spawn_net_worker(&params, scratch.path(), |_row| {});
+    assert!(res.is_err(), "refused sidecar => fail-closed, no worker");
+    assert_eq!(
+        sidecar_backend.calls(),
+        1,
+        "the sidecar must spawn under sidecar_backend"
+    );
+    assert_eq!(
+        worker_backend.calls(),
+        0,
+        "the worker backend must not be touched when the sidecar fails"
+    );
 }

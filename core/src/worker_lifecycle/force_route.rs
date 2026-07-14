@@ -248,6 +248,10 @@ pub(crate) fn spawn_worker_maybe_forced(
             let pins_json = cfg.pins_for(&allowlist);
             let params = crate::egress::net_worker::NetWorkerSpawn {
                 backend,
+                // Host workers: the sidecar and worker share the same backend
+                // (there is no VM). VM force-routing passes a distinct host
+                // `sidecar_backend` at the call site (see the VM×broker e2e).
+                sidecar_backend: backend,
                 proxy_bin: &cfg.proxy_bin,
                 spec,
                 allowlist: &allowlist,

@@ -287,6 +287,7 @@ async fn render_in_jail_forced(
     };
     let params = NetWorkerSpawn {
         backend: backend.as_ref(),
+        sidecar_backend: backend.as_ref(),
         proxy_bin,
         spec: &spec,
         allowlist: sidecar_allowlist,

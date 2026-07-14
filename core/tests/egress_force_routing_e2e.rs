@@ -150,6 +150,7 @@ fn forced_coupling_enforces_allowlist_and_ingests_decisions() {
     let allowlist = ["127.0.0.1".to_string()];
     let params = NetWorkerSpawn {
         backend: backend.as_ref(),
+        sidecar_backend: backend.as_ref(),
         proxy_bin: &proxy,
         spec: &spec,
         allowlist: &allowlist,
@@ -260,6 +261,7 @@ fn forced_coupling_worker_has_no_direct_route() {
     let allowlist = ["example.com:443".to_string()];
     let params = NetWorkerSpawn {
         backend: backend.as_ref(),
+        sidecar_backend: backend.as_ref(),
         proxy_bin: &proxy,
         spec: &spec,
         allowlist: &allowlist,
@@ -384,6 +386,7 @@ fn real_mitm_fetch_through_sidecar() {
     let allowlist = ["example.com:443".to_string()];
     let params = NetWorkerSpawn {
         backend: backend.as_ref(),
+        sidecar_backend: backend.as_ref(),
         proxy_bin: &proxy,
         spec: &spec,
         allowlist: &allowlist,
