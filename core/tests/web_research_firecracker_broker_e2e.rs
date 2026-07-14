@@ -332,11 +332,14 @@ async fn brokered_vm_worker_ranks_hybrid_over_vsock_with_zero_embed_egress() {
         return;
     };
 
-    let worker_path = workspace_target_binary("kastellan-worker-web-research");
-    if !worker_path.exists() {
-        eprintln!("\n[SKIP] web-research worker binary not built; run cargo build --workspace\n");
-        return;
-    }
+    // The web-research worker runs FROM THE ROOTFS at this baked in-guest path —
+    // NOT the host `target/debug` binary, which does not exist inside the guest
+    // (passing the host path bakes it into `kastellan.worker=`, the guest execv
+    // fails ENOENT, PID1 panics). `skip_if_no_microvm` already gates on the rootfs
+    // (built from that binary), so no host-path existence check is needed here.
+    // (Contrast host-mode e2es, which DO run the host `workspace_target_binary`.)
+    let worker_in_guest = "/usr/local/bin/kastellan-worker-web-research";
+    // The embed broker runs host-side, so it IS the host binary.
     let broker_bin = workspace_target_binary("kastellan-worker-embed-broker");
     if !broker_bin.exists() {
         eprintln!("\n[SKIP] embed-broker binary not built; run cargo build --workspace\n");
@@ -369,7 +372,7 @@ async fn brokered_vm_worker_ranks_hybrid_over_vsock_with_zero_embed_egress() {
     // VM×broker manifest entry: embed host absent from egress, broker spec
     // carries the backend the broker forwards to.
     let entry = web_research_firecracker_broker_entry(
-        worker_path.clone(),
+        PathBuf::from(worker_in_guest),
         image_dir(),
         &searx_endpoint,
         &embed_endpoint,
@@ -416,10 +419,9 @@ async fn brokered_vm_worker_ranks_hybrid_over_vsock_with_zero_embed_egress() {
     // survives the force-route clone, so both vsock channels (1025 egress, 1026
     // broker) are live. disable_mitm: false → the sidecar delivers its
     // per-instance CA in-guest (the web-research rootfs ships no system CA).
-    let worker_str = worker_path.to_string_lossy().into_owned();
     let spec = WorkerSpec {
         policy: &policy,
-        program: &worker_str,
+        program: worker_in_guest,
         args: &[],
         // VM mode is slower than host mode (boot + vsock + MITM proxy + a
         // multi-page fetch + a brokered embed), so give the dispatch generous
