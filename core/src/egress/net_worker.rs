@@ -30,6 +30,12 @@ use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec
 /// these keeps both spawn fns at a sane arity without `#[allow(too_many_arguments)]`.
 pub struct NetWorkerSpawn<'a> {
     pub backend: &'a dyn SandboxBackend,
+    /// The HOST backend the egress-proxy sidecar runs under. The sidecar is the
+    /// real-network egress boundary (`Net::ProxyEgress` + a real host route), so
+    /// it ALWAYS runs on the host even when `backend` is a VM. On non-VM paths
+    /// pass the same backend for both. Mirrors
+    /// [`super::persistent_net::NetTransportSpawn::sidecar_backend`].
+    pub sidecar_backend: &'a dyn SandboxBackend,
     pub proxy_bin: &'a Path,
     pub spec: &'a WorkerSpec<'a>,
     pub allowlist: &'a [String],
@@ -190,9 +196,12 @@ pub fn spawn_net_worker<F>(
 where
     F: FnMut(EgressAuditRow) + Send + 'static,
 {
-    // 1. Sidecar first; fail-closed on its Err (no worker without a proxy).
+    // 1. Sidecar first; fail-closed on its Err (no worker without a proxy). The
+    //    sidecar runs on the HOST backend (`sidecar_backend`) — it is the
+    //    real-network egress boundary — while the worker (below) runs under
+    //    `backend`, which may be a VM.
     let mut sidecar = spawn_sidecar(
-        params.backend,
+        params.sidecar_backend,
         params.proxy_bin,
         params.allowlist,
         scratch,
