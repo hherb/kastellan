@@ -275,6 +275,7 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
             self.force.as_deref(),
             &self.broker_configs,
             backend.as_ref(),
+            backend.as_ref(),
             &spec,
             entry.broker.as_ref(),
             tool_name,

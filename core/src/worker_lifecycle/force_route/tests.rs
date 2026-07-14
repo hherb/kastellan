@@ -488,6 +488,7 @@ fn broker_requested_without_config_fails_closed_before_spawn() {
         None,                     // no force-routing
         &BrokerConfigs::default(), // no broker config for any kind → fail closed
         &FailBackend,
+        &FailBackend,
         &spec,
         Some(&broker_spec),
         "web-research",
@@ -504,6 +505,56 @@ fn broker_requested_without_config_fails_closed_before_spawn() {
     }
 }
 
+/// #448: the embed broker spawns on `sidecar_backend` (the trusted host
+/// sidecar), NOT the worker `backend` (which may be a VM the worker reaches the
+/// broker from over vsock 1026). The broker is spawned first and fails
+/// (recording backend), so only the host recorder is hit.
+#[test]
+fn broker_spawns_on_sidecar_backend_not_worker_backend() {
+    use crate::broker::{BrokerConfig, BrokerConfigs, BrokerKind, BrokerSpec};
+
+    let policy = SandboxPolicy {
+        net: Net::Allowlist(vec!["searx.example.org:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let scratch = tempfile::tempdir().expect("broker scratch root");
+    let broker_cfg = BrokerConfig::new(
+        BrokerKind::Embed,
+        PathBuf::from("/nonexistent/embed-broker"),
+        scratch.path().to_path_buf(),
+    );
+    let broker_configs = BrokerConfigs { embed: Some(Arc::new(broker_cfg)), ..Default::default() };
+    let broker_spec = BrokerSpec::embed("http://127.0.0.1:11434/v1/embeddings");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker_backend = RecordingBackend { label: "vm-worker", calls: Arc::clone(&calls) };
+    let sidecar_backend = RecordingBackend { label: "host-sidecar", calls: Arc::clone(&calls) };
+
+    let res = spawn_worker_with_optional_broker(
+        None, // no force-routing — the broker spawn is what we're testing
+        &broker_configs,
+        &worker_backend,
+        &sidecar_backend,
+        &spec_for(&policy),
+        Some(&broker_spec),
+        "web-research",
+    );
+
+    // The broker is spawned first and fails (recording backend). Unlike the
+    // egress sidecar (whose spawn error `spawn_net_worker` wraps in `Io`),
+    // `spawn_broker` propagates the raw `SandboxError` via `?` → `Sandbox`.
+    assert!(
+        matches!(res, Err(ToolHostError::Sandbox(_))),
+        "broker spawn failure must propagate the backend's SandboxError"
+    );
+    let hit = calls.lock().unwrap().clone();
+    assert_eq!(
+        hit,
+        vec!["host-sidecar"],
+        "the embed broker must spawn on sidecar_backend (host); the worker backend must not be reached"
+    );
+}
+
 /// No broker requested → byte-identical pass-through to the legacy path
 /// (Sandbox error for an allowlist worker with no force-routing).
 #[test]
@@ -515,6 +566,7 @@ fn no_broker_requested_is_passthrough() {
     let res = spawn_worker_with_optional_broker(
         None,
         &BrokerConfigs::default(),
+        &FailBackend,
         &FailBackend,
         &spec_for(&policy),
         None, // no broker

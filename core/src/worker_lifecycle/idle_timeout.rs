@@ -495,6 +495,7 @@ pub(crate) async fn acquire_impl(
         force,
         broker_configs,
         sandbox,
+        sandbox,
         &spec,
         entry.broker.as_ref(),
         tool_name,

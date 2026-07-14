@@ -299,20 +299,24 @@ pub(crate) fn spawn_worker_maybe_forced(
 ///
 /// When `broker` is `None` this is a **byte-identical** pass-through to
 /// [`spawn_worker_maybe_forced`].
+///
+/// `sidecar_backend` is the host backend both the embed broker AND the egress
+/// sidecar run under. It equals `backend` for host workers (byte-identical); for
+/// a VM worker it is the host bwrap/Seatbelt backend, so the trusted sidecars
+/// always run on the host while the worker boots in the VM (#448).
 #[allow(clippy::too_many_arguments)] // mirrors spawn_worker_maybe_forced + the broker configs
 pub(crate) fn spawn_worker_with_optional_broker(
     force: Option<&ForceRoutingConfig>,
     broker_configs: &BrokerConfigs,
     backend: &dyn SandboxBackend,
+    sidecar_backend: &dyn SandboxBackend,
     spec: &WorkerSpec<'_>,
     broker: Option<&BrokerSpec>,
     worker_name: &str,
 ) -> Result<SupervisedWorker, ToolHostError> {
     let Some(broker_spec) = broker else {
-        // No broker requested → legacy path, byte-identical. (#448 Task 2 makes
-        // the broker + egress sidecar run on a distinct host `sidecar_backend`;
-        // until then this forwards `backend` for both.)
-        return spawn_worker_maybe_forced(force, backend, backend, spec, worker_name);
+        // No broker requested → legacy path, byte-identical.
+        return spawn_worker_maybe_forced(force, backend, sidecar_backend, spec, worker_name);
     };
     // Fail-closed: a broker-wanting worker must not spawn without a matching config.
     let cfg = broker_configs.for_kind(broker_spec.kind).ok_or_else(|| {
@@ -324,7 +328,10 @@ pub(crate) fn spawn_worker_with_optional_broker(
         )))
     })?;
     // 1. Broker first (fail-closed on its Err — its scratch is cleaned there).
-    let (sidecar, uds) = spawn_broker(cfg, broker_spec, backend)?;
+    //    The embed broker is a trusted HOST sidecar the worker reaches over
+    //    vsock 1026 in VM mode, so it runs on `sidecar_backend` — the host
+    //    default — never inside a VM. (#448)
+    let (sidecar, uds) = spawn_broker(cfg, broker_spec, sidecar_backend)?;
     // 2. Rewrite the policy onto the broker UDS. If spawning the worker below
     //    fails, `sidecar` drops here → its Drop kills the broker + removes its
     //    scratch (fail-closed, no orphan).
@@ -336,7 +343,7 @@ pub(crate) fn spawn_worker_with_optional_broker(
         wall_clock_ms: spec.wall_clock_ms,
     };
     // 3. Route as usual (force-routing may also apply; it preserves our fields).
-    let mut worker = spawn_worker_maybe_forced(force, backend, backend, &brokered_spec, worker_name)?;
+    let mut worker = spawn_worker_maybe_forced(force, backend, sidecar_backend, &brokered_spec, worker_name)?;
     // 4. Attach the broker so teardown is 1:1 with the worker.
     worker.broker = Some(sidecar);
     Ok(worker)
