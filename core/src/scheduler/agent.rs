@@ -39,7 +39,38 @@ pub trait PlanFormulator: Send + Sync {
         &self,
         ctx: &TaskContext,
     ) -> Result<(Plan, FormulationMeta), AgentError>;
+
+    /// Forced-synthesis variant of [`formulate_plan`]: the same prompt
+    /// assembly, but the agent is instructed to STOP gathering and emit a
+    /// terminal `task_complete` answer synthesized from the observations
+    /// already in `ctx.plans_so_far`. The inner loop calls this for the
+    /// single fallback turn it spends when the plan-iteration cap is reached
+    /// with observations in hand (see [`super::inner_loop::run_to_terminal`]).
+    ///
+    /// The default delegates to `formulate_plan` so scripted test doubles —
+    /// which return plans by call order and ignore `ctx` — need no special
+    /// handling; the production [`RouterAgent`] overrides it to inject the
+    /// synthesis directive into the user message.
+    async fn formulate_synthesis(
+        &self,
+        ctx: &TaskContext,
+    ) -> Result<(Plan, FormulationMeta), AgentError> {
+        self.formulate_plan(ctx).await
+    }
 }
+
+/// Appended to the agent's user message on the forced-synthesis turn. Tells
+/// the model to answer from what it already gathered rather than issue
+/// another tool call — the last chance to produce a best-effort answer
+/// before the inner loop fails at the plan-iteration cap.
+const SYNTHESIS_DIRECTIVE: &str = "You have reached your tool-step budget for \
+this task. Do NOT plan any more tool steps. Using ONLY the observations \
+already gathered in `plans_so_far`, emit a terminal plan now: `decision` \
+exactly \"task_complete\", `steps` [], and `result.body` = your best-effort \
+final answer synthesized from what you already have. If the gathered \
+information is incomplete, still emit task_complete and give the best answer \
+you can, briefly noting what remains uncertain. Do not issue another search \
+or tool call.";
 
 /// Returned alongside the decoded `Plan`. The inner loop writes
 /// these fields into the `plan.formulate` audit-log row payload.
@@ -116,6 +147,28 @@ impl PlanFormulator for RouterAgent {
         &self,
         ctx: &TaskContext,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
+        self.formulate_inner(ctx, false).await
+    }
+
+    async fn formulate_synthesis(
+        &self,
+        ctx: &TaskContext,
+    ) -> Result<(Plan, FormulationMeta), AgentError> {
+        self.formulate_inner(ctx, true).await
+    }
+}
+
+impl RouterAgent {
+    /// Shared assembly for both [`PlanFormulator::formulate_plan`] and
+    /// [`PlanFormulator::formulate_synthesis`]. `synthesize` selects whether
+    /// the [`SYNTHESIS_DIRECTIVE`] is appended to the user message — the only
+    /// difference between a normal planning turn and the forced-synthesis
+    /// turn (identical system prompt, recall, entity seeds, and audit meta).
+    async fn formulate_inner(
+        &self,
+        ctx: &TaskContext,
+        synthesize: bool,
+    ) -> Result<(Plan, FormulationMeta), AgentError> {
         let entry = self.prompts.get("agent_planner")
             .ok_or(AgentError::PromptMissing)?;
 
@@ -165,7 +218,7 @@ impl PlanFormulator for RouterAgent {
             format!("{:x}", h.finalize())
         };
 
-        let user_msg = serialise_context_for_agent(ctx);
+        let user_msg = serialise_context_for_agent(ctx, synthesize);
         let local_model = self.router.config().local_model.clone();
 
         let req = ChatRequest {
@@ -231,25 +284,77 @@ impl PlanFormulator for RouterAgent {
     }
 }
 
-fn serialise_context_for_agent(ctx: &TaskContext) -> String {
+fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool) -> String {
     // Compact, deterministic shape. The agent reads this each
     // iteration and must produce the next Plan.
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "instruction": ctx.instruction,
         "classification_floor": ctx.classification_floor,
         "plans_so_far": ctx.plans_so_far_summary(),
         "advisories": ctx.advisories,
         "blocks":     ctx.blocks,
-    }).to_string()
+    });
+    // Forced-synthesis turn: append the directive telling the agent to stop
+    // gathering and answer from what it already has. Only ever set on the
+    // single fallback turn the inner loop spends at the plan cap.
+    if synthesize {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "directive".to_string(),
+                serde_json::Value::String(SYNTHESIS_DIRECTIVE.to_string()),
+            );
+        }
+    }
+    obj.to_string()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::cassandra::types::DataClass;
+    use super::super::inner_loop::ClassificationFloorSource;
+
+    fn ctx() -> TaskContext {
+        TaskContext {
+            task_id: 1,
+            lane: kastellan_db::tasks::Lane::Fast,
+            instruction: "what happened in Russia today?".into(),
+            classification_floor: DataClass::Public,
+            classification_floor_source: ClassificationFloorSource::Default,
+            classification_floor_signals: vec![],
+            plans: vec![],
+            advisories: vec![],
+            blocks: vec![],
+            plan_count: 0,
+            max_plans: 5,
+        }
+    }
+
     #[test]
     fn serialise_context_includes_instruction() {
-        // Deferred until inner_loop::TaskContext is concrete (Task 2.4).
-        // The pure-function test lives there; this module's only
-        // surface is the trait + RouterAgent integration which is
-        // exercised by scheduler_inner_loop_e2e.
+        let s = serialise_context_for_agent(&ctx(), false);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["instruction"], "what happened in Russia today?");
+    }
+
+    #[test]
+    fn serialise_context_omits_directive_on_a_normal_turn() {
+        let s = serialise_context_for_agent(&ctx(), false);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert!(v.get("directive").is_none(), "normal turn must carry no directive");
+    }
+
+    #[test]
+    fn serialise_context_appends_synthesis_directive_when_flagged() {
+        let s = serialise_context_for_agent(&ctx(), true);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let directive = v["directive"].as_str().expect("directive present on synth turn");
+        assert!(directive.contains("task_complete"), "directive must steer to task_complete");
+        assert!(
+            directive.contains("Do not issue another search"),
+            "directive must forbid another tool call",
+        );
+        // The instruction + gathered context still ride alongside the directive.
+        assert_eq!(v["instruction"], "what happened in Russia today?");
     }
 }
