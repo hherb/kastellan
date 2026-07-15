@@ -263,3 +263,114 @@ fn outcome_label(r: &Resolution) -> &'static str {
         Resolution::Misconfigured { .. } => "Misconfigured",
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn resolve_uses_direct_microvm_entry_when_opted_in() {
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("https://searx.example.org:8888/search".to_string()),
+        "KASTELLAN_WEB_SEARCH_USE_MICROVM" => Some("1".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| Vec::<String>::new();
+    let c = ctx(&get_env, &exists, &allowlist);
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert_eq!(
+                entry.sandbox_backend,
+                Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm),
+                "VM entry emits the FirecrackerVm backend"
+            );
+            assert!(entry.policy.fs_read.is_empty(), "VM entry has empty fs_read");
+            assert!(entry.broker.is_none(), "direct VM entry has no broker");
+            // The in-rootfs binary path, NOT the discovered host path.
+            assert_eq!(
+                entry.binary,
+                PathBuf::from("/usr/local/bin/kastellan-worker-web-search")
+            );
+            // Endpoint host:port allowlist preserved (routable-SearxNG path).
+            match &entry.policy.net {
+                Net::Allowlist(hosts) => {
+                    assert_eq!(hosts, &vec!["searx.example.org:8888".to_string()])
+                }
+                other => panic!("expected Net::Allowlist, got {other:?}"),
+            }
+            // Rootfs env forwarded.
+            assert!(entry
+                .policy
+                .env
+                .iter()
+                .any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS" && v == "web-search.ext4"));
+            assert!(entry.policy.env.iter().any(|(k, _)| k == "KASTELLAN_MICROVM_DIR"));
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn resolve_uses_broker_microvm_entry_when_both_opted_in() {
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+        "KASTELLAN_WEB_SEARCH_USE_MICROVM" => Some("1".to_string()),
+        "KASTELLAN_WEB_SEARCH_USE_BROKER" => Some("1".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| Vec::<String>::new();
+    let c = ctx(&get_env, &exists, &allowlist);
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert_eq!(
+                entry.sandbox_backend,
+                Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+            );
+            // Broker declared, carrying the SearxNG endpoint it forwards to.
+            let spec = entry.broker.as_ref().expect("broker set in VM broker mode");
+            assert_eq!(spec.kind, crate::broker::BrokerKind::Search);
+            assert_eq!(spec.endpoint, "http://127.0.0.1:8888/search");
+            // Zero direct egress — empty allowlist.
+            match &entry.policy.net {
+                Net::Allowlist(hosts) => {
+                    assert!(hosts.is_empty(), "broker VM worker must have no egress: {hosts:?}")
+                }
+                other => panic!("expected empty Net::Allowlist, got {other:?}"),
+            }
+            // No direct endpoint env leaked to the worker in broker mode.
+            assert!(entry.policy.env.iter().all(|(k, _)| k != ENDPOINT_ENV));
+            assert!(entry.policy.fs_read.is_empty());
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn resolve_vm_entry_still_injects_batch_cap() {
+    // The batch cap must survive the VM short-circuit (it applies in the host path
+    // after entry construction; the VM branch returns early, so it must thread it
+    // too — else a batched search in the VM ignores the operator cap).
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+        "KASTELLAN_WEB_SEARCH_USE_MICROVM" => Some("1".to_string()),
+        "KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES" => Some("5".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| Vec::<String>::new();
+    let c = ctx(&get_env, &exists, &allowlist);
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert!(
+                entry.policy.env.iter().any(|(k, v)| k == MAX_BATCH_QUERIES_ENV && v == "5"),
+                "batch cap must be injected in VM mode: {:?}",
+                entry.policy.env
+            );
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
