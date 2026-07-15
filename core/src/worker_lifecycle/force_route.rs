@@ -304,6 +304,19 @@ pub(crate) fn spawn_worker_maybe_forced(
 /// sidecar run under. It equals `backend` for host workers (byte-identical); for
 /// a VM worker it is the host bwrap/Seatbelt backend, so the trusted sidecars
 /// always run on the host while the worker boots in the VM (#448).
+///
+/// **Invariant assumption — host↔worker relay plumbing.** Running the
+/// sidecar/broker on `sidecar_backend` while the worker runs on a *different*
+/// `backend` is only sound when that `backend` provides a host↔worker relay for
+/// the sidecar's UDS. Today only the Firecracker VM backend does (the vsock
+/// relays 1025/1026 + VMM-jail UDS binds from #445/#446). A worker on a backend
+/// with an isolated FS namespace but **no** such relay (e.g. a future
+/// force-routed / broker-backed macOS `Container` worker) would be handed a host
+/// UDS it cannot reach. This is inert in the current tree — every non-default
+/// host backend (macOS `Container`: `gliner_relex`, `python_exec`) is
+/// `Net::Deny` + `broker: None`, so it takes the `Direct` path and never
+/// consumes `sidecar_backend`. Add relay plumbing before pairing this seam with
+/// any other isolated backend.
 #[allow(clippy::too_many_arguments)] // mirrors spawn_worker_maybe_forced + the broker configs
 pub(crate) fn spawn_worker_with_optional_broker(
     force: Option<&ForceRoutingConfig>,
