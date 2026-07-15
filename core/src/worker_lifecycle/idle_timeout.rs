@@ -370,8 +370,13 @@ pub(crate) fn slot_for(registry: &WarmRegistry, tool_name: &str) -> Arc<ToolSlot
 ///   4. Honor `next_spawn_allowed_at` (restart backoff): sleep until allowed.
 ///   5. Warm-reuse if the slot has a worker and it's not aged out; otherwise spawn.
 ///   6. Build the handle holding the owned guard + the slot Arc.
+#[allow(clippy::too_many_arguments)] // an internal helper mirroring the manager's inputs (#448 added sidecar_backend)
 pub(crate) async fn acquire_impl(
     sandbox: &dyn SandboxBackend,
+    // Host default backend the egress sidecar + embed broker run on. Equals
+    // `sandbox` for host workers; the host bwrap/Seatbelt for a VM worker so the
+    // trusted sidecars stay on the host while the worker boots in the VM. (#448)
+    sidecar_backend: &dyn SandboxBackend,
     backoff: RestartBackoff,
     registry: &WarmRegistry,
     tool_name: &str,
@@ -495,6 +500,7 @@ pub(crate) async fn acquire_impl(
         force,
         broker_configs,
         sandbox,
+        sidecar_backend,
         &spec,
         entry.broker.as_ref(),
         tool_name,

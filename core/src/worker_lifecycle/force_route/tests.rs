@@ -11,10 +11,31 @@
 use super::*;
 use crate::tool_host::{ToolHostError, WorkerSpec};
 use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
+use std::sync::{Arc, Mutex};
 
 /// A no-op sink factory — proves the routing decision without a live pool.
 fn noop_sink_factory() -> DecisionSinkFactory {
     Box::new(|| Box::new(|_row| {}))
+}
+
+/// A backend that records the label of each spawn attempt and always fails
+/// (so no real child process is created). Two instances with distinct labels
+/// let a test assert *which* backend a given spawn hit. Shared by the
+/// egress-sidecar (#448 Task 1) and broker (#448 Task 2) seam tests.
+struct RecordingBackend {
+    label: &'static str,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+impl SandboxBackend for RecordingBackend {
+    fn spawn_under_policy(
+        &self,
+        _policy: &SandboxPolicy,
+        _program: &str,
+        _args: &[&str],
+    ) -> Result<std::process::Child, SandboxError> {
+        self.calls.lock().expect("recording mutex poisoned").push(self.label);
+        Err(SandboxError::Backend(self.label.into()))
+    }
 }
 
 /// Backend whose spawn always fails. The point of these tests is *which*
@@ -58,7 +79,7 @@ fn none_config_uses_plain_spawn_worker_even_for_allowlist() {
         net: Net::Allowlist(vec!["api.example.com:443".into()]),
         ..SandboxPolicy::default()
     };
-    let res = spawn_worker_maybe_forced(None, &FailBackend, &spec_for(&policy), "web-fetch");
+    let res = spawn_worker_maybe_forced(None, &FailBackend, &FailBackend, &spec_for(&policy), "web-fetch");
     // Plain spawn_worker surfaces the backend error as Sandbox.
     assert!(
         matches!(res, Err(ToolHostError::Sandbox(_))),
@@ -75,11 +96,46 @@ fn some_config_allowlist_routes_through_forced_spawn() {
     let scratch = tempfile::tempdir().expect("scratch root");
     let cfg = config_with(scratch.path().to_path_buf());
     let res =
-        spawn_worker_maybe_forced(Some(&cfg), &FailBackend, &spec_for(&policy), "web-fetch");
+        spawn_worker_maybe_forced(Some(&cfg), &FailBackend, &FailBackend, &spec_for(&policy), "web-fetch");
     // The forced path maps the sidecar-spawn failure to Io (fail-closed).
     assert!(
         matches!(res, Err(ToolHostError::Io(_))),
         "Some config + Allowlist must force-route (Io fail-closed error)"
+    );
+}
+
+/// #448: on the Sidecar path the egress-proxy sidecar spawns on
+/// `sidecar_backend` (the host default), NOT the worker `backend` (which may be
+/// a VM). Proven with two recording backends: the sidecar spawn is attempted
+/// first and fails, so only the host recorder is hit — the worker backend is
+/// never reached.
+#[test]
+fn forced_egress_sidecar_spawns_on_sidecar_backend_not_worker_backend() {
+    let policy = SandboxPolicy {
+        net: Net::Allowlist(vec!["api.example.com:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let scratch = tempfile::tempdir().expect("scratch root");
+    let cfg = config_with(scratch.path().to_path_buf());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker_backend = RecordingBackend { label: "vm-worker", calls: Arc::clone(&calls) };
+    let sidecar_backend = RecordingBackend { label: "host-sidecar", calls: Arc::clone(&calls) };
+
+    let res = spawn_worker_maybe_forced(
+        Some(&cfg),
+        &worker_backend,
+        &sidecar_backend,
+        &spec_for(&policy),
+        "web-fetch",
+    );
+
+    // Force-route path fails at the (recording) sidecar spawn → Io.
+    assert!(matches!(res, Err(ToolHostError::Io(_))), "forced path maps sidecar failure to Io");
+    let hit = calls.lock().unwrap().clone();
+    assert_eq!(
+        hit,
+        vec!["host-sidecar"],
+        "the egress sidecar must spawn on sidecar_backend (host); the worker backend must not be reached"
     );
 }
 
@@ -91,7 +147,7 @@ fn some_config_deny_net_uses_plain_spawn_worker() {
     };
     let scratch = tempfile::tempdir().expect("scratch root");
     let cfg = config_with(scratch.path().to_path_buf());
-    let res = spawn_worker_maybe_forced(Some(&cfg), &FailBackend, &spec_for(&policy), "shell");
+    let res = spawn_worker_maybe_forced(Some(&cfg), &FailBackend, &FailBackend, &spec_for(&policy), "shell");
     // Net::Deny is not force-routable → legacy spawn_worker (Sandbox error).
     assert!(
         matches!(res, Err(ToolHostError::Sandbox(_))),
@@ -136,7 +192,7 @@ fn browser_driver_force_routed_takes_sidecar_path() {
     let scratch = tempfile::tempdir().expect("scratch root");
     let cfg = config_with(scratch.path().to_path_buf());
     let res = spawn_worker_maybe_forced(
-        Some(&cfg), &FailBackend, &spec_for(&policy), BROWSER_DRIVER_TOOL);
+        Some(&cfg), &FailBackend, &FailBackend, &spec_for(&policy), BROWSER_DRIVER_TOOL);
     // Sidecar path maps the (failing) sidecar spawn to Io — proving it tried
     // to force-route the browser rather than refuse or run direct.
     assert!(matches!(res, Err(ToolHostError::Io(_))),
@@ -432,6 +488,7 @@ fn broker_requested_without_config_fails_closed_before_spawn() {
         None,                     // no force-routing
         &BrokerConfigs::default(), // no broker config for any kind → fail closed
         &FailBackend,
+        &FailBackend,
         &spec,
         Some(&broker_spec),
         "web-research",
@@ -448,6 +505,114 @@ fn broker_requested_without_config_fails_closed_before_spawn() {
     }
 }
 
+/// #448: the embed broker spawns on `sidecar_backend` (the trusted host
+/// sidecar), NOT the worker `backend` (which may be a VM the worker reaches the
+/// broker from over vsock 1026). The broker is spawned first and fails
+/// (recording backend), so only the host recorder is hit.
+#[test]
+fn broker_spawns_on_sidecar_backend_not_worker_backend() {
+    use crate::broker::{BrokerConfig, BrokerConfigs, BrokerKind, BrokerSpec};
+
+    let policy = SandboxPolicy {
+        net: Net::Allowlist(vec!["searx.example.org:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let scratch = tempfile::tempdir().expect("broker scratch root");
+    let broker_cfg = BrokerConfig::new(
+        BrokerKind::Embed,
+        PathBuf::from("/nonexistent/embed-broker"),
+        scratch.path().to_path_buf(),
+    );
+    let broker_configs = BrokerConfigs { embed: Some(Arc::new(broker_cfg)), ..Default::default() };
+    let broker_spec = BrokerSpec::embed("http://127.0.0.1:11434/v1/embeddings");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker_backend = RecordingBackend { label: "vm-worker", calls: Arc::clone(&calls) };
+    let sidecar_backend = RecordingBackend { label: "host-sidecar", calls: Arc::clone(&calls) };
+
+    let res = spawn_worker_with_optional_broker(
+        None, // no force-routing — the broker spawn is what we're testing
+        &broker_configs,
+        &worker_backend,
+        &sidecar_backend,
+        &spec_for(&policy),
+        Some(&broker_spec),
+        "web-research",
+    );
+
+    // The broker is spawned first and fails (recording backend). Unlike the
+    // egress sidecar (whose spawn error `spawn_net_worker` wraps in `Io`),
+    // `spawn_broker` propagates the raw `SandboxError` via `?` → `Sandbox`.
+    assert!(
+        matches!(res, Err(ToolHostError::Sandbox(_))),
+        "broker spawn failure must propagate the backend's SandboxError"
+    );
+    let hit = calls.lock().unwrap().clone();
+    assert_eq!(
+        hit,
+        vec!["host-sidecar"],
+        "the embed broker must spawn on sidecar_backend (host); the worker backend must not be reached"
+    );
+}
+
+/// #448: the realistic web-research VM config — a worker that is BOTH
+/// broker-backed AND force-routed. The broker is spawned first, and it must land
+/// on `sidecar_backend` (the host) even though force-routing is *also* active;
+/// this guards against a regression that selected the broker backend based on
+/// the force flag. The recording broker fails first, so this asserts only the
+/// broker's backend — it cannot reach the subsequent egress-sidecar spawn (the
+/// broker never binds a UDS to continue past). The full both-sidecars-on-host
+/// path is exercised end-to-end by the DGX `#[ignore]`
+/// `web_research_vm_force_route_daemon_e2e`.
+#[test]
+fn brokered_and_force_routed_broker_still_spawns_on_sidecar_backend() {
+    use crate::broker::{BrokerConfig, BrokerConfigs, BrokerKind, BrokerSpec};
+
+    let policy = SandboxPolicy {
+        // Force-routable net — with a force config this WOULD take the Sidecar
+        // path after the broker, mirroring production web-research in VM mode.
+        net: Net::Allowlist(vec!["searx.example.org:443".into()]),
+        ..SandboxPolicy::default()
+    };
+    let broker_scratch = tempfile::tempdir().expect("broker scratch root");
+    let force_scratch = tempfile::tempdir().expect("force scratch root");
+    let broker_cfg = BrokerConfig::new(
+        BrokerKind::Embed,
+        PathBuf::from("/nonexistent/embed-broker"),
+        broker_scratch.path().to_path_buf(),
+    );
+    let broker_configs = BrokerConfigs { embed: Some(Arc::new(broker_cfg)), ..Default::default() };
+    let broker_spec = BrokerSpec::embed("http://127.0.0.1:11434/v1/embeddings");
+    let force = config_with(force_scratch.path().to_path_buf());
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker_backend = RecordingBackend { label: "vm-worker", calls: Arc::clone(&calls) };
+    let sidecar_backend = RecordingBackend { label: "host-sidecar", calls: Arc::clone(&calls) };
+
+    let res = spawn_worker_with_optional_broker(
+        Some(&force), // force-routing ALSO active (unlike the broker-only test)
+        &broker_configs,
+        &worker_backend,
+        &sidecar_backend,
+        &spec_for(&policy),
+        Some(&broker_spec),
+        "web-research",
+    );
+
+    // Broker spawns first and fails → raw SandboxError propagates as Sandbox.
+    assert!(
+        matches!(res, Err(ToolHostError::Sandbox(_))),
+        "broker spawn failure must propagate the backend's SandboxError"
+    );
+    let hit = calls.lock().unwrap().clone();
+    assert_eq!(
+        hit,
+        vec!["host-sidecar"],
+        "the embed broker must spawn on sidecar_backend (host) even when force-routing is active; \
+         the worker backend must not be reached"
+    );
+}
+
 /// No broker requested → byte-identical pass-through to the legacy path
 /// (Sandbox error for an allowlist worker with no force-routing).
 #[test]
@@ -459,6 +624,7 @@ fn no_broker_requested_is_passthrough() {
     let res = spawn_worker_with_optional_broker(
         None,
         &BrokerConfigs::default(),
+        &FailBackend,
         &FailBackend,
         &spec_for(&policy),
         None, // no broker

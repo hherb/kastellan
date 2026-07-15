@@ -224,9 +224,15 @@ pub(crate) fn force_route_action(
 ///
 /// `worker_name` is the logical tool name; it labels the sidecar's audit rows
 /// and (via the proxy's `KASTELLAN_EGRESS_PROXY_WORKER` env) its decision lines.
+///
+/// `sidecar_backend` is the host backend the egress-proxy sidecar runs under; it
+/// equals `backend` for host workers (byte-identical), but differs for a VM
+/// worker — the sidecar is the real-network egress boundary and always runs on
+/// the host while the worker boots in the VM (#448).
 pub(crate) fn spawn_worker_maybe_forced(
     force: Option<&ForceRoutingConfig>,
     backend: &dyn SandboxBackend,
+    sidecar_backend: &dyn SandboxBackend,
     spec: &WorkerSpec<'_>,
     worker_name: &str,
 ) -> Result<SupervisedWorker, ToolHostError> {
@@ -248,10 +254,11 @@ pub(crate) fn spawn_worker_maybe_forced(
             let pins_json = cfg.pins_for(&allowlist);
             let params = crate::egress::net_worker::NetWorkerSpawn {
                 backend,
-                // Host workers: the sidecar and worker share the same backend
-                // (there is no VM). VM force-routing passes a distinct host
-                // `sidecar_backend` at the call site (see the VM×broker e2e).
-                sidecar_backend: backend,
+                // The egress-proxy sidecar is the real-network egress boundary,
+                // so it ALWAYS runs on the host default backend even when
+                // `backend` is a VM. For host workers the caller passes the same
+                // backend for both (byte-identical). (#448)
+                sidecar_backend,
                 proxy_bin: &cfg.proxy_bin,
                 spec,
                 allowlist: &allowlist,
@@ -292,18 +299,37 @@ pub(crate) fn spawn_worker_maybe_forced(
 ///
 /// When `broker` is `None` this is a **byte-identical** pass-through to
 /// [`spawn_worker_maybe_forced`].
+///
+/// `sidecar_backend` is the host backend both the embed broker AND the egress
+/// sidecar run under. It equals `backend` for host workers (byte-identical); for
+/// a VM worker it is the host bwrap/Seatbelt backend, so the trusted sidecars
+/// always run on the host while the worker boots in the VM (#448).
+///
+/// **Invariant assumption — host↔worker relay plumbing.** Running the
+/// sidecar/broker on `sidecar_backend` while the worker runs on a *different*
+/// `backend` is only sound when that `backend` provides a host↔worker relay for
+/// the sidecar's UDS. Today only the Firecracker VM backend does (the vsock
+/// relays 1025/1026 + VMM-jail UDS binds from #445/#446). A worker on a backend
+/// with an isolated FS namespace but **no** such relay (e.g. a future
+/// force-routed / broker-backed macOS `Container` worker) would be handed a host
+/// UDS it cannot reach. This is inert in the current tree — every non-default
+/// host backend (macOS `Container`: `gliner_relex`, `python_exec`) is
+/// `Net::Deny` + `broker: None`, so it takes the `Direct` path and never
+/// consumes `sidecar_backend`. Add relay plumbing before pairing this seam with
+/// any other isolated backend.
 #[allow(clippy::too_many_arguments)] // mirrors spawn_worker_maybe_forced + the broker configs
 pub(crate) fn spawn_worker_with_optional_broker(
     force: Option<&ForceRoutingConfig>,
     broker_configs: &BrokerConfigs,
     backend: &dyn SandboxBackend,
+    sidecar_backend: &dyn SandboxBackend,
     spec: &WorkerSpec<'_>,
     broker: Option<&BrokerSpec>,
     worker_name: &str,
 ) -> Result<SupervisedWorker, ToolHostError> {
     let Some(broker_spec) = broker else {
         // No broker requested → legacy path, byte-identical.
-        return spawn_worker_maybe_forced(force, backend, spec, worker_name);
+        return spawn_worker_maybe_forced(force, backend, sidecar_backend, spec, worker_name);
     };
     // Fail-closed: a broker-wanting worker must not spawn without a matching config.
     let cfg = broker_configs.for_kind(broker_spec.kind).ok_or_else(|| {
@@ -315,7 +341,10 @@ pub(crate) fn spawn_worker_with_optional_broker(
         )))
     })?;
     // 1. Broker first (fail-closed on its Err — its scratch is cleaned there).
-    let (sidecar, uds) = spawn_broker(cfg, broker_spec, backend)?;
+    //    The embed broker is a trusted HOST sidecar the worker reaches over
+    //    vsock 1026 in VM mode, so it runs on `sidecar_backend` — the host
+    //    default — never inside a VM. (#448)
+    let (sidecar, uds) = spawn_broker(cfg, broker_spec, sidecar_backend)?;
     // 2. Rewrite the policy onto the broker UDS. If spawning the worker below
     //    fails, `sidecar` drops here → its Drop kills the broker + removes its
     //    scratch (fail-closed, no orphan).
@@ -327,7 +356,7 @@ pub(crate) fn spawn_worker_with_optional_broker(
         wall_clock_ms: spec.wall_clock_ms,
     };
     // 3. Route as usual (force-routing may also apply; it preserves our fields).
-    let mut worker = spawn_worker_maybe_forced(force, backend, &brokered_spec, worker_name)?;
+    let mut worker = spawn_worker_maybe_forced(force, backend, sidecar_backend, &brokered_spec, worker_name)?;
     // 4. Attach the broker so teardown is 1:1 with the worker.
     worker.broker = Some(sidecar);
     Ok(worker)

@@ -268,6 +268,11 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
         let backend = self
             .sandboxes
             .resolve(entry.sandbox_backend, entry.container_image.as_deref());
+        // The egress sidecar + embed broker always run on the host default
+        // backend (never inside a VM). For host workers this equals `backend`,
+        // so the spawn is byte-identical; for a VM worker (sandbox_backend =
+        // Some(FirecrackerVm)) it is the host bwrap/Seatbelt backend. (#448)
+        let sidecar_backend = self.sandboxes.resolve(None, None);
         // Attach a per-worker embed-broker sidecar when the entry declares one,
         // then force-route `Net::Allowlist` workers through an egress-proxy
         // sidecar when configured; otherwise byte-identical to `spawn_worker`.
@@ -275,6 +280,7 @@ impl WorkerLifecycleManager for SingleUseLifecycle {
             self.force.as_deref(),
             &self.broker_configs,
             backend.as_ref(),
+            sidecar_backend.as_ref(),
             &spec,
             entry.broker.as_ref(),
             tool_name,
@@ -435,8 +441,11 @@ impl WorkerLifecycleManager for IdleTimeoutLifecycle {
         let backend = self
             .sandboxes
             .resolve(entry.sandbox_backend, entry.container_image.as_deref());
+        // Host default for the egress sidecar + embed broker (see SingleUse). (#448)
+        let sidecar_backend = self.sandboxes.resolve(None, None);
         super::idle_timeout::acquire_impl(
             backend.as_ref(),
+            sidecar_backend.as_ref(),
             self.backoff,
             &self.registry,
             tool_name,
