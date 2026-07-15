@@ -304,6 +304,16 @@ fn resolve_uses_direct_microvm_entry_when_opted_in() {
                 .iter()
                 .any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS" && v == "web-search.ext4"));
             assert!(entry.policy.env.iter().any(|(k, _)| k == "KASTELLAN_MICROVM_DIR"));
+            // Worker env mirrors the host direct path: the endpoint plus the
+            // host-only allowlist JSON (the worker re-checks `endpoint host ∈
+            // allowlist` at startup, so the VM entry must carry it too).
+            assert!(entry
+                .policy
+                .env
+                .iter()
+                .any(|(k, v)| k == ENDPOINT_ENV && v == "https://searx.example.org:8888/search"));
+            assert!(entry.policy.env.iter().any(|(k, v)| k == "KASTELLAN_WEB_SEARCH_ALLOWLIST"
+                && v == r#"["searx.example.org"]"#));
         }
         other => panic!("expected Register, got {}", outcome_label(&other)),
     }
