@@ -87,6 +87,33 @@ fn host_allowlist_from_endpoint(endpoint: &str) -> Vec<String> {
     }
 }
 
+/// The #452 resolve-time guard: `Some(detail)` iff this worker's egress will be
+/// force-routed (micro-VM always; host iff `KASTELLAN_EGRESS_FORCE_ROUTING`),
+/// broker mode is off (the search-broker is the loopback escape hatch), and the
+/// operator endpoint is a loopback/private address the egress proxy would
+/// SSRF-block — i.e. a config where the tool registers but every search fails.
+fn forced_loopback_misconfig(
+    use_broker: bool,
+    is_microvm: bool,
+    endpoint: &str,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    use crate::workers::endpoint_guard::{egress_will_force_route, endpoint_host_is_local};
+    if use_broker
+        || !egress_will_force_route(is_microvm, get_env)
+        || !endpoint_host_is_local(endpoint)
+    {
+        return None;
+    }
+    Some(format!(
+        "{ENDPOINT_ENV} ({endpoint}) points at a loopback/private host, but this \
+         worker's egress is force-routed through the egress proxy, which \
+         SSRF-blocks loopback/private addresses — every search would fail at \
+         request time. Set {USE_BROKER_ENV}=1 (the host-side search-broker \
+         reaches a loopback SearxNG) or point the endpoint at a routable host."
+    ))
+}
+
 /// Build the [`ToolEntry`] for the web-search worker.
 ///
 /// The administrator controls the endpoint (`KASTELLAN_WEB_SEARCH_ENDPOINT` on
@@ -197,7 +224,8 @@ pub fn web_search_broker_entry(binary: PathBuf, endpoint: &str) -> ToolEntry {
 /// reaches a **routable** SearxNG through the host MITM egress sidecar.
 ///
 /// Loopback-SearxNG caveat: in VM mode egress force-routes through the host proxy,
-/// which SSRF-blocks loopback, so a `127.0.0.1` SearxNG is unreachable here — use
+/// which SSRF-blocks loopback, so a `127.0.0.1` SearxNG is unreachable here —
+/// `resolve()` refuses to register that dead config (`Misconfigured`, #452); use
 /// the broker VM entry ([`web_search_firecracker_broker_entry`], `USE_BROKER=1`)
 /// for a loopback SearxNG. Linux-only: emits the `FirecrackerVm` backend variant.
 #[cfg(target_os = "linux")]
@@ -384,6 +412,13 @@ impl WorkerManifest for WebSearchManifest {
         {
             let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
             if use_microvm {
+                // #452: a Net::Allowlist VM worker force-routes unconditionally,
+                // so a direct (non-broker) loopback endpoint can never be reached.
+                if let Some(detail) =
+                    forced_loopback_misconfig(use_broker, true, &endpoint, ctx.get_env)
+                {
+                    return Resolution::Misconfigured { detail };
+                }
                 let binary = PathBuf::from(MICROVM_WORKER_BIN);
                 let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
                     .filter(|v| !v.trim().is_empty())
@@ -400,6 +435,13 @@ impl WorkerManifest for WebSearchManifest {
                 let entry = maybe_inject_max_batch(entry, (ctx.get_env)(MAX_BATCH_QUERIES_ENV));
                 return Resolution::Register(entry);
             }
+        }
+
+        // #452: same guard for the host path — force-routing is the operator
+        // flag there, not unconditional like the VM branch above.
+        if let Some(detail) = forced_loopback_misconfig(use_broker, false, &endpoint, ctx.get_env)
+        {
+            return Resolution::Misconfigured { detail };
         }
 
         let binary = match discover_binary(ctx, BIN_ENV, DEFAULT_BIN_NAME) {

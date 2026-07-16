@@ -384,3 +384,89 @@ fn resolve_vm_entry_still_injects_batch_cap() {
         other => panic!("expected Register, got {}", outcome_label(&other)),
     }
 }
+
+#[test]
+fn resolve_forced_host_loopback_endpoint_is_misconfigured() {
+    // Host mode + KASTELLAN_EGRESS_FORCE_ROUTING + loopback endpoint + no
+    // broker: the egress proxy would SSRF-block every CONNECT — refuse to
+    // register rather than register a dead tool (#452).
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+        "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+    let c = ctx(&get_env, &exists, &allowlist);
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Misconfigured { detail } => {
+            assert!(detail.contains("KASTELLAN_WEB_SEARCH_ENDPOINT"), "detail: {detail}");
+            assert!(detail.contains("KASTELLAN_WEB_SEARCH_USE_BROKER=1"), "detail: {detail}");
+        }
+        other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+    }
+}
+
+#[test]
+fn resolve_forced_host_loopback_with_broker_still_registers() {
+    // The search-broker is the loopback escape hatch — broker mode must be
+    // exempt from the #452 guard.
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+        "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+        "KASTELLAN_WEB_SEARCH_USE_BROKER" => Some("1".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+    let c = ctx(&get_env, &exists, &allowlist);
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            assert!(entry.broker.is_some(), "broker mode entry expected");
+        }
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
+
+#[test]
+fn resolve_forced_host_routable_endpoint_still_registers() {
+    // Flag on + routable endpoint + no broker: no false positive.
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+        "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| vec!["searx.example.org".to_string()];
+    let c = ctx(&get_env, &exists, &allowlist);
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Register(_) => {}
+        other => panic!("expected Register, got {}", outcome_label(&other)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn resolve_direct_microvm_loopback_endpoint_is_misconfigured() {
+    // A Net::Allowlist VM worker force-routes unconditionally (no flag needed):
+    // direct VM + loopback endpoint is always dead (#452). Broker-VM + loopback
+    // stays allowed — pinned by resolve_uses_broker_microvm_entry_when_both_opted_in.
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+        "KASTELLAN_WEB_SEARCH_USE_MICROVM" => Some("1".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+    let c = ctx(&get_env, &exists, &allowlist);
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Misconfigured { detail } => {
+            assert!(detail.contains("KASTELLAN_WEB_SEARCH_USE_BROKER=1"), "detail: {detail}");
+        }
+        other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+    }
+}
