@@ -820,12 +820,18 @@ async fn terminal_python_skill_captured_under_grounding_gate() {
 ///    news-query loop).
 ///  - Scenario 2: the synthesis turn STILL returns a non-terminal plan →
 ///    `Failed(plan_iteration_cap_exceeded)`, and no extra tool step runs.
+///  - Scenario 3: the synthesis turn terminates WITH a `python_skill`
+///    candidate → `Completed`, but the candidate is NOT captured (a
+///    best-effort answer under the cap must not seed a reusable skill).
 ///
 /// Skips silently when Postgres / the supervisor are unavailable.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forced_synthesis_at_cap_answers_from_gathered_observations() {
-    use inner_loop_test_stubs::{one_step_plan, terminal_plan, OkDispatcher, ScriptedFormulator};
+    use inner_loop_test_stubs::{
+        complete_plan_with_python_skill, one_step_plan, terminal_plan, OkDispatcher,
+        ScriptedFormulator,
+    };
 
     if kastellan_tests_common::skip_if_no_supervisor() {
         return;
@@ -923,7 +929,7 @@ async fn forced_synthesis_at_cap_answers_from_gathered_observations() {
     let result = super::run_to_terminal(
         &pool,
         formulator,
-        review,
+        review.clone(),
         std::sync::Arc::new(OkDispatcher),
         ctx,
     )
@@ -938,4 +944,39 @@ async fn forced_synthesis_at_cap_answers_from_gathered_observations() {
     }
     // The synthesis turn executed no tool step — dispatch stays at the gather.
     assert_eq!(result.dispatch_count, 1, "synthesis turn must not dispatch a step");
+
+    // ── Scenario 3: synthesis answer carries a skill → not crystallised ────
+    // Script: [gather step (Ok), terminal answer WITH a python_skill]. The
+    // answer completes the task, but because it was produced on the forced-
+    // synthesis turn (under the cap, not a demonstrated-good procedure) the
+    // skill candidate must NOT be captured.
+    let cand = crate::cassandra::types::PythonSkillCandidate {
+        name: "noop".into(),
+        description: "d".into(),
+        code: "pass\n".into(),
+    };
+    let formulator = std::sync::Arc::new(ScriptedFormulator::new(vec![
+        one_step_plan(),
+        complete_plan_with_python_skill("best-effort answer", cand),
+    ]));
+    let ctx = claim_ctx(&pool).await;
+    let result = super::run_to_terminal(
+        &pool,
+        formulator,
+        review,
+        std::sync::Arc::new(OkDispatcher),
+        ctx,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(result.outcome, Outcome::Completed(_)),
+        "expected Completed from forced synthesis, got {:?}",
+        result.outcome
+    );
+    assert!(
+        result.terminal_python_skill.is_none(),
+        "a forced-synthesis answer must not seed a reusable skill, got {:?}",
+        result.terminal_python_skill
+    );
 }
