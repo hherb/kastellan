@@ -582,6 +582,24 @@ mod inner_loop_test_stubs {
         }
     }
 
+    /// A plain terminal `task_complete` plan carrying a text answer.
+    pub fn terminal_plan(body: &str) -> Plan {
+        Plan {
+            context: "c".into(),
+            decision: "task_complete".into(),
+            rationale: "done".into(),
+            steps: vec![],
+            result: Some(serde_json::json!({"kind": "text", "body": body})),
+            data_ceiling: DataClass::Public,
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+            invoke_skill: None,
+            python_skill: None,
+        }
+    }
+
     /// A terminal `task_complete` plan carrying a `python_skill` candidate.
     pub fn complete_plan_with_python_skill(
         body: &str,
@@ -790,5 +808,175 @@ async fn terminal_python_skill_captured_under_grounding_gate() {
         result.terminal_python_skill.as_ref(),
         Some(&cand),
         "terminal_python_skill must be captured under the grounding gate"
+    );
+}
+
+/// Forced-synthesis fallback (A): once the agent has gathered ≥1 successful
+/// observation, hitting the plan-iteration cap spends ONE synthesis turn
+/// (instructing the model to answer from what it has) before failing.
+///
+///  - Scenario 1: the synthesis turn returns a terminal answer → `Completed`
+///    carrying that answer (the fix for the "kept searching, never answered"
+///    news-query loop).
+///  - Scenario 2: the synthesis turn STILL returns a non-terminal plan →
+///    `Failed(plan_iteration_cap_exceeded)`, and no extra tool step runs.
+///  - Scenario 3: the synthesis turn terminates WITH a `python_skill`
+///    candidate → `Completed`, but the candidate is NOT captured (a
+///    best-effort answer under the cap must not seed a reusable skill).
+///
+/// Skips silently when Postgres / the supervisor are unavailable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_synthesis_at_cap_answers_from_gathered_observations() {
+    use inner_loop_test_stubs::{
+        complete_plan_with_python_skill, one_step_plan, terminal_plan, OkDispatcher,
+        ScriptedFormulator,
+    };
+
+    if kastellan_tests_common::skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = kastellan_tests_common::pg_bin_dir_or_skip() else {
+        return;
+    };
+    let suffix = format!("ilfs-{}", kastellan_tests_common::unique_suffix());
+    let service_name = format!("kastellan-sched-test-pg-{suffix}");
+    let cluster = tokio::task::block_in_place(|| {
+        kastellan_tests_common::bring_up_pg_cluster(&bin_dir, "if-d", "if-l", &service_name)
+    });
+    kastellan_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"purpose": "inner-loop-forced-synth-unit"}),
+    )
+    .await
+    .ok();
+    let pool = match kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec).await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let review = std::sync::Arc::new(crate::cassandra::review::ChainReviewStage::new(vec![
+        std::sync::Arc::new(crate::cassandra::review::NoopReviewStage),
+    ]));
+
+    // Insert + claim a fresh Fast task and build a `max_plans = 1` context, so
+    // the cap fires on the 2nd loop entry (right after the single gather step).
+    async fn claim_ctx(pool: &sqlx::PgPool) -> TaskContext {
+        let id = kastellan_db::tasks::insert_pending(
+            pool,
+            kastellan_db::tasks::Lane::Fast,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let _ = kastellan_db::tasks::claim_one(pool, kastellan_db::tasks::Lane::Fast, 60)
+            .await
+            .unwrap()
+            .unwrap();
+        TaskContext {
+            task_id: id,
+            lane: kastellan_db::tasks::Lane::Fast,
+            instruction: "what happened in Russia today?".into(),
+            classification_floor: crate::cassandra::types::DataClass::Public,
+            classification_floor_source: ClassificationFloorSource::Default,
+            classification_floor_signals: vec![],
+            plans: vec![],
+            advisories: vec![],
+            blocks: vec![],
+            plan_count: 0,
+            max_plans: 1,
+        }
+    }
+
+    // ── Scenario 1: synthesis turn produces an answer → Completed ──────────
+    // Script: [gather step (Ok), synthesis answer]. The gather arms `gathered`;
+    // the cap then spends the synthesis turn, which returns the terminal answer.
+    let formulator = std::sync::Arc::new(ScriptedFormulator::new(vec![
+        one_step_plan(),
+        terminal_plan("Overnight strikes on Kyiv; Putin vowed a stronger response."),
+    ]));
+    let ctx = claim_ctx(&pool).await;
+    let result = super::run_to_terminal(
+        &pool,
+        formulator,
+        review.clone(),
+        std::sync::Arc::new(OkDispatcher),
+        ctx,
+    )
+    .await
+    .unwrap();
+    match result.outcome {
+        Outcome::Completed(v) => assert!(
+            v["body"].as_str().unwrap_or_default().contains("Kyiv"),
+            "forced synthesis must surface the gathered answer, got {v:?}"
+        ),
+        o => panic!("expected Completed from forced synthesis, got {o:?}"),
+    }
+    // One gather dispatch, then the synthesis turn = 2 formulate calls.
+    assert_eq!(result.dispatch_count, 1, "only the gather step dispatched");
+    assert_eq!(result.plan_count, 2, "gather turn + synthesis turn");
+
+    // ── Scenario 2: synthesis turn won't wrap up → Failed at the cap ───────
+    // Script: [gather step (Ok), non-terminal plan]. The synthesis turn's
+    // non-terminal plan must NOT execute — the loop fails at the cap instead.
+    let formulator = std::sync::Arc::new(ScriptedFormulator::new(vec![
+        one_step_plan(),
+        one_step_plan(),
+    ]));
+    let ctx = claim_ctx(&pool).await;
+    let result = super::run_to_terminal(
+        &pool,
+        formulator,
+        review.clone(),
+        std::sync::Arc::new(OkDispatcher),
+        ctx,
+    )
+    .await
+    .unwrap();
+    match result.outcome {
+        Outcome::Failed(s) => assert!(
+            s.contains("plan_iteration_cap_exceeded"),
+            "expected cap failure, got: {s}"
+        ),
+        o => panic!("expected Failed, got {o:?}"),
+    }
+    // The synthesis turn executed no tool step — dispatch stays at the gather.
+    assert_eq!(result.dispatch_count, 1, "synthesis turn must not dispatch a step");
+
+    // ── Scenario 3: synthesis answer carries a skill → not crystallised ────
+    // Script: [gather step (Ok), terminal answer WITH a python_skill]. The
+    // answer completes the task, but because it was produced on the forced-
+    // synthesis turn (under the cap, not a demonstrated-good procedure) the
+    // skill candidate must NOT be captured.
+    let cand = crate::cassandra::types::PythonSkillCandidate {
+        name: "noop".into(),
+        description: "d".into(),
+        code: "pass\n".into(),
+    };
+    let formulator = std::sync::Arc::new(ScriptedFormulator::new(vec![
+        one_step_plan(),
+        complete_plan_with_python_skill("best-effort answer", cand),
+    ]));
+    let ctx = claim_ctx(&pool).await;
+    let result = super::run_to_terminal(
+        &pool,
+        formulator,
+        review,
+        std::sync::Arc::new(OkDispatcher),
+        ctx,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(result.outcome, Outcome::Completed(_)),
+        "expected Completed from forced synthesis, got {:?}",
+        result.outcome
+    );
+    assert!(
+        result.terminal_python_skill.is_none(),
+        "a forced-synthesis answer must not seed a reusable skill, got {:?}",
+        result.terminal_python_skill
     );
 }

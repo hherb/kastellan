@@ -241,25 +241,55 @@ pub async fn run_to_terminal(
         };
     }
 
+    // Set true once the agent gathers ≥1 successful tool observation. Gates
+    // the forced-synthesis fallback below: with nothing gathered there is
+    // nothing to synthesize, so the cap fails hard (unchanged behaviour).
+    let mut gathered = false;
+    // Set true once the single forced-synthesis turn has been spent, so we
+    // never loop back into it (belt-and-suspenders — a synth turn always
+    // returns a terminal outcome anyway).
+    let mut synth_attempted = false;
+
     loop {
         // Cancellation poll — top of loop.
         if tasks::observe_state(pool, ctx.task_id).await? == "cancelled" {
             return finish!(Outcome::Cancelled);
         }
 
-        if ctx.plan_count >= ctx.max_plans {
+        // Plan-iteration cap. When the agent has already gathered at least
+        // one successful observation, spend ONE final "forced-synthesis"
+        // turn — instruct the model to stop gathering and answer from what
+        // it has — before failing. This converts the common
+        // kept-searching-never-answered cap-hit (e.g. an open-ended "what
+        // happened today?" news query, where a deterministic local planner
+        // keeps chasing fresher results) into a best-effort answer instead
+        // of a bare `plan_iteration_cap_exceeded` error. With nothing
+        // gathered (every step denied / errored / blocked-before-execution)
+        // there is nothing to synthesize, so the cap fails hard as before —
+        // which is why the existing cap tests are unaffected.
+        let over_cap = ctx.plan_count >= ctx.max_plans;
+        let synth_turn = over_cap && gathered && !synth_attempted;
+        if over_cap && !synth_turn {
             return finish!(Outcome::Failed(format!(
                 "plan_iteration_cap_exceeded ({}>={})", ctx.plan_count, ctx.max_plans
             )));
         }
+        if synth_turn {
+            synth_attempted = true;
+        }
 
-        // 1. Formulate plan
+        // 1. Formulate plan (forced-synthesis variant on the synth turn).
         //
         // No loop-level retry: replanning IS the retry shape (the agent
         // sees the prior failure on the next iteration, bounded by
         // `max_plans`). A transient HTTP/transport error that escapes
         // the formulator's own retry is therefore terminal here.
-        let (mut plan, meta) = match formulator.formulate_plan(&ctx).await {
+        let formulation = if synth_turn {
+            formulator.formulate_synthesis(&ctx).await
+        } else {
+            formulator.formulate_plan(&ctx).await
+        };
+        let (mut plan, meta) = match formulation {
             Ok(x) => x,
             Err(e) => return finish!(Outcome::Failed(format!("llm: {e}"))),
         };
@@ -423,14 +453,18 @@ pub async fn run_to_terminal(
             // actually executed >= 1 tool step (dispatch_count is the
             // running per-task counter). A pure-text-answer task
             // (terminal on plan 1, zero dispatches) emits no skill.
+            // Also never crystallise off the forced-synthesis turn: that
+            // answer is a best-effort wrap-up produced under the plan cap,
+            // not a demonstrated-good procedure, so it must not seed a
+            // reusable skill even if the model volunteers one.
             let captured_l3_skill: Option<crate::cassandra::types::L3SkillCandidate> =
-                if dispatch_count >= 1 && !invoke_used {
+                if dispatch_count >= 1 && !invoke_used && !synth_turn {
                     plan.completion_skill().cloned()
                 } else {
                     None
                 };
             let captured_python_skill: Option<crate::cassandra::types::PythonSkillCandidate> =
-                if dispatch_count >= 1 && !invoke_used {
+                if dispatch_count >= 1 && !invoke_used && !synth_turn {
                     plan.completion_python_skill().cloned()
                 } else {
                     None
@@ -441,6 +475,22 @@ pub async fn run_to_terminal(
                 captured_l3_skill,
                 captured_python_skill
             );
+        }
+
+        // Forced-synthesis turn: the model was told to answer now. A
+        // terminal plan already returned `Outcome::Completed` above (and a
+        // self-refusal returned `Outcome::Refused`). If it STILL returned a
+        // non-terminal plan, do NOT execute more tool steps — fail at the
+        // cap rather than spending another gather round.
+        if synth_turn {
+            // Report the cap the same way as the primary cap message above
+            // (`max_plans>=max_plans`). `ctx.plan_count` is now `max_plans + 1`
+            // — the synthesis turn spent one extra formulation — so printing it
+            // here read as an off-by-one (`6>=5`) against the cap of 5.
+            return finish!(Outcome::Failed(format!(
+                "plan_iteration_cap_exceeded ({}>={}); forced synthesis did not produce a final answer",
+                ctx.max_plans, ctx.max_plans
+            )));
         }
 
         // 4. Execute steps
@@ -459,6 +509,11 @@ pub async fn run_to_terminal(
         let steps_total = plan.steps.len();
         let steps_executed = outcomes.len();
         let any_err = outcomes.iter().any(|o| o.is_err());
+        // Arm the forced-synthesis fallback once any step actually succeeds:
+        // there is now a real observation to synthesize an answer from.
+        if outcomes.iter().any(|o| matches!(o, StepOutcome::Ok(_))) {
+            gathered = true;
+        }
         write_audit_plan_outcome(
             pool, &ctx, steps_executed, steps_total, any_err,
         ).await?;
