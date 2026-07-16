@@ -1,4 +1,4 @@
-//! Pure IP-range classifier shared by the egress proxy and core.
+//! Pure IP-range classifier: the SSRF / DNS-rebinding deny predicate.
 //!
 //! [`is_denied_range`] is the single security-critical predicate: it returns
 //! true for every address class a *hostname* must not be permitted to resolve

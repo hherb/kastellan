@@ -1,7 +1,11 @@
 //! Trusted search broker sidecar.
 //!
-//! A force-routed jailed worker cannot reach a loopback SearxNG (the egress proxy
-//! SSRF-blocks loopback). It talks JSON-RPC `search{query,count?}` to this broker
+//! A force-routed jailed worker cannot reach a `localhost`-NAME SearxNG (the
+//! egress proxy range-denies what the name resolves to; an operator-allowlisted
+//! literal IP is dialed via its carve-out — #457 correction). The broker removes
+//! SearxNG from worker egress entirely — the stronger-containment option, and
+//! the only path for a `localhost`-name endpoint. The worker talks JSON-RPC
+//! `search{query,count?}` to this broker
 //! over a Unix socket core bind-mounts into its jail; the broker — running in the
 //! host netns with `Net::Allowlist([searx host:port])` — forwards to SearxNG and
 //! returns the parsed hits. All SearxNG coupling lives in web-common's `search`.
