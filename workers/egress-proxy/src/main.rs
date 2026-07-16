@@ -25,7 +25,6 @@ mod pins;
 mod proxy;
 mod report;
 mod request_line;
-mod ssrf;
 
 use std::os::unix::net::UnixListener;
 

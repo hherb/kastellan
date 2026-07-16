@@ -2346,6 +2346,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kastellan-net-classify"
+version = "0.1.0"
+
+[[package]]
 name = "kastellan-protocol"
 version = "0.1.0"
 dependencies = [
@@ -2403,6 +2407,7 @@ dependencies = [
  "anyhow",
  "base64",
  "kastellan-leak-scan",
+ "kastellan-net-classify",
  "kastellan-worker-prelude",
  "kastellan-worker-web-common",
  "libc",
