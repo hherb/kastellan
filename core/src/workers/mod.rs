@@ -7,6 +7,7 @@
 //! not on-disk TOML) per the 2026-06-05 worker-manifest-plumbing design.
 
 pub mod browser_driver;
+pub mod endpoint_guard;
 pub mod gliner_relex;
 pub mod interpreter_deps;
 pub mod python_exec;

@@ -29,7 +29,9 @@ use crate::tool_host::{spawn_worker, SupervisedWorker, ToolHostError, WorkerSpec
 use crate::worker_manifest::{discover_binary, ResolveCtx};
 
 /// Env var that opts the daemon into egress force-routing (slice #2 Task 4.4).
-const ENV_ENABLE: &str = "KASTELLAN_EGRESS_FORCE_ROUTING";
+/// `pub(crate)` so `workers::endpoint_guard` mirrors the exact flag the spawn
+/// path reads (#452) — one home for the name, no drift.
+pub(crate) const ENV_ENABLE: &str = "KASTELLAN_EGRESS_FORCE_ROUTING";
 /// Override env var for the egress-proxy binary path (mirrors `KASTELLAN_*_BIN`).
 const ENV_PROXY_BIN: &str = "KASTELLAN_EGRESS_PROXY_BIN";
 /// Default sibling name of the egress-proxy binary (exe-relative discovery).
@@ -415,8 +417,9 @@ pub fn resolve_force_routing(
 /// Pure: does this env value enable force-routing? Truthy spellings are
 /// `1`/`true`/`yes`/`on` (case-insensitive). Anything else — including unset
 /// (`None`) and an empty string — is **off**, so the security-relevant flag is
-/// never enabled by accident.
-fn env_flag_enabled(value: Option<String>) -> bool {
+/// never enabled by accident. `pub(crate)` so `workers::endpoint_guard` shares
+/// this exact truthiness parse (#452) rather than growing a drifting copy.
+pub(crate) fn env_flag_enabled(value: Option<String>) -> bool {
     matches!(
         value.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")

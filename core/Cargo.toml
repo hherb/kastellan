@@ -31,6 +31,7 @@ kastellan-protocol   = { path = "../protocol", version = "0.1.0" }
 kastellan-db         = { path = "../db", version = "0.1.0" }
 kastellan-llm-router = { path = "../llm-router", version = "0.1.0" }
 kastellan-leak-scan  = { path = "../leak-scan", version = "0.1.0" }
+kastellan-net-classify = { path = "../net-classify", version = "0.1.0" }
 kastellan-matrix-wire = { path = "../workers/matrix-wire", version = "0.1.0" }
 
 tokio              = { workspace = true }
