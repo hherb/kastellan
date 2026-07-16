@@ -1,0 +1,12 @@
+[package]
+name        = "kastellan-net-classify"
+description = "Pure IP-range classifier: the SSRF / DNS-rebinding deny predicate the egress proxy enforces at connect time, extracted to a single pure home so future consumers cannot drift from it."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+readme      = "../README.md"
+
+[dependencies]

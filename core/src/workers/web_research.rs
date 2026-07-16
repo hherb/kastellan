@@ -55,6 +55,33 @@ fn endpoint_net_entry(endpoint: &str) -> Vec<String> {
     }
 }
 
+/// The #452 resolve-time guard, web-research flavour: unlike web-search there
+/// is no search-broker escape hatch — this worker's only broker is the
+/// embed-broker, which carries no search traffic — so a force-routed worker
+/// with a `localhost`-NAME SearxNG endpoint reaches nothing in ANY broker mode
+/// (the proxy range-denies what the name resolves to). A *literal* loopback
+/// endpoint is NOT flagged: the proxy dials an operator-allowlisted literal
+/// via its carve-out.
+fn forced_localhost_misconfig(
+    is_microvm: bool,
+    endpoint: &str,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    use crate::workers::endpoint_guard::{egress_will_force_route, endpoint_is_localhost_name};
+    if !egress_will_force_route(is_microvm, get_env) || !endpoint_is_localhost_name(endpoint) {
+        return None;
+    }
+    Some(format!(
+        "{ENDPOINT_ENV} ({endpoint}) uses a `localhost` name, but this worker's \
+         egress is force-routed through the egress proxy, which range-denies \
+         what a localhost name resolves to (SSRF/DNS-rebinding defense) — every \
+         search would fail at request time. web-research has no search-broker (its \
+         broker carries only embed traffic); use the literal-IP form (e.g. \
+         http://127.0.0.1:<port> — an allowlisted literal is dialed via the \
+         proxy's carve-out) or a routable SearxNG host."
+    ))
+}
+
 /// Union of the endpoint host:port, the optional embed-endpoint host:port, and
 /// the content host:443 entries, de-duped (order-preserving: SearxNG endpoint
 /// first, embed endpoint second, content hosts last). The content half reuses
@@ -250,14 +277,17 @@ pub fn web_research_broker_entry(
 /// * `env` forwards the host env ([`base_env`]) plus `KASTELLAN_MICROVM_DIR` and
 ///   `KASTELLAN_MICROVM_ROOTFS=web-research.ext4` so the backend boots the right rootfs.
 ///
-/// **Loopback-embed caveat (this DIRECT VM entry only):** in VM mode all egress
-/// tunnels through the host-side proxy, which SSRF-blocks loopback/private IPs. So
-/// the *default* embed endpoint (local Ollama `127.0.0.1:11434`) is unreachable →
-/// the query embed fails and the worker degrades to lexical ranking with an
-/// `embed_note` (never silent). For hybrid ranking with this direct entry, point
-/// `KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT` at a **routable** embed host. Host mode
-/// is unaffected. A resolve-time operator warning for this loopback+VM
-/// misconfiguration is tracked in issue #429. **Remedy:** set
+/// **Localhost-embed caveat (this DIRECT VM entry only):** in VM mode all
+/// egress tunnels through the host-side proxy. A **literal** embed endpoint —
+/// the default local Ollama `127.0.0.1:11434` included — stays reachable (the
+/// proxy dials an operator-allowlisted literal via its carve-out; it is
+/// unioned into `Net::Allowlist` here). A `localhost` **name** is dead (the
+/// proxy range-denies what the name resolves to) → the query embed fails and
+/// the worker degrades to lexical ranking with an `embed_note` (never
+/// silent); `resolve()` emits an operator warning for that name+forced
+/// misconfiguration (#429), and refuses a `localhost`-name *SearxNG* endpoint
+/// outright (`Misconfigured`, #452 — no search-broker exists for
+/// web-research). Non-force-routed host mode is unaffected. **Remedy:** set
 /// `KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER=1` — the VM × broker entry
 /// ([`web_research_firecracker_broker_entry`]) reaches a **loopback** embed backend
 /// through the host-side broker (a second vsock channel), so hybrid ranking works
@@ -415,6 +445,23 @@ impl WorkerManifest for WebResearchManifest {
         {
             let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
             if use_microvm {
+                // #452: a Net::Allowlist VM worker force-routes unconditionally,
+                // and the embed-broker can't carry search traffic, so a
+                // `localhost`-name SearxNG endpoint is dead in EVERY VM
+                // sub-mode (a literal loopback works via the proxy carve-out).
+                if let Some(detail) = forced_localhost_misconfig(true, &endpoint, ctx.get_env) {
+                    return Resolution::Misconfigured { detail };
+                }
+                // #429: a `localhost`-name embed endpoint without the
+                // embed-broker is unreachable here → silent hybrid→lexical
+                // downgrade; warn (registration proceeds — the tool works).
+                if let Some(w) = crate::workers::endpoint_guard::embed_local_warning(
+                    true,
+                    use_broker,
+                    embed_endpoint.as_deref(),
+                ) {
+                    tracing::warn!(target: "web_research.resolve", "{w}");
+                }
                 let binary = PathBuf::from(MICROVM_WORKER_BIN);
                 let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
                     .filter(|v| !v.trim().is_empty())
@@ -442,6 +489,22 @@ impl WorkerManifest for WebResearchManifest {
                     &allowlist,
                 ));
             }
+        }
+
+        // #452 (host path): the guard applies iff the operator enabled
+        // force-routing — a plain host worker resolves localhost itself.
+        if let Some(detail) = forced_localhost_misconfig(false, &endpoint, ctx.get_env) {
+            return Resolution::Misconfigured { detail };
+        }
+        // #429 (host path): warn on a force-routed, unbrokered
+        // `localhost`-name embed endpoint (hybrid→lexical downgrade);
+        // never blocks registration.
+        if let Some(w) = crate::workers::endpoint_guard::embed_local_warning(
+            crate::workers::endpoint_guard::egress_will_force_route(false, ctx.get_env),
+            use_broker,
+            embed_endpoint.as_deref(),
+        ) {
+            tracing::warn!(target: "web_research.resolve", "{w}");
         }
 
         let binary = match discover_binary(ctx, BIN_ENV, DEFAULT_BIN_NAME) {
@@ -809,5 +872,116 @@ mod tests {
         assert_eq!(get(EMBED_MODEL_ENV), Some("embeddinggemma"), "default model forwarded");
         assert_eq!(get("KASTELLAN_MICROVM_DIR"), Some("/var/lib/kastellan/microvm"));
         assert_eq!(get("KASTELLAN_MICROVM_ROOTFS"), Some("web-research.ext4"));
+    }
+
+    #[test]
+    fn resolve_forced_host_localhost_name_searxng_is_misconfigured() {
+        // Host mode + force-routing flag + a `localhost`-NAME SearxNG endpoint:
+        // web-research has no search-broker and the proxy range-denies what the
+        // name resolves to, so this config reaches nothing (#452).
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("http://localhost:8888/search".to_string()),
+            "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["localhost".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Misconfigured { detail } => {
+                assert!(detail.contains("KASTELLAN_WEB_RESEARCH_ENDPOINT"), "detail: {detail}");
+                assert!(detail.contains("127.0.0.1"), "literal-IP remedy missing: {detail}");
+            }
+            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_forced_host_literal_loopback_searxng_still_registers() {
+        // Option-A policy pin (2026-07-16 review): a LITERAL loopback SearxNG
+        // endpoint is dialed via the egress proxy's allowlisted-literal
+        // carve-out, so it works force-routed and must keep registering.
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(_) => {}
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn resolve_forced_host_localhost_name_embed_only_warns_and_registers() {
+        // A `localhost`-NAME *embed* endpoint under force-routing degrades
+        // ranking but does not break the tool: warn-only, registration
+        // proceeds and the entry is unchanged (#429).
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+            EMBED_ENDPOINT_ENV => Some("http://localhost:11434/v1/embeddings".to_string()),
+            "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist =
+            |_t: &str| vec!["searx.example.org".to_string(), "localhost".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                // The embed env is still injected — the entry itself is unchanged
+                // (the warning is a log line, not a policy change).
+                assert!(entry.policy.env.iter().any(|(k, _)| k == EMBED_ENDPOINT_ENV));
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_microvm_localhost_name_searxng_is_misconfigured() {
+        // A VM worker force-routes unconditionally: a `localhost`-name SearxNG
+        // is dead in VM mode regardless of the host force-routing flag (#452).
+        let get_env = |k: &str| match k {
+            "KASTELLAN_WEB_RESEARCH_USE_MICROVM" => Some("1".to_string()),
+            ENDPOINT_ENV => Some("http://localhost:8888/search".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["localhost".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Misconfigured { detail } => {
+                assert!(detail.contains("KASTELLAN_WEB_RESEARCH_ENDPOINT"), "detail: {detail}");
+            }
+            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_vm_embed_broker_does_not_rescue_localhost_name_searxng() {
+        // The embed-broker carries only embed traffic — it must NOT exempt a
+        // `localhost`-name SearxNG endpoint from the #452 guard.
+        let get_env = |k: &str| match k {
+            "KASTELLAN_WEB_RESEARCH_USE_MICROVM" => Some("1".to_string()),
+            USE_EMBED_BROKER_ENV => Some("1".to_string()),
+            ENDPOINT_ENV => Some("http://localhost:8888/search".to_string()),
+            EMBED_ENDPOINT_ENV => Some("http://127.0.0.1:11434/v1/embeddings".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["localhost".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Misconfigured { .. } => {}
+            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+        }
     }
 }

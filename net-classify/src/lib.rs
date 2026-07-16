@@ -1,7 +1,12 @@
-//! SSRF range classifier. `is_denied_range` is the single security-critical
-//! predicate: it returns true for every address class a *hostname* must not be
-//! permitted to resolve to (the DNS-rebinding defense). Literal-IP CONNECT
-//! targets are handled by the carve-out in `proxy.rs`, not here.
+//! Pure IP-range classifier shared by the egress proxy and core.
+//!
+//! [`is_denied_range`] is the single security-critical predicate: it returns
+//! true for every address class a *hostname* must not be permitted to resolve
+//! to (the DNS-rebinding defense). The egress proxy — today's sole consumer —
+//! applies it at connect time to resolved addresses (its literal-IP CONNECT
+//! targets get the allowlisted-literal carve-out in the proxy itself, not
+//! here). Extracted to a pure crate so any future resolve-time or second
+//! consumer shares this one home for the range list and cannot drift.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

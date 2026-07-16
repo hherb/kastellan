@@ -11,7 +11,7 @@ use kastellan_worker_web_common::allowlist::HostAllowlist;
 
 use crate::report::{Decision, Reporter, Verdict};
 use crate::request_line::parse_connect;
-use crate::ssrf::is_denied_range;
+use kastellan_net_classify::is_denied_range;
 
 /// DNS seam: real impl resolves via getaddrinfo; tests stub it.
 pub trait Resolve: Send + Sync {

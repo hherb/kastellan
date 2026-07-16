@@ -5,6 +5,7 @@ members = [
     "db",
     "leak-scan",
     "llm-router",
+    "net-classify",
     "sandbox",
     "supervisor",
     "protocol",

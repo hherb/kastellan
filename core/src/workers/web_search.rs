@@ -87,6 +87,37 @@ fn host_allowlist_from_endpoint(endpoint: &str) -> Vec<String> {
     }
 }
 
+/// The #452 resolve-time guard: `Some(detail)` iff this worker's egress will be
+/// force-routed (micro-VM always; host iff `KASTELLAN_EGRESS_FORCE_ROUTING`),
+/// broker mode is off (the search-broker never touches worker egress), and the
+/// operator endpoint uses a `localhost` NAME — the one endpoint class the
+/// egress proxy can never serve (it resolves the name, gets loopback, and
+/// range-denies the CONNECT), i.e. a config where the tool registers but every
+/// search fails. A *literal* loopback endpoint (`http://127.0.0.1:…`) is NOT
+/// flagged: the proxy dials an operator-allowlisted literal via its carve-out.
+fn forced_localhost_misconfig(
+    use_broker: bool,
+    is_microvm: bool,
+    endpoint: &str,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    use crate::workers::endpoint_guard::{egress_will_force_route, endpoint_is_localhost_name};
+    if use_broker
+        || !egress_will_force_route(is_microvm, get_env)
+        || !endpoint_is_localhost_name(endpoint)
+    {
+        return None;
+    }
+    Some(format!(
+        "{ENDPOINT_ENV} ({endpoint}) uses a `localhost` name, but this worker's \
+         egress is force-routed through the egress proxy, which range-denies \
+         what a localhost name resolves to (SSRF/DNS-rebinding defense) — every \
+         search would fail at request time. Use the literal-IP form (e.g. \
+         http://127.0.0.1:<port> — an allowlisted literal is dialed via the \
+         proxy's carve-out), a routable host, or set {USE_BROKER_ENV}=1."
+    ))
+}
+
 /// Build the [`ToolEntry`] for the web-search worker.
 ///
 /// The administrator controls the endpoint (`KASTELLAN_WEB_SEARCH_ENDPOINT` on
@@ -196,10 +227,15 @@ pub fn web_search_broker_entry(binary: PathBuf, endpoint: &str) -> ToolEntry {
 /// the endpoint-derived `Net::Allowlist` + endpoint/allowlist env, so the worker
 /// reaches a **routable** SearxNG through the host MITM egress sidecar.
 ///
-/// Loopback-SearxNG caveat: in VM mode egress force-routes through the host proxy,
-/// which SSRF-blocks loopback, so a `127.0.0.1` SearxNG is unreachable here — use
-/// the broker VM entry ([`web_search_firecracker_broker_entry`], `USE_BROKER=1`)
-/// for a loopback SearxNG. Linux-only: emits the `FirecrackerVm` backend variant.
+/// Loopback-SearxNG caveat: in VM mode egress force-routes through the host
+/// proxy. A **literal** loopback endpoint (`http://127.0.0.1:…`) stays reachable
+/// — the proxy dials an operator-allowlisted literal via its carve-out
+/// (`egress-proxy::proxy::decide`) — but a `localhost` **name** is dead (the
+/// proxy range-denies what the name resolves to), and `resolve()` refuses that
+/// config (`Misconfigured`, #452). The broker VM entry
+/// ([`web_search_firecracker_broker_entry`], `USE_BROKER=1`) removes SearxNG
+/// from worker egress entirely (the stronger-containment option). Linux-only:
+/// emits the `FirecrackerVm` backend variant.
 #[cfg(target_os = "linux")]
 pub fn web_search_firecracker_entry(
     binary: PathBuf,
@@ -250,8 +286,11 @@ pub fn web_search_firecracker_entry(
 /// VM the broker rides a second vsock channel (port 1026); the FC plan rewrites the
 /// injected `KASTELLAN_SEARCH_BROKER_UDS` to the in-guest relay path.
 ///
-/// Because the broker runs host-side, this is the ONLY way a VM web-search worker
-/// reaches a **loopback** SearxNG (the egress proxy SSRF-blocks loopback). Linux-only.
+/// Because the broker runs host-side, a VM web-search worker reaches a loopback
+/// SearxNG with ZERO direct egress (a literal-loopback endpoint is also reachable
+/// in the direct entry via the proxy's allowlisted-literal carve-out; the broker
+/// is the stronger-containment option and the only path for a `localhost`-name
+/// endpoint). Linux-only.
 #[cfg(target_os = "linux")]
 pub fn web_search_firecracker_broker_entry(
     binary: PathBuf,
@@ -384,6 +423,15 @@ impl WorkerManifest for WebSearchManifest {
         {
             let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
             if use_microvm {
+                // #452: a Net::Allowlist VM worker force-routes unconditionally,
+                // so a direct (non-broker) `localhost`-name endpoint can never
+                // be reached (a literal loopback IS reached via the proxy's
+                // allowlisted-literal carve-out).
+                if let Some(detail) =
+                    forced_localhost_misconfig(use_broker, true, &endpoint, ctx.get_env)
+                {
+                    return Resolution::Misconfigured { detail };
+                }
                 let binary = PathBuf::from(MICROVM_WORKER_BIN);
                 let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
                     .filter(|v| !v.trim().is_empty())
@@ -400,6 +448,13 @@ impl WorkerManifest for WebSearchManifest {
                 let entry = maybe_inject_max_batch(entry, (ctx.get_env)(MAX_BATCH_QUERIES_ENV));
                 return Resolution::Register(entry);
             }
+        }
+
+        // #452: same guard for the host path — force-routing is the operator
+        // flag there, not unconditional like the VM branch above.
+        if let Some(detail) = forced_localhost_misconfig(use_broker, false, &endpoint, ctx.get_env)
+        {
+            return Resolution::Misconfigured { detail };
         }
 
         let binary = match discover_binary(ctx, BIN_ENV, DEFAULT_BIN_NAME) {
