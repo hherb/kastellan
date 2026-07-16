@@ -1,8 +1,12 @@
 //! Trusted broker sidecar — core-side wiring (kind-parameterized).
 //!
 //! A jailed / force-routed / micro-VM worker cannot reach an operator backend
-//! (embedding backend, search backend) directly: loopback services are
-//! SSRF-blocked by the egress proxy, and a MITM re-origination is webpki-only.
+//! (embedding backend, search backend) by local NAME: the egress proxy
+//! range-denies what a `localhost` name resolves to, and a MITM
+//! re-origination is webpki-only. (An operator-allowlisted literal IP IS
+//! dialed via the proxy's carve-out — #457 correction — but the broker
+//! removes the backend from worker egress entirely, the stronger-containment
+//! option regardless of endpoint form.)
 //! Instead of routing those requests through the general egress proxy or baking a
 //! backend into every worker, core spawns a single-purpose **broker sidecar** per
 //! consuming worker (1:1, mirroring the egress force-routing sidecar). The broker

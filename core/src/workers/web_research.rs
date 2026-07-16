@@ -17,6 +17,7 @@ use crate::scheduler::ToolEntry;
 use crate::worker_manifest::{
     discover_binary, ResolveCtx, Resolution, ToolDoc, ToolParam, WorkerManifest,
 };
+use crate::workers::endpoint_guard;
 
 const TOOL_NAME: &str = "web-research";
 const BIN_ENV: &str = "KASTELLAN_WEB_RESEARCH_BIN";
@@ -61,25 +62,92 @@ fn endpoint_net_entry(endpoint: &str) -> Vec<String> {
 /// with a `localhost`-NAME SearxNG endpoint reaches nothing in ANY broker mode
 /// (the proxy range-denies what the name resolves to). A *literal* loopback
 /// endpoint is NOT flagged: the proxy dials an operator-allowlisted literal
-/// via its carve-out.
-fn forced_localhost_misconfig(
-    is_microvm: bool,
-    endpoint: &str,
-    get_env: &dyn Fn(&str) -> Option<String>,
+/// via its carve-out. Predicate + shared message live in
+/// [`endpoint_guard::forced_localhost_misconfig`]; the remedy tail is ours,
+/// and — unlike web-search, whose worker allowlist derives from the endpoint —
+/// it must say to update the `tool_allowlists` row too: the worker validates
+/// the endpoint host against that row and fail-closes when it is missing (the
+/// #428 lesson), so "switch the env to the literal" alone trades one
+/// registered-but-dead config for another. Https for routable hosts for the
+/// same reason (worker-side rule: plain http is loopback-only).
+fn forced_localhost_misconfig(force_routed: bool, endpoint: &str) -> Option<String> {
+    endpoint_guard::forced_localhost_misconfig(
+        ENDPOINT_ENV,
+        endpoint,
+        force_routed,
+        "web-research has no search-broker (its broker carries only embed \
+         traffic); use the literal-IP form (e.g. http://127.0.0.1:<port> — an \
+         allowlisted literal is dialed via the proxy's carve-out) or an \
+         https:// routable SearxNG host (plain http is loopback-only). Either \
+         way the new host must also be on this tool's `tool_allowlists` row — \
+         the worker validates the endpoint host against it and fail-closes \
+         when missing.",
+    )
+}
+
+/// `Some(warning)` iff web-research's *optional* embed endpoint is configured
+/// but unreachable: egress is force-routed, the embed-broker is not enabled,
+/// and the endpoint is a `localhost` name (the proxy range-denies what it
+/// resolves to). Assuming the name is on the tool's allowlist, the worker
+/// still functions — ranking silently degrades hybrid→lexical — so this is an
+/// operator warning, not `Misconfigured` (#429). `None` when not force-routed
+/// (the worker resolves `localhost` itself), when brokered (the embed-broker
+/// reaches the backend over its UDS), or when the endpoint is a literal IP
+/// (dialed via the proxy's allowlisted-literal carve-out) / routable / unset.
+/// Lives here, not in [`endpoint_guard`]: the message cites this worker's env
+/// names, so it belongs beside the consts it names.
+fn embed_local_warning(
+    force_routed: bool,
+    use_broker: bool,
+    embed_endpoint: Option<&str>,
 ) -> Option<String> {
-    use crate::workers::endpoint_guard::{egress_will_force_route, endpoint_is_localhost_name};
-    if !egress_will_force_route(is_microvm, get_env) || !endpoint_is_localhost_name(endpoint) {
+    if !force_routed || use_broker {
+        return None;
+    }
+    let embed = embed_endpoint?;
+    if !endpoint_guard::endpoint_is_localhost_name(embed) {
         return None;
     }
     Some(format!(
-        "{ENDPOINT_ENV} ({endpoint}) uses a `localhost` name, but this worker's \
-         egress is force-routed through the egress proxy, which range-denies \
-         what a localhost name resolves to (SSRF/DNS-rebinding defense) — every \
-         search would fail at request time. web-research has no search-broker (its \
-         broker carries only embed traffic); use the literal-IP form (e.g. \
-         http://127.0.0.1:<port> — an allowlisted literal is dialed via the \
-         proxy's carve-out) or a routable SearxNG host."
+        "web-research: {EMBED_ENDPOINT_ENV} ({embed}) uses a `localhost` name \
+         while egress is force-routed: the egress proxy range-denies what the \
+         name resolves to (SSRF/DNS-rebinding defense), so the query embed \
+         fails and ranking degrades hybrid->lexical. Remedies — note the worker \
+         validates the embed host against this tool's `tool_allowlists` row and \
+         fail-closes the WHOLE worker when it is missing, so update the row to \
+         match: the literal-IP form (e.g. http://127.0.0.1:11434 — an \
+         allowlisted literal is dialed via the proxy's carve-out), an https:// \
+         routable host (plain http is loopback-only), or \
+         {USE_EMBED_BROKER_ENV}=1 (the broker path has no worker egress and \
+         needs no allowlist entry)."
     ))
+}
+
+/// #452-adjacent, warn tier: content-allowlist hosts are the THIRD
+/// `Net::Allowlist` source ([`net_entries`] maps them to `host:443`), and a
+/// `localhost`/`*.localhost` NAME entry is just as statically dead under
+/// force-routing as an endpoint one — every content fetch to it is
+/// range-denied at CONNECT, so results thin out with only per-result
+/// `unfetched` reasons. Warn-only: search and the other content hosts still
+/// work, so this never blocks registration. Literal-IP entries are not
+/// flagged (the proxy's carve-out dials them).
+fn content_localhost_warnings(force_routed: bool, allowlist: &[String]) -> Vec<String> {
+    if !force_routed {
+        return Vec::new();
+    }
+    allowlist
+        .iter()
+        .filter(|h| endpoint_guard::host_is_localhost_name(h))
+        .map(|h| {
+            format!(
+                "web-research: content-allowlist entry `{h}` (tool_allowlists) \
+                 is a `localhost` name while egress is force-routed: the egress \
+                 proxy range-denies what the name resolves to, so every content \
+                 fetch to it will fail (results will carry `unfetched` reasons \
+                 instead). Use a literal-IP entry or a routable host."
+            )
+        })
+        .collect()
 }
 
 /// Union of the endpoint host:port, the optional embed-endpoint host:port, and
@@ -440,71 +508,63 @@ impl WorkerManifest for WebResearchManifest {
         // Firecracker micro-VM mode (Linux) short-circuits host binary discovery:
         // the worker binary lives inside the rootfs image, not on the host.
         // Linux-only — on macOS USE_MICROVM is never read so the `FirecrackerVm`
-        // variant is never referenced (issue #144).
+        // variant is never referenced (issue #144); the guard below sees
+        // `use_microvm = false` there.
         #[cfg(target_os = "linux")]
+        let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
+        #[cfg(not(target_os = "linux"))]
+        let use_microvm = false;
+
+        // #452 — one guard for every path. A Net::Allowlist VM worker is never
+        // given a direct NIC (plan.rs fails closed without the egress proxy)
+        // and the embed-broker can't carry search traffic, so a
+        // `localhost`-name SearxNG endpoint is dead in EVERY VM sub-mode and
+        // in force-routed host mode (a literal loopback works via the proxy
+        // carve-out; a plain host worker resolves localhost itself).
+        let force_routed = endpoint_guard::egress_will_force_route(use_microvm, ctx.get_env);
+        if let Some(detail) = forced_localhost_misconfig(force_routed, &endpoint) {
+            return Resolution::Misconfigured { detail };
+        }
+        // #429 — warn tier, never blocks registration: a `localhost`-name
+        // embed endpoint without the embed-broker (hybrid→lexical downgrade),
+        // and `localhost`-name content-allowlist entries (dead content
+        // fetches under force-routing).
+        if let Some(w) = embed_local_warning(force_routed, use_broker, embed_endpoint.as_deref())
         {
-            let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
-            if use_microvm {
-                // #452: a Net::Allowlist VM worker force-routes unconditionally,
-                // and the embed-broker can't carry search traffic, so a
-                // `localhost`-name SearxNG endpoint is dead in EVERY VM
-                // sub-mode (a literal loopback works via the proxy carve-out).
-                if let Some(detail) = forced_localhost_misconfig(true, &endpoint, ctx.get_env) {
-                    return Resolution::Misconfigured { detail };
-                }
-                // #429: a `localhost`-name embed endpoint without the
-                // embed-broker is unreachable here → silent hybrid→lexical
-                // downgrade; warn (registration proceeds — the tool works).
-                if let Some(w) = crate::workers::endpoint_guard::embed_local_warning(
-                    true,
-                    use_broker,
-                    embed_endpoint.as_deref(),
-                ) {
-                    tracing::warn!(target: "web_research.resolve", "{w}");
-                }
-                let binary = PathBuf::from(MICROVM_WORKER_BIN);
-                let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
-                    .filter(|v| !v.trim().is_empty())
-                    .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
-                // VM × broker: the broker runs host-side and the VM worker reaches it
-                // over the slice-4a vsock UDS (port 1026), so a loopback embed backend
-                // works in VM mode. `use_broker` guarantees an embed endpoint.
-                if use_broker {
-                    let embed_endpoint = embed_endpoint.as_deref().expect("use_broker implies Some");
-                    return Resolution::Register(web_research_firecracker_broker_entry(
-                        binary,
-                        image_dir,
-                        &endpoint,
-                        embed_endpoint,
-                        embed_model.as_deref(),
-                        &allowlist,
-                    ));
-                }
-                return Resolution::Register(web_research_firecracker_entry(
+            tracing::warn!(target: "web_research.resolve", "{w}");
+        }
+        for w in content_localhost_warnings(force_routed, &allowlist) {
+            tracing::warn!(target: "web_research.resolve", "{w}");
+        }
+
+        #[cfg(target_os = "linux")]
+        if use_microvm {
+            let binary = PathBuf::from(MICROVM_WORKER_BIN);
+            let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
+            // VM × broker: the broker runs host-side and the VM worker reaches it
+            // over the slice-4a vsock UDS (port 1026), so a loopback embed backend
+            // works in VM mode. `use_broker` guarantees an embed endpoint.
+            if use_broker {
+                let embed_endpoint = embed_endpoint.as_deref().expect("use_broker implies Some");
+                return Resolution::Register(web_research_firecracker_broker_entry(
                     binary,
                     image_dir,
                     &endpoint,
-                    embed_endpoint.as_deref(),
+                    embed_endpoint,
                     embed_model.as_deref(),
                     &allowlist,
                 ));
             }
-        }
-
-        // #452 (host path): the guard applies iff the operator enabled
-        // force-routing — a plain host worker resolves localhost itself.
-        if let Some(detail) = forced_localhost_misconfig(false, &endpoint, ctx.get_env) {
-            return Resolution::Misconfigured { detail };
-        }
-        // #429 (host path): warn on a force-routed, unbrokered
-        // `localhost`-name embed endpoint (hybrid→lexical downgrade);
-        // never blocks registration.
-        if let Some(w) = crate::workers::endpoint_guard::embed_local_warning(
-            crate::workers::endpoint_guard::egress_will_force_route(false, ctx.get_env),
-            use_broker,
-            embed_endpoint.as_deref(),
-        ) {
-            tracing::warn!(target: "web_research.resolve", "{w}");
+            return Resolution::Register(web_research_firecracker_entry(
+                binary,
+                image_dir,
+                &endpoint,
+                embed_endpoint.as_deref(),
+                embed_model.as_deref(),
+                &allowlist,
+            ));
         }
 
         let binary = match discover_binary(ctx, BIN_ENV, DEFAULT_BIN_NAME) {
@@ -892,6 +952,12 @@ mod tests {
             Resolution::Misconfigured { detail } => {
                 assert!(detail.contains("KASTELLAN_WEB_RESEARCH_ENDPOINT"), "detail: {detail}");
                 assert!(detail.contains("127.0.0.1"), "literal-IP remedy missing: {detail}");
+                // The worker fail-closes on an off-allowlist endpoint host
+                // (the #428 lesson) and SchemeDenies http on non-loopback
+                // hosts — the remedy must carry both caveats or it trades one
+                // registered-but-dead config for another.
+                assert!(detail.contains("tool_allowlists"), "allowlist caveat missing: {detail}");
+                assert!(detail.contains("https://"), "https caveat missing: {detail}");
             }
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
         }
@@ -983,5 +1049,59 @@ mod tests {
             Resolution::Misconfigured { .. } => {}
             other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
         }
+    }
+
+    #[test]
+    fn embed_warning_only_when_forced_unbrokered_and_localhost_name() {
+        let localhost_name = Some("http://localhost:11434/v1/embeddings");
+        assert!(embed_local_warning(true, false, localhost_name).is_some());
+        // Not force-routed: the worker resolves localhost itself, no proxy.
+        assert!(embed_local_warning(false, false, localhost_name).is_none());
+        // Brokered: the embed-broker reaches the backend over its UDS.
+        assert!(embed_local_warning(true, true, localhost_name).is_none());
+        // A LITERAL loopback embed endpoint is dialed via the proxy's
+        // allowlisted-literal carve-out (it is unioned into net_entries) —
+        // never warn about a working config.
+        let literal = Some("http://127.0.0.1:11434/v1/embeddings");
+        assert!(embed_local_warning(true, false, literal).is_none());
+        // Routable or unset endpoint: nothing to warn about.
+        let routable = Some("http://embed.example.org:11434/v1/embeddings");
+        assert!(embed_local_warning(true, false, routable).is_none());
+        assert!(embed_local_warning(true, false, None).is_none());
+    }
+
+    #[test]
+    fn embed_warning_names_env_remedies_and_allowlist_caveat() {
+        let w = embed_local_warning(true, false, Some("http://localhost:11434/v1/embeddings"))
+            .expect("should warn");
+        assert!(w.contains("KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT"), "warning: {w}");
+        assert!(w.contains("KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER=1"), "warning: {w}");
+        assert!(w.contains("127.0.0.1"), "literal-IP remedy missing: {w}");
+        // The worker validates the embed host against tool_allowlists and
+        // fail-closes the whole worker when missing — the warning must say so
+        // or its literal-IP remedy escalates a ranking degradation into a
+        // dead tool.
+        assert!(w.contains("tool_allowlists"), "allowlist caveat missing: {w}");
+        assert!(w.contains("https://"), "https caveat missing: {w}");
+    }
+
+    #[test]
+    fn content_allowlist_localhost_names_warn_only_when_forced() {
+        let allowlist = vec![
+            "docs.example.org".to_string(),
+            "localhost".to_string(),
+            "foo.localhost".to_string(),
+            "127.0.0.1".to_string(), // literal: carve-out, never flagged
+        ];
+        // Force-routed: one warning per localhost-NAME entry, naming it.
+        let warnings = content_localhost_warnings(true, &allowlist);
+        assert_eq!(warnings.len(), 2, "warnings: {warnings:?}");
+        assert!(warnings[0].contains("`localhost`"), "warning: {}", warnings[0]);
+        assert!(warnings[1].contains("`foo.localhost`"), "warning: {}", warnings[1]);
+        // Not force-routed: local names resolve in the worker itself — quiet.
+        assert!(content_localhost_warnings(false, &allowlist).is_empty());
+        // No localhost-name entries: quiet.
+        let clean = vec!["docs.example.org".to_string()];
+        assert!(content_localhost_warnings(true, &clean).is_empty());
     }
 }

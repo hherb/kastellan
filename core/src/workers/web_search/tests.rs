@@ -404,6 +404,10 @@ fn resolve_forced_host_localhost_name_endpoint_is_misconfigured() {
             assert!(detail.contains("KASTELLAN_WEB_SEARCH_ENDPOINT"), "detail: {detail}");
             assert!(detail.contains("KASTELLAN_WEB_SEARCH_USE_BROKER=1"), "detail: {detail}");
             assert!(detail.contains("127.0.0.1"), "literal-IP remedy missing: {detail}");
+            // The worker's own validate_endpoint allows plain http for
+            // loopback hosts only — a routable-host remedy without https
+            // would pass this guard and die SchemeDenied at the worker.
+            assert!(detail.contains("https://"), "https caveat missing: {detail}");
         }
         other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
     }

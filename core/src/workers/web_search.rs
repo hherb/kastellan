@@ -16,6 +16,7 @@ use crate::scheduler::ToolEntry;
 use crate::worker_manifest::{
     discover_binary, ResolveCtx, Resolution, ToolDoc, ToolParam, WorkerManifest,
 };
+use crate::workers::endpoint_guard;
 
 /// Tool name the registry keys web-search on.
 const TOOL_NAME: &str = "web-search";
@@ -87,35 +88,39 @@ fn host_allowlist_from_endpoint(endpoint: &str) -> Vec<String> {
     }
 }
 
-/// The #452 resolve-time guard: `Some(detail)` iff this worker's egress will be
+/// The #452 resolve-time guard, web-search flavour: `Some(detail)` iff broker
+/// mode is off (the search-broker owns SearxNG egress host-side, so worker
+/// egress never carries search traffic), this worker's egress will be
 /// force-routed (micro-VM always; host iff `KASTELLAN_EGRESS_FORCE_ROUTING`),
-/// broker mode is off (the search-broker never touches worker egress), and the
-/// operator endpoint uses a `localhost` NAME — the one endpoint class the
-/// egress proxy can never serve (it resolves the name, gets loopback, and
-/// range-denies the CONNECT), i.e. a config where the tool registers but every
-/// search fails. A *literal* loopback endpoint (`http://127.0.0.1:…`) is NOT
-/// flagged: the proxy dials an operator-allowlisted literal via its carve-out.
+/// and the operator endpoint uses a `localhost` NAME — the one endpoint class
+/// the egress proxy can never serve. A *literal* loopback endpoint
+/// (`http://127.0.0.1:…`) is NOT flagged: the proxy dials an
+/// operator-allowlisted literal via its carve-out. Predicate + shared message
+/// live in [`endpoint_guard::forced_localhost_misconfig`]; only the remedy
+/// tail is per-worker. The remedy names https for routable hosts because the
+/// worker's own `validate_endpoint` allows plain http for loopback hosts only
+/// — an `http://` routable endpoint would pass this guard and then die
+/// SchemeDenied at worker startup.
 fn forced_localhost_misconfig(
     use_broker: bool,
     is_microvm: bool,
     endpoint: &str,
     get_env: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    use crate::workers::endpoint_guard::{egress_will_force_route, endpoint_is_localhost_name};
-    if use_broker
-        || !egress_will_force_route(is_microvm, get_env)
-        || !endpoint_is_localhost_name(endpoint)
-    {
+    if use_broker {
         return None;
     }
-    Some(format!(
-        "{ENDPOINT_ENV} ({endpoint}) uses a `localhost` name, but this worker's \
-         egress is force-routed through the egress proxy, which range-denies \
-         what a localhost name resolves to (SSRF/DNS-rebinding defense) — every \
-         search would fail at request time. Use the literal-IP form (e.g. \
-         http://127.0.0.1:<port> — an allowlisted literal is dialed via the \
-         proxy's carve-out), a routable host, or set {USE_BROKER_ENV}=1."
-    ))
+    endpoint_guard::forced_localhost_misconfig(
+        ENDPOINT_ENV,
+        endpoint,
+        endpoint_guard::egress_will_force_route(is_microvm, get_env),
+        &format!(
+            "Use the literal-IP form (e.g. http://127.0.0.1:<port> — an \
+             allowlisted literal is dialed via the proxy's carve-out), an \
+             https:// routable host (the worker allows plain http for loopback \
+             hosts only), or set {USE_BROKER_ENV}=1."
+        ),
+    )
 }
 
 /// Build the [`ToolEntry`] for the web-search worker.
@@ -423,10 +428,11 @@ impl WorkerManifest for WebSearchManifest {
         {
             let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
             if use_microvm {
-                // #452: a Net::Allowlist VM worker force-routes unconditionally,
-                // so a direct (non-broker) `localhost`-name endpoint can never
-                // be reached (a literal loopback IS reached via the proxy's
-                // allowlisted-literal carve-out).
+                // #452: a Net::Allowlist VM worker is never given a direct NIC
+                // (plan.rs refuses to boot one without the egress proxy), so a
+                // direct (non-broker) `localhost`-name endpoint can never be
+                // reached in VM mode (a literal loopback IS reached via the
+                // proxy's allowlisted-literal carve-out).
                 if let Some(detail) =
                     forced_localhost_misconfig(use_broker, true, &endpoint, ctx.get_env)
                 {

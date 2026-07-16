@@ -5,18 +5,23 @@
 //! **resolved hostname** — but an operator-allowlisted **literal IP** is
 //! dialed with the range check deliberately skipped (the allowlisted-literal
 //! carve-out in `egress-proxy::proxy::decide`; operator intent is explicit and
-//! a literal cannot be rebound). Both guarded workers derive their allowlist
-//! from the endpoint itself, so a literal endpoint — loopback included — is
-//! REACHABLE when force-routed.
+//! a literal cannot be rebound). So a literal endpoint — loopback included —
+//! is dialable by the proxy when force-routed. (Worker-side rules still apply
+//! on top: web-common's `validate_endpoint` allows plain `http` only for
+//! loopback hosts and requires the host on the worker's allowlist — web-search
+//! derives that allowlist from the endpoint itself, web-research reads its
+//! operator `tool_allowlists` row, so its remedies must say to update the row
+//! too.)
 //!
 //! The one endpoint class that is statically knowable to be dead is an RFC
 //! 6761 `localhost` / `*.localhost` **name**: it takes the proxy's hostname
 //! path, always resolves to loopback, and is range-denied on every CONNECT.
 //! The worker then registers and looks healthy while every request fails — a
 //! silent footgun (#452). The helpers here let a manifest refuse that dead
-//! configuration at `resolve()` time (`Resolution::Misconfigured`), or — for
-//! web-research's *optional* embed endpoint, where the same class only
-//! degrades ranking — warn (#429).
+//! configuration at `resolve()` time (`Resolution::Misconfigured`), or warn
+//! where the same class only degrades behaviour (#429, web-research's
+//! optional embed endpoint — its message lives in `web_research.rs` beside
+//! the env names it cites).
 //!
 //! Deliberately **no DNS at resolve time**: any other hostname that happens to
 //! resolve to a private address (including a rebinding attack) is caught by
@@ -32,19 +37,31 @@ use crate::worker_lifecycle::force_route;
 /// proxy resolves the name, gets loopback, and range-denies the CONNECT).
 ///
 /// Literal IPs — loopback/private included — return `false`: the proxy's
-/// allowlisted-literal carve-out dials them, so they work when force-routed.
-/// A real remote hostname also returns `false` (resolve-time cannot know its
-/// address without DNS; the connect-time proxy check owns that case), and so
-/// does an unset / unparseable endpoint (those keep today's fail-closed worker
-/// startup behaviour instead of a guard message about the wrong problem).
+/// allowlisted-literal carve-out dials them, so the proxy serves them when
+/// force-routed. A real remote hostname also returns `false` (resolve-time
+/// cannot know its address without DNS; the connect-time proxy check owns that
+/// case), and so does an unset, unparseable, or **host-less** endpoint — note
+/// a scheme-less `localhost:8888/search` *parses* with `localhost` as the
+/// scheme and no host, so it lands here too; all of these keep today's
+/// fail-closed worker startup behaviour (the worker's own `validate_endpoint`
+/// rejects them with a precise error) instead of a guard message about the
+/// wrong problem.
 pub(crate) fn endpoint_is_localhost_name(endpoint: &str) -> bool {
     let Ok(url) = Url::parse(endpoint) else { return false };
     match url.host() {
         Some(Host::Domain(d)) => is_local_domain(d),
-        // Ipv4/Ipv6 literals: reachable via the proxy's carve-out; no host: no
-        // guard business either way.
+        // Ipv4/Ipv6 literals: dialable via the proxy's carve-out; no host
+        // (including the scheme-less `localhost:8888` trap): the worker's own
+        // endpoint validation owns that failure — no guard business either way.
         _ => false,
     }
+}
+
+/// Host-level flavour of [`endpoint_is_localhost_name`] for bare allowlist
+/// entries (no URL around them). Tolerates the wildcard leading-dot form
+/// (`.localhost`) since it ends with the suffix, and the FQDN trailing dot.
+pub(crate) fn host_is_localhost_name(host: &str) -> bool {
+    is_local_domain(host)
 }
 
 /// RFC 6761: `localhost` and any `*.localhost` name always resolve to loopback.
@@ -54,10 +71,14 @@ fn is_local_domain(domain: &str) -> bool {
 }
 
 /// True iff a `Net::Allowlist` worker spawned by this daemon will have its
-/// egress force-routed through the host egress proxy: always in micro-VM mode
-/// (`linux_firecracker/plan.rs` refuses to give a `Net::Allowlist` VM worker a
-/// NIC), and in host mode iff the operator enabled
-/// `KASTELLAN_EGRESS_FORCE_ROUTING`. The flag name and truthiness parse are
+/// egress force-routed through the host egress proxy: in host mode iff the
+/// operator enabled `KASTELLAN_EGRESS_FORCE_ROUTING`; in micro-VM mode
+/// treated as always-on. Strictly, `linux_firecracker/plan.rs` guarantees a
+/// `Net::Allowlist` VM worker is never given a direct NIC — it fail-closed
+/// REFUSES to boot without the egress proxy — so with the flag unset a VM
+/// worker cannot spawn at all rather than being routed; either way no direct
+/// route to a `localhost` name ever exists in VM mode, which is what the
+/// guard needs to know. The flag name and truthiness parse are
 /// `force_route`'s own (`ENV_ENABLE` / `env_flag_enabled`), so this mirror
 /// cannot drift from the spawn path.
 pub(crate) fn egress_will_force_route(
@@ -67,35 +88,26 @@ pub(crate) fn egress_will_force_route(
     is_microvm || force_route::env_flag_enabled(get_env(force_route::ENV_ENABLE))
 }
 
-/// `Some(warning)` iff web-research's *optional* embed endpoint is configured
-/// but unreachable: egress is force-routed, the embed-broker is not enabled,
-/// and the endpoint is a `localhost` name (the proxy range-denies what it
-/// resolves to). The worker still functions — ranking silently degrades
-/// hybrid→lexical — so this is an operator warning, not `Misconfigured`
-/// (#429). `None` when not force-routed (the worker resolves `localhost`
-/// itself), when brokered (the embed-broker reaches the backend over its
-/// UDS), or when the endpoint is a literal IP (reachable via the proxy's
-/// allowlisted-literal carve-out) / routable / unset.
-pub(crate) fn embed_local_warning(
+/// The shared #452 `Misconfigured` message builder: `Some(detail)` iff the
+/// worker's egress will be force-routed AND `endpoint` uses a `localhost`
+/// name. The predicate composition and the explanation live here — once —
+/// while each manifest passes its own env-var name and remedy sentence
+/// (`remedy`), which is the only genuinely per-worker part. Callers that have
+/// a broker escape hatch (web-search) apply that exemption at the call site.
+pub(crate) fn forced_localhost_misconfig(
+    endpoint_env: &str,
+    endpoint: &str,
     force_routed: bool,
-    use_broker: bool,
-    embed_endpoint: Option<&str>,
+    remedy: &str,
 ) -> Option<String> {
-    if !force_routed || use_broker {
-        return None;
-    }
-    let embed = embed_endpoint?;
-    if !endpoint_is_localhost_name(embed) {
+    if !force_routed || !endpoint_is_localhost_name(endpoint) {
         return None;
     }
     Some(format!(
-        "web-research: KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT ({embed}) uses a \
-         `localhost` name while egress is force-routed: the egress proxy \
-         range-denies what the name resolves to (SSRF/DNS-rebinding defense), \
-         so the query embed will fail and ranking degrades hybrid->lexical. Use the literal-IP \
-         form (e.g. http://127.0.0.1:11434 — an allowlisted literal is dialed via \
-         the proxy's carve-out), a routable host, or set \
-         KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER=1."
+        "{endpoint_env} ({endpoint}) uses a `localhost` name, but this worker's \
+         egress is force-routed through the egress proxy, which range-denies \
+         what a localhost name resolves to (SSRF/DNS-rebinding defense) — the \
+         tool would register but every request to it would fail. {remedy}"
     ))
 }
 
@@ -107,9 +119,12 @@ mod tests {
     fn ip_literals_are_not_flagged_even_when_loopback_or_private() {
         // The egress proxy's operator-allowlisted-literal carve-out
         // (`egress-proxy::proxy::decide`) dials an allowlisted literal IP with
-        // the SSRF range check skipped, and both workers derive their
-        // allowlist from the endpoint — so a literal endpoint is REACHABLE
-        // when force-routed and must never be flagged as dead.
+        // the SSRF range check skipped — so at the PROXY layer a literal
+        // endpoint is dialable when force-routed and must never be flagged as
+        // statically dead. (Worker-side rules are separate and still apply:
+        // plain `http` is loopback-only and the host must be allowlisted, so
+        // e.g. the http+private rows below would be SchemeDenied by the worker
+        // itself — not the proxy — which is out of this predicate's scope.)
         for ep in [
             "http://127.0.0.1:8888/search",
             "https://127.1.2.3/",
@@ -152,10 +167,29 @@ mod tests {
     }
 
     #[test]
-    fn unset_or_unparseable_endpoints_are_not_flagged() {
+    fn unset_unparseable_or_hostless_endpoints_are_not_flagged() {
         assert!(!endpoint_is_localhost_name(""));
-        assert!(!endpoint_is_localhost_name("not a url"));
-        assert!(!endpoint_is_localhost_name("127.0.0.1:8888/search")); // no scheme
+        assert!(!endpoint_is_localhost_name("not a url")); // Url::parse Err
+        // Url::parse Err too: a scheme cannot start with a digit.
+        assert!(!endpoint_is_localhost_name("127.0.0.1:8888/search"));
+        // The realistic scheme-less typo: this PARSES (scheme `localhost`,
+        // host None) and takes the `_ => false` arm — the worker's own
+        // validate_endpoint rejects it at startup ("endpoint has no host"),
+        // which is the diagnostic the operator should get.
+        assert!(!endpoint_is_localhost_name("localhost:8888/search"));
+    }
+
+    #[test]
+    fn allowlist_hosts_classify_like_endpoint_hosts() {
+        assert!(host_is_localhost_name("localhost"));
+        assert!(host_is_localhost_name("LOCALHOST"));
+        assert!(host_is_localhost_name("foo.localhost"));
+        assert!(host_is_localhost_name(".localhost")); // wildcard entry form
+        assert!(host_is_localhost_name("localhost.")); // FQDN trailing dot
+        assert!(!host_is_localhost_name("docs.example.org"));
+        assert!(!host_is_localhost_name(".example.org"));
+        assert!(!host_is_localhost_name("127.0.0.1")); // literal: carve-out
+        assert!(!host_is_localhost_name("localhost.attacker.example"));
     }
 
     #[test]
@@ -185,30 +219,27 @@ mod tests {
     }
 
     #[test]
-    fn warns_only_when_forced_unbrokered_and_localhost_name() {
-        let localhost_name = Some("http://localhost:11434/v1/embeddings");
-        assert!(embed_local_warning(true, false, localhost_name).is_some());
-        // Not force-routed: the worker resolves localhost itself, no proxy.
-        assert!(embed_local_warning(false, false, localhost_name).is_none());
-        // Brokered: the embed-broker reaches the backend over its UDS.
-        assert!(embed_local_warning(true, true, localhost_name).is_none());
-        // A LITERAL loopback embed endpoint is reachable via the proxy's
-        // allowlisted-literal carve-out (it is unioned into net_entries) —
-        // never warn about a working config.
-        let literal = Some("http://127.0.0.1:11434/v1/embeddings");
-        assert!(embed_local_warning(true, false, literal).is_none());
-        // Routable or unset endpoint: nothing to warn about.
-        let routable = Some("http://embed.example.org:11434/v1/embeddings");
-        assert!(embed_local_warning(true, false, routable).is_none());
-        assert!(embed_local_warning(true, false, None).is_none());
-    }
-
-    #[test]
-    fn warning_names_the_env_and_the_remedies() {
-        let w = embed_local_warning(true, false, Some("http://localhost:11434/v1/embeddings"))
-            .expect("should warn");
-        assert!(w.contains("KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT"), "warning: {w}");
-        assert!(w.contains("KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER=1"), "warning: {w}");
-        assert!(w.contains("127.0.0.1"), "literal-IP remedy missing: {w}");
+    fn misconfig_builder_composes_env_endpoint_and_remedy() {
+        let d = forced_localhost_misconfig(
+            "KASTELLAN_TEST_ENDPOINT",
+            "http://localhost:8888/search",
+            true,
+            "Do the remedy thing.",
+        )
+        .expect("forced + localhost name must produce a detail");
+        assert!(d.contains("KASTELLAN_TEST_ENDPOINT"), "detail: {d}");
+        assert!(d.contains("http://localhost:8888/search"), "detail: {d}");
+        assert!(d.contains("Do the remedy thing."), "detail: {d}");
+        // Not force-routed, or not a localhost name: no message.
+        assert!(forced_localhost_misconfig(
+            "E",
+            "http://localhost:8888/search",
+            false,
+            "r"
+        )
+        .is_none());
+        assert!(
+            forced_localhost_misconfig("E", "http://127.0.0.1:8888/search", true, "r").is_none()
+        );
     }
 }
