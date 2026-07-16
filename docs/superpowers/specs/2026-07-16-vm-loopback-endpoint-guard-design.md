@@ -6,8 +6,42 @@
 **Scope decision (operator, 2026-07-16):** the guard covers **any force-routed
 mode** — micro-VM (always force-routed) ∪ host mode with
 `KASTELLAN_EGRESS_FORCE_ROUTING` enabled — not just the VM mode #452 was filed
-against. The mechanism ("force-routed egress SSRF-blocks loopback") is identical
-in both, and the supervised DGX deployment runs host workers force-routed.
+against. The mechanism is identical in both, and the supervised DGX deployment
+runs host workers force-routed.
+
+## ⚠️ Revision after final review (operator decision, 2026-07-16)
+
+The final whole-branch review found the original premise of this spec — "a
+force-routed loopback endpoint is unreachable; the proxy denies the loopback
+CONNECT" — **false for IP literals**. The egress proxy has an ORIGINAL
+(slice #1, commit `4f6f5857`), test-pinned
+(`decide_allows_literal_loopback_when_allowlisted`), live-relied-upon
+(`web_research_vm_force_route_daemon_e2e`, #448 arc) **allowlisted-literal
+carve-out**: `decide()` dials an operator-allowlisted literal IP with the SSRF
+range check skipped ("operator intent is explicit" — a literal cannot be
+DNS-rebound). Both guarded workers derive `Net::Allowlist` from the endpoint,
+so a literal loopback endpoint (`http://127.0.0.1:8888/…`) **works**
+force-routed. Only RFC 6761 `localhost` / `*.localhost` **names** take the
+hostname path (resolve → loopback → range-denied) and are genuinely dead.
+
+**Operator decision: Option A — keep the carve-out, narrow the guard.** The
+shipped design therefore flags **`localhost`-name endpoints only**:
+
+- `endpoint_host_is_local` became **`endpoint_is_localhost_name`** (Domain arm
+  only; literal IPs are never flagged — they are reachable via the carve-out).
+- The `Misconfigured` details and the #429 warning now name the literal-IP form
+  (`http://127.0.0.1:<port>`) as a remedy alongside routable hosts / brokers.
+- Core's dependency on `kastellan-net-classify` was dropped (the narrowed
+  predicate is pure name logic); the crate extraction itself **stands** —
+  egress-proxy consumes it, and the range list keeps its single pure home.
+- Test expectations for literal endpoints flipped to `Register` (pinned as the
+  Option-A policy), with `localhost`-name variants pinning the guard.
+- The pre-existing docstrings claiming "loopback is unreachable in VM mode"
+  (#428/#451 era) were corrected in both workers; the
+  `dgx-force-routing-deploy-facts` memory note was corrected likewise.
+
+Sections below describe the original (pre-revision) reasoning where they speak
+of loopback/private literals being blocked — read them through this revision.
 
 ## Problem
 

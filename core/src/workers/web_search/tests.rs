@@ -386,10 +386,35 @@ fn resolve_vm_entry_still_injects_batch_cap() {
 }
 
 #[test]
-fn resolve_forced_host_loopback_endpoint_is_misconfigured() {
-    // Host mode + KASTELLAN_EGRESS_FORCE_ROUTING + loopback endpoint + no
-    // broker: the egress proxy would SSRF-block every CONNECT — refuse to
-    // register rather than register a dead tool (#452).
+fn resolve_forced_host_localhost_name_endpoint_is_misconfigured() {
+    // Host mode + KASTELLAN_EGRESS_FORCE_ROUTING + a `localhost` NAME endpoint
+    // + no broker: the proxy range-denies what the name resolves to — refuse
+    // to register rather than register a dead tool (#452).
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("http://localhost:8888/search".to_string()),
+        "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| vec!["localhost".to_string()];
+    let c = ctx(&get_env, &exists, &allowlist);
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Misconfigured { detail } => {
+            assert!(detail.contains("KASTELLAN_WEB_SEARCH_ENDPOINT"), "detail: {detail}");
+            assert!(detail.contains("KASTELLAN_WEB_SEARCH_USE_BROKER=1"), "detail: {detail}");
+            assert!(detail.contains("127.0.0.1"), "literal-IP remedy missing: {detail}");
+        }
+        other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+    }
+}
+
+#[test]
+fn resolve_forced_host_literal_loopback_still_registers() {
+    // Option-A policy pin (2026-07-16 review): an operator-allowlisted LITERAL
+    // loopback endpoint is dialed via the egress proxy's carve-out
+    // (`egress-proxy::proxy::decide`), so it works force-routed and must keep
+    // registering — the guard is for `localhost` NAMES only.
     let get_env = |k: &str| match k {
         BIN_ENV => Some("/opt/web-search".to_string()),
         ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
@@ -400,27 +425,25 @@ fn resolve_forced_host_loopback_endpoint_is_misconfigured() {
     let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
     let c = ctx(&get_env, &exists, &allowlist);
     match WebSearchManifest.resolve(&c) {
-        Resolution::Misconfigured { detail } => {
-            assert!(detail.contains("KASTELLAN_WEB_SEARCH_ENDPOINT"), "detail: {detail}");
-            assert!(detail.contains("KASTELLAN_WEB_SEARCH_USE_BROKER=1"), "detail: {detail}");
-        }
-        other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+        Resolution::Register(_) => {}
+        other => panic!("expected Register, got {}", outcome_label(&other)),
     }
 }
 
 #[test]
-fn resolve_forced_host_loopback_with_broker_still_registers() {
-    // The search-broker is the loopback escape hatch — broker mode must be
-    // exempt from the #452 guard.
+fn resolve_forced_host_localhost_name_with_broker_still_registers() {
+    // Broker mode is exempt from the #452 guard: the host-side search-broker
+    // resolves and fetches the endpoint itself (no worker egress at all), so
+    // even a `localhost` name works there.
     let get_env = |k: &str| match k {
         BIN_ENV => Some("/opt/web-search".to_string()),
-        ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+        ENDPOINT_ENV => Some("http://localhost:8888/search".to_string()),
         "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
         "KASTELLAN_WEB_SEARCH_USE_BROKER" => Some("1".to_string()),
         _ => None,
     };
     let exists = |_p: &Path| true;
-    let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+    let allowlist = |_t: &str| vec!["localhost".to_string()];
     let c = ctx(&get_env, &exists, &allowlist);
     match WebSearchManifest.resolve(&c) {
         Resolution::Register(entry) => {
@@ -450,18 +473,20 @@ fn resolve_forced_host_routable_endpoint_still_registers() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn resolve_direct_microvm_loopback_endpoint_is_misconfigured() {
+fn resolve_direct_microvm_localhost_name_endpoint_is_misconfigured() {
     // A Net::Allowlist VM worker force-routes unconditionally (no flag needed):
-    // direct VM + loopback endpoint is always dead (#452). Broker-VM + loopback
-    // stays allowed — pinned by resolve_uses_broker_microvm_entry_when_both_opted_in.
+    // direct VM + a `localhost` NAME endpoint is always dead (#452). A literal
+    // loopback stays allowed via the proxy carve-out (host-path pin above);
+    // broker-VM + literal loopback is separately pinned by
+    // resolve_uses_broker_microvm_entry_when_both_opted_in.
     let get_env = |k: &str| match k {
         BIN_ENV => Some("/opt/web-search".to_string()),
-        ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+        ENDPOINT_ENV => Some("http://localhost:8888/search".to_string()),
         "KASTELLAN_WEB_SEARCH_USE_MICROVM" => Some("1".to_string()),
         _ => None,
     };
     let exists = |_p: &Path| true;
-    let allowlist = |_t: &str| vec!["127.0.0.1".to_string()];
+    let allowlist = |_t: &str| vec!["localhost".to_string()];
     let c = ctx(&get_env, &exists, &allowlist);
     match WebSearchManifest.resolve(&c) {
         Resolution::Misconfigured { detail } => {

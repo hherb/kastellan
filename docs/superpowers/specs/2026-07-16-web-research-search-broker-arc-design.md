@@ -2,14 +2,22 @@
 
 **Date:** 2026-07-16 (brainstormed alongside the loopback-endpoint-guard spec;
 implementation deferred to its own session/PR).
-**Motivation:** web-research's SearxNG endpoint has **no broker escape hatch** —
-its only broker is the embed-broker (`BrokerSpec::embed`). In every force-routed
-mode (micro-VM always; host with `KASTELLAN_EGRESS_FORCE_ROUTING=1`, the
-supervised DGX default) the egress proxy SSRF-blocks loopback, so a loopback
-SearxNG makes web-research dead. The guard spec
-(`2026-07-16-vm-loopback-endpoint-guard-design.md`) makes that config an explicit
-`Resolution::Misconfigured`; **this arc makes it work instead**, mirroring what
-web-search already has (#440 host search-broker, #451 VM × search-broker).
+**Motivation (revised 2026-07-16 after the carve-out finding):** web-research's
+SearxNG endpoint has **no broker escape hatch** — its only broker is the
+embed-broker (`BrokerSpec::embed`). In a force-routed mode (micro-VM always;
+host with `KASTELLAN_EGRESS_FORCE_ROUTING=1`, the supervised DGX default) the
+egress proxy range-denies what a **hostname** resolves to, so a
+`localhost`-name (or any local-name) SearxNG endpoint is dead; a **literal**
+loopback endpoint works via the proxy's allowlisted-literal carve-out (see the
+guard spec's Revision section). The value of a web-research search-broker is
+therefore: (a) serve name-form / non-literal local endpoints, and (b) the
+**stronger containment posture** — SearxNG leaves worker egress entirely (zero
+direct egress), the same reason web-search's broker exists beyond mere
+reachability. The guard spec
+(`2026-07-16-vm-loopback-endpoint-guard-design.md`) makes the dead name-form
+config an explicit `Resolution::Misconfigured`; **this arc gives web-research
+the broker option web-search already has** (#440 host search-broker, #451 VM ×
+search-broker).
 
 ## Slice 1 (the arc's deliverable): single-broker search-broker for web-research
 

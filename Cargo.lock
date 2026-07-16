@@ -2255,7 +2255,6 @@ dependencies = [
  "kastellan-leak-scan",
  "kastellan-llm-router",
  "kastellan-matrix-wire",
- "kastellan-net-classify",
  "kastellan-protocol",
  "kastellan-sandbox",
  "kastellan-supervisor",
