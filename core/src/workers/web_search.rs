@@ -110,9 +110,9 @@ fn forced_localhost_misconfig(
     }
     Some(format!(
         "{ENDPOINT_ENV} ({endpoint}) uses a `localhost` name, but this worker's \
-         egress is force-routed through the egress proxy, which refuses to \
-         resolve localhost names (SSRF/DNS-rebinding defense) — every search \
-         would fail at request time. Use the literal-IP form (e.g. \
+         egress is force-routed through the egress proxy, which range-denies \
+         what a localhost name resolves to (SSRF/DNS-rebinding defense) — every \
+         search would fail at request time. Use the literal-IP form (e.g. \
          http://127.0.0.1:<port> — an allowlisted literal is dialed via the \
          proxy's carve-out), a routable host, or set {USE_BROKER_ENV}=1."
     ))

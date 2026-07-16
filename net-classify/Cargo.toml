@@ -1,6 +1,6 @@
 [package]
 name        = "kastellan-net-classify"
-description = "Pure IP-range classifier: the SSRF / DNS-rebinding deny predicate shared by the egress proxy (connect-time containment) and core (resolve-time endpoint sanity checks)."
+description = "Pure IP-range classifier: the SSRF / DNS-rebinding deny predicate the egress proxy enforces at connect time, extracted to a single pure home so future consumers cannot drift from it."
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

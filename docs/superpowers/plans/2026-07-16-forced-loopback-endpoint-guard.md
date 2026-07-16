@@ -1,5 +1,12 @@
 # Forced-Loopback Endpoint Guard Implementation Plan
 
+> **⚠️ SUPERSEDED IN PART (2026-07-16, post-review):** the shipped predicate is
+> `endpoint_is_localhost_name` (localhost/*.localhost NAMES only) — the
+> literal-flagging `endpoint_host_is_local` this plan specifies was narrowed
+> after the final review found the egress proxy's allowlisted-literal
+> carve-out. See the spec's "Revision after final review" section. Core no
+> longer depends on net-classify. (Also: ssrf.rs had 12 tests, not 13.)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Detect at `resolve()` time when an operator points a force-routed net worker (web-search / web-research) at a loopback/private endpoint the egress proxy will SSRF-block, and refuse to register it (`Misconfigured`) — or warn, for web-research's optional embed endpoint (#452 + #429).
@@ -103,7 +110,7 @@ Delete the old file: `git rm workers/egress-proxy/src/ssrf.rs`.
 source "$HOME/.cargo/env"
 cargo test -p kastellan-net-classify
 ```
-Expected: **13 passed** (public_v4_is_allowed … sixtofour_embedded_private_is_denied).
+Expected: **12 passed** (public_v4_is_allowed … sixtofour_embedded_private_is_denied).
 
 ```sh
 cargo test -p kastellan-worker-egress-proxy

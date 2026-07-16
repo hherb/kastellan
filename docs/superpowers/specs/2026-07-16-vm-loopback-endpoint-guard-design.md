@@ -105,7 +105,7 @@ egress-proxy so a security-critical predicate has one home and cannot drift).
 
 - **Move** `is_denied_range(ip: IpAddr) -> bool` and its private helpers
   (`is_denied_v4/v6`, `is_cgnat_v4`, `is_reserved_v4`, `is_unique_local_v6`,
-  `is_link_local_v6`, `embedded_transition_v4`) plus **all 13 unit tests** out of
+  `is_link_local_v6`, `embedded_transition_v4`) plus **all 12 unit tests** out of
   `workers/egress-proxy/src/ssrf.rs` into the new crate. Pure `std::net` only — no
   new deps, cross-platform, Mac-buildable.
 - **egress-proxy** depends on the crate; `proxy.rs` re-points

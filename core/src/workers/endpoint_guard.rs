@@ -90,9 +90,9 @@ pub(crate) fn embed_local_warning(
     }
     Some(format!(
         "web-research: KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT ({embed}) uses a \
-         `localhost` name while egress is force-routed: the egress proxy refuses \
-         to resolve localhost names (SSRF/DNS-rebinding defense), so the query \
-         embed will fail and ranking degrades hybrid->lexical. Use the literal-IP \
+         `localhost` name while egress is force-routed: the egress proxy \
+         range-denies what the name resolves to (SSRF/DNS-rebinding defense), \
+         so the query embed will fail and ranking degrades hybrid->lexical. Use the literal-IP \
          form (e.g. http://127.0.0.1:11434 — an allowlisted literal is dialed via \
          the proxy's carve-out), a routable host, or set \
          KASTELLAN_WEB_RESEARCH_USE_EMBED_BROKER=1."
