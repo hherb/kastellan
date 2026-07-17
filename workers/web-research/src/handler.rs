@@ -13,7 +13,8 @@ use url::Url;
 
 use kastellan_worker_web_common::allowlist::HostAllowlist;
 use kastellan_worker_web_common::http::{make_get, HttpGet};
-use kastellan_worker_web_common::search::{validate_endpoint, SearchError};
+use kastellan_worker_web_common::search::validate_endpoint;
+use kastellan_worker_web_common::search_provider::search_err_to_rpc;
 
 use crate::embed::{choose_embedder, BrokeredEmbedder, Embedder, EmbedderChoice, HttpEmbedder};
 use crate::research::{
@@ -27,36 +28,6 @@ struct ResearchParams {
     max_sources: Option<usize>,
     #[serde(default)]
     max_passages: Option<usize>,
-}
-
-/// Map a [`SearchError`] to a JSON-RPC error (shared shape with web-search).
-fn search_err_to_rpc(e: SearchError) -> RpcError {
-    match e {
-        SearchError::EmptyQuery => RpcError::new(codes::INVALID_PARAMS, "query is empty".to_string()),
-        SearchError::BadEndpoint(m) => {
-            RpcError::new(codes::POLICY_DENIED, format!("configured endpoint invalid: {m}"))
-        }
-        SearchError::SchemeDenied(s) => RpcError::new(
-            codes::POLICY_DENIED,
-            format!("endpoint scheme {s:?} not allowed (https, or http for loopback only)"),
-        ),
-        SearchError::HostDenied(h) => {
-            RpcError::new(codes::POLICY_DENIED, format!("endpoint host {h:?} not on allowlist"))
-        }
-        SearchError::Transport(m) => {
-            RpcError::new(codes::OPERATION_FAILED, format!("search request failed: {m}"))
-        }
-        SearchError::Redirected => RpcError::new(
-            codes::OPERATION_FAILED,
-            "search endpoint returned an unexpected redirect".to_string(),
-        ),
-        SearchError::BadStatus(s) => {
-            RpcError::new(codes::OPERATION_FAILED, format!("search endpoint returned status {s}"))
-        }
-        SearchError::Parse(m) => {
-            RpcError::new(codes::OPERATION_FAILED, format!("parsing results failed: {m}"))
-        }
-    }
 }
 
 fn research_err_to_rpc(e: ResearchError) -> RpcError {

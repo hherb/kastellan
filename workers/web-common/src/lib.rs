@@ -5,6 +5,8 @@
 //! - [`embed_rows`] — shared reorder/count/contiguity check for embedding responses.
 //! - [`testing`] (feature `testing`) — a fake transport + builders for unit tests.
 //! - [`search`] / [`parse`] (feature `search`) — pure SearxNG query logic.
+//! - [`search_provider`] (feature `search`) — the direct/brokered `SearchProvider`
+//!   seam + the shared `SearchError → RpcError` mapper.
 //! - [`fetch`] (feature `fetch`) — redirect-following drive loop.
 //! - [`extract`] (feature `extract`) — HTML/PDF/text readable-text extraction.
 
@@ -33,6 +35,8 @@ pub const WEB_SEARCH_BATCH_METHOD: &str = "web.search_batch";
 pub mod parse;
 #[cfg(feature = "search")]
 pub mod search;
+#[cfg(feature = "search")]
+pub mod search_provider;
 #[cfg(feature = "fetch")]
 pub mod fetch;
 #[cfg(feature = "extract")]

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use kastellan_worker_web_common::parse::Hit;
 
-use crate::handler::{search_err_to_rpc, SearchProvider};
+use kastellan_worker_web_common::search_provider::{search_err_to_rpc, SearchProvider};
 
 /// Env var (set on the daemon, injected into the jail only when set) that
 /// overrides the batch-size cap. Defined once in `web-common` so core (which
