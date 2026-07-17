@@ -50,6 +50,23 @@ pub(crate) async fn spawn_matrix_channel(
     if let Some(spawn_cfg) = kastellan_core::channel::matrix::daemon_spawn_config_from_env(
         std::env::current_exe().ok().as_deref().and_then(|p| p.parent()),
     ) {
+        // #459: a `localhost`-NAME homeserver is statically dead once egress
+        // is force-routed (the proxy resolves the name → loopback →
+        // range-denies every CONNECT), and the spawn path would respawn-loop
+        // on it forever. Refuse the channel up front — fail-soft, daemon
+        // unaffected. VM mode counts as always-forced: the Firecracker plan
+        // refuses to boot a Net::Allowlist worker without the egress proxy.
+        #[cfg(target_os = "linux")]
+        let vm_mode = spawn_cfg.use_microvm;
+        #[cfg(not(target_os = "linux"))]
+        let vm_mode = false;
+        if let Some(detail) = kastellan_core::channel::matrix::forced_localhost_homeserver(
+            &spawn_cfg.homeserver_url,
+            force_routing.is_some() || vm_mode,
+        ) {
+            error!(%detail, "matrix homeserver misconfigured; channel not started");
+            return None;
+        }
         // The worker's login is blocking (matrix.init waits for the SDK's login +
         // first sync), so run it on a blocking thread under a bounded timeout: an
         // unreachable homeserver fails-soft (channel not started) instead of

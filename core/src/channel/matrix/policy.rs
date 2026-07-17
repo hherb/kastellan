@@ -151,3 +151,49 @@ pub fn build_matrix_vm_policy(
 pub(crate) fn matrix_vm_password_path(pid: u32) -> PathBuf {
     PathBuf::from(format!("/tmp/kastellan-matrix-{pid}")).join(LOGIN_PASSWORD_FILE)
 }
+
+/// #459: resolve-time guard for the one statically-dead homeserver class — a
+/// force-routed matrix worker configured with a `localhost`/`*.localhost`
+/// NAME homeserver (the egress proxy resolves the name to loopback and
+/// range-denies every CONNECT). Without this check the worker spawns,
+/// `matrix.init` fails on every CONNECT, and `PersistentWorker` respawn-loops
+/// forever with no actionable operator message. `Some(detail)` ⇒ the caller
+/// must NOT start the channel (fail-soft: log and skip; the daemon runs on).
+/// Literal-IP homeservers (e.g. `http://127.0.0.1:8008`) are never flagged —
+/// the proxy's operator-allowlisted-literal carve-out dials them. Message
+/// composition delegates to the shared #452 builder; only the env-var name
+/// and the matrix remedy live here (this module owns the matrix env surface).
+pub fn forced_localhost_homeserver(
+    homeserver_url: &str,
+    force_routed: bool,
+) -> Option<String> {
+    crate::workers::endpoint_guard::forced_localhost_misconfig(
+        "KASTELLAN_MATRIX_HOMESERVER_URL",
+        homeserver_url,
+        force_routed,
+        "Use a literal-IP homeserver URL (the egress proxy dials an \
+         operator-allowlisted literal, e.g. http://127.0.0.1:8008) or a \
+         routable hostname; the matrix channel will not start until then.",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forced_localhost_homeserver_flags_only_names_under_forcing() {
+        // The statically-dead class: localhost NAMES, only when force-routed.
+        assert!(forced_localhost_homeserver("http://localhost:8008", true).is_some());
+        let d = forced_localhost_homeserver("http://conduit.localhost:6167", true)
+            .expect("localhost-name homeserver must be flagged when forced");
+        assert!(d.contains("KASTELLAN_MATRIX_HOMESERVER_URL"), "detail: {d}");
+        assert!(d.contains("http://conduit.localhost:6167"), "detail: {d}");
+        // Not forced: the worker resolves localhost itself — fine (dev conduit).
+        assert!(forced_localhost_homeserver("http://localhost:8008", false).is_none());
+        // Literal IP: the proxy's allowlisted-literal carve-out dials it.
+        assert!(forced_localhost_homeserver("http://127.0.0.1:8008", true).is_none());
+        // Routable name: connect-time proxy territory, never flagged here.
+        assert!(forced_localhost_homeserver("https://matrix.kastellan.dev", true).is_none());
+    }
+}
