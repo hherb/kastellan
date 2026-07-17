@@ -1,7 +1,9 @@
 //! Compose search + fetch + rank into one research pass, pure over the
 //! [`HttpGet`] seam so the whole flow is hermetic-testable with `FakeGet`.
 //!
-//! Flow: reject empty query → `search()` the SearxNG endpoint → fetch every
+//! Flow: reject empty query → run the configured [`SearchProvider`] (direct
+//! SearxNG endpoint, or the trusted search-broker UDS with zero worker search
+//! egress) → fetch every
 //! allowlisted hit concurrently in bounded waves (`fetch_candidates`,
 //! `MAX_CONCURRENT_FETCHES`) → classify + rank the fetched pages in rank order.
 //! On a 2xx that yields at least one relevant passage the page becomes a source;
@@ -25,7 +27,8 @@ use kastellan_worker_web_common::extract::extract;
 use kastellan_worker_web_common::fetch::{drive, FetchError};
 use kastellan_worker_web_common::http::HttpGet;
 use kastellan_worker_web_common::parse::Hit;
-use kastellan_worker_web_common::search::{search, SearchError};
+use kastellan_worker_web_common::search::SearchError;
+use kastellan_worker_web_common::search_provider::SearchProvider;
 
 use crate::chunk::chunk_passages;
 use crate::embed::Embedder;
@@ -270,8 +273,8 @@ fn rank_fetched_page(
 
 /// Run the research pass. See the module doc for the flow.
 pub fn research<T: HttpGet>(
+    search: &dyn SearchProvider,
     transport: &T,
-    endpoint: &Url,
     allowlist: &HostAllowlist,
     embedder: Option<&dyn Embedder>,
     query: &str,
@@ -309,8 +312,10 @@ pub fn research<T: HttpGet>(
     let eff_embedder = query_emb.as_ref().and(embedder);
     let ranking = if query_emb.is_some() { RankMode::Hybrid } else { RankMode::Lexical };
 
-    let hits = search(transport, endpoint, allowlist, query, SEARCH_COUNT)
-        .map_err(ResearchError::Search)?;
+    // Run the configured provider (direct SearxNG endpoint or the search-broker
+    // UDS); the provider owns its own transport/endpoint/allowlist, so the
+    // fetch `transport` + `allowlist` below are used only for content pages.
+    let hits = search.search(query, SEARCH_COUNT).map_err(ResearchError::Search)?;
 
     // Phase 1: fetch+chunk every allowlisted candidate concurrently.
     let candidates: Vec<(usize, &Hit)> = hits
@@ -369,6 +374,7 @@ pub fn research<T: HttpGet>(
 mod tests {
     use super::*;
     use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::search_provider::DirectSearchProvider;
     use kastellan_worker_web_common::testing::{al, json_resp, ok_resp, redirect_to, FakeGet, KeyedFakeGet};
     use crate::embed::FakeEmbedder;
 
@@ -376,10 +382,26 @@ mod tests {
         Url::parse("https://searx.example.org/search").unwrap()
     }
 
-    /// Build a KeyedFakeGet with the search endpoint + a set of page responses.
-    fn keyed(search: &str, pages: Vec<(&str, RawResponse)>) -> KeyedFakeGet {
-        let mut pairs = vec![("https://searx.example.org/search", json_resp(search))];
-        pairs.extend(pages);
+    /// A direct search provider over the standard test endpoint/allowlist, fed
+    /// only the SEARCH response(s). Page fetches now stay on the separate fetch
+    /// transport passed to `research` (search and fetch no longer share one
+    /// transport, so each test splits its responses across the two).
+    fn direct(search_responses: Vec<RawResponse>) -> DirectSearchProvider<FakeGet> {
+        DirectSearchProvider::new(
+            endpoint(),
+            al(&["searx.example.org", "docs.example.org"]),
+            FakeGet::new(search_responses),
+        )
+    }
+
+    /// Convenience: a direct provider serving one search JSON body.
+    fn direct_json(search: &str) -> DirectSearchProvider<FakeGet> {
+        direct(vec![json_resp(search)])
+    }
+
+    /// A keyed fetch transport over page (url, response) pairs — no search entry
+    /// now that the search goes through the provider rather than this transport.
+    fn pages(pairs: Vec<(&str, RawResponse)>) -> KeyedFakeGet {
         KeyedFakeGet::new(pairs)
     }
 
@@ -396,13 +418,13 @@ mod tests {
     fn happy_path_search_then_fetch_ranks_passages() {
         // 1 search response, then 1 fetch response (text/plain).
         let page = "Intro paragraph unrelated.\n\nbwrap creates unprivileged user namespaces to sandbox the worker.";
+        let s = direct_json(&search_json(&[("Doc", "https://docs.example.org/bwrap")]));
         let t = FakeGet::new(vec![
-            json_resp(&search_json(&[("Doc", "https://docs.example.org/bwrap")])),
             RawResponse { status: 200, location: None,
                 content_type: "text/plain; charset=utf-8".into(), body: page.as_bytes().to_vec() },
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "bwrap user namespaces", 3, 3).unwrap();
+        let out = research(&s, &t, &a, None, "bwrap user namespaces", 3, 3).unwrap();
         assert_eq!(out.sources.len(), 1);
         assert_eq!(out.sources[0].url, "https://docs.example.org/bwrap");
         assert!(!out.sources[0].passages.is_empty());
@@ -416,11 +438,10 @@ mod tests {
     fn off_allowlist_hit_is_recorded_not_fetched() {
         // Only the search response is served; the off-allowlist hit must NOT
         // consume a fetch response (FakeGet would run dry otherwise).
-        let t = FakeGet::new(vec![
-            json_resp(&search_json(&[("Evil", "https://evil.test/x")])),
-        ]);
+        let s = direct_json(&search_json(&[("Evil", "https://evil.test/x")]));
+        let t = FakeGet::new(vec![]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "q term", 3, 3).unwrap();
+        let out = research(&s, &t, &a, None, "q term", 3, 3).unwrap();
         assert!(out.sources.is_empty());
         assert_eq!(out.unfetched.len(), 1);
         assert_eq!(out.unfetched[0].reason, "off-allowlist");
@@ -434,13 +455,14 @@ mod tests {
             ("A", "https://docs.example.org/a"),
             ("B", "https://docs.example.org/b"),
         ]);
-        let t = keyed(&search, vec![
+        let s = direct_json(&search);
+        let t = pages(vec![
             ("https://docs.example.org/a", ok_resp("user namespaces sandbox bwrap details")),
             // 302 → itself: drive re-fetches the same host+path until MAX_REDIRECTS.
             ("https://docs.example.org/b", redirect_to("https://docs.example.org/b")),
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
+        let out = research(&s, &t, &a, None, "bwrap namespaces", 3, 3).unwrap();
         assert_eq!(out.sources.len(), 1, "A should succeed");
         assert_eq!(out.sources[0].url, "https://docs.example.org/a");
         assert_eq!(out.unfetched.len(), 1, "B should be recorded as failed");
@@ -450,13 +472,13 @@ mod tests {
     #[test]
     fn non_2xx_fetch_is_recorded_not_a_source() {
         // A 404 terminal response must not become a source with error-page text.
+        let s = direct_json(&search_json(&[("A", "https://docs.example.org/a")]));
         let t = FakeGet::new(vec![
-            json_resp(&search_json(&[("A", "https://docs.example.org/a")])),
             RawResponse { status: 404, location: None,
                 content_type: "text/plain".into(), body: b"not found".to_vec() },
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
+        let out = research(&s, &t, &a, None, "bwrap namespaces", 3, 3).unwrap();
         assert!(out.sources.is_empty());
         assert_eq!(out.unfetched.len(), 1);
         assert_eq!(out.unfetched[0].reason, "fetch-failed: status 404");
@@ -466,12 +488,12 @@ mod tests {
     fn fetched_page_with_no_relevant_passages_is_recorded_not_a_source() {
         // 200 page whose content shares no terms with the query → BM25 scores
         // nothing → recorded in `unfetched`, does not consume a source slot.
+        let s = direct_json(&search_json(&[("A", "https://docs.example.org/a")]));
         let t = FakeGet::new(vec![
-            json_resp(&search_json(&[("A", "https://docs.example.org/a")])),
             ok_resp("completely unrelated cooking recipe content"),
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces sandbox", 3, 3).unwrap();
+        let out = research(&s, &t, &a, None, "bwrap namespaces sandbox", 3, 3).unwrap();
         assert!(out.sources.is_empty());
         assert_eq!(out.unfetched.len(), 1);
         assert_eq!(out.unfetched[0].reason, "no-relevant-passages");
@@ -486,13 +508,14 @@ mod tests {
             ("B", "https://docs.example.org/b"),
             ("C", "https://docs.example.org/c"),
         ]);
-        let t = keyed(&search, vec![
+        let s = direct_json(&search);
+        let t = pages(vec![
             ("https://docs.example.org/a", ok_resp("bwrap namespaces one")),
             ("https://docs.example.org/b", ok_resp("bwrap namespaces two")),
             ("https://docs.example.org/c", ok_resp("bwrap namespaces three")),
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 2, 3).unwrap();
+        let out = research(&s, &t, &a, None, "bwrap namespaces", 2, 3).unwrap();
         assert_eq!(out.sources.len(), 2);
         let urls: Vec<&str> = out.sources.iter().map(|s| s.url.as_str()).collect();
         assert_eq!(urls, vec!["https://docs.example.org/a", "https://docs.example.org/b"]);
@@ -508,13 +531,14 @@ mod tests {
             ("B", "https://docs.example.org/b"),
             ("C", "https://docs.example.org/c"),
         ]);
-        let t = keyed(&search, vec![
+        let sp = direct_json(&search);
+        let t = pages(vec![
             ("https://docs.example.org/a", ok_resp("bwrap namespaces alpha content")),
             ("https://docs.example.org/b", ok_resp("bwrap namespaces bravo content")),
             ("https://docs.example.org/c", ok_resp("bwrap namespaces charlie content")),
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
+        let out = research(&sp, &t, &a, None, "bwrap namespaces", 3, 3).unwrap();
         let urls: Vec<&str> = out.sources.iter().map(|s| s.url.as_str()).collect();
         assert_eq!(urls, vec![
             "https://docs.example.org/a",
@@ -532,14 +556,15 @@ mod tests {
             ("B", "https://docs.example.org/b"),
             ("C", "https://docs.example.org/c"),
         ]);
-        let t = keyed(&search, vec![
+        let sp = direct_json(&search);
+        let t = pages(vec![
             ("https://docs.example.org/a", ok_resp("bwrap namespaces alpha")),
             ("https://docs.example.org/b", RawResponse { status: 404, location: None,
                 content_type: "text/plain".into(), body: b"nope".to_vec() }),
             ("https://docs.example.org/c", ok_resp("bwrap namespaces charlie")),
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
+        let out = research(&sp, &t, &a, None, "bwrap namespaces", 3, 3).unwrap();
         let urls: Vec<&str> = out.sources.iter().map(|s| s.url.as_str()).collect();
         assert_eq!(urls, vec!["https://docs.example.org/a", "https://docs.example.org/c"]);
         assert_eq!(out.unfetched.len(), 1);
@@ -559,12 +584,15 @@ mod tests {
         let a = al(&["searx.example.org", "docs.example.org"]);
         let mut seen: Option<Vec<String>> = None;
         for _ in 0..5 {
-            let t = keyed(&search, vec![
+            // Rebuild the provider each iteration: its FakeGet consumes the one
+            // queued search response per `.search()` call.
+            let sp = direct_json(&search);
+            let t = pages(vec![
                 ("https://docs.example.org/a", ok_resp("bwrap namespaces alpha")),
                 ("https://docs.example.org/b", ok_resp("bwrap namespaces bravo")),
                 ("https://docs.example.org/c", ok_resp("bwrap namespaces charlie")),
             ]);
-            let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 3).unwrap();
+            let out = research(&sp, &t, &a, None, "bwrap namespaces", 3, 3).unwrap();
             let urls: Vec<String> = out.sources.iter().map(|s| s.url.clone()).collect();
             match &seen {
                 None => seen = Some(urls),
@@ -575,18 +603,21 @@ mod tests {
 
     #[test]
     fn empty_query_is_error() {
+        let s = direct(vec![]); // never called: empty query returns early
         let t = FakeGet::new(vec![]);
         let a = al(&["searx.example.org"]);
-        let err = research(&t, &endpoint(), &a, None, "   ", 3, 3).unwrap_err();
+        let err = research(&s, &t, &a, None, "   ", 3, 3).unwrap_err();
         assert!(matches!(err, ResearchError::EmptyQuery));
     }
 
     #[test]
     fn search_failure_is_error() {
-        let t = FakeGet::new(vec![RawResponse { status: 503, location: None,
+        // The failing status is served by the search PROVIDER, not the fetch transport.
+        let s = direct(vec![RawResponse { status: 503, location: None,
             content_type: "text/plain".into(), body: Vec::new() }]);
+        let t = FakeGet::new(vec![]);
         let a = al(&["searx.example.org"]);
-        let err = research(&t, &endpoint(), &a, None, "q term", 3, 3).unwrap_err();
+        let err = research(&s, &t, &a, None, "q term", 3, 3).unwrap_err();
         assert!(matches!(err, ResearchError::Search(_)));
     }
 
@@ -594,13 +625,13 @@ mod tests {
     fn max_passages_truncates_per_source() {
         let page = (0..6).map(|i| format!("bwrap namespaces passage number {i}."))
             .collect::<Vec<_>>().join("\n\n");
+        let s = direct_json(&search_json(&[("A", "https://docs.example.org/a")]));
         let t = FakeGet::new(vec![
-            json_resp(&search_json(&[("A", "https://docs.example.org/a")])),
             RawResponse { status: 200, location: None, content_type: "text/plain".into(),
                 body: page.into_bytes() },
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
-        let out = research(&t, &endpoint(), &a, None, "bwrap namespaces", 3, 2).unwrap();
+        let out = research(&s, &t, &a, None, "bwrap namespaces", 3, 2).unwrap();
         assert_eq!(out.sources[0].passages.len(), 2, "capped at max_passages");
     }
 
@@ -613,8 +644,8 @@ mod tests {
         //   ["unrelated filler line.", "Containers isolate processes from the host."]
         // (an unmapped key -> empty vec -> cosine skips it -> the test would fail).
         let page = "unrelated filler line.\n\nContainers isolate processes from the host.";
+        let s = direct_json(&search_json(&[("Doc", "https://docs.example.org/x")]));
         let t = FakeGet::new(vec![
-            json_resp(&search_json(&[("Doc", "https://docs.example.org/x")])),
             RawResponse { status: 200, location: None,
                 content_type: "text/plain".into(), body: page.as_bytes().to_vec() },
         ]);
@@ -625,7 +656,7 @@ mod tests {
             ("Containers isolate processes from the host.", vec![1.0_f32, 0.05]),
             ("unrelated filler line.", vec![0.0_f32, 1.0]),
         ]);
-        let out = research(&t, &endpoint(), &a, Some(&emb), query, 3, 3).unwrap();
+        let out = research(&s, &t, &a, Some(&emb), query, 3, 3).unwrap();
         assert!(matches!(out.ranking, RankMode::Hybrid));
         assert!(out.embed_note.is_none());
         assert_eq!(out.sources.len(), 1);
@@ -678,14 +709,14 @@ mod tests {
     #[test]
     fn query_embed_failure_degrades_whole_call_to_lexical_and_is_fail_fast() {
         let page = "bwrap namespaces sandbox details here.";
+        let s = direct_json(&search_json(&[("Doc", "https://docs.example.org/x")]));
         let t = FakeGet::new(vec![
-            json_resp(&search_json(&[("Doc", "https://docs.example.org/x")])),
             RawResponse { status: 200, location: None,
                 content_type: "text/plain".into(), body: page.as_bytes().to_vec() },
         ]);
         let a = al(&["searx.example.org", "docs.example.org"]);
         let emb = FakeEmbedder::failing();
-        let out = research(&t, &endpoint(), &a, Some(&emb), "bwrap namespaces", 3, 3).unwrap();
+        let out = research(&s, &t, &a, Some(&emb), "bwrap namespaces", 3, 3).unwrap();
         assert!(matches!(out.ranking, RankMode::Lexical));
         assert!(out.embed_note.is_some(), "degrade must be signalled");
         assert_eq!(out.sources.len(), 1, "lexical still ranks the page");

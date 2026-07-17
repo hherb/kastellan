@@ -1,7 +1,8 @@
 //! JSON-RPC handler for `web.research`.
 //!
 //! Flow: parse params → run `research` (search + fetch top-N allowlisted pages +
-//! rank passages) → build the result object. The endpoint + allowlist are
+//! rank passages) → build the result object. The search source (a direct SearxNG
+//! endpoint, or the trusted search-broker UDS) + content allowlist are
 //! operator-controlled and validated at construction (`from_env`); the LLM
 //! supplies only the query + optional caps. Errors map onto the protocol code
 //! vocabulary. No silent fallbacks.
@@ -9,12 +10,19 @@
 use kastellan_protocol::{codes, server::Handler, RpcError};
 use serde::Deserialize;
 use serde_json::json;
+// `Url` is used only by the test helpers now (the `endpoint: Url` field became a
+// `Box<dyn SearchProvider>` in #464); `validate_endpoint` returns `Url` by
+// inference in `from_env` without naming the type.
+#[cfg(test)]
 use url::Url;
 
 use kastellan_worker_web_common::allowlist::HostAllowlist;
 use kastellan_worker_web_common::http::{make_get, HttpGet};
 use kastellan_worker_web_common::search::validate_endpoint;
-use kastellan_worker_web_common::search_provider::search_err_to_rpc;
+use kastellan_worker_web_common::search_provider::{
+    choose_search_provider, search_err_to_rpc, BrokeredSearchProvider, DirectSearchProvider,
+    SearchProvider, SearchProviderChoice,
+};
 
 use crate::embed::{choose_embedder, BrokeredEmbedder, Embedder, EmbedderChoice, HttpEmbedder};
 use crate::research::{
@@ -78,36 +86,64 @@ fn outcome_to_json(query: &str, out: ResearchOutcome) -> serde_json::Value {
     obj
 }
 
-/// The worker handler, generic over the transport so tests inject a fake.
+/// The worker handler, generic over the fetch transport so tests inject a fake.
+/// The search source is held behind the [`SearchProvider`] trait object so the
+/// direct-endpoint path and the broker path are interchangeable.
 pub struct WebResearchHandler<T: HttpGet> {
-    endpoint: Url,
+    search: Box<dyn SearchProvider>,
     allowlist: HostAllowlist,
     transport: T,
     embedder: Option<Box<dyn Embedder>>,
 }
 
 impl WebResearchHandler<Box<dyn HttpGet>> {
-    /// Build from env: endpoint + allowlist JSON + env-selected transport.
-    /// Validates the endpoint up front and fails closed (the worker never
-    /// serves) if it is missing, unparseable, wrong-scheme, or off-allowlist.
+    /// Build from env: search provider + content allowlist + env-selected
+    /// fetch transport + optional embedder. Fails closed (the worker never
+    /// serves) on a misconfigured direct endpoint or embed endpoint.
+    ///
+    /// Search-provider selection mirrors web-search: the broker UDS
+    /// (`KASTELLAN_SEARCH_BROKER_UDS`, injected by core at spawn) wins over a
+    /// direct `KASTELLAN_WEB_RESEARCH_ENDPOINT`. In broker mode no endpoint env
+    /// is required — the broker holds the only SearxNG route.
     pub fn from_env() -> anyhow::Result<Self> {
-        let endpoint_raw = std::env::var("KASTELLAN_WEB_RESEARCH_ENDPOINT")
-            .map_err(|_| anyhow::anyhow!("KASTELLAN_WEB_RESEARCH_ENDPOINT not set"))?;
         let allow_raw =
             std::env::var("KASTELLAN_WEB_RESEARCH_ALLOWLIST").unwrap_or_else(|_| "[]".into());
         let allowlist = HostAllowlist::from_env_json(&allow_raw)?;
-        let endpoint = validate_endpoint(&endpoint_raw, &allowlist)
-            .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
+
+        // Search source: broker UDS wins; a direct endpoint is validated against
+        // the operator allowlist and fails closed (#428) if off-allowlist.
+        let search_broker_uds = std::env::var("KASTELLAN_SEARCH_BROKER_UDS").ok();
+        let endpoint_raw = std::env::var("KASTELLAN_WEB_RESEARCH_ENDPOINT").ok();
+        let search: Box<dyn SearchProvider> =
+            match choose_search_provider(search_broker_uds.as_deref(), endpoint_raw.as_deref()) {
+                SearchProviderChoice::Broker { uds } => {
+                    Box::new(BrokeredSearchProvider::new(std::path::PathBuf::from(uds)))
+                }
+                SearchProviderChoice::Endpoint { endpoint } => {
+                    let url = validate_endpoint(endpoint, &allowlist)
+                        .map_err(|e| anyhow::anyhow!(search_err_to_rpc(e).message))?;
+                    // HostAllowlist is not Clone: parse the JSON a second time for
+                    // the provider's own copy (startup-only cost).
+                    let search_allowlist = HostAllowlist::from_env_json(&allow_raw)?;
+                    let search_transport = make_get("kastellan-web-research/0")?;
+                    Box::new(DirectSearchProvider::new(url, search_allowlist, search_transport))
+                }
+                SearchProviderChoice::None => anyhow::bail!(
+                    "web-research: neither KASTELLAN_SEARCH_BROKER_UDS nor \
+                     KASTELLAN_WEB_RESEARCH_ENDPOINT set"
+                ),
+            };
+
         let transport = make_get("kastellan-web-research/0")?;
-        // Embedder selection: the broker UDS (KASTELLAN_EMBED_BROKER_UDS) wins
-        // over a direct endpoint (KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT). The
-        // model is shared by both paths.
-        let broker_uds = std::env::var("KASTELLAN_EMBED_BROKER_UDS").ok();
+        // Embedder selection: the embed broker UDS (KASTELLAN_EMBED_BROKER_UDS)
+        // wins over a direct endpoint (KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT). The
+        // model is shared by both paths. UNCHANGED by the search-provider rework.
+        let embed_broker_uds = std::env::var("KASTELLAN_EMBED_BROKER_UDS").ok();
         let embed_endpoint_raw = std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_ENDPOINT").ok();
         let model = std::env::var("KASTELLAN_WEB_RESEARCH_EMBED_MODEL")
             .unwrap_or_else(|_| "embeddinggemma".to_string());
         let embedder: Option<Box<dyn Embedder>> =
-            match choose_embedder(broker_uds.as_deref(), embed_endpoint_raw.as_deref()) {
+            match choose_embedder(embed_broker_uds.as_deref(), embed_endpoint_raw.as_deref()) {
                 EmbedderChoice::Broker { uds } => {
                     // No allowlist check: the broker path has no worker egress.
                     Some(Box::new(BrokeredEmbedder::new(std::path::PathBuf::from(uds), model)))
@@ -122,14 +158,14 @@ impl WebResearchHandler<Box<dyn HttpGet>> {
                 }
                 EmbedderChoice::None => None,
             };
-        Ok(Self { endpoint, allowlist, transport, embedder })
+        Ok(Self { search, allowlist, transport, embedder })
     }
 }
 
 impl<T: HttpGet> WebResearchHandler<T> {
     #[cfg(test)]
-    fn with_parts(endpoint: Url, allowlist: HostAllowlist, transport: T) -> Self {
-        Self { endpoint, allowlist, transport, embedder: None }
+    fn with_parts(search: Box<dyn SearchProvider>, allowlist: HostAllowlist, transport: T) -> Self {
+        Self { search, allowlist, transport, embedder: None }
     }
 }
 
@@ -146,7 +182,7 @@ impl<T: HttpGet> Handler for WebResearchHandler<T> {
         let max_passages = p.max_passages.unwrap_or(DEFAULT_MAX_PASSAGES);
 
         let out = research(
-            &self.transport, &self.endpoint, &self.allowlist,
+            &*self.search, &self.transport, &self.allowlist,
             self.embedder.as_deref(), &p.query, max_sources, max_passages,
         ).map_err(research_err_to_rpc)?;
 
@@ -158,14 +194,33 @@ impl<T: HttpGet> Handler for WebResearchHandler<T> {
 mod tests {
     use super::*;
     use kastellan_worker_web_common::http::RawResponse;
+    use kastellan_worker_web_common::search_provider::DirectSearchProvider;
     use kastellan_worker_web_common::testing::{al, json_resp, FakeGet};
 
-    fn handler(responses: Vec<RawResponse>) -> WebResearchHandler<FakeGet> {
+    /// Build a handler with a direct search provider over `search_responses` and a
+    /// fetch transport over `page_responses`. Search and fetch no longer share one
+    /// transport, so callers split their responses across the two.
+    fn handler_parts(
+        search_responses: Vec<RawResponse>,
+        page_responses: Vec<RawResponse>,
+    ) -> WebResearchHandler<FakeGet> {
         WebResearchHandler::with_parts(
-            Url::parse("https://searx.example.org/search").unwrap(),
+            Box::new(DirectSearchProvider::new(
+                Url::parse("https://searx.example.org/search").unwrap(),
+                al(&["searx.example.org", "docs.example.org"]),
+                FakeGet::new(search_responses),
+            )),
             al(&["searx.example.org", "docs.example.org"]),
-            FakeGet::new(responses),
+            FakeGet::new(page_responses),
         )
+    }
+
+    /// Legacy single-list helper: `responses[0]` is the SEARCH response, the rest
+    /// are page fetches (an empty list — for query-validation tests that never
+    /// search — yields empty queues for both).
+    fn handler(mut responses: Vec<RawResponse>) -> WebResearchHandler<FakeGet> {
+        let pages = if responses.is_empty() { Vec::new() } else { responses.split_off(1) };
+        handler_parts(responses, pages)
     }
 
     fn search_json(title: &str, url: &str) -> String {
@@ -229,14 +284,11 @@ mod tests {
     }
 
     fn handler_with_embedder(
-        responses: Vec<RawResponse>,
+        mut responses: Vec<RawResponse>,
         embedder: Option<Box<dyn crate::embed::Embedder>>,
     ) -> WebResearchHandler<FakeGet> {
-        let mut h = WebResearchHandler::with_parts(
-            Url::parse("https://searx.example.org/search").unwrap(),
-            al(&["searx.example.org", "docs.example.org"]),
-            FakeGet::new(responses),
-        );
+        let pages = if responses.is_empty() { Vec::new() } else { responses.split_off(1) };
+        let mut h = handler_parts(responses, pages);
         h.embedder = embedder;
         h
     }
@@ -289,5 +341,49 @@ mod tests {
         let out = h.call("web.research", json!({"query": "bwrap user namespaces"})).unwrap();
         assert_eq!(out["ranking"], "lexical");
         assert!(out["embed_note"].as_str().unwrap().contains("embed"));
+    }
+
+    /// One-shot stub search-broker on `sock`: reads one request line, replies with
+    /// `response_json`. Mirrors web-common's `search_provider::tests::stub_broker`.
+    fn stub_broker(sock: std::path::PathBuf, response_json: String) -> std::thread::JoinHandle<()> {
+        use std::io::Write;
+        use std::os::unix::net::UnixListener;
+        let listener = UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut br = std::io::BufReader::new(conn.try_clone().unwrap());
+            let _ = kastellan_protocol::read_capped_record(&mut br, 1_000_000).unwrap();
+            conn.write_all(response_json.as_bytes()).unwrap();
+            conn.write_all(b"\n").unwrap();
+            conn.flush().unwrap();
+        })
+    }
+
+    #[test]
+    fn brokered_search_feeds_research_pipeline() {
+        // With a brokered provider the worker searches via the broker UDS (zero
+        // search egress) then fetches the returned content page over the normal
+        // fetch transport — the whole pipeline runs unchanged behind the seam.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("search.sock");
+        let broker = stub_broker(
+            sock.clone(),
+            r#"{"jsonrpc":"2.0","id":1,"result":{"results":[{"title":"Doc","url":"https://docs.example.org/bwrap","snippet":"c","engine":"e"}]}}"#.to_string(),
+        );
+        let page = "bwrap creates user namespaces for sandboxing workers.";
+        let mut h = WebResearchHandler::with_parts(
+            Box::new(BrokeredSearchProvider::new(sock)),
+            al(&["searx.example.org", "docs.example.org"]),
+            FakeGet::new(vec![RawResponse {
+                status: 200,
+                location: None,
+                content_type: "text/plain".into(),
+                body: page.as_bytes().to_vec(),
+            }]),
+        );
+        let out = h.call("web.research", json!({"query": "bwrap user namespaces"})).unwrap();
+        assert_eq!(out["sources_fetched"], 1);
+        assert_eq!(out["sources"][0]["url"], "https://docs.example.org/bwrap");
+        broker.join().unwrap();
     }
 }
