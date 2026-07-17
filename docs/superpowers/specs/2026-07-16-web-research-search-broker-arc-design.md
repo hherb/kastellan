@@ -1,5 +1,11 @@
 # web-research × search-broker arc (follow-up feature — NOT this session)
 
+> **✅ SHIPPED (2026-07-17):** Slice 1 (single-broker search-broker for
+> web-research) implemented on branch `feat/web-research-search-broker` (#464),
+> plan `docs/superpowers/plans/2026-07-17-web-research-search-broker-xor.md`.
+> DGX-verified (VM search-broker live e2e GREEN, zero direct SearxNG egress);
+> see the HANDOVER header entry. The multi-broker follow-up below stays deferred.
+
 **Date:** 2026-07-16 (brainstormed alongside the loopback-endpoint-guard spec;
 implementation deferred to its own session/PR).
 **Motivation (revised 2026-07-16 after the carve-out finding):** web-research's

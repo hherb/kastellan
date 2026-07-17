@@ -13,11 +13,12 @@ readme      = "../../README.md"
 # Pulls in the FakeGet test transport + helpers. Enable from a consumer's
 # [dev-dependencies] so unit tests across workers share one fake.
 testing = []
-# Pure SearxNG query logic (validate_endpoint / build_query_url / search / parse).
-# No extra deps — uses url + serde + the always-present allowlist/http modules.
+# SearxNG query logic (validate_endpoint / build_query_url / search / parse)
+# plus the SearchProvider seam (direct + brokered). Pulls the internal
+# kastellan-protocol dep for the brokered provider's JSON-RPC-over-UDS client.
 # Its own #[cfg(test)] block uses crate::testing, so web-common's test command
 # must enable both "search" and "testing" together.
-search  = []
+search  = ["dep:kastellan-protocol"]
 # Redirect-following drive loop (re-checks allowlist+https per hop). No extra deps.
 fetch   = []
 # Readable-text extraction (HTML readability / PDF / text). Pulls the parsers
@@ -25,6 +26,7 @@ fetch   = []
 extract = ["dep:pdf-extract", "dep:readable_html"]
 
 [dependencies]
+kastellan-protocol = { path = "../../protocol", version = "0.1.0", optional = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
@@ -41,3 +43,7 @@ webpki-roots    = "1"
 bytes           = "1"
 pdf-extract   = { workspace = true, optional = true }
 readable_html = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The brokered-provider tests bind a real one-shot Unix socket in a tempdir.
+tempfile = "3"

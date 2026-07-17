@@ -129,6 +129,32 @@ pub fn json_resp(json: &str) -> RawResponse {
     }
 }
 
+/// One-shot stub search-broker on `sock`: binds a Unix listener, accepts one
+/// connection, reads a single JSON-RPC request line, then writes `response_json`
+/// followed by a newline. Shared by the `search_provider` seam tests and the
+/// web-research handler tests — both exercise `BrokeredSearchProvider` over a
+/// real UDS. Returns the join handle so the caller can await the stub. Requires
+/// the `search` feature (pulls `kastellan-protocol` for the record reader).
+#[cfg(feature = "search")]
+pub fn stub_broker(
+    sock: std::path::PathBuf,
+    response_json: String,
+) -> std::thread::JoinHandle<()> {
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    let listener = UnixListener::bind(&sock).expect("bind stub-broker socket");
+    std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().expect("accept stub-broker connection");
+        let mut br = std::io::BufReader::new(conn.try_clone().expect("clone stub-broker conn"));
+        let _ = kastellan_protocol::read_capped_record(&mut br, 1_000_000)
+            .expect("read stub-broker request");
+        conn.write_all(response_json.as_bytes())
+            .expect("write stub-broker response");
+        conn.write_all(b"\n").expect("write stub-broker newline");
+        conn.flush().expect("flush stub-broker");
+    })
+}
+
 #[cfg(test)]
 mod post_fake_tests {
     use super::*;
