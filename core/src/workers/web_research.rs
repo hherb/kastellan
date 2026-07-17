@@ -123,33 +123,6 @@ fn embed_local_warning(
     ))
 }
 
-/// #452-adjacent, warn tier: content-allowlist hosts are the THIRD
-/// `Net::Allowlist` source ([`net_entries`] maps them to `host:443`), and a
-/// `localhost`/`*.localhost` NAME entry is just as statically dead under
-/// force-routing as an endpoint one — every content fetch to it is
-/// range-denied at CONNECT, so results thin out with only per-result
-/// `unfetched` reasons. Warn-only: search and the other content hosts still
-/// work, so this never blocks registration. Literal-IP entries are not
-/// flagged (the proxy's carve-out dials them).
-fn content_localhost_warnings(force_routed: bool, allowlist: &[String]) -> Vec<String> {
-    if !force_routed {
-        return Vec::new();
-    }
-    allowlist
-        .iter()
-        .filter(|h| endpoint_guard::host_is_localhost_name(h))
-        .map(|h| {
-            format!(
-                "web-research: content-allowlist entry `{h}` (tool_allowlists) \
-                 is a `localhost` name while egress is force-routed: the egress \
-                 proxy range-denies what the name resolves to, so every content \
-                 fetch to it will fail (results will carry `unfetched` reasons \
-                 instead). Use a literal-IP entry or a routable host."
-            )
-        })
-        .collect()
-}
-
 /// Union of the endpoint host:port, the optional embed-endpoint host:port, and
 /// the content host:443 entries, de-duped (order-preserving: SearxNG endpoint
 /// first, embed endpoint second, content hosts last). The content half reuses
@@ -526,14 +499,11 @@ impl WorkerManifest for WebResearchManifest {
             return Resolution::Misconfigured { detail };
         }
         // #429 — warn tier, never blocks registration: a `localhost`-name
-        // embed endpoint without the embed-broker (hybrid→lexical downgrade),
-        // and `localhost`-name content-allowlist entries (dead content
-        // fetches under force-routing).
+        // embed endpoint without the embed-broker (hybrid→lexical downgrade).
+        // (`localhost`-name CONTENT-allowlist entries are warned by the
+        // generic #459 registry screen — see registry_build's Register arm.)
         if let Some(w) = embed_local_warning(force_routed, use_broker, embed_endpoint.as_deref())
         {
-            tracing::warn!(target: "web_research.resolve", "{w}");
-        }
-        for w in content_localhost_warnings(force_routed, &allowlist) {
             tracing::warn!(target: "web_research.resolve", "{w}");
         }
 
@@ -1085,23 +1055,4 @@ mod tests {
         assert!(w.contains("https://"), "https caveat missing: {w}");
     }
 
-    #[test]
-    fn content_allowlist_localhost_names_warn_only_when_forced() {
-        let allowlist = vec![
-            "docs.example.org".to_string(),
-            "localhost".to_string(),
-            "foo.localhost".to_string(),
-            "127.0.0.1".to_string(), // literal: carve-out, never flagged
-        ];
-        // Force-routed: one warning per localhost-NAME entry, naming it.
-        let warnings = content_localhost_warnings(true, &allowlist);
-        assert_eq!(warnings.len(), 2, "warnings: {warnings:?}");
-        assert!(warnings[0].contains("`localhost`"), "warning: {}", warnings[0]);
-        assert!(warnings[1].contains("`foo.localhost`"), "warning: {}", warnings[1]);
-        // Not force-routed: local names resolve in the worker itself — quiet.
-        assert!(content_localhost_warnings(false, &allowlist).is_empty());
-        // No localhost-name entries: quiet.
-        let clean = vec!["docs.example.org".to_string()];
-        assert!(content_localhost_warnings(true, &clean).is_empty());
-    }
 }

@@ -65,7 +65,7 @@ pub use config::{
     daemon_spawn_config_from_env, host_from_url, host_port_from_url, parse_peers_csv, MatrixConfig,
     MatrixSpawnConfig,
 };
-pub use policy::{build_matrix_policy, build_matrix_vm_policy};
+pub use policy::{build_matrix_policy, build_matrix_vm_policy, forced_localhost_homeserver};
 pub use wire::{encode_matrix_send, parse_matrix_poll, MATRIX_POLLED_SPEC, POLL_MS};
 
 // Internal helpers used by the spawn factory below on every platform. The

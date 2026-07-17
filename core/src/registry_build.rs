@@ -27,6 +27,23 @@ pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] = &[
     &crate::workers::browser_driver::BrowserDriverManifest,
 ];
 
+/// True iff this entry runs as a Firecracker micro-VM worker — the
+/// always-force-routed case for the #459 screen (`linux_firecracker/plan.rs`
+/// fail-closed refuses to boot a `Net::Allowlist` VM without the egress
+/// proxy, so a direct route never exists in VM mode). Non-Linux builds have
+/// no VM backend variant, so the answer is statically `false` there.
+#[cfg(target_os = "linux")]
+fn entry_is_vm(entry: &crate::scheduler::tool_dispatch::ToolEntry) -> bool {
+    matches!(
+        entry.sandbox_backend,
+        Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+    )
+}
+#[cfg(not(target_os = "linux"))]
+fn entry_is_vm(_entry: &crate::scheduler::tool_dispatch::ToolEntry) -> bool {
+    false
+}
+
 /// One per-tool record carried in the `registry.loaded` audit-row payload.
 #[derive(serde::Serialize)]
 pub struct LoadedToolRecord {
@@ -154,6 +171,39 @@ pub fn assemble_registry(
         match m.resolve(ctx) {
             Resolution::Register(entry) => {
                 let name = m.name();
+                // #459 generic guard: a force-routed worker whose
+                // Net::Allowlist carries `localhost` NAMES is statically dead
+                // for those hosts (proxy resolves the name → loopback →
+                // range-denied). All entries dead ⇒ refuse exactly like
+                // Misconfigured; a subset ⇒ warn and register. Per-manifest
+                // guards (#452/#457) still fire first inside resolve() with
+                // their more precise remedies; this screen is the generic
+                // backstop covering every current and future manifest.
+                let force_routed = crate::workers::endpoint_guard::egress_will_force_route(
+                    entry_is_vm(&entry),
+                    ctx.get_env,
+                );
+                if let kastellan_sandbox::Net::Allowlist(net_entries) = &entry.policy.net {
+                    use crate::workers::endpoint_guard::{screen_net_allowlist, NetScreen};
+                    match screen_net_allowlist(name, net_entries, force_routed) {
+                        NetScreen::Refuse { detail } => {
+                            tracing::error!(tool = name, %detail, "worker misconfigured; skipping");
+                            continue;
+                        }
+                        NetScreen::Warn { dead } => {
+                            tracing::warn!(
+                                tool = name,
+                                dead = ?dead,
+                                "Net::Allowlist entries use `localhost` names that are \
+                                 statically dead under force-routing — requests to them \
+                                 will fail (use literal IPs or routable hostnames, and \
+                                 update the matching tool_allowlists rows / endpoint \
+                                 env vars to agree)"
+                            );
+                        }
+                        NetScreen::Ok => {}
+                    }
+                }
                 let allowlist = (ctx.allowlist)(name);
                 tracing::info!(
                     tool = name,
@@ -199,6 +249,14 @@ mod tests {
     }
     enum FakeOutcome {
         Register,
+        /// Register, but with `policy.net = Net::Allowlist(these entries)` —
+        /// exercises the #459 generic screen.
+        RegisterWithNet(Vec<String>),
+        /// Linux-gated: like `RegisterWithNet` but the entry is a Firecracker
+        /// micro-VM worker (`sandbox_backend = FirecrackerVm`) — pins the
+        /// VM-is-always-force-routed screen composition.
+        #[cfg(target_os = "linux")]
+        RegisterVmWithNet(Vec<String>),
         Disabled,
         Misconfigured,
     }
@@ -210,13 +268,32 @@ mod tests {
             self.allowlist_name
         }
         fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
-            match self.outcome {
+            match &self.outcome {
                 FakeOutcome::Register => Resolution::Register(
                     crate::workers::shell_exec::shell_exec_entry(
                         PathBuf::from(format!("/fake/{}", self.name)),
                         &(ctx.allowlist)(self.name),
                     ),
                 ),
+                FakeOutcome::RegisterWithNet(entries) => {
+                    let mut entry = crate::workers::shell_exec::shell_exec_entry(
+                        PathBuf::from(format!("/fake/{}", self.name)),
+                        &(ctx.allowlist)(self.name),
+                    );
+                    entry.policy.net = kastellan_sandbox::Net::Allowlist(entries.clone());
+                    Resolution::Register(entry)
+                }
+                #[cfg(target_os = "linux")]
+                FakeOutcome::RegisterVmWithNet(entries) => {
+                    let mut entry = crate::workers::shell_exec::shell_exec_entry(
+                        PathBuf::from(format!("/fake/{}", self.name)),
+                        &(ctx.allowlist)(self.name),
+                    );
+                    entry.policy.net = kastellan_sandbox::Net::Allowlist(entries.clone());
+                    entry.sandbox_backend =
+                        Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm);
+                    Resolution::Register(entry)
+                }
                 FakeOutcome::Disabled => Resolution::Disabled { detail: "off".into() },
                 FakeOutcome::Misconfigured => {
                     Resolution::Misconfigured { detail: "broken".into() }
@@ -234,6 +311,100 @@ mod tests {
             canonicalize: &|_p| None,
             allowlist,
         }
+    }
+
+    /// Build a ResolveCtx whose env has KASTELLAN_EGRESS_FORCE_ROUTING=1
+    /// (the test_ctx helper pins get_env to None, so these build their own).
+    fn forced_ctx<'a>(allowlist: &'a dyn Fn(&str) -> Vec<String>) -> ResolveCtx<'a> {
+        ResolveCtx {
+            get_env: &|k| (k == "KASTELLAN_EGRESS_FORCE_ROUTING").then(|| "1".to_string()),
+            exists: &|_p: &Path| false,
+            is_dir: &|_p: &Path| false,
+            exe_dir: None,
+            canonicalize: &|_p| None,
+            allowlist,
+        }
+    }
+
+    #[test]
+    fn force_routed_all_localhost_allowlist_is_refused_like_misconfigured() {
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = forced_ctx(&allow);
+        let m = FakeManifest {
+            name: "deadtool",
+            outcome: FakeOutcome::RegisterWithNet(vec![
+                "localhost:443".to_string(),
+                "svc.localhost:8080".to_string(),
+            ]),
+            allowlist_name: None,
+        };
+        let (reg, loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("deadtool").is_none(), "statically dead tool must not register");
+        assert!(loaded.is_empty(), "no LoadedToolRecord for a refused tool");
+    }
+
+    #[test]
+    fn force_routed_subset_localhost_allowlist_warns_but_registers() {
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = forced_ctx(&allow);
+        let m = FakeManifest {
+            name: "mixedtool",
+            outcome: FakeOutcome::RegisterWithNet(vec![
+                "docs.example.org:443".to_string(),
+                "localhost:443".to_string(),
+            ]),
+            allowlist_name: None,
+        };
+        let (reg, loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("mixedtool").is_some(), "subset-dead tool still registers");
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn unforced_localhost_allowlist_registers_exactly_as_today() {
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = test_ctx(&allow); // get_env is None ⇒ not force-routed
+        let m = FakeManifest {
+            name: "hosttool",
+            outcome: FakeOutcome::RegisterWithNet(vec!["localhost:443".to_string()]),
+            allowlist_name: None,
+        };
+        let (reg, loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("hosttool").is_some(), "no force-routing ⇒ untouched");
+        assert_eq!(loaded.len(), 1);
+    }
+
+    /// Linux-gated: a Firecracker-VM entry is ALWAYS force-routed
+    /// (`plan.rs` refuses a `Net::Allowlist` VM without the egress proxy),
+    /// so the screen fires even with `KASTELLAN_EGRESS_FORCE_ROUTING` unset.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vm_entry_all_localhost_allowlist_is_refused_even_unforced() {
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = test_ctx(&allow); // get_env is None ⇒ host flag off
+        let m = FakeManifest {
+            name: "vmdead",
+            outcome: FakeOutcome::RegisterVmWithNet(vec!["localhost:443".to_string()]),
+            allowlist_name: None,
+        };
+        let (reg, loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("vmdead").is_none(), "VM ⇒ always forced ⇒ all-dead refused");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn force_routed_non_allowlist_net_is_not_screened() {
+        // shell_exec_entry's policy is Net::Deny — the screen only inspects
+        // Net::Allowlist, so this registers exactly as before.
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = forced_ctx(&allow);
+        let m = FakeManifest {
+            name: "denytool",
+            outcome: FakeOutcome::Register,
+            allowlist_name: None,
+        };
+        let (reg, _loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("denytool").is_some());
     }
 
     #[test]
