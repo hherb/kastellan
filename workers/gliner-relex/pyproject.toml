@@ -16,7 +16,7 @@ dependencies = [
     # Torch is implicit via transformers, but pin it explicitly so an
     # accidental wheel-resolution surprise (CUDA version mismatch) is
     # caught at uv sync time rather than at model load.
-    "torch>=2.2",
+    "torch>=2.13.0",
 ]
 
 [project.optional-dependencies]
