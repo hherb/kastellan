@@ -51,6 +51,9 @@ impl MatrixConfig {
 /// - `KASTELLAN_MATRIX_WORKER_BIN` (optional) — default `exe_dir/kastellan-worker-matrix`.
 /// - `KASTELLAN_MATRIX_ENFORCE_SANDBOX` (optional, default on — `matrix_client`
 ///   seccomp [TSYNC'd] + Landlock) — `0`/`false` is the operator debug opt-out.
+/// - `KASTELLAN_MATRIX_USE_MICROVM` (optional, default off, Linux only) — opt the
+///   worker into Firecracker micro-VM mode; truthy under the unified
+///   `1|true|yes|on` dialect (#459).
 ///
 /// `password` is `None`: the daemon relies on the worker's persisted
 /// `session.json` (do the one-time initial login with `kastellan-cli matrix
@@ -83,9 +86,12 @@ pub(crate) fn parse_daemon_spawn_config(
     let enforce_sandbox = get("KASTELLAN_MATRIX_ENFORCE_SANDBOX")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
-    let use_microvm = get("KASTELLAN_MATRIX_USE_MICROVM")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false);
+    // Opt-in gate under the one unified flag dialect (`1|true|yes|on`, trimmed,
+    // case-insensitive) — #459 routed every worker/channel opt-in flag through
+    // `env_flag_enabled` so a `…=true` can't silently read as off next to a
+    // `KASTELLAN_EGRESS_FORCE_ROUTING=true` that reads on.
+    let use_microvm =
+        crate::worker_lifecycle::force_route::env_flag_enabled(get("KASTELLAN_MATRIX_USE_MICROVM"));
     let password = get("KASTELLAN_MATRIX_PASSWORD").filter(|v| !v.is_empty());
     Some(MatrixSpawnConfig {
         worker_bin,
