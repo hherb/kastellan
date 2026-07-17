@@ -199,8 +199,7 @@ impl WorkerManifest for WebFetchManifest {
         // variant is never referenced (issue #144).
         #[cfg(target_os = "linux")]
         {
-            let use_microvm =
-                (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
+            let use_microvm = ctx.flag_enabled(USE_MICROVM_ENV);
             if use_microvm {
                 let binary = PathBuf::from(MICROVM_WORKER_BIN);
                 let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")

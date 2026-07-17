@@ -121,6 +121,18 @@ pub struct ResolveCtx<'a> {
     pub allowlist: &'a dyn Fn(&str) -> Vec<String>,
 }
 
+impl ResolveCtx<'_> {
+    /// True iff env var `key` is set to a truthy value under the one daemon-wide
+    /// flag dialect (`1|true|yes|on`, trimmed, case-insensitive), shared with
+    /// force-routing via [`crate::worker_lifecycle::force_route::env_flag_enabled`].
+    /// Every worker `USE_*` / `ENABLE` opt-in flag goes through this so a
+    /// `…=true` can never silently read as off while a neighbouring
+    /// `KASTELLAN_EGRESS_FORCE_ROUTING=true` reads on (#459 residual).
+    pub(crate) fn flag_enabled(&self, key: &str) -> bool {
+        crate::worker_lifecycle::force_route::env_flag_enabled((self.get_env)(key))
+    }
+}
+
 /// Locate a worker binary. Precedence:
 ///   1. **If the override env var (e.g. `"KASTELLAN_SHELL_EXEC_BIN"`) is set, it
 ///      is authoritative** — return it iff it names a runnable file, otherwise
@@ -187,6 +199,24 @@ mod tests {
             canonicalize: &|_p| None,
             allowlist: &|_t| Vec::new(),
         }
+    }
+
+    #[test]
+    fn flag_enabled_honors_unified_truthiness_dialect() {
+        let exists = |_p: &Path| false;
+        for v in ["1", "true", "yes", "on", " TRUE "] {
+            let get_env = move |k: &str| (k == "K").then(|| v.to_string());
+            let c = ctx(&get_env, &exists, None);
+            assert!(c.flag_enabled("K"), "{v:?} should enable");
+        }
+        for v in ["0", "false", "off", "", "banana"] {
+            let get_env = move |k: &str| (k == "K").then(|| v.to_string());
+            let c = ctx(&get_env, &exists, None);
+            assert!(!c.flag_enabled("K"), "{v:?} must not enable");
+        }
+        let unset = |_k: &str| None;
+        let c = ctx(&unset, &exists, None);
+        assert!(!c.flag_enabled("K"), "unset ⇒ false");
     }
 
     #[test]

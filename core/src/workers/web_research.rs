@@ -621,10 +621,8 @@ impl WorkerManifest for WebResearchManifest {
         // Single-broker XOR (#464): a worker binds at most one broker socket
         // (single `broker_uds`, one vsock channel), so the search-broker and
         // embed-broker flags are mutually exclusive — refuse the pair up front.
-        let use_search_broker =
-            (ctx.get_env)(USE_SEARCH_BROKER_ENV).unwrap_or_default().trim() == "1";
-        let use_embed_broker_flag =
-            (ctx.get_env)(USE_EMBED_BROKER_ENV).unwrap_or_default().trim() == "1";
+        let use_search_broker = ctx.flag_enabled(USE_SEARCH_BROKER_ENV);
+        let use_embed_broker_flag = ctx.flag_enabled(USE_EMBED_BROKER_ENV);
         if use_search_broker && use_embed_broker_flag {
             return Resolution::Misconfigured {
                 detail: format!(
@@ -663,7 +661,7 @@ impl WorkerManifest for WebResearchManifest {
         // variant is never referenced (issue #144); the guard below sees
         // `use_microvm = false` there.
         #[cfg(target_os = "linux")]
-        let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
+        let use_microvm = ctx.flag_enabled(USE_MICROVM_ENV);
         #[cfg(not(target_os = "linux"))]
         let use_microvm = false;
 

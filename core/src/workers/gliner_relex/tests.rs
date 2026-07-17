@@ -585,14 +585,27 @@ fn resolve_env_disabled_when_enable_unset() {
 }
 
 #[test]
-fn resolve_env_disabled_when_enable_is_zero_or_truthy_alias() {
-    for v in ["0", "true", "yes", "on", ""] {
+fn resolve_env_disabled_only_for_falsy_enable_values() {
+    // #459 unified the flag dialect (`1|true|yes|on`, trimmed, case-insensitive)
+    // across every worker flag. Genuinely-off values keep the worker Disabled…
+    for v in ["0", "", "false", "off", "banana"] {
         let env = env_map_of(&[("KASTELLAN_GLINER_RELEX_ENABLE", v)]);
         let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
         assert_eq!(
             r,
             Err(ResolveSkipReason::Disabled),
-            "enable={v:?} must be Disabled (strict on the value, only \"1\" enables)"
+            "enable={v:?} (falsy) must be Disabled"
+        );
+    }
+    // …while truthy aliases now pass the opt-in gate (they then fail later for
+    // the missing weights dir, not with Disabled).
+    for v in ["1", "true", "yes", "on", " TRUE "] {
+        let env = env_map_of(&[("KASTELLAN_GLINER_RELEX_ENABLE", v)]);
+        let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
+        assert_ne!(
+            r,
+            Err(ResolveSkipReason::Disabled),
+            "enable={v:?} (truthy) must pass the opt-in gate"
         );
     }
 }
@@ -781,33 +794,48 @@ fn resolve_env_sets_use_container_backend_when_env_var_is_one() {
     );
 }
 
-// macOS-only: the strict-"1" parsing of KASTELLAN_GLINER_RELEX_USE_CONTAINER
-// only runs on macOS; on Linux the flag is compile-time `false` (issue #144).
+// macOS-only: the parsing of KASTELLAN_GLINER_RELEX_USE_CONTAINER only runs on
+// macOS; on Linux the flag is compile-time `false` (issue #144).
 #[cfg(target_os = "macos")]
 #[test]
-fn resolve_env_strict_about_use_container_value() {
-    // Only "1" (after trim) counts — symmetric with KASTELLAN_GLINER_RELEX_ENABLE
-    // strictness. Surface dialect debate ("true", "yes", "on") would
-    // creep in over time without this pin.
-    for value in &["true", "yes", "on", "0", " 1 \n"] {
+fn resolve_env_use_container_honors_unified_truthiness_dialect() {
+    // #459 unified the flag dialect (`1|true|yes|on`, trimmed, case-insensitive)
+    // across every worker flag, so USE_CONTAINER now goes through the one
+    // `env_flag_enabled` primitive like ENABLE / USE_MICROVM / force-routing.
+    // Truthy aliases select container mode…
+    for value in &["1", "true", "yes", "on", " TRUE "] {
         let env_map = std::collections::HashMap::from([
             ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
             ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
             ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", *value),
-            // Anchor required so host-mode path can resolve venv dir
-            // (non-"1" values fall through to host mode, which needs
-            // at least one of VENV_DIR / DATA_DIR / HOME set).
+            // Anchor required so a host-mode fall-through can resolve venv dir
+            // (needs at least one of VENV_DIR / DATA_DIR / HOME set).
             ("HOME", "/tmp/fake-home"),
         ]);
         let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
         let is_dir = |_: &Path| true;
         let exists = |_: &Path| true;
         let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
-        // " 1 \n" → trim() == "1" so it DOES count; others don't.
-        let expected = value.trim() == "1";
-        assert_eq!(
-            env.use_container_backend, expected,
-            "value {value:?} should yield use_container_backend = {expected}"
+        assert!(
+            env.use_container_backend,
+            "value {value:?} (truthy) should yield use_container_backend = true"
+        );
+    }
+    // …while falsy / non-dialect values fall through to host mode.
+    for value in &["0", "false", "off", "banana", ""] {
+        let env_map = std::collections::HashMap::from([
+            ("KASTELLAN_GLINER_RELEX_ENABLE", "1"),
+            ("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR", "/tmp/fake-weights"),
+            ("KASTELLAN_GLINER_RELEX_USE_CONTAINER", *value),
+            ("HOME", "/tmp/fake-home"),
+        ]);
+        let env_lookup = |k: &str| env_map.get(k).map(|v| v.to_string());
+        let is_dir = |_: &Path| true;
+        let exists = |_: &Path| true;
+        let env = resolve_env(env_lookup, is_dir, exists).expect("resolve_env ok");
+        assert!(
+            !env.use_container_backend,
+            "value {value:?} (falsy) should yield use_container_backend = false"
         );
     }
 }

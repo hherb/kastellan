@@ -31,6 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::worker_lifecycle::force_route::env_flag_enabled;
 use crate::worker_manifest::{
     discover_binary, Resolution, ResolveCtx, ToolDoc, ToolParam, WorkerManifest,
 };
@@ -134,7 +135,7 @@ where
     E: Fn(&str) -> Option<String>,
     X: Fn(&Path) -> bool,
 {
-    if env_lookup(ENABLE_ENV).unwrap_or_default().trim() != "1" {
+    if !env_flag_enabled(env_lookup(ENABLE_ENV)) {
         return Err(ResolveSkipReason::Disabled);
     }
     if let Some(raw) = env_lookup(PYTHON_ENV) {
@@ -188,9 +189,8 @@ impl WorkerManifest for PythonExecManifest {
         // `Container` variant is never referenced (issue #144).
         #[cfg(target_os = "macos")]
         {
-            let enabled = (ctx.get_env)(ENABLE_ENV).unwrap_or_default().trim() == "1";
-            let use_container =
-                (ctx.get_env)(USE_CONTAINER_ENV).unwrap_or_default().trim() == "1";
+            let enabled = ctx.flag_enabled(ENABLE_ENV);
+            let use_container = ctx.flag_enabled(USE_CONTAINER_ENV);
             if enabled && use_container {
                 let binary = PathBuf::from(CONTAINER_WORKER_BIN);
                 let image = (ctx.get_env)(IMAGE_ENV)
@@ -215,9 +215,8 @@ impl WorkerManifest for PythonExecManifest {
         // `FirecrackerVm` variant is never referenced (issue #144).
         #[cfg(target_os = "linux")]
         {
-            let enabled = (ctx.get_env)(ENABLE_ENV).unwrap_or_default().trim() == "1";
-            let use_microvm =
-                (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
+            let enabled = ctx.flag_enabled(ENABLE_ENV);
+            let use_microvm = ctx.flag_enabled(USE_MICROVM_ENV);
             if enabled && use_microvm {
                 let binary =
                     PathBuf::from("/usr/local/bin/kastellan-worker-python-exec");

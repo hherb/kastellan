@@ -22,6 +22,23 @@ use super::*;
     }
 
     #[test]
+    fn enable_accepts_non_one_truthy_flag() {
+        // #459: the ENABLE gate now goes through the unified `env_flag_enabled`
+        // dialect, so a non-"1" truthy value (`true`) is NOT treated as off — it
+        // passes the gate (then fails later for the missing anchor, not Disabled).
+        let env = |k: &str| (k == "KASTELLAN_BROWSER_DRIVER_ENABLE").then(|| "true".to_string());
+        let is_dir = |_p: &Path| true;
+        let exists = |_p: &Path| true;
+        assert!(
+            !matches!(
+                resolve_env(env, is_dir, exists, no_canon, no_deps),
+                Err(ResolveSkipReason::Disabled)
+            ),
+            "ENABLE=true must pass the opt-in gate (not read as off)"
+        );
+    }
+
+    #[test]
     fn unresolvable_when_no_anchor() {
         let env = |k: &str| (k == "KASTELLAN_BROWSER_DRIVER_ENABLE").then(|| "1".to_string());
         let is_dir = |_p: &Path| true;

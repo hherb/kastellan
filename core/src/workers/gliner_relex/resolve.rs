@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::worker_lifecycle::force_route::env_flag_enabled;
+
 /// Resolved paths + config for the GLiNER-Relex worker.
 ///
 /// Populated by `GlinerRelexManifest::resolve` from environment variables
@@ -186,12 +188,11 @@ where
     IsDir: Fn(&Path) -> bool,
     Exists: Fn(&Path) -> bool,
 {
-    let enable = env_lookup("KASTELLAN_GLINER_RELEX_ENABLE").unwrap_or_default();
-    // `trim` so a stray newline from `echo "1" > envfile` doesn't fail
-    // the opt-in silently. Strict on the value itself: only `"1"`
-    // counts. Inviting `true` / `yes` / `on` would surface the next
-    // operator's dialect debate; the README documents `=1` explicitly.
-    if enable.trim() != "1" {
+    // Opt-in gate under the one unified flag dialect (`1|true|yes|on`, trimmed,
+    // case-insensitive) — #459 unified the dialect across every worker flag, so
+    // `…=true` can no longer silently read as off next to a
+    // `KASTELLAN_EGRESS_FORCE_ROUTING=true` that reads on. `=1` still enables.
+    if !env_flag_enabled(env_lookup("KASTELLAN_GLINER_RELEX_ENABLE")) {
         return Err(ResolveSkipReason::Disabled);
     }
 
@@ -219,12 +220,8 @@ where
     // operator who sets `KASTELLAN_GLINER_RELEX_USE_CONTAINER=1` on Linux
     // gets host-mode + bwrap silently (the env var isn't even read).
     #[cfg(target_os = "macos")]
-    let use_container_backend = env_lookup("KASTELLAN_GLINER_RELEX_USE_CONTAINER")
-        .map(|v| {
-            // trim() rationale: matches KASTELLAN_GLINER_RELEX_ENABLE strictness; see comment above.
-            v.trim() == "1"
-        })
-        .unwrap_or(false);
+    let use_container_backend =
+        env_flag_enabled(env_lookup("KASTELLAN_GLINER_RELEX_USE_CONTAINER"));
     #[cfg(not(target_os = "macos"))]
     let use_container_backend = false;
     let container_image = env_lookup("KASTELLAN_GLINER_RELEX_IMAGE");

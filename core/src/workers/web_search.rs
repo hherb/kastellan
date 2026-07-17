@@ -418,7 +418,7 @@ impl WorkerManifest for WebSearchManifest {
         // Broker mode: the worker reaches SearxNG only through a trusted
         // search-broker sidecar (so a force-routed worker can reach a loopback
         // SearxNG). The broker owns the SearxNG allowlist; the worker gets none.
-        let use_broker = (ctx.get_env)(USE_BROKER_ENV).unwrap_or_default().trim() == "1";
+        let use_broker = ctx.flag_enabled(USE_BROKER_ENV);
 
         // Firecracker micro-VM mode (Linux) short-circuits host binary discovery:
         // the worker binary lives inside the rootfs image, not on the host.
@@ -426,7 +426,7 @@ impl WorkerManifest for WebSearchManifest {
         // variant is never referenced (issue #144).
         #[cfg(target_os = "linux")]
         {
-            let use_microvm = (ctx.get_env)(USE_MICROVM_ENV).unwrap_or_default().trim() == "1";
+            let use_microvm = ctx.flag_enabled(USE_MICROVM_ENV);
             if use_microvm {
                 // #452: a Net::Allowlist VM worker is never given a direct NIC
                 // (plan.rs refuses to boot one without the egress proxy), so a
