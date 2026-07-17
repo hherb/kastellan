@@ -136,7 +136,12 @@ without a daemon.
   double-report. They keep their precise per-worker remedies.
 - web-research's `content_localhost_warnings` (added in the #457 retro pass)
   becomes semantically identical to the generic subset-warn → **removed in
-  this slice** (its tests migrate to the generic screen's).
+  this slice** (its tests migrate to the generic screen's). The
+  "can-only-Warn-never-Refuse" equivalence holds whenever the SearxNG
+  endpoint is configured (the #457 guard guarantees it is then a live union
+  entry); with the endpoint env unset — an already-nonfunctional config —
+  an all-localhost content allowlist can Refuse instead, which is benign
+  and arguably clearer than register-but-dead.
 - web-research's **embed** warning stays: it explains the hybrid→lexical
   degradation consequence, which the generic message cannot know. If the embed
   host also appears in the union net allowlist, one duplicate warn is accepted

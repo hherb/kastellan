@@ -160,9 +160,13 @@ pub(crate) fn matrix_vm_password_path(pid: u32) -> PathBuf {
 /// forever with no actionable operator message. `Some(detail)` ⇒ the caller
 /// must NOT start the channel (fail-soft: log and skip; the daemon runs on).
 /// Literal-IP homeservers (e.g. `http://127.0.0.1:8008`) are never flagged —
-/// the proxy's operator-allowlisted-literal carve-out dials them. Message
-/// composition delegates to the shared #452 builder; only the env-var name
-/// and the matrix remedy live here (this module owns the matrix env surface).
+/// the proxy's operator-allowlisted-literal carve-out dials them. A
+/// scheme-less value (e.g. `localhost:8008`) is also not flagged — like
+/// `endpoint_is_localhost_name`, it defers to worker-side URL validation
+/// (matrix-sdk requires a full URL and fails fast at login, not in a
+/// respawn loop). Message composition delegates to the shared #452 builder;
+/// only the env-var name and the matrix remedy live here (this module owns
+/// the matrix env surface).
 pub fn forced_localhost_homeserver(
     homeserver_url: &str,
     force_routed: bool,

@@ -251,6 +251,11 @@ mod tests {
         /// Register, but with `policy.net = Net::Allowlist(these entries)` —
         /// exercises the #459 generic screen.
         RegisterWithNet(Vec<String>),
+        /// Linux-gated: like `RegisterWithNet` but the entry is a Firecracker
+        /// micro-VM worker (`sandbox_backend = FirecrackerVm`) — pins the
+        /// VM-is-always-force-routed screen composition.
+        #[cfg(target_os = "linux")]
+        RegisterVmWithNet(Vec<String>),
         Disabled,
         Misconfigured,
     }
@@ -275,6 +280,17 @@ mod tests {
                         &(ctx.allowlist)(self.name),
                     );
                     entry.policy.net = kastellan_sandbox::Net::Allowlist(entries.clone());
+                    Resolution::Register(entry)
+                }
+                #[cfg(target_os = "linux")]
+                FakeOutcome::RegisterVmWithNet(entries) => {
+                    let mut entry = crate::workers::shell_exec::shell_exec_entry(
+                        PathBuf::from(format!("/fake/{}", self.name)),
+                        &(ctx.allowlist)(self.name),
+                    );
+                    entry.policy.net = kastellan_sandbox::Net::Allowlist(entries.clone());
+                    entry.sandbox_backend =
+                        Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm);
                     Resolution::Register(entry)
                 }
                 FakeOutcome::Disabled => Resolution::Disabled { detail: "off".into() },
@@ -355,6 +371,24 @@ mod tests {
         let (reg, loaded, _docs) = assemble_registry(&[&m], &ctx);
         assert!(reg.lookup("hosttool").is_some(), "no force-routing ⇒ untouched");
         assert_eq!(loaded.len(), 1);
+    }
+
+    /// Linux-gated: a Firecracker-VM entry is ALWAYS force-routed
+    /// (`plan.rs` refuses a `Net::Allowlist` VM without the egress proxy),
+    /// so the screen fires even with `KASTELLAN_EGRESS_FORCE_ROUTING` unset.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vm_entry_all_localhost_allowlist_is_refused_even_unforced() {
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = test_ctx(&allow); // get_env is None ⇒ host flag off
+        let m = FakeManifest {
+            name: "vmdead",
+            outcome: FakeOutcome::RegisterVmWithNet(vec!["localhost:443".to_string()]),
+            allowlist_name: None,
+        };
+        let (reg, loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("vmdead").is_none(), "VM ⇒ always forced ⇒ all-dead refused");
+        assert!(loaded.is_empty());
     }
 
     #[test]
