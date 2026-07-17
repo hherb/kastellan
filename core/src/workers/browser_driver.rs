@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use kastellan_sandbox::{Net, Profile, SandboxPolicy};
 
 use crate::scheduler::ToolEntry;
+use crate::worker_lifecycle::force_route::env_flag_enabled;
 use crate::worker_manifest::{Resolution, ResolveCtx, ToolDoc, ToolParam, WorkerManifest};
 
 /// Tool name the registry/planner keys browser-driver on.
@@ -88,13 +89,10 @@ where
     C: Fn(&Path) -> Option<PathBuf>,
     R: Fn(&Path) -> Vec<PathBuf>,
 {
-    // `trim` so a stray newline from `echo "1" > envfile` doesn't fail the
-    // opt-in silently. Strict on the value: only `"1"` counts.
-    if env_lookup("KASTELLAN_BROWSER_DRIVER_ENABLE")
-        .unwrap_or_default()
-        .trim()
-        != "1"
-    {
+    // Opt-in gate under the one unified flag dialect (`1|true|yes|on`, trimmed,
+    // case-insensitive) — #459 retired the strict `== "1"` so `…=true` can't
+    // silently read as off next to a `FORCE_ROUTING=true` that reads on.
+    if !env_flag_enabled(env_lookup("KASTELLAN_BROWSER_DRIVER_ENABLE")) {
         return Err(ResolveSkipReason::Disabled);
     }
 

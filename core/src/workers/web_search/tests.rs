@@ -171,6 +171,29 @@ fn resolve_broker_mode_drops_egress_and_declares_search_broker() {
 }
 
 #[test]
+fn resolve_broker_mode_accepts_non_one_truthy_flag() {
+    // #459: USE_BROKER now goes through the unified `env_flag_enabled` dialect,
+    // so a non-"1" truthy value (`on`) selects broker mode just like "1" did.
+    let get_env = |k: &str| match k {
+        BIN_ENV => Some("/opt/web-search".to_string()),
+        ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+        "KASTELLAN_WEB_SEARCH_USE_BROKER" => Some("on".to_string()),
+        _ => None,
+    };
+    let exists = |_p: &Path| true;
+    let allowlist = |_t: &str| Vec::<String>::new();
+    let c = ctx(&get_env, &exists, &allowlist);
+
+    match WebSearchManifest.resolve(&c) {
+        Resolution::Register(entry) => {
+            let spec = entry.broker.as_ref().expect("USE_BROKER=on ⇒ broker mode");
+            assert_eq!(spec.kind, crate::broker::BrokerKind::Search);
+        }
+        other => panic!("expected Register (broker mode), got {}", outcome_label(&other)),
+    }
+}
+
+#[test]
 fn resolve_direct_mode_unchanged_when_use_broker_unset() {
     let get_env = |k: &str| match k {
         BIN_ENV => Some("/opt/web-search".to_string()),
