@@ -111,6 +111,85 @@ pub(crate) fn forced_localhost_misconfig(
     ))
 }
 
+/// Outcome of the generic #459 screen over a registered worker's
+/// `Net::Allowlist` entries. Severity is data-driven — no per-worker hooks
+/// (per-manifest copies are how the #452 gap happened in the first place):
+/// the whole list dead ⇒ the tool is statically unreachable ⇒ refuse; a
+/// proper subset dead ⇒ the tool still works for the live hosts ⇒ warn.
+#[derive(Debug)]
+pub(crate) enum NetScreen {
+    /// Nothing to flag: not force-routed, empty list (the broker/zero-egress
+    /// posture), or no `localhost`-name entries.
+    Ok,
+    /// A proper subset of entries is statically dead: register the tool but
+    /// warn, naming the dead entries.
+    Warn { dead: Vec<String> },
+    /// Every entry is statically dead: the caller must treat this exactly
+    /// like [`crate::worker_manifest::Resolution::Misconfigured`].
+    Refuse { detail: String },
+}
+
+/// Host part of a `Net::Allowlist` entry. Entries today are `host:port`
+/// (the entry builders' `format!` / web-fetch's `allowlist_to_net_entries`),
+/// bare domains (browser-driver passes DB rows verbatim), or bracketed IPv6
+/// forms. Strips one trailing `:<digits>` port; anything else is returned
+/// whole — an unrecognized shape then classifies `false`, which is the safe
+/// no-flag direction (the connect-time proxy check still owns it).
+fn host_of_entry(entry: &str) -> &str {
+    if entry.starts_with('[') {
+        // Bracketed IPv6 literal, with or without a port suffix.
+        if let Some(end) = entry.find(']') {
+            return &entry[..=end];
+        }
+    }
+    match entry.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            host
+        }
+        _ => entry,
+    }
+}
+
+/// The generic #459 screen: classify every allowlist entry with
+/// [`host_is_localhost_name`] (via [`host_of_entry`]) when `force_routed`.
+/// See [`NetScreen`] for the severity policy. Like the rest of this module:
+/// **no DNS** — only the statically-dead RFC 6761 name class is flagged, and
+/// literal IPs are never flagged (the proxy's allowlisted-literal carve-out
+/// dials them).
+pub(crate) fn screen_net_allowlist(
+    tool: &str,
+    entries: &[String],
+    force_routed: bool,
+) -> NetScreen {
+    if !force_routed || entries.is_empty() {
+        return NetScreen::Ok;
+    }
+    let dead: Vec<String> = entries
+        .iter()
+        .filter(|e| host_is_localhost_name(host_of_entry(e)))
+        .cloned()
+        .collect();
+    if dead.is_empty() {
+        return NetScreen::Ok;
+    }
+    if dead.len() == entries.len() {
+        let hosts = dead.join(", ");
+        return NetScreen::Refuse {
+            detail: format!(
+                "every Net::Allowlist entry for {tool} uses a `localhost` name \
+                 ({hosts}), but its egress is force-routed through the egress \
+                 proxy, which range-denies what a localhost name resolves to \
+                 (SSRF/DNS-rebinding defense) — the tool would register but \
+                 every request would fail. Use literal-IP entries (the proxy \
+                 dials an operator-allowlisted literal) or routable hostnames, \
+                 and update the matching tool_allowlists rows / endpoint env \
+                 vars to agree."
+            ),
+        };
+    }
+    NetScreen::Warn { dead }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +320,65 @@ mod tests {
         assert!(
             forced_localhost_misconfig("E", "http://127.0.0.1:8888/search", true, "r").is_none()
         );
+    }
+
+    #[test]
+    fn host_of_entry_strips_only_a_trailing_digit_port() {
+        assert_eq!(host_of_entry("localhost:443"), "localhost");
+        assert_eq!(host_of_entry("localhost"), "localhost"); // bare DB row (browser-driver)
+        assert_eq!(host_of_entry("example.org:8080"), "example.org");
+        assert_eq!(host_of_entry("[::1]:443"), "[::1]"); // bracketed v6 stays whole
+        assert_eq!(host_of_entry("[::1]"), "[::1]");
+        // Defensive: a non-digit "port" is not a port — return the entry as-is
+        // (it then classifies false, which is the safe no-flag direction).
+        assert_eq!(host_of_entry("example.org:https"), "example.org:https");
+    }
+
+    #[test]
+    fn screen_is_ok_when_not_forced_or_list_is_empty() {
+        let dead_only = vec!["localhost:443".to_string()];
+        assert!(matches!(screen_net_allowlist("t", &dead_only, false), NetScreen::Ok));
+        // Empty allowlist = the broker/zero-egress posture: deliberately exempt.
+        assert!(matches!(screen_net_allowlist("t", &[], true), NetScreen::Ok));
+    }
+
+    #[test]
+    fn screen_is_ok_when_no_entry_is_a_localhost_name() {
+        let entries = vec![
+            "searx.example.org:8888".to_string(),
+            "docs.example.org".to_string(), // bare row form
+            "127.0.0.1:8888".to_string(),   // literal: carve-out, never flagged
+            "[::1]:443".to_string(),        // v6 literal: carve-out
+        ];
+        assert!(matches!(screen_net_allowlist("t", &entries, true), NetScreen::Ok));
+    }
+
+    #[test]
+    fn screen_warns_on_a_proper_subset_of_dead_entries() {
+        let entries = vec![
+            "docs.example.org:443".to_string(),
+            "localhost:443".to_string(),
+            "foo.localhost".to_string(),
+        ];
+        match screen_net_allowlist("t", &entries, true) {
+            NetScreen::Warn { dead } => {
+                assert_eq!(dead, vec!["localhost:443".to_string(), "foo.localhost".to_string()]);
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn screen_refuses_when_every_entry_is_dead() {
+        let entries = vec!["localhost:443".to_string(), "svc.localhost:8080".to_string()];
+        match screen_net_allowlist("deadtool", &entries, true) {
+            NetScreen::Refuse { detail } => {
+                assert!(detail.contains("deadtool"), "detail: {detail}");
+                assert!(detail.contains("localhost:443"), "detail: {detail}");
+                assert!(detail.contains("svc.localhost:8080"), "detail: {detail}");
+                assert!(detail.contains("literal"), "remedy missing: {detail}");
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
     }
 }
