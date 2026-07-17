@@ -195,7 +195,7 @@ mod tests {
     use super::*;
     use kastellan_worker_web_common::http::RawResponse;
     use kastellan_worker_web_common::search_provider::DirectSearchProvider;
-    use kastellan_worker_web_common::testing::{al, json_resp, FakeGet};
+    use kastellan_worker_web_common::testing::{al, json_resp, stub_broker, FakeGet};
 
     /// Build a handler with a direct search provider over `search_responses` and a
     /// fetch transport over `page_responses`. Search and fetch no longer share one
@@ -341,22 +341,6 @@ mod tests {
         let out = h.call("web.research", json!({"query": "bwrap user namespaces"})).unwrap();
         assert_eq!(out["ranking"], "lexical");
         assert!(out["embed_note"].as_str().unwrap().contains("embed"));
-    }
-
-    /// One-shot stub search-broker on `sock`: reads one request line, replies with
-    /// `response_json`. Mirrors web-common's `search_provider::tests::stub_broker`.
-    fn stub_broker(sock: std::path::PathBuf, response_json: String) -> std::thread::JoinHandle<()> {
-        use std::io::Write;
-        use std::os::unix::net::UnixListener;
-        let listener = UnixListener::bind(&sock).unwrap();
-        std::thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            let mut br = std::io::BufReader::new(conn.try_clone().unwrap());
-            let _ = kastellan_protocol::read_capped_record(&mut br, 1_000_000).unwrap();
-            conn.write_all(response_json.as_bytes()).unwrap();
-            conn.write_all(b"\n").unwrap();
-            conn.flush().unwrap();
-        })
     }
 
     #[test]

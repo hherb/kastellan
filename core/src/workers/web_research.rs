@@ -636,6 +636,22 @@ impl WorkerManifest for WebResearchManifest {
                 ),
             };
         }
+        // Search-broker mode forwards to the SearxNG endpoint *host-side* (the
+        // worker never dials it), so the endpoint is still required — with none,
+        // there is nothing for the broker to reach. Fail closed at registration
+        // with a clear message rather than spawning a broker pointed at an empty
+        // endpoint (the search calls would then fail at runtime as an opaque
+        // broker transport error). #464 review.
+        if use_search_broker && endpoint.trim().is_empty() {
+            return Resolution::Misconfigured {
+                detail: format!(
+                    "{USE_SEARCH_BROKER_ENV}=1 requires {ENDPOINT_ENV}: the \
+                     search-broker forwards to that SearxNG endpoint host-side, so \
+                     it must be set (a loopback/name-form URL is fine in broker \
+                     mode — the broker holds the route)."
+                ),
+            };
+        }
         // Embed-broker mode (Slice B): only active when the operator opts in AND
         // an embed endpoint is configured (nothing to broker otherwise → falls
         // through to the direct/lexical entry, byte-identical to today).

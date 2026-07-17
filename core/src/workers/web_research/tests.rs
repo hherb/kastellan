@@ -516,6 +516,29 @@
     }
 
     #[test]
+    fn search_broker_without_endpoint_is_misconfigured() {
+        // USE_SEARCH_BROKER=1 but no ENDPOINT_ENV: the broker forwards to the
+        // SearxNG endpoint host-side, so a missing endpoint leaves it with nothing
+        // to reach → Misconfigured at registration (naming both envs), not an
+        // opaque runtime broker failure. #464 review.
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            USE_SEARCH_BROKER_ENV => Some("1".to_string()),
+            _ => None, // ENDPOINT_ENV unset
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec![".docs.example.org".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Misconfigured { detail } => {
+                assert!(detail.contains(USE_SEARCH_BROKER_ENV), "detail: {detail}");
+                assert!(detail.contains(ENDPOINT_ENV), "endpoint env missing: {detail}");
+            }
+            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
     fn search_broker_entry_has_no_searxng_egress_and_no_endpoint_env() {
         // USE_SEARCH_BROKER=1, loopback SearxNG endpoint, content allowlist: the
         // SearxNG host leaves egress and no endpoint env is injected; the broker

@@ -382,7 +382,14 @@ async fn brokered_web_research_vm_returns_results_with_zero_egress() {
     // the port distinguishes SearxNG).
     let searx_url = url::Url::parse(&searx_endpoint).ok();
     let searx_host = url_host(&searx_endpoint);
-    let searx_port = searx_url.as_ref().and_then(url::Url::port).unwrap_or(8888);
+    // `port_or_known_default` (not `port`) so a scheme-default endpoint (e.g.
+    // `http://host/search`, implicit :80) yields the real port rather than the
+    // 8888 fallback — otherwise the needle would check the wrong port and the
+    // zero-egress assertion could silently pass. #464 review.
+    let searx_port = searx_url
+        .as_ref()
+        .and_then(url::Url::port_or_known_default)
+        .unwrap_or(8888);
     let host_needle = format!("\"host\":\"{searx_host}\"");
     let port_needle = format!("\"port\":{searx_port}");
     let leaked: Vec<_> = decisions

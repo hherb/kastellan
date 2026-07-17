@@ -374,23 +374,9 @@ mod tests {
         assert!(FakeEmbedder::failing().embed(&["x".into()]).is_err());
     }
 
-    use std::io::{BufReader as StdBufReader, Write as StdWrite};
-    use std::os::unix::net::UnixListener;
-
-    /// Spawn a one-shot stub broker on `sock` that reads one request line and
-    /// writes `response_json` back. Returns the join handle.
-    fn stub_broker(sock: std::path::PathBuf, response_json: String) -> std::thread::JoinHandle<()> {
-        let listener = UnixListener::bind(&sock).unwrap();
-        std::thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            // Drain the request line (we don't assert on it here).
-            let mut br = StdBufReader::new(conn.try_clone().unwrap());
-            let _ = kastellan_protocol::read_capped_record(&mut br, 1_000_000).unwrap();
-            conn.write_all(response_json.as_bytes()).unwrap();
-            conn.write_all(b"\n").unwrap();
-            conn.flush().unwrap();
-        })
-    }
+    // The one-shot stub broker (reads one request line, writes a response) is
+    // shared with the search-provider tests — it is generic over the JSON body.
+    use kastellan_worker_web_common::testing::stub_broker;
 
     #[test]
     fn brokered_embedder_round_trip_returns_vectors() {
