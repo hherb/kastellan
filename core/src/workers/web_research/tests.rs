@@ -333,9 +333,11 @@
 
     #[test]
     fn resolve_forced_host_localhost_name_searxng_is_misconfigured() {
-        // Host mode + force-routing flag + a `localhost`-NAME SearxNG endpoint:
-        // web-research has no search-broker and the proxy range-denies what the
-        // name resolves to, so this config reaches nothing (#452).
+        // Host mode + force-routing flag + a `localhost`-NAME SearxNG endpoint,
+        // no search-broker enabled (USE_SEARCH_BROKER unset): the proxy
+        // range-denies what the name resolves to, so this config reaches nothing
+        // (#452). With the flag it would register — see
+        // `localhost_name_endpoint_with_search_broker_registers`.
         let get_env = |k: &str| match k {
             BIN_ENV => Some("/opt/web-research".to_string()),
             ENDPOINT_ENV => Some("http://localhost:8888/search".to_string()),
@@ -480,5 +482,242 @@
         // dead tool.
         assert!(w.contains("tool_allowlists"), "allowlist caveat missing: {w}");
         assert!(w.contains("https://"), "https caveat missing: {w}");
+    }
+
+    // ------------------------------------------------------------------
+    // #464 — search-broker (single-broker XOR) resolve behaviour
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn both_broker_flags_is_misconfigured() {
+        // USE_SEARCH_BROKER=1 + USE_EMBED_BROKER=1 (+ an embed endpoint so the
+        // embed flag would otherwise be effective) → Misconfigured naming both
+        // envs and the single-broker rule (at most ONE broker socket per worker).
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("https://searx.example.org/search".to_string()),
+            EMBED_ENDPOINT_ENV => Some("https://embed.example.org:11434/v1/embeddings".to_string()),
+            USE_SEARCH_BROKER_ENV => Some("1".to_string()),
+            USE_EMBED_BROKER_ENV => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist =
+            |_t: &str| vec!["searx.example.org".to_string(), "embed.example.org".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Misconfigured { detail } => {
+                assert!(detail.contains(USE_SEARCH_BROKER_ENV), "detail: {detail}");
+                assert!(detail.contains(USE_EMBED_BROKER_ENV), "detail: {detail}");
+                assert!(detail.contains("one broker socket"), "single-broker rule missing: {detail}");
+            }
+            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn search_broker_entry_has_no_searxng_egress_and_no_endpoint_env() {
+        // USE_SEARCH_BROKER=1, loopback SearxNG endpoint, content allowlist: the
+        // SearxNG host leaves egress and no endpoint env is injected; the broker
+        // spec carries the SearxNG endpoint; content hosts stay in the allowlist.
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            USE_SEARCH_BROKER_ENV => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["127.0.0.1".to_string(), ".docs.example.org".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                let spec = entry.broker.as_ref().expect("broker set in search-broker mode");
+                assert_eq!(spec.kind, crate::broker::BrokerKind::Search);
+                assert_eq!(spec.endpoint, "http://127.0.0.1:8888/search");
+                match &entry.policy.net {
+                    Net::Allowlist(hosts) => {
+                        // Match host:PORT — the #448 DGX lesson (SearxNG + embed may
+                        // share 127.0.0.1; only the port distinguishes them).
+                        assert!(
+                            !hosts.iter().any(|h| h == "127.0.0.1:8888"),
+                            "SearxNG host must be absent from net: {hosts:?}"
+                        );
+                        assert!(
+                            hosts.iter().any(|h| h == "docs.example.org:443"),
+                            "content host missing from net: {hosts:?}"
+                        );
+                    }
+                    other => panic!("expected Net::Allowlist, got {other:?}"),
+                }
+                assert!(
+                    entry.policy.env.iter().any(|(k, _)| k == "KASTELLAN_WEB_RESEARCH_ALLOWLIST"),
+                    "allowlist env still injected"
+                );
+                assert!(
+                    !entry.policy.env.iter().any(|(k, _)| k == ENDPOINT_ENV),
+                    "endpoint env must be omitted in broker mode"
+                );
+                assert!(
+                    !entry.policy.env.iter().any(|(k, _)| k == "KASTELLAN_SEARCH_BROKER_UDS"),
+                    "broker UDS is injected at spawn, not by the manifest"
+                );
+                assert!(entry.policy.broker_uds.is_none(), "broker_uds set at spawn");
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn search_broker_entry_keeps_direct_embed() {
+        // Same as above but a direct embed endpoint is set (no embed-broker flag):
+        // the embed host stays in Net::Allowlist and the embed env is injected —
+        // the search-broker choice leaves the embed path direct (the XOR trade-off).
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            EMBED_ENDPOINT_ENV => Some("https://embed.example.org:11434/v1/embeddings".to_string()),
+            USE_SEARCH_BROKER_ENV => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| {
+            vec![
+                "127.0.0.1".to_string(),
+                "embed.example.org".to_string(),
+                ".docs.example.org".to_string(),
+            ]
+        };
+        let c = ctx(&get_env, &exists, &allowlist);
+        match WebResearchManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert_eq!(
+                    entry.broker.as_ref().expect("broker set").kind,
+                    crate::broker::BrokerKind::Search
+                );
+                match &entry.policy.net {
+                    Net::Allowlist(hosts) => {
+                        assert!(
+                            hosts.iter().any(|h| h == "embed.example.org:11434"),
+                            "direct embed host must stay in net: {hosts:?}"
+                        );
+                        assert!(
+                            !hosts.iter().any(|h| h == "127.0.0.1:8888"),
+                            "SearxNG host must be absent: {hosts:?}"
+                        );
+                    }
+                    other => panic!("expected Net::Allowlist, got {other:?}"),
+                }
+                let has = |k: &str, v: &str| entry.policy.env.iter().any(|(ek, ev)| ek == k && ev == v);
+                assert!(has(EMBED_ENDPOINT_ENV, "https://embed.example.org:11434/v1/embeddings"));
+                assert!(has(EMBED_MODEL_ENV, "embeddinggemma"), "default embed model injected");
+            }
+            other => panic!("expected Register, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[test]
+    fn localhost_name_endpoint_with_search_broker_registers() {
+        // Force-routing + a `localhost`-NAME SearxNG endpoint + USE_SEARCH_BROKER=1
+        // → Register: the #452 guard must NOT fire (the broker holds the route).
+        let exists = |_p: &Path| true;
+        let allowlist =
+            |_t: &str| vec!["searxng.localhost".to_string(), ".docs.example.org".to_string()];
+
+        let with_broker = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("http://searxng.localhost:8888/search".to_string()),
+            "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+            USE_SEARCH_BROKER_ENV => Some("1".to_string()),
+            _ => None,
+        };
+        match WebResearchManifest.resolve(&ctx(&with_broker, &exists, &allowlist)) {
+            Resolution::Register(entry) => {
+                assert_eq!(
+                    entry.broker.as_ref().expect("broker set").kind,
+                    crate::broker::BrokerKind::Search
+                );
+            }
+            other => panic!("expected Register with search-broker, got {}", outcome_label(&other)),
+        }
+
+        // The SAME env WITHOUT the flag is Misconfigured today (#452) — contrast pin.
+        let no_broker = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("http://searxng.localhost:8888/search".to_string()),
+            "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+            _ => None,
+        };
+        assert!(
+            matches!(
+                WebResearchManifest.resolve(&ctx(&no_broker, &exists, &allowlist)),
+                Resolution::Misconfigured { .. }
+            ),
+            "localhost-name SearxNG force-routed without the broker must be Misconfigured"
+        );
+    }
+
+    #[test]
+    fn misconfigured_remedy_offers_search_broker() {
+        // The forced-localhost Misconfigured detail (no broker flags) now also
+        // offers the search-broker alongside the existing literal/https/row pins.
+        let get_env = |k: &str| match k {
+            BIN_ENV => Some("/opt/web-research".to_string()),
+            ENDPOINT_ENV => Some("http://localhost:8888/search".to_string()),
+            "KASTELLAN_EGRESS_FORCE_ROUTING" => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["localhost".to_string()];
+        match WebResearchManifest.resolve(&ctx(&get_env, &exists, &allowlist)) {
+            Resolution::Misconfigured { detail } => {
+                assert!(detail.contains(USE_SEARCH_BROKER_ENV), "search-broker remedy missing: {detail}");
+                assert!(detail.contains("127.0.0.1"), "literal-IP remedy missing: {detail}");
+                assert!(detail.contains("tool_allowlists"), "allowlist caveat missing: {detail}");
+                assert!(detail.contains("https://"), "https caveat missing: {detail}");
+            }
+            other => panic!("expected Misconfigured, got {}", outcome_label(&other)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_uses_vm_search_broker_entry_when_opted_in() {
+        // USE_MICROVM=1 + USE_SEARCH_BROKER=1: FirecrackerVm backend, empty fs_read,
+        // env carries KASTELLAN_MICROVM_DIR + ROOTFS=web-research.ext4, broker =
+        // search(endpoint), Net::Allowlist has no SearxNG entry.
+        let get_env = |k: &str| match k {
+            "KASTELLAN_WEB_RESEARCH_USE_MICROVM" => Some("1".to_string()),
+            USE_SEARCH_BROKER_ENV => Some("1".to_string()),
+            ENDPOINT_ENV => Some("http://127.0.0.1:8888/search".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec!["127.0.0.1".to_string(), ".docs.example.org".to_string()];
+        match WebResearchManifest.resolve(&ctx(&get_env, &exists, &allowlist)) {
+            Resolution::Register(entry) => {
+                assert!(matches!(
+                    entry.sandbox_backend,
+                    Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+                ));
+                assert!(entry.policy.fs_read.is_empty(), "VM entry has empty fs_read");
+                let spec = entry.broker.as_ref().expect("broker set");
+                assert_eq!(spec.kind, crate::broker::BrokerKind::Search);
+                assert_eq!(spec.endpoint, "http://127.0.0.1:8888/search");
+                let env = &entry.policy.env;
+                assert!(env.iter().any(|(k, _)| k == "KASTELLAN_MICROVM_DIR"));
+                assert!(
+                    env.iter().any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS" && v == "web-research.ext4"),
+                    "rootfs env missing: {env:?}"
+                );
+                match &entry.policy.net {
+                    Net::Allowlist(hosts) => assert!(
+                        !hosts.iter().any(|h| h == "127.0.0.1:8888"),
+                        "SearxNG host absent in VM search-broker mode: {hosts:?}"
+                    ),
+                    other => panic!("expected Net::Allowlist, got {other:?}"),
+                }
+            }
+            other => panic!("expected Register(VM search-broker entry), got {}", outcome_label(&other)),
+        }
     }
 
