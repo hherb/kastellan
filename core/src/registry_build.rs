@@ -197,7 +197,8 @@ pub fn assemble_registry(
                                 "Net::Allowlist entries use `localhost` names that are \
                                  statically dead under force-routing — requests to them \
                                  will fail (use literal IPs or routable hostnames, and \
-                                 update the matching tool_allowlists rows)"
+                                 update the matching tool_allowlists rows / endpoint \
+                                 env vars to agree)"
                             );
                         }
                         NetScreen::Ok => {}
