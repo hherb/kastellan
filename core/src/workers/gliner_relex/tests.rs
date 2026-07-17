@@ -585,14 +585,27 @@ fn resolve_env_disabled_when_enable_unset() {
 }
 
 #[test]
-fn resolve_env_disabled_when_enable_is_zero_or_truthy_alias() {
-    for v in ["0", "true", "yes", "on", ""] {
+fn resolve_env_disabled_only_for_falsy_enable_values() {
+    // #459 unified the flag dialect (`1|true|yes|on`, trimmed, case-insensitive)
+    // across every worker flag. Genuinely-off values keep the worker Disabled…
+    for v in ["0", "", "false", "off", "banana"] {
         let env = env_map_of(&[("KASTELLAN_GLINER_RELEX_ENABLE", v)]);
         let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
         assert_eq!(
             r,
             Err(ResolveSkipReason::Disabled),
-            "enable={v:?} must be Disabled (strict on the value, only \"1\" enables)"
+            "enable={v:?} (falsy) must be Disabled"
+        );
+    }
+    // …while truthy aliases now pass the opt-in gate (they then fail later for
+    // the missing weights dir, not with Disabled).
+    for v in ["1", "true", "yes", "on", " TRUE "] {
+        let env = env_map_of(&[("KASTELLAN_GLINER_RELEX_ENABLE", v)]);
+        let r = resolve_env(|k| env.get(k).cloned(), always_true, always_true);
+        assert_ne!(
+            r,
+            Err(ResolveSkipReason::Disabled),
+            "enable={v:?} (truthy) must pass the opt-in gate"
         );
     }
 }
