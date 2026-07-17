@@ -171,6 +171,26 @@ pub fn assemble_registry(
         match m.resolve(ctx) {
             Resolution::Register(entry) => {
                 let name = m.name();
+                // #459 residual: a broker-declaring worker whose broker binary
+                // is not discoverable would register, be advertised to the
+                // planner, and then fail fail-closed on its first dispatch at
+                // the spawn chokepoint ("no matching broker config"). Refuse it
+                // here instead — the same drift-proof discovery the daemon runs
+                // at startup (`BrokerConfigs::from_env`), keyed off this ctx
+                // (main.rs feeds both the identical `exe_dir`). Unconditional: a
+                // missing broker binary is dead in every mode, force-routed or not.
+                if let Some(spec) = &entry.broker {
+                    if !crate::broker::config::broker_bin_present(spec.kind, ctx) {
+                        tracing::error!(
+                            tool = name,
+                            kind = ?spec.kind,
+                            "worker declares a broker but its binary is not \
+                             discoverable; skipping — it would register but every \
+                             dispatch fails fail-closed at the spawn chokepoint"
+                        );
+                        continue;
+                    }
+                }
                 // #459 generic guard: a force-routed worker whose
                 // Net::Allowlist carries `localhost` NAMES is statically dead
                 // for those hosts (proxy resolves the name → loopback →
@@ -257,6 +277,10 @@ mod tests {
         /// VM-is-always-force-routed screen composition.
         #[cfg(target_os = "linux")]
         RegisterVmWithNet(Vec<String>),
+        /// Register with `entry.broker = Some(BrokerSpec::search(..))` and an
+        /// EMPTY Net::Allowlist (the broker/zero-egress posture) — exercises the
+        /// #459 resolve-time broker-presence refuse.
+        RegisterBrokerSearch,
         Disabled,
         Misconfigured,
     }
@@ -292,6 +316,17 @@ mod tests {
                     entry.policy.net = kastellan_sandbox::Net::Allowlist(entries.clone());
                     entry.sandbox_backend =
                         Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm);
+                    Resolution::Register(entry)
+                }
+                FakeOutcome::RegisterBrokerSearch => {
+                    let mut entry = crate::workers::shell_exec::shell_exec_entry(
+                        PathBuf::from(format!("/fake/{}", self.name)),
+                        &(ctx.allowlist)(self.name),
+                    );
+                    entry.policy.net = kastellan_sandbox::Net::Allowlist(Vec::new());
+                    entry.broker = Some(crate::broker::BrokerSpec::search(
+                        "https://searx.example.org/search",
+                    ));
                     Resolution::Register(entry)
                 }
                 FakeOutcome::Disabled => Resolution::Disabled { detail: "off".into() },
@@ -405,6 +440,60 @@ mod tests {
         };
         let (reg, _loaded, _docs) = assemble_registry(&[&m], &ctx);
         assert!(reg.lookup("denytool").is_some());
+    }
+
+    #[test]
+    fn broker_worker_registers_when_broker_binary_present() {
+        // exists=true + exe_dir set ⇒ the search-broker sibling resolves ⇒
+        // broker_bin_present is true ⇒ the broker worker registers.
+        let allow = |_t: &str| Vec::<String>::new();
+        let exe_dir = PathBuf::from("/install/bin");
+        let ctx = ResolveCtx {
+            get_env: &|_k| None,
+            exists: &|_p: &Path| true,
+            is_dir: &|_p: &Path| false,
+            exe_dir: Some(exe_dir.as_path()),
+            canonicalize: &|_p| None,
+            allowlist: &allow,
+        };
+        let m = FakeManifest {
+            name: "brokertool",
+            outcome: FakeOutcome::RegisterBrokerSearch,
+            allowlist_name: None,
+        };
+        let (reg, loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("brokertool").is_some(), "broker present ⇒ registers");
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn broker_worker_refused_when_broker_binary_absent() {
+        // test_ctx: exists=|_|false ⇒ no broker binary discoverable ⇒ refuse.
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = test_ctx(&allow);
+        let m = FakeManifest {
+            name: "brokerdead",
+            outcome: FakeOutcome::RegisterBrokerSearch,
+            allowlist_name: None,
+        };
+        let (reg, loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("brokerdead").is_none(), "absent broker binary ⇒ refused");
+        assert!(loaded.is_empty(), "no LoadedToolRecord for a refused broker worker");
+    }
+
+    #[test]
+    fn broker_worker_refused_even_when_not_force_routed() {
+        // test_ctx has get_env=None ⇒ NOT force-routed. The broker refuse is
+        // unconditional (independent of force-routing), so it still fires.
+        let allow = |_t: &str| Vec::<String>::new();
+        let ctx = test_ctx(&allow);
+        let m = FakeManifest {
+            name: "brokerdead2",
+            outcome: FakeOutcome::RegisterBrokerSearch,
+            allowlist_name: None,
+        };
+        let (reg, _loaded, _docs) = assemble_registry(&[&m], &ctx);
+        assert!(reg.lookup("brokerdead2").is_none(), "unconditional broker refuse");
     }
 
     #[test]

@@ -109,6 +109,20 @@ fn discover_broker_bin_with(
     discover_binary(&ctx, kind.bin_env(), kind.broker_bin_default())
 }
 
+/// True iff `kind`'s broker binary is discoverable from `ctx` — the same
+/// discovery [`from_env`] runs at daemon startup, driven off the [`ResolveCtx`]
+/// probes instead of `std::env` / the live FS. Because `main.rs` feeds both this
+/// path and `from_env` the identical `exe_dir`, the answer here cannot drift
+/// from the `BrokerConfig` slot the spawn chokepoint will (or won't) find — the
+/// same "can't-drift mirror" shape as `endpoint_guard::egress_will_force_route`.
+///
+/// Used by `assemble_registry` to refuse a broker-declaring worker at
+/// `resolve()` time when its binary is absent, instead of registering a tool
+/// that only fails fail-closed on its first dispatch.
+pub(crate) fn broker_bin_present(kind: BrokerKind, ctx: &ResolveCtx) -> bool {
+    discover_broker_bin_with(kind, ctx.get_env, ctx.exists, ctx.is_dir, ctx.exe_dir).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +162,44 @@ mod tests {
             discover_broker_bin_with(BrokerKind::Embed, &get_env, &exists, &is_dir, None),
             None
         );
+    }
+
+    #[test]
+    fn broker_bin_present_true_when_sibling_exists() {
+        let exe_dir = PathBuf::from("/install/bin");
+        let sibling = exe_dir.join(BrokerKind::Search.broker_bin_default());
+        let get_env = |_k: &str| None;
+        let exists = {
+            let sibling = sibling.clone();
+            move |p: &Path| p == sibling.as_path()
+        };
+        let is_dir = |_p: &Path| false;
+        let allowlist = |_t: &str| Vec::new();
+        let ctx = ResolveCtx {
+            get_env: &get_env,
+            exists: &exists,
+            is_dir: &is_dir,
+            exe_dir: Some(exe_dir.as_path()),
+            canonicalize: &|_p| None,
+            allowlist: &allowlist,
+        };
+        assert!(super::broker_bin_present(BrokerKind::Search, &ctx));
+    }
+
+    #[test]
+    fn broker_bin_present_false_when_absent() {
+        let get_env = |_k: &str| None;
+        let exists = |_p: &Path| false;
+        let is_dir = |_p: &Path| false;
+        let allowlist = |_t: &str| Vec::new();
+        let ctx = ResolveCtx {
+            get_env: &get_env,
+            exists: &exists,
+            is_dir: &is_dir,
+            exe_dir: Some(Path::new("/install/bin")),
+            canonicalize: &|_p| None,
+            allowlist: &allowlist,
+        };
+        assert!(!super::broker_bin_present(BrokerKind::Embed, &ctx));
     }
 }
