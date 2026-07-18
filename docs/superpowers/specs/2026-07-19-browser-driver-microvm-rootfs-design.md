@@ -53,8 +53,9 @@ A `browser-driver.ext4` rootfs that:
   `discover_binary`)
 - the live "render a real page through the egress sidecar from a VM" e2e
 
-Slice 1 changes **no production Rust** except the `microvm-init` mount fix in
-§4.3. Its test constructs the `ToolEntry`/`SandboxPolicy` inline, exactly as
+Slice 1 changes **no production Rust** except possibly the `microvm-init` mount
+fix, which §4.3 defers to plan task 1 and may turn out to be unnecessary
+(option D). Its test constructs the `ToolEntry`/`SandboxPolicy` inline, exactly as
 `core/tests/web_fetch_firecracker_egress_e2e.rs:187-192` already hand-applies
 what `rewrite_worker_policy` does in production.
 
@@ -143,8 +144,32 @@ Differences:
   and the full `chromium-*` bundle if the worker only ever uses
   `chromium_headless_shell-*` (to be confirmed during the spike — Playwright's
   `chromium` channel selection decides this);
-- `ROOTFS_MIB` is **measured, not guessed** — the spike sizes the staging dir
-  first. Expected order of magnitude ~2 GiB against 256 MiB for its siblings.
+- `ROOTFS_MIB` is **measured, not guessed** (see §4.2.1).
+
+#### 4.2.1 Sizing method and expectation
+
+Build the first image at an over-provisioned **1536 MiB** so `mkfs` cannot fail
+for lack of space, then `du -sh` the staging dir and commit
+`ROOTFS_MIB = measured × 1.2`.
+
+Component estimate, for sanity-checking the measurement rather than replacing
+it:
+
+| Component | Extracted |
+|---|---|
+| `ubuntu:24.04` base | ~110 MB |
+| python3 + venv | ~50 MB |
+| `playwright` pip package incl. its bundled Node driver | ~120 MB |
+| `chromium_headless_shell-*` | ~100 MB |
+| full `chromium-*` bundle (strip candidate) | ~170 MB |
+| `--with-deps` apt set (GTK/X11/fonts) | ~250 MB |
+| **before stripping** | **~800 MB** |
+| after stripping apt lists, docs, locales, ffmpeg, full chromium | ~500–700 MB |
+
+**Expect to land at 768–1024 MiB** — the same order as `python-exec.ext4`
+(768 MB), not the ~2 GiB an earlier draft of this spec guessed. At ~1 GiB per
+image against 1.6 TB free on the DGX, disk is not a constraint and no hard
+ceiling is imposed.
 
 `kastellan-microvm-init` is still built with cargo on the host and
 `install -D -m0755`'d to `/sbin/init` in staging, exactly as today.
@@ -152,22 +177,39 @@ Differences:
 ### 4.3 `workers/microvm-init` — pseudo-fs mounts
 
 `mount_pseudo_fs` (`workers/microvm-init/src/guest.rs:176-197`) currently mounts
-only `/proc`, `/sys`, and a tmpfs `/tmp`. Chromium additionally needs `/dev`
+only `/proc`, `/sys`, and a tmpfs `/tmp`. Chromium additionally wants `/dev`
 entries (`/dev/null`, `/dev/urandom`) and `/dev/shm`.
 
-Add devtmpfs on `/dev` and tmpfs on `/dev/shm`, following the existing
-best-effort, EBUSY-ignored idiom. The change is additive and benefits every
-worker.
+**This decision is deliberately deferred to the first task of the plan.** It
+depends on two facts we do not have yet, and committing now would mean adding
+mounts on speculation:
 
-**Spike step 1 narrows this:** the Firecracker guest kernel may already
-auto-mount devtmpfs (`CONFIG_DEVTMPFS_MOUNT`), in which case only `/dev/shm` is
-needed. Verify before writing the change rather than adding a mount on
-speculation.
+1. Does the pinned guest kernel already auto-mount devtmpfs
+   (`CONFIG_DEVTMPFS_MOUNT`)?
+2. Does `--disable-dev-shm-usage` — already in `DEFAULT_LAUNCH_ARGS`
+   (`render.py:31-41`), which redirects Chromium's shared memory to `/tmp` —
+   fully remove the `/dev/shm` need, or does some Chromium child still touch it
+   directly?
 
-Note that `DEFAULT_LAUNCH_ARGS` in `render.py:31-41` already passes
-`--disable-dev-shm-usage`, which redirects Chromium's shared memory to `/tmp`.
-That is a genuine second line of defence, but `/tmp`'s tmpfs defaults to half of
-guest RAM, so the VM needs real memory headroom regardless (see §6).
+**Plan task 1 answers both** by booting an existing rootfs with the guest console
+un-nulled (per `microvm-persistent-store-fsync` / the microvm-run console note:
+`Stdio::null()` → `<run-dir>/guest-console.log`) and reading `/proc/mounts`.
+
+The finding then selects among:
+
+| Option | When it wins | Cost |
+|---|---|---|
+| **D — no init change** | devtmpfs auto-mounts *and* `--disable-dev-shm-usage` suffices | none; the question evaporates |
+| **A — fold the mounts into this slice** | a change is needed and we accept the blast radius | affects all 7 existing VM workers inside a PR reviewed for Chromium |
+| **B — separate PR, own DGX gate** | a change is needed and we want it isolated | the change is unmotivated alone — no existing worker needs it, so no test fails without it |
+| **C — conditional cmdline token** (`kastellan.devshm=1`) | we want it opt-in per worker | a new constant pair **manually duplicated** across `plan.rs` and `cmdline.rs` (a known drift hazard), plus cmdline budget, for something arguably correct-by-default |
+
+**Preference order if a change is needed: A, then B.** C's drift hazard is not
+worth buying opt-in-ness for a mount that is correct by default in a Linux
+guest. Whichever is chosen, follow the existing best-effort, EBUSY-ignored idiom.
+
+Independently of the outcome: `/tmp`'s tmpfs defaults to half of guest RAM, so
+the VM needs real memory headroom regardless (see §6).
 
 ---
 
@@ -285,11 +327,11 @@ non-interactive SSH PATH (without it the test silently SKIP-as-passes).
 
 | Risk | Mitigation |
 |---|---|
-| Rootfs ~2 GiB vs 256 MiB siblings | Measure staging before fixing `ROOTFS_MIB`; strip pass. DGX has 1.6 TB free. |
+| Rootfs much larger than its 256 MiB siblings | Build at 1536 MiB, measure, commit at ×1.2; expected 768–1024 MiB, same order as `python-exec.ext4` (§4.2.1). DGX has 1.6 TB free. |
 | Cmdline 1920-byte budget with a long allowlist | Hermetic pin asserts the budget; bail-out is a shorter browsers path. |
 | Chromium `dlopen` closure still incomplete after `--with-deps` | The spike's whole purpose. Failure is loud and local to the rootfs. |
 | Docker as a new build-time dep | Build-time only; already present and sudo-free on the DGX. Runtime unchanged. |
-| Guest kernel may not auto-mount devtmpfs | Spike step 1 verifies before the init change is written. |
+| Guest kernel may not auto-mount devtmpfs | Plan task 1 verifies and selects among options A–D (§4.3) before any init change is written. |
 
 `--no-sandbox` in `DEFAULT_LAUNCH_ARGS` stops being a compromise here: inside a
 micro-VM the VM is the security boundary.
