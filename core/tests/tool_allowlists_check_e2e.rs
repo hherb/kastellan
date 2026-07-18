@@ -16,13 +16,19 @@ use kastellan_db::probe::run as probe_run;
 use kastellan_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, unique_suffix};
 
 /// Insert one row with no Rust-side validation, so only the SQL CHECK judges it.
-async fn raw_insert(pool: &sqlx::PgPool, tool: &str, argv0: &str) -> Result<(), sqlx::Error> {
+async fn raw_insert(
+    pool: &sqlx::PgPool,
+    tool: &str,
+    kind: &str,
+    argv0: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO tool_allowlists (tool, argv0, created_by)
-         VALUES ($1, $2, 'test') ON CONFLICT (tool, argv0) DO NOTHING",
+        "INSERT INTO tool_allowlists (tool, argv0, kind, created_by)
+         VALUES ($1, $2, $3, 'test') ON CONFLICT (tool, argv0) DO NOTHING",
     )
     .bind(tool)
     .bind(argv0)
+    .bind(kind)
     .execute(pool)
     .await
     .map(|_| ())
@@ -52,22 +58,21 @@ async fn migration_0021_check_accepts_both_kinds_and_rejects_malformed() {
         .await
         .expect("runtime pool");
 
-    // Accepted: argv0 exec path, bare domain, wildcard, IPv4, bracketed IPv6.
+    // domain-kind accepts: bare domain, wildcard, IPv4, bracketed IPv6.
     for ok in [
-        "/bin/echo",
         "example.org",
         ".example.org",
         "203.0.113.5",
         "[::1]",
         "[2606:4700:4700::1111]",
     ] {
-        raw_insert(&pool, "web-fetch", ok)
+        raw_insert(&pool, "web-fetch", "domain", ok)
             .await
-            .unwrap_or_else(|e| panic!("{ok} should satisfy the 0021 CHECK: {e}"));
+            .unwrap_or_else(|e| panic!("domain {ok} should satisfy the 0021 CHECK: {e}"));
     }
 
-    // Rejected by the CHECK: embedded port (#459 residual #3), scheme, path,
-    // userinfo, unbracketed IPv6, '..' segment, empty.
+    // domain-kind rejects: embedded port (#459 residual #3), scheme, path,
+    // userinfo, unbracketed IPv6, '..' segment, empty, and an absolute path.
     for bad in [
         "localhost:8888",
         "http://example.org",
@@ -76,10 +81,32 @@ async fn migration_0021_check_accepts_both_kinds_and_rejects_malformed() {
         "::1",
         "../etc/passwd",
         "",
+        "/bin/echo",
     ] {
         assert!(
-            raw_insert(&pool, "web-fetch", bad).await.is_err(),
-            "{bad:?} should violate the 0021 CHECK"
+            raw_insert(&pool, "web-fetch", "domain", bad).await.is_err(),
+            "domain {bad:?} should violate the 0021 CHECK"
         );
     }
+
+    // argv0-kind keeps the 0009 guarantee: absolute paths only. A relative
+    // `echo` must still be refused even though it is a valid *domain* shape —
+    // this is exactly what a kind-blind union CHECK would have let through.
+    raw_insert(&pool, "shell-exec", "argv0", "/usr/bin/echo")
+        .await
+        .expect("absolute argv0 should satisfy the 0021 CHECK");
+    for bad in ["echo", "usr/bin/echo", "example.org", "/usr/bin/../bin/echo"] {
+        assert!(
+            raw_insert(&pool, "shell-exec", "argv0", bad).await.is_err(),
+            "argv0 {bad:?} should violate the 0021 CHECK"
+        );
+    }
+
+    // The kind column itself is constrained to the two known values.
+    assert!(
+        raw_insert(&pool, "web-fetch", "banana", "example.net")
+            .await
+            .is_err(),
+        "an unknown kind should violate the 0021 CHECK"
+    );
 }

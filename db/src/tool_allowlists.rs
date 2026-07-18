@@ -28,12 +28,41 @@ pub const MAX_TOOL_NAME_LEN: usize = 64;
 /// Which shape an entry in `tool_allowlists` takes for a given tool. A tool is
 /// entirely one kind or the other — it is a function of the tool, never mixed:
 /// `shell-exec` stores argv0 exec paths; the web workers store domains.
+///
+/// Persisted in the row's `kind` column (migration `0021`) so the SQL CHECK can
+/// apply the right shape rule **without SQL needing to know any tool name** —
+/// adding a new tool is then a pure Rust manifest change (no migration), and
+/// only a genuinely new *kind* needs schema work. `add` writes the value from
+/// the single Rust source of truth (`WorkerManifest::allowlist_kind`), so the
+/// column stays consistent with the tool by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     /// Absolute `argv[0]` exec path — validated by [`validate_argv0`].
     Argv0,
     /// Host / domain allowlist entry — validated by [`validate_domain`].
     Domain,
+}
+
+impl EntryKind {
+    /// The `kind` column value. Must match the literals in the migration-0021
+    /// CHECK — these two strings are the wire contract with the schema.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryKind::Argv0 => "argv0",
+            EntryKind::Domain => "domain",
+        }
+    }
+
+    /// Parse a `kind` column value read back from the DB. Fails closed on
+    /// anything else: the CHECK constrains the column to these two, so an
+    /// unknown value means schema drift, not a routine case.
+    pub fn from_db_str(s: &str) -> Result<Self, ToolAllowlistError> {
+        match s {
+            "argv0" => Ok(EntryKind::Argv0),
+            "domain" => Ok(EntryKind::Domain),
+            _ => Err(ToolAllowlistError::UnknownEntryKind),
+        }
+    }
 }
 
 /// Errors that can come out of this module.
@@ -56,6 +85,9 @@ pub enum ToolAllowlistError {
              IPv6 literal ([::1]) — no scheme, port, path, '@', or whitespace")]
     InvalidDomain,
 
+    #[error("tool_allowlists row carries an unknown `kind`; expected 'argv0' or 'domain' (schema drift?)")]
+    UnknownEntryKind,
+
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -65,6 +97,9 @@ pub enum ToolAllowlistError {
 pub struct AllowlistEntry {
     pub tool: String,
     pub argv0: String,
+    /// Which shape `argv0` takes for this row (migration `0021`). Surfaced so
+    /// the row is self-describing to an operator listing the allowlist.
+    pub kind: EntryKind,
     pub created_at: OffsetDateTime,
     pub created_by: String,
 }
@@ -192,12 +227,13 @@ pub async fn add(
     validate_tool_name(tool)?;
     validate_entry(kind, argv0)?;
     let rows = sqlx::query(
-        "INSERT INTO tool_allowlists (tool, argv0, created_by)
-         VALUES ($1, $2, $3)
+        "INSERT INTO tool_allowlists (tool, argv0, kind, created_by)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (tool, argv0) DO NOTHING",
     )
     .bind(tool)
     .bind(argv0)
+    .bind(kind.as_str())
     .bind(created_by)
     .execute(pool)
     .await?;
@@ -253,8 +289,8 @@ pub async fn list_for_tool_full(
     tool: &str,
 ) -> Result<Vec<AllowlistEntry>, ToolAllowlistError> {
     validate_tool_name(tool)?;
-    let rows: Vec<(String, String, OffsetDateTime, String)> = sqlx::query_as(
-        "SELECT tool, argv0, created_at, created_by
+    let rows: Vec<(String, String, String, OffsetDateTime, String)> = sqlx::query_as(
+        "SELECT tool, argv0, kind, created_at, created_by
          FROM tool_allowlists
          WHERE tool = $1
          ORDER BY argv0 ASC",
@@ -262,35 +298,39 @@ pub async fn list_for_tool_full(
     .bind(tool)
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(tool, argv0, created_at, created_by)| AllowlistEntry {
-            tool,
-            argv0,
-            created_at,
-            created_by,
+    rows.into_iter()
+        .map(|(tool, argv0, kind, created_at, created_by)| {
+            Ok(AllowlistEntry {
+                tool,
+                argv0,
+                kind: EntryKind::from_db_str(&kind)?,
+                created_at,
+                created_by,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// List every entry across every tool, ordered by `(tool, argv0)`.
 pub async fn list_all(pool: &PgPool) -> Result<Vec<AllowlistEntry>, ToolAllowlistError> {
-    let rows: Vec<(String, String, OffsetDateTime, String)> = sqlx::query_as(
-        "SELECT tool, argv0, created_at, created_by
+    let rows: Vec<(String, String, String, OffsetDateTime, String)> = sqlx::query_as(
+        "SELECT tool, argv0, kind, created_at, created_by
          FROM tool_allowlists
          ORDER BY tool ASC, argv0 ASC",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(tool, argv0, created_at, created_by)| AllowlistEntry {
-            tool,
-            argv0,
-            created_at,
-            created_by,
+    rows.into_iter()
+        .map(|(tool, argv0, kind, created_at, created_by)| {
+            Ok(AllowlistEntry {
+                tool,
+                argv0,
+                kind: EntryKind::from_db_str(&kind)?,
+                created_at,
+                created_by,
+            })
         })
-        .collect())
+        .collect()
 }
 
 // --- Tests ------------------------------------------------------------

@@ -167,11 +167,13 @@ async fn tools_allowlist_list(args: &[String]) -> ExitCode {
             Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
         },
     };
-    println!("{:<16}  {:<48}  {:<24}  CREATED_BY",
-        "TOOL", "ARGV0", "CREATED_AT");
+    // `KIND` makes each row self-describing: `argv0` rows hold absolute exec
+    // paths, `domain` rows hold hosts (see migration 0021).
+    println!("{:<16}  {:<7}  {:<48}  {:<24}  CREATED_BY",
+        "TOOL", "KIND", "ARGV0", "CREATED_AT");
     for e in entries {
-        println!("{:<16}  {:<48}  {:<24}  {}",
-            e.tool, e.argv0, e.created_at, e.created_by);
+        println!("{:<16}  {:<7}  {:<48}  {:<24}  {}",
+            e.tool, e.kind.as_str(), e.argv0, e.created_at, e.created_by);
     }
     ExitCode::from(0)
 }
