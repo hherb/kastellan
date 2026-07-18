@@ -150,6 +150,21 @@ fn host_of_entry(entry: &str) -> &str {
     }
 }
 
+/// A `Net::Allowlist` entry host is malformed when — after [`host_of_entry`]
+/// has stripped one trailing `:<port>` — a **non-bracketed** host still holds a
+/// colon. A well-formed host never carries a bare colon (IPv6 literals are
+/// bracketed, and `host_of_entry` returns them intact), so this catches the
+/// #459 residual-#3 double-port shape: an operator `tool_allowlists` row like
+/// `localhost:8888` maps through `{host}:443` to `localhost:8888:443`, whose
+/// host part is `localhost:8888` — not a `localhost` NAME, so the name check
+/// alone misses it. Such an entry is statically dead: nothing can dial a host
+/// with an embedded port. Layer-1/2 validation (the domain validator + the
+/// migration-0021 CHECK) now prevent the row from existing at all; this is the
+/// defense-in-depth backstop for anything that bypasses them.
+fn host_is_malformed(host: &str) -> bool {
+    !host.starts_with('[') && host.contains(':')
+}
+
 /// The generic #459 screen: classify every allowlist entry with
 /// [`host_is_localhost_name`] (via [`host_of_entry`]) when `force_routed`.
 /// See [`NetScreen`] for the severity policy. Like the rest of this module:
@@ -166,7 +181,10 @@ pub(crate) fn screen_net_allowlist(
     }
     let dead: Vec<String> = entries
         .iter()
-        .filter(|e| host_is_localhost_name(host_of_entry(e)))
+        .filter(|e| {
+            let host = host_of_entry(e);
+            host_is_localhost_name(host) || host_is_malformed(host)
+        })
         .cloned()
         .collect();
     if dead.is_empty() {
@@ -177,13 +195,14 @@ pub(crate) fn screen_net_allowlist(
         return NetScreen::Refuse {
             detail: format!(
                 "every Net::Allowlist entry for {tool} uses a `localhost` name \
-                 ({hosts}), but its egress is force-routed through the egress \
-                 proxy, which range-denies what a localhost name resolves to \
-                 (SSRF/DNS-rebinding defense) — the tool would register but \
-                 every request would fail. Use literal-IP entries (the proxy \
-                 dials an operator-allowlisted literal) or routable hostnames, \
-                 and update the matching tool_allowlists rows / endpoint env \
-                 vars to agree."
+                 or carries an embedded port ({hosts}), but its egress is \
+                 force-routed through the egress proxy, which range-denies what \
+                 a localhost name resolves to (SSRF/DNS-rebinding defense) and \
+                 cannot dial a host with an embedded port — the tool would \
+                 register but every request would fail. Use literal-IP entries \
+                 (the proxy dials an operator-allowlisted literal) or routable \
+                 hostnames, and update the matching tool_allowlists rows / \
+                 endpoint env vars to agree."
             ),
         };
     }
@@ -320,6 +339,53 @@ mod tests {
         assert!(
             forced_localhost_misconfig("E", "http://127.0.0.1:8888/search", true, "r").is_none()
         );
+    }
+
+    #[test]
+    fn host_is_malformed_flags_nonbracketed_embedded_colon() {
+        // The residual-#3 double-port shape: a `localhost:8888` DB row maps to
+        // `localhost:8888:443`, and host_of_entry strips only the trailing
+        // :443 — leaving a host that still carries a colon.
+        assert!(host_is_malformed("localhost:8888"));
+        assert!(host_is_malformed("evil.example.org:1234"));
+        // Well-formed hosts and bracketed IPv6 are NOT malformed.
+        assert!(!host_is_malformed("localhost"));
+        assert!(!host_is_malformed("example.org"));
+        assert!(!host_is_malformed("127.0.0.1"));
+        assert!(!host_is_malformed("[::1]"));
+        assert!(!host_is_malformed("[2606:4700:4700::1111]"));
+    }
+
+    #[test]
+    fn screen_flags_double_port_entry_as_dead() {
+        // A single all-dead malformed entry ⇒ Refuse.
+        let entries = vec!["localhost:8888:443".to_string()];
+        assert!(matches!(
+            screen_net_allowlist("web-fetch", &entries, true),
+            NetScreen::Refuse { .. }
+        ));
+        // A live host alongside a malformed one ⇒ Warn naming the dead entry.
+        let mixed = vec![
+            "docs.example.org:443".to_string(),
+            "localhost:8888:443".to_string(),
+        ];
+        match screen_net_allowlist("web-fetch", &mixed, true) {
+            NetScreen::Warn { dead } => {
+                assert_eq!(dead, vec!["localhost:8888:443".to_string()])
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+        // A legitimate bracketed-IPv6 entry is never flagged.
+        let ipv6 = vec!["[::1]:443".to_string()];
+        assert!(matches!(
+            screen_net_allowlist("web-fetch", &ipv6, true),
+            NetScreen::Ok
+        ));
+        // Not force-routed ⇒ Ok (unchanged).
+        assert!(matches!(
+            screen_net_allowlist("web-fetch", &entries, false),
+            NetScreen::Ok
+        ));
     }
 
     #[test]
