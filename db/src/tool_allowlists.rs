@@ -242,14 +242,20 @@ pub async fn add(
 
 /// Remove one allowlist entry. Idempotent — returns `Ok(true)` if a
 /// row was deleted, `Ok(false)` if nothing matched.
-pub async fn remove(
-    pool: &PgPool,
-    tool: &str,
-    kind: EntryKind,
-    argv0: &str,
-) -> Result<bool, ToolAllowlistError> {
+///
+/// Deliberately does **not** validate the entry's shape, unlike [`add`].
+/// Removal only ever narrows an allowlist, so there is nothing to fail closed
+/// against — while shape-validating here would strand any row the current
+/// validators reject, making it unremovable through the CLI. That is not
+/// hypothetical: before the entry-kind split every tool was validated as
+/// argv0-kind, so a `web-fetch` row like `/example.org` was insertable, and
+/// migration `0021` backfills it as `kind = 'argv0'`. Such a row is inert
+/// (it maps to the dead net entry `/example.org:443`, which
+/// `endpoint_guard::host_is_malformed` flags at registration) but an operator
+/// must still be able to delete it. `validate_tool_name` is kept — it bounds
+/// the audit payload rather than gating the deletion.
+pub async fn remove(pool: &PgPool, tool: &str, argv0: &str) -> Result<bool, ToolAllowlistError> {
     validate_tool_name(tool)?;
-    validate_entry(kind, argv0)?;
     let rows = sqlx::query(
         "DELETE FROM tool_allowlists WHERE tool = $1 AND argv0 = $2",
     )
@@ -280,7 +286,7 @@ pub async fn list_for_tool(
 }
 
 /// Like [`list_for_tool`] but returns the full [`AllowlistEntry`] shape
-/// (`tool`, `argv0`, `created_at`, `created_by`). Used by the
+/// (`tool`, `argv0`, `kind`, `created_at`, `created_by`). Used by the
 /// `kastellan-cli tools allowlist list --tool <name>` path so the WHERE
 /// predicate runs on the PK-indexed server side instead of the CLI
 /// filtering client-side over [`list_all`].

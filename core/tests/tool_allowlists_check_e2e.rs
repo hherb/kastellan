@@ -1,4 +1,4 @@
-//! Live-PG pin for the migration-0021 union-branch CHECK on `tool_allowlists`.
+//! Live-PG pin for the migration-0021 kind-branched CHECK on `tool_allowlists`.
 //!
 //! Uses **raw SQL** INSERTs — deliberately bypassing the Rust validators in
 //! `db::tool_allowlists` — so this exercises the SQL-layer backstop on its own.

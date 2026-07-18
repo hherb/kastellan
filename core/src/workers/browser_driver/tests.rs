@@ -187,14 +187,30 @@ use super::*;
             interpreter_lib_dirs: vec![],
             extra_fs_read: vec![],
         };
-        let entry = browser_driver_entry(&env, &["example.com:443".to_string()], None);
+        // Rows are bare hosts — `db::tool_allowlists::validate_domain` forbids an
+        // embedded port, so a `tool_allowlists` row can never carry one.
+        let entry = browser_driver_entry(
+            &env,
+            &["example.com".to_string(), ".wiki.example.org".to_string()],
+            None,
+        );
         assert_eq!(entry.binary, PathBuf::from("/v/bin/kastellan-worker-browser-driver"));
         // Phase 2: the browser-specific seccomp/Seatbelt profile.
         assert!(matches!(entry.policy.profile, Profile::WorkerBrowserClient));
         // Manifest leaves proxy_uds None; force-routing sets it at spawn.
         assert!(entry.policy.proxy_uds.is_none());
+        // Net::Allowlist is PORT-SCOPED to 443, not the verbatim rows: a
+        // bare-host entry is an all-port grant at the egress proxy, so
+        // `example.com:22` must not be reachable from an `example.com` row.
+        // The wildcard dot survives the mapping (proxy suffix match).
         match &entry.policy.net {
-            Net::Allowlist(hosts) => assert_eq!(hosts, &vec!["example.com:443".to_string()]),
+            Net::Allowlist(hosts) => assert_eq!(
+                hosts,
+                &vec![
+                    "example.com:443".to_string(),
+                    ".wiki.example.org:443".to_string()
+                ]
+            ),
             other => panic!("expected Net::Allowlist, got {other:?}"),
         }
         // venv mounted RO; resolver config present for in-jail DNS.
@@ -212,9 +228,10 @@ use super::*;
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.clone())
         };
+        // The worker's own check still gets the VERBATIM rows (wildcard intact).
         assert_eq!(
             env_get("KASTELLAN_BROWSER_DRIVER_ALLOWLIST").as_deref(),
-            Some(r#"["example.com:443"]"#)
+            Some(r#"["example.com",".wiki.example.org"]"#)
         );
         // Browsers staged inside the (already-bound) venv; TMPDIR scratch wired.
         assert_eq!(
@@ -280,7 +297,7 @@ use super::*;
             _ => None,
         };
         let exists = |_p: &Path| true;
-        let allowlist = |_t: &str| vec!["example.com:443".to_string()];
+        let allowlist = |_t: &str| vec!["example.com".to_string()];
         // is_dir=false so the shim override path counts as a runnable file
         // (discover_binary requires exists && !is_dir).
         let c = ResolveCtx {
@@ -313,7 +330,7 @@ use super::*;
             _ => None,
         };
         let exists = |_p: &Path| true;
-        let allowlist = |_t: &str| vec!["example.com:443".to_string()];
+        let allowlist = |_t: &str| vec!["example.com".to_string()];
         let c = ctx(&get_env, &exists, &allowlist); // exe_dir: None
         assert!(
             matches!(

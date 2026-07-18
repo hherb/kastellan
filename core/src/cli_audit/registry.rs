@@ -40,7 +40,11 @@ pub async fn tools_allowlist_add_and_audit(
     let inserted =
         kastellan_db::tool_allowlists::add(pool, tool, kind, argv0, CLI_AUDIT_ACTOR).await?;
     if inserted {
-        let payload = serde_json::json!({ "tool": tool, "argv0": argv0 });
+        // `kind` is part of the row's shape (migration 0021), so the audit
+        // trail records it too — an `argv0`-only payload can no longer
+        // reconstruct "what was true at time T" for this table.
+        let payload =
+            serde_json::json!({ "tool": tool, "kind": kind.as_str(), "argv0": argv0 });
         if let Err(e) = kastellan_db::audit::insert(
             pool,
             CLI_AUDIT_ACTOR,
@@ -68,10 +72,9 @@ pub async fn tools_allowlist_add_and_audit(
 pub async fn tools_allowlist_remove_and_audit(
     pool: &PgPool,
     tool: &str,
-    kind: kastellan_db::tool_allowlists::EntryKind,
     argv0: &str,
 ) -> Result<bool, kastellan_db::tool_allowlists::ToolAllowlistError> {
-    let removed = kastellan_db::tool_allowlists::remove(pool, tool, kind, argv0).await?;
+    let removed = kastellan_db::tool_allowlists::remove(pool, tool, argv0).await?;
     if removed {
         let payload = serde_json::json!({ "tool": tool, "argv0": argv0 });
         if let Err(e) = kastellan_db::audit::insert(

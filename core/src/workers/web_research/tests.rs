@@ -35,10 +35,12 @@
                 assert!(entry.policy.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
                 match &entry.policy.net {
                     Net::Allowlist(hosts) => {
-                        // endpoint host:443 first, then content docs.example.org:443.
+                        // endpoint host:443 first, then the content host — whose
+                        // wildcard dot is preserved (.docs.example.org:443), so
+                        // the proxy suffix-matches it like the worker does.
                         assert_eq!(hosts, &vec![
                             "searx.example.org:443".to_string(),
-                            "docs.example.org:443".to_string(),
+                            ".docs.example.org:443".to_string(),
                         ]);
                     }
                     other => panic!("expected Net::Allowlist, got {other:?}"),
@@ -120,7 +122,7 @@
                             hosts,
                             &vec![
                                 "searx.example.org:443".to_string(),
-                                "docs.example.org:443".to_string(),
+                                ".docs.example.org:443".to_string(),
                             ]
                         );
                     }
@@ -316,7 +318,7 @@
             Net::Allowlist(hosts) => {
                 assert_eq!(hosts[0], "searx.example.org:8888", "endpoint host:port first");
                 assert!(hosts.iter().any(|h| h == "embed.example.org:11434"), "embed host:port present: {hosts:?}");
-                assert!(hosts.iter().any(|h| h == "docs.example.org:443"), "content host:443 present: {hosts:?}");
+                assert!(hosts.iter().any(|h| h == ".docs.example.org:443"), "content host:443 present: {hosts:?}");
             }
             other => panic!("expected Net::Allowlist, got {other:?}"),
         }
@@ -566,7 +568,7 @@
                             "SearxNG host must be absent from net: {hosts:?}"
                         );
                         assert!(
-                            hosts.iter().any(|h| h == "docs.example.org:443"),
+                            hosts.iter().any(|h| h == ".docs.example.org:443"),
                             "content host missing from net: {hosts:?}"
                         );
                     }

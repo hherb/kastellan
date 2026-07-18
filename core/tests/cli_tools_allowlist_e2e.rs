@@ -77,13 +77,16 @@ async fn cli_add_domain_tool_accepts_domain_rejects_port_bearing() {
     assert!(ok.status.success(), "add domain exit: {:?}, stderr: {}",
         ok.status, String::from_utf8_lossy(&ok.stderr));
 
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT argv0 FROM tool_allowlists WHERE tool = $1 ORDER BY argv0")
+    // The row must land with kind='domain' — pin the column, not just argv0,
+    // so a regression that passed EntryKind::Argv0 here would be caught
+    // directly rather than only via the validator refusing the entry.
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT argv0, kind FROM tool_allowlists WHERE tool = $1 ORDER BY argv0")
         .bind("web-fetch")
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(rows, vec![("example.org".to_string(),)]);
+    assert_eq!(rows, vec![("example.org".to_string(), "domain".to_string())]);
 
     // A port-bearing host is a user error: exit 2, and no row lands.
     let bad = Command::new(&bin)
@@ -122,6 +125,42 @@ async fn cli_add_domain_tool_accepts_domain_rejects_port_bearing() {
         .await
         .unwrap();
     assert_eq!(count, 1, "the rejected domain row must not have landed");
+
+    // A legacy argv0-shaped row under a domain-kind tool — insertable before
+    // the entry-kind split, backfilled kind='argv0' by migration 0021 — must
+    // stay REMOVABLE through the CLI. `remove` deliberately skips shape
+    // validation for exactly this case; validating it would strand the row.
+    sqlx::query(
+        "INSERT INTO tool_allowlists (tool, argv0, kind, created_by)
+         VALUES ('web-fetch', '/legacy.example.org', 'argv0', 'test')")
+        .execute(&pool)
+        .await
+        .expect("seed a legacy argv0-shaped row");
+    let legacy_rm = Command::new(&bin)
+        .args(["tools", "allowlist", "remove", "web-fetch", "/legacy.example.org"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli remove legacy row");
+    assert!(legacy_rm.status.success(), "stderr: {}",
+        String::from_utf8_lossy(&legacy_rm.stderr));
+
+    // And a normal domain row round-trips out too.
+    let dom_rm = Command::new(&bin)
+        .args(["tools", "allowlist", "remove", "web-fetch", "example.org"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli remove domain");
+    assert!(dom_rm.status.success(), "stderr: {}",
+        String::from_utf8_lossy(&dom_rm.stderr));
+
+    let left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tool_allowlists WHERE tool = 'web-fetch'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "both web-fetch rows must be removable");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

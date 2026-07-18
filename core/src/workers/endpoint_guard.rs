@@ -152,61 +152,109 @@ fn host_of_entry(entry: &str) -> &str {
 
 /// A `Net::Allowlist` entry host is malformed when — after [`host_of_entry`]
 /// has stripped one trailing `:<port>` — a **non-bracketed** host still holds a
-/// colon. A well-formed host never carries a bare colon (IPv6 literals are
-/// bracketed, and `host_of_entry` returns them intact), so this catches the
-/// #459 residual-#3 double-port shape: an operator `tool_allowlists` row like
-/// `localhost:8888` maps through `{host}:443` to `localhost:8888:443`, whose
-/// host part is `localhost:8888` — not a `localhost` NAME, so the name check
-/// alone misses it. Such an entry is statically dead: nothing can dial a host
-/// with an embedded port. Layer-1/2 validation (the domain validator + the
-/// migration-0021 CHECK) now prevent the row from existing at all; this is the
-/// defense-in-depth backstop for anything that bypasses them.
+/// colon, or the host holds a `/`. A well-formed host carries neither (IPv6
+/// literals are bracketed, and `host_of_entry` returns them intact). Two shapes
+/// are caught:
+///
+/// * The #459 residual-#3 double-port shape — an operator `tool_allowlists` row
+///   like `localhost:8888` maps through `{host}:443` to `localhost:8888:443`,
+///   whose host part is `localhost:8888`, not a `localhost` NAME, so the name
+///   check alone misses it.
+/// * A **legacy argv0-shaped row under a domain-kind tool** — before the
+///   entry-kind split every tool validated as argv0-kind, so `web-fetch` could
+///   hold `/example.org`; migration `0021` backfills it `kind = 'argv0'`, where
+///   it satisfies the CHECK and still maps to the dead `/example.org:443`.
+///
+/// Both are statically dead in **every** routing mode: nothing can dial a host
+/// with an embedded port or a slash. That is why the caller applies this check
+/// unconditionally, unlike [`host_is_localhost_name`] — a `localhost` name is
+/// dead only under force-routing, a malformed host is dead always.
+///
+/// Layers 1–2 (the domain validator + the `0021` CHECK) stop new rows of this
+/// shape from being created; this is the defense-in-depth backstop for rows
+/// that predate them or bypass them.
 fn host_is_malformed(host: &str) -> bool {
-    !host.starts_with('[') && host.contains(':')
+    (!host.starts_with('[') && host.contains(':')) || host.contains('/')
 }
 
-/// The generic #459 screen: classify every allowlist entry with
-/// [`host_is_localhost_name`] (via [`host_of_entry`]) when `force_routed`.
-/// See [`NetScreen`] for the severity policy. Like the rest of this module:
-/// **no DNS** — only the statically-dead RFC 6761 name class is flagged, and
-/// literal IPs are never flagged (the proxy's allowlisted-literal carve-out
-/// dials them).
+/// The generic #459 screen: classify every allowlist entry (via
+/// [`host_of_entry`]) as statically dead or not. Two predicates with different
+/// scopes — [`host_is_malformed`] applies **always**, [`host_is_localhost_name`]
+/// only when `force_routed`. See [`NetScreen`] for the severity policy. Like the
+/// rest of this module: **no DNS** — only the statically-dead RFC 6761 name
+/// class and structurally-undialable hosts are flagged, and literal IPs are
+/// never flagged (the proxy's allowlisted-literal carve-out dials them).
 pub(crate) fn screen_net_allowlist(
     tool: &str,
     entries: &[String],
     force_routed: bool,
 ) -> NetScreen {
-    if !force_routed || entries.is_empty() {
+    if entries.is_empty() {
         return NetScreen::Ok;
     }
-    let dead: Vec<String> = entries
-        .iter()
-        .filter(|e| {
-            let host = host_of_entry(e);
-            host_is_localhost_name(host) || host_is_malformed(host)
-        })
-        .cloned()
-        .collect();
+    // Two independent death causes with different scopes: a malformed host is
+    // undialable in EVERY routing mode, so it is screened unconditionally; a
+    // `localhost` NAME is dead only when force-routed through the proxy (which
+    // range-denies what it resolves to), so that half stays gated.
+    let mut malformed = 0usize;
+    let mut localhost = 0usize;
+    let mut dead: Vec<String> = Vec::new();
+    for e in entries {
+        let host = host_of_entry(e);
+        if host_is_malformed(host) {
+            malformed += 1;
+        } else if force_routed && host_is_localhost_name(host) {
+            localhost += 1;
+        } else {
+            continue;
+        }
+        dead.push(e.clone());
+    }
     if dead.is_empty() {
         return NetScreen::Ok;
     }
     if dead.len() == entries.len() {
-        let hosts = dead.join(", ");
         return NetScreen::Refuse {
-            detail: format!(
-                "every Net::Allowlist entry for {tool} uses a `localhost` name \
-                 or carries an embedded port ({hosts}), but its egress is \
-                 force-routed through the egress proxy, which range-denies what \
-                 a localhost name resolves to (SSRF/DNS-rebinding defense) and \
-                 cannot dial a host with an embedded port — the tool would \
-                 register but every request would fail. Use literal-IP entries \
-                 (the proxy dials an operator-allowlisted literal) or routable \
-                 hostnames, and update the matching tool_allowlists rows / \
-                 endpoint env vars to agree."
-            ),
+            detail: dead_entry_detail(tool, &dead, malformed > 0, localhost > 0),
         };
     }
     NetScreen::Warn { dead }
+}
+
+/// Explain why every `Net::Allowlist` entry is dead, naming only the causes
+/// that actually fired — a malformed-only list must not be explained as an
+/// SSRF/force-routing problem, and vice versa.
+fn dead_entry_detail(
+    tool: &str,
+    dead: &[String],
+    any_malformed: bool,
+    any_localhost: bool,
+) -> String {
+    let hosts = dead.join(", ");
+    let cause = match (any_malformed, any_localhost) {
+        (true, true) => {
+            "uses a `localhost` name (whose resolved address the egress proxy \
+             range-denies as an SSRF/DNS-rebinding defense) or carries an \
+             embedded port or path separator (undialable in any routing mode)"
+        }
+        (true, false) => {
+            "carries an embedded port or path separator, which is undialable in \
+             any routing mode — most likely a stale `tool_allowlists` row that \
+             predates entry-kind validation"
+        }
+        _ => {
+            "uses a `localhost` name, but its egress is force-routed through the \
+             egress proxy, which range-denies what a localhost name resolves to \
+             (SSRF/DNS-rebinding defense)"
+        }
+    };
+    format!(
+        "every Net::Allowlist entry for {tool} {cause} ({hosts}) — the tool \
+         would register but every request would fail. Use literal-IP entries \
+         (the proxy dials an operator-allowlisted literal) or routable \
+         hostnames, and update the matching tool_allowlists rows / endpoint env \
+         vars to agree."
+    )
 }
 
 #[cfg(test)]
@@ -348,12 +396,65 @@ mod tests {
         // :443 — leaving a host that still carries a colon.
         assert!(host_is_malformed("localhost:8888"));
         assert!(host_is_malformed("evil.example.org:1234"));
+        // A legacy argv0-shaped row under a domain-kind tool: `web-fetch`
+        // could hold `/example.org` before the entry-kind split, and 0021
+        // backfills it kind='argv0' where it still satisfies the CHECK.
+        assert!(host_is_malformed("/example.org"));
+        assert!(host_is_malformed("/usr/bin/echo"));
         // Well-formed hosts and bracketed IPv6 are NOT malformed.
         assert!(!host_is_malformed("localhost"));
         assert!(!host_is_malformed("example.org"));
+        assert!(!host_is_malformed(".example.org")); // wildcard entries survive
         assert!(!host_is_malformed("127.0.0.1"));
         assert!(!host_is_malformed("[::1]"));
         assert!(!host_is_malformed("[2606:4700:4700::1111]"));
+    }
+
+    #[test]
+    fn malformed_entries_are_screened_even_when_not_force_routed() {
+        // A `localhost` NAME is dead only under force-routing, but a host with
+        // an embedded port or a slash cannot be dialled in ANY mode — so the
+        // malformed half of the screen is deliberately ungated.
+        for entry in ["localhost:8888:443", "/example.org:443"] {
+            let entries = vec![entry.to_string()];
+            assert!(
+                matches!(
+                    screen_net_allowlist("web-fetch", &entries, false),
+                    NetScreen::Refuse { .. }
+                ),
+                "{entry} must be refused even unforced"
+            );
+        }
+        // A plain `localhost` entry stays Ok when unforced (unchanged).
+        assert!(matches!(
+            screen_net_allowlist("web-fetch", &["localhost:443".to_string()], false),
+            NetScreen::Ok
+        ));
+    }
+
+    #[test]
+    fn refuse_detail_names_only_the_cause_that_fired() {
+        // Malformed-only must NOT be explained as an SSRF/force-routing problem.
+        let malformed = vec!["localhost:8888:443".to_string()];
+        match screen_net_allowlist("web-fetch", &malformed, true) {
+            NetScreen::Refuse { detail } => {
+                assert!(detail.contains("embedded port or path separator"), "{detail}");
+                assert!(
+                    !detail.contains("SSRF"),
+                    "malformed-only refusal must not cite SSRF: {detail}"
+                );
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+        // localhost-only keeps the original SSRF explanation.
+        let localhost = vec!["localhost:443".to_string()];
+        match screen_net_allowlist("web-fetch", &localhost, true) {
+            NetScreen::Refuse { detail } => {
+                assert!(detail.contains("SSRF"), "{detail}");
+                assert!(!detail.contains("path separator"), "{detail}");
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
     }
 
     #[test]
@@ -381,10 +482,17 @@ mod tests {
             screen_net_allowlist("web-fetch", &ipv6, true),
             NetScreen::Ok
         ));
-        // Not force-routed ⇒ Ok (unchanged).
+        // A wildcard entry survives the mapping and is never flagged.
+        let wildcard = vec![".example.org:443".to_string()];
+        assert!(matches!(
+            screen_net_allowlist("web-fetch", &wildcard, true),
+            NetScreen::Ok
+        ));
+        // Unforced is NOT a reprieve for a malformed entry — see
+        // `malformed_entries_are_screened_even_when_not_force_routed`.
         assert!(matches!(
             screen_net_allowlist("web-fetch", &entries, false),
-            NetScreen::Ok
+            NetScreen::Refuse { .. }
         ));
     }
 

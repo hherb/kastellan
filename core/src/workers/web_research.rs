@@ -155,8 +155,9 @@ fn embed_local_warning(
 /// Union of the endpoint host:port, the optional embed-endpoint host:port, and
 /// the content host:443 entries, de-duped (order-preserving: SearxNG endpoint
 /// first, embed endpoint second, content hosts last). The content half reuses
-/// web-fetch's canonical domain→`host:443` mapping (wildcard `.d` → `d:443`) so
-/// both fetching workers share one wildcard-flattening rule.
+/// web-fetch's canonical domain→`host:443` mapping (a wildcard `.d` keeps its
+/// dot as `.d:443`, which the proxy matches as a subdomain suffix) so every
+/// domain-allowlist consumer shares one mapping rule.
 fn net_entries(endpoint: Option<&str>, embed_endpoint: Option<&str>, allowlist: &[String]) -> Vec<String> {
     // `None` endpoint (search-broker mode) drops the SearxNG host — the broker
     // holds the only route to it, so it never leaves the worker's egress.

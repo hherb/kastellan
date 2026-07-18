@@ -1453,12 +1453,12 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     ));
     // Drop the seeded row so the rest of the test sees the pre-existing
     // 2-row state.
-    remove(&pool, "other-tool", EntryKind::Argv0, "/usr/bin/true").await.unwrap();
+    remove(&pool, "other-tool", "/usr/bin/true").await.unwrap();
 
     // (5) Idempotent remove.
-    let removed = remove(&pool, "shell-exec", EntryKind::Argv0, "/usr/bin/echo").await.unwrap();
+    let removed = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();
     assert!(removed);
-    let removed2 = remove(&pool, "shell-exec", EntryKind::Argv0, "/usr/bin/echo").await.unwrap();
+    let removed2 = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();
     assert!(!removed2, "second remove must be a no-op");
 
     // (6) GRANT shape: UPDATE on tool_allowlists denied to kastellan_runtime.

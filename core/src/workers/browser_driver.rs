@@ -161,8 +161,10 @@ fn parse_extra_fs_read(raw: &str) -> Vec<PathBuf> {
 /// slice #2). `Profile::WorkerBrowserClient` (the spike's seccomp + Seatbelt browser
 /// widening, §3.1), `SingleUse` lifecycle. The operator allowlist is injected
 /// verbatim as `KASTELLAN_BROWSER_DRIVER_ALLOWLIST` JSON; the worker
-/// self-enforces it per navigation + subresource. `mem_mb` (1 GiB) is the
-/// spike's safe cap (§3.1: headless-shell ~150-300 MB).
+/// self-enforces it per navigation + subresource. The same rows are mapped to
+/// port-scoped `host:443` entries for `Net::Allowlist` (see the comment on the
+/// `net` field) — the dual-allowlist shape web-fetch uses. `mem_mb` (1 GiB) is
+/// the spike's safe cap (§3.1: headless-shell ~150-300 MB).
 ///
 /// **Browsers live inside the venv** (`PLAYWRIGHT_BROWSERS_PATH =
 /// <venv>/browsers`, set here + by `install.sh`) so only `venv_dir` needs an
@@ -286,7 +288,17 @@ pub fn browser_driver_entry(
     let policy = SandboxPolicy {
         fs_read,
         fs_write,
-        net: Net::Allowlist(allowlist.to_vec()),
+        // Port-scoped to 443 via web-fetch's canonical mapper, NOT the verbatim
+        // rows. A bare-host `Net::Allowlist` entry is a grant on EVERY port at
+        // the egress proxy (it logs `allowed:host-only-entry` rather than
+        // blocking), so passing rows through unmapped would have made an
+        // allowlisted `example.org` reach `example.org:22` as well. `validate_domain`
+        // forbids an embedded port in a row, so the row itself can never narrow
+        // this — the mapping has to. The worker's own Playwright-side check
+        // still receives the verbatim rows (wildcards intact) via
+        // `KASTELLAN_BROWSER_DRIVER_ALLOWLIST`, the same dual-allowlist shape
+        // web-fetch uses. HTTPS-only, consistent with the other web workers.
+        net: Net::Allowlist(crate::workers::web_fetch::allowlist_to_net_entries(allowlist)),
         cpu_ms: 30_000,
         mem_mb: 1024, // spike §3.1: headless-shell ~150-300 MB; 1 GiB is a safe cap
         profile: Profile::WorkerBrowserClient,

@@ -15,19 +15,20 @@ use crate::worker_manifest::{
     discover_binary, ResolveCtx, Resolution, ToolDoc, ToolParam, WorkerManifest,
 };
 
-/// Map the operator domain allowlist to `Net::Allowlist` `host:443` entries:
-/// a wildcard `.domain` maps to its bare `domain:443` (the egress proxy refines
-/// wildcard semantics). HTTPS-only, so port 443. Pure — shared by the host and
-/// micro-VM entries here, and reused by the web-research manifest's content-host
-/// half of its union allowlist.
+/// Map the operator domain allowlist to port-scoped `Net::Allowlist` entries.
+/// HTTPS-only, so port 443. Pure — shared by the host and micro-VM entries here,
+/// reused by the web-research manifest's content-host half of its union
+/// allowlist, and by browser-driver.
+///
+/// A wildcard `.domain` row keeps its leading dot (`.domain:443`): the egress
+/// proxy's matcher parses a dotted entry as a `HostMatch::Suffix` and honours it
+/// as a real subdomain wildcard (`web-common::allowlist`). Flattening it to the
+/// bare `domain:443` — as this did before — made the two enforcement points
+/// disagree: the worker's own per-hop check honoured the wildcard while the
+/// proxy blocked every subdomain. Bracketed IPv6 literals have no leading dot,
+/// so `[::1]` maps to the well-formed `[::1]:443`.
 pub(crate) fn allowlist_to_net_entries(allowlist: &[String]) -> Vec<String> {
-    allowlist
-        .iter()
-        .map(|d| {
-            let host = d.strip_prefix('.').unwrap_or(d);
-            format!("{host}:443")
-        })
-        .collect()
+    allowlist.iter().map(|d| format!("{d}:443")).collect()
 }
 
 /// Tool name the registry keys web-fetch on.
@@ -57,10 +58,10 @@ const MICROVM_WORKER_BIN: &str = "/usr/local/bin/kastellan-worker-web-fetch";
 ///   - injected verbatim as the `KASTELLAN_WEB_FETCH_ALLOWLIST` env JSON for the
 ///     worker's own per-hop check (which understands the `.domain` wildcard), and
 ///   - mapped to `host:443` entries for `Net::Allowlist`, so the policy is
-///     correct for the future egress proxy. (Wildcard `.domain` entries map to
-///     their bare `domain:443`; the egress-proxy slice refines wildcard egress
-///     semantics.) Port 80 is intentionally excluded: the worker enforces
-///     HTTPS-only fetches.
+///     correct for the egress proxy. (A wildcard `.domain` keeps its dot —
+///     `.domain:443` — which the proxy matches as a subdomain suffix, so both
+///     enforcement points agree.) Port 80 is intentionally excluded: the worker
+///     enforces HTTPS-only fetches.
 ///
 /// Defaults: `Net::Allowlist`, `Profile::WorkerNetClient` (permits `socket(2)`),
 /// `cpu_ms = 10_000`, `mem_mb = 512` (HTML/PDF parsing is heavier than argv
@@ -251,6 +252,29 @@ mod tests {
     }
 
     #[test]
+    fn allowlist_to_net_entries_port_scopes_and_preserves_wildcards() {
+        let got = allowlist_to_net_entries(&[
+            "example.org".to_string(),
+            ".example.org".to_string(),
+            "203.0.113.5".to_string(),
+            "[::1]".to_string(),
+        ]);
+        assert_eq!(
+            got,
+            vec![
+                "example.org:443".to_string(),
+                // The dot survives: the proxy parses this as HostMatch::Suffix,
+                // so `docs.example.org` is allowed — matching the worker's own
+                // per-hop check. Flattening it here made the two disagree.
+                ".example.org:443".to_string(),
+                "203.0.113.5:443".to_string(),
+                // Bracketed IPv6 appends cleanly; `host_of_entry` strips it back.
+                "[::1]:443".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn resolve_registers_with_net_client_policy_and_dual_allowlist() {
         let get_env = |k: &str| (k == BIN_ENV).then(|| "/opt/web-fetch".to_string());
         let exists = |_p: &Path| true;
@@ -269,14 +293,16 @@ mod tests {
                 assert!(entry.policy.fs_read.contains(&PathBuf::from("/etc/resolv.conf")));
                 assert!(entry.policy.fs_read.contains(&PathBuf::from("/etc/hosts")));
                 assert!(entry.policy.fs_read.contains(&PathBuf::from("/etc/nsswitch.conf")));
-                // Net::Allowlist derived from the domains (wildcard → bare host).
+                // Net::Allowlist derived from the domains: port-scoped to 443,
+                // with the wildcard dot PRESERVED so the proxy matches it as a
+                // subdomain suffix (same semantics as the worker's own check).
                 match &entry.policy.net {
                     Net::Allowlist(hosts) => {
                         assert_eq!(
                             hosts,
                             &vec![
                                 "en.wikipedia.org:443".to_string(),
-                                "example.com:443".to_string()
+                                ".example.com:443".to_string()
                             ]
                         );
                     }
@@ -362,11 +388,11 @@ mod tests {
         assert!(matches!(entry.policy.profile, Profile::WorkerNetClient));
         assert!(entry.policy.fs_read.is_empty(), "VM fs_read must be empty (no NIC, no local DNS)");
         assert!(entry.policy.proxy_uds.is_none(), "proxy_uds is set at spawn, not in the manifest");
-        // Net::Allowlist derived from the domains (wildcard → bare host:443).
+        // Net::Allowlist derived from the domains (wildcard dot preserved).
         match &entry.policy.net {
             Net::Allowlist(hosts) => assert_eq!(
                 hosts,
-                &vec!["en.wikipedia.org:443".to_string(), "example.com:443".to_string()]
+                &vec!["en.wikipedia.org:443".to_string(), ".example.com:443".to_string()]
             ),
             other => panic!("expected Net::Allowlist, got {other:?}"),
         }
