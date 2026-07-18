@@ -15,6 +15,8 @@
 //! validation on `tool` names — keep `validate_tool_name` as the single
 //! authoritative source there.
 
+use std::net::Ipv6Addr;
+
 use sqlx::PgPool;
 use time::OffsetDateTime;
 
@@ -22,6 +24,46 @@ use time::OffsetDateTime;
 /// for the foreseeable shape of worker names (`shell-exec`, `web-fetch`,
 /// `python-exec`, …) and bounds the size of audit-row payloads.
 pub const MAX_TOOL_NAME_LEN: usize = 64;
+
+/// Which shape an entry in `tool_allowlists` takes for a given tool. A tool is
+/// entirely one kind or the other — it is a function of the tool, never mixed:
+/// `shell-exec` stores argv0 exec paths; the web workers store domains.
+///
+/// Persisted in the row's `kind` column (migration `0021`) so the SQL CHECK can
+/// apply the right shape rule **without SQL needing to know any tool name** —
+/// adding a new tool is then a pure Rust manifest change (no migration), and
+/// only a genuinely new *kind* needs schema work. `add` writes the value from
+/// the single Rust source of truth (`WorkerManifest::allowlist_kind`), so the
+/// column stays consistent with the tool by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// Absolute `argv[0]` exec path — validated by [`validate_argv0`].
+    Argv0,
+    /// Host / domain allowlist entry — validated by [`validate_domain`].
+    Domain,
+}
+
+impl EntryKind {
+    /// The `kind` column value. Must match the literals in the migration-0021
+    /// CHECK — these two strings are the wire contract with the schema.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EntryKind::Argv0 => "argv0",
+            EntryKind::Domain => "domain",
+        }
+    }
+
+    /// Parse a `kind` column value read back from the DB. Fails closed on
+    /// anything else: the CHECK constrains the column to these two, so an
+    /// unknown value means schema drift, not a routine case.
+    pub fn from_db_str(s: &str) -> Result<Self, ToolAllowlistError> {
+        match s {
+            "argv0" => Ok(EntryKind::Argv0),
+            "domain" => Ok(EntryKind::Domain),
+            _ => Err(ToolAllowlistError::UnknownEntryKind),
+        }
+    }
+}
 
 /// Errors that can come out of this module.
 #[derive(thiserror::Error, Debug)]
@@ -38,6 +80,14 @@ pub enum ToolAllowlistError {
     #[error("argv0 contains a '..' segment; reject path-confusion bypasses by sending exact canonical paths")]
     Argv0HasDotDot,
 
+    #[error("allowlist entry is not a valid host/domain; expected a bare domain \
+             (example.org), a wildcard (.example.org), a bare IPv4, or a bracketed \
+             IPv6 literal ([::1]) — no scheme, port, path, '@', or whitespace")]
+    InvalidDomain,
+
+    #[error("tool_allowlists row carries an unknown `kind`; expected 'argv0' or 'domain' (schema drift?)")]
+    UnknownEntryKind,
+
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -47,6 +97,9 @@ pub enum ToolAllowlistError {
 pub struct AllowlistEntry {
     pub tool: String,
     pub argv0: String,
+    /// Which shape `argv0` takes for this row (migration `0021`). Surfaced so
+    /// the row is self-describing to an operator listing the allowlist.
+    pub kind: EntryKind,
     pub created_at: OffsetDateTime,
     pub created_by: String,
 }
@@ -99,6 +152,67 @@ pub fn validate_argv0(argv0: &str) -> Result<(), ToolAllowlistError> {
     Ok(())
 }
 
+/// Validate a domain-kind allowlist entry: a bare domain (`example.org`), a
+/// wildcard (`.example.org`), a bare IPv4 (`203.0.113.5`), or a **bracketed**
+/// IPv6 literal (`[::1]`). Rejects anything carrying a scheme, embedded port,
+/// path, userinfo (`@`), or whitespace — so `localhost:8888` (the #459
+/// residual-#3 footgun) is rejected here at the source, before it can become
+/// the dead net entry `localhost:8888:443`.
+///
+/// Brackets are REQUIRED for IPv6 so the downstream `host:443` mapping
+/// (`allowlist_to_net_entries`) yields a valid `[::1]:443` and the bracket-aware
+/// `host_of_entry` strips it back cleanly. A bare `::1` is rejected — it would
+/// map to the ambiguous `::1:443`.
+///
+/// Hand-rolled (no `url`/idna dependency — IPv6 via `std::net::Ipv6Addr`), LDH
+/// label rules, matching the style of [`validate_argv0`]. The SQL CHECK in
+/// migration `0021` is a coarser shape backstop; this is the authoritative gate.
+pub fn validate_domain(entry: &str) -> Result<(), ToolAllowlistError> {
+    if entry.is_empty() {
+        return Err(ToolAllowlistError::InvalidDomain);
+    }
+    // No control chars, whitespace, or NUL anywhere (bytes 0x00..=0x20 and DEL).
+    if entry.bytes().any(|b| b <= 0x20 || b == 0x7f) {
+        return Err(ToolAllowlistError::InvalidDomain);
+    }
+    // Bracketed IPv6 literal: the inner text must parse as an Ipv6Addr.
+    if let Some(inner) = entry.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        return match inner.parse::<Ipv6Addr>() {
+            Ok(_) => Ok(()),
+            Err(_) => Err(ToolAllowlistError::InvalidDomain),
+        };
+    }
+    // Domain / IPv4 branch. Strip one optional wildcard leading dot and one
+    // optional FQDN trailing dot, then validate the remaining LDH labels.
+    let host = entry.strip_prefix('.').unwrap_or(entry);
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() || host.len() > 253 {
+        return Err(ToolAllowlistError::InvalidDomain);
+    }
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err(ToolAllowlistError::InvalidDomain);
+        }
+        if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err(ToolAllowlistError::InvalidDomain);
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(ToolAllowlistError::InvalidDomain);
+        }
+    }
+    Ok(())
+}
+
+/// Dispatch to the right validator for a tool's [`EntryKind`]. `add`/`remove`
+/// call this so the DB layer applies argv0 rules to argv0 tools and domain
+/// rules to domain tools.
+pub fn validate_entry(kind: EntryKind, entry: &str) -> Result<(), ToolAllowlistError> {
+    match kind {
+        EntryKind::Argv0 => validate_argv0(entry),
+        EntryKind::Domain => validate_domain(entry),
+    }
+}
+
 // --- I/O layer ---------------------------------------------------------
 
 /// Add one allowlist entry. Idempotent — returns `Ok(true)` if a row
@@ -106,18 +220,20 @@ pub fn validate_argv0(argv0: &str) -> Result<(), ToolAllowlistError> {
 pub async fn add(
     pool: &PgPool,
     tool: &str,
+    kind: EntryKind,
     argv0: &str,
     created_by: &str,
 ) -> Result<bool, ToolAllowlistError> {
     validate_tool_name(tool)?;
-    validate_argv0(argv0)?;
+    validate_entry(kind, argv0)?;
     let rows = sqlx::query(
-        "INSERT INTO tool_allowlists (tool, argv0, created_by)
-         VALUES ($1, $2, $3)
+        "INSERT INTO tool_allowlists (tool, argv0, kind, created_by)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (tool, argv0) DO NOTHING",
     )
     .bind(tool)
     .bind(argv0)
+    .bind(kind.as_str())
     .bind(created_by)
     .execute(pool)
     .await?;
@@ -126,13 +242,20 @@ pub async fn add(
 
 /// Remove one allowlist entry. Idempotent — returns `Ok(true)` if a
 /// row was deleted, `Ok(false)` if nothing matched.
-pub async fn remove(
-    pool: &PgPool,
-    tool: &str,
-    argv0: &str,
-) -> Result<bool, ToolAllowlistError> {
+///
+/// Deliberately does **not** validate the entry's shape, unlike [`add`].
+/// Removal only ever narrows an allowlist, so there is nothing to fail closed
+/// against — while shape-validating here would strand any row the current
+/// validators reject, making it unremovable through the CLI. That is not
+/// hypothetical: before the entry-kind split every tool was validated as
+/// argv0-kind, so a `web-fetch` row like `/example.org` was insertable, and
+/// migration `0021` backfills it as `kind = 'argv0'`. Such a row is inert
+/// (it maps to the dead net entry `/example.org:443`, which
+/// `endpoint_guard::host_is_malformed` flags at registration) but an operator
+/// must still be able to delete it. `validate_tool_name` is kept — it bounds
+/// the audit payload rather than gating the deletion.
+pub async fn remove(pool: &PgPool, tool: &str, argv0: &str) -> Result<bool, ToolAllowlistError> {
     validate_tool_name(tool)?;
-    validate_argv0(argv0)?;
     let rows = sqlx::query(
         "DELETE FROM tool_allowlists WHERE tool = $1 AND argv0 = $2",
     )
@@ -163,7 +286,7 @@ pub async fn list_for_tool(
 }
 
 /// Like [`list_for_tool`] but returns the full [`AllowlistEntry`] shape
-/// (`tool`, `argv0`, `created_at`, `created_by`). Used by the
+/// (`tool`, `argv0`, `kind`, `created_at`, `created_by`). Used by the
 /// `kastellan-cli tools allowlist list --tool <name>` path so the WHERE
 /// predicate runs on the PK-indexed server side instead of the CLI
 /// filtering client-side over [`list_all`].
@@ -172,8 +295,8 @@ pub async fn list_for_tool_full(
     tool: &str,
 ) -> Result<Vec<AllowlistEntry>, ToolAllowlistError> {
     validate_tool_name(tool)?;
-    let rows: Vec<(String, String, OffsetDateTime, String)> = sqlx::query_as(
-        "SELECT tool, argv0, created_at, created_by
+    let rows: Vec<(String, String, String, OffsetDateTime, String)> = sqlx::query_as(
+        "SELECT tool, argv0, kind, created_at, created_by
          FROM tool_allowlists
          WHERE tool = $1
          ORDER BY argv0 ASC",
@@ -181,35 +304,39 @@ pub async fn list_for_tool_full(
     .bind(tool)
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(tool, argv0, created_at, created_by)| AllowlistEntry {
-            tool,
-            argv0,
-            created_at,
-            created_by,
+    rows.into_iter()
+        .map(|(tool, argv0, kind, created_at, created_by)| {
+            Ok(AllowlistEntry {
+                tool,
+                argv0,
+                kind: EntryKind::from_db_str(&kind)?,
+                created_at,
+                created_by,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// List every entry across every tool, ordered by `(tool, argv0)`.
 pub async fn list_all(pool: &PgPool) -> Result<Vec<AllowlistEntry>, ToolAllowlistError> {
-    let rows: Vec<(String, String, OffsetDateTime, String)> = sqlx::query_as(
-        "SELECT tool, argv0, created_at, created_by
+    let rows: Vec<(String, String, String, OffsetDateTime, String)> = sqlx::query_as(
+        "SELECT tool, argv0, kind, created_at, created_by
          FROM tool_allowlists
          ORDER BY tool ASC, argv0 ASC",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(tool, argv0, created_at, created_by)| AllowlistEntry {
-            tool,
-            argv0,
-            created_at,
-            created_by,
+    rows.into_iter()
+        .map(|(tool, argv0, kind, created_at, created_by)| {
+            Ok(AllowlistEntry {
+                tool,
+                argv0,
+                kind: EntryKind::from_db_str(&kind)?,
+                created_at,
+                created_by,
+            })
         })
-        .collect())
+        .collect()
 }
 
 // --- Tests ------------------------------------------------------------
@@ -305,5 +432,59 @@ mod tests {
         // `..` *inside* a segment (no slash on either side) is fine —
         // it's a legal filename character.
         validate_argv0("/usr/bin/foo..bar").unwrap();
+    }
+
+    #[test]
+    fn validate_domain_accepts_domains_wildcards_ipv4_and_bracketed_ipv6() {
+        for ok in [
+            "example.org",
+            "api.example.org",
+            ".example.org",   // wildcard
+            "example.org.",   // FQDN trailing dot
+            "a-b.example.org", // hyphen inside a label
+            "203.0.113.5",    // bare IPv4
+            "[::1]",          // IPv6 loopback (bracketed)
+            "[2606:4700:4700::1111]",
+            "[fd12:3456::1]", // ULA
+        ] {
+            validate_domain(ok).unwrap_or_else(|e| panic!("{ok} should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_domain_rejects_ports_schemes_paths_and_malformed() {
+        for bad in [
+            "",
+            "localhost:8888",     // embedded port — the #459 residual-#3 footgun
+            "http://example.org", // scheme
+            "example.org/search", // path
+            "user@example.org",   // userinfo
+            "a..b",               // empty label
+            "-a.example.org",     // leading hyphen
+            "a-.example.org",     // trailing hyphen
+            "::1",                // unbracketed IPv6
+            "[not-ipv6]",         // brackets but not an IPv6 addr
+            "exa mple.org",       // whitespace
+            "foo\tbar",           // control char
+        ] {
+            assert!(
+                matches!(validate_domain(bad), Err(ToolAllowlistError::InvalidDomain)),
+                "{bad:?} should be InvalidDomain"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_entry_dispatches_by_kind() {
+        validate_entry(EntryKind::Argv0, "/bin/echo").unwrap();
+        assert!(matches!(
+            validate_entry(EntryKind::Argv0, "example.org"),
+            Err(ToolAllowlistError::InvalidArgv0)
+        ));
+        validate_entry(EntryKind::Domain, "example.org").unwrap();
+        assert!(matches!(
+            validate_entry(EntryKind::Domain, "localhost:8888"),
+            Err(ToolAllowlistError::InvalidDomain)
+        ));
     }
 }

@@ -35,6 +35,134 @@ fn cli_env(data_dir: &std::path::Path) -> Vec<(String, String)> {
     env
 }
 
+/// The #459-residual-#3 pair: a domain-kind tool (`web-fetch`) accepts a bare
+/// domain — impossible before the entry-kind split, since the argv0 validator
+/// and the `0009` CHECK both demanded a leading `/` — and refuses a
+/// port-bearing host, which would otherwise map to the dead net entry
+/// `localhost:8888:443`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_add_domain_tool_accepts_domain_rejects_port_bearing() {
+    if skip_if_no_supervisor() { return; }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return; };
+
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "ta-dom-d",
+        "ta-dom-l",
+        &format!("kastellan-postgres-cli-tools-allowlist-domain-e2e-{suffix}"),
+    );
+    probe_run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"test": "cli_tools_allowlist_domain_e2e"}),
+    )
+    .await
+    .expect("probe run");
+    let pool = connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("runtime pool");
+
+    let bin = cli_binary();
+    let env = cli_env(&cluster.data_dir);
+
+    // A bare domain is accepted for a domain-kind tool.
+    let ok = Command::new(&bin)
+        .args(["tools", "allowlist", "add", "web-fetch", "example.org"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli add domain");
+    assert!(ok.status.success(), "add domain exit: {:?}, stderr: {}",
+        ok.status, String::from_utf8_lossy(&ok.stderr));
+
+    // The row must land with kind='domain' — pin the column, not just argv0,
+    // so a regression that passed EntryKind::Argv0 here would be caught
+    // directly rather than only via the validator refusing the entry.
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT argv0, kind FROM tool_allowlists WHERE tool = $1 ORDER BY argv0")
+        .bind("web-fetch")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![("example.org".to_string(), "domain".to_string())]);
+
+    // A port-bearing host is a user error: exit 2, and no row lands.
+    let bad = Command::new(&bin)
+        .args(["tools", "allowlist", "add", "web-fetch", "localhost:8888"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli add bad domain");
+    assert_eq!(bad.status.code(), Some(2), "stderr: {}",
+        String::from_utf8_lossy(&bad.stderr));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("host/domain"),
+        "stderr was: {}", String::from_utf8_lossy(&bad.stderr));
+
+    // shell-exec still takes argv0 paths and still rejects a bare domain.
+    let argv0_ok = Command::new(&bin)
+        .args(["tools", "allowlist", "add", "shell-exec", "/usr/bin/echo"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli add argv0");
+    assert!(argv0_ok.status.success(), "stderr: {}",
+        String::from_utf8_lossy(&argv0_ok.stderr));
+
+    let argv0_bad = Command::new(&bin)
+        .args(["tools", "allowlist", "add", "shell-exec", "example.org"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli add argv0 bad");
+    assert_eq!(argv0_bad.status.code(), Some(2), "stderr: {}",
+        String::from_utf8_lossy(&argv0_bad.stderr));
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tool_allowlists WHERE tool = 'web-fetch'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "the rejected domain row must not have landed");
+
+    // A legacy argv0-shaped row under a domain-kind tool — insertable before
+    // the entry-kind split, backfilled kind='argv0' by migration 0021 — must
+    // stay REMOVABLE through the CLI. `remove` deliberately skips shape
+    // validation for exactly this case; validating it would strand the row.
+    sqlx::query(
+        "INSERT INTO tool_allowlists (tool, argv0, kind, created_by)
+         VALUES ('web-fetch', '/legacy.example.org', 'argv0', 'test')")
+        .execute(&pool)
+        .await
+        .expect("seed a legacy argv0-shaped row");
+    let legacy_rm = Command::new(&bin)
+        .args(["tools", "allowlist", "remove", "web-fetch", "/legacy.example.org"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli remove legacy row");
+    assert!(legacy_rm.status.success(), "stderr: {}",
+        String::from_utf8_lossy(&legacy_rm.stderr));
+
+    // And a normal domain row round-trips out too.
+    let dom_rm = Command::new(&bin)
+        .args(["tools", "allowlist", "remove", "web-fetch", "example.org"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .expect("spawn cli remove domain");
+    assert!(dom_rm.status.success(), "stderr: {}",
+        String::from_utf8_lossy(&dom_rm.stderr));
+
+    let left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tool_allowlists WHERE tool = 'web-fetch'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "both web-fetch rows must be removable");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_tools_allowlist_add_remove_list_round_trip_writes_audit_rows() {
     if skip_if_no_supervisor() { return; }

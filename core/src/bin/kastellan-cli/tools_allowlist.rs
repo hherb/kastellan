@@ -48,7 +48,7 @@ async fn tools_allowlist_add(args: &[String]) -> ExitCode {
     let (tool, argv0) = match args {
         [t, a] => (t.clone(), a.clone()),
         _ => {
-            eprintln!("usage: kastellan-cli tools allowlist add <tool> <argv0>");
+            eprintln!("usage: kastellan-cli tools allowlist add <tool> <argv0|domain>");
             return ExitCode::from(2);
         }
     };
@@ -62,11 +62,30 @@ async fn tools_allowlist_add(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
-    match tools_allowlist_add_and_audit(&pool, &tool, &argv0).await {
+    // Which validator applies is a property of the tool: shell-exec stores
+    // absolute argv0 paths, the web workers store host/domain entries. An
+    // unknown tool falls back to argv0 — today's behaviour for any name that
+    // is not a known allowlist consumer — but say so, because the fallback
+    // otherwise reports a typo'd tool name as "argv0 must be an absolute
+    // path", pointing the operator at the wrong half of the command.
+    let kind = match kastellan_core::registry_build::allowlist_kind_for_tool(&tool) {
+        Some(k) => k,
+        None => {
+            eprintln!(
+                "note: '{tool}' is not a known allowlist consumer; validating \
+                 '{argv0}' as an argv0 path. Check the tool name if that is not \
+                 what you meant."
+            );
+            kastellan_db::tool_allowlists::EntryKind::Argv0
+        }
+    };
+
+    match tools_allowlist_add_and_audit(&pool, &tool, kind, &argv0).await {
         Ok(true)  => { println!("added {tool} {argv0}"); ExitCode::from(0) }
         Ok(false) => { println!("already present"); ExitCode::from(0) }
         Err(e @ (kastellan_db::tool_allowlists::ToolAllowlistError::InvalidArgv0
             | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidToolName
+            | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidDomain
             | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasNul
             | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasDotDot)) => {
             eprintln!("{e}");
@@ -83,7 +102,7 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
     let (tool, argv0) = match args {
         [t, a] => (t.clone(), a.clone()),
         _ => {
-            eprintln!("usage: kastellan-cli tools allowlist remove <tool> <argv0>");
+            eprintln!("usage: kastellan-cli tools allowlist remove <tool> <argv0|domain>");
             return ExitCode::from(2);
         }
     };
@@ -96,13 +115,14 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
+    // No kind needed: `remove` deliberately does not shape-validate, so a
+    // legacy or malformed row stays deletable (see its docstring).
     match tools_allowlist_remove_and_audit(&pool, &tool, &argv0).await {
         Ok(true)  => { println!("removed {tool} {argv0}"); ExitCode::from(0) }
         Ok(false) => { println!("not present"); ExitCode::from(0) }
-        Err(e @ (kastellan_db::tool_allowlists::ToolAllowlistError::InvalidArgv0
-            | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidToolName
-            | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasNul
-            | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasDotDot)) => {
+        // Only the tool name is validated on removal — the entry-shape errors
+        // are unreachable here by design (see `db::tool_allowlists::remove`).
+        Err(e @ kastellan_db::tool_allowlists::ToolAllowlistError::InvalidToolName) => {
             eprintln!("{e}");
             ExitCode::from(2)
         }
@@ -155,11 +175,13 @@ async fn tools_allowlist_list(args: &[String]) -> ExitCode {
             Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
         },
     };
-    println!("{:<16}  {:<48}  {:<24}  CREATED_BY",
-        "TOOL", "ARGV0", "CREATED_AT");
+    // `KIND` makes each row self-describing: `argv0` rows hold absolute exec
+    // paths, `domain` rows hold hosts (see migration 0021).
+    println!("{:<16}  {:<7}  {:<48}  {:<24}  CREATED_BY",
+        "TOOL", "KIND", "ARGV0", "CREATED_AT");
     for e in entries {
-        println!("{:<16}  {:<48}  {:<24}  {}",
-            e.tool, e.argv0, e.created_at, e.created_by);
+        println!("{:<16}  {:<7}  {:<48}  {:<24}  {}",
+            e.tool, e.kind.as_str(), e.argv0, e.created_at, e.created_by);
     }
     ExitCode::from(0)
 }

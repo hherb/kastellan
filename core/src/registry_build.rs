@@ -27,6 +27,20 @@ pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] = &[
     &crate::workers::browser_driver::BrowserDriverManifest,
 ];
 
+/// The kind of `tool_allowlists` entry a tool uses, discovered by scanning the
+/// static manifest list. `None` for a tool that declares no allowlist or an
+/// unrecognized name — the CLI treats `None` as the argv0 default, preserving
+/// today's behaviour for any tool name that is not a known allowlist consumer.
+/// Pure.
+pub fn allowlist_kind_for_tool(
+    name: &str,
+) -> Option<kastellan_db::tool_allowlists::EntryKind> {
+    WORKER_MANIFESTS
+        .iter()
+        .find(|m| m.allowlist_tool() == Some(name))
+        .and_then(|m| m.allowlist_kind())
+}
+
 /// True iff this entry runs as a Firecracker micro-VM worker — the
 /// always-force-routed case for the #459 screen (`linux_firecracker/plan.rs`
 /// fail-closed refuses to boot a `Net::Allowlist` VM without the egress
@@ -115,7 +129,8 @@ pub async fn build_tool_registry(
     if std::env::var_os("KASTELLAN_SHELL_EXEC_ALLOWLIST").is_some() {
         tracing::warn!(
             "KASTELLAN_SHELL_EXEC_ALLOWLIST is no longer honored; \
-             use 'kastellan-cli tools allowlist add <tool> <argv0>' to populate the DB"
+             use 'kastellan-cli tools allowlist add <tool> <argv0|domain>' \
+             to populate the DB"
         );
     }
 
@@ -214,11 +229,13 @@ pub fn assemble_registry(
                             tracing::warn!(
                                 tool = name,
                                 dead = ?dead,
-                                "Net::Allowlist entries use `localhost` names that are \
-                                 statically dead under force-routing — requests to them \
-                                 will fail (use literal IPs or routable hostnames, and \
-                                 update the matching tool_allowlists rows / endpoint \
-                                 env vars to agree)"
+                                "Net::Allowlist entries are statically dead — either a \
+                                 `localhost` name under force-routing, or a host \
+                                 carrying an embedded port or path separator (dead in \
+                                 any routing mode) — requests to them will fail (use \
+                                 literal IPs or routable hostnames, and update the \
+                                 matching tool_allowlists rows / endpoint env vars to \
+                                 agree)"
                             );
                         }
                         NetScreen::Ok => {}
@@ -690,5 +707,36 @@ mod tests {
             !docs.iter().any(|d| d.name == "web-search"),
             "disabled web-search must not be advertised"
         );
+    }
+
+    #[test]
+    fn allowlist_kind_for_tool_maps_argv0_and_domain_tools() {
+        use kastellan_db::tool_allowlists::EntryKind;
+        assert_eq!(allowlist_kind_for_tool("shell-exec"), Some(EntryKind::Argv0));
+        assert_eq!(allowlist_kind_for_tool("web-fetch"), Some(EntryKind::Domain));
+        assert_eq!(allowlist_kind_for_tool("web-research"), Some(EntryKind::Domain));
+        assert_eq!(allowlist_kind_for_tool("browser-driver"), Some(EntryKind::Domain));
+        // A worker with no allowlist, and an unknown name, both map to None.
+        assert_eq!(allowlist_kind_for_tool("python-exec"), None);
+        assert_eq!(allowlist_kind_for_tool("nonexistent-tool"), None);
+    }
+
+    /// Every manifest that declares an allowlist must also declare its KIND.
+    /// Without this, a future network worker that overrides `allowlist_tool`
+    /// but forgets `allowlist_kind` silently inherits the `Argv0` default, and
+    /// the operator's first `tools allowlist add <tool> example.org` fails with
+    /// "argv0 must be an absolute path" — a fail-closed but thoroughly
+    /// misleading error. Cheap to pin, so pin it.
+    #[test]
+    fn every_allowlist_declaring_manifest_also_declares_a_kind() {
+        for m in WORKER_MANIFESTS {
+            if let Some(tool) = m.allowlist_tool() {
+                assert!(
+                    m.allowlist_kind().is_some(),
+                    "{tool} declares allowlist_tool() but not allowlist_kind(); \
+                     add the override to its WorkerManifest impl"
+                );
+            }
+        }
     }
 }

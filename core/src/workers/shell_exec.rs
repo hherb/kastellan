@@ -81,6 +81,10 @@ impl WorkerManifest for ShellExecManifest {
         Some(TOOL_NAME)
     }
 
+    fn allowlist_kind(&self) -> Option<kastellan_db::tool_allowlists::EntryKind> {
+        Some(kastellan_db::tool_allowlists::EntryKind::Argv0)
+    }
+
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
         let binary = match discover_binary(ctx, BIN_ENV, DEFAULT_BIN_NAME) {
             Some(b) => b,
