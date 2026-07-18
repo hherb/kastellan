@@ -339,3 +339,44 @@ decide during implementation once the real line count is known.
 - **IPv6 from the start:** bracketed IPv6 literals (`[::1]`) are accepted via
   `std::net::Ipv6Addr` (still no new dep) — the allowlist is IPv6-ready rather
   than deferring it. Brackets required so the `{host}:443` append stays valid.
+
+## 9. Revision (2026-07-18, during implementation): `kind` column supersedes the union-branch CHECK
+
+**§3.2's union-branch CHECK was wrong and has been replaced.** The claim that it
+"keeps argv0's absolute-path SQL guarantee" was false: a union of branches means
+any row may satisfy *either* branch, so a bare relative argv0 like `echo`
+matches the **domain** branch (`^\.?[A-Za-z0-9.-]+$`) and a raw
+`INSERT ('shell-exec','echo')` was accepted — silently dropping the `0009`
+guarantee. The pre-existing `db/tests/postgres_e2e.rs` assertion
+*"relative argv0 must be CHECK-rejected"* caught this in the full DGX gate.
+
+The defect is structural, not a regex bug: **a bare word is simultaneously a
+valid domain and an invalid argv0**, so a CHECK that cannot see which kind the
+row is can never separate them.
+
+**Replacement:** the row carries its own `kind` column
+(`TEXT NOT NULL DEFAULT 'argv0'`; existing rows are all shell-exec argv0 paths,
+so the default backfills correctly) and the CHECK branches on it via `CASE`.
+`EntryKind::{as_str, from_db_str}` are the wire contract with those literals;
+`add` writes the value from the Rust source of truth; `AllowlistEntry` surfaces
+it and `tools allowlist list` gained a `KIND` column.
+
+**Why the `kind` column over a `CASE WHEN tool IN (…)` CHECK** (the other option
+that also preserves both guarantees): the tool roster **grows**. Encoding it in
+SQL would make every future network worker pay a schema migration merely to be
+added to a hardcoded list, and that list would drift against
+`WorkerManifest::allowlist_kind`. With the kind in the row, **SQL never needs to
+know a tool name** — adding a tool is a pure Rust manifest change (zero
+migrations), and only a genuinely new *kind* needs schema work. Kinds change
+rarely; tools change often, so the churn belongs where it is cheap.
+
+**Accepted trade-off:** the row asserts its own kind, so a caller with direct
+INSERT could write `kind='domain'` on a shell-exec row to slip a relative argv0
+past the CHECK. This is acceptable — the only direct-INSERT holder is the
+runtime role, and a compromised daemon can already insert *well-formed*
+malicious entries (`/bin/sh` for shell-exec) that the CHECK never blocked. The
+CHECK guards malformed data, not a compromised daemon; and a relative argv0 is
+inert anyway (shell-exec requires absolute and the jail has no `PATH`).
+
+§2's "no `kind` column" non-goal is withdrawn; §3.2 is superseded by this
+section.

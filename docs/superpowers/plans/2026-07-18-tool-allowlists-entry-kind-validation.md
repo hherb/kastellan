@@ -353,6 +353,10 @@ git commit -m "feat(core): WorkerManifest::allowlist_kind + allowlist_kind_for_t
 - Modify: `db/src/tool_allowlists.rs` (`add`/`remove` gain `kind: EntryKind`)
 - Modify: `core/src/cli_audit/registry.rs` (`tools_allowlist_{add,remove}_and_audit` gain + forward `kind`)
 - Modify: `core/src/bin/kastellan-cli/tools_allowlist.rs` (resolve kind, `InvalidDomain` arm, usage text)
+- Modify: `db/tests/postgres_e2e.rs` (**9 call sites, lines ~1408–1531** — `add`/`remove` in
+  `tool_allowlists_round_trip_and_grant_shape` + the validation-rejection test; all argv0-kind,
+  so each gains `EntryKind::Argv0`. Discovered during Task 1's DGX run — this file was missed by
+  the original caller sweep.)
 
 **Interfaces:**
 - Consumes: `EntryKind`, `validate_entry` (Task 1); `allowlist_kind_for_tool` (Task 2).
@@ -599,7 +603,16 @@ git commit -m "feat(core): NetScreen backstop for malformed double-port allowlis
 
 ---
 
-## Task 5: Migration 0021 — union-branch CHECK (DGX-gated)
+## Task 5: Migration 0021 — CHECK for both entry kinds (DGX-gated)
+
+> **SUPERSEDED during execution — do not use the union-branch SQL below.** The
+> union-branch CHECK silently dropped the `0009` guarantee that shell-exec
+> entries are absolute (a bare `echo` matches the *domain* branch), which the
+> pre-existing `postgres_e2e` assertion caught in the full DGX gate. Shipped
+> instead: a `kind` column (`DEFAULT 'argv0'`) with a `CASE`-on-kind CHECK, so
+> SQL never needs to know a tool name and adding a tool costs no migration. See
+> spec §9 (Revision) and `db/migrations/0021_tool_allowlists_domain_entries.sql`
+> for the authoritative version.
 
 **Files:**
 - Create: `db/migrations/0021_tool_allowlists_domain_entries.sql`
