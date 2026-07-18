@@ -190,6 +190,10 @@ impl WorkerManifest for WebFetchManifest {
         Some(TOOL_NAME)
     }
 
+    fn allowlist_kind(&self) -> Option<kastellan_db::tool_allowlists::EntryKind> {
+        Some(kastellan_db::tool_allowlists::EntryKind::Domain)
+    }
+
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
         let allowlist = (ctx.allowlist)(TOOL_NAME);
 

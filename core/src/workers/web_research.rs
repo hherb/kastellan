@@ -612,6 +612,10 @@ impl WorkerManifest for WebResearchManifest {
     fn allowlist_tool(&self) -> Option<&'static str> {
         Some(TOOL_NAME)
     }
+
+    fn allowlist_kind(&self) -> Option<kastellan_db::tool_allowlists::EntryKind> {
+        Some(kastellan_db::tool_allowlists::EntryKind::Domain)
+    }
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
         let endpoint = (ctx.get_env)(ENDPOINT_ENV).unwrap_or_default();
         let embed_endpoint = (ctx.get_env)(EMBED_ENDPOINT_ENV).filter(|s| !s.trim().is_empty());

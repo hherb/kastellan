@@ -50,6 +50,14 @@ pub trait WorkerManifest: Sync {
         None
     }
 
+    /// The shape of this worker's `tool_allowlists` entries, when it declares
+    /// an allowlist. `None` ⇒ no allowlist (the default). Drives which
+    /// validator the CLI applies on `add`/`remove`: `shell-exec` stores
+    /// absolute argv0 exec paths, the web workers store host/domain entries.
+    fn allowlist_kind(&self) -> Option<kastellan_db::tool_allowlists::EntryKind> {
+        None
+    }
+
     /// Optional planner-facing description used to advertise this tool in the
     /// `<tools>` prompt block. `None` (the default) ⇒ dispatchable but not
     /// advertised. Only collected for workers that reach

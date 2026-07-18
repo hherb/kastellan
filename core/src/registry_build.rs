@@ -27,6 +27,20 @@ pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] = &[
     &crate::workers::browser_driver::BrowserDriverManifest,
 ];
 
+/// The kind of `tool_allowlists` entry a tool uses, discovered by scanning the
+/// static manifest list. `None` for a tool that declares no allowlist or an
+/// unrecognized name — the CLI treats `None` as the argv0 default, preserving
+/// today's behaviour for any tool name that is not a known allowlist consumer.
+/// Pure.
+pub fn allowlist_kind_for_tool(
+    name: &str,
+) -> Option<kastellan_db::tool_allowlists::EntryKind> {
+    WORKER_MANIFESTS
+        .iter()
+        .find(|m| m.allowlist_tool() == Some(name))
+        .and_then(|m| m.allowlist_kind())
+}
+
 /// True iff this entry runs as a Firecracker micro-VM worker — the
 /// always-force-routed case for the #459 screen (`linux_firecracker/plan.rs`
 /// fail-closed refuses to boot a `Net::Allowlist` VM without the egress
@@ -690,5 +704,17 @@ mod tests {
             !docs.iter().any(|d| d.name == "web-search"),
             "disabled web-search must not be advertised"
         );
+    }
+
+    #[test]
+    fn allowlist_kind_for_tool_maps_argv0_and_domain_tools() {
+        use kastellan_db::tool_allowlists::EntryKind;
+        assert_eq!(allowlist_kind_for_tool("shell-exec"), Some(EntryKind::Argv0));
+        assert_eq!(allowlist_kind_for_tool("web-fetch"), Some(EntryKind::Domain));
+        assert_eq!(allowlist_kind_for_tool("web-research"), Some(EntryKind::Domain));
+        assert_eq!(allowlist_kind_for_tool("browser-driver"), Some(EntryKind::Domain));
+        // A worker with no allowlist, and an unknown name, both map to None.
+        assert_eq!(allowlist_kind_for_tool("python-exec"), None);
+        assert_eq!(allowlist_kind_for_tool("nonexistent-tool"), None);
     }
 }

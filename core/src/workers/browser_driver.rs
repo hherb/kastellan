@@ -354,6 +354,10 @@ impl WorkerManifest for BrowserDriverManifest {
         Some(TOOL_NAME)
     }
 
+    fn allowlist_kind(&self) -> Option<kastellan_db::tool_allowlists::EntryKind> {
+        Some(kastellan_db::tool_allowlists::EntryKind::Domain)
+    }
+
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
         match resolve_env(
             |k| (ctx.get_env)(k),
