@@ -48,7 +48,7 @@ async fn tools_allowlist_add(args: &[String]) -> ExitCode {
     let (tool, argv0) = match args {
         [t, a] => (t.clone(), a.clone()),
         _ => {
-            eprintln!("usage: kastellan-cli tools allowlist add <tool> <argv0>");
+            eprintln!("usage: kastellan-cli tools allowlist add <tool> <argv0|domain>");
             return ExitCode::from(2);
         }
     };
@@ -62,11 +62,19 @@ async fn tools_allowlist_add(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
-    match tools_allowlist_add_and_audit(&pool, &tool, &argv0).await {
+    // Which validator applies is a property of the tool: shell-exec stores
+    // absolute argv0 paths, the web workers store host/domain entries. An
+    // unknown tool falls back to argv0 — today's behaviour for any name that
+    // is not a known allowlist consumer.
+    let kind = kastellan_core::registry_build::allowlist_kind_for_tool(&tool)
+        .unwrap_or(kastellan_db::tool_allowlists::EntryKind::Argv0);
+
+    match tools_allowlist_add_and_audit(&pool, &tool, kind, &argv0).await {
         Ok(true)  => { println!("added {tool} {argv0}"); ExitCode::from(0) }
         Ok(false) => { println!("already present"); ExitCode::from(0) }
         Err(e @ (kastellan_db::tool_allowlists::ToolAllowlistError::InvalidArgv0
             | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidToolName
+            | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidDomain
             | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasNul
             | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasDotDot)) => {
             eprintln!("{e}");
@@ -83,7 +91,7 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
     let (tool, argv0) = match args {
         [t, a] => (t.clone(), a.clone()),
         _ => {
-            eprintln!("usage: kastellan-cli tools allowlist remove <tool> <argv0>");
+            eprintln!("usage: kastellan-cli tools allowlist remove <tool> <argv0|domain>");
             return ExitCode::from(2);
         }
     };
@@ -96,11 +104,15 @@ async fn tools_allowlist_remove(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
     };
 
-    match tools_allowlist_remove_and_audit(&pool, &tool, &argv0).await {
+    let kind = kastellan_core::registry_build::allowlist_kind_for_tool(&tool)
+        .unwrap_or(kastellan_db::tool_allowlists::EntryKind::Argv0);
+
+    match tools_allowlist_remove_and_audit(&pool, &tool, kind, &argv0).await {
         Ok(true)  => { println!("removed {tool} {argv0}"); ExitCode::from(0) }
         Ok(false) => { println!("not present"); ExitCode::from(0) }
         Err(e @ (kastellan_db::tool_allowlists::ToolAllowlistError::InvalidArgv0
             | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidToolName
+            | kastellan_db::tool_allowlists::ToolAllowlistError::InvalidDomain
             | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasNul
             | kastellan_db::tool_allowlists::ToolAllowlistError::Argv0HasDotDot)) => {
             eprintln!("{e}");

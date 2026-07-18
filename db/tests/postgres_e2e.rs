@@ -1376,7 +1376,7 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     use kastellan_db::pool::connect_runtime_pool;
     use kastellan_db::probe::run as probe_run;
     use kastellan_db::tool_allowlists::{
-        add, list_all, list_for_tool, list_for_tool_full, remove, AllowlistEntry,
+        add, list_all, list_for_tool, list_for_tool_full, remove, AllowlistEntry, EntryKind,
         ToolAllowlistError,
     };
     use kastellan_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix};
@@ -1405,9 +1405,9 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
         .expect("runtime pool");
 
     // (1) Idempotent add.
-    let inserted = add(&pool, "shell-exec", "/usr/bin/echo", "test").await.unwrap();
+    let inserted = add(&pool, "shell-exec", EntryKind::Argv0, "/usr/bin/echo", "test").await.unwrap();
     assert!(inserted, "first add must INSERT");
-    let inserted2 = add(&pool, "shell-exec", "/usr/bin/echo", "test").await.unwrap();
+    let inserted2 = add(&pool, "shell-exec", EntryKind::Argv0, "/usr/bin/echo", "test").await.unwrap();
     assert!(!inserted2, "duplicate add must be a no-op");
 
     // (2) list_for_tool returns one entry.
@@ -1415,7 +1415,7 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     assert_eq!(v, vec!["/usr/bin/echo".to_string()]);
 
     // (3) A second entry under the same tool.
-    let inserted3 = add(&pool, "shell-exec", "/bin/sh", "test").await.unwrap();
+    let inserted3 = add(&pool, "shell-exec", EntryKind::Argv0, "/bin/sh", "test").await.unwrap();
     assert!(inserted3);
     let v2 = list_for_tool(&pool, "shell-exec").await.unwrap();
     assert_eq!(v2, vec!["/bin/sh".to_string(), "/usr/bin/echo".to_string()],
@@ -1432,7 +1432,7 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     // (4b) list_for_tool_full returns the full row shape, server-side
     // filtered (`WHERE tool = $1`). Seed a row under a second tool so the
     // filter is non-trivial.
-    add(&pool, "other-tool", "/usr/bin/true", "test").await.unwrap();
+    add(&pool, "other-tool", EntryKind::Argv0, "/usr/bin/true", "test").await.unwrap();
     let shell_rows = list_for_tool_full(&pool, "shell-exec").await.unwrap();
     assert_eq!(shell_rows.len(), 2, "must include both shell-exec rows");
     assert!(
@@ -1453,12 +1453,12 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     ));
     // Drop the seeded row so the rest of the test sees the pre-existing
     // 2-row state.
-    remove(&pool, "other-tool", "/usr/bin/true").await.unwrap();
+    remove(&pool, "other-tool", EntryKind::Argv0, "/usr/bin/true").await.unwrap();
 
     // (5) Idempotent remove.
-    let removed = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();
+    let removed = remove(&pool, "shell-exec", EntryKind::Argv0, "/usr/bin/echo").await.unwrap();
     assert!(removed);
-    let removed2 = remove(&pool, "shell-exec", "/usr/bin/echo").await.unwrap();
+    let removed2 = remove(&pool, "shell-exec", EntryKind::Argv0, "/usr/bin/echo").await.unwrap();
     assert!(!removed2, "second remove must be a no-op");
 
     // (6) GRANT shape: UPDATE on tool_allowlists denied to kastellan_runtime.
@@ -1525,10 +1525,10 @@ async fn tool_allowlists_round_trip_and_grant_shape() {
     // (8) Validator gate: add() rejects a malformed argv0 before the DB
     // sees it. Confirms the public API uses the validator, not just the
     // SQL CHECK constraint.
-    let bad_argv0 = add(&pool, "shell-exec", "echo", "test").await;
+    let bad_argv0 = add(&pool, "shell-exec", EntryKind::Argv0, "echo", "test").await;
     assert!(matches!(bad_argv0, Err(ToolAllowlistError::InvalidArgv0)),
         "expected InvalidArgv0; got {bad_argv0:?}");
-    let bad_tool = add(&pool, "shell exec", "/usr/bin/echo", "test").await;
+    let bad_tool = add(&pool, "shell exec", EntryKind::Argv0, "/usr/bin/echo", "test").await;
     assert!(matches!(bad_tool, Err(ToolAllowlistError::InvalidToolName)),
         "expected InvalidToolName; got {bad_tool:?}");
 

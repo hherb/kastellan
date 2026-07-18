@@ -185,11 +185,12 @@ pub fn validate_entry(kind: EntryKind, entry: &str) -> Result<(), ToolAllowlistE
 pub async fn add(
     pool: &PgPool,
     tool: &str,
+    kind: EntryKind,
     argv0: &str,
     created_by: &str,
 ) -> Result<bool, ToolAllowlistError> {
     validate_tool_name(tool)?;
-    validate_argv0(argv0)?;
+    validate_entry(kind, argv0)?;
     let rows = sqlx::query(
         "INSERT INTO tool_allowlists (tool, argv0, created_by)
          VALUES ($1, $2, $3)
@@ -208,10 +209,11 @@ pub async fn add(
 pub async fn remove(
     pool: &PgPool,
     tool: &str,
+    kind: EntryKind,
     argv0: &str,
 ) -> Result<bool, ToolAllowlistError> {
     validate_tool_name(tool)?;
-    validate_argv0(argv0)?;
+    validate_entry(kind, argv0)?;
     let rows = sqlx::query(
         "DELETE FROM tool_allowlists WHERE tool = $1 AND argv0 = $2",
     )
