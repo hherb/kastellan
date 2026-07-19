@@ -383,9 +383,22 @@ the plan sketched, so that procedure was not run.
 `/dev/shm` (it creates device nodes only), and nothing in `microvm-init` mounts
 it, so it does not exist in the guest. The question was whether
 `--disable-dev-shm-usage` — already unconditional in `DEFAULT_LAUNCH_ARGS`
-(`render.py:31-41`) — fully removes the need. A controlled two-arm experiment in
-the built image, with `/dev/shm` unmounted **and** `rmdir`'d so it was genuinely
-absent:
+(`render.py:31-41`) — fully removes the need.
+
+*Rig, for reproducibility.* This needed a real Chromium, so Task 2's container
+image was built first and the experiment run against it (the rootfs `.ext4` did
+not exist yet). Task 1 and Task 2 were therefore partly interleaved; the plan's
+strict ordering assumed the diagnostic vehicle could be `web-fetch.ext4`, which
+contains no browser and so could only have reported whether the *directory*
+exists — never whether the flag suffices, which is what §4.3 actually asked.
+
+```
+docker run --rm --privileged kastellan-browser-driver-rootfs:latest bash -c '
+  umount /dev/shm && rmdir /dev/shm      # genuinely absent, not merely small
+  headless_shell --no-sandbox [--disable-dev-shm-usage] --dump-dom about:blank'
+```
+
+Result:
 
 | Arm | Flag | Result |
 |---|---|---|
@@ -395,17 +408,33 @@ absent:
 Arm A is the production configuration. Arm B confirms the experiment was real
 (absence genuinely breaks an unprotected Chromium) rather than a false negative.
 
-**Why option D over option A.** The spec's mechanical selection rule reads
-"devtmpfs auto-mounts, `/dev/shm` absent → option A", but that rule was written
-before Fact 2 was measurable. Its underlying question — *does the flag remove the
-need?* — is answered yes. Mounting `/dev/shm` in `microvm-init` would change
-every one of the 7 existing VM workers to satisfy a need that does not exist.
-That is precisely the speculative change §4.3 was written to avoid.
+**Why option D over option A.** §4.3's own option table already conditions D on
+exactly these two facts ("devtmpfs auto-mounts *and* `--disable-dev-shm-usage`
+suffices"), so D is not a deviation from this spec at all. What literally pointed
+to A was the **implementation plan's** Task 1 Step 5 "selection rule, applied
+mechanically", which collapsed §4.3's second question into a cruder proxy — *is
+`/dev/shm` present after boot?* — because the plan's chosen diagnostic vehicle
+(`web-fetch.ext4`) has no browser and so could not test sufficiency at all. The
+plan's operationalization fell short of this spec's criterion; measuring the real
+criterion resolves to D. Mounting `/dev/shm` in `microvm-init` would change every
+one of the 7 existing VM workers to satisfy a need that does not exist — precisely
+the speculative change §4.3 was written to avoid.
 
 **Accepted coupling, and how it is guarded.** Option D makes the micro-VM rootfs
 depend on `--disable-dev-shm-usage` staying in `DEFAULT_LAUNCH_ARGS`. Deleting it
-would break the VM worker with Arm B's FATAL. Rather than pre-empt that with a
-speculative mount, the dependency is documented at the site where someone would
-delete the flag (`render.py`), naming the consequence. If a future slice needs
-`/dev/shm` for a real reason, option A is still available and this finding
-records exactly what it would buy.
+would break the VM worker with Arm B's FATAL. Two guards, deliberately outside
+the plan's declared file list for this task (a scoped, disclosed exception —
+both are guard-only and change no runtime behaviour):
+
+1. **A test pin** — `tests/test_launch_args.py::test_disable_dev_shm_usage_is_pinned`.
+   This was necessary because the two pre-existing tests in that file compare
+   `build_launch_args()` output *against* `DEFAULT_LAUNCH_ARGS` and so stay green
+   if the flag is deleted from that list. The new test asserts on the flag
+   itself, in both the default and force-routed arg sets.
+2. **A comment at the deletion site** — `render.py`, beneath `DEFAULT_LAUNCH_ARGS`,
+   naming the exact failure and pointing here.
+
+A comment alone was the first attempt and was insufficient: it left the property
+resting entirely on a future editor reading prose before deleting a list entry.
+If a future slice needs `/dev/shm` for a real reason, option A remains available
+and this finding records exactly what it would buy.
