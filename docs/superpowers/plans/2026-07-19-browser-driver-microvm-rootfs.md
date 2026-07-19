@@ -291,10 +291,16 @@ RUN "$KASTELLAN_BD_ROOT/venv/bin/pip" install --no-cache-dir --no-deps \
 #    (MICROVM_WORKER_BIN, slice 2). Must NOT sit under a share anchor
 #    (/opt /data /srv /mnt /work /tmp) — apply_host_mounts tmpfs-mounts those
 #    and would shadow it.
-RUN ln -sf "$KASTELLAN_BD_ROOT/venv/bin/kastellan-worker-browser-driver" \
-           /usr/local/bin/kastellan-worker-browser-driver \
- && /usr/local/bin/kastellan-worker-browser-driver --help > /dev/null 2>&1 \
-    || echo "note: worker has no --help; symlink presence verified by build script"
+RUN set -eux; \
+    ln -sf "$KASTELLAN_BD_ROOT/venv/bin/kastellan-worker-browser-driver" \
+           /usr/local/bin/kastellan-worker-browser-driver; \
+    # Fail the build if the symlink dangles or is not executable. The worker
+    # reads JSON-RPC from stdin and has no --help, so do NOT try to run it
+    # here — a `|| true`-style probe would silently pass on a broken link.
+    test -x /usr/local/bin/kastellan-worker-browser-driver; \
+    # Prove the interpreter behind the console script can import the package.
+    "$KASTELLAN_BD_ROOT/venv/bin/python" -c \
+      "import kastellan_worker_browser_driver.__main__ as m; assert callable(m.main)"
 ```
 
 - [ ] **Step 2: Build the image on the DGX and confirm the smoke passed**
