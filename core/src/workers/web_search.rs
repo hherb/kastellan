@@ -439,9 +439,7 @@ impl WorkerManifest for WebSearchManifest {
                     return Resolution::Misconfigured { detail };
                 }
                 let binary = PathBuf::from(MICROVM_WORKER_BIN);
-                let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
-                    .filter(|v| !v.trim().is_empty())
-                    .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
+                let image_dir = ctx.microvm_image_dir();
                 // VM × broker: the broker runs host-side and the VM worker reaches
                 // it over the vsock UDS (port 1026), so a loopback SearxNG works in
                 // VM mode.

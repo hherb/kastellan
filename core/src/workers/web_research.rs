@@ -696,9 +696,7 @@ impl WorkerManifest for WebResearchManifest {
         #[cfg(target_os = "linux")]
         if use_microvm {
             let binary = PathBuf::from(MICROVM_WORKER_BIN);
-            let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
+            let image_dir = ctx.microvm_image_dir();
             // VM × search-broker: the search-broker runs host-side and the VM
             // worker reaches it over the vsock UDS (port 1026), so a loopback/name
             // SearxNG works in VM mode with zero direct search egress. (XOR with the

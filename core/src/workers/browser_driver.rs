@@ -55,6 +55,13 @@ const MICROVM_ROOTFS: &str = "browser-driver.ext4";
 /// Playwright browser tree inside the rootfs (`ENV PLAYWRIGHT_BROWSERS_PATH` in
 /// `Dockerfile.browser-driver`). Differs from host mode, where the tree lives
 /// under the host venv — in the guest there is no host venv to anchor against.
+///
+/// **Must match the Dockerfile's `ENV` byte for byte.** `docker export` ships
+/// only the filesystem — image env metadata is dropped — so the Dockerfile's
+/// value positions the browsers at build time and THIS const is the sole
+/// runtime source. A divergence fails loudly (Playwright: "executable doesn't
+/// exist"), unlike the [`MICROVM_WORKER_BIN`] hang, and the live e2e tier
+/// launches Chromium through this value for real.
 #[cfg(target_os = "linux")]
 const MICROVM_BROWSERS_PATH: &str = "/usr/local/lib/kastellan-browser-driver/browsers";
 
@@ -508,12 +515,9 @@ impl WorkerManifest for BrowserDriverManifest {
         #[cfg(target_os = "linux")]
         {
             if ctx.flag_enabled(ENABLE_ENV) && ctx.flag_enabled(USE_MICROVM_ENV) {
-                let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
-                    .filter(|v| !v.trim().is_empty())
-                    .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
                 return Resolution::Register(browser_driver_firecracker_entry(
                     PathBuf::from(MICROVM_WORKER_BIN),
-                    image_dir,
+                    ctx.microvm_image_dir(),
                     &(ctx.allowlist)(TOOL_NAME),
                 ));
             }

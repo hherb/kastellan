@@ -139,6 +139,17 @@ impl ResolveCtx<'_> {
     pub(crate) fn flag_enabled(&self, key: &str) -> bool {
         crate::worker_lifecycle::force_route::env_flag_enabled((self.get_env)(key))
     }
+
+    /// Directory holding the micro-VM images: `KASTELLAN_MICROVM_DIR`, falling
+    /// back to the shared default when unset or blank. The one copy of that
+    /// default — every VM-capable manifest resolves through here, so the path
+    /// cannot drift between workers.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn microvm_image_dir(&self) -> String {
+        (self.get_env)("KASTELLAN_MICROVM_DIR")
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
+    }
 }
 
 /// Locate a worker binary. Precedence:

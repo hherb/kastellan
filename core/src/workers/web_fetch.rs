@@ -207,11 +207,10 @@ impl WorkerManifest for WebFetchManifest {
             let use_microvm = ctx.flag_enabled(USE_MICROVM_ENV);
             if use_microvm {
                 let binary = PathBuf::from(MICROVM_WORKER_BIN);
-                let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
-                    .filter(|v| !v.trim().is_empty())
-                    .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
                 return Resolution::Register(web_fetch_firecracker_entry(
-                    binary, image_dir, &allowlist,
+                    binary,
+                    ctx.microvm_image_dir(),
+                    &allowlist,
                 ));
             }
         }

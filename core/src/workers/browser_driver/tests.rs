@@ -526,6 +526,16 @@ use super::*;
         // Chromium plus the /tmp tmpfs that --disable-dev-shm-usage redirects
         // shared memory into (spec §6/§10.4) — hence 2048, not host mode's 1024.
         assert_eq!(entry.policy.mem_mb, 2048);
+        // Timing budgets. The live DGX tier dispatches with the entry's own
+        // wall_clock_ms, but it is `#[ignore]`d — this pin is the only check
+        // that runs everywhere, so an accidental tightening (90_000 → 9_000
+        // would still boot-and-fail plausibly) cannot land silently.
+        assert_eq!(
+            entry.wall_clock_ms,
+            Some(90_000),
+            "cold VM boot + Playwright Node driver + Chromium cold start"
+        );
+        assert_eq!(entry.policy.cpu_ms, 30_000, "same CPU budget as host mode");
 
         // Same dual-allowlist shape as host mode: port-scoped for the proxy
         // (a bare host would be an all-port grant), verbatim for the worker.
