@@ -256,7 +256,15 @@ driver" (already documented at `browser_driver.rs:246-276`).
 
 ## 7. Testing
 
-### 7.1 Hermetic pin — always runs, Mac and Linux
+### 7.1 Hermetic pin — always runs on Linux (compiled out on macOS)
+
+> **Corrected during implementation.** This section originally said "always
+> runs, Mac and Linux". That is wrong: `kastellan_sandbox::linux_firecracker` is
+> `#[cfg(target_os = "linux")]` (`sandbox/src/lib.rs:11-16`), so the whole test
+> file is compiled out on macOS. It needs no KVM and no rootfs image, so it runs
+> on any Linux checkout — but the DGX
+> `clippy -p kastellan-core --all-targets -D warnings` gate is the authoritative
+> check for it. That gate duly caught an MSRV violation the Mac could not see.
 
 Feed a hand-built browser-driver VM `SandboxPolicy` through the **real**
 `build_launch_plan` and assert:
@@ -438,3 +446,50 @@ A comment alone was the first attempt and was insufficient: it left the property
 resting entirely on a future editor reading prose before deleting a list entry.
 If a future slice needs `/dev/shm` for a real reason, option A remains available
 and this finding records exactly what it would buy.
+
+### 10.2 Acceptance criterion changed during implementation (2026-07-19)
+
+§7.2 specified a two-part acceptance: (a) a direct headless-shell smoke *inside
+the guest*, and (b) a `browser.render` whose error message was pattern-matched
+to separate a navigation failure from a launch failure. **Both parts were
+superseded by something stronger, and the reasons are worth recording.**
+
+**(a) moved to Docker build time.** The guest `execv`s exactly one program
+(`kastellan.worker=`), so running a second binary inside it would have required
+un-nulling the guest console and parsing it — plumbing, for no extra signal. The
+same property is now asserted as a `RUN` step in `Dockerfile.browser-driver`
+(`headless_shell --dump-dom about:blank`), where an incomplete dlopen closure
+**fails the image build** with a non-zero exit. That is strictly more
+deterministic than a string match, and it fails at the moment one is already
+iterating on the image.
+
+**(b) replaced by the CONNECT assertion.** Mirroring
+`web_fetch_firecracker_egress_e2e.rs`, a host `UnixListener` stub stands in for
+the egress proxy and the test asserts it **receives the in-VM Chromium's
+`CONNECT example.org:443` line**. This is better than the planned message
+discrimination on every axis:
+
+* it is a byte sequence, not a string match, so it cannot rot across Playwright
+  versions — which was §7.2's own stated fallback worry;
+* **a browser that fails to launch emits no CONNECT at all**, making this
+  positive proof of launch rather than an inference from an error's wording;
+* one assertion covers the entire chain — VM boot, PID1 `execv` of the
+  in-rootfs entrypoint, the worker serving JSON-RPC over the vsock stdio bridge,
+  `ProxyShim` start, Chromium launch, the `--proxy-server` /
+  `--proxy-bypass-list=<-loopback>` wiring, and the guest→host vsock egress
+  relay on port 1025.
+
+The render itself still fails (the stub answers 503 and closes) — the render
+result was never the signal, exactly as §7.2 anticipated.
+
+### 10.3 Sizing estimate was wrong (2026-07-19)
+
+§4.2.1 predicted 768–1024 MiB. The measured staging tree is **1007 MB**, and the
+committed `ROOTFS_MIB` is **1280**. The component table undercounted two items:
+the `chromium_headless_shell` bundle is ~333 MB (estimated 100 MB) and the
+`--with-deps` apt closure is larger than assumed. The full `chromium` bundle
+would have added a further ~620 MB, which is why the Dockerfile installs only
+`chromium-headless-shell`. Disk is not a constraint (1.6 TB free on the DGX);
+the estimate was wrong, not the artifact. The build script now prints the
+staging size every run and fails closed if it would not fit, so this cannot
+drift silently.
