@@ -19,9 +19,9 @@ path = "src/main.rs"
 live-matrix = ["dep:matrix-sdk"]
 
 [dependencies]
-kastellan-protocol       = { path = "../../protocol" }
-kastellan-worker-prelude = { path = "../prelude" }
-kastellan-matrix-wire    = { path = "../matrix-wire" }
+kastellan-protocol       = { path = "../../protocol", version = "0.2.0" }
+kastellan-worker-prelude = { path = "../prelude", version = "0.2.0" }
+kastellan-matrix-wire    = { path = "../matrix-wire", version = "0.2.0" }
 serde                    = { workspace = true }
 serde_json               = { workspace = true }
 anyhow                   = { workspace = true }
