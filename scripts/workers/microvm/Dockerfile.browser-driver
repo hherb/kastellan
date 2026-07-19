@@ -20,7 +20,17 @@
 # Layer ordering is deliberate: apt, the venv, and the ~100 MB Chromium
 # download all sit ABOVE the worker-source COPY, so editing worker code
 # rebuilds only the final layers. Slices 2 and 3 iterate on this image.
-FROM ubuntu:24.04
+# Pinned by DIGEST, not by the `24.04` tag: this image's contents end up inside
+# a containment boundary, and a floating tag means two operators building "the
+# same" rootfs a month apart get materially different userlands with nothing to
+# diff against. The digest is a multi-arch manifest list, so it resolves on both
+# x86_64 and aarch64. Bump deliberately, not incidentally.
+#
+# NOTE what this does NOT pin — see the rootfs design spec §8 for the accepted
+# risk: the `--with-deps` apt closure (~125 packages, resolved at build time),
+# the Chromium build fetched from the Playwright CDN, and the guest kernel
+# (curl'd without a checksum by the build script, matching the sibling scripts).
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV KASTELLAN_BD_ROOT=/usr/local/lib/kastellan-browser-driver

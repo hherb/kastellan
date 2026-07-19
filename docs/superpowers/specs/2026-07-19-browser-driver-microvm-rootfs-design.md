@@ -339,6 +339,7 @@ non-interactive SSH PATH (without it the test silently SKIP-as-passes).
 | Cmdline 1920-byte budget with a long allowlist | Hermetic pin asserts the budget; bail-out is a shorter browsers path. |
 | Chromium `dlopen` closure still incomplete after `--with-deps` | The spike's whole purpose. Failure is loud and local to the rootfs. |
 | Docker as a new build-time dep | Build-time only; already present and sudo-free on the DGX. Runtime unchanged. |
+| **Supply chain: only part of the image is pinned** | The base image is pinned by **digest** and all three pip deps by exact version. NOT pinned, and accepted: the `--with-deps` apt closure (~125 packages, resolved at build time), the Chromium build fetched from the Playwright CDN, and the guest kernel (curl'd without a checksum — the same posture as every sibling script). These land inside the containment boundary, so a compromised or merely changed upstream is not detectable by diffing a digest. Mitigating factors: the rootfs is read-only at runtime, the VM has no NIC, and reach is bounded by the one tool's allowlist. Revisit if a reproducible-rootfs requirement appears. |
 | Guest kernel may not auto-mount devtmpfs | Plan task 1 verifies and selects among options A–D (§4.3) before any init change is written. |
 
 `--no-sandbox` in `DEFAULT_LAUNCH_ARGS` stops being a compromise here: inside a
@@ -349,7 +350,8 @@ micro-VM the VM is the security boundary.
 ## 9. Definition of done
 
 1. `build-browser-driver-rootfs.sh` produces a `browser-driver.ext4` on the DGX.
-2. The hermetic launch-plan pin is green on Mac and Linux.
+2. The hermetic launch-plan pin is green on Linux (it is compiled out on
+   macOS — see §7.1).
 3. The DGX `#[ignore]` spike test boots the VM, the worker answers JSON-RPC over
    vsock, and Chromium launches.
 4. Workspace tests and clippy are green at the stated baseline.
@@ -493,3 +495,41 @@ would have added a further ~620 MB, which is why the Dockerfile installs only
 the estimate was wrong, not the artifact. The build script now prints the
 staging size every run and fails closed if it would not fit, so this cannot
 drift silently.
+
+### 10.4 Carried forward to slices 2 and 3 (from the final whole-branch review)
+
+Recorded here so they are not assumed retired by slice 1's green gate.
+
+**For slice 2 — the in-rootfs path is not mechanically bound.** The path
+`/usr/local/bin/kastellan-worker-browser-driver` exists as three unlinked
+copies: the Dockerfile's symlink, and two in
+`core/tests/browser_driver_firecracker_e2e.rs` (the `IN_ROOTFS_WORKER` const and
+the hardcoded literal the shape assertion compares against). The hermetic pin
+catches a change to the test constant, but it does **not** bind slice 2's future
+`MICROVM_WORKER_BIN` to the baked symlink — a slice-2 author who types a
+different path gets a green pin and a boot loop. The sibling workers have the
+same shape (`web_fetch.rs:50` vs `build-web-fetch-rootfs.sh`), so this is
+house-consistent rather than novel, but it is an instruction, not a mechanism.
+
+**For slice 3 — option D is proven for launch, not for a real render.** The §10.1
+two-arm experiment used `about:blank`, and slice 1's live tier is answered by a
+503 stub, so **no real page has ever rendered inside the VM**. Two consequences:
+
+1. `--disable-dev-shm-usage` redirects Chromium's shared memory into
+   `TMPDIR=/tmp`, which in-guest is a tmpfs drawn from the same 2048 MB budget as
+   everything else rather than a separate `/dev/shm`. A heavy real page's shm
+   allocations therefore compete with guest RAM and could OOM the VM with the
+   `test_disable_dev_shm_usage_is_pinned` guard green throughout. Slice 3 should
+   render something substantial and re-check the memory budget.
+2. The pin guards `DEFAULT_LAUNCH_ARGS` and `build_launch_args`, but
+   `PlaywrightRenderer.__init__` still accepts an arbitrary `launch_args`
+   override (`render.py:161-165`). Production does not use it — `__main__.py`
+   builds args via `build_launch_args(port)` — but a future caller could route
+   around the guard.
+
+**Also noted, not actioned:** the VM rootfs ships a full Ubuntu userland, so a
+compromised Chromium finds `bash`, `coreutils`, `python3`, `apt` and `dpkg`
+in-guest, which the from-scratch sibling images do not offer. The
+worst-case-compromise *reach* is unchanged (read-only rootfs so apt/dpkg cannot
+install, no NIC, no host FS, one tool's allowlist through the proxy), but
+stripping those binaries would be a cheap defence-in-depth follow-up.

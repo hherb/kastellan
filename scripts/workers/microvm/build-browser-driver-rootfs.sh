@@ -153,6 +153,36 @@ mkdir -p "$WORK/proc" "$WORK/sys" "$WORK/tmp" "$WORK/dev" \
          "$WORK/ro-share" "$WORK/opt" "$WORK/data" "$WORK/srv" "$WORK/mnt" "$WORK/work"
 mkdir -p "$WORK/run"
 
+# Post-strip integrity check.
+#
+# The Dockerfile's headless_shell smoke proves the dlopen closure inside the
+# IMAGE, but the strip pass above runs afterwards on the exported tree — so the
+# smoke does not cover what actually ships. Without this check, adding a path to
+# that `rm -rf` to shave MB would still build green and surface only as an
+# opaque RENDER_FAILED at VM boot, which is exactly the failure class this slice
+# exists to retire.
+#
+# These are the runtime-dlopen'd inputs `ldd` cannot see, which is why they must
+# be asserted by name rather than inferred.
+for required in \
+    "etc/fonts" \
+    "usr/share/fonts" \
+    "usr/lib/$(uname -m)-linux-gnu/libnss3.so" \
+    "usr/local/lib/kastellan-browser-driver/browsers"
+do
+    if [ ! -e "$WORK/$required" ]; then
+        echo "strip pass removed a Chromium runtime dependency: /$required" >&2
+        echo "Chromium dlopen's fontconfig/fonts/NSS at runtime; ldd cannot see them," >&2
+        echo "so removing them builds green and fails only at VM boot." >&2
+        exit 1
+    fi
+done
+if ! find "$WORK/usr/local/lib/kastellan-browser-driver/browsers" \
+        -name headless_shell -type f | grep -q .; then
+    echo "strip pass removed the headless_shell binary" >&2
+    exit 1
+fi
+
 STAGE_MIB=$(du -sm "$WORK" | cut -f1)
 echo "staging size: ${STAGE_MIB} MB (image will be ${ROOTFS_MIB}M)"
 if [ "$STAGE_MIB" -ge "$ROOTFS_MIB" ]; then
