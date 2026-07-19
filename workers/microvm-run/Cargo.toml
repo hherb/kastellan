@@ -1,6 +1,7 @@
 [package]
 name        = "kastellan-microvm-run"
 description = "Firecracker micro-VM launcher: boots a VM and bridges the worker JSON-RPC channel over hybrid vsock."
+publish     = false # deployment builds this from git; internal launcher, not a crates.io artifact
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

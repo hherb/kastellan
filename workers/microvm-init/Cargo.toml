@@ -1,6 +1,7 @@
 [package]
 name        = "kastellan-microvm-init"
 description = "PID1 inside the Firecracker guest: mounts pseudo-FS, opens AF_VSOCK, wires it onto the worker's stdio, and execs the worker."
+publish     = false # guest-internal binary baked into rootfs images, not a crates.io artifact
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

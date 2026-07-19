@@ -1,6 +1,7 @@
 [package]
 name        = "kastellan-worker-net-demo"
 description = "Demo long-lived Net::Allowlist worker: does its own end-to-end TLS through a transparent-tunnel egress sidecar. Exercises network egress in a persistent VM (slice 5c)."
+publish     = false # demo worker — test/reference only, not a crates.io artifact
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

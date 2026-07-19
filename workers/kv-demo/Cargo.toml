@@ -1,6 +1,7 @@
 [package]
 name        = "kastellan-worker-kv-demo"
 description = "Demo long-lived Net::Deny worker: a tiny persistent key/value store over JSON-RPC. Exercises the persistent-VM lifecycle (slice 5b)."
+publish     = false # demo worker — test/reference only, not a crates.io artifact
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
