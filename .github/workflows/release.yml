@@ -17,9 +17,15 @@
 # Trigger: pushing a version tag (`v0.2.0`), matching the convention
 # started with v0.1.0. The guard step refuses to publish if the tag
 # doesn't equal the workspace version, so a mistagged release dies
-# before anything is uploaded. `workflow_dispatch` is for re-runs after
-# a partial failure (e.g. rate limit): `cargo publish --workspace`
-# skips already-published versions, so re-running is safe.
+# before anything is uploaded. NB re-running after a PARTIAL publish
+# does NOT work: `cargo publish --workspace` hard-errors with
+# "crate X@V already exists on crates.io index" on any already-published
+# member instead of skipping it (observed finishing v0.2.0, 2026-07-20).
+# Recovery from a partial state is per-crate `cargo publish -p <crate>`
+# for the missing ones; `workflow_dispatch` only helps when NOTHING of
+# the version has been uploaded yet. Also: Trusted Publishing cannot
+# CREATE crates — a brand-new crate name needs a one-time manual first
+# publish with a real token, then per-crate TP config in the UI.
 #
 # `cargo publish --workspace` (stable since 1.90) resolves the publish
 # order from the dependency graph (protocol/supervisor/sandbox/… before
