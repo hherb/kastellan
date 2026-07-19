@@ -339,7 +339,7 @@ non-interactive SSH PATH (without it the test silently SKIP-as-passes).
 | Cmdline 1920-byte budget with a long allowlist | Hermetic pin asserts the budget; bail-out is a shorter browsers path. |
 | Chromium `dlopen` closure still incomplete after `--with-deps` | The spike's whole purpose. Failure is loud and local to the rootfs. |
 | Docker as a new build-time dep | Build-time only; already present and sudo-free on the DGX. Runtime unchanged. |
-| **Supply chain: only part of the image is pinned** | The base image is pinned by **digest** and all three pip deps by exact version. NOT pinned, and accepted: the `--with-deps` apt closure (~125 packages, resolved at build time), the Chromium build fetched from the Playwright CDN, and the guest kernel (curl'd without a checksum — the same posture as every sibling script). These land inside the containment boundary, so a compromised or merely changed upstream is not detectable by diffing a digest. Mitigating factors: the rootfs is read-only at runtime, the VM has no NIC, and reach is bounded by the one tool's allowlist. Revisit if a reproducible-rootfs requirement appears. |
+| **Supply chain: only part of the image is pinned** | The base image is pinned by **digest** and all three pip deps by exact version. NOT pinned, and accepted: the `--with-deps` apt closure (~125 packages, resolved at build time), the Chromium build fetched from the Playwright CDN, and the guest kernel (curl'd without a checksum — the same posture as every sibling script; closing this across all `build-*-rootfs.sh` in one pass is [#471](https://github.com/hherb/kastellan/issues/471)). These land inside the containment boundary, so a compromised or merely changed upstream is not detectable by diffing a digest. Mitigating factors: the rootfs is read-only at runtime, the VM has no NIC, and reach is bounded by the one tool's allowlist. Revisit if a reproducible-rootfs requirement appears. |
 | Guest kernel may not auto-mount devtmpfs | Plan task 1 verifies and selects among options A–D (§4.3) before any init change is written. |
 
 `--no-sandbox` in `DEFAULT_LAUNCH_ARGS` stops being a compromise here: inside a
@@ -526,6 +526,14 @@ two-arm experiment used `about:blank`, and slice 1's live tier is answered by a
    override (`render.py:161-165`). Production does not use it — `__main__.py`
    builds args via `build_launch_args(port)` — but a future caller could route
    around the guard.
+
+**Host/VM Playwright skew is possible over time.** The Dockerfile pins
+`playwright==1.60.0` (plus lxml + readability-lxml) while
+`workers/browser-driver/pyproject.toml` floats `>=` ranges for the host install
+path, so a host venv restaged later can run a newer Playwright than the image
+ships. Behaviour then differs silently between host mode and VM mode (launch
+handshake, headless-shell resolution). When bumping a pyproject minimum, bump
+the Dockerfile pins in the same change and rebuild the rootfs.
 
 **Also noted, not actioned:** the VM rootfs ships a full Ubuntu userland, so a
 compromised Chromium finds `bash`, `coreutils`, `python3`, `apt` and `dpkg`

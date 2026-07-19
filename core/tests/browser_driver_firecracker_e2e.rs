@@ -55,6 +55,9 @@ fn image_dir() -> String {
 /// byte for byte.
 const IN_ROOTFS_WORKER: &str = "/usr/local/bin/kastellan-worker-browser-driver";
 
+/// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
+const ROOTFS_FILE: &str = "browser-driver.ext4";
+
 /// Decode the lowercase-hex cmdline tokens `microvm-init` consumes.
 ///
 /// `plan.rs::hex_encode` is `pub(super)`, so a test cannot reach its inverse;
@@ -128,9 +131,6 @@ fn browser_driver_image() -> FirecrackerImage {
         rootfs_path: dir.join(ROOTFS_FILE),
     }
 }
-
-/// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
-const ROOTFS_FILE: &str = "browser-driver.ext4";
 
 fn locate_microvm_run() -> Option<PathBuf> {
     let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -347,19 +347,31 @@ async fn vm_booted_browser_driver_launches_chromium() {
     let uds_path = dir.join("egress.sock");
     let _ = std::fs::remove_file(&uds_path);
 
-    // Stub "proxy": report the first request line back, then 503 and close so
-    // Chromium's navigation fails fast instead of hanging.
+    // Stub "proxy": accept connections until the NAVIGATION CONNECT arrives,
+    // answering every request 503 so Chromium fails fast instead of hanging.
+    // A single accept would be fragile: a future Chromium may open a
+    // speculative or background connection before the navigation CONNECT, and
+    // that connection would consume the only slot, failing the test on browser
+    // drift rather than on a real regression. Non-target request lines are
+    // printed under --nocapture rather than silently swallowed, so if the
+    // recv_timeout below ever fires, what DID arrive is visible.
     let listener = UnixListener::bind(&uds_path).unwrap();
     let (tx, rx) = mpsc::channel::<String>();
     thread::spawn(move || {
-        if let Ok((stream, _)) = listener.accept() {
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let Ok(clone) = stream.try_clone() else {
+                continue;
+            };
             let mut line = String::new();
-            if reader.read_line(&mut line).is_ok() {
-                let _ = tx.send(line.clone());
-            }
+            let _ = BufReader::new(clone).read_line(&mut line);
             let mut w = stream;
             let _ = w.write_all(b"HTTP/1.1 503 stub\r\n\r\n");
+            if line.starts_with("CONNECT example.org:443") {
+                let _ = tx.send(line);
+                return;
+            }
+            eprintln!("[stub-proxy] ignoring non-target request line: {line:?}");
         }
     });
 
@@ -400,9 +412,10 @@ async fn vm_booted_browser_driver_launches_chromium() {
 
     let started = std::time::Instant::now();
     let got = rx.recv_timeout(Duration::from_secs(90)).expect(
-        "stub proxy never received a CONNECT from the in-VM browser: the VM failed to boot, \
-         the worker failed to serve over vsock, the ProxyShim did not start, or CHROMIUM \
-         FAILED TO LAUNCH (an incomplete dlopen/lib closure in the rootfs)",
+        "stub proxy never received the navigation CONNECT from the in-VM browser (any \
+         non-target request lines it DID receive are printed above): the VM failed to \
+         boot, the worker failed to serve over vsock, the ProxyShim did not start, or \
+         CHROMIUM FAILED TO LAUNCH (an incomplete dlopen/lib closure in the rootfs)",
     );
     // Print the evidence, not just a green line. A live VM tier that passes
     // suspiciously fast is exactly the case the project's "when tests pass but
@@ -413,6 +426,8 @@ async fn vm_booted_browser_driver_launches_chromium() {
          Playwright driver + Chromium launch + navigation)",
         started.elapsed()
     );
+    // Belt-and-braces with the accept loop's filter: this can only fail if a
+    // future edit weakens that filter, in which case it fails loudly here.
     assert!(
         got.starts_with("CONNECT example.org:443"),
         "expected CONNECT example.org:443 from the in-VM Chromium, got {got:?}"

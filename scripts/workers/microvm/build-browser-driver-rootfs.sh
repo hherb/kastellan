@@ -185,8 +185,12 @@ fi
 
 STAGE_MIB=$(du -sm "$WORK" | cut -f1)
 echo "staging size: ${STAGE_MIB} MB (image will be ${ROOTFS_MIB}M)"
-if [ "$STAGE_MIB" -ge "$ROOTFS_MIB" ]; then
-    echo "staging (${STAGE_MIB} MB) does not fit in ROOTFS_MIB=${ROOTFS_MIB}; raise it to >= $(( STAGE_MIB * 12 / 10 ))" >&2
+# Require 10% headroom over the tree, not merely "fits": ext4 inode tables and
+# metadata consume image space beyond the file bytes, so a tree only just under
+# ROOTFS_MIB can still fail mkfs (or fill the fs) cryptically. Fail closed here
+# with the same 1.2x re-size advice the ROOTFS_MIB comment gives.
+if [ $(( STAGE_MIB * 11 / 10 )) -ge "$ROOTFS_MIB" ]; then
+    echo "staging (${STAGE_MIB} MB) leaves under 10% ext4-metadata headroom in ROOTFS_MIB=${ROOTFS_MIB}; raise it to >= $(( STAGE_MIB * 12 / 10 ))" >&2
     exit 1
 fi
 
