@@ -11,9 +11,25 @@
 # Docker is a BUILD-TIME tool only — the runtime is pure Firecracker, exactly
 # like every other worker, with no new runtime dependency.
 #
-# No system CA bundle is baked in: browser-driver runs the egress sidecar in
-# no-MITM transparent-tunnel mode (force_route.rs::disable_mitm_for names this
-# worker), because the browser does end-to-end TLS itself.
+# Differences from build-web-fetch-rootfs.sh, beyond the staging source:
+#   * absolute paths via REPO_ROOT rather than assuming CWD == repo root
+#     (cargo is still invoked bare, relying on its upward Cargo.toml search);
+#   * a STAGE_MIB pre-flight fit check before mkfs, which the siblings lack;
+#   * the CA posture noted below.
+# The mkfs tail itself is the same shape as the siblings'.
+#
+# CA posture, stated precisely (this differs from the sibling scripts, which
+# bake NO CA material at all):
+#
+#   * A system CA bundle IS present — the Dockerfile installs `ca-certificates`
+#     because pip and apt need HTTPS at BUILD time, and the strip pass does not
+#     remove /etc/ssl/certs. Do not describe this image as CA-free.
+#   * No per-instance MITM CA is delivered at spawn, unlike web-fetch. This
+#     worker runs the egress sidecar in no-MITM transparent-tunnel mode
+#     (force_route.rs::disable_mitm_for names browser-driver) because the
+#     browser does end-to-end TLS itself and cannot trust our per-instance CA.
+#   * The system bundle is inert for rendering: Chromium validates against its
+#     own compiled-in root store, not /etc/ssl/certs.
 if [ -z "${BASH_VERSION:-}" ]; then
     echo "Run with bash, not sh: ./scripts/workers/microvm/build-browser-driver-rootfs.sh" >&2
     exit 1
@@ -32,8 +48,15 @@ case "${HOST_ARCH}" in
 esac
 KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/${KERNEL_ARCH}/vmlinux-6.1.102"
 # Measured from the docker-export staging tree (1006 MB after the strip pass on
-# aarch64), x1.2 headroom. Re-measure if the Dockerfile's browser set changes —
-# the script prints the staging size on every run so drift is visible.
+# aarch64) plus headroom, rounded up to a power-of-two-ish boundary: 1006 x 1.2
+# = 1207, rounded to 1280. Re-measure if the Dockerfile's browser set changes —
+# the script prints the staging size on every run so drift is visible, and the
+# fit check below fails closed rather than letting mkfs error out cryptically.
+#
+# This exceeds the design spec's original 768-1024 MiB estimate (S4.2.1). That
+# estimate undercounted: the `--with-deps` apt closure and the headless-shell
+# bundle are both larger than assumed. Disk is not a constraint (1.6 TB free on
+# the DGX); the estimate was wrong, not the artifact.
 ROOTFS_MIB=1280
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -102,6 +125,11 @@ if [ ! -e "$entry_link" ] && [ ! -L "$entry_link" ]; then
 fi
 if [ -L "$entry_link" ]; then
     entry_target="$(readlink "$entry_link")"
+    # Single hop only. pip's console-script generator writes a plain executable
+    # file at the target, so one hop is all that exists today. If a future
+    # change made the target itself an absolute symlink, THAT hop would be
+    # resolved by the kernel against the build host's real /, not $WORK, and
+    # this check would silently test the wrong file.
     case "$entry_target" in
         /*) entry_resolved="$WORK$entry_target" ;;
         *)  entry_resolved="$(dirname "$entry_link")/$entry_target" ;;

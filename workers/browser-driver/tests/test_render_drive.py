@@ -205,3 +205,37 @@ def test_render_fails_closed_when_redirect_lands_off_allowlist():
 
     assert not content_reads, "off-allowlist content must not be read"
     assert browser.closed, "browser must still be torn down on the fail-closed path"
+
+
+def test_headless_true_is_pinned_for_the_microvm_rootfs():
+    """The renderer must launch headless — the micro-VM rootfs ships no other browser.
+
+    scripts/workers/microvm/Dockerfile.browser-driver installs ONLY
+    `chromium-headless-shell`, not the full `chromium` bundle, because
+    `pw.chromium.launch(headless=True)` resolves to the headless shell. That
+    saves ~620 MB of never-executed browser in a read-only, security-sensitive
+    rootfs. Switching to `headless=False` (or passing a `channel=` that selects
+    full Chrome) would fail at runtime inside the VM with a missing-executable
+    error, while still passing every host-mode test — the host venv, staged by
+    scripts/workers/browser-driver/install.sh, DOES have the full bundle.
+
+    test_render_drives_goto_and_extracts already asserts the launch kwargs, but
+    incidentally, as part of checking extraction. This test exists so the
+    failure names the rootfs coupling rather than looking like an unrelated
+    assertion to update. Same lesson as test_disable_dev_shm_usage_is_pinned in
+    test_launch_args.py: a comment alone did not hold.
+    """
+    page = FakePage(html="<html><body><p>x</p></body></html>", title="t",
+                    final_url="https://x.test/", status=200)
+    browser = FakeBrowser(page)
+    r = PlaywrightRenderer(
+        allowlist=HostAllowlist.from_endpoints(["x.test"]),
+        playwright_factory=make_factory(browser),
+    )
+
+    r.render(url="https://x.test/", timeout_ms=5000, wait_until="load")
+
+    assert browser.launch_args["headless"] is True, (
+        "headless=False would need the full chromium bundle, which the micro-VM "
+        "rootfs deliberately does not ship"
+    )

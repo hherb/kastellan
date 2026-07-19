@@ -12,7 +12,10 @@
 # which is exactly the job it is maintained to do.
 #
 # Build context is `workers/browser-driver/` (NOT the repo root) so the whole
-# `target/` tree is never sent to the daemon.
+# `target/` tree is never sent to the daemon. That alone is not enough: on a
+# developer machine that directory also holds a git-ignored ~715 MB `.venv/`
+# plus `.pytest_cache/`, and Docker honours `.dockerignore`, not `.gitignore` —
+# see `workers/browser-driver/.dockerignore`, which excludes them.
 #
 # Layer ordering is deliberate: apt, the venv, and the ~100 MB Chromium
 # download all sit ABOVE the worker-source COPY, so editing worker code
@@ -32,11 +35,19 @@ RUN apt-get update \
 
 RUN python3 -m venv "$KASTELLAN_BD_ROOT/venv"
 
-# 2. Third-party deps FIRST, pinned, so the expensive layers cache. These are
-#    the three declared in workers/browser-driver/pyproject.toml; the playwright
-#    pin matches workers/browser-driver/uv.lock.
+# 2. Third-party deps FIRST, exactly pinned, so the expensive layers cache and
+#    the rootfs is reproducible. These are the three declared in
+#    workers/browser-driver/pyproject.toml (which floats them as >= ranges for
+#    the host install path).
+#
+#    Pinned here rather than deferred to a lock file on purpose:
+#    workers/browser-driver/uv.lock is git-IGNORED (.gitignore:43), so it is a
+#    local developer artifact and cannot be this image's source of truth. These
+#    versions were taken from a resolved uv.lock and must be bumped by hand.
+#    Pinning only playwright while letting lxml/readability float would make the
+#    image's contents depend on when it happened to be built.
 RUN "$KASTELLAN_BD_ROOT/venv/bin/pip" install --no-cache-dir \
-      "playwright==1.60.0" "readability-lxml>=0.8" "lxml>=5"
+      "playwright==1.60.0" "readability-lxml==0.8.4.1" "lxml==6.1.1"
 
 # 3. Chromium + its apt dependency closure. The expensive layer; kept above the
 #    source COPY on purpose.

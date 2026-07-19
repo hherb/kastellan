@@ -60,7 +60,10 @@ const IN_ROOTFS_WORKER: &str = "/usr/local/bin/kastellan-worker-browser-driver";
 /// `plan.rs::hex_encode` is `pub(super)`, so a test cannot reach its inverse;
 /// this is the minimal decoder needed to read one token back.
 fn hex_decode(s: &str) -> Vec<u8> {
-    assert!(s.len().is_multiple_of(2), "hex token has odd length: {s}");
+    // `% 2 == 0` rather than `usize::is_multiple_of`: that method is stable only
+    // since 1.87 and this workspace's clippy MSRV is 1.78, so it trips
+    // `clippy::incompatible_msrv` under `-D warnings`.
+    assert!(s.len() % 2 == 0, "hex token has odd length: {s}");
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex byte"))
