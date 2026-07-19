@@ -3,7 +3,13 @@
 **Date:** 2026-07-19
 **Arc:** browser-driver Firecracker micro-VM entry (slice 1 = rootfs, PR #470;
 slice 2 = the VM entry, PR #472; **this is slice 3, the last**)
-**Status:** design
+**Status:** implemented (PR #474)
+
+**Execution note:** implemented inline (controller-implements) rather than via a
+separate plan document — the slice is two tests in one existing file with no
+production-code change, so a task-decomposed plan would have added ceremony
+without adding safety. Prior slices in this arc each had a matching
+`docs/superpowers/plans/…` file; this one deliberately does not.
 
 ---
 
@@ -206,4 +212,49 @@ no-technical-debt rule.
 
 ## 8. Revisions
 
-*(Recorded during implementation.)*
+### 8.1 The measurements (2026-07-19, DGX, real KVM + live PG + real sidecar)
+
+Both slice-2 budgets are now **measured and confirmed**, with wide margins.
+
+| Tier | Origin | Text | Elapsed | Peak VMM RSS |
+|---|---|---|---|---|
+| acceptance | `example.org` | 125 B | **1.61 s** = 1.8% of the 90 s budget | not sampled |
+| measurement | Wikipedia "Rust (programming language)" | 38 408 B | 3.50 s | **628 MiB** = 30.7% of the 2048 MiB budget |
+
+Both sidecar decisions came back `egress.allowed … "tls_intercepted":false`,
+confirming the transparent tunnel: Chromium validated each origin's real
+certificate itself.
+
+**Neither budget is changed.** `mem_mb: 2048` carries ~69% headroom on a page far
+heavier than anything slice 2 reasoned about, and `wall_clock_ms: 90_000` is
+enormously generous — a *complete* cold-boot-to-rendered-page cycle is under two
+seconds. Trimming the wall clock toward the observed figure was considered and
+rejected: the budget must cover a cold host page cache, a slower origin, and a
+much heavier page than either sampled here, and the cost of it being too generous
+is only a slower failure, whereas too tight is a spurious dispatch abort.
+
+### 8.2 Two corrections found by running it
+
+1. **The egress action is `egress.allowed`, not `allowed`.** `decision_to_audit`
+   namespaces every verdict under `egress.` (siblings
+   `egress.blocked.credential_leak`, `egress.blocked.tls_pin`). The first live
+   run rendered the page successfully and then failed on this assertion — a good
+   failure: the render evidence was already printed, so the cause was immediate.
+2. **A transparent-tunnel assertion was added** (`tls_intercepted == false`).
+   The design leaned on `disable_mitm_for` naming this worker but never observed
+   it; now a change that starts MITM-ing browser traffic fails here with a
+   message naming the cause, instead of surfacing as an opaque certificate error.
+
+### 8.3 Negative-case verification
+
+Following the arc's standing discipline (slice 1's tautological pin, slice 2's
+repointed const), the memory assertion was verified to be **live rather than
+vacuous**: with the threshold tightened from 85% to 20%, the test **failed
+loudly** with the intended message and the same reproducible 628 MiB reading,
+then passed again on restore. The reading was identical across three separate
+runs, so the sampler is measuring a real, stable quantity.
+
+### 8.4 Debt lodged
+
+§7's hollow `real_web_fetch_through_sidecar` scaffold is filed as
+[#473](https://github.com/hherb/kastellan/issues/473).
