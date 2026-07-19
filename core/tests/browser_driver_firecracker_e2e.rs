@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
-//! browser-driver × Firecracker micro-VM — slices 1 (the rootfs) and 2 (the
-//! VM entry).
+//! browser-driver × Firecracker micro-VM — slices 1 (the rootfs), 2 (the VM
+//! entry) and 3 (a live render through a real egress sidecar).
 //!
 //! Both tiers now drive the PRODUCTION entry via `BrowserDriverManifest::resolve`
 //! under `ENABLE=1` + `USE_MICROVM=1` (see [`browser_driver_vm_entry`]). Slice 1
@@ -21,9 +21,21 @@
 //!   budget, because env is hex-encoded and therefore costs two cmdline bytes
 //!   per env byte.
 //!
-//! * `vm_booted_browser_driver_launches_chromium` — the live DGX tier
+//! * `vm_booted_browser_driver_launches_chromium` — the slice-2 live DGX tier
 //!   (`#[ignore]`): boots `browser-driver.ext4` and proves Chromium starts
-//!   inside the guest.
+//!   inside the guest. Its stub proxy 503s, so the render deliberately fails and
+//!   the received `CONNECT` line is the signal.
+//!
+//! * `vm_renders_real_page_through_real_sidecar` — **slice 3's acceptance tier**
+//!   (`#[ignore]`, DGX + outbound HTTPS): the first real page ever rendered
+//!   inside the VM, through a real egress-proxy sidecar driven by the production
+//!   `SingleUseLifecycle::with_force_routing` manager. Asserts real returned
+//!   text, an `allowed` sidecar decision, and wall-clock headroom.
+//!
+//! * `vm_render_of_heavy_page_stays_within_memory_budget` — slice 3's
+//!   measurement tier (`#[ignore]`): renders a heavy page and samples the
+//!   Firecracker VMM's peak RSS, turning `mem_mb: 2048` from a reasoned value
+//!   into a measured one.
 //!
 //! Note `kastellan_sandbox::linux_firecracker` is `#[cfg(target_os = "linux")]`
 //! (`sandbox/src/lib.rs:11-16`), so this whole file is compiled out on macOS.
@@ -38,16 +50,20 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use kastellan_core::broker::BrokerConfigs;
+use kastellan_core::egress::audit::EgressAuditRow;
 use kastellan_core::scheduler::ToolEntry;
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::worker_lifecycle::force_route::{DecisionSinkFactory, ForceRoutingConfig};
+use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManager};
 use kastellan_core::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
 use kastellan_core::workers::browser_driver::BrowserDriverManifest;
 use kastellan_sandbox::linux_firecracker::{build_launch_plan, FirecrackerImage, LinuxFirecracker};
 use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxPolicy};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
-    unique_suffix,
+    unique_suffix, workspace_target_binary,
 };
 
 fn image_dir() -> String {
@@ -59,6 +75,36 @@ fn image_dir() -> String {
 
 /// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
 const ROOTFS_FILE: &str = "browser-driver.ext4";
+
+/// The acceptance origin for the slice-3 live render (§3/§4.2 of the design
+/// spec). It must be a **real public HTTPS host**: browser-driver's sidecar runs
+/// in no-MITM transparent-tunnel mode, so Chromium does end-to-end TLS and has
+/// to trust the origin's certificate on its own root store. A hermetic
+/// self-signed loopback origin would need a CA in Chromium's NSS store — the
+/// deferred MITM-of-browser work — which is why no real render through a real
+/// sidecar had ever completed before this slice, in VM *or* host mode.
+///
+/// `example.org` specifically: a tiny page whose `Example Domain` heading has
+/// been invariant for years, so the acceptance gate does not flake on content
+/// drift.
+const DEFAULT_ORIGIN_HOST: &str = "example.org";
+const DEFAULT_ORIGIN_URL: &str = "https://example.org/";
+/// Stable needle in `example.org`'s rendered text.
+const DEFAULT_ORIGIN_NEEDLE: &str = "Example Domain";
+
+/// A deliberately heavy real page for the memory measurement: a large DOM,
+/// unlike [`DEFAULT_ORIGIN_URL`], which is far too small to exercise the
+/// `/tmp`-tmpfs-versus-guest-RAM question at all.
+///
+/// Only this host is allowlisted, so **cross-host subresources — notably the
+/// article's images on `upload.wikimedia.org` — are egress-blocked** and the
+/// render is DOM + same-origin CSS/JS only. That makes the measured peak a
+/// *floor*: a page whose image assets were all in-allowlist would decode them
+/// into exactly the shm-in-tmpfs memory this tier measures. Deliberate anyway —
+/// this tier was split off to isolate content-drift risk, and widening the
+/// allowlist would couple the reading to Wikipedia's image weight too.
+const HEAVY_ORIGIN_HOST: &str = "en.wikipedia.org";
+const HEAVY_ORIGIN_URL: &str = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
 
 /// The production micro-VM entry under test, resolved exactly as the daemon
 /// resolves it: through `BrowserDriverManifest::resolve` with `ENABLE=1` and
@@ -78,6 +124,17 @@ const ROOTFS_FILE: &str = "browser-driver.ext4";
 /// **no** host venv, interpreter or lockdown-exec shim on disk. Host mode would
 /// return `Misconfigured` under the same probes.
 fn browser_driver_vm_entry() -> ToolEntry {
+    browser_driver_vm_entry_for(&[DEFAULT_ORIGIN_HOST.to_string()])
+}
+
+/// As [`browser_driver_vm_entry`], but with an explicit content allowlist.
+///
+/// Slice 3 renders against two different origins (a stable tiny page and a heavy
+/// one), so the host list can no longer be a constant. The rows are handed to
+/// the manifest exactly as `tool_allowlists` would supply them — bare hosts,
+/// which `allowlist_to_net_entries` maps to `{host}:443` (#469: a bare host
+/// reaching the proxy unmapped is an all-port grant).
+fn browser_driver_vm_entry_for(hosts: &[String]) -> ToolEntry {
     let dir = image_dir();
     let get_env = move |k: &str| match k {
         "KASTELLAN_BROWSER_DRIVER_ENABLE" | "KASTELLAN_BROWSER_DRIVER_USE_MICROVM" => {
@@ -87,7 +144,8 @@ fn browser_driver_vm_entry() -> ToolEntry {
         _ => None,
     };
     let exists = |_p: &std::path::Path| false;
-    let allowlist = |_t: &str| vec!["example.org".to_string()];
+    let hosts = hosts.to_vec();
+    let allowlist = move |_t: &str| hosts.clone();
     let ctx = ResolveCtx {
         get_env: &get_env,
         exists: &exists,
@@ -200,6 +258,192 @@ fn skip_if_no_microvm() -> bool {
 
 fn firecracker_backend() -> Arc<dyn SandboxBackend> {
     SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
+}
+
+fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
+    let p = workspace_target_binary("kastellan-worker-egress-proxy");
+    if p.is_file() {
+        Some(p)
+    } else {
+        eprintln!(
+            "\n[SKIP] egress-proxy not built; run \
+             `cargo build -p kastellan-worker-egress-proxy`\n"
+        );
+        None
+    }
+}
+
+/// Skip-as-pass unless `host:443` is actually reachable from this box.
+///
+/// The slice-3 tiers need a real public origin (see [`DEFAULT_ORIGIN_HOST`]), so
+/// they cannot run offline. A silent skip would be the false-green pattern
+/// CLAUDE.md warns about, so print an explicit `[SKIP]` naming the reason —
+/// visible under `--nocapture`, like every other skip helper here.
+fn skip_if_origin_unreachable(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let addrs = match (host, 443u16).to_socket_addrs() {
+        Ok(a) => a.collect::<Vec<_>>(),
+        Err(e) => {
+            eprintln!("\n[SKIP] cannot resolve {host}: {e} (this tier needs outbound HTTPS)\n");
+            return true;
+        }
+    };
+    for addr in &addrs {
+        if std::net::TcpStream::connect_timeout(addr, Duration::from_secs(5)).is_ok() {
+            return false;
+        }
+    }
+    eprintln!("\n[SKIP] cannot reach {host}:443 (this tier needs outbound HTTPS)\n");
+    true
+}
+
+/// Peak resident memory of the Firecracker VMM process, in MiB, sampled from the
+/// host while a render is in flight.
+///
+/// **Why the VMM's host RSS is the right proxy for guest memory.** Firecracker
+/// allocates guest RAM lazily, so its RSS grows to track the pages the guest has
+/// actually touched — including the `/tmp` tmpfs pages that
+/// `--disable-dev-shm-usage` redirects Chromium's shared memory into. That
+/// redirect is exactly why `mem_mb` had to be raised to 2048 for the VM entry
+/// (slice-1 spec §10.1, slice-2 manifest doc), and it is the quantity this
+/// sampler measures.
+///
+/// VMMs already alive when sampling starts are **excluded**: another tier's VM
+/// or a stale spike VM is not ours, and attributing its RSS to this render
+/// would corrupt the reading in either direction. The VM this sampler brackets
+/// boots strictly after the snapshot, so exclusion by pre-existing PID is safe.
+///
+/// Returns `None` when no *new* `firecracker` process was seen at all — the
+/// caller treats that as a failure, not as "nothing to assert".
+fn sample_peak_vmm_rss_mib(stop: &std::sync::atomic::AtomicBool) -> Option<u64> {
+    use std::sync::atomic::Ordering;
+    let preexisting: Vec<u32> =
+        firecracker_vmm_rss_kb().into_iter().map(|(pid, _)| pid).collect();
+    let mut peak: Option<u64> = None;
+    while !stop.load(Ordering::Relaxed) {
+        for (pid, kb) in firecracker_vmm_rss_kb() {
+            if preexisting.contains(&pid) {
+                continue;
+            }
+            let mib = kb / 1024;
+            peak = Some(peak.map_or(mib, |p: u64| p.max(mib)));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    peak
+}
+
+/// Live `firecracker` VMM processes, as `(pid, current VmRSS in KiB)`.
+fn firecracker_vmm_rss_kb() -> Vec<(u32, u64)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let pid_dir = entry.path();
+        // `comm` is the 15-char-truncated process name; "firecracker" fits.
+        let Ok(comm) = std::fs::read_to_string(pid_dir.join("comm")) else {
+            continue;
+        };
+        if comm.trim() != "firecracker" {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(pid_dir.join("status")) else {
+            continue;
+        };
+        for line in status.lines() {
+            let Some(rest) = line.strip_prefix("VmRSS:") else {
+                continue;
+            };
+            // "VmRSS:\t  123456 kB"
+            if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()) {
+                out.push((pid, kb));
+            }
+        }
+    }
+    out
+}
+
+/// Boot the production browser-driver VM entry through the **real daemon
+/// manager** and drive one `browser.render`.
+///
+/// Returns `(render_result, egress_decisions, elapsed)`.
+///
+/// **Why the manager rather than a hand-wired `NetWorkerSpawn`** (design spec
+/// §4.1): `SingleUseLifecycle::with_force_routing(...).acquire(...)` is the real
+/// daemon path. It resolves the *worker* backend from `entry.sandbox_backend`
+/// (`FirecrackerVm`) and the *sidecar* backend from `resolve(None, None)` (host
+/// bwrap), and — the load-bearing part here — it derives `disable_mitm` by
+/// calling `force_route::disable_mitm_for(worker_name)` itself. A hand-wired
+/// spawn would have this test *assert* `disable_mitm: true`, consulting no
+/// production code. Under the manager, dropping `browser-driver` from
+/// `disable_mitm_for` makes the sidecar terminate TLS and the render fails on an
+/// untrusted certificate.
+async fn render_in_vm_through_real_sidecar(
+    pool: &sqlx::PgPool,
+    proxy_bin: PathBuf,
+    hosts: &[String],
+    url: &str,
+    timeout_ms: u64,
+) -> (
+    Result<serde_json::Value, kastellan_core::tool_host::ToolHostError>,
+    Vec<String>,
+    Duration,
+) {
+    let entry = browser_driver_vm_entry_for(hosts);
+
+    let decisions: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_src = Arc::clone(&decisions);
+    let make_sink: DecisionSinkFactory = Box::new(move || {
+        let d = Arc::clone(&sink_src);
+        Box::new(move |row: EgressAuditRow| {
+            d.lock().unwrap().push(format!("{} {}", row.action, row.payload));
+        })
+    });
+    // Scratch under /tmp: a SHARE_ANCHOR, so the confined VMM jail can bind the
+    // sidecar's UDS and the guest→host vsock relay can reach it.
+    let force = Arc::new(ForceRoutingConfig::new(
+        proxy_bin,
+        std::env::temp_dir(),
+        make_sink,
+        None, // no cert pins
+    ));
+    let sandboxes = Arc::new(SandboxBackends::default_for_current_os());
+    let mgr = SingleUseLifecycle::with_force_routing(sandboxes, Some(force), BrokerConfigs::default());
+
+    let started = std::time::Instant::now();
+    let mut handle = mgr
+        .acquire("browser-driver", &entry)
+        .await
+        .expect("acquire a force-routed browser-driver VM worker through the manager");
+    let result = dispatch(
+        pool,
+        &Vault::new(),
+        handle.worker_mut(),
+        "browser-driver",
+        "browser.render",
+        serde_json::json!({ "url": url, "wait_until": "load", "timeout_ms": timeout_ms }),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    // Decisions land on a detached ingest thread reading the proxy's stdout;
+    // poll briefly so we do not race it.
+    let mut snapshot = Vec::new();
+    for _ in 0..60 {
+        snapshot = decisions.lock().unwrap().clone();
+        if !snapshot.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    (result, snapshot, elapsed)
+}
+
+/// The post-JS readable text of a `browser.render` reply.
+fn rendered_text(v: &serde_json::Value) -> String {
+    v["text"].as_str().unwrap_or_default().to_string()
 }
 
 async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
@@ -488,4 +732,275 @@ async fn vm_booted_browser_driver_launches_chromium() {
     let _ = worker.close();
     pool.close().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Slice 3, tier (a) — **the first real page ever rendered inside the micro-VM**,
+/// through a real `kastellan-worker-egress-proxy` sidecar.
+///
+/// Slices 1 and 2 stopped at the `CONNECT` line: their stub proxy answers 503 and
+/// closes, so the render deliberately fails and the render *result* carries no
+/// information. Everything after the CONNECT — end-to-end TLS to the origin, the
+/// response body, Playwright's post-JS DOM extraction, the JSON-RPC reply
+/// carrying real text — was untested in a VM until this test.
+///
+/// ## Why a real public origin, and not a hermetic one
+///
+/// browser-driver's sidecar runs in **no-MITM transparent-tunnel** mode
+/// (`force_route::disable_mitm_for` names this worker), because the browser does
+/// its own end-to-end TLS and cannot trust our per-instance MITM CA. So Chromium
+/// must trust the ORIGIN's certificate on its own root store, and a hermetic
+/// self-signed loopback origin would need a CA installed in Chromium's NSS store
+/// inside the rootfs — the deferred MITM-of-browser work.
+///
+/// That constraint is why no real render through a real sidecar had ever
+/// completed in this repo, in VM *or* host mode: the host-mode
+/// `browser_driver_e2e::forced_render_of_loopback_page_through_sidecar` navigates
+/// `https://` at a plain-HTTP loopback server precisely because the handshake
+/// cannot succeed, and settles for the sidecar decision row as its signal. See
+/// the design spec §3 for the full option table (a `--ignore-certificate-errors-*`
+/// flag was rejected: it would weaken PRODUCTION launch args to make a test pass).
+///
+/// ## What is asserted
+///
+/// 1. The dispatch **succeeds** and the post-JS text contains `Example Domain` —
+///    a completed render, not merely an attempt.
+/// 2. A sidecar decision `allowed` for `example.org:443` — the render went
+///    *through* the sidecar, not around it.
+/// 3. Real wall-clock **headroom** under the entry's own `wall_clock_ms`. Merely
+///    finishing is not enough: finishing at 89 s under a 90 s budget is a latent
+///    failure, so the assertion is a fraction of budget, not a bare completion.
+///
+/// DGX-only. Needs outbound HTTPS. Run:
+///
+///     export PATH=$HOME/.local/bin:$PATH
+///     cargo build --release -p kastellan-microvm-run
+///     cargo build -p kastellan-worker-egress-proxy
+///     cargo test -p kastellan-core --test browser_driver_firecracker_e2e -- \
+///         --test-threads=1 --ignored --nocapture
+///
+/// `--test-threads=1` matters: each ignored tier boots its own VM, and the
+/// memory tier attributes RSS to the one firecracker process that appears
+/// after its sampler starts — tiers racing in parallel would defeat that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
+async fn vm_renders_real_page_through_real_sidecar() {
+    if skip_if_no_microvm() || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+        return;
+    }
+    if skip_if_origin_unreachable(DEFAULT_ORIGIN_HOST) {
+        return;
+    }
+    let Some(proxy_bin) = egress_proxy_bin_or_skip() else {
+        return;
+    };
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "bd-r",
+        "bd-rl",
+        &format!("kastellan-supervisor-test-pg-bdrender-{suffix}"),
+    );
+    let pool = probe_and_pool(&cluster.conn_spec).await;
+
+    let hosts = vec![DEFAULT_ORIGIN_HOST.to_string()];
+    let (result, decisions, elapsed) = render_in_vm_through_real_sidecar(
+        &pool,
+        proxy_bin,
+        &hosts,
+        DEFAULT_ORIGIN_URL,
+        20_000,
+    )
+    .await;
+
+    // Print the sidecar's own verdicts before asserting: on failure these say
+    // whether the browser reached egress at all, and what the proxy decided.
+    for line in &decisions {
+        eprintln!("[egress-decision] {line}");
+    }
+
+    let value = result.expect(
+        "browser.render must SUCCEED against a real HTTPS origin through the real sidecar — \
+         this is slice 3's whole point. A failure here means the VM booted and Chromium \
+         launched (slice 2 proves that separately) but the render did not complete: check \
+         the egress decisions printed above for a block, and check that the origin's TLS \
+         completed end-to-end (the sidecar must be in no-MITM transparent-tunnel mode)",
+    );
+    let text = rendered_text(&value);
+    eprintln!(
+        "[EVIDENCE] rendered {DEFAULT_ORIGIN_URL} in the micro-VM in {elapsed:?}; \
+         status={} text={} bytes",
+        value["status"],
+        text.len()
+    );
+    assert_eq!(value["status"], 200, "render result: {value}");
+    assert!(
+        text.contains(DEFAULT_ORIGIN_NEEDLE),
+        "expected {DEFAULT_ORIGIN_NEEDLE:?} in the rendered text, got {text:?}"
+    );
+
+    // The render must have gone THROUGH the sidecar. Match host AND port: a bare
+    // host check would pass on any decision mentioning the host (#469's
+    // all-port-grant lesson applies to assertions too).
+    // NB the action is `egress.allowed`, not `allowed` — `decision_to_audit`
+    // namespaces every verdict under `egress.` (its siblings are
+    // `egress.blocked.credential_leak` / `egress.blocked.tls_pin`).
+    let allowed_row = decisions
+        .iter()
+        .find(|d| {
+            d.starts_with("egress.allowed")
+                && d.contains(&format!("\"host\":\"{DEFAULT_ORIGIN_HOST}\""))
+                && d.contains("\"port\":443")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no `egress.allowed {DEFAULT_ORIGIN_HOST}:443` decision: the page rendered \
+                 but not provably through the sidecar. Decisions: {decisions:?}"
+            )
+        });
+
+    // Transparent tunnel, not MITM: the sidecar must NOT have terminated TLS on
+    // THIS connection — the check is scoped to the allowed row above, not to any
+    // decision that happens to carry the flag. This is the production property
+    // `force_route::disable_mitm_for` carries, observed here rather than
+    // restated — Chromium validated example.org's real certificate itself,
+    // which is what makes a real origin necessary at all. (NB `decision_to_audit`
+    // defaults a MISSING `tls_intercepted` to false, so what this catches is the
+    // sidecar reporting `true`, i.e. actively MITM-ing browser traffic.)
+    assert!(
+        allowed_row.contains("\"tls_intercepted\":false"),
+        "the allowed decision for {DEFAULT_ORIGIN_HOST}:443 is not a transparent-tunnel \
+         (non-MITM) one; a MITM'd connection would mean disable_mitm_for no longer names \
+         this worker, and Chromium would reject our per-instance CA. Row: {allowed_row}"
+    );
+
+    // Wall-clock headroom against the entry's OWN budget, so this measures the
+    // production value rather than a test-local one.
+    let budget = browser_driver_vm_entry()
+        .wall_clock_ms
+        .expect("the VM entry sets a wall-clock budget");
+    let used_pct = (elapsed.as_millis() as f64 / budget as f64) * 100.0;
+    eprintln!("[EVIDENCE] wall clock: {elapsed:?} = {used_pct:.1}% of the {budget} ms budget");
+    assert!(
+        used_pct < 70.0,
+        "render used {used_pct:.1}% of the {budget} ms wall-clock budget, leaving under \
+         30% headroom: the budget in browser_driver_firecracker_entry is too tight for a \
+         cold VM boot + Playwright driver + Chromium cold start + a real navigation"
+    );
+
+    pool.close().await;
+}
+
+/// Slice 3, tier (b) — **the memory measurement**: render a heavy real page and
+/// check what it actually costs in guest RAM.
+///
+/// ## The question this answers
+///
+/// The guest has no `/dev/shm` (slice-1 spec §10.1), so Chromium runs with an
+/// unconditional `--disable-dev-shm-usage`, which redirects its shared memory
+/// into the guest `/tmp` tmpfs. That tmpfs is drawn from the **same** `mem_mb`
+/// budget as everything else rather than from a separate device — so a heavy
+/// page's shared-memory allocations compete with guest RAM, and if they tip over
+/// the VM OOMs *with* `test_disable_dev_shm_usage_is_pinned` green throughout
+/// (that test pins the flag, not the budget). Slice 2 set `mem_mb: 2048` by
+/// reasoning; nothing had measured it.
+///
+/// ## How it is measured
+///
+/// Firecracker allocates guest RAM lazily, so the VMM process's host RSS tracks
+/// the pages the guest has actually touched — tmpfs pages included. A sampler
+/// thread walks `/proc/*/comm` for `firecracker` during the render and keeps the
+/// peak (see [`sample_peak_vmm_rss_mib`]).
+///
+/// **A missing sample fails the test rather than skipping the assertion.** The
+/// render succeeded, so a VM demonstrably ran; finding no firecracker process
+/// means the sampler is broken, and quietly skipping would be exactly the
+/// false-green pattern CLAUDE.md's "when tests pass but feel suspicious" rule
+/// exists to prevent.
+///
+/// Split from the acceptance tier on purpose: this one depends on a page whose
+/// weight can drift, and isolating that risk keeps the acceptance gate stable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
+async fn vm_render_of_heavy_page_stays_within_memory_budget() {
+    if skip_if_no_microvm() || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+        return;
+    }
+    if skip_if_origin_unreachable(HEAVY_ORIGIN_HOST) {
+        return;
+    }
+    let Some(proxy_bin) = egress_proxy_bin_or_skip() else {
+        return;
+    };
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "bd-m",
+        "bd-ml",
+        &format!("kastellan-supervisor-test-pg-bdmem-{suffix}"),
+    );
+    let pool = probe_and_pool(&cluster.conn_spec).await;
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler_stop = Arc::clone(&stop);
+    let sampler = thread::spawn(move || sample_peak_vmm_rss_mib(&sampler_stop));
+
+    let hosts = vec![HEAVY_ORIGIN_HOST.to_string()];
+    let (result, decisions, elapsed) =
+        render_in_vm_through_real_sidecar(&pool, proxy_bin, &hosts, HEAVY_ORIGIN_URL, 45_000).await;
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let peak = sampler.join().expect("sampler thread joins");
+
+    for line in &decisions {
+        eprintln!("[egress-decision] {line}");
+    }
+    let value = result.expect(
+        "browser.render of the heavy page must succeed: a failure here is the OOM this \
+         test exists to detect (or an egress block — check the decisions above)",
+    );
+    let text = rendered_text(&value);
+    eprintln!(
+        "[EVIDENCE] rendered {HEAVY_ORIGIN_URL} in {elapsed:?}; status={} text={} bytes",
+        value["status"],
+        text.len()
+    );
+    assert_eq!(value["status"], 200, "render result: {value}");
+    assert!(
+        text.len() > 5_000,
+        "expected a substantial page (>5 KiB of text) so the memory measurement is \
+         meaningful, got {} bytes — did the article move or get blocked?",
+        text.len()
+    );
+
+    let peak = peak.expect(
+        "no `firecracker` process was ever seen in /proc while the render was in flight, \
+         yet the render succeeded — so a VM certainly ran and the SAMPLER is broken. \
+         Failing loudly rather than skipping the memory assertion, which would be a \
+         silent false green",
+    );
+    // Memory budget from the entry's OWN policy — the same "measure the
+    // production value, not a test-local mirror" rule the acceptance tier
+    // applies to wall_clock_ms. Firecracker enforces `policy.mem_mb` as the
+    // guest RAM size, so this is the number the guest can actually OOM against.
+    let budget_mb = browser_driver_vm_entry().policy.mem_mb;
+    let used_pct = (peak as f64 / budget_mb as f64) * 100.0;
+    eprintln!(
+        "[EVIDENCE] peak Firecracker VMM RSS {peak} MiB = {used_pct:.1}% of the \
+         {budget_mb} MiB guest budget (Chromium + the /tmp tmpfs holding its shm)"
+    );
+    assert!(
+        used_pct < 85.0,
+        "peak guest memory {peak} MiB is {used_pct:.1}% of the {budget_mb} MiB budget, \
+         leaving under 15% headroom — raise mem_mb in browser_driver_firecracker_entry; \
+         a heavier page would OOM the VM, and because --disable-dev-shm-usage redirects \
+         Chromium's shm into the guest /tmp tmpfs that OOM competes with guest RAM"
+    );
+
+    pool.close().await;
 }
