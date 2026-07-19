@@ -26,6 +26,15 @@ MAX_TEXT_CHARS = 200_000           # post-readability text char cap
 # defers containment to OUR jail (Chromium's own user-ns sandbox can't nest
 # inside bwrap); `--disable-dev-shm-usage` makes Chromium use the profile dir
 # instead of /dev/shm so the jail needs no writable /dev/shm.
+#
+# `--disable-dev-shm-usage` is LOAD-BEARING in the Firecracker micro-VM rootfs,
+# not merely an optimisation: the guest kernel auto-mounts devtmpfs on /dev
+# (CONFIG_DEVTMPFS_MOUNT=y) but devtmpfs provides device nodes only, and
+# microvm-init mounts just /proc, /sys and /tmp — so /dev/shm does not exist in
+# the guest at all. Removing this flag makes Chromium abort at startup there
+# with "Creating shared memory in /dev/shm/... failed: No such file or
+# directory" (measured both ways; see the micro-VM rootfs design spec §10.1).
+# If it ever must be removed, mount a /dev/shm tmpfs in microvm-init first.
 DEFAULT_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 
 def build_launch_args(proxy_port: Optional[int]) -> list[str]:

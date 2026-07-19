@@ -1,0 +1,25 @@
+# Docker build context excludes for scripts/workers/microvm/Dockerfile.browser-driver.
+#
+# This directory IS the build context (the Dockerfile is built with
+# `docker build -f .../Dockerfile.browser-driver workers/browser-driver`), and
+# Docker honours .dockerignore — NOT .gitignore. Several large git-ignored
+# artifacts live here on a developer machine, most notably a ~715 MB `.venv/`
+# created by scripts/workers/browser-driver/install.sh or by running the Python
+# tests locally. Without these excludes that venv is uploaded to the daemon and
+# baked into the `COPY . /src/browser-driver` layer; the later `rm -rf /src`
+# hides it from the final filesystem but the layer still carries the bytes.
+#
+# Keep `src/` and `pyproject.toml` — they are what actually gets pip-installed.
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local resolver output, git-ignored (.gitignore:43). The Dockerfile pins
+# versions explicitly rather than consuming this file.
+uv.lock
+
+# Tests are not installed into the rootfs; the worker package is installed
+# non-editable and only `src/` matters at runtime.
+tests/

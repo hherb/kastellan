@@ -1,0 +1,114 @@
+# Build-time-only recipe for the browser-driver micro-VM rootfs.
+#
+# Docker is NOT a runtime dependency. This image exists purely so
+# `docker export` can hand us a staging tree; the tree then flows through the
+# same `mkfs.ext4 -d` tail every other rootfs script uses
+# (scripts/workers/microvm/build-*.sh).
+#
+# Why Docker at all: Chromium dlopen's NSS modules, fontconfig backends and
+# SwiftShader at runtime. `ldd` cannot see any of those, so the from-scratch
+# lib-closure pattern the sibling scripts use (copy_lib_closure) does not work
+# here. `playwright install --with-deps chromium` resolves that closure for us,
+# which is exactly the job it is maintained to do.
+#
+# Build context is `workers/browser-driver/` (NOT the repo root) so the whole
+# `target/` tree is never sent to the daemon. That alone is not enough: on a
+# developer machine that directory also holds a git-ignored ~715 MB `.venv/`
+# plus `.pytest_cache/`, and Docker honours `.dockerignore`, not `.gitignore` —
+# see `workers/browser-driver/.dockerignore`, which excludes them.
+#
+# Layer ordering is deliberate: apt, the venv, and the ~100 MB Chromium
+# download all sit ABOVE the worker-source COPY, so editing worker code
+# rebuilds only the final layers. Slices 2 and 3 iterate on this image.
+# Pinned by DIGEST, not by the `24.04` tag: this image's contents end up inside
+# a containment boundary, and a floating tag means two operators building "the
+# same" rootfs a month apart get materially different userlands with nothing to
+# diff against. The digest is a multi-arch manifest list, so it resolves on both
+# x86_64 and aarch64. Bump deliberately, not incidentally.
+#
+# NOTE what this does NOT pin — see the rootfs design spec §8 for the accepted
+# risk: the `--with-deps` apt closure (~125 packages, resolved at build time),
+# the Chromium build fetched from the Playwright CDN, and the guest kernel
+# (curl'd without a checksum by the build script, matching the sibling scripts).
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV KASTELLAN_BD_ROOT=/usr/local/lib/kastellan-browser-driver
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/lib/kastellan-browser-driver/browsers
+
+# 1. Interpreter. Use the system python3 + venv deliberately (NOT uv): a uv
+#    venv symlinks to an external CPython, and the interpreter must live inside
+#    the rootfs. Same reasoning as scripts/workers/browser-driver/install.sh.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv "$KASTELLAN_BD_ROOT/venv"
+
+# 2. Third-party deps FIRST, exactly pinned, so the expensive layers cache and
+#    the rootfs is reproducible. These are the three declared in
+#    workers/browser-driver/pyproject.toml (which floats them as >= ranges for
+#    the host install path).
+#
+#    Pinned here rather than deferred to a lock file on purpose:
+#    workers/browser-driver/uv.lock is git-IGNORED (.gitignore:43), so it is a
+#    local developer artifact and cannot be this image's source of truth. These
+#    versions were taken from a resolved uv.lock and must be bumped by hand.
+#    Pinning only playwright while letting lxml/readability float would make the
+#    image's contents depend on when it happened to be built.
+RUN "$KASTELLAN_BD_ROOT/venv/bin/pip" install --no-cache-dir \
+      "playwright==1.60.0" "readability-lxml==0.8.4.1" "lxml==6.1.1"
+
+# 3. Chromium + its apt dependency closure. The expensive layer; kept above the
+#    source COPY on purpose.
+#
+#    Install ONLY `chromium-headless-shell`, not `chromium`. The worker launches
+#    `pw.chromium.launch(headless=True, ...)` (render.py), which Playwright
+#    resolves to the headless shell — verified empirically: with the full
+#    chromium bundle deleted, that exact launch still succeeds and renders.
+#    Installing both would bake an extra 620 MB of never-executed browser into a
+#    read-only, security-sensitive rootfs.
+#
+#    Deleting the full bundle post-install was rejected as the alternative: it
+#    leaves `pw.chromium.executable_path` reporting a path that no longer exists,
+#    so a future caller resolving through that property would fail confusingly.
+#    Installing only what runs keeps the registry honest.
+#
+#    NOTE: this couples the rootfs to headless mode. `headless=False` (or a
+#    `channel=` that selects full Chrome) will NOT work in this image.
+RUN "$KASTELLAN_BD_ROOT/venv/bin/playwright" install --with-deps chromium-headless-shell \
+ && rm -rf /var/lib/apt/lists/*
+
+# 4. Build-time launch smoke. If the dlopen closure is incomplete, FAIL THE
+#    BUILD HERE — loudly and locally — rather than during a VM boot where the
+#    failure surfaces as an opaque render error. This does not prove the VM
+#    case (different kernel and mounts), but it catches the missing-library
+#    class, which is the main risk this slice exists to retire.
+RUN set -eux; \
+    shell_bin="$(find "$PLAYWRIGHT_BROWSERS_PATH" -name headless_shell -type f | head -1)"; \
+    test -n "$shell_bin"; \
+    "$shell_bin" --no-sandbox --dump-dom about:blank > /dev/null; \
+    echo "chromium headless smoke OK: $shell_bin"
+
+# 5. The worker package LAST, non-editable + --no-deps, so its source is copied
+#    into site-packages and a code edit invalidates only these final layers.
+COPY . /src/browser-driver
+RUN "$KASTELLAN_BD_ROOT/venv/bin/pip" install --no-cache-dir --no-deps \
+      --force-reinstall /src/browser-driver \
+ && rm -rf /src
+
+# 6. Stable entrypoint path. The console script the venv generated lives in the
+#    venv's bin/; symlink it to the path baked into the kernel cmdline
+#    (slice 2's MICROVM_WORKER_BIN). Must NOT sit under a share anchor
+#    (/opt /data /srv /mnt /work /tmp) — apply_host_mounts tmpfs-mounts those
+#    and would shadow it.
+RUN set -eux; \
+    ln -sf "$KASTELLAN_BD_ROOT/venv/bin/kastellan-worker-browser-driver" \
+           /usr/local/bin/kastellan-worker-browser-driver; \
+    # Fail the build if the symlink dangles or is not executable. The worker
+    # reads JSON-RPC from stdin and has no --help, so do NOT try to run it
+    # here — a `|| true`-style probe would silently pass on a broken link.
+    test -x /usr/local/bin/kastellan-worker-browser-driver; \
+    # Prove the interpreter behind the console script can import the package.
+    "$KASTELLAN_BD_ROOT/venv/bin/python" -c \
+      "import kastellan_worker_browser_driver.__main__ as m; assert callable(m.main)"
