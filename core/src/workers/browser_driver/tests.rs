@@ -448,3 +448,253 @@ use super::*;
             .fs_read
             .contains(&PathBuf::from("/opt/hb/gettext/lib")));
     }
+
+    // ---- Firecracker micro-VM entry (slice 2) --------------------------------
+    //
+    // `Resolution` deliberately derives no `Debug` (it holds a large
+    // `ToolEntry`), so a failing match cannot be `{:?}`-printed. Name the arm
+    // instead — the same helper web-fetch's tests use. `cfg`-gated with its only
+    // callers so macOS clippy does not see it as dead code.
+
+    #[cfg(target_os = "linux")]
+    fn outcome_label(r: &Resolution) -> &'static str {
+        match r {
+            Resolution::Register(_) => "Register",
+            Resolution::Disabled { .. } => "Disabled",
+            Resolution::Misconfigured { .. } => "Misconfigured",
+        }
+    }
+    //
+    // Linux-only: `browser_driver_firecracker_entry` and the `FirecrackerVm`
+    // backend variant are `cfg(target_os = "linux")`, so macOS compiles this
+    // block out entirely. The DGX `clippy -p kastellan-core --all-targets
+    // -D warnings` gate is the authoritative check for it (memory:
+    // cfg-linux-e2e-deadcode-dgx-clippy).
+
+    /// The VM entry's shape: VM backend, no host paths shared in, no lockdown
+    /// shim, port-scoped allowlist, and the in-rootfs browser tree.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn firecracker_entry_is_vm_backed_with_no_host_binds_or_shim() {
+        let allowlist = vec!["example.com".to_string(), ".wiki.example.org".to_string()];
+        let entry = browser_driver_firecracker_entry(
+            PathBuf::from("/usr/local/bin/kastellan-worker-browser-driver"),
+            "/var/lib/kastellan/microvm".to_string(),
+            &allowlist,
+        );
+
+        assert!(
+            matches!(
+                entry.sandbox_backend,
+                Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+            ),
+            "VM mode must select the Firecracker backend"
+        );
+        // A VM shares no host paths in: the venv, interpreter and browser tree
+        // all live inside the rootfs. The per-instance CA would be appended at
+        // spawn — browser-driver does not even get one (no-MITM tunnel).
+        assert!(
+            entry.policy.fs_read.is_empty(),
+            "VM fs_read must be empty (no host FS, no NIC, no local DNS)"
+        );
+        assert!(entry.policy.fs_write.is_empty());
+        // The lockdown-exec shim is a HOST-mode mechanism (#281): it is not
+        // staged in the rootfs, so requiring it would be a boot failure. In VM
+        // mode the isolation boundary is the VM itself.
+        assert!(
+            entry.lockdown_shim.is_none(),
+            "VM mode must not require the host lockdown-exec shim"
+        );
+        assert!(
+            !entry
+                .policy
+                .env
+                .iter()
+                .any(|(k, _)| k == crate::tool_host::ENV_LANDLOCK_RW),
+            "Landlock RW is a host-mode (bwrap+shim) grant; the VM has no shim to honour it"
+        );
+        // proxy_uds stays None in the manifest; force-routing sets it at spawn.
+        assert!(entry.policy.proxy_uds.is_none());
+        assert!(matches!(entry.policy.profile, Profile::WorkerBrowserClient));
+        assert!(matches!(
+            entry.lifecycle,
+            crate::worker_lifecycle::Lifecycle::SingleUse
+        ));
+        // Chromium's process tree still needs the raised task cap.
+        assert_eq!(entry.policy.tasks_max, Some(512));
+        // Firecracker ENFORCES mem_mb as total guest RAM, and it must cover
+        // Chromium plus the /tmp tmpfs that --disable-dev-shm-usage redirects
+        // shared memory into (spec §6/§10.4) — hence 2048, not host mode's 1024.
+        assert_eq!(entry.policy.mem_mb, 2048);
+
+        // Same dual-allowlist shape as host mode: port-scoped for the proxy
+        // (a bare host would be an all-port grant), verbatim for the worker.
+        match &entry.policy.net {
+            Net::Allowlist(hosts) => assert_eq!(
+                hosts,
+                &vec![
+                    "example.com:443".to_string(),
+                    ".wiki.example.org:443".to_string()
+                ]
+            ),
+            other => panic!("expected Net::Allowlist, got {other:?}"),
+        }
+        let env_get = |key: &str| {
+            entry
+                .policy
+                .env
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(
+            env_get("KASTELLAN_BROWSER_DRIVER_ALLOWLIST"),
+            Some(r#"["example.com",".wiki.example.org"]"#)
+        );
+        // In-rootfs browser tree (Dockerfile.browser-driver's
+        // ENV PLAYWRIGHT_BROWSERS_PATH), NOT a host venv subdir.
+        assert_eq!(
+            env_get("PLAYWRIGHT_BROWSERS_PATH"),
+            Some("/usr/local/lib/kastellan-browser-driver/browsers")
+        );
+        // Playwright's Node driver calls uv_os_homedir() at startup.
+        assert_eq!(env_get("TMPDIR"), Some("/tmp"));
+        assert_eq!(env_get("HOME"), Some("/tmp"));
+        // Backend image coordinates (stripped before the guest env is encoded).
+        assert_eq!(env_get("KASTELLAN_MICROVM_DIR"), Some("/var/lib/kastellan/microvm"));
+        assert_eq!(env_get("KASTELLAN_MICROVM_ROOTFS"), Some("browser-driver.ext4"));
+    }
+
+    /// `USE_MICROVM=1` registers the VM entry **without** any host venv,
+    /// interpreter or lockdown shim on disk.
+    ///
+    /// This is the property that makes slice 2 more than a copy of web-fetch's
+    /// branch: host mode fail-closes with `Misconfigured` when the venv shim or
+    /// the lockdown-exec shim is missing, and on a VM-only deployment neither
+    /// exists. `exists`/`canonicalize` here return "nothing on this host", which
+    /// would make host mode `Misconfigured`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_uses_microvm_entry_without_any_host_venv_or_shim() {
+        let get_env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+            "KASTELLAN_BROWSER_DRIVER_USE_MICROVM" => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| false; // no venv shim, no lockdown-exec shim
+        let allowlist = |_t: &str| vec!["example.org".to_string()];
+        let c = ctx(&get_env, &exists, &allowlist);
+
+        match BrowserDriverManifest.resolve(&c) {
+            Resolution::Register(entry) => {
+                assert!(matches!(
+                    entry.sandbox_backend,
+                    Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+                ));
+                // THE PIN that matters: the guest execs the in-rootfs path, not
+                // a host build-output path. A host path ENOENTs inside the
+                // guest, panics PID1 and boot-loops, and the dispatch hangs to
+                // wall-clock naming nothing (memory:
+                // vm-worker-in-rootfs-binary-path). Must match the symlink baked
+                // by build-browser-driver-rootfs.sh byte for byte.
+                assert_eq!(
+                    entry.binary,
+                    PathBuf::from("/usr/local/bin/kastellan-worker-browser-driver")
+                );
+                // Default image dir when KASTELLAN_MICROVM_DIR is unset.
+                assert!(entry.policy.env.iter().any(|(k, v)| k
+                    == "KASTELLAN_MICROVM_DIR"
+                    && v == "/var/lib/kastellan/microvm"));
+            }
+            other => panic!("expected Register(VM entry), got {}", outcome_label(&other)),
+        }
+    }
+
+    /// An operator-set `KASTELLAN_MICROVM_DIR` overrides the default; a blank
+    /// one falls back (mirrors web-fetch's `.filter(|v| !v.trim().is_empty())`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_microvm_honors_image_dir_override_and_ignores_blank() {
+        let dir_of = |entry: &crate::scheduler::ToolEntry| {
+            entry
+                .policy
+                .env
+                .iter()
+                .find(|(k, _)| k == "KASTELLAN_MICROVM_DIR")
+                .map(|(_, v)| v.clone())
+                .expect("VM entry carries an image dir")
+        };
+        for (set, want) in [
+            (Some("/srv/images"), "/srv/images"),
+            (Some("   "), "/var/lib/kastellan/microvm"),
+        ] {
+            let get_env = move |k: &str| match k {
+                "KASTELLAN_BROWSER_DRIVER_ENABLE" | "KASTELLAN_BROWSER_DRIVER_USE_MICROVM" => {
+                    Some("1".to_string())
+                }
+                "KASTELLAN_MICROVM_DIR" => set.map(|s| s.to_string()),
+                _ => None,
+            };
+            let exists = |_p: &Path| false;
+            let allowlist = |_t: &str| vec![];
+            let c = ctx(&get_env, &exists, &allowlist);
+            match BrowserDriverManifest.resolve(&c) {
+                Resolution::Register(entry) => assert_eq!(dir_of(&entry), want, "set={set:?}"),
+                other => panic!("expected Register, got {}", outcome_label(&other)),
+            }
+        }
+    }
+
+    /// `USE_MICROVM=1` with the worker itself disabled must stay `Disabled` —
+    /// the VM flag is a backend choice, never an implicit opt-in.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_microvm_without_enable_stays_disabled() {
+        let get_env = |k: &str| match k {
+            "KASTELLAN_BROWSER_DRIVER_USE_MICROVM" => Some("1".to_string()),
+            _ => None,
+        };
+        let exists = |_p: &Path| true;
+        let allowlist = |_t: &str| vec![];
+        let c = ctx(&get_env, &exists, &allowlist);
+        match BrowserDriverManifest.resolve(&c) {
+            Resolution::Disabled { .. } => {}
+            other => panic!("expected Disabled, got {}", outcome_label(&other)),
+        }
+    }
+
+    /// The VM flag honours the unified truthiness dialect (#459 residual #2), so
+    /// `=true` cannot silently read as off next to a `FORCE_ROUTING=true`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_microvm_flag_honors_unified_truthiness_dialect() {
+        for (raw, want_vm) in [
+            ("1", true),
+            ("true", true),
+            ("YES", true),
+            ("on", true),
+            ("0", false),
+            ("false", false),
+            ("", false),
+        ] {
+            let get_env = move |k: &str| match k {
+                "KASTELLAN_BROWSER_DRIVER_ENABLE" => Some("1".to_string()),
+                "KASTELLAN_BROWSER_DRIVER_USE_MICROVM" => Some(raw.to_string()),
+                _ => None,
+            };
+            // Host mode would be Misconfigured here (nothing on disk), so the
+            // falsy arm is distinguishable from the VM arm without a venv.
+            let exists = |_p: &Path| false;
+            let allowlist = |_t: &str| vec![];
+            let c = ctx(&get_env, &exists, &allowlist);
+            let got_vm = matches!(
+                BrowserDriverManifest.resolve(&c),
+                Resolution::Register(ref e)
+                    if matches!(
+                        e.sandbox_backend,
+                        Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm)
+                    )
+            );
+            assert_eq!(got_vm, want_vm, "USE_MICROVM={raw:?}");
+        }
+    }

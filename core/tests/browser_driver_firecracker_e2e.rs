@@ -1,18 +1,25 @@
 #![cfg(target_os = "linux")]
-//! browser-driver × Firecracker micro-VM — slice 1 (the rootfs).
+//! browser-driver × Firecracker micro-VM — slices 1 (the rootfs) and 2 (the
+//! VM entry).
+//!
+//! Both tiers now drive the PRODUCTION entry via `BrowserDriverManifest::resolve`
+//! under `ENABLE=1` + `USE_MICROVM=1` (see [`browser_driver_vm_entry`]). Slice 1
+//! had to hand-roll an equivalent policy inline because that entry did not exist
+//! yet; slice 2 replaced it, which is what binds the private
+//! `MICROVM_WORKER_BIN` const to the path baked into the rootfs.
 //!
 //! ## Tiers
 //!
 //! * `vm_policy_flows_through_plan_to_in_rootfs_guest_path` — hermetic; always
-//!   runs on Linux (no KVM, no network, no rootfs image needed). It feeds a
-//!   browser-driver VM policy through the REAL `build_launch_plan` and pins
-//!   that the guest execs the **in-rootfs** worker path rather than a host
-//!   `target/` path. That failure mode is nasty and has cost a debugging
-//!   session before: PID1 `execv`s a path that does not exist inside the guest,
-//!   panics, the VM boot-loops, and the dispatch simply hangs to wall-clock —
-//!   presenting as a channel hang with no error naming the real cause. It also
-//!   pins the cmdline budget, because env is hex-encoded and therefore costs
-//!   two cmdline bytes per env byte.
+//!   runs on Linux (no KVM, no network, no rootfs image needed). It feeds the
+//!   resolved VM policy through the REAL `build_launch_plan` and pins that the
+//!   guest execs the **in-rootfs** worker path rather than a host `target/`
+//!   path. That failure mode is nasty and has cost a debugging session before:
+//!   PID1 `execv`s a path that does not exist inside the guest, panics, the VM
+//!   boot-loops, and the dispatch simply hangs to wall-clock — presenting as a
+//!   channel hang with no error naming the real cause. It also pins the cmdline
+//!   budget, because env is hex-encoded and therefore costs two cmdline bytes
+//!   per env byte.
 //!
 //! * `vm_booted_browser_driver_launches_chromium` — the live DGX tier
 //!   (`#[ignore]`): boots `browser-driver.ext4` and proves Chromium starts
@@ -31,12 +38,13 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use kastellan_core::scheduler::ToolEntry;
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_core::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
+use kastellan_core::workers::browser_driver::BrowserDriverManifest;
 use kastellan_sandbox::linux_firecracker::{build_launch_plan, FirecrackerImage, LinuxFirecracker};
-use kastellan_sandbox::{
-    Net, Profile, SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxPolicy,
-};
+use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxPolicy};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
     unique_suffix,
@@ -49,14 +57,56 @@ fn image_dir() -> String {
         .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
 }
 
-/// The worker path baked into the rootfs by
-/// `scripts/workers/microvm/build-browser-driver-rootfs.sh` (as a symlink into
-/// the staged venv). Slice 2's `MICROVM_WORKER_BIN` const must match this
-/// byte for byte.
-const IN_ROOTFS_WORKER: &str = "/usr/local/bin/kastellan-worker-browser-driver";
-
 /// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
 const ROOTFS_FILE: &str = "browser-driver.ext4";
+
+/// The production micro-VM entry under test, resolved exactly as the daemon
+/// resolves it: through `BrowserDriverManifest::resolve` with `ENABLE=1` and
+/// `USE_MICROVM=1`.
+///
+/// **Slice 2 made this the real thing, and that is the point.** Slice 1
+/// hand-rolled an inline policy here because the production entry did not exist
+/// yet, which left the guest worker path as three unlinked copies (the
+/// Dockerfile symlink, a test const, and a literal inside an assertion). Spec
+/// §10.4 flagged the consequence: a slice-2 author who typed a different
+/// `MICROVM_WORKER_BIN` would get a green pin and a boot loop. Going through the
+/// manifest closes that gap — the guest path, the rootfs filename, the memory
+/// budget and the whole env set now come from the code that runs in production,
+/// so any divergence fails these tests instead of hiding until a hang.
+///
+/// `exists` returns false throughout on purpose: it proves the VM branch needs
+/// **no** host venv, interpreter or lockdown-exec shim on disk. Host mode would
+/// return `Misconfigured` under the same probes.
+fn browser_driver_vm_entry() -> ToolEntry {
+    let dir = image_dir();
+    let get_env = move |k: &str| match k {
+        "KASTELLAN_BROWSER_DRIVER_ENABLE" | "KASTELLAN_BROWSER_DRIVER_USE_MICROVM" => {
+            Some("1".to_string())
+        }
+        "KASTELLAN_MICROVM_DIR" => Some(dir.clone()),
+        _ => None,
+    };
+    let exists = |_p: &std::path::Path| false;
+    let allowlist = |_t: &str| vec!["example.org".to_string()];
+    let ctx = ResolveCtx {
+        get_env: &get_env,
+        exists: &exists,
+        is_dir: &|_p| true,
+        exe_dir: None,
+        canonicalize: &|_p| None,
+        allowlist: &allowlist,
+    };
+    match BrowserDriverManifest.resolve(&ctx) {
+        Resolution::Register(entry) => entry,
+        Resolution::Disabled { detail } => {
+            panic!("VM branch must register, got Disabled: {detail}")
+        }
+        Resolution::Misconfigured { detail } => panic!(
+            "VM branch must register without any host venv/shim on disk, got \
+             Misconfigured: {detail}"
+        ),
+    }
+}
 
 /// Decode the lowercase-hex cmdline tokens `microvm-init` consumes.
 ///
@@ -73,52 +123,21 @@ fn hex_decode(s: &str) -> Vec<u8> {
         .collect()
 }
 
-/// The VM policy slice 2's `browser_driver_firecracker_entry` will produce.
+/// Force-route the production entry's policy the way `rewrite_worker_policy`
+/// does at spawn: set `proxy_uds`.
 ///
-/// Built inline because that production entry does not exist yet — slice 1 is
-/// the rootfs only. Mirrors the shape of `web_fetch_firecracker_entry`: empty
-/// `fs_read` (a VM shares no host paths in), force-routed, VM backend.
-fn browser_driver_vm_policy() -> SandboxPolicy {
-    SandboxPolicy {
-        // Empty: the per-instance CA is appended at spawn, and browser-driver
-        // runs the sidecar in no-MITM transparent-tunnel mode anyway
-        // (force_route::disable_mitm_for names this worker).
-        fs_read: vec![],
-        fs_write: vec![],
-        // `Net::Allowlist` WITH `proxy_uds` == force-routed. Without `proxy_uds`
-        // `build_launch_plan` rejects it fail-closed, because a VM carries no
-        // virtio-net device (plan.rs:255-267).
-        net: Net::Allowlist(vec!["example.org:443".to_string()]),
-        cpu_ms: 30_000,
-        // Chromium plus a RAM-backed /tmp tmpfs; see the design spec §6.
-        mem_mb: 2048,
-        profile: Profile::WorkerBrowserClient,
-        tasks_max: Some(512),
-        env: vec![
-            (
-                "KASTELLAN_BROWSER_DRIVER_ALLOWLIST".to_string(),
-                r#"["example.org"]"#.to_string(),
-            ),
-            (
-                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
-                "/usr/local/lib/kastellan-browser-driver/browsers".to_string(),
-            ),
-            ("TMPDIR".to_string(), "/tmp".to_string()),
-            // Playwright's Node driver calls uv_os_homedir(); without HOME it
-            // dies with "Connection closed while reading from the driver".
-            ("HOME".to_string(), "/tmp".to_string()),
-            // Host-side backend config: `resolve_image` reads these to find the
-            // rootfs. `build_launch_plan` strips them before hex-encoding the
-            // guest env (plan.rs:390), so they cost no cmdline budget.
-            ("KASTELLAN_MICROVM_DIR".to_string(), image_dir()),
-            (
-                "KASTELLAN_MICROVM_ROOTFS".to_string(),
-                ROOTFS_FILE.to_string(),
-            ),
-        ],
-        proxy_uds: Some(PathBuf::from("/tmp/kastellan-egress.sock")),
-        ..Default::default()
-    }
+/// The manifest deliberately leaves `proxy_uds` `None` (force-routing owns it),
+/// but `build_launch_plan` **rejects** a `Net::Allowlist` VM policy without one,
+/// fail-closed, because a VM carries no virtio-net device (plan.rs:255-267). So
+/// every VM tier here has to apply that one spawn-time mutation itself.
+///
+/// Unlike web-fetch there is no CA to add: browser-driver runs its sidecar in
+/// no-MITM transparent-tunnel mode (`force_route::disable_mitm_for` names this
+/// worker), because the browser does end-to-end TLS itself.
+fn force_routed_policy(entry: &ToolEntry, uds: PathBuf) -> SandboxPolicy {
+    let mut policy = entry.policy.clone();
+    policy.proxy_uds = Some(uds);
+    policy
 }
 
 /// Image coordinates for the browser-driver micro-VM. The paths need not exist
@@ -199,13 +218,37 @@ async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::Pg
 
 #[test]
 fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
+    // The PRODUCTION entry (slice 2), not a hand-rolled fixture: the guest path
+    // asserted below is `browser_driver::MICROVM_WORKER_BIN` itself.
+    let entry = browser_driver_vm_entry();
+    let program = entry.binary.display().to_string();
     let plan = build_launch_plan(
-        &browser_driver_vm_policy(),
+        &force_routed_policy(&entry, PathBuf::from("/tmp/kastellan-egress.sock")),
         &browser_driver_image(),
-        IN_ROOTFS_WORKER,
+        &program,
         &[],
     )
     .expect("a force-routed browser-driver VM policy must produce a launch plan");
+
+    // The manifest must select the VM backend — otherwise everything below
+    // would be asserting about a host-mode entry that never boots a VM.
+    assert!(
+        matches!(
+            entry.sandbox_backend,
+            Some(SandboxBackendKind::FirecrackerVm)
+        ),
+        "USE_MICROVM=1 must resolve to the Firecracker backend"
+    );
+    // The rootfs the entry names must be the one this file's image coordinates
+    // (and the build script) refer to.
+    assert!(
+        entry
+            .policy
+            .env
+            .iter()
+            .any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS" && v == ROOTFS_FILE),
+        "the entry must boot {ROOTFS_FILE}, the image build-browser-driver-rootfs.sh produces"
+    );
 
     let token = plan
         .boot_args
@@ -214,25 +257,17 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
         .expect("boot args must carry a kastellan.worker= token");
     let decoded = String::from_utf8(hex_decode(token)).expect("worker token is utf8");
 
-    // 1a. The plan carries the program through faithfully (hex round-trips and
-    //     the token is the one we asked for).
-    //
-    //     NOTE this assertion ALONE is tautological — it compares the decoded
-    //     token against the very constant fed into `build_launch_plan`, so it
-    //     stays green even if that constant points at a host build path. It is
-    //     kept only as an encoding check; 1b below is what carries the real
-    //     property. (An earlier revision of this test had 1a only, and passed
-    //     when the constant was deliberately repointed at `target/debug` —
-    //     found by exercising the negative case.)
-    assert_eq!(decoded, IN_ROOTFS_WORKER, "hex token must round-trip");
+    // 1a. The plan carries the program through faithfully (hex round-trips).
+    //     Purely an encoding check — it compares the decoded token against what
+    //     was fed in, so it says nothing about whether that value is correct.
+    //     1b and 1c carry the real properties.
+    assert_eq!(decoded, program, "hex token must round-trip");
 
-    // 1b. THE REAL PIN: the path handed to the guest must be an in-rootfs path,
-    //     asserted by SHAPE rather than by equality with itself. A host
-    //     `target/{debug,release}` path ENOENTs inside the guest, panics PID1
-    //     and boot-loops, which surfaces only as a dispatch hang to wall-clock
-    //     with nothing naming the real cause (memory:
-    //     vm-worker-in-rootfs-binary-path). Slice 2's `MICROVM_WORKER_BIN` must
-    //     satisfy the same shape.
+    // 1b. The path handed to the guest must be an in-rootfs path, asserted by
+    //     SHAPE. A host `target/{debug,release}` path ENOENTs inside the guest,
+    //     panics PID1 and boot-loops, which surfaces only as a dispatch hang to
+    //     wall-clock with nothing naming the real cause (memory:
+    //     vm-worker-in-rootfs-binary-path).
     assert!(
         decoded.starts_with('/'),
         "guest worker path must be absolute, got {decoded:?}"
@@ -243,9 +278,21 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
          exist inside the guest, so PID1 will ENOENT, panic and boot-loop, and \
          the dispatch will hang to wall-clock looking like a channel hang"
     );
+
+    // 1c. THE REAL PIN, and the reason this test drives the production manifest:
+    //     `decoded` is `browser_driver::MICROVM_WORKER_BIN` carried through
+    //     `resolve()` and `build_launch_plan`, so this equality binds that
+    //     private const to the symlink baked by the build script. Slice 1 could
+    //     only assert this against its own test constant (spec §10.4: "an
+    //     instruction, not a mechanism"); now a typo in the production const
+    //     fails here instead of boot-looping on the DGX.
+    //
+    //     If this ever fails, change whichever side is wrong — but the two must
+    //     agree: `Dockerfile.browser-driver`'s `ln -sf … /usr/local/bin/…` and
+    //     `MICROVM_WORKER_BIN` in `core/src/workers/browser_driver.rs`.
     assert_eq!(
         decoded, "/usr/local/bin/kastellan-worker-browser-driver",
-        "guest worker path must be the path baked by \
+        "the production MICROVM_WORKER_BIN must equal the path baked by \
          scripts/workers/microvm/build-browser-driver-rootfs.sh"
     );
 
@@ -375,23 +422,27 @@ async fn vm_booted_browser_driver_launches_chromium() {
         }
     });
 
-    // Force-route the policy exactly as rewrite_worker_policy does in
-    // production — minus the CA, which this worker deliberately does not get.
-    let mut policy = browser_driver_vm_policy();
-    policy.proxy_uds = Some(uds_path.clone());
+    // Boot the PRODUCTION entry (slice 2) and force-route it exactly as
+    // rewrite_worker_policy does at spawn — minus the CA, which this worker
+    // deliberately does not get (no-MITM transparent tunnel).
+    let entry = browser_driver_vm_entry();
+    let mut policy = force_routed_policy(&entry, uds_path.clone());
     policy.env.push((
         "KASTELLAN_EGRESS_PROXY_UDS".into(),
         uds_path.to_string_lossy().into_owned(),
     ));
 
     let backend = firecracker_backend();
-    let program = IN_ROOTFS_WORKER.to_string();
+    let program = entry.binary.display().to_string();
     let spec = WorkerSpec {
         policy: &policy,
         program: &program,
         args: &[],
-        // Generous: VM boot + Playwright's Node driver + a Chromium cold start.
-        wall_clock_ms: Some(120_000),
+        // The entry's own budget (90 s: VM boot + Playwright's Node driver + a
+        // Chromium cold start), so this tier exercises the production value
+        // rather than a more generous test-only one that could mask a
+        // too-tight manifest setting.
+        wall_clock_ms: entry.wall_clock_ms,
     };
     let mut worker = spawn_worker(&*backend, &spec).expect("spawn browser-driver in micro-VM");
 
