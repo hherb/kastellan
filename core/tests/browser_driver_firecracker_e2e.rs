@@ -23,10 +23,31 @@
 //! The DGX `clippy -p kastellan-core --all-targets -D warnings` gate is the
 //! authoritative check for it; Mac clippy cannot see this code at all.
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-use kastellan_sandbox::linux_firecracker::{build_launch_plan, FirecrackerImage};
-use kastellan_sandbox::{Net, Profile, SandboxPolicy};
+use kastellan_core::secrets::Vault;
+use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
+use kastellan_sandbox::linux_firecracker::{build_launch_plan, FirecrackerImage, LinuxFirecracker};
+use kastellan_sandbox::{
+    Net, Profile, SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxPolicy,
+};
+use kastellan_tests_common::{
+    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
+    unique_suffix,
+};
+
+fn image_dir() -> String {
+    std::env::var("KASTELLAN_MICROVM_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
+}
 
 /// The worker path baked into the rootfs by
 /// `scripts/workers/microvm/build-browser-driver-rootfs.sh` (as a symlink into
@@ -80,6 +101,14 @@ fn browser_driver_vm_policy() -> SandboxPolicy {
             // Playwright's Node driver calls uv_os_homedir(); without HOME it
             // dies with "Connection closed while reading from the driver".
             ("HOME".to_string(), "/tmp".to_string()),
+            // Host-side backend config: `resolve_image` reads these to find the
+            // rootfs. `build_launch_plan` strips them before hex-encoding the
+            // guest env (plan.rs:390), so they cost no cmdline budget.
+            ("KASTELLAN_MICROVM_DIR".to_string(), image_dir()),
+            (
+                "KASTELLAN_MICROVM_ROOTFS".to_string(),
+                ROOTFS_FILE.to_string(),
+            ),
         ],
         proxy_uds: Some(PathBuf::from("/tmp/kastellan-egress.sock")),
         ..Default::default()
@@ -90,10 +119,79 @@ fn browser_driver_vm_policy() -> SandboxPolicy {
 /// for the hermetic tier — `build_launch_plan` is pure and does not touch the
 /// filesystem.
 fn browser_driver_image() -> FirecrackerImage {
+    let dir = PathBuf::from(image_dir());
     FirecrackerImage {
-        kernel_path: PathBuf::from("/var/lib/kastellan/microvm/vmlinux"),
-        rootfs_path: PathBuf::from("/var/lib/kastellan/microvm/browser-driver.ext4"),
+        kernel_path: dir.join("vmlinux"),
+        rootfs_path: dir.join(ROOTFS_FILE),
     }
+}
+
+/// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
+const ROOTFS_FILE: &str = "browser-driver.ext4";
+
+fn locate_microvm_run() -> Option<PathBuf> {
+    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("core has a workspace parent")
+        .join("target");
+    for profile in ["release", "debug"] {
+        let p = target.join(profile).join("kastellan-microvm-run");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Skip-as-pass unless real KVM + vsock + the browser-driver rootfs are present
+/// AND the launcher is built. `locate_microvm_run` prefers `target/release`, so
+/// a stale release binary silently runs OLD launcher code — rebuild it before
+/// running this test (memory: firecracker-e2e-stale-release-launcher).
+fn skip_if_no_microvm() -> bool {
+    if let Err(e) = LinuxFirecracker::probe(&browser_driver_image()) {
+        eprintln!(
+            "\n[SKIP] firecracker probe failed (need {ROOTFS_FILE} + KVM + vsock): {e}\n\
+             \x20      build it with: bash scripts/workers/microvm/build-browser-driver-rootfs.sh\n"
+        );
+        return true;
+    }
+    match locate_microvm_run() {
+        Some(bin) => {
+            use std::sync::Once;
+            static PATH_ONCE: Once = Once::new();
+            PATH_ONCE.call_once(|| {
+                let dir = bin.parent().unwrap().to_path_buf();
+                let cur = std::env::var_os("PATH").unwrap_or_default();
+                let mut paths = vec![dir];
+                paths.extend(std::env::split_paths(&cur));
+                let joined = std::env::join_paths(paths).expect("join PATH");
+                std::env::set_var("PATH", joined);
+            });
+            false
+        }
+        None => {
+            eprintln!("\n[SKIP] kastellan-microvm-run not built; run `cargo build --release -p kastellan-microvm-run`\n");
+            true
+        }
+    }
+}
+
+fn firecracker_backend() -> Arc<dyn SandboxBackend> {
+    SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
+}
+
+async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
+    kastellan_db::probe::run(
+        conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "browser-driver-firecracker-e2e"}),
+    )
+    .await
+    .expect("probe run");
+    kastellan_db::pool::connect_runtime_pool(conn_spec)
+        .await
+        .expect("connect runtime pool")
 }
 
 #[test]
@@ -169,4 +267,156 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
         "cmdline is {used} bytes, leaving under 384 bytes of headroom below the \
          1920-byte cap; a production-sized allowlist would not fit"
     );
+}
+
+/// Live tier: boot `browser-driver.ext4` and prove Chromium launches inside it.
+///
+/// ## Why "the stub proxy received CONNECT" is the acceptance signal
+///
+/// A host `UnixListener` stands in for the egress proxy at the worker's
+/// `proxy_uds`. A force-routed browser-driver VM boots, one `browser.render` is
+/// dispatched, and we assert the stub **receives the worker's
+/// `CONNECT example.org:443` line**.
+///
+/// That single line proves the whole chain at once, and each link is load-bearing:
+///
+/// * the VM booted and PID1 `execv`'d the in-rootfs Python entrypoint;
+/// * the worker came up and served JSON-RPC over the vsock stdio bridge
+///   (otherwise `dispatch` never returns a reply);
+/// * `_maybe_start_shim` started the in-jail `ProxyShim` (it only starts when
+///   `KASTELLAN_EGRESS_PROXY_UDS` is non-blank);
+/// * **Chromium actually launched** — a browser that failed to start emits no
+///   CONNECT at all, so this is a positive proof of launch, not an inference;
+/// * Chromium honoured `--proxy-server` + `--proxy-bypass-list=<-loopback>`;
+/// * the guest→host vsock egress relay (port 1025) carried the bytes.
+///
+/// This is deliberately stronger than discriminating on the render error's
+/// message text. A browser-launch failure and a navigation failure both surface
+/// as `RENDER_FAILED` (-32003, `errors.py`), so the JSON-RPC code cannot tell
+/// them apart and the message would have to be pattern-matched — brittle across
+/// Playwright versions. A received CONNECT line is a byte sequence, not a
+/// string match on an error.
+///
+/// The render itself is EXPECTED to fail: the stub answers 503 and closes, so
+/// Chromium reports a proxy/navigation error. That is fine — the render result
+/// is not the signal. Completing a real render through a real sidecar is
+/// slice 3.
+///
+/// Unlike the web-fetch VM e2e there is **no CA** here: browser-driver runs the
+/// sidecar in no-MITM transparent-tunnel mode (`force_route::disable_mitm_for`
+/// names this worker), because the browser does end-to-end TLS itself and
+/// cannot trust our per-instance MITM CA.
+///
+/// DGX-only. Run:
+///
+///     export PATH=$HOME/.local/bin:$PATH
+///     cargo build --release -p kastellan-microvm-run
+///     bash scripts/workers/microvm/build-browser-driver-rootfs.sh
+///     cargo test -p kastellan-core --test browser_driver_firecracker_e2e -- --ignored --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs"]
+async fn vm_booted_browser_driver_launches_chromium() {
+    if skip_if_no_microvm() {
+        return;
+    }
+    // Skip-as-pass without PG/supervisor/sandbox (dispatch needs a pool for audit).
+    if skip_if_no_supervisor() {
+        return;
+    }
+    if skip_if_sandbox_unavailable() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "bd-d",
+        "bd-l",
+        &format!("kastellan-supervisor-test-pg-browserdriver-{suffix}"),
+    );
+    let pool = probe_and_pool(&cluster.conn_spec).await;
+
+    // Host scratch under /tmp (a share anchor) holding the stub proxy UDS.
+    let dir = std::env::temp_dir().join(format!("kastellan-bd-vm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let uds_path = dir.join("egress.sock");
+    let _ = std::fs::remove_file(&uds_path);
+
+    // Stub "proxy": report the first request line back, then 503 and close so
+    // Chromium's navigation fails fast instead of hanging.
+    let listener = UnixListener::bind(&uds_path).unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_ok() {
+                let _ = tx.send(line.clone());
+            }
+            let mut w = stream;
+            let _ = w.write_all(b"HTTP/1.1 503 stub\r\n\r\n");
+        }
+    });
+
+    // Force-route the policy exactly as rewrite_worker_policy does in
+    // production — minus the CA, which this worker deliberately does not get.
+    let mut policy = browser_driver_vm_policy();
+    policy.proxy_uds = Some(uds_path.clone());
+    policy.env.push((
+        "KASTELLAN_EGRESS_PROXY_UDS".into(),
+        uds_path.to_string_lossy().into_owned(),
+    ));
+
+    let backend = firecracker_backend();
+    let program = IN_ROOTFS_WORKER.to_string();
+    let spec = WorkerSpec {
+        policy: &policy,
+        program: &program,
+        args: &[],
+        // Generous: VM boot + Playwright's Node driver + a Chromium cold start.
+        wall_clock_ms: Some(120_000),
+    };
+    let mut worker = spawn_worker(&*backend, &spec).expect("spawn browser-driver in micro-VM");
+
+    // Drive one render on a background task; we only need it to make Chromium
+    // attempt egress. The assertion is the stub receiving CONNECT.
+    let render = tokio::spawn(async move {
+        let _ = dispatch(
+            &pool,
+            &Vault::new(),
+            &mut worker,
+            "browser-driver",
+            "browser.render",
+            serde_json::json!({ "url": "https://example.org/", "timeout_ms": 20000 }),
+        )
+        .await;
+        (worker, pool)
+    });
+
+    let started = std::time::Instant::now();
+    let got = rx.recv_timeout(Duration::from_secs(90)).expect(
+        "stub proxy never received a CONNECT from the in-VM browser: the VM failed to boot, \
+         the worker failed to serve over vsock, the ProxyShim did not start, or CHROMIUM \
+         FAILED TO LAUNCH (an incomplete dlopen/lib closure in the rootfs)",
+    );
+    // Print the evidence, not just a green line. A live VM tier that passes
+    // suspiciously fast is exactly the case the project's "when tests pass but
+    // feel suspicious" rule warns about, so make the received bytes and the
+    // elapsed time visible under --nocapture.
+    eprintln!(
+        "[EVIDENCE] stub proxy received {got:?} after {:?} (VM boot + Python worker + \
+         Playwright driver + Chromium launch + navigation)",
+        started.elapsed()
+    );
+    assert!(
+        got.starts_with("CONNECT example.org:443"),
+        "expected CONNECT example.org:443 from the in-VM Chromium, got {got:?}"
+    );
+
+    let (worker, pool) = render.await.expect("render task joins");
+    let _ = worker.close();
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
