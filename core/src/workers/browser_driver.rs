@@ -25,6 +25,45 @@ use crate::worker_manifest::{Resolution, ResolveCtx, ToolDoc, ToolParam, WorkerM
 const TOOL_NAME: &str = "browser-driver";
 /// uv console-script shim name (`<venv>/bin/<SHIM_NAME>`).
 const SHIM_NAME: &str = "kastellan-worker-browser-driver";
+/// Opt-in gate for the whole worker. Read in both host and micro-VM mode, so
+/// `USE_MICROVM=1` alone never registers a tool the operator has not enabled.
+const ENABLE_ENV: &str = "KASTELLAN_BROWSER_DRIVER_ENABLE";
+
+/// Opt into the Linux Firecracker micro-VM backend for browser-driver.
+/// Linux-only: on macOS the flag is never read (the `FirecrackerVm` variant
+/// doesn't exist there), so the const is `cfg`-gated out (the issue-#144 rule).
+#[cfg(target_os = "linux")]
+const USE_MICROVM_ENV: &str = "KASTELLAN_BROWSER_DRIVER_USE_MICROVM";
+
+/// In-rootfs path of the browser-driver entrypoint, baked as a symlink into the
+/// staged venv by `scripts/workers/microvm/build-browser-driver-rootfs.sh`
+/// (via `Dockerfile.browser-driver`). This is the path PID1 `execv`s INSIDE the
+/// guest — **never** a host `target/` path.
+///
+/// Getting this wrong is expensive and quiet: PID1 ENOENTs, panics, the VM
+/// boot-loops, and the dispatch merely hangs to wall-clock, presenting as a
+/// channel hang that names nothing (memory: `vm-worker-in-rootfs-binary-path`).
+/// `core/tests/browser_driver_firecracker_e2e.rs` pins this const against the
+/// baked path through the real `build_launch_plan`.
+#[cfg(target_os = "linux")]
+const MICROVM_WORKER_BIN: &str = "/usr/local/bin/kastellan-worker-browser-driver";
+
+/// Rootfs image filename produced by `build-browser-driver-rootfs.sh`.
+#[cfg(target_os = "linux")]
+const MICROVM_ROOTFS: &str = "browser-driver.ext4";
+
+/// Playwright browser tree inside the rootfs (`ENV PLAYWRIGHT_BROWSERS_PATH` in
+/// `Dockerfile.browser-driver`). Differs from host mode, where the tree lives
+/// under the host venv — in the guest there is no host venv to anchor against.
+///
+/// **Must match the Dockerfile's `ENV` byte for byte.** `docker export` ships
+/// only the filesystem — image env metadata is dropped — so the Dockerfile's
+/// value positions the browsers at build time and THIS const is the sole
+/// runtime source. A divergence fails loudly (Playwright: "executable doesn't
+/// exist"), unlike the [`MICROVM_WORKER_BIN`] hang, and the live e2e tier
+/// launches Chromium through this value for real.
+#[cfg(target_os = "linux")]
+const MICROVM_BROWSERS_PATH: &str = "/usr/local/lib/kastellan-browser-driver/browsers";
 
 /// Resolved config for the browser-driver worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +131,7 @@ where
     // Opt-in gate under the one unified flag dialect (`1|true|yes|on`, trimmed,
     // case-insensitive) — #459 retired the strict `== "1"` so `…=true` can't
     // silently read as off next to a `FORCE_ROUTING=true` that reads on.
-    if !env_flag_enabled(env_lookup("KASTELLAN_BROWSER_DRIVER_ENABLE")) {
+    if !env_flag_enabled(env_lookup(ENABLE_ENV)) {
         return Err(ResolveSkipReason::Disabled);
     }
 
@@ -329,6 +368,94 @@ pub fn browser_driver_entry(
     }
 }
 
+/// Build the [`ToolEntry`] for browser-driver running inside a Firecracker
+/// micro-VM (opt-in via `KASTELLAN_BROWSER_DRIVER_USE_MICROVM=1`, on top of the
+/// usual `ENABLE` gate). Slice 2 of the VM-entry arc; the rootfs is slice 1.
+///
+/// Mirrors [`browser_driver_entry`] but as a VM net worker. What changes, and
+/// why each difference is load-bearing:
+///
+/// * **`fs_read: vec![]`** — a VM shares no host paths in at all. The venv, the
+///   interpreter and the Playwright browser tree all live inside the rootfs, so
+///   none of host mode's binds (venv, interpreter prefix + lib dirs, `/etc`
+///   resolver files, operator extras) has anything to point at. The worker has
+///   no NIC and does no local DNS either — the egress proxy resolves host-side.
+/// * **No `lockdown_shim`, no `KASTELLAN_LANDLOCK_RW`** — host mode needs the
+///   `kastellan-worker-lockdown-exec` shim to apply seccomp + Landlock to a
+///   pure-Python venv worker bwrap spawns directly (#281). In VM mode the
+///   isolation boundary *is* the VM: a separate kernel, no host FS, no NIC. The
+///   shim binary is not staged in the rootfs, so requiring it would be a boot
+///   failure, not a hardening.
+/// * **`mem_mb: 2048`** (host mode: 1024) — Firecracker *enforces* this as the
+///   guest's total RAM, and it must cover Chromium **plus** the guest `/tmp`
+///   tmpfs. `--disable-dev-shm-usage` redirects Chromium's shared memory into
+///   `TMPDIR=/tmp`, so shm competes with guest RAM instead of living in a
+///   separate `/dev/shm` (design spec §6, §10.4). Slice 3 should re-check this
+///   budget against a real, heavy render — no real page has rendered in the VM yet.
+/// * **`PLAYWRIGHT_BROWSERS_PATH`** points at the in-rootfs tree, not a venv
+///   subdir. **`KASTELLAN_MICROVM_DIR` / `_ROOTFS`** tell the backend which image
+///   to boot; `build_launch_plan` strips both before hex-encoding the guest env,
+///   so they cost no cmdline budget.
+/// * **`wall_clock_ms: 90_000`** (host mode: 45_000) — a cold VM boot precedes
+///   the Playwright Node driver and a Chromium cold start.
+///
+/// What deliberately stays the same: `Net::Allowlist` mapped to `host:443` by
+/// web-fetch's canonical mapper (a bare-host entry would be an all-port grant at
+/// the proxy), the verbatim rows in `KASTELLAN_BROWSER_DRIVER_ALLOWLIST` for the
+/// worker's own per-navigation check (the dual-allowlist shape), `TMPDIR`/`HOME`
+/// at `/tmp` for Playwright's `uv_os_homedir()`, `tasks_max: 512` for Chromium's
+/// process tree, `Profile::WorkerBrowserClient`, `SingleUse`, and `proxy_uds:
+/// None` in the manifest (force-routing sets it at spawn).
+///
+/// Linux-only: emits the `#[cfg(target_os = "linux")]` `FirecrackerVm` variant.
+#[cfg(target_os = "linux")]
+pub fn browser_driver_firecracker_entry(
+    binary: PathBuf,
+    image_dir: String,
+    allowlist: &[String],
+) -> ToolEntry {
+    let allow_json =
+        serde_json::to_string(allowlist).expect("serializing Vec<String> never fails");
+    let policy = SandboxPolicy {
+        fs_read: vec![],
+        fs_write: vec![],
+        net: Net::Allowlist(crate::workers::web_fetch::allowlist_to_net_entries(allowlist)),
+        cpu_ms: 30_000,
+        mem_mb: 2048,
+        profile: Profile::WorkerBrowserClient,
+        env: vec![
+            ("KASTELLAN_BROWSER_DRIVER_ALLOWLIST".to_string(), allow_json),
+            (
+                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                MICROVM_BROWSERS_PATH.to_string(),
+            ),
+            ("TMPDIR".to_string(), "/tmp".to_string()),
+            ("HOME".to_string(), "/tmp".to_string()),
+            ("KASTELLAN_MICROVM_DIR".to_string(), image_dir),
+            (
+                "KASTELLAN_MICROVM_ROOTFS".to_string(),
+                MICROVM_ROOTFS.to_string(),
+            ),
+        ],
+        cpu_quota_pct: None,
+        tasks_max: Some(512),
+        proxy_uds: None,
+        broker_uds: None,
+        persistent_store: None,
+    };
+    ToolEntry {
+        binary,
+        policy,
+        wall_clock_ms: Some(90_000),
+        lifecycle: crate::worker_lifecycle::Lifecycle::SingleUse,
+        sandbox_backend: Some(kastellan_sandbox::SandboxBackendKind::FirecrackerVm),
+        container_image: None,
+        lockdown_shim: None,
+        ephemeral_scratch: false,
+        broker: None,
+    }
+}
+
 /// browser-driver's host-side manifest. Reads its operator allowlist from the
 /// `tool_allowlists` table (keyed `"browser-driver"`) and injects it into the
 /// worker policy; maps the resolver's skip reasons onto [`Resolution`].
@@ -371,6 +498,31 @@ impl WorkerManifest for BrowserDriverManifest {
     }
 
     fn resolve(&self, ctx: &ResolveCtx<'_>) -> Resolution {
+        // Firecracker micro-VM mode (Linux) short-circuits the ENTIRE host-side
+        // resolution below — not just binary discovery, as in web-fetch. Host
+        // mode resolves a venv, its interpreter prefix and out-of-prefix lib
+        // dirs, and then fail-closes on the missing lockdown-exec shim; in VM
+        // mode every one of those lives inside the rootfs image, so none of them
+        // needs to exist on this host and requiring them would make a correctly
+        // configured VM deployment `Misconfigured`.
+        //
+        // Both flags are read: `USE_MICROVM=1` on its own must never register a
+        // tool the operator has not enabled, and with ENABLE off we fall through
+        // to `resolve_env`, which reports the accurate `Disabled`.
+        //
+        // Linux-only — on macOS `USE_MICROVM` is never read, so the
+        // `FirecrackerVm` variant is never referenced (issue #144).
+        #[cfg(target_os = "linux")]
+        {
+            if ctx.flag_enabled(ENABLE_ENV) && ctx.flag_enabled(USE_MICROVM_ENV) {
+                return Resolution::Register(browser_driver_firecracker_entry(
+                    PathBuf::from(MICROVM_WORKER_BIN),
+                    ctx.microvm_image_dir(),
+                    &(ctx.allowlist)(TOOL_NAME),
+                ));
+            }
+        }
+
         match resolve_env(
             |k| (ctx.get_env)(k),
             |p| (ctx.is_dir)(p),

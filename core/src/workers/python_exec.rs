@@ -220,9 +220,7 @@ impl WorkerManifest for PythonExecManifest {
             if enabled && use_microvm {
                 let binary =
                     PathBuf::from("/usr/local/bin/kastellan-worker-python-exec");
-                let image_dir = (ctx.get_env)("KASTELLAN_MICROVM_DIR")
-                    .filter(|v| !v.trim().is_empty())
-                    .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string());
+                let image_dir = ctx.microvm_image_dir();
                 let params_file_max = (ctx.get_env)(PARAMS_FILE_MAX_ENV);
                 let (idle, max_req, max_age) = parse_idle_caps(|k| (ctx.get_env)(k));
                 return Resolution::Register(firecracker_mode_entry(
