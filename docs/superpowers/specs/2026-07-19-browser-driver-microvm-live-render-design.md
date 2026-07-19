@@ -225,6 +225,16 @@ Both sidecar decisions came back `egress.allowed … "tls_intercepted":false`,
 confirming the transparent tunnel: Chromium validated each origin's real
 certificate itself.
 
+**The 628 MiB reading is a floor, not a ceiling.** Only `en.wikipedia.org` is
+allowlisted, so cross-host subresources — notably the article's images on
+`upload.wikimedia.org` — were egress-blocked and the render was DOM +
+same-origin CSS/JS only. A page whose image assets were all in-allowlist would
+decode them into exactly the shm-in-tmpfs memory this tier measures. Kept that
+way deliberately (post-review, 2026-07-19): the tier exists to isolate
+content-drift risk, and widening the allowlist would couple the reading to
+Wikipedia's image weight too. The ~69% headroom conclusion stands with that
+caveat attached.
+
 **Neither budget is changed.** `mem_mb: 2048` carries ~69% headroom on a page far
 heavier than anything slice 2 reasoned about, and `wall_clock_ms: 90_000` is
 enormously generous — a *complete* cold-boot-to-rendered-page cycle is under two
@@ -258,3 +268,28 @@ runs, so the sampler is measuring a real, stable quantity.
 
 §7's hollow `real_web_fetch_through_sidecar` scaffold is filed as
 [#473](https://github.com/hherb/kastellan/issues/473).
+
+### 8.5 Post-review hardening (/fixall, 2026-07-19)
+
+Four review findings, all fixed in-PR and re-verified live on the DGX: all
+three ignored tiers green post-fix, memory tier at **623 MiB = 30.4%** —
+consistent with the prior 628 MiB readings, so the sampler change measures the
+same stable quantity.
+
+1. **Memory budget read from the entry, not a mirrored const.** The
+   `VM_MEM_MB: u64 = 2048` mirror contradicted the acceptance tier's own
+   "measure the production value" rule for `wall_clock_ms`; the memory tier now
+   reads `browser_driver_vm_entry().policy.mem_mb`, so a future `mem_mb` change
+   cannot leave the assertion measuring against a stale budget.
+2. **Sampler excludes pre-existing `firecracker` PIDs.** Matching by comm alone
+   could attribute another tier's (or a stale spike) VMM to this render; VMMs
+   alive before the sampler starts are now snapshotted and skipped, and the
+   documented run command gained `--test-threads=1` so tiers cannot race.
+3. **Transparent-tunnel assertion scoped to the allowed row.** It previously
+   matched `"tls_intercepted":false` on *any* decision; it now checks the same
+   `egress.allowed <host>:443` row, with a comment noting `decision_to_audit`
+   defaults a missing field to false — what the assertion catches is the sidecar
+   reporting `true`, i.e. actively MITM-ing browser traffic.
+4. **The measurement's floor caveat documented** (§8.1 above and at
+   `HEAVY_ORIGIN_HOST`): cross-host image subresources are egress-blocked, so
+   628 MiB understates a fully-loaded heavy page.

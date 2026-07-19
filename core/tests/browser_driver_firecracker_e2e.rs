@@ -92,16 +92,19 @@ const DEFAULT_ORIGIN_URL: &str = "https://example.org/";
 /// Stable needle in `example.org`'s rendered text.
 const DEFAULT_ORIGIN_NEEDLE: &str = "Example Domain";
 
-/// A deliberately heavy real page for the memory measurement: a large DOM with
-/// many subresources, unlike [`DEFAULT_ORIGIN_URL`], which is far too small to
-/// exercise the `/tmp`-tmpfs-versus-guest-RAM question at all.
+/// A deliberately heavy real page for the memory measurement: a large DOM,
+/// unlike [`DEFAULT_ORIGIN_URL`], which is far too small to exercise the
+/// `/tmp`-tmpfs-versus-guest-RAM question at all.
+///
+/// Only this host is allowlisted, so **cross-host subresources — notably the
+/// article's images on `upload.wikimedia.org` — are egress-blocked** and the
+/// render is DOM + same-origin CSS/JS only. That makes the measured peak a
+/// *floor*: a page whose image assets were all in-allowlist would decode them
+/// into exactly the shm-in-tmpfs memory this tier measures. Deliberate anyway —
+/// this tier was split off to isolate content-drift risk, and widening the
+/// allowlist would couple the reading to Wikipedia's image weight too.
 const HEAVY_ORIGIN_HOST: &str = "en.wikipedia.org";
 const HEAVY_ORIGIN_URL: &str = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
-
-/// Total guest RAM the VM entry requests, mirrored from
-/// `browser_driver_firecracker_entry`. Used to express the memory assertion as a
-/// fraction of the real budget rather than a bare magic number.
-const VM_MEM_MB: u64 = 2048;
 
 /// The production micro-VM entry under test, resolved exactly as the daemon
 /// resolves it: through `BrowserDriverManifest::resolve` with `ENABLE=1` and
@@ -305,39 +308,60 @@ fn skip_if_origin_unreachable(host: &str) -> bool {
 /// (slice-1 spec §10.1, slice-2 manifest doc), and it is the quantity this
 /// sampler measures.
 ///
-/// Returns `None` when no `firecracker` process was seen at all — the caller
-/// treats that as a failure, not as "nothing to assert".
+/// VMMs already alive when sampling starts are **excluded**: another tier's VM
+/// or a stale spike VM is not ours, and attributing its RSS to this render
+/// would corrupt the reading in either direction. The VM this sampler brackets
+/// boots strictly after the snapshot, so exclusion by pre-existing PID is safe.
+///
+/// Returns `None` when no *new* `firecracker` process was seen at all — the
+/// caller treats that as a failure, not as "nothing to assert".
 fn sample_peak_vmm_rss_mib(stop: &std::sync::atomic::AtomicBool) -> Option<u64> {
     use std::sync::atomic::Ordering;
+    let preexisting: Vec<u32> =
+        firecracker_vmm_rss_kb().into_iter().map(|(pid, _)| pid).collect();
     let mut peak: Option<u64> = None;
     while !stop.load(Ordering::Relaxed) {
-        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-            let pid_dir = entry.path();
-            // `comm` is the 15-char-truncated process name; "firecracker" fits.
-            let Ok(comm) = std::fs::read_to_string(pid_dir.join("comm")) else {
-                continue;
-            };
-            if comm.trim() != "firecracker" {
+        for (pid, kb) in firecracker_vmm_rss_kb() {
+            if preexisting.contains(&pid) {
                 continue;
             }
-            let Ok(status) = std::fs::read_to_string(pid_dir.join("status")) else {
-                continue;
-            };
-            for line in status.lines() {
-                let Some(rest) = line.strip_prefix("VmRSS:") else {
-                    continue;
-                };
-                // "VmRSS:\t  123456 kB"
-                if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok())
-                {
-                    let mib = kb / 1024;
-                    peak = Some(peak.map_or(mib, |p: u64| p.max(mib)));
-                }
-            }
+            let mib = kb / 1024;
+            peak = Some(peak.map_or(mib, |p: u64| p.max(mib)));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     peak
+}
+
+/// Live `firecracker` VMM processes, as `(pid, current VmRSS in KiB)`.
+fn firecracker_vmm_rss_kb() -> Vec<(u32, u64)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let pid_dir = entry.path();
+        // `comm` is the 15-char-truncated process name; "firecracker" fits.
+        let Ok(comm) = std::fs::read_to_string(pid_dir.join("comm")) else {
+            continue;
+        };
+        if comm.trim() != "firecracker" {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(pid_dir.join("status")) else {
+            continue;
+        };
+        for line in status.lines() {
+            let Some(rest) = line.strip_prefix("VmRSS:") else {
+                continue;
+            };
+            // "VmRSS:\t  123456 kB"
+            if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()) {
+                out.push((pid, kb));
+            }
+        }
+    }
+    out
 }
 
 /// Boot the production browser-driver VM entry through the **real daemon
@@ -751,7 +775,12 @@ async fn vm_booted_browser_driver_launches_chromium() {
 ///     export PATH=$HOME/.local/bin:$PATH
 ///     cargo build --release -p kastellan-microvm-run
 ///     cargo build -p kastellan-worker-egress-proxy
-///     cargo test -p kastellan-core --test browser_driver_firecracker_e2e -- --ignored --nocapture
+///     cargo test -p kastellan-core --test browser_driver_firecracker_e2e -- \
+///         --test-threads=1 --ignored --nocapture
+///
+/// `--test-threads=1` matters: each ignored tier boots its own VM, and the
+/// memory tier attributes RSS to the one firecracker process that appears
+/// after its sampler starts — tiers racing in parallel would defeat that.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
 async fn vm_renders_real_page_through_real_sidecar() {
@@ -818,26 +847,33 @@ async fn vm_renders_real_page_through_real_sidecar() {
     // NB the action is `egress.allowed`, not `allowed` — `decision_to_audit`
     // namespaces every verdict under `egress.` (its siblings are
     // `egress.blocked.credential_leak` / `egress.blocked.tls_pin`).
-    let allowed = decisions.iter().any(|d| {
-        d.starts_with("egress.allowed")
-            && d.contains(&format!("\"host\":\"{DEFAULT_ORIGIN_HOST}\""))
-            && d.contains("\"port\":443")
-    });
-    assert!(
-        allowed,
-        "no `egress.allowed {DEFAULT_ORIGIN_HOST}:443` decision: the page rendered but \
-         not provably through the sidecar. Decisions: {decisions:?}"
-    );
+    let allowed_row = decisions
+        .iter()
+        .find(|d| {
+            d.starts_with("egress.allowed")
+                && d.contains(&format!("\"host\":\"{DEFAULT_ORIGIN_HOST}\""))
+                && d.contains("\"port\":443")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no `egress.allowed {DEFAULT_ORIGIN_HOST}:443` decision: the page rendered \
+                 but not provably through the sidecar. Decisions: {decisions:?}"
+            )
+        });
 
-    // Transparent tunnel, not MITM: the sidecar must NOT have terminated TLS.
-    // This is the production property `force_route::disable_mitm_for` carries,
-    // observed here rather than restated — Chromium validated example.org's real
-    // certificate itself, which is what makes a real origin necessary at all.
+    // Transparent tunnel, not MITM: the sidecar must NOT have terminated TLS on
+    // THIS connection — the check is scoped to the allowed row above, not to any
+    // decision that happens to carry the flag. This is the production property
+    // `force_route::disable_mitm_for` carries, observed here rather than
+    // restated — Chromium validated example.org's real certificate itself,
+    // which is what makes a real origin necessary at all. (NB `decision_to_audit`
+    // defaults a MISSING `tls_intercepted` to false, so what this catches is the
+    // sidecar reporting `true`, i.e. actively MITM-ing browser traffic.)
     assert!(
-        decisions.iter().any(|d| d.contains("\"tls_intercepted\":false")),
-        "expected a transparent-tunnel (non-MITM) decision for browser-driver; \
-         a MITM'd connection would mean disable_mitm_for no longer names this \
-         worker, and Chromium would reject our per-instance CA. Decisions: {decisions:?}"
+        allowed_row.contains("\"tls_intercepted\":false"),
+        "the allowed decision for {DEFAULT_ORIGIN_HOST}:443 is not a transparent-tunnel \
+         (non-MITM) one; a MITM'd connection would mean disable_mitm_for no longer names \
+         this worker, and Chromium would reject our per-instance CA. Row: {allowed_row}"
     );
 
     // Wall-clock headroom against the entry's OWN budget, so this measures the
@@ -948,14 +984,19 @@ async fn vm_render_of_heavy_page_stays_within_memory_budget() {
          Failing loudly rather than skipping the memory assertion, which would be a \
          silent false green",
     );
-    let used_pct = (peak as f64 / VM_MEM_MB as f64) * 100.0;
+    // Memory budget from the entry's OWN policy — the same "measure the
+    // production value, not a test-local mirror" rule the acceptance tier
+    // applies to wall_clock_ms. Firecracker enforces `policy.mem_mb` as the
+    // guest RAM size, so this is the number the guest can actually OOM against.
+    let budget_mb = browser_driver_vm_entry().policy.mem_mb;
+    let used_pct = (peak as f64 / budget_mb as f64) * 100.0;
     eprintln!(
         "[EVIDENCE] peak Firecracker VMM RSS {peak} MiB = {used_pct:.1}% of the \
-         {VM_MEM_MB} MiB guest budget (Chromium + the /tmp tmpfs holding its shm)"
+         {budget_mb} MiB guest budget (Chromium + the /tmp tmpfs holding its shm)"
     );
     assert!(
         used_pct < 85.0,
-        "peak guest memory {peak} MiB is {used_pct:.1}% of the {VM_MEM_MB} MiB budget, \
+        "peak guest memory {peak} MiB is {used_pct:.1}% of the {budget_mb} MiB budget, \
          leaving under 15% headroom — raise mem_mb in browser_driver_firecracker_entry; \
          a heavier page would OOM the VM, and because --disable-dev-shm-usage redirects \
          Chromium's shm into the guest /tmp tmpfs that OOM competes with guest RAM"
