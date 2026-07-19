@@ -76,7 +76,7 @@ path = "src/bin/kastellan-db-init.rs"
 # launchd LaunchAgent on macOS) and then connects over the UDS to issue
 # a `SELECT 1`. Skips with a `[SKIP]` line when Postgres is not on the
 # host (mirrors the sandbox/supervisor smoke-test pattern).
-kastellan-supervisor   = { path = "../supervisor", version = "0.1.0" }
+kastellan-supervisor   = { path = "../supervisor", version = "0.2.0" }
 # Shared test fixtures: PG cluster bring-up, RAII guards, skip helpers
 # (issue #15 hoist). dev-only — never linked into a runtime binary.
 kastellan-tests-common = { path = "../tests-common" }

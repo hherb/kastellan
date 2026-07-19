@@ -14,10 +14,10 @@ name = "kastellan-worker-egress-proxy"
 path = "src/main.rs"
 
 [dependencies]
-kastellan-worker-prelude    = { path = "../prelude", version = "0.1.0" }
-kastellan-worker-web-common = { path = "../web-common", version = "0.1.0" }
-kastellan-leak-scan = { path = "../../leak-scan", version = "0.1.0" }
-kastellan-net-classify = { path = "../../net-classify", version = "0.1.0" }
+kastellan-worker-prelude    = { path = "../prelude", version = "0.2.0" }
+kastellan-worker-web-common = { path = "../web-common", version = "0.2.0" }
+kastellan-leak-scan = { path = "../../leak-scan", version = "0.2.0" }
+kastellan-net-classify = { path = "../../net-classify", version = "0.2.0" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }

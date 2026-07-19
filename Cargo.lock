@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2284,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "kastellan-supervisor",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-leak-scan"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-llm-router"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-matrix-wire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2333,25 +2333,25 @@ dependencies = [
 
 [[package]]
 name = "kastellan-microvm-init"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "kastellan-microvm-run"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "kastellan-net-classify"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "kastellan-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2360,7 +2360,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-supervisor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -2382,7 +2382,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-tests-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "kastellan-core",
@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-egress-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-embed-broker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-kv-demo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",
@@ -2450,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-matrix"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-matrix-wire",
@@ -2464,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-net-demo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",
@@ -2482,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-prelude"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kastellan-protocol",
  "landlock",
@@ -2495,7 +2495,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-python-exec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-search-broker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-shell-exec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",
@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-web-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-web-fetch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",
@@ -2567,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-web-research"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "kastellan-worker-web-search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "kastellan-protocol",

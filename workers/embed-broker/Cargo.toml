@@ -14,9 +14,9 @@ name = "kastellan-worker-embed-broker"
 path = "src/main.rs"
 
 [dependencies]
-kastellan-protocol          = { path = "../../protocol", version = "0.1.0" }
-kastellan-worker-prelude    = { path = "../prelude", version = "0.1.0" }
-kastellan-worker-web-common = { path = "../web-common", version = "0.1.0" }
+kastellan-protocol          = { path = "../../protocol", version = "0.2.0" }
+kastellan-worker-prelude    = { path = "../prelude", version = "0.2.0" }
+kastellan-worker-web-common = { path = "../web-common", version = "0.2.0" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
