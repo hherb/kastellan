@@ -350,3 +350,62 @@ micro-VM the VM is the security boundary.
    raises `NotImplementedError`" and recommends `pip install -e .` — is
    corrected, since this slice makes it actively misleading. (Found while
    mapping the worker; the render has been fully implemented for some time.)
+
+---
+
+## 10. Revisions
+
+### 10.1 Task 1 finding — the guest `/dev` reality (2026-07-19)
+
+**Decision: option D — no `microvm-init` change.** Task 3 of the plan drops out.
+
+Two facts, measured separately:
+
+**Fact 1 — devtmpfs auto-mounts.** Read directly from the pinned guest kernel
+rather than by booting: `extract-ikconfig` on
+`/var/lib/kastellan/microvm/vmlinux` reports
+
+```
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_SHMEM=y
+CONFIG_TMPFS=y
+```
+
+`CONFIG_DEVTMPFS_MOUNT=y` means the kernel mounts devtmpfs on `/dev` in
+`prepare_namespace()` when it mounts the root filesystem. Firecracker boots this
+worker from a `root=` block device with no initrd, so that path is taken and
+`/dev/null` + `/dev/urandom` are present before PID1 runs. **No `/dev` mount is
+needed.** This was cheaper and more conclusive than the boot-and-dump procedure
+the plan sketched, so that procedure was not run.
+
+**Fact 2 — `/dev/shm` is absent, and that is fine.** devtmpfs never provides
+`/dev/shm` (it creates device nodes only), and nothing in `microvm-init` mounts
+it, so it does not exist in the guest. The question was whether
+`--disable-dev-shm-usage` — already unconditional in `DEFAULT_LAUNCH_ARGS`
+(`render.py:31-41`) — fully removes the need. A controlled two-arm experiment in
+the built image, with `/dev/shm` unmounted **and** `rmdir`'d so it was genuinely
+absent:
+
+| Arm | Flag | Result |
+|---|---|---|
+| A | `--disable-dev-shm-usage` | **exit 0** — renders `about:blank` |
+| B (control) | none | **FATAL** — `Creating shared memory in /dev/shm/.org.chromium.Chromium.* failed: No such file or directory` |
+
+Arm A is the production configuration. Arm B confirms the experiment was real
+(absence genuinely breaks an unprotected Chromium) rather than a false negative.
+
+**Why option D over option A.** The spec's mechanical selection rule reads
+"devtmpfs auto-mounts, `/dev/shm` absent → option A", but that rule was written
+before Fact 2 was measurable. Its underlying question — *does the flag remove the
+need?* — is answered yes. Mounting `/dev/shm` in `microvm-init` would change
+every one of the 7 existing VM workers to satisfy a need that does not exist.
+That is precisely the speculative change §4.3 was written to avoid.
+
+**Accepted coupling, and how it is guarded.** Option D makes the micro-VM rootfs
+depend on `--disable-dev-shm-usage` staying in `DEFAULT_LAUNCH_ARGS`. Deleting it
+would break the VM worker with Arm B's FATAL. Rather than pre-empt that with a
+speculative mount, the dependency is documented at the site where someone would
+delete the flag (`render.py`), naming the consequence. If a future slice needs
+`/dev/shm` for a real reason, option A is still available and this finding
+records exactly what it would buy.
