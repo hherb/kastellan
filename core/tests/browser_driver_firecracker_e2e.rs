@@ -815,15 +815,29 @@ async fn vm_renders_real_page_through_real_sidecar() {
     // The render must have gone THROUGH the sidecar. Match host AND port: a bare
     // host check would pass on any decision mentioning the host (#469's
     // all-port-grant lesson applies to assertions too).
+    // NB the action is `egress.allowed`, not `allowed` — `decision_to_audit`
+    // namespaces every verdict under `egress.` (its siblings are
+    // `egress.blocked.credential_leak` / `egress.blocked.tls_pin`).
     let allowed = decisions.iter().any(|d| {
-        d.starts_with("allowed")
+        d.starts_with("egress.allowed")
             && d.contains(&format!("\"host\":\"{DEFAULT_ORIGIN_HOST}\""))
             && d.contains("\"port\":443")
     });
     assert!(
         allowed,
-        "no `allowed {DEFAULT_ORIGIN_HOST}:443` egress decision: the page rendered but \
+        "no `egress.allowed {DEFAULT_ORIGIN_HOST}:443` decision: the page rendered but \
          not provably through the sidecar. Decisions: {decisions:?}"
+    );
+
+    // Transparent tunnel, not MITM: the sidecar must NOT have terminated TLS.
+    // This is the production property `force_route::disable_mitm_for` carries,
+    // observed here rather than restated — Chromium validated example.org's real
+    // certificate itself, which is what makes a real origin necessary at all.
+    assert!(
+        decisions.iter().any(|d| d.contains("\"tls_intercepted\":false")),
+        "expected a transparent-tunnel (non-MITM) decision for browser-driver; \
+         a MITM'd connection would mean disable_mitm_for no longer names this \
+         worker, and Chromium would reject our per-instance CA. Decisions: {decisions:?}"
     );
 
     // Wall-clock headroom against the entry's OWN budget, so this measures the
