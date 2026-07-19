@@ -106,18 +106,46 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
     )
     .expect("a force-routed browser-driver VM policy must produce a launch plan");
 
-    // 1. The guest execs the in-rootfs path, NOT a host target/ path.
     let token = plan
         .boot_args
         .split_whitespace()
         .find_map(|t| t.strip_prefix("kastellan.worker="))
         .expect("boot args must carry a kastellan.worker= token");
     let decoded = String::from_utf8(hex_decode(token)).expect("worker token is utf8");
+
+    // 1a. The plan carries the program through faithfully (hex round-trips and
+    //     the token is the one we asked for).
+    //
+    //     NOTE this assertion ALONE is tautological — it compares the decoded
+    //     token against the very constant fed into `build_launch_plan`, so it
+    //     stays green even if that constant points at a host build path. It is
+    //     kept only as an encoding check; 1b below is what carries the real
+    //     property. (An earlier revision of this test had 1a only, and passed
+    //     when the constant was deliberately repointed at `target/debug` —
+    //     found by exercising the negative case.)
+    assert_eq!(decoded, IN_ROOTFS_WORKER, "hex token must round-trip");
+
+    // 1b. THE REAL PIN: the path handed to the guest must be an in-rootfs path,
+    //     asserted by SHAPE rather than by equality with itself. A host
+    //     `target/{debug,release}` path ENOENTs inside the guest, panics PID1
+    //     and boot-loops, which surfaces only as a dispatch hang to wall-clock
+    //     with nothing naming the real cause (memory:
+    //     vm-worker-in-rootfs-binary-path). Slice 2's `MICROVM_WORKER_BIN` must
+    //     satisfy the same shape.
+    assert!(
+        decoded.starts_with('/'),
+        "guest worker path must be absolute, got {decoded:?}"
+    );
+    assert!(
+        !decoded.contains("/target/debug/") && !decoded.contains("/target/release/"),
+        "guest worker path {decoded:?} is a HOST build-output path: it does not \
+         exist inside the guest, so PID1 will ENOENT, panic and boot-loop, and \
+         the dispatch will hang to wall-clock looking like a channel hang"
+    );
     assert_eq!(
-        decoded, IN_ROOTFS_WORKER,
-        "the guest must exec the in-rootfs worker path; a host target/ path \
-         ENOENTs inside the guest, panics PID1 and boot-loops, which surfaces \
-         only as a dispatch hang to wall-clock"
+        decoded, "/usr/local/bin/kastellan-worker-browser-driver",
+        "guest worker path must be the path baked by \
+         scripts/workers/microvm/build-browser-driver-rootfs.sh"
     );
 
     // 2. Force-routed ⇒ the VM carries no virtio-net device at all. This is
