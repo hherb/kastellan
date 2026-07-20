@@ -48,12 +48,21 @@
 # Upstream publishes no signature for this CI bucket, so TOFU is the
 # ceiling available to us here.
 #
-# What raises confidence above bare TOFU: the recorded aarch64 sum was
-# confirmed against a copy downloaded independently, three weeks earlier,
-# on a different host (the DGX's working `vmlinux`, fetched 2026-06-27
-# and used for every micro-VM run since). Two fetches that far apart
-# agreeing means a substitution would have had to be in place the whole
-# time. The x86_64 sum has no such second witness — it is honest TOFU.
+# What raises confidence above bare TOFU, per arch:
+#
+#   * aarch64 — confirmed against a copy downloaded independently three
+#     weeks earlier on a different host (the DGX's working `vmlinux`,
+#     fetched 2026-06-27 and used for every micro-VM run since). Two
+#     fetches that far apart agreeing means a substitution would have had
+#     to be in place the whole time.
+#
+#   * x86_64 — re-fetched 2026-07-20 from two hosts on separate network
+#     paths (the DGX and the dev Mac), both matching. That rules out a
+#     local MITM, a poisoned resolver, and a mis-recorded sum; it does
+#     not rule out a substitution at the origin, and there is no temporal
+#     separation. So: still honest TOFU, just not a single-fetch one.
+#
+# Neither is a signature. If upstream ever publishes one, prefer it.
 #
 # When the pinned kernel version changes, re-record both sums in the same
 # deliberate step as the version bump; never "fix" a mismatch by pasting
@@ -116,6 +125,40 @@ verify_sha256() {
     fi
 }
 
+# _kastellan_quarantine <file> <evidence-prefix>
+#
+# Move a rejected artefact aside as `<evidence-prefix>.rejected.<sha256>`
+# and echo where it went.
+#
+# Named by *content*, for two reasons. A second bad kernel cannot clobber
+# the evidence from the first — the point of keeping the bytes is being
+# able to answer "what exactly did we almost boot?", and that answer is
+# worth much less if only the most recent attempt survives. And re-running
+# the build on the same bad file is idempotent: same content, same name,
+# no pile of near-identical corpses.
+#
+# The prefix is passed separately so a rejection from the download path
+# lands on `vmlinux.rejected.<sum>` too, rather than on the internal
+# `vmlinux.partial.<pid>` name — an operator looking for evidence should
+# find one naming scheme, not two.
+#
+# Fails if the move fails. The caller must not claim to have preserved
+# something it did not: a verifier that misreports what it did is barely
+# better than one that never checked.
+_kastellan_quarantine() {
+    local file="$1" prefix="$2" sum target
+    # A hash failure here is not fatal — we still want the bytes moved
+    # out of the way — but it does mean we cannot name them by content.
+    sum="$(_kastellan_sha256_of "$file" 2>/dev/null)" || sum="unhashable"
+    target="$prefix.rejected.$sum"
+    if ! mv -f "$file" "$target"; then
+        echo "Could not quarantine $file (tried: $target)." >&2
+        echo "Remove it by hand; the build will keep refusing until you do." >&2
+        return 1
+    fi
+    echo "$target"
+}
+
 # guest_kernel_sha256 <arch>
 #
 # The recorded sum for a supported architecture. Fails — rather than
@@ -166,47 +209,65 @@ guest_kernel_url() {
 #     is the actual gap from issue #471 — the old `[ -f … ] ||` guard
 #     meant a bad file, once written, was reused by every later build.
 #
-#   * A **rejected** kernel is moved to `vmlinux.rejected` rather than
-#     deleted. The build still stops, and the next run still starts
-#     clean, but the suspect bytes survive for investigation — if this
-#     ever fires for real, "what exactly did we almost boot?" is the
+#   * A **rejected** kernel is moved to `vmlinux.rejected.<sha256>`
+#     rather than deleted. The build still stops, and the next run still
+#     starts clean, but the suspect bytes survive for investigation — if
+#     this ever fires for real, "what exactly did we almost boot?" is the
 #     first question, and deleting the evidence answers it badly.
 #
-#   * The download lands on `vmlinux.partial` and is renamed only after
-#     it verifies, so an interrupted or failed run can never leave
-#     something at `vmlinux` that a later build would treat as good.
+#   * The download lands on a per-process `vmlinux.partial.<pid>` and is
+#     renamed only after it verifies, so an interrupted or failed run can
+#     never leave something at `vmlinux` that a later build would treat
+#     as good — and two build scripts running at once cannot scribble
+#     over each other's in-flight download (which was harmless, in that
+#     the sum caught it, but produced a baffling spurious rejection).
+#
+#     The cost of the per-process name: a run killed hard (SIGKILL, power
+#     loss) leaves its `.partial.<pid>` behind, where the old single
+#     `.partial` would have been truncated and reused. Deliberately not
+#     swept here — this function cannot tell a corpse from a download
+#     another live build is midway through, and deleting the latter to
+#     tidy up the former is a bad trade. Sweep by hand if they pile up.
 fetch_guest_kernel() {
-    local out_dir="$1" arch="${2:-}" expected url dest
+    local out_dir="$1" arch="${2:-}" expected url dest tmp quarantined
     if [ -z "$arch" ]; then
         arch="$(guest_kernel_arch)" || return 1
     fi
     expected="$(guest_kernel_sha256 "$arch")" || return 1
     url="$(guest_kernel_url "$arch")"
     dest="$out_dir/vmlinux"
+    tmp="$dest.partial.$$"
 
     if [ -f "$dest" ]; then
         if verify_sha256 "$dest" "$expected"; then
             return 0
         fi
-        mv -f "$dest" "$dest.rejected"
+        quarantined="$(_kastellan_quarantine "$dest" "$dest")" || return 1
         echo "Refusing to build on an unverified guest kernel." >&2
-        echo "  quarantined: $dest.rejected" >&2
+        echo "  quarantined: $quarantined" >&2
         echo "  re-run this script to fetch a fresh copy." >&2
         return 1
     fi
 
     echo "Fetching pinned guest kernel (${arch}, ${KASTELLAN_GUEST_KERNEL_VERSION})..."
-    if ! curl -fL --retry 3 -o "$dest.partial" "$url"; then
-        rm -f "$dest.partial"
+    if ! curl -fL --retry 3 -o "$tmp" "$url"; then
+        rm -f "$tmp"
         echo "Guest-kernel download failed: $url" >&2
         return 1
     fi
-    if ! verify_sha256 "$dest.partial" "$expected"; then
-        mv -f "$dest.partial" "$dest.rejected"
+    if ! verify_sha256 "$tmp" "$expected"; then
+        quarantined="$(_kastellan_quarantine "$tmp" "$dest")" || return 1
         echo "Downloaded guest kernel does not match the recorded sha256." >&2
         echo "  source:      $url" >&2
-        echo "  quarantined: $dest.rejected" >&2
+        echo "  quarantined: $quarantined" >&2
         return 1
     fi
-    mv -f "$dest.partial" "$dest"
+    # Verified. Only now does it get the name a build will trust — and if
+    # even this fails, say so rather than returning a bare non-zero: the
+    # bytes were good, so "download failed" would be the wrong story.
+    if ! mv -f "$tmp" "$dest"; then
+        echo "Verified guest kernel, but could not move it into place: $dest" >&2
+        echo "  it is still at: $tmp" >&2
+        return 1
+    fi
 }

@@ -443,7 +443,7 @@ mod tests {
             "d=$(mktemp -d); printf 'not a kernel' >\"$d/vmlinux\"; \
              fetch_guest_kernel \"$d\" aarch64 && echo WRONGLY_ACCEPTED; \
              echo \"present=$([ -f \"$d/vmlinux\" ] && echo yes || echo no)\"; \
-             echo \"quarantined=$([ -f \"$d/vmlinux.rejected\" ] && echo yes || echo no)\"; \
+             echo \"quarantined=$(ls \"$d\"/vmlinux.rejected.* 2>/dev/null | wc -l | tr -d ' ')\"; \
              rm -rf \"$d\"",
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -453,8 +453,83 @@ mod tests {
             "the rejected kernel must not stay in place for the next build: {stdout}"
         );
         assert!(
-            stdout.contains("quarantined=yes"),
+            stdout.contains("quarantined=1"),
             "the rejected kernel must be kept aside as evidence: {stdout}"
+        );
+    }
+
+    /// Evidence is named by content, so a second bad kernel cannot
+    /// overwrite what the first one left behind. "What did we almost
+    /// boot?" is worth much less if only the latest attempt survives.
+    #[test]
+    fn a_second_distinct_bad_kernel_does_not_clobber_the_first_as_evidence() {
+        let out = bash_with_pin(
+            "d=$(mktemp -d); \
+             printf 'bad kernel one' >\"$d/vmlinux\"; fetch_guest_kernel \"$d\" aarch64 || true; \
+             printf 'bad kernel two' >\"$d/vmlinux\"; fetch_guest_kernel \"$d\" aarch64 || true; \
+             echo \"kept=$(ls \"$d\"/vmlinux.rejected.* 2>/dev/null | wc -l | tr -d ' ')\"; \
+             rm -rf \"$d\"",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("kept=2"),
+            "both rejected kernels must survive as separate evidence: {stdout}"
+        );
+    }
+
+    /// Re-running the build against the *same* bad file must not pile up
+    /// near-identical corpses — content-addressed naming makes the
+    /// quarantine idempotent.
+    #[test]
+    fn re_rejecting_identical_bytes_is_idempotent() {
+        let out = bash_with_pin(
+            "d=$(mktemp -d); \
+             printf 'same bad bytes' >\"$d/vmlinux\"; fetch_guest_kernel \"$d\" aarch64 || true; \
+             printf 'same bad bytes' >\"$d/vmlinux\"; fetch_guest_kernel \"$d\" aarch64 || true; \
+             echo \"kept=$(ls \"$d\"/vmlinux.rejected.* 2>/dev/null | wc -l | tr -d ' ')\"; \
+             rm -rf \"$d\"",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("kept=1"),
+            "identical rejected bytes must collapse to one evidence file: {stdout}"
+        );
+    }
+
+    /// If the quarantine move itself fails, the function must not claim
+    /// to have preserved the bytes. It still fails closed either way —
+    /// the point is that the operator-facing report stays truthful, so
+    /// nobody goes looking for evidence that was never written.
+    ///
+    /// Skips under uid 0, where a read-only directory does not actually
+    /// stop the move. Announced via `eprintln!` rather than silently, in
+    /// the same spirit as the `[SKIP]` convention the micro-VM e2es use:
+    /// a check that quietly does nothing is worse than one that fails.
+    #[test]
+    fn a_failed_quarantine_is_reported_rather_than_claimed() {
+        let out = bash_with_pin(
+            "if [ \"$(id -u)\" = 0 ]; then echo ROOT_SKIP; exit 0; fi; \
+             d=$(mktemp -d); printf 'not a kernel' >\"$d/vmlinux\"; chmod 500 \"$d\"; \
+             fetch_guest_kernel \"$d\" aarch64 && echo WRONGLY_ACCEPTED; \
+             chmod 700 \"$d\"; rm -rf \"$d\"",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.contains("ROOT_SKIP") {
+            eprintln!(
+                "[SKIP] a_failed_quarantine_is_reported_rather_than_claimed: \
+                 running as root, a read-only dir does not block the move"
+            );
+            return;
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stdout.contains("WRONGLY_ACCEPTED"), "a tampered kernel was accepted: {stdout}");
+        assert!(
+            stderr.contains("Could not quarantine"),
+            "a failed quarantine must say so, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains("  quarantined:"),
+            "must not claim to have quarantined when the move failed: {stderr}"
         );
     }
 
