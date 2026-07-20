@@ -48,6 +48,28 @@ pub fn cli_binary() -> PathBuf {
     workspace_target_binary("kastellan-cli")
 }
 
+/// Path to the egress-proxy sidecar binary, or `None` with a `[SKIP]` line when
+/// it has not been built.
+///
+/// Deliberately **debug-only** (via [`workspace_target_binary`]): every forced-
+/// egress e2e that spawns a real sidecar is itself a `cargo test` debug build, so
+/// the debug artifact is the one guaranteed to match the tree under test. A
+/// release fallback would reintroduce the stale-binary trap that has already cost
+/// this repo a false leak finding — `locate_microvm_run` prefers `target/release`
+/// and silently ran an old launcher.
+pub fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
+    let p = workspace_target_binary("kastellan-worker-egress-proxy");
+    if p.is_file() {
+        Some(p)
+    } else {
+        eprintln!(
+            "\n[SKIP] egress-proxy not built; run \
+             `cargo build -p kastellan-worker-egress-proxy`\n"
+        );
+        None
+    }
+}
+
 /// A [`Command`] for the operator CLI with the deliberately-minimal env every
 /// CLI e2e test uses: `env_clear()` then exactly `PATH`, `LC_ALL`, `USER`, and
 /// `KASTELLAN_DATA_DIR`.
