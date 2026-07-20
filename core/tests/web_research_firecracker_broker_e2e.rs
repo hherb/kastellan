@@ -212,7 +212,6 @@ const DEFAULT_SEARX_ENDPOINT: &str = "http://127.0.0.1:8888/search";
 /// the worker never has it in egress.
 const DEFAULT_EMBED_ENDPOINT: &str = "http://127.0.0.1:11434/v1/embeddings";
 
-
 /// The HOST backend (bwrap on Linux) for the egress-proxy sidecar AND the embed
 /// broker — both are host-side services, never in the VM.
 fn host_backend() -> Arc<dyn SandboxBackend> {

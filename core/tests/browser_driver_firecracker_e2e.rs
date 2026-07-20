@@ -60,7 +60,7 @@ use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManage
 use kastellan_core::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
 use kastellan_core::workers::browser_driver::BrowserDriverManifest;
 use kastellan_sandbox::linux_firecracker::build_launch_plan;
-use kastellan_sandbox::SandboxPolicy;
+use kastellan_sandbox::{SandboxBackendKind, SandboxBackends, SandboxPolicy};
 use kastellan_tests_common::microvm::{
     firecracker_backend, firecracker_image_for, image_dir, skip_if_no_microvm,
 };
@@ -68,7 +68,6 @@ use kastellan_tests_common::{
     bring_up_pg_cluster, egress_proxy_bin_or_skip, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_origin_unreachable, skip_if_sandbox_unavailable, unique_suffix,
 };
-
 
 /// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
 const ROOTFS_FILE: &str = "browser-driver.ext4";
@@ -194,7 +193,6 @@ fn force_routed_policy(entry: &ToolEntry, uds: PathBuf) -> SandboxPolicy {
     policy.proxy_uds = Some(uds);
     policy
 }
-
 
 /// Peak resident memory of the Firecracker VMM process, in MiB, sampled from the
 /// host while a render is in flight.

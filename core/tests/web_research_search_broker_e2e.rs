@@ -164,18 +164,6 @@ const VM_ROOTFS: &str = "web-research.ext4";
 const DEFAULT_SEARX_ENDPOINT: &str = "http://127.0.0.1:8888/search";
 
 #[cfg(target_os = "linux")]
-
-#[cfg(target_os = "linux")]
-
-#[cfg(target_os = "linux")]
-
-/// Skip unless a bootable web-research micro-VM is available. Also prepends the
-/// `kastellan-microvm-run` build dir to PATH (the Firecracker backend spawns the
-/// launcher by bare name; it is off the default SSH PATH — see the memory note
-/// `firecracker-e2e-stale-release-launcher`). Idempotent via `Once`.
-#[cfg(target_os = "linux")]
-
-#[cfg(target_os = "linux")]
 async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
     kastellan_db::probe::run(
         conn_spec,

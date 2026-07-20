@@ -61,6 +61,7 @@ use kastellan_core::worker_lifecycle::force_route::{DecisionSinkFactory, ForceRo
 use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManager};
 use kastellan_core::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
 use kastellan_core::workers::web_fetch::WebFetchManifest;
+use kastellan_sandbox::SandboxBackends;
 use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::{
     bring_up_pg_cluster, egress_proxy_bin_or_skip, pg_bin_dir_or_skip, skip_if_no_supervisor,
@@ -93,8 +94,6 @@ const ORIGIN_TITLE: &str = "Example Domain";
 /// survived extraction — the thing the stub tier structurally cannot reach —
 /// without pinning any particular wording of it.
 const MIN_EXTRACTED_TEXT_BYTES: usize = 50;
-
-
 
 /// The production micro-VM entry, resolved exactly as the daemon resolves it:
 /// through `WebFetchManifest::resolve` with `KASTELLAN_WEB_FETCH_USE_MICROVM=1`.
@@ -143,9 +142,6 @@ fn web_fetch_vm_entry_for(hosts: &[String]) -> ToolEntry {
         ),
     }
 }
-
-
-
 
 async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
     kastellan_db::probe::run(

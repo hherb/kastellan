@@ -26,7 +26,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -47,7 +46,6 @@ const VM_ROOTFS: &str = "web-research.ext4";
 /// SearxNG endpoint the VM worker searches first. The host part must appear in the
 /// worker's CONNECT (host:port), so we pin a non-443 port to make the assertion sharp.
 const SEARXNG_ENDPOINT: &str = "https://searx.example.org:8888/search";
-
 
 async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
     kastellan_db::probe::run(

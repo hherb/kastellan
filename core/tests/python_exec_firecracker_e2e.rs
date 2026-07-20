@@ -26,7 +26,6 @@
 #![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, ToolHostError, WorkerSpec};
@@ -40,7 +39,6 @@ use kastellan_tests_common::NoopAuditSink;
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
 /// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
 const VM_ROOTFS: &str = "python-exec.ext4";
-
 
 /// Spawn the worker in the micro-VM with the given `params_file_max` (forwarded
 /// into the guest via the #360 cmdline env token), dispatch one `python.exec`,

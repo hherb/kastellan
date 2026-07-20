@@ -45,7 +45,6 @@ const VM_ROOTFS: &str = "net-demo.ext4";
 
 // ── Firecracker harness helpers (mirrored from kv_demo_firecracker_persistent_e2e.rs) ──
 
-
 /// The HOST backend (bwrap on Linux) for the egress-proxy sidecar. The sidecar
 /// is the real-network egress boundary and must run on the host, not in the VM;
 /// only the worker (`firecracker_backend`) runs in the Firecracker VM.

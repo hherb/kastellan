@@ -45,7 +45,6 @@ const DEFAULT_SEARX_ENDPOINT: &str = "http://127.0.0.1:8888/search";
 /// the worker never has it in egress.
 const DEFAULT_EMBED_ENDPOINT: &str = "http://127.0.0.1:11434/v1/embeddings";
 
-
 fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
     let p = workspace_target_binary("kastellan-worker-egress-proxy");
     if p.is_file() {

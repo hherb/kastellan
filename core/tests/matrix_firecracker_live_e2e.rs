@@ -83,14 +83,12 @@ fn vm_test_guard() -> std::sync::MutexGuard<'static, ()> {
 
 // ── Firecracker harness helpers (mirrored from net_demo_firecracker_egress_e2e.rs) ──
 
-
 /// The persistent E2E store ext4 image — the same stable path
 /// `build_matrix_vm_policy` derives (`<image_dir>/matrix-state.ext4`). It survives a
 /// VM respawn (mkfs-once), which is what carries the #321 downtime recovery.
 fn matrix_state_image() -> PathBuf {
     PathBuf::from(image_dir()).join("matrix-state.ext4")
 }
-
 
 /// The HOST backend (bwrap on Linux) for the egress-proxy sidecar — the sidecar is
 /// the real-network boundary and must run on the host, never in the VM.

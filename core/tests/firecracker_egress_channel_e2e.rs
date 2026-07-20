@@ -19,7 +19,6 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -32,7 +31,6 @@ use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
 /// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
 const VM_ROOTFS: &str = "python-exec.ext4";
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "DGX-only: real KVM + vsock + rootfs with /run mountpoint"]

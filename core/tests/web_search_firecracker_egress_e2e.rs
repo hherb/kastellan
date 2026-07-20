@@ -66,7 +66,6 @@ const SEARXNG_ENDPOINT: &str = "https://searx.example.org:8888/search";
 /// Default live SearxNG for the broker test (loopback; reached only via the broker).
 const DEFAULT_SEARX_ENDPOINT: &str = "http://127.0.0.1:8888/search";
 
-
 async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
     kastellan_db::probe::run(
         conn_spec,

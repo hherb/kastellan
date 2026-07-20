@@ -15,7 +15,6 @@
 //!     cargo test -p kastellan-core --test python_exec_firecracker_hostdir_e2e -- --ignored --nocapture
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, WorkerSpec};
@@ -27,7 +26,6 @@ use kastellan_tests_common::NoopAuditSink;
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
 /// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
 const VM_ROOTFS: &str = "python-exec.ext4";
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "DGX-only: real KVM + vsock + rootfs with slice-3 anchors"]

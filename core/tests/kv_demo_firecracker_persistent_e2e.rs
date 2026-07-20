@@ -37,7 +37,6 @@ const VM_ROOTFS: &str = "kv-demo.ext4";
 
 // ── harness helpers (mirrored from python_exec_firecracker_e2e.rs) ─────────────
 
-
 // ── kv-demo VM policy helper ───────────────────────────────────────────────────
 
 /// Build a base `SandboxPolicy` for the kv-demo Firecracker worker:

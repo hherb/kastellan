@@ -67,7 +67,6 @@ impl SandboxBackend for CountingBackend {
     }
 }
 
-
 /// IdleTimeout lifecycle whose Firecracker slot is the spawn-counting backend.
 fn lifecycle_with_counter(count: Arc<AtomicUsize>) -> IdleTimeoutLifecycle {
     let real = SandboxBackends::default_for_current_os()
