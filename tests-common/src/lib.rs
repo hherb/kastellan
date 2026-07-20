@@ -61,7 +61,8 @@ pub mod watchdog;
 pub use allowlist::seed_tool_allowlist;
 pub use audit::NoopAuditSink;
 pub use binaries::{
-    cli_binary, cli_command, core_binary, shell_exec_worker_binary, workspace_target_binary,
+    cli_binary, cli_command, core_binary, egress_proxy_bin_or_skip, shell_exec_worker_binary,
+    workspace_target_binary,
 };
 pub use daemon::{
     assert_cli_failure, assert_cli_success, bring_up_daemon, spawn_inert_mock, DaemonGuards,
@@ -75,7 +76,7 @@ pub use pg::{
 };
 pub use sandbox::{backend, policy_for_shell_exec, skip_if_sandbox_unavailable};
 pub use serial::serial_lock;
-pub use skip::{pg_bin_dir_or_skip, skip_if_no_supervisor};
+pub use skip::{pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_origin_unreachable};
 pub use temp::{current_username, unique_suffix, unique_temp_root};
 pub use wait::{wait_for_log_match, wait_for_socket, wait_for_status};
 pub use watchdog::{await_within, close_pool, close_pool_bounded, DEFAULT_POOL_CLOSE_TIMEOUT};

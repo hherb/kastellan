@@ -62,8 +62,8 @@ use kastellan_core::workers::browser_driver::BrowserDriverManifest;
 use kastellan_sandbox::linux_firecracker::{build_launch_plan, FirecrackerImage, LinuxFirecracker};
 use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxPolicy};
 use kastellan_tests_common::{
-    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
-    unique_suffix, workspace_target_binary,
+    bring_up_pg_cluster, egress_proxy_bin_or_skip, pg_bin_dir_or_skip, skip_if_no_supervisor,
+    skip_if_origin_unreachable, skip_if_sandbox_unavailable, unique_suffix,
 };
 
 fn image_dir() -> String {
@@ -258,43 +258,6 @@ fn skip_if_no_microvm() -> bool {
 
 fn firecracker_backend() -> Arc<dyn SandboxBackend> {
     SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
-}
-
-fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
-    let p = workspace_target_binary("kastellan-worker-egress-proxy");
-    if p.is_file() {
-        Some(p)
-    } else {
-        eprintln!(
-            "\n[SKIP] egress-proxy not built; run \
-             `cargo build -p kastellan-worker-egress-proxy`\n"
-        );
-        None
-    }
-}
-
-/// Skip-as-pass unless `host:443` is actually reachable from this box.
-///
-/// The slice-3 tiers need a real public origin (see [`DEFAULT_ORIGIN_HOST`]), so
-/// they cannot run offline. A silent skip would be the false-green pattern
-/// CLAUDE.md warns about, so print an explicit `[SKIP]` naming the reason —
-/// visible under `--nocapture`, like every other skip helper here.
-fn skip_if_origin_unreachable(host: &str) -> bool {
-    use std::net::ToSocketAddrs;
-    let addrs = match (host, 443u16).to_socket_addrs() {
-        Ok(a) => a.collect::<Vec<_>>(),
-        Err(e) => {
-            eprintln!("\n[SKIP] cannot resolve {host}: {e} (this tier needs outbound HTTPS)\n");
-            return true;
-        }
-    };
-    for addr in &addrs {
-        if std::net::TcpStream::connect_timeout(addr, Duration::from_secs(5)).is_ok() {
-            return false;
-        }
-    }
-    eprintln!("\n[SKIP] cannot reach {host}:443 (this tier needs outbound HTTPS)\n");
-    true
 }
 
 /// Peak resident memory of the Firecracker VMM process, in MiB, sampled from the
