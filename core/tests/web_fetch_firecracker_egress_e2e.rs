@@ -68,14 +68,27 @@ use kastellan_tests_common::{
     skip_if_origin_unreachable, skip_if_sandbox_unavailable, unique_suffix,
 };
 
-/// The public origin both tiers fetch. Small, stable, and boring on purpose:
-/// its body has not meaningfully changed in years, so [`ORIGIN_NEEDLE`] is not a
-/// content-drift trap.
+/// The public origin both tiers fetch. Small and about as stable as the open
+/// web gets — but see [`ORIGIN_TITLE`] for what "stable" is worth here.
 const ORIGIN_HOST: &str = "example.com";
 const ORIGIN_URL: &str = "https://example.com/";
-/// A string the extracted readable text must contain. Proves the *body* came
-/// back and was extracted, not merely that a connection was allowed.
-const ORIGIN_NEEDLE: &str = "Example Domain";
+
+/// The `<title>` the extracted document must carry — the page's identity.
+///
+/// Anchoring on the title rather than on a sentence from the body is a
+/// deliberate correction, not a weakening. The first run of this tier asserted
+/// the body contained `"Example Domain"` and failed: IANA has since reworded the
+/// prose (it now reads "This domain is for use in documentation examples…"),
+/// and readability puts the `<h1>` in `title`, not in `text`. Body copy on a
+/// third-party page is content we do not control and cannot pin, so matching a
+/// phrase from it would make an unrelated edit upstream look like an egress
+/// regression. The `<title>` has outlived several such rewrites.
+const ORIGIN_TITLE: &str = "Example Domain";
+
+/// A floor on the extracted readable text. Proves a real body came back and
+/// survived extraction — the thing the stub tier structurally cannot reach —
+/// without pinning any particular wording of it.
+const MIN_EXTRACTED_TEXT_BYTES: usize = 50;
 
 fn image_dir() -> String {
     std::env::var("KASTELLAN_MICROVM_DIR")
@@ -412,9 +425,10 @@ async fn fetch_in_vm_through_real_sidecar(
 ///
 /// ## What is asserted
 ///
-/// 1. The dispatch **succeeds**, status is 200, and the extracted readable text
-///    contains [`ORIGIN_NEEDLE`] — a completed fetch with a real body, not merely
-///    an allowed connection.
+/// 1. The dispatch **succeeds**, status is 200, the extracted document carries
+///    [`ORIGIN_TITLE`], and its readable text clears
+///    [`MIN_EXTRACTED_TEXT_BYTES`] — a completed fetch with a real body that
+///    survived extraction, not merely an allowed connection.
 /// 2. A sidecar decision `egress.allowed` for `example.com:443` — the fetch went
 ///    *through* the sidecar, not around it. Host **and** port are matched: a bare
 ///    host check would pass on any decision mentioning the host (#469's
@@ -473,16 +487,25 @@ async fn real_web_fetch_through_sidecar() {
          proxy's upstream leg validated the origin (it trusts webpki roots only)",
     );
     let text = value["text"].as_str().unwrap_or_default();
+    let title = value["title"].as_str().unwrap_or_default();
     eprintln!(
         "[EVIDENCE] fetched {ORIGIN_URL} from inside the micro-VM in {elapsed:?}; \
-         status={} text={} bytes",
+         status={} title={title:?} text={} bytes",
         value["status"],
         text.len()
     );
     assert_eq!(value["status"], 200, "fetch result: {value}");
     assert!(
-        text.contains(ORIGIN_NEEDLE),
-        "expected {ORIGIN_NEEDLE:?} in the extracted text, got {text:?}"
+        title.contains(ORIGIN_TITLE),
+        "expected {ORIGIN_TITLE:?} in the extracted title, got {title:?} — either the \
+         proxy returned somebody else's page, or extraction lost the <title>"
+    );
+    assert!(
+        text.len() >= MIN_EXTRACTED_TEXT_BYTES,
+        "extracted only {} bytes of readable text (floor {MIN_EXTRACTED_TEXT_BYTES}): a 200 \
+         with an empty body would mean the MITM leg completed but delivered nothing. Text: \
+         {text:?}",
+        text.len()
     );
 
     // The fetch must have gone THROUGH the sidecar. Match host AND port.
