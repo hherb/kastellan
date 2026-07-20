@@ -9,18 +9,9 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 set -euo pipefail
 OUT_DIR="${KASTELLAN_MICROVM_DIR:-/var/lib/kastellan/microvm}"
-# Pinned guest kernel, selected for the host arch (the firecracker-ci bucket
-# publishes the same kernel under x86_64/ and aarch64/). Don't hardcode the
-# DGX's aarch64 — the backend must run on any Linux box (CLAUDE.md).
-HOST_ARCH="$(uname -m)"
-case "${HOST_ARCH}" in
-    x86_64|aarch64) KERNEL_ARCH="${HOST_ARCH}" ;;
-    *)
-        echo "Unsupported architecture '${HOST_ARCH}'. The pinned guest kernel is published for x86_64 and aarch64 only." >&2
-        exit 1
-        ;;
-esac
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/${KERNEL_ARCH}/vmlinux-6.1.102"
+# Pinned, integrity-checked guest kernel (arch detection, URL and sha256 all
+# live in the shared snippet — see it for why they are not inlined here).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
 ROOTFS_MIB=768
 
 # The output dir defaults to /var/lib/kastellan/microvm, which is provisioned
@@ -38,8 +29,8 @@ if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
     exit 1
 fi
 
-# 1. Guest kernel (pinned).
-[ -f "$OUT_DIR/vmlinux" ] || curl -fL --retry 3 -o "$OUT_DIR/vmlinux" "$KERNEL_URL"
+# 1. Guest kernel (pinned + sha256-verified, including an existing copy).
+fetch_guest_kernel "$OUT_DIR"
 
 # 2. Cross-build worker + init for the guest (native on the DGX aarch64).
 source "$HOME/.cargo/env"

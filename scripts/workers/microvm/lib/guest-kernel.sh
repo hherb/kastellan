@@ -1,0 +1,212 @@
+# shellcheck shell=bash
+#
+# Shared, integrity-checked guest-kernel fetch for every build-*-rootfs.sh.
+#
+# SOURCE this file, do not execute it:
+#
+#     source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
+#     fetch_guest_kernel "$OUT_DIR"
+#
+# ---------------------------------------------------------------------
+# Why this file exists (issue #471)
+# ---------------------------------------------------------------------
+#
+# All eight rootfs build scripts boot the *same* guest kernel, and each
+# one used to carry its own copy of the URL, the architecture `case`, and
+# an unchecked download:
+#
+#     [ -f "$OUT_DIR/vmlinux" ] || curl -fL --retry 3 -o … "$KERNEL_URL"
+#
+# Two problems, in increasing order of seriousness:
+#
+#   1. The URL was version-pinned but never integrity-checked, so a
+#      compromised mirror, a MITM, or plain corruption on the wire hands
+#      us an arbitrary kernel — which then boots *inside* the containment
+#      boundary. The micro-VM is the boundary; the kernel is the thing
+#      enforcing it. This is close to the worst artefact in the project
+#      to fetch on trust.
+#
+#   2. `[ -f … ] ||` means a kernel already on disk was reused **forever,
+#      unchecked**. Whatever landed there the first time — however it got
+#      there — is what every later build boots. Point 1 is a fetch-time
+#      risk; point 2 makes it permanent.
+#
+# Eight copies of that pattern also meant eight chances to drift, which
+# issue #475 had just finished cleaning up on the test side. So the fix
+# is one shared file rather than eight parallel edits: the URL, the arch
+# table and the sums are written down exactly once, and the unit tests in
+# `tests-common/src/microvm.rs` fail if a build script grows its own copy
+# again.
+#
+# ---------------------------------------------------------------------
+# On trusting these sums
+# ---------------------------------------------------------------------
+#
+# The sums below were recorded by downloading the artefacts, which on its
+# own is trust-on-first-use: it pins the kernel against *future* drift or
+# tampering, but cannot prove the bytes were honest the first time.
+# Upstream publishes no signature for this CI bucket, so TOFU is the
+# ceiling available to us here.
+#
+# What raises confidence above bare TOFU: the recorded aarch64 sum was
+# confirmed against a copy downloaded independently, three weeks earlier,
+# on a different host (the DGX's working `vmlinux`, fetched 2026-06-27
+# and used for every micro-VM run since). Two fetches that far apart
+# agreeing means a substitution would have had to be in place the whole
+# time. The x86_64 sum has no such second witness — it is honest TOFU.
+#
+# When the pinned kernel version changes, re-record both sums in the same
+# deliberate step as the version bump; never "fix" a mismatch by pasting
+# in whatever the failure printed.
+
+# Pinned guest kernel. The firecracker-ci bucket publishes the same
+# kernel version under x86_64/ and aarch64/.
+KASTELLAN_GUEST_KERNEL_VERSION="6.1.102"
+KASTELLAN_GUEST_KERNEL_CI_TAG="v1.10"
+KASTELLAN_GUEST_KERNEL_BASE_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci"
+
+# sha256 of vmlinux-6.1.102 for each published architecture.
+#
+# Recorded 2026-07-20. Bump these together with the version above.
+KASTELLAN_GUEST_KERNEL_SHA256_X86_64="49ba99a5299444ac59dda2efc3569cc2d58a5d72ea6475a6bfc37aa0bf322e54"
+KASTELLAN_GUEST_KERNEL_SHA256_AARCH64="bb1f50912d63a8ca5e92d488984875e1177eb9283050ffa592a8cb455cada52d"
+
+# sha256 of a file, printed as bare hex.
+#
+# Linux ships `sha256sum`, macOS ships `shasum`. The build scripts only
+# ever run on Linux, but the unit tests that prove this file fails closed
+# run on the dev Mac too — and a check that is only exercised on one host
+# is a check that is half-verified.
+_kastellan_sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d' ' -f1
+    else
+        echo "Need sha256sum (Linux) or shasum (macOS) to verify downloads." >&2
+        return 1
+    fi
+}
+
+# verify_sha256 <path> <expected-hex>
+#
+# Succeeds only on an exact match. Prints both sums on failure so the
+# operator can tell "truncated download" from "different artefact"
+# without re-running anything.
+#
+# Pure: reads the file, touches nothing else, and never deletes. Callers
+# decide what to do with a bad file.
+#
+# The local is called `file`, not `path`, deliberately. In zsh `path` is
+# the array tied to `$PATH`, so `local path=…` silently destroys command
+# lookup for the rest of the function — `command -v sha256sum` then finds
+# nothing and this reports "no hasher available" instead of the mismatch
+# it was asked about. These scripts run under bash, where `path` is an
+# ordinary name, so that only bites someone sourcing this from an
+# interactive zsh — but a verifier that fails for the wrong reason is the
+# one thing a verifier must never do.
+verify_sha256() {
+    local file="$1" expected="$2" actual
+    actual="$(_kastellan_sha256_of "$file")" || return 1
+    if [ "$actual" != "$expected" ]; then
+        echo "sha256 mismatch for $file" >&2
+        echo "  expected: $expected" >&2
+        echo "  actual:   $actual" >&2
+        return 1
+    fi
+}
+
+# guest_kernel_sha256 <arch>
+#
+# The recorded sum for a supported architecture. Fails — rather than
+# printing an empty string — for anything else, so an unknown arch can
+# never degrade into an unverified download.
+guest_kernel_sha256() {
+    case "$1" in
+        x86_64) echo "$KASTELLAN_GUEST_KERNEL_SHA256_X86_64" ;;
+        aarch64) echo "$KASTELLAN_GUEST_KERNEL_SHA256_AARCH64" ;;
+        *)
+            echo "No recorded guest-kernel sha256 for architecture '$1'." >&2
+            return 1
+            ;;
+    esac
+}
+
+# The host architecture, validated against what upstream publishes.
+#
+# Deliberately does not map macOS's `arm64` onto `aarch64`: these scripts
+# build a Linux guest rootfs and only run on Linux. Silently accepting a
+# Mac would swap a clear error for a confusing failure later.
+guest_kernel_arch() {
+    local host_arch
+    host_arch="$(uname -m)"
+    case "${host_arch}" in
+        x86_64 | aarch64) echo "${host_arch}" ;;
+        *)
+            echo "Unsupported architecture '${host_arch}'. The pinned guest kernel is published for x86_64 and aarch64 only." >&2
+            return 1
+            ;;
+    esac
+}
+
+# guest_kernel_url <arch>
+guest_kernel_url() {
+    echo "${KASTELLAN_GUEST_KERNEL_BASE_URL}/${KASTELLAN_GUEST_KERNEL_CI_TAG}/$1/vmlinux-${KASTELLAN_GUEST_KERNEL_VERSION}"
+}
+
+# fetch_guest_kernel <out_dir> [arch]
+#
+# Leaves a verified `$out_dir/vmlinux` in place, or fails without leaving
+# an unverified one. `arch` defaults to this host's; the tests pass it
+# explicitly so they can exercise the logic on either dev box.
+#
+# Three properties worth keeping:
+#
+#   * An **already-present** kernel is verified rather than trusted. This
+#     is the actual gap from issue #471 — the old `[ -f … ] ||` guard
+#     meant a bad file, once written, was reused by every later build.
+#
+#   * A **rejected** kernel is moved to `vmlinux.rejected` rather than
+#     deleted. The build still stops, and the next run still starts
+#     clean, but the suspect bytes survive for investigation — if this
+#     ever fires for real, "what exactly did we almost boot?" is the
+#     first question, and deleting the evidence answers it badly.
+#
+#   * The download lands on `vmlinux.partial` and is renamed only after
+#     it verifies, so an interrupted or failed run can never leave
+#     something at `vmlinux` that a later build would treat as good.
+fetch_guest_kernel() {
+    local out_dir="$1" arch="${2:-}" expected url dest
+    if [ -z "$arch" ]; then
+        arch="$(guest_kernel_arch)" || return 1
+    fi
+    expected="$(guest_kernel_sha256 "$arch")" || return 1
+    url="$(guest_kernel_url "$arch")"
+    dest="$out_dir/vmlinux"
+
+    if [ -f "$dest" ]; then
+        if verify_sha256 "$dest" "$expected"; then
+            return 0
+        fi
+        mv -f "$dest" "$dest.rejected"
+        echo "Refusing to build on an unverified guest kernel." >&2
+        echo "  quarantined: $dest.rejected" >&2
+        echo "  re-run this script to fetch a fresh copy." >&2
+        return 1
+    fi
+
+    echo "Fetching pinned guest kernel (${arch}, ${KASTELLAN_GUEST_KERNEL_VERSION})..."
+    if ! curl -fL --retry 3 -o "$dest.partial" "$url"; then
+        rm -f "$dest.partial"
+        echo "Guest-kernel download failed: $url" >&2
+        return 1
+    fi
+    if ! verify_sha256 "$dest.partial" "$expected"; then
+        mv -f "$dest.partial" "$dest.rejected"
+        echo "Downloaded guest kernel does not match the recorded sha256." >&2
+        echo "  source:      $url" >&2
+        echo "  quarantined: $dest.rejected" >&2
+        return 1
+    fi
+    mv -f "$dest.partial" "$dest"
+}

@@ -38,15 +38,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OUT_DIR="${KASTELLAN_MICROVM_DIR:-/var/lib/kastellan/microvm}"
 IMAGE_TAG="kastellan-browser-driver-rootfs:latest"
-HOST_ARCH="$(uname -m)"
-case "${HOST_ARCH}" in
-    x86_64|aarch64) KERNEL_ARCH="${HOST_ARCH}" ;;
-    *)
-        echo "Unsupported architecture '${HOST_ARCH}'. The pinned guest kernel is published for x86_64 and aarch64 only." >&2
-        exit 1
-        ;;
-esac
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/${KERNEL_ARCH}/vmlinux-6.1.102"
+# Pinned, integrity-checked guest kernel (shared with every sibling script).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
 # Measured from the docker-export staging tree (1006 MB after the strip pass on
 # aarch64) plus headroom, rounded up to a power-of-two-ish boundary: 1006 x 1.2
 # = 1207, rounded to 1280. Re-measure if the Dockerfile's browser set changes —
@@ -73,8 +66,9 @@ if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
     exit 1
 fi
 
-# Shared guest kernel (pinned). Reused if another build-*-rootfs.sh fetched it.
-[ -f "$OUT_DIR/vmlinux" ] || curl -fL --retry 3 -o "$OUT_DIR/vmlinux" "$KERNEL_URL"
+# Shared guest kernel (pinned). A copy left by a sibling script is re-verified,
+# not trusted — that reuse-unchecked path is exactly what issue #471 closed.
+fetch_guest_kernel "$OUT_DIR"
 
 # Guest PID1, built on the host with cargo (native on the DGX aarch64), exactly
 # as every sibling script does. The worker itself is staged by the container
