@@ -26,14 +26,13 @@ use std::time::Duration;
 use kastellan_core::worker_lifecycle::{
     ClientTransport, PersistentFactory, PersistentTransport, PersistentWorker,
 };
-use kastellan_sandbox::{Net, PersistentStore, Profile, SandboxBackend, SandboxBackendKind,
+use kastellan_sandbox::{Net, PersistentStore, Profile, SandboxPolicy};
 use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 
 /// The rootfs image this suite boots. Passed to the shared
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
 /// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
 const VM_ROOTFS: &str = "kv-demo.ext4";
-    SandboxBackends, SandboxPolicy};
 
 // ── harness helpers (mirrored from python_exec_firecracker_e2e.rs) ─────────────
 

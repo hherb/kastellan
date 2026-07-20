@@ -33,10 +33,8 @@ use std::time::Duration;
 
 use kastellan_core::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
 use kastellan_core::worker_lifecycle::{PersistentFactory, PersistentTransport, PersistentWorker};
-use kastellan_sandbox::{
+use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxBackends, SandboxPolicy};
 use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
-    Net, Profile, SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxPolicy,
-};
 
 /// The rootfs image this suite boots. Passed to the shared
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,

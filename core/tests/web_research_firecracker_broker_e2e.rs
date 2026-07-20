@@ -52,9 +52,7 @@ use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, WorkerSpec};
 use kastellan_core::worker_lifecycle::force_route::rewrite_policy_for_broker;
 use kastellan_core::workers::web_research::web_research_firecracker_broker_entry;
-use kastellan_sandbox::linux_firecracker::{
-    build_launch_plan, FirecrackerImage, LinuxFirecracker, BROKER_VSOCK_PORT,
-};
+use kastellan_sandbox::linux_firecracker::{build_launch_plan, FirecrackerImage, BROKER_VSOCK_PORT};
 use kastellan_sandbox::{Net, SandboxBackend, SandboxBackendKind, SandboxBackends};
 use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::{

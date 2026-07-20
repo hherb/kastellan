@@ -30,8 +30,6 @@ use std::path::PathBuf;
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, ToolHostError, WorkerSpec};
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
-use kastellan_sandbox::linux_firecracker::{LinuxFirecracker};
-use kastellan_sandbox::{SandboxBackendKind};
 use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::NoopAuditSink;
 
