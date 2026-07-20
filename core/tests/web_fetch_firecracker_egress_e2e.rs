@@ -322,6 +322,21 @@ async fn web_fetch_vm_reaches_proxy_with_ca_delivered() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// True iff `d` is the sidecar's allow verdict for `host:443`. Shared between
+/// the ingest poll and the test's assertion so the two cannot drift — the poll
+/// waits for exactly the row the assertion will then look for.
+///
+/// NB the action is `egress.allowed`, not `allowed` — `decision_to_audit`
+/// namespaces every verdict under `egress.` (its siblings are
+/// `egress.blocked.credential_leak` / `egress.blocked.tls_pin`). Host AND port
+/// are matched: a bare-host check would pass on any decision mentioning the
+/// host (#469's all-port-grant lesson applies to assertions too).
+fn is_allowed_row_for(d: &str, host: &str) -> bool {
+    d.starts_with("egress.allowed")
+        && d.contains(&format!("\"host\":\"{host}\""))
+        && d.contains("\"port\":443")
+}
+
 /// Drive one `web.fetch` through the production force-routing manager and return
 /// `(dispatch result, sidecar decisions, wall clock)`.
 ///
@@ -382,11 +397,16 @@ async fn fetch_in_vm_through_real_sidecar(
     let elapsed = started.elapsed();
 
     // Decisions land on a detached ingest thread reading the proxy's stdout;
-    // poll briefly so we do not race it.
+    // poll until the allowed row for this fetch is visible, not merely until
+    // the vec is non-empty — were the fetch ever to produce more than one row
+    // (a redirect, a connection retry), the needed row could land a beat after
+    // the first and a first-row snapshot would miss it. Falls back to the
+    // timeout so a blocked or decision-less run still returns what it saw for
+    // the caller's failure message.
     let mut snapshot = Vec::new();
     for _ in 0..60 {
         snapshot = decisions.lock().unwrap().clone();
-        if !snapshot.is_empty() {
+        if snapshot.iter().any(|d| hosts.iter().any(|h| is_allowed_row_for(d, h))) {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -508,17 +528,12 @@ async fn real_web_fetch_through_sidecar() {
         text.len()
     );
 
-    // The fetch must have gone THROUGH the sidecar. Match host AND port.
-    // NB the action is `egress.allowed`, not `allowed` — `decision_to_audit`
-    // namespaces every verdict under `egress.` (its siblings are
-    // `egress.blocked.credential_leak` / `egress.blocked.tls_pin`).
+    // The fetch must have gone THROUGH the sidecar. Same predicate the ingest
+    // poll waited on (see `is_allowed_row_for` for the action-namespacing and
+    // host-AND-port rationale), so a row the poll accepted is found here too.
     let allowed_row = decisions
         .iter()
-        .find(|d| {
-            d.starts_with("egress.allowed")
-                && d.contains(&format!("\"host\":\"{ORIGIN_HOST}\""))
-                && d.contains("\"port\":443")
-        })
+        .find(|d| is_allowed_row_for(d, ORIGIN_HOST))
         .unwrap_or_else(|| {
             panic!(
                 "no `egress.allowed {ORIGIN_HOST}:443` decision: the fetch returned text \
