@@ -570,4 +570,86 @@ mod tests {
             );
         }
     }
+
+    // --- #479: the boot-time pin must not drift from the build-time one ---
+
+    /// Pull `NAME="value"` out of the shared bash pin.
+    ///
+    /// Deliberately strict about the shape: if the assignment is
+    /// reformatted, this panics rather than quietly matching nothing and
+    /// letting the comparison below pass vacuously — a test that can
+    /// silently stop testing is worse than no test.
+    fn bash_pin_value(body: &str, name: &str) -> String {
+        let prefix = format!("{name}=\"");
+        let line = body
+            .lines()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{GUEST_KERNEL_LIB} has no line starting `{prefix}`"));
+        line[prefix.len()..]
+            .strip_suffix('"')
+            .unwrap_or_else(|| panic!("malformed assignment in {GUEST_KERNEL_LIB}: {line}"))
+            .to_string()
+    }
+
+    /// #479: the boot-time check (Rust) and the build-time check (bash)
+    /// must agree, or one of them is verifying against a stale sum.
+    ///
+    /// The duplication is deliberate — `kastellan-sandbox` is published
+    /// to crates.io and cannot `include_str!` a path outside its own
+    /// directory — so this test is what makes it safe. It runs on every
+    /// PR via `linux-check.yml`, because a version bump that updates one
+    /// side and not the other is exactly the drift least likely to be
+    /// caught by an operator's occasional DGX run.
+    #[test]
+    fn rust_and_bash_kernel_pins_agree() {
+        use kastellan_sandbox::guest_kernel_pin::{
+            GUEST_KERNEL_SHA256_AARCH64, GUEST_KERNEL_SHA256_X86_64,
+        };
+        let body = std::fs::read_to_string(repo_root().join(GUEST_KERNEL_LIB))
+            .unwrap_or_else(|e| panic!("read {GUEST_KERNEL_LIB}: {e}"));
+
+        assert_eq!(
+            bash_pin_value(&body, "KASTELLAN_GUEST_KERNEL_SHA256_X86_64"),
+            GUEST_KERNEL_SHA256_X86_64,
+            "x86_64 pin drifted between {GUEST_KERNEL_LIB} and \
+             sandbox/src/guest_kernel_pin.rs — bump both together"
+        );
+        assert_eq!(
+            bash_pin_value(&body, "KASTELLAN_GUEST_KERNEL_SHA256_AARCH64"),
+            GUEST_KERNEL_SHA256_AARCH64,
+            "aarch64 pin drifted between {GUEST_KERNEL_LIB} and \
+             sandbox/src/guest_kernel_pin.rs — bump both together"
+        );
+    }
+
+    /// #479's other half: the privileged installer is the only thing that
+    /// puts the kernel in place root-owned, and the image dir must be
+    /// sticky.
+    ///
+    /// The sticky bit is load-bearing, not cosmetic: POSIX directory
+    /// write permission alone permits `unlink()` of any entry regardless
+    /// of that file's owner, so a root-owned `vmlinux` in a
+    /// worker-writable dir could simply be removed and replaced. If a
+    /// later edit drops the `chmod 1755`, the ownership half of #479 is
+    /// silently void — hence a test rather than a comment.
+    #[test]
+    fn installer_root_owns_the_kernel_in_a_sticky_dir() {
+        let script = "scripts/linux/install-firecracker-vsock.sh";
+        let body = std::fs::read_to_string(repo_root().join(script))
+            .unwrap_or_else(|e| panic!("read {script}: {e}"));
+
+        assert!(
+            body.contains("chmod 1755"),
+            "{script} must make the micro-VM image dir sticky (1755); without +t the \
+             agent user can unlink root's vmlinux and the ownership half of #479 is void"
+        );
+        assert!(
+            body.contains("guest-kernel.sh"),
+            "{script} must source {GUEST_KERNEL_LIB} rather than fetching the kernel itself"
+        );
+        assert!(
+            body.contains("chown root:root"),
+            "{script} must leave vmlinux root-owned"
+        );
+    }
 }

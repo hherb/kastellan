@@ -15,8 +15,11 @@
 #   sudo scripts/linux/install-firecracker-vsock.sh [--user <name>] [--kvm]
 #
 # It also provisions the micro-VM image dir /var/lib/kastellan/microvm (owned
-# by the worker user) so the unprivileged build-rootfs.sh + the per-user
-# service can write it without further root.
+# by the worker user, mode 1755) so the unprivileged build-rootfs.sh + the
+# per-user service can write it without further root, and installs the pinned
+# guest kernel there as root:root 0644 — the sticky bit is what stops the
+# worker user from unlinking and replacing it (issue #479). Re-run this script
+# after bumping the pinned kernel version.
 #
 # Reversible: remove /etc/udev/rules.d/99-kastellan-microvm.rules and
 # /etc/modules-load.d/kastellan-vsock.conf, then `udevadm control --reload`.
@@ -89,14 +92,47 @@ udevadm control --reload
 "${SETFACL_BIN}" -m "u:${TARGET_USER}:rw" /dev/vhost-vsock
 [[ "${GRANT_KVM}" -eq 1 ]] && "${SETFACL_BIN}" -m "u:${TARGET_USER}:rw" /dev/kvm
 
-# 4. Provision the micro-VM image dir, owned by the worker user. build-rootfs.sh
-#    and the FirecrackerVm backend both default to /var/lib/kastellan/microvm;
-#    creating it here (the one privileged step) lets the unprivileged rootfs
-#    build + the per-user service write it without further root.
+# 4. Provision the micro-VM image dir + install the pinned guest kernel.
+#
+#    The dir stays owned by the worker user so the eight unprivileged
+#    build-*-rootfs.sh scripts keep working without root. Issue #479 adds two
+#    things on top of that:
+#
+#      * mode 1755 — the STICKY bit, and it is load-bearing rather than
+#        belt-and-braces. POSIX directory write permission on its own permits
+#        unlink() and rename() of ANY entry, regardless of that entry's owner
+#        and mode. So root-owning vmlinux inside a worker-writable dir would
+#        stop nothing at all: the agent could remove it and drop in its own.
+#        With +t, removal and rename are restricted to the entry's owner. The
+#        agent still freely creates and replaces its own *.ext4 images (it
+#        owns those); it cannot touch root's kernel.
+#
+#      * the guest kernel is fetched HERE, as root, and left root:root 0644.
+#        docs/threat-model.md assumes a worst-case compromise reaches the
+#        agent's own OS user — and the micro-VM is the containment boundary
+#        while the guest kernel is what enforces it. It is the one artefact in
+#        that directory an attacker at that level must not be able to rewrite.
+#        (kastellan also re-verifies it at every VM boot; see
+#        sandbox/src/guest_kernel_pin.rs. That check is TOCTOU-limited, which
+#        is why this ownership step is the half that actually closes it.)
+#
+#    The rootfs images are deliberately NOT protected this way: a tampered
+#    rootfs is not an escalation — the guest userland is already assumed
+#    hostile and the VM is what contains it.
 MICROVM_DIR="/var/lib/kastellan/microvm"
 mkdir -p "${MICROVM_DIR}"
 chown "${TARGET_USER}:$(id -gn "${TARGET_USER}")" "${MICROVM_DIR}"
-echo "Provisioned ${MICROVM_DIR} (owner ${TARGET_USER})"
+chmod 1755 "${MICROVM_DIR}"
+echo "Provisioned ${MICROVM_DIR} (owner ${TARGET_USER}, sticky)"
+
+# The same pinned+verified fetch the rootfs builds use — one place the URL,
+# the arch table and the sums are written down (issue #471).
+# shellcheck source=../workers/microvm/lib/guest-kernel.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../workers/microvm/lib/guest-kernel.sh"
+fetch_guest_kernel "${MICROVM_DIR}"
+chown root:root "${MICROVM_DIR}/vmlinux"
+chmod 0644 "${MICROVM_DIR}/vmlinux"
+echo "Installed pinned guest kernel root-owned at ${MICROVM_DIR}/vmlinux"
 
 echo
 echo "Done. Verify as ${TARGET_USER}:"

@@ -276,6 +276,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The two sizes where a chunked read loop classically goes wrong:
+    /// nothing to read at all, and a length that is an exact multiple of
+    /// the buffer (so the final `read` returns 0 rather than a short
+    /// count). Both must still produce the true digest — an empty file
+    /// in particular must be *rejected*, never waved through.
+    #[test]
+    fn verify_kernel_handles_empty_and_exact_multiple_files() {
+        let dir = temp_dir("edges");
+
+        let empty = write_file(&dir, "empty", b"");
+        assert!(
+            verify_kernel(&empty, HELLO_SHA256).is_err(),
+            "a 0-byte kernel must never pass"
+        );
+        assert!(verify_kernel(&empty, &sha256_hex_of_slice(b"")).is_ok());
+
+        let exact = vec![0x5Au8; HASH_CHUNK_BYTES * 2];
+        let path = write_file(&dir, "exact", &exact);
+        assert!(verify_kernel(&path, &sha256_hex_of_slice(&exact)).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Test-local reference implementation, deliberately not the one
     /// under test: hashing the whole slice at once is what the streaming
     /// loop is being checked against.

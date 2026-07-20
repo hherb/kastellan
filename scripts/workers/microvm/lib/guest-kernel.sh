@@ -153,7 +153,10 @@ _kastellan_quarantine() {
     target="$prefix.rejected.$sum"
     if ! mv -f "$file" "$target"; then
         echo "Could not quarantine $file (tried: $target)." >&2
-        echo "Remove it by hand; the build will keep refusing until you do." >&2
+        echo "If it is root-owned (the default since #479), re-run the privileged" >&2
+        echo "installer, which owns the kernel and can replace it:" >&2
+        echo "    sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
+        echo "Otherwise remove it by hand; the build will keep refusing until you do." >&2
         return 1
     fi
     echo "$target"
