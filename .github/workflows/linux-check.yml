@@ -25,10 +25,20 @@
 # must build the exact pinned dependency graph and fail (not silently
 # rewrite the lockfile) if it has drifted out of sync with the manifests.
 #
-# What this does NOT do: run the test suite. Integration tests need a live
-# Postgres cluster and the bwrap AppArmor profile; the full
+# What this does NOT do: run the *full* test suite. Integration tests need
+# a live Postgres cluster and the bwrap AppArmor profile; the full
 # `cargo test --workspace` run stays operator/DGX-driven (see HANDOVER).
-# This job only proves the code *builds* on Linux.
+#
+# The one exception is `kastellan-tests-common`, whose unit tests are
+# hermetic (no Postgres, no bwrap, no KVM, no network — ~0.1s). They carry
+# the structural guards that only pay off if they fire on a *pull request*:
+# in particular `kernel_pin_is_the_only_place_the_kernel_url_appears`
+# (issue #471), which exists to catch a contributor re-inlining an
+# unverified kernel download into one of the eight build scripts. Leaving
+# that to an operator's occasional DGX run would mean the drift it guards
+# against is exactly the case least likely to be caught. `cargo test` does
+# need real codegen where `check`/`clippy` do not, so this step costs more
+# than the two above — deliberate, for a security guard on every PR.
 #
 # x86_64 is sufficient: the #144 break was `target_os`-conditional, not
 # arch-conditional, so an x86_64 Linux check catches it just as well as
@@ -64,6 +74,11 @@ jobs:
 
       - name: cargo clippy (workspace, all targets, deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Hermetic guards only — see the header for why this one crate's
+      # tests run here while the rest of the suite stays DGX-driven.
+      - name: cargo test (tests-common — hermetic structural guards)
+        run: cargo test -p kastellan-tests-common --locked
 
   # The Matrix worker's live SDK path (`workers/matrix/src/sdk_live.rs`) is
   # behind the optional `live-matrix` feature (`dep:matrix-sdk`). The `check`

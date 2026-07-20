@@ -11,12 +11,8 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 set -euo pipefail
 OUT_DIR="${KASTELLAN_MICROVM_DIR:-/var/lib/kastellan/microvm}"
-HOST_ARCH="$(uname -m)"
-case "${HOST_ARCH}" in
-    x86_64|aarch64) KERNEL_ARCH="${HOST_ARCH}" ;;
-    *) echo "Unsupported arch '${HOST_ARCH}'." >&2; exit 1 ;;
-esac
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/${KERNEL_ARCH}/vmlinux-6.1.102"
+# Pinned, integrity-checked guest kernel (shared with every sibling script).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
 # matrix-sdk + tokio + rustls/ring + bundled-sqlite closure — net-demo's 128 is far
 # too small. 512 MiB leaves headroom for the worker's read-only rootfs.
 ROOTFS_MIB=512
@@ -25,7 +21,7 @@ if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
     echo "Cannot write micro-VM dir: $OUT_DIR — run sudo ./scripts/linux/install-firecracker-vsock.sh or set KASTELLAN_MICROVM_DIR." >&2
     exit 1
 fi
-[ -f "$OUT_DIR/vmlinux" ] || curl -fL --retry 3 -o "$OUT_DIR/vmlinux" "$KERNEL_URL"
+fetch_guest_kernel "$OUT_DIR"
 
 source "$HOME/.cargo/env"
 # bundled-sqlite ⇒ no host libsqlite3 needed; rustls-tls ⇒ no host OpenSSL needed.

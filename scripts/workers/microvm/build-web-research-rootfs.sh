@@ -12,15 +12,8 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 set -euo pipefail
 OUT_DIR="${KASTELLAN_MICROVM_DIR:-/var/lib/kastellan/microvm}"
-HOST_ARCH="$(uname -m)"
-case "${HOST_ARCH}" in
-    x86_64|aarch64) KERNEL_ARCH="${HOST_ARCH}" ;;
-    *)
-        echo "Unsupported architecture '${HOST_ARCH}'. The pinned guest kernel is published for x86_64 and aarch64 only." >&2
-        exit 1
-        ;;
-esac
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/${KERNEL_ARCH}/vmlinux-6.1.102"
+# Pinned, integrity-checked guest kernel (shared with every sibling script).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
 ROOTFS_MIB=256
 
 if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
@@ -32,8 +25,9 @@ if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
     exit 1
 fi
 
-# Shared guest kernel (pinned). Reused if build-rootfs.sh already fetched it.
-[ -f "$OUT_DIR/vmlinux" ] || curl -fL --retry 3 -o "$OUT_DIR/vmlinux" "$KERNEL_URL"
+# Shared guest kernel (pinned). A copy left by a sibling script is re-verified,
+# not trusted — that reuse-unchecked path is exactly what issue #471 closed.
+fetch_guest_kernel "$OUT_DIR"
 
 # Cross-build worker + init for the guest (native on the DGX aarch64).
 source "$HOME/.cargo/env"

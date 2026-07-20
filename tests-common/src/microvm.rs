@@ -90,6 +90,16 @@ const ROOTFS_BUILD_SCRIPTS: &[(&str, &str)] = &[
     ("kv-demo.ext4", "scripts/workers/kv-demo/build-kv-demo-rootfs.sh"),
 ];
 
+/// The shared guest-kernel pin sourced by every `build-*-rootfs.sh`
+/// (repo-relative).
+///
+/// All eight build scripts fetch the *same* `vmlinux`. Before issue #471
+/// each one carried its own copy of the URL, the arch `case`, and an
+/// unchecked `curl`. This file is now the single place any of that is
+/// written down; `kernel_pin_is_the_only_place_the_kernel_url_appears`
+/// keeps it that way.
+pub const GUEST_KERNEL_LIB: &str = "scripts/workers/microvm/lib/guest-kernel.sh";
+
 /// The build script for `rootfs`, or `None` for an image this table does
 /// not know about.
 ///
@@ -314,5 +324,250 @@ mod tests {
         let msg = probe_skip_message("mystery.ext4", "boom");
         assert!(msg.contains("mystery.ext4"));
         assert!(!msg.contains("build the rootfs with"), "must not invent a script: {msg}");
+    }
+
+    // ---------------------------------------------------------------
+    // Guest-kernel integrity pin (issue #471)
+    //
+    // The build scripts download a kernel that then boots *inside* the
+    // containment boundary, so a corrupted or substituted `vmlinux` is
+    // about the worst artefact this project can fetch unchecked. These
+    // tests pin two separate things:
+    //
+    //   * the *structural* rule — the URL and the sums live in exactly
+    //     one file, so the eight scripts cannot drift apart again (the
+    //     #475 lesson, applied before the divergence happens); and
+    //   * the *behavioural* rule — verification actually fails closed.
+    //
+    // Both are deliberately host-independent: they run on macOS as well
+    // as the DGX. Anything gated behind `cfg(linux)` is verified only by
+    // the DGX run, and "does the integrity check reject a bad file" is a
+    // fact that needs no VM (see the module docs).
+    // ---------------------------------------------------------------
+
+    /// Run `snippet` under `bash` with the kernel pin already sourced.
+    ///
+    /// The pin is a *library*: sourcing it must define functions and
+    /// nothing else. If it ever grew a top-level side effect (a stray
+    /// `curl`, an `exit`), every one of these tests would break, which
+    /// is the intended alarm.
+    fn bash_with_pin(snippet: &str) -> std::process::Output {
+        let lib = repo_root().join(GUEST_KERNEL_LIB);
+        let script = format!("set -euo pipefail; source '{}'; {snippet}", lib.display());
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("bash is available on both dev hosts")
+    }
+
+    /// sha256 of the 5 bytes `hello`, from the standard test vectors.
+    ///
+    /// Lets the accept/reject paths be exercised against a 5-byte file
+    /// instead of a 16 MB kernel, so these stay unit tests.
+    const HELLO_SHA256: &str =
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    #[test]
+    fn kernel_pin_exists_and_sources_cleanly() {
+        let lib = repo_root().join(GUEST_KERNEL_LIB);
+        assert!(lib.is_file(), "missing the shared kernel pin: {}", lib.display());
+        let out = bash_with_pin("true");
+        assert!(
+            out.status.success(),
+            "sourcing the pin must have no side effects; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A recorded sum per supported arch, and an explicit refusal for
+    /// anything else — never a silently unverified fetch.
+    #[test]
+    fn kernel_pin_records_a_sha256_for_both_supported_arches() {
+        for arch in ["x86_64", "aarch64"] {
+            let out = bash_with_pin(&format!("guest_kernel_sha256 {arch}"));
+            let sum = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert!(out.status.success(), "no recorded sum for {arch}");
+            assert_eq!(sum.len(), 64, "{arch} sum is not a sha256: {sum:?}");
+            assert!(
+                sum.chars().all(|c| c.is_ascii_hexdigit()),
+                "{arch} sum is not hex: {sum:?}"
+            );
+        }
+        let out = bash_with_pin("guest_kernel_sha256 mips64 || echo REFUSED");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("REFUSED"),
+            "an unsupported arch must refuse, not return an empty sum"
+        );
+    }
+
+    #[test]
+    fn verify_accepts_content_matching_the_expected_sum() {
+        let out = bash_with_pin(&format!(
+            "d=$(mktemp -d); printf hello >\"$d/f\"; \
+             verify_sha256 \"$d/f\" {HELLO_SHA256} && echo OK; rm -rf \"$d\""
+        ));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("OK"),
+            "a matching file must verify; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The load-bearing negative case: a byte that does not match the
+    /// recorded sum must fail, and the failure must be loud.
+    #[test]
+    fn verify_rejects_content_that_does_not_match() {
+        let out = bash_with_pin(&format!(
+            "d=$(mktemp -d); printf tampered >\"$d/f\"; \
+             verify_sha256 \"$d/f\" {HELLO_SHA256} && echo WRONGLY_ACCEPTED; rm -rf \"$d\""
+        ));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("WRONGLY_ACCEPTED"), "tampered content was accepted");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("sha256 mismatch"),
+            "a mismatch must say so on stderr, got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The gap issue #471 was actually filed for: the old scripts did
+    /// `[ -f vmlinux ] || curl …`, so a kernel already on disk was
+    /// reused **unchecked** forever. A pre-existing bad file must now be
+    /// caught, quarantined, and the build stopped.
+    ///
+    /// Runs without network: the file exists, so the fetch never starts.
+    #[test]
+    fn a_pre_existing_tampered_kernel_is_quarantined_and_fails_closed() {
+        let out = bash_with_pin(
+            "d=$(mktemp -d); printf 'not a kernel' >\"$d/vmlinux\"; \
+             fetch_guest_kernel \"$d\" aarch64 && echo WRONGLY_ACCEPTED; \
+             echo \"present=$([ -f \"$d/vmlinux\" ] && echo yes || echo no)\"; \
+             echo \"quarantined=$(ls \"$d\"/vmlinux.rejected.* 2>/dev/null | wc -l | tr -d ' ')\"; \
+             rm -rf \"$d\"",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("WRONGLY_ACCEPTED"), "a tampered kernel was accepted: {stdout}");
+        assert!(
+            stdout.contains("present=no"),
+            "the rejected kernel must not stay in place for the next build: {stdout}"
+        );
+        assert!(
+            stdout.contains("quarantined=1"),
+            "the rejected kernel must be kept aside as evidence: {stdout}"
+        );
+    }
+
+    /// Evidence is named by content, so a second bad kernel cannot
+    /// overwrite what the first one left behind. "What did we almost
+    /// boot?" is worth much less if only the latest attempt survives.
+    #[test]
+    fn a_second_distinct_bad_kernel_does_not_clobber_the_first_as_evidence() {
+        let out = bash_with_pin(
+            "d=$(mktemp -d); \
+             printf 'bad kernel one' >\"$d/vmlinux\"; fetch_guest_kernel \"$d\" aarch64 || true; \
+             printf 'bad kernel two' >\"$d/vmlinux\"; fetch_guest_kernel \"$d\" aarch64 || true; \
+             echo \"kept=$(ls \"$d\"/vmlinux.rejected.* 2>/dev/null | wc -l | tr -d ' ')\"; \
+             rm -rf \"$d\"",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("kept=2"),
+            "both rejected kernels must survive as separate evidence: {stdout}"
+        );
+    }
+
+    /// Re-running the build against the *same* bad file must not pile up
+    /// near-identical corpses — content-addressed naming makes the
+    /// quarantine idempotent.
+    #[test]
+    fn re_rejecting_identical_bytes_is_idempotent() {
+        let out = bash_with_pin(
+            "d=$(mktemp -d); \
+             printf 'same bad bytes' >\"$d/vmlinux\"; fetch_guest_kernel \"$d\" aarch64 || true; \
+             printf 'same bad bytes' >\"$d/vmlinux\"; fetch_guest_kernel \"$d\" aarch64 || true; \
+             echo \"kept=$(ls \"$d\"/vmlinux.rejected.* 2>/dev/null | wc -l | tr -d ' ')\"; \
+             rm -rf \"$d\"",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("kept=1"),
+            "identical rejected bytes must collapse to one evidence file: {stdout}"
+        );
+    }
+
+    /// If the quarantine move itself fails, the function must not claim
+    /// to have preserved the bytes. It still fails closed either way —
+    /// the point is that the operator-facing report stays truthful, so
+    /// nobody goes looking for evidence that was never written.
+    ///
+    /// Skips under uid 0, where a read-only directory does not actually
+    /// stop the move. Announced via `eprintln!` rather than silently, in
+    /// the same spirit as the `[SKIP]` convention the micro-VM e2es use:
+    /// a check that quietly does nothing is worse than one that fails.
+    #[test]
+    fn a_failed_quarantine_is_reported_rather_than_claimed() {
+        let out = bash_with_pin(
+            "if [ \"$(id -u)\" = 0 ]; then echo ROOT_SKIP; exit 0; fi; \
+             d=$(mktemp -d); printf 'not a kernel' >\"$d/vmlinux\"; chmod 500 \"$d\"; \
+             fetch_guest_kernel \"$d\" aarch64 && echo WRONGLY_ACCEPTED; \
+             chmod 700 \"$d\"; rm -rf \"$d\"",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.contains("ROOT_SKIP") {
+            eprintln!(
+                "[SKIP] a_failed_quarantine_is_reported_rather_than_claimed: \
+                 running as root, a read-only dir does not block the move"
+            );
+            return;
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stdout.contains("WRONGLY_ACCEPTED"), "a tampered kernel was accepted: {stdout}");
+        assert!(
+            stderr.contains("Could not quarantine"),
+            "a failed quarantine must say so, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains("  quarantined:"),
+            "must not claim to have quarantined when the move failed: {stderr}"
+        );
+    }
+
+    /// Structural pin: the URL lives in the shared file and nowhere
+    /// else. Eight scripts each holding their own copy is what #475
+    /// showed goes wrong — and here the drift would be a *silently
+    /// unverified* download rather than a bad hint.
+    #[test]
+    fn kernel_pin_is_the_only_place_the_kernel_url_appears() {
+        let root = repo_root();
+        for (rootfs, script) in ROOTFS_BUILD_SCRIPTS {
+            let body = std::fs::read_to_string(root.join(script))
+                .unwrap_or_else(|e| panic!("read {script}: {e}"));
+            assert!(
+                !body.contains("spec.ccfc.min"),
+                "{script} (for {rootfs}) declares its own kernel URL; \
+                 it must source {GUEST_KERNEL_LIB} instead"
+            );
+        }
+    }
+
+    /// Every build script must actually *use* the pin. Without this a
+    /// script could drop its URL (satisfying the test above) and simply
+    /// stop fetching the kernel at all.
+    #[test]
+    fn every_build_script_fetches_through_the_pin() {
+        let root = repo_root();
+        for (rootfs, script) in ROOTFS_BUILD_SCRIPTS {
+            let body = std::fs::read_to_string(root.join(script))
+                .unwrap_or_else(|e| panic!("read {script}: {e}"));
+            assert!(
+                body.contains("guest-kernel.sh"),
+                "{script} (for {rootfs}) does not source {GUEST_KERNEL_LIB}"
+            );
+            assert!(
+                body.contains("fetch_guest_kernel"),
+                "{script} (for {rootfs}) sources the pin but never calls fetch_guest_kernel"
+            );
+        }
     }
 }
