@@ -41,7 +41,8 @@ use std::path::{Path, PathBuf};
 /// Where the guest kernel and rootfs images live when the operator has
 /// not overridden `KASTELLAN_MICROVM_DIR`.
 ///
-/// Provisioned (created + chowned to the worker user) by the one-time
+/// Provisioned root-owned, group-writable (1775), with a root-owned
+/// vmlinux the agent cannot replace (#479), by the one-time
 /// `sudo scripts/linux/install-firecracker-vsock.sh`.
 pub const DEFAULT_IMAGE_DIR: &str = "/var/lib/kastellan/microvm";
 
@@ -565,8 +566,238 @@ mod tests {
                 "{script} (for {rootfs}) does not source {GUEST_KERNEL_LIB}"
             );
             assert!(
-                body.contains("fetch_guest_kernel"),
-                "{script} (for {rootfs}) sources the pin but never calls fetch_guest_kernel"
+                body.contains("require_guest_kernel"),
+                "{script} (for {rootfs}) sources the pin but never calls require_guest_kernel"
+            );
+        }
+    }
+
+    // --- #479: the boot-time pin must not drift from the build-time one ---
+
+    /// Pull `NAME="value"` out of the shared bash pin.
+    ///
+    /// Deliberately strict about the shape: if the assignment is
+    /// reformatted, this panics rather than quietly matching nothing and
+    /// letting the comparison below pass vacuously — a test that can
+    /// silently stop testing is worse than no test.
+    fn bash_pin_value(body: &str, name: &str) -> String {
+        let prefix = format!("{name}=\"");
+        let line = body
+            .lines()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{GUEST_KERNEL_LIB} has no line starting `{prefix}`"));
+        line[prefix.len()..]
+            .strip_suffix('"')
+            .unwrap_or_else(|| panic!("malformed assignment in {GUEST_KERNEL_LIB}: {line}"))
+            .to_string()
+    }
+
+    /// #479: the boot-time check (Rust) and the build-time check (bash)
+    /// must agree, or one of them is verifying against a stale sum.
+    ///
+    /// The duplication is deliberate — `kastellan-sandbox` is published
+    /// to crates.io and cannot `include_str!` a path outside its own
+    /// directory — so this test is what makes it safe. It runs on every
+    /// PR via `linux-check.yml`, because a version bump that updates one
+    /// side and not the other is exactly the drift least likely to be
+    /// caught by an operator's occasional DGX run.
+    #[test]
+    fn rust_and_bash_kernel_pins_agree() {
+        use kastellan_sandbox::guest_kernel_pin::{
+            GUEST_KERNEL_SHA256_AARCH64, GUEST_KERNEL_SHA256_X86_64,
+        };
+        let body = std::fs::read_to_string(repo_root().join(GUEST_KERNEL_LIB))
+            .unwrap_or_else(|e| panic!("read {GUEST_KERNEL_LIB}: {e}"));
+
+        assert_eq!(
+            bash_pin_value(&body, "KASTELLAN_GUEST_KERNEL_SHA256_X86_64"),
+            GUEST_KERNEL_SHA256_X86_64,
+            "x86_64 pin drifted between {GUEST_KERNEL_LIB} and \
+             sandbox/src/guest_kernel_pin.rs — bump both together"
+        );
+        assert_eq!(
+            bash_pin_value(&body, "KASTELLAN_GUEST_KERNEL_SHA256_AARCH64"),
+            GUEST_KERNEL_SHA256_AARCH64,
+            "aarch64 pin drifted between {GUEST_KERNEL_LIB} and \
+             sandbox/src/guest_kernel_pin.rs — bump both together"
+        );
+    }
+
+    /// #479's other half: the privileged installer must leave the guest
+    /// kernel where the agent's own OS user cannot replace it.
+    ///
+    /// Three properties, and the first is the one that was got WRONG on
+    /// the first attempt — which is exactly why it is asserted rather
+    /// than commented.
+    ///
+    /// `unlink(2)` refuses removal from a sticky directory only when the
+    /// process's UID "is neither the UID of the file to be deleted nor
+    /// that of the directory containing it". There are **two**
+    /// exemptions, not one. The original version of this change chowned
+    /// the directory to the worker user and root-owned only `vmlinux`,
+    /// which satisfies the *directory-owner* exemption: the agent could
+    /// still `rm` the kernel and drop in its own, and the whole ownership
+    /// half was void while looking correct. So the directory `chown` must
+    /// name **root**, and asserting `chown root:root` somewhere in the
+    /// file is not enough — the earlier bug passed exactly that check.
+    #[test]
+    fn installer_root_owns_the_kernel_in_a_sticky_dir() {
+        let script = "scripts/linux/install-firecracker-vsock.sh";
+        let body = std::fs::read_to_string(repo_root().join(script))
+            .unwrap_or_else(|e| panic!("read {script}: {e}"));
+
+        // Every assertion below anchors to a real command line, not to a
+        // bare substring: the version of this test that shipped the
+        // original bug used `contains("chown root:root")`, which the
+        // BUGGY script also satisfied. A comment must never be able to
+        // satisfy a security assertion.
+        let cmd = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+            body.lines().map(str::trim).find(|l| !l.starts_with('#') && pred(l)).map(str::to_string)
+        };
+
+        // 1. The image dir must be owned by ROOT. unlink(2) exempts the
+        //    DIRECTORY's owner as well as the file's, so naming
+        //    TARGET_USER here re-opens the hole however vmlinux is owned.
+        let dir_chown = cmd(&|l| l.starts_with("chown ") && l.ends_with("\"${MICROVM_DIR}\""))
+            .unwrap_or_else(|| panic!("{script} never chowns ${{MICROVM_DIR}} itself"));
+        assert!(
+            dir_chown.starts_with("chown \"root:") || dir_chown.starts_with("chown root:"),
+            "the micro-VM image dir must be owned by ROOT, not the worker. Found: {dir_chown}"
+        );
+
+        // 2. And so must its PARENT — unlink/rename permission on the
+        //    image dir is governed by the parent, so an agent-owned
+        //    /var/lib/kastellan lets the agent swap the whole directory.
+        assert!(
+            cmd(&|l| l.starts_with("chown root:root") && l.ends_with("\"${MICROVM_PARENT}\""))
+                .is_some(),
+            "{script} must root-own the PARENT of the image dir too"
+        );
+
+        // 3. Sticky + group-writable exactly. 1777 would be world-writable
+        //    and is NOT what this ships; accepting it would let a later
+        //    edit weaken the dir while keeping this test green.
+        assert!(
+            cmd(&|l| l.starts_with("chmod 1775") && l.ends_with("\"${MICROVM_DIR}\"")).is_some(),
+            "{script} must chmod the image dir 1775 (sticky + group write)"
+        );
+
+        // 4. vmlinux itself root-owned, and the pin actually SOURCED —
+        //    `contains(\"guest-kernel.sh\")` alone is satisfied by the
+        //    `# shellcheck source=...` comment sitting right above it.
+        assert!(
+            cmd(&|l| l.starts_with("chown root:root") && l.contains("/vmlinux")).is_some(),
+            "{script} must leave vmlinux itself root-owned"
+        );
+
+        // 5. And root-owned is only half of it: the kernel's MODE is
+        //    asserted for the same reason the directory's is. A root-owned
+        //    `vmlinux` at 0664 or 0666 can be overwritten IN PLACE — no
+        //    unlink, no rename, so neither the sticky bit nor either
+        //    ownership assertion above notices — and the ownership half of
+        //    #479 is void while this test stays green. That is exactly the
+        //    shape of the four bugs this branch already fixed, so read the
+        //    bit rather than assuming it.
+        assert!(
+            cmd(&|l| l.starts_with("chmod 0644") && l.contains("/vmlinux")).is_some(),
+            "{script} must chmod vmlinux 0644 — a group/world-writable kernel is \
+             replaceable in place however it is owned"
+        );
+
+        assert!(
+            cmd(&|l| l.starts_with("source ") && l.contains("guest-kernel.sh")).is_some(),
+            "{script} must actually source {GUEST_KERNEL_LIB}, not merely mention it"
+        );
+        assert!(
+            cmd(&|l| l.starts_with("fetch_guest_kernel ")).is_some(),
+            "{script} is the only thing that may CREATE the kernel — builds only verify"
+        );
+
+        // 6. The post-install verification must READ BACK what it just
+        //    set, both bits of it, rather than reporting success on the
+        //    strength of having run chown/chmod. `stat` here must NOT be
+        //    given `-L`: on a symlink planted in the window between the
+        //    pre-fetch `[ -L ]` check and the fetch itself, an
+        //    undereferenced `%u` reports the agent-owned LINK, which is
+        //    what catches that race. `stat -Lc` would follow to the
+        //    root-owned target and report success.
+        assert!(
+            cmd(&|l| l.contains("stat -c '%u'") && l.contains("/vmlinux")).is_some(),
+            "{script} must read back the kernel's owner with a NON-dereferencing \
+             stat (no -L, or a planted symlink reports its target's uid)"
+        );
+        assert!(
+            cmd(&|l| l.contains("stat -c '%a'") && l.contains("/vmlinux")).is_some(),
+            "{script} must read back the kernel's mode after setting it"
+        );
+        assert!(
+            !body.lines().map(str::trim).any(|l| !l.starts_with('#') && l.contains("stat -L")),
+            "{script} must not dereference symlinks when reading back the kernel's \
+             owner — that is what catches a link planted during the fetch window"
+        );
+
+        // 7. ORDER, not just presence. `chown` and `chmod` follow symlinks,
+        //    so the post-fetch `[ -L ]` check must sit BETWEEN the fetch and
+        //    the chown — otherwise root follows an agent-planted link out of
+        //    this directory before anything notices. The first version of
+        //    this very fix got that wrong (the check was added *after* the
+        //    chown), which is the branch's own signature bug recurring
+        //    inside its remedy: reading a permission property instead of
+        //    ordering the operations that establish it. A presence-only
+        //    assertion would have stayed green through it, so assert the
+        //    sequence.
+        let line_of = |pred: &dyn Fn(&str) -> bool| -> Option<usize> {
+            body.lines().map(str::trim).position(|l| !l.starts_with('#') && pred(l))
+        };
+        let fetch_at = line_of(&|l| l.starts_with("fetch_guest_kernel "))
+            .unwrap_or_else(|| panic!("{script} never calls fetch_guest_kernel"));
+        let chown_at = line_of(&|l| l.starts_with("chown root:root") && l.contains("/vmlinux"))
+            .unwrap_or_else(|| panic!("{script} never chowns vmlinux"));
+        let recheck_at = body
+            .lines()
+            .map(str::trim)
+            .enumerate()
+            .find(|(i, l)| *i > fetch_at && !l.starts_with('#') && l.contains("[ -L "))
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| {
+                panic!("{script} never re-checks for a symlink after fetch_guest_kernel")
+            });
+        assert!(
+            fetch_at < recheck_at && recheck_at < chown_at,
+            "{script}: the post-fetch symlink re-check must sit between the fetch \
+             (line {fetch_at}) and the chown (line {chown_at}), but is at line \
+             {recheck_at}. chown/chmod FOLLOW symlinks — checking after them means \
+             root has already followed the link out of the image dir."
+        );
+    }
+
+    /// #479: a build script must never be able to create the guest
+    /// kernel.
+    ///
+    /// The image dir is group-writable so builds can manage their own
+    /// `*.ext4`, which also means a build CAN create a new entry. So if
+    /// `vmlinux` were ever absent, a build calling `fetch_guest_kernel`
+    /// would rename its download into place and leave an **agent-owned**
+    /// kernel — no unlink of root's file needed, nothing failing, and the
+    /// ownership half of #479 silently gone from then on. Builds verify
+    /// (`require_guest_kernel`); only the privileged installer creates.
+    #[test]
+    fn build_scripts_verify_the_kernel_but_never_create_it() {
+        let root = repo_root();
+        for (rootfs, script) in ROOTFS_BUILD_SCRIPTS {
+            let body = std::fs::read_to_string(root.join(script))
+                .unwrap_or_else(|e| panic!("read {script}: {e}"));
+            let calls = |name: &str| {
+                body.lines().map(str::trim).any(|l| !l.starts_with('#') && l.starts_with(name))
+            };
+            assert!(
+                calls("require_guest_kernel"),
+                "{script} (for {rootfs}) must call require_guest_kernel"
+            );
+            assert!(
+                !calls("fetch_guest_kernel"),
+                "{script} (for {rootfs}) calls fetch_guest_kernel — an unprivileged build that \
+                 can CREATE the kernel can create an agent-owned one, voiding #479"
             );
         }
     }

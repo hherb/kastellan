@@ -15,7 +15,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
 ROOTFS_MIB=768
 
 # The output dir defaults to /var/lib/kastellan/microvm, which is provisioned
-# (created + chowned to the worker user) by the privileged one-time setup
+# (created root-owned + group-writable, mode 1775, with a root-owned vmlinux) by
 # `sudo scripts/linux/install-firecracker-vsock.sh`. If it is missing or
 # unwritable, point the operator at that step rather than failing on a bare
 # `mkdir: Permission denied`.
@@ -30,7 +30,7 @@ if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
 fi
 
 # 1. Guest kernel (pinned + sha256-verified, including an existing copy).
-fetch_guest_kernel "$OUT_DIR"
+require_guest_kernel "$OUT_DIR"
 
 # 2. Cross-build worker + init for the guest (native on the DGX aarch64).
 source "$HOME/.cargo/env"

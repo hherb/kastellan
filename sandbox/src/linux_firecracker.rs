@@ -180,6 +180,23 @@ impl SandboxBackend for LinuxFirecracker {
         // the entry): KASTELLAN_MICROVM_DIR / KASTELLAN_MICROVM_ROOTFS. The dir
         // (and vmlinux) is shared; the rootfs filename differs per worker.
         let image = resolve_image(&policy.env);
+        // #479: verify the guest kernel is the pinned one, on EVERY boot.
+        //
+        // #471 verifies it at rootfs-build time, which does not constrain
+        // the file afterwards — it is booted for months without another
+        // check. The image dir is reachable by the agent's own OS user,
+        // exactly what the threat model assumes a compromise reaches, and
+        // the guest kernel is what enforces the containment boundary the
+        // rest of the model rests on.
+        //
+        // Deliberately the first thing after resolving the paths: a bad
+        // kernel costs no run dir, no images and no launcher. Fails closed
+        // with no bypass env var — that would be the "spawn unsandboxed"
+        // escape hatch CLAUDE.md forbids, on the one file that defines the
+        // boundary. See `guest_kernel_pin` for the TOCTOU caveat and for
+        // why the ownership half of #479 is the part that closes it.
+        crate::guest_kernel_pin::verify_pinned_kernel(&image.kernel_path, std::env::consts::ARCH)
+            .map_err(|e| SandboxError::Backend(e.to_string()))?;
         let mut plan = build_launch_plan(policy, &image, program, args)?;
         // Per-spawn temp dir for the config + log files. No new dep: uses std
         // only (atomic counter + create_dir_all).
@@ -415,5 +432,98 @@ mod spawn_tests {
         // Blank ROOTFS falls back to the python default; DIR is honoured.
         assert_eq!(img.rootfs_path, std::path::PathBuf::from("/srv/vm/python-exec.ext4"));
         assert_eq!(img.kernel_path, std::path::PathBuf::from("/srv/vm/vmlinux"));
+    }
+
+    // --- #479: the guest-kernel pin is enforced on the boot path ---
+    //
+    // These need no KVM, no firecracker binary and no root: the pin check
+    // runs before any VM work, so a bogus image dir short-circuits the
+    // spawn. They therefore run in an ordinary `cargo test` on any Linux
+    // host, not only where a micro-VM can actually boot.
+
+    /// A unique temp dir holding a fake image set, using `std` only.
+    fn fake_image_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after the epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir()
+            .join(format!("kastellan-fcpin-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fake image dir");
+        dir
+    }
+
+    fn policy_pointing_at(dir: &std::path::Path) -> SandboxPolicy {
+        SandboxPolicy {
+            env: vec![(
+                "KASTELLAN_MICROVM_DIR".to_string(),
+                dir.to_string_lossy().into_owned(),
+            )],
+            ..Default::default()
+        }
+    }
+
+    /// The #479 gate. A `vmlinux` that is not the pinned one must stop
+    /// the spawn outright — no VM, no run dir, no launcher.
+    #[test]
+    fn spawn_refuses_a_guest_kernel_that_does_not_match_the_pin() {
+        let dir = fake_image_dir("bad-kernel");
+        std::fs::write(dir.join("vmlinux"), b"not the pinned kernel").expect("write fake kernel");
+        std::fs::write(dir.join("python-exec.ext4"), b"fake rootfs").expect("write fake rootfs");
+
+        let err = LinuxFirecracker::new()
+            .spawn_under_policy(&policy_pointing_at(&dir), "/bin/true", &[])
+            .expect_err("an unpinned kernel must never boot");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not match the pinned sha256"),
+            "the failure must name the pin, not some downstream symptom: {msg}"
+        );
+
+        // The check must run BEFORE any spawn work. Code order says so
+        // today, but nothing pinned it — so moving the call below
+        // make_spawn_dir() would still pass the assertion above while
+        // quietly doing work on behalf of a kernel we are about to
+        // reject. Count run dirs instead of trusting the ordering.
+        //
+        // Scoped to THIS PROCESS's dirs, and that scoping is load-bearing
+        // rather than tidiness. `make_spawn_dir` names them
+        // `{PREFIX}{pid}-{seq}` in the shared `env::temp_dir()`, and the
+        // orphan sweep only removes dirs whose pid is *dead*. A live
+        // micro-VM e2e running concurrently in another test binary — which
+        // is precisely what `cargo test --workspace` does on the DGX —
+        // would leave its own run dir sitting there and fail this
+        // assertion with a message claiming the pin check had moved. A
+        // false security regression is the worst kind of flake, so match
+        // on our own pid and nothing else.
+        let own_prefix = format!("{}{}-", cleanup::RUN_DIR_PREFIX, std::process::id());
+        let leaked: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .expect("read temp dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&own_prefix))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a rejected kernel must cost no run dir; found {} — the pin check has moved \
+             below make_spawn_dir()",
+            leaked.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing kernel must fail on the pin check with an actionable
+    /// message, rather than surfacing later as an opaque launcher error.
+    #[test]
+    fn spawn_refuses_a_missing_guest_kernel() {
+        let dir = fake_image_dir("no-kernel");
+        let err = LinuxFirecracker::new()
+            .spawn_under_policy(&policy_pointing_at(&dir), "/bin/true", &[])
+            .expect_err("a missing kernel must never reach the launcher");
+        assert!(
+            err.to_string().contains("cannot read the micro-VM guest kernel"),
+            "got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

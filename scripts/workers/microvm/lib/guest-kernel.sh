@@ -153,7 +153,10 @@ _kastellan_quarantine() {
     target="$prefix.rejected.$sum"
     if ! mv -f "$file" "$target"; then
         echo "Could not quarantine $file (tried: $target)." >&2
-        echo "Remove it by hand; the build will keep refusing until you do." >&2
+        echo "If it is root-owned (the default since #479), re-run the privileged" >&2
+        echo "installer, which owns the kernel and can replace it:" >&2
+        echo "    sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
+        echo "Otherwise remove it by hand; the build will keep refusing until you do." >&2
         return 1
     fi
     echo "$target"
@@ -197,6 +200,61 @@ guest_kernel_url() {
     echo "${KASTELLAN_GUEST_KERNEL_BASE_URL}/${KASTELLAN_GUEST_KERNEL_CI_TAG}/$1/vmlinux-${KASTELLAN_GUEST_KERNEL_VERSION}"
 }
 
+# require_guest_kernel <out_dir> [arch]
+#
+# Verify an EXISTING `$out_dir/vmlinux` and never create one. This is what
+# the eight build-*-rootfs.sh call; `fetch_guest_kernel` below is for the
+# privileged installer only.
+#
+# Why builds must not fetch (issue #479). The image dir is
+# `root:<worker-group>` mode 1775, so the worker has GROUP WRITE — it owns
+# and manages its own `*.ext4` images there. Group write is also enough to
+# CREATE a new entry. So if `vmlinux` is ever absent, an unprivileged build
+# calling `fetch_guest_kernel` would happily rename its download into place
+# and leave an **agent-owned** kernel: no unlink of root's file is needed,
+# nothing fails, and the ownership half of #479 is silently gone from that
+# moment on. unlink(2)'s first exemption (the file's own owner) then
+# applies and the agent can replace the kernel at will.
+#
+# Verifying-but-never-creating removes that path entirely. A missing kernel
+# becomes a loud, actionable stop instead of a quiet downgrade.
+require_guest_kernel() {
+    local out_dir="$1" arch="${2:-}" expected dest
+    if [ -z "$arch" ]; then
+        arch="$(guest_kernel_arch)" || return 1
+    fi
+    expected="$(guest_kernel_sha256 "$arch")" || return 1
+    dest="$out_dir/vmlinux"
+
+    # Symlink FIRST, existence second. `-e` dereferences, so a DANGLING
+    # link is `! -e` and would otherwise take the "no guest kernel" branch
+    # — sending the operator to an installer message when the actionable
+    # fact is that something planted a link here. Both fail closed either
+    # way; this is about the message naming what actually happened.
+    if [ -L "$dest" ]; then
+        echo "$dest is a symlink, not a regular file." >&2
+        echo "Refusing to build: a symlink is owned by whoever created it, so it" >&2
+        echo "can be re-pointed even when its target is root-owned (issue #479)." >&2
+        echo "Remove it and re-run sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
+        return 1
+    fi
+    if [ ! -e "$dest" ]; then
+        echo "No guest kernel at $dest." >&2
+        echo "Builds do not fetch it: it must be installed by root so the agent" >&2
+        echo "cannot replace it (issue #479). Install it with:" >&2
+        echo "    sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
+        echo "For a non-default KASTELLAN_MICROVM_DIR (which root does not manage," >&2
+        echo "so it carries no ownership protection) fetch it deliberately with:" >&2
+        echo "    ./scripts/workers/microvm/fetch-guest-kernel.sh \"$out_dir\"" >&2
+        return 1
+    fi
+    if ! verify_sha256 "$dest" "$expected"; then
+        echo "Refusing to build on an unverified guest kernel." >&2
+        echo "Re-install it: sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
+        return 1
+    fi
+}
+
 # fetch_guest_kernel <out_dir> [arch]
 #
 # Leaves a verified `$out_dir/vmlinux` in place, or fails without leaving
@@ -228,6 +286,11 @@ guest_kernel_url() {
 #     swept here — this function cannot tell a corpse from a download
 #     another live build is midway through, and deleting the latter to
 #     tidy up the former is a bad trade. Sweep by hand if they pile up.
+#
+# Callers: the privileged installer, and fetch-guest-kernel.sh (a
+# deliberate operator action for a non-default image dir). NOT the build
+# scripts — since #479 they call `require_guest_kernel` above, because a
+# build that can create the kernel can create an agent-owned one.
 fetch_guest_kernel() {
     local out_dir="$1" arch="${2:-}" expected url dest tmp quarantined
     if [ -z "$arch" ]; then
