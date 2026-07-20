@@ -622,34 +622,55 @@ mod tests {
         );
     }
 
-    /// #479's other half: the privileged installer is the only thing that
-    /// puts the kernel in place root-owned, and the image dir must be
-    /// sticky.
+    /// #479's other half: the privileged installer must leave the guest
+    /// kernel where the agent's own OS user cannot replace it.
     ///
-    /// The sticky bit is load-bearing, not cosmetic: POSIX directory
-    /// write permission alone permits `unlink()` of any entry regardless
-    /// of that file's owner, so a root-owned `vmlinux` in a
-    /// worker-writable dir could simply be removed and replaced. If a
-    /// later edit drops the `chmod 1755`, the ownership half of #479 is
-    /// silently void — hence a test rather than a comment.
+    /// Three properties, and the first is the one that was got WRONG on
+    /// the first attempt — which is exactly why it is asserted rather
+    /// than commented.
+    ///
+    /// `unlink(2)` refuses removal from a sticky directory only when the
+    /// process's UID "is neither the UID of the file to be deleted nor
+    /// that of the directory containing it". There are **two**
+    /// exemptions, not one. The original version of this change chowned
+    /// the directory to the worker user and root-owned only `vmlinux`,
+    /// which satisfies the *directory-owner* exemption: the agent could
+    /// still `rm` the kernel and drop in its own, and the whole ownership
+    /// half was void while looking correct. So the directory `chown` must
+    /// name **root**, and asserting `chown root:root` somewhere in the
+    /// file is not enough — the earlier bug passed exactly that check.
     #[test]
     fn installer_root_owns_the_kernel_in_a_sticky_dir() {
         let script = "scripts/linux/install-firecracker-vsock.sh";
         let body = std::fs::read_to_string(repo_root().join(script))
             .unwrap_or_else(|e| panic!("read {script}: {e}"));
 
+        // The directory chown must make ROOT the owner. Anything naming
+        // TARGET_USER on the left of the colon re-opens the hole.
+        let dir_chown = body
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("chown ") && l.contains("${MICROVM_DIR}"))
+            .unwrap_or_else(|| panic!("{script} never chowns ${{MICROVM_DIR}}"));
         assert!(
-            body.contains("chmod 1755"),
-            "{script} must make the micro-VM image dir sticky (1755); without +t the \
-             agent user can unlink root's vmlinux and the ownership half of #479 is void"
+            dir_chown.starts_with("chown \"root:") || dir_chown.starts_with("chown root:"),
+            "the micro-VM image dir must be owned by ROOT, not the worker: unlink(2) exempts \
+             the DIRECTORY's owner as well as the file's, so a worker-owned dir lets the agent \
+             rm root's vmlinux and #479's ownership half is void. Found: {dir_chown}"
+        );
+
+        assert!(
+            body.contains("chmod 1775") || body.contains("chmod 1777"),
+            "{script} must make the micro-VM image dir sticky AND group/other writable, so \
+             unprivileged rootfs builds still work while the kernel stays protected"
+        );
+        assert!(
+            body.contains("chown root:root \"${MICROVM_DIR}/vmlinux\""),
+            "{script} must leave vmlinux itself root-owned"
         );
         assert!(
             body.contains("guest-kernel.sh"),
             "{script} must source {GUEST_KERNEL_LIB} rather than fetching the kernel itself"
-        );
-        assert!(
-            body.contains("chown root:root"),
-            "{script} must leave vmlinux root-owned"
         );
     }
 }

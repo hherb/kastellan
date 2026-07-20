@@ -23,12 +23,16 @@
 //! boots down to microseconds — real, but not a closed hole.
 //!
 //! What actually closes it is the other half of #479, in
-//! `scripts/linux/install-firecracker-vsock.sh`: the image dir is sticky
-//! (`1755`) and `vmlinux` is `root:root`, so the agent user has no write
-//! primitive on it at all. The two halves are complementary and neither
-//! is sufficient alone — this one is what still holds when ownership was
-//! never applied (a pre-existing install, or an operator pointing
-//! `KASTELLAN_MICROVM_DIR` at a directory they control).
+//! `scripts/linux/install-firecracker-vsock.sh`: the image dir is
+//! `root:<worker-group>` mode `1775` and `vmlinux` is `root:root`, so the
+//! agent user has no write primitive on it at all. Note that **root must
+//! own the directory too**, not just the kernel — `unlink(2)` exempts the
+//! directory's owner as well as the file's, so a worker-owned directory
+//! would leave the kernel replaceable however the kernel itself is owned.
+//! The two halves are complementary and neither is sufficient alone —
+//! this one is what still holds when ownership was never applied (a
+//! pre-existing install, or an operator pointing `KASTELLAN_MICROVM_DIR`
+//! at a directory they control).
 //!
 //! Closing the TOCTOU properly would mean hashing through an already-open
 //! fd and handing that same fd to Firecracker, which its config-file

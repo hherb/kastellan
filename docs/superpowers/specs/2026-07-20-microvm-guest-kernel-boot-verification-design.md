@@ -102,8 +102,20 @@ hoped-for — the same pattern #471 already established with
 `scripts/linux/install-firecracker-vsock.sh` (already root-only) changes in
 three ways:
 
-1. `/var/lib/kastellan/microvm/` becomes mode **`1755`** — still owned by the
-   worker user, but **sticky**.
+1. `/var/lib/kastellan/microvm/` becomes **`root:<worker-group>` mode `1775`**
+   — root-owned, group-writable, and **sticky**.
+
+   > **Correction (2026-07-21, found in the Task 3+4 review).** This section
+   > originally specified mode `1755` with the directory *still owned by the
+   > worker user*. That does not work, and the "why the sticky bit is
+   > load-bearing" paragraph below stated the reason incorrectly. `unlink(2)`
+   > refuses removal from a sticky directory only when the process's UID "is
+   > neither the UID of the file to be deleted **nor that of the directory
+   > containing it**" — **two** exemptions. A worker-owned directory satisfies
+   > the second one, so the agent could still `rm` root's `vmlinux` and
+   > replace it, and the ownership half would have been void while appearing
+   > correct. Root must own the directory as well; the worker's group gets
+   > write so unprivileged rootfs builds still work.
 2. The script takes over fetching the guest kernel: it sources
    `guest-kernel.sh`, calls `fetch_guest_kernel` (unchanged — it already
    verifies), then `chown root:root` + `chmod 0644` the result.
@@ -121,14 +133,19 @@ three ways:
    image is unaffected — `+t` restricts only removal and rename by non-owners,
    and the agent user owns every `*.ext4` in that directory.
 
-**Why the sticky bit is load-bearing, not decoration.** POSIX directory write
-permission alone permits `unlink()` and `rename()` of *any* entry in that
-directory, regardless of the file's own owner and mode. Root-owning `vmlinux`
-inside an agent-writable directory would therefore stop nothing: the agent
-could simply remove it and create its own. `+t` restricts removal and rename
-to the file's owner (or the directory's, or root). With it, the agent can
-still freely create and replace its own rootfs images in that directory —
-which is what keeps builds unprivileged — but cannot touch root's `vmlinux`.
+**Why the sticky bit is load-bearing, and why root must own the directory.**
+POSIX directory write permission alone permits `unlink()` and `rename()` of
+*any* entry in that directory, regardless of the file's own owner and mode.
+Root-owning `vmlinux` inside a group-writable directory without `+t` would
+therefore stop nothing: the agent could simply remove it and create its own.
+
+`+t` narrows removal and rename to **either** the file's owner **or the
+directory's owner** (or root). Both exemptions matter: making the worker the
+directory's owner would hand it the second one and defeat the whole
+arrangement. So the directory is `root:<worker-group>`. The worker is neither
+`vmlinux`'s owner nor the directory's, so it cannot unlink or rename the
+kernel; group write still lets it create and replace its own rootfs images —
+which is what keeps builds unprivileged — because it owns those.
 
 Net effect on operator UX: rootfs builds stay unprivileged; a guest-kernel
 version bump costs one `sudo` run of a script that already required `sudo`.

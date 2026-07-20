@@ -14,12 +14,15 @@
 # Run once with sudo:
 #   sudo scripts/linux/install-firecracker-vsock.sh [--user <name>] [--kvm]
 #
-# It also provisions the micro-VM image dir /var/lib/kastellan/microvm (owned
-# by the worker user, mode 1755) so the unprivileged build-rootfs.sh + the
-# per-user service can write it without further root, and installs the pinned
-# guest kernel there as root:root 0644 — the sticky bit is what stops the
-# worker user from unlinking and replacing it (issue #479). Re-run this script
-# after bumping the pinned kernel version.
+# It also provisions the micro-VM image dir /var/lib/kastellan/microvm as
+# root:<worker-group> mode 1775, so the unprivileged build-rootfs.sh + the
+# per-user service can still write their images there, and installs the pinned
+# guest kernel as root:root 0644. Root owning BOTH the directory and the kernel
+# is what makes the sticky bit bite: unlink(2) exempts the directory's owner as
+# well as the file's, so a worker-owned directory would leave the kernel
+# replaceable (issue #479). Re-run this script after bumping the pinned kernel
+# version; the ownership fixes are unconditional, so a re-run also repairs an
+# older install.
 #
 # Reversible: remove /etc/udev/rules.d/99-kastellan-microvm.rules and
 # /etc/modules-load.d/kastellan-vsock.conf, then `udevadm control --reload`.
@@ -94,18 +97,29 @@ udevadm control --reload
 
 # 4. Provision the micro-VM image dir + install the pinned guest kernel.
 #
-#    The dir stays owned by the worker user so the eight unprivileged
-#    build-*-rootfs.sh scripts keep working without root. Issue #479 adds two
-#    things on top of that:
+#    The worker must still be able to write its eight *.ext4 images here
+#    unprivileged, but must NOT be able to replace the guest kernel. Issue
+#    #479 gets both with root:<worker-group> ownership, mode 1775:
 #
-#      * mode 1755 — the STICKY bit, and it is load-bearing rather than
+#      * ROOT owns the directory, the worker's GROUP has write. Group write
+#        is what keeps build-*-rootfs.sh unprivileged (creating a new entry
+#        needs write+execute on the directory, not ownership of it).
+#
+#      * mode 1775 — the STICKY bit, and it is load-bearing rather than
 #        belt-and-braces. POSIX directory write permission on its own permits
 #        unlink() and rename() of ANY entry, regardless of that entry's owner
-#        and mode. So root-owning vmlinux inside a worker-writable dir would
-#        stop nothing at all: the agent could remove it and drop in its own.
-#        With +t, removal and rename are restricted to the entry's owner. The
-#        agent still freely creates and replaces its own *.ext4 images (it
-#        owns those); it cannot touch root's kernel.
+#        and mode. So root-owning vmlinux in a group-writable dir without +t
+#        would stop nothing: the agent could remove it and drop in its own.
+#
+#        The DIRECTORY's owner matters as much as the file's. unlink(2):
+#        removal is refused when the sticky bit is set and the process's UID
+#        "is neither the UID of the file to be deleted nor that of the
+#        directory containing it". So a worker-OWNED directory would exempt
+#        the worker no matter who owns vmlinux — which is exactly why the
+#        chown below names root and not ${TARGET_USER}. With root owning both
+#        the directory and the kernel, the worker matches neither exemption
+#        and cannot unlink or rename it; it can still freely create and
+#        replace its own *.ext4 images, because it owns those.
 #
 #      * the guest kernel is fetched HERE, as root, and left root:root 0644.
 #        docs/threat-model.md assumes a worst-case compromise reaches the
@@ -119,11 +133,14 @@ udevadm control --reload
 #    The rootfs images are deliberately NOT protected this way: a tampered
 #    rootfs is not an escalation — the guest userland is already assumed
 #    hostile and the VM is what contains it.
+#
+#    The chown/chmod are unconditional so a re-run repairs an older install
+#    whose dir is still worker-owned.
 MICROVM_DIR="/var/lib/kastellan/microvm"
 mkdir -p "${MICROVM_DIR}"
-chown "${TARGET_USER}:$(id -gn "${TARGET_USER}")" "${MICROVM_DIR}"
-chmod 1755 "${MICROVM_DIR}"
-echo "Provisioned ${MICROVM_DIR} (owner ${TARGET_USER}, sticky)"
+chown "root:$(id -gn "${TARGET_USER}")" "${MICROVM_DIR}"
+chmod 1775 "${MICROVM_DIR}"
+echo "Provisioned ${MICROVM_DIR} (root-owned, group $(id -gn "${TARGET_USER}") writable, sticky)"
 
 # The same pinned+verified fetch the rootfs builds use — one place the URL,
 # the arch table and the sums are written down (issue #471).
