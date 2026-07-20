@@ -27,19 +27,22 @@
 //!   complete. See its doc comment for why the origin has to be a real public one
 //!   and what MITM adds over browser-driver's transparent tunnel.
 //!
+//! ## Running them
+//!
 //! Both are `#[ignore]`d and DGX-only: they need `/dev/kvm` + `/dev/vhost-vsock`
 //! + the web-fetch rootfs (REBUILD via `build-web-fetch-rootfs.sh`) + the
 //! `kastellan-microvm-run` RELEASE launcher; the second also needs the
-//! egress-proxy binary and outbound HTTPS. Run:
+//! egress-proxy binary and outbound HTTPS. `--test-threads=1` matters — each
+//! tier boots its own VM.
 //!
-//!     export PATH=$HOME/.local/bin:$PATH
-//!     cargo build --release -p kastellan-microvm-run
-//!     cargo build -p kastellan-worker-egress-proxy
-//!     bash scripts/workers/microvm/build-web-fetch-rootfs.sh
-//!     cargo test -p kastellan-core --test web_fetch_firecracker_egress_e2e -- \
-//!         --test-threads=1 --ignored --nocapture
-//!
-//! `--test-threads=1` matters: each tier boots its own VM.
+//! ```sh
+//! export PATH=$HOME/.local/bin:$PATH
+//! cargo build --release -p kastellan-microvm-run
+//! cargo build -p kastellan-worker-egress-proxy
+//! bash scripts/workers/microvm/build-web-fetch-rootfs.sh
+//! cargo test -p kastellan-core --test web_fetch_firecracker_egress_e2e -- \
+//!     --test-threads=1 --ignored --nocapture
+//! ```
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
