@@ -112,7 +112,8 @@ pub fn launcher_candidates(target_dir: &Path) -> Vec<PathBuf> {
 /// usually a missing image, and "which image?" is the operator's first
 /// question) and, when known, the script that builds it.
 pub fn probe_skip_message(rootfs: &str, err: &str) -> String {
-    let mut msg = format!("\n[SKIP] firecracker probe failed (need {rootfs} + KVM + vsock): {err}\n");
+    let mut msg =
+        format!("\n[SKIP] firecracker probe failed (need {rootfs} + KVM + vsock): {err}\n");
     if let Some(script) = build_script_for(rootfs) {
         msg.push_str(&format!("       build the rootfs with: bash {script}\n"));
     }
