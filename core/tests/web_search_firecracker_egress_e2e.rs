@@ -47,7 +47,7 @@ use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManage
 use kastellan_core::workers::web_search::{
     web_search_firecracker_broker_entry, web_search_firecracker_entry,
 };
-use kastellan_sandbox::{SandboxBackends};
+use kastellan_sandbox::SandboxBackends;
 use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,

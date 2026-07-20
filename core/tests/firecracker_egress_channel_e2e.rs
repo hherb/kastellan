@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use kastellan_core::tool_host::{spawn_worker, WorkerSpec};
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
-use kastellan_sandbox::{Net};
+use kastellan_sandbox::Net;
 use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 
 /// The rootfs image this suite boots. Passed to the shared
