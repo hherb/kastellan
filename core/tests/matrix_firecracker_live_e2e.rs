@@ -56,8 +56,8 @@ use kastellan_core::egress::persistent_net::{spawn_net_transport, NetTransportSp
 use kastellan_core::worker_lifecycle::{PersistentFactory, PersistentTransport, PersistentWorker};
 use kastellan_protocol::client::Client;
 use kastellan_sandbox::{SandboxBackend, SandboxBackends};
-use serde_json::{json, Value};
 use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
+use serde_json::{json, Value};
 
 /// The rootfs image this suite boots. Passed to the shared
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,

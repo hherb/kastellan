@@ -48,6 +48,10 @@ pub const DEFAULT_IMAGE_DIR: &str = "/var/lib/kastellan/microvm";
 /// The VMM launcher binary. The Firecracker backend spawns this by
 /// **bare name** via a `PATH` lookup, which is why
 /// [`skip_if_no_microvm`] prepends its build directory to `PATH`.
+///
+/// [`launcher_skip_message`] also uses this as the `cargo build -p`
+/// **package** name — true today because the crate and its binary share
+/// the name. If they ever diverge, split this into two consts.
 pub const LAUNCHER_BIN: &str = "kastellan-microvm-run";
 
 /// Build profiles probed for [`LAUNCHER_BIN`], **most-preferred first**.
@@ -179,6 +183,12 @@ mod linux {
     /// 1. the Firecracker probe (`/dev/kvm`, `/dev/vhost-vsock`, and the
     ///    rootfs + kernel actually present), and
     /// 2. the VMM launcher being built.
+    ///
+    /// With VMM confinement on (`KASTELLAN_MICROVM_CONFINE_VMM` unset — the
+    /// default), the probe *also* fails closed on a missing bwrap or user
+    /// cgroup (the slice-5a gate), so a host without the AppArmor profile or
+    /// a systemd user session `[SKIP]`s here too — read the probe error
+    /// before assuming a KVM/vsock problem.
     ///
     /// On success it prepends the launcher's directory to `PATH`,
     /// because the backend spawns it by bare name. That is a

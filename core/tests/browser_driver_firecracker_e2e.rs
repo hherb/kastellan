@@ -70,7 +70,7 @@ use kastellan_tests_common::{
 };
 
 /// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
-const ROOTFS_FILE: &str = "browser-driver.ext4";
+const VM_ROOTFS: &str = "browser-driver.ext4";
 
 /// The acceptance origin for the slice-3 live render (§3/§4.2 of the design
 /// spec). It must be a **real public HTTPS host**: browser-driver's sidecar runs
@@ -365,7 +365,7 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
     let program = entry.binary.display().to_string();
     let plan = build_launch_plan(
         &force_routed_policy(&entry, PathBuf::from("/tmp/kastellan-egress.sock")),
-        &firecracker_image_for(ROOTFS_FILE),
+        &firecracker_image_for(VM_ROOTFS),
         &program,
         &[],
     )
@@ -387,8 +387,8 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
             .policy
             .env
             .iter()
-            .any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS" && v == ROOTFS_FILE),
-        "the entry must boot {ROOTFS_FILE}, the image build-browser-driver-rootfs.sh produces"
+            .any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS" && v == VM_ROOTFS),
+        "the entry must boot {VM_ROOTFS}, the image build-browser-driver-rootfs.sh produces"
     );
 
     let token = plan
@@ -507,7 +507,7 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs"]
 async fn vm_booted_browser_driver_launches_chromium() {
-    if skip_if_no_microvm(ROOTFS_FILE) {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     // Skip-as-pass without PG/supervisor/sandbox (dispatch needs a pool for audit).
@@ -681,7 +681,7 @@ async fn vm_booted_browser_driver_launches_chromium() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
 async fn vm_renders_real_page_through_real_sidecar() {
-    if skip_if_no_microvm(ROOTFS_FILE) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
         return;
     }
     if skip_if_origin_unreachable(DEFAULT_ORIGIN_HOST) {
@@ -822,7 +822,7 @@ async fn vm_renders_real_page_through_real_sidecar() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
 async fn vm_render_of_heavy_page_stays_within_memory_budget() {
-    if skip_if_no_microvm(ROOTFS_FILE) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
         return;
     }
     if skip_if_origin_unreachable(HEAVY_ORIGIN_HOST) {

@@ -145,10 +145,10 @@ use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManage
 #[cfg(target_os = "linux")]
 use kastellan_core::workers::web_research::web_research_firecracker_search_broker_entry;
 #[cfg(target_os = "linux")]
-#[cfg(target_os = "linux")]
 use kastellan_sandbox::SandboxBackends;
 #[cfg(target_os = "linux")]
 use kastellan_tests_common::microvm::{image_dir, skip_if_no_microvm};
+#[cfg(target_os = "linux")]
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
     unique_suffix, workspace_target_binary,
@@ -157,6 +157,9 @@ use kastellan_tests_common::{
 /// The rootfs image this suite boots. Passed to the shared
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
 /// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+/// Gated like every other Linux-only item here — this file also compiles its
+/// hermetic tier on macOS, which must stay free of dead code.
+#[cfg(target_os = "linux")]
 const VM_ROOTFS: &str = "web-research.ext4";
 
 /// Default live SearxNG for the broker test (loopback; reached only via the broker).
