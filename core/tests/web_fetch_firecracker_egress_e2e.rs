@@ -29,8 +29,8 @@
 //!
 //! ## Running them
 //!
-//! Both are `#[ignore]`d and DGX-only: they need `/dev/kvm` + `/dev/vhost-vsock`
-//! + the web-fetch rootfs (REBUILD via `build-web-fetch-rootfs.sh`) + the
+//! Both are `#[ignore]`d and DGX-only: they need `/dev/kvm`, `/dev/vhost-vsock`,
+//! the web-fetch rootfs (REBUILD via `build-web-fetch-rootfs.sh`) and the
 //! `kastellan-microvm-run` RELEASE launcher; the second also needs the
 //! egress-proxy binary and outbound HTTPS. `--test-threads=1` matters — each
 //! tier boots its own VM.
