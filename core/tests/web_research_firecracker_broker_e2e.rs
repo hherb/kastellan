@@ -52,14 +52,18 @@ use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, WorkerSpec};
 use kastellan_core::worker_lifecycle::force_route::rewrite_policy_for_broker;
 use kastellan_core::workers::web_research::web_research_firecracker_broker_entry;
-use kastellan_sandbox::linux_firecracker::{
-    build_launch_plan, FirecrackerImage, LinuxFirecracker, BROKER_VSOCK_PORT,
-};
+use kastellan_sandbox::linux_firecracker::{build_launch_plan, FirecrackerImage, BROKER_VSOCK_PORT};
 use kastellan_sandbox::{Net, SandboxBackend, SandboxBackendKind, SandboxBackends};
+use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, workspace_target_binary,
 };
+
+/// The rootfs image this suite boots. Passed to the shared
+/// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
+/// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+const VM_ROOTFS: &str = "web-research.ext4";
 
 /// Hermetic (no KVM/network): pin the post-rewrite VM broker policy the live tier
 /// depends on — VM backend, broker UDS bound + injected, embed host absent from
@@ -206,73 +210,6 @@ const DEFAULT_SEARX_ENDPOINT: &str = "http://127.0.0.1:8888/search";
 /// the worker never has it in egress.
 const DEFAULT_EMBED_ENDPOINT: &str = "http://127.0.0.1:11434/v1/embeddings";
 
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
-
-fn firecracker_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage {
-        kernel_path: dir.join("vmlinux"),
-        rootfs_path: dir.join("web-research.ext4"),
-    }
-}
-
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&firecracker_image()) {
-        eprintln!("\n[SKIP] firecracker probe failed (need web-research.ext4 + KVM + vsock): {e}\n");
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            // The Firecracker backend spawns the `kastellan-microvm-run` VMM
-            // launcher by bare name via a PATH lookup, so prepend its build dir
-            // to PATH (it is off the default SSH PATH — see the memory note
-            // `firecracker-e2e-stale-release-launcher`). This is a process-global
-            // mutation, but each integration-test binary is its own process and
-            // this is the sole test in the file, so there is no cross-test race;
-            // the `Once` also makes repeated calls idempotent.
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!("\n[SKIP] kastellan-microvm-run not built; run `cargo build --release -p kastellan-microvm-run`\n");
-            true
-        }
-    }
-}
-
-/// The VM backend the worker runs under.
-fn firecracker_backend() -> Arc<dyn SandboxBackend> {
-    SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
-}
-
 /// The HOST backend (bwrap on Linux) for the egress-proxy sidecar AND the embed
 /// broker — both are host-side services, never in the VM.
 fn host_backend() -> Arc<dyn SandboxBackend> {
@@ -323,7 +260,7 @@ fn url_host(endpoint: &str) -> String {
             Asserts hybrid ranking from inside a VM with the embed host absent \
             from egress — embed rides vsock 1026 to the host broker."]
 async fn brokered_vm_worker_ranks_hybrid_over_vsock_with_zero_embed_egress() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     if skip_if_no_supervisor() {

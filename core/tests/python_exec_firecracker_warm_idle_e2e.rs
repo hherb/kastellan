@@ -34,12 +34,17 @@ use kastellan_core::worker_lifecycle::{
     WorkerLifecycleManager,
 };
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
-use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
 use kastellan_sandbox::{
     SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxError, SandboxPolicy,
 };
+use kastellan_tests_common::microvm::{image_dir, skip_if_no_microvm};
 use kastellan_tests_common::NoopAuditSink;
 use std::process::Child;
+
+/// The rootfs image this suite boots. Passed to the shared
+/// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
+/// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+const VM_ROOTFS: &str = "python-exec.ext4";
 
 const TOOL_NAME: &str = "python-exec";
 const CONTAINER_WORKER_BIN: &str = "/usr/local/bin/kastellan-worker-python-exec";
@@ -59,64 +64,6 @@ impl SandboxBackend for CountingBackend {
     ) -> Result<Child, SandboxError> {
         self.count.fetch_add(1, Ordering::SeqCst);
         self.inner.spawn_under_policy(policy, program, args)
-    }
-}
-
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
-
-fn firecracker_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage {
-        kernel_path: dir.join("vmlinux"),
-        rootfs_path: dir.join("python-exec.ext4"),
-    }
-}
-
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&firecracker_image()) {
-        eprintln!("\n[SKIP] firecracker probe failed: {e}\n");
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!(
-                "\n[SKIP] kastellan-microvm-run not built; run \
-                 `cargo build --release -p kastellan-microvm-run`\n"
-            );
-            true
-        }
     }
 }
 
@@ -173,7 +120,7 @@ async fn dispatch_over_handle(handle: &mut WorkerHandle, code: &str) -> serde_js
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs DGX: /dev/kvm + vhost_vsock + built rootfs + kastellan-microvm-run"]
 async fn firecracker_warm_reuse_three_calls_boot_vm_once() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     let count = Arc::new(AtomicUsize::new(0));
@@ -205,7 +152,7 @@ async fn firecracker_warm_reuse_three_calls_boot_vm_once() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs DGX"]
 async fn firecracker_tmp_is_wiped_between_warm_calls() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     let count = Arc::new(AtomicUsize::new(0));
@@ -246,7 +193,7 @@ async fn firecracker_tmp_is_wiped_between_warm_calls() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs DGX"]
 async fn firecracker_idle_teardown_clears_warm_slot() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     let count = Arc::new(AtomicUsize::new(0));
@@ -274,7 +221,7 @@ async fn firecracker_idle_teardown_clears_warm_slot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs DGX"]
 async fn firecracker_warm_survives_idle_gap_past_wall_clock() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     let count = Arc::new(AtomicUsize::new(0));

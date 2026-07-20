@@ -145,81 +145,26 @@ use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManage
 #[cfg(target_os = "linux")]
 use kastellan_core::workers::web_research::web_research_firecracker_search_broker_entry;
 #[cfg(target_os = "linux")]
-use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
-#[cfg(target_os = "linux")]
 use kastellan_sandbox::SandboxBackends;
+#[cfg(target_os = "linux")]
+use kastellan_tests_common::microvm::{image_dir, skip_if_no_microvm};
 #[cfg(target_os = "linux")]
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
     unique_suffix, workspace_target_binary,
 };
 
+/// The rootfs image this suite boots. Passed to the shared
+/// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
+/// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+/// Gated like every other Linux-only item here — this file also compiles its
+/// hermetic tier on macOS, which must stay free of dead code.
+#[cfg(target_os = "linux")]
+const VM_ROOTFS: &str = "web-research.ext4";
+
 /// Default live SearxNG for the broker test (loopback; reached only via the broker).
 #[cfg(target_os = "linux")]
 const DEFAULT_SEARX_ENDPOINT: &str = "http://127.0.0.1:8888/search";
-
-#[cfg(target_os = "linux")]
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
-
-#[cfg(target_os = "linux")]
-fn firecracker_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage {
-        kernel_path: dir.join("vmlinux"),
-        rootfs_path: dir.join("web-research.ext4"),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Skip unless a bootable web-research micro-VM is available. Also prepends the
-/// `kastellan-microvm-run` build dir to PATH (the Firecracker backend spawns the
-/// launcher by bare name; it is off the default SSH PATH — see the memory note
-/// `firecracker-e2e-stale-release-launcher`). Idempotent via `Once`.
-#[cfg(target_os = "linux")]
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&firecracker_image()) {
-        eprintln!("\n[SKIP] firecracker probe failed (need web-research.ext4 + KVM + vsock): {e}\n");
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!("\n[SKIP] kastellan-microvm-run not built; run `cargo build --release -p kastellan-microvm-run`\n");
-            true
-        }
-    }
-}
 
 #[cfg(target_os = "linux")]
 async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
@@ -268,7 +213,7 @@ fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
             search-broker + live SearxNG. Drives SingleUseLifecycle::acquire for a \
             VM web-research worker; asserts a real result with zero direct search egress."]
 async fn brokered_web_research_vm_returns_results_with_zero_egress() {
-    if skip_if_no_microvm() || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
         return;
     }
     let Some(bin_dir) = pg_bin_dir_or_skip() else {

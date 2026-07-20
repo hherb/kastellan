@@ -15,91 +15,22 @@
 //!     cargo test -p kastellan-core --test python_exec_firecracker_hostdir_e2e -- --ignored --nocapture
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, WorkerSpec};
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
-use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
-use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends};
+use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::NoopAuditSink;
 
-/// The micro-VM image dir (kernel + rootfs). Matches the backend default and is
-/// overridable for a user-local build, exactly like the runtime resolver.
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
-
-fn firecracker_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage {
-        kernel_path: dir.join("vmlinux"),
-        rootfs_path: dir.join("python-exec.ext4"),
-    }
-}
-
-/// Locate the `kastellan-microvm-run` launcher among the workspace target dirs
-/// (release preferred, then debug) and prepend its parent to `$PATH` so the
-/// backend's `Command::new("kastellan-microvm-run")` resolves it. Returns the
-/// path if found.
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Skip (early-return `true`) when this host can't run the micro-VM: the
-/// firecracker probe fails (no firecracker / KVM / vhost-vsock / images) or the
-/// launcher binary isn't built. On success, prepend the launcher's dir to
-/// `$PATH` exactly once.
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&firecracker_image()) {
-        eprintln!("\n[SKIP] firecracker probe failed: {e}\n");
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!(
-                "\n[SKIP] kastellan-microvm-run not built; run \
-                 `cargo build -p kastellan-microvm-run`\n"
-            );
-            true
-        }
-    }
-}
-
-fn firecracker_backend() -> Arc<dyn SandboxBackend> {
-    SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
-}
+/// The rootfs image this suite boots. Passed to the shared
+/// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
+/// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+const VM_ROOTFS: &str = "python-exec.ext4";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "DGX-only: real KVM + vsock + rootfs with slice-3 anchors"]
 async fn host_dir_is_readonly_and_scratch_writable_in_vm() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
 

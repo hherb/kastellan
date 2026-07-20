@@ -49,6 +49,7 @@ pub mod daemon;
 pub mod embedding;
 pub mod env;
 pub mod guards;
+pub mod microvm;
 pub mod pg;
 pub mod sandbox;
 pub mod serial;

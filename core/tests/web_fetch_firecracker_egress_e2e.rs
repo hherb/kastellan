@@ -61,12 +61,17 @@ use kastellan_core::worker_lifecycle::force_route::{DecisionSinkFactory, ForceRo
 use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManager};
 use kastellan_core::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
 use kastellan_core::workers::web_fetch::WebFetchManifest;
-use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
-use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends};
+use kastellan_sandbox::SandboxBackends;
+use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::{
     bring_up_pg_cluster, egress_proxy_bin_or_skip, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_origin_unreachable, skip_if_sandbox_unavailable, unique_suffix,
 };
+
+/// The rootfs image both tiers boot. Passed to the shared
+/// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
+/// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+const VM_ROOTFS: &str = "web-fetch.ext4";
 
 /// The public origin both tiers fetch. Small and about as stable as the open
 /// web gets — but see [`ORIGIN_TITLE`] for what "stable" is worth here.
@@ -89,18 +94,6 @@ const ORIGIN_TITLE: &str = "Example Domain";
 /// survived extraction — the thing the stub tier structurally cannot reach —
 /// without pinning any particular wording of it.
 const MIN_EXTRACTED_TEXT_BYTES: usize = 50;
-
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
-
-fn firecracker_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage { kernel_path: dir.join("vmlinux"), rootfs_path: dir.join("web-fetch.ext4") }
-}
 
 /// The production micro-VM entry, resolved exactly as the daemon resolves it:
 /// through `WebFetchManifest::resolve` with `KASTELLAN_WEB_FETCH_USE_MICROVM=1`.
@@ -150,50 +143,6 @@ fn web_fetch_vm_entry_for(hosts: &[String]) -> ToolEntry {
     }
 }
 
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&firecracker_image()) {
-        eprintln!("\n[SKIP] firecracker probe failed (need web-fetch.ext4 + KVM + vsock): {e}\n");
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!("\n[SKIP] kastellan-microvm-run not built; run `cargo build --release -p kastellan-microvm-run`\n");
-            true
-        }
-    }
-}
-
-fn firecracker_backend() -> Arc<dyn SandboxBackend> {
-    SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
-}
-
 async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
     kastellan_db::probe::run(
         conn_spec,
@@ -226,7 +175,7 @@ fn write_test_ca(path: &std::path::Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + web-fetch rootfs"]
 async fn web_fetch_vm_reaches_proxy_with_ca_delivered() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
 
@@ -468,7 +417,7 @@ async fn fetch_in_vm_through_real_sidecar(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + web-fetch rootfs + egress proxy + outbound HTTPS"]
 async fn real_web_fetch_through_sidecar() {
-    if skip_if_no_microvm() || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
         return;
     }
     if skip_if_origin_unreachable(ORIGIN_HOST) {

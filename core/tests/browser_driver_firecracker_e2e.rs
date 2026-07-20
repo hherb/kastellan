@@ -59,22 +59,18 @@ use kastellan_core::worker_lifecycle::force_route::{DecisionSinkFactory, ForceRo
 use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManager};
 use kastellan_core::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
 use kastellan_core::workers::browser_driver::BrowserDriverManifest;
-use kastellan_sandbox::linux_firecracker::{build_launch_plan, FirecrackerImage, LinuxFirecracker};
-use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxPolicy};
+use kastellan_sandbox::linux_firecracker::build_launch_plan;
+use kastellan_sandbox::{SandboxBackendKind, SandboxBackends, SandboxPolicy};
+use kastellan_tests_common::microvm::{
+    firecracker_backend, firecracker_image_for, image_dir, skip_if_no_microvm,
+};
 use kastellan_tests_common::{
     bring_up_pg_cluster, egress_proxy_bin_or_skip, pg_bin_dir_or_skip, skip_if_no_supervisor,
     skip_if_origin_unreachable, skip_if_sandbox_unavailable, unique_suffix,
 };
 
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
-
 /// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
-const ROOTFS_FILE: &str = "browser-driver.ext4";
+const VM_ROOTFS: &str = "browser-driver.ext4";
 
 /// The acceptance origin for the slice-3 live render (§3/§4.2 of the design
 /// spec). It must be a **real public HTTPS host**: browser-driver's sidecar runs
@@ -196,68 +192,6 @@ fn force_routed_policy(entry: &ToolEntry, uds: PathBuf) -> SandboxPolicy {
     let mut policy = entry.policy.clone();
     policy.proxy_uds = Some(uds);
     policy
-}
-
-/// Image coordinates for the browser-driver micro-VM. The paths need not exist
-/// for the hermetic tier — `build_launch_plan` is pure and does not touch the
-/// filesystem.
-fn browser_driver_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage {
-        kernel_path: dir.join("vmlinux"),
-        rootfs_path: dir.join(ROOTFS_FILE),
-    }
-}
-
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Skip-as-pass unless real KVM + vsock + the browser-driver rootfs are present
-/// AND the launcher is built. `locate_microvm_run` prefers `target/release`, so
-/// a stale release binary silently runs OLD launcher code — rebuild it before
-/// running this test (memory: firecracker-e2e-stale-release-launcher).
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&browser_driver_image()) {
-        eprintln!(
-            "\n[SKIP] firecracker probe failed (need {ROOTFS_FILE} + KVM + vsock): {e}\n\
-             \x20      build it with: bash scripts/workers/microvm/build-browser-driver-rootfs.sh\n"
-        );
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!("\n[SKIP] kastellan-microvm-run not built; run `cargo build --release -p kastellan-microvm-run`\n");
-            true
-        }
-    }
-}
-
-fn firecracker_backend() -> Arc<dyn SandboxBackend> {
-    SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
 }
 
 /// Peak resident memory of the Firecracker VMM process, in MiB, sampled from the
@@ -431,7 +365,7 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
     let program = entry.binary.display().to_string();
     let plan = build_launch_plan(
         &force_routed_policy(&entry, PathBuf::from("/tmp/kastellan-egress.sock")),
-        &browser_driver_image(),
+        &firecracker_image_for(VM_ROOTFS),
         &program,
         &[],
     )
@@ -453,8 +387,8 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
             .policy
             .env
             .iter()
-            .any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS" && v == ROOTFS_FILE),
-        "the entry must boot {ROOTFS_FILE}, the image build-browser-driver-rootfs.sh produces"
+            .any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS" && v == VM_ROOTFS),
+        "the entry must boot {VM_ROOTFS}, the image build-browser-driver-rootfs.sh produces"
     );
 
     let token = plan
@@ -573,7 +507,7 @@ fn vm_policy_flows_through_plan_to_in_rootfs_guest_path() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs"]
 async fn vm_booted_browser_driver_launches_chromium() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     // Skip-as-pass without PG/supervisor/sandbox (dispatch needs a pool for audit).
@@ -747,7 +681,7 @@ async fn vm_booted_browser_driver_launches_chromium() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
 async fn vm_renders_real_page_through_real_sidecar() {
-    if skip_if_no_microvm() || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
         return;
     }
     if skip_if_origin_unreachable(DEFAULT_ORIGIN_HOST) {
@@ -888,7 +822,7 @@ async fn vm_renders_real_page_through_real_sidecar() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
 async fn vm_render_of_heavy_page_stays_within_memory_budget() {
-    if skip_if_no_microvm() || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
         return;
     }
     if skip_if_origin_unreachable(HEAVY_ORIGIN_HOST) {
