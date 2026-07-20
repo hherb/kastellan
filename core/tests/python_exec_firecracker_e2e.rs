@@ -31,81 +31,16 @@ use std::sync::Arc;
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, ToolHostError, WorkerSpec};
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
-use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
-use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends};
+use kastellan_sandbox::linux_firecracker::{LinuxFirecracker};
+use kastellan_sandbox::{SandboxBackendKind};
+use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::NoopAuditSink;
 
-/// The micro-VM image dir (kernel + rootfs). Matches the backend default and is
-/// overridable for a user-local build, exactly like the runtime resolver.
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
+/// The rootfs image this suite boots. Passed to the shared
+/// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
+/// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+const VM_ROOTFS: &str = "python-exec.ext4";
 
-fn firecracker_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage {
-        kernel_path: dir.join("vmlinux"),
-        rootfs_path: dir.join("python-exec.ext4"),
-    }
-}
-
-/// Locate the `kastellan-microvm-run` launcher among the workspace target dirs
-/// (release preferred, then debug) and prepend its parent to `$PATH` so the
-/// backend's `Command::new("kastellan-microvm-run")` resolves it. Returns the
-/// path if found.
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Skip (early-return `true`) when this host can't run the micro-VM: the
-/// firecracker probe fails (no firecracker / KVM / vhost-vsock / images) or the
-/// launcher binary isn't built. On success, prepend the launcher's dir to
-/// `$PATH` exactly once.
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&firecracker_image()) {
-        eprintln!("\n[SKIP] firecracker probe failed: {e}\n");
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!(
-                "\n[SKIP] kastellan-microvm-run not built; run \
-                 `cargo build -p kastellan-microvm-run`\n"
-            );
-            true
-        }
-    }
-}
-
-fn firecracker_backend() -> Arc<dyn SandboxBackend> {
-    SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
-}
 
 /// Spawn the worker in the micro-VM with the given `params_file_max` (forwarded
 /// into the guest via the #360 cmdline env token), dispatch one `python.exec`,
@@ -160,7 +95,7 @@ async fn run_in_microvm(code: &str) -> serde_json::Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "needs DGX: /dev/kvm + vhost_vsock + built rootfs + kastellan-microvm-run"]
 async fn microvm_round_trip_six_times_seven() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     let out = run_in_microvm("print(6 * 7)").await;
@@ -175,7 +110,7 @@ async fn microvm_round_trip_six_times_seven() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "needs DGX"]
 async fn microvm_enforces_mem_cap() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     // Allocate ~900 MiB in a 512 MiB VM. KVM enforces the cap at the hypervisor
@@ -201,7 +136,7 @@ async fn microvm_enforces_mem_cap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "needs DGX"]
 async fn microvm_net_is_denied() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     // Net::Deny renders the VM with no virtio-net device, so a connect to a
@@ -232,7 +167,7 @@ except Exception:
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "needs DGX"]
 async fn microvm_large_params_ride_file_channel() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     // A >64 KiB params payload exceeds the inline env threshold, so the worker
@@ -272,7 +207,7 @@ async fn microvm_large_params_ride_file_channel() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "needs DGX"]
 async fn microvm_forwarded_params_file_max_is_enforced_in_guest() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     // The #360 differential: prove the operator `KASTELLAN_PYTHON_PARAMS_FILE_MAX`
@@ -307,7 +242,7 @@ async fn microvm_forwarded_params_file_max_is_enforced_in_guest() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "needs DGX: /dev/kvm + vhost_vsock + built rootfs + kastellan-microvm-run"]
 async fn microvm_spawn_leaves_no_orphan_run_dir() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
     // #362: a completed micro-VM spawn must leave no per-spawn run-dir behind —

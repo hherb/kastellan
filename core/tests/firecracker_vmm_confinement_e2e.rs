@@ -28,80 +28,14 @@ use std::sync::Arc;
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, WorkerSpec};
 use kastellan_core::workers::python_exec::firecracker_mode_entry;
-use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
-use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends};
+use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
 use kastellan_tests_common::NoopAuditSink;
 
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
+/// The rootfs image this suite boots. Passed to the shared
+/// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
+/// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+const VM_ROOTFS: &str = "python-exec.ext4";
 
-fn firecracker_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage {
-        kernel_path: dir.join("vmlinux"),
-        rootfs_path: dir.join("python-exec.ext4"),
-    }
-}
-
-/// Locate the `kastellan-microvm-run` launcher among the workspace target dirs
-/// (release preferred, then debug). The confined path also resolves it via
-/// `find_executable` on `$PATH`, so we prepend its dir to `$PATH` below.
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Skip (early-return `true`) when this host can't run the confined micro-VM.
-/// Note: with confinement ON (the default), `LinuxFirecracker::probe` ALSO
-/// requires a usable bwrap + user cgroup (the slice-5a fail-closed gate), so a
-/// host missing the AppArmor profile / systemd-user session SKIPs here rather
-/// than failing — exactly the fail-closed contract. Prepends the launcher dir to
-/// `$PATH` once so both the launcher and (via the export) firecracker resolve.
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&firecracker_image()) {
-        eprintln!("\n[SKIP] firecracker probe failed: {e}\n");
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!(
-                "\n[SKIP] kastellan-microvm-run not built; run \
-                 `cargo build --release -p kastellan-microvm-run`\n"
-            );
-            true
-        }
-    }
-}
-
-fn firecracker_backend() -> Arc<dyn SandboxBackend> {
-    SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
-}
 
 /// Spawn a python-exec worker in the micro-VM (under whatever confinement the
 /// current `KASTELLAN_MICROVM_CONFINE_VMM` env selects) and run one `print(6*7)`.
@@ -137,7 +71,7 @@ async fn boot_and_compute() -> serde_json::Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "needs DGX: /dev/kvm + vhost_vsock + built rootfs + launcher + bwrap/cgroup"]
 async fn confined_default_and_opt_out_both_boot_and_compute() {
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
 

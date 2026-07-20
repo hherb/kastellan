@@ -55,9 +55,14 @@ use kastellan_core::channel::matrix::build_matrix_vm_policy;
 use kastellan_core::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
 use kastellan_core::worker_lifecycle::{PersistentFactory, PersistentTransport, PersistentWorker};
 use kastellan_protocol::client::Client;
-use kastellan_sandbox::linux_firecracker::{FirecrackerImage, LinuxFirecracker};
-use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends};
+use kastellan_sandbox::{SandboxBackend, SandboxBackends};
 use serde_json::{json, Value};
+use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
+
+/// The rootfs image this suite boots. Passed to the shared
+/// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
+/// the launcher discovery and the `KASTELLAN_MICROVM_DIR` lookup (issue #475).
+const VM_ROOTFS: &str = "matrix.ext4";
 
 /// Opt-in gate: the operator sets this when the homeserver + accounts are staged.
 const GATE: &str = "KASTELLAN_MATRIX_FC_LIVE_E2E";
@@ -78,22 +83,6 @@ fn vm_test_guard() -> std::sync::MutexGuard<'static, ()> {
 
 // ── Firecracker harness helpers (mirrored from net_demo_firecracker_egress_e2e.rs) ──
 
-/// The micro-VM image dir (kernel + rootfs). Matches the backend default and is
-/// overridable for a user-local build, exactly like the runtime resolver.
-fn image_dir() -> String {
-    std::env::var("KASTELLAN_MICROVM_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "/var/lib/kastellan/microvm".to_string())
-}
-
-fn firecracker_image() -> FirecrackerImage {
-    let dir = PathBuf::from(image_dir());
-    FirecrackerImage {
-        kernel_path: dir.join("vmlinux"),
-        rootfs_path: dir.join("matrix.ext4"),
-    }
-}
 
 /// The persistent E2E store ext4 image — the same stable path
 /// `build_matrix_vm_policy` derives (`<image_dir>/matrix-state.ext4`). It survives a
@@ -102,57 +91,6 @@ fn matrix_state_image() -> PathBuf {
     PathBuf::from(image_dir()).join("matrix-state.ext4")
 }
 
-/// Locate the `kastellan-microvm-run` launcher (release preferred, then debug) and
-/// prepend its dir to `$PATH` so the backend's `Command::new("kastellan-microvm-run")`
-/// resolves it. Returns the path if found.
-fn locate_microvm_run() -> Option<PathBuf> {
-    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("core has a workspace parent")
-        .join("target");
-    for profile in ["release", "debug"] {
-        let p = target.join(profile).join("kastellan-microvm-run");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Skip (early-return `true`) when this host can't run the micro-VM. On success,
-/// prepend the launcher's dir to `$PATH` exactly once.
-fn skip_if_no_microvm() -> bool {
-    if let Err(e) = LinuxFirecracker::probe(&firecracker_image()) {
-        eprintln!("\n[SKIP] firecracker probe failed: {e}\n");
-        return true;
-    }
-    match locate_microvm_run() {
-        Some(bin) => {
-            use std::sync::Once;
-            static PATH_ONCE: Once = Once::new();
-            PATH_ONCE.call_once(|| {
-                let dir = bin.parent().unwrap().to_path_buf();
-                let cur = std::env::var_os("PATH").unwrap_or_default();
-                let mut paths = vec![dir];
-                paths.extend(std::env::split_paths(&cur));
-                let joined = std::env::join_paths(paths).expect("join PATH");
-                std::env::set_var("PATH", joined);
-            });
-            false
-        }
-        None => {
-            eprintln!(
-                "\n[SKIP] kastellan-microvm-run not built; run \
-                 `cargo build --release -p kastellan-microvm-run`\n"
-            );
-            true
-        }
-    }
-}
-
-fn firecracker_backend() -> Arc<dyn SandboxBackend> {
-    SandboxBackends::default_for_current_os().resolve(Some(SandboxBackendKind::FirecrackerVm), None)
-}
 
 /// The HOST backend (bwrap on Linux) for the egress-proxy sidecar — the sidecar is
 /// the real-network boundary and must run on the host, never in the VM.
@@ -317,7 +255,7 @@ fn gate() -> Option<(String, Account, Account, String, PathBuf, PathBuf)> {
         eprintln!("\n[SKIP] {GATE} unset — VM-mode live Matrix e2e needs a homeserver; see module docs\n");
         return None;
     }
-    if skip_if_no_microvm() {
+    if skip_if_no_microvm(VM_ROOTFS) {
         return None;
     }
     let Some(proxy) = proxy_bin() else {
