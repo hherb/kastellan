@@ -173,6 +173,30 @@ fi
 # shellcheck source=../workers/microvm/lib/guest-kernel.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../workers/microvm/lib/guest-kernel.sh"
 fetch_guest_kernel "${MICROVM_DIR}"
+
+# Re-check for a symlink AFTER the fetch, and — critically — BEFORE the
+# chown/chmod below. The `[ -L ]` above closes the pre-existing-link case,
+# but it runs while the directory is already group-writable, so there is a
+# window between that `rm -f` and `fetch_guest_kernel`'s own `[ -f "$dest" ]`
+# in which the agent can create a fresh link.
+#
+# Order matters here, not just presence. `chown` and `chmod` both FOLLOW
+# symlinks, so running them first would have root modify whatever the agent
+# pointed at — outside this directory. In practice the reachable damage is
+# small (a mismatched target is quarantined by the fetch and aborts under
+# `set -e`, so only a target that already hashes to the pinned kernel gets
+# through, and root-owning that gains an attacker nothing) — but "the
+# escalation happens to be worthless" is a much weaker property than "root
+# never follows the link at all", and only one of them survives someone
+# reordering the fetch later. Check first, act second.
+if [ -L "${MICROVM_DIR}/vmlinux" ]; then
+    echo "${MICROVM_DIR}/vmlinux is a symlink after the fetch." >&2
+    echo "It was planted between the pre-fetch check and the fetch; a link is owned" >&2
+    echo "by whoever created it and stays re-pointable however its target is owned." >&2
+    echo "Refusing to continue: chown/chmod would follow it out of this directory." >&2
+    exit 1
+fi
+
 chown root:root "${MICROVM_DIR}/vmlinux"
 chmod 0644 "${MICROVM_DIR}/vmlinux"
 
@@ -180,13 +204,30 @@ chmod 0644 "${MICROVM_DIR}/vmlinux"
 # contribution to #479 is that the kernel ends up beyond the agent's reach,
 # and a message asserting that without checking is the failure mode #471's
 # quarantine bug already taught us about.
+
+# NOTE: the absence of `-L` here is load-bearing, not an oversight. GNU
+# `stat` does NOT dereference by default, so on a symlink `%u` reports the
+# LINK's owner (the agent) rather than its target's — which is the second
+# thing that catches the race above. Do not "tidy" this into `stat -Lc` or
+# `stat -c '%u' "$(readlink -f ...)"`: either silently reopens the symlink
+# hole while leaving every test green.
 KERNEL_UID="$(stat -c '%u' "${MICROVM_DIR}/vmlinux")"
 if [ "${KERNEL_UID}" != "0" ]; then
     echo "Guest kernel is not root-owned after install (uid ${KERNEL_UID})." >&2
     echo "Refusing to report success; the agent could replace it." >&2
     exit 1
 fi
-echo "Installed pinned guest kernel root-owned at ${MICROVM_DIR}/vmlinux"
+
+# Mode matters as much as ownership: a root-owned kernel that is group- or
+# world-writable can be overwritten IN PLACE, with no unlink and no rename,
+# which would void the ownership half without tripping any check above.
+KERNEL_MODE="$(stat -c '%a' "${MICROVM_DIR}/vmlinux")"
+if [ "${KERNEL_MODE}" != "644" ]; then
+    echo "Guest kernel mode is ${KERNEL_MODE}, expected 644." >&2
+    echo "Anything group- or world-writable lets the agent overwrite it in place." >&2
+    exit 1
+fi
+echo "Installed pinned guest kernel root-owned (0644) at ${MICROVM_DIR}/vmlinux"
 
 echo
 echo "Done. Verify as ${TARGET_USER}:"

@@ -486,10 +486,22 @@ mod spawn_tests {
         // make_spawn_dir() would still pass the assertion above while
         // quietly doing work on behalf of a kernel we are about to
         // reject. Count run dirs instead of trusting the ordering.
+        //
+        // Scoped to THIS PROCESS's dirs, and that scoping is load-bearing
+        // rather than tidiness. `make_spawn_dir` names them
+        // `{PREFIX}{pid}-{seq}` in the shared `env::temp_dir()`, and the
+        // orphan sweep only removes dirs whose pid is *dead*. A live
+        // micro-VM e2e running concurrently in another test binary — which
+        // is precisely what `cargo test --workspace` does on the DGX —
+        // would leave its own run dir sitting there and fail this
+        // assertion with a message claiming the pin check had moved. A
+        // false security regression is the worst kind of flake, so match
+        // on our own pid and nothing else.
+        let own_prefix = format!("{}{}-", cleanup::RUN_DIR_PREFIX, std::process::id());
         let leaked: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .expect("read temp dir")
             .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with(cleanup::RUN_DIR_PREFIX))
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&own_prefix))
             .collect();
         assert!(
             leaked.is_empty(),

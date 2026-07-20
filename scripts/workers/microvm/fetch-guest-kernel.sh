@@ -36,6 +36,14 @@ fi
 # shellcheck source=lib/guest-kernel.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
 
+# Normalise BEFORE comparing. A bare string compare is bypassed by a
+# trailing slash, a doubled `//`, a `..` segment or a symlinked path — and
+# bypassing it is not cosmetic: the default dir is group-writable, so if
+# `vmlinux` is absent this script running as the agent user CAN create an
+# agent-owned kernel there, which is precisely the hole `require_guest_kernel`
+# was added to close. `realpath -m` does not require the path to exist.
+OUT_DIR="$(realpath -m "$OUT_DIR")"
+
 if [ "$OUT_DIR" = "/var/lib/kastellan/microvm" ]; then
     echo "Refusing to fetch into the default image dir: $OUT_DIR" >&2
     echo "That dir is root-managed so the kernel cannot be agent-owned (#479)." >&2

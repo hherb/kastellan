@@ -689,6 +689,21 @@ mod tests {
             cmd(&|l| l.starts_with("chown root:root") && l.contains("/vmlinux")).is_some(),
             "{script} must leave vmlinux itself root-owned"
         );
+
+        // 5. And root-owned is only half of it: the kernel's MODE is
+        //    asserted for the same reason the directory's is. A root-owned
+        //    `vmlinux` at 0664 or 0666 can be overwritten IN PLACE — no
+        //    unlink, no rename, so neither the sticky bit nor either
+        //    ownership assertion above notices — and the ownership half of
+        //    #479 is void while this test stays green. That is exactly the
+        //    shape of the four bugs this branch already fixed, so read the
+        //    bit rather than assuming it.
+        assert!(
+            cmd(&|l| l.starts_with("chmod 0644") && l.contains("/vmlinux")).is_some(),
+            "{script} must chmod vmlinux 0644 — a group/world-writable kernel is \
+             replaceable in place however it is owned"
+        );
+
         assert!(
             cmd(&|l| l.starts_with("source ") && l.contains("guest-kernel.sh")).is_some(),
             "{script} must actually source {GUEST_KERNEL_LIB}, not merely mention it"
@@ -696,6 +711,63 @@ mod tests {
         assert!(
             cmd(&|l| l.starts_with("fetch_guest_kernel ")).is_some(),
             "{script} is the only thing that may CREATE the kernel — builds only verify"
+        );
+
+        // 6. The post-install verification must READ BACK what it just
+        //    set, both bits of it, rather than reporting success on the
+        //    strength of having run chown/chmod. `stat` here must NOT be
+        //    given `-L`: on a symlink planted in the window between the
+        //    pre-fetch `[ -L ]` check and the fetch itself, an
+        //    undereferenced `%u` reports the agent-owned LINK, which is
+        //    what catches that race. `stat -Lc` would follow to the
+        //    root-owned target and report success.
+        assert!(
+            cmd(&|l| l.contains("stat -c '%u'") && l.contains("/vmlinux")).is_some(),
+            "{script} must read back the kernel's owner with a NON-dereferencing \
+             stat (no -L, or a planted symlink reports its target's uid)"
+        );
+        assert!(
+            cmd(&|l| l.contains("stat -c '%a'") && l.contains("/vmlinux")).is_some(),
+            "{script} must read back the kernel's mode after setting it"
+        );
+        assert!(
+            !body.lines().map(str::trim).any(|l| !l.starts_with('#') && l.contains("stat -L")),
+            "{script} must not dereference symlinks when reading back the kernel's \
+             owner — that is what catches a link planted during the fetch window"
+        );
+
+        // 7. ORDER, not just presence. `chown` and `chmod` follow symlinks,
+        //    so the post-fetch `[ -L ]` check must sit BETWEEN the fetch and
+        //    the chown — otherwise root follows an agent-planted link out of
+        //    this directory before anything notices. The first version of
+        //    this very fix got that wrong (the check was added *after* the
+        //    chown), which is the branch's own signature bug recurring
+        //    inside its remedy: reading a permission property instead of
+        //    ordering the operations that establish it. A presence-only
+        //    assertion would have stayed green through it, so assert the
+        //    sequence.
+        let line_of = |pred: &dyn Fn(&str) -> bool| -> Option<usize> {
+            body.lines().map(str::trim).position(|l| !l.starts_with('#') && pred(l))
+        };
+        let fetch_at = line_of(&|l| l.starts_with("fetch_guest_kernel "))
+            .unwrap_or_else(|| panic!("{script} never calls fetch_guest_kernel"));
+        let chown_at = line_of(&|l| l.starts_with("chown root:root") && l.contains("/vmlinux"))
+            .unwrap_or_else(|| panic!("{script} never chowns vmlinux"));
+        let recheck_at = body
+            .lines()
+            .map(str::trim)
+            .enumerate()
+            .find(|(i, l)| *i > fetch_at && !l.starts_with('#') && l.contains("[ -L "))
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| {
+                panic!("{script} never re-checks for a symlink after fetch_guest_kernel")
+            });
+        assert!(
+            fetch_at < recheck_at && recheck_at < chown_at,
+            "{script}: the post-fetch symlink re-check must sit between the fetch \
+             (line {fetch_at}) and the chown (line {chown_at}), but is at line \
+             {recheck_at}. chown/chmod FOLLOW symlinks — checking after them means \
+             root has already followed the link out of the image dir."
         );
     }
 

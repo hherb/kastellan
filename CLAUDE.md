@@ -63,10 +63,21 @@ Fix: `sudo scripts/linux/install-bwrap-apparmor-profile.sh` once. Same pattern F
 Other Linux distros without AppArmor user-ns restrictions don't need this script.
 
 For the optional Firecracker micro-VM backend (`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`),
-run the one-time privileged setup so the worker user can open the vsock device:
-`sudo scripts/linux/install-firecracker-vsock.sh`. Without it, `LinuxFirecracker::probe()`
-fails closed and the worker stays on bwrap. `/dev/kvm` is usually already accessible;
-pass `--kvm` if not.
+run the one-time privileged setup: `sudo scripts/linux/install-firecracker-vsock.sh`.
+It does three things — grants the worker user the vsock device, provisions
+`/var/lib/kastellan/microvm` as `root:<worker-group>` mode `1775`, and installs the
+pinned guest kernel `root:root 0644`. Without it, `LinuxFirecracker::probe()` fails
+closed and the worker stays on bwrap. `/dev/kvm` is usually already accessible; pass
+`--kvm` if not.
+
+Since #479 it is also a **hard prerequisite for every `build-*-rootfs.sh`**: builds only
+*verify* the guest kernel (`require_guest_kernel`) and will never create one, because an
+unprivileged build that can create it can create an **agent-owned** one in a
+group-writable dir — silently voiding the ownership guarantee. Re-run the installer after
+a pinned-kernel bump; it is idempotent and repairs older installs. For the documented
+non-default layout (`KASTELLAN_MICROVM_DIR=~/.local/share/kastellan/microvm`, which root
+does not manage and which therefore has **no** ownership protection) fetch the kernel
+deliberately with `scripts/workers/microvm/fetch-guest-kernel.sh <dir>`.
 
 ## Architecture invariants worth knowing
 

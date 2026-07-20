@@ -226,6 +226,18 @@ require_guest_kernel() {
     expected="$(guest_kernel_sha256 "$arch")" || return 1
     dest="$out_dir/vmlinux"
 
+    # Symlink FIRST, existence second. `-e` dereferences, so a DANGLING
+    # link is `! -e` and would otherwise take the "no guest kernel" branch
+    # — sending the operator to an installer message when the actionable
+    # fact is that something planted a link here. Both fail closed either
+    # way; this is about the message naming what actually happened.
+    if [ -L "$dest" ]; then
+        echo "$dest is a symlink, not a regular file." >&2
+        echo "Refusing to build: a symlink is owned by whoever created it, so it" >&2
+        echo "can be re-pointed even when its target is root-owned (issue #479)." >&2
+        echo "Remove it and re-run sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
+        return 1
+    fi
     if [ ! -e "$dest" ]; then
         echo "No guest kernel at $dest." >&2
         echo "Builds do not fetch it: it must be installed by root so the agent" >&2
@@ -234,13 +246,6 @@ require_guest_kernel() {
         echo "For a non-default KASTELLAN_MICROVM_DIR (which root does not manage," >&2
         echo "so it carries no ownership protection) fetch it deliberately with:" >&2
         echo "    ./scripts/workers/microvm/fetch-guest-kernel.sh \"$out_dir\"" >&2
-        return 1
-    fi
-    if [ -L "$dest" ]; then
-        echo "$dest is a symlink, not a regular file." >&2
-        echo "Refusing to build: a symlink is owned by whoever created it, so it" >&2
-        echo "can be re-pointed even when its target is root-owned (issue #479)." >&2
-        echo "Remove it and re-run sudo ./scripts/linux/install-firecracker-vsock.sh" >&2
         return 1
     fi
     if ! verify_sha256 "$dest" "$expected"; then
