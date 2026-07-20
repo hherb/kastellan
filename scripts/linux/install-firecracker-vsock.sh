@@ -137,18 +137,55 @@ udevadm control --reload
 #    The chown/chmod are unconditional so a re-run repairs an older install
 #    whose dir is still worker-owned.
 MICROVM_DIR="/var/lib/kastellan/microvm"
+MICROVM_PARENT="$(dirname "${MICROVM_DIR}")"
+
+# The PARENT matters as much as the dir itself. Unlink/rename permission on
+# `microvm` is governed by ITS parent, so an agent-owned /var/lib/kastellan
+# would let the agent `mv microvm microvm.old; mkdir microvm` and walk away
+# with a directory it owns entirely. `mkdir -p` is a no-op on an existing
+# dir and would silently inherit whatever ownership it already had — and
+# other kastellan state (matrix/, kv/) lives under here and may well have
+# been created by hand as the agent user. So assert it, unconditionally.
+mkdir -p "${MICROVM_PARENT}"
+chown root:root "${MICROVM_PARENT}"
+chmod 0755 "${MICROVM_PARENT}"
+
 mkdir -p "${MICROVM_DIR}"
 chown "root:$(id -gn "${TARGET_USER}")" "${MICROVM_DIR}"
 chmod 1775 "${MICROVM_DIR}"
 echo "Provisioned ${MICROVM_DIR} (root-owned, group $(id -gn "${TARGET_USER}") writable, sticky)"
 
-# The same pinned+verified fetch the rootfs builds use — one place the URL,
-# the arch table and the sums are written down (issue #471).
+# A pre-existing `vmlinux` may be a SYMLINK the agent planted before this
+# dir was locked down. `[ -f ]` and `chown`/`chmod` all follow symlinks, so
+# without this the fetch below would verify through the link, the chown
+# would retarget its destination, and the LINK would stay agent-owned —
+# leaving the agent able to re-point it whenever it likes, while this
+# script cheerfully reported success. Remove the link, never follow it.
+if [ -L "${MICROVM_DIR}/vmlinux" ]; then
+    echo "Removing a pre-existing symlink at ${MICROVM_DIR}/vmlinux (must be a regular file)."
+    rm -f "${MICROVM_DIR}/vmlinux"
+fi
+
+# The same pinned+verified fetch the rootfs builds used to do — one place
+# the URL, the arch table and the sums are written down (issue #471). Since
+# #479 the builds only *verify* (require_guest_kernel); creating the kernel
+# is root's job, here, so it can never end up agent-owned.
 # shellcheck source=../workers/microvm/lib/guest-kernel.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../workers/microvm/lib/guest-kernel.sh"
 fetch_guest_kernel "${MICROVM_DIR}"
 chown root:root "${MICROVM_DIR}/vmlinux"
 chmod 0644 "${MICROVM_DIR}/vmlinux"
+
+# Verify rather than assume before claiming success: this script's whole
+# contribution to #479 is that the kernel ends up beyond the agent's reach,
+# and a message asserting that without checking is the failure mode #471's
+# quarantine bug already taught us about.
+KERNEL_UID="$(stat -c '%u' "${MICROVM_DIR}/vmlinux")"
+if [ "${KERNEL_UID}" != "0" ]; then
+    echo "Guest kernel is not root-owned after install (uid ${KERNEL_UID})." >&2
+    echo "Refusing to report success; the agent could replace it." >&2
+    exit 1
+fi
 echo "Installed pinned guest kernel root-owned at ${MICROVM_DIR}/vmlinux"
 
 echo

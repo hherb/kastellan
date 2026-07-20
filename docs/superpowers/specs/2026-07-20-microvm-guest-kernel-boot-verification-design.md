@@ -61,7 +61,13 @@ Together they cover each other's gap. This matches the issue's own preference.
 
 ### 2.2 Protect the kernel, not the whole directory
 
-**Chosen:** sticky bit on the image dir + `vmlinux` alone owned by root.
+**Chosen:** sticky bit on the image dir, with **root owning the directory,
+its parent, and `vmlinux`**, and the worker's group holding write on the
+image dir so builds stay unprivileged.
+
+> The original wording here was "sticky bit + `vmlinux` **alone** owned by
+> root", which is wrong and was implemented before being caught — see the
+> correction in §3.1. Root must own the directory too.
 
 **Rejected:** root-owning the entire directory (with either staged builds or
 `sudo`-run builds). Two reasons:
@@ -129,9 +135,38 @@ three ways:
    `kernel_pin_is_the_only_place_the_kernel_url_appears` drift test continues
    to hold unmodified.
 
+   > **This item was briefly dropped during planning and then restored
+   > (2026-07-21, final review).** The argument for dropping it was that
+   > `fetch_guest_kernel` already early-returns on a verified kernel without
+   > writing, so a root-owned kernel is no obstacle to an unprivileged build.
+   > That is true for the present-and-good and present-and-bad paths, and
+   > **false for the absent path** — the one that matters. The image dir is
+   > group-writable so builds can manage their own `*.ext4`, which also means
+   > a build can *create* a new entry: if `vmlinux` were ever missing, a
+   > build would rename its download into place and leave an **agent-owned**
+   > kernel. No unlink of root's file, nothing failing, and the ownership
+   > half silently void from then on. Verify-but-never-create removes that
+   > path.
+
    Sticky-bit compatibility: a build creating or truncating **its own** rootfs
    image is unaffected — `+t` restricts only removal and rename by non-owners,
    and the agent user owns every `*.ext4` in that directory.
+
+4. A new `scripts/workers/microvm/fetch-guest-kernel.sh` covers the
+   alternative layout the build scripts document
+   (`KASTELLAN_MICROVM_DIR="$HOME/.local/share/kastellan/microvm"`), as a
+   deliberate operator action. Root does not manage that directory, so it
+   carries **no ownership protection at all** — only the boot-time hash. The
+   script says so, and refuses to run against the default dir.
+
+5. Two pre-existing hazards the installer must handle, both found in the final
+   review: a `vmlinux` that is already a **symlink** (`[ -f ]`, `chown` and
+   `chmod` all follow links, so the fetch would verify through it and the
+   chown would retarget its destination while the agent-owned *link* survived)
+   is removed rather than followed; and the **parent** `/var/lib/kastellan` is
+   root-owned `0755`, since unlink/rename permission on the image dir is
+   governed by its parent. The installer also `stat`s the kernel's uid before
+   claiming success.
 
 **Why the sticky bit is load-bearing, and why root must own the directory.**
 POSIX directory write permission alone permits `unlink()` and `rename()` of
@@ -238,7 +273,7 @@ fail is not yet known to be load-bearing.
 
 **Script changes:** verified on the DGX by running the install script and a
 rootfs build against the real image dir, confirming `vmlinux` ends up
-`root:root 0644` in a `1755` directory, that a rootfs build still succeeds
+`root:root 0644` in a root-owned `1775` directory, that a rootfs build succeeds
 unprivileged, and that the agent user genuinely cannot unlink the kernel.
 
 ## 7. Cost gate

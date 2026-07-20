@@ -24,15 +24,27 @@
 //!
 //! What actually closes it is the other half of #479, in
 //! `scripts/linux/install-firecracker-vsock.sh`: the image dir is
-//! `root:<worker-group>` mode `1775` and `vmlinux` is `root:root`, so the
-//! agent user has no write primitive on it at all. Note that **root must
-//! own the directory too**, not just the kernel — `unlink(2)` exempts the
-//! directory's owner as well as the file's, so a worker-owned directory
-//! would leave the kernel replaceable however the kernel itself is owned.
-//! The two halves are complementary and neither is sufficient alone —
-//! this one is what still holds when ownership was never applied (a
-//! pre-existing install, or an operator pointing `KASTELLAN_MICROVM_DIR`
-//! at a directory they control).
+//! `root:<worker-group>` mode `1775` and `vmlinux` is `root:root`, so on a
+//! correctly provisioned host the agent cannot unlink, rename or overwrite
+//! it. Note that **root must own the directory and its parent too**, not
+//! just the kernel — `unlink(2)` exempts the directory's owner as well as
+//! the file's, and permission to rename the image dir itself comes from
+//! its parent.
+//!
+//! The two halves are complementary and neither is sufficient alone. This
+//! one is what still holds wherever the ownership half does not reach, and
+//! those cases are real rather than hypothetical:
+//!
+//!   * an install predating that change, or one whose installer was never
+//!     re-run;
+//!   * `KASTELLAN_MICROVM_DIR` pointed at a directory root does not manage
+//!     — including `~/.local/share/kastellan/microvm`, which the build
+//!     scripts themselves document as a supported layout and which carries
+//!     **no** ownership protection at all;
+//!   * anything that puts an agent-owned `vmlinux` back into the protected
+//!     directory.
+//!
+//! So: do not read the ownership half as making this check redundant.
 //!
 //! Closing the TOCTOU properly would mean hashing through an already-open
 //! fd and handing that same fd to Firecracker, which its config-file

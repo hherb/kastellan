@@ -17,7 +17,7 @@ if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
     echo "Cannot write micro-VM dir: $OUT_DIR — run sudo ./scripts/linux/install-firecracker-vsock.sh or set KASTELLAN_MICROVM_DIR." >&2
     exit 1
 fi
-fetch_guest_kernel "$OUT_DIR"
+require_guest_kernel "$OUT_DIR"
 
 source "$HOME/.cargo/env"
 cargo build --release -p kastellan-worker-net-demo -p kastellan-microvm-init

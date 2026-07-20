@@ -480,6 +480,23 @@ mod spawn_tests {
             msg.contains("does not match the pinned sha256"),
             "the failure must name the pin, not some downstream symptom: {msg}"
         );
+
+        // The check must run BEFORE any spawn work. Code order says so
+        // today, but nothing pinned it — so moving the call below
+        // make_spawn_dir() would still pass the assertion above while
+        // quietly doing work on behalf of a kernel we are about to
+        // reject. Count run dirs instead of trusting the ordering.
+        let leaked: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .expect("read temp dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with(cleanup::RUN_DIR_PREFIX))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a rejected kernel must cost no run dir; found {} — the pin check has moved \
+             below make_spawn_dir()",
+            leaked.len()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

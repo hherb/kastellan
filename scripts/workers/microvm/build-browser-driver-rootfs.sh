@@ -68,7 +68,7 @@ fi
 
 # Shared guest kernel (pinned). A copy left by a sibling script is re-verified,
 # not trusted — that reuse-unchecked path is exactly what issue #471 closed.
-fetch_guest_kernel "$OUT_DIR"
+require_guest_kernel "$OUT_DIR"
 
 # Guest PID1, built on the host with cargo (native on the DGX aarch64), exactly
 # as every sibling script does. The worker itself is staged by the container

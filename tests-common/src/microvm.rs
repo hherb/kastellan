@@ -41,7 +41,8 @@ use std::path::{Path, PathBuf};
 /// Where the guest kernel and rootfs images live when the operator has
 /// not overridden `KASTELLAN_MICROVM_DIR`.
 ///
-/// Provisioned (created + chowned to the worker user) by the one-time
+/// Provisioned root-owned, group-writable (1775), with a root-owned
+/// vmlinux the agent cannot replace (#479), by the one-time
 /// `sudo scripts/linux/install-firecracker-vsock.sh`.
 pub const DEFAULT_IMAGE_DIR: &str = "/var/lib/kastellan/microvm";
 
@@ -565,8 +566,8 @@ mod tests {
                 "{script} (for {rootfs}) does not source {GUEST_KERNEL_LIB}"
             );
             assert!(
-                body.contains("fetch_guest_kernel"),
-                "{script} (for {rootfs}) sources the pin but never calls fetch_guest_kernel"
+                body.contains("require_guest_kernel"),
+                "{script} (for {rootfs}) sources the pin but never calls require_guest_kernel"
             );
         }
     }
@@ -645,32 +646,87 @@ mod tests {
         let body = std::fs::read_to_string(repo_root().join(script))
             .unwrap_or_else(|e| panic!("read {script}: {e}"));
 
-        // The directory chown must make ROOT the owner. Anything naming
-        // TARGET_USER on the left of the colon re-opens the hole.
-        let dir_chown = body
-            .lines()
-            .map(str::trim)
-            .find(|l| l.starts_with("chown ") && l.contains("${MICROVM_DIR}"))
-            .unwrap_or_else(|| panic!("{script} never chowns ${{MICROVM_DIR}}"));
+        // Every assertion below anchors to a real command line, not to a
+        // bare substring: the version of this test that shipped the
+        // original bug used `contains("chown root:root")`, which the
+        // BUGGY script also satisfied. A comment must never be able to
+        // satisfy a security assertion.
+        let cmd = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+            body.lines().map(str::trim).find(|l| !l.starts_with('#') && pred(l)).map(str::to_string)
+        };
+
+        // 1. The image dir must be owned by ROOT. unlink(2) exempts the
+        //    DIRECTORY's owner as well as the file's, so naming
+        //    TARGET_USER here re-opens the hole however vmlinux is owned.
+        let dir_chown = cmd(&|l| l.starts_with("chown ") && l.ends_with("\"${MICROVM_DIR}\""))
+            .unwrap_or_else(|| panic!("{script} never chowns ${{MICROVM_DIR}} itself"));
         assert!(
             dir_chown.starts_with("chown \"root:") || dir_chown.starts_with("chown root:"),
-            "the micro-VM image dir must be owned by ROOT, not the worker: unlink(2) exempts \
-             the DIRECTORY's owner as well as the file's, so a worker-owned dir lets the agent \
-             rm root's vmlinux and #479's ownership half is void. Found: {dir_chown}"
+            "the micro-VM image dir must be owned by ROOT, not the worker. Found: {dir_chown}"
         );
 
+        // 2. And so must its PARENT — unlink/rename permission on the
+        //    image dir is governed by the parent, so an agent-owned
+        //    /var/lib/kastellan lets the agent swap the whole directory.
         assert!(
-            body.contains("chmod 1775") || body.contains("chmod 1777"),
-            "{script} must make the micro-VM image dir sticky AND group/other writable, so \
-             unprivileged rootfs builds still work while the kernel stays protected"
+            cmd(&|l| l.starts_with("chown root:root") && l.ends_with("\"${MICROVM_PARENT}\""))
+                .is_some(),
+            "{script} must root-own the PARENT of the image dir too"
         );
+
+        // 3. Sticky + group-writable exactly. 1777 would be world-writable
+        //    and is NOT what this ships; accepting it would let a later
+        //    edit weaken the dir while keeping this test green.
         assert!(
-            body.contains("chown root:root \"${MICROVM_DIR}/vmlinux\""),
+            cmd(&|l| l.starts_with("chmod 1775") && l.ends_with("\"${MICROVM_DIR}\"")).is_some(),
+            "{script} must chmod the image dir 1775 (sticky + group write)"
+        );
+
+        // 4. vmlinux itself root-owned, and the pin actually SOURCED —
+        //    `contains(\"guest-kernel.sh\")` alone is satisfied by the
+        //    `# shellcheck source=...` comment sitting right above it.
+        assert!(
+            cmd(&|l| l.starts_with("chown root:root") && l.contains("/vmlinux")).is_some(),
             "{script} must leave vmlinux itself root-owned"
         );
         assert!(
-            body.contains("guest-kernel.sh"),
-            "{script} must source {GUEST_KERNEL_LIB} rather than fetching the kernel itself"
+            cmd(&|l| l.starts_with("source ") && l.contains("guest-kernel.sh")).is_some(),
+            "{script} must actually source {GUEST_KERNEL_LIB}, not merely mention it"
         );
+        assert!(
+            cmd(&|l| l.starts_with("fetch_guest_kernel ")).is_some(),
+            "{script} is the only thing that may CREATE the kernel — builds only verify"
+        );
+    }
+
+    /// #479: a build script must never be able to create the guest
+    /// kernel.
+    ///
+    /// The image dir is group-writable so builds can manage their own
+    /// `*.ext4`, which also means a build CAN create a new entry. So if
+    /// `vmlinux` were ever absent, a build calling `fetch_guest_kernel`
+    /// would rename its download into place and leave an **agent-owned**
+    /// kernel — no unlink of root's file needed, nothing failing, and the
+    /// ownership half of #479 silently gone from then on. Builds verify
+    /// (`require_guest_kernel`); only the privileged installer creates.
+    #[test]
+    fn build_scripts_verify_the_kernel_but_never_create_it() {
+        let root = repo_root();
+        for (rootfs, script) in ROOTFS_BUILD_SCRIPTS {
+            let body = std::fs::read_to_string(root.join(script))
+                .unwrap_or_else(|e| panic!("read {script}: {e}"));
+            let calls = |name: &str| {
+                body.lines().map(str::trim).any(|l| !l.starts_with('#') && l.starts_with(name))
+            };
+            assert!(
+                calls("require_guest_kernel"),
+                "{script} (for {rootfs}) must call require_guest_kernel"
+            );
+            assert!(
+                !calls("fetch_guest_kernel"),
+                "{script} (for {rootfs}) calls fetch_guest_kernel — an unprivileged build that \
+                 can CREATE the kernel can create an agent-owned one, voiding #479"
+            );
+        }
     }
 }
