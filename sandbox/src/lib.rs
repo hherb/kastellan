@@ -8,6 +8,12 @@
 //!   - macos_seatbelt — sandbox-exec (Seatbelt) + setrlimit
 //!   - microvm       — Firecracker (Linux) / Apple `container` CLI (macOS Tahoe+)
 
+// Deliberately NOT cfg(linux)-gated even though its only caller is the
+// Linux Firecracker backend. Everything here — the arch table, hashing a
+// file, the verdict — needs no KVM and no Linux, and a fail-closed check
+// exercised on only one host is half-verified (issue #471's own lesson).
+pub mod guest_kernel_pin;
+
 #[cfg(target_os = "linux")]
 pub mod linux_bwrap;
 #[cfg(target_os = "linux")]

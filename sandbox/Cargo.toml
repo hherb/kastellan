@@ -21,6 +21,12 @@ tracing    = { workspace = true }
 # getpid/getsid on every supported platform.
 libc       = { workspace = true }
 
+# sha2: #479 — verify the pinned micro-VM guest kernel at VM boot, not
+# just at rootfs-build time. MIT OR Apache-2.0, AGPL-compatible,
+# pure-Rust with no system deps. Already a workspace dependency (the
+# audit-log payload fingerprint uses it).
+sha2       = { workspace = true }
+
 # Test fixture: standalone TcpStream::connect probe used by macos_smoke's
 # network-deny test. Built into target/debug/net_probe by `cargo build`.
 [[bin]]
