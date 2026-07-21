@@ -29,7 +29,41 @@ VERSION="v0.5.9"
 # needs libjemalloc2 (already installed) + kernel io_uring (kernel 7.0, fine).
 BIN_URL="https://forgejo.ellis.link/continuwuation/continuwuity/releases/download/${VERSION}/conduwuit-haswell-linux-amd64-maxperf"
 
+# sha256 of that exact binary variant (#386). This is the one download in the
+# VPS bring-up that installs a third-party binary root:root 0755 and runs it
+# under systemd, so it is verified before install.
+#
+# HONEST LIMITATION — this is trust-on-first-use: Continuwuity publishes no
+# checksum or signature alongside its release binaries (only the bare files),
+# so we cannot chain to an upstream attestation. What raises it above a single
+# blind fetch: the sum was corroborated three ways when recorded (2026-07-21)
+# — the binary already running on the live matrix.kastellan.dev box (installed
+# 2026-06-19), plus a fresh fetch from two hosts on separate network paths
+# (the DGX and the dev Mac), all three identical. The one-month-old live copy
+# is a temporal witness: a substitution would have had to be in place since
+# before this deployment existed. If it changes for a variant/version, re-pin
+# deliberately (re-fetch + compare); never paste in whatever a mismatch prints.
+BIN_SHA256="7489e33c541f9e7fad8d10a93209ed7c5cada84c9292b53b02971ff30be79460"
+
 log() { printf '\n=== %s ===\n' "$*"; }
+
+# verify_sha256 <path> <expected-hex> — exact-match or non-zero.
+#
+# Deliberately inline rather than sourced. Every other provisioning script
+# shares scripts/workers/microvm/lib/verify.sh, but the VPS deployment copies
+# only these phase scripts into ~/ (see scripts/matrix/vps/README.md) — there
+# is no repo on the box to source from — so this carries its own copy of the
+# same three lines. The VPS is always Linux, so `sha256sum` is assumed present.
+verify_sha256() {
+  local file="$1" expected="$2" actual
+  actual="$(sha256sum "$file" | cut -d' ' -f1)" || return 1
+  if [ "$actual" != "$expected" ]; then
+    echo "sha256 mismatch for $file" >&2
+    echo "  expected: $expected" >&2
+    echo "  actual:   $actual" >&2
+    return 1
+  fi
+}
 if [ "$(id -u)" -ne 0 ]; then echo "Run as root (sudo bash $0)"; exit 1; fi
 
 # -----------------------------------------------------------------------------
@@ -61,10 +95,18 @@ chmod 700 "${DATA_DIR}"
 log "Continuwuity ${VERSION} binary"
 tmpbin="$(mktemp)"
 curl -fSL --proto '=https' --tlsv1.2 -o "${tmpbin}" "${BIN_URL}"
+# Verify BEFORE install. The previous version of this script only *printed*
+# the sha after installing — which verifies nothing: by then an attacker-
+# substituted binary is already root:root 0755 and one systemctl start from
+# running. Compare against the pin and refuse on mismatch.
+if ! verify_sha256 "${tmpbin}" "${BIN_SHA256}"; then
+  rm -f "${tmpbin}"
+  echo "Downloaded Continuwuity binary does not match the pinned sha256 — refusing to install." >&2
+  echo "  source: ${BIN_URL}" >&2
+  exit 1
+fi
 install -m 0755 -o root -g root "${tmpbin}" "${BIN}"
 rm -f "${tmpbin}"
-echo "sha256 (record this for future pin-verification):"
-sha256sum "${BIN}"
 echo "version check (also smoke-tests jemalloc/io_uring load):"
 "${BIN}" --version
 

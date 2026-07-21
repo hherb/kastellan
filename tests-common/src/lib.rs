@@ -51,6 +51,7 @@ pub mod env;
 pub mod guards;
 pub mod microvm;
 pub mod pg;
+pub mod provisioning;
 pub mod sandbox;
 pub mod serial;
 pub mod skip;

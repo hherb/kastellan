@@ -80,50 +80,12 @@ KASTELLAN_GUEST_KERNEL_BASE_URL="https://s3.amazonaws.com/spec.ccfc.min/firecrac
 KASTELLAN_GUEST_KERNEL_SHA256_X86_64="49ba99a5299444ac59dda2efc3569cc2d58a5d72ea6475a6bfc37aa0bf322e54"
 KASTELLAN_GUEST_KERNEL_SHA256_AARCH64="bb1f50912d63a8ca5e92d488984875e1177eb9283050ffa592a8cb455cada52d"
 
-# sha256 of a file, printed as bare hex.
-#
-# Linux ships `sha256sum`, macOS ships `shasum`. The build scripts only
-# ever run on Linux, but the unit tests that prove this file fails closed
-# run on the dev Mac too — and a check that is only exercised on one host
-# is a check that is half-verified.
-_kastellan_sha256_of() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | cut -d' ' -f1
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | cut -d' ' -f1
-    else
-        echo "Need sha256sum (Linux) or shasum (macOS) to verify downloads." >&2
-        return 1
-    fi
-}
-
-# verify_sha256 <path> <expected-hex>
-#
-# Succeeds only on an exact match. Prints both sums on failure so the
-# operator can tell "truncated download" from "different artefact"
-# without re-running anything.
-#
-# Pure: reads the file, touches nothing else, and never deletes. Callers
-# decide what to do with a bad file.
-#
-# The local is called `file`, not `path`, deliberately. In zsh `path` is
-# the array tied to `$PATH`, so `local path=…` silently destroys command
-# lookup for the rest of the function — `command -v sha256sum` then finds
-# nothing and this reports "no hasher available" instead of the mismatch
-# it was asked about. These scripts run under bash, where `path` is an
-# ordinary name, so that only bites someone sourcing this from an
-# interactive zsh — but a verifier that fails for the wrong reason is the
-# one thing a verifier must never do.
-verify_sha256() {
-    local file="$1" expected="$2" actual
-    actual="$(_kastellan_sha256_of "$file")" || return 1
-    if [ "$actual" != "$expected" ]; then
-        echo "sha256 mismatch for $file" >&2
-        echo "  expected: $expected" >&2
-        echo "  actual:   $actual" >&2
-        return 1
-    fi
-}
+# The sha256 helpers (`_kastellan_sha256_of`, `verify_sha256`) live in the
+# sibling `verify.sh` since #386 — they are not kernel-specific and are
+# shared with install-firecracker.sh. Sourcing by path relative to this
+# file's own location works regardless of the caller's cwd.
+# shellcheck source=scripts/workers/microvm/lib/verify.sh
+source "$(dirname "${BASH_SOURCE[0]}")/verify.sh"
 
 # _kastellan_quarantine <file> <evidence-prefix>
 #
