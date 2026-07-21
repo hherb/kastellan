@@ -127,6 +127,38 @@ mod tests {
             .unwrap_or_else(|| panic!("no command line contains {needle:?}"))
     }
 
+    /// 0-based index of the first **command** line that *calls* `func` — a
+    /// reference to it somewhere other than its own `func() {` definition.
+    ///
+    /// This distinction is load-bearing for the ordering assertions.
+    /// `phase2-homeserver.sh` defines `verify_sha256` inline, so anchoring an
+    /// ordering check on the bare name via [`first_command_line`] would match
+    /// the *definition* — which sits near the top, always before `install` —
+    /// and the check would pass no matter where, or whether, the call actually
+    /// sits. A verifier that is defined-but-never-called, or called only
+    /// *after* the install, must fail these tests; anchoring on the call site
+    /// is what makes that true. (The Firecracker installer has no inline
+    /// definition — it sources the shared lib — so there the call *is* the
+    /// only match; using this helper for both just keeps the rule uniform and
+    /// future-proof against someone adding an inline copy later.)
+    ///
+    /// Panics if no call is found: deleting the call is itself a regression
+    /// these tests exist to catch, so it must fail loudly, not vacuously pass.
+    fn first_call_line(body: &str, func: &str) -> usize {
+        let definition = format!("{func}()");
+        body.lines()
+            .enumerate()
+            .find(|(_, line)| {
+                let trimmed = line.trim_start();
+                !trimmed.is_empty()
+                    && !trimmed.starts_with('#')
+                    && line.contains(func)
+                    && !trimmed.starts_with(&definition)
+            })
+            .map(|(idx, _)| idx)
+            .unwrap_or_else(|| panic!("no command line calls {func:?}"))
+    }
+
     /// True iff some **command** line (not a comment) contains `needle`.
     fn has_command_line(body: &str, needle: &str) -> bool {
         body.lines().any(|line| {
@@ -253,18 +285,19 @@ mod tests {
         // The order is the whole point: a tarball verified only *after* it is
         // unpacked and the binary installed protects nothing.
         let body = read_script(FIRECRACKER_INSTALLER);
-        let verify = first_command_line(&body, "verify_sha256");
+        // Anchor on the verify *call*, not the bare name — see [`first_call_line`].
+        let verify = first_call_line(&body, "verify_sha256");
         let extract = first_command_line(&body, "tar -xzf");
         let install = first_command_line(&body, "install -m 0755");
         assert!(
             verify < extract,
-            "verify_sha256 (line {}) must precede `tar -xzf` (line {})",
+            "the verify_sha256 call (line {}) must precede `tar -xzf` (line {})",
             verify + 1,
             extract + 1
         );
         assert!(
             verify < install,
-            "verify_sha256 (line {}) must precede `install -m 0755` (line {})",
+            "the verify_sha256 call (line {}) must precede `install -m 0755` (line {})",
             verify + 1,
             install + 1
         );
@@ -285,11 +318,15 @@ mod tests {
     #[test]
     fn matrix_phase2_verifies_before_it_installs() {
         let body = read_script(MATRIX_PHASE2);
-        let verify = first_command_line(&body, "verify_sha256");
+        // phase2 defines `verify_sha256` inline, so this MUST anchor on the
+        // call — [`first_call_line`], not [`first_command_line`]. Anchoring on
+        // the bare name would match the definition (always above `install`)
+        // and let a verify-after-install, or a deleted call, pass silently.
+        let verify = first_call_line(&body, "verify_sha256");
         let install = first_command_line(&body, "install -m 0755");
         assert!(
             verify < install,
-            "verify_sha256 (line {}) must precede `install -m 0755` (line {})",
+            "the verify_sha256 call (line {}) must precede `install -m 0755` (line {})",
             verify + 1,
             install + 1
         );
