@@ -2450,6 +2450,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kastellan-worker-mail"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "kastellan-protocol",
+ "kastellan-worker-prelude",
+ "kastellan-worker-web-common",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "kastellan-worker-matrix"
 version = "0.2.0"
 dependencies = [
