@@ -68,14 +68,18 @@ impl MailClient {
             .map_err(|e| MailError::BadParams(format!("bad path {path}: {e}")))
     }
 
-    /// Reject a non-2xx upstream response, clamping the echoed body.
+    /// Reject a non-2xx upstream response, clamping the echoed body. Truncate to
+    /// at most 512 bytes BEFORE the lossy decode so a multi-MB error body isn't
+    /// fully materialised into a `String` just to echo a snippet (a byte-boundary
+    /// split at most yields a trailing replacement char — fine for a diagnostic).
     fn check(resp: RawResponse) -> Result<RawResponse, MailError> {
         if (200..300).contains(&resp.status) {
             Ok(resp)
         } else {
+            let snippet = &resp.body[..resp.body.len().min(512)];
             Err(MailError::Upstream {
                 status: resp.status,
-                body: String::from_utf8_lossy(&resp.body).chars().take(512).collect(),
+                body: String::from_utf8_lossy(snippet).into_owned(),
             })
         }
     }

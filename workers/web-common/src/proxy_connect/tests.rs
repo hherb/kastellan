@@ -230,6 +230,115 @@ fn spawn_stub_proxy_multi(
     });
 }
 
+/// Like `spawn_stub_proxy` but captures the forwarded origin request HEAD and
+/// hands it back over a channel, so a test can assert what the client sent
+/// through the tunnel (e.g. `Authorization: Bearer …`). Reads until the head's
+/// blank line so a header split across TCP reads is still fully captured.
+fn spawn_stub_proxy_capturing(
+    path: std::path::PathBuf,
+    origin_response: &'static [u8],
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let listener = UnixListener::bind(&path).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        // Drain the CONNECT head up to its blank line.
+        let mut buf = [0u8; 1024];
+        let mut acc = Vec::new();
+        loop {
+            let n = conn.read(&mut buf).unwrap();
+            acc.extend_from_slice(&buf[..n]);
+            if acc.windows(4).any(|w| w == b"\r\n\r\n") || n == 0 {
+                break;
+            }
+        }
+        conn.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").unwrap();
+        // Capture the raw-HTTP origin request HEAD, forward it to the test.
+        let mut req = Vec::new();
+        let mut b = [0u8; 512];
+        loop {
+            let n = conn.read(&mut b).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&b[..n]);
+            if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let _ = tx.send(req);
+        conn.write_all(origin_response).unwrap();
+    });
+    rx
+}
+
+#[test]
+fn get_authed_forwards_bearer_over_proxy() {
+    // The force-routed transport (this type) is the PRODUCTION path for the mail
+    // worker under `KASTELLAN_EGRESS_FORCE_ROUTING=1`; prove the bearer header
+    // actually reaches the origin through the CONNECT tunnel, not just that
+    // `ReqwestGet` (the non-force-routed sibling) sends it.
+    let dir = std::env::temp_dir().join(format!("kastellan-pc-auth-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let uds = dir.join("egress.sock");
+    let _ = std::fs::remove_file(&uds);
+    let rx = spawn_stub_proxy_capturing(
+        uds.clone(),
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+    );
+
+    let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
+    let url = Url::parse("http://127.0.0.1:8888/v1/accounts").unwrap();
+    let resp = get.get_authed(&url, "secret-bearer", 1024).expect("round trip");
+    assert_eq!(resp.status, 200);
+
+    let sent = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("origin request captured");
+    let sent = String::from_utf8_lossy(&sent).to_lowercase();
+    assert!(
+        sent.contains("authorization: bearer secret-bearer"),
+        "bearer header must traverse the proxy tunnel, got: {sent}"
+    );
+    let _ = std::fs::remove_file(&uds);
+}
+
+#[test]
+fn post_authed_forwards_bearer_and_content_type_over_proxy() {
+    // `mail.search` is a `post_authed` — the most-used mail path. Prove the
+    // bearer + content-type + POST method all traverse the tunnel.
+    let dir = std::env::temp_dir().join(format!("kastellan-pc-postauth-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let uds = dir.join("egress.sock");
+    let _ = std::fs::remove_file(&uds);
+    let rx = spawn_stub_proxy_capturing(
+        uds.clone(),
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+    );
+
+    let get = ProxyConnectGet::new("kastellan-test/0", uds.clone());
+    let url = Url::parse("http://127.0.0.1:8888/v1/search").unwrap();
+    let resp = get
+        .post_authed(&url, "post-bearer", "application/json", br#"{"query":"x"}"#, 1024)
+        .expect("round trip");
+    assert_eq!(resp.status, 200);
+
+    let sent = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("origin request captured");
+    let head = String::from_utf8_lossy(&sent).to_lowercase();
+    assert!(head.starts_with("post /v1/search"), "expected POST request line, got: {head}");
+    assert!(
+        head.contains("authorization: bearer post-bearer"),
+        "bearer header must traverse the proxy tunnel, got: {head}"
+    );
+    assert!(
+        head.contains("content-type: application/json"),
+        "content-type must traverse the proxy tunnel, got: {head}"
+    );
+    let _ = std::fs::remove_file(&uds);
+}
+
 #[test]
 fn concurrent_gets_share_one_transport() {
     // One ProxyConnectGet (one multi-thread runtime) driven by several threads at

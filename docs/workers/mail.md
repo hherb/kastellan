@@ -59,6 +59,14 @@ retention/cleanup of delivered files is an operator concern.
    KASTELLAN_MAIL_ATTACHMENT_MAX_BYTES=26214400
    ```
 
+   > The attachment is buffered in memory before it is written, so keep
+   > `KASTELLAN_MAIL_ATTACHMENT_MAX_BYTES` comfortably below the worker's memory
+   > budget (`mem_mb: 256` in `core/src/workers/mail.rs`). A cap larger than that
+   > only means an oversized attachment gets the worker OOM-killed by its cgroup
+   > (surfacing to the agent as an `OPERATION_FAILED` transport error), never a
+   > containment breach — but it is a needless failure. Raise `mem_mb` too if you
+   > genuinely need a larger cap.
+
    The worker's network allowlist is **derived from the endpoint** — it can reach
    exactly that `host:port` and nothing else. There is no separate allowlist to
    configure.

@@ -112,6 +112,8 @@ impl MailHandler {
         }
         let p: P = parse_params(params)?;
         validate_sha256(&p.sha256).map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
+        // `get_bytes` (the higher attachment cap, not the JSON cap) — extracted
+        // text of a large document can exceed the JSON-response ceiling.
         let (_ct, bytes) = self
             .client
             .get_bytes(&format!("/v1/attachments/{}/text", p.sha256))
@@ -146,9 +148,15 @@ impl MailHandler {
         // Per-process-unique .partial so an interrupted write or two concurrent
         // same-name fetches never share/clobber the scratch file (M-1).
         let partial = dir.join(format!(".{}.{name}.partial", std::process::id()));
-        std::fs::write(&partial, &bytes)
-            .map_err(|e| RpcError::new(codes::OPERATION_FAILED, format!("write attachment: {e}")))?;
+        std::fs::write(&partial, &bytes).map_err(|e| {
+            // Best-effort: reclaim any truncated scratch file so it neither
+            // lingers nor blocks the runner's empty-dir prune.
+            let _ = std::fs::remove_file(&partial);
+            RpcError::new(codes::OPERATION_FAILED, format!("write attachment: {e}"))
+        })?;
         std::fs::rename(&partial, &dest).map_err(|e| {
+            // Rename failed → the .partial is orphaned; reclaim it (same reason).
+            let _ = std::fs::remove_file(&partial);
             RpcError::new(codes::OPERATION_FAILED, format!("finalize attachment: {e}"))
         })?;
         Ok(serde_json::json!({
