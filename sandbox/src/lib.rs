@@ -248,6 +248,42 @@ pub(crate) fn validate_linux_bind_path(
     Ok(())
 }
 
+/// Canonicalize a single host path, resolving symlinks (and `..`). For a path
+/// whose final component does not exist yet (a not-yet-created socket or scratch
+/// file), the parent directory is canonicalized and the file name reattached —
+/// so symlinks *above* the leaf are still resolved before the leaf exists. If the
+/// parent is also absent, the original path is returned unchanged (nothing to
+/// resolve). Any other `io::Error` (e.g. `PermissionDenied` on a parent)
+/// propagates, so a caller never binds/stages an unresolved path.
+///
+/// This is the symlink half of audit finding #7 (issue #387): the lexical guard
+/// [`validate_linux_bind_path`] rejects `..`; this resolves symlinks so a path
+/// that *names* one location cannot bind/stage what it *resolves* to. Shared by
+/// the macOS Seatbelt backend and both Linux backends, so the guarantee comes
+/// from one place on every platform.
+pub(crate) fn canonicalize_one(
+    p: &std::path::Path,
+) -> Result<std::path::PathBuf, SandboxError> {
+    match std::fs::canonicalize(p) {
+        Ok(resolved) => Ok(resolved),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match p.parent().zip(p.file_name()) {
+                Some((parent, name)) => match std::fs::canonicalize(parent) {
+                    Ok(canon_parent) => Ok(canon_parent.join(name)),
+                    Err(pe) if pe.kind() == std::io::ErrorKind::NotFound => Ok(p.to_path_buf()),
+                    Err(pe) => Err(SandboxError::Backend(format!(
+                        "could not canonicalize policy path {p:?}: {pe}"
+                    ))),
+                },
+                None => Ok(p.to_path_buf()),
+            }
+        }
+        Err(e) => Err(SandboxError::Backend(format!(
+            "could not canonicalize policy path {p:?}: {e}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod bind_path_tests {
     use super::validate_linux_bind_path;
@@ -289,6 +325,61 @@ mod bind_path_tests {
         // `..foo` / `foo..bar` are ordinary names, not a ParentDir component.
         assert!(validate_linux_bind_path(Path::new("/opt/..foo/bar"), "policy").is_ok());
         assert!(validate_linux_bind_path(Path::new("/opt/foo..bar"), "policy").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod canonicalize_one_tests {
+    use super::canonicalize_one;
+    use std::path::PathBuf;
+
+    // Unique per-test scratch dir under the OS temp dir (std-only; no tempfile dep).
+    // Cleaned up best-effort at the end of each test.
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("kastellan-canon-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn resolves_a_symlink_to_its_target() {
+        let dir = scratch("resolve");
+        let target = dir.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // Resolution equivalence, NOT a literal path: on macOS a temp dir resolves
+        // through /private, so compare against an independent canonicalize of the
+        // target rather than the lexical target path.
+        let got = canonicalize_one(&link).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&target).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notfound_leaf_resolves_symlinks_in_the_parent() {
+        let dir = scratch("notfound");
+        let real_parent = dir.join("real_parent");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        let link_parent = dir.join("link_parent");
+        std::os::unix::fs::symlink(&real_parent, &link_parent).unwrap();
+
+        // The leaf socket does not exist yet — the parent symlink must still resolve.
+        let not_yet = link_parent.join("worker.sock");
+        let got = canonicalize_one(&not_yet).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&real_parent).unwrap().join("worker.sock"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fully_absent_path_falls_back_to_the_original() {
+        // Neither the leaf nor its parent exists → nothing to resolve, return as-is.
+        let p = std::env::temp_dir().join(format!("kastellan-absent-{}/nope/leaf", std::process::id()));
+        assert_eq!(canonicalize_one(&p).unwrap(), p);
     }
 }
 

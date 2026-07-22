@@ -214,8 +214,11 @@ fn encode_worker_args_cmdline(args: &[&str]) -> Option<String> {
     Some(format!(" {WORKER_ARGS_CMDLINE_KEY}={joined}"))
 }
 
-/// Translate a policy into a launch plan. Pure + fallible (rejects relative
-/// FS paths, matching bwrap).
+/// Translate a policy into a launch plan. Fallible (rejects relative FS paths,
+/// matching bwrap). Mostly pure, but the `fs_read` anchor check resolves each
+/// root's symlinks via [`crate::canonicalize_one`] (issue #387), so it touches
+/// the filesystem for that one check — a non-existent synthetic path falls back
+/// to its lexical form and is checked exactly as before.
 pub fn build_launch_plan(
     policy: &SandboxPolicy,
     image: &FirecrackerImage,
@@ -299,11 +302,20 @@ pub fn build_launch_plan(
     // worker never believes it has access to a directory the guest cannot expose.
     const ANCHOR_HINT: &str = "allowed share anchors: /opt /data /srv /mnt /work /tmp";
     for p in &policy.fs_read {
-        if let Some(top) = non_anchor_top_level(p) {
+        // #387 symlink half: resolve the root before the anchor check so a
+        // symlinked fs_read root can't smuggle an out-of-anchor target past the
+        // first-component allowlist (e.g. `/opt/link -> /etc/shadow` would pass a
+        // lexical `/opt` check yet stage `/etc`). The lexical `..`/absolute guard
+        // already ran above; `canonicalize_one` falls back to the lexical path for
+        // a not-yet-existing path, so a synthetic path is checked exactly as
+        // before. RoShare.sources keeps the ORIGINAL path — `copy_tree` resolves
+        // within-tree links itself; only this anchor check resolves the root.
+        let resolved = crate::canonicalize_one(p)?;
+        if let Some(top) = non_anchor_top_level(&resolved) {
             return Err(SandboxError::Backend(format!(
-                "fs_read path {p:?} has top-level /{top}, which is not a micro-VM share anchor \
-                 ({ANCHOR_HINT}): the guest cannot mount it on the read-only rootfs — place the \
-                 shared dir under one of those anchors"
+                "fs_read path {p:?} (resolves to {resolved:?}) has top-level /{top}, which is not \
+                 a micro-VM share anchor ({ANCHOR_HINT}): the guest cannot mount it on the \
+                 read-only rootfs — place the shared dir under one of those anchors"
             )));
         }
     }
@@ -887,6 +899,53 @@ mod tests {
                 "non-anchor fs_read {p} must be rejected: {err}"
             );
         }
+    }
+
+    #[test]
+    fn symlinked_fs_read_root_escaping_anchor_is_rejected() {
+        // #387: a real symlink under /tmp (an anchor) pointing OUT to /etc (not an
+        // anchor). Without canonicalization non_anchor_top_level sees "tmp" and
+        // accepts it, staging /etc into the RO image. The resolved top-level must
+        // be checked instead.
+        let dir = std::env::temp_dir().join(format!("kastellan-fc387-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("escape");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+
+        let policy = SandboxPolicy { fs_read: vec![link.clone()], ..Default::default() };
+        let err = build_launch_plan(&policy, &img(), "/w", &[]).unwrap_err();
+        assert!(
+            format!("{err}").contains("share anchor") && format!("{err}").contains("/etc"),
+            "escaping symlinked fs_read root must be rejected on its resolved top-level: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn symlinked_fs_read_root_within_anchor_is_accepted() {
+        // #387 (the non-regression companion): /tmp/<x>/link -> /tmp/<x>/real
+        // resolves within the /tmp anchor, so it must still be accepted.
+        //
+        // Implicit dependency: this asserts acceptance, so it relies on
+        // `std::env::temp_dir()` resolving to a path whose top-level is a share
+        // anchor — `/tmp` under the standard Linux layout (the anchor set is
+        // /opt /data /srv /mnt /work /tmp). If a runner set `TMPDIR` to a
+        // non-anchor top-level, this would fail for an environmental reason, not a
+        // code one. The escaping companion above has no such coupling (it asserts
+        // on the resolved `/etc` target, independent of where the link lives).
+        let dir = std::env::temp_dir().join(format!("kastellan-fc387ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let policy = SandboxPolicy { fs_read: vec![link.clone()], ..Default::default() };
+        build_launch_plan(&policy, &img(), "/w", &[]).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
