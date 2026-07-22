@@ -39,10 +39,13 @@ pub fn apply_scratch(policy: &mut SandboxPolicy, dir: &Path) {
         .push((ENV_WORKER_SCRATCH.to_string(), dir.to_string_lossy().into_owned()));
 }
 
-/// Env var naming the per-task workspace `out/` dir for a worker that opts
-/// into durable artifact output (mirrors [`ENV_WORKER_SCRATCH`]). Unlike the
-/// scratch env, this dir is **task-scoped**, not per-spawn, and is NOT wiped by
-/// this module — the lane runner harvests + wipes it (see `scheduler::runner`).
+/// Env var naming the per-task durable output dir for a worker that opts into
+/// artifact output (mirrors [`ENV_WORKER_SCRATCH`]). Unlike the scratch env,
+/// this dir is **task-scoped** and **durable**: the lane runner creates it under
+/// the artifacts root (`<artifacts_root>/<task_id>/`), so a file written here
+/// survives the task and the path the worker returns is where the file actually
+/// is. The runner prunes it after the task only if it is empty (see
+/// `scheduler::runner`); retention of delivered files is an operator concern.
 pub const ENV_WORKER_OUT: &str = "KASTELLAN_WORKER_OUT";
 
 /// Bind a per-task `out/` directory into a worker policy: a writable `fs_write`

@@ -143,7 +143,9 @@ impl MailHandler {
         let name = safe_attachment_name(p.filename.as_deref(), &p.sha256);
         let dir = Path::new(&out_dir);
         let dest = dir.join(&name);
-        let partial = dir.join(format!("{name}.partial"));
+        // Per-process-unique .partial so an interrupted write or two concurrent
+        // same-name fetches never share/clobber the scratch file (M-1).
+        let partial = dir.join(format!(".{}.{name}.partial", std::process::id()));
         std::fs::write(&partial, &bytes)
             .map_err(|e| RpcError::new(codes::OPERATION_FAILED, format!("write attachment: {e}")))?;
         std::fs::rename(&partial, &dest).map_err(|e| {

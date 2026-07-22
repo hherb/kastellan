@@ -19,10 +19,12 @@ attachments delivered as extracted text **or** as original-format files.
 | `mail.get_attachment` | Save an attachment in its **original format** (PDF, etc.) to the task output dir; returns `{path, size, content_type, filename}`. Use to **deliver** a file. |
 
 The agent does the reasoning (e.g. extracting flight-booking fields into a CSV);
-the worker only searches and retrieves. Attachments delivered by
-`mail.get_attachment` land in the task's workspace `out/`, harvested at task
-finalize to `$KASTELLAN_ARTIFACTS_ROOT/<task_id>/` (default
-`~/.kastellan/artifacts/<task_id>/`).
+the worker only searches and retrieves. Files delivered by `mail.get_attachment`
+are written **directly and durably** into the per-task output dir
+`$KASTELLAN_ARTIFACTS_ROOT/<task_id>/` (default `~/.kastellan/artifacts/<task_id>/`)
+— the path the tool returns is where the file actually is, and it survives the
+task. An empty per-task dir (a task that saved no files) is pruned automatically;
+retention/cleanup of delivered files is an operator concern.
 
 ## One-time operator setup
 

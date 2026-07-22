@@ -35,7 +35,6 @@ use super::audit::{action_task_terminal, ACTION_TASK_RUNNING};
 use super::inner_loop::StepDispatcher;
 
 mod audit_rows;
-mod harvest;
 mod task_exec;
 
 use audit_rows::{
@@ -259,19 +258,35 @@ async fn drain_lane(
             continue;
         }
 
-        // Per-task workspace: construct + register its `out/` dir so opt-in
-        // workers (mail) get a durable write location. Non-fatal on failure —
-        // search/text tools still work; only attachment delivery needs it.
-        // Held across run_one + finalize, then harvested and wiped below.
-        let workspace = match crate::workspace::Workspace::new(&claimed.id.to_string()) {
-            Ok(ws) => {
-                dispatcher.set_task_out_dir(claimed.id, ws.outputs().to_path_buf());
-                Some(ws)
+        // Per-task DURABLE output dir for opt-in workers (mail): attachments are
+        // written straight into `<artifacts_root>/<task_id>/` and survive the
+        // task — the worker returns that path, so what it reports is where the
+        // file actually is (no harvest/relocate, no silent-loss window; see the
+        // final-review I-1 decision). Retention/GC of the artifacts root is an
+        // operator concern. Non-fatal on failure — search/text tools still work;
+        // only attachment delivery needs it. `claimed.id` is a positive bigserial
+        // → plain digits, so the join can't escape the root.
+        let task_out_dir = match crate::workspace::default_artifacts_root() {
+            Ok(root) => {
+                let dir = root.join(claimed.id.to_string());
+                match std::fs::create_dir_all(&dir) {
+                    Ok(()) => {
+                        dispatcher.set_task_out_dir(claimed.id, dir.clone());
+                        Some(dir)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = claimed.id, error = %e, dir = ?dir,
+                            "task output dir create failed; attachment delivery unavailable"
+                        );
+                        None
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
                     task_id = claimed.id, error = %e,
-                    "workspace: construct failed; no out/ dir for this task"
+                    "artifacts root unresolved; attachment delivery unavailable"
                 );
                 None
             }
@@ -344,27 +359,12 @@ async fn drain_lane(
             write_python_skill_crystallised_row(pool, claimed.id, skill).await;
         }
 
-        // Harvest the task's workspace `out/` deliverables to the durable
-        // artifacts dir, then wipe the ephemeral tree. After finalize so a
-        // delivered file outlives the task; before the next iteration. The
-        // ephemeral tree is wiped in both arms (harvest_and_wipe consumes `ws`
-        // in the Ok arm; the Err arm drops it at block end).
-        if let Some(ws) = workspace {
-            match crate::workspace::default_artifacts_root() {
-                Ok(root) => {
-                    let harvested = harvest::harvest_and_wipe(ws, &root, claimed.id);
-                    if !harvested.is_empty() {
-                        tracing::info!(
-                            task_id = claimed.id, count = harvested.len(),
-                            "harvested workspace out/ deliverables to artifacts dir"
-                        );
-                    }
-                }
-                Err(e) => tracing::warn!(
-                    task_id = claimed.id, error = %e,
-                    "artifacts root unresolved; workspace out/ not harvested (tree still wiped)"
-                ),
-            }
+        // Prune the task output dir iff nothing was delivered: `remove_dir` is
+        // non-recursive, so it succeeds only on an empty dir and leaves any
+        // real deliverables (and their parent) intact. Keeps the artifacts root
+        // from filling with empty per-task dirs for tasks that saved no files.
+        if let Some(dir) = task_out_dir {
+            let _ = std::fs::remove_dir(&dir);
         }
     }
 }
