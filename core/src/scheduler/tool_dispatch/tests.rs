@@ -372,3 +372,11 @@ fn shell_exec_entry_defaults_sandbox_backend_to_none() {
     );
     assert_eq!(entry.sandbox_backend, None);
 }
+
+#[test]
+fn wants_workspace_out_only_for_mail() {
+    assert!(wants_workspace_out("mail"));
+    assert!(!wants_workspace_out("web-fetch"));
+    assert!(!wants_workspace_out("shell-exec"));
+    assert!(!wants_workspace_out("browser-driver"));
+}
