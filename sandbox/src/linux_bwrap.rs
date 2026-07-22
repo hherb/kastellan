@@ -20,7 +20,8 @@
 //!     **outside** `bwrap` here so the cgroup is in place before the
 //!     unshare-all namespace is created.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use crate::{Net, SandboxBackend, SandboxError, SandboxPolicy};
@@ -161,7 +162,29 @@ impl SandboxBackend for LinuxBwrap {
             })?;
         }
 
-        let bwrap_argv = build_argv(policy, program, args);
+        // #387 symlink half: resolve each HOST-SOURCE path's symlinks up front —
+        // the lexical `..`/absolute guard already ran above. We bind
+        // `canonical-src → original-dest`, so the worker still opens the path it was
+        // granted while bwrap receives the resolved literal (a symlink can't be
+        // swapped between our check and bwrap's bind — TOCTOU-safe — and the argv/
+        // audit shows the real target). A canonicalize error (e.g. PermissionDenied
+        // on a parent) fails the spawn closed. Guest-side paths
+        // (persistent_store.guest_mount) are NOT resolved — they are jail dests.
+        let mut resolved: HashMap<PathBuf, PathBuf> = HashMap::new();
+        for p in policy.fs_read.iter().chain(policy.fs_write.iter()) {
+            resolved.insert(p.clone(), crate::canonicalize_one(p)?);
+        }
+        if let Some(uds) = &policy.proxy_uds {
+            resolved.insert(uds.clone(), crate::canonicalize_one(uds)?);
+        }
+        if let Some(uds) = &policy.broker_uds {
+            resolved.insert(uds.clone(), crate::canonicalize_one(uds)?);
+        }
+        if let Some(ps) = &policy.persistent_store {
+            resolved.insert(ps.host_backing.clone(), crate::canonicalize_one(&ps.host_backing)?);
+        }
+        let resolve = |p: &Path| resolved.get(p).cloned().unwrap_or_else(|| p.to_path_buf());
+        let bwrap_argv = build_argv_with_resolver(policy, program, args, &resolve);
         // systemd-run is the **outer** process; it sets up the cgroup
         // before bwrap creates the unshare-all namespace. Final shape:
         //   systemd-run --user --scope ... -- bwrap --unshare-all ... -- <program> <args>
@@ -184,8 +207,24 @@ impl SandboxBackend for LinuxBwrap {
 
 /// Build the bwrap argv (including the leading `bwrap`) for `program` `args`
 /// under `policy`. Pure function, no I/O — exposed so unit tests can assert
-/// on the argv shape without spawning a process.
+/// on the argv shape without spawning a process. Host-source bind sources are
+/// emitted unresolved (identity); the spawn path uses [`build_argv_with_resolver`]
+/// to bind `canonical-src → original-dest` (issue #387).
 pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<String> {
+    build_argv_with_resolver(policy, program, args, &|p| p.to_path_buf())
+}
+
+/// Like [`build_argv`], but each HOST-SOURCE bind source is passed through
+/// `resolve` (symlink canonicalization, issue #387) while the jail-side
+/// destination keeps the policy's original path — so the worker still opens the
+/// path it was granted while bwrap receives the resolved literal. Pure: `resolve`
+/// is injected so the argv shape stays deterministically testable.
+pub fn build_argv_with_resolver(
+    policy: &SandboxPolicy,
+    program: &str,
+    args: &[&str],
+    resolve: &dyn Fn(&Path) -> PathBuf,
+) -> Vec<String> {
     let mut argv: Vec<String> = Vec::with_capacity(64);
     argv.push("bwrap".into());
 
@@ -226,24 +265,23 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
     ]);
 
     for path in &policy.fs_read {
-        push_bind(&mut argv, "--ro-bind-try", path);
+        push_bind(&mut argv, "--ro-bind-try", &resolve(path), path);
     }
     for path in &policy.fs_write {
-        push_bind(&mut argv, "--bind-try", path);
+        push_bind(&mut argv, "--bind-try", &resolve(path), path);
     }
     if let Some(uds) = &policy.proxy_uds {
-        // Bind the proxy UDS rw at an identical host↔jail path.
-        // AF_UNIX connect requires write permission on the inode; `--bind`
-        // (not `--ro-bind`) gives the worker that permission while keeping
-        // the path identical so no path rewrite is needed inside the jail.
-        push_bind(&mut argv, "--bind", uds);
+        // Bind the proxy UDS rw: the jail-side dest keeps the policy path; the
+        // SOURCE is the resolved (canonical) path (issue #387). AF_UNIX connect
+        // requires write on the inode, so `--bind` (not `--ro-bind`). For a
+        // non-symlink path canonical == original, so the bind is byte-identical.
+        push_bind(&mut argv, "--bind", &resolve(uds), uds);
     }
     if let Some(uds) = &policy.broker_uds {
-        // Bind the embed-broker UDS rw at an identical host↔jail path — same
-        // rationale as proxy_uds above (AF_UNIX connect needs write on the
-        // inode). Independent of the netns match: the worker may or may not be
-        // force-routed, but reaching the broker socket only needs the bind.
-        push_bind(&mut argv, "--bind", uds);
+        // Bind the embed-broker UDS rw — same rationale as proxy_uds (canonical
+        // source, original jail dest). Independent of the netns match: the worker
+        // may or may not be force-routed, but reaching the broker only needs the bind.
+        push_bind(&mut argv, "--bind", &resolve(uds), uds);
     }
 
     // Slice 5b-2: a persistent store is a RW bind from a stable host dir to the
@@ -253,7 +291,7 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
     // every write and defeat the cross-respawn persistence guarantee.
     if let Some(ps) = &policy.persistent_store {
         argv.push("--bind".into());
-        argv.push(ps.host_backing.display().to_string());
+        argv.push(resolve(&ps.host_backing).display().to_string());
         argv.push(ps.guest_mount.display().to_string());
     }
 
@@ -265,11 +303,10 @@ pub fn build_argv(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Vec<S
     argv
 }
 
-fn push_bind(argv: &mut Vec<String>, flag: &str, path: &Path) {
-    let s = path.display().to_string();
+fn push_bind(argv: &mut Vec<String>, flag: &str, src: &Path, dest: &Path) {
     argv.push(flag.into());
-    argv.push(s.clone());
-    argv.push(s);
+    argv.push(src.display().to_string());
+    argv.push(dest.display().to_string());
 }
 
 #[cfg(test)]
@@ -322,6 +359,29 @@ mod tests {
         let argv = build_argv(&p, "/bin/true", &[]);
         let joined = argv.join(" ");
         assert!(joined.contains("--ro-bind-try /etc/ssl /etc/ssl"));
+    }
+
+    #[test]
+    fn symlinked_fs_read_binds_canonical_src_to_original_dest() {
+        // #387: a symlinked fs_read source must bind the RESOLVED target as the
+        // bwrap source (TOCTOU-safe) while keeping the worker's original jail path
+        // as the destination. Inject a fake resolver standing in for /opt/link ->
+        // /etc so the argv assertion stays pure (the real resolver is
+        // canonicalize_one, exercised by lib.rs's canonicalize_one_tests).
+        let mut p = strict_policy();
+        p.fs_read = vec![PathBuf::from("/opt/link")];
+        let resolve = |path: &Path| {
+            if path == Path::new("/opt/link") {
+                PathBuf::from("/etc")
+            } else {
+                path.to_path_buf()
+            }
+        };
+        let argv = build_argv_with_resolver(&p, "/bin/true", &[], &resolve);
+        assert!(
+            argv.join(" ").contains("--ro-bind-try /etc /opt/link"),
+            "symlinked fs_read must bind canonical src to original dest; got: {argv:?}"
+        );
     }
 
     #[test]
