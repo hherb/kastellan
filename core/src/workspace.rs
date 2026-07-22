@@ -37,6 +37,11 @@ use kastellan_sandbox::SandboxPolicy;
 /// `~/.kastellan/`.
 pub const ENV_WORKSPACE_ROOT: &str = "KASTELLAN_WORKSPACE_ROOT";
 
+/// Env var overriding the durable artifacts root (harvested worker `out/`
+/// deliverables). Defaults to `~/.kastellan/artifacts`. See
+/// [`default_artifacts_root`].
+pub const ENV_ARTIFACTS_ROOT: &str = "KASTELLAN_ARTIFACTS_ROOT";
+
 /// Errors from constructing a workspace. Keep small and explicit so callers
 /// can turn each variant into a useful diagnostic.
 #[derive(Debug, thiserror::Error)]
@@ -221,6 +226,18 @@ fn default_root() -> Result<PathBuf, WorkspaceError> {
     Ok(PathBuf::from(home).join(".kastellan").join("workspace"))
 }
 
+/// Durable root where a task's `out/` deliverables are harvested to, surviving
+/// the ephemeral workspace wipe: `$KASTELLAN_ARTIFACTS_ROOT` if set, else
+/// `~/.kastellan/artifacts`. Errors only if neither is available. No silent
+/// `/tmp` fallback — same posture as [`default_root`].
+pub fn default_artifacts_root() -> Result<PathBuf, WorkspaceError> {
+    if let Some(root) = std::env::var_os(ENV_ARTIFACTS_ROOT) {
+        return Ok(PathBuf::from(root));
+    }
+    let home = std::env::var_os("HOME").ok_or(WorkspaceError::NoHomeDir)?;
+    Ok(PathBuf::from(home).join(".kastellan").join("artifacts"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +270,18 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn artifacts_root_honours_env_override() {
+        let tmp = std::env::temp_dir().join(format!(
+            "kastellan-artifacts-test-{}",
+            std::process::id()
+        ));
+        std::env::set_var(ENV_ARTIFACTS_ROOT, &tmp);
+        let got = default_artifacts_root().unwrap();
+        std::env::remove_var(ENV_ARTIFACTS_ROOT);
+        assert_eq!(got, tmp);
     }
 
     #[test]

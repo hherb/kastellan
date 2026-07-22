@@ -153,12 +153,15 @@ impl ProxyConnectGet {
         Ok(Self { user_agent: user_agent.to_string(), uds, tls, rt })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn request_async(
         &self,
         url: &Url,
         method: &str,
         content_type: Option<&str>,
         body: Vec<u8>,
+        bearer: Option<&str>,
+        max_body: usize,
     ) -> Result<RawResponse, String> {
         let host = url.host_str().ok_or("url has no host")?;
         let port = url
@@ -185,9 +188,9 @@ impl ProxyConnectGet {
         match url.scheme() {
             "https" => {
                 let tls = tls_connect(stream, url, Arc::clone(&self.tls)).await?;
-                run_request(tls, url, host, &self.user_agent, method, content_type, body).await
+                run_request(tls, url, host, &self.user_agent, method, content_type, body, bearer, max_body).await
             }
-            "http" => run_request(stream, url, host, &self.user_agent, method, content_type, body).await,
+            "http" => run_request(stream, url, host, &self.user_agent, method, content_type, body, bearer, max_body).await,
             other => Err(format!("unsupported scheme: {other}")),
         }
     }
@@ -198,7 +201,7 @@ impl HttpGet for ProxyConnectGet {
         self.rt.block_on(async {
             match tokio::time::timeout(
                 Duration::from_secs(TIMEOUT_SECS),
-                self.request_async(url, "GET", None, Vec::new()),
+                self.request_async(url, "GET", None, Vec::new(), None, MAX_BODY_BYTES),
             ).await {
                 Ok(r) => r,
                 Err(_) => Err(format!("request exceeded {TIMEOUT_SECS}s")),
@@ -212,7 +215,37 @@ impl HttpGet for ProxyConnectGet {
         self.rt.block_on(async {
             match tokio::time::timeout(
                 Duration::from_secs(TIMEOUT_SECS),
-                self.request_async(url, "POST", Some(&ct), body),
+                self.request_async(url, "POST", Some(&ct), body, None, MAX_BODY_BYTES),
+            ).await {
+                Ok(r) => r,
+                Err(_) => Err(format!("request exceeded {TIMEOUT_SECS}s")),
+            }
+        })
+    }
+
+    fn get_authed(&self, url: &Url, bearer: &str, max_body: usize) -> Result<RawResponse, String> {
+        let bearer = bearer.to_string();
+        self.rt.block_on(async {
+            match tokio::time::timeout(
+                Duration::from_secs(TIMEOUT_SECS),
+                self.request_async(url, "GET", None, Vec::new(), Some(&bearer), max_body),
+            ).await {
+                Ok(r) => r,
+                Err(_) => Err(format!("request exceeded {TIMEOUT_SECS}s")),
+            }
+        })
+    }
+
+    fn post_authed(&self, url: &Url, bearer: &str, content_type: &str, body: &[u8], max_body: usize)
+        -> Result<RawResponse, String>
+    {
+        let ct = content_type.to_string();
+        let bearer = bearer.to_string();
+        let body = body.to_vec();
+        self.rt.block_on(async {
+            match tokio::time::timeout(
+                Duration::from_secs(TIMEOUT_SECS),
+                self.request_async(url, "POST", Some(&ct), body, Some(&bearer), max_body),
             ).await {
                 Ok(r) => r,
                 Err(_) => Err(format!("request exceeded {TIMEOUT_SECS}s")),
@@ -303,6 +336,7 @@ async fn tls_connect(
 
 /// Drive a single HTTP/1.1 request over `io` (raw or TLS stream), return `RawResponse`.
 /// The body is capped at `MAX_BODY_BYTES`; exceeding that returns `Err`.
+#[allow(clippy::too_many_arguments)]
 async fn run_request<IO>(
     io: IO,
     url: &Url,
@@ -311,6 +345,8 @@ async fn run_request<IO>(
     method: &str,
     content_type: Option<&str>,
     body: Vec<u8>,
+    bearer: Option<&str>,
+    max_body: usize,
 ) -> Result<RawResponse, String>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -341,6 +377,9 @@ where
     if let Some(ct) = content_type {
         builder = builder.header(hyper::header::CONTENT_TYPE, ct);
     }
+    if let Some(b) = bearer {
+        builder = builder.header(hyper::header::AUTHORIZATION, format!("Bearer {b}"));
+    }
     let req = builder
         .body(http_body_util::Full::<bytes::Bytes>::new(bytes::Bytes::from(body)))
         .map_err(|e| format!("build request: {e}"))?;
@@ -370,8 +409,8 @@ where
     while let Some(frame) = frames.frame().await {
         let frame = frame.map_err(|e| format!("body read: {e}"))?;
         if let Some(data) = frame.data_ref() {
-            if body_bytes.len() + data.len() > MAX_BODY_BYTES {
-                return Err(format!("response body exceeds {MAX_BODY_BYTES} bytes"));
+            if body_bytes.len() + data.len() > max_body {
+                return Err(format!("response body exceeds {max_body} bytes"));
             }
             body_bytes.extend_from_slice(data);
         }

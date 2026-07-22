@@ -258,6 +258,40 @@ async fn drain_lane(
             continue;
         }
 
+        // Per-task DURABLE output dir for opt-in workers (mail): attachments are
+        // written straight into `<artifacts_root>/<task_id>/` and survive the
+        // task — the worker returns that path, so what it reports is where the
+        // file actually is (no harvest/relocate, no silent-loss window; see the
+        // final-review I-1 decision). Retention/GC of the artifacts root is an
+        // operator concern. Non-fatal on failure — search/text tools still work;
+        // only attachment delivery needs it. `claimed.id` is a positive bigserial
+        // → plain digits, so the join can't escape the root.
+        let task_out_dir = match crate::workspace::default_artifacts_root() {
+            Ok(root) => {
+                let dir = root.join(claimed.id.to_string());
+                match std::fs::create_dir_all(&dir) {
+                    Ok(()) => {
+                        dispatcher.set_task_out_dir(claimed.id, dir.clone());
+                        Some(dir)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = claimed.id, error = %e, dir = ?dir,
+                            "task output dir create failed; attachment delivery unavailable"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = claimed.id, error = %e,
+                    "artifacts root unresolved; attachment delivery unavailable"
+                );
+                None
+            }
+        };
+
         let result = run_one(
             pool, formulator.clone(), review.clone(), dispatcher.clone(),
             &claimed, max_plans,
@@ -323,6 +357,14 @@ async fn drain_lane(
         // as the L1/L3 hooks; Some only on Outcome::Completed + dispatch_count>=1.
         if let Some(skill) = result.terminal_python_skill.as_ref() {
             write_python_skill_crystallised_row(pool, claimed.id, skill).await;
+        }
+
+        // Prune the task output dir iff nothing was delivered: `remove_dir` is
+        // non-recursive, so it succeeds only on an empty dir and leaves any
+        // real deliverables (and their parent) intact. Keeps the artifacts root
+        // from filling with empty per-task dirs for tasks that saved no files.
+        if let Some(dir) = task_out_dir {
+            let _ = std::fs::remove_dir(&dir);
         }
     }
 }
