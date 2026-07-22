@@ -30,7 +30,7 @@
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
-use crate::{SandboxBackend, SandboxError, SandboxPolicy};
+use crate::{canonicalize_one, SandboxBackend, SandboxError, SandboxPolicy};
 
 /// Shell out to `/usr/bin/sandbox-exec` for sandboxing.
 #[derive(Default)]
@@ -248,40 +248,6 @@ impl SandboxBackend for MacosSeatbelt {
 
         cmd.spawn()
             .map_err(|e| SandboxError::Backend(format!("sandbox-exec spawn failed: {e}")))
-    }
-}
-
-/// Canonicalize a single path, resolving symlinks. For a path whose final
-/// component does not exist yet (e.g. a not-yet-created socket or scratch
-/// file), the parent directory is canonicalized and the filename appended —
-/// this correctly resolves `/tmp/foo.sock` to `/private/tmp/foo.sock` on
-/// macOS even before the socket file exists. Any other `io::Error`
-/// (PermissionDenied on a parent, etc.) propagates so callers don't silently
-/// emit a non-functional Seatbelt rule.
-fn canonicalize_one(p: &std::path::Path) -> Result<std::path::PathBuf, SandboxError> {
-    match std::fs::canonicalize(p) {
-        Ok(resolved) => Ok(resolved),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // The path itself doesn't exist yet; canonicalize the parent to
-            // resolve any symlinks there (e.g. /tmp -> /private/tmp on macOS),
-            // then reattach the filename so Seatbelt sees the real path.
-            match p.parent().zip(p.file_name()) {
-                Some((parent, name)) => {
-                    match std::fs::canonicalize(parent) {
-                        Ok(canon_parent) => Ok(canon_parent.join(name)),
-                        Err(pe) if pe.kind() == std::io::ErrorKind::NotFound => Ok(p.to_path_buf()),
-                        Err(pe) => Err(SandboxError::Backend(format!(
-                            "could not canonicalize policy path {p:?}: {pe}"
-                        ))),
-                    }
-                }
-                // No parent (root path) or no filename — keep as-is.
-                None => Ok(p.to_path_buf()),
-            }
-        }
-        Err(e) => Err(SandboxError::Backend(format!(
-            "could not canonicalize policy path {p:?}: {e}"
-        ))),
     }
 }
 
