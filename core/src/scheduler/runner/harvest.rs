@@ -52,9 +52,42 @@ fn copy_then_remove(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::remove_file(src)
 }
 
+/// Harvest a task's `out/` deliverables to `artifacts_root/<task_id>/`, then
+/// wipe the ephemeral workspace — the [`crate::workspace::Workspace`] is taken
+/// by value and drops (recursively wiping `<root>/<task_id>`) at the end of
+/// this function, *after* the harvest has moved the deliverables out. Returns
+/// the harvested destination paths.
+pub(super) fn harvest_and_wipe(
+    ws: crate::workspace::Workspace,
+    artifacts_root: &Path,
+    task_id: i64,
+) -> Vec<PathBuf> {
+    harvest_outputs(ws.outputs(), artifacts_root, task_id)
+    // `ws` drops here → wipes the ephemeral in/out/tmp tree.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harvest_and_wipe_moves_out_then_wipes_tree() {
+        let base = std::env::temp_dir().join(format!("kastellan-hw-{}", std::process::id()));
+        let ws_root = base.join("ws");
+        let artifacts = base.join("artifacts");
+        let ws = crate::workspace::Workspace::with_root(&ws_root, "55").unwrap();
+        let task_tree = ws.root().to_path_buf();
+        std::fs::write(ws.outputs().join("deliverable.txt"), b"keep me").unwrap();
+
+        let harvested = harvest_and_wipe(ws, &artifacts, 55);
+
+        assert_eq!(harvested.len(), 1);
+        let dest = artifacts.join("55").join("deliverable.txt");
+        assert!(dest.exists(), "deliverable harvested to durable artifacts dir");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"keep me");
+        assert!(!task_tree.exists(), "ephemeral workspace tree wiped after harvest");
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     #[test]
     fn harvest_moves_files_and_returns_dest_paths() {

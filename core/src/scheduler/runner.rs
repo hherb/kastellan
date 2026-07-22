@@ -259,6 +259,24 @@ async fn drain_lane(
             continue;
         }
 
+        // Per-task workspace: construct + register its `out/` dir so opt-in
+        // workers (mail) get a durable write location. Non-fatal on failure —
+        // search/text tools still work; only attachment delivery needs it.
+        // Held across run_one + finalize, then harvested and wiped below.
+        let workspace = match crate::workspace::Workspace::new(&claimed.id.to_string()) {
+            Ok(ws) => {
+                dispatcher.set_task_out_dir(claimed.id, ws.outputs().to_path_buf());
+                Some(ws)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = claimed.id, error = %e,
+                    "workspace: construct failed; no out/ dir for this task"
+                );
+                None
+            }
+        };
+
         let result = run_one(
             pool, formulator.clone(), review.clone(), dispatcher.clone(),
             &claimed, max_plans,
@@ -324,6 +342,29 @@ async fn drain_lane(
         // as the L1/L3 hooks; Some only on Outcome::Completed + dispatch_count>=1.
         if let Some(skill) = result.terminal_python_skill.as_ref() {
             write_python_skill_crystallised_row(pool, claimed.id, skill).await;
+        }
+
+        // Harvest the task's workspace `out/` deliverables to the durable
+        // artifacts dir, then wipe the ephemeral tree. After finalize so a
+        // delivered file outlives the task; before the next iteration. The
+        // ephemeral tree is wiped in both arms (harvest_and_wipe consumes `ws`
+        // in the Ok arm; the Err arm drops it at block end).
+        if let Some(ws) = workspace {
+            match crate::workspace::default_artifacts_root() {
+                Ok(root) => {
+                    let harvested = harvest::harvest_and_wipe(ws, &root, claimed.id);
+                    if !harvested.is_empty() {
+                        tracing::info!(
+                            task_id = claimed.id, count = harvested.len(),
+                            "harvested workspace out/ deliverables to artifacts dir"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    task_id = claimed.id, error = %e,
+                    "artifacts root unresolved; workspace out/ not harvested (tree still wiped)"
+                ),
+            }
         }
     }
 }
