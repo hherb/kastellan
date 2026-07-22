@@ -91,6 +91,13 @@ fn mail_worker_stdio_roundtrip_against_mock() {
         .env("KASTELLAN_MAIL_ENDPOINT", &base)
         .env("KASTELLAN_MAIL_TOKEN_FILE", &token_file)
         .env("KASTELLAN_WORKER_OUT", &out_dir)
+        // Opt out of the prelude's Linux self-lockdown: this e2e exercises the
+        // worker's application logic standalone, so it does not receive the
+        // daemon-derived landlock RW set (which, in production, includes out/).
+        // Without this, the unset KASTELLAN_LANDLOCK_RW yields an empty writable
+        // set and the out/ write is denied on Linux (macOS has no landlock).
+        .env("KASTELLAN_LANDLOCK_PROFILE", "none")
+        .env("KASTELLAN_SECCOMP_PROFILE", "none")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
