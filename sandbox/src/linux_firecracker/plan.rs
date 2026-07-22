@@ -927,6 +927,14 @@ mod tests {
     fn symlinked_fs_read_root_within_anchor_is_accepted() {
         // #387 (the non-regression companion): /tmp/<x>/link -> /tmp/<x>/real
         // resolves within the /tmp anchor, so it must still be accepted.
+        //
+        // Implicit dependency: this asserts acceptance, so it relies on
+        // `std::env::temp_dir()` resolving to a path whose top-level is a share
+        // anchor — `/tmp` under the standard Linux layout (the anchor set is
+        // /opt /data /srv /mnt /work /tmp). If a runner set `TMPDIR` to a
+        // non-anchor top-level, this would fail for an environmental reason, not a
+        // code one. The escaping companion above has no such coupling (it asserts
+        // on the resolved `/etc` target, independent of where the link lives).
         let dir = std::env::temp_dir().join(format!("kastellan-fc387ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let real = dir.join("real");

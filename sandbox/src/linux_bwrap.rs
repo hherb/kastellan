@@ -183,7 +183,21 @@ impl SandboxBackend for LinuxBwrap {
         if let Some(ps) = &policy.persistent_store {
             resolved.insert(ps.host_backing.clone(), crate::canonicalize_one(&ps.host_backing)?);
         }
-        let resolve = |p: &Path| resolved.get(p).cloned().unwrap_or_else(|| p.to_path_buf());
+        // The `resolved` map above and the host-source bind sites in
+        // `build_argv_with_resolver` must stay in lock-step: a new host-source
+        // field added to the argv builder but not pre-canonicalized here would
+        // fall through the identity `unwrap_or_else` and bind UNRESOLVED — silently
+        // (the exact "control not verified by reading it" shape #387/#479 warn
+        // about). The debug_assert makes that desync a test-time panic instead.
+        let resolve = |p: &Path| {
+            debug_assert!(
+                resolved.contains_key(p),
+                "resolve() called on a path not pre-canonicalized in spawn_under_policy: {p:?} \
+                 — a host-source bind was added to build_argv_with_resolver without adding it to \
+                 the `resolved` map here (#387)"
+            );
+            resolved.get(p).cloned().unwrap_or_else(|| p.to_path_buf())
+        };
         let bwrap_argv = build_argv_with_resolver(policy, program, args, &resolve);
         // systemd-run is the **outer** process; it sets up the cgroup
         // before bwrap creates the unshare-all namespace. Final shape:
@@ -381,6 +395,37 @@ mod tests {
         assert!(
             argv.join(" ").contains("--ro-bind-try /etc /opt/link"),
             "symlinked fs_read must bind canonical src to original dest; got: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn symlinked_proxy_uds_binds_canonical_src_to_original_dest() {
+        // #387: the canonical-src → original-dest guarantee also covers the proxy
+        // UDS bind (a distinct code path from fs_read — `--bind`, and it flips the
+        // netns). Inject a fake resolver standing in for
+        // /scratch/link.sock -> /run/egress.sock so the argv assertion stays pure;
+        // the jail-side dest keeps the policy path while bwrap gets the resolved
+        // literal. Scan the `--bind <src> <dst>` triple (not the first `--bind`,
+        // which fs_write can precede) as `allowlist_with_proxy_uds_...` does.
+        let p = SandboxPolicy {
+            net: Net::Allowlist(vec!["api.example.com:443".into()]),
+            proxy_uds: Some(PathBuf::from("/scratch/link.sock")),
+            ..SandboxPolicy::default()
+        };
+        let resolve = |path: &Path| {
+            if path == Path::new("/scratch/link.sock") {
+                PathBuf::from("/run/egress.sock")
+            } else {
+                path.to_path_buf()
+            }
+        };
+        let argv = build_argv_with_resolver(&p, "/bin/worker", &[], &resolve);
+        let has_resolved_bind = argv
+            .windows(3)
+            .any(|w| w[0] == "--bind" && w[1] == "/run/egress.sock" && w[2] == "/scratch/link.sock");
+        assert!(
+            has_resolved_bind,
+            "symlinked proxy_uds must bind canonical src to original dest; got: {argv:?}"
         );
     }
 

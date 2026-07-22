@@ -210,3 +210,14 @@ this wrong is the `cfg-linux-e2e-deadcode-dgx-clippy` trap.
   `copy_tree`; a symlink to a file is copied). We are not *newly supporting*
   such roots, only guaranteeing they cannot escape — so no in-guest remap
   behaviour is introduced.
+- **Anchor-dir-as-symlink is a possible newly-rejected case (Firecracker).**
+  The resolve posture rejects on the *resolved* top-level, so on an unusual host
+  where an anchor directory is itself a symlink to a non-anchor top-level (e.g.
+  `/tmp → /var/tmp`, `/var` not an anchor), an `fs_read` under it that the
+  lexical check accepted before (`/tmp/models` → anchor `tmp`) is now rejected on
+  its resolved top-level (`/var/tmp/models` → `var`). This is the intended
+  parity semantics (the guest can only mount under the anchor set anyway) and is
+  uncommon on Linux (`/tmp` is normally a real tmpfs), but it is a config-
+  dependent behaviour change beyond "symlinked *root* escapes" — flagged here so
+  an operator hitting the reject finds it documented rather than surprising. The
+  fix is to point `fs_read` at a path whose resolved top-level is an anchor.
