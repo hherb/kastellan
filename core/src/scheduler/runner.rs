@@ -35,6 +35,7 @@ use super::audit::{action_task_terminal, ACTION_TASK_RUNNING};
 use super::inner_loop::StepDispatcher;
 
 mod audit_rows;
+mod harvest;
 mod task_exec;
 
 use audit_rows::{
