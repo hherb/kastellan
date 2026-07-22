@@ -56,6 +56,24 @@ pub trait HttpGet: Send + Sync {
     {
         Err("post: unsupported by this transport".to_string())
     }
+
+    /// GET with an `Authorization: Bearer <bearer>` header and a caller-chosen
+    /// body cap `max_body` (larger than [`MAX_BODY_BYTES`] for attachment
+    /// downloads). Default: unsupported — only transports that need auth (the
+    /// mail worker) override it, so GET-only siblings are untouched.
+    fn get_authed(&self, _url: &Url, _bearer: &str, _max_body: usize)
+        -> Result<RawResponse, String>
+    {
+        Err("get_authed: unsupported by this transport".to_string())
+    }
+
+    /// POST `body` with `Authorization: Bearer <bearer>` + `content_type`,
+    /// capped at `max_body`. Default: unsupported.
+    fn post_authed(&self, _url: &Url, _bearer: &str, _content_type: &str, _body: &[u8], _max_body: usize)
+        -> Result<RawResponse, String>
+    {
+        Err("post_authed: unsupported by this transport".to_string())
+    }
 }
 
 impl HttpGet for Box<dyn HttpGet> {
@@ -71,6 +89,18 @@ impl HttpGet for Box<dyn HttpGet> {
         -> Result<RawResponse, String>
     {
         (**self).post(url, content_type, body)
+    }
+
+    fn get_authed(&self, url: &Url, bearer: &str, max_body: usize)
+        -> Result<RawResponse, String>
+    {
+        (**self).get_authed(url, bearer, max_body)
+    }
+
+    fn post_authed(&self, url: &Url, bearer: &str, content_type: &str, body: &[u8], max_body: usize)
+        -> Result<RawResponse, String>
+    {
+        (**self).post_authed(url, bearer, content_type, body, max_body)
     }
 }
 
@@ -95,44 +125,46 @@ impl ReqwestGet {
     }
 }
 
+/// Read a `reqwest::blocking::Response` into a [`RawResponse`], capping the body
+/// at `max_body` via `Read::take` (one byte over → hard error, never copied in).
+/// The single capped-read path shared by every `ReqwestGet` method.
+fn read_capped(resp: reqwest::blocking::Response, max_body: usize) -> Result<RawResponse, String> {
+    use std::io::Read;
+    let status = resp.status().as_u16();
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let mut body = Vec::new();
+    resp.take((max_body as u64) + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| e.to_string())?;
+    if body.len() > max_body {
+        return Err(format!("response body exceeds {max_body} bytes"));
+    }
+    Ok(RawResponse { status, location, content_type, body })
+}
+
 impl HttpGet for ReqwestGet {
     fn transport_kind(&self) -> &'static str {
         "reqwest"
     }
 
     fn get(&self, url: &Url) -> Result<RawResponse, String> {
-        use std::io::Read;
-
-        let resp = self
-            .client
-            .get(url.clone())
-            .send()
-            .map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let header = |name: reqwest::header::HeaderName| -> Option<String> {
-            resp.headers()
-                .get(&name)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        };
-        let location = header(reqwest::header::LOCATION);
-        let content_type = header(reqwest::header::CONTENT_TYPE).unwrap_or_default();
-
-        let mut body = Vec::new();
-        resp.take((MAX_BODY_BYTES as u64) + 1)
-            .read_to_end(&mut body)
-            .map_err(|e| e.to_string())?;
-        if body.len() > MAX_BODY_BYTES {
-            return Err(format!("response body exceeds {MAX_BODY_BYTES} bytes"));
-        }
-
-        Ok(RawResponse { status, location, content_type, body })
+        let resp = self.client.get(url.clone()).send().map_err(|e| e.to_string())?;
+        read_capped(resp, MAX_BODY_BYTES)
     }
 
     fn post(&self, url: &Url, content_type: &str, body: &[u8])
         -> Result<RawResponse, String>
     {
-        use std::io::Read;
         let resp = self
             .client
             .post(url.clone())
@@ -140,18 +172,33 @@ impl HttpGet for ReqwestGet {
             .body(body.to_vec())
             .send()
             .map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let header = |name: reqwest::header::HeaderName| -> Option<String> {
-            resp.headers().get(&name).and_then(|v| v.to_str().ok()).map(|s| s.to_string())
-        };
-        let location = header(reqwest::header::LOCATION);
-        let content_type = header(reqwest::header::CONTENT_TYPE).unwrap_or_default();
-        let mut out = Vec::new();
-        resp.take((MAX_BODY_BYTES as u64) + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
-        if out.len() > MAX_BODY_BYTES {
-            return Err(format!("response body exceeds {MAX_BODY_BYTES} bytes"));
-        }
-        Ok(RawResponse { status, location, content_type, body: out })
+        read_capped(resp, MAX_BODY_BYTES)
+    }
+
+    fn get_authed(&self, url: &Url, bearer: &str, max_body: usize)
+        -> Result<RawResponse, String>
+    {
+        let resp = self
+            .client
+            .get(url.clone())
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .send()
+            .map_err(|e| e.to_string())?;
+        read_capped(resp, max_body)
+    }
+
+    fn post_authed(&self, url: &Url, bearer: &str, content_type: &str, body: &[u8], max_body: usize)
+        -> Result<RawResponse, String>
+    {
+        let resp = self
+            .client
+            .post(url.clone())
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body.to_vec())
+            .send()
+            .map_err(|e| e.to_string())?;
+        read_capped(resp, max_body)
     }
 }
 
@@ -278,5 +325,41 @@ mod post_tests {
         // regardless of process state.
         super::ensure_crypto_provider();
         super::ensure_crypto_provider();
+    }
+
+    #[test]
+    fn default_get_authed_is_unsupported() {
+        let t = GetOnly;
+        let err = t
+            .get_authed(&Url::parse("https://x.test/e").unwrap(), "tok", 1024)
+            .unwrap_err();
+        assert!(err.contains("unsupported"), "got: {err}");
+    }
+
+    #[test]
+    fn reqwest_get_authed_sends_bearer_and_caps() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = sock.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            assert!(
+                req.contains("authorization: bearer testtok"),
+                "missing bearer header in request: {req}"
+            );
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .unwrap();
+        });
+        let t = ReqwestGet::new("test/0").unwrap();
+        let url = Url::parse(&format!("http://{addr}/x")).unwrap();
+        let resp = t.get_authed(&url, "testtok", 1024).unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"{}");
+        handle.join().unwrap();
     }
 }
