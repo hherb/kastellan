@@ -39,6 +39,23 @@ pub fn apply_scratch(policy: &mut SandboxPolicy, dir: &Path) {
         .push((ENV_WORKER_SCRATCH.to_string(), dir.to_string_lossy().into_owned()));
 }
 
+/// Env var naming the per-task workspace `out/` dir for a worker that opts
+/// into durable artifact output (mirrors [`ENV_WORKER_SCRATCH`]). Unlike the
+/// scratch env, this dir is **task-scoped**, not per-spawn, and is NOT wiped by
+/// this module — the lane runner harvests + wipes it (see `scheduler::runner`).
+pub const ENV_WORKER_OUT: &str = "KASTELLAN_WORKER_OUT";
+
+/// Bind a per-task `out/` directory into a worker policy: a writable `fs_write`
+/// entry (→ the worker-side Landlock filter via `derive_lockdown_env`, so host
+/// and worker agree) plus the [`ENV_WORKER_OUT`] env pointer telling the worker
+/// where to write. Pure. Mirrors [`apply_scratch`] but for durable task output.
+pub fn apply_workspace_out(policy: &mut SandboxPolicy, out_dir: &Path) {
+    policy.fs_write.push(out_dir.to_path_buf());
+    policy
+        .env
+        .push((ENV_WORKER_OUT.to_string(), out_dir.to_string_lossy().into_owned()));
+}
+
 /// RAII owner of a host-created per-spawn scratch dir. `Drop` best-effort
 /// removes the whole subtree — mirrors `crate::egress::net_worker`'s scratch
 /// cleanup. Held inside `SupervisedWorker` so the dir outlives the worker
@@ -118,6 +135,17 @@ mod tests {
         let hits: Vec<_> = p.env.iter().filter(|(k, _)| k == ENV_WORKER_SCRATCH).collect();
         assert_eq!(hits.len(), 1, "exactly one scratch env entry");
         assert_eq!(hits[0].1, "/var/tmp/pyexec-1-1");
+    }
+
+    #[test]
+    fn apply_workspace_out_pushes_fs_write_and_env() {
+        let mut p = SandboxPolicy::default();
+        let dir = Path::new("/tmp/ws/out");
+        apply_workspace_out(&mut p, dir);
+        assert!(p.fs_write.contains(&PathBuf::from("/tmp/ws/out")), "out dir must be writable");
+        let hits: Vec<_> = p.env.iter().filter(|(k, _)| k == ENV_WORKER_OUT).collect();
+        assert_eq!(hits.len(), 1, "exactly one out env entry");
+        assert_eq!(hits[0].1, "/tmp/ws/out");
     }
 
     #[test]
