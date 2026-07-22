@@ -380,3 +380,32 @@ fn wants_workspace_out_only_for_mail() {
     assert!(!wants_workspace_out("shell-exec"));
     assert!(!wants_workspace_out("browser-driver"));
 }
+
+#[test]
+fn apply_task_out_binds_only_for_opt_in_with_out_dir() {
+    // A SingleUse base entry (shell_exec_entry is SingleUse) so the opt-in
+    // debug-assert is satisfied when we test the "mail" branch.
+    let base = shell_exec_entry(
+        std::path::PathBuf::from("/usr/bin/true"),
+        &["true".to_string()],
+    );
+    let out = std::path::PathBuf::from("/tmp/task-out");
+
+    // Non-opt-in tool → None even with an out dir registered.
+    assert!(apply_task_out("shell-exec", &base, Some(out.clone())).is_none());
+    // Opt-in tool but no out dir registered → None (base used unchanged).
+    assert!(apply_task_out("mail", &base, None).is_none());
+
+    // Opt-in + out dir → a clone with out/ bound in fs_write + env.
+    let got = apply_task_out("mail", &base, Some(out.clone())).expect("clone for opt-in tool");
+    assert!(got.policy.fs_write.contains(&out), "out/ bound writable in the clone");
+    assert!(
+        got.policy
+            .env
+            .iter()
+            .any(|(k, v)| k == crate::tool_host::ENV_WORKER_OUT && v == "/tmp/task-out"),
+        "KASTELLAN_WORKER_OUT points at out/ in the clone"
+    );
+    // The base entry is untouched (only the clone is mutated).
+    assert!(!base.policy.fs_write.contains(&out), "base entry unchanged");
+}

@@ -49,6 +49,15 @@ pub const ENV_WORKER_OUT: &str = "KASTELLAN_WORKER_OUT";
 /// entry (→ the worker-side Landlock filter via `derive_lockdown_env`, so host
 /// and worker agree) plus the [`ENV_WORKER_OUT`] env pointer telling the worker
 /// where to write. Pure. Mirrors [`apply_scratch`] but for durable task output.
+///
+/// **Per-spawn vs. per-worker-lifetime hazard** (same class as
+/// `ToolEntry.ephemeral_scratch`): this binds ONE task's `out/` into a policy
+/// clone consulted only on a COLD spawn. A warm-reusable (`Lifecycle::IdleTimeout`)
+/// worker would keep the first task's `out/` for every later task — and that dir
+/// is wiped at the first task's finalize. So a tool that opts in via
+/// `wants_workspace_out` MUST be `Lifecycle::SingleUse`; `apply_task_out`
+/// debug-asserts this. No warm-reusable worker opts in today (mail is SingleUse);
+/// revisit before the first one does.
 pub fn apply_workspace_out(policy: &mut SandboxPolicy, out_dir: &Path) {
     policy.fs_write.push(out_dir.to_path_buf());
     policy

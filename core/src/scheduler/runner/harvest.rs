@@ -47,6 +47,10 @@ pub(super) fn harvest_outputs(out_dir: &Path, artifacts_root: &Path, task_id: i6
     harvested
 }
 
+// Cross-filesystem fallback for a flat file (the only shape `out/` holds —
+// `mail.get_attachment` writes `out/<safe-filename>`). `std::fs::copy` fails on
+// a directory source, so a subdirectory deliverable would be logged-and-skipped
+// by the caller rather than harvested; revisit if directory outputs ever ship.
 fn copy_then_remove(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::copy(src, dst)?;
     std::fs::remove_file(src)
