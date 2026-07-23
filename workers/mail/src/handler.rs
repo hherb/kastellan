@@ -118,7 +118,15 @@ impl MailHandler {
             .client
             .get_bytes(&format!("/v1/attachments/{}/text", p.sha256))
             .map_err(mail_err_to_rpc)?;
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // localmail returns `application/json {"text": "..."}`; surface the inner
+        // text so the agent gets the extracted content, not a JSON envelope
+        // double-encoded as a string. Fall back to the raw body for a non-JSON
+        // response (defensive — the API contract is JSON, but this keeps a
+        // plain-text body usable rather than failing).
+        let text = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_owned))
+            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
         Ok(serde_json::json!({ "sha256": p.sha256, "text": text }))
     }
 
@@ -288,7 +296,8 @@ mod tests {
             let s = String::from_utf8_lossy(body);
             assert!(s.contains("qantas"), "body missing query: {s}");
             assert!(!s.contains("smart"), "body must not carry smart: {s}");
-            Ok(json_resp(br#"{"hits":[],"next_cursor":null}"#))
+            // Real localmail keys results under "results" (not "hits").
+            Ok(json_resp(br#"{"results":[],"next_cursor":null}"#))
         }
     }
 
@@ -296,7 +305,7 @@ mod tests {
     fn search_posts_query_without_smart() {
         let mut h = MailHandler::with_client(client_with(Box::new(SearchFake)));
         let out = h.call("mail.search", serde_json::json!({"query": "qantas"})).unwrap();
-        assert!(out["hits"].is_array());
+        assert!(out["results"].is_array());
     }
 
     // --- GET path assertions for get_message / list_messages / list_accounts ---
@@ -339,7 +348,14 @@ mod tests {
         fn transport_kind(&self) -> &'static str { "fake" }
         fn get_authed(&self, url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
             assert!(url.path().ends_with("/text"), "path {}", url.path());
-            Ok(RawResponse { status: 200, location: None, content_type: "text/plain".into(), body: b"extracted body".to_vec() })
+            // Real localmail returns application/json `{"text": "..."}`, NOT
+            // text/plain — the worker must surface the inner text, not the envelope.
+            Ok(RawResponse {
+                status: 200,
+                location: None,
+                content_type: "application/json".into(),
+                body: br#"{"text":"extracted body"}"#.to_vec(),
+            })
         }
     }
 
@@ -348,6 +364,42 @@ mod tests {
         let mut h = MailHandler::with_client(client_with(Box::new(TextFake)));
         let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})).unwrap();
         assert_eq!(out["text"], "extracted body");
+    }
+
+    /// A non-JSON `/text` body (defensive fallback) is surfaced verbatim.
+    struct PlainTextFake;
+    impl HttpGet for PlainTextFake {
+        fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
+        fn transport_kind(&self) -> &'static str { "fake" }
+        fn get_authed(&self, _url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
+            Ok(RawResponse { status: 200, location: None, content_type: "text/plain".into(), body: b"raw text".to_vec() })
+        }
+    }
+
+    #[test]
+    fn get_attachment_text_falls_back_to_raw_for_non_json() {
+        let mut h = MailHandler::with_client(client_with(Box::new(PlainTextFake)));
+        let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})).unwrap();
+        assert_eq!(out["text"], "raw text");
+    }
+
+    /// Valid JSON but without a `text` key → surfaced verbatim (same fallback as
+    /// non-JSON: we only unwrap the envelope when the expected `text` field is a
+    /// string, never a partial/foreign shape).
+    struct NoTextKeyFake;
+    impl HttpGet for NoTextKeyFake {
+        fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
+        fn transport_kind(&self) -> &'static str { "fake" }
+        fn get_authed(&self, _url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
+            Ok(RawResponse { status: 200, location: None, content_type: "application/json".into(), body: br#"{"other":"x"}"#.to_vec() })
+        }
+    }
+
+    #[test]
+    fn get_attachment_text_falls_back_when_json_lacks_text_key() {
+        let mut h = MailHandler::with_client(client_with(Box::new(NoTextKeyFake)));
+        let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})).unwrap();
+        assert_eq!(out["text"], r#"{"other":"x"}"#);
     }
 
     #[test]
