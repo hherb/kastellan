@@ -39,9 +39,11 @@ fn spawn_mock() -> (String, std::thread::JoinHandle<()>) {
             {
                 ("200 OK", "application/json", br#"[{"id":1,"name":"work"}]"#.to_vec())
             } else if first.contains("POST /v1/search") {
-                ("200 OK", "application/json", br#"{"hits":[{"message_id":7}],"next_cursor":null}"#.to_vec())
+                // Real localmail keys results under "results" (not "hits").
+                ("200 OK", "application/json", br#"{"results":[{"message_id":7}],"next_cursor":null}"#.to_vec())
             } else if first.contains("/v1/attachments/") && first.contains("/text") {
-                ("200 OK", "text/plain", b"extracted booking text".to_vec())
+                // Real localmail returns application/json {"text": "..."}.
+                ("200 OK", "application/json", br#"{"text":"extracted booking text"}"#.to_vec())
             } else if first.contains("/v1/attachments/") {
                 ("200 OK", "application/pdf", b"%PDF-1.7 fake booking".to_vec())
             } else {
@@ -111,9 +113,15 @@ fn mail_worker_stdio_roundtrip_against_mock() {
     let r = rpc(&mut stdin, &mut stdout, 1, "mail.list_accounts", serde_json::json!({}));
     assert_eq!(r["result"][0]["id"], 1, "resp: {r}");
 
-    // 2. search → a hit.
+    // 2. search → a hit under localmail's real "results" key.
     let r = rpc(&mut stdin, &mut stdout, 2, "mail.search", serde_json::json!({"query": "qantas"}));
-    assert_eq!(r["result"]["hits"][0]["message_id"], 7, "resp: {r}");
+    assert_eq!(r["result"]["results"][0]["message_id"], 7, "resp: {r}");
+
+    // 2b. get_attachment_text → localmail returns application/json {"text": …};
+    // the worker must surface the inner text, not the JSON envelope as a string.
+    let text_sha = "a".repeat(64);
+    let r = rpc(&mut stdin, &mut stdout, 5, "mail.get_attachment_text", serde_json::json!({"sha256": text_sha}));
+    assert_eq!(r["result"]["text"], "extracted booking text", "resp: {r}");
 
     // 3. get_attachment → original bytes written to out/, path returned, no bytes inline.
     let sha = "a".repeat(64);
