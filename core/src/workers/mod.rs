@@ -10,6 +10,7 @@ pub mod browser_driver;
 pub mod endpoint_guard;
 pub mod gliner_relex;
 pub mod interpreter_deps;
+pub mod mail;
 pub mod python_exec;
 pub mod shell_exec;
 pub mod web_fetch;

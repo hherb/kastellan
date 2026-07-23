@@ -39,6 +39,35 @@ pub fn apply_scratch(policy: &mut SandboxPolicy, dir: &Path) {
         .push((ENV_WORKER_SCRATCH.to_string(), dir.to_string_lossy().into_owned()));
 }
 
+/// Env var naming the per-task durable output dir for a worker that opts into
+/// artifact output (mirrors [`ENV_WORKER_SCRATCH`]). Unlike the scratch env,
+/// this dir is **task-scoped** and **durable**: the lane runner creates it under
+/// the artifacts root (`<artifacts_root>/<task_id>/`), so a file written here
+/// survives the task and the path the worker returns is where the file actually
+/// is. The runner prunes it after the task only if it is empty (see
+/// `scheduler::runner`); retention of delivered files is an operator concern.
+pub const ENV_WORKER_OUT: &str = "KASTELLAN_WORKER_OUT";
+
+/// Bind a per-task `out/` directory into a worker policy: a writable `fs_write`
+/// entry (→ the worker-side Landlock filter via `derive_lockdown_env`, so host
+/// and worker agree) plus the [`ENV_WORKER_OUT`] env pointer telling the worker
+/// where to write. Pure. Mirrors [`apply_scratch`] but for durable task output.
+///
+/// **Per-spawn vs. per-worker-lifetime hazard** (same class as
+/// `ToolEntry.ephemeral_scratch`): this binds ONE task's `out/` into a policy
+/// clone consulted only on a COLD spawn. A warm-reusable (`Lifecycle::IdleTimeout`)
+/// worker would keep the first task's `out/` for every later task — and that dir
+/// is wiped at the first task's finalize. So a tool that opts in via
+/// `wants_workspace_out` MUST be `Lifecycle::SingleUse`; `apply_task_out`
+/// debug-asserts this. No warm-reusable worker opts in today (mail is SingleUse);
+/// revisit before the first one does.
+pub fn apply_workspace_out(policy: &mut SandboxPolicy, out_dir: &Path) {
+    policy.fs_write.push(out_dir.to_path_buf());
+    policy
+        .env
+        .push((ENV_WORKER_OUT.to_string(), out_dir.to_string_lossy().into_owned()));
+}
+
 /// RAII owner of a host-created per-spawn scratch dir. `Drop` best-effort
 /// removes the whole subtree — mirrors `crate::egress::net_worker`'s scratch
 /// cleanup. Held inside `SupervisedWorker` so the dir outlives the worker
@@ -118,6 +147,17 @@ mod tests {
         let hits: Vec<_> = p.env.iter().filter(|(k, _)| k == ENV_WORKER_SCRATCH).collect();
         assert_eq!(hits.len(), 1, "exactly one scratch env entry");
         assert_eq!(hits[0].1, "/var/tmp/pyexec-1-1");
+    }
+
+    #[test]
+    fn apply_workspace_out_pushes_fs_write_and_env() {
+        let mut p = SandboxPolicy::default();
+        let dir = Path::new("/tmp/ws/out");
+        apply_workspace_out(&mut p, dir);
+        assert!(p.fs_write.contains(&PathBuf::from("/tmp/ws/out")), "out dir must be writable");
+        let hits: Vec<_> = p.env.iter().filter(|(k, _)| k == ENV_WORKER_OUT).collect();
+        assert_eq!(hits.len(), 1, "exactly one out env entry");
+        assert_eq!(hits[0].1, "/tmp/ws/out");
     }
 
     #[test]

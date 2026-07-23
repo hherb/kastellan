@@ -71,7 +71,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::handoff::{FetchResult, HandoffCache, DEFAULT_RESULT_BYTE_CAP};
@@ -308,12 +308,51 @@ fn build_scheduler_step_failure_payload(
 /// Cheap to clone (all fields are `Arc`/`PgPool`); the daemon's
 /// scheduler holds a single instance and the inner loop calls
 /// `dispatch_step` directly on it.
+/// Tools that opt into a per-task workspace `out/` dir (durable file output).
+/// Name-based, mirroring `worker_lifecycle::force_route::disable_mitm_for` —
+/// no `ToolEntry` field so the many existing entry constructors are untouched.
+pub(crate) fn wants_workspace_out(tool_name: &str) -> bool {
+    matches!(tool_name, "mail")
+}
+
+/// Return an owned `ToolEntry` clone with the per-task workspace `out/` bound
+/// into its policy, when `tool` opts in ([`wants_workspace_out`]) AND an
+/// `out_dir` is registered for the task; otherwise `None` (the caller uses the
+/// base entry unchanged, byte-identical to pre-workspace behaviour). Pure —
+/// extracted from `dispatch_step` so the A1↔A3 join point is unit-testable.
+///
+/// # Panics (debug builds only)
+/// Debug-asserts an opt-in entry is [`Lifecycle::SingleUse`]. A warm-reused
+/// (`IdleTimeout`) worker keeps the FIRST task's `out_dir` baked into its
+/// sandbox for every later task — and that dir is wiped at the first task's
+/// finalize — so a workspace-out tool MUST spawn fresh per call. Mirrors the
+/// `ToolEntry.ephemeral_scratch` per-spawn-vs-per-worker-lifetime guard.
+fn apply_task_out(tool: &str, base: &ToolEntry, out_dir: Option<PathBuf>) -> Option<ToolEntry> {
+    if !wants_workspace_out(tool) {
+        return None;
+    }
+    let dir = out_dir?;
+    debug_assert!(
+        matches!(base.lifecycle, crate::worker_lifecycle::Lifecycle::SingleUse),
+        "wants_workspace_out tool '{tool}' must be Lifecycle::SingleUse: a warm-reused worker \
+         would bake the first task's out_dir (wiped at its finalize) into later tasks — see \
+         crate::tool_host::apply_workspace_out"
+    );
+    let mut e = base.clone();
+    crate::tool_host::apply_workspace_out(&mut e.policy, &dir);
+    Some(e)
+}
+
 pub struct ToolHostStepDispatcher {
     pool: PgPool,
     vault: Arc<Vault>,                    // NEW — Item 31
     lifecycle: Arc<dyn crate::worker_lifecycle::WorkerLifecycleManager>,
     registry: Arc<ToolRegistry>,
     handoff: Arc<HandoffCache>,
+    /// Per-task workspace `out/` dirs, registered by the lane runner. Read in
+    /// `dispatch_step` to bind `out/` into an opt-in worker's policy clone;
+    /// cleared by `purge_task`.
+    task_out_dirs: Mutex<HashMap<i64, PathBuf>>,
 }
 
 impl ToolHostStepDispatcher {
@@ -324,7 +363,22 @@ impl ToolHostStepDispatcher {
         registry: Arc<ToolRegistry>,
         handoff: Arc<HandoffCache>,
     ) -> Self {
-        Self { pool, vault, lifecycle, registry, handoff }
+        Self {
+            pool,
+            vault,
+            lifecycle,
+            registry,
+            handoff,
+            task_out_dirs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn out_dir_for(&self, task_id: i64) -> Option<PathBuf> {
+        self.task_out_dirs
+            .lock()
+            .expect("task_out_dirs mutex poisoned")
+            .get(&task_id)
+            .cloned()
     }
 }
 
@@ -336,6 +390,17 @@ impl StepDispatcher for ToolHostStepDispatcher {
 
     fn purge_task(&self, task_id: i64) {
         self.handoff.purge_task(task_id);
+        self.task_out_dirs
+            .lock()
+            .expect("task_out_dirs mutex poisoned")
+            .remove(&task_id);
+    }
+
+    fn set_task_out_dir(&self, task_id: i64, out_dir: PathBuf) {
+        self.task_out_dirs
+            .lock()
+            .expect("task_out_dirs mutex poisoned")
+            .insert(task_id, out_dir);
     }
 
     async fn dispatch_step(&self, task_id: i64, step: &PlannedStep) -> StepOutcome {
@@ -433,6 +498,16 @@ impl StepDispatcher for ToolHostStepDispatcher {
                 detail: format!("tool '{}' not registered", step.tool),
             };
         };
+
+        // Opt-in per-task workspace `out/`: bind the task's out dir into a
+        // clone of the base policy before spawn (the ToolEntry.policy doc
+        // anticipates exactly this per-step override). `owned_entry` must
+        // outlive `acquire`; tools that do not opt in, or a task with no
+        // registered out dir, use the base entry unchanged (byte-identical to
+        // before). Branch selection lives in the pure `apply_task_out` so it is
+        // unit-testable off the async dispatch path.
+        let owned_entry = apply_task_out(&step.tool, entry, self.out_dir_for(task_id));
+        let entry = owned_entry.as_ref().unwrap_or(entry);
 
         // The manager owns the spawn/warm-cache decision. `acquire` returns
         // `Err(ToolHostError)` only on real spawn failures (warm-cache hits never

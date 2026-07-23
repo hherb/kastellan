@@ -25,6 +25,7 @@ pub static WORKER_MANIFESTS: &[&dyn WorkerManifest] = &[
     &crate::workers::web_search::WebSearchManifest,
     &crate::workers::web_research::WebResearchManifest,
     &crate::workers::browser_driver::BrowserDriverManifest,
+    &crate::workers::mail::MailManifest,
 ];
 
 /// The kind of `tool_allowlists` entry a tool uses, discovered by scanning the

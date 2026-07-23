@@ -189,6 +189,12 @@ pub trait StepDispatcher: Send + Sync {
     /// production dispatcher overrides it. Called once per task by the lane
     /// runner after [`run_to_terminal`].
     fn purge_task(&self, _task_id: i64) {}
+
+    /// Register a per-task workspace `out/` dir so `dispatch_step` can bind it
+    /// into opt-in workers (durable file output). Called once per task by the
+    /// lane runner before dispatching, when a `Workspace` was constructed.
+    /// Default no-op; only the production dispatcher holds workspace state.
+    fn set_task_out_dir(&self, _task_id: i64, _out_dir: std::path::PathBuf) {}
 }
 
 /// Run the inner loop until terminal. Returns an [`InnerLoopResult`]
