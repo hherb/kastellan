@@ -198,6 +198,73 @@ pub fn discover_binary(
     None
 }
 
+/// Trust verdict for the directory workers are discovered from (audit #12 /
+/// #388). See [`assess_install_dir`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallDirTrust {
+    Trusted,
+    Untrusted { reason: String },
+}
+
+/// Ownership + permission facts about the install directory, read from Unix
+/// metadata by the caller. A plain integer struct so [`assess_install_dir`] is
+/// pure and testable without a real filesystem.
+#[derive(Clone, Copy, Debug)]
+pub struct InstallDirFacts {
+    /// Owning uid (`MetadataExt::uid`).
+    pub owner_uid: u32,
+    /// Permission + type bits (`MetadataExt::mode`).
+    pub mode: u32,
+}
+
+/// Classify the install directory's trust. **Untrusted** iff it is writable by
+/// a principal OTHER than root or the daemon's own euid — i.e. someone who
+/// could drop a malicious `kastellan-worker-*` sibling that [`discover_binary`]
+/// would register on restart:
+///   - world-writable (`mode & 0o002`), OR
+///   - group-writable (`mode & 0o020`), OR
+///   - owned by a uid that is neither 0 (root) nor `self_euid`.
+///
+/// The normal per-user install (`~/.local/lib/kastellan`, owned by the daemon
+/// user, mode 0755) is **Trusted** — writability by the daemon's own user is
+/// already inside the threat-model boundary (a compromise there owns the worker
+/// slot regardless). Defence-in-depth backstop for the documented "install dir
+/// must not be user-writable" deploy assumption; pure, so unit-tested on both
+/// hosts.
+///
+/// **Residual (parent-chain writability, cf. #479).** This inspects only the
+/// leaf install dir, not its ancestors. A leaf that is itself safe (0755,
+/// self-owned) but whose PARENT is group/world-writable is still substitutable:
+/// an attacker with write on the parent can `rename(2)` the real dir away and
+/// drop in their own tree of `kastellan-worker-*` binaries, which
+/// [`discover_binary`] would then register — the same "the parent was never
+/// asserted" shape #479 hit. Not closed here (this is a warn-only advisory for a
+/// Low-sev deploy assumption, and a full ancestor walk risks false positives on
+/// legitimate layouts); the deploy assumption remains the primary control. A
+/// future tightening would walk `dir.ancestors()` to the mount root.
+pub fn assess_install_dir(self_euid: u32, facts: &InstallDirFacts) -> InstallDirTrust {
+    let perms = facts.mode & 0o777;
+    if facts.mode & 0o002 != 0 {
+        return InstallDirTrust::Untrusted {
+            reason: format!("world-writable (mode {perms:04o})"),
+        };
+    }
+    if facts.mode & 0o020 != 0 {
+        return InstallDirTrust::Untrusted {
+            reason: format!("group-writable (mode {perms:04o})"),
+        };
+    }
+    if facts.owner_uid != 0 && facts.owner_uid != self_euid {
+        return InstallDirTrust::Untrusted {
+            reason: format!(
+                "owned by uid {} (neither root nor the daemon's euid {self_euid})",
+                facts.owner_uid
+            ),
+        };
+    }
+    InstallDirTrust::Trusted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +402,45 @@ mod tests {
         let get_env2 = |_k: &str| None;
         let c2 = ctx(&get_env2, &exists, None);
         assert_eq!(discover_binary(&c2, "OVERRIDE", "worker"), None);
+    }
+
+    #[test]
+    fn self_owned_0755_is_trusted() {
+        // The normal per-user install: owned by self, drwxr-xr-x.
+        let facts = InstallDirFacts { owner_uid: 1000, mode: 0o040755 };
+        assert_eq!(assess_install_dir(1000, &facts), InstallDirTrust::Trusted);
+    }
+
+    #[test]
+    fn root_owned_0755_is_trusted() {
+        let facts = InstallDirFacts { owner_uid: 0, mode: 0o040755 };
+        assert_eq!(assess_install_dir(1000, &facts), InstallDirTrust::Trusted);
+    }
+
+    #[test]
+    fn world_writable_is_untrusted() {
+        let facts = InstallDirFacts { owner_uid: 1000, mode: 0o040757 };
+        assert!(matches!(assess_install_dir(1000, &facts), InstallDirTrust::Untrusted { .. }));
+    }
+
+    #[test]
+    fn group_writable_is_untrusted() {
+        let facts = InstallDirFacts { owner_uid: 1000, mode: 0o040775 };
+        assert!(matches!(assess_install_dir(1000, &facts), InstallDirTrust::Untrusted { .. }));
+    }
+
+    #[test]
+    fn owned_by_other_nonroot_uid_is_untrusted() {
+        let facts = InstallDirFacts { owner_uid: 1234, mode: 0o040755 };
+        assert!(matches!(assess_install_dir(1000, &facts), InstallDirTrust::Untrusted { .. }));
+    }
+
+    #[test]
+    fn world_writable_beats_root_ownership() {
+        // Writability dominates: even root-owned but world-writable is untrusted
+        // (e.g. a /tmp-like sticky 1777 dir must never host worker binaries).
+        let facts = InstallDirFacts { owner_uid: 0, mode: 0o041777 };
+        assert!(matches!(assess_install_dir(1000, &facts), InstallDirTrust::Untrusted { .. }));
     }
 }
 

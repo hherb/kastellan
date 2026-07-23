@@ -95,6 +95,118 @@ pub struct OsKeyringProvider {
     key_bytes: Zeroizing<[u8; KEY_LEN]>,
 }
 
+/// Minimal keyring surface the first-init logic needs, so the get→set→read-back
+/// decision can be unit-tested without a real keyring. Production impl
+/// ([`KeyringEntryOps`]) wraps `keyring::Entry`; tests fake it and can return a
+/// different read-back value to simulate a racing writer.
+trait KeyringOps {
+    fn get_secret(&self) -> Result<Vec<u8>, KeyringOpsError>;
+    fn set_secret(&self, bytes: &[u8]) -> Result<(), KeyringOpsError>;
+}
+
+/// Errors from a [`KeyringOps`] call. `NoEntry` is modelled explicitly (it
+/// drives the first-init branch); everything else is opaque.
+enum KeyringOpsError {
+    NoEntry,
+    Other(String),
+}
+
+/// How [`resolve_or_init`] resolved, for caller-side logging.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstInit {
+    /// An entry already existed; its key was returned.
+    ExistingKey,
+    /// No entry existed; we generated, stored, and read back OUR key.
+    FreshKey,
+    /// No entry existed; we stored a key but the read-back returned a DIFFERENT
+    /// key — a concurrent process won the first-init race, and we adopted its
+    /// key so both converge. See the concurrency note on
+    /// [`OsKeyringProvider::ensure_initialized`]: this catches the race only
+    /// when the competing `set` lands before our read-back; it is NOT a mutex.
+    RacedConverged,
+}
+
+/// Validate a raw keyring value into a fixed-size key.
+fn to_key(bytes: Vec<u8>) -> Result<[u8; KEY_LEN], SecretsError> {
+    if bytes.len() != KEY_LEN {
+        return Err(SecretsError::KeyLengthInvalid {
+            expected: KEY_LEN,
+            got: bytes.len(),
+        });
+    }
+    let mut out = [0u8; KEY_LEN];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Pure first-init logic over a [`KeyringOps`] seam. On `NoEntry`: generate a
+/// key with `gen`, store it, then READ IT BACK. If the read-back differs from
+/// what we wrote, a concurrent process overwrote us — adopt its key
+/// (`RacedConverged`) so both processes converge on ONE key before any secret
+/// is encrypted. `gen` is injected (OsRng in production, fixed in tests), so
+/// this function is deterministic under test.
+fn resolve_or_init(
+    ops: &dyn KeyringOps,
+    gen: impl FnOnce() -> [u8; KEY_LEN],
+) -> Result<([u8; KEY_LEN], FirstInit), SecretsError> {
+    match ops.get_secret() {
+        Ok(existing) => Ok((to_key(existing)?, FirstInit::ExistingKey)),
+        Err(KeyringOpsError::NoEntry) => {
+            let fresh = gen();
+            ops.set_secret(&fresh)
+                .map_err(|e| SecretsError::Keyring(format!("set_secret failed: {}", op_err(e))))?;
+            // Read back to detect a racing writer that overwrote us.
+            let after = match ops.get_secret() {
+                Ok(b) => to_key(b)?,
+                Err(KeyringOpsError::NoEntry) => {
+                    return Err(SecretsError::Keyring(
+                        "keyring entry vanished immediately after set_secret".into(),
+                    ))
+                }
+                Err(KeyringOpsError::Other(s)) => {
+                    return Err(SecretsError::Keyring(format!("read-back get_secret failed: {s}")))
+                }
+            };
+            if after == fresh {
+                Ok((fresh, FirstInit::FreshKey))
+            } else {
+                Ok((after, FirstInit::RacedConverged))
+            }
+        }
+        Err(KeyringOpsError::Other(s)) => {
+            Err(SecretsError::Keyring(format!("get_secret failed: {s}")))
+        }
+    }
+}
+
+/// Render a [`KeyringOpsError`] for an error message.
+fn op_err(e: KeyringOpsError) -> String {
+    match e {
+        KeyringOpsError::NoEntry => "no entry".into(),
+        KeyringOpsError::Other(s) => s,
+    }
+}
+
+/// Production [`KeyringOps`] wrapping a real `keyring::Entry`.
+struct KeyringEntryOps {
+    entry: keyring::Entry,
+}
+
+impl KeyringOps for KeyringEntryOps {
+    fn get_secret(&self) -> Result<Vec<u8>, KeyringOpsError> {
+        match self.entry.get_secret() {
+            Ok(b) => Ok(b),
+            Err(keyring::Error::NoEntry) => Err(KeyringOpsError::NoEntry),
+            Err(other) => Err(KeyringOpsError::Other(other.to_string())),
+        }
+    }
+    fn set_secret(&self, bytes: &[u8]) -> Result<(), KeyringOpsError> {
+        self.entry
+            .set_secret(bytes)
+            .map_err(|e| KeyringOpsError::Other(e.to_string()))
+    }
+}
+
 impl OsKeyringProvider {
     /// Open or initialize the keyring entry for the default
     /// `(kastellan, secrets-v1)` identity. See [`KEY_SERVICE`] /
@@ -104,14 +216,16 @@ impl OsKeyringProvider {
     /// retrieve it. Returns [`SecretsError::Keyring`] when the
     /// keyring is locked, missing, or otherwise unreachable.
     ///
-    /// **Concurrency contract.** This is `get-then-set` and is **not**
-    /// safe to call concurrently when no entry yet exists: two callers
-    /// can both observe `NoEntry`, both generate distinct keys, and
-    /// the second `set_secret` overwrites the first — leaving any data
-    /// the first caller already encrypted unrecoverable. Callers must
-    /// ensure exactly one process performs the first-ever
-    /// initialisation. The agent's single-daemon / single-user model
-    /// makes this trivially true in practice; callers spawning
+    /// **Concurrency contract.** First-init does a read-back-verify: after
+    /// storing a freshly generated key it reads the entry back and, if a
+    /// concurrent process overwrote it, ADOPTS that process's key so both
+    /// converge on one (logged at WARN). This closes the common race window but
+    /// is **not** a full mutex — the read-back only catches a competing `set`
+    /// that lands before it, so an unfavourable interleaving (the other
+    /// process's `get` precedes our `set`) can still leave the two holding
+    /// different keys. Callers must therefore still ensure exactly one process
+    /// performs the first-ever initialisation. The agent's single-daemon /
+    /// single-user model makes this trivially true in practice; callers spawning
     /// multiple instances must serialise the first call externally.
     pub fn ensure_initialized() -> Result<Self, SecretsError> {
         Self::ensure_initialized_for(KEY_SERVICE, KEY_ACCOUNT)
@@ -124,32 +238,21 @@ impl OsKeyringProvider {
     pub fn ensure_initialized_for(service: &str, account: &str) -> Result<Self, SecretsError> {
         let entry = keyring::Entry::new(service, account)
             .map_err(|e| SecretsError::Keyring(format!("Entry::new failed: {e}")))?;
-        let bytes: [u8; KEY_LEN] = match entry.get_secret() {
-            Ok(existing) => {
-                if existing.len() != KEY_LEN {
-                    return Err(SecretsError::KeyLengthInvalid {
-                        expected: KEY_LEN,
-                        got: existing.len(),
-                    });
-                }
-                let mut out = [0u8; KEY_LEN];
-                out.copy_from_slice(&existing);
-                out
-            }
-            Err(keyring::Error::NoEntry) => {
-                let mut fresh = [0u8; KEY_LEN];
-                OsRng.fill_bytes(&mut fresh);
-                entry
-                    .set_secret(&fresh)
-                    .map_err(|e| SecretsError::Keyring(format!("set_secret failed: {e}")))?;
-                fresh
-            }
-            Err(other) => {
-                return Err(SecretsError::Keyring(format!(
-                    "get_secret failed: {other}"
-                )));
-            }
-        };
+        let ops = KeyringEntryOps { entry };
+        let (bytes, outcome) = resolve_or_init(&ops, || {
+            let mut fresh = [0u8; KEY_LEN];
+            OsRng.fill_bytes(&mut fresh);
+            fresh
+        })?;
+        if outcome == FirstInit::RacedConverged {
+            tracing::warn!(
+                service,
+                account,
+                "concurrent keyring first-init detected; converged on the winning key. \
+                 Defence-in-depth, NOT full serialisation — ensure exactly one process \
+                 performs the first-ever init (see OsKeyringProvider docs)."
+            );
+        }
         Ok(Self {
             current_id: format!("{service}.{account}"),
             key_bytes: Zeroizing::new(bytes),
@@ -177,6 +280,95 @@ impl KeyProvider for OsKeyringProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    /// Scripted [`KeyringOps`] fake: `get_secret` returns queued responses in
+    /// order; `set_secret` records writes. A second queued get that differs from
+    /// the stored write simulates a racing first-init writer.
+    struct ScriptedOps {
+        gets: RefCell<VecDeque<Result<Vec<u8>, KeyringOpsError>>>,
+        sets: RefCell<Vec<Vec<u8>>>,
+    }
+    impl ScriptedOps {
+        fn new(gets: Vec<Result<Vec<u8>, KeyringOpsError>>) -> Self {
+            Self {
+                gets: RefCell::new(gets.into()),
+                sets: RefCell::new(Vec::new()),
+            }
+        }
+    }
+    impl KeyringOps for ScriptedOps {
+        fn get_secret(&self) -> Result<Vec<u8>, KeyringOpsError> {
+            self.gets
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Err(KeyringOpsError::NoEntry))
+        }
+        fn set_secret(&self, bytes: &[u8]) -> Result<(), KeyringOpsError> {
+            self.sets.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn resolve_returns_existing_key_without_writing() {
+        let ops = ScriptedOps::new(vec![Ok(vec![7u8; KEY_LEN])]);
+        let (key, outcome) = resolve_or_init(&ops, || [1u8; KEY_LEN]).unwrap();
+        assert_eq!(key, [7u8; KEY_LEN]);
+        assert_eq!(outcome, FirstInit::ExistingKey);
+        assert!(ops.sets.borrow().is_empty(), "must not write when an entry exists");
+    }
+
+    #[test]
+    fn resolve_generates_and_stores_on_no_entry() {
+        // NoEntry, then read-back returns exactly what we stored → FreshKey.
+        let ops = ScriptedOps::new(vec![Err(KeyringOpsError::NoEntry), Ok(vec![1u8; KEY_LEN])]);
+        let (key, outcome) = resolve_or_init(&ops, || [1u8; KEY_LEN]).unwrap();
+        assert_eq!(key, [1u8; KEY_LEN]);
+        assert_eq!(outcome, FirstInit::FreshKey);
+        assert_eq!(ops.sets.borrow().as_slice(), &[vec![1u8; KEY_LEN]]);
+    }
+
+    #[test]
+    fn resolve_converges_on_racing_writers_key() {
+        // NoEntry, we store K1, but the read-back returns a DIFFERENT valid key
+        // K2 — a racer won. We adopt K2 (converge), not keep K1.
+        let ops = ScriptedOps::new(vec![Err(KeyringOpsError::NoEntry), Ok(vec![2u8; KEY_LEN])]);
+        let (key, outcome) = resolve_or_init(&ops, || [1u8; KEY_LEN]).unwrap();
+        assert_eq!(key, [2u8; KEY_LEN], "must adopt the winner's key");
+        assert_eq!(outcome, FirstInit::RacedConverged);
+        assert_eq!(ops.sets.borrow().as_slice(), &[vec![1u8; KEY_LEN]]);
+    }
+
+    #[test]
+    fn resolve_rejects_existing_wrong_length() {
+        let ops = ScriptedOps::new(vec![Ok(vec![0u8; 10])]);
+        let err = resolve_or_init(&ops, || [1u8; KEY_LEN]).unwrap_err();
+        assert!(matches!(err, SecretsError::KeyLengthInvalid { expected, got }
+            if expected == KEY_LEN && got == 10));
+    }
+
+    #[test]
+    fn resolve_propagates_get_error() {
+        let ops = ScriptedOps::new(vec![Err(KeyringOpsError::Other("boom".into()))]);
+        let err = resolve_or_init(&ops, || [1u8; KEY_LEN]).unwrap_err();
+        assert!(matches!(err, SecretsError::Keyring(s) if s.contains("boom")));
+    }
+
+    #[test]
+    fn resolve_errors_when_readback_wrong_length() {
+        let ops = ScriptedOps::new(vec![Err(KeyringOpsError::NoEntry), Ok(vec![0u8; 5])]);
+        let err = resolve_or_init(&ops, || [1u8; KEY_LEN]).unwrap_err();
+        assert!(matches!(err, SecretsError::KeyLengthInvalid { got, .. } if got == 5));
+    }
+
+    #[test]
+    fn resolve_errors_when_entry_vanishes_after_set() {
+        let ops = ScriptedOps::new(vec![Err(KeyringOpsError::NoEntry), Err(KeyringOpsError::NoEntry)]);
+        let err = resolve_or_init(&ops, || [1u8; KEY_LEN]).unwrap_err();
+        assert!(matches!(err, SecretsError::Keyring(s) if s.contains("vanished")));
+    }
 
     /// MapKeyProvider returns the registered key and reports its id.
     #[test]

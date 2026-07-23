@@ -2,11 +2,17 @@
 //!
 //! The streaming [`crate::RollingMatcher`] reports the FIRST leak and is built
 //! to BLOCK a tunnel. python-exec output is a bounded in-memory buffer that must
-//! instead be SCRUBBED in place, so this finds EVERY non-overlapping occurrence
-//! of a secret's verbatim bytes and replaces it with a marker. It reuses the
-//! same Rabin pre-filter + SHA-256 confirm as the matcher (so detection cannot
-//! drift between the two), specialized to a contiguous slice (direct indexing,
-//! no ring buffer).
+//! instead be SCRUBBED in place, so this finds EVERY occurrence of a secret's
+//! verbatim bytes and replaces it with a marker — coincidentally-overlapping
+//! matches MERGE into one redacted run so no secret byte survives between two
+//! overlapping secrets (see [`redact`]). It reuses the same Rabin pre-filter +
+//! SHA-256 confirm as the matcher (so detection cannot drift between the two),
+//! specialized to a contiguous slice (direct indexing, no ring buffer).
+//!
+//! An ENCODED appearance of a secret (base64/hex/url-encoded) is NOT scrubbed —
+//! this matches verbatim value bytes only, as does the streaming matcher. The
+//! containment boundary for encoded egress is the sandbox + egress proxy, not
+//! this fingerprint scanner.
 
 use std::collections::HashMap;
 
@@ -31,22 +37,38 @@ pub struct RedactOutcome {
     pub hits: Vec<RedactHit>,
 }
 
-/// Write the redaction marker for `sha256_hex` directly into `out`. Carries the
-/// first 8 hex chars of the secret's SHA-256 so a redaction correlates to the
-/// matching `secret.redeemed` audit row WITHOUT leaking any plaintext.
-fn push_marker(out: &mut Vec<u8>, sha256_hex_str: &str) {
+/// Write the redaction marker directly into `out`. Lists each contributing
+/// secret's first-8 SHA-256 hex chars (joined by `+`) so a redaction correlates
+/// to the matching `secret.redeemed` audit row(s) WITHOUT leaking any plaintext.
+/// A single-secret run yields exactly `[redacted:<8hex>]` (unchanged format).
+fn push_marker(out: &mut Vec<u8>, sha256_hex_strs: &[String]) {
     use std::fmt::Write as _;
-    let mut m = String::with_capacity(19); // "[redacted:" + 8 + "]"
-    let _ = write!(m, "[redacted:{}]", &sha256_hex_str[..8]);
+    let mut m = String::from("[redacted:");
+    for (i, s) in sha256_hex_strs.iter().enumerate() {
+        if i > 0 {
+            m.push('+');
+        }
+        let _ = write!(m, "{}", &s[..8]);
+    }
+    m.push(']');
     out.extend_from_slice(m.as_bytes());
 }
 
-/// Find every non-overlapping occurrence of any `patterns` value in `input` and
-/// replace it with a `[redacted:<8hex>]` marker. Earliest match wins; on equal
-/// start the longer
-/// span wins; scanning resumes past a chosen span. Empty `patterns` (or none
-/// matching) returns `input` unchanged with no hits. Bounded full-buffer scan:
-/// O(input.len()) per distinct pattern length.
+/// A maximal run of overlapping redaction spans, merged into one redacted
+/// region so no secret byte can survive between two coincidentally-overlapping
+/// secrets.
+struct Run {
+    start: usize,
+    end: usize,
+    /// Contributing (offset, len, sha256) spans, in scan order.
+    spans: Vec<(usize, usize, [u8; 32])>,
+}
+
+/// Find every occurrence of any `patterns` value in `input` and replace it with
+/// a `[redacted:<8hex>]` marker. Overlapping matches MERGE into one redacted
+/// region (no secret byte survives an overlap); adjacent matches stay separate.
+/// Empty `patterns` (or none matching) returns `input` unchanged with no hits.
+/// Bounded full-buffer scan: O(input.len()) per distinct pattern length.
 pub fn redact(input: &[u8], patterns: &[SecretFingerprint]) -> RedactOutcome {
     // Group target SHA-256s by (len, fp64), skipping patterns longer than the
     // input (they cannot match) and any defensive len == 0.
@@ -91,49 +113,66 @@ pub fn redact(input: &[u8], patterns: &[SecretFingerprint]) -> RedactOutcome {
         }
     }
 
-    // Resolve overlaps: earliest start first, longer span first on a tie; then
-    // greedily keep non-overlapping spans.
-    //
-    // Accepted limitation: when two DISTINCT secrets overlap (the tail of one is
-    // the head of the other), the earlier-start span is redacted and the later
-    // one is dropped, so the later secret's non-overlapping suffix survives in
-    // plaintext. This is not adversarially reachable — agent-authored code cannot
-    // control vault secret values, so it cannot engineer such an alignment; it can
-    // only occur by genuine coincidence of two high-entropy secrets (negligible).
-    // The streaming `RollingMatcher` has the equivalent first-hit limitation, and
-    // this matches conventional non-overlapping find/replace semantics. Pinned by
-    // `overlapping_distinct_secrets_leave_second_suffix`.
+    // Merge overlapping spans into maximal runs so NO secret byte can survive.
+    // Sort earliest-start first, longer span first on a tie; then fold each span
+    // into the current run when it STRICTLY overlaps it (`off < run.end`).
+    // Adjacent spans (`off == run.end`) start a fresh run, preserving
+    // back-to-back redaction. A run redacts the union of its spans — a strict
+    // superset of the old greedy behaviour, so over-redaction is always safe.
+    // This closes the prior gap where two DISTINCT overlapping secrets let the
+    // later one's non-overlapping suffix survive in plaintext (a coincidence of
+    // two high-entropy values; not adversarially reachable, since agent code
+    // cannot control vault secret values). Pinned by
+    // `overlapping_distinct_secrets_are_fully_redacted`.
     raw.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-    let mut next_free = 0usize;
-    let mut chosen: Vec<(usize, usize, [u8; 32])> = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
     for (off, len, sha) in raw {
-        if off >= next_free {
-            next_free = off + len;
-            chosen.push((off, len, sha));
+        match runs.last_mut() {
+            Some(run) if off < run.end => {
+                run.end = run.end.max(off + len);
+                run.spans.push((off, len, sha));
+            }
+            _ => runs.push(Run {
+                start: off,
+                end: off + len,
+                spans: vec![(off, len, sha)],
+            }),
         }
     }
 
-    if chosen.is_empty() {
+    if runs.is_empty() {
         return RedactOutcome {
             bytes: input.to_vec(),
             hits: Vec::new(),
         };
     }
 
-    // Splice the markers in, recording one RedactHit per replaced span.
+    // Splice one marker per run. The marker lists each DISTINCT contributing
+    // secret's 8-hex in first-appearance order (for a non-overlapping run that
+    // is exactly one secret → byte-identical to the prior format). One RedactHit
+    // is recorded per contributing span (original offsets/lens preserved), so
+    // the audit trail sees every secret that appeared.
     let mut bytes = Vec::with_capacity(input.len());
-    let mut hits = Vec::with_capacity(chosen.len());
+    let mut hits = Vec::new();
     let mut cursor = 0usize;
-    for (off, len, sha) in chosen {
-        bytes.extend_from_slice(&input[cursor..off]);
-        let sha_hex = sha256_hex(&sha);
-        push_marker(&mut bytes, &sha_hex);
-        hits.push(RedactHit {
-            sha256_hex: sha_hex,
-            offset: off,
-            len,
-        });
-        cursor = off + len;
+    for run in runs {
+        bytes.extend_from_slice(&input[cursor..run.start]);
+        let mut marker_hexes: Vec<String> = Vec::new();
+        let mut seen: Vec<[u8; 32]> = Vec::new();
+        for (off, len, sha) in &run.spans {
+            let sha_hex = sha256_hex(sha);
+            if !seen.contains(sha) {
+                seen.push(*sha);
+                marker_hexes.push(sha_hex.clone());
+            }
+            hits.push(RedactHit {
+                sha256_hex: sha_hex,
+                offset: *off,
+                len: *len,
+            });
+        }
+        push_marker(&mut bytes, &marker_hexes);
+        cursor = run.end;
     }
     bytes.extend_from_slice(&input[cursor..]);
     RedactOutcome { bytes, hits }
@@ -226,49 +265,84 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_candidates_resolve_earliest_start() {
-        // "abcdefghij" contains "abcdefgh" (len 8) at offset 0 and "cdefghij"
-        // (len 8) at offset 2; the earlier-start match wins.
-        let a = b"abcdefgh";
-        let b = b"cdefghij";
+    fn overlapping_candidates_merge_into_one_run() {
+        // "abcdefghij" contains "abcdefgh" (len 8) at [0,8) and "cdefghij"
+        // (len 8) at [2,10) — they overlap, so they MERGE into one redacted run
+        // covering [0,10). Both secrets are recorded; no plaintext survives.
+        let a = b"abcdefgh"; // [0,8)
+        let b = b"cdefghij"; // [2,10)
         let out = redact(b"abcdefghij", &[fp(a), fp(b)]);
-        assert_eq!(out.hits.len(), 1);
+        let body = String::from_utf8(out.bytes).unwrap();
+        assert_eq!(out.hits.len(), 2, "both overlapping secrets recorded");
         assert_eq!(out.hits[0].offset, 0);
-        assert_eq!(out.hits[0].sha256_hex.len(), 64);
+        assert_eq!(out.hits[1].offset, 2);
+        assert_eq!(body, format!("[redacted:{}+{}]", sha8(a), sha8(b)));
+        assert!(!body.contains("cdefghij"));
+        assert!(!body.contains("abcdefgh"));
     }
 
     #[test]
-    fn overlapping_candidates_resolve_longer_span_on_tie() {
-        // "abcdefghijklmnop" (len 16) starts at offset 0 and "abcdefgh" (len 8)
-        // is a prefix of it, also at offset 0. The longer span must win.
-        let short = b"abcdefgh"; // len 8, offset 0
-        let long = b"abcdefghijklmnop"; // len 16, offset 0
+    fn nested_spans_same_start_merge_into_one_run() {
+        // "abcdefghijklmnop" (len 16) at [0,16) and its prefix "abcdefgh"
+        // (len 8) at [0,8) merge into [0,16); both recorded. The sort puts the
+        // longer span first on the start tie, so its sha leads the marker.
+        let short = b"abcdefgh"; // [0,8)
+        let long = b"abcdefghijklmnop"; // [0,16)
         let out = redact(b"abcdefghijklmnop", &[fp(short), fp(long)]);
-        assert_eq!(out.hits.len(), 1, "longer span must win on equal start offset");
-        assert_eq!(out.hits[0].len, long.len());
-        assert_eq!(out.hits[0].offset, 0);
+        let body = String::from_utf8(out.bytes).unwrap();
+        assert_eq!(out.hits.len(), 2);
+        assert_eq!(body, format!("[redacted:{}+{}]", sha8(long), sha8(short)));
+        assert!(!body.contains("abcdefgh"));
     }
 
     #[test]
-    fn overlapping_distinct_secrets_leave_second_suffix() {
-        // Accepted-limitation characterization (see the greedy-resolution comment
-        // in `redact`): two DISTINCT len-8 secrets overlap in the input —
-        // A="abcdefgh" at [0,8) and B="fghijklm" at [5,13). Greedy keeps the
-        // earlier-start span (A) and drops B, so B's non-overlapping suffix
-        // ("ijklm") survives in plaintext. Not adversarially reachable: agent
-        // code cannot align two vault secret values like this. If overlap
-        // semantics ever change to redact the union, update this test.
+    fn overlapping_distinct_secrets_are_fully_redacted() {
+        // Two DISTINCT len-8 secrets overlap: A="abcdefgh" [0,8) and
+        // B="fghijklm" [5,13). Merging redacts the UNION [0,13), so B's suffix
+        // ("ijklm") can no longer survive — the gap the greedy resolution left.
         let a = b"abcdefgh"; // [0,8)
         let b = b"fghijklm"; // [5,13)
         let out = redact(b"abcdefghijklm", &[fp(a), fp(b)]);
         let body = String::from_utf8(out.bytes).unwrap();
-        assert_eq!(out.hits.len(), 1, "only the earlier-start span is chosen");
+        assert_eq!(out.hits.len(), 2, "both overlapping secrets recorded");
         assert_eq!(out.hits[0].offset, 0);
-        assert_eq!(out.hits[0].len, a.len());
-        assert_eq!(body, format!("[redacted:{}]ijklm", sha8(a)));
-        // The full second secret is gone, but its suffix coincidentally survives.
+        assert_eq!(out.hits[1].offset, 5);
+        assert_eq!(body, format!("[redacted:{}+{}]", sha8(a), sha8(b)));
         assert!(!body.contains("fghijklm"));
-        assert!(body.contains("ijklm"));
+        assert!(!body.contains("ijklm"), "the suffix must NOT survive after merge");
+    }
+
+    #[test]
+    fn three_overlapping_secrets_merge_into_one_run() {
+        // A [0,8), B [5,13), C [10,18) form an overlap chain → one run [0,18).
+        let a = b"abcdefgh"; // [0,8)
+        let b = b"fghijklm"; // [5,13)
+        let c = b"klmnopqr"; // [10,18)
+        let out = redact(b"abcdefghijklmnopqr", &[fp(a), fp(b), fp(c)]);
+        let body = String::from_utf8(out.bytes).unwrap();
+        assert_eq!(out.hits.len(), 3);
+        assert_eq!(body, format!("[redacted:{}+{}+{}]", sha8(a), sha8(b), sha8(c)));
+    }
+
+    #[test]
+    fn disjoint_overlapping_pairs_stay_separate_runs() {
+        // Two overlap-pairs separated by a gap → two runs, two markers.
+        let a = b"abcdefgh"; // pair 1: [0,8)
+        let b = b"fghijklm"; // pair 1: [5,13)
+        let c = b"ABCDEFGH"; // pair 2: [15,23)
+        let d = b"FGHIJKLM"; // pair 2: [20,28)
+        let input = b"abcdefghijklm  ABCDEFGHIJKLM";
+        let out = redact(input, &[fp(a), fp(b), fp(c), fp(d)]);
+        let body = String::from_utf8(out.bytes).unwrap();
+        assert_eq!(body.matches("[redacted:").count(), 2, "two separate runs");
+        assert_eq!(out.hits.len(), 4, "all four secrets recorded");
+        assert_eq!(
+            body,
+            format!(
+                "[redacted:{}+{}]  [redacted:{}+{}]",
+                sha8(a), sha8(b), sha8(c), sha8(d)
+            )
+        );
     }
 
     #[test]

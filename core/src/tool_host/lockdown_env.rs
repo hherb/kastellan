@@ -107,6 +107,61 @@ pub fn derive_lockdown_env(policy: &SandboxPolicy) -> SandboxPolicy {
     out
 }
 
+/// A lockdown env entry that DISABLES a sandbox layer, weakening the
+/// profile-derived default (audit #12 / #388). Produced by
+/// [`detect_lockdown_overrides`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockdownOverride {
+    pub var: String,
+    pub value: String,
+}
+
+/// Inspect a *finalized* policy for sandbox-DISABLING lockdown env entries:
+/// `KASTELLAN_SECCOMP_PROFILE` set to `"none"`/`""` (the prelude parses both as
+/// "no filter") or `KASTELLAN_LANDLOCK_PROFILE` set to `"none"`. Returns one
+/// entry per disabled layer; empty when nothing is weakened.
+///
+/// [`derive_lockdown_env`] honours a manifest-supplied value verbatim, so a
+/// manifest author could silently under-lock a worker. This pure detector is
+/// the guard the audit asked for; the spawn paths log its output at WARN (see
+/// [`warn_lockdown_overrides`]). It does NOT reject — matrix legitimately sets
+/// both to `none` under the `--enforce-sandbox=false` dev opt-out — it only
+/// makes a sandbox-disabled spawn loud.
+pub fn detect_lockdown_overrides(policy: &SandboxPolicy) -> Vec<LockdownOverride> {
+    let mut out = Vec::new();
+    for (k, v) in &policy.env {
+        let disabled = if k == ENV_SECCOMP_PROFILE {
+            matches!(v.as_str(), "none" | "")
+        } else if k == ENV_LANDLOCK_PROFILE {
+            v == "none"
+        } else {
+            false
+        };
+        if disabled {
+            out.push(LockdownOverride {
+                var: k.clone(),
+                value: v.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Detect (via [`detect_lockdown_overrides`]) and log every sandbox-disabling
+/// lockdown override in `policy` at WARN, naming `worker` for context. The one
+/// place the log format lives, so the spawn paths that call it
+/// (`tool_host::spawn_worker`, `worker_lifecycle::persistent`) cannot drift.
+pub fn warn_lockdown_overrides(worker: &str, policy: &SandboxPolicy) {
+    for ov in detect_lockdown_overrides(policy) {
+        tracing::warn!(
+            worker,
+            var = %ov.var,
+            value = %ov.value,
+            "worker spawns with a sandbox layer DISABLED via a policy.env override"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +350,48 @@ mod tests {
             "caller-supplied KASTELLAN_LANDLOCK_RO must not be duplicated"
         );
         assert_eq!(ro_entries[0].1, r#"["/custom/ro"]"#);
+    }
+
+    #[test]
+    fn detect_flags_seccomp_none() {
+        let mut p = base_policy();
+        p.env.push((ENV_SECCOMP_PROFILE.into(), "none".into()));
+        let ov = detect_lockdown_overrides(&p);
+        assert_eq!(ov.len(), 1);
+        assert_eq!(ov[0].var, ENV_SECCOMP_PROFILE);
+        assert_eq!(ov[0].value, "none");
+    }
+
+    #[test]
+    fn detect_flags_landlock_none() {
+        let mut p = base_policy();
+        p.env.push((ENV_LANDLOCK_PROFILE.into(), "none".into()));
+        let ov = detect_lockdown_overrides(&p);
+        assert_eq!(ov.len(), 1);
+        assert_eq!(ov[0].var, ENV_LANDLOCK_PROFILE);
+    }
+
+    #[test]
+    fn detect_flags_both_disabled() {
+        let mut p = base_policy();
+        p.env.push((ENV_SECCOMP_PROFILE.into(), "none".into()));
+        p.env.push((ENV_LANDLOCK_PROFILE.into(), "none".into()));
+        assert_eq!(detect_lockdown_overrides(&p).len(), 2);
+    }
+
+    #[test]
+    fn detect_empty_for_derived_default_policy() {
+        // A normal policy through derive_lockdown_env gets a real seccomp
+        // profile ("strict"), never "none" → nothing flagged.
+        let derived = derive_lockdown_env(&base_policy());
+        assert!(detect_lockdown_overrides(&derived).is_empty());
+    }
+
+    #[test]
+    fn detect_empty_for_explicit_strict() {
+        let mut p = base_policy();
+        p.env.push((ENV_SECCOMP_PROFILE.into(), "strict".into()));
+        assert!(detect_lockdown_overrides(&p).is_empty());
     }
 
     #[test]

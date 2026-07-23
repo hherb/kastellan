@@ -11,6 +11,58 @@ mod bootstrap;
 #[path = "main/matrix_boot.rs"]
 mod matrix_boot;
 
+/// #388.1: install-dir trust probe. Defence-in-depth backstop for the
+/// documented "install dir must not be user-writable" deploy assumption: warn
+/// (or, with `KASTELLAN_REQUIRE_TRUSTED_INSTALL_DIR` set, fail closed) when the
+/// directory workers are discovered from is writable by a principal other than
+/// root or the daemon's own euid. The normal per-user install
+/// (`~/.local/lib/kastellan`, self-owned 0755) passes silently.
+#[cfg(unix)]
+fn probe_install_dir_trust(exe_dir: Option<&std::path::Path>) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(dir) = exe_dir else { return Ok(()) };
+    let meta = match std::fs::metadata(dir) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e,
+                "could not stat install dir for the trust probe (continuing)");
+            return Ok(());
+        }
+    };
+    let facts = kastellan_core::worker_manifest::InstallDirFacts {
+        owner_uid: meta.uid(),
+        mode: meta.mode(),
+    };
+    // SAFETY: geteuid() has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    if let kastellan_core::worker_manifest::InstallDirTrust::Untrusted { reason } =
+        kastellan_core::worker_manifest::assess_install_dir(euid, &facts)
+    {
+        let strict = kastellan_core::worker_lifecycle::force_route::env_flag_enabled(
+            std::env::var("KASTELLAN_REQUIRE_TRUSTED_INSTALL_DIR").ok(),
+        );
+        if strict {
+            anyhow::bail!(
+                "install dir {} is untrusted ({reason}); refusing to start because \
+                 KASTELLAN_REQUIRE_TRUSTED_INSTALL_DIR is set",
+                dir.display()
+            );
+        }
+        tracing::error!(
+            dir = %dir.display(), reason = %reason,
+            "install dir is writable by a principal other than root/self; a malicious \
+             sibling worker binary could be registered on restart. Set \
+             KASTELLAN_REQUIRE_TRUSTED_INSTALL_DIR=1 to fail closed."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn probe_install_dir_trust(_exe_dir: Option<&std::path::Path>) -> Result<()> {
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -116,6 +168,9 @@ async fn main() -> Result<()> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    // #388.1: probe the install dir before wiring worker discovery off it.
+    probe_install_dir_trust(exe_dir.as_deref())?;
 
     // Egress force-routing (slice #2 Task 4.4) — opt-in via
     // KASTELLAN_EGRESS_FORCE_ROUTING. Off ⇒ `None` ⇒ the lifecycle's spawn path
