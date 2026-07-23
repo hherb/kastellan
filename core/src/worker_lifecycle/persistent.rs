@@ -52,6 +52,9 @@ impl ClientTransport {
         args: &[&str],
     ) -> anyhow::Result<Self> {
         let derived = crate::tool_host::derive_lockdown_env(policy);
+        // #388.2: the matrix channel's `--enforce-sandbox=false` dev opt-out
+        // flows through here; make a sandbox-disabled persistent worker loud.
+        crate::tool_host::warn_lockdown_overrides(program, &derived);
         let mut child = backend
             .spawn_under_policy(&derived, program, args)
             .map_err(|e| anyhow::anyhow!("spawn persistent worker: {e}"))?;
