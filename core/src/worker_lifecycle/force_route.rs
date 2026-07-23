@@ -414,12 +414,14 @@ pub fn resolve_force_routing(
     Ok(Some(ForceRoutingConfig::new(proxy_bin, scratch_root, make_sink, cert_pins)))
 }
 
-/// Pure: does this env value enable force-routing? Truthy spellings are
-/// `1`/`true`/`yes`/`on` (case-insensitive). Anything else — including unset
-/// (`None`) and an empty string — is **off**, so the security-relevant flag is
-/// never enabled by accident. `pub(crate)` so `workers::endpoint_guard` shares
-/// this exact truthiness parse (#452) rather than growing a drifting copy.
-pub(crate) fn env_flag_enabled(value: Option<String>) -> bool {
+/// Pure: does this env value enable a daemon-wide opt-in flag? Truthy spellings
+/// are `1`/`true`/`yes`/`on` (case-insensitive). Anything else — including unset
+/// (`None`) and an empty string — is **off**, so a security-relevant flag is
+/// never enabled by accident. `pub` (the one canonical dialect): shared by
+/// `workers::endpoint_guard` (#452), every worker `USE_*`/`ENABLE` flag (#459
+/// residual), and the daemon's `KASTELLAN_REQUIRE_TRUSTED_INSTALL_DIR` (#388)
+/// rather than growing drifting copies.
+pub fn env_flag_enabled(value: Option<String>) -> bool {
     matches!(
         value.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")
