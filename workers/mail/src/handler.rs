@@ -296,7 +296,8 @@ mod tests {
             let s = String::from_utf8_lossy(body);
             assert!(s.contains("qantas"), "body missing query: {s}");
             assert!(!s.contains("smart"), "body must not carry smart: {s}");
-            Ok(json_resp(br#"{"hits":[],"next_cursor":null}"#))
+            // Real localmail keys results under "results" (not "hits").
+            Ok(json_resp(br#"{"results":[],"next_cursor":null}"#))
         }
     }
 
@@ -304,7 +305,7 @@ mod tests {
     fn search_posts_query_without_smart() {
         let mut h = MailHandler::with_client(client_with(Box::new(SearchFake)));
         let out = h.call("mail.search", serde_json::json!({"query": "qantas"})).unwrap();
-        assert!(out["hits"].is_array());
+        assert!(out["results"].is_array());
     }
 
     // --- GET path assertions for get_message / list_messages / list_accounts ---
@@ -380,6 +381,25 @@ mod tests {
         let mut h = MailHandler::with_client(client_with(Box::new(PlainTextFake)));
         let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})).unwrap();
         assert_eq!(out["text"], "raw text");
+    }
+
+    /// Valid JSON but without a `text` key → surfaced verbatim (same fallback as
+    /// non-JSON: we only unwrap the envelope when the expected `text` field is a
+    /// string, never a partial/foreign shape).
+    struct NoTextKeyFake;
+    impl HttpGet for NoTextKeyFake {
+        fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
+        fn transport_kind(&self) -> &'static str { "fake" }
+        fn get_authed(&self, _url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
+            Ok(RawResponse { status: 200, location: None, content_type: "application/json".into(), body: br#"{"other":"x"}"#.to_vec() })
+        }
+    }
+
+    #[test]
+    fn get_attachment_text_falls_back_when_json_lacks_text_key() {
+        let mut h = MailHandler::with_client(client_with(Box::new(NoTextKeyFake)));
+        let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})).unwrap();
+        assert_eq!(out["text"], r#"{"other":"x"}"#);
     }
 
     #[test]

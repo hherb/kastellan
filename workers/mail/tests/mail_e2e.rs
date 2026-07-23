@@ -117,18 +117,18 @@ fn mail_worker_stdio_roundtrip_against_mock() {
     let r = rpc(&mut stdin, &mut stdout, 2, "mail.search", serde_json::json!({"query": "qantas"}));
     assert_eq!(r["result"]["results"][0]["message_id"], 7, "resp: {r}");
 
-    // 2b. get_attachment_text → localmail returns application/json {"text": …};
+    // 3. get_attachment_text → localmail returns application/json {"text": …};
     // the worker must surface the inner text, not the JSON envelope as a string.
     let text_sha = "a".repeat(64);
-    let r = rpc(&mut stdin, &mut stdout, 5, "mail.get_attachment_text", serde_json::json!({"sha256": text_sha}));
+    let r = rpc(&mut stdin, &mut stdout, 3, "mail.get_attachment_text", serde_json::json!({"sha256": text_sha}));
     assert_eq!(r["result"]["text"], "extracted booking text", "resp: {r}");
 
-    // 3. get_attachment → original bytes written to out/, path returned, no bytes inline.
+    // 4. get_attachment → original bytes written to out/, path returned, no bytes inline.
     let sha = "a".repeat(64);
     let r = rpc(
         &mut stdin,
         &mut stdout,
-        3,
+        4,
         "mail.get_attachment",
         serde_json::json!({"sha256": sha, "filename": "booking.pdf"}),
     );
@@ -138,8 +138,8 @@ fn mail_worker_stdio_roundtrip_against_mock() {
     assert_eq!(r["result"]["content_type"], "application/pdf");
     assert!(r["result"].get("data_base64").is_none(), "no inline bytes");
 
-    // 4. unknown method → JSON-RPC error (-32601).
-    let r = rpc(&mut stdin, &mut stdout, 4, "mail.nope", serde_json::json!({}));
+    // 5. unknown method → JSON-RPC error (-32601).
+    let r = rpc(&mut stdin, &mut stdout, 5, "mail.nope", serde_json::json!({}));
     assert_eq!(r["error"]["code"], -32601, "resp: {r}");
 
     drop(stdin); // EOF → worker exits its stdio loop.
