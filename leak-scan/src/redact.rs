@@ -2,11 +2,12 @@
 //!
 //! The streaming [`crate::RollingMatcher`] reports the FIRST leak and is built
 //! to BLOCK a tunnel. python-exec output is a bounded in-memory buffer that must
-//! instead be SCRUBBED in place, so this finds EVERY non-overlapping occurrence
-//! of a secret's verbatim bytes and replaces it with a marker. It reuses the
-//! same Rabin pre-filter + SHA-256 confirm as the matcher (so detection cannot
-//! drift between the two), specialized to a contiguous slice (direct indexing,
-//! no ring buffer).
+//! instead be SCRUBBED in place, so this finds EVERY occurrence of a secret's
+//! verbatim bytes and replaces it with a marker — coincidentally-overlapping
+//! matches MERGE into one redacted run so no secret byte survives between two
+//! overlapping secrets (see [`redact`]). It reuses the same Rabin pre-filter +
+//! SHA-256 confirm as the matcher (so detection cannot drift between the two),
+//! specialized to a contiguous slice (direct indexing, no ring buffer).
 //!
 //! An ENCODED appearance of a secret (base64/hex/url-encoded) is NOT scrubbed —
 //! this matches verbatim value bytes only, as does the streaming matcher. The

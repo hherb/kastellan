@@ -231,6 +231,17 @@ pub struct InstallDirFacts {
 /// slot regardless). Defence-in-depth backstop for the documented "install dir
 /// must not be user-writable" deploy assumption; pure, so unit-tested on both
 /// hosts.
+///
+/// **Residual (parent-chain writability, cf. #479).** This inspects only the
+/// leaf install dir, not its ancestors. A leaf that is itself safe (0755,
+/// self-owned) but whose PARENT is group/world-writable is still substitutable:
+/// an attacker with write on the parent can `rename(2)` the real dir away and
+/// drop in their own tree of `kastellan-worker-*` binaries, which
+/// [`discover_binary`] would then register — the same "the parent was never
+/// asserted" shape #479 hit. Not closed here (this is a warn-only advisory for a
+/// Low-sev deploy assumption, and a full ancestor walk risks false positives on
+/// legitimate layouts); the deploy assumption remains the primary control. A
+/// future tightening would walk `dir.ancestors()` to the mount root.
 pub fn assess_install_dir(self_euid: u32, facts: &InstallDirFacts) -> InstallDirTrust {
     let perms = facts.mode & 0o777;
     if facts.mode & 0o002 != 0 {
