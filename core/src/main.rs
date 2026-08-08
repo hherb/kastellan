@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 // Daemon bring-up + shutdown helpers and the Matrix channel bring-up live in
 // sibling files under `main/` to keep this binary entrypoint under the 500-LOC
@@ -198,6 +198,28 @@ async fn main() -> Result<()> {
         let swept = fr.sweep_stale_scratch_dirs();
         if swept > 0 {
             info!(dirs = swept, "egress: reclaimed stale per-worker scratch dirs from a prior daemon");
+        }
+    } else {
+        use kastellan_core::egress::force_routing_notice as frn;
+        warn!(
+            env_var = "KASTELLAN_EGRESS_FORCE_ROUTING",
+            "{} — Net::Allowlist workers get a direct network route; no egress \
+             proxy enforces host:port or SSRF. Set it to 1 in kastellan.env.local \
+             unless this is a deliberate bring-up without the proxy.",
+            frn::FORCE_ROUTING_DISABLED_LOG_PHRASE
+        );
+        // Best-effort: the posture belongs in the oversight record, not only in
+        // a plaintext log with no role gating. A failed insert must not stop a
+        // daemon that is otherwise healthy.
+        if let Err(e) = kastellan_db::audit::insert(
+            &pool,
+            frn::ACTOR,
+            frn::ACTION_FORCE_ROUTING_DISABLED,
+            frn::force_routing_disabled_payload(),
+        )
+        .await
+        {
+            warn!(error = %e, "could not audit the disabled force-routing posture");
         }
     }
 

@@ -343,9 +343,13 @@ kastellan-cli uninstall [--purge]               # --purge also deletes the clust
 ```
 
 Tune the LLM/prompt/data settings any time by editing
-`~/.config/kastellan/kastellan.env` and restarting:
-`systemctl --user restart kastellan.target` (Linux). Check health with
-`systemctl --user status kastellan.target` and `kastellan-cli secret list`.
+`~/.config/kastellan/kastellan.env.local` and restarting:
+`systemctl --user restart kastellan.target` (Linux). `install` regenerates
+`kastellan.env` itself on every run, so hand edits there don't survive the
+next deploy — the `.local` overlay is never touched by the installer and its
+values win. See [`docs/deploy/operator-env.md`](docs/deploy/operator-env.md).
+Check health with `systemctl --user status kastellan.target` and
+`kastellan-cli secret list`.
 
 ## License
 

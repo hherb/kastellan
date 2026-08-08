@@ -151,7 +151,7 @@ fn install_start_status_stop_uninstall_round_trip() {
         after: vec![],
         part_of: None,
         restart_backoff: None,
-        environment_file: None,
+        environment_files: Vec::new(),
     };
 
     sup.install(&spec).expect("install");
@@ -245,7 +245,7 @@ fn install_enables_the_unit_so_it_comes_back_after_a_reboot() {
         after: vec![],
         part_of: None,
         restart_backoff: None,
-        environment_file: None,
+        environment_files: Vec::new(),
     };
 
     sup.install(&spec).expect("install");

@@ -3,6 +3,7 @@
 //! the IO orchestration (copy, db-init, supervisor install, verify)
 //! is added alongside.
 
+pub mod env_diff;
 pub mod plan;
 pub mod run;
 

@@ -257,26 +257,33 @@ impl Supervisor for LaunchAgents {
         fs::create_dir_all(&self.agents_dir)
             .map_err(|e| SupervisorError::Io(format!("create {}: {e}", self.agents_dir.display())))?;
 
-        // launchd has no `EnvironmentFile=` equivalent, so honour
-        // `spec.environment_file` by reading it at install time and baking its
-        // KEY=value pairs into the plist's `EnvironmentVariables` (file values
-        // override inline `spec.env` on key collision, matching systemd's
-        // EnvironmentFile-after-Environment ordering). This gives macOS the
-        // same guarantee the Linux backend gets from `EnvironmentFile=` rather
-        // than silently dropping the operator's tuned config.
+        // launchd has no `EnvironmentFile=` directive, so honour
+        // `spec.environment_files` by reading each one at install time and
+        // folding its KEY=value pairs into the plist's `EnvironmentVariables`
+        // — in declared order, later winning on key collision (over both
+        // each other and `spec.env`), matching systemd's file-order-wins
+        // semantics at start time. This gives macOS the same guarantee the
+        // Linux backend gets from `EnvironmentFile=` rather than silently
+        // dropping the operator's tuned config. An absent OPTIONAL file is
+        // skipped (the normal state of `kastellan.env.local`); an absent
+        // REQUIRED one is still an error.
         let path = self.plist_path(&spec.name);
-        let body = match &spec.environment_file {
-            Some(env_file) => {
-                let contents = fs::read_to_string(env_file).map_err(|e| {
-                    SupervisorError::Io(format!("read environment_file {}: {e}", env_file.display()))
-                })?;
-                let mut merged = spec.clone();
-                builders::merge_env(&mut merged.env, builders::parse_env_file(&contents));
-                merged.environment_file = None; // already folded into env
-                build_plist(&merged)
-            }
-            None => build_plist(spec),
-        };
+        let mut merged = spec.clone();
+        for ef in &spec.environment_files {
+            let contents = match fs::read_to_string(&ef.path) {
+                Ok(c) => c,
+                Err(e) if ef.optional && e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(SupervisorError::Io(format!(
+                        "read environment_file {}: {e}",
+                        ef.path.display()
+                    )))
+                }
+            };
+            crate::env_file::merge_env(&mut merged.env, crate::env_file::parse_env_file(&contents));
+        }
+        merged.environment_files = Vec::new(); // already folded into env
+        let body = build_plist(&merged);
         write_atomic(&path, body.as_bytes())?;
         // Unlike the Linux backend, there is no separate "reload"
         // step — `bootstrap` is the load step and is invoked from

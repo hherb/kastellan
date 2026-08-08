@@ -15,6 +15,8 @@
 //!   - `systemctl --user` and `launchctl bootstrap gui/<uid>` are the
 //!     standard cross-platform pair for per-user always-on services.
 
+pub mod env_file;
+
 #[cfg(target_os = "linux")]
 pub mod systemd_user;
 
@@ -66,6 +68,34 @@ pub struct RestartBackoff {
     /// to `max_delay_sec`. systemd `RestartSteps=`. Must be ≥ 1 to take effect
     /// (`0` disables the ramp — see the type-level note).
     pub steps: u32,
+}
+
+/// One `EnvironmentFile=` entry on a [`ServiceSpec`].
+///
+/// Entries are applied **in order, later winning on key collision** — systemd's
+/// own semantics for repeated `EnvironmentFile=` directives, measured on a live
+/// user manager rather than recalled. That ordering is the mechanism by which an
+/// operator's `kastellan.env.local` overrides the `kastellan.env` the installer
+/// regenerates on every deploy (#458).
+///
+/// `optional` is a real field rather than a convention because the two backends
+/// need it for different reasons: systemd needs the `-` prefix, and the launchd
+/// backend reads the file at install time and would otherwise hard-error on a
+/// `.local` that does not exist — which is the normal case.
+///
+/// **Platform asymmetry, stated rather than hidden.** systemd re-reads these at
+/// every service start, so an edit takes effect on `restart`. launchd has no
+/// `EnvironmentFile=` directive, so the backend folds the pairs into the plist
+/// at *install* time and an edit needs a re-install. The guarantee #458 asks for
+/// — surviving a reinstall — holds identically on both; only the refresh moment
+/// differs, and it is inherent to launchd.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EnvFileRef {
+    pub path: PathBuf,
+    /// A missing file is not an error: renders systemd's `-` prefix, and the
+    /// launchd backend skips it instead of failing the install.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// Declarative description of one supervised service.
@@ -123,17 +153,15 @@ pub struct ServiceSpec {
     /// warning** (no equivalent knob).
     #[serde(default)]
     pub restart_backoff: Option<RestartBackoff>,
-    /// Optional path to a systemd `EnvironmentFile=` (KEY=value lines) the
-    /// service reads on start. `None` (default) renders no directive —
-    /// byte-identical to today for every current caller. Used by the
-    /// installer to point the core daemon at `~/.config/kastellan/kastellan.env`
-    /// so operators can tune LLM/prompt/data settings without reinstalling.
-    /// On **launchd** there is no `EnvironmentFile=` directive, so the backend
-    /// reads this file at install time and folds its `KEY=value` pairs into the
-    /// plist's `EnvironmentVariables` (file values override inline `env` on key
-    /// collision) — the equivalent guarantee, not a silent drop.
+    /// Ordered `EnvironmentFile=` entries (KEY=value lines) the service reads on
+    /// start. Empty (the default) renders no directive — byte-identical to a
+    /// spec that set nothing. The installer points the core daemon at
+    /// `~/.config/kastellan/kastellan.env` (required) followed by
+    /// `~/.config/kastellan/kastellan.env.local` (optional, never written by the
+    /// installer), so operator tuning survives a reinstall. See [`EnvFileRef`]
+    /// for the ordering and platform notes.
     #[serde(default)]
-    pub environment_file: Option<PathBuf>,
+    pub environment_files: Vec<EnvFileRef>,
 }
 
 /// A named bundle of services brought up and torn down together.
@@ -405,7 +433,7 @@ mod default_target_tests {
             after: vec![],
             part_of: Some("kastellan".into()),
             restart_backoff: None,
-            environment_file: None,
+            environment_files: Vec::new(),
         }
     }
 
@@ -508,7 +536,7 @@ mod spec_ordering_tests {
             after: vec![],
             part_of: None,
             restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
-            environment_file: None,
+            environment_files: Vec::new(),
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: ServiceSpec = serde_json::from_str(&json).expect("deserialize");

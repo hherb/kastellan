@@ -127,10 +127,14 @@ pub fn build_unit_file(spec: &ServiceSpec) -> String {
     // (audit finding #10). Escaping here, not just at the driver, keeps the
     // guarantee at the point every directive is written (cf. launchd's
     // `xml_escape` inside `build_plist`).
-    if let Some(env_file) = &spec.environment_file {
+    // One directive per entry, in order. systemd applies them in file order with
+    // a LATER file overriding an earlier one; the `-` prefix makes a missing file
+    // non-fatal. Both behaviours were measured on a live user manager (#458).
+    for ef in &spec.environment_files {
+        let prefix = if ef.optional { "-" } else { "" };
         out.push_str(&format!(
-            "EnvironmentFile={}\n",
-            quote_if_needed(&env_file.to_string_lossy())
+            "EnvironmentFile={prefix}{}\n",
+            quote_if_needed(&ef.path.to_string_lossy())
         ));
     }
 

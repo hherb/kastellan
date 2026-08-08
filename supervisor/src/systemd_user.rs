@@ -381,20 +381,25 @@ impl SystemdUser {
         // escapes newlines), but these path fields did not. Specs are
         // code-constructed today, but `ServiceSpec` is `Deserialize`, so reject
         // any control character before the write.
-        let path_fields: [(&str, Option<&PathBuf>); 5] = [
-            ("program", Some(&spec.program)),
-            ("environment_file", spec.environment_file.as_ref()),
-            ("working_dir", spec.working_dir.as_ref()),
-            ("stdout_log", spec.stdout_log.as_ref()),
-            ("stderr_log", spec.stderr_log.as_ref()),
-        ];
-        for (field, maybe_path) in path_fields {
-            if let Some(p) = maybe_path {
-                if p.to_string_lossy().contains(|c: char| c.is_control()) {
-                    return Err(SupervisorError::Io(format!(
-                        "{field} must not contain control characters, got {p:?}"
-                    )));
-                }
+        let mut path_fields: Vec<(&str, &PathBuf)> = vec![("program", &spec.program)];
+        for ef in &spec.environment_files {
+            path_fields.push(("environment_file", &ef.path));
+        }
+        for (field, p) in spec
+            .working_dir
+            .as_ref()
+            .map(|p| ("working_dir", p))
+            .into_iter()
+            .chain(spec.stdout_log.as_ref().map(|p| ("stdout_log", p)))
+            .chain(spec.stderr_log.as_ref().map(|p| ("stderr_log", p)))
+        {
+            path_fields.push((field, p));
+        }
+        for (field, p) in path_fields {
+            if p.to_string_lossy().contains(|c: char| c.is_control()) {
+                return Err(SupervisorError::Io(format!(
+                    "{field} must not contain control characters, got {p:?}"
+                )));
             }
         }
 

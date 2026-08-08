@@ -47,13 +47,17 @@ STORE_DIR="$HOME/.local/state/kastellan/matrix/store"
 CORE_LOG="$HOME/.local/state/kastellan/kastellan-core.out"
 
 # Preserve the Matrix channel config across the reinstall by reading it back from
-# the installed env file (`install` REGENERATES the env from CLI flags, dropping
-# the Matrix block unless --matrix-* are re-passed).
+# the installed env files (`install` REGENERATES $ENV_FILE from CLI flags,
+# dropping the Matrix block unless --matrix-* are re-passed). Read the overlay
+# FIRST, then fall back to the generated file, matching the runtime precedence
+# (later file wins) — an operator who moved the Matrix block into
+# ${ENV_FILE}.local per this script's own advice below must still be found here.
 HS=""; MX_USER=""
-if [ -f "$ENV_FILE" ]; then
-  HS="$(sed -n 's/^KASTELLAN_MATRIX_HOMESERVER_URL=//p' "$ENV_FILE" | head -1)"
-  MX_USER="$(sed -n 's/^KASTELLAN_MATRIX_USER=//p' "$ENV_FILE" | head -1)"
-fi
+for f in "$ENV_FILE.local" "$ENV_FILE"; do
+  [ -f "$f" ] || continue
+  [ -n "$HS" ]      || HS="$(sed -n 's/^KASTELLAN_MATRIX_HOMESERVER_URL=//p' "$f" | head -1)"
+  [ -n "$MX_USER" ] || MX_USER="$(sed -n 's/^KASTELLAN_MATRIX_USER=//p' "$f" | head -1)"
+done
 
 # shellcheck disable=SC1090,SC1091
 source "$HOME/.cargo/env" 2>/dev/null || true
@@ -78,18 +82,23 @@ if [ -f "$CORE_LOG" ]; then
   CORE_LOG_OFFSET="$(wc -c < "$CORE_LOG" | tr -d ' ')"
 fi
 
+# NOTE: `install` REGENERATES $ENV_FILE from CLI flags. Operator settings belong
+# in ${ENV_FILE}.local, which the installer never writes and whose values win
+# (systemd applies EnvironmentFile= directives in order, later winning). If the
+# install reports dropped or changed keys, they were still in the generated file
+# — move them into the .local and re-run. See issue #458.
 echo "==> install"
 if [ -n "$HS" ] && [ -n "$MX_USER" ]; then
   ./target/release/kastellan-cli install --matrix-homeserver-url "$HS" --matrix-user "$MX_USER"
 else
-  echo "    (no Matrix channel configured in $ENV_FILE — installing without it)"
+  echo "    (no Matrix channel configured in $ENV_FILE or $ENV_FILE.local — installing without it)"
   ./target/release/kastellan-cli install
 fi
 
 # ---- 4. optional re-login (matrix-sdk major bump / stale secret) -------------
 if [ "$RELOGIN" -eq 1 ]; then
   if [ -z "$HS" ] || [ -z "$MX_USER" ]; then
-    echo "ERROR: --relogin requires a Matrix channel configured in $ENV_FILE" >&2
+    echo "ERROR: --relogin requires a Matrix channel configured in $ENV_FILE or $ENV_FILE.local" >&2
     exit 1
   fi
   echo "==> re-login: stop core → wipe store → fresh login"

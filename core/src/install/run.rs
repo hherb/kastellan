@@ -16,6 +16,66 @@ use super::plan::{
     build_specs, cli_path_precedence_note, estimate_model_bytes, is_local_ollama, memory_suffices,
     optional_binaries, render_env_file, required_binaries, InstallArgs, Layout,
 };
+use crate::install::env_diff::EnvDiff;
+
+/// Build the operator-facing warning for a destructive env-file rewrite.
+///
+/// Pure, so the text an operator actually reads is unit-testable — the point
+/// of this warning is that it is SEEN, and a message with no test is one
+/// refactor away from silently losing a line.
+///
+/// Key names only: values are never interpolated here. The operator reads
+/// values from the backup, which keeps anything secret-shaped out of the
+/// install transcript.
+fn render_drop_warning(env_file: &Path, backup: &Path, local: &Path, diff: &EnvDiff) -> String {
+    let mut msg = format!("warning: install is regenerating {}\n", env_file.display());
+    for k in &diff.lost {
+        msg.push_str(&format!("  dropped: {k}\n"));
+    }
+    for k in &diff.changed {
+        msg.push_str(&format!("  changed: {k}\n"));
+    }
+    msg.push_str(&format!(
+        "  previous file saved to {}\n  \
+         to keep these across future installs, move them into {} —\n  \
+         the installer never writes that file, and its values override this one.",
+        backup.display(),
+        local.display()
+    ));
+    msg
+}
+
+/// Back up and report on the `kastellan.env` an install is about to overwrite.
+///
+/// `install` regenerates the env file from CLI flags, so every hand-added key is
+/// dropped and every hand-tuned value reverts (#458). Silence there cost the
+/// deployed agent its mail capability for two days. This makes the loss loud and
+/// recoverable:
+///
+/// * nothing to lose (fresh install, or a purely additive rewrite) ⇒ no backup,
+///   no output — the common case stays quiet;
+/// * otherwise ⇒ copy the current file to `kastellan.env.bak` and name every key
+///   being dropped or changed, pointing at `kastellan.env.local` as the fix.
+///
+/// **Key names only, never values.** The operator reads values from the backup;
+/// keeping them out of the install transcript means an env file that one day
+/// holds a secret does not echo it to a terminal.
+pub(crate) fn preserve_and_report_env(env_file: &Path, new_contents: &str) -> Result<(), String> {
+    let Ok(old) = fs::read_to_string(env_file) else {
+        return Ok(()); // first install: nothing to preserve
+    };
+    let diff = crate::install::env_diff::diff_env_files(&old, new_contents);
+    if diff.is_empty() {
+        return Ok(());
+    }
+
+    let bak = env_file.with_extension("env.bak");
+    write_private(&bak, old.as_bytes())?;
+
+    let local = env_file.with_extension("env.local");
+    eprintln!("{}", render_drop_warning(env_file, &bak, &local, &diff));
+    Ok(())
+}
 
 /// Create dirs, copy binaries + assets, write the EnvironmentFile.
 /// Returns the names of binaries actually copied. Fails closed if a
@@ -57,6 +117,7 @@ pub fn prepare_filesystem(
     copy_tree(&assets_src.join("seeds"), &layout.assets_dir.join("seeds"))?;
 
     let env = render_env_file(args, layout);
+    preserve_and_report_env(&layout.env_file, &env)?;
     write_private(&layout.env_file, env.as_bytes())?;
 
     // Put the operator CLI on PATH. The flat prefix (`bin_dir`) lives under
@@ -219,7 +280,11 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
                 Err(e) => return Err(format!("purge {}: {e}", d.display())),
             }
         }
-        eprintln!("purged prefix + data + logs (cluster + secrets deleted)");
+        eprintln!(
+            "purged prefix + data + logs (cluster + secrets deleted), including \
+             kastellan.env.local and kastellan.env.bak if present — copy anything you \
+             need out of them first next time"
+        );
     } else {
         eprintln!("kept data dir + secrets at {} (use --purge to delete)", layout.assets_dir.display());
     }

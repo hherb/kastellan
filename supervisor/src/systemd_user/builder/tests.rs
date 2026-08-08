@@ -3,7 +3,7 @@
 //! resolves to the parent `builder` module (the builders + its `use crate::…`).
 
 use super::*;
-use crate::RestartBackoff;
+use crate::{EnvFileRef, RestartBackoff};
 use std::path::PathBuf;
 
 /// Minimal spec used as a starting point in builder tests.
@@ -20,7 +20,7 @@ fn minimal_spec(name: &str) -> ServiceSpec {
         after: vec![],
         part_of: None,
         restart_backoff: None,
-        environment_file: None,
+        environment_files: Vec::new(),
     }
 }
 
@@ -243,20 +243,32 @@ fn target_unit_wants_all_members() {
 }
 
 #[test]
-fn environment_file_rendered_when_set() {
+fn environment_files_render_in_order_with_optional_prefixed() {
     let mut spec = minimal_spec("svc");
-    spec.environment_file = Some(std::path::PathBuf::from("/home/u/.config/kastellan/kastellan.env"));
+    spec.environment_files = vec![
+        EnvFileRef { path: std::path::PathBuf::from("/home/u/.config/kastellan/kastellan.env"), optional: false },
+        EnvFileRef { path: std::path::PathBuf::from("/home/u/.config/kastellan/kastellan.env.local"), optional: true },
+    ];
     let unit = build_unit_file(&spec);
-    assert!(
-        unit.contains("EnvironmentFile=/home/u/.config/kastellan/kastellan.env"),
-        "unit should carry EnvironmentFile=; got:\n{unit}"
+    let lines: Vec<&str> = unit.lines().filter(|l| l.starts_with("EnvironmentFile=")).collect();
+    // Order is load-bearing: systemd applies these in file order and a LATER
+    // file overrides an earlier one, which is the whole mechanism by which the
+    // operator's `.local` beats the regenerated `kastellan.env`.
+    assert_eq!(
+        lines,
+        vec![
+            "EnvironmentFile=/home/u/.config/kastellan/kastellan.env",
+            "EnvironmentFile=-/home/u/.config/kastellan/kastellan.env.local",
+        ],
+        "{unit}"
     );
 }
 
 #[test]
-fn environment_file_absent_when_none() {
-    let unit = build_unit_file(&minimal_spec("svc"));
-    assert!(!unit.contains("EnvironmentFile="), "no EnvironmentFile= when None");
+fn environment_files_absent_when_empty() {
+    let spec = minimal_spec("svc");
+    let unit = build_unit_file(&spec);
+    assert!(!unit.contains("EnvironmentFile="), "{unit}");
 }
 
 // ---------- name validator tests ----------
