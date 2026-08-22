@@ -1,0 +1,8 @@
+{
+  "id": "cap-077-apache-license",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821223457id_/https://www.apache.org/licenses/LICENSE-2.0",
+  "notes": "A second licence text, for the same reason as agpl-license and to check the effect is not one document's quirk.",
+  "sha256": "743ed902d6ac61b030ae40d6799684247088926a2fc7e29d2f6aa6dfd26c0320"
+}

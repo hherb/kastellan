@@ -1,0 +1,8 @@
+{
+  "id": "cap-014-promptmap-dan4",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/utkusen/promptmap/432e072ae654788ad5b30172d42f3b1bcbda21cf/rules/jailbreak/dan4.yaml",
+  "notes": "Jailbreak rule from promptmap: a long DAN-family persona override directed at the reader.",
+  "sha256": "5f4da9601c8f05a207400619fc6bb717448c33a31c27c012f2fcd1cf372b8839"
+}

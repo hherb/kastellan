@@ -1,0 +1,8 @@
+{
+  "id": "cap-036-plinius-openai",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/elder-plinius/L1B3RT4S/64960b783249d36f76a48a33103cc4b168332b9b/OPENAI.mkd",
+  "notes": "Vendor-targeted jailbreak collection (~13 KB).",
+  "sha256": "63a8a3ac776e7a8e9772ff953c481d9df49e1a1356a9c817caa6e92dab969053"
+}

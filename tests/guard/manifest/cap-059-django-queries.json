@@ -1,0 +1,8 @@
+{
+  "id": "cap-059-django-queries",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/django/django/03988c5a5ba248c3b9b11ea96fd4fda5e98849aa/docs/topics/db/queries.txt",
+  "notes": "OVER-CAP (~78 KB): Django's query documentation. Contains SQL and ORM examples -- code-in-prose, which the seeded safe-003 shell tutorial covers only at small size.",
+  "sha256": "0313f2de4504708c300bf6aae6ff313106db29c29f748894f8f2270ce29cf9da"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cap-073-tokio-home",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260819190144id_/https://tokio.rs/",
+  "notes": "Async-runtime landing page.",
+  "sha256": "748c78030b914855ca27bfe771bda6054173ad1e72255c60c66a6d7f9adfb145"
+}

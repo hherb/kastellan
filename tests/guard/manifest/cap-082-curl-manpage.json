@@ -1,0 +1,8 @@
+{
+  "id": "cap-082-curl-manpage",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260820222923id_/https://curl.se/docs/manpage.html",
+  "notes": "OVER-CAP: the curl manual -- every option for making arbitrary network requests to arbitrary hosts. Benign, and about as close to describing exfiltration mechanics as ordinary documentation gets.",
+  "sha256": "49998ea0379882095060dde119f70c5d83a00cbddae6f707b491609207a641a5"
+}

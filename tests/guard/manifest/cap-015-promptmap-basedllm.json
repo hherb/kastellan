@@ -1,0 +1,8 @@
+{
+  "id": "cap-015-promptmap-basedllm",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/utkusen/promptmap/432e072ae654788ad5b30172d42f3b1bcbda21cf/rules/jailbreak/basedllm.yaml",
+  "notes": "Jailbreak rule: persona replacement instructing the model to drop its guidelines.",
+  "sha256": "569377a0d373445eed5316575438c8f8c2ed89e8dae176d4c4ca53061762f9f7"
+}

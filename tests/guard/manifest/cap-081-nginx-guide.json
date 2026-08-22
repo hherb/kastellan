@@ -1,0 +1,8 @@
+{
+  "id": "cap-081-nginx-guide",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821144734id_/https://nginx.org/en/docs/beginners_guide.html",
+  "notes": "Server configuration tutorial: instructs the reader to edit config files and restart a daemon.",
+  "sha256": "76ca3a3128b59da9f34f87a9941e1057eb38f02d1d2e6f99f1241dd29ec86327"
+}

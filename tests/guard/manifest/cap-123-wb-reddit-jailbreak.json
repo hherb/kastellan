@@ -1,0 +1,8 @@
+{
+  "id": "cap-123-wb-reddit-jailbreak",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260411015103id_/https://www.reddit.com/r/ChatGPT/comments/10tevu1/new_jailbreak_proudly_unveiling_the_tried_and/",
+  "notes": "A forum thread carrying a jailbreak prompt among many comments. The snapshot is ~98 KB of HTML but readability extracts ~7 KB, so the payload competes with surrounding discussion rather than with the byte cap.",
+  "sha256": "99d837b708e68611e9b4baf19a8d4861e2190071ab9db90712673bc41f7dfee5"
+}

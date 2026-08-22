@@ -247,6 +247,73 @@ pub struct RunMeta {
     pub weights: WeightsProvenance,
 }
 
+/// Render one line per case: score, label, provenance, id.
+///
+/// **Why the report needs this at all.** Every other section reports
+/// *aggregates* -- a confusion matrix and sorted score lists with the
+/// case identities stripped off. That answers "how many attacks did the
+/// guard miss?" and cannot answer "which ones?", which is the question
+/// that decides whether a miss is a tolerable tail or a whole class of
+/// attack the tier is blind to. On measurement 3's corpus the corpus-wide
+/// count was `FN 19` and nothing in the artefact said which nineteen.
+///
+/// Sorted ascending, so the two failure modes land at the two ends: the
+/// lowest-scoring ATTACKS (misses) at the top, the highest-scoring
+/// BENIGNS (false positives) at the bottom. A reader scans inwards from
+/// both ends and stops when the labels stop surprising them.
+///
+/// Three states are rendered distinctly, because collapsing any two of
+/// them would misreport a case:
+///
+/// * a **score**, for a case the guard actually judged;
+/// * `excluded`, for a case the catalogue blocks -- the CLI never sent
+///   it to the model, so it has no score, and printing `0.0000` would
+///   read as "judged harmless" when the truth is "blocked outright";
+/// * `UNMEASURED`, for an *adjudicated* case the backend returned no
+///   usable verdict for. D5 makes a single one of these an invalid run,
+///   so it is shouted rather than mentioned.
+pub fn render_per_case(cases: &[ScoredCase]) -> String {
+    let mut rows: Vec<&ScoredCase> = cases.iter().collect();
+    // Excluded and unmeasured cases have no score to sort by. They sort
+    // last, together, rather than being given a fake 0.0 that would put
+    // them among the guard's most confident benign judgements.
+    rows.sort_by(|a, b| {
+        let key = |c: &ScoredCase| {
+            if c.is_adjudicated() {
+                c.probability
+            } else {
+                None
+            }
+        };
+        match (key(a), key(b)) {
+            (Some(x), Some(y)) => x.total_cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let mut s = String::from("\n-- PER CASE (ascending score) --\n");
+    for c in rows {
+        let verdict = match (c.is_adjudicated(), c.probability) {
+            (true, Some(p)) => format!("{p:.4}"),
+            (true, None) => "UNMEASURED".to_string(),
+            (false, _) => "excluded".to_string(),
+        };
+        let label = match c.label {
+            Label::Attack => "attack",
+            Label::Benign => "benign",
+        };
+        s.push_str(&format!(
+            "  {verdict:>10}  {label:6}  {:<22}  {}\n",
+            c.provenance.as_str(),
+            c.id
+        ));
+    }
+    s
+}
+
 /// Render the operator-facing report.
 pub fn format_report(cases: &[ScoredCase], tau: f32, meta: &RunMeta) -> String {
     let mut out = String::new();
@@ -611,6 +678,129 @@ mod tests {
             catalogue_score: cat,
             probability: p,
         }
+    }
+
+
+    // ----- per-case rendering (which cases did the guard get wrong?) -----
+
+    /// The whole point of the section: an operator reading a corpus-wide
+    /// `FN 19` must be able to find out WHICH nineteen. Before this
+    /// existed the report printed sorted score lists with no case
+    /// identity attached, so "the guard misses a third of the attacks"
+    /// was measurable and "which attacks" was not.
+    #[test]
+    fn per_case_names_every_case_exactly_once() {
+        let cases = vec![
+            case("miss", Label::Attack, Provenance::Captured, 0.0, Some(0.01)),
+            case("hit", Label::Attack, Provenance::Captured, 0.0, Some(0.99)),
+            case("fp", Label::Benign, Provenance::Captured, 0.0, Some(0.80)),
+            case("tn", Label::Benign, Provenance::Captured, 0.0, Some(0.02)),
+        ];
+        let out = render_per_case(&cases);
+        for id in ["miss", "hit", "fp", "tn"] {
+            assert_eq!(
+                out.matches(id).count(),
+                1,
+                "{id} must appear exactly once in:\n{out}"
+            );
+        }
+    }
+
+    /// Ascending, so the two failure modes sit at the two ends: the
+    /// attacks the guard scored lowest (misses) at the top, the benigns
+    /// it scored highest (false positives) at the bottom. Sorting is the
+    /// entire ergonomic value -- an unsorted list of 133 lines is a file
+    /// to grep, not a section to read.
+    #[test]
+    fn per_case_is_sorted_by_score_ascending() {
+        let cases = vec![
+            case("high", Label::Attack, Provenance::Captured, 0.0, Some(0.9)),
+            case("low", Label::Benign, Provenance::Captured, 0.0, Some(0.1)),
+            case("mid", Label::Attack, Provenance::Captured, 0.0, Some(0.5)),
+        ];
+        let out = render_per_case(&cases);
+        let pos = |id: &str| out.find(id).expect("id present");
+        assert!(
+            pos("low") < pos("mid") && pos("mid") < pos("high"),
+            "must be ascending by score, got:\n{out}"
+        );
+    }
+
+    /// An excluded case has no guard score because the CLI never sent it
+    /// to the model. Rendering `0.0000` for it would read as "the guard
+    /// judged this harmless", which is the opposite of what happened --
+    /// the catalogue blocked it outright.
+    #[test]
+    fn per_case_marks_an_excluded_case_rather_than_scoring_it() {
+        let cases = vec![case(
+            "blocked",
+            Label::Attack,
+            Provenance::DerivedFromCatalogue,
+            BLOCK_THRESHOLD,
+            None,
+        )];
+        let out = render_per_case(&cases);
+        assert!(
+            out.contains("excluded"),
+            "an excluded case must say so: {out}"
+        );
+        assert!(
+            !out.contains("0.0000"),
+            "must not render a score it never had: {out}"
+        );
+    }
+
+    /// `probability: None` on an ADJUDICATED case is F2's failure mode --
+    /// the backend returned no usable logprob. D5 makes that an invalid
+    /// run, so it must be visually distinct from both a real score and
+    /// from an exclusion, which is a different thing entirely.
+    #[test]
+    fn per_case_marks_an_unmeasured_case_distinctly_from_an_excluded_one() {
+        let cases = vec![
+            case("unmeasured", Label::Attack, Provenance::Captured, 0.0, None),
+            case(
+                "excluded",
+                Label::Attack,
+                Provenance::DerivedFromCatalogue,
+                BLOCK_THRESHOLD,
+                None,
+            ),
+        ];
+        let out = render_per_case(&cases);
+        let line = |id: &str| {
+            out.lines()
+                .find(|l| l.contains(id))
+                .unwrap_or_else(|| panic!("no line for {id} in {out}"))
+                .to_string()
+        };
+        assert!(
+            line("unmeasured").contains("UNMEASURED"),
+            "an unmeasured adjudicated case must be loud: {}",
+            line("unmeasured")
+        );
+        assert_ne!(
+            line("unmeasured").replace("unmeasured", ""),
+            line("excluded").replace("excluded", ""),
+            "unmeasured and excluded must not render identically"
+        );
+    }
+
+    /// The label has to be on the line, or a reader cannot tell a miss
+    /// (low-scoring ATTACK) from a correct rejection (low-scoring
+    /// benign) -- and those sit adjacent to each other in the sort.
+    #[test]
+    fn per_case_carries_the_label_and_provenance() {
+        let cases = vec![case(
+            "x",
+            Label::Attack,
+            Provenance::Captured,
+            0.0,
+            Some(0.25),
+        )];
+        let out = render_per_case(&cases);
+        assert!(out.contains("attack"), "label must be present: {out}");
+        assert!(out.contains("captured"), "provenance must be present: {out}");
+        assert!(out.contains("0.25"), "score must be present: {out}");
     }
 
     #[test]

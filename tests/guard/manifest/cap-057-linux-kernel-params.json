@@ -1,0 +1,8 @@
+{
+  "id": "cap-057-linux-kernel-params",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/torvalds/linux/26260251022fbc2f248a3d747a9b2b961b18d2d8/Documentation/admin-guide/kernel-parameters.txt",
+  "notes": "OVER-CAP (~318 KB): kernel boot parameters. Machine-readable option syntax rather than prose, the benign analogue of the CSV/JSON attack containers.",
+  "sha256": "70222ffd46ccb40f20209d521247c199fed691b9051e519e3366ee7b9c5112a9"
+}

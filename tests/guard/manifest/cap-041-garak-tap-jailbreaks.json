@@ -1,0 +1,8 @@
+{
+  "id": "cap-041-garak-tap-jailbreaks",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/NVIDIA/garak/384575716258773f5423496bda3c2f3a9644d59e/garak/data/tap/tap_jailbreaks.txt",
+  "notes": "OVER-CAP (~85 KB): machine-generated TAP jailbreaks. Adversarially OPTIMISED text rather than hand-written, which is the stratum a hand-built corpus otherwise misses entirely.",
+  "sha256": "89bde037ea489ddd85180ca8e05b614ce843a9228d8d202be602dc9854b3b442"
+}

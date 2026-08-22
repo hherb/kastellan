@@ -13,7 +13,7 @@ pub(crate) fn run_guard(args: &[String]) -> ExitCode {
     if args.is_empty() {
         eprintln!(
             "usage: kastellan-cli guard calibrate [--corpus DIR] [--tau F] \
-             [--weights-unpinned]"
+             [--weights-unpinned] [--per-case]"
         );
         eprintln!("       kastellan-cli guard capture --manifest DIR --out DIR [--record]");
         return ExitCode::from(2);
@@ -37,6 +37,11 @@ fn run_guard_calibrate(args: &[String]) -> ExitCode {
     // make needlessly painful. The cost is paid in the artefact: an
     // unpinned run is stamped in its own report header.
     let mut weights_unpinned = false;
+    // Print one line per case after the aggregates. Off by default: on a
+    // 133-case corpus it is 133 lines, which would bury the confusion
+    // matrix an operator normally comes for. On when the question is
+    // "WHICH cases did it get wrong?", which the aggregates cannot answer.
+    let mut per_case = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -61,6 +66,7 @@ fn run_guard_calibrate(args: &[String]) -> ExitCode {
                 }
             }
             "--weights-unpinned" => weights_unpinned = true,
+            "--per-case" => per_case = true,
             other => {
                 eprintln!("guard calibrate: unknown flag {other}");
                 return ExitCode::from(2);
@@ -72,7 +78,10 @@ fn run_guard_calibrate(args: &[String]) -> ExitCode {
     // Runtime construction deferred until here (all args parsed and
     // validated above) so a parse error never pays for a runtime it
     // won't use — the same posture the other CLI dispatchers take.
-    with_runtime("guard calibrate", guard_calibrate_async(dir, tau, weights_unpinned))
+    with_runtime(
+        "guard calibrate",
+        guard_calibrate_async(dir, tau, weights_unpinned, per_case),
+    )
 }
 
 /// Mirrors `observation_replay::default_captures_dir`: under `cargo run`
@@ -95,13 +104,19 @@ fn default_corpus_dir() -> PathBuf {
     PathBuf::from("tests/guard/corpus")
 }
 
-async fn guard_calibrate_async(dir: PathBuf, tau: f32, weights_unpinned: bool) -> ExitCode {
+async fn guard_calibrate_async(
+    dir: PathBuf,
+    tau: f32,
+    weights_unpinned: bool,
+    per_case: bool,
+) -> ExitCode {
     use kastellan_core::cassandra::guard_model::policy::policy_digest;
     use kastellan_core::cassandra::guard_model::GuardClient;
     use kastellan_core::cassandra::injection_guard::{screen, BLOCK_THRESHOLD};
     use kastellan_core::guard_calibration::corpus::{load_corpus_from_dir, scannable_prefix};
     use kastellan_core::guard_calibration::report::{
-        confusion_at, format_report, operating_point_invalidity, RunMeta, ScoredCase,
+        confusion_at, format_report, operating_point_invalidity, render_per_case, RunMeta,
+        ScoredCase,
         BUDGET_SCOPE,
     };
     use kastellan_llm_router::RouterConfig;
@@ -215,6 +230,11 @@ async fn guard_calibrate_async(dir: PathBuf, tau: f32, weights_unpinned: bool) -
         weights,
     };
     print!("{}", format_report(&scored, tau, &meta));
+    // After the report, not inside it: `format_report` is what the
+    // committed evidence is made of, and its shape is pinned by tests.
+    if per_case {
+        print!("{}", render_per_case(&scored));
+    }
 
     // A run that is not believable must not exit 0, or a CI caller
     // reads the zero and moves on. TWO SOURCES, because the matrix and

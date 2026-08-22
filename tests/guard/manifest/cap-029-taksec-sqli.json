@@ -1,0 +1,8 @@
+{
+  "id": "cap-029-taksec-sqli",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/TakSec/Prompt-Injection-Everywhere/9b69c8ae7958f68d562d484103a7b14b66983d63/Prompt-Injection-SQLi.txt",
+  "notes": "Injection payload chaining into SQL injection -- the LLM is the delivery vehicle for a classical web vulnerability.",
+  "sha256": "b8fe37fa26840f8d4ba3066974c6e333687dabfec1a343595cb798724e20f719"
+}

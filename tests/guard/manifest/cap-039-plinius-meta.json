@@ -1,0 +1,8 @@
+{
+  "id": "cap-039-plinius-meta",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/elder-plinius/L1B3RT4S/64960b783249d36f76a48a33103cc4b168332b9b/META.mkd",
+  "notes": "Vendor-targeted jailbreak collection (~3.8 KB).",
+  "sha256": "43f0c882c4a0e4cf57ab04f16c08cecb88d03ecdc9598d923a6fa77a751cbd19"
+}

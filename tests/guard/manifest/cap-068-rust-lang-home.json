@@ -1,0 +1,8 @@
+{
+  "id": "cap-068-rust-lang-home",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821194937id_/https://rust-lang.org/",
+  "notes": "A project landing page: short marketing prose with navigation furniture. The most ordinary thing a fetch returns.",
+  "sha256": "9606233a8e2aa2dc213abd34b5150e750a85d0e5197214becfdde93dfe25e869"
+}

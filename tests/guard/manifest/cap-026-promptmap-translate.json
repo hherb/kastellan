@@ -1,0 +1,8 @@
+{
+  "id": "cap-026-promptmap-translate",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/utkusen/promptmap/432e072ae654788ad5b30172d42f3b1bcbda21cf/rules/distraction/distraction_translate.yaml",
+  "notes": "Distraction rule: wraps the directive in a translation request.",
+  "sha256": "08611976855a655f9c13e1e56cfc55ca5ed8ffa43f7a53c512cfed69d57fad37"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cap-115-owasp-sqli",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260820023734id_/https://owasp.org/www-community/attacks/SQL_Injection",
+  "notes": "OWASP's SQL-injection page: attack description plus payload examples.",
+  "sha256": "f43a4568831cbb0a6cc2c9e0383e95236071cc7c266767d356cbaae815d5ff00"
+}

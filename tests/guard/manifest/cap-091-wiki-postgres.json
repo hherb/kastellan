@@ -1,0 +1,8 @@
+{
+  "id": "cap-091-wiki-postgres",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821024703id_/https://en.wikipedia.org/wiki/PostgreSQL",
+  "notes": "Encyclopedia article on a database.",
+  "sha256": "6a947463c751b11b3c50e8f6bb2d0ccce933a3ca7d26a61d2f2ca1ae97ac587c"
+}

@@ -1,6 +1,11 @@
 # Guard calibration campaign — runbook
 
 **Status:** PILOT RUN COMPLETE 2026-08-22. **This is not measurement 3.**
+**SUPERSEDED 2026-08-23** by [`2026-08-23-guard-measurement-3.md`](2026-08-23-guard-measurement-3.md),
+which is the real campaign: 133 cases, 109 captured, fitted on both hosts.
+This file is kept as the pilot's record — the numbers below are the
+pilot's and are superseded, but the two plan corrections it documents
+still hold.
 
 Measurement 3 needs ≥ 100 labelled cases with a **captured half**. This run has 28 cases
 of which **4** are captured, and all four are benign. It exists to prove the pipeline
@@ -183,7 +188,7 @@ covers the hostname half, which needs the egress proxy).
 - **~85 more manifest entries**: ~35 ordinary benign, ~15 security prose, **~35 captured
   attacks** (the pilot has none), ≥ 8 over the 64 KiB cap (the pilot's largest is 24 KB, so
   truncation is still unexercised).
-- The **Mac leg and the two-host comparison**, blocked on
-  [#592](https://github.com/hherb/kastellan/issues/592)'s durable half: both hosts hold the
-  verified weights, but nothing *enforces* it, and D6's comparison only means something if
-  they are known-identical rather than currently-identical.
+- ~~The **Mac leg and the two-host comparison**~~ **DONE 2026-08-23.** #592's
+  durable half shipped in #598, so both hosts now hash the file `/props` names
+  and refuse anything but the pinned bytes. The two operating points differ by
+  0.1% — see the measurement-3 runbook.

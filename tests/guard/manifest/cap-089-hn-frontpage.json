@@ -1,0 +1,8 @@
+{
+  "id": "cap-089-hn-frontpage",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260822033440id_/https://news.ycombinator.com/",
+  "notes": "A link aggregator's front page: dozens of unrelated user-submitted headlines with no connecting prose. The most heterogeneous benign document here, and USER-SUBMITTED content, which is the class most likely to carry something odd.",
+  "sha256": "c03a62231fa19213abaa53ad96768f69d2e4c9df950f282a9f1a39a6f705d657"
+}

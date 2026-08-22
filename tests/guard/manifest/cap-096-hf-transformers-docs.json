@@ -1,0 +1,8 @@
+{
+  "id": "cap-096-hf-transformers-docs",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821081708id_/https://huggingface.co/docs/transformers/index",
+  "notes": "ML-library documentation. Same HOST as two attack cases in this corpus, which is a useful control: the host cannot be the signal.",
+  "sha256": "9e54945caa008c839ff82fee03320a4fd889dfa56ad1c22665aa4f0eab69626b"
+}

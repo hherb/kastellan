@@ -1,0 +1,8 @@
+{
+  "id": "cap-078-sqlite-select",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260820154735id_/https://www.sqlite.org/lang_select.html",
+  "notes": "SQLite's SELECT reference: a second SQL grammar page.",
+  "sha256": "b8f34ae68d42f917bdec3b4d3caf2962c2bb83b36737f6fa9d19361c39c44a20"
+}

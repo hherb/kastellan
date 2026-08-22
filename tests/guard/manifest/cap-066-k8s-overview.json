@@ -1,0 +1,8 @@
+{
+  "id": "cap-066-k8s-overview",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/kubernetes/website/56464fe6c846523da555b49fbb012f0e270871ae/content/en/docs/concepts/overview/_index.md",
+  "notes": "Kubernetes concept overview (~10 KB): documentation with front-matter, so the scored text carries metadata keys as well as prose.",
+  "sha256": "d08aaf4d85050ded345fd5dd53752e71d31838dac9e75691ecf705f90b2cb78b"
+}

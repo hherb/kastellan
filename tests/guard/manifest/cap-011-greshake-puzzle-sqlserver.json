@@ -1,0 +1,8 @@
+{
+  "id": "cap-011-greshake-puzzle-sqlserver",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/greshake/llm-security/c312325bee5f16d8f6524bd6f41e1510c5623a1e/scenarios/puzzle/puzzles/sqlserver",
+  "notes": "Indirect-injection puzzle payload: directs the reading model at a database it was not asked to touch.",
+  "sha256": "2670a0231f84efd7849a313e1c1caf2fd74403008b4ae45b6b5d23fa2197f561"
+}

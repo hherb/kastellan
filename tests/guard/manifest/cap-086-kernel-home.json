@@ -1,0 +1,8 @@
+{
+  "id": "cap-086-kernel-home",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821160052id_/https://www.kernel.org/",
+  "notes": "The kernel archive front page: mostly a table of version numbers and links, very little prose.",
+  "sha256": "120bcc084e2e1a4ba39f2703b8396e547353c2b4fd199c5dc7ff0c0965bae587"
+}

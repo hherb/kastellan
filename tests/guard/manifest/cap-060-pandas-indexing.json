@@ -1,0 +1,8 @@
+{
+  "id": "cap-060-pandas-indexing",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/pandas-dev/pandas/1026aa1ba6d03bfcbfc6e8981c37f56823017c4c/doc/source/user_guide/indexing.rst",
+  "notes": "Pandas indexing guide (~55 KB): the largest UNDER-cap benign document, so it is scored whole.",
+  "sha256": "ca0ed8b980bdb21d7857a85ccee44d03bc15804f7f0c5de5e0b79e692aaba05c"
+}

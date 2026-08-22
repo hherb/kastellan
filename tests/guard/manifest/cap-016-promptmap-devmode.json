@@ -1,0 +1,8 @@
+{
+  "id": "cap-016-promptmap-devmode",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/utkusen/promptmap/432e072ae654788ad5b30172d42f3b1bcbda21cf/rules/jailbreak/devmode3.yaml",
+  "notes": "Jailbreak rule: the 'developer mode' framing, one of the most-copied override patterns.",
+  "sha256": "550823357a4d8cee6b8c39091edb46fdf1391340b88dbd8bc75ecd9da1eb3dfe"
+}

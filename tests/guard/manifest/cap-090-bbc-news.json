@@ -1,0 +1,8 @@
+{
+  "id": "cap-090-bbc-news",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260822043817id_/https://www.bbc.com/news",
+  "notes": "A news front page: headlines and summaries across unrelated topics.",
+  "sha256": "99bda70c42e34d00fdf04a9b1fb9a742a36e751c8450ac8371db5ae6956612cf"
+}

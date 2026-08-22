@@ -1,0 +1,8 @@
+{
+  "id": "cap-045-verazuo-forbidden-q",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/verazuo/jailbreak_llms/4f4031bf8be187f4478c7f94f42b08714722c12e/data/forbidden_question/forbidden_question_set.csv",
+  "notes": "Forbidden-question set (~38 KB): directed requests in CSV form.",
+  "sha256": "47911005fb0bcc481801ed2b6d5b3472fd015c2197fc5b6dcca84fd64611d72a"
+}

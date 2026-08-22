@@ -1,0 +1,8 @@
+{
+  "id": "cap-012-greshake-puzzle-terminal",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/greshake/llm-security/c312325bee5f16d8f6524bd6f41e1510c5623a1e/scenarios/puzzle/puzzles/terminal-musk",
+  "notes": "Indirect-injection puzzle payload: impersonates an authority to redirect the reading model's behaviour.",
+  "sha256": "ff97c23554715cbd8852344e730ce2db71cd35995b7128391f8b1f4b74ea1098"
+}

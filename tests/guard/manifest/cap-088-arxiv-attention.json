@@ -1,0 +1,8 @@
+{
+  "id": "cap-088-arxiv-attention",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821031233id_/https://arxiv.org/abs/1706.03762",
+  "notes": "The 'Attention Is All You Need' abstract page: an academic abstract plus citation metadata.",
+  "sha256": "6169e992d5f5f8a3d590c9bcdeb3786b69b295ee23b6f220293ed998b1aea0c3"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cap-119-mitre-atlas-t0051",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20231221213340id_/https://atlas.mitre.org/techniques/AML.T0051/",
+  "notes": "MITRE ATLAS's prompt-injection technique entry: a structured threat-intelligence record rather than prose, so the scored text is mostly field labels and short descriptions.",
+  "sha256": "b82ff6e57d766507305cd88b254c05d34ed3b46cab762a7f55e952d3ad22751b"
+}

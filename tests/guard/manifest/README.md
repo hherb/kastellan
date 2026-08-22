@@ -35,7 +35,20 @@ So, when reviewing a new entry, check that `source` is one of:
   wrapper: `https://web.archive.org/web/<14-digit-timestamp>id_/<url>`;
 - a **HuggingFace URL pinned to a dataset revision**:
   `…/resolve/<commit-sha>/…`. Never `resolve/main`;
+- a **GitHub raw URL pinned to a full 40-hex commit SHA**:
+  `https://raw.githubusercontent.com/<owner>/<repo>/<40-hex>/<path>`.
+  Git is content-addressed, so the bytes under a commit SHA cannot
+  change; the only failure mode is the commit becoming unreachable,
+  which yields a **404** and is refused by the HTTP-status check rather
+  than silently serving different content. Never a branch or tag name —
+  `…/main/…` and `…/v1.2.3/…` are both mutable, and a tag can be moved.
 - any other locator whose content cannot change under it.
+
+**A size limit rides along with immutability.** `web-common`'s
+`MAX_BODY_BYTES` is 5 MiB and one byte over is a **hard error, not a
+truncation** — so a source larger than that fails the whole entry
+rather than capturing a prefix. Check the size before pinning something
+big; the largest entry in this corpus is ~1.8 MB.
 
 A `sha256` over a live page is a hash of whatever it said that day, and
 a corpus nobody can reproduce is a τ nobody can check.

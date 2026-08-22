@@ -1,0 +1,8 @@
+{
+  "id": "cap-064-serde-lib-docs",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/serde-rs/serde/747814f7d5fbab872df3b02f070c165b91bde062/serde/src/lib.rs",
+  "notes": "Serde's crate root (~12 KB): more Rust source, at a different size.",
+  "sha256": "bc5f9f7c32e63dff5a4ce2f9dc90d25e6fb7da8bdff4925276ada67835510e22"
+}

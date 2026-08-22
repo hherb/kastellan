@@ -1,0 +1,8 @@
+{
+  "id": "cap-108-portswigger-llm",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821065155id_/https://portswigger.net/web-security/llm-attacks",
+  "notes": "A hands-on security-training module on LLM attacks: instructions for a HUMAN learner to attack a deliberately vulnerable lab. Second-person imperative aimed at a student -- the most contestable benign case in this stratum.",
+  "sha256": "1b003a3a43f935bb853f996852f49853899fcc44045c2909b8f7eb82193797e1"
+}

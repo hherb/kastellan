@@ -1,0 +1,8 @@
+{
+  "id": "cap-065-curl-libcurl",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/curl/curl/5c61e168698a72b87437d58ed728bcdea6d5db42/docs/libcurl/libcurl.md",
+  "notes": "libcurl's overview man page (~10 KB): a network-client manual, so it discusses making requests to arbitrary hosts without directing any.",
+  "sha256": "06bff0c4538a4cfc6b8862390f6d68a5a437bc0bb59c7915e1bcf4cd9c0d5959"
+}

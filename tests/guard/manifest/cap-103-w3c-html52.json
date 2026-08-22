@@ -1,0 +1,8 @@
+{
+  "id": "cap-103-w3c-html52",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20210903134437id_/https://www.w3.org/TR/html52/",
+  "notes": "The Wayback snapshot of the HTML 5.2 spec index. Extracts to only ~2.5 KB -- a standards landing page rather than the spec body, which is a useful reminder that a large SOURCE is not a large scored document.",
+  "sha256": "123bffeb383cb9bbed15071eeddbe521c7a8e876e4d86f0c2101fb0d4f087147"
+}

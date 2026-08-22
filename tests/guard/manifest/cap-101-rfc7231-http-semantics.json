@@ -1,0 +1,8 @@
+{
+  "id": "cap-101-rfc7231-http-semantics",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260819231003id_/https://www.rfc-editor.org/rfc/rfc7231.txt",
+  "notes": "OVER-CAP: RFC 7231 (HTTP semantics), a second RFC 2119 document.",
+  "sha256": "73ca1a9487716b3c81aeffd6ff55614673b627054defeb132bbb24756fc69b0a"
+}

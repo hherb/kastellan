@@ -1,0 +1,8 @@
+{
+  "id": "cap-030-taksec-xss",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/TakSec/Prompt-Injection-Everywhere/9b69c8ae7958f68d562d484103a7b14b66983d63/Prompt-Injection-XSS.txt",
+  "notes": "Injection payload chaining into XSS via model output.",
+  "sha256": "3e72f97f543044a4698f2ab9e5e04c925047fa84fb00b7cebfd89aeae9261456"
+}

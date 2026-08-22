@@ -1,0 +1,8 @@
+{
+  "id": "cap-037-plinius-google",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/elder-plinius/L1B3RT4S/64960b783249d36f76a48a33103cc4b168332b9b/GOOGLE.mkd",
+  "notes": "Vendor-targeted jailbreak collection (~20 KB).",
+  "sha256": "67e4b5fb44e98297b26b73e692526dcdfdc16e62f2462b0fd1d949ad97f9878a"
+}

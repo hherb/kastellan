@@ -1,0 +1,8 @@
+{
+  "id": "cap-110-owasp-llm01",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260820014541id_/https://genai.owasp.org/llmrisk/llm01-prompt-injection/",
+  "notes": "OWASP's LLM01 entry: the canonical prompt-injection taxonomy, with example attacks listed as a reference.",
+  "sha256": "d51d17e85fd006544824cd04af5796244220d5fbf1aba080f123b9f777549184"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cap-097-nasa-home",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821222231id_/https://www.nasa.gov/",
+  "notes": "A government agency front page: entirely outside the technical domain of every other case.",
+  "sha256": "8c448f12f5afe497c62e8c01b2fa187ae4e72c19d31532bf2391a835dd9fe6ae"
+}

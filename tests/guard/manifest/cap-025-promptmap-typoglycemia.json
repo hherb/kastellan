@@ -1,0 +1,8 @@
+{
+  "id": "cap-025-promptmap-typoglycemia",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/utkusen/promptmap/432e072ae654788ad5b30172d42f3b1bcbda21cf/rules/distraction/distraction_typoglycemia.yaml",
+  "notes": "Distraction rule: scrambled-spelling obfuscation of a directive, the same evasion family as the seeded corpus's leetspeak inj-001..003.",
+  "sha256": "64ad9481d00dd5914bc51fb8798f13a9a3e226fe3b47241f97a60e6d76c8dedf"
+}

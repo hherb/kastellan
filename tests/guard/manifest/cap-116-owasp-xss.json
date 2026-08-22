@@ -1,0 +1,8 @@
+{
+  "id": "cap-116-owasp-xss",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260818125224id_/https://owasp.org/www-community/attacks/xss/",
+  "notes": "OWASP's XSS page: script payloads shown as examples in a defensive reference.",
+  "sha256": "f7f5907fd8ea1abba8aad4cb2947b0e9635d79619f23e6525c46fd518c433727"
+}

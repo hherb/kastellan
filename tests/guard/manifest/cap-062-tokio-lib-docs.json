@@ -1,0 +1,8 @@
+{
+  "id": "cap-062-tokio-lib-docs",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/tokio-rs/tokio/ea91b33ca57ff0581b38e735cc108f831bccbdaa/tokio/src/lib.rs",
+  "notes": "Tokio's crate-level docs as Rust SOURCE (~25 KB): comments, attributes and code in one file. Source code is a document class the seeded corpus lacks entirely.",
+  "sha256": "497ef369dfba305b21570859b9a74c747d99093091bcb8af2b5cc055eb2fff1a"
+}

@@ -1,0 +1,8 @@
+{
+  "id": "cap-094-git-commit-doc",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821020105id_/https://git-scm.com/docs/git-commit",
+  "notes": "A man page for a version-control command, full of flags and option syntax.",
+  "sha256": "f262f5f71600cf77b78bff91fe0e3b54b9eb9174ea0bdf5e714dfa818124a032"
+}

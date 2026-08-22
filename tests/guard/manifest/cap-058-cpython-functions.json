@@ -1,0 +1,8 @@
+{
+  "id": "cap-058-cpython-functions",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/python/cpython/f74cdf80a120649e4c353430da8cbd1305c00993/Doc/library/functions.rst",
+  "notes": "OVER-CAP (~98 KB): Python's built-in functions reference. Just past the cap, so it pins the truncation boundary from the benign side.",
+  "sha256": "a1dbd7b4d86c830fa9b090387a7fdc4d1f51000db63ad3a5c3006f91e189688a"
+}

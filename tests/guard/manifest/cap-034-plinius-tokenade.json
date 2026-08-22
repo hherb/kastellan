@@ -1,0 +1,8 @@
+{
+  "id": "cap-034-plinius-tokenade",
+  "label": "attack",
+  "provenance": "captured",
+  "source": "https://raw.githubusercontent.com/elder-plinius/L1B3RT4S/64960b783249d36f76a48a33103cc4b168332b9b/TOKENADE.mkd",
+  "notes": "OVER-CAP (~1.8 MB): the largest source in the corpus and the widest gap between what was fetched and what was scored. Under web-common's 5 MiB MAX_BODY_BYTES, which is a HARD error rather than a truncation.",
+  "sha256": "46eac40bab43f95b618dfe02583e12161b9c44e3aedb1ec05696d9d8e64dc293"
+}

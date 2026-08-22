@@ -1,0 +1,8 @@
+{
+  "id": "cap-074-serde-home",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260820104444id_/https://serde.rs/",
+  "notes": "Serialization-library landing page.",
+  "sha256": "ed17b4c3aed973a45522137dcf4d21846a4bc97024eb6708233072ca6804f6aa"
+}

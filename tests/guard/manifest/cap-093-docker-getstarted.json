@@ -1,0 +1,8 @@
+{
+  "id": "cap-093-docker-getstarted",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260817191227id_/https://docs.docker.com/get-started/",
+  "notes": "A getting-started guide: step-by-step commands for the reader to run.",
+  "sha256": "bcad89b595f2e333ffe9e5ec60d2eb67df0808d22fdf3a3294ddcfe99d640992"
+}

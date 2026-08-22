@@ -1,0 +1,8 @@
+{
+  "id": "cap-085-debian-home",
+  "label": "benign",
+  "provenance": "captured",
+  "source": "https://web.archive.org/web/20260821222844id_/https://www.debian.org/",
+  "notes": "Distribution landing page. Re-recorded 2026-08-23 after a Wayback redirect changed the URL inside the scored text (see #603); the new hash agreed across three consecutive captures.",
+  "sha256": "d1fd512b677fda6647500262f5877d18275ed765779878f38287efd879a5b4cc"
+}
