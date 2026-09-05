@@ -305,6 +305,95 @@ pub(crate) fn anchor_of(path: &str) -> Option<String> {
     Some(format!("/{first}"))
 }
 
+/// Mount options for the guest `/run` tmpfs.
+///
+/// **An explicit mode, because the kernel default is not one anybody chose.** A
+/// tmpfs mounted with no `mode=` comes up **1777** — world-writable and sticky —
+/// regardless of the mounting process's umask (measured, not assumed). Inside
+/// the VM that was close to harmless, since the worker is the only workload and
+/// is the uid everything is chowned to anyway; but it was load-bearing in a
+/// misleading way. #669 originally chowned `/run` to the worker, justified as
+/// "the worker needs to traverse and write in it" — both of which the 1777
+/// default had silently already granted, so the chown's only real effect was to
+/// hand the worker ownership of a *sticky* directory, which is precisely what
+/// lets an owner unlink entries it does not own.
+///
+/// At `0755` the directory's permissions are a decision: root (the pre-drop
+/// init) creates the relay sockets, everyone can traverse to reach them, and
+/// the per-socket `chown` in [`worker_owned_paths`] is the ONLY grant the
+/// worker gets. Removing that chown must then break the worker — which is the
+/// property #669 wanted and the 1777 default was quietly masking.
+///
+/// Lives here rather than beside the `mount(2)` call so it is readable and
+/// unit-testable on a Mac; `guest::egress::mount_run_tmpfs` applies it. (#672)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) const RUN_TMPFS_MOUNT_OPTS: &str = "mode=0755";
+
+/// What a path in the chown set is FOR — the two kinds fail very differently,
+/// and a single flat `Vec<String>` could not say so.
+///
+/// The distinction is not cosmetic: it decides whether a failed `chown` is a
+/// degradation or a guaranteed dead worker, and re-deriving it in the chown
+/// loop by comparing paths against the UDS constants would put a second place
+/// in the tree that knows which paths are sockets. That kind of second place is
+/// how the first version of this drifted. (#670)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnedPathRole {
+    /// A directory the worker writes into: an RW mountpoint, a share anchor, or
+    /// `/tmp`. If the chown fails the worker still runs and fails on the
+    /// specific write — bad, but survivable and self-describing.
+    Writable,
+    /// A relay socket the worker must `connect(2)` to. `connect` on an
+    /// `AF_UNIX` socket needs **write** permission on the socket *file*, so a
+    /// failed chown here is not a degradation: that worker dies on its first
+    /// dial, every time, reporting a permission error that names the proxy
+    /// rather than the cause.
+    RelaySocket,
+}
+
+impl OwnedPathRole {
+    /// Whether a failed `chown` of a path in this role must halt the guest.
+    ///
+    /// Fail-closed for the socket, and the asymmetry is the whole point: every
+    /// other step of the privilege drop already panics, and the chowns were the
+    /// one exception. That exception was defensible only while a panicking
+    /// PID 1 was *illegible* — the VM halted and the host saw the same
+    /// contentless `Protocol(EarlyExit)` the whole defect class hides behind.
+    /// Now that the launcher captures the guest console (#666), the panic text
+    /// reaches the host, so refusing to serve a worker that cannot possibly
+    /// work is strictly better than serving it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn chown_failure_is_fatal(self) -> bool {
+        match self {
+            OwnedPathRole::Writable => false,
+            OwnedPathRole::RelaySocket => true,
+        }
+    }
+}
+
+/// One entry of the chown set: the path, and what it is for.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnedPath {
+    pub(crate) path: String,
+    pub(crate) role: OwnedPathRole,
+}
+
+impl OwnedPath {
+    /// A directory the worker writes into.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn writable(path: impl Into<String>) -> Self {
+        Self { path: path.into(), role: OwnedPathRole::Writable }
+    }
+
+    /// A relay socket the worker must be able to connect to.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn relay_socket(path: impl Into<String>) -> Self {
+        Self { path: path.into(), role: OwnedPathRole::RelaySocket }
+    }
+}
+
 /// Every path the guest init must hand to the worker uid before it drops root.
 ///
 /// Pure function of the kernel cmdline — no syscalls — so the *decision* is
@@ -335,6 +424,12 @@ pub(crate) fn anchor_of(path: &str) -> Option<String> {
 /// inside a hardening change, with nothing asking for it. The two socket files
 /// are the whole fix.
 ///
+/// Each entry carries its [`OwnedPathRole`], because a failed `chown` of a
+/// writable directory and a failed `chown` of a relay socket are not the same
+/// event (#670): the first is a degradation, the second is a worker that will
+/// fail every dial it ever makes. The role travels WITH the path so the chown
+/// loop never has to re-derive it by comparing against the UDS constants.
+///
 /// Paths are returned in a stable order and are **not** deduplicated: two RW
 /// mounts under one top-level directory yield that anchor twice, and an RW
 /// mountpoint that is itself top-level appears as both mountpoint and anchor.
@@ -346,13 +441,17 @@ pub(crate) fn anchor_of(path: &str) -> Option<String> {
 /// module carry, it is narrowed to non-Linux so the Linux build still fails if
 /// the guest ever stops calling this.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn worker_owned_paths(cmdline: &str) -> Vec<String> {
+pub(crate) fn worker_owned_paths(cmdline: &str) -> Vec<OwnedPath> {
     let m = parse_mount_manifest(cmdline);
-    let mut paths: Vec<String> = m.rw.iter().map(|rw| rw.mountpoint.clone()).collect();
-    paths.push("/tmp".to_string());
+    let mut paths: Vec<OwnedPath> = m
+        .rw
+        .iter()
+        .map(|rw| OwnedPath::writable(rw.mountpoint.clone()))
+        .collect();
+    paths.push(OwnedPath::writable("/tmp"));
     for t in m.rw.iter().map(|rw| rw.mountpoint.as_str()) {
         if let Some(a) = anchor_of(t) {
-            paths.push(a);
+            paths.push(OwnedPath::writable(a));
         }
     }
     // Each socket is conditional on ITS OWN relay, never on "any relay": a
@@ -363,10 +462,10 @@ pub(crate) fn worker_owned_paths(cmdline: &str) -> Vec<String> {
     let egress = parse_egress_config(cmdline).enabled;
     let broker = parse_broker_config(cmdline).enabled;
     if egress {
-        paths.push(GUEST_EGRESS_UDS.to_string());
+        paths.push(OwnedPath::relay_socket(GUEST_EGRESS_UDS));
     }
     if broker {
-        paths.push(GUEST_BROKER_UDS.to_string());
+        paths.push(OwnedPath::relay_socket(GUEST_BROKER_UDS));
     }
     paths
 }

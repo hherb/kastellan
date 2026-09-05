@@ -88,7 +88,7 @@
 //!    here. This assembler therefore escapes `&`/`<`/`>` and neutralises
 //!    every line-breaking or invisibly-reordering character — C0 controls,
 //!    the Unicode line separators and the bidi controls, see
-//!    [`is_neutralised_control`] — in **every L1 and recalled body** via
+//!    [`crate::untrusted_text::is_neutralised_control`] — in **every L1 and recalled body** via
 //!    [`escape_untrusted_body`], so no stored row can close a block, forge
 //!    framing, or forge an extra `- ` row. Recall gains a second layer:
 //!    catalogue screening in [`crate::recall_assembly`] drops rows that
@@ -171,7 +171,7 @@ fn render_handoff_block() -> String {
 /// - Replacing every **line-breaking or invisibly-reordering** character with a
 ///   space keeps the one-row-per-line contract, so a body cannot forge a
 ///   sibling `- ` row (nor smuggle NUL / ANSI escapes into the prompt). Three
-///   groups, listed by [`is_neutralised_control`].
+///   groups, listed by [`crate::untrusted_text::is_neutralised_control`].
 ///
 /// **What this does NOT buy** (#544, decided rather than inherited): it is not
 /// a general Unicode sanitiser. Zero-width characters (U+200B–U+200D, U+FEFF),
@@ -189,50 +189,11 @@ pub(super) fn escape_untrusted_body(body: &str) -> String {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
-            c if is_neutralised_control(c) => out.push(' '),
+            c if crate::untrusted_text::is_neutralised_control(c) => out.push(' '),
             c => out.push(c),
         }
     }
     out
-}
-
-/// The character class [`escape_untrusted_body`] replaces with a space.
-///
-/// Enumerated rather than taken from a Unicode-property crate: the set is
-/// small, stable, and each group is here for a stated reason, so a reader can
-/// check the guarantee against the list without resolving a dependency.
-///
-/// 1. **Unicode control codes** — category `Cc`, i.e. C0 (`\n`, `\r`, NUL, the
-///    ESC that introduces an ANSI sequence), DEL, and the C1 block. The old
-///    rule was `< 0x20`, which stopped at C0 and so neutralised the 7-bit ESC
-///    while letting through U+009B, the 8-bit CSI that does the same job in a
-///    terminal — and U+0085 (NEL), a line break. Taking the whole category
-///    removes the seam instead of listing exceptions to it.
-/// 2. **The two line separators outside `Cc`** — U+2028 (LINE SEPARATOR) and
-///    U+2029 (PARAGRAPH SEPARATOR). Line breaks to any consumer following the
-///    Unicode line-breaking algorithm, so leaving them in would make the
-///    one-row-per-line contract a claim about Rust's `char` rather than about
-///    the reader (#544).
-/// 3. **Bidi formatting controls** — the marks, embeddings, overrides and
-///    isolates (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069). They are
-///    invisible and reorder the *displayed* text that follows, so a stored row
-///    can read one way to the operator auditing it and another way in the
-///    prompt. Only the control characters go; RTL script itself is untouched.
-///
-/// All three are replaced with a **space**, never deleted: deleting would
-/// silently join the tokens on either side (`a<U+202E>b` → `ab`), and one rule
-/// for the whole class is one fewer thing to get wrong than a per-character
-/// policy.
-fn is_neutralised_control(c: char) -> bool {
-    // 1. Category Cc — C0, DEL, C1 (which contains U+0085 NEL and U+009B CSI).
-    c.is_control()
-        // 2. The line separators that sit outside Cc.
-        || matches!(c, '\u{2028}' | '\u{2029}')
-        // 3. Bidi formatting controls.
-        || matches!(
-            c,
-            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-        )
 }
 
 /// Render the `<tools>` block: one entry per advertised tool. The `doc` fields

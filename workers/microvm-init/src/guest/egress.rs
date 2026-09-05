@@ -15,7 +15,7 @@
 //! are widened to `pub(crate)` (their sole caller is `crate::main`); the socket
 //! helpers stay module-private.
 
-use crate::cmdline::{GUEST_EGRESS_UDS, VMADDR_CID_HOST};
+use crate::cmdline::{GUEST_EGRESS_UDS, RUN_TMPFS_MOUNT_OPTS, VMADDR_CID_HOST};
 use std::os::unix::io::RawFd;
 
 /// Mount a writable `/run` tmpfs (the rootfs is a read-only superblock). Call
@@ -23,14 +23,32 @@ use std::os::unix::io::RawFd;
 /// stacks a second tmpfs over the first and hides the earlier relay's bound
 /// socket. Best-effort; a mount failure logs nothing here and the first UDS bind
 /// then fails loudly.
+///
+/// The mode comes from [`RUN_TMPFS_MOUNT_OPTS`] rather than from the kernel
+/// default, which is 1777 — see that constant for why an unchosen
+/// world-writable sticky `/run` was quietly masking whether the relay-socket
+/// chowns were doing anything (#672). This runs as root, before the privilege
+/// drop, so 0755 is still writable by the process that binds the sockets.
 pub(crate) fn mount_run_tmpfs() {
     let _ = std::fs::create_dir_all("/run");
-    if let (Ok(src), Ok(tgt), Ok(fst)) = (
+    if let (Ok(src), Ok(tgt), Ok(fst), Ok(opts)) = (
         std::ffi::CString::new("tmpfs"),
         std::ffi::CString::new("/run"),
         std::ffi::CString::new("tmpfs"),
+        std::ffi::CString::new(RUN_TMPFS_MOUNT_OPTS),
     ) {
-        unsafe { libc::mount(src.as_ptr(), tgt.as_ptr(), fst.as_ptr(), 0, std::ptr::null()) };
+        // SAFETY: four NUL-terminated strings that outlive the call; no flags.
+        // The data pointer is the filesystem-specific option string, which for
+        // tmpfs is exactly the `mode=` form used here.
+        unsafe {
+            libc::mount(
+                src.as_ptr(),
+                tgt.as_ptr(),
+                fst.as_ptr(),
+                0,
+                opts.as_ptr() as *const libc::c_void,
+            )
+        };
     }
 }
 

@@ -101,11 +101,13 @@ const GUEST_BROKER_UDS: &str = "/run/kastellan-broker.sock";
 /// Kernel cmdline: serial console for *kernel* logs only; JSON-RPC rides vsock,
 /// not the console.
 ///
-/// ⚠️ Nothing currently READS this console: the launcher spawns firecracker with
-/// `Stdio::null()` on both stdout and stderr, and the guest console IS that
-/// stdout, so every `microvm-init` diagnostic is discarded (#666). `--log-path`
-/// catches firecracker's own logs, not the guest console. This comment used to
-/// claim the launcher routed it to a log fd; it never did.
+/// The console IS firecracker's stdout, and since #666 the launcher redirects
+/// it (and firecracker's stderr) to `console.log` in the per-spawn run dir, so
+/// every `microvm-init` diagnostic and the worker's own stderr land in one
+/// chronological transcript. `--log-path` catches firecracker's own logs and
+/// nothing written before it opens that file, which is why it was never a
+/// substitute. On a boot failure the launcher echoes a redacted tail of the
+/// console to its own stderr, which the backend pipes and core drains.
 const BASE_BOOT_ARGS: &str =
     "console=ttyS0 reboot=k panic=1 pci=off i8042.noaux=1 i8042.nomux=1";
 

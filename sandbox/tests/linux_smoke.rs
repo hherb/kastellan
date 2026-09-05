@@ -1,5 +1,13 @@
-//! End-to-end tests for the Linux bwrap backend. These actually invoke `bwrap`,
-//! so they only run on Linux and require `bwrap` on `$PATH`.
+//! End-to-end tests for the Linux **bwrap jails**. These actually invoke
+//! `bwrap`, so they only run on Linux and require `bwrap` on `$PATH`.
+//!
+//! Two jails live here, and that is deliberate: the worker jail
+//! ([`LinuxBwrap`]) and the Firecracker **VMM jail** (`build_vmm_jail_argv`).
+//! They are built by different modules but are the same kind of object, and
+//! keeping their real-bwrap gates in one file is what makes "which jails does
+//! anything actually launch?" answerable by reading one file (#671). It also
+//! keeps `skip_if_no_userns` to a single copy — the drift that #642 and #661
+//! are both instances of.
 
 #![cfg(target_os = "linux")]
 
@@ -307,4 +315,92 @@ fn relative_policy_paths_are_rejected() {
         res,
         Err(kastellan_sandbox::SandboxError::Backend(_))
     ));
+}
+
+// ── The Firecracker VMM jail (#671) ───────────────────────────────────────────
+
+/// The Firecracker VMM jail is a bwrap jail too, and until this test it was the
+/// only one nothing ever *executed*: `build_vmm_jail_argv`'s output was read
+/// solely by `contains` assertions over a `Vec<String>` and by the live spawn
+/// path. That is why the same defect shipped green twice — #661 in
+/// `linux_bwrap`, then #669 in this jail, which the #661 fix missed.
+///
+/// **A content assertion cannot see the defect class.** In both cases every flag
+/// was spelled correctly; bwrap rejected the *combination* (`--disable-userns`
+/// with no hard `--unshare-user`) at option-parse time. Only a real `bwrap` can
+/// render that verdict, so this test renders it: build the production argv and
+/// run a trivial payload under it.
+///
+/// The assertion is **exit status**, deliberately not stderr text. Both an
+/// option-parse refusal and a failed bind exit 1 and both print a `bwrap:`
+/// line, so classifying by message would pin bubblewrap's wording rather than
+/// the property; every bind source here is real, so success is unambiguous.
+///
+/// Skips when the host cannot make an unprivileged user namespace, or when the
+/// two devices the jail `--dev-bind`s are absent (no KVM host). It needs no
+/// firecracker binary, no rootfs and no guest kernel — only files at those
+/// paths — so it is far cheaper than every other gate on this path.
+#[test]
+fn vmm_jail_argv_launches_under_real_bwrap() {
+    use kastellan_sandbox::linux_firecracker::{build_vmm_jail_argv, FirecrackerImage};
+
+    if skip_if_no_userns() {
+        return;
+    }
+    for dev in ["/dev/kvm", "/dev/vhost-vsock"] {
+        if !std::path::Path::new(dev).exists() {
+            eprintln!("\n[SKIP] {dev} absent; the VMM jail --dev-binds it\n");
+            return;
+        }
+    }
+
+    // A real run dir with real (empty) stand-ins for the kernel and rootfs: the
+    // jail only ro-binds them, so their contents are irrelevant, but bwrap
+    // refuses a bind whose source is missing and that would be a different
+    // failure than the one under test.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let kernel = dir.path().join("vmlinux");
+    let rootfs = dir.path().join("rootfs.ext4");
+    std::fs::write(&kernel, b"").expect("write kernel stand-in");
+    std::fs::write(&rootfs, b"").expect("write rootfs stand-in");
+
+    let plan = kastellan_sandbox::linux_firecracker::build_launch_plan(
+        &SandboxPolicy::default(),
+        &FirecrackerImage {
+            kernel_path: kernel,
+            rootfs_path: rootfs,
+        },
+        "/usr/local/bin/kastellan-worker-kv-demo",
+        &[],
+    )
+    .expect("build_launch_plan");
+
+    // Two distinct real executables stand in for firecracker and the launcher —
+    // the jail ro-binds each at its own absolute path, exactly as production does.
+    let mut argv = build_vmm_jail_argv(
+        &plan,
+        dir.path(),
+        std::path::Path::new("/bin/true"),
+        std::path::Path::new("/bin/false"),
+    )
+    .expect("build_vmm_jail_argv");
+    assert_eq!(
+        argv.last().map(String::as_str),
+        Some("--"),
+        "the jail argv must end with the `--` this test appends its payload after: {argv:?}"
+    );
+    argv.push("/bin/true".into());
+
+    let out = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+        .expect("spawn bwrap");
+    assert!(
+        out.status.success(),
+        "the VMM jail argv was refused by real bwrap (status {:?}). This is the #661/#669 \
+         defect class: a flag combination bwrap rejects, which no `contains` assertion can \
+         see. bwrap said: {}\nargv: {argv:?}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim(),
+    );
 }

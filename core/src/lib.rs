@@ -32,6 +32,9 @@ pub mod scheduler;
 // NEW — Item 31 (HANDOVER) opaque secret refs slice 1
 pub mod secrets;
 pub mod tool_host;
+/// One definition of the dangerous-character class in untrusted text, shared
+/// by the prompt escaper and the daemon-log neutraliser.
+mod untrusted_text;
 pub mod worker_manifest;
 pub mod worker_lifecycle;
 pub mod worker_stderr;

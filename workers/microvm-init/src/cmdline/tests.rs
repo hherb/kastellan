@@ -245,7 +245,7 @@ fn mounts_cmdline(manifest: &str) -> String {
 /// was too broad (see `..._keeps_each_socket_to_its_own_relay`).
 #[test]
 fn worker_owned_paths_without_a_relay_is_tmp_alone() {
-    assert_eq!(worker_owned_paths(""), ["/tmp"]);
+    assert_eq!(worker_owned_paths(""), [OwnedPath::writable("/tmp")]);
 }
 
 /// The relay socket must be in the chown set when its relay is enabled.
@@ -263,7 +263,13 @@ fn worker_owned_paths_without_a_relay_is_tmp_alone() {
 /// stops it being re-added on a plausible-sounding hunch.
 #[test]
 fn worker_owned_paths_for_an_egress_worker_is_tmp_and_its_socket() {
-    assert_eq!(worker_owned_paths("kastellan.egress=1"), ["/tmp", GUEST_EGRESS_UDS]);
+    assert_eq!(
+        worker_owned_paths("kastellan.egress=1"),
+        [
+            OwnedPath::writable("/tmp"),
+            OwnedPath::relay_socket(GUEST_EGRESS_UDS),
+        ],
+    );
 }
 
 /// Each socket is conditional on ITS OWN relay, not on "any relay".
@@ -278,10 +284,20 @@ fn worker_owned_paths_for_an_egress_worker_is_tmp_and_its_socket() {
 /// configuration where the over-broad guard is indistinguishable from this one.
 #[test]
 fn worker_owned_paths_keeps_each_socket_to_its_own_relay() {
-    assert_eq!(worker_owned_paths("kastellan.broker=1"), ["/tmp", GUEST_BROKER_UDS]);
+    assert_eq!(
+        worker_owned_paths("kastellan.broker=1"),
+        [
+            OwnedPath::writable("/tmp"),
+            OwnedPath::relay_socket(GUEST_BROKER_UDS),
+        ],
+    );
     assert_eq!(
         worker_owned_paths("kastellan.egress=1 kastellan.broker=1"),
-        ["/tmp", GUEST_EGRESS_UDS, GUEST_BROKER_UDS],
+        [
+            OwnedPath::writable("/tmp"),
+            OwnedPath::relay_socket(GUEST_EGRESS_UDS),
+            OwnedPath::relay_socket(GUEST_BROKER_UDS),
+        ],
     );
 }
 
@@ -300,7 +316,12 @@ fn worker_owned_paths_keeps_rw_mountpoints_and_their_anchors() {
     );
     assert_eq!(
         worker_owned_paths(&cmdline),
-        ["/data/scratch", "/tmp", "/data", GUEST_EGRESS_UDS],
+        [
+            OwnedPath::writable("/data/scratch"),
+            OwnedPath::writable("/tmp"),
+            OwnedPath::writable("/data"),
+            OwnedPath::relay_socket(GUEST_EGRESS_UDS),
+        ],
     );
 }
 
@@ -313,6 +334,70 @@ fn worker_owned_paths_repeats_a_shared_anchor_rather_than_deduplicating() {
     let cmdline = mounts_cmdline("rw\tvdb\t/data/scratch\nrw\tvdc\t/data/store");
     assert_eq!(
         worker_owned_paths(&cmdline),
-        ["/data/scratch", "/data/store", "/tmp", "/data", "/data"],
+        [
+            OwnedPath::writable("/data/scratch"),
+            OwnedPath::writable("/data/store"),
+            OwnedPath::writable("/tmp"),
+            OwnedPath::writable("/data"),
+            OwnedPath::writable("/data"),
+        ],
+    );
+}
+
+/// A failed `chown` means something different for each role, and this is the
+/// single place that decides which.
+///
+/// The mutation it kills is a collapse to a constant — `false` restores the
+/// pre-#670 warn-only behaviour (a networked worker that dies on every dial
+/// while the VM reports a clean boot), and `true` makes a mountpoint that
+/// cannot be chowned refuse the whole VM, which is a far worse trade than the
+/// degradation it replaces. Both directions are asserted for that reason.
+#[test]
+fn only_a_relay_socket_makes_a_failed_chown_fatal() {
+    assert!(
+        OwnedPathRole::RelaySocket.chown_failure_is_fatal(),
+        "a socket the worker cannot connect to is a dead worker, not a degraded one"
+    );
+    assert!(
+        !OwnedPathRole::Writable.chown_failure_is_fatal(),
+        "a mountpoint the worker cannot own must NOT halt the VM — the worker runs \
+         and fails on the specific write, which is more useful than refusing to boot"
+    );
+}
+
+/// The role is derived from what the path IS, not from where it sits in the
+/// vector — so a reordering of `worker_owned_paths` cannot silently turn a
+/// socket into a directory.
+#[test]
+fn roles_follow_the_path_kind_not_its_position() {
+    let paths = worker_owned_paths("kastellan.egress=1 kastellan.broker=1");
+    for p in &paths {
+        let expected = if p.path == GUEST_EGRESS_UDS || p.path == GUEST_BROKER_UDS {
+            OwnedPathRole::RelaySocket
+        } else {
+            OwnedPathRole::Writable
+        };
+        assert_eq!(p.role, expected, "wrong role for {}", p.path);
+    }
+}
+
+/// `/run` is mounted with an EXPLICIT mode, not the kernel's 1777 default.
+///
+/// A weak-looking assertion that is doing real work: the whole of #672 is that
+/// the previous value was nobody's decision, and the failure mode it guards
+/// against is someone dropping the option again while every test stays green
+/// (the guest works fine at 1777 — that is exactly why it survived). The live
+/// proof is the in-guest e2e that stats `/run`; this is the cheap regression
+/// guard beside the constant.
+#[test]
+fn run_tmpfs_is_mounted_with_an_explicit_mode() {
+    assert!(
+        RUN_TMPFS_MOUNT_OPTS.contains("mode="),
+        "the /run tmpfs must name its mode; without one the kernel gives 1777: \
+         {RUN_TMPFS_MOUNT_OPTS}"
+    );
+    assert!(
+        !RUN_TMPFS_MOUNT_OPTS.contains("1777") && !RUN_TMPFS_MOUNT_OPTS.contains("0777"),
+        "world-writable is the default this constant exists to replace: {RUN_TMPFS_MOUNT_OPTS}"
     );
 }

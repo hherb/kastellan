@@ -9,9 +9,20 @@
 //! restart-on-crash supervision, and per-worker UDS multiplexing are
 //! follow-on work.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kastellan_protocol::client::{Client, ClientError};
+
+/// How long the `EarlyExit` path waits for the stderr drainer to reach EOF
+/// before reporting what it has.
+///
+/// Paid only when a worker has already failed, so it costs nothing on the happy
+/// path. Small because the pipe is already closing — the worker exited — and a
+/// larger budget would only add latency to an error that is about to be
+/// returned anyway. Its floor is set by the alternative: reporting "wrote
+/// NOTHING" for a worker that in fact explained itself.
+const EARLY_EXIT_DRAIN_WAIT: Duration = Duration::from_millis(250);
+
 use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 
 mod audit_sink;
@@ -442,9 +453,17 @@ where
     // empty) and surfaces each chunk at `debug`; the thread self-terminates when
     // the worker exits (stderr closes). See `worker_stderr` (the Matrix channel
     // worker uses the tail-retaining variant for death reports — #348).
-    if let Some(stderr) = child.stderr.take() {
-        crate::worker_stderr::spawn_drain(pid, stderr);
-    }
+    //
+    // The TAIL-retaining variant (#666): the drain still logs every chunk at
+    // `debug`, but a bounded ring of recent lines is kept so that an `EarlyExit`
+    // — "worker exited before responding", the most content-free failure this
+    // system produces — can be reported WITH the worker's own explanation
+    // instead of on its own. Previously that explanation existed only at
+    // `debug`, i.e. invisible at the default log level.
+    let stderr_tail = child
+        .stderr
+        .take()
+        .map(|stderr| crate::worker_stderr::spawn_drain_with_tail(pid, stderr));
     let client = Client::from_child(child)?;
     // Build the re-armable watchdog in the DISARMED state. It is armed only for
     // the duration of each `SupervisedWorker::call` (see that method), so a warm
@@ -453,6 +472,8 @@ where
     Ok(SupervisedWorker {
         client,
         watchdog,
+        program: spec.program.to_string(),
+        stderr_tail,
         egress: None,
         broker: None,
         scratch: None,
@@ -481,6 +502,16 @@ pub struct SupervisedWorker {
     /// between, so a reused (warm) worker is never killed while idle. Dropping
     /// it shuts the watchdog thread down (no kill).
     watchdog: Option<watchdog::Watchdog>,
+    /// The worker program, kept only so an `EarlyExit` can name which worker
+    /// died. Naming it matters more than it looks: the caller's tool name and
+    /// the process that actually exited are not the same thing on the micro-VM
+    /// path, where the process is `kastellan-microvm-run` and the tool is
+    /// whatever ran inside the guest.
+    program: String,
+    /// Bounded ring of the worker's recent stderr lines (#666). `None` only if
+    /// the backend did not pipe stderr. Read on the `EarlyExit` path, where it
+    /// is the difference between a diagnosis and a shrug.
+    stderr_tail: Option<crate::worker_stderr::StderrTail>,
     /// `Some` only for a force-routed net worker; set by
     /// `crate::egress::net_worker::spawn_net_worker`. Additive — its `Drop`
     /// tears the coupled egress-proxy sidecar down 1:1 with this worker.
@@ -523,7 +554,47 @@ impl SupervisedWorker {
         // race against the slot handoff. The watchdog bounds the JSON-RPC call
         // window, not the spawn/boot window (boot is bounded by the spawn path).
         let _arm = self.watchdog.as_ref().map(watchdog::Watchdog::arm_scope);
-        self.client.call(&cmd.method, cmd.params)
+        let method = cmd.method.clone();
+        let result = self.client.call(&cmd.method, cmd.params);
+        if matches!(result, Err(ClientError::EarlyExit)) {
+            self.warn_early_exit(&method);
+        }
+        result
+    }
+
+    /// Log why the worker went away, at `warn`, using its own retained stderr.
+    ///
+    /// Log-only, and deliberately so: the tail is raw worker output, and the
+    /// dispatch chokepoint scrubs redeemed secrets out of everything that
+    /// reaches the planner and the audit row (audit H1). Routing unscrubbed
+    /// worker bytes into the returned error would walk straight through that
+    /// guarantee. The daemon log already receives this same stream at `debug`,
+    /// so this changes the LEVEL — from invisible to visible — and nothing
+    /// about where the bytes may go.
+    fn warn_early_exit(&self, method: &str) {
+        let Some(tail) = self.stderr_tail.as_ref() else {
+            tracing::warn!(
+                worker = %self.program,
+                method = %method,
+                "worker exited before responding; its stderr was not piped, so there is \
+                 nothing to report"
+            );
+            return;
+        };
+        // Wait briefly for the drainer to reach EOF. The worker has already
+        // closed stdout, so its stderr is closing too; without this we would
+        // usually snapshot an empty ring and report "wrote NOTHING" for a
+        // worker that explained itself a millisecond later — the same
+        // ambiguity, restored by a race.
+        tail.wait_for_drain(EARLY_EXIT_DRAIN_WAIT);
+        tracing::warn!(
+            "{}",
+            crate::worker_stderr::format_early_exit_report(
+                &self.program,
+                method,
+                &tail.snapshot(),
+            )
+        );
     }
 
     /// Close stdin (signals EOF to the worker), wait for it to exit, and
@@ -536,6 +607,8 @@ impl SupervisedWorker {
         let SupervisedWorker {
             client,
             watchdog,
+            program: _,
+            stderr_tail: _,
             egress,
             broker,
             scratch,

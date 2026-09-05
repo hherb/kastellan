@@ -302,8 +302,9 @@ pub(crate) fn exec_worker() {
 /// mountpoints — rw scratch and persistent store — their share anchors, `/tmp`,
 /// and each enabled relay's UDS) is chowned to it, supplementary groups are
 /// cleared, then gid and uid are switched. Every step is fatal (PID 1 panics →
-/// the VM halts → the spawn fails closed) **except the chowns**, which only warn
-/// — see the loop for why that asymmetry is a liability rather than a design.
+/// the VM halts → the spawn fails closed). The chowns are split by role (#670):
+/// a relay socket the worker cannot own is fatal, a writable directory it
+/// cannot own only warns — see the loop for why.
 /// When the variable is absent — a rootfs newer than its host — the worker stays
 /// root exactly as before, and says so on stderr, so the two halves can be
 /// upgraded in either order without a silent change.
@@ -339,28 +340,44 @@ fn drop_privileges_for_worker(cmdline: &str) {
     // the pure `worker_owned_paths`, which is where the reasoning and the tests
     // live; this loop only applies it.
     //
-    // A failure here WARNS rather than panicking, and the two cases behind that
-    // one branch are not equally survivable: a mountpoint the worker cannot own
-    // is a degradation, but a RELAY SOCKET it cannot own is a total failure —
-    // that worker will die on its first dial, every time. Fail-closed would
-    // ordinarily be the house rule, and it is deliberately NOT applied yet:
-    // panicking in PID 1 halts the VM, and the host then sees the same
-    // contentless `Protocol(EarlyExit)` this whole defect hid behind, because
-    // the launcher discards the guest console (#666). Until that lands, a
-    // degraded worker reporting `connect proxy uds: Permission denied` carries
-    // strictly more information than a VM that refuses to boot silently.
-    // Revisit when #666 makes a panic legible: tracked in #670.
-    for dir in worker_owned_paths(cmdline) {
-        let c = std::ffi::CString::new(dir.clone()).expect("mountpoint has no NUL");
+    // How a failure is treated depends on the path's ROLE, and the two are not
+    // equally survivable (#670): a mountpoint the worker cannot own is a
+    // degradation — the worker runs and fails on the specific write — but a
+    // RELAY SOCKET it cannot own is a total failure, because `connect(2)` needs
+    // write permission on the socket file, so that worker dies on its first
+    // dial, every time. Only the second halts the VM.
+    //
+    // This asymmetry was deliberately NOT applied while a panicking PID 1 was
+    // illegible: the VM halted and the host saw the same contentless
+    // `Protocol(EarlyExit)` the whole defect class hides behind, because the
+    // launcher discarded the guest console. Since #666 the launcher captures
+    // the console and echoes a tail of it on a boot failure, so the panic text
+    // below actually reaches the operator — which is what makes fail-closed the
+    // better trade here.
+    //
+    // The role travels with the path from `worker_owned_paths`; this loop never
+    // re-derives it. A second place that knew which paths are sockets is how
+    // the first version of this drifted.
+    for owned in worker_owned_paths(cmdline) {
+        let path = owned.path;
+        let c = std::ffi::CString::new(path.clone()).expect("mountpoint has no NUL");
         // SAFETY: chown on a path we own as root; the cstring outlives the call.
         let rc = unsafe { libc::chown(c.as_ptr(), uid, uid) };
-        if rc != 0 {
-            eprintln!(
-                "microvm-init: chown {dir} to the worker uid failed: {} \
-                 (the worker may be unable to write there, or — for a relay socket — to connect at all)",
-                std::io::Error::last_os_error()
+        if rc == 0 {
+            continue;
+        }
+        let err = std::io::Error::last_os_error();
+        if owned.role.chown_failure_is_fatal() {
+            panic!(
+                "microvm-init: chown of the relay socket {path} to the worker uid failed: \
+                 {err} — the worker could not connect to it, so every dial would fail with a \
+                 permission error naming the proxy rather than this. Halting instead."
             );
         }
+        eprintln!(
+            "microvm-init: chown {path} to the worker uid failed: {err} \
+             (the worker may be unable to write there)"
+        );
     }
     // SAFETY: plain setgroups/setgid/setuid; each return code is checked.
     unsafe {

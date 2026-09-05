@@ -16,7 +16,9 @@
 use std::collections::VecDeque;
 use std::io::Read;
 use std::process::ExitStatus;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Default number of recent stderr lines retained for a death report.
 pub const DEFAULT_TAIL_LINES: usize = 50;
@@ -37,6 +39,15 @@ const MAX_CARRY_BYTES: usize = 64 * 1024;
 pub struct StderrTail {
     lines: Arc<Mutex<VecDeque<String>>>,
     cap: usize,
+    /// Set once the drain thread has read the pipe to EOF.
+    ///
+    /// Without this a caller that reacts to a worker's death races the drainer
+    /// and usually wins: it snapshots an EMPTY tail and reports "no stderr
+    /// captured" for a worker that explained itself perfectly well a
+    /// millisecond later. That failure mode is indistinguishable from the
+    /// worker having said nothing, which is precisely the ambiguity #666 exists
+    /// to remove — so the flag is load-bearing, not a convenience.
+    drained: Arc<AtomicBool>,
 }
 
 impl StderrTail {
@@ -46,6 +57,32 @@ impl StderrTail {
         Self {
             lines: Arc::new(Mutex::new(VecDeque::new())),
             cap,
+            drained: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Mark the pipe as read to EOF. Called by the drain thread when it returns.
+    fn mark_drained(&self) {
+        self.drained.store(true, Ordering::Release);
+    }
+
+    /// Block until the drain thread reaches EOF, or `timeout` elapses.
+    ///
+    /// Returns `true` if the drain completed. Callers use this on the ERROR
+    /// path only: a worker that died owes an explanation, and the few
+    /// milliseconds the pipe needs to flush are worth spending to get one. A
+    /// `false` return still leaves whatever arrived so far readable — the tail
+    /// is a bounded ring, not a transaction.
+    pub fn wait_for_drain(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.drained.load(Ordering::Acquire) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 
@@ -88,7 +125,24 @@ pub fn drain_reader<R: Read>(pid: u32, mut reader: R, tail: Option<&StderrTail>)
             Ok(0) => break, // EOF — pipe closed (worker exited)
             Ok(n) => {
                 let chunk = String::from_utf8_lossy(&buf[..n]);
-                tracing::debug!(worker_pid = pid, "worker stderr: {}", chunk.trim_end());
+                // Neutralise terminal-control characters before the bytes reach
+                // `tracing`. A compromised worker is in scope, the daemon log is
+                // read in a terminal, and an ESC (or the 8-bit CSI that does the
+                // same job) in this stream is an ANSI sequence executing in
+                // whoever is tailing it. Same class the prompt escaper uses —
+                // one definition, in `untrusted_text`.
+                //
+                // ⚠️ On the LOG COPY only. `\n` is in that class (it is what
+                // would forge a row in a prompt), so neutralising `chunk` itself
+                // would replace every newline with a space and the line split
+                // below would never fire again — one line, forever, silently.
+                // The split runs on the raw text; each line is neutralised as it
+                // enters the tail, in `push_trimmed`.
+                tracing::debug!(
+                    worker_pid = pid,
+                    "worker stderr: {}",
+                    crate::untrusted_text::neutralise_controls(chunk.trim_end())
+                );
                 if let Some(tail) = tail {
                     carry.push_str(&chunk);
                     while let Some(nl) = carry.find('\n') {
@@ -114,10 +168,17 @@ pub fn drain_reader<R: Read>(pid: u32, mut reader: R, tail: Option<&StderrTail>)
 }
 
 /// Push `line` into `tail` after stripping line endings, skipping blanks.
+///
+/// **This is where the tail's text is neutralised**, and the placement is
+/// load-bearing: the tail feeds `format_death_report` and
+/// [`format_early_exit_report`], both of which log at warn — visible in an
+/// operator's terminal by default — and doing it any earlier would eat the `\n`
+/// the caller splits on. Line endings are stripped first, so the neutralisation
+/// only ever sees the interior of a line.
 fn push_trimmed(tail: &StderrTail, line: &str) {
     let trimmed = line.trim_end_matches(['\n', '\r']);
     if !trimmed.is_empty() {
-        tail.push(trimmed.to_string());
+        tail.push(crate::untrusted_text::neutralise_controls(trimmed));
     }
 }
 
@@ -133,7 +194,13 @@ pub fn spawn_drain(pid: u32, stderr: std::process::ChildStderr) {
 pub fn spawn_drain_with_tail(pid: u32, stderr: std::process::ChildStderr) -> StderrTail {
     let tail = StderrTail::new(DEFAULT_TAIL_LINES);
     let thread_tail = tail.clone();
-    std::thread::spawn(move || drain_reader(pid, stderr, Some(&thread_tail)));
+    std::thread::spawn(move || {
+        drain_reader(pid, stderr, Some(&thread_tail));
+        // Always mark, even if the read ended in an error: a caller waiting for
+        // an explanation must not block for the full timeout because the pipe
+        // broke.
+        thread_tail.mark_drained();
+    });
     tail
 }
 
@@ -150,6 +217,34 @@ pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &[String]) -
         format!("worker exited ({status_str}); no stderr captured")
     } else {
         format!("worker exited ({status_str}); recent stderr: {}", stderr_tail.join(" | "))
+    }
+}
+
+/// Explain an `EarlyExit` — the protocol client's "worker exited before
+/// responding" — using the worker's own retained stderr.
+///
+/// `EarlyExit` is the single most content-free failure this system produces: it
+/// says the pipe closed and nothing else. Three separate micro-VM production
+/// defects all surfaced as exactly this string, and telling them apart took a
+/// session (#666). The worker almost always *did* say why, on the stream nobody
+/// was reading — this turns that stream into the message.
+///
+/// The empty case is deliberately not silent, and does not read like the
+/// populated one: "said nothing" is itself a diagnosis (a hard kill, a jail
+/// refused before the worker ran, a guest that never booted), and it points at
+/// a different place to look than a worker that logged a reason.
+pub fn format_early_exit_report(program: &str, method: &str, stderr_tail: &[String]) -> String {
+    if stderr_tail.is_empty() {
+        format!(
+            "worker {program} exited before responding to {method}, and wrote NOTHING to \
+             stderr — suspect a kill (wall-clock/OOM/seccomp) or a sandbox that refused the \
+             spawn before the worker ran, rather than the worker's own logic"
+        )
+    } else {
+        format!(
+            "worker {program} exited before responding to {method}; its last words: {}",
+            stderr_tail.join(" | ")
+        )
     }
 }
 
@@ -246,5 +341,90 @@ mod tests {
         let report = format_death_report(Some(status), &["boom".into(), "trace".into()]);
         assert!(report.contains("exit status"), "{report}");
         assert!(report.contains("boom | trace"), "{report}");
+    }
+
+    #[test]
+    fn early_exit_report_carries_the_workers_last_words() {
+        let r = format_early_exit_report(
+            "kastellan-microvm-run",
+            "python.exec",
+            &["microvm-init: relay UDS bind failed".to_string()],
+        );
+        assert!(r.contains("kastellan-microvm-run"), "{r}");
+        assert!(r.contains("python.exec"), "{r}");
+        assert!(r.contains("relay UDS bind failed"), "{r}");
+    }
+
+    #[test]
+    fn early_exit_report_says_so_when_the_worker_was_silent() {
+        // Silence is a different diagnosis, not a missing one — it must point
+        // somewhere (a kill, a refused spawn) rather than read as an absence.
+        let r = format_early_exit_report("w", "m", &[]);
+        assert!(r.contains("NOTHING"), "{r}");
+        assert!(r.contains("kill"), "silence must name where to look: {r}");
+    }
+
+    #[test]
+    fn wait_for_drain_returns_once_the_drainer_finishes() {
+        let tail = StderrTail::new(4);
+        assert!(
+            !tail.wait_for_drain(Duration::from_millis(10)),
+            "an un-drained tail must time out rather than claim completion"
+        );
+        tail.mark_drained();
+        assert!(
+            tail.wait_for_drain(Duration::from_millis(10)),
+            "a drained tail must be observed as drained"
+        );
+    }
+
+    #[test]
+    fn drain_then_mark_makes_the_tail_observably_complete() {
+        // The whole point of the flag: a caller reacting to a worker death must
+        // be able to WAIT for the explanation instead of racing it. This is the
+        // exact sequence `spawn_drain_with_tail`'s thread runs, driven from a
+        // Cursor so it needs no real child process.
+        let tail = StderrTail::new(4);
+        let t = tail.clone();
+        let h = std::thread::spawn(move || {
+            drain_reader(0, Cursor::new(b"boom\n".to_vec()), Some(&t));
+            t.mark_drained();
+        });
+        assert!(
+            tail.wait_for_drain(Duration::from_secs(5)),
+            "the drain must be observed as complete"
+        );
+        h.join().unwrap();
+        assert_eq!(tail.snapshot(), vec!["boom".to_string()]);
+    }
+
+    #[test]
+    fn drain_reader_neutralises_terminal_controls_before_they_reach_the_log() {
+        // A compromised worker is in scope, and this stream now reaches the
+        // daemon log at WARN via `format_early_exit_report` — i.e. visible in
+        // an operator's terminal by default rather than only under `debug`.
+        // An ESC here would be an ANSI sequence executing in that terminal.
+        let tail = StderrTail::new(10);
+        drain_reader(
+            0,
+            Cursor::new("red\u{1b}[31m and 8-bit \u{9b}31m\nsecond\n".as_bytes().to_vec()),
+            Some(&tail),
+        );
+        let got = tail.snapshot();
+        // TWO lines, not one: `\n` is itself in the neutralised class, so
+        // neutralising before the split would collapse the whole stream into a
+        // single line — which is how the first version of this broke.
+        assert_eq!(got.len(), 2, "the line split must survive neutralisation: {got:?}");
+        assert_eq!(got[1], "second", "{got:?}");
+        assert!(
+            !got[0].contains('\u{1b}') && !got[0].contains('\u{9b}'),
+            "both the 7-bit ESC and the 8-bit CSI must be neutralised: {:?}",
+            got[0]
+        );
+        assert!(
+            got[0].contains("red") && got[0].contains("[31m"),
+            "the surrounding text must survive — a log line is evidence: {:?}",
+            got[0]
+        );
     }
 }
