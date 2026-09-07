@@ -73,8 +73,17 @@ require_guest_kernel "$OUT_DIR"
 # Guest PID1, built on the host with cargo (native on the DGX aarch64), exactly
 # as every sibling script does. The worker itself is staged by the container
 # image, not by cargo — it is Python.
-source "$HOME/.cargo/env"
-cargo build --release -p kastellan-microvm-init
+# Guest binaries come from the ONE canonical producer, never from a narrow
+# `cargo build -p ...` here. Package selection changes the BYTES of an
+# identical binary (cargo unifies features per invocation), so a private
+# invocation leaves a target/release/ reference no image was ever built from
+# and the #667 freshness gate then calls every correct image stale (#682).
+# build-release.sh is what scripts/upgrade_from_git.sh runs, so image bytes,
+# deploy bytes and the bytes the gate reads are now one build by construction;
+# it also handles the live-matrix worker a plain --workspace build gets wrong.
+# Full rationale: RELEASE_BUILD_SCRIPT in tests-common/src/microvm/images.rs,
+# pinned by `no_rootfs_build_script_runs_its_own_cargo_build`.
+bash scripts/build-release.sh
 
 WORK=$(mktemp -d)
 CID=""

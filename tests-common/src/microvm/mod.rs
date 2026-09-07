@@ -74,7 +74,8 @@ pub use freshness::{
 };
 pub use images::{
     baked_for, build_script_for, image_entry, BakedBinary, RootfsImage, GUEST_INIT_BIN,
-    GUEST_INIT_IN_IMAGE, GUEST_KERNEL_LIB, REBUILD_ALL_SCRIPT, ROOTFS_IMAGES,
+    GUEST_INIT_IN_IMAGE, GUEST_KERNEL_LIB, REBUILD_ALL_SCRIPT, RELEASE_BUILD_SCRIPT,
+    ROOTFS_IMAGES,
 };
 pub use require::{dep_or_skip, first_unmet, host_probes, skip_unless_ready, Probe};
 

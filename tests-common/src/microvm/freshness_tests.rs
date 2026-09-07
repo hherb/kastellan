@@ -112,7 +112,7 @@ fn a_partly_verified_image_says_which_binary_was_not_checked() {
     );
     assert!(msg.contains("worker"), "must name the binary: {msg}");
     assert!(msg.contains("PARTLY gated"), "must say the gate was partial: {msg}");
-    assert!(msg.contains("cargo build --release"), "must give the remedy: {msg}");
+    assert!(msg.contains(RELEASE_BUILD_SCRIPT), "must give the remedy: {msg}");
 }
 
 /// The two leads must not read alike: "partly gated" and "not gated"
@@ -244,6 +244,70 @@ fn the_stale_reason_names_the_image_the_binary_and_both_rebuild_routes() {
     assert!(msg.contains("#667"), "must be traceable to the issue: {msg}");
 }
 
+/// `Missing::NOT_BUILT_REMEDY` has to be a `const`, so it spells the script
+/// path as a literal instead of interpolating [`RELEASE_BUILD_SCRIPT`].
+///
+/// That is a second copy of one fact, which is the drift channel this whole
+/// change exists to close — so it is pinned rather than trusted. A rename that
+/// updates the const and not the literal (or the reverse) fails here instead
+/// of sending an operator to a path that does not exist.
+#[test]
+fn the_not_built_remedy_names_the_canonical_producer() {
+    let msg = unverified_reason(
+        "web-fetch.ext4",
+        &[Unverified { binary: "a-bin".to_string(), why: Missing::NotBuilt }],
+        false,
+    );
+    assert!(
+        msg.contains(RELEASE_BUILD_SCRIPT),
+        "the not-built remedy must name {RELEASE_BUILD_SCRIPT}: {msg}"
+    );
+}
+
+/// A digest mismatch has **two** possible causes, and only one of them is
+/// staleness (issue #682).
+///
+/// Cargo's feature unification makes the bytes depend on the package
+/// selection of the build that last wrote `target/release/`, so a narrow
+/// `cargo build -p …` leaves a reference no image was ever built from. The
+/// verdict cannot tell that apart from a genuinely stale image — there is no
+/// cheap local discriminator — so the message must name the cheap check
+/// FIRST. Sending an operator to rebuild eight images when one `bash
+/// scripts/build-release.sh` would clear it is how a gate earns the
+/// reputation that gets it switched off.
+#[test]
+fn the_stale_reason_offers_the_cheap_rebuild_before_the_expensive_one() {
+    let msg = stale_reason("kv-demo.ext4", "kastellan-microvm-init", Some("scripts/x.sh"));
+    assert!(msg.contains("#682"), "must be traceable to the issue: {msg}");
+    assert!(
+        msg.contains(&format!("bash {RELEASE_BUILD_SCRIPT}")),
+        "must name the canonical producer: {msg}"
+    );
+
+    // Order is the point, not mere presence: an operator who reads one clause
+    // and acts must be sent to the 3-second command, not the 8-image one.
+    let cheap = msg.find(RELEASE_BUILD_SCRIPT).expect("checked above");
+    let expensive = msg.find("scripts/x.sh").expect("the per-image script is named");
+    assert!(
+        cheap < expensive,
+        "the cheap check must come before the image rebuild: {msg}"
+    );
+}
+
+/// The invocation-skew caveat belongs to a digest MISMATCH and to nothing
+/// else.
+///
+/// [`Freshness::Unusable`] means a working reader could not get the binary
+/// out of the image, so no digest was ever compared and re-running a build
+/// cannot change the outcome. Offering the remedy there would be a confident
+/// wrong answer — the failure this module's four verdicts exist to prevent.
+#[test]
+fn the_unusable_reason_does_not_blame_the_build_selection() {
+    let msg = unusable_reason("kv-demo.ext4", "some-bin", "File not found", Some("scripts/x.sh"));
+    assert!(!msg.contains("#682"), "no digest was compared, so skew is irrelevant: {msg}");
+    assert!(msg.contains("File not found"), "must carry the reader's words: {msg}");
+}
+
 /// An unknown image must not have a build script invented for it — the
 /// hint would send the operator to a path that does not exist, which is
 /// the failure `images.rs` was written to prevent.
@@ -263,7 +327,10 @@ fn the_unverified_reason_separates_the_causes() {
         &[Unverified { binary: "a-bin".to_string(), why: Missing::NotBuilt }],
         false,
     );
-    assert!(unbuilt_msg.contains("cargo build --release"), "how to fix: {unbuilt_msg}");
+    assert!(
+        unbuilt_msg.contains(RELEASE_BUILD_SCRIPT),
+        "how to fix, via the one producer every image is baked from: {unbuilt_msg}"
+    );
     assert!(!unbuilt_msg.contains("e2fsprogs"), "wrong blame: {unbuilt_msg}");
 
     let no_tool = unverified_reason(
@@ -288,7 +355,7 @@ fn the_unverified_reason_groups_binaries_sharing_a_cause() {
         false,
     );
     assert!(msg.contains("one, two"), "must group: {msg}");
-    assert_eq!(msg.matches("cargo build --release").count(), 1, "one remedy, once: {msg}");
+    assert_eq!(msg.matches(RELEASE_BUILD_SCRIPT).count(), 1, "one remedy, once: {msg}");
 }
 
 /// ...but two DIFFERENT causes must stay two clauses.
@@ -302,7 +369,7 @@ fn the_unverified_reason_keeps_distinct_causes_apart() {
         ],
         false,
     );
-    assert!(msg.contains("cargo build --release"), "{msg}");
+    assert!(msg.contains(RELEASE_BUILD_SCRIPT), "{msg}");
     assert!(msg.contains("e2fsprogs"), "{msg}");
     assert!(msg.contains("; "), "must be two clauses: {msg}");
 }

@@ -177,6 +177,49 @@ pub const ROOTFS_IMAGES: &[RootfsImage] = &[
 /// keeps it that way.
 pub const GUEST_KERNEL_LIB: &str = "scripts/workers/microvm/lib/guest-kernel.sh";
 
+/// The one script that produces every `target/release/` binary an image bakes
+/// (repo-relative), and the *only* cargo invocation a `build-*-rootfs.sh` may
+/// use (issue #682).
+///
+/// # Why a shared producer rather than eight `cargo build -p …` lines
+///
+/// Cargo's feature unification is per *invocation*: the features other
+/// selected packages enable on a shared dependency are unified into that
+/// dependency's build, so **the package selection changes the bytes of an
+/// otherwise identical binary**. Measured on the DGX at `ec9a2e94`, back and
+/// forth, deterministic each way:
+///
+/// ```text
+/// cargo build --release -p kastellan-microvm-init   669821d3…  (== every image's baked copy)
+/// cargo build --release --workspace                 8a21877a…
+/// ```
+///
+/// Each `build-*-rootfs.sh` used a narrow `-p` set while the deploy path
+/// (`scripts/upgrade_from_git.sh`) runs this script, so after any deploy the
+/// freshness check compared an image against a binary **no image is ever
+/// built from** and declared all eight stale. Every image was correct. That
+/// is fail-closed, so it was noise rather than a containment hole — but it is
+/// exactly the *"a check that cries wolf on the common case is a check
+/// somebody switches off"* failure [`super::freshness`] was designed to
+/// avoid, and it left the whole Firecracker tier unrunnable after a normal
+/// build unless you knew to re-run each image's exact `-p` line.
+///
+/// Pointing every producer at one script removes the ambiguity at its source
+/// instead of teaching the gate to tolerate it: the bytes in the image, the
+/// bytes the deploy ships and the bytes the gate reads are then the same
+/// build by construction. It also picks up the `live-matrix` step for free —
+/// `--workspace` alone builds `kastellan-worker-matrix` *without* its feature
+/// and that worker refuses to run, which is why this script exists at all.
+///
+/// The cost is small enough to be a non-issue: cargo keeps both artefact sets
+/// under different `-C metadata` hashes, so flipping selections re-links from
+/// cache. Both measured builds above finished in **3.00 s** on a warm tree.
+///
+/// [`tests::no_rootfs_build_script_runs_its_own_cargo_build`] is what keeps a
+/// ninth script from growing its own copy again — the same drift channel
+/// [`GUEST_KERNEL_LIB`] closed for eight unchecked `curl`s (#471).
+pub const RELEASE_BUILD_SCRIPT: &str = "scripts/build-release.sh";
+
 /// The one script that rebuilds every image in [`ROOTFS_IMAGES`].
 ///
 /// Exists because the build scripts live in **two** directories, which makes
@@ -219,6 +262,29 @@ pub fn baked_for(rootfs: &str) -> &'static [BakedBinary] {
 mod tests {
     use super::*;
     use crate::microvm::repo_root;
+
+    /// The executable part of a shell line: everything before its trailing comment.
+    ///
+    /// Every scanner over a `build-*-rootfs.sh` must ignore prose, or a comment
+    /// that merely *names* a path or a command reads as one being run. That is not
+    /// hypothetical: the #682 note added to all eight build scripts contains the
+    /// words `target/release/` and `cargo build -p`, and tripped **two** of the
+    /// scanners below within minutes of being written — one of them by claiming
+    /// the script interpolates a variable it does not have.
+    ///
+    /// A `#` only opens a comment when it begins a word, so `${VAR#prefix}` and
+    /// `"a#b"` survive. The error direction is deliberate: a `#` this rule misses
+    /// leaves *more* text to scan, never less, so it cannot quietly weaken a
+    /// fail-closed guard — it can only make one complain.
+    fn code_of(line: &str) -> &str {
+        let bytes = line.as_bytes();
+        for (i, &c) in bytes.iter().enumerate() {
+            if c == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+                return &line[..i];
+            }
+        }
+        line
+    }
 
     /// Every hint must name a script that actually exists, so a rename
     /// or a move breaks this test rather than silently sending an
@@ -271,8 +337,10 @@ mod tests {
     fn the_table_and_the_scripts_agree_on_every_baked_binary() {
         let root = repo_root();
         for entry in ROOTFS_IMAGES {
-            let body = std::fs::read_to_string(root.join(entry.build_script))
+            let raw = std::fs::read_to_string(root.join(entry.build_script))
                 .unwrap_or_else(|e| panic!("read {}: {e}", entry.build_script));
+            let body: String =
+                raw.lines().map(code_of).collect::<Vec<_>>().join("\n");
 
             // Every `target/release/<name>` the script mentions, deduped.
             let mut in_script: Vec<&str> = body
@@ -312,6 +380,100 @@ mod tests {
         }
     }
 
+    /// The comment rule is load-bearing for three scanners, so it is tested
+    /// directly rather than only through them.
+    ///
+    /// The `${VAR#prefix}` case is the one that would matter if a build script
+    /// ever grew parameter expansion on an `install` line: stripping there
+    /// would hide a real bake and silently narrow the freshness reference,
+    /// which is #667 with extra steps.
+    #[test]
+    fn code_of_strips_prose_and_leaves_shell_syntax_alone() {
+        assert_eq!(code_of("install -D target/release/foo \"$WORK/bin/foo\""),
+                   "install -D target/release/foo \"$WORK/bin/foo\"");
+        assert_eq!(code_of("# target/release/phantom is only mentioned"), "");
+        assert_eq!(code_of("mkdir -p \"$WORK/run\"   # slice 4a"), "mkdir -p \"$WORK/run\"   ");
+        // A `#` that does not begin a word is shell syntax, not a comment.
+        assert_eq!(code_of("script_of() { echo \"${1#*:}\"; }"), "script_of() { echo \"${1#*:}\"; }");
+        assert_eq!(code_of("no comment here"), "no comment here");
+    }
+
+    /// Every rootfs build script must get its `target/release/` binaries from
+    /// the one canonical producer, and must not run cargo itself (issue #682).
+    ///
+    /// # Why both halves are needed
+    ///
+    /// The `contains` half alone is satisfied by a script that calls the
+    /// producer *and* keeps its old narrow `cargo build -p …` line — and
+    /// since that line would run second, it would overwrite the canonical
+    /// bytes with the very ones #682 is about. The `!contains` half alone is
+    /// satisfied by a script that builds nothing at all and bakes whatever
+    /// happens to be lying in `target/release/`, which is #667 restored.
+    ///
+    /// This is the pin that lets the convention stay a convention: a ninth
+    /// script that grows its own `cargo build` fails here rather than
+    /// silently reintroducing the skew. Same drift channel, same remedy as
+    /// [`GUEST_KERNEL_LIB`] (#471).
+    #[test]
+    fn no_rootfs_build_script_runs_its_own_cargo_build() {
+        let root = repo_root();
+        for entry in ROOTFS_IMAGES {
+            let raw = std::fs::read_to_string(root.join(entry.build_script))
+                .unwrap_or_else(|e| panic!("read {}: {e}", entry.build_script));
+            let code: Vec<&str> = raw.lines().map(code_of).collect();
+
+            let invocation = format!("bash {RELEASE_BUILD_SCRIPT}");
+            assert!(
+                code.iter().any(|l| l.contains(&invocation)),
+                "{} must build its binaries with `{invocation}` — the one producer \
+                 the deploy path also uses. Without it the image is baked from a \
+                 package selection nothing else shares, and the freshness check \
+                 compares against bytes no image was built from (#682)",
+                entry.build_script
+            );
+
+            // Prose is excluded via the shared rule: the scripts explain WHY
+            // they no longer run cargo, and naming the command they replaced
+            // must not read as running it.
+            let own_cargo: Vec<&&str> =
+                code.iter().filter(|l| l.contains("cargo build")).collect();
+            assert!(
+                own_cargo.is_empty(),
+                "{} runs its own cargo build ({own_cargo:?}) — package selection \
+                 changes the BYTES of an identical binary, so a second invocation \
+                 overwrites the canonical reference and reinstates #682. Let \
+                 {RELEASE_BUILD_SCRIPT} be the only one",
+                entry.build_script
+            );
+        }
+    }
+
+    /// The canonical producer must exist, and must itself be what the deploy
+    /// path runs — otherwise the whole argument collapses.
+    ///
+    /// Without the second half this is a file-existence check: a
+    /// `build-release.sh` that nothing deploys with would make the images
+    /// agree with a build **nobody else performs**, which is #682 with the
+    /// odd one out swapped rather than removed.
+    #[test]
+    fn the_canonical_producer_is_the_one_the_deploy_path_runs() {
+        let root = repo_root();
+        assert!(
+            root.join(RELEASE_BUILD_SCRIPT).is_file(),
+            "{RELEASE_BUILD_SCRIPT} is missing, so every build script now names \
+             a path that does not exist"
+        );
+        let deploy = "scripts/upgrade_from_git.sh";
+        let body = std::fs::read_to_string(root.join(deploy))
+            .unwrap_or_else(|e| panic!("read {deploy}: {e}"));
+        assert!(
+            body.contains(&format!("bash {RELEASE_BUILD_SCRIPT}")),
+            "{deploy} no longer builds with {RELEASE_BUILD_SCRIPT}, so the bytes \
+             a deploy installs and the bytes an image bakes have diverged again \
+             (#682) — point both at the same producer"
+        );
+    }
+
     /// The destination matters as much as the name: the digest is read back
     /// from `in_image`, so a wrong path yields `Indeterminate` — a check that
     /// silently stops checking, which is #667 with extra steps. Every script
@@ -320,8 +482,10 @@ mod tests {
     fn the_table_and_the_scripts_agree_on_every_in_image_destination() {
         let root = repo_root();
         for entry in ROOTFS_IMAGES {
-            let body = std::fs::read_to_string(root.join(entry.build_script))
+            let raw = std::fs::read_to_string(root.join(entry.build_script))
                 .unwrap_or_else(|e| panic!("read {}: {e}", entry.build_script));
+            let body: String =
+                raw.lines().map(code_of).collect::<Vec<_>>().join("\n");
             for b in entry.baked {
                 let dest = format!("\"$WORK{}\"", b.in_image);
                 assert!(

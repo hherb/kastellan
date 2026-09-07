@@ -33,8 +33,17 @@ fi
 require_guest_kernel "$OUT_DIR"
 
 # 2. Cross-build worker + init for the guest (native on the DGX aarch64).
-source "$HOME/.cargo/env"
-cargo build --release -p kastellan-worker-python-exec -p kastellan-microvm-init
+# Guest binaries come from the ONE canonical producer, never from a narrow
+# `cargo build -p ...` here. Package selection changes the BYTES of an
+# identical binary (cargo unifies features per invocation), so a private
+# invocation leaves a target/release/ reference no image was ever built from
+# and the #667 freshness gate then calls every correct image stale (#682).
+# build-release.sh is what scripts/upgrade_from_git.sh runs, so image bytes,
+# deploy bytes and the bytes the gate reads are now one build by construction;
+# it also handles the live-matrix worker a plain --workspace build gets wrong.
+# Full rationale: RELEASE_BUILD_SCRIPT in tests-common/src/microvm/images.rs,
+# pinned by `no_rootfs_build_script_runs_its_own_cargo_build`.
+bash scripts/build-release.sh
 
 # 3. Assemble the ext4. No root needed: mkfs.ext4 -d stages a dir tree without
 #    loop-mounting or mknod. Everything is copied as the building user.
