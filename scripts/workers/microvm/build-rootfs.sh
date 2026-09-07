@@ -32,7 +32,6 @@ fi
 # 1. Guest kernel (pinned + sha256-verified, including an existing copy).
 require_guest_kernel "$OUT_DIR"
 
-# 2. Cross-build worker + init for the guest (native on the DGX aarch64).
 # Guest binaries come from the ONE canonical producer, never from a narrow
 # `cargo build -p ...` here. Package selection changes the BYTES of an
 # identical binary (cargo unifies features per invocation), so a private

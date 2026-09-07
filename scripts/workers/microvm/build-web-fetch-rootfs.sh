@@ -28,7 +28,6 @@ fi
 # not trusted — that reuse-unchecked path is exactly what issue #471 closed.
 require_guest_kernel "$OUT_DIR"
 
-# Cross-build worker + init for the guest (native on the DGX aarch64).
 # Guest binaries come from the ONE canonical producer, never from a narrow
 # `cargo build -p ...` here. Package selection changes the BYTES of an
 # identical binary (cargo unifies features per invocation), so a private

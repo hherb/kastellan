@@ -70,9 +70,8 @@ fi
 # not trusted — that reuse-unchecked path is exactly what issue #471 closed.
 require_guest_kernel "$OUT_DIR"
 
-# Guest PID1, built on the host with cargo (native on the DGX aarch64), exactly
-# as every sibling script does. The worker itself is staged by the container
-# image, not by cargo — it is Python.
+# This image bakes only the guest PID1 — the driver itself is Python, staged
+# by the container image rather than by cargo.
 # Guest binaries come from the ONE canonical producer, never from a narrow
 # `cargo build -p ...` here. Package selection changes the BYTES of an
 # identical binary (cargo unifies features per invocation), so a private

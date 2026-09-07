@@ -23,7 +23,8 @@ if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
 fi
 require_guest_kernel "$OUT_DIR"
 
-# bundled-sqlite ⇒ no host libsqlite3 needed; rustls-tls ⇒ no host OpenSSL needed.
+# The live-matrix worker is built with bundled-sqlite (no host libsqlite3) and
+# rustls-tls (no host OpenSSL), so nothing here needs those libraries staged.
 # Guest binaries come from the ONE canonical producer, never from a narrow
 # `cargo build -p ...` here. Package selection changes the BYTES of an
 # identical binary (cargo unifies features per invocation), so a private
