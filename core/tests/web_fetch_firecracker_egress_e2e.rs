@@ -62,10 +62,13 @@ use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManage
 use kastellan_core::worker_manifest::{Resolution, ResolveCtx, WorkerManifest};
 use kastellan_core::workers::web_fetch::WebFetchManifest;
 use kastellan_sandbox::SandboxBackends;
-use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
+use kastellan_tests_common::microvm::{
+    dep_or_skip, firecracker_backend, host_probes, image_dir, skip_if_no_microvm,
+    skip_unless_ready,
+};
 use kastellan_tests_common::{
-    bring_up_pg_cluster, egress_proxy_bin_or_skip, pg_bin_dir_or_skip, skip_if_no_supervisor,
-    skip_if_origin_unreachable, skip_if_sandbox_unavailable, unique_suffix,
+    bring_up_pg_cluster, egress_proxy_bin_or_reason, origin_unreachable_reason,
+    pg_bin_dir_or_reason, unique_suffix,
 };
 
 /// The rootfs image both tiers boot. Passed to the shared
@@ -191,13 +194,10 @@ async fn web_fetch_vm_reaches_proxy_with_ca_delivered() {
     }
 
     // Skip-as-pass without PG/supervisor/sandbox (dispatch needs a pool for audit).
-    if skip_if_no_supervisor() {
+    if skip_unless_ready(&host_probes()) {
         return;
     }
-    if skip_if_sandbox_unavailable() {
-        return;
-    }
-    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+    let Some(bin_dir) = dep_or_skip(pg_bin_dir_or_reason()) else {
         return;
     };
     let suffix = unique_suffix();
@@ -399,7 +399,9 @@ async fn fetch_in_vm_through_real_sidecar(
 /// make this test pass would widen a production trust store, which is the same
 /// trade rejected on the browser-driver arc when `--ignore-certificate-errors-*`
 /// was proposed. So this tier takes the real-network dependency instead, and
-/// `skip_if_origin_unreachable` skips loudly when the network is absent.
+/// `origin_unreachable_reason`, routed through `skip_unless_ready`, skips
+/// loudly when the network is absent — or fails the run outright under
+/// `KASTELLAN_MICROVM_REQUIRE_E2E`.
 ///
 /// (The worker side is already hermetic and stays that way: the in-guest
 /// transport trusts **only** the sidecar's per-instance CA, delivered at spawn.
@@ -430,16 +432,16 @@ async fn fetch_in_vm_through_real_sidecar(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + web-fetch rootfs + egress proxy + outbound HTTPS"]
 async fn real_web_fetch_through_sidecar() {
-    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_unless_ready(&host_probes()) {
         return;
     }
-    if skip_if_origin_unreachable(ORIGIN_HOST) {
+    if skip_unless_ready(&[&|| origin_unreachable_reason(ORIGIN_HOST)]) {
         return;
     }
-    let Some(proxy_bin) = egress_proxy_bin_or_skip() else {
+    let Some(proxy_bin) = dep_or_skip(egress_proxy_bin_or_reason()) else {
         return;
     };
-    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+    let Some(bin_dir) = dep_or_skip(pg_bin_dir_or_reason()) else {
         return;
     };
     let suffix = unique_suffix();

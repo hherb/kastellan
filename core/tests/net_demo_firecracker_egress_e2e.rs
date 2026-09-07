@@ -35,7 +35,10 @@ use kastellan_core::egress::persistent_net::{spawn_net_transport, NetTransportSp
 use kastellan_core::egress::spawn::Mitm;
 use kastellan_core::worker_lifecycle::{PersistentFactory, PersistentTransport, PersistentWorker};
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxBackends, SandboxPolicy};
-use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
+use kastellan_tests_common::egress_proxy_bin_or_reason;
+use kastellan_tests_common::microvm::{
+    dep_or_skip, firecracker_backend, image_dir, skip_if_no_microvm,
+};
 
 /// The rootfs image this suite boots. Passed to the shared
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
@@ -104,27 +107,18 @@ fn net_demo_tls_probe_through_vm_survives_respawn() {
         return;
     }
 
-    // The host egress-proxy sidecar binary (debug or release). Skip-as-pass if
-    // it isn't built — same discovery as net_demo_egress_e2e.rs.
-    let proxy_bin = {
-        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("target");
-        let candidates = [
-            target.join("debug").join("kastellan-worker-egress-proxy"),
-            target.join("release").join("kastellan-worker-egress-proxy"),
-        ];
-        match candidates.into_iter().find(|p| p.is_file()) {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "[SKIP] egress-proxy not built; run \
-                     `cargo build -p kastellan-worker-egress-proxy`"
-                );
-                return;
-            }
-        }
+    // The host egress-proxy sidecar binary. Routed through the shared resolver
+    // so KASTELLAN_MICROVM_REQUIRE_E2E can turn a missing one into a failure:
+    // this check was the 12th #679 site, found only in review because its
+    // hand-written `[SKIP]` was wrapped across two lines and the source guard
+    // matched the macro and the literal on one.
+    //
+    // The private copy this replaces also probed `target/release`, which
+    // `egress_proxy_bin_or_reason` deliberately does not — a stale release
+    // binary silently running in place of a rebuilt debug one is the trap
+    // recorded in `binaries.rs` and in the #362 false bug report.
+    let Some(proxy_bin) = dep_or_skip(egress_proxy_bin_or_reason()) else {
+        return;
     };
 
     // Loopback self-signed origin (host, real netns); its cert PEM lives under

@@ -58,17 +58,48 @@ pub fn cli_binary() -> PathBuf {
 /// this repo a false leak finding — `locate_microvm_run` prefers `target/release`
 /// and silently ran an old launcher.
 pub fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
-    let p = workspace_target_binary("kastellan-worker-egress-proxy");
+    match egress_proxy_bin_or_reason() {
+        Ok(p) => Some(p),
+        Err(reason) => {
+            eprint!("{}", crate::skip::skip_line(&reason));
+            None
+        }
+    }
+}
+
+/// The egress-proxy sidecar binary, or the *reason* it is unavailable — no
+/// `[SKIP]` prefix, so a caller that must not skip can render it as a
+/// failure.
+///
+/// The `*_or_reason` half of [`egress_proxy_bin_or_skip`], added for #679:
+/// four micro-VM suites had each grown their own byte-identical private copy
+/// of the skip half, all of them invisible to
+/// `KASTELLAN_MICROVM_REQUIRE_E2E`. See [`crate::microvm::dep_or_skip`].
+pub fn egress_proxy_bin_or_reason() -> Result<PathBuf, String> {
+    workspace_binary_or_reason("kastellan-worker-egress-proxy")
+        .map_err(|_| {
+            "egress-proxy not built; run `cargo build -p kastellan-worker-egress-proxy`".to_string()
+        })
+}
+
+/// A `cargo build --workspace` artifact by name, or the *reason* it is
+/// missing — no `[SKIP]` prefix, for the same reason as its siblings.
+///
+/// Covers the host-side broker sidecars (`kastellan-worker-embed-broker`,
+/// `kastellan-worker-search-broker`), which four micro-VM suites had been
+/// checking with a hand-written `eprintln!("[SKIP] …")` — the shape
+/// the source guard in `microvm::guard` now refuses, because a hand-written
+/// line cannot be turned into a failure by any knob.
+///
+/// Debug-only via [`workspace_target_binary`], deliberately: every e2e that
+/// spawns one of these is itself a `cargo test` debug build, so the debug
+/// artifact is the one guaranteed to match the tree under test.
+pub fn workspace_binary_or_reason(name: &str) -> Result<PathBuf, String> {
+    let p = workspace_target_binary(name);
     if p.is_file() {
-        Some(p)
+        Ok(p)
     } else {
-        eprint!(
-            "{}",
-            crate::skip::skip_line(
-                "egress-proxy not built; run `cargo build -p kastellan-worker-egress-proxy`"
-            )
-        );
-        None
+        Err(format!("{name} not built; run `cargo build --workspace`"))
     }
 }
 
@@ -92,9 +123,95 @@ pub fn cli_command(data_dir: &Path, user: &str) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::workspace_target_binary;
+    use super::{egress_proxy_bin_or_reason, workspace_binary_or_reason, workspace_target_binary};
     use crate::env::{env_lock, EnvVarGuard};
     use std::path::PathBuf;
+
+    /// A missing artifact yields a reason that names BOTH the binary and the
+    /// command that produces it. Under `KASTELLAN_MICROVM_REQUIRE_E2E` this
+    /// string becomes a panic message and is the only thing the operator
+    /// gets, so "not built" alone would leave them guessing which one.
+    #[test]
+    fn a_missing_workspace_binary_reason_names_the_binary_and_the_remedy() {
+        let err = workspace_binary_or_reason("kastellan-worker-does-not-exist")
+            .expect_err("a binary that cannot exist must not resolve");
+        assert!(err.contains("kastellan-worker-does-not-exist"), "names the binary: {err}");
+        assert!(err.contains("cargo build --workspace"), "names the remedy: {err}");
+    }
+
+    /// A *directory* at the artifact path is not an artifact, and a real file
+    /// beside it is — both arms, one fixture.
+    ///
+    /// `is_file()` rather than `exists()` is the check: `target/debug/`
+    /// routinely holds directories (`build/`, `deps/`, `incremental/`), so an
+    /// `exists()` test would hand a caller a path it cannot exec.
+    ///
+    /// The `Ok` half is not decoration. Without it `workspace_binary_or_reason`
+    /// returning `Err` unconditionally survives the suite — which under
+    /// `KASTELLAN_MICROVM_REQUIRE_E2E` turns every broker and egress-proxy
+    /// precondition into a permanent panic, and without it into a permanent
+    /// skip. And the *path* is asserted, not just the `Ok`-ness, or the
+    /// function could hand back any path at all.
+    ///
+    /// The `CARGO_TARGET_DIR` override is asserted before it is relied on: if
+    /// it stopped being honoured, both lookups would miss under the real
+    /// `target/debug` and the directory-vs-file distinction would silently
+    /// stop being pinned.
+    #[test]
+    fn a_directory_is_not_an_artifact_but_a_file_beside_it_is() {
+        const KEY: &str = "CARGO_TARGET_DIR";
+        let _lock = env_lock();
+        let tmp = std::env::temp_dir().join(format!("kastellan-binreason-{}", std::process::id()));
+        let debug = tmp.join("debug");
+        std::fs::create_dir_all(debug.join("adir")).expect("mkdir fixture");
+        std::fs::write(debug.join("afile"), b"#!/bin/sh\n").expect("write fixture binary");
+        let _restore = EnvVarGuard::set(KEY, tmp.to_str().expect("utf8 tmp"));
+
+        let target_dir_is_honoured = workspace_target_binary("afile") == debug.join("afile");
+        let dir = workspace_binary_or_reason("adir");
+        let file = workspace_binary_or_reason("afile");
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert!(target_dir_is_honoured, "CARGO_TARGET_DIR must drive the lookup, or this is vacuous");
+        assert!(dir.is_err(), "a directory must not pass as a built binary: {dir:?}");
+        assert_eq!(
+            file.expect("a real file at the artifact path resolves"),
+            debug.join("afile"),
+            "resolves to the artifact path itself, not merely to something"
+        );
+    }
+
+    /// The egress-proxy resolver names the **right binary** and the remedy
+    /// that builds it. The binary name is a bare literal in the source; swap it
+    /// for any other worker and every micro-VM egress tier silently runs the
+    /// wrong sidecar, which no other test would notice.
+    #[test]
+    fn the_egress_proxy_resolver_names_its_own_binary_and_remedy() {
+        const KEY: &str = "CARGO_TARGET_DIR";
+        let _lock = env_lock();
+        let tmp = std::env::temp_dir().join(format!("kastellan-proxyreason-{}", std::process::id()));
+        let debug = tmp.join("debug");
+        std::fs::create_dir_all(&debug).expect("mkdir fixture");
+        let _restore = EnvVarGuard::set(KEY, tmp.to_str().expect("utf8 tmp"));
+
+        let absent = egress_proxy_bin_or_reason();
+        std::fs::write(debug.join("kastellan-worker-egress-proxy"), b"#!/bin/sh\n")
+            .expect("write fixture binary");
+        let present = egress_proxy_bin_or_reason();
+        std::fs::remove_dir_all(&tmp).ok();
+
+        let reason = absent.expect_err("an empty target dir has no egress proxy");
+        assert!(reason.contains("egress-proxy"), "names the sidecar: {reason}");
+        assert!(
+            reason.contains("cargo build -p kastellan-worker-egress-proxy"),
+            "names the remedy that builds it: {reason}"
+        );
+        assert_eq!(
+            present.expect("a built proxy resolves"),
+            debug.join("kastellan-worker-egress-proxy"),
+            "resolves the egress-proxy binary, not some other worker"
+        );
+    }
 
     /// `CARGO_TARGET_DIR` (when set) overrides the default
     /// `<workspace_root>/target`; otherwise the default applies. `env_lock()`

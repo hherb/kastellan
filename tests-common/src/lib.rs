@@ -99,8 +99,8 @@ pub mod watchdog;
 pub use allowlist::seed_tool_allowlist;
 pub use audit::NoopAuditSink;
 pub use binaries::{
-    cli_binary, cli_command, core_binary, egress_proxy_bin_or_skip, shell_exec_worker_binary,
-    workspace_target_binary,
+    cli_binary, cli_command, core_binary, egress_proxy_bin_or_reason, egress_proxy_bin_or_skip,
+    shell_exec_worker_binary, workspace_binary_or_reason, workspace_target_binary,
 };
 pub use daemon::{
     assert_cli_failure, assert_cli_success, bring_up_daemon, guard_tier_boot_payload,
@@ -131,8 +131,8 @@ pub use signal_death::{
     assert_nonzero_exit, stdout_of,
 };
 pub use skip::{
-    one_line, pg_bin_dir_or_reason, pg_bin_dir_or_skip, skip_if_no_supervisor,
-    skip_if_origin_unreachable, skip_line, supervisor_unavailable_reason, warn_line,
+    one_line, origin_unreachable_reason, origin_unreachable_reason_at, pg_bin_dir_or_reason,
+    pg_bin_dir_or_skip, skip_if_no_supervisor, skip_line, supervisor_unavailable_reason, warn_line,
 };
 pub use temp::{current_username, unique_suffix, unique_temp_root};
 pub use venv_interpreter::venv_interpreter_binds;

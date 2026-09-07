@@ -147,11 +147,13 @@ use kastellan_core::workers::web_research::web_research_firecracker_search_broke
 #[cfg(target_os = "linux")]
 use kastellan_sandbox::SandboxBackends;
 #[cfg(target_os = "linux")]
-use kastellan_tests_common::microvm::{image_dir, skip_if_no_microvm};
+use kastellan_tests_common::microvm::{
+    dep_or_skip, host_probes, image_dir, skip_if_no_microvm, skip_unless_ready,
+};
 #[cfg(target_os = "linux")]
 use kastellan_tests_common::{
-    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
-    unique_suffix, workspace_target_binary,
+    bring_up_pg_cluster, egress_proxy_bin_or_reason, pg_bin_dir_or_reason, unique_suffix,
+    workspace_binary_or_reason,
 };
 
 /// The rootfs image this suite boots. Passed to the shared
@@ -190,17 +192,6 @@ fn url_host(endpoint: &str) -> String {
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
-#[cfg(target_os = "linux")]
-fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
-    let p = workspace_target_binary("kastellan-worker-egress-proxy");
-    if p.is_file() {
-        Some(p)
-    } else {
-        eprintln!("[SKIP] egress-proxy not built; run `cargo build -p kastellan-worker-egress-proxy`");
-        None
-    }
-}
-
 /// Live manager-level proof (#451 pattern, search-broker flavour): a VM
 /// web-research worker acquired through the real `SingleUseLifecycle::acquire`
 /// reaches a live loopback SearxNG ONLY over vsock 1026 to the host search-broker,
@@ -213,20 +204,19 @@ fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
             search-broker + live SearxNG. Drives SingleUseLifecycle::acquire for a \
             VM web-research worker; asserts a real result with zero direct search egress."]
 async fn brokered_web_research_vm_returns_results_with_zero_egress() {
-    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_unless_ready(&host_probes()) {
         return;
     }
-    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+    let Some(bin_dir) = dep_or_skip(pg_bin_dir_or_reason()) else {
         return;
     };
-    let Some(proxy_bin) = egress_proxy_bin_or_skip() else {
+    let Some(proxy_bin) = dep_or_skip(egress_proxy_bin_or_reason()) else {
         return;
     };
-    let broker_bin = workspace_target_binary("kastellan-worker-search-broker");
-    if !broker_bin.exists() {
-        eprintln!("\n[SKIP] search-broker binary not built; run cargo build --workspace\n");
+    let Some(broker_bin) = dep_or_skip(workspace_binary_or_reason("kastellan-worker-search-broker"))
+    else {
         return;
-    }
+    };
 
     let searx_endpoint = std::env::var("KASTELLAN_WEB_RESEARCH_ENDPOINT")
         .unwrap_or_else(|_| DEFAULT_SEARX_ENDPOINT.to_string());

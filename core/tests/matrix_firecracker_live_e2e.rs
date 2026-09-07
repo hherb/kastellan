@@ -57,7 +57,9 @@ use kastellan_core::egress::spawn::Mitm;
 use kastellan_core::worker_lifecycle::{PersistentFactory, PersistentTransport, PersistentWorker};
 use kastellan_protocol::client::Client;
 use kastellan_sandbox::{SandboxBackend, SandboxBackends};
-use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
+use kastellan_tests_common::microvm::{
+    dep_or_skip, firecracker_backend, image_dir, skip_if_no_microvm,
+};
 use serde_json::{json, Value};
 
 /// The rootfs image this suite boots. Passed to the shared
@@ -251,6 +253,13 @@ fn vm_bot_factory(
 /// Shared gate: returns the live config or `None` (skip-as-pass), after checking the
 /// opt-in env, the micro-VM readiness, and the peer + proxy binaries.
 fn gate() -> Option<(String, Account, Account, String, PathBuf, PathBuf)> {
+    // GATE is this tier's OPT-IN, not a host precondition. An operator demanding
+    // a real micro-VM run (KASTELLAN_MICROVM_REQUIRE_E2E) has not thereby asked
+    // for a live homeserver round-trip with credentials only they can supply —
+    // same category as `#[ignore]`. Everything BELOW this point is different: it
+    // is an unmet precondition on a run that WAS asked for, so each one routes
+    // through the knob (#679).
+    // REQUIRE-EXEMPT: opt-in enablement flag, not a host precondition.
     if std::env::var(GATE).is_err() {
         eprintln!("\n[SKIP] {GATE} unset — VM-mode live Matrix e2e needs a homeserver; see module docs\n");
         return None;
@@ -258,23 +267,18 @@ fn gate() -> Option<(String, Account, Account, String, PathBuf, PathBuf)> {
     if skip_if_no_microvm(VM_ROOTFS) {
         return None;
     }
-    let Some(proxy) = proxy_bin() else {
-        eprintln!("[SKIP] egress-proxy not built; run `cargo build -p kastellan-worker-egress-proxy`");
-        return None;
-    };
-    let Some(peer_bin) = peer_worker_bin() else {
-        eprintln!(
-            "[SKIP] peer worker not built; run `cargo build -p kastellan-worker-matrix --features live-matrix`"
-        );
-        return None;
-    };
-    let Some((homeserver, bot, peer, room)) = required_env() else {
-        eprintln!(
-            "\n[SKIP] VM live Matrix e2e env incomplete — need KASTELLAN_MATRIX_HOMESERVER_URL, \
-             _USER/_PASSWORD, _PEER_USER/_PEER_PASSWORD, _ROOM\n"
-        );
-        return None;
-    };
+    let proxy = dep_or_skip(proxy_bin().ok_or_else(|| {
+        "egress-proxy not built; run `cargo build -p kastellan-worker-egress-proxy`".to_string()
+    }))?;
+    let peer_bin = dep_or_skip(peer_worker_bin().ok_or_else(|| {
+        "peer worker not built; run `cargo build -p kastellan-worker-matrix --features live-matrix`"
+            .to_string()
+    }))?;
+    let (homeserver, bot, peer, room) = dep_or_skip(required_env().ok_or_else(|| {
+        "VM live Matrix e2e env incomplete — need KASTELLAN_MATRIX_HOMESERVER_URL, \
+         _USER/_PASSWORD, _PEER_USER/_PEER_PASSWORD, _ROOM"
+            .to_string()
+    }))?;
     Some((homeserver, bot, peer, room, proxy, peer_bin))
 }
 

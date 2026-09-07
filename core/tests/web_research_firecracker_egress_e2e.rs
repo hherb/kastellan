@@ -32,11 +32,11 @@ use std::time::Duration;
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
 use kastellan_core::workers::web_research::web_research_firecracker_entry;
-use kastellan_tests_common::microvm::{firecracker_backend, image_dir, skip_if_no_microvm};
-use kastellan_tests_common::{
-    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
-    unique_suffix,
+use kastellan_tests_common::microvm::{
+    dep_or_skip, firecracker_backend, host_probes, image_dir, skip_if_no_microvm,
+    skip_unless_ready,
 };
+use kastellan_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_reason, unique_suffix};
 
 /// The rootfs image this suite boots. Passed to the shared
 /// `kastellan_tests_common::microvm` helpers, which own the `[SKIP]` wording,
@@ -79,13 +79,10 @@ async fn web_research_vm_reaches_proxy_with_ca_delivered() {
     if skip_if_no_microvm(VM_ROOTFS) {
         return;
     }
-    if skip_if_no_supervisor() {
+    if skip_unless_ready(&host_probes()) {
         return;
     }
-    if skip_if_sandbox_unavailable() {
-        return;
-    }
-    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+    let Some(bin_dir) = dep_or_skip(pg_bin_dir_or_reason()) else {
         return;
     };
     let suffix = unique_suffix();

@@ -62,11 +62,12 @@ use kastellan_core::workers::browser_driver::BrowserDriverManifest;
 use kastellan_sandbox::linux_firecracker::build_launch_plan;
 use kastellan_sandbox::{SandboxBackendKind, SandboxBackends, SandboxPolicy};
 use kastellan_tests_common::microvm::{
-    firecracker_backend, firecracker_image_for, image_dir, skip_if_no_microvm,
+    dep_or_skip, firecracker_backend, firecracker_image_for, host_probes, image_dir,
+    skip_if_no_microvm, skip_unless_ready,
 };
 use kastellan_tests_common::{
-    bring_up_pg_cluster, egress_proxy_bin_or_skip, pg_bin_dir_or_skip, skip_if_no_supervisor,
-    skip_if_origin_unreachable, skip_if_sandbox_unavailable, unique_suffix,
+    bring_up_pg_cluster, egress_proxy_bin_or_reason, origin_unreachable_reason,
+    pg_bin_dir_or_reason, unique_suffix,
 };
 
 /// The rootfs filename produced by `build-browser-driver-rootfs.sh`.
@@ -523,13 +524,10 @@ async fn vm_booted_browser_driver_launches_chromium() {
         return;
     }
     // Skip-as-pass without PG/supervisor/sandbox (dispatch needs a pool for audit).
-    if skip_if_no_supervisor() {
+    if skip_unless_ready(&host_probes()) {
         return;
     }
-    if skip_if_sandbox_unavailable() {
-        return;
-    }
-    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+    let Some(bin_dir) = dep_or_skip(pg_bin_dir_or_reason()) else {
         return;
     };
     let suffix = unique_suffix();
@@ -694,16 +692,16 @@ async fn vm_booted_browser_driver_launches_chromium() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
 async fn vm_renders_real_page_through_real_sidecar() {
-    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_unless_ready(&host_probes()) {
         return;
     }
-    if skip_if_origin_unreachable(DEFAULT_ORIGIN_HOST) {
+    if skip_unless_ready(&[&|| origin_unreachable_reason(DEFAULT_ORIGIN_HOST)]) {
         return;
     }
-    let Some(proxy_bin) = egress_proxy_bin_or_skip() else {
+    let Some(proxy_bin) = dep_or_skip(egress_proxy_bin_or_reason()) else {
         return;
     };
-    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+    let Some(bin_dir) = dep_or_skip(pg_bin_dir_or_reason()) else {
         return;
     };
     let suffix = unique_suffix();
@@ -835,16 +833,16 @@ async fn vm_renders_real_page_through_real_sidecar() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "DGX-only: real KVM + vsock + browser-driver rootfs + egress proxy + outbound HTTPS"]
 async fn vm_render_of_heavy_page_stays_within_memory_budget() {
-    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_unless_ready(&host_probes()) {
         return;
     }
-    if skip_if_origin_unreachable(HEAVY_ORIGIN_HOST) {
+    if skip_unless_ready(&[&|| origin_unreachable_reason(HEAVY_ORIGIN_HOST)]) {
         return;
     }
-    let Some(proxy_bin) = egress_proxy_bin_or_skip() else {
+    let Some(proxy_bin) = dep_or_skip(egress_proxy_bin_or_reason()) else {
         return;
     };
-    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+    let Some(bin_dir) = dep_or_skip(pg_bin_dir_or_reason()) else {
         return;
     };
     let suffix = unique_suffix();

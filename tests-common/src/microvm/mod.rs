@@ -67,6 +67,7 @@ const LAUNCHER_PROFILES: [&str; 2] = ["release", "debug"];
 
 mod freshness;
 mod images;
+mod require;
 pub use freshness::{
     freshness, stale_reason, unusable_reason, unverified_reason, BakedDigest, Freshness, Missing,
     Unverified,
@@ -75,6 +76,13 @@ pub use images::{
     baked_for, build_script_for, image_entry, BakedBinary, RootfsImage, GUEST_INIT_BIN,
     GUEST_INIT_IN_IMAGE, GUEST_KERNEL_LIB, REBUILD_ALL_SCRIPT, ROOTFS_IMAGES,
 };
+pub use require::{dep_or_skip, first_unmet, host_probes, skip_unless_ready, Probe};
+
+// The source-level guard is machinery for this crate's own tests, not
+// vocabulary for a suite: nothing outside `tests-common` refers to it, so it
+// is compiled only under `cfg(test)` rather than shipped as public surface.
+#[cfg(test)]
+mod guard;
 
 #[cfg(test)]
 mod freshness_tests;
@@ -639,3 +647,10 @@ pub use linux::{firecracker_backend, firecracker_image_for, skip_if_no_microvm};
 
 #[cfg(test)]
 mod preflight_tests;
+
+#[cfg(test)]
+mod call_site_tests;
+#[cfg(test)]
+mod guard_tests;
+#[cfg(test)]
+mod require_tests;

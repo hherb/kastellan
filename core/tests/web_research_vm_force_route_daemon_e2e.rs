@@ -26,10 +26,12 @@ use kastellan_core::worker_lifecycle::force_route::{DecisionSinkFactory, ForceRo
 use kastellan_core::worker_lifecycle::{SingleUseLifecycle, WorkerLifecycleManager};
 use kastellan_core::workers::web_research::web_research_firecracker_broker_entry;
 use kastellan_sandbox::SandboxBackends;
-use kastellan_tests_common::microvm::{image_dir, skip_if_no_microvm};
+use kastellan_tests_common::microvm::{
+    dep_or_skip, host_probes, image_dir, skip_if_no_microvm, skip_unless_ready,
+};
 use kastellan_tests_common::{
-    bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, skip_if_sandbox_unavailable,
-    unique_suffix, workspace_target_binary,
+    bring_up_pg_cluster, egress_proxy_bin_or_reason, pg_bin_dir_or_reason, unique_suffix,
+    workspace_binary_or_reason,
 };
 
 /// The rootfs image this suite boots. Passed to the shared
@@ -44,16 +46,6 @@ const DEFAULT_SEARX_ENDPOINT: &str = "http://127.0.0.1:8888/search";
 /// Default embed backend (loopback Ollama). Reached ONLY by the host broker;
 /// the worker never has it in egress.
 const DEFAULT_EMBED_ENDPOINT: &str = "http://127.0.0.1:11434/v1/embeddings";
-
-fn egress_proxy_bin_or_skip() -> Option<PathBuf> {
-    let p = workspace_target_binary("kastellan-worker-egress-proxy");
-    if p.is_file() {
-        Some(p)
-    } else {
-        eprintln!("[SKIP] egress-proxy not built; run `cargo build -p kastellan-worker-egress-proxy`");
-        None
-    }
-}
 
 /// Bare host of a URL (for the content allowlist entry + the embed-absence check).
 fn url_host(endpoint: &str) -> String {
@@ -90,23 +82,22 @@ async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::Pg
             SingleUseLifecycle::acquire path for a VM web-research worker; \
             asserts hybrid ranking with the embed host absent from egress."]
 async fn daemon_force_routes_vm_web_research_through_host_sidecar_and_broker() {
-    if skip_if_no_microvm(VM_ROOTFS) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {
+    if skip_if_no_microvm(VM_ROOTFS) || skip_unless_ready(&host_probes()) {
         return;
     }
-    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+    let Some(bin_dir) = dep_or_skip(pg_bin_dir_or_reason()) else {
         return;
     };
-    let Some(proxy_bin) = egress_proxy_bin_or_skip() else {
+    let Some(proxy_bin) = dep_or_skip(egress_proxy_bin_or_reason()) else {
         return;
     };
 
     // VM worker runs from the rootfs-baked path; the broker is a host binary.
     let worker_in_guest = "/usr/local/bin/kastellan-worker-web-research";
-    let broker_bin = workspace_target_binary("kastellan-worker-embed-broker");
-    if !broker_bin.exists() {
-        eprintln!("\n[SKIP] embed-broker binary not built; run cargo build --workspace\n");
+    let Some(broker_bin) = dep_or_skip(workspace_binary_or_reason("kastellan-worker-embed-broker"))
+    else {
         return;
-    }
+    };
 
     let searx_endpoint = std::env::var("KASTELLAN_WEB_RESEARCH_ENDPOINT")
         .unwrap_or_else(|_| DEFAULT_SEARX_ENDPOINT.to_string());
