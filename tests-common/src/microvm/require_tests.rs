@@ -10,7 +10,8 @@
 //! knob — including ones nobody has written yet.
 
 use super::require::{
-    bypassed_gates, dep_or_skip_to, first_unmet, skip_unless_ready_to, Probe, BANNED_HELPERS,
+    dep_or_skip, dep_or_skip_to, first_unmet, host_probe_order, host_probes, skip_unless_ready,
+    skip_unless_ready_to, Probe,
 };
 use crate::env::{env_lock, EnvVarGuard};
 use crate::microvm::REQUIRE_ENV;
@@ -56,10 +57,10 @@ fn first_unmet_returns_the_first_unmet_reason_in_order() {
 }
 
 /// Short-circuiting is a behaviour, not an optimisation: these probes SPAWN
-/// (`default_probe` shells out; `skip_if_origin_unreachable` opens a TCP
-/// connection with a 5 s timeout). A probe after the first failure must not
-/// run at all, or an offline host pays five seconds to be told something it
-/// already knew.
+/// (`default_probe` shells out; `origin_unreachable_reason` opens a TCP
+/// connection with a 5 s timeout PER RESOLVED ADDRESS). A probe after the
+/// first failure must not run at all, or an offline host pays seconds to be
+/// told something it already knew.
 #[test]
 fn first_unmet_does_not_evaluate_probes_past_the_first_failure() {
     use std::cell::Cell;
@@ -186,120 +187,60 @@ fn dep_or_skip_panics_when_a_real_run_was_demanded() {
 }
 
 // ---------------------------------------------------------------------------
-// bypassed_gates — the pure source scanner
+// The stderr-writing wrappers
+// ---------------------------------------------------------------------------
+//
+// Everything above tests the `_to(out)` seam. The wrappers are what the 10 real
+// call sites actually call, and #680's review is precisely the lesson that an
+// untested one-line delegation is a place a knob quietly stops working: both
+// `skip_unless_ready(_) -> false` and `dep_or_skip(d) -> d.ok()` survived the
+// whole suite before these two tests existed, the second silently deleting the
+// `[SKIP]` line AND the panic from every micro-VM suite in the tree.
+//
+// The panic is observable without capturing stderr, so proving delegation costs
+// one `#[should_panic]` each.
+
+/// [`super::require::skip_unless_ready`] really delegates to the tested seam.
+#[test]
+#[should_panic(expected = "KASTELLAN_MICROVM_REQUIRE_E2E")]
+fn the_skip_unless_ready_wrapper_reaches_the_knob() {
+    let _lock = env_lock();
+    let _guard = EnvVarGuard::set(REQUIRE_ENV, "1");
+
+    let fails = || Some("supervisor unavailable: no bus".to_string());
+    let probes: [Probe; 1] = [&fails];
+    let _ = skip_unless_ready(&probes);
+}
+
+/// [`super::require::dep_or_skip`] really delegates to the tested seam.
+#[test]
+#[should_panic(expected = "KASTELLAN_MICROVM_REQUIRE_E2E")]
+fn the_dep_or_skip_wrapper_reaches_the_knob() {
+    let _lock = env_lock();
+    let _guard = EnvVarGuard::set(REQUIRE_ENV, "1");
+
+    let _: Option<u32> = dep_or_skip(Err("no Postgres install found".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// host_probes — the pair, and its order
 // ---------------------------------------------------------------------------
 
-/// A bare call to a non-REQUIRE-aware helper is the defect #679 is about.
+/// The pair is supervisor-then-sandbox, and the order is documented as a claim
+/// about which diagnosis is more useful.
+///
+/// Asserted by *name*, because neither of the two obvious alternatives works:
+/// calling the probes is vacuous on a healthy host (both return `None`, so a
+/// swap passes), and comparing `&fn_item` addresses is meaningless because a
+/// fn item is zero-sized and every reference to one shares an address. That
+/// second attempt is why `host_probes` carries a name-tagged table at all.
 #[test]
-fn bypassed_gates_flags_a_bare_helper_call() {
-    let src = "fn t() {\n    if skip_if_no_supervisor() {\n        return;\n    }\n}\n";
-    let found = bypassed_gates(src);
-    assert_eq!(found.len(), 1, "one violation expected: {found:?}");
-    assert_eq!(found[0].line, 2, "must report the line to fix");
-    assert_eq!(found[0].what, "skip_if_no_supervisor");
-}
-
-/// The `||`-chained shape the issue was filed about: three helpers on one
-/// line are three findings, because the fix is three substitutions.
-#[test]
-fn bypassed_gates_flags_every_helper_on_one_line() {
-    let src = "if skip_if_no_microvm(R) || skip_if_no_supervisor() || skip_if_sandbox_unavailable() {\n";
-    let found = bypassed_gates(src);
-    let names: Vec<&str> = found.iter().map(|g| g.what.as_str()).collect();
-    assert_eq!(names, vec!["skip_if_no_supervisor", "skip_if_sandbox_unavailable"]);
-}
-
-/// Every banned helper is actually reachable by the scanner. Without this a
-/// typo in one entry of [`BANNED_HELPERS`] would silently stop checking that
-/// one — a guard that guards less than it claims, which is #667's own shape.
-#[test]
-fn bypassed_gates_flags_every_banned_helper() {
-    for helper in BANNED_HELPERS {
-        let src = format!("    let _ = {helper}();\n");
-        let found = bypassed_gates(&src);
-        assert_eq!(found.len(), 1, "{helper} must be detected: {found:?}");
-        assert_eq!(found[0].what, *helper);
-    }
-}
-
-/// Prose is not a call. The module docs of a suite may well name a helper
-/// while explaining why it does not use it; flagging that would make the
-/// guard's own remedy impossible to document.
-#[test]
-fn bypassed_gates_ignores_a_helper_named_in_a_comment() {
-    let src = "// skip_if_no_supervisor() is routed through the knob below\n\
-               /// See skip_if_sandbox_unavailable for the bare form.\n";
-    assert!(bypassed_gates(src).is_empty(), "a mention in prose is not a call");
-}
-
-/// A REQUIRE-aware call site must not trip the guard, or the fix cannot be
-/// applied. `supervisor_unavailable_reason` is the sibling that IS routed.
-#[test]
-fn bypassed_gates_accepts_the_reason_siblings() {
-    let src = "if skip_unless_ready(&[&supervisor_unavailable_reason, &sandbox_unavailable_reason]) {\n";
-    assert!(bypassed_gates(src).is_empty(), "the fixed shape must pass: {:?}", bypassed_gates(src));
-}
-
-/// A hand-written `[SKIP]` is the other half of the class — it is how the
-/// broker-binary checks were written, and it bypasses the knob just as
-/// completely as a helper call does.
-#[test]
-fn bypassed_gates_flags_a_hand_written_skip_literal() {
-    let src = "    eprintln!(\"\\n[SKIP] search-broker binary not built\\n\");\n";
-    let found = bypassed_gates(src);
-    assert_eq!(found.len(), 1, "one violation expected: {found:?}");
-    assert_eq!(found[0].what, "hand-written [SKIP]");
-}
-
-/// ...but an *opt-in enablement flag* is legitimately not a host
-/// precondition. A test whose own env gate is unset was never asked for, so
-/// demanding a micro-VM run must not turn it into a failure. The exemption is
-/// explicit, local, and carries its reason on the same line.
-#[test]
-fn bypassed_gates_honours_an_inline_exemption_marker() {
-    let src = "    // REQUIRE-EXEMPT: opt-in enablement flag, not a host precondition\n\
-               \x20   eprintln!(\"\\n[SKIP] {GATE} unset\\n\");\n";
-    assert!(bypassed_gates(src).is_empty(), "an exempted literal must pass: {:?}", bypassed_gates(src));
-}
-
-/// The real placement: the marker sits above the `if` that guards the print,
-/// so one line (the `if`) separates it from the literal. A window that
-/// rejected this would reject the only exemption in the tree — measured, not
-/// assumed: it did, at a window of 1.
-#[test]
-fn bypassed_gates_honours_a_marker_above_the_guarding_if() {
-    let src = "    // REQUIRE-EXEMPT: opt-in enablement flag, not a host precondition.\n\
-               \x20   if std::env::var(GATE).is_err() {\n\
-               \x20       eprintln!(\"\\n[SKIP] {GATE} unset\\n\");\n";
-    assert!(bypassed_gates(src).is_empty(), "the real shape must pass: {:?}", bypassed_gates(src));
-}
-
-/// ...but no further. Three lines up is a marker that has drifted away from
-/// what it excuses, and this is the guard's only escape hatch — it must stay
-/// visibly attached.
-#[test]
-fn a_marker_three_lines_up_does_not_exempt() {
-    let src = "    // REQUIRE-EXEMPT: drifted\n\
-               \x20   let a = 1;\n\
-               \x20   let b = 2;\n\
-               \x20   eprintln!(\"[SKIP] gate unset\");\n";
-    let found = bypassed_gates(src);
-    assert_eq!(found.len(), 1, "a drifted marker must not exempt: {found:?}");
-    assert_eq!(found[0].line, 4);
-}
-
-/// The marker exempts only what it is next to. A second, unmarked literal
-/// further down the same file is still a finding — otherwise one exemption
-/// would silently disarm the whole file.
-#[test]
-fn an_exemption_marker_does_not_cover_a_later_literal() {
-    let src = "    // REQUIRE-EXEMPT: opt-in enablement flag\n\
-               \x20   eprintln!(\"[SKIP] gate unset\");\n\
-               \x20   let x = 1;\n\
-               \x20   let y = 2;\n\
-               \x20   let z = 3;\n\
-               \x20   eprintln!(\"[SKIP] egress-proxy not built\");\n";
-    let found = bypassed_gates(src);
-    assert_eq!(found.len(), 1, "only the unmarked literal is a finding: {found:?}");
-    assert_eq!(found[0].line, 6);
+fn host_probes_reports_the_supervisor_before_the_sandbox() {
+    assert_eq!(
+        host_probe_order(),
+        ["supervisor", "sandbox"],
+        "the supervisor is probed first: enable-linger is a prerequisite for the PG cluster \
+         every one of these sites brings up next, so it is the more useful diagnosis"
+    );
+    assert_eq!(host_probes().len(), 2, "the pair every daemon e2e asks for");
 }

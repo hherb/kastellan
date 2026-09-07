@@ -192,7 +192,6 @@ fn url_host(endpoint: &str) -> String {
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
-#[cfg(target_os = "linux")]
 /// Live manager-level proof (#451 pattern, search-broker flavour): a VM
 /// web-research worker acquired through the real `SingleUseLifecycle::acquire`
 /// reaches a live loopback SearxNG ONLY over vsock 1026 to the host search-broker,

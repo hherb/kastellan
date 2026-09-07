@@ -62,6 +62,11 @@ pub fn warn_line(reason: &str) -> String {
 }
 
 /// How long to wait for a TCP connect when probing a real origin's reachability.
+///
+/// Paid **per resolved address**, not per probe: `origin_unreachable_reason_at`
+/// tries every A/AAAA record before giving up, so a dual-stack host with a
+/// blocked route waits a multiple of this. That is the cost
+/// [`crate::microvm::first_unmet`]'s short-circuit exists to avoid paying twice.
 const ORIGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Why the user-level supervisor is unusable on this host, or `None` when it
@@ -133,8 +138,17 @@ pub fn pg_bin_dir_or_skip() -> Option<PathBuf> {
     }
 }
 
-/// Returns `true` if `host:443` is not reachable from this box, so the caller
-/// should `return` immediately.
+/// Why `host:443` is not reachable from this box, or `None` when it is.
+///
+/// A *reason*, with no `[SKIP]` prefix, so the call site decides the verdict —
+/// #653's split. `skip_unless_ready(&[&|| origin_unreachable_reason(HOST)])`
+/// renders it as a skip, or as a **failure** when the operator set
+/// `KASTELLAN_MICROVM_REQUIRE_E2E`; see [`crate::microvm::skip_unless_ready`].
+/// The rendering half (`skip_if_origin_unreachable`) was retired with #679's
+/// review: every caller had moved to the knob-aware form, and leaving a
+/// `[SKIP]`-rendering sibling alive is an invitation to bypass the knob again.
+///
+/// # Why these tiers need a real origin at all
 ///
 /// Some egress e2e tiers need a **real public HTTPS origin** and cannot be made
 /// hermetic. Two independent reasons, both structural rather than laziness:
@@ -150,35 +164,31 @@ pub fn pg_bin_dir_or_skip() -> Option<PathBuf> {
 ///   proxy's upstream leg.
 ///
 /// Widening either trust store to make a test pass would weaken production, so
-/// these tiers take the real-network dependency instead — and skip cleanly when
-/// the network is absent. The `[SKIP]` line is load-bearing: a silent skip is
+/// these tiers take the real-network dependency instead — and report cleanly
+/// when the network is absent. That report is load-bearing: a silent skip is
 /// exactly the false-green pattern `CLAUDE.md` warns about.
-pub fn skip_if_origin_unreachable(host: &str) -> bool {
-    match origin_unreachable_reason(host) {
-        Some(reason) => {
-            eprint!("{}", skip_line(&reason));
-            true
-        }
-        None => false,
-    }
-}
-
-/// Why `host:443` is not reachable from this box, or `None` when it is — the
-/// `*_or_reason` half of [`skip_if_origin_unreachable`], with no `[SKIP]`
-/// prefix so a caller that must not skip can render it as a failure instead.
-///
-/// Added for #679: a micro-VM suite that needs a real origin was reaching
-/// this precondition *past* `skip_if_no_microvm`, so
-/// `KASTELLAN_MICROVM_REQUIRE_E2E` could not see it and an offline DGX still
-/// reported a green micro-VM run. See
-/// [`crate::microvm::skip_unless_ready`].
 ///
 /// The two arms are distinguished on purpose: "cannot resolve" and "cannot
 /// reach" are different remedies (DNS vs egress), and a reason that merged
 /// them would send the operator to the wrong one.
 pub fn origin_unreachable_reason(host: &str) -> Option<String> {
+    origin_unreachable_reason_at(host, 443)
+}
+
+/// [`origin_unreachable_reason`] against an explicit port.
+///
+/// The port is a parameter only so both arms are reachable from a unit test: a
+/// bound ephemeral listener exercises the `None` arm and a closed one the
+/// "cannot reach" arm, with no network and no root. Before this seam the only
+/// test could reach `Some`, so "never returns `None`" and "the two reasons are
+/// swapped" both survived the suite.
+///
+/// Callers want [`origin_unreachable_reason`]: 443 is the port these tiers
+/// actually need, and a caller free to pick one could probe a port the tier
+/// never uses and call it reachable.
+pub fn origin_unreachable_reason_at(host: &str, port: u16) -> Option<String> {
     use std::net::ToSocketAddrs;
-    let addrs = match (host, 443u16).to_socket_addrs() {
+    let addrs = match (host, port).to_socket_addrs() {
         Ok(a) => a.collect::<Vec<_>>(),
         Err(e) => {
             return Some(format!("cannot resolve {host}: {e} (this tier needs outbound HTTPS)"))
@@ -189,7 +199,7 @@ pub fn origin_unreachable_reason(host: &str) -> Option<String> {
             return None;
         }
     }
-    Some(format!("cannot reach {host}:443 (this tier needs outbound HTTPS)"))
+    Some(format!("cannot reach {host}:{port} (this tier needs outbound HTTPS)"))
 }
 
 #[cfg(test)]
@@ -252,6 +262,55 @@ mod tests {
             .expect("a reserved-TLD host is never reachable");
         assert!(reason.contains("kastellan-no-such-host.invalid"), "names the host: {reason}");
         assert!(!reason.contains("[SKIP]"), "a reason carries no verdict: {reason}");
+    }
+
+    /// **A reachable origin yields `None`.** Without this the whole function
+    /// could stop returning `None` — every micro-VM tier that needs a real
+    /// origin would then skip (or, under the knob, fail) forever, and the one
+    /// test above would not notice. A bound ephemeral loopback listener is a
+    /// reachable "origin" needing no network and no root.
+    #[test]
+    fn a_reachable_origin_yields_no_reason() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        assert_eq!(
+            origin_unreachable_reason_at("127.0.0.1", port),
+            None,
+            "a listening port is reachable"
+        );
+    }
+
+    /// The two arms say **different** things, and the distinction is the whole
+    /// point: "cannot resolve" sends the operator to DNS, "cannot reach" to
+    /// egress. Swapping the strings is invisible to any test that only checks
+    /// the host is named.
+    #[test]
+    fn the_resolve_and_reach_arms_name_different_remedies() {
+        // Closed port on loopback: resolves, does not connect.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let p = l.local_addr().expect("local addr").port();
+            drop(l);
+            p
+        };
+        let unreachable =
+            origin_unreachable_reason_at("127.0.0.1", port).expect("a closed port is unreachable");
+        assert!(unreachable.contains("cannot reach"), "connect arm: {unreachable}");
+        assert!(unreachable.contains(&port.to_string()), "names the port: {unreachable}");
+
+        let unresolvable = origin_unreachable_reason_at("kastellan-no-such-host.invalid", 443)
+            .expect("a reserved-TLD host is never reachable");
+        if unresolvable.contains("cannot reach") {
+            // A resolver that hijacks NXDOMAIN reaches the connect arm; the
+            // resolve arm is then untestable on this host and the assertion
+            // below would be a lie rather than a check.
+            eprint!(
+                "{}",
+                warn_line("resolver hijacks NXDOMAIN; the resolve arm was not exercised")
+            );
+        } else {
+            assert!(unresolvable.contains("cannot resolve"), "resolve arm: {unresolvable}");
+        }
     }
 
     /// A reason is one line whatever the probe embedded in it.

@@ -23,14 +23,25 @@
 //! `loginctl enable-linger` then produces the same silent skip-as-pass the
 //! knob exists to abolish, one helper to the right.
 //!
-//! ⚠️ **The issue counted one syntactic shape; the property is broader.**
-//! Grepping for the `||` chain found 7 call sites. Asking instead "which
+//! ⚠️ **The issue counted one syntactic shape; the property was broader — and
+//! the first re-derivation was still one site short.** Grepping for the `||`
+//! chain the issue described found 7 call sites. Asking instead "which
 //! preconditions inside a micro-VM-gated test bypass the knob" found **11
 //! tests across 6 kinds** — the `||` chain, the same three helpers written as
 //! sequential `if`s, `pg_bin_dir_or_skip`, `skip_if_origin_unreachable`,
 //! `egress_proxy_bin_or_skip`, and four hand-written `eprintln!("[SKIP] …")`
-//! broker-binary checks. Hence [`bypassed_gates`], which pins the *property*
-//! over the real sources instead of the shape.
+//! broker-binary checks — plus the live-Matrix `gate()`, whose three
+//! value-dependency checks are a 7th kind.
+//!
+//! Reviewing *that* turned up a **12th** site, in
+//! `net_demo_firecracker_egress_e2e.rs`: a hand-written `[SKIP]` whose
+//! `eprintln!` and format string rustfmt had split across two lines. The first
+//! version of the source guard (`microvm::guard`) matched the macro and the
+//! literal on one line, so it could not see it — **the census and the guard
+//! shared a blind spot.**
+//! That is why the guard is now written *fail-closed* against a shape rather
+//! than against a roster of known-bad names, and why rule 2 tracks a macro
+//! invocation across the lines it wraps onto.
 //!
 //! # The vocabulary
 //!
@@ -49,9 +60,15 @@ use std::io::Write;
 /// A precondition probe: `None` when met, `Some(reason)` when not.
 ///
 /// The `*_or_reason` half of the tree's `*_or_reason` / `skip_if_*` split.
-/// Named because a bare `&[&dyn Fn() -> Option<String>]` at a call site does
-/// not coerce from a mixed array of closures without an annotation, and the
-/// annotation should say what the thing *is*.
+///
+/// Named for the *bindings*, not the call sites. An array of distinct `fn`
+/// items has no common type, so `let probes: [Probe; N] = [&a, &b];` and
+/// [`host_probes`]'s return type must spell the trait object out or hit
+/// `E0308: different fn items have unique types`. A call site needs no
+/// annotation — the expected parameter type propagates into the array literal,
+/// which is why `skip_unless_ready(&[&|| origin_unreachable_reason(HOST)])`
+/// compiles bare — but the name is what makes the annotation readable where
+/// one *is* required.
 pub type Probe<'a> = &'a dyn Fn() -> Option<String>;
 
 /// The first unmet precondition among `probes`, in order, or `None` when all
@@ -64,27 +81,64 @@ pub type Probe<'a> = &'a dyn Fn() -> Option<String>;
 /// with nothing failing.
 ///
 /// **Short-circuiting is behaviour, not an optimisation.** These probes spawn
-/// processes and open sockets (`default_probe` shells out; an origin probe
-/// waits up to 5 s for a TCP connect), so a probe after the first failure
-/// must not run: an offline host would otherwise pay seconds to be told
-/// something the first probe already established.
+/// processes and open sockets — `default_probe` shells out, and
+/// [`crate::skip::origin_unreachable_reason`] waits up to 5 s *per resolved
+/// address* and tries them all, so a dual-stack host pays a multiple of that.
+/// A probe after the first failure must not run: an offline host would
+/// otherwise pay seconds to be told something the first probe already
+/// established.
 pub fn first_unmet(probes: &[Probe]) -> Option<String> {
     probes.iter().find_map(|probe| probe())
 }
 
-/// The two host preconditions **every** micro-VM daemon e2e needs, in
+/// The two host preconditions every micro-VM **daemon** e2e needs, in
 /// diagnosis order.
 ///
-/// All 11 sites #679 covers ask for exactly this pair, so naming it once
-/// keeps the call sites to one line and stops the pair drifting apart the way
-/// the byte-copied `[SKIP]` helpers this module was created to end did.
+/// The 11 daemon-e2e sites #679 covers ask for exactly this pair, so naming it
+/// once keeps the call sites to one line and stops the pair drifting apart the
+/// way the byte-copied `[SKIP]` helpers this module was created to end did.
+/// (The live-Matrix tier needs neither probe, and takes only [`dep_or_skip`].)
 ///
-/// The order is a claim about usefulness, not an accident: an absent user
-/// supervisor explains a Postgres cluster that will not come up, so reporting
-/// it first sends the operator to `loginctl enable-linger` rather than to a
-/// database that was never the problem.
+/// The order is a claim about usefulness, not an accident. Both are
+/// independent host facts, but their remedies are not equally load-bearing:
+/// `loginctl enable-linger` is a prerequisite for the Postgres cluster every
+/// one of these sites brings up two lines later — `bring_up_pg_cluster`
+/// installs and starts a *user service* — whereas the sandbox probe's remedy,
+/// `scripts/linux/install-bwrap-apparmor-profile.sh`, unblocks only the
+/// sandbox. Reporting the supervisor first therefore sends the operator to the
+/// fix that unblocks the most, rather than to a database that was never the
+/// problem.
 pub fn host_probes() -> [Probe<'static>; 2] {
-    [&crate::skip::supervisor_unavailable_reason, &crate::sandbox::sandbox_unavailable_reason]
+    [&HOST_PROBE_TABLE[0].1, &HOST_PROBE_TABLE[1].1]
+}
+
+/// A host precondition probe with the name it is reported under.
+///
+/// A plain `fn` rather than a [`Probe`], because [`HOST_PROBE_TABLE`] is a
+/// `static` and a `dyn Fn` cannot be one.
+type NamedProbe = (&'static str, fn() -> Option<String>);
+
+/// [`host_probes`]' entries, name-tagged, in diagnosis order.
+///
+/// A table rather than an array literal inside [`host_probes`] so the
+/// documented order can be *asserted*. The obvious test — compare
+/// `host_probes()[0]` against `&supervisor_unavailable_reason` — cannot work:
+/// a fn item is zero-sized, so every `&fn_item` shares one address and the
+/// comparison is meaningless in both directions. Naming the entries gives the
+/// order something to be wrong about.
+///
+/// [`host_probes`] is a mechanical projection of this table directly beneath
+/// it; that projection is short enough to read but is not itself pinned by a
+/// test, which is the honest limit of this arrangement.
+static HOST_PROBE_TABLE: [NamedProbe; 2] = [
+    ("supervisor", crate::skip::supervisor_unavailable_reason),
+    ("sandbox", crate::sandbox::sandbox_unavailable_reason),
+];
+
+/// The order [`host_probes`] reports in, for the test that pins it.
+#[cfg(test)]
+pub(crate) fn host_probe_order() -> [&'static str; 2] {
+    [HOST_PROBE_TABLE[0].0, HOST_PROBE_TABLE[1].0]
 }
 
 /// `[SKIP]` + `true` when any precondition is unmet, or panic when
@@ -162,157 +216,4 @@ pub fn dep_or_skip_to<T>(dep: Result<T, String>, out: &mut dyn Write) -> Option<
             None
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// The source-level guard
-// ---------------------------------------------------------------------------
-
-/// Skip helpers that are **not** REQUIRE-aware, and so must not be called
-/// from a micro-VM suite.
-///
-/// Each is shared with ~70 non-micro-VM suites, which is why none of them can
-/// be made require-aware in place: the knob is a micro-VM concept and these
-/// helpers have no business knowing about it. The resolution is #653's — the
-/// helper keeps its `*_or_reason` sibling, and the *call site* decides the
-/// verdict. This list is what the call sites may no longer say.
-///
-/// Kept in one place because [`bypassed_gates`] and its "every entry is
-/// actually detected" test both read it: a typo in an entry would otherwise
-/// silently stop checking that one helper, which is a guard that guards less
-/// than it claims — #667's own shape.
-pub const BANNED_HELPERS: &[&str] = &[
-    "skip_if_no_supervisor",
-    "skip_if_sandbox_unavailable",
-    "skip_if_origin_unreachable",
-    "pg_bin_dir_or_skip",
-    "egress_proxy_bin_or_skip",
-];
-
-/// The marker that exempts a hand-written `[SKIP]` from [`bypassed_gates`].
-///
-/// For an **opt-in enablement flag** — a test whose own env gate is unset was
-/// never asked for, so demanding a micro-VM run must not turn it into a
-/// failure. That is categorically different from an unmet *host* precondition,
-/// which is what the knob is about. The exemption is inline and carries its
-/// reason so the distinction is made where it applies, not in a list some
-/// other file owns.
-pub const EXEMPT_MARKER: &str = "REQUIRE-EXEMPT";
-
-/// How many lines above a `[SKIP]` literal an [`EXEMPT_MARKER`] may sit.
-///
-/// **Two**, and the number is measured rather than chosen: the idiomatic
-/// placement is above the `if` that guards the print, not inside the block —
-///
-/// ```ignore
-/// // REQUIRE-EXEMPT: opt-in enablement flag, not a host precondition.
-/// if std::env::var(GATE).is_err() {
-///     eprintln!("\n[SKIP] {GATE} unset …");
-/// ```
-///
-/// — which puts exactly one line (the `if`) between the marker and what it
-/// excuses. A window of 1 rejected the only real exemption in the tree.
-///
-/// It stays deliberately small. A marker that has drifted away from its
-/// literal is a marker nobody re-reads, and this one is the single escape
-/// hatch in the guard: it must stay visibly attached to the thing it excuses.
-const EXEMPT_WINDOW: usize = 2;
-
-/// A precondition that reports a green run when [`super::REQUIRE_ENV`]
-/// demanded a real one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BypassedGate {
-    /// 1-based line within the scanned source.
-    pub line: usize,
-    /// What was found: a [`BANNED_HELPERS`] name, or `"hand-written [SKIP]"`.
-    pub what: String,
-}
-
-/// Pure: every precondition in `src` that bypasses [`super::REQUIRE_ENV`].
-///
-/// Two rules, both textual, because the property is not visible to the type
-/// system and not visible to any run — the false green only appears on a host
-/// where the micro-VM preconditions are met and a neighbouring one is not,
-/// which is by definition not the host anybody gates on.
-///
-/// 1. **No [`BANNED_HELPERS`] call.** Comment-only lines are exempt: a suite's
-///    docs may well name a helper while explaining why it does not use it, and
-///    flagging that would make this guard's own remedy undocumentable.
-/// 2. **No hand-written `[SKIP]` in a print macro**, unless an
-///    [`EXEMPT_MARKER`] sits on that line or the one above.
-///
-/// Deliberately conservative about what counts as a call: it matches the bare
-/// identifier anywhere on a non-comment line, imports included. An import of a
-/// banned helper into a micro-VM suite is itself the finding — nothing else
-/// would want it there.
-pub fn bypassed_gates(src: &str) -> Vec<BypassedGate> {
-    let lines: Vec<&str> = src.lines().collect();
-    let mut found = Vec::new();
-
-    for (idx, raw) in lines.iter().enumerate() {
-        let line_no = idx + 1;
-        let trimmed = raw.trim_start();
-        let is_comment = trimmed.starts_with("//");
-
-        if !is_comment {
-            for helper in BANNED_HELPERS {
-                if contains_identifier(raw, helper) {
-                    found.push(BypassedGate { line: line_no, what: (*helper).to_string() });
-                }
-            }
-        }
-
-        if is_print_macro(raw) && raw.contains("[SKIP]") && !exempt_near(&lines, idx) {
-            found.push(BypassedGate { line: line_no, what: "hand-written [SKIP]".to_string() });
-        }
-    }
-    found
-}
-
-/// Pure: does `line` contain `name` as a whole identifier?
-///
-/// Substring matching alone would report `skip_if_no_supervisor` inside a
-/// hypothetical `skip_if_no_supervisor_reason`, and — the case that actually
-/// matters — would flag `pg_bin_dir_or_skip` inside nothing at all while
-/// missing that `egress_proxy_bin_or_skip` is a **prefix** of no other name
-/// only by luck. Bounding on Rust identifier characters makes the rule stable
-/// as names are added.
-fn contains_identifier(line: &str, name: &str) -> bool {
-    let bytes = line.as_bytes();
-    let mut from = 0;
-    while let Some(rel) = line[from..].find(name) {
-        let start = from + rel;
-        let end = start + name.len();
-        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
-        let after_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
-        if before_ok && after_ok {
-            return true;
-        }
-        from = start + 1;
-    }
-    false
-}
-
-/// Pure: Rust identifier body character (ASCII is enough — these are all
-/// snake_case helper names).
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// Pure: is this line a stderr/stdout print macro?
-///
-/// The `[SKIP]` rule targets a line that *renders* a skip, not one that
-/// mentions the string — an assertion such as
-/// `assert!(!rendered.contains("[SKIP]"))` must not be a finding.
-fn is_print_macro(line: &str) -> bool {
-    ["eprintln!", "eprint!", "println!", "print!", "write!", "writeln!"]
-        .iter()
-        .any(|m| line.contains(m))
-}
-
-/// Pure: does an [`EXEMPT_MARKER`] sit on line `idx` or within
-/// [`EXEMPT_WINDOW`] lines above it?
-fn exempt_near(lines: &[&str], idx: usize) -> bool {
-    let first = idx.saturating_sub(EXEMPT_WINDOW);
-    lines[first..=idx].iter().any(|l| l.contains(EXEMPT_MARKER))
 }

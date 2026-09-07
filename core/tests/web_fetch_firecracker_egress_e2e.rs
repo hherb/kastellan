@@ -399,7 +399,9 @@ async fn fetch_in_vm_through_real_sidecar(
 /// make this test pass would widen a production trust store, which is the same
 /// trade rejected on the browser-driver arc when `--ignore-certificate-errors-*`
 /// was proposed. So this tier takes the real-network dependency instead, and
-/// `skip_if_origin_unreachable` skips loudly when the network is absent.
+/// `origin_unreachable_reason`, routed through `skip_unless_ready`, skips
+/// loudly when the network is absent — or fails the run outright under
+/// `KASTELLAN_MICROVM_REQUIRE_E2E`.
 ///
 /// (The worker side is already hermetic and stays that way: the in-guest
 /// transport trusts **only** the sidecar's per-instance CA, delivered at spawn.
