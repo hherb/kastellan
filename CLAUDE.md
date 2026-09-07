@@ -51,6 +51,13 @@ cargo test --workspace -- --nocapture                      # show stderr (useful
 ./target/debug/kastellan                                     # run the core daemon
 ```
 
+**Release builds go through one script, always:** `bash scripts/build-release.sh`. Cargo unifies
+features *per invocation*, so `cargo build --release -p <pkg>` and `--workspace` produce **different
+bytes from identical source** — and the micro-VM rootfs images, the deploy path and the #667
+freshness gate all read `target/release/`. A narrow `-p` release build leaves a reference no image
+was ever built from, which is issue #682. The script also rebuilds `kastellan-worker-matrix` with
+`live-matrix`, which a plain `--workspace` build gets wrong.
+
 There's no `rustfmt` config yet; keep formatting consistent with what's already in the tree. Clippy IS enforced: CI runs `cargo clippy --workspace --all-targets -- -D warnings` and the tree is warning-clean — keep it that way.
 
 ## Linux host setup (Ubuntu 24.04+)
