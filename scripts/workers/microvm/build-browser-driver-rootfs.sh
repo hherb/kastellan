@@ -12,8 +12,9 @@
 # like every other worker, with no new runtime dependency.
 #
 # Differences from build-web-fetch-rootfs.sh, beyond the staging source:
-#   * absolute paths via REPO_ROOT rather than assuming CWD == repo root
-#     (cargo is still invoked bare, relying on its upward Cargo.toml search);
+#   * absolute paths via REPO_ROOT rather than assuming CWD == repo root — the
+#     canonical release build is invoked through REPO_ROOT too, and anchors
+#     itself on its own location, so this script runs from anywhere;
 #   * a STAGE_MIB pre-flight fit check before mkfs, which the siblings lack;
 #   * the CA posture noted below.
 # The mkfs tail itself is the same shape as the siblings'.
@@ -70,11 +71,17 @@ fi
 # not trusted — that reuse-unchecked path is exactly what issue #471 closed.
 require_guest_kernel "$OUT_DIR"
 
-# Guest PID1, built on the host with cargo (native on the DGX aarch64), exactly
-# as every sibling script does. The worker itself is staged by the container
-# image, not by cargo — it is Python.
-source "$HOME/.cargo/env"
-cargo build --release -p kastellan-microvm-init
+# This image bakes only the guest PID1 — the driver itself is Python, staged
+# by the container image rather than by cargo.
+# Guest binaries come from the one canonical producer, never from a narrow
+# `cargo build -p ...` here: cargo unifies features per invocation, so package
+# selection changes the BYTES of an identical binary, and a private invocation
+# leaves a target/release/ reference no image was ever built from — which makes
+# the #667 freshness gate call every correct image stale (#682). It is the same
+# script scripts/upgrade_from_git.sh deploys with.
+# Rationale + the tests that pin it: RELEASE_BUILD_SCRIPT in
+# tests-common/src/microvm/images.rs.
+bash "$REPO_ROOT/scripts/build-release.sh"
 
 WORK=$(mktemp -d)
 CID=""

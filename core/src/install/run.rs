@@ -192,11 +192,18 @@ pub fn prepare_filesystem(
     }
 
     // Required binaries: all must be present.
+    //
+    // The hint names `scripts/build-release.sh`, not a bare
+    // `cargo build --release`. Following the bare form and then installing
+    // ships a `kastellan-worker-matrix` built WITHOUT `live-matrix`, which
+    // refuses to run at spawn — the exact failure that script exists to
+    // prevent (issue #682).
     for name in required_binaries() {
         let src = from_dir.join(name);
         if !src.is_file() {
             return Err(format!(
-                "required binary {name:?} not found in {} — run `cargo build --release` first",
+                "required binary {name:?} not found in {} — run \
+                 `bash scripts/build-release.sh` first",
                 from_dir.display()
             ));
         }

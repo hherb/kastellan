@@ -12,6 +12,7 @@
 
 use super::images::{GUEST_KERNEL_LIB, ROOTFS_IMAGES};
 use super::repo_root;
+use super::script_scan::code_body;
 
 /// The pin is a *library*: sourcing it must define functions and
 /// nothing else. If it ever grew a top-level side effect (a stray
@@ -207,8 +208,9 @@ fn a_failed_quarantine_is_reported_rather_than_claimed() {
 fn kernel_pin_is_the_only_place_the_kernel_url_appears() {
     let root = repo_root();
     for &super::images::RootfsImage { image: rootfs, build_script: script, .. } in ROOTFS_IMAGES {
-        let body = std::fs::read_to_string(root.join(script))
+        let raw = std::fs::read_to_string(root.join(script))
             .unwrap_or_else(|e| panic!("read {script}: {e}"));
+        let body = code_body(&raw);
         assert!(
             !body.contains("spec.ccfc.min"),
             "{script} (for {rootfs}) declares its own kernel URL; \
@@ -224,8 +226,13 @@ fn kernel_pin_is_the_only_place_the_kernel_url_appears() {
 fn every_build_script_fetches_through_the_pin() {
     let root = repo_root();
     for &super::images::RootfsImage { image: rootfs, build_script: script, .. } in ROOTFS_IMAGES {
-        let body = std::fs::read_to_string(root.join(script))
+        let raw = std::fs::read_to_string(root.join(script))
             .unwrap_or_else(|e| panic!("read {script}: {e}"));
+        // Prose must not satisfy a PRESENCE check: a script that only
+        // MENTIONS the pin in a comment while no longer sourcing it would
+        // download an unverified kernel and pass (#471, and the
+        // [[guard-shares-the-census-blind-spot]] lesson).
+        let body = code_body(&raw);
         assert!(
             body.contains("guest-kernel.sh"),
             "{script} (for {rootfs}) does not source {GUEST_KERNEL_LIB}"
@@ -450,11 +457,12 @@ fn installer_root_owns_the_kernel_in_a_sticky_dir() {
 fn build_scripts_verify_the_kernel_but_never_create_it() {
     let root = repo_root();
     for &super::images::RootfsImage { image: rootfs, build_script: script, .. } in ROOTFS_IMAGES {
-        let body = std::fs::read_to_string(root.join(script))
+        let raw = std::fs::read_to_string(root.join(script))
             .unwrap_or_else(|e| panic!("read {script}: {e}"));
-        let calls = |name: &str| {
-            body.lines().map(str::trim).any(|l| !l.starts_with('#') && l.starts_with(name))
-        };
+        // The same shared comment rule as every other scanner over these
+        // files, rather than a fourth private notion of "ignore the prose".
+        let body = code_body(&raw);
+        let calls = |name: &str| body.lines().map(str::trim).any(|l| l.starts_with(name));
         assert!(
             calls("require_guest_kernel"),
             "{script} (for {rootfs}) must call require_guest_kernel"

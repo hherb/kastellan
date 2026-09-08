@@ -177,6 +177,91 @@ pub const ROOTFS_IMAGES: &[RootfsImage] = &[
 /// keeps it that way.
 pub const GUEST_KERNEL_LIB: &str = "scripts/workers/microvm/lib/guest-kernel.sh";
 
+/// The one script that produces every `target/release/` binary an image bakes
+/// (repo-relative), and the only way a `build-*-rootfs.sh` may cause cargo to
+/// run at all (issue #682).
+///
+/// # Why a shared producer rather than eight `cargo build -p …` lines
+///
+/// Cargo's feature unification is per *invocation*: the features other
+/// selected packages enable on a shared dependency are unified into that
+/// dependency's build, so **the package selection changes the bytes of an
+/// otherwise identical binary**. Measured on the DGX at `ec9a2e94`, back and
+/// forth, deterministic each way — `8a21877a…` is the reference the images
+/// bake since this branch, `669821d3…` is what they baked before it:
+///
+/// ```text
+/// cargo build --release -p kastellan-microvm-init   669821d3…  (what images USED to bake)
+/// cargo build --release --workspace                 8a21877a…  (the reference now)
+/// ```
+///
+/// Each `build-*-rootfs.sh` used a narrow `-p` set while the deploy path
+/// (`scripts/upgrade_from_git.sh`) runs this script, so after any deploy the
+/// freshness check compared an image against a binary **no image is ever
+/// built from** and declared all eight stale. Every image was correct. That
+/// is fail-closed, so it was noise rather than a containment hole — but it is
+/// exactly the *"a check that cries wolf on the common case is a check
+/// somebody switches off"* failure [`super::freshness`] was designed to
+/// avoid, and it left the whole Firecracker tier unrunnable after a normal
+/// build unless you knew to re-run each image's exact `-p` line.
+///
+/// Pointing every producer at one script removes the ambiguity at its source
+/// instead of teaching the gate to tolerate it: the bytes in the image, the
+/// bytes the deploy ships and the bytes the gate reads all come from the same
+/// script. It also picks up the `live-matrix` step — `--workspace` alone
+/// builds `kastellan-worker-matrix` *without* its feature and that worker
+/// refuses to run, which is why this script exists at all.
+///
+/// # ⚠️ One script, two invocations, last writer wins
+///
+/// This is **not** "one build by construction", and overstating it is how the
+/// next person gets caught. The script runs `--workspace` and then a narrow
+/// `-p kastellan-worker-matrix --features live-matrix`; both write
+/// `target/release/kastellan-worker-matrix` and the second wins, which is why
+/// [`tests::the_canonical_producer_is_the_one_the_deploy_path_runs`] pins
+/// that **order** as well as the contents.
+///
+/// The consequence is that the result is only stable until something else
+/// touches that path. Measured on the Mac, 2026-09-08: after the live-matrix
+/// build (`0ca537c2…`), a bare `cargo build --release --workspace` re-uplifted
+/// the non-featured artefact (`9d29cd49…`) in **0.32 s** with no compilation
+/// and no output but `Finished`. That state ships a Matrix worker which
+/// refuses to run, and makes `matrix.ext4` read stale here. So the rule is
+/// *run this script last*, and the script prints the matrix digest to make
+/// the flip visible rather than something a stale-image panic reveals later.
+///
+/// # Cost
+///
+/// Warm, it is free: cargo keeps both artefact sets under different
+/// `-C metadata` hashes, so flipping selections re-links from cache — both
+/// measured builds above finished in **3.00 s** on a warm tree, and
+/// `rebuild-all-rootfs.sh`'s eight invocations cost about five seconds
+/// between them.
+///
+/// Cold, it is not free and the docs should not pretend otherwise. Building
+/// one image on a fresh checkout went from a two-crate closure
+/// (`-p kastellan-microvm-init`) to the whole workspace (392 crates) plus the
+/// `matrix-rust-sdk` subtree — measured at 4 m 09 s for the live-matrix step
+/// alone — even for `kv-demo`, `net-demo` and `browser-driver`, which have
+/// nothing to do with Matrix. That is the price of removing the ambiguity at
+/// the producer, and it is paid once per checkout rather than per image.
+///
+/// # What is out of scope, deliberately
+///
+/// `scripts/workers/python-exec/build-image.sh` also runs `cargo build
+/// --release`, and correctly so: it cross-builds inside an Apple `container`
+/// with its own `--target-dir`, never writes this tree's `target/release/`,
+/// and so cannot take part in the skew. The rule here is about who writes
+/// `target/release/`, not about the string `cargo build`.
+///
+/// [`tests::no_rootfs_build_script_runs_its_own_cargo_build`] is what keeps a
+/// ninth script from growing its own copy again — the same drift channel
+/// [`GUEST_KERNEL_LIB`] closed for eight unchecked `curl`s (#471) — and
+/// [`tests::every_rootfs_build_script_on_disk_is_registered`] is what stops a
+/// ninth script from simply never being registered, which would put it
+/// outside every scanner in this module.
+pub const RELEASE_BUILD_SCRIPT: &str = "scripts/build-release.sh";
+
 /// The one script that rebuilds every image in [`ROOTFS_IMAGES`].
 ///
 /// Exists because the build scripts live in **two** directories, which makes
@@ -219,6 +304,23 @@ pub fn baked_for(rootfs: &str) -> &'static [BakedBinary] {
 mod tests {
     use super::*;
     use crate::microvm::repo_root;
+    use crate::microvm::script_scan::{cargo_invocations, code_body, invokes, sources_of};
+
+    /// The table must not be empty, or every `for entry in ROOTFS_IMAGES`
+    /// below passes having checked nothing.
+    ///
+    /// Non-emptiness *is* pinned from `rebuild_script_tests` and
+    /// `preflight_tests`, but both of those are about a different script and
+    /// would leave with it. A loop guard belongs next to the loops.
+    #[test]
+    fn the_registry_is_not_empty() {
+        assert!(
+            ROOTFS_IMAGES.len() >= 8,
+            "every scanner in this module loops over ROOTFS_IMAGES and would pass \
+             vacuously if it shrank; got {}",
+            ROOTFS_IMAGES.len()
+        );
+    }
 
     /// Every hint must name a script that actually exists, so a rename
     /// or a move breaks this test rather than silently sending an
@@ -271,8 +373,9 @@ mod tests {
     fn the_table_and_the_scripts_agree_on_every_baked_binary() {
         let root = repo_root();
         for entry in ROOTFS_IMAGES {
-            let body = std::fs::read_to_string(root.join(entry.build_script))
+            let raw = std::fs::read_to_string(root.join(entry.build_script))
                 .unwrap_or_else(|e| panic!("read {}: {e}", entry.build_script));
+            let body = code_body(&raw);
 
             // Every `target/release/<name>` the script mentions, deduped.
             let mut in_script: Vec<&str> = body
@@ -312,6 +415,211 @@ mod tests {
         }
     }
 
+    /// Every rootfs build script must get its `target/release/` binaries from
+    /// the one canonical producer, and no build it drives may run cargo
+    /// itself (issue #682).
+    ///
+    /// # Why both halves are needed
+    ///
+    /// The presence half alone is satisfied by a script that calls the
+    /// producer *and* keeps its old narrow `cargo build -p …` line. Whichever
+    /// of the two runs last then wins, so the image's bytes become
+    /// order-dependent — which is the ambiguity #682 is about, not merely a
+    /// slower build. The absence half alone is satisfied by a script that
+    /// builds nothing at all and bakes whatever happens to be lying in
+    /// `target/release/`, which is #667 restored.
+    ///
+    /// # Why it follows the `source`
+    ///
+    /// The scan covers the script **and every in-repo file it sources**
+    /// ([`sources_of`]). All eight already source `lib/guest-kernel.sh`, so a
+    /// scan of the script text alone would be evaded by moving one `cargo
+    /// build` into the shared lib — the drift channel reopened one
+    /// indirection out. The detection itself is
+    /// [`cargo_invocations`], a pure function over the text, so
+    /// `the_cargo_scan_reports_a_planted_invocation` can prove it detects.
+    #[test]
+    fn no_rootfs_build_script_runs_its_own_cargo_build() {
+        let root = repo_root();
+        for entry in ROOTFS_IMAGES {
+            let scanned = sources_of(&root, entry.build_script);
+            let (_, script_text) = &scanned[0];
+
+            assert!(
+                invokes(script_text, RELEASE_BUILD_SCRIPT),
+                "{} must build its binaries with `bash {RELEASE_BUILD_SCRIPT}` — the \
+                 one producer the deploy path also uses. Without it the image is \
+                 baked from a package selection nothing else shares, and the \
+                 freshness check compares against bytes no image was built from (#682)",
+                entry.build_script
+            );
+
+            for (path, text) in &scanned {
+                let own = cargo_invocations(text);
+                assert!(
+                    own.is_empty(),
+                    "{path} (reached from {}) runs cargo itself ({own:?}) — package \
+                     selection changes the BYTES of an identical binary, so a second \
+                     invocation makes the image's bytes depend on which ran last and \
+                     reinstates #682. Let {RELEASE_BUILD_SCRIPT} be the only one",
+                    entry.build_script
+                );
+            }
+        }
+    }
+
+    /// The positive control for the test above.
+    ///
+    /// Plants each violation into a copy of a **real** build script's text
+    /// and requires the scan to come back with it. Without this,
+    /// `assert!(own.is_empty())` is green whether the loop found nothing or
+    /// the detector cannot detect — the failure
+    /// [`crate::microvm::call_site_tests`] documents and the reason its scan
+    /// is a pure function too.
+    #[test]
+    fn the_cargo_scan_reports_a_planted_invocation() {
+        let root = repo_root();
+        let script = ROOTFS_IMAGES[0].build_script;
+        let clean = std::fs::read_to_string(root.join(script))
+            .unwrap_or_else(|e| panic!("read {script}: {e}"));
+        assert!(cargo_invocations(&clean).is_empty(), "{script} must start clean");
+        assert!(invokes(&clean, RELEASE_BUILD_SCRIPT), "{script} must call the producer");
+
+        // Each of these evaded the literal `contains("cargo build")` this
+        // scan replaced; the last is the shape that hid behind a quoted `#`.
+        for planted in [
+            "cargo build --release -p kastellan-microvm-init",
+            "cargo  build --release -p kastellan-microvm-init",
+            "\"$CARGO\" build --release -p kastellan-microvm-init",
+            "cargo rustc --release -p kastellan-microvm-init",
+            "echo \"step # 2\" && cargo build --release -p kastellan-microvm-init",
+        ] {
+            let mutant = format!("{clean}{planted}\n");
+            let found = cargo_invocations(&mutant);
+            assert_eq!(found.len(), 1, "planted `{planted}` must be caught, got {found:?}");
+        }
+
+        // ...and the presence half must fail when the producer goes away,
+        // or a script that builds nothing at all would pass.
+        let without = clean.replace(RELEASE_BUILD_SCRIPT, "scripts/nothing.sh");
+        assert!(
+            !invokes(&without, RELEASE_BUILD_SCRIPT),
+            "dropping the producer must be visible, or the presence half is vacuous"
+        );
+    }
+
+    /// A ninth build script that never lands in [`ROOTFS_IMAGES`] is invisible
+    /// to every scanner in this module, which all loop over the registry.
+    ///
+    /// So the registry is pinned against the filesystem, not just the
+    /// filesystem against the registry (`every_build_script_exists` does
+    /// that). Without this, "a ninth script cannot grow its own cargo build"
+    /// is only true of a ninth script somebody remembered to register.
+    #[test]
+    fn every_rootfs_build_script_on_disk_is_registered() {
+        let root = repo_root();
+        let registered: Vec<&str> = ROOTFS_IMAGES.iter().map(|e| e.build_script).collect();
+        for dir in ["scripts/workers/microvm", "scripts/workers/kv-demo"] {
+            let entries = std::fs::read_dir(root.join(dir))
+                .unwrap_or_else(|e| panic!("read dir {dir}: {e}"));
+            for entry in entries {
+                let name = entry.expect("dir entry").file_name();
+                let name = name.to_string_lossy().to_string();
+                if !(name.starts_with("build-") && name.ends_with("rootfs.sh")) {
+                    continue;
+                }
+                let rel = format!("{dir}/{name}");
+                assert!(
+                    registered.contains(&rel.as_str()),
+                    "{rel} builds a rootfs but is not in ROOTFS_IMAGES, so no freshness \
+                     check knows what it bakes and no guard sees what it runs (#667/#682)"
+                );
+            }
+        }
+    }
+
+    /// Every build script must at least PARSE, which no amount of text
+    /// scanning can tell you.
+    ///
+    /// This module reads these files as text and asserts what they say. That
+    /// leaves a whole class untouched: an edit that satisfies every scanner
+    /// and does not run. `bash -n` is the cheapest possible check that the
+    /// files are still shell, and it works on both hosts.
+    #[test]
+    fn every_build_script_parses() {
+        let root = repo_root();
+        for entry in ROOTFS_IMAGES {
+            let out = std::process::Command::new("bash")
+                .arg("-n")
+                .arg(root.join(entry.build_script))
+                .output()
+                .expect("bash is present on every host this suite runs on");
+            assert!(
+                out.status.success(),
+                "{} is not valid bash: {}",
+                entry.build_script,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// The canonical producer must exist, must be what the deploy path runs,
+    /// and must still be a **workspace** build — otherwise the whole argument
+    /// collapses with every other guard green.
+    ///
+    /// The existence half alone is worthless: a `build-release.sh` that
+    /// nothing deploys with would make the images agree with a build nobody
+    /// else performs, which is #682 with the odd one out swapped rather than
+    /// removed. And the deploy half alone would still pass if line 1 of the
+    /// producer were edited to a narrow `-p` set, which is #682 itself moved
+    /// one file over.
+    ///
+    /// ⚠️ The `-p` allowance is deliberate and narrow. The producer ends with
+    /// `-p kastellan-worker-matrix --features live-matrix` **on purpose** —
+    /// `--workspace` builds that worker without its feature and it then
+    /// refuses to run. Both invocations write
+    /// `target/release/kastellan-worker-matrix` and the last one wins, so the
+    /// order is load-bearing too: the workspace build must come FIRST.
+    #[test]
+    fn the_canonical_producer_is_the_one_the_deploy_path_runs() {
+        let root = repo_root();
+        assert!(
+            root.join(RELEASE_BUILD_SCRIPT).is_file(),
+            "{RELEASE_BUILD_SCRIPT} is missing, so every build script now names \
+             a path that does not exist"
+        );
+        let deploy = "scripts/upgrade_from_git.sh";
+        let deploy_body = std::fs::read_to_string(root.join(deploy))
+            .unwrap_or_else(|e| panic!("read {deploy}: {e}"));
+        assert!(
+            invokes(&deploy_body, RELEASE_BUILD_SCRIPT),
+            "{deploy} no longer builds with {RELEASE_BUILD_SCRIPT}, so the bytes \
+             a deploy installs and the bytes an image bakes have diverged again \
+             (#682) — point both at the same producer"
+        );
+
+        let producer = std::fs::read_to_string(root.join(RELEASE_BUILD_SCRIPT))
+            .unwrap_or_else(|e| panic!("read {RELEASE_BUILD_SCRIPT}: {e}"));
+        let builds = cargo_invocations(&producer);
+        let workspace = builds.iter().position(|l| l.contains("--workspace"));
+        assert_eq!(
+            workspace,
+            Some(0),
+            "{RELEASE_BUILD_SCRIPT} must build the WHOLE workspace, and first — a \
+             narrow selection here would silently make every image agree with a \
+             build nothing else performs (#682), and a later --workspace would \
+             overwrite the live-matrix worker. Got {builds:?}"
+        );
+        for extra in &builds[1..] {
+            assert!(
+                extra.contains("kastellan-worker-matrix") && extra.contains("live-matrix"),
+                "{RELEASE_BUILD_SCRIPT} runs a second selection that is not the \
+                 sanctioned live-matrix rebuild: {extra}. Every extra invocation \
+                 overwrites what --workspace just wrote"
+            );
+        }
+    }
+
     /// The destination matters as much as the name: the digest is read back
     /// from `in_image`, so a wrong path yields `Indeterminate` — a check that
     /// silently stops checking, which is #667 with extra steps. Every script
@@ -320,8 +628,9 @@ mod tests {
     fn the_table_and_the_scripts_agree_on_every_in_image_destination() {
         let root = repo_root();
         for entry in ROOTFS_IMAGES {
-            let body = std::fs::read_to_string(root.join(entry.build_script))
+            let raw = std::fs::read_to_string(root.join(entry.build_script))
                 .unwrap_or_else(|e| panic!("read {}: {e}", entry.build_script));
+            let body = code_body(&raw);
             for b in entry.baked {
                 let dest = format!("\"$WORK{}\"", b.in_image);
                 assert!(

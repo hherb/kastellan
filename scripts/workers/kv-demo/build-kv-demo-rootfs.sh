@@ -18,8 +18,15 @@ if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -w "$OUT_DIR" ]; then
 fi
 require_guest_kernel "$OUT_DIR"
 
-source "$HOME/.cargo/env"
-cargo build --release -p kastellan-worker-kv-demo -p kastellan-microvm-init
+# Guest binaries come from the one canonical producer, never from a narrow
+# `cargo build -p ...` here: cargo unifies features per invocation, so package
+# selection changes the BYTES of an identical binary, and a private invocation
+# leaves a target/release/ reference no image was ever built from — which makes
+# the #667 freshness gate call every correct image stale (#682). It is the same
+# script scripts/upgrade_from_git.sh deploys with.
+# Rationale + the tests that pin it: RELEASE_BUILD_SCRIPT in
+# tests-common/src/microvm/images.rs.
+bash scripts/build-release.sh
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 install -D -m0755 target/release/kastellan-microvm-init "$WORK/sbin/init"

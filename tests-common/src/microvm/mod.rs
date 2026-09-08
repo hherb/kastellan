@@ -74,7 +74,8 @@ pub use freshness::{
 };
 pub use images::{
     baked_for, build_script_for, image_entry, BakedBinary, RootfsImage, GUEST_INIT_BIN,
-    GUEST_INIT_IN_IMAGE, GUEST_KERNEL_LIB, REBUILD_ALL_SCRIPT, ROOTFS_IMAGES,
+    GUEST_INIT_IN_IMAGE, GUEST_KERNEL_LIB, REBUILD_ALL_SCRIPT, RELEASE_BUILD_SCRIPT,
+    ROOTFS_IMAGES,
 };
 pub use require::{dep_or_skip, first_unmet, host_probes, skip_unless_ready, Probe};
 
@@ -83,6 +84,12 @@ pub use require::{dep_or_skip, first_unmet, host_probes, skip_unless_ready, Prob
 // is compiled only under `cfg(test)` rather than shipped as public surface.
 #[cfg(test)]
 mod guard;
+
+// The one shell-reading rule the build-script scanners in `images` and
+// `kernel_pin_tests` share. Same reasoning as `guard`: test machinery, not
+// vocabulary for a suite, so it never leaves `cfg(test)`.
+#[cfg(test)]
+mod script_scan;
 
 #[cfg(test)]
 mod freshness_tests;

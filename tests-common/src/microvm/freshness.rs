@@ -100,10 +100,25 @@ pub enum Missing {
 }
 
 impl Missing {
+    /// What to run when a binary is absent from `target/release/`.
+    ///
+    /// A `const` because [`Missing::remedy`] returns a *borrow*, so this arm
+    /// cannot build its string with `format!` — and `concat!` takes only
+    /// literals, not a const item, so `super::RELEASE_BUILD_SCRIPT` cannot be
+    /// spliced in either. That leaves the script path written out a second
+    /// time. It is a copy, not a single source of truth, so
+    /// `the_not_built_remedy_names_the_canonical_producer` pins the two
+    /// together rather than trusting them to stay in step.
+    const NOT_BUILT_REMEDY: &'static str = "build it with bash scripts/build-release.sh";
+
     /// The remedy clause for this cause, without the binary names.
     fn remedy(&self) -> &str {
         match self {
-            Missing::NotBuilt => "cargo build --release",
+            // Names the canonical producer rather than a bare
+            // `cargo build --release`: the reference must come from the same
+            // package selection every image is baked from, or fixing this
+            // cause creates the #682 one.
+            Missing::NotBuilt => Self::NOT_BUILT_REMEDY,
             Missing::NoImageReader => "needs debugfs from e2fsprogs",
             Missing::Unreadable { detail } => detail,
         }
@@ -249,8 +264,42 @@ pub fn stale_reason(image: &str, binary: &str, build_script: Option<&str>) -> St
     format!(
         "{image} bakes a copy of {binary} that DIFFERS from the one this tree builds, so \
          booting it would test code that no longer exists — the gate would pass having \
-         verified nothing (#667). {}",
+         verified nothing (#667). {} {}",
+        selection_skew_clause(),
         rebuild_clause(build_script)
+    )
+}
+
+/// The cheap check that must be offered before a rebuild of eight images
+/// (issue #682).
+///
+/// A digest mismatch has **two** causes and this verdict cannot tell them
+/// apart. The obvious one is a stale image. The other is that cargo unifies
+/// features *per invocation*, so the package selection of whichever build
+/// last wrote `target/release/` changes the bytes of an otherwise identical
+/// binary — measured on the DGX, `-p kastellan-microvm-init` and
+/// `--workspace` differ from the same source, deterministically. Until #682
+/// every `build-*-rootfs.sh` used its own narrow `-p` set while the deploy
+/// path ran the workspace build, so after any deploy all eight *correct*
+/// images were declared stale.
+///
+/// Pointing every build script at [`super::RELEASE_BUILD_SCRIPT`] removes
+/// that skew for the documented workflows, but a hand-run
+/// `cargo build --release -p <one worker>` still rewrites one reference. No
+/// cheap local discriminator exists — the two causes are byte-identical in
+/// their symptom — so the honest move is to name the three-second remedy
+/// first and the eight-image one second. An operator who reads one clause
+/// and acts must be sent to the cheap one; a gate that habitually demands the
+/// expensive one is a gate that gets switched off, which is the failure this
+/// whole module was written to avoid.
+fn selection_skew_clause() -> String {
+    format!(
+        "CHECK THIS FIRST if you have not changed guest source: cargo unifies features per \
+         invocation, so the package selection of the build that last wrote target/release/ \
+         changes the BYTES of an identical binary, and a narrow `cargo build -p …` leaves a \
+         reference no image is ever built from (#682). Re-run `bash {}` — it re-links from \
+         cargo's cache in seconds — and try again.",
+        super::RELEASE_BUILD_SCRIPT
     )
 }
 
