@@ -30,16 +30,16 @@ fi
 # not trusted — that reuse-unchecked path is exactly what issue #471 closed.
 require_guest_kernel "$OUT_DIR"
 
-# Guest binaries come from the ONE canonical producer, never from a narrow
-# `cargo build -p ...` here. Package selection changes the BYTES of an
-# identical binary (cargo unifies features per invocation), so a private
-# invocation leaves a target/release/ reference no image was ever built from
-# and the #667 freshness gate then calls every correct image stale (#682).
-# build-release.sh is what scripts/upgrade_from_git.sh runs, so image bytes,
-# deploy bytes and the bytes the gate reads are now one build by construction;
-# it also handles the live-matrix worker a plain --workspace build gets wrong.
-# Full rationale: RELEASE_BUILD_SCRIPT in tests-common/src/microvm/images.rs,
-# pinned by `no_rootfs_build_script_runs_its_own_cargo_build`.
+# The guest binaries are host-native: these scripts assume the build host's
+# arch matches the guest's (native on the DGX aarch64). There is no --target.
+# Guest binaries come from the one canonical producer, never from a narrow
+# `cargo build -p ...` here: cargo unifies features per invocation, so package
+# selection changes the BYTES of an identical binary, and a private invocation
+# leaves a target/release/ reference no image was ever built from — which makes
+# the #667 freshness gate call every correct image stale (#682). It is the same
+# script scripts/upgrade_from_git.sh deploys with.
+# Rationale + the tests that pin it: RELEASE_BUILD_SCRIPT in
+# tests-common/src/microvm/images.rs.
 bash scripts/build-release.sh
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT

@@ -12,8 +12,9 @@
 # like every other worker, with no new runtime dependency.
 #
 # Differences from build-web-fetch-rootfs.sh, beyond the staging source:
-#   * absolute paths via REPO_ROOT rather than assuming CWD == repo root
-#     (cargo is still invoked bare, relying on its upward Cargo.toml search);
+#   * absolute paths via REPO_ROOT rather than assuming CWD == repo root — the
+#     canonical release build is invoked through REPO_ROOT too, and anchors
+#     itself on its own location, so this script runs from anywhere;
 #   * a STAGE_MIB pre-flight fit check before mkfs, which the siblings lack;
 #   * the CA posture noted below.
 # The mkfs tail itself is the same shape as the siblings'.
@@ -72,17 +73,15 @@ require_guest_kernel "$OUT_DIR"
 
 # This image bakes only the guest PID1 — the driver itself is Python, staged
 # by the container image rather than by cargo.
-# Guest binaries come from the ONE canonical producer, never from a narrow
-# `cargo build -p ...` here. Package selection changes the BYTES of an
-# identical binary (cargo unifies features per invocation), so a private
-# invocation leaves a target/release/ reference no image was ever built from
-# and the #667 freshness gate then calls every correct image stale (#682).
-# build-release.sh is what scripts/upgrade_from_git.sh runs, so image bytes,
-# deploy bytes and the bytes the gate reads are now one build by construction;
-# it also handles the live-matrix worker a plain --workspace build gets wrong.
-# Full rationale: RELEASE_BUILD_SCRIPT in tests-common/src/microvm/images.rs,
-# pinned by `no_rootfs_build_script_runs_its_own_cargo_build`.
-bash scripts/build-release.sh
+# Guest binaries come from the one canonical producer, never from a narrow
+# `cargo build -p ...` here: cargo unifies features per invocation, so package
+# selection changes the BYTES of an identical binary, and a private invocation
+# leaves a target/release/ reference no image was ever built from — which makes
+# the #667 freshness gate call every correct image stale (#682). It is the same
+# script scripts/upgrade_from_git.sh deploys with.
+# Rationale + the tests that pin it: RELEASE_BUILD_SCRIPT in
+# tests-common/src/microvm/images.rs.
+bash "$REPO_ROOT/scripts/build-release.sh"
 
 WORK=$(mktemp -d)
 CID=""

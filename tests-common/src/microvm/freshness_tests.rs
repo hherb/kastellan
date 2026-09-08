@@ -283,6 +283,13 @@ fn the_stale_reason_offers_the_cheap_rebuild_before_the_expensive_one() {
         msg.contains(&format!("bash {RELEASE_BUILD_SCRIPT}")),
         "must name the canonical producer: {msg}"
     );
+    // The lead is the whole operator value of the clause — without it the
+    // message names a command but not the reason to try it first. Asserting
+    // only the two positions below would let the lead be deleted silently.
+    assert!(
+        msg.contains("CHECK THIS FIRST"),
+        "the cheap check must announce itself as the first thing to try: {msg}"
+    );
 
     // Order is the point, not mere presence: an operator who reads one clause
     // and acts must be sent to the 3-second command, not the 8-image one.
@@ -291,6 +298,20 @@ fn the_stale_reason_offers_the_cheap_rebuild_before_the_expensive_one() {
     assert!(
         cheap < expensive,
         "the cheap check must come before the image rebuild: {msg}"
+    );
+    assert!(
+        cheap < msg.find(REBUILD_ALL_SCRIPT).expect("the rebuild-all script is named"),
+        "and before the rebuild-everything route too: {msg}"
+    );
+
+    // The unregistered-image arm renders a different tail, and it must keep
+    // the same ordering — a reader there has no per-image script to try.
+    let unregistered = stale_reason("mystery.ext4", "kastellan-microvm-init", None);
+    assert!(unregistered.contains("CHECK THIS FIRST"), "{unregistered}");
+    assert!(
+        unregistered.find(RELEASE_BUILD_SCRIPT).expect("names the producer")
+            < unregistered.find(REBUILD_ALL_SCRIPT).expect("names rebuild-all"),
+        "the cheap check must lead here too: {unregistered}"
     );
 }
 
@@ -305,6 +326,12 @@ fn the_stale_reason_offers_the_cheap_rebuild_before_the_expensive_one() {
 fn the_unusable_reason_does_not_blame_the_build_selection() {
     let msg = unusable_reason("kv-demo.ext4", "some-bin", "File not found", Some("scripts/x.sh"));
     assert!(!msg.contains("#682"), "no digest was compared, so skew is irrelevant: {msg}");
+    // Not just the issue number: a reworded skew clause that dropped it would
+    // still be the same wrong answer, and it would still name the producer.
+    assert!(
+        !msg.contains(RELEASE_BUILD_SCRIPT),
+        "re-running the build cannot make an unreadable image readable: {msg}"
+    );
     assert!(msg.contains("File not found"), "must carry the reader's words: {msg}");
 }
 

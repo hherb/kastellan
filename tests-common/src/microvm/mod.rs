@@ -85,6 +85,12 @@ pub use require::{dep_or_skip, first_unmet, host_probes, skip_unless_ready, Prob
 #[cfg(test)]
 mod guard;
 
+// The one shell-reading rule the build-script scanners in `images` and
+// `kernel_pin_tests` share. Same reasoning as `guard`: test machinery, not
+// vocabulary for a suite, so it never leaves `cfg(test)`.
+#[cfg(test)]
+mod script_scan;
+
 #[cfg(test)]
 mod freshness_tests;
 #[cfg(test)]

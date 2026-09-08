@@ -102,9 +102,13 @@ pub enum Missing {
 impl Missing {
     /// What to run when a binary is absent from `target/release/`.
     ///
-    /// A `const` because [`Missing::remedy`] returns a borrow tied to `self`,
-    /// and `super::RELEASE_BUILD_SCRIPT` needs a prefix that outlives the
-    /// call. Kept beside the variant it serves so the two cannot drift.
+    /// A `const` because [`Missing::remedy`] returns a *borrow*, so this arm
+    /// cannot build its string with `format!` — and `concat!` takes only
+    /// literals, not a const item, so `super::RELEASE_BUILD_SCRIPT` cannot be
+    /// spliced in either. That leaves the script path written out a second
+    /// time. It is a copy, not a single source of truth, so
+    /// `the_not_built_remedy_names_the_canonical_producer` pins the two
+    /// together rather than trusting them to stay in step.
     const NOT_BUILT_REMEDY: &'static str = "build it with bash scripts/build-release.sh";
 
     /// The remedy clause for this cause, without the binary names.
