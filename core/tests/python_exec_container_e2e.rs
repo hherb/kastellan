@@ -10,8 +10,14 @@
 //! Postgres cluster — the container itself is the only external dependency.
 //!
 //! `[SKIP]`s cleanly when the `container` CLI / its system service / the
-//! `kastellan/python-exec:dev` image are missing. Build the image first:
+//! `kastellan/python-exec:dev` image are missing, **or when that image is
+//! older than the worker sources baked into it** (#687). Build the image
+//! first:
 //!     scripts/workers/python-exec/build-image.sh
+//!
+//! Every one of those preconditions answers to `KASTELLAN_MICROVM_REQUIRE_E2E`
+//! (#684): set it and an unmet one panics naming itself, instead of reporting
+//! green having booted no VM.
 
 #![cfg(target_os = "macos")]
 
@@ -20,36 +26,12 @@ use std::sync::Arc;
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, ToolHostError, WorkerSpec};
 use kastellan_core::workers::python_exec::{container_mode_entry, DEFAULT_IMAGE};
-use kastellan_sandbox::{macos_container::MacosContainer, SandboxBackendKind, SandboxBackends};
+use kastellan_sandbox::{SandboxBackendKind, SandboxBackends};
+use kastellan_tests_common::microvm::skip_if_no_container;
 use kastellan_tests_common::{
     assert_contained_by_signal, assert_contained_signal_death, assert_nonzero_exit, stdout_of,
     NoopAuditSink,
 };
-
-/// Skip the test (via early-return) when Apple `container` isn't usable
-/// on this host or the python-exec image is absent. Returns `true` when
-/// the caller should skip.
-fn skip_if_no_container_image() -> bool {
-    if let Err(e) = MacosContainer::probe() {
-        eprintln!("\n[SKIP] container probe failed: {e}\n");
-        return true;
-    }
-    let listed = std::process::Command::new("container")
-        .args(["image", "list"])
-        .output();
-    let has_image = matches!(
-        listed,
-        Ok(o) if String::from_utf8_lossy(&o.stdout).contains("python-exec")
-    );
-    if !has_image {
-        eprintln!(
-            "\n[SKIP] {DEFAULT_IMAGE} image not present; run \
-             scripts/workers/python-exec/build-image.sh\n"
-        );
-        return true;
-    }
-    false
-}
 
 /// Resolve the container backend for the python-exec image.
 ///
@@ -125,7 +107,7 @@ async fn run_in_container(code: &str) -> serde_json::Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn python_exec_round_trips_through_container() {
-    if skip_if_no_container_image() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let out = run_in_container("print('hello-from-microvm')").await;
@@ -139,7 +121,7 @@ async fn python_exec_round_trips_through_container() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn container_enforces_mem_cap() {
-    if skip_if_no_container_image() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     // Allocate ~900 MiB — above the 512 MiB cap. The VM enforces the cap, so the
@@ -175,7 +157,7 @@ async fn container_enforces_mem_cap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn container_contains_socket_attempt() {
-    if skip_if_no_container_image() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     // Net::Deny + --network none: a connect to a public IP cannot succeed in the VM.
@@ -230,7 +212,7 @@ except Exception as e:
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn container_large_param_round_trips_via_file_channel() {
-    if skip_if_no_container_image() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     // A >64 KiB params payload exceeds the inline env threshold, so the worker

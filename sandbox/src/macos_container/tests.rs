@@ -538,3 +538,95 @@ fn probe_image_rejects_empty_tag_upfront() {
         "expected None-fallback hint in diagnostic, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The guest kernel has no Landlock (#684/#687 found this via the freshness gate)
+// ---------------------------------------------------------------------------
+
+/// A minimal strict policy, as `container_mode_entry` produces.
+fn landlock_policy(env: Vec<(String, String)>) -> SandboxPolicy {
+    SandboxPolicy {
+        fs_read: vec![],
+        fs_write: vec![],
+        net: Net::Deny,
+        cpu_ms: 10_000,
+        mem_mb: 512,
+        profile: Profile::WorkerStrict,
+        env,
+        cpu_quota_pct: None,
+        tasks_max: None,
+        proxy_uds: None,
+        broker_uds: None,
+        persistent_store: None,
+    }
+}
+
+/// The `-e KEY=VALUE` pairs in an argv, as `(key, value)`.
+fn env_pairs(argv: &[String]) -> Vec<(String, String)> {
+    argv.windows(2)
+        .filter(|w| w[0] == "-e")
+        .filter_map(|w| w[1].split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect()
+}
+
+#[test]
+fn the_guest_landlock_opt_out_is_injected_by_default() {
+    // MEASURED on Apple `container` 1.1.0, guest kernel 6.18.15: a worker
+    // that reaches its own lockdown dies with
+    //   "landlock: Landlock ruleset is not enforced by this kernel"
+    // and the whole macOS container tier has been dead since the 2026-09-02
+    // audit made that fail-closed. Same root cause as the Firecracker guest
+    // kernel in #669, and the same sanctioned remedy.
+    let argv = build_container_argv(&landlock_policy(vec![]), "img", "/bin/true", &[]);
+    let pairs = env_pairs(&argv);
+    assert!(
+        pairs
+            .iter()
+            .any(|(k, v)| k == crate::LANDLOCK_PROFILE_ENV && v == "none"),
+        "the container backend must inject the guest Landlock opt-out: {pairs:?}"
+    );
+}
+
+#[test]
+fn an_explicit_landlock_profile_is_never_overridden() {
+    // "A default that never overrides a caller" is the #669 wording, and it
+    // is load-bearing: a future caller pinning a real profile (a guest kernel
+    // that DOES enforce Landlock) must win over this backend's fallback.
+    let argv = build_container_argv(
+        &landlock_policy(vec![(crate::LANDLOCK_PROFILE_ENV.to_string(), "strict".to_string())]),
+        "img",
+        "/bin/true",
+        &[],
+    );
+    let profiles: Vec<String> = env_pairs(&argv)
+        .into_iter()
+        .filter(|(k, _)| k == crate::LANDLOCK_PROFILE_ENV)
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(
+        profiles,
+        vec!["strict".to_string()],
+        "the caller's profile must survive, exactly once"
+    );
+}
+
+#[test]
+fn the_landlock_opt_out_does_not_disturb_seccomp() {
+    // The justification for disabling one layer rests on the other surviving,
+    // and that claim is MEASURED, not assumed: a hand-run worker in this image
+    // reports `lockdown Linux { landlock: Disabled, seccomp: Installed, .. }`.
+    // This pins that the backend does not also swallow the seccomp profile.
+    let argv = build_container_argv(
+        &landlock_policy(vec![("KASTELLAN_SECCOMP_PROFILE".to_string(), "strict".to_string())]),
+        "img",
+        "/bin/true",
+        &[],
+    );
+    let pairs = env_pairs(&argv);
+    assert!(
+        pairs
+            .iter()
+            .any(|(k, v)| k == "KASTELLAN_SECCOMP_PROFILE" && v == "strict"),
+        "seccomp must reach the guest untouched: {pairs:?}"
+    );
+}

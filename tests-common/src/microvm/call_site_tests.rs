@@ -35,9 +35,12 @@
 //!
 //! # What this guard does *not* cover
 //!
-//! The Firecracker backend only. Discovery keys on `skip_if_no_microvm`, so
-//! the macOS Apple-`container` micro-VM suites are outside it — they have no
-//! REQUIRE knob at all. Tracked separately; see the handover.
+//! Since #684, **both** micro-VM backends: discovery keys on
+//! `MICROVM_PREFLIGHTS`, which names `skip_if_no_microvm` (Firecracker) and
+//! `skip_if_no_container` (macOS Apple `container`). What it still does not
+//! cover is a suite that gates on neither — which is why `REQUIRE_AWARE` is
+//! cross-checked against the helpers that actually exist, so a third preflight
+//! cannot be added silently.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -45,7 +48,7 @@ use std::path::{Path, PathBuf};
 use super::repo_root;
 use super::guard::{
     bypassed_gates, ends_inside_string_literal, is_skip_shaped, BANNED_HELPERS,
-    REQUIRE_AWARE,
+    MICROVM_MODULE_PATH, MICROVM_PREFLIGHTS, REQUIRE_AWARE,
 };
 
 /// Suites that are known to gate on the micro-VM preflight, asserted present
@@ -60,11 +63,18 @@ use super::guard::{
 /// `net_demo_firecracker_egress_e2e.rs` held the wrapped-`[SKIP]` bypass that
 /// the first version of this guard could not see. Renaming either must not
 /// quietly drop it from the scan.
-const KNOWN_MICROVM_SUITES: [&str; 10] = [
+const KNOWN_MICROVM_SUITES: [&str; 13] = [
     "browser_driver_firecracker_e2e.rs",
+    // The three macOS Apple-`container` suites, in scope since #684. Their
+    // presence here is the positive control on the widened discovery rule:
+    // without it, "MICROVM_PREFLIGHTS now names two backends" could be a
+    // no-op and every assertion built on the scan would still pass.
+    "lifecycle_container_routing_e2e.rs",
     "matrix_firecracker_live_e2e.rs",
     "net_demo_firecracker_egress_e2e.rs",
+    "python_exec_container_e2e.rs",
     "python_exec_firecracker_e2e.rs",
+    "python_exec_warm_idle_e2e.rs",
     "web_fetch_firecracker_egress_e2e.rs",
     "web_research_firecracker_broker_e2e.rs",
     "web_research_firecracker_egress_e2e.rs",
@@ -73,8 +83,9 @@ const KNOWN_MICROVM_SUITES: [&str; 10] = [
     "web_search_firecracker_egress_e2e.rs",
 ];
 
-/// Every `core/tests/*.rs` that gates on [`super::REQUIRE_ENV`]'s preflight,
-/// i.e. that calls `skip_if_no_microvm`.
+/// Every `core/tests/*.rs` that gates on [`super::REQUIRE_ENV`]'s preflight:
+/// it imports [`MICROVM_MODULE_PATH`] **and** calls one of
+/// [`MICROVM_PREFLIGHTS`].
 ///
 /// Returns `(path, source)` pairs so a failure can name the file and the
 /// caller does not read twice.
@@ -91,7 +102,13 @@ fn microvm_suites() -> Vec<(PathBuf, String)> {
         }
         let src = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        if src.contains("skip_if_no_microvm") {
+        // BOTH halves are required. The module import alone would sweep in a
+        // file that merely borrows a helper; a preflight name alone sweeps in
+        // `gliner_relex_e2e.rs`, whose private `skip_if_no_container` answers
+        // to a different knob entirely. See `MICROVM_PREFLIGHTS`.
+        let gates_on_shared_preflight = src.contains(MICROVM_MODULE_PATH)
+            && MICROVM_PREFLIGHTS.iter().any(|entry| src.contains(entry));
+        if gates_on_shared_preflight {
             found.push((path, src));
         }
     }

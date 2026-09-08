@@ -155,7 +155,7 @@ const ENV_CMDLINE_KEY: &str = "kastellan.env";
 /// Landlock — [`build_launch_plan`] only fills the key in when the caller has
 /// not chosen, so a caller can already opt back in today. Nothing detects that
 /// automatically, which is what the kernel-pin half of that test is for.
-pub const GUEST_LANDLOCK_PROFILE_ENV: &str = "KASTELLAN_LANDLOCK_PROFILE";
+pub const GUEST_LANDLOCK_PROFILE_ENV: &str = crate::LANDLOCK_PROFILE_ENV;
 
 /// Env key carrying the uid the guest init switches to before `execv`.
 /// Read by `kastellan-microvm-init`; a guest built before it existed simply

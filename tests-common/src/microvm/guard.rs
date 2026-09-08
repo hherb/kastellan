@@ -26,9 +26,42 @@
 //! never appeared here, and closing it would cost the ability to write an
 //! assertion *about* `[SKIP]` output, which this crate's own tests need.
 //!
-//! Discovery keys on `skip_if_no_microvm`, so the scope is the Firecracker
-//! tier; the macOS Apple-`container` suites are outside it and have no knob at
-//! all (#684).
+//! Discovery keys on [`MICROVM_PREFLIGHTS`] — the REQUIRE-aware entry points
+//! a micro-VM suite gates on — so it covers **both** backends since #684:
+//! Firecracker via `skip_if_no_microvm`, and the macOS Apple-`container` tier
+//! via `skip_if_no_container`.
+//!
+//! ⚠️ That list is the discovery rule, and a suite gating on a preflight NOT
+//! named there is invisible to every assertion built on it. It is therefore
+//! kept honest from the other end: [`REQUIRE_AWARE`] is cross-checked against
+//! the helpers that actually exist, so a third preflight cannot be written
+//! without a decision being recorded.
+
+/// The preflight entry points a micro-VM suite gates on.
+///
+/// One per backend. `skip_if_no_microvm` is Firecracker (Linux);
+/// `skip_if_no_container` is Apple `container` (macOS), added by #684 —
+/// before which the macOS tier was scanned by nothing and had no knob.
+///
+/// ⚠️ **A bare identifier is not enough to discover a suite, and widening this
+/// list is what proved it.** `core/tests/gliner_relex_e2e.rs` defines its own
+/// private `fn skip_if_no_container()` for the gliner-relex worker image — a
+/// different container, gated by a different knob (`KASTELLAN_GLINER_*`,
+/// #653/#664). Keying discovery on the name alone swept that suite into the
+/// micro-VM scan and reported ten violations in a file that is correct as
+/// written. Discovery therefore also requires the file to import
+/// [`MICROVM_MODULE_PATH`]: a suite with its own same-named helper is by
+/// definition not gating on the shared preflight.
+pub(crate) const MICROVM_PREFLIGHTS: &[&str] =
+    &["skip_if_no_microvm", "skip_if_no_container"];
+
+/// The import that marks a file as gating on the shared micro-VM preflight.
+///
+/// The second half of the discovery rule — see [`MICROVM_PREFLIGHTS`] for the
+/// collision that made one half insufficient. Measured over `core/tests`:
+/// 18 files import it, exactly the 15 Firecracker suites plus the 3 macOS
+/// container suites, and no other.
+pub(crate) const MICROVM_MODULE_PATH: &str = "kastellan_tests_common::microvm";
 
 /// Helpers that **are** REQUIRE-aware, and so may be called from a micro-VM
 /// suite.
@@ -50,6 +83,10 @@ pub(crate) const REQUIRE_AWARE: &[&str] = &[
     "skip_if_image_stale_to",
     "dep_or_skip",
     "dep_or_skip_to",
+    // The macOS Apple-`container` tier (#684). It routes its every verdict
+    // through `report_unmet_microvm`/`report_caveat_microvm`, so the knob
+    // covers the container backend exactly as it covers Firecracker.
+    "skip_if_no_container",
 ];
 
 /// Skip helpers that are **not** REQUIRE-aware, and so must not be called
