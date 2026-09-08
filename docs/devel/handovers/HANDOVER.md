@@ -75,24 +75,48 @@ new cross-language contract in a tree that keeps getting bitten by two copies of
 
 - **The ambiguity is removed at the producer.** All eight rootfs scripts now call
   `scripts/build-release.sh`, already what `upgrade_from_git.sh` runs, so image bytes, deploy bytes
-  and the bytes the gate reads are one build by construction. It also repairs the matrix image, which
+  and the bytes the gate reads come from one script. It also repairs the matrix image, which
   approximated the `live-matrix` step with a *combined* invocation that unified differently again.
-  **The cost is nil**: cargo keeps both artefact sets under different `-C metadata` hashes, so the
-  switch re-links from cache — both measured builds took **3.00 s**.
+  **Warm the cost is nil** (both measured builds 3.00 s; the eight `rebuild-all` invocations ~5 s
+  between them) — **cold it is not**: one image on a fresh checkout went from a 2-crate closure to
+  392 crates plus the `matrix-rust-sdk` subtree (4 m 09 s for the live-matrix step), even for
+  `kv-demo` / `net-demo` / `browser-driver`. Paid once per checkout, not per image.
+- ⚠️ **It is ONE SCRIPT WITH TWO INVOCATIONS, not "one build by construction" — and the second one is
+  reversible.** `build-release.sh` runs `--workspace` and then
+  `-p kastellan-worker-matrix --features live-matrix`; both write
+  `target/release/kastellan-worker-matrix`, last writer wins. **Reproduced on the Mac 2026-09-08:**
+  after the live-matrix build (`0ca537c2…`) a bare `cargo build --release --workspace` re-uplifted
+  the non-featured artefact (`9d29cd49…`) in **0.32 s, no compilation, no output but `Finished`** —
+  a Matrix worker that refuses to run, and a `matrix.ext4` the gate calls stale. **Run
+  `build-release.sh` LAST**; it now prints that digest, and
+  `the_canonical_producer_is_the_one_the_deploy_path_runs` pins the script's contents *and* the
+  order, so a narrow `-p` edited into it fails a test rather than moving #682 one file over.
+  [[cargo-package-selection-changes-binary-bytes]]
 - **`no_rootfs_build_script_runs_its_own_cargo_build` is the drift pin**, the channel
   `guest-kernel.sh` closed for eight unchecked `curl`s (#471). **Both halves are load-bearing:** the
-  presence check alone passes a script that calls the producer *and* keeps its old `-p` line (which
-  runs second and overwrites the canonical bytes); the absence check alone passes a script that
-  builds nothing at all.
+  presence check alone passes a script that calls the producer *and* keeps its old `-p` line
+  (whichever runs last wins, so the image's bytes become order-dependent — the ambiguity itself);
+  the absence check alone passes a script that builds nothing at all. It **follows the `source`**,
+  because all eight already source `lib/guest-kernel.sh` and a text scan of the script alone would
+  be evaded by moving one `cargo build` in there. It has a **positive control**
+  (`the_cargo_scan_reports_a_planted_invocation`), and the registry is pinned against the filesystem
+  (`every_rootfs_build_script_on_disk_is_registered`) because every scanner here loops over
+  `ROOTFS_IMAGES` and a ninth *unregistered* script would be invisible to all of them.
 - ⚠️ **No cheap local discriminator exists** — a hand-run narrow `-p` and a genuinely stale image are
   byte-identical in their symptom. So `stale_reason` names the three-second remedy **before** the
   eight-image one, and the test asserts that **order**, not mere presence.
-- ⚠️ **The change walked into a booby trap and then fixed it.** Both existing script scanners read
-  comments as code, so the #682 note added to all eight scripts made one report a variable
-  interpolation that does not exist. They now read code only, via a shared `code_of()` that strips a
-  `#` **only where it begins a word** (`${VAR#prefix}` survives). Its error direction leaves *more*
-  text to scan, never less, so it can make a fail-closed guard complain but never go quiet.
-  [[guard-shares-the-census-blind-spot]]
+- ⚠️ **The change walked into a booby trap, and the first fix for it was wrong in the dangerous
+  direction.** Both existing script scanners read comments as code, so the #682 note added to all
+  eight scripts made one report a variable interpolation that does not exist. The first `code_of()`
+  stripped a `#` wherever it began a word — and its doc claimed the error direction *"leaves more
+  text to scan, never less, so it can make a fail-closed guard complain but never go quiet."*
+  **That was false, and false exactly where it mattered:** `echo "step # 2" && cargo build …`
+  over-strips and hides a real invocation from the one `!contains(…)` guard on the branch, while
+  `: ;# bash scripts/build-release.sh` under-strips and lets prose satisfy a *presence* check.
+  `code_of` now tracks quote state and treats `;#`/`&#`/`(#` as comments, both directions are unit
+  tested by name, and it lives in `microvm/script_scan.rs` so **all six** scanners over these eight
+  files share it — the three in `kernel_pin_tests.rs` previously had two more notions of "ignore the
+  prose" between them. [[guard-shares-the-census-blind-spot]]
 - **The negative control is the whole proof, and it ran on the real host.** After
   `bash scripts/build-release.sh` the *pre-existing* images failed with the `DIFFERS` panic — #682
   reproducing on demand — then `rebuild-all-rootfs.sh` rebuilt all eight, a **second**
