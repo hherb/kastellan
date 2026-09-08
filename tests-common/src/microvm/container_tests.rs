@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use super::container::{
     cli_unavailable_reason, container_preflight, image_age, image_missing_reason,
+    indeterminate_age_reason,
     stale_image_reason, unverified_age_reason, ContainerImage, ImageAge, SourceStamp,
     PYTHON_EXEC_BUILD_SCRIPT,
 };
@@ -320,6 +321,39 @@ fn a_stale_image_is_an_unmet_precondition_not_a_warning() {
 }
 
 #[test]
+fn an_indeterminate_warning_says_what_could_not_be_established() {
+    // An error with no content is a defect multiplier (#660/#669): three
+    // independent production defects once hid behind one contentless
+    // `Protocol(EarlyExit)`. `ImageAge::Indeterminate` already carries WHY it
+    // could not decide, so throwing that away and printing a generic sentence
+    // would reproduce the shape this tree keeps paying for.
+    let warned = std::cell::RefCell::new(String::new());
+    container_preflight(
+        PY_IMAGE,
+        || Ok(()),
+        || {
+            Ok(Some(ContainerImage {
+                reference: PY_IMAGE.to_string(),
+                created_unix: None,
+            }))
+        },
+        |_, _| ImageAge::Indeterminate {
+            detail: "the container CLI reported no build timestamp".to_string(),
+        },
+        |_| panic!("an indeterminate age is not an unmet precondition"),
+        |reason| {
+            *warned.borrow_mut() = reason.to_string();
+            false
+        },
+    );
+    assert!(
+        warned.borrow().contains("no build timestamp"),
+        "the verdict's own detail must reach the operator: {}",
+        warned.borrow()
+    );
+}
+
+#[test]
 fn an_indeterminate_age_warns_and_still_runs() {
     // Absence of a comparable timestamp is not evidence of staleness;
     // downgrading a real VM run to a skip would lose coverage for nothing.
@@ -414,6 +448,9 @@ fn every_reason_is_a_single_line() {
         stale_image_reason(PY_IMAGE, IMAGE_BUILT, &stamp("a/b.rs", SOURCE_NEWER), PYTHON_EXEC_BUILD_SCRIPT),
         unverified_age_reason(PY_IMAGE, &[PathBuf::from("Cargo.lock")]),
         unverified_age_reason(PY_IMAGE, &[]),
+        // A multi-line detail is the interesting case: it arrives from a
+        // verdict, so it must be flattened, not passed through.
+        indeterminate_age_reason(PY_IMAGE, "no build timestamp\nand no reader"),
     ];
     for reason in reasons {
         assert!(!reason.contains('\n'), "reason must be one line: {reason}");

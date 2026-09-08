@@ -83,7 +83,7 @@ pub use images::{
 pub use container::{inspect_image, skip_if_no_container};
 pub use container::{
     built_image, cli_unavailable_reason, container_preflight, find_image, image_age,
-    image_missing_reason, normalize_reference, parse_image_list, source_stamps, stale_image_reason,
+    image_missing_reason, indeterminate_age_reason, normalize_reference, parse_image_list, source_stamps, stale_image_reason,
     stamps_for, unverified_age_reason, BuiltImage, ContainerImage, ImageAge, SourceStamp,
     BUILT_IMAGES, PYTHON_EXEC_BUILD_INPUTS, PYTHON_EXEC_BUILD_SCRIPT, PYTHON_EXEC_SOURCE_DIRS,
 };

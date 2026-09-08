@@ -313,6 +313,23 @@ pub fn unverified_age_reason(reference: &str, unstat: &[PathBuf]) -> String {
     )
 }
 
+/// Why no age verdict was possible, carrying the reason the verdict itself
+/// gives.
+///
+/// Separate from [`unverified_age_reason`] because "the image is newer than
+/// everything I could read, but N of them I could not" and "I could not decide
+/// at all, because X" are different admissions an operator acts on
+/// differently — and because an error with no content is a defect multiplier
+/// (#660/#669: three production defects once hid behind one contentless
+/// `Protocol(EarlyExit)`).
+pub fn indeterminate_age_reason(reference: &str, detail: &str) -> String {
+    format!(
+        "could not establish whether the `{reference}` container image contains the code \
+         under test ({}); running anyway",
+        crate::skip::one_line(detail)
+    )
+}
+
 /// A Unix timestamp as a bare `YYYY-MM-DD HH:MM` UTC stamp, for messages.
 ///
 /// Deliberately coarse: the operator needs "June, and my edit was September",
@@ -385,8 +402,7 @@ pub fn container_preflight(
         }
         ImageAge::NewerThanSources { unstat } => warn(&unverified_age_reason(reference, &unstat)),
         ImageAge::Indeterminate { detail } => {
-            let _ = detail;
-            warn(&unverified_age_reason(reference, &[]))
+            warn(&indeterminate_age_reason(reference, &detail))
         }
     }
 }
