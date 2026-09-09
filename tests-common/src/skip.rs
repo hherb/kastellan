@@ -284,15 +284,40 @@ mod tests {
     /// point: "cannot resolve" sends the operator to DNS, "cannot reach" to
     /// egress. Swapping the strings is invisible to any test that only checks
     /// the host is named.
+    /// A loopback port that is closed **right now**, confirmed rather than
+    /// assumed.
+    ///
+    /// ⚠️ Binding an ephemeral port and dropping the listener does NOT reserve
+    /// it: the OS is free to hand the freed port straight to another process,
+    /// and under a full parallel `cargo test --workspace` — which opens
+    /// hundreds of sockets — it sometimes does. That raced in the sweep for
+    /// PR #688 (`a closed port is unreachable`, once in three full sweeps,
+    /// and **zero times in 40 isolated runs**), which is precisely the shape
+    /// that gets mis-attributed to whatever change is in flight.
+    ///
+    /// Confirming and retrying makes the precondition true instead of likely.
+    /// The retries are bounded because an environment where many consecutive
+    /// freed ephemeral ports are instantly re-taken is one the caller should
+    /// hear about, not one to spin in.
+    fn a_closed_loopback_port() -> u16 {
+        for _ in 0..16 {
+            let port = {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+                let p = l.local_addr().expect("local addr").port();
+                drop(l);
+                p
+            };
+            if origin_unreachable_reason_at("127.0.0.1", port).is_some() {
+                return port;
+            }
+        }
+        panic!("could not obtain a closed loopback port in 16 attempts");
+    }
+
     #[test]
     fn the_resolve_and_reach_arms_name_different_remedies() {
         // Closed port on loopback: resolves, does not connect.
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-            let p = l.local_addr().expect("local addr").port();
-            drop(l);
-            p
-        };
+        let port = a_closed_loopback_port();
         let unreachable =
             origin_unreachable_reason_at("127.0.0.1", port).expect("a closed port is unreachable");
         assert!(unreachable.contains("cannot reach"), "connect arm: {unreachable}");
