@@ -43,6 +43,7 @@
 
 use std::process::{Child, Command, Stdio};
 
+use crate::bounded_command;
 use crate::{Net, Profile, SandboxBackend, SandboxError, SandboxPolicy};
 
 /// Apple `container` rejects `-m` values below 200 MiB with
@@ -306,6 +307,15 @@ pub fn build_container_argv(
     // Delete this once an Apple `container` guest kernel ships Landlock; a
     // caller can already opt back in today, since this only fills the key in
     // when the policy has not chosen.
+    //
+    // ⚠️ Something DOES now say when that day arrives (#689):
+    // `macos_container_smoke::the_guest_kernel_still_has_no_landlock_so_the_opt_out_still_applies`
+    // boots a real container and reads `crate::GUEST_LSM_LIST_PATH`. It matters
+    // that the reminder is automatic here specifically: the Firecracker twin's
+    // guest kernel is a sha256 pin this repo controls, and only moves on a
+    // deliberate edit — Apple's moves on a routine `brew upgrade container`,
+    // outside anybody's decision. The tier with no detector was the one whose
+    // assumption could expire on its own.
     if !policy
         .env
         .iter()
@@ -362,6 +372,79 @@ pub fn build_image_inspect_argv(image_tag: &str) -> Vec<String> {
         "inspect".into(),
         image_tag.into(),
     ]
+}
+
+/// The remedy for an Apple `container` call that never answered.
+///
+/// Apple `container` is **daemon-backed**: the CLI talks XPC to
+/// `container-apiserver`. A wedged or half-started apiserver makes these calls
+/// *block* rather than return an error, which is a different fault from "the
+/// service is stopped" and needs a different sentence — folding the two would
+/// re-create the #684 defect that sent an operator to a build for a problem no
+/// build can fix. Shared with the test-side preflight so both spell one remedy
+/// (#690).
+pub const WEDGED_APISERVER_HINT: &str = "the `container-apiserver` may be wedged — try \
+     `container system stop && container system start`";
+
+/// Why an Apple `container` probe could not answer (#690).
+///
+/// Two causes with two different remedies, kept apart by the **type** rather
+/// than by prose a caller would have to match on. This module already refuses
+/// to decide anything by matching on another program's wording, and a caller
+/// that has to grep a sentence to learn what to suggest is that rule broken
+/// one layer up.
+///
+/// The distinction is not cosmetic: `container system start` is the remedy for
+/// a *stopped* service and the wrong advice for a *wedged* one, which needs a
+/// `stop` first. Handing an operator the weaker remedy alongside the right one
+/// is the #684 folding defect in its politest form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeFault {
+    /// The CLI is absent, or it answered and said the host is not usable.
+    /// Remedy: install it, or start the service.
+    Unavailable(String),
+    /// The CLI was spawned and never answered inside its budget, and was
+    /// killed. Remedy: unwedge the apiserver.
+    Wedged(String),
+}
+
+impl ProbeFault {
+    /// The operator-facing sentence, for a caller that wants prose and has no
+    /// use for the classification.
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Unavailable(reason) | Self::Wedged(reason) => reason,
+        }
+    }
+}
+
+/// Run one `container` probe under [`bounded_command::PROBE_BUDGET`] (#690).
+///
+/// The budget is **not** a latency limit and must never fire on a slow but
+/// working host — measured on the dev Mac at `container` 1.1.0, these calls
+/// answer in 10–240 ms against a ten-second budget. It exists only so a wedged
+/// apiserver turns into a sentence instead of a `cargo test --workspace` that
+/// stalls with no `[SKIP]`, no `[WARN]`, no panic and no message at all.
+///
+/// The three outcomes stay apart, which is the whole point: `Ok` for a CLI
+/// that answered (**including a non-zero exit** — that is an answer), a
+/// wedge-worded `Err` for one that did not, and the caller's own spawn wording
+/// for a `container` that is not installed. `spawn_suffix` is appended to the
+/// spawn message so each call site keeps the remedy it already had.
+fn container_probe_output(
+    cmd: &mut Command,
+    command: &str,
+    spawn_suffix: &str,
+) -> Result<std::process::Output, ProbeFault> {
+    bounded_command::probe_output(cmd, bounded_command::PROBE_BUDGET).map_err(|failure| match failure
+    {
+        bounded_command::ProbeFailure::Wedged(t) => ProbeFault::Wedged(
+            bounded_command::timed_out_reason(command, &t, WEDGED_APISERVER_HINT),
+        ),
+        bounded_command::ProbeFailure::Spawn(e) => {
+            ProbeFault::Unavailable(format!("could not spawn `{command}`: {e}{spawn_suffix}"))
+        }
+    })
 }
 
 /// Shell out to Apple `container` for sandboxing. Holds the image tag the
@@ -433,17 +516,11 @@ impl MacosContainer {
             ));
         }
         let argv = build_image_inspect_argv(image_tag);
-        let output = Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| {
-                SandboxError::Backend(format!(
-                    "could not spawn `container image inspect {image_tag}`: {e}"
-                ))
-            })?;
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        let output =
+            container_probe_output(&mut cmd, &format!("container image inspect {image_tag}"), "")
+                .map_err(|fault| SandboxError::Backend(fault.reason().to_string()))?;
         if !output.status.success() {
             return Err(SandboxError::Backend(format!(
                 "image `{image_tag}` not present in local store \
@@ -472,36 +549,37 @@ impl MacosContainer {
     /// fix is `brew install container && container system start
     /// --enable-kernel-install` (one-time).
     pub fn probe() -> Result<(), SandboxError> {
-        let version = Command::new("container")
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| {
-                SandboxError::Backend(format!(
-                    "could not spawn `container --version`: {e} \
-                     (install with `brew install container`)"
-                ))
-            })?;
+        Self::probe_fault().map_err(|fault| SandboxError::Backend(fault.reason().to_string()))
+    }
+
+    /// [`Self::probe`] without flattening the verdict — the `*_or_reason`
+    /// sibling pattern (#653), one step further: return the fault *classified*
+    /// so one caller can name a remedy that another cannot.
+    ///
+    /// [`Self::probe`] must keep returning [`SandboxError`] because that is
+    /// what the [`SandboxBackend`] contract is written in, and a fault that
+    /// has been turned into a string can only be classified again by matching
+    /// on prose — which this module forbids everywhere else.
+    pub fn probe_fault() -> Result<(), ProbeFault> {
+        let mut version_cmd = Command::new("container");
+        version_cmd.arg("--version");
+        let version = container_probe_output(
+            &mut version_cmd,
+            "container --version",
+            " (install with `brew install container`)",
+        )?;
         if !version.status.success() {
-            return Err(SandboxError::Backend(format!(
+            return Err(ProbeFault::Unavailable(format!(
                 "`container --version` failed: {}",
                 String::from_utf8_lossy(&version.stderr).trim()
             )));
         }
 
-        let status = Command::new("container")
-            .args(["system", "status"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| {
-                SandboxError::Backend(format!("could not spawn `container system status`: {e}"))
-            })?;
+        let mut status_cmd = Command::new("container");
+        status_cmd.args(["system", "status"]);
+        let status = container_probe_output(&mut status_cmd, "container system status", "")?;
         if !status.status.success() {
-            return Err(SandboxError::Backend(format!(
+            return Err(ProbeFault::Unavailable(format!(
                 "`container system status` failed: {} \
                  (start the service with `container system start --enable-kernel-install`)",
                 String::from_utf8_lossy(&status.stderr).trim()

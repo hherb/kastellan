@@ -83,9 +83,10 @@ pub use images::{
 pub use container::{inspect_image, skip_if_no_container};
 pub use container::{
     built_image, classify_inspect_exit, cli_unavailable_reason, container_preflight, find_image,
-    image_age, image_missing_reason, indeterminate_age_reason, normalize_reference, now_unix,
-    parse_image_list, source_stamps, stale_image_reason, stamps_for, unreadable_inspect_reason,
-    unverified_age_reason, BuiltImage, ContainerImage, ImageAge, InspectExit, InspectFault,
+    cli_fault_reason, image_age, image_missing_reason, indeterminate_age_reason,
+    normalize_reference, now_unix, parse_image_list, source_stamps, stale_image_reason, stamps_for,
+    unreadable_inspect_reason, wedged_cli_reason,
+    unverified_age_reason, BuiltImage, CliFault, ContainerImage, ImageAge, InspectExit,
     SourceStamp, BUILT_IMAGES, FUTURE_BUILD_SLACK_SECS, PYTHON_EXEC_BUILD_INPUTS,
     PYTHON_EXEC_BUILD_SCRIPT, PYTHON_EXEC_IMAGE, PYTHON_EXEC_SOURCE_DIRS,
 };
@@ -102,6 +103,12 @@ mod guard;
 // vocabulary for a suite, so it never leaves `cfg(test)`.
 #[cfg(test)]
 mod script_scan;
+
+// The rule that no preflight shells out unbounded (#690). Same reasoning as
+// `guard`: it exists to scan this workspace's own sources, so it never leaves
+// `cfg(test)`.
+#[cfg(test)]
+mod subprocess_guard;
 
 #[cfg(test)]
 mod container_images_tests;
@@ -383,15 +390,44 @@ pub fn debugfs_argv(image: &Path, in_image: &str) -> Vec<String> {
 /// and anything else is [`Missing::Unreadable`] carrying `debugfs`'s own
 /// stderr (**not** benign — a working reader could not read *this* image).
 fn image_digest(image: &Path, in_image: &str) -> Result<String, Missing> {
-    let output = std::process::Command::new("debugfs")
-        .args(debugfs_argv(image, in_image))
-        .output();
-    let output = match output {
+    // Bounded (#690). ⚠️ A `debugfs` that never answers used to stall the whole
+    // sweep with no message at all — this runs inside a *preflight*, so there
+    // is no test output to blame it on. **Measured on the DGX:** reading the
+    // 398 032-byte init back out takes ≤ 0.01 s even from the 1.3 GB
+    // browser-driver image, so `PROBE_BUDGET` is ~1000x headroom and cannot
+    // fire on a working host; it exists only to convert *forever* into a
+    // sentence.
+    let mut cmd = std::process::Command::new("debugfs");
+    cmd.args(debugfs_argv(image, in_image));
+    let output = match kastellan_sandbox::bounded_command::probe_output(
+        &mut cmd,
+        kastellan_sandbox::bounded_command::PROBE_BUDGET,
+    ) {
         Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        // A reader that is not installed is benign: no image on this host can
+        // be read, so no image can be checked. Unchanged by #690.
+        Err(kastellan_sandbox::bounded_command::ProbeFailure::Spawn(e))
+            if e.kind() == std::io::ErrorKind::NotFound =>
+        {
             return Err(Missing::NoImageReader)
         }
-        Err(e) => return Err(Missing::Unreadable { detail: format!("debugfs: {e}") }),
+        Err(kastellan_sandbox::bounded_command::ProbeFailure::Spawn(e)) => {
+            return Err(Missing::Unreadable { detail: format!("debugfs: {e}") })
+        }
+        // ⚠️ A wedge is NOT benign and must not become `NoImageReader`: a
+        // reader that exists and hangs says nothing about whether the image is
+        // correct, and folding it into "this host has no reader" would let a
+        // stuck read certify every image on the host.
+        Err(kastellan_sandbox::bounded_command::ProbeFailure::Wedged(t)) => {
+            return Err(Missing::Unreadable {
+                detail: kastellan_sandbox::bounded_command::timed_out_reason(
+                    "debugfs -R cat",
+                    &t,
+                    "the image may be on an unresponsive filesystem, or corrupt enough to stall \
+                     the inode walk",
+                ),
+            })
+        }
     };
     if output.stdout.is_empty() {
         return Err(Missing::Unreadable { detail: debugfs_complaint(&output.stderr) });

@@ -213,9 +213,14 @@ pub fn image_age(
 #[cfg(test)]
 pub(crate) fn workspace_closure_dirs(package: &str) -> Result<Vec<String>, String> {
     let root = super::repo_root();
-    let out = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .current_dir(&root)
+    let mut cmd = std::process::Command::new(env!("CARGO"));
+    cmd.args(["metadata", "--no-deps", "--format-version", "1"]).current_dir(&root);
+    // BOUNDED-EXEMPT: `cargo metadata` takes cargo's own package-cache lock,
+    // which a concurrent build on the same machine may legitimately hold for
+    // minutes. A budget here would turn a benign wait into a flake, which is
+    // the opposite of #690's purpose — the point is to make *unbounded*
+    // failures legible, not to fail on slow-but-correct ones.
+    let out = cmd
         .output()
         .map_err(|e| format!("could not run `cargo metadata`: {e}"))?;
     if !out.status.success() {
@@ -262,19 +267,35 @@ pub(crate) fn workspace_closure_dirs(package: &str) -> Result<Vec<String>, Strin
     Ok(dirs)
 }
 
-/// Why a `container image inspect` could not answer the question asked.
+/// Why the `container` CLI could not answer the question asked — whether that
+/// question was `system status` or `image inspect`.
 ///
-/// Two variants, because the two faults have **different remedies** and
-/// folding them is the same mistake as folding a CLI fault into an absent
-/// image (#684). A service that is down is fixed by starting it; a CLI whose
-/// output this gate can no longer read is fixed by changing this gate, and
-/// telling the operator to restart a service would waste their time exactly
-/// as `build-image.sh` did.
+/// Three variants, because the three faults have **different remedies** and
+/// folding any two is the same mistake as folding a CLI fault into an absent
+/// image (#684). A service that is down is fixed by starting it; one that is
+/// *wedged* needs a `stop` first, so the same sentence is the wrong advice; and
+/// a CLI whose output this gate can no longer read is fixed by changing this
+/// gate, where telling the operator to restart a service would waste their
+/// time exactly as `build-image.sh` did.
+///
+/// One type serves both the probe and the inspect deliberately: they can fail
+/// the same three ways, and two near-identical enums would be the drift
+/// channel #669 spent a session closing. The probe never parses output, so it
+/// simply never produces [`CliFault::Unreadable`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InspectFault {
+pub enum CliFault {
     /// The CLI could not be spawned, died on a signal, or exited with a
     /// status this gate does not recognise. Remedy: the service.
-    Cli(String),
+    Unavailable(String),
+    /// The CLI was spawned and never answered inside its budget, and was
+    /// killed (#690). Remedy: unwedge the daemon — which is `stop` **then**
+    /// `start`, not `start`, so it is **not** the remedy above.
+    ///
+    /// ⚠️ Before #690 this variant had no observable form at all: the process
+    /// simply never returned, and `cargo test --workspace` stalled with no
+    /// `[SKIP]`, no `[WARN]`, no panic and no message of any kind. Naming it
+    /// is the whole point — an error with no content is a defect multiplier.
+    Wedged(String),
     /// The CLI answered and the answer could not be read. Remedy: this gate.
     Unreadable(String),
 }
@@ -314,17 +335,17 @@ pub fn classify_inspect_exit(
     code: Option<i32>,
     stderr: &str,
     command: &str,
-) -> Result<InspectExit, InspectFault> {
+) -> Result<InspectExit, CliFault> {
     match code {
         Some(0) => Ok(InspectExit::Present),
         Some(ABSENT_IMAGE_EXIT) => Ok(InspectExit::Absent),
-        Some(other) => Err(InspectFault::Cli(format!(
+        Some(other) => Err(CliFault::Unavailable(format!(
             "`{command}` exited {other}{}",
             trailing_detail(stderr)
         ))),
         // No code at all means a signal killed it, which is never an absent
         // image and must not be reported as one.
-        None => Err(InspectFault::Cli(format!(
+        None => Err(CliFault::Unavailable(format!(
             "`{command}` was killed by a signal{}",
             trailing_detail(stderr)
         ))),
@@ -355,6 +376,28 @@ pub fn unreadable_inspect_reason(reference: &str, detail: &str) -> String {
     )
 }
 
+/// Why the `container` CLI was killed without answering (#690).
+///
+/// ⚠️ **Not** [`cli_unavailable_reason`], and the difference is the remedy, not
+/// the tone: that sentence ends in `container system start`, which is what you
+/// do to a *stopped* service and not enough for a *wedged* one. Appending it
+/// after a correct remedy is the #684 folding defect in its politest form —
+/// the right advice is still there, with weaker advice after it.
+///
+/// The detail already names the command, the budget and the remedy (it comes
+/// from [`kastellan_sandbox::bounded_command::timed_out_reason`]), so this
+/// wrapper only has to place it and add nothing that contradicts it.
+///
+/// One line, for the reason [`super::probe_reason`] gives: a reason carrying
+/// its own newline emits an orphan continuation line that
+/// `grep -c '^\[SKIP\]'` cannot attribute to anything.
+pub fn wedged_cli_reason(detail: &str) -> String {
+    format!(
+        "Apple `container` did not answer on this host ({})",
+        crate::skip::one_line(detail)
+    )
+}
+
 /// Why the `container` CLI itself cannot be used.
 ///
 /// ⚠️ **This must never mention the image build.** Folding a CLI or
@@ -371,6 +414,22 @@ pub fn cli_unavailable_reason(detail: &str) -> String {
          start it with `container system start`, or install it with `brew install container`",
         crate::skip::one_line(detail)
     )
+}
+
+/// The operator-facing sentence for a [`CliFault`] — the **one** place a fault
+/// becomes prose.
+///
+/// Pure, exhaustive, and shared by both the probe arm and the inspect arm of
+/// [`container_preflight`], so a fourth fault cannot be added with one of the
+/// two arms quietly left rendering it as something else. Before #690 the two
+/// arms rendered independently and already disagreed: the probe arm sent every
+/// fault through [`cli_unavailable_reason`], including ones it does not fit.
+pub fn cli_fault_reason(reference: &str, fault: &CliFault) -> String {
+    match fault {
+        CliFault::Unavailable(detail) => cli_unavailable_reason(detail),
+        CliFault::Wedged(detail) => wedged_cli_reason(detail),
+        CliFault::Unreadable(detail) => unreadable_inspect_reason(reference, detail),
+    }
 }
 
 /// Why the requested image is absent — the one case a build *does* fix.
@@ -487,7 +546,7 @@ fn format_unix_date(unix: i64) -> String {
 ///
 /// 1. `probe` — is the CLI and its system service usable at all?
 /// 2. `inspect` — is *this* image present, and when was it built? `Ok(None)`
-///    is an absent image; an `Err` is a fault, and [`InspectFault`] splits it
+///    is an absent image; an `Err` is a fault, and [`CliFault`] splits it
 ///    again into "the CLI could not answer" and "the CLI answered and this
 ///    gate could not read it". Conflating any of the three is #684, which is
 ///    why they are different types rather than different values.
@@ -502,14 +561,14 @@ fn format_unix_date(unix: i64) -> String {
 /// caveat path that still runs.
 pub fn container_preflight(
     reference: &str,
-    probe: impl FnOnce() -> Result<(), String>,
-    inspect: impl FnOnce() -> Result<Option<ContainerImage>, InspectFault>,
+    probe: impl FnOnce() -> Result<(), CliFault>,
+    inspect: impl FnOnce() -> Result<Option<ContainerImage>, CliFault>,
     age: impl FnOnce(&ContainerImage, &BuiltImage) -> ImageAge,
     unmet: impl Fn(&str) -> bool,
     warn: impl Fn(&str) -> bool,
 ) -> bool {
-    if let Err(e) = probe() {
-        return unmet(&cli_unavailable_reason(&e));
+    if let Err(fault) = probe() {
+        return unmet(&cli_fault_reason(reference, &fault));
     }
     let image = match inspect() {
         Ok(Some(image)) => image,
@@ -522,10 +581,7 @@ pub fn container_preflight(
         // messages. Folding them would repeat #684 one layer up: a schema
         // change is not fixed by starting a service, any more than a stopped
         // service is fixed by building an image.
-        Err(InspectFault::Cli(e)) => return unmet(&cli_unavailable_reason(&e)),
-        Err(InspectFault::Unreadable(e)) => {
-            return unmet(&unreadable_inspect_reason(reference, &e))
-        }
+        Err(fault) => return unmet(&cli_fault_reason(reference, &fault)),
     };
     // An image this repo does not build has no source closure to be stale
     // against, so the age check is not merely ignored — it is never ASKED.
@@ -568,12 +624,12 @@ pub fn container_preflight(
 mod macos {
     use super::{
         classify_inspect_exit, container_preflight, find_image, image_age, parse_image_list,
-        ContainerImage, InspectExit, InspectFault,
+        ContainerImage, InspectExit, CliFault,
     };
 
     /// Look one image up: `Ok(Some)` present, `Ok(None)` absent, `Err` a
-    /// fault — [`InspectFault::Cli`] when the CLI could not answer,
-    /// [`InspectFault::Unreadable`] when it answered unintelligibly.
+    /// fault — [`CliFault::Unavailable`] when the CLI could not answer,
+    /// [`CliFault::Unreadable`] when it answered unintelligibly.
     ///
     /// Uses `container image inspect`, via the **production** argv producer
     /// [`kastellan_sandbox::macos_container::build_image_inspect_argv`] rather
@@ -586,14 +642,30 @@ mod macos {
     /// `container image list` scan the three suites used to do. That scan is
     /// also what made the substring defect possible: `inspect` takes the tag
     /// as an argument, so there is nothing to match loosely.
-    pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, InspectFault> {
+    pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, CliFault> {
         let argv = kastellan_sandbox::macos_container::build_image_inspect_argv(reference);
         let command = argv.join(" ");
-        let out = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|e| InspectFault::Cli(format!("could not spawn `{command}`: {e}")))?;
+        // Bounded (#690): Apple `container` is daemon-backed, so a wedged
+        // apiserver makes this BLOCK rather than fail. Unbounded, that stalled
+        // a whole `cargo test --workspace` with no output at all.
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        let out = kastellan_sandbox::bounded_command::probe_output(
+            &mut cmd,
+            kastellan_sandbox::bounded_command::PROBE_BUDGET,
+        )
+        .map_err(|failure| match failure {
+            kastellan_sandbox::bounded_command::ProbeFailure::Wedged(t) => {
+                CliFault::Wedged(kastellan_sandbox::bounded_command::timed_out_reason(
+                    &command,
+                    &t,
+                    kastellan_sandbox::macos_container::WEDGED_APISERVER_HINT,
+                ))
+            }
+            kastellan_sandbox::bounded_command::ProbeFailure::Spawn(e) => {
+                CliFault::Unavailable(format!("could not spawn `{command}`: {e}"))
+            }
+        })?;
         // The exit status is the presence signal, and ONLY exit 1 means
         // absence — see `ABSENT_IMAGE_EXIT`. The classification is a pure
         // function so its fault arms are reachable from a unit test on any
@@ -607,7 +679,7 @@ mod macos {
         // A CLI that answered but cannot be parsed is `Unreadable`, never a
         // service fault: the remedy is this gate, not `container system start`.
         let images = parse_image_list(&String::from_utf8_lossy(&out.stdout))
-            .map_err(InspectFault::Unreadable)?;
+            .map_err(CliFault::Unreadable)?;
         // Re-check the name the CLI handed back rather than trusting that it
         // answered the question asked. A record whose reference does not match
         // is reported as absent, which is the fail-closed direction.
@@ -630,9 +702,20 @@ mod macos {
     pub fn skip_if_no_container(reference: &str) -> bool {
         container_preflight(
             reference,
+            // `probe_fault`, not `probe`: the flattened `SandboxError` could
+            // only be re-classified by matching on its prose, which is what
+            // this module refuses to do anywhere else (#690).
             || {
-                kastellan_sandbox::macos_container::MacosContainer::probe()
-                    .map_err(|e| e.to_string())
+                kastellan_sandbox::macos_container::MacosContainer::probe_fault().map_err(
+                    |fault| match fault {
+                        kastellan_sandbox::macos_container::ProbeFault::Wedged(reason) => {
+                            CliFault::Wedged(reason)
+                        }
+                        kastellan_sandbox::macos_container::ProbeFault::Unavailable(reason) => {
+                            CliFault::Unavailable(reason)
+                        }
+                    },
+                )
             },
             || inspect_image(reference),
             |image, built| {

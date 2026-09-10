@@ -21,11 +21,15 @@ use super::script_scan::code_body;
 fn bash_with_pin(snippet: &str) -> std::process::Output {
     let lib = repo_root().join(GUEST_KERNEL_LIB);
     let script = format!("set -euo pipefail; source '{}'; {snippet}", lib.display());
-    std::process::Command::new("bash")
-        .arg("-c")
-        .arg(script)
-        .output()
-        .expect("bash is available on both dev hosts")
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg("-c").arg(script);
+    // Bounded (#690): every shell-out in this module answers to a budget, so a
+    // snippet that hangs names itself instead of stalling the sweep.
+    kastellan_sandbox::bounded_command::probe_output(
+        &mut cmd,
+        kastellan_sandbox::bounded_command::PROBE_BUDGET,
+    )
+    .unwrap_or_else(|e| panic!("the pin snippet did not answer: {e:?}"))
 }
 
 /// sha256 of the 5 bytes `hello`, from the standard test vectors.

@@ -15,7 +15,8 @@ use super::container::{
     classify_inspect_exit, cli_unavailable_reason, container_preflight, image_age,
     image_missing_reason, indeterminate_age_reason, stale_image_reason,
     unreadable_inspect_reason, unverified_age_reason, ContainerImage, ImageAge, InspectExit,
-    InspectFault, SourceStamp, FUTURE_BUILD_SLACK_SECS, PYTHON_EXEC_BUILD_SCRIPT,
+    cli_fault_reason, wedged_cli_reason, CliFault, SourceStamp, FUTURE_BUILD_SLACK_SECS,
+    PYTHON_EXEC_BUILD_SCRIPT,
 };
 
 /// Record what a preflight step was asked, so the ORDER and the
@@ -187,7 +188,7 @@ fn a_failed_cli_spawn_is_not_reported_as_a_missing_image() {
     let seen = std::cell::RefCell::new(String::new());
     container_preflight(
         PY_IMAGE,
-        || Err("container system service is not running".to_string()),
+        || Err(CliFault::Unavailable("container system service is not running".to_string())),
         || panic!("the image must not be inspected once the CLI is unusable"),
         |_, _| panic!("the age must not be consulted once the CLI is unusable"),
         |reason| {
@@ -237,7 +238,7 @@ fn a_broken_image_inspect_is_not_reported_as_a_missing_image() {
     container_preflight(
         PY_IMAGE,
         || Ok(()),
-        || Err(InspectFault::Unreadable("inspect output is not JSON".to_string())),
+        || Err(CliFault::Unreadable("inspect output is not JSON".to_string())),
         |_, _| panic!("the age must not be consulted when the inspect failed"),
         |reason| {
             *seen.borrow_mut() = reason.to_string();
@@ -508,7 +509,7 @@ fn only_exit_one_is_an_absent_image() {
     )
     .expect_err("exit 64 is a CLI fault, not an absent image");
     match fault {
-        InspectFault::Cli(reason) => {
+        CliFault::Unavailable(reason) => {
             assert!(reason.contains("64"), "the status must survive: {reason}");
             assert!(
                 reason.contains("Missing expected argument"),
@@ -524,7 +525,7 @@ fn only_exit_one_is_an_absent_image() {
 fn a_signalled_inspect_is_a_cli_fault() {
     let fault = classify_inspect_exit(None, "", "container image inspect x")
         .expect_err("no exit code at all cannot mean the image is absent");
-    assert!(matches!(fault, InspectFault::Cli(_)));
+    assert!(matches!(fault, CliFault::Unavailable(_)));
 }
 
 /// The two fault kinds reach DIFFERENT remedies.
@@ -539,7 +540,7 @@ fn an_unreadable_answer_does_not_name_the_service_or_the_build() {
     container_preflight(
         PY_IMAGE,
         || Ok(()),
-        || Err(InspectFault::Unreadable("shape has changed".to_string())),
+        || Err(CliFault::Unreadable("shape has changed".to_string())),
         |_, _| panic!("the age must not be consulted when the inspect could not be read"),
         |reason| {
             *seen.borrow_mut() = reason.to_string();
@@ -604,4 +605,116 @@ fn small_clock_drift_does_not_trip_the_future_arm() {
         NOW,
     );
     assert_eq!(age, ImageAge::NewerThanSources { unstat: vec![] });
+}
+
+// ---------------------------------------------------------------------------
+// #690 — a CLI that never answers is its own fault, with its own remedy
+// ---------------------------------------------------------------------------
+
+/// A wedged probe must not be rendered as a *stopped* one.
+///
+/// ⚠️ The two are close enough that folding them looks harmless, and it is
+/// not: `container system start` is what you do to a stopped service and is
+/// **not enough** for a wedged apiserver, which needs a `stop` first. Before
+/// #690 the probe arm sent every fault through `cli_unavailable_reason`, so a
+/// wedge would have arrived with the right remedy followed by a weaker one —
+/// the #684 folding defect in its politest form.
+#[test]
+fn a_wedged_probe_does_not_name_the_stopped_service_remedy() {
+    let seen = std::cell::RefCell::new(String::new());
+    container_preflight(
+        PY_IMAGE,
+        || {
+            Err(CliFault::Wedged(
+                "`container system status` did not answer within 10s and was killed; \
+                 the `container-apiserver` may be wedged — try \
+                 `container system stop && container system start`"
+                    .to_string(),
+            ))
+        },
+        || panic!("the inspect must not be attempted when the CLI is not answering"),
+        |_, _| panic!("the age must not be consulted"),
+        |reason| {
+            *seen.borrow_mut() = reason.to_string();
+            true
+        },
+        |_| panic!("a wedged CLI is not a warn-and-run"),
+    );
+    let reason = seen.borrow().clone();
+    assert!(
+        reason.contains("did not answer"),
+        "the wedge must survive to the operator: {reason}"
+    );
+    assert!(
+        reason.contains("container system stop"),
+        "the remedy that actually applies must survive: {reason}"
+    );
+    assert!(
+        !reason.contains("brew install container"),
+        "an install cannot unwedge a running daemon: {reason}"
+    );
+    assert!(
+        !reason.contains("build-image.sh"),
+        "no build fixes a wedged daemon — #684's rule, one fault further: {reason}"
+    );
+}
+
+/// The same for the inspect arm, which is a separate call site and was a
+/// separate renderer before `cli_fault_reason` unified them.
+#[test]
+fn a_wedged_inspect_reaches_the_wedge_remedy_too() {
+    let seen = std::cell::RefCell::new(String::new());
+    container_preflight(
+        PY_IMAGE,
+        || Ok(()),
+        || Err(CliFault::Wedged("`container image inspect x` did not answer".to_string())),
+        |_, _| panic!("the age must not be consulted"),
+        |reason| {
+            *seen.borrow_mut() = reason.to_string();
+            true
+        },
+        |_| panic!("a wedged CLI is not a warn-and-run"),
+    );
+    let reason = seen.borrow().clone();
+    assert!(reason.contains("did not answer"), "{reason}");
+    assert!(
+        !reason.contains("container system start"),
+        "the stopped-service remedy must not be appended to a wedge: {reason}"
+    );
+}
+
+/// ⚠️ **Three faults, three distinct sentences.** The property is not that
+/// each contains some phrase — it is that no two are the same string, which is
+/// what "different remedies" has to mean for the operator reading one line.
+///
+/// This is the guard against a fourth variant being added and quietly rendered
+/// as one of the existing three, which is exactly how the probe arm came to
+/// render a wedge as an unavailability.
+#[test]
+fn every_cli_fault_renders_to_its_own_sentence() {
+    let rendered: Vec<String> = [
+        CliFault::Unavailable("detail".to_string()),
+        CliFault::Wedged("detail".to_string()),
+        CliFault::Unreadable("detail".to_string()),
+    ]
+    .iter()
+    .map(|fault| cli_fault_reason(PY_IMAGE, fault))
+    .collect();
+
+    for (i, a) in rendered.iter().enumerate() {
+        for b in rendered.iter().skip(i + 1) {
+            assert_ne!(a, b, "two faults render identically, so they name one remedy");
+        }
+        assert!(!a.is_empty(), "a fault with no sentence is a fault with no content");
+        assert!(!a.contains('\n'), "a reason with a newline orphans a [SKIP] line: {a}");
+    }
+}
+
+/// The wedge sentence must read as one line and carry the detail it was given
+/// — the detail is where the command, the budget and the remedy live.
+#[test]
+fn the_wedge_reason_is_one_line_and_keeps_its_detail() {
+    let reason = wedged_cli_reason("`container system status` did not answer\nsecond line");
+    assert!(reason.contains("did not answer"), "{reason}");
+    assert!(!reason.contains('\n'), "must be one line: {reason}");
 }

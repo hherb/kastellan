@@ -86,6 +86,9 @@ pub fn build_share_images(
     env: &[(String, String)],
 ) -> Result<(), SandboxError> {
     let run = |argv: Vec<String>| -> Result<(), SandboxError> {
+        // BOUNDED-EXEMPT: the SPAWN path, not a preflight. `mkfs.ext4` on a
+        // multi-gigabyte share image legitimately runs for a long time, and a
+        // budget here would kill a correct build rather than surface a wedge.
         let status = Command::new(&argv[0])
             .args(&argv[1..])
             .status()
@@ -199,6 +202,9 @@ pub fn build_persistent_image(plan: &mut FirecrackerLaunchPlan) -> Result<(), Sa
         &ps.host_backing.to_string_lossy(),
         ps.size_mib as u64,
     ) {
+        // BOUNDED-EXEMPT: the SPAWN path, not a preflight. `mkfs.ext4` on a
+        // multi-gigabyte share image legitimately runs for a long time, and a
+        // budget here would kill a correct build rather than surface a wedge.
         let status = Command::new(&argv[0])
             .args(&argv[1..])
             .status()

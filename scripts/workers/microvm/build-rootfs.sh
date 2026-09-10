@@ -12,6 +12,17 @@ OUT_DIR="${KASTELLAN_MICROVM_DIR:-/var/lib/kastellan/microvm}"
 # Pinned, integrity-checked guest kernel (arch detection, URL and sha256 all
 # live in the shared snippet — see it for why they are not inlined here).
 source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
+
+# Repo-relative paths below (`target/release/...`) mean this script must run
+# from the workspace root whatever directory it was invoked from (#686).
+# Resolved from BASH_SOURCE, which is why it sits AFTER the `source` above:
+# that line resolves its own relative path and must not run post-`cd`.
+# ⚠️ `cd ""` SUCCEEDS in bash, so an empty REPO_ROOT would silently run the
+# build from the operator's cwd and blame a missing `target/release/...`.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)" || REPO_ROOT=""
+if [ -z "$REPO_ROOT" ] || ! cd "$REPO_ROOT"; then
+    echo "Cannot locate the workspace root from ${BASH_SOURCE[0]}" >&2; exit 1
+fi
 ROOTFS_MIB=768
 
 # The output dir defaults to /var/lib/kastellan/microvm, which is provisioned
