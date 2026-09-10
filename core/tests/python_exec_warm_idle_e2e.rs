@@ -10,8 +10,12 @@
 //!      clears.
 //!
 //! `[SKIP]`s when Apple `container` / its service / the python-exec image are
-//! missing. Build the image first:
+//! missing, **or when that image predates the worker sources** (#687). Build
+//! the image first:
 //!     scripts/workers/python-exec/build-image.sh
+//!
+//! Every one of those preconditions answers to `KASTELLAN_MICROVM_REQUIRE_E2E`
+//! (#684).
 
 #![cfg(target_os = "macos")]
 
@@ -29,10 +33,10 @@ use kastellan_core::worker_lifecycle::{
 use kastellan_core::workers::python_exec::{
     container_mode_entry, CONTAINER_WORKER_BIN, DEFAULT_IMAGE,
 };
-use kastellan_sandbox::macos_container::MacosContainer;
 use kastellan_sandbox::{
     SandboxBackend, SandboxBackendKind, SandboxBackends, SandboxError, SandboxPolicy,
 };
+use kastellan_tests_common::microvm::skip_if_no_container;
 use kastellan_tests_common::NoopAuditSink;
 
 const TOOL_NAME: &str = "python-exec";
@@ -55,30 +59,6 @@ impl SandboxBackend for CountingBackend {
         self.count.fetch_add(1, Ordering::SeqCst);
         self.inner.spawn_under_policy(policy, program, args)
     }
-}
-
-/// Skip (early-return `true`) when Apple `container` isn't usable on this host
-/// or the python-exec image is absent.
-fn skip_if_no_container_image() -> bool {
-    if let Err(e) = MacosContainer::probe() {
-        eprintln!("\n[SKIP] container probe failed: {e}\n");
-        return true;
-    }
-    let listed = std::process::Command::new("container")
-        .args(["image", "list"])
-        .output();
-    let has_image = matches!(
-        listed,
-        Ok(o) if String::from_utf8_lossy(&o.stdout).contains("python-exec")
-    );
-    if !has_image {
-        eprintln!(
-            "\n[SKIP] {DEFAULT_IMAGE} image not present; run \
-             scripts/workers/python-exec/build-image.sh\n"
-        );
-        return true;
-    }
-    false
 }
 
 /// Build an idle-timeout lifecycle whose Container slot is the counting backend.
@@ -141,7 +121,7 @@ async fn dispatch_over_handle(handle: &mut WorkerHandle, code: &str) -> serde_js
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warm_reuse_three_calls_boot_vm_once() {
-    if skip_if_no_container_image() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let count = Arc::new(AtomicUsize::new(0));
@@ -172,7 +152,7 @@ async fn warm_reuse_three_calls_boot_vm_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tmp_is_wiped_between_warm_calls() {
-    if skip_if_no_container_image() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let count = Arc::new(AtomicUsize::new(0));
@@ -216,7 +196,7 @@ async fn tmp_is_wiped_between_warm_calls() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_teardown_clears_warm_slot() {
-    if skip_if_no_container_image() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let count = Arc::new(AtomicUsize::new(0));

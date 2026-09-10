@@ -25,7 +25,14 @@
 //! ambiguity.
 //!
 //! Skip-as-pass when `container --version` / `container system status`
-//! / the `alpine:3.20` image are missing.
+//! / the `alpine:3.20` image are missing — every one of those answering to
+//! `KASTELLAN_MICROVM_REQUIRE_E2E` (#684), so an operator can demand a real
+//! container run and get a failure rather than a silent skip.
+//!
+//! No freshness gate here, and that is correct rather than an omission:
+//! `alpine:3.20` is an upstream image this repo does not build, so it has no
+//! source closure to be stale against. #687's rule applies to the images
+//! `scripts/workers/*/build-image.sh` produces.
 
 #![cfg(target_os = "macos")]
 
@@ -35,33 +42,10 @@ use std::sync::Arc;
 use kastellan_core::scheduler::ToolEntry;
 use kastellan_core::worker_lifecycle::{Lifecycle, SingleUseLifecycle, WorkerLifecycleManager};
 use kastellan_sandbox::{
-    macos_container::MacosContainer, Net, Profile, SandboxBackendKind, SandboxBackends,
+    macos_container::DEFAULT_IMAGE, Net, Profile, SandboxBackendKind, SandboxBackends,
     SandboxPolicy,
 };
-
-/// Skip the test (via early-return) when Apple `container` isn't usable
-/// on this host. Returns `true` when the caller should skip.
-fn skip_if_no_container() -> bool {
-    if let Err(e) = MacosContainer::probe() {
-        eprintln!("\n[SKIP] container probe failed: {e}\n");
-        return true;
-    }
-    // Image presence: cheap `container image list | grep` check.
-    let listed = std::process::Command::new("container")
-        .args(["image", "list"])
-        .output();
-    let has_image = matches!(
-        listed,
-        Ok(o) if String::from_utf8_lossy(&o.stdout).contains("alpine:3.20")
-    );
-    if !has_image {
-        eprintln!(
-            "\n[SKIP] alpine:3.20 image not present; run `container image pull alpine:3.20`\n"
-        );
-        return true;
-    }
-    false
-}
+use kastellan_tests_common::microvm::skip_if_no_container;
 
 fn minimal_policy() -> SandboxPolicy {
     SandboxPolicy {
@@ -86,7 +70,7 @@ fn minimal_policy() -> SandboxPolicy {
 /// otherwise hang waiting for stdin / a real RPC call.
 #[tokio::test]
 async fn single_use_lifecycle_routes_through_container_when_entry_opts_in() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
 

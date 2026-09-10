@@ -65,6 +65,8 @@ pub const LAUNCHER_BIN: &str = "kastellan-microvm-run";
 /// module therefore says `--release`; see the module docs.
 const LAUNCHER_PROFILES: [&str; 2] = ["release", "debug"];
 
+mod container;
+mod container_images;
 mod freshness;
 mod images;
 mod require;
@@ -76,6 +78,16 @@ pub use images::{
     baked_for, build_script_for, image_entry, BakedBinary, RootfsImage, GUEST_INIT_BIN,
     GUEST_INIT_IN_IMAGE, GUEST_KERNEL_LIB, REBUILD_ALL_SCRIPT, RELEASE_BUILD_SCRIPT,
     ROOTFS_IMAGES,
+};
+#[cfg(target_os = "macos")]
+pub use container::{inspect_image, skip_if_no_container};
+pub use container::{
+    built_image, classify_inspect_exit, cli_unavailable_reason, container_preflight, find_image,
+    image_age, image_missing_reason, indeterminate_age_reason, normalize_reference, now_unix,
+    parse_image_list, source_stamps, stale_image_reason, stamps_for, unreadable_inspect_reason,
+    unverified_age_reason, BuiltImage, ContainerImage, ImageAge, InspectExit, InspectFault,
+    SourceStamp, BUILT_IMAGES, FUTURE_BUILD_SLACK_SECS, PYTHON_EXEC_BUILD_INPUTS,
+    PYTHON_EXEC_BUILD_SCRIPT, PYTHON_EXEC_IMAGE, PYTHON_EXEC_SOURCE_DIRS,
 };
 pub use require::{dep_or_skip, first_unmet, host_probes, skip_unless_ready, Probe};
 
@@ -91,6 +103,10 @@ mod guard;
 #[cfg(test)]
 mod script_scan;
 
+#[cfg(test)]
+mod container_images_tests;
+#[cfg(test)]
+mod container_tests;
 #[cfg(test)]
 mod freshness_tests;
 #[cfg(test)]
@@ -525,11 +541,37 @@ fn warn_and_run(
     gated: bool,
     out: &mut dyn std::io::Write,
 ) -> bool {
-    let reason = unverified_reason(rootfs, unverified, gated);
+    report_caveat_microvm_to(&unverified_reason(rootfs, unverified, gated), out)
+}
+
+/// Emit a micro-VM caveat and let the run proceed — or fail, if the operator
+/// demanded a fully-gated run.
+///
+/// Returns `false` (do not skip): downgrading a real VM run to a skip would
+/// lose coverage for nothing.
+///
+/// The `[WARN]` counterpart of [`report_unmet_microvm`], and shared by the
+/// Firecracker freshness gate and the macOS container tier (#684) so the two
+/// cannot drift apart — the duplication that produced four private copies of
+/// one `[SKIP]` helper before #679 deleted them.
+///
+/// # Panics
+///
+/// When [`REQUIRE_ENV`] is truthy.
+pub fn report_caveat_microvm(reason: &str) -> bool {
+    report_caveat_microvm_to(reason, &mut std::io::stderr())
+}
+
+/// [`report_caveat_microvm`] with the `[WARN]` written to `out`.
+///
+/// # Panics
+///
+/// As [`report_caveat_microvm`].
+pub fn report_caveat_microvm_to(reason: &str, out: &mut dyn std::io::Write) -> bool {
     if require_action_to(out) == crate::gliner_e2e::UnmetAction::Fail {
-        require_panic(&reason);
+        require_panic(reason);
     }
-    let _ = write!(out, "{}", crate::skip::warn_line(&reason));
+    let _ = write!(out, "{}", crate::skip::warn_line(reason));
     false
 }
 

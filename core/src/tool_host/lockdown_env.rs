@@ -31,17 +31,23 @@ pub const ENV_SECCOMP_PROFILE: &str = "KASTELLAN_SECCOMP_PROFILE";
 /// Env var read by `kastellan-worker-prelude::landlock_lock` to disable the
 /// Landlock layer (`"none"`). Source of truth for the string is the prelude;
 /// mirrored here for manifests that set it, and a THIRD time as
-/// `kastellan_sandbox::linux_firecracker::plan::GUEST_LANDLOCK_PROFILE_ENV`
-/// (the sandbox crate cannot depend on the prelude either). Keep all three
-/// identical; the sandbox copy is literal-pinned by its own unit test.
+/// `kastellan_sandbox::LANDLOCK_PROFILE_ENV` (the sandbox crate cannot depend
+/// on the prelude either). ⚠️ That copy moved to the sandbox **crate root** in
+/// #684: `linux_firecracker::plan::GUEST_LANDLOCK_PROFILE_ENV` is now an alias
+/// of it, because both micro-VM backends need the key and each compiles on a
+/// different host. Keep all three identical; the sandbox copy is literal-pinned
+/// by `the_landlock_opt_out_is_pinned_to_its_kernel_and_key`, which still
+/// compares against the bare string and so still catches a rename.
 ///
 /// Not set by `derive_lockdown_env`, and — since browser-driver stopped opting
-/// out — set by no manifest either. The one production setter is the Firecracker
-/// backend, which injects `=none` per spawn because the pinned guest kernel has
-/// no `CONFIG_SECURITY_LANDLOCK`. That injection happens INSIDE the backend,
+/// out — set by no manifest either. There are TWO production setters, both
+/// micro-VM backends: the Firecracker backend (#669) and, since #684, the macOS
+/// Apple-`container` backend — each injects `=none` per spawn because neither
+/// guest kernel has `CONFIG_SECURITY_LANDLOCK`. Those injections happen INSIDE
+/// the backend,
 /// after [`warn_lockdown_overrides`] has already inspected the derived policy,
 /// so it is invisible here by construction; the backend emits its own WARN
-/// instead. See #669.
+/// instead. See #669 and #684.
 pub const ENV_LANDLOCK_PROFILE: &str = "KASTELLAN_LANDLOCK_PROFILE";
 /// Env var name read by `kastellan-worker-prelude::rlimit` for the
 /// `policy.cpu_ms` budget. Plumbed cross-platform — applied via

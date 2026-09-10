@@ -287,6 +287,49 @@ pub fn build_container_argv(
         argv.push(format!("{k}={v}"));
     }
 
+    // The guest kernel has no Landlock, so state the exception — as a DEFAULT
+    // THAT NEVER OVERRIDES A CALLER. Exactly #669's remedy for the Firecracker
+    // guest kernel, and found the same way: by a freshness gate (#687) that
+    // made a stale fixture stop certifying a run.
+    //
+    // ⚠️ MEASURED on Apple `container` 1.1.0 / guest kernel 6.18.15, not
+    // assumed: `/sys/kernel/security/lsm` does not exist in the guest, and a
+    // worker reaching its own lockdown dies with "landlock: Landlock ruleset
+    // is not enforced by this kernel". The whole macOS container tier had been
+    // dead since the 2026-09-02 audit made that fail-closed; the only reason
+    // nobody saw it is that the image on the dev Mac predated the audit.
+    //
+    // ⚠️ Seccomp is UNAFFECTED, and that is what the justification rests on —
+    // also measured, not argued: the same hand-run worker reports
+    // `lockdown Linux { landlock: Disabled, seccomp: Installed, .. }`.
+    //
+    // Delete this once an Apple `container` guest kernel ships Landlock; a
+    // caller can already opt back in today, since this only fills the key in
+    // when the policy has not chosen.
+    if !policy
+        .env
+        .iter()
+        .any(|(k, _)| k == crate::LANDLOCK_PROFILE_ENV)
+    {
+        // Say it out loud, once per spawn. `tool_host::warn_lockdown_overrides`
+        // exists so a sandbox-disabling env is never silent, but it inspects
+        // the DERIVED POLICY before a backend runs — and this injection happens
+        // inside the backend, so that detector is structurally blind to it.
+        // The Firecracker plan carries the identical warning for the identical
+        // reason.
+        tracing::warn!(
+            worker_env = crate::LANDLOCK_PROFILE_ENV,
+            "Apple `container` guest kernel does not enforce Landlock, so this worker runs \
+             with the worker-side FS layer DISABLED inside the guest; seccomp is unaffected"
+        );
+        argv.push("-e".into());
+        argv.push(format!(
+            "{}={}",
+            crate::LANDLOCK_PROFILE_ENV,
+            crate::LANDLOCK_PROFILE_NONE
+        ));
+    }
+
     argv.push(image.into());
     argv.push(program.into());
     for a in args {
@@ -303,9 +346,15 @@ pub fn build_container_argv(
 ///
 /// The shape is always exactly `["container", "image", "inspect", <tag>]`
 /// — no flags. `container image inspect` exits non-zero on absent
-/// images, which is the load-bearing signal here; we don't read its
-/// stdout (the verbose image-manifest JSON is irrelevant for a
-/// presence check).
+/// images, which is the load-bearing signal for
+/// [`MacosContainer::probe_image`], which ignores stdout.
+///
+/// ⚠️ **A second caller now reads that stdout.** The macOS container
+/// freshness gate (`kastellan_tests_common::microvm::container`, #687)
+/// parses the image-manifest JSON for `configuration.creationDate` and
+/// compares it against source mtimes. So the JSON is no longer
+/// "irrelevant": changing this argv to suppress or reformat stdout
+/// would silently disable that gate.
 pub fn build_image_inspect_argv(image_tag: &str) -> Vec<String> {
     vec![
         "container".into(),

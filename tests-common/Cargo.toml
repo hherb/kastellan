@@ -44,6 +44,11 @@ async-trait          = { workspace = true }
 # same Tokio reactor the tests use. Workspace pin (full features), dev-only.
 tokio              = { workspace = true }
 serde_json         = { workspace = true }
+# `microvm::container` (#687) reads the RFC 3339 build timestamp Apple
+# `container` reports for an image and compares it against source mtimes.
+# Already a workspace pin `core` depends on (Unlicense OR MIT,
+# AGPL-compatible), so it costs nothing new in the graph.
+jiff               = { workspace = true }
 sha2               = { workspace = true }
 sqlx               = { workspace = true }
 # Reentrant launchd serial lock (macOS, issue #130). std::sync::ReentrantLock
