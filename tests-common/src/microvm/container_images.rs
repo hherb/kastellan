@@ -19,7 +19,8 @@ use super::container::SourceStamp;
 /// `created` is optional because the CLI emits image records whose variants
 /// carry no `created` field at all (measured: every multi-arch manifest here
 /// has `"architecture":"unknown"` variants with `created: None`). An absent
-/// timestamp is [`ImageAge::Indeterminate`], never a silent pass.
+/// timestamp is `ImageAge::Indeterminate` (declared in the sibling module,
+/// so a plain span rather than an unresolvable link), never a silent pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerImage {
     /// The normalised reference, e.g. `kastellan/python-exec:dev`.
@@ -63,13 +64,25 @@ pub struct BuiltImage {
     pub build_script: &'static str,
 }
 
+/// The python-exec image reference, taken from the daemon rather than copied.
+///
+/// ⚠️ **This is the constant the three suites actually pass**, not a second
+/// spelling of it. A hand-written copy here would have been the whole gate's
+/// single point of silent failure: [`built_image`] looks the reference up,
+/// an unregistered one is never age-checked, and that arm returns without a
+/// `[SKIP]` or a `[WARN]` — so bumping the daemon's tag would have deleted
+/// the #687 gate from all three suites with **no change to any test output**
+/// and every assertion still green. Naming the real constant makes that
+/// drift a compile-time impossibility rather than a test we hope catches it.
+pub const PYTHON_EXEC_IMAGE: &str = kastellan_core::workers::python_exec::DEFAULT_IMAGE;
+
 /// Every container image this repo builds.
 ///
 /// One entry today. It is a table rather than three constants so a second
 /// worker image (the gliner-relex image is the obvious next one) is a row,
 /// not a second copy of the rule.
 pub const BUILT_IMAGES: &[BuiltImage] = &[BuiltImage {
-    reference: "kastellan/python-exec:dev",
+    reference: PYTHON_EXEC_IMAGE,
     source_dirs: &PYTHON_EXEC_SOURCE_DIRS,
     build_inputs: &PYTHON_EXEC_BUILD_INPUTS,
     build_script: PYTHON_EXEC_BUILD_SCRIPT,
@@ -113,18 +126,27 @@ pub fn normalize_reference(reference: &str) -> &str {
     reference.strip_prefix(DOCKER_HUB_PREFIX).unwrap_or(reference)
 }
 
-/// Parse `container image list --format json` into image records.
+/// Parse Apple `container`'s image-record JSON into image records.
+///
+/// ⚠️ **The production caller feeds this `container image inspect <tag>`**,
+/// not `container image list --format json`. Both emit the same array of
+/// `configuration.name` / `configuration.creationDate` records (measured on
+/// 1.1.0, which is why one parser serves both), but the fixtures in this
+/// crate's tests are `list` captures — so nothing here pins the shape the
+/// production path actually parses. Treat that as the gap it is: a fixture
+/// that certifies a neighbouring command is the shape this branch exists to
+/// kill [[stale-fixture-turns-a-gate-into-a-formality]].
 ///
 /// A real JSON parse rather than a line scan, for the reason `installable.rs`
 /// states: this guard's failure mode is a silent false pass, and a
 /// `contains()` over CLI output is precisely the defect being fixed.
 pub fn parse_image_list(json: &str) -> Result<Vec<ContainerImage>, String> {
     let root: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| format!("`container image list --format json` output is not JSON: {e}"))?;
+        .map_err(|e| format!("the `container` CLI's image-record output is not JSON: {e}"))?;
     let entries = root
         .as_array()
         .ok_or_else(|| "expected a JSON array of images".to_string())?;
-    Ok(entries
+    let parsed: Vec<ContainerImage> = entries
         .iter()
         .filter_map(|entry| {
             let configuration = entry.get("configuration")?;
@@ -137,13 +159,26 @@ pub fn parse_image_list(json: &str) -> Result<Vec<ContainerImage>, String> {
                     .and_then(parse_rfc3339_seconds),
             })
         })
-        .collect())
+        .collect();
+    // ⚠️ Records the CLI sent that NONE of which carried the shape this reads
+    // is a schema change, not an empty store — and the two used to be the same
+    // value. An empty vec reaches `find_image`, returns `None`, and renders as
+    // "the image is not present; build it": a parse failure wearing the
+    // absent-image costume, which is the #684 folding one layer down.
+    if !entries.is_empty() && parsed.is_empty() {
+        return Err(format!(
+            "the CLI returned {} image record(s) and none carried the `configuration.name` \
+             this gate reads; its output shape has changed",
+            entries.len()
+        ));
+    }
+    Ok(parsed)
 }
 
 /// An RFC 3339 instant as seconds since the Unix epoch, or `None`.
 ///
 /// `None` rather than an error: a record the CLI reports without a usable
-/// timestamp is [`ImageAge::Indeterminate`], which is a verdict the caller
+/// timestamp is `ImageAge::Indeterminate`, which is a verdict the caller
 /// already has to render. Turning it into a parse failure would conflate "this
 /// image has no build time" with "the CLI is broken" — the folding this module
 /// exists to undo.
@@ -178,8 +213,18 @@ pub const PYTHON_EXEC_BUILD_SCRIPT: &str = "scripts/workers/python-exec/build-im
 /// `target/` is pruned. Including build output would swamp the comparison with
 /// artefacts whose mtimes move on every build — reintroducing the very relink
 /// problem that made mtime the wrong rule for #667.
+///
+/// ⚠️ **Convenience for tests, despite being `pub`.** Every caller today is in
+/// this crate's own test modules; the preflight calls [`stamps_for`] with the
+/// row [`built_image`] returned, because it has already looked one up. Kept
+/// because the walk is worth exercising on both hosts by name.
 pub fn source_stamps() -> (Vec<SourceStamp>, Vec<PathBuf>) {
-    stamps_for(&BUILT_IMAGES[0])
+    // By name, not by index: `BUILT_IMAGES` is documented as a table a second
+    // row can be added to, and a row inserted at 0 would silently change what
+    // this function means while its doc kept saying python-exec.
+    let image = built_image(PYTHON_EXEC_IMAGE)
+        .expect("the python-exec image is registered in BUILT_IMAGES");
+    stamps_for(image)
 }
 
 /// mtimes for one registered image's source closure.
@@ -198,9 +243,14 @@ pub fn stamps_for(image: &BuiltImage) -> (Vec<SourceStamp>, Vec<PathBuf>) {
 
 /// The workspace root this crate lives in.
 ///
-/// A sibling of the `cfg(test)`-only [`super::repo_root`], because
-/// [`source_stamps`] is production vocabulary for the suites, not test
-/// machinery, and so must exist outside `cfg(test)`.
+/// A sibling of the `cfg(test)`-only `super::repo_root`, because
+/// [`stamps_for`] runs on the suites' path — `skip_if_no_container` calls it
+/// per run — and so must exist outside `cfg(test)`.
+///
+/// ⚠️ This used to credit [`source_stamps`] for that, which is **not** true:
+/// the production path calls [`stamps_for`] with the registry row it looked
+/// up, and `source_stamps` has only ever had test callers. The requirement is
+/// real, the function named for it was wrong.
 fn repo_root_for_sources() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -217,9 +267,25 @@ fn collect_dir(root: &Path, dir: &Path, stamps: &mut Vec<SourceStamp>, unstat: &
             return;
         }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        // ⚠️ NOT `.flatten()`. A `DirEntry` that cannot be read is exactly
+        // what this function's contract promises never to lose: `.flatten()`
+        // dropped it from BOTH lists, so the file the gate could no longer
+        // see was also the file it stopped admitting it could not check.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                unstat.push(relative(root, dir));
+                continue;
+            }
+        };
         let path = entry.path();
-        if path.is_dir() {
+        // ⚠️ `entry.file_type()`, not `path.is_dir()`: the latter FOLLOWS
+        // symlinks, so a link pointing at an ancestor recurses until the stack
+        // runs out. A source tree has no reason to contain one, which is
+        // exactly why nobody would notice adding one.
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if is_dir {
             // Build output has nothing to say about source freshness.
             if path.file_name().is_some_and(|n| n == "target") {
                 continue;
@@ -233,20 +299,26 @@ fn collect_dir(root: &Path, dir: &Path, stamps: &mut Vec<SourceStamp>, unstat: &
 
 /// Record one file's mtime, or note it as unreadable.
 fn push_stamp(root: &Path, path: &Path, stamps: &mut Vec<SourceStamp>, unstat: &mut Vec<PathBuf>) {
-    match std::fs::metadata(path).and_then(|m| m.modified()) {
-        Ok(modified) => {
-            let secs = modified
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                // A pre-epoch mtime is not a reason to lose the file; clamping
-                // to 0 keeps it in the comparison as unambiguously old.
-                .unwrap_or(0);
-            stamps.push(SourceStamp {
-                path: relative(root, path),
-                modified_unix: secs,
-            });
-        }
-        Err(_) => unstat.push(relative(root, path)),
+    let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+        unstat.push(relative(root, path));
+        return;
+    };
+    // ⚠️ An mtime that cannot be turned into a timestamp goes to `unstat`, it
+    // does NOT become a synthetic one. Substituting 0 here used to keep the
+    // file in the comparison at the one value guaranteed never to trigger
+    // `Stale`, and kept it out of `unstat` too — so the gate silently voted
+    // "fresh" on a file whose age it had failed to establish. A pre-epoch or
+    // out-of-range mtime is a fact about a file the check could not read.
+    match modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+    {
+        Some(secs) => stamps.push(SourceStamp {
+            path: relative(root, path),
+            modified_unix: secs,
+        }),
+        None => unstat.push(relative(root, path)),
     }
 }
 

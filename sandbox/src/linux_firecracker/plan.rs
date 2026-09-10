@@ -140,16 +140,29 @@ const ENV_CMDLINE_KEY: &str = "kastellan.env";
 /// to processes outside it. The worker shares a PID namespace with PID 1 and the
 /// relay children, so the signal scope was not moot here. Both halves go.
 ///
-/// **Mirror of `kastellan_prelude::landlock_lock::LANDLOCK_PROFILE_ENV`**
+/// ⚠️ **An ALIAS since #684, not a copy.** The literal moved to the sandbox
+/// crate root as `crate::LANDLOCK_PROFILE_ENV`, because both micro-VM backends
+/// need the key and each compiles on a different host — two `cfg`-gated copies
+/// could never be compared by any single compilation. This name is kept because
+/// it says *which* consumer is meant, and every call site here reads better for
+/// it.
+///
+/// The literals in the tree are therefore: the prelude
 /// (`workers/prelude/src/landlock_lock.rs`), which is the source of truth; the
-/// core keeps a third copy as `core::tool_host::lockdown_env::ENV_LANDLOCK_PROFILE`.
-/// This crate cannot depend on the prelude, so the copy is unavoidable and is
-/// pinned to its literal by `the_landlock_opt_out_is_pinned_to_its_kernel_and_key`
-/// below — the same treatment `USERNS_LOCKDOWN_FLAGS` gets in `linux_bwrap`, and
-/// for the same reason: a silent rename here re-kills every micro-VM worker in
-/// exactly the pre-#669 way. Note the *value* is as brittle as the key —
-/// `landlock_disabled_by_profile` is an exact, untrimmed, case-sensitive
-/// `== Some("none")`.
+/// core's `tool_host::lockdown_env::ENV_LANDLOCK_PROFILE`; and
+/// `kastellan_sandbox::LANDLOCK_PROFILE_ENV`. Neither the core nor this crate
+/// can depend on the prelude, so those copies are unavoidable — but there are
+/// now three of them and not four.
+///
+/// The pin still works **through** the alias:
+/// `the_landlock_opt_out_is_pinned_to_its_kernel_and_key` below compares this
+/// name against the bare string, so a rename at the crate root fails it just as
+/// a rename here used to. That matters because you can no longer see the pin
+/// from the definition. Same treatment `USERNS_LOCKDOWN_FLAGS` gets in
+/// `linux_bwrap`, for the same reason: a silent rename re-kills every micro-VM
+/// worker in exactly the pre-#669 way. Note the *value* is as brittle as the
+/// key — `landlock_disabled_by_profile` is an exact, untrimmed, case-sensitive
+/// `== Some("none")`, spelled here as `crate::LANDLOCK_PROFILE_NONE`.
 ///
 /// Delete this injection if the guest kernel pin ever moves to one built with
 /// Landlock — [`build_launch_plan`] only fills the key in when the caller has
@@ -472,7 +485,10 @@ pub fn build_launch_plan(
              pinned vmlinux), so this worker runs with the worker-side FS layer and the \
              ABI-v6 UDS/signal scoping DISABLED inside the guest; seccomp is unaffected"
         );
-        env.push((GUEST_LANDLOCK_PROFILE_ENV.to_string(), "none".to_string()));
+        env.push((
+            GUEST_LANDLOCK_PROFILE_ENV.to_string(),
+            crate::LANDLOCK_PROFILE_NONE.to_string(),
+        ));
     }
     // The guest init drops from root to this uid before exec'ing the worker
     // (security audit 2026-09-02, workers 2 / prelude F3). The daemon's own

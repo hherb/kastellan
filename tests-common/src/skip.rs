@@ -280,10 +280,6 @@ mod tests {
         );
     }
 
-    /// The two arms say **different** things, and the distinction is the whole
-    /// point: "cannot resolve" sends the operator to DNS, "cannot reach" to
-    /// egress. Swapping the strings is invisible to any test that only checks
-    /// the host is named.
     /// A loopback port that is closed **right now**, confirmed rather than
     /// assumed.
     ///
@@ -295,7 +291,10 @@ mod tests {
     /// and **zero times in 40 isolated runs**), which is precisely the shape
     /// that gets mis-attributed to whatever change is in flight.
     ///
-    /// Confirming and retrying makes the precondition true instead of likely.
+    /// Confirming and retrying narrows the window from the whole test setup to
+/// the microseconds between this check and the caller's. It does not close
+/// it — nothing can reserve a port by not listening on it — but it turns a
+/// standing assumption into a checked one.
     /// The retries are bounded because an environment where many consecutive
     /// freed ephemeral ports are instantly re-taken is one the caller should
     /// hear about, not one to spin in.
@@ -314,6 +313,10 @@ mod tests {
         panic!("could not obtain a closed loopback port in 16 attempts");
     }
 
+    /// The two arms say **different** things, and the distinction is the whole
+    /// point: "cannot resolve" sends the operator to DNS, "cannot reach" to
+    /// egress. Swapping the strings is invisible to any test that only checks
+    /// the host is named.
     #[test]
     fn the_resolve_and_reach_arms_name_different_remedies() {
         // Closed port on loopback: resolves, does not connect.

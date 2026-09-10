@@ -346,9 +346,15 @@ pub fn build_container_argv(
 ///
 /// The shape is always exactly `["container", "image", "inspect", <tag>]`
 /// — no flags. `container image inspect` exits non-zero on absent
-/// images, which is the load-bearing signal here; we don't read its
-/// stdout (the verbose image-manifest JSON is irrelevant for a
-/// presence check).
+/// images, which is the load-bearing signal for
+/// [`MacosContainer::probe_image`], which ignores stdout.
+///
+/// ⚠️ **A second caller now reads that stdout.** The macOS container
+/// freshness gate (`kastellan_tests_common::microvm::container`, #687)
+/// parses the image-manifest JSON for `configuration.creationDate` and
+/// compares it against source mtimes. So the JSON is no longer
+/// "irrelevant": changing this argv to suppress or reformat stdout
+/// would silently disable that gate.
 pub fn build_image_inspect_argv(image_tag: &str) -> Vec<String> {
     vec![
         "container".into(),

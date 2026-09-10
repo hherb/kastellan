@@ -7,12 +7,18 @@
 use std::path::Path;
 
 use super::container::{
-    container_preflight, find_image, normalize_reference, parse_image_list, ContainerImage,
-    PYTHON_EXEC_BUILD_INPUTS, PYTHON_EXEC_BUILD_SCRIPT, PYTHON_EXEC_SOURCE_DIRS,
+    built_image, container_preflight, find_image, normalize_reference, parse_image_list,
+    ContainerImage, PYTHON_EXEC_BUILD_INPUTS, PYTHON_EXEC_BUILD_SCRIPT, PYTHON_EXEC_IMAGE,
+    PYTHON_EXEC_SOURCE_DIRS,
 };
 
 /// The reference the three container suites actually ask for.
-const PY_IMAGE: &str = "kastellan/python-exec:dev";
+///
+/// ⚠️ Not a literal. This used to be a hand-written copy of the tag, checked
+/// against another hand-written copy in the registry — a copy verifying a
+/// copy, which cannot notice that both are wrong. It now resolves through the
+/// daemon's own constant.
+const PY_IMAGE: &str = PYTHON_EXEC_IMAGE;
 
 /// A trimmed but REAL `container image list --format json` capture from this
 /// Mac (2026-09-09), not a hand-written ideal.
@@ -273,5 +279,101 @@ fn each_built_image_names_its_own_build_script() {
     assert!(
         super::repo_root().join(built.build_script).is_file(),
         "a registered build script must exist on disk"
+    );
+}
+
+/// The registry names the constant the daemon actually uses.
+///
+/// ⚠️ **This is a belt to the compile-time braces.** `PYTHON_EXEC_IMAGE` IS
+/// `kastellan_core::workers::python_exec::DEFAULT_IMAGE`, so they cannot drift
+/// — but the property that matters is one step further out: the reference the
+/// suites pass must be one `built_image` recognises. An unregistered reference
+/// is never age-checked, and that arm returns without a `[SKIP]` or a `[WARN]`,
+/// so the #687 gate would vanish from all three suites with no change to any
+/// test output. Asserting the lookup, not just the equality, is what pins the
+/// behaviour rather than the spelling.
+#[test]
+fn the_registry_recognises_the_image_the_suites_pass() {
+    let reference = kastellan_core::workers::python_exec::DEFAULT_IMAGE;
+    let built = built_image(reference).unwrap_or_else(|| {
+        panic!(
+            "the daemon's DEFAULT_IMAGE ({reference}) is not in BUILT_IMAGES, so the \
+             freshness gate is silently disabled for every container suite"
+        )
+    });
+    assert_eq!(built.reference, reference);
+    assert!(
+        !built.source_dirs.is_empty(),
+        "a registered image with no source closure cannot be age-checked"
+    );
+}
+
+/// A CLI answer nobody can read is a fault, not an empty image store.
+///
+/// The `filter_map` drops any record lacking `configuration.name`, so a schema
+/// change used to yield `Ok(vec![])` — which reaches `find_image`, returns
+/// `None`, and renders as "the image is not present; build it". A parse
+/// failure wearing the absent-image costume, which is #684 one layer down.
+/// An genuinely empty array still parses to an empty vec, because an empty
+/// store IS an empty store.
+#[test]
+fn records_that_none_of_which_parse_are_a_fault_not_an_empty_store() {
+    let unknown_shape = r#"[{"Descriptor":{"digest":"sha256:abc"}}]"#;
+    let err = parse_image_list(unknown_shape)
+        .expect_err("records in an unrecognised shape must not read as an empty store");
+    assert!(
+        err.contains("shape has changed") || err.contains("configuration.name"),
+        "the fault must name what could not be read: {err}"
+    );
+
+    assert_eq!(
+        parse_image_list("[]").expect("an empty array is a readable empty store"),
+        vec![],
+        "an empty store is not a schema change"
+    );
+}
+
+/// A real `container image inspect kastellan/python-exec:dev` capture.
+///
+/// ⚠️ **The production path parses `inspect`, and until now every fixture in
+/// this file was a `list` capture.** The two happen to share a shape, so the
+/// parser worked — but nothing pinned the command the code actually runs, and
+/// "the fixture certifies a neighbouring command" is the exact shape this
+/// branch exists to kill [[stale-fixture-turns-a-gate-into-a-formality]].
+///
+/// Captured on Apple `container` 1.1.0, macOS, 2026-09-10, then re-serialised:
+/// the `descriptor` body is trimmed to the two fields that identify it (the
+/// original is ~8 KB of manifest no code here reads), and the CLI's `\/`
+/// escapes are normalised to `/` by the round-trip. **The two fields this
+/// parser reads carry the CLI's own values unchanged**, which is the property
+/// the fixture exists for; it is not a byte-for-byte capture, and calling it
+/// one would be the overclaim this file is otherwise careful to avoid.
+const REAL_INSPECT_JSON: &str = r#"[
+  {
+    "configuration": {
+      "creationDate": "2026-09-08T23:08:46Z",
+      "name": "kastellan/python-exec:dev",
+      "descriptor": {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "digest": "sha256:581c22979603a78fe8ee786e47fe03e7cbb51166d7155ecfc5d8171f06546893"
+      }
+    }
+  }
+]"#;
+
+/// The parser reads the command the production path actually runs.
+///
+/// Pins `configuration.name` and `configuration.creationDate` against a real
+/// `inspect` capture, so a CLI that renames either is caught here rather than
+/// by every macOS suite mysteriously reporting the image absent.
+#[test]
+fn the_parser_reads_a_real_image_inspect_capture() {
+    let images = parse_image_list(REAL_INSPECT_JSON).expect("a real inspect capture parses");
+    let image = find_image(&images, PY_IMAGE)
+        .unwrap_or_else(|| panic!("the capture must contain {PY_IMAGE}: {images:?}"));
+    assert_eq!(
+        image.created_unix,
+        Some(1_788_908_926),
+        "2026-09-08T23:08:46Z — a build time the freshness gate can compare"
     );
 }

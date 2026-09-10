@@ -82,10 +82,12 @@ pub use images::{
 #[cfg(target_os = "macos")]
 pub use container::{inspect_image, skip_if_no_container};
 pub use container::{
-    built_image, cli_unavailable_reason, container_preflight, find_image, image_age,
-    image_missing_reason, indeterminate_age_reason, normalize_reference, parse_image_list, source_stamps, stale_image_reason,
-    stamps_for, unverified_age_reason, BuiltImage, ContainerImage, ImageAge, SourceStamp,
-    BUILT_IMAGES, PYTHON_EXEC_BUILD_INPUTS, PYTHON_EXEC_BUILD_SCRIPT, PYTHON_EXEC_SOURCE_DIRS,
+    built_image, classify_inspect_exit, cli_unavailable_reason, container_preflight, find_image,
+    image_age, image_missing_reason, indeterminate_age_reason, normalize_reference, now_unix,
+    parse_image_list, source_stamps, stale_image_reason, stamps_for, unreadable_inspect_reason,
+    unverified_age_reason, BuiltImage, ContainerImage, ImageAge, InspectExit, InspectFault,
+    SourceStamp, BUILT_IMAGES, FUTURE_BUILD_SLACK_SECS, PYTHON_EXEC_BUILD_INPUTS,
+    PYTHON_EXEC_BUILD_SCRIPT, PYTHON_EXEC_IMAGE, PYTHON_EXEC_SOURCE_DIRS,
 };
 pub use require::{dep_or_skip, first_unmet, host_probes, skip_unless_ready, Probe};
 

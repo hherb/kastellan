@@ -27,7 +27,6 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kastellan_sandbox::macos_container::{MacosContainer, DEFAULT_IMAGE};
@@ -36,40 +35,39 @@ use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 /// Skip the test if Apple `container` is unavailable on this host. Prints
 /// to stderr via `eprintln!` so `cargo test -- --nocapture` shows the
 /// reason. Same pattern as [`skip_if_no_seatbelt`] in `macos_smoke.rs`.
+///
+/// ⚠️ **This is the fourth copy of a container precondition, and the only one
+/// the micro-VM source guard cannot see** — that guard's census is
+/// `core/tests`, so a helper living in `sandbox/tests` is outside it by
+/// construction [[guard-shares-the-census-blind-spot]]. It cannot be replaced
+/// by the shared `kastellan_tests_common::microvm` preflight either:
+/// `tests-common` depends on `kastellan-sandbox`, so this crate's own tests
+/// using it would be a dependency cycle. What it CAN do is stop repeating the
+/// two defects #684 removed from the other three, which is what it now does.
+///
+/// It stays a `[SKIP]` with no REQUIRE knob deliberately: `alpine:3.20` is an
+/// upstream image with no source in this tree, so there is no staleness rule
+/// to enforce and nothing for a freshness gate to say.
 fn skip_if_no_container() -> bool {
     if let Err(e) = MacosContainer::probe() {
         eprintln!("\n[SKIP] Apple `container` probe failed: {e}\n");
         return true;
     }
-    if !alpine_image_is_cached() {
+    // ⚠️ `probe_image`, NOT a `container image list` substring scan. The old
+    // scan had both defects #684 retired from the `core/tests` copies: an
+    // `Err` from the spawn became "image absent" (sending the operator to a
+    // pull for a problem no pull fixes), and `starts_with("alpine")` matched
+    // any tag with that prefix, so a hand-tagged image certified the run.
+    // `probe_image` takes the tag as an argument, so there is nothing to
+    // match loosely, and it carries the CLI's own stderr in its error.
+    if let Err(e) = MacosContainer::probe_image(DEFAULT_IMAGE) {
         eprintln!(
-            "\n[SKIP] {DEFAULT_IMAGE} not in `container image list` — \
-             run `container image pull {DEFAULT_IMAGE}` to enable container smoke tests\n"
+            "\n[SKIP] {DEFAULT_IMAGE} unusable for the container smoke tests ({e}) — \
+             run `container image pull {DEFAULT_IMAGE}` if it is simply not pulled\n"
         );
         return true;
     }
     false
-}
-
-/// Returns true iff `container image list` shows the smoke-test image as
-/// already pulled. Tests skip on absence rather than triggering a multi-GB
-/// pull-on-CI surprise.
-fn alpine_image_is_cached() -> bool {
-    let output = match Command::new("container").args(["image", "list"]).output() {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Output is a fixed-width table with `alpine 3.20 <digest>` as one
-    // line per image. Substring match is enough for the smoke-test
-    // pre-check (we don't need to parse the table strictly).
-    text.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with("alpine") && trimmed.contains("3.20")
-    })
 }
 
 fn strict_policy() -> SandboxPolicy {

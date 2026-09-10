@@ -24,7 +24,8 @@
 //!
 //! * An `Err` from the spawn — CLI absent, system service down — became
 //!   "image not present", sending the operator to `build-image.sh` for a
-//!   problem no build can fix. [`image_or_reason`] separates the two.
+//!   problem no build can fix. [`cli_unavailable_reason`] and
+//!   [`image_missing_reason`] separate the two.
 //! * `contains("python-exec")` matches **any** tag containing that substring,
 //!   so a stale or hand-tagged image certified the run. [`find_image`] matches
 //!   a normalised, *exact* reference.
@@ -91,7 +92,7 @@ use std::path::PathBuf;
 pub use super::container_images::{
     built_image, find_image, normalize_reference, parse_image_list, source_stamps, stamps_for,
     BuiltImage, ContainerImage, BUILT_IMAGES, PYTHON_EXEC_BUILD_INPUTS, PYTHON_EXEC_BUILD_SCRIPT,
-    PYTHON_EXEC_SOURCE_DIRS,
+    PYTHON_EXEC_IMAGE, PYTHON_EXEC_SOURCE_DIRS,
 };
 
 /// A source file and its mtime, in seconds since the Unix epoch.
@@ -134,15 +135,24 @@ pub enum ImageAge {
     },
 }
 
+/// How much a build time may lead this host's clock before it is disbelieved.
+///
+/// Generous, because small skew between a build host and this one is normal
+/// and is not what this arm is for; an image from the future by more than an
+/// hour is a broken clock, not a rounding difference.
+pub const FUTURE_BUILD_SLACK_SECS: i64 = 3600;
+
 /// Compare the image's build time against the newest source mtime.
 ///
-/// Pure over injected stamps — the seam #680's review made mandatory, after
-/// finding that the impure half of the last such check could be replaced
-/// wholesale with nothing failing.
+/// Pure over injected stamps **and over `now_unix`** — the seam #680's review
+/// made mandatory, after finding that the impure half of the last such check
+/// could be replaced wholesale with nothing failing. Taking the clock as a
+/// parameter is what makes the future-build arm testable at all.
 pub fn image_age(
     built_unix: Option<i64>,
     sources: &[SourceStamp],
     unstat: &[PathBuf],
+    now_unix: i64,
 ) -> ImageAge {
     let Some(built_unix) = built_unix else {
         return ImageAge::Indeterminate {
@@ -163,6 +173,22 @@ pub fn image_age(
             ),
         };
     };
+    // ⚠️ An image that claims to have been built in the FUTURE is more
+    // suspicious than one built yesterday, not less — and a bare `>` silently
+    // certifies it forever. Clock skew is real here: the image is built inside
+    // a container on a cross-build host, and `container image save`/`load`
+    // moves images between machines. This is the one way the one-sided rule
+    // could quietly do the certifying it says it cannot do.
+    if built_unix > now_unix.saturating_add(FUTURE_BUILD_SLACK_SECS) {
+        return ImageAge::Indeterminate {
+            detail: format!(
+                "the image's build time ({}) is in the future relative to this host ({}), \
+                 so a clock is wrong somewhere and the age comparison proves nothing",
+                format_unix_date(built_unix),
+                format_unix_date(now_unix)
+            ),
+        };
+    }
     if newest.modified_unix > built_unix {
         // Positive evidence outranks incomplete coverage: if any source is
         // newer, the image cannot contain it whatever else went unread.
@@ -234,6 +260,99 @@ pub(crate) fn workspace_closure_dirs(package: &str) -> Result<Vec<String>, Strin
         }
     }
     Ok(dirs)
+}
+
+/// Why a `container image inspect` could not answer the question asked.
+///
+/// Two variants, because the two faults have **different remedies** and
+/// folding them is the same mistake as folding a CLI fault into an absent
+/// image (#684). A service that is down is fixed by starting it; a CLI whose
+/// output this gate can no longer read is fixed by changing this gate, and
+/// telling the operator to restart a service would waste their time exactly
+/// as `build-image.sh` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InspectFault {
+    /// The CLI could not be spawned, died on a signal, or exited with a
+    /// status this gate does not recognise. Remedy: the service.
+    Cli(String),
+    /// The CLI answered and the answer could not be read. Remedy: this gate.
+    Unreadable(String),
+}
+
+/// What a finished `container image inspect` says, before its stdout is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectExit {
+    /// Exit 0 — the image is present and its JSON is on stdout.
+    Present,
+    /// Exit 1 — the CLI read the image store cleanly, and the tag is not in
+    /// it. The one case a build or a pull actually fixes.
+    Absent,
+}
+
+/// The exit code Apple `container` uses for "this tag is not in the store".
+///
+/// ⚠️ Exit 1 is the absence signal and it is the **only** one. Measured on
+/// Apple `container` 1.1.0: an absent tag exits 1, a present tag exits 0, and
+/// a missing argument exits **64**. Treating every non-zero status as absence
+/// is #684's folding defect re-entering through the exit status instead of
+/// through the spawn — it sends an operator whose CLI changed under them to a
+/// ten-minute cross-build that cannot possibly help.
+const ABSENT_IMAGE_EXIT: i32 = 1;
+
+/// Classify a finished `container image inspect` by its exit status.
+///
+/// Pure, and deliberately **not** `cfg`-gated, so the classification is
+/// unit-testable on a host with no Apple `container` at all — the seam that
+/// makes the fault arms reachable. Before it existed, the only broken-inspect
+/// shape any test could reach was the one that arrives through
+/// [`parse_image_list`], while the exit-status arm was covered by nothing and
+/// reported as covered [[unreachable-success-path-proves-nothing]].
+///
+/// `stderr` rides along in the reason rather than being discarded: an error
+/// with no content is a defect multiplier (#660/#669).
+pub fn classify_inspect_exit(
+    code: Option<i32>,
+    stderr: &str,
+    command: &str,
+) -> Result<InspectExit, InspectFault> {
+    match code {
+        Some(0) => Ok(InspectExit::Present),
+        Some(ABSENT_IMAGE_EXIT) => Ok(InspectExit::Absent),
+        Some(other) => Err(InspectFault::Cli(format!(
+            "`{command}` exited {other}{}",
+            trailing_detail(stderr)
+        ))),
+        // No code at all means a signal killed it, which is never an absent
+        // image and must not be reported as one.
+        None => Err(InspectFault::Cli(format!(
+            "`{command}` was killed by a signal{}",
+            trailing_detail(stderr)
+        ))),
+    }
+}
+
+/// `": <one-line stderr>"`, or nothing when the process said nothing.
+fn trailing_detail(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", crate::skip::one_line(trimmed))
+    }
+}
+
+/// Why the CLI answered in a shape this gate cannot read.
+///
+/// ⚠️ **Not** [`cli_unavailable_reason`]: no `container system start` and no
+/// image build fixes a schema change, and both were what the operator used to
+/// be told. The remedy named here is the only one that applies — the gate.
+pub fn unreadable_inspect_reason(reference: &str, detail: &str) -> String {
+    format!(
+        "the `container` CLI answered for `{reference}` in a shape this freshness gate \
+         cannot read ({}); the gate needs updating — no service restart and no image \
+         build will change it",
+        crate::skip::one_line(detail)
+    )
 }
 
 /// Why the `container` CLI itself cannot be used.
@@ -330,6 +449,19 @@ pub fn indeterminate_age_reason(reference: &str, detail: &str) -> String {
     )
 }
 
+/// This host's wall clock, seconds since the Unix epoch.
+///
+/// The single impure input to the age rule, injected at the one call site so
+/// [`image_age`] stays pure. A clock before the epoch reads as 0, which is
+/// only reachable on a host whose clock is already unusable.
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
+}
+
 /// A Unix timestamp as a bare `YYYY-MM-DD HH:MM` UTC stamp, for messages.
 ///
 /// Deliberately coarse: the operator needs "June, and my edit was September",
@@ -354,10 +486,11 @@ fn format_unix_date(unix: i64) -> String {
 /// The order is the order an operator can act on:
 ///
 /// 1. `probe` — is the CLI and its system service usable at all?
-/// 2. `inspect` — is *this* image present, and when was it built? An `Err` is
-///    a **CLI fault**; `Ok(None)` is an absent image. Conflating the two is
-///    #684, which is why the two states have different types rather than
-///    different values.
+/// 2. `inspect` — is *this* image present, and when was it built? `Ok(None)`
+///    is an absent image; an `Err` is a fault, and [`InspectFault`] splits it
+///    again into "the CLI could not answer" and "the CLI answered and this
+///    gate could not read it". Conflating any of the three is #684, which is
+///    why they are different types rather than different values.
 /// 3. `age` — can it contain the code under test? (#687)
 ///
 /// The last is last because it is the only one that can say the run would be
@@ -370,7 +503,7 @@ fn format_unix_date(unix: i64) -> String {
 pub fn container_preflight(
     reference: &str,
     probe: impl FnOnce() -> Result<(), String>,
-    inspect: impl FnOnce() -> Result<Option<ContainerImage>, String>,
+    inspect: impl FnOnce() -> Result<Option<ContainerImage>, InspectFault>,
     age: impl FnOnce(&ContainerImage, &BuiltImage) -> ImageAge,
     unmet: impl Fn(&str) -> bool,
     warn: impl Fn(&str) -> bool,
@@ -385,7 +518,14 @@ pub fn container_preflight(
         // two is exactly #684, and it is why this is a `Result<Option<_>>`
         // rather than an `Option<_>`.
         Ok(None) => return unmet(&image_missing_reason(reference)),
-        Err(e) => return unmet(&cli_unavailable_reason(&e)),
+        // The two faults have different remedies, so they get different
+        // messages. Folding them would repeat #684 one layer up: a schema
+        // change is not fixed by starting a service, any more than a stopped
+        // service is fixed by building an image.
+        Err(InspectFault::Cli(e)) => return unmet(&cli_unavailable_reason(&e)),
+        Err(InspectFault::Unreadable(e)) => {
+            return unmet(&unreadable_inspect_reason(reference, &e))
+        }
     };
     // An image this repo does not build has no source closure to be stale
     // against, so the age check is not merely ignored — it is never ASKED.
@@ -397,6 +537,16 @@ pub fn container_preflight(
     };
     match age(&image, built) {
         ImageAge::NewerThanSources { unstat } if unstat.is_empty() => false,
+        // ⚠️ The Firecracker twin PANICS here unconditionally, and this tier
+        // deliberately does not. That rule's written justification is "these
+        // suites are `#[ignore]`d, so reaching this code means an operator
+        // explicitly asked for a VM run" — and that premise is FALSE here:
+        // all eight container tests run on a plain `cargo test --workspace`.
+        // So the same panic would turn every sweep on every Mac with the CLI
+        // installed red on a stale image. Routing through `unmet` keeps both
+        // behaviours instead: `[SKIP]` by default, panic under REQUIRE.
+        // Operator's decision, 2026-09-09; pinned by
+        // `a_stale_image_is_an_unmet_precondition_not_a_warning`.
         ImageAge::Stale { built_unix, newest } => {
             unmet(&stale_image_reason(reference, built_unix, &newest, built.build_script))
         }
@@ -416,10 +566,14 @@ pub fn container_preflight(
 /// clean Mac run for exactly this reason, in the mirror direction.
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{container_preflight, find_image, image_age, parse_image_list, ContainerImage};
+    use super::{
+        classify_inspect_exit, container_preflight, find_image, image_age, parse_image_list,
+        ContainerImage, InspectExit, InspectFault,
+    };
 
-    /// Look one image up: `Ok(Some)` present, `Ok(None)` absent, `Err` a CLI
-    /// fault.
+    /// Look one image up: `Ok(Some)` present, `Ok(None)` absent, `Err` a
+    /// fault — [`InspectFault::Cli`] when the CLI could not answer,
+    /// [`InspectFault::Unreadable`] when it answered unintelligibly.
     ///
     /// Uses `container image inspect`, via the **production** argv producer
     /// [`kastellan_sandbox::macos_container::build_image_inspect_argv`] rather
@@ -432,21 +586,28 @@ mod macos {
     /// `container image list` scan the three suites used to do. That scan is
     /// also what made the substring defect possible: `inspect` takes the tag
     /// as an argument, so there is nothing to match loosely.
-    pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, String> {
+    pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, InspectFault> {
         let argv = kastellan_sandbox::macos_container::build_image_inspect_argv(reference);
+        let command = argv.join(" ");
         let out = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(std::process::Stdio::null())
             .output()
-            .map_err(|e| format!("could not spawn `{}`: {e}", argv.join(" ")))?;
-        // Measured: `container image inspect <absent-tag>` exits 1, and the
-        // same command on a present tag exits 0 with the image's JSON. The
-        // exit status is therefore the presence signal, and no output is
-        // matched loosely anywhere.
-        if !out.status.success() {
-            return Ok(None);
+            .map_err(|e| InspectFault::Cli(format!("could not spawn `{command}`: {e}")))?;
+        // The exit status is the presence signal, and ONLY exit 1 means
+        // absence — see `ABSENT_IMAGE_EXIT`. The classification is a pure
+        // function so its fault arms are reachable from a unit test on any
+        // host; this wiring must stay thin enough to have nothing of its own
+        // to get wrong.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match classify_inspect_exit(out.status.code(), &stderr, &command)? {
+            InspectExit::Absent => return Ok(None),
+            InspectExit::Present => {}
         }
-        let images = parse_image_list(&String::from_utf8_lossy(&out.stdout))?;
+        // A CLI that answered but cannot be parsed is `Unreadable`, never a
+        // service fault: the remedy is this gate, not `container system start`.
+        let images = parse_image_list(&String::from_utf8_lossy(&out.stdout))
+            .map_err(InspectFault::Unreadable)?;
         // Re-check the name the CLI handed back rather than trusting that it
         // answered the question asked. A record whose reference does not match
         // is reported as absent, which is the fail-closed direction.
@@ -476,7 +637,7 @@ mod macos {
             || inspect_image(reference),
             |image, built| {
                 let (stamps, unstat) = super::stamps_for(built);
-                image_age(image.created_unix, &stamps, &unstat)
+                image_age(image.created_unix, &stamps, &unstat, super::now_unix())
             },
             super::super::report_unmet_microvm,
             super::super::report_caveat_microvm,

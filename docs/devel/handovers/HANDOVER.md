@@ -7,13 +7,18 @@
 > [`archive/handover_20260909_684_pre-prune.md`](archive/handover_20260909_684_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
-**Last updated:** 2026-09-09 (session 2) · **`main` HEAD:** `0939e80c` —
+**Last updated:** 2026-09-10 (review round on PR
+[#688](https://github.com/hherb/kastellan/pull/688)) · **`main` HEAD:** `0939e80c` —
 [#685](https://github.com/hherb/kastellan/pull/685) MERGED (#682, one producer for
 `target/release/`), on top of [#683](https://github.com/hherb/kastellan/pull/683) `ec9a2e94` (#679,
 the micro-VM REQUIRE knob + its source guard) and
 [#680](https://github.com/hherb/kastellan/pull/680) `fb560ab7` (#667, the rootfs freshness gate). ·
-**OPEN BRANCH: `fix/684-687-macos-container-parity`** — see
-[This session](#this-session-684--687--the-macos-container-tier-gets-what-the-linux-one-has). ·
+**OPEN BRANCH: `fix/684-687-macos-container-parity`** (PR
+[#688](https://github.com/hherb/kastellan/pull/688), **review round applied**) — see
+[This session](#this-session-684--687--the-macos-container-tier-gets-what-the-linux-one-has) and
+[the review round](#this-session-2-the-review-round-on-688). ⚠️ **A full two-host sweep is OWED
+before merge** — the Mac attempt collided with another session's concurrent workspace test run; see
+the gate table. ·
 **DGX RUNNING `fb560ab7`** — behind `main`, but everything since is tests + scripts + docs, so the
 running daemon is unaffected; redeploy at the next core change. ⚠️ **Its eight rootfs images were
 rebuilt 2026-09-08** and now bake the `--workspace` init (`8a21877a…`).
@@ -116,15 +121,115 @@ This is #667's thesis reproducing exactly, on the other platform.
   `container image inspect` through the production argv producer `build_image_inspect_argv`, so this
   crate does not become a fourth spelling (#669's "count the producers"). One call yields **both**
   facts: presence (exit status) and build time (JSON).
-- ⚠️ **Widening the source guard's discovery by helper NAME was wrong, and the tree told me so.**
+- ⚠️ **Widening the source guard's discovery by helper NAME was wrong, and the tree told me so —
+  and then the FIX for it was wrong in the mirror direction.**
   `core/tests/gliner_relex_e2e.rs` has its own private `fn skip_if_no_container()` for the
   gliner-relex worker image — different container, different knob (#653/#664). Keying on the name
-  swept it in and reported **ten violations in a file that is correct as written**. Discovery now
-  requires **both** a `MICROVM_PREFLIGHTS` name **and** the `kastellan_tests_common::microvm` import;
-  measured, that is exactly the 15 Firecracker + 3 container suites and nothing else.
+  swept it in and reported **ten violations in a file that is correct as written**. The first
+  remedy required **both** a `MICROVM_PREFLIGHTS` name **and** the literal
+  `kastellan_tests_common::microvm` import — which review found was **fail-OPEN and strictly
+  narrower than the rule it replaced**: that literal is absent from
+  `use kastellan_tests_common::{microvm::skip_if_no_container, NoopAuditSink};`, the brace-grouped
+  form any tidy-up of two adjacent imports produces, so merging two imports would have silently
+  removed a suite from every assertion built on the scan.
+  ⚠️ **The lesson is that "require a second condition" is not automatically a tightening** — it
+  tightens against the shapes you thought of and loosens against every spelling you did not.
+  Discovery is now a pure predicate `guard::gates_on_shared_preflight(src)`: names one of
+  `MICROVM_PREFLIGHTS` **and does not define one**. That is a *negative* test on the actual
+  collision rather than a positive test on one import spelling, so it depends on no spelling at
+  all. **Measured both ways: old rule 18 files, new rule the same 18, empty symmetric difference**
+  — and it is now tested against three import shapes plus the gliner shape, none of which
+  `core/tests` contains [[guard-shares-the-census-blind-spot]].
 - **#683's fail-closed guard caught the new helper by itself.** Adding `skip_if_no_container` failed
   `the_banned_roster_matches_the_helpers_that_actually_exist` until it was declared REQUIRE-aware —
   the shape rule working as designed on a helper written after it.
+
+### This session (2): the review round on #688
+
+Four specialist reviewers over `git diff main...HEAD`, every load-bearing claim re-verified against
+the code before it was acted on. Two reviewers were **wrong in opposite directions on the same
+finding** and both corrections mattered, which is the round's own lesson.
+
+⚠️ **The headline gate was reported as a defect and is not one — it is a recorded decision, and the
+review found the record.** A `Stale` verdict `[SKIP]`s a plain `cargo test` and panics under
+`REQUIRE`, while the Firecracker twin panics *unconditionally*. That asymmetry is deliberate
+(`a_stale_image_is_an_unmet_precondition_not_a_warning`, dated 2026-09-09). **What survives is one
+fact that was not in view when it was taken:** the Firecracker rule's written justification is *"and
+these suites are `#[ignore]`d, so reaching this code means an operator explicitly asked"* — and that
+premise is **false here**. All 8 container tests run on a plain `cargo test --workspace`
+(measured: 4 + 3 + 1 tests, **0** `#[ignore]`, against 7/7 on `python_exec_firecracker_e2e`). So the
+two tiers make the same trade against different backgrounds. Recorded in the code at the arm rather
+than changed.
+
+⚠️ **The `#684` folding defect had a SECOND door, and the suite reported it as covered.**
+`inspect_image` mapped **every** non-zero exit to `Ok(None)` — "image not present, run
+`build-image.sh`" — discarding stderr. Measured on this Mac: an absent tag exits **1**, but a usage
+error exits **64**, so a CLI interface change sends the operator to a ten-minute cross-build that
+cannot help. ⚠️ **And `a_broken_image_inspect_is_not_reported_as_a_missing_image` was green
+throughout**, because it injects its `Err` directly into the closure: the only fault the real code
+could produce came through `parse_image_list` (exit **0** with garbage — a missing plugin, measured),
+while the exit-status half was reachable by nothing. **The pure half was proven over an input the
+impure half could only produce for one of the two causes**
+[[unreachable-success-path-proves-nothing]]. Fixed by extracting `classify_inspect_exit` as a pure,
+un-`cfg`-gated function, so both arms are reachable from any host.
+
+- **A fault needs the right remedy, not just a reason.** `inspect_image`'s `Err` channel carried two
+  unrelated causes and `container_preflight` rendered both as *"Apple `container` is not usable;
+  start it with `container system start`"* — so a **schema change** was reported as a **service
+  fault**. `InspectFault::{Cli, Unreadable}` splits them, which is the same rule
+  `cli_unavailable_reason`'s own doc states and was violating in the other direction.
+- ⚠️ **Three silent losses in the walker that the module's own contract forbids.** `entries.flatten()`
+  dropped an unreadable `DirEntry` from **both** lists, so the file the gate could no longer see was
+  also the file it stopped admitting it could not check; an unreadable mtime was clamped to `0`,
+  the one value guaranteed never to trigger `Stale`, and did not reach `unstat` either; and
+  `path.is_dir()` follows symlinks, so a link at an ancestor recurses until the stack ends. All
+  three now reach `unstat` or use `entry.file_type()`.
+- ⚠️ **A future build time silently certified forever.** `built >= newest` had no upper bound, and
+  the image is built on a cross-build host and can be moved with `container image save`/`load`. That
+  was the one way the deliberately one-sided rule could quietly do the certifying it says it cannot.
+  `FUTURE_BUILD_SLACK_SECS` (1 h) turns it into `Indeterminate` naming the clock.
+- ⚠️ **The registry's reference was a hand-written copy, checked against another hand-written copy.**
+  `BUILT_IMAGES` spelled `"kastellan/python-exec:dev"` while the suites pass
+  `python_exec::DEFAULT_IMAGE`, and the test pinning it compared against a *third* literal in the
+  test file. An unregistered reference is never age-checked **and that arm emits nothing at all** —
+  so bumping the daemon's tag would have deleted the #687 gate from all three suites with **no change
+  to any test output**. Now `PYTHON_EXEC_IMAGE = kastellan_core::workers::python_exec::DEFAULT_IMAGE`:
+  a compile-time identity, not a test we hope catches it.
+- **A parse that reads nothing is not an empty store.** `filter_map` dropped every record lacking
+  `configuration.name`, yielding `Ok(vec![])` → `find_image` → `None` → "not present; build it".
+  Non-empty input parsing to nothing is now an error naming the shape.
+- ⚠️ **Every fixture in the crate was a `container image list` capture and the production path runs
+  `container image inspect`.** They share a shape, so it worked — but nothing pinned the command the
+  code actually runs, which is this branch's own thesis pointed at itself
+  [[stale-fixture-turns-a-gate-into-a-formality]]. A real `inspect` capture (1.1.0, 2026-09-10) is
+  now a fixture; its provenance line says it is re-serialised, not byte-verbatim, because claiming
+  otherwise would be the overclaim the file is otherwise careful to avoid.
+- **The fourth container helper.** `sandbox/tests/macos_container_smoke.rs` still hand-rolled
+  `container image list` + `starts_with("alpine")`. It is **outside the guard's census by
+  construction** (that census is `core/tests`) and cannot use the shared preflight at all, because
+  `tests-common` depends on `kastellan-sandbox` — a cycle. It now calls the production
+  `MacosContainer::probe_image`, so it stops repeating the two defects even though nothing can force
+  it to.
+- **Doc claims the code contradicted:** a dangling `[`image_or_reason`]` (no such item anywhere);
+  `build_image_inspect_argv` still saying *"we don't read its stdout"* when #687 now parses it for
+  `creationDate`; `lockdown_env.rs` pointing at what is now an **alias** and asserting *"the one
+  production setter is the Firecracker backend"* when there are **two**; a `SOURCE_NEWER` comment
+  reading 2026-09-03 for a constant that decodes to 09-04; four intra-doc links broken on one host
+  each (a `cfg`-gated module can never resolve on both); `LANDLOCK_PROFILE_NONE` created and then not
+  used by `plan.rs`; and one doc comment **orphaned onto the wrong item** in `skip.rs` by the
+  ephemeral-port fix, leaving the test it described undocumented.
+- **Two rosters that guarded nothing.** `MICROVM_PREFLIGHTS` was cross-checked against **nothing**,
+  while the module docs claimed "a third preflight cannot be added silently"; it is now asserted to
+  be a subset of `REQUIRE_AWARE`.
+
+**Deferred, filed:** [#689](https://github.com/hherb/kastellan/issues/689) — the macOS Landlock
+opt-out has **no drift detector**, and the asymmetry runs the wrong way: the Firecracker guest kernel
+is a sha256 pin *this repo controls* whose bump fails a test, while Apple's moves on a routine
+`brew upgrade`. When Apple ships Landlock the FS layer stays off forever with every gate greener than
+before. [#690](https://github.com/hherb/kastellan/issues/690) — **no micro-VM preflight subprocess
+has a timeout**, and Apple `container` is daemon-backed, so a wedged apiserver hangs a sweep with no
+`[SKIP]`, no `[WARN]`, no panic and no message at all. Parity gap, not a regression: the Firecracker
+`bash` shell-out has it too.
 
 ### Merged arcs — only what still binds
 
@@ -471,7 +576,8 @@ re-derives them: egress #242, #251, #304 (needs a controllable TLS origin), #260
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac + DGX** (this branch, #684 + #687 — **the gate that stands**) | **`0fa5b8b6`** | **Mac full sweep** (the host this tier runs on): `cargo test --workspace --no-fail-fast --locked -- --nocapture` **4104 / 0 / 29**, **177** suites, `TEST_EXIT=0`, **0 `[WARN]`**. **DGX full sweep: 4239 / 0 / 61**, 177 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner tier, held), **0 `[WARN]`**. **Both deltas reconcile exactly.** DGX **+33** over the 4206 below — the container tests, all of which run on Linux because the decision logic is deliberately *not* `cfg`-gated; the 3 `sandbox::macos_container` tests are macOS-only, which is why the Mac gains 36 and the DGX 33. ⚠️ **+1 ignored (60 → 61) is a DOC-TEST, not a test that stopped running** — `container.rs` carries exactly one ```` ```ignore ```` fence (the `[SKIP]`-folding snippet in its module docs) and libtest counts it as an ignored doc-test [[ignore-fenced-doc-example-moves-ignored-count]]. `kastellan-tests-common` **326** (Mac) vs **324** (DGX): the 2 are the pre-existing macOS-only `serial.rs` tests. ⚠️ **349 `[SKIP]` on the Mac, 326 of them "no Postgres install found"** — pre-existing (Postgres.app paths are deliberately off the search list), and **zero** of them are the container tier, which now RUNS. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 8 / 0** across all 3 suites, **0 `[SKIP]`, 0 `[WARN]`** — first time they have exercised current code since June. **Three live negative controls on the real host:** (a) the 2026-06-26 image `[SKIP]`ed by default naming the source and remedy, and **panicked** under REQUIRE; (b) with `container system stop` the reason named `container system start`, **not** `build-image.sh` — the #684 folding defect, which before this change printed "alpine:3.20 image not present"; (c) the rebuilt image turned all four python-exec tests **red** at `Protocol(EarlyExit)`, and the Landlock injection turned them green | Mac `--workspace --all-targets --locked -D warnings` exit 0, **234** crates after `touch`; DGX the same, exit 0 over the correct **4**-crate reverse-dependency set (sandbox, core, tests-common, db). `kastellan-sandbox` also cross-checked **and** cross-clippied for `aarch64-unknown-linux-gnu` from the Mac, exit 0, since `LANDLOCK_PROFILE_ENV` is now shared by both backends | **4** DGX (gliner), **349** Mac (326 absent-Postgres). **0** `[WARN]` |
+| **Mac** (this branch, **after the review round**) | **working tree** | ⚠️ **The full Mac sweep was ATTEMPTED and ABANDONED, and saying so is the point** — a second `cargo test --workspace` from another session was running on this host throughout (a different rustup toolchain, `1.96.0`, its own target dir). Under that contention `cli_entities_e2e` sat at **0 % CPU for 12 minutes** with the load average falling from 26 to 3.8, which is the wedge signature and not the contention one [[mac-fresh-large-binaries-hang-in-dyld]] — **and it is neither**: run alone immediately afterwards it passed **6 / 0 in 5.77 s**. Nothing in this round touches it. A number produced under a competing sweep is not a gate, so none is recorded; the DGX row above still stands at `5afc88cd` and **a full two-host sweep is owed before merge**. What WAS measured, all foreground, full logs under `$HOME`: `kastellan-tests-common --lib` **336 / 0** (326 → 336, **+10**, every one cross-platform, so the DGX gains 10 too); `kastellan-sandbox --lib` **103 / 0**. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 8 / 0** across all 3 suites (4 + 3 + 1), **0 `[SKIP]`, 0 `[WARN]`** — the tier this round changes, exercising the new `classify_inspect_exit` path on the real host. ⚠️ **Live negative control on the new rule, measured on this Mac at Apple `container` 1.1.0:** a present tag exits **0**, an absent tag exits **1**, and `container image inspect` with no argument exits **64** — so the pre-review code reported a CLI usage fault as *"the image is not present; build it with build-image.sh"*, and the new classifier reports it as a CLI fault carrying the CLI's own stderr. **Discovery-rule control:** the old import-based rule and the new definition-based one were enumerated over the real `core/tests` and both return the **same 18 files, empty symmetric difference** — the fail-open shape is gone with no change to what is scanned | `clippy -p kastellan-tests-common -p kastellan-sandbox -p kastellan-core --all-targets -D warnings` exit **0**. `cargo doc`: the **4** intra-doc links this round fixed are gone; the 17 that remain are all pre-existing `crate::linux_*` links unresolvable on macOS, none on a line this round wrote ([#638](https://github.com/hherb/kastellan/issues/638)) | **0** `[SKIP]`, **0** `[WARN]` in the container tier |
+| **Mac + DGX** (this branch, #684 + #687 — **the gate that stands**) | **`0fa5b8b6`** | **Mac full sweep** (the host this tier runs on): `cargo test --workspace --no-fail-fast --locked -- --nocapture` **4104 / 0 / 29**, **177** suites, `TEST_EXIT=0`, **0 `[WARN]`**. **DGX full sweep: 4239 / 0 / 61**, 177 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner tier, held), **0 `[WARN]`**. ⚠️ **The deltas do NOT reconcile as originally written, and the review caught it.** The container tests are **34** cross-platform (`container_tests` + `container_images_tests`, neither `cfg`-gated) plus **3** macOS-only in `sandbox::macos_container` — so the Mac gains **37** and the DGX **34**, not 36 and 33. Those were the figures at **`5afc88cd`**; the next commit `b3558fc9` added one more cross-platform test and **the DGX row was never re-measured**, so `4239` is a `5afc88cd` number presented under an `0fa5b8b6` label and the reconciled figure is **4240**. The handover's own `kastellan-tests-common` numbers say so independently: 292 → **326** is +34. ⚠️ **This is the "prose accurate at commit *N* shipped stale at *N+3*" failure reproducing four lines below the warning about it** — a two-host gate must re-measure BOTH hosts at the revision it claims, or label each with the revision it actually ran at. ⚠️ **+1 ignored (60 → 61) is a DOC-TEST, not a test that stopped running** — `container.rs` carries exactly one ```` ```ignore ```` fence (the `[SKIP]`-folding snippet in its module docs) and libtest counts it as an ignored doc-test [[ignore-fenced-doc-example-moves-ignored-count]]. `kastellan-tests-common` **326** (Mac) vs **324** (DGX): the 2 are the pre-existing macOS-only `serial.rs` tests. ⚠️ **349 `[SKIP]` on the Mac, 326 of them "no Postgres install found"** — pre-existing (Postgres.app paths are deliberately off the search list), and **zero** of them are the container tier, which now RUNS. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 8 / 0** across all 3 suites, **0 `[SKIP]`, 0 `[WARN]`** — first time they have exercised current code since June. **Three live negative controls on the real host:** (a) the 2026-06-26 image `[SKIP]`ed by default naming the source and remedy, and **panicked** under REQUIRE; (b) with `container system stop` the reason named `container system start`, **not** `build-image.sh` — the #684 folding defect, which before this change printed "alpine:3.20 image not present"; (c) the rebuilt image turned all four python-exec tests **red** at `Protocol(EarlyExit)`, and the Landlock injection turned them green | Mac `--workspace --all-targets --locked -D warnings` exit 0, **234** crates after `touch`; DGX the same, exit 0 over the correct **4**-crate reverse-dependency set (sandbox, core, tests-common, db). `kastellan-sandbox` also cross-checked **and** cross-clippied for `aarch64-unknown-linux-gnu` from the Mac, exit 0, since `LANDLOCK_PROFILE_ENV` is now shared by both backends | **4** DGX (gliner), **349** Mac (326 absent-Postgres). **0** `[WARN]` |
 | **DGX** (#685/#682 **after its review round** — **the gate that stands**; merged as `0939e80c`) | **`10cb6761`** | **Full sweep:** `cargo test --workspace` **4206 / 0 / 60**, **177** suites, `TEST_EXIT=0`, **4 `[SKIP]`** (all the gliner tier, held) and **0 `[WARN]`**. **The delta reconciles exactly: +11** over the 4195 below — the review's new tests, all in `kastellan-tests-common` (Mac 281 → 292) — and **ignored is unchanged at 60**. **Firecracker tier, `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 30 / 0** across all **15** suites (the set is discovered by grepping `core/tests/` for the micro-VM preconditions, not hand-listed), every suite exit 0, **0 `[WARN]`**, 2 `KASTELLAN_MATRIX_FC_LIVE_E2E` opt-in `[SKIP]`s — run **after a plain `bash scripts/build-release.sh`**. ⚠️ **These tests are `#[ignore]`d and need `-- --ignored`**: the first attempt without it reported `3 passed, 28 ignored` and every suite exit 0, which is a green run that booted no VM at all. ⚠️ **The C0 negative control ran on the real host against the real image:** `matrix.ext4` bakes `d7e6aee6…`, `build-release.sh` reproduces exactly that, and a bare `cargo build --release --workspace` then flipped `target/release/kastellan-worker-matrix` to `f606683b…` — a digest no image bakes — in **0.45 s with no compilation**, while the init stayed at `8a21877a…`. Blast radius is exactly one binary. A second `build-release.sh` restored it. Plus a live mutation control on the Mac: a `cargo build` planted **two hops away** in the sourced `lib/guest-kernel.sh` was caught and named, which the pre-review text scan could not see | `--workspace --all-targets --locked -D warnings` exit 0 on the Mac; DGX sweep `TEST_EXIT=0` | **4**, gliner tier. **0** `[WARN]` |
 | **DGX** (#683/#679 after its review round) | **`1c17eb4d`** | **Full sweep:** `cargo test --workspace --no-fail-fast` **4189 / 0 / 60**, **177** suites, `TEST_EXIT=0`, **4 `[SKIP]`** (all the gliner tier, held) and **0 `[WARN]`**. **Both deltas reconcile exactly.** **+21 passed** over the 4168 below — the review's new tests, all in `kastellan-tests-common` (Mac 254 → 275). ⚠️ **−1 ignored (61 → 60) is a doc-test that MOVED, not a test that started running:** the source guard was split out of `require.rs` into a `#[cfg(test)] mod guard`, and rustdoc does not collect doc-tests from a `cfg(test)` module, so `EXEMPT_WINDOW`'s ```` ```ignore ```` fence stopped being counted. Same mechanism as the +4 recorded below, in reverse. [[ignore-fenced-doc-example-moves-ignored-count]] **Two live negative controls**, both re-planted and watched to fail: the wrapped `[SKIP]` in `net_demo_firecracker_egress_e2e.rs` (rule 2) and deleting the tree's only `REQUIRE-EXEMPT` marker (the exemption path) | `--workspace --all-targets --locked -D warnings` exit 0 on the DGX; Mac `-p kastellan-tests-common --all-targets -D warnings` exit 0 | **4**, gliner tier. **0** `[WARN]` |
 | **DGX** (#680 after its review round) | **`4f268c14`** | **Full sweep:** `cargo test --workspace --no-fail-fast --locked -- --nocapture` **4142 / 0 / 57**, **177** suites, `TEST_EXIT=0`, **4 `[SKIP]`** (all the gliner tier, held) and **0 `[WARN]`**. **The delta reconciles exactly: +34** over the 4108 below, all in `kastellan-tests-common` (Linux **192 → 226**). **Linux gate** (the check CI does *not* run on this branch — `linux-check` last fired on `2411d241`, so it was run by hand): `cargo check --workspace --all-targets` exit 0, `clippy --workspace --all-targets -D warnings` exit 0, `cargo test -p kastellan-tests-common` **226 / 0**. ⚠️ **226 on Linux vs 228 on the Mac, and the 2 are pre-existing** — `serial.rs` is `cfg(target_os = "macos")`; the `microvm::` test set is **85 on both**, so nothing in this change compiles out on either host. **Firecracker gate** with `KASTELLAN_MICROVM_REQUIRE_E2E=1`: **10 / 0** across kv-demo + python-exec + web-fetch, **0 `[SKIP]`, 0 `[WARN]`** — and under REQUIRE a `Fresh`-with-caveats or `Indeterminate` verdict would have **panicked**, so this is positive evidence that both baked binaries in each image were actually compared, not that the check was skipped. **Live negative control:** appending one byte to `target/release/kastellan-microvm-init` turned the suite **red** with the full operator message naming `build-kv-demo-rootfs.sh` **and** `rebuild-all-rootfs.sh`; restoring the binary (digest re-verified identical to the baked copy) turned it green again | Mac: `--workspace --all-targets -D warnings` exit 0, **zero** warnings; `cargo doc` warnings **15 → 9**, none left in `microvm/` (the rest pre-existing, tracked by [#638](https://github.com/hherb/kastellan/issues/638)) | **0** `[SKIP]`, **0** `[WARN]` |

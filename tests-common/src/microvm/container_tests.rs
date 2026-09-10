@@ -12,10 +12,10 @@
 use std::path::PathBuf;
 
 use super::container::{
-    cli_unavailable_reason, container_preflight, image_age, image_missing_reason,
-    indeterminate_age_reason,
-    stale_image_reason, unverified_age_reason, ContainerImage, ImageAge, SourceStamp,
-    PYTHON_EXEC_BUILD_SCRIPT,
+    classify_inspect_exit, cli_unavailable_reason, container_preflight, image_age,
+    image_missing_reason, indeterminate_age_reason, stale_image_reason,
+    unreadable_inspect_reason, unverified_age_reason, ContainerImage, ImageAge, InspectExit,
+    InspectFault, SourceStamp, FUTURE_BUILD_SLACK_SECS, PYTHON_EXEC_BUILD_SCRIPT,
 };
 
 /// Record what a preflight step was asked, so the ORDER and the
@@ -36,10 +36,19 @@ impl Calls {
 
 /// 2026-06-26T03:54:57Z, the measured build time of this Mac's image.
 const IMAGE_BUILT: i64 = 1_782_446_097;
-/// 2026-09-03T19:15:00Z, ~the measured mtime of the newest worker source.
+/// 2026-09-04T19:15:00Z, just past the measured mtime of the newest worker
+/// source (2026-09-03). Any value after `IMAGE_BUILT` exercises the arm; the
+/// exact instant is not load-bearing, but a comment that says "measured"
+/// must decode to what it claims.
 const SOURCE_NEWER: i64 = 1_788_549_300;
 /// 2026-06-25T21:49:00Z, ~the measured mtime of the Containerfile.
 const SOURCE_OLDER: i64 = 1_782_424_140;
+
+/// A wall clock well after every fixture instant, so the future-build arm
+/// stays out of the way of the tests that are not about it.
+///
+/// 2027-01-01T00:00:00Z.
+const NOW: i64 = 1_798_761_600;
 
 fn stamp(path: &str, modified_unix: i64) -> SourceStamp {
     SourceStamp {
@@ -62,6 +71,7 @@ fn an_image_older_than_a_source_is_stale() {
             stamp("workers/python-exec/src/exec/mod.rs", SOURCE_NEWER),
         ],
         &[],
+        NOW,
     );
     match age {
         ImageAge::Stale { built_unix, newest } => {
@@ -85,6 +95,7 @@ fn an_image_newer_than_every_source_is_not_certified_fresh() {
         Some(SOURCE_NEWER),
         &[stamp("workers/python-exec/src/exec/mod.rs", IMAGE_BUILT)],
         &[],
+        NOW,
     );
     assert_eq!(age, ImageAge::NewerThanSources { unstat: vec![] });
 }
@@ -98,6 +109,7 @@ fn a_source_with_the_same_mtime_as_the_image_is_not_stale() {
         Some(IMAGE_BUILT),
         &[stamp("workers/python-exec/src/main.rs", IMAGE_BUILT)],
         &[],
+        NOW,
     );
     assert_eq!(age, ImageAge::NewerThanSources { unstat: vec![] });
 }
@@ -111,6 +123,7 @@ fn a_stale_source_wins_over_an_unstat_able_one() {
         Some(IMAGE_BUILT),
         &[stamp("workers/python-exec/src/exec/mod.rs", SOURCE_NEWER)],
         &[PathBuf::from("Cargo.lock")],
+        NOW,
     );
     assert!(
         matches!(age, ImageAge::Stale { .. }),
@@ -126,6 +139,7 @@ fn unstat_able_sources_are_carried_into_the_fresh_arm() {
         Some(SOURCE_NEWER),
         &[stamp("workers/python-exec/src/main.rs", IMAGE_BUILT)],
         &[PathBuf::from("Cargo.lock")],
+        NOW,
     );
     assert_eq!(
         age,
@@ -137,7 +151,7 @@ fn unstat_able_sources_are_carried_into_the_fresh_arm() {
 
 #[test]
 fn an_image_with_no_timestamp_is_indeterminate() {
-    let age = image_age(None, &[stamp("workers/python-exec/src/main.rs", IMAGE_BUILT)], &[]);
+    let age = image_age(None, &[stamp("workers/python-exec/src/main.rs", IMAGE_BUILT)], &[], NOW);
     assert!(
         matches!(age, ImageAge::Indeterminate { .. }),
         "a missing image timestamp must not read as fresh"
@@ -150,7 +164,7 @@ fn no_readable_source_at_all_is_indeterminate_not_fresh() {
     // source" test is vacuously true, which would certify any image on a host
     // where the enumeration silently returned nothing — #683's "green whether
     // the loop found nothing or never ran".
-    let age = image_age(Some(IMAGE_BUILT), &[], &[PathBuf::from("Cargo.lock")]);
+    let age = image_age(Some(IMAGE_BUILT), &[], &[PathBuf::from("Cargo.lock")], NOW);
     assert!(
         matches!(age, ImageAge::Indeterminate { .. }),
         "zero comparable sources must not be a pass"
@@ -223,7 +237,7 @@ fn a_broken_image_inspect_is_not_reported_as_a_missing_image() {
     container_preflight(
         PY_IMAGE,
         || Ok(()),
-        || Err("inspect output is not JSON".to_string()),
+        || Err(InspectFault::Unreadable("inspect output is not JSON".to_string())),
         |_, _| panic!("the age must not be consulted when the inspect failed"),
         |reason| {
             *seen.borrow_mut() = reason.to_string();
@@ -458,3 +472,136 @@ fn every_reason_is_a_single_line() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The exit-status classification (#684, second door)
+// ---------------------------------------------------------------------------
+
+/// Only exit 1 means "absent"; every other status is a CLI fault.
+///
+/// ⚠️ **This is the arm the suite used to report as covered while nothing
+/// could reach it.** `a_broken_image_inspect_is_not_reported_as_a_missing_image`
+/// injects its `Err` directly into the closure, so it proves the preflight
+/// handles a fault — but the only fault the real `inspect_image` could
+/// produce came through `parse_image_list`. Every non-zero exit was mapped to
+/// `Ok(None)` before any parsing happened, so the exit-status half of the
+/// fault space was tested by nothing at all
+/// [[unreachable-success-path-proves-nothing]]. Classifying in a pure
+/// function is what makes it reachable from here.
+#[test]
+fn only_exit_one_is_an_absent_image() {
+    assert_eq!(
+        classify_inspect_exit(Some(0), "", "container image inspect x"),
+        Ok(InspectExit::Present)
+    );
+    assert_eq!(
+        classify_inspect_exit(Some(1), "Error: image not found", "container image inspect x"),
+        Ok(InspectExit::Absent)
+    );
+
+    // Measured on Apple `container` 1.1.0: a usage error exits 64. Reporting
+    // that as an absent image sends the operator to a ten-minute cross-build
+    // that cannot help — #684, one layer down from the spawn.
+    let fault = classify_inspect_exit(
+        Some(64),
+        "Error: Missing expected argument '<images> ...'",
+        "container image inspect",
+    )
+    .expect_err("exit 64 is a CLI fault, not an absent image");
+    match fault {
+        InspectFault::Cli(reason) => {
+            assert!(reason.contains("64"), "the status must survive: {reason}");
+            assert!(
+                reason.contains("Missing expected argument"),
+                "stderr must ride along, or the fault has no content: {reason}"
+            );
+        }
+        other => panic!("expected a CLI fault, got {other:?}"),
+    }
+}
+
+/// A signal death is never an absent image.
+#[test]
+fn a_signalled_inspect_is_a_cli_fault() {
+    let fault = classify_inspect_exit(None, "", "container image inspect x")
+        .expect_err("no exit code at all cannot mean the image is absent");
+    assert!(matches!(fault, InspectFault::Cli(_)));
+}
+
+/// The two fault kinds reach DIFFERENT remedies.
+///
+/// A schema change is not fixed by `container system start`, and saying so was
+/// the whole point of splitting the error. Before the split both rendered as
+/// "Apple `container` is not usable on this host", which named a remedy that
+/// could not apply.
+#[test]
+fn an_unreadable_answer_does_not_name_the_service_or_the_build() {
+    let seen = std::cell::RefCell::new(String::new());
+    container_preflight(
+        PY_IMAGE,
+        || Ok(()),
+        || Err(InspectFault::Unreadable("shape has changed".to_string())),
+        |_, _| panic!("the age must not be consulted when the inspect could not be read"),
+        |reason| {
+            *seen.borrow_mut() = reason.to_string();
+            true
+        },
+        |_| panic!("an unreadable inspect is not a warn-and-run"),
+    );
+    let reason = seen.borrow().clone();
+    assert!(
+        !reason.contains("container system start"),
+        "a schema change is not fixed by starting a service: {reason}"
+    );
+    assert!(
+        !reason.contains("build-image.sh"),
+        "nor by building an image: {reason}"
+    );
+    assert!(
+        reason.contains("shape"),
+        "the reason must carry its own detail: {reason}"
+    );
+    // And the direct renderer says the same thing.
+    let direct = unreadable_inspect_reason(PY_IMAGE, "shape has changed");
+    assert!(direct.contains(PY_IMAGE), "names the image: {direct}");
+}
+
+// ---------------------------------------------------------------------------
+// Clock skew (#687 residual)
+// ---------------------------------------------------------------------------
+
+/// An image built in the future certifies nothing, however new it looks.
+///
+/// A bare `built >= newest` comparison silently and permanently passes an
+/// image whose timestamp leads this host's clock — the one way the one-sided
+/// rule could quietly do the certifying its own docs say it cannot do.
+#[test]
+fn an_image_built_in_the_future_is_indeterminate_not_fresh() {
+    let age = image_age(
+        Some(NOW + FUTURE_BUILD_SLACK_SECS + 60),
+        &[stamp("workers/python-exec/src/main.rs", IMAGE_BUILT)],
+        &[],
+        NOW,
+    );
+    match age {
+        ImageAge::Indeterminate { detail } => assert!(
+            detail.contains("future"),
+            "the operator must be told a clock is wrong: {detail}"
+        ),
+        other => panic!("expected Indeterminate for a future build time, got {other:?}"),
+    }
+}
+
+/// Slack inside the tolerance is still a normal verdict.
+///
+/// The arm is for a broken clock, not for the seconds of drift between a
+/// build host and this one; firing on ordinary skew would make it noise.
+#[test]
+fn small_clock_drift_does_not_trip_the_future_arm() {
+    let age = image_age(
+        Some(NOW + FUTURE_BUILD_SLACK_SECS - 60),
+        &[stamp("workers/python-exec/src/main.rs", IMAGE_BUILT)],
+        &[],
+        NOW,
+    );
+    assert_eq!(age, ImageAge::NewerThanSources { unstat: vec![] });
+}

@@ -34,8 +34,11 @@ pub mod private_dir;
 /// crate cannot depend on the prelude, so *a* copy is unavoidable — but only
 /// one. It lives here, ungated, because **both** micro-VM backends need it and
 /// each runs on a different host:
-/// [`linux_firecracker::plan::GUEST_LANDLOCK_PROFILE_ENV`] (#669) and the
-/// macOS [`macos_container`] backend (#684/#687). Two `cfg`-gated copies could
+/// `linux_firecracker::plan::GUEST_LANDLOCK_PROFILE_ENV` (#669) and the
+/// macOS `macos_container` backend (#684/#687). ⚠️ Both are deliberately
+/// PLAIN code spans, not intra-doc links: each module is `cfg`-gated to one
+/// OS, so a link resolves on exactly one host and emits a rustdoc warning on
+/// the other. Two `cfg`-gated copies could
 /// never be compared by any single compilation, which is precisely how a
 /// silent rename would re-kill every micro-VM worker on one platform while the
 /// other stayed green.

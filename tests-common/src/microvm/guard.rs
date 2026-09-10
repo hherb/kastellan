@@ -33,9 +33,10 @@
 //!
 //! ⚠️ That list is the discovery rule, and a suite gating on a preflight NOT
 //! named there is invisible to every assertion built on it. It is therefore
-//! kept honest from the other end: [`REQUIRE_AWARE`] is cross-checked against
-//! the helpers that actually exist, so a third preflight cannot be written
-//! without a decision being recorded.
+//! kept honest from two other ends: [`REQUIRE_AWARE`] is cross-checked against
+//! the helpers that actually exist, and every name in [`MICROVM_PREFLIGHTS`]
+//! must appear in [`REQUIRE_AWARE`] — so a third preflight cannot be written
+//! without landing on both rosters.
 
 /// The preflight entry points a micro-VM suite gates on.
 ///
@@ -49,19 +50,41 @@
 /// different container, gated by a different knob (`KASTELLAN_GLINER_*`,
 /// #653/#664). Keying discovery on the name alone swept that suite into the
 /// micro-VM scan and reported ten violations in a file that is correct as
-/// written. Discovery therefore also requires the file to import
-/// [`MICROVM_MODULE_PATH`]: a suite with its own same-named helper is by
-/// definition not gating on the shared preflight.
+/// written. [`gates_on_shared_preflight`] therefore excludes a file that
+/// *defines* one of these names.
 pub(crate) const MICROVM_PREFLIGHTS: &[&str] =
     &["skip_if_no_microvm", "skip_if_no_container"];
 
-/// The import that marks a file as gating on the shared micro-VM preflight.
+/// Does this source gate on the **shared** micro-VM preflight?
 ///
-/// The second half of the discovery rule — see [`MICROVM_PREFLIGHTS`] for the
-/// collision that made one half insufficient. Measured over `core/tests`:
-/// 18 files import it, exactly the 15 Firecracker suites plus the 3 macOS
-/// container suites, and no other.
-pub(crate) const MICROVM_MODULE_PATH: &str = "kastellan_tests_common::microvm";
+/// The discovery rule, as a pure predicate over file text so it can be tested
+/// against shapes nobody in `core/tests` has written yet — which is the whole
+/// point, since the rule exists to catch call sites that do not exist today.
+///
+/// Two halves, and the second is a **negative** test on the real collision:
+///
+/// 1. the file names one of [`MICROVM_PREFLIGHTS`], and
+/// 2. it does not **define** one itself.
+///
+/// ⚠️ **The obvious second half — "and it imports `kastellan_tests_common::microvm`"
+/// — is fail-OPEN, and strictly narrower than the rule it replaced.** That
+/// literal is absent from the brace-grouped import
+/// `use kastellan_tests_common::{microvm::skip_if_no_container, NoopAuditSink};`,
+/// which is what `imports_granularity` produces and what any tidy-up of two
+/// adjacent imports produces by hand. A suite written that way vanished from
+/// the scan with every assertion still green. Keying on the *definition*
+/// instead depends on no import spelling at all.
+pub(crate) fn gates_on_shared_preflight(src: &str) -> bool {
+    let names_one = MICROVM_PREFLIGHTS.iter().any(|entry| src.contains(entry));
+    // `core/tests/gliner_relex_e2e.rs` has its own private
+    // `fn skip_if_no_container()` for the gliner-relex worker image, under a
+    // different knob (#653/#664). A file that defines the helper is by
+    // definition not gating on the shared one.
+    let defines_its_own = MICROVM_PREFLIGHTS
+        .iter()
+        .any(|entry| src.contains(&format!("fn {entry}")));
+    names_one && !defines_its_own
+}
 
 /// Helpers that **are** REQUIRE-aware, and so may be called from a micro-VM
 /// suite.
@@ -86,6 +109,14 @@ pub(crate) const REQUIRE_AWARE: &[&str] = &[
     // The macOS Apple-`container` tier (#684). It routes its every verdict
     // through `report_unmet_microvm`/`report_caveat_microvm`, so the knob
     // covers the container backend exactly as it covers Firecracker.
+    //
+    // ⚠️ This allowlist keys on a BARE IDENTIFIER, and the tree contains a
+    // private `fn skip_if_no_container()` that is NOT REQUIRE-aware
+    // (`core/tests/gliner_relex_e2e.rs`, a different image under a different
+    // knob). Listing the name here would exempt that helper too — except that
+    // `gates_on_shared_preflight` excludes any file which DEFINES one of these
+    // names, so such a file is never scanned in the first place. The two rules
+    // are load-bearing together; loosening either re-opens the other.
     "skip_if_no_container",
 ];
 

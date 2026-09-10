@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use super::repo_root;
 use super::guard::{
     bypassed_gates, ends_inside_string_literal, is_skip_shaped, BANNED_HELPERS,
-    MICROVM_MODULE_PATH, MICROVM_PREFLIGHTS, REQUIRE_AWARE,
+    MICROVM_PREFLIGHTS, REQUIRE_AWARE,
 };
 
 /// Suites that are known to gate on the micro-VM preflight, asserted present
@@ -83,9 +83,8 @@ const KNOWN_MICROVM_SUITES: [&str; 13] = [
     "web_search_firecracker_egress_e2e.rs",
 ];
 
-/// Every `core/tests/*.rs` that gates on [`super::REQUIRE_ENV`]'s preflight:
-/// it imports [`MICROVM_MODULE_PATH`] **and** calls one of
-/// [`MICROVM_PREFLIGHTS`].
+/// Every `core/tests/*.rs` that gates on [`super::REQUIRE_ENV`]'s preflight,
+/// per [`super::guard::gates_on_shared_preflight`].
 ///
 /// Returns `(path, source)` pairs so a failure can name the file and the
 /// caller does not read twice.
@@ -102,13 +101,10 @@ fn microvm_suites() -> Vec<(PathBuf, String)> {
         }
         let src = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        // BOTH halves are required. The module import alone would sweep in a
-        // file that merely borrows a helper; a preflight name alone sweeps in
-        // `gliner_relex_e2e.rs`, whose private `skip_if_no_container` answers
-        // to a different knob entirely. See `MICROVM_PREFLIGHTS`.
-        let gates_on_shared_preflight = src.contains(MICROVM_MODULE_PATH)
-            && MICROVM_PREFLIGHTS.iter().any(|entry| src.contains(entry));
-        if gates_on_shared_preflight {
+        // The rule is a pure predicate so it can be tested against import
+        // spellings this directory does not currently contain — see
+        // `gates_on_shared_preflight`.
+        if super::guard::gates_on_shared_preflight(&src) {
             found.push((path, src));
         }
     }
@@ -310,4 +306,57 @@ fn shaped_public_helpers(dir: &Path) -> BTreeSet<String> {
         }
     }
     found
+}
+
+/// The discovery rule must not depend on how a suite spells its import.
+///
+/// ⚠️ **The regression this pins is one the tree very nearly shipped.** The
+/// rule used to require the literal `kastellan_tests_common::microvm`, which
+/// the brace-grouped form does not contain — so merging two adjacent imports,
+/// a pure tidy-up, silently removed a suite from every assertion built on the
+/// scan. Written against shapes `core/tests` does not currently contain,
+/// because a rule tested only against the files that exist inherits their
+/// spellings [[guard-shares-the-census-blind-spot]].
+#[test]
+fn discovery_survives_every_import_spelling_and_still_excludes_gliner() {
+    let flat = "use kastellan_tests_common::microvm::skip_if_no_container;\n\
+                fn t() { if skip_if_no_container(IMG) { return; } }";
+    let grouped = "use kastellan_tests_common::{microvm::skip_if_no_container, NoopAuditSink};\n\
+                   fn t() { if skip_if_no_container(IMG) { return; } }";
+    let aliased = "use kastellan_tests_common as tc;\n\
+                   fn t() { if tc::microvm::skip_if_no_microvm() { return; } }";
+    for (label, src) in [("flat", flat), ("grouped", grouped), ("aliased", aliased)] {
+        assert!(
+            super::guard::gates_on_shared_preflight(src),
+            "{label} import must still be discovered as a micro-VM suite"
+        );
+    }
+
+    // The negative half: a suite that DEFINES the helper answers to its own
+    // knob and must stay out, whatever it imports.
+    let gliner_shaped = "use kastellan_tests_common::gliner_e2e;\n\
+                         fn skip_if_no_container() -> bool { false }\n\
+                         fn t() { if skip_if_no_container() { return; } }";
+    assert!(
+        !super::guard::gates_on_shared_preflight(gliner_shaped),
+        "a suite defining its own same-named helper is not gating on the shared preflight"
+    );
+}
+
+/// Every discovery name is also a REQUIRE-aware name.
+///
+/// The claim in `guard`'s module docs — "a third preflight cannot be written
+/// without landing on both rosters" — was prose with nothing behind it:
+/// `MICROVM_PREFLIGHTS` was cross-checked against nothing at all. A preflight
+/// added to the discovery list but not to [`REQUIRE_AWARE`] would be reported
+/// as a violation in every suite that calls it.
+#[test]
+fn every_discovery_preflight_is_require_aware() {
+    for entry in MICROVM_PREFLIGHTS {
+        assert!(
+            REQUIRE_AWARE.contains(entry),
+            "{entry} is a discovery preflight but is not on REQUIRE_AWARE, so every suite \
+             gating on it would be reported as bypassing the knob"
+        );
+    }
 }
