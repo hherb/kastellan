@@ -488,3 +488,31 @@ fn apply_task_out_binds_only_for_opt_in_with_out_dir() {
     // The base entry is untouched (only the clone is mutated).
     assert!(!base.policy.fs_write.contains(&out), "base entry unchanged");
 }
+
+/// An oversized scheduler step-failure row still records the request.
+///
+/// This producer is the one issue #617 does not mention, and it is the
+/// reason the summary is derived inside `truncate_payload` rather than at
+/// each producer: nothing was added here, and the row is covered anyway.
+/// A producer-side rule would have covered `tool_host` and quietly missed
+/// this.
+#[test]
+fn an_oversized_step_failure_row_still_records_the_request() {
+    let req = serde_json::json!({
+        "argv": ["/bin/bash", "-c", "s".repeat(kastellan_db::audit::PAYLOAD_MAX_BYTES * 2)],
+    });
+
+    let stored = kastellan_db::audit::truncate_payload(build_scheduler_step_failure_payload(
+        "shell-exec",
+        "shell.exec",
+        req,
+        Some("sandbox: policy paths must be absolute"),
+        7,
+    ));
+
+    assert!(kastellan_db::audit::is_truncation_envelope(&stored));
+    let head = stored[kastellan_db::audit::REQ_SUMMARY_KEY]["head"]
+        .as_str()
+        .expect("an oversized row with a request must carry its summary");
+    assert!(head.starts_with(r#"{"argv":["/bin/bash","-c","#), "got: {head}");
+}

@@ -518,7 +518,11 @@ fn a_nested_preserved_key_is_not_promoted() {
 fn wire_key_literals_are_pinned() {
     assert_eq!(DROPPED_PRESERVED_KEY, "_dropped_preserved");
     assert_eq!(GUARD_KEY, "guard");
-    assert_eq!(PRESERVED_KEYS, ["guard"].as_slice());
+    assert_eq!(REQ_SUMMARY_KEY, "req_summary");
+    // Order is priority order, and `the_guard_record_is_admitted_before_the_
+    // req_summary` proves what that costs the loser. Pinned here so a
+    // re-ordering is a deliberate edit rather than a silent one.
+    assert_eq!(PRESERVED_KEYS, ["guard", "req_summary"].as_slice());
 }
 
 /// `str_eq` is the sole enforcer of the compile-time shadow guard.
@@ -578,4 +582,155 @@ fn truncate_fingerprint_distinguishes_different_payloads() {
         ob.get("sha256"),
         "different bodies must produce different SHA-256s"
     );
+}
+
+// ── The bounded request summary (issue #617) ────────────────────────────
+
+/// The common shape of the #617 loss, and the one that motivated the issue:
+/// the argv is small, the command's *output* is what pushes the row over the
+/// cap. Before this, such a row recorded the guard tier's opinion of the act
+/// and a digest of the whole payload — and nothing whatever about the act.
+#[test]
+fn truncation_records_what_ran_when_the_result_is_the_bulk() {
+    let payload = serde_json::json!({
+        REQ_KEY: {"argv": ["/usr/bin/env", "bash", "-c", "make test"]},
+        "result": {"stdout": "o".repeat(PAYLOAD_MAX_BYTES * 2)},
+        "ms": 12,
+    });
+
+    let out = truncate_payload(payload);
+
+    assert!(is_truncation_envelope(&out), "fixture must actually be over the cap");
+    let head = out[REQ_SUMMARY_KEY]["head"].as_str().expect("summary head");
+    assert!(head.contains("/usr/bin/env"), "the head must name the command, got: {head}");
+    assert!(head.contains("make test"), "and its arguments, got: {head}");
+}
+
+/// The case the issue names explicitly: `req` *itself* is over the cap — a
+/// generated script or a long heredoc. The head cannot hold the script, but
+/// it still names the interpreter, and `len` says how much is not shown.
+#[test]
+fn truncation_records_the_interpreter_for_an_oversized_argv() {
+    let payload = serde_json::json!({
+        REQ_KEY: {"argv": ["/bin/bash", "-c", "x".repeat(PAYLOAD_MAX_BYTES * 10)]},
+        "ms": 3,
+    });
+
+    let out = truncate_payload(payload);
+
+    let summary = &out[REQ_SUMMARY_KEY];
+    let head = summary["head"].as_str().expect("summary head");
+    assert!(head.starts_with(r#"{"argv":["/bin/bash","-c","#), "got: {head}");
+    assert!(
+        summary["len"].as_u64().unwrap() > head.len() as u64,
+        "an elided head must be detectable from the row itself"
+    );
+}
+
+/// A write site with no request claims nothing about one. Silence and an
+/// empty record must not render identically — the same rule
+/// `DROPPED_PRESERVED_KEY` exists for one level up.
+#[test]
+fn a_payload_with_no_req_gets_no_summary() {
+    let payload = serde_json::json!({"note": "z".repeat(PAYLOAD_MAX_BYTES * 2)});
+
+    let out = truncate_payload(payload);
+
+    assert!(is_truncation_envelope(&out));
+    assert!(out.get(REQ_SUMMARY_KEY).is_none(), "nothing to summarise, nothing claimed");
+}
+
+/// Under the cap the whole request is already on the row, so a summary
+/// would be duplicated noise. The under-cap path must still return the
+/// payload *itself*, byte for byte.
+#[test]
+fn an_under_cap_payload_gains_no_summary() {
+    let v = serde_json::json!({REQ_KEY: {"argv": ["/bin/true"]}, "ms": 1});
+
+    assert_eq!(truncate_payload(v.clone()), v);
+}
+
+/// The envelope's `sha256` and `len` describe the **input**, so deriving a
+/// summary must not move them — otherwise two rows for one body stop
+/// comparing equal, which is exactly what the fingerprint is for.
+///
+/// This is the derived-key twin of
+/// `a_preserved_key_does_not_change_the_fingerprint`, and it is the test
+/// that pins the ordering inside `truncate_payload`: the fingerprint is
+/// taken over the serialised input *before* the summary is inserted.
+#[test]
+fn the_req_summary_does_not_change_the_envelope_fingerprint() {
+    let payload = serde_json::json!({
+        REQ_KEY: {"argv": ["/bin/echo", "hi"]},
+        "result": "r".repeat(PAYLOAD_MAX_BYTES * 2),
+    });
+    let raw = serde_json::to_vec(&payload).unwrap();
+    let expected_len = raw.len();
+    let expected_sha = super::req_summary::sha256_hex(&raw);
+
+    let out = truncate_payload(payload);
+
+    assert_eq!(out["len"].as_u64().unwrap() as usize, expected_len);
+    assert_eq!(out["sha256"].as_str().unwrap(), expected_sha);
+    assert!(out.get(REQ_SUMMARY_KEY).is_some(), "and the summary is still there");
+}
+
+/// Both preserved keys survive together. The guard record answers "what did
+/// the control think", the summary answers "of what act" — a row with one
+/// and not the other answers neither question completely.
+#[test]
+fn truncation_keeps_both_the_guard_record_and_the_req_summary() {
+    let payload = serde_json::json!({
+        REQ_KEY: {"argv": ["/bin/cat", "/etc/hosts"]},
+        "result": "h".repeat(PAYLOAD_MAX_BYTES * 2),
+        (GUARD_KEY): {"state": "clear", "p": 0.11, "tau": 0.79552656},
+    });
+
+    let out = truncate_payload(payload);
+
+    assert_eq!(out[GUARD_KEY]["state"], "clear");
+    assert!(out[REQ_SUMMARY_KEY]["head"].as_str().unwrap().contains("/bin/cat"));
+    assert!(out.get(DROPPED_PRESERVED_KEY).is_none(), "both fit, so nothing is named");
+}
+
+/// `PRESERVED_KEYS` is **priority order** — keys are admitted left to right
+/// against a shared budget, so an earlier member can starve a later one.
+/// That was moot at one member and is live at two, so the order is asserted
+/// behaviourally rather than by reading the array.
+///
+/// The guard score wins: it is a handful of scalars, it is irrecoverable
+/// (a cleared document writes no second row), and losing it was the measured
+/// live defect that created `PRESERVED_KEYS` in the first place. The summary
+/// is the larger of the two and the one that must yield — and yielding, it
+/// is still *named*.
+#[test]
+fn the_guard_record_is_admitted_before_the_req_summary() {
+    let src = source(&[
+        (GUARD_KEY, serde_json::json!({"state": "clear", "p": 0.5})),
+        (REQ_SUMMARY_KEY, serde_json::json!({"head": "x".repeat(PAYLOAD_MAX_BYTES)})),
+    ]);
+
+    let out = preserve_onto(bare_envelope(), &src, PRESERVED_KEYS);
+
+    assert_eq!(out[GUARD_KEY]["state"], "clear", "the guard score must never be starved");
+    assert_eq!(out[DROPPED_PRESERVED_KEY], serde_json::json!([REQ_SUMMARY_KEY]));
+}
+
+/// A summary the producer wrote itself does not win over the derived one.
+/// There is exactly one producer of this rule by design (see the module
+/// docs), and a payload that arrived carrying the key must not be able to
+/// put a different answer on the row than the one the rule computes.
+#[test]
+fn a_producer_supplied_summary_is_replaced_by_the_derived_one() {
+    let payload = serde_json::json!({
+        REQ_KEY: {"argv": ["/bin/real"]},
+        REQ_SUMMARY_KEY: {"head": "{\"argv\":[\"/bin/fake\"]}", "sha256": "0".repeat(64), "len": 1},
+        "result": "r".repeat(PAYLOAD_MAX_BYTES * 2),
+    });
+
+    let out = truncate_payload(payload);
+
+    let head = out[REQ_SUMMARY_KEY]["head"].as_str().unwrap();
+    assert!(head.contains("/bin/real"), "the derived summary wins, got: {head}");
+    assert!(!head.contains("/bin/fake"));
 }

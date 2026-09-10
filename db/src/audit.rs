@@ -48,6 +48,15 @@
 //! equality without storing the bytes themselves; the length tells an
 //! operator how much was elided.
 //!
+//! **The request is summarised rather than lost.** The premise above —
+//! that operators want "who did what" and not the body — holds for a tool
+//! whose bulk is a fetched document, and fails for `shell.exec`, where the
+//! argv *is* the act being audited. So an over-cap payload that carried a
+//! request keeps a bounded [`req_summary`] naming what ran, derived here
+//! rather than at each producer because there is more than one producer and
+//! a rule each of them can forget is a rule that will be forgotten
+//! (issue #617). See [`req_summary`] for the shape and the reasoning.
+//!
 //! **[`PRESERVED_KEYS`] ride through that replacement.** "Who did what"
 //! includes the outcome of a control that ran on the payload, and such a
 //! record is bounded, tiny, and — unlike a request body — recoverable
@@ -63,6 +72,10 @@
 use sqlx::Row;
 
 use crate::DbError;
+
+pub mod req_summary;
+
+pub use req_summary::{HEAD_MAX_BYTES, REQ_KEY, REQ_SUMMARY_KEY};
 
 /// Maximum size in bytes of a serialised `audit_log.payload` JSONB
 /// value before [`truncate_payload`] replaces it with a fingerprint
@@ -107,7 +120,7 @@ pub const PAYLOAD_MAX_BYTES: usize = 4096;
 /// **Array order is priority order.** Keys are admitted left to right
 /// against a shared budget, so an earlier member can starve a later one.
 /// Moot at one member; decide it deliberately before adding a second.
-pub const PRESERVED_KEYS: &[&str] = &[GUARD_KEY];
+pub const PRESERVED_KEYS: &[&str] = &[GUARD_KEY, REQ_SUMMARY_KEY];
 
 /// The payload key under which `core::tool_host::post_process` records the
 /// guard tier's per-dispatch verdict — and the sole member of
@@ -356,7 +369,7 @@ pub struct AuditRow {
 ///
 /// Pure: deterministic, no I/O, no global state. Same input → same
 /// output, every call.
-pub fn truncate_payload(payload: serde_json::Value) -> serde_json::Value {
+pub fn truncate_payload(mut payload: serde_json::Value) -> serde_json::Value {
     // `to_vec` is infallible for `serde_json::Value` (the value is
     // already valid JSON in memory). The serialised form is what
     // Postgres will see — so that's the form we measure.
@@ -365,21 +378,40 @@ pub fn truncate_payload(payload: serde_json::Value) -> serde_json::Value {
         return payload;
     }
 
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(&bytes);
-    let mut hex = String::with_capacity(64);
-    for b in digest.iter() {
-        // Two lowercase hex chars per byte. Width-padded so a leading
-        // zero in any byte is preserved — `format!("{b:02x}")` is the
-        // canonical idiom for reproducible hex.
-        use std::fmt::Write;
-        write!(&mut hex, "{:02x}", b).expect("write to String cannot fail");
-    }
+    // One renderer, shared with the request summary's digest: readers
+    // compare both across rows, and two hex spellings that disagreed on
+    // zero-padding would make rows silently incomparable.
+    let hex = req_summary::sha256_hex(&bytes);
 
     let mut bare = serde_json::Map::new();
     bare.insert(TRUNCATED_MARKER_KEY.to_string(), serde_json::Value::Bool(true));
     bare.insert(FINGERPRINT_SHA256_KEY.to_string(), serde_json::Value::String(hex));
     bare.insert(FINGERPRINT_LEN_KEY.to_string(), serde_json::json!(bytes.len()));
+
+    // ── Derive the bounded request summary (issue #617). ──
+    //
+    // Strictly after the fingerprint above, which is computed over `bytes`
+    // — the serialisation of the payload as it arrived. Inserting the
+    // summary first would fold it into the digest and two rows for one
+    // request body would stop comparing equal, which is the one thing the
+    // fingerprint exists to do. `the_req_summary_does_not_change_the_
+    // envelope_fingerprint` pins that order.
+    //
+    // Written onto the payload rather than handed to `preserve_onto`
+    // separately so the summary is admitted, budgeted and — if it ever did
+    // not fit — *named* by exactly the same machinery as every other
+    // preserved key, with no second code path to keep in step. `payload` is
+    // owned here and about to be dropped, so the insert costs one small
+    // value and no clone of the oversized body.
+    //
+    // It overwrites any `req_summary` the producer supplied: there is one
+    // producer of this rule by design, and a payload must not be able to
+    // put its own answer on the row.
+    if let Some(summary) = req_summary::summarize_req(&payload) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(REQ_SUMMARY_KEY.to_string(), summary);
+        }
+    }
 
     // Only an object can have keys to preserve; a bare string or array
     // over the cap is all data by definition. Nothing is lost silently

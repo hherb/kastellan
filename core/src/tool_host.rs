@@ -192,7 +192,11 @@ impl WorkerCommand {
 ///   on failure. Payloads larger than 4 KiB are replaced inside
 ///   [`kastellan_db::audit::insert`] with a SHA-256 envelope — **except
 ///   the `guard` sub-object**, which rides through it
-///   ([`kastellan_db::audit::PRESERVED_KEYS`]). Without that it was the
+///   ([`kastellan_db::audit::PRESERVED_KEYS`]), **and a derived
+///   `req_summary`**, which the same replacement computes from `req` so an
+///   oversized dispatch still records what ran rather than only the guard's
+///   opinion of it (issue #617; shape in
+///   [`kastellan_db::audit::req_summary`]). Without that it was the
 ///   large *cleared* documents that lost their score while blocks kept
 ///   theirs, which is the wrong half: recording `p` on the cleared side is
 ///   what makes production a score source that is not catalogue-selected.

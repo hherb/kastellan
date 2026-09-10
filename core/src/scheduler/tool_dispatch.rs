@@ -313,7 +313,12 @@ fn build_scheduler_step_failure_payload(
     let mut payload = serde_json::Map::with_capacity(5);
     payload.insert("tool".into(), serde_json::Value::String(tool.into()));
     payload.insert("method".into(), serde_json::Value::String(method.into()));
-    payload.insert("req".into(), req);
+    // `REQ_KEY`, not `"req"`: `kastellan_db::audit::truncate_payload` derives
+    // this row's bounded request summary by looking the key up, so a rename
+    // on that side must be a compile error here rather than a silent stop to
+    // summarisation on the one row class whose `tool`/`method` live only in
+    // the payload (issue #617).
+    payload.insert(kastellan_db::audit::REQ_KEY.into(), req);
     if let Some(e) = err {
         payload.insert("err".into(), serde_json::Value::String(e.into()));
     }
