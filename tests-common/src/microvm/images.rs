@@ -538,6 +538,167 @@ mod tests {
         }
     }
 
+    /// The prologue that makes a build script cwd-independent (#686).
+    ///
+    /// ⚠️ **One spelling, compared byte-for-byte against all eight scripts.**
+    /// Seven of the eight used bare `target/release/...` paths and failed
+    /// partway through with `install: cannot stat` when run from anywhere but
+    /// the workspace root; the eighth had solved it a third way. #669's lesson
+    /// was to *count the producers* — a rule written out in eight places is
+    /// eight chances to drift, and two of the three hand-spelled copies of the
+    /// bwrap userns pair were wrong.
+    ///
+    /// Because every script is asserted to contain this exact text,
+    /// [`tests::the_prologue_lands_on_the_workspace_root_from_a_foreign_cwd`]
+    /// can execute **this** string and thereby cover all eight behaviourally,
+    /// rather than proving eight times over what a script merely *says*.
+    const REPO_ROOT_PROLOGUE: &str = r#"REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)" || REPO_ROOT=""
+if [ -z "$REPO_ROOT" ] || ! cd "$REPO_ROOT"; then
+    echo "Cannot locate the workspace root from ${BASH_SOURCE[0]}" >&2; exit 1
+fi"#;
+
+    /// Every rootfs build script anchors itself on the workspace root.
+    ///
+    /// A hand-run of a single script from a subdirectory used to die at
+    /// `install: cannot stat 'target/release/…'`, which names a missing file
+    /// rather than the wrong cwd — a diagnostic pointing at the wrong cause,
+    /// which is the family of defect this whole module keeps finding.
+    #[test]
+    fn every_build_script_anchors_on_the_workspace_root() {
+        let root = repo_root();
+        let mut missing: Vec<&str> = Vec::new();
+        for entry in ROOTFS_IMAGES {
+            let src = std::fs::read_to_string(root.join(entry.build_script))
+                .unwrap_or_else(|e| panic!("read {}: {e}", entry.build_script));
+            if !src.contains(REPO_ROOT_PROLOGUE) {
+                missing.push(entry.build_script);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these run with the operator's cwd and fail at `install: cannot stat \
+             target/release/…` when invoked from anywhere but the workspace root (#686). \
+             Add the prologue verbatim, after the `source` of `lib/guest-kernel.sh`:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    /// ⚠️ **Behavioural, not textual: the prologue is RUN, from a directory it
+    /// was not invoked from, and asserted to arrive at the workspace root.**
+    ///
+    /// The eight files had no behavioural coverage at all before this — every
+    /// existing check reads what they *say*. A prologue that parses, contains
+    /// the right words and lands in the wrong directory would have satisfied
+    /// all of them.
+    #[test]
+    fn the_prologue_lands_on_the_workspace_root_from_a_foreign_cwd() {
+        // A stand-in workspace root, three levels above the script — the same
+        // depth as `scripts/workers/<group>/`, which is what `../../..` means.
+        let tmp = std::env::temp_dir().join(format!("kastellan-686-{}", std::process::id()));
+        let script_dir = tmp.join("scripts/workers/microvm");
+        std::fs::create_dir_all(&script_dir).expect("create the stand-in tree");
+        let script = script_dir.join("probe.sh");
+        std::fs::write(&script, format!("set -euo pipefail\n{REPO_ROOT_PROLOGUE}\npwd\n"))
+            .expect("write the probe script");
+
+        let mut cmd = std::process::Command::new("bash");
+        // Invoked with a RELATIVE path from a foreign cwd, which is the case a
+        // prologue placed before the `source` line would get wrong.
+        cmd.arg("scripts/workers/microvm/probe.sh").current_dir(&tmp);
+        let out = kastellan_sandbox::bounded_command::probe_output(
+            &mut cmd,
+            kastellan_sandbox::bounded_command::PROBE_BUDGET,
+        )
+        .unwrap_or_else(|e| panic!("the probe script did not answer: {e:?}"));
+
+        let landed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let expected = std::fs::canonicalize(&tmp).expect("canonicalize the stand-in root");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(out.status.success(), "the prologue exited non-zero: {}", landed);
+        assert_eq!(
+            std::path::Path::new(&landed),
+            expected,
+            "the prologue landed in {landed}, not the workspace root"
+        );
+    }
+
+    /// ⚠️ **A root that cannot be resolved STOPS the script — it does not fall
+    /// through to the operator's cwd.**
+    ///
+    /// Behavioural, and it drives the real prologue text down its failure arm
+    /// by making `dirname` hand back a path nothing can `cd` into. That arm is
+    /// the reason the prologue is four lines rather than one, and until now
+    /// nothing reached it.
+    ///
+    /// ⚠️ **The premise behind it is bash-version-dependent, and the two dev
+    /// hosts disagree today — measured 2026-09-10, not assumed:**
+    ///
+    /// | bash | `cd ""` |
+    /// | --- | --- |
+    /// | 3.2.57 (macOS `/bin/bash`) | exit **0** |
+    /// | 5.2.21 (DGX) | exit **0** |
+    /// | 5.3.15 (Homebrew, dev Mac) | exit **1**, `cd: null directory` |
+    ///
+    /// So `cd ""` silently succeeding is real on two of the three bashes this
+    /// project runs on, and the `[ -z "$REPO_ROOT" ]` half of the guard is
+    /// load-bearing — while a test asserting bash's behaviour directly would
+    /// pass on one host and fail on the other. This asserts the **guard's**
+    /// behaviour instead, which is the same on every bash.
+    #[test]
+    fn an_unresolvable_root_stops_the_script_rather_than_using_the_cwd() {
+        let tmp = std::env::temp_dir().join(format!("kastellan-686-neg-{}", std::process::id()));
+        let script_dir = tmp.join("scripts/workers/microvm");
+        let stub_bin = tmp.join("stub");
+        std::fs::create_dir_all(&script_dir).expect("create the stand-in tree");
+        std::fs::create_dir_all(&stub_bin).expect("create the stub bin");
+        std::fs::write(
+            script_dir.join("probe.sh"),
+            format!("set -euo pipefail\n{REPO_ROOT_PROLOGUE}\npwd\n"),
+        )
+        .expect("write the probe script");
+        // `cd` and `pwd` are shell builtins, so `dirname` is the only external
+        // the prologue depends on — shadowing it is enough to drive the
+        // command substitution to failure without editing the prologue.
+        let stub = stub_bin.join("dirname");
+        std::fs::write(&stub, "#!/bin/sh\necho /kastellan-686-no-such-directory\n")
+            .expect("write the stub dirname");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod the stub");
+        }
+
+        let path = format!(
+            "{}:{}",
+            stub_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("scripts/workers/microvm/probe.sh").current_dir(&tmp).env("PATH", path);
+        let out = kastellan_sandbox::bounded_command::probe_output(
+            &mut cmd,
+            kastellan_sandbox::bounded_command::PROBE_BUDGET,
+        )
+        .unwrap_or_else(|e| panic!("the probe script did not answer: {e:?}"));
+
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            !out.status.success(),
+            "an unresolvable root must stop the script; it printed {stdout:?} and exited 0"
+        );
+        assert!(
+            stderr.contains("Cannot locate the workspace root"),
+            "the failure must name its own cause, not leave the operator guessing: {stderr:?}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "the script continued past the guard and reached `pwd`: {stdout:?}"
+        );
+    }
+
     /// Every build script must at least PARSE, which no amount of text
     /// scanning can tell you.
     ///
@@ -549,11 +710,17 @@ mod tests {
     fn every_build_script_parses() {
         let root = repo_root();
         for entry in ROOTFS_IMAGES {
-            let out = std::process::Command::new("bash")
-                .arg("-n")
-                .arg(root.join(entry.build_script))
-                .output()
-                .expect("bash is present on every host this suite runs on");
+            // Bounded (#690), for the same reason as every other shell-out in
+            // this module: `bash -n` on a local file has no business taking
+            // ten seconds, and an unbounded one that did would stall the sweep
+            // with nothing to read.
+            let mut cmd = std::process::Command::new("bash");
+            cmd.arg("-n").arg(root.join(entry.build_script));
+            let out = kastellan_sandbox::bounded_command::probe_output(
+                &mut cmd,
+                kastellan_sandbox::bounded_command::PROBE_BUDGET,
+            )
+            .unwrap_or_else(|e| panic!("`bash -n {}` did not answer: {e:?}", entry.build_script));
             assert!(
                 out.status.success(),
                 "{} is not valid bash: {}",

@@ -13,6 +13,17 @@ set -euo pipefail
 OUT_DIR="${KASTELLAN_MICROVM_DIR:-/var/lib/kastellan/microvm}"
 # Pinned, integrity-checked guest kernel (shared with every sibling script).
 source "$(dirname "${BASH_SOURCE[0]}")/lib/guest-kernel.sh"
+
+# Repo-relative paths below (`target/release/...`) mean this script must run
+# from the workspace root whatever directory it was invoked from (#686).
+# Resolved from BASH_SOURCE, which is why it sits AFTER the `source` above:
+# that line resolves its own relative path and must not run post-`cd`.
+# ⚠️ `cd ""` SUCCEEDS in bash, so an empty REPO_ROOT would silently run the
+# build from the operator's cwd and blame a missing `target/release/...`.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)" || REPO_ROOT=""
+if [ -z "$REPO_ROOT" ] || ! cd "$REPO_ROOT"; then
+    echo "Cannot locate the workspace root from ${BASH_SOURCE[0]}" >&2; exit 1
+fi
 # matrix-sdk + tokio + rustls/ring + bundled-sqlite closure — net-demo's 128 is far
 # too small. 512 MiB leaves headroom for the worker's read-only rootfs.
 ROOTFS_MIB=512

@@ -71,7 +71,8 @@ impl LinuxBwrap {
         // is missing but because its loader is — which is what we hit on
         // Ubuntu 24.04+ before this fix and which masked broken probes as
         // "kernel restricts userns" false positives.
-        let output = Command::new("bwrap")
+        let mut probe_cmd = Command::new("bwrap");
+        probe_cmd
             // The same userns pair the real argv carries — one const, so the
             // probe exercises exactly what every spawn will pass, and a bwrap
             // too old to know `--disable-userns` fails here with a clear
@@ -103,12 +104,30 @@ impl LinuxBwrap {
                 "--tmpfs",
                 "/tmp",
                 "/usr/bin/true",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| SandboxError::Backend(format!("could not spawn bwrap: {e}")))?;
+            ]);
+        // Bounded (#690): an unbounded probe that never answers stalls the
+        // caller with no message at all. bwrap is not daemon-backed, but it
+        // does mount work, and a stuck filesystem under one of the binds
+        // above blocks it rather than failing it.
+        let output = crate::bounded_command::probe_output(
+            &mut probe_cmd,
+            crate::bounded_command::PROBE_BUDGET,
+        )
+        .map_err(|failure| {
+            SandboxError::Backend(match failure {
+                crate::bounded_command::ProbeFailure::Wedged(t) => {
+                    crate::bounded_command::timed_out_reason(
+                        "bwrap … /usr/bin/true",
+                        &t,
+                        "a bwrap that neither succeeds nor fails usually means a stuck mount or an \
+                         unresponsive filesystem under one of the probe's binds",
+                    )
+                }
+                crate::bounded_command::ProbeFailure::Spawn(e) => {
+                    format!("could not spawn bwrap: {e}")
+                }
+            })
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

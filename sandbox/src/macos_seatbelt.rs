@@ -90,13 +90,30 @@ impl MacosSeatbelt {
                        (allow file-read-metadata (subpath \"/\"))\n\
                        (allow mach-lookup)\n\
                        (allow sysctl-read)\n";
-        let output = Command::new("sandbox-exec")
-            .args(["-p", profile, "/usr/bin/true"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| SandboxError::Backend(format!("could not spawn sandbox-exec: {e}")))?;
+        // Bounded (#690), for parity with every other probe in this crate: an
+        // unbounded probe that never answers stalls its caller with no message
+        // at all, and `sandbox-exec` depends on the system policy daemon.
+        let mut probe_cmd = Command::new("sandbox-exec");
+        probe_cmd.args(["-p", profile, "/usr/bin/true"]);
+        let output = crate::bounded_command::probe_output(
+            &mut probe_cmd,
+            crate::bounded_command::PROBE_BUDGET,
+        )
+        .map_err(|failure| {
+            SandboxError::Backend(match failure {
+                crate::bounded_command::ProbeFailure::Wedged(t) => {
+                    crate::bounded_command::timed_out_reason(
+                        "sandbox-exec -p … /usr/bin/true",
+                        &t,
+                        "a `sandbox-exec` that neither succeeds nor fails usually means the system \
+                         policy daemon (`syspolicyd`) is unresponsive",
+                    )
+                }
+                crate::bounded_command::ProbeFailure::Spawn(e) => {
+                    format!("could not spawn sandbox-exec: {e}")
+                }
+            })
+        })?;
         if output.status.success() {
             return Ok(());
         }

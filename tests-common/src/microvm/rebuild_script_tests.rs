@@ -71,12 +71,15 @@ impl StubTree {
     /// Run the script from a directory that is NOT the workspace root, so
     /// the tests also cover its `cd` to the root.
     fn run(&self, args: &[&str]) -> Output {
-        std::process::Command::new("bash")
-            .arg(self.script())
-            .args(args)
-            .current_dir(self.path().join("scripts"))
-            .output()
-            .expect("spawn bash")
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg(self.script()).args(args).current_dir(self.path().join("scripts"));
+        // Bounded (#690): the stub tree makes this fast, and a budget means a
+        // script that loops names itself instead of hanging the sweep.
+        kastellan_sandbox::bounded_command::probe_output(
+            &mut cmd,
+            kastellan_sandbox::bounded_command::PROBE_BUDGET,
+        )
+        .unwrap_or_else(|e| panic!("the rebuild script did not answer: {e:?}"))
     }
 }
 
@@ -179,10 +182,13 @@ fn a_missing_build_script_is_a_failure_not_a_skip() {
 #[test]
 fn the_script_runs_from_the_workspace_root_whatever_the_cwd() {
     let tree = StubTree::new(&[]);
-    let out = std::process::Command::new("bash")
-        .arg(tree.script())
-        .current_dir(std::env::temp_dir())
-        .output()
-        .expect("spawn bash");
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(tree.script()).current_dir(std::env::temp_dir());
+    // Bounded (#690), as everywhere else in this module.
+    let out = kastellan_sandbox::bounded_command::probe_output(
+        &mut cmd,
+        kastellan_sandbox::bounded_command::PROBE_BUDGET,
+    )
+    .unwrap_or_else(|e| panic!("the rebuild script did not answer: {e:?}"));
     assert!(out.status.success(), "must not depend on cwd: {}", stderr_of(&out));
 }

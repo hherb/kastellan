@@ -14,6 +14,51 @@
 // exercised on only one host is half-verified (issue #471's own lesson).
 pub mod guest_kernel_pin;
 
+// Same reasoning as `guest_kernel_pin` above, for the same reason: both
+// micro-VM tiers shell out to a host probe, each on a different OS, so a
+// `cfg`-gated bounded runner would be exercised on one host only. Everything
+// here is plain `std` and its unit tests run everywhere (#690).
+pub mod bounded_command;
+
+/// Where a Linux guest lists the LSMs it actually has enabled.
+///
+/// `securityfs`, so it exists only when the kernel was built with it — and its
+/// **absence is the common case in both micro-VM guests today**, which is
+/// exactly why the worker-side Landlock layer is switched off in each.
+pub const GUEST_LSM_LIST_PATH: &str = "/sys/kernel/security/lsm";
+
+/// Does a guest's [`GUEST_LSM_LIST_PATH`] contents list Landlock?
+///
+/// Pure, ungated, and shared by both micro-VM tiers, because the question is
+/// the same on each and the answer is currently "no" on each — the Firecracker
+/// pinned kernel has `CONFIG_SECURITY_LANDLOCK` unset (#668), and the Apple
+/// `container` guest has no `/sys/kernel/security/lsm` at all (measured on
+/// `container` 1.1.0 / guest 6.18.15, and re-measured 2026-09-10: the
+/// directory exists and is empty). Both therefore run **seccomp-only by
+/// design**, and both inject `KASTELLAN_LANDLOCK_PROFILE=none` as a default a
+/// caller may override.
+///
+/// ⚠️ **This can raise the question; it cannot answer it.** The kernel listing
+/// `landlock` means the LSM is *enabled*, not that
+/// `landlock_create_ruleset` will accept the ABI the worker prelude asks for —
+/// the failure that killed the macOS tier for 69 days was the prelude's own
+/// probe, not this file. So a positive result means "go re-measure with a real
+/// worker and delete the opt-out if it passes", never "the opt-out is now
+/// wrong". Naming it `landlock_in_lsm_list` rather than `landlock_available`
+/// is deliberate, for the same reason #687's fresh arm is `NewerThanSources`
+/// rather than `Fresh`: a check that refutes must not be named as if it
+/// certifies.
+///
+/// The list is comma-separated with no spaces (`capability,landlock,bpf`), so
+/// this splits rather than substring-matches — `landlock` and a hypothetical
+/// `landlock_lite` are different entries, and a substring test would conflate
+/// them. Issue #689.
+pub fn landlock_in_lsm_list(lsm_file_contents: &str) -> bool {
+    lsm_file_contents
+        .split([',', '\n'])
+        .any(|entry| entry.trim() == "landlock")
+}
+
 #[cfg(target_os = "linux")]
 pub mod linux_bwrap;
 #[cfg(target_os = "linux")]
@@ -621,6 +666,40 @@ mod firecracker_registry_tests {
         let _backend = backends.resolve(Some(SandboxBackendKind::FirecrackerVm), None);
         // The default (None) must still resolve to bwrap and remain distinct.
         let _default = backends.resolve(None, None);
+    }
+}
+
+/// Unit tests for [`landlock_in_lsm_list`] (#689). Ungated: the question is
+/// about a *guest* kernel, so the host running the test is irrelevant, and a
+/// detector exercised on one host is half-verified.
+#[cfg(test)]
+mod landlock_lsm_tests {
+    use super::landlock_in_lsm_list;
+
+    /// The shape a kernel with Landlock actually reports.
+    #[test]
+    fn a_list_containing_landlock_is_detected() {
+        assert!(landlock_in_lsm_list("capability,landlock,bpf"));
+        assert!(landlock_in_lsm_list("landlock"));
+        assert!(landlock_in_lsm_list("capability,landlock\n"));
+    }
+
+    /// Both micro-VM guests today: no securityfs entry, or one without it.
+    #[test]
+    fn a_list_without_landlock_is_not_detected() {
+        assert!(!landlock_in_lsm_list(""));
+        assert!(!landlock_in_lsm_list("capability,bpf"));
+        assert!(!landlock_in_lsm_list("\n"));
+    }
+
+    /// ⚠️ Split, not substring. A substring test would report Landlock for an
+    /// entry that merely starts with the word — the `devbox`-matches-`dev`
+    /// footgun this crate has already been bitten by once, in
+    /// `MacosContainer::probe_image`'s own doc.
+    #[test]
+    fn a_longer_name_containing_landlock_is_not_landlock() {
+        assert!(!landlock_in_lsm_list("capability,landlock_lite,bpf"));
+        assert!(!landlock_in_lsm_list("nolandlock"));
     }
 }
 

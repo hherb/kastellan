@@ -44,7 +44,7 @@
 //!   - `--service` would detach into a transient service unit and
 //!     redirect stdio to the journal. That breaks JSON-RPC.
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use crate::{SandboxError, SandboxPolicy};
 
@@ -149,13 +149,33 @@ pub fn build_systemd_run_argv(policy: &SandboxPolicy) -> Vec<String> {
 /// containment defense-in-depth requires the cgroup ceiling to be
 /// available.
 pub fn cgroup_probe() -> Result<(), SandboxError> {
-    let output = Command::new("systemd-run")
-        .args(["--user", "--scope", "--quiet", "--collect", "/usr/bin/true"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| SandboxError::Backend(format!("could not spawn systemd-run: {e}")))?;
+    // Bounded (#690). ⚠️ `systemd-run` is **daemon-backed** — it talks D-Bus to
+    // the per-user manager — so this is the Linux twin of the wedged Apple
+    // `container-apiserver`, not a lesser case. A hung session bus makes the
+    // call *block* rather than return the "Failed to connect to bus" the arm
+    // below is written for, and unbounded that stalls a whole sweep silently.
+    let mut probe_cmd = Command::new("systemd-run");
+    probe_cmd.args(["--user", "--scope", "--quiet", "--collect", "/usr/bin/true"]);
+    let output = crate::bounded_command::probe_output(
+        &mut probe_cmd,
+        crate::bounded_command::PROBE_BUDGET,
+    )
+    .map_err(|failure| {
+        SandboxError::Backend(match failure {
+            crate::bounded_command::ProbeFailure::Wedged(t) => {
+                crate::bounded_command::timed_out_reason(
+                    "systemd-run --user --scope … /usr/bin/true",
+                    &t,
+                    "the per-user systemd manager is not answering — check \
+                     `systemctl --user status`; a hung session D-Bus blocks \
+                     `systemd-run` rather than failing it",
+                )
+            }
+            crate::bounded_command::ProbeFailure::Spawn(e) => {
+                format!("could not spawn systemd-run: {e}")
+            }
+        })
+    })?;
 
     if output.status.success() {
         return Ok(());

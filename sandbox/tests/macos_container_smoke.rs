@@ -434,3 +434,84 @@ fn probe_image_returns_ok_for_cached_image_and_err_for_missing_tag() {
         "error message must say the image is not present; got: {msg}"
     );
 }
+
+/// ⚠️ **The drift detector for the macOS Landlock opt-out (#689).**
+///
+/// `build_container_argv` injects `KASTELLAN_LANDLOCK_PROFILE=none` for every
+/// Apple `container` spawn, because the guest kernel does not enforce Landlock
+/// and the 2026-09-02 audit made an unenforceable ruleset **fail closed** — so
+/// without the opt-out every container worker dies at
+/// `landlock: Landlock ruleset is not enforced by this kernel`. That injection
+/// carries the comment *"delete this once an Apple `container` guest kernel
+/// ships Landlock"*, and until now nothing would ever have reminded anyone.
+///
+/// ⚠️ **The asymmetry with the Firecracker twin ran the wrong way.** That
+/// kernel is a sha256 pin *this repo controls*, whose bump fails
+/// `the_landlock_opt_out_is_pinned_to_its_kernel_and_key` and puts the question
+/// in front of whoever bumped it. Apple's guest kernel moves on a routine
+/// `brew upgrade container` — outside anybody's decision — so the tier with no
+/// detector was the one whose assumption could expire on its own. That is the
+/// `stale-fixture-turns-a-gate-into-a-formality` shape, and this tier has
+/// already lived it once: a 69-day-old image kept eight e2es green while the
+/// code under test had moved on.
+///
+/// ⚠️ **This test refutes; it does not certify.** A kernel listing `landlock`
+/// has the LSM *enabled*, which is not the same as
+/// `landlock_create_ruleset` accepting the ABI the worker prelude asks for —
+/// and the prelude's probe is what actually killed the tier. So a failure here
+/// means **go re-measure with a real worker**, not "the opt-out is wrong".
+/// Same reasoning that named #687's fresh arm `NewerThanSources`.
+///
+/// Impact if it never fires: defence-in-depth erosion, not a containment
+/// break. The VM boundary, `--read-only --cap-drop ALL --user nobody` and
+/// **seccomp** all survive, and seccomp's survival is measured rather than
+/// argued (a hand-run worker reports
+/// `lockdown Linux { landlock: Disabled, seccomp: Installed, .. }`). But the
+/// justification for switching one layer off rests entirely on the other, and
+/// it should not rest there silently and indefinitely.
+#[test]
+fn the_guest_kernel_still_has_no_landlock_so_the_opt_out_still_applies() {
+    if skip_if_no_container() {
+        return;
+    }
+    // Three outcomes have to stay apart, or the detector reports the one that
+    // requires no action for a state that does: ABSENT (no securityfs entry —
+    // definitively no Landlock), the file's contents, and a file that exists
+    // and cannot be read (which proves nothing either way and must not be
+    // silently folded into "no Landlock").
+    const ABSENT: &str = "__no_lsm_file__";
+    let script = format!(
+        "if [ -e {path} ]; then cat {path}; else echo {ABSENT}; fi",
+        path = kastellan_sandbox::GUEST_LSM_LIST_PATH
+    );
+    let backend = MacosContainer::new();
+    let mut child = backend
+        .spawn_under_policy(&strict_policy(), "/bin/sh", &["-c", &script])
+        .expect("container should spawn sh");
+    let status = child.wait().expect("wait");
+    let stdout = read_to_string(&mut child.stdout);
+    let stderr = read_to_string(&mut child.stderr);
+    let seen = stdout.trim();
+
+    assert!(
+        status.success(),
+        "could not read the guest LSM list, so this run proves nothing about Landlock \
+         either way: status={status:?} stdout={stdout:?} stderr={stderr:?}"
+    );
+    if seen == ABSENT {
+        // Today's state on Apple `container` 1.1.0 / guest 6.18.15, re-measured
+        // 2026-09-10: `/sys/kernel/security` exists and is empty.
+        return;
+    }
+    assert!(
+        !kastellan_sandbox::landlock_in_lsm_list(seen),
+        "GOOD NEWS THAT NEEDS A DECISION (#689): the Apple `container` guest kernel now \
+         enables Landlock ({seen:?}). The worker-side FS layer has been off since #684 \
+         because it did not. Re-measure with a REAL worker first — an enabled LSM is not \
+         proof that `landlock_create_ruleset` accepts the prelude's ABI, and the prelude's \
+         probe is what killed this tier before. If a worker survives with the injection \
+         removed, delete the `KASTELLAN_LANDLOCK_PROFILE` default in \
+         `macos_container::build_container_argv` and delete this test. See also #668, the \
+         same question for the Firecracker guest kernel."
+    );
+}
