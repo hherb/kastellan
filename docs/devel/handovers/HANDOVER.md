@@ -11,8 +11,10 @@
 [#688](https://github.com/hherb/kastellan/pull/688) MERGED (#684 + #687, the macOS container
 REQUIRE knob + freshness gate), on top of `0939e80c` (#682), `ec9a2e94` (#679) and `fb560ab7`
 (#667). ·
-**OPEN BRANCH: `fix/690-689-686-microvm-preflight-timeouts`** — #690, #689 and #686, the three
-deferrals #688 filed. See [This session](#this-session-690--689--686--the-micro-vm-arc-closes-out). ·
+**OPEN BRANCH: `fix/690-689-686-microvm-preflight-timeouts`** (`499c9488`) — #690, #689 and #686,
+the three deferrals #688 filed; **two-host gate GREEN and reconciled**, see
+[This session](#this-session-690--689--686--the-micro-vm-arc-closes-out). Filed
+[#691](https://github.com/hherb/kastellan/issues/691). ·
 **DGX RUNNING `fb560ab7`** — behind `main`, but everything since is tests + scripts + docs, so the
 running daemon is unaffected; redeploy at the next core change. ⚠️ **Its eight rootfs images were
 rebuilt 2026-09-08** and bake the `--workspace` init (`8a21877a…`).
@@ -275,6 +277,18 @@ Most are also memory notes (auto-loaded); kept here because they change the *fir
 > | xargs touch`; that re-lints all **27** workspace crates. And `cargo check`/`clippy --all-targets`
 > do **not** warm the target dir for `cargo test` — **run the sweep first, lint after.**
 
+> ⚠️ **The forced-cold clippy recipe FALSIFIES the #687 container freshness gate, and the two are
+> both in this file.** `find … -name main.rs | xargs touch` moves
+> `workers/python-exec/src/main.rs`, which is in the gate's source closure, so every container e2e
+> then reports the image stale and **panics under REQUIRE** — naming a ten-minute cross-build as the
+> remedy for a file nobody edited. Measured 2026-09-11: *"image 2026-09-10 16:36 UTC, source
+> 2026-09-10 16:36 UTC"*, the same minute, on an image built from those exact bytes. It is #667's
+> original objection to mtimes, reappearing on the one tier allowed to use them, and it is a false
+> **refusal** — the direction that gets a gate switched off.
+> **Order the two commands: clippy first, then rebuild the image, then run the container tier.**
+> [#691](https://github.com/hherb/kastellan/issues/691) holds the four options and the measurement
+> each needs.
+
 > ⚠️ **A private `CARGO_TARGET_DIR` does not build `examples/`,** so `email_channel_e2e`'s 6 tests
 > fail with `fixture not built` at a perfectly green commit
 > [[custom-cargo-target-dir-breaks-daemon-e2e]]. Read the failure text before believing a regression.
@@ -458,9 +472,8 @@ re-derives them: egress #242, #251, #304 (needs a controllable TLS origin), #260
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **DGX** (`main`, the sweep #688 owed and never ran) | **`09a4f924`** | **Full sweep:** `cargo test --workspace --no-fail-fast --locked -- --nocapture` **4250 / 0 / 61**, **177** suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner tier, held), **0 `[WARN]`**. ⚠️ **The delta reconciles exactly and settles the arithmetic #688's own row got wrong: +10** over the reconciled **4240** at `0fa5b8b6` — the review round's new tests, all in `kastellan-tests-common` and all cross-platform (Mac 326 → 336). Ignored unchanged at 61 | `--workspace --all-targets --locked -D warnings` exit **0**. ⚠️ **Forced cold**: `find … -name lib.rs -o -name main.rs \| xargs touch` first, so all **27** workspace crates were re-linted rather than the 4 a warm dir reports | **4**, gliner tier. **0** `[WARN]` |
-| **Mac** (`main`) | **`09a4f924`** | Recorded at session end — see the branch row. The Mac half of #688's owed sweep was run on clean `main` in the primary checkout while this session's work proceeded in a `git worktree` | — | — |
-| **Mac + DGX** (this branch, #690/#689/#686) | branch tip | Recorded at session end | — | — |
+| **Mac + DGX** (this branch, #690/#689/#686 — **the gate that stands**) | **`499c9488`** | **Mac full sweep:** `cargo test --workspace --no-fail-fast --locked -- --nocapture` **4155 / 0 / 29**, **177** suites, `TEST_EXIT=0`, **0 `[WARN]`**, 339 `[SKIP]` (328 of them the pre-existing absent-Postgres ones). **DGX full sweep: 4290 / 0 / 61**, 177 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner tier, held), **0 `[WARN]`**. ⚠️ **Both deltas reconcile exactly, and against different baselines.** DGX: **+40** over `main`'s 4250 — every new test is cross-platform (`bounded_command` 18, `subprocess_guard` 12, `container_tests` 4, `images` 3, `landlock_lsm` 3). Mac: 4104 at `0fa5b8b6` **+10** (#688's review round, which post-dated that gate) **+41** (the 40 above plus the one macOS-only smoke test) = **4155**. The host gap moved from **−136** to **−135**, which is that one macOS-only test and nothing else. Ignored unchanged on both. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 10 / 0** across all three suites (4 + 1 + 5), every suite exit 0, **0 `[WARN]`**, 4 opt-in gliner `[SKIP]`s. ⚠️ **That tier needed the image rebuilt twice, and the second rebuild is a finding, not a chore** — see [#691](https://github.com/hherb/kastellan/issues/691) below. **Live negative controls, all run:** the budget removed → the suite takes **30.01 s instead of 0.50 s** and both timeout tests fail; the drains removed → a 512 KiB writer **times out at the full 60 s budget** and 6 tests fail; the guard's rule planted with a violation → found and named; the #689 detector fed `capability,landlock,bpf` from a real container → red with the full operator message | **Mac** `--workspace --all-targets --locked -D warnings` exit **0**, zero warnings, all **27** workspace crates from a forced-cold `touch`. **DGX** the same, exit **0**, 27 crates. `kastellan-sandbox` also cross-clippied for `aarch64-unknown-linux-gnu` from the Mac — **which caught a Linux-only unused import the Mac run compiles out** | **339** Mac (328 absent-Postgres), **4** DGX. **0** `[WARN]` |
+| **DGX** (`main`, the sweep #688 owed and never ran) | **`09a4f924`** | Superseded by the row above; kept because it is the only direct measurement of `main`. **4250 / 0 / 61**, 177 suites, `TEST_EXIT=0` | exit 0, 27 crates | **4** |
 | **Mac + DGX** (#688, the gate that stood) | **`0fa5b8b6`** | Mac **4104 / 0 / 29**, 177 suites, `TEST_EXIT=0`; DGX **4239** measured a commit early at `5afc88cd`, reconciled to **4240**. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 8 / 0** across all 3 suites, **0 `[SKIP]`, 0 `[WARN]`** — first time they exercised current code since June. Three live negative controls on the real host: the 2026-06-26 image `[SKIP]`ed by default and **panicked** under REQUIRE; `container system stop` produced "start the service", not "rebuild the image"; the rebuilt image turned all four python-exec tests red at `Protocol(EarlyExit)`, which the Landlock injection turned green | Both hosts exit 0; `kastellan-sandbox` also cross-clippied for `aarch64-unknown-linux-gnu` from the Mac | **349** Mac (326 absent-Postgres, pre-existing), **4** DGX |
 | **DGX** (#685/#682) | **`10cb6761`** | **4206 / 0 / 60**, 177 suites, `TEST_EXIT=0`. **Firecracker tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 30 / 0** across all **15** suites (discovered by grep, not hand-listed), run **after a plain `bash scripts/build-release.sh`**. ⚠️ **These tests are `#[ignore]`d and need `-- --ignored`**: the first attempt without it reported `3 passed, 28 ignored` with every suite exit 0 — a green run that booted no VM at all | exit 0 | **4**, gliner |
 Older rows (#683 `4189`, #680 `4142`, #675 `4075`, #669 `4049`, and back to 2950) are in the
@@ -575,9 +588,10 @@ allowlisted endpoints for the *one* compromised tool. Nothing else.
 Newest first; substance is compressed under [Current state](#current-state), full prose in the
 [`archive/`](archive/) snapshots and git history.
 
-- **(open branch `fix/690-689-686-microvm-preflight-timeouts`)** — every micro-VM preflight
-  subprocess answers to a budget (#690), the macOS Landlock opt-out gets a drift detector (#689),
-  and all eight rootfs build scripts become cwd-independent (#686).
+- **(open branch `fix/690-689-686-microvm-preflight-timeouts`, `499c9488`)** — every micro-VM
+  preflight subprocess answers to a budget (#690), the macOS Landlock opt-out gets a drift detector
+  (#689), and all eight rootfs build scripts become cwd-independent (#686). Two-host gate green,
+  both deltas reconciled. Filed [#691](https://github.com/hherb/kastellan/issues/691).
 - **[#688](https://github.com/hherb/kastellan/pull/688)** `09a4f924` — the macOS Apple-`container`
   tier gets the REQUIRE knob and a freshness gate (#684, #687), and the Landlock defect that gate
   immediately found. Filed #689 and #690.
