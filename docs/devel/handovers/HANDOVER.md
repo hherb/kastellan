@@ -7,25 +7,30 @@
 > [`archive/handover_20260910_688_pre-prune.md`](archive/handover_20260910_688_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
-**Last updated:** 2026-09-10 · **`main` HEAD:** `09a4f924` —
-[#688](https://github.com/hherb/kastellan/pull/688) MERGED (#684 + #687, the macOS container
-REQUIRE knob + freshness gate), on top of `0939e80c` (#682), `ec9a2e94` (#679) and `fb560ab7`
-(#667). ·
-**OPEN BRANCH: `fix/690-689-686-microvm-preflight-timeouts`** (`499c9488`) — #690, #689 and #686,
-the three deferrals #688 filed; **two-host gate GREEN and reconciled**, see
-[This session](#this-session-690--689--686--the-micro-vm-arc-closes-out). Filed
-[#691](https://github.com/hherb/kastellan/issues/691). ·
-**DGX RUNNING `fb560ab7`** — behind `main`, but everything since is tests + scripts + docs, so the
-running daemon is unaffected; redeploy at the next core change. ⚠️ **Its eight rootfs images were
-rebuilt 2026-09-08** and bake the `--workspace` init (`8a21877a…`).
+**Last updated:** 2026-09-11 ·
+**Recent PRs, newest first:** [#692](https://github.com/hherb/kastellan/pull/692) (#690 + #689 +
+#686, the micro-VM preflight budgets), [#688](https://github.com/hherb/kastellan/pull/688) (#684 +
+#687), [#685](https://github.com/hherb/kastellan/pull/685) (#682),
+[#683](https://github.com/hherb/kastellan/pull/683) (#679),
+[#680](https://github.com/hherb/kastellan/pull/680) (#667). #692 filed
+[#691](https://github.com/hherb/kastellan/issues/691), still open. ·
+**DGX DEPLOYED FROM `fb560ab7`** — ⚠️ **and it is now behind `main` in PRODUCTION code, not just
+tests.** #692 bounded `LinuxBwrap::probe` and `linux_cgroup::cgroup_probe`, both of which the
+daemon links, so the header's previous "everything since is tests + scripts + docs, the running
+daemon is unaffected" no longer holds. ⚠️ **Its eight rootfs images were rebuilt 2026-09-08** and
+bake the `--workspace` init (`8a21877a…`).
 
-> ⚠️ **`main` shipped a handover describing its own branch as open.** The
-> `Last updated:` block above was written on the #688 branch, merged unchanged, and then said
-> "OPEN BRANCH: fix/684-687…" about a commit that was already `main`'s HEAD — for a whole day,
-> with the two-host sweep it declared owed never run. Git has no opinion about prose and CI has
-> none either. **Re-read this file's header against `git log --oneline -1` at the START of a
-> session, not the end.** (The 2026-09-07 failure was the same class: two branches each edited
-> this header and the merge kept both.)
+> **Header convention — CHANGED 2026-09-11, after the third recurrence. Read this before editing
+> the block above.** This header names **PRs and issues only. Never a branch name, never a HEAD
+> sha, never the word OPEN.** Those are claims about VCS state that a merge falsifies with no
+> actor in between, and this file has now shipped self-contradicting **three times** on exactly
+> that class: the 2026-09-07 clean auto-merge that kept both branches' headers; #688, which
+> described its own already-merged branch as open for a day with the sweep it declared owed never
+> run; and #692, the same again. A PR number cannot be falsified by a merge — GitHub owns the
+> merged-vs-open distinction, so let it. **The tip and the open set are questions for the tools
+> that own them, and both are one command:** `git log --oneline -1 origin/main` and
+> `gh pr list --state open`. Run them at the START of a session, before trusting a word of this
+> file. What a *session* is doing belongs under [Current state](#current-state), not up here.
 
 > ⚠️ **An issue's own census can be wrong, and so can the rule it proposes — and so can YOUR
 > re-derivation.** #679 named 7 call sites, the property covered 11, review found a 12th. #667
@@ -64,7 +69,7 @@ rebuilt 2026-09-08** and bake the `--workspace` init (`8a21877a…`).
 
 ## Current state
 
-### This session: #690 + #689 + #686 — the micro-VM arc closes out
+### Most recently merged: #690 + #689 + #686 — the micro-VM arc closes out ([#692](https://github.com/hherb/kastellan/pull/692))
 
 Branch `fix/690-689-686-microvm-preflight-timeouts`. The three deferrals #688 filed, taken together
 because they are one theme: **the micro-VM preconditions could fail in ways that said nothing.**
@@ -472,7 +477,7 @@ re-derives them: egress #242, #251, #304 (needs a controllable TLS origin), #260
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac + DGX** (this branch, #690/#689/#686 — **the gate that stands**) | **`499c9488`** | **Mac full sweep:** `cargo test --workspace --no-fail-fast --locked -- --nocapture` **4155 / 0 / 29**, **177** suites, `TEST_EXIT=0`, **0 `[WARN]`**, 339 `[SKIP]` (328 of them the pre-existing absent-Postgres ones). **DGX full sweep: 4290 / 0 / 61**, 177 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner tier, held), **0 `[WARN]`**. ⚠️ **Both deltas reconcile exactly, and against different baselines.** DGX: **+40** over `main`'s 4250 — every new test is cross-platform (`bounded_command` 18, `subprocess_guard` 12, `container_tests` 4, `images` 3, `landlock_lsm` 3). Mac: 4104 at `0fa5b8b6` **+10** (#688's review round, which post-dated that gate) **+41** (the 40 above plus the one macOS-only smoke test) = **4155**. The host gap moved from **−136** to **−135**, which is that one macOS-only test and nothing else. Ignored unchanged on both. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 10 / 0** across all three suites (4 + 1 + 5), every suite exit 0, **0 `[WARN]`**, 4 opt-in gliner `[SKIP]`s. ⚠️ **That tier needed the image rebuilt twice, and the second rebuild is a finding, not a chore** — see [#691](https://github.com/hherb/kastellan/issues/691) below. **Live negative controls, all run:** the budget removed → the suite takes **30.01 s instead of 0.50 s** and both timeout tests fail; the drains removed → a 512 KiB writer **times out at the full 60 s budget** and 6 tests fail; the guard's rule planted with a violation → found and named; the #689 detector fed `capability,landlock,bpf` from a real container → red with the full operator message | **Mac** `--workspace --all-targets --locked -D warnings` exit **0**, zero warnings, all **27** workspace crates from a forced-cold `touch`. **DGX** the same, exit **0**, 27 crates. `kastellan-sandbox` also cross-clippied for `aarch64-unknown-linux-gnu` from the Mac — **which caught a Linux-only unused import the Mac run compiles out** | **339** Mac (328 absent-Postgres), **4** DGX. **0** `[WARN]` |
+| **Mac + DGX** ([#692](https://github.com/hherb/kastellan/pull/692), #690/#689/#686 — **the gate that stands**) | **`499c9488`** (branch tip; squashed to `c5bf5e5f`) | **Mac full sweep:** `cargo test --workspace --no-fail-fast --locked -- --nocapture` **4155 / 0 / 29**, **177** suites, `TEST_EXIT=0`, **0 `[WARN]`**, 339 `[SKIP]` (328 of them the pre-existing absent-Postgres ones). **DGX full sweep: 4290 / 0 / 61**, 177 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner tier, held), **0 `[WARN]`**. ⚠️ **Both deltas reconcile exactly, and against different baselines.** DGX: **+40** over `main`'s 4250 — every new test is cross-platform (`bounded_command` 18, `subprocess_guard` 12, `container_tests` 4, `images` 3, `landlock_lsm` 3). Mac: 4104 at `0fa5b8b6` **+10** (#688's review round, which post-dated that gate) **+41** (the 40 above plus the one macOS-only smoke test) = **4155**. The host gap moved from **−136** to **−135**, which is that one macOS-only test and nothing else. Ignored unchanged on both. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 10 / 0** across all three suites (4 + 1 + 5), every suite exit 0, **0 `[WARN]`**, 4 opt-in gliner `[SKIP]`s. ⚠️ **That tier needed the image rebuilt twice, and the second rebuild is a finding, not a chore** — see [#691](https://github.com/hherb/kastellan/issues/691) below. **Live negative controls, all run:** the budget removed → the suite takes **30.01 s instead of 0.50 s** and both timeout tests fail; the drains removed → a 512 KiB writer **times out at the full 60 s budget** and 6 tests fail; the guard's rule planted with a violation → found and named; the #689 detector fed `capability,landlock,bpf` from a real container → red with the full operator message | **Mac** `--workspace --all-targets --locked -D warnings` exit **0**, zero warnings, all **27** workspace crates from a forced-cold `touch`. **DGX** the same, exit **0**, 27 crates. `kastellan-sandbox` also cross-clippied for `aarch64-unknown-linux-gnu` from the Mac — **which caught a Linux-only unused import the Mac run compiles out** | **339** Mac (328 absent-Postgres), **4** DGX. **0** `[WARN]` |
 | **DGX** (`main`, the sweep #688 owed and never ran) | **`09a4f924`** | Superseded by the row above; kept because it is the only direct measurement of `main`. **4250 / 0 / 61**, 177 suites, `TEST_EXIT=0` | exit 0, 27 crates | **4** |
 | **Mac + DGX** (#688, the gate that stood) | **`0fa5b8b6`** | Mac **4104 / 0 / 29**, 177 suites, `TEST_EXIT=0`; DGX **4239** measured a commit early at `5afc88cd`, reconciled to **4240**. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 8 / 0** across all 3 suites, **0 `[SKIP]`, 0 `[WARN]`** — first time they exercised current code since June. Three live negative controls on the real host: the 2026-06-26 image `[SKIP]`ed by default and **panicked** under REQUIRE; `container system stop` produced "start the service", not "rebuild the image"; the rebuilt image turned all four python-exec tests red at `Protocol(EarlyExit)`, which the Landlock injection turned green | Both hosts exit 0; `kastellan-sandbox` also cross-clippied for `aarch64-unknown-linux-gnu` from the Mac | **349** Mac (326 absent-Postgres, pre-existing), **4** DGX |
 | **DGX** (#685/#682) | **`10cb6761`** | **4206 / 0 / 60**, 177 suites, `TEST_EXIT=0`. **Firecracker tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 30 / 0** across all **15** suites (discovered by grep, not hand-listed), run **after a plain `bash scripts/build-release.sh`**. ⚠️ **These tests are `#[ignore]`d and need `-- --ignored`**: the first attempt without it reported `3 passed, 28 ignored` with every suite exit 0 — a green run that booted no VM at all | exit 0 | **4**, gliner |
@@ -588,7 +593,7 @@ allowlisted endpoints for the *one* compromised tool. Nothing else.
 Newest first; substance is compressed under [Current state](#current-state), full prose in the
 [`archive/`](archive/) snapshots and git history.
 
-- **(open branch `fix/690-689-686-microvm-preflight-timeouts`, `499c9488`)** — every micro-VM
+- **[#692](https://github.com/hherb/kastellan/pull/692)** `c5bf5e5f` — every micro-VM
   preflight subprocess answers to a budget (#690), the macOS Landlock opt-out gets a drift detector
   (#689), and all eight rootfs build scripts become cwd-independent (#686). Two-host gate green,
   both deltas reconciled. Filed [#691](https://github.com/hherb/kastellan/issues/691).
@@ -627,9 +632,11 @@ Newest first; substance is compressed under [Current state](#current-state), ful
    session's first move belongs here; a fact recoverable from `git log` does not.
 4. Keep this file under ~500 lines. When it grows past that, snapshot it to
    `archive/handover_<date>_<topic>_pre-prune.md` and compress in place, leaving the archive link.
-5. **Re-read the header against `main` before merging a long-lived branch** — this file has now
-   shipped self-contradicting twice, once from a clean auto-merge and once from a branch that
-   described itself as open after it landed.
+5. **Keep the header free of VCS state.** Since 2026-09-11 it names PRs and issues only — no
+   branch names, no HEAD shas, no "OPEN". Three recurrences established that a claim a merge can
+   falsify *will* be merged unchanged, because no actor stands between the write and the merge.
+   Put what this session is doing under [Current state](#current-state) instead, where it reads
+   as history the moment it lands rather than as a false claim.
 6. Update [`ROADMAP.md`](../ROADMAP.md) in the same commit, and commit both together.
 
 ### Pruning convention
