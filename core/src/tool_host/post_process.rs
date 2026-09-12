@@ -252,27 +252,24 @@ pub(super) async fn finalize(
     // the `guard` sub-object whenever the tier ran. No new rows: the row count
     // per dispatch is unchanged.
     let actor = format!("tool:{tool}");
+    // Shape and key spellings live in `build_tool_audit_payload`, which is
+    // pure and therefore testable against `kastellan-db`'s truncation rule
+    // without a worker or a database (issue #617). The two keys the db
+    // crate READS BACK (`req`, `guard`) are spelled as that crate's own
+    // `const`s, so a rename there is a compile error here rather than a
+    // silent stop to preservation past the payload cap; `ms`, `result` and
+    // `err` are local literals, because nothing across the crate boundary
+    // looks them up.
     let audit_payload = match &final_result {
-        Ok(v) => {
-            let mut payload = serde_json::json!({
-                "req":    req_for_audit,
-                "result": v,
-                "ms":     elapsed_ms,
-            });
-            if let Some(report) = &guard_report {
-                // `GUARD_KEY`, not `"guard"`: the allowlist that carries
-                // this key through `truncate_payload` lives in another
-                // crate, and two independent spellings would let a rename
-                // on either side silently stop preserving the score.
-                payload[kastellan_db::audit::GUARD_KEY] = report.audit_value();
-            }
-            payload
-        }
-        Err(e) => serde_json::json!({
-            "req": req_for_audit,
-            "err": e.to_string(),
-            "ms":  elapsed_ms,
-        }),
+        Ok(v) => build_tool_audit_payload(
+            req_for_audit,
+            Ok(v),
+            guard_report.as_ref().map(|r| r.audit_value()),
+            elapsed_ms,
+        ),
+        // The error arm never carries a guard verdict: an error is not
+        // text-channel content, so the screen above skipped it entirely.
+        Err(e) => build_tool_audit_payload(req_for_audit, Err(&e.to_string()), None, elapsed_ms),
     };
     // ── Emit `secret.redeemed` audit rows (one per substitution). ──
     //
@@ -362,3 +359,48 @@ pub(super) async fn finalize(
 
     Ok(final_result?)
 }
+
+/// Build the `audit_log` payload for one tool dispatch.
+///
+/// Pure — no I/O, no clock, no global state — so the wire shape the
+/// chokepoint stores is unit-testable without a worker, a vault or a
+/// database. It was inline in [`finalize`] until issue #617 needed the
+/// shape asserted against `kastellan-db`'s truncation rule.
+///
+/// * `outcome` is `Ok(result)` or `Err(error text)`.
+/// * `guard_audit_value` is the guard tier's verdict when it ran. Passed as
+///   a plain `Value` rather than a `GuardReport` so a test never has to
+///   *construct* one — which would mean booting a guard tier. (It does not
+///   remove a dependency: `GuardReport` is same-crate, and this function
+///   already names `kastellan_db::audit`'s key `const`s below.)
+///
+/// `outcome` borrows and `guard_audit_value` is owned because that is what
+/// each caller has: [`finalize`] matches on `&final_result`, so it holds
+/// only a borrow, while `GuardReport::audit_value` mints a fresh `Value`.
+///
+/// The request goes under [`kastellan_db::audit::REQ_KEY`] and the verdict
+/// under [`kastellan_db::audit::GUARD_KEY`] — both `const`s owned by the
+/// crate that reads them, so a rename there is a compile error here rather
+/// than a silent change of behaviour past the payload cap.
+pub(super) fn build_tool_audit_payload(
+    req_for_audit: &serde_json::Value,
+    outcome: Result<&serde_json::Value, &str>,
+    guard_audit_value: Option<serde_json::Value>,
+    elapsed_ms: u64,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        (kastellan_db::audit::REQ_KEY): req_for_audit,
+        "ms": elapsed_ms,
+    });
+    match outcome {
+        Ok(v) => payload["result"] = v.clone(),
+        Err(text) => payload["err"] = serde_json::Value::String(text.to_string()),
+    }
+    if let Some(verdict) = guard_audit_value {
+        payload[kastellan_db::audit::GUARD_KEY] = verdict;
+    }
+    payload
+}
+
+#[cfg(test)]
+mod tests;

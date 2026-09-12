@@ -299,6 +299,15 @@ const ACTION_HANDOFF_FETCHED: &str = "handoff.fetched";
 /// without a join: when `actor = "scheduler"`, the worker name doesn't
 /// appear in the action.
 ///
+/// ⚠️ **That filter under-counts above [`kastellan_db::audit::PAYLOAD_MAX_BYTES`].**
+/// Neither key is in [`kastellan_db::audit::PRESERVED_KEYS`], so truncation
+/// elides both and `WHERE payload->>'tool' = '…'` silently returns *no*
+/// rows for oversized dispatches rather than erroring — an operator
+/// counting spawn failures misses precisely the large ones. Tracked as
+/// issue #693; it is a `PRESERVED_KEYS` policy call, since unlike the
+/// chokepoint's rows these two live only in the payload and not in the
+/// `actor`/`action` columns.
+///
 /// * `err = None`  → suitable for `step.unknown_tool` (no underlying
 ///   error string; the failure is a missing registration).
 /// * `err = Some`  → suitable for `step.spawn_failed` (`Display`
@@ -313,7 +322,12 @@ fn build_scheduler_step_failure_payload(
     let mut payload = serde_json::Map::with_capacity(5);
     payload.insert("tool".into(), serde_json::Value::String(tool.into()));
     payload.insert("method".into(), serde_json::Value::String(method.into()));
-    payload.insert("req".into(), req);
+    // `REQ_KEY`, not `"req"`: `kastellan_db::audit::truncate_payload` derives
+    // this row's bounded request summary by looking the key up, so a rename
+    // on that side must be a compile error here rather than a silent stop to
+    // summarisation on the one row class whose `tool`/`method` live only in
+    // the payload (issue #617).
+    payload.insert(kastellan_db::audit::REQ_KEY.into(), req);
     if let Some(e) = err {
         payload.insert("err".into(), serde_json::Value::String(e.into()));
     }

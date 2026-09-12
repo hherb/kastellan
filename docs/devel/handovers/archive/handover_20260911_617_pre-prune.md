@@ -8,19 +8,17 @@
 > which holds the verbose pre-prune version of everything summarised here.
 
 **Last updated:** 2026-09-11 ·
-**Recent PRs, newest first:** [#694](https://github.com/hherb/kastellan/pull/694) (#617, the
-bounded request summary), [#692](https://github.com/hherb/kastellan/pull/692) (#690 + #689 + #686,
-the micro-VM preflight budgets), [#688](https://github.com/hherb/kastellan/pull/688) (#684 + #687),
-[#685](https://github.com/hherb/kastellan/pull/685) (#682),
-[#683](https://github.com/hherb/kastellan/pull/683) (#679). **Open issues these filed:**
-[#691](https://github.com/hherb/kastellan/issues/691) (from #692),
-[#693](https://github.com/hherb/kastellan/issues/693) (from #694). ·
-**DGX DEPLOYED FROM `fb560ab7`** — ⚠️ **behind `main` in PRODUCTION code, not just tests.** #692
-bounded `LinuxBwrap::probe` and `linux_cgroup::cgroup_probe` and #694 changes the audit write path,
-all of which the daemon links, so the long-standing "everything since is tests + scripts + docs, the
-running daemon is unaffected" no longer holds. **Redeploy with `scripts/upgrade_from_git.sh`, which
-deploys from `main`.** ⚠️ **Its eight rootfs images were rebuilt 2026-09-08** and bake the
-`--workspace` init (`8a21877a…`).
+**Recent PRs, newest first:** [#692](https://github.com/hherb/kastellan/pull/692) (#690 + #689 +
+#686, the micro-VM preflight budgets), [#688](https://github.com/hherb/kastellan/pull/688) (#684 +
+#687), [#685](https://github.com/hherb/kastellan/pull/685) (#682),
+[#683](https://github.com/hherb/kastellan/pull/683) (#679),
+[#680](https://github.com/hherb/kastellan/pull/680) (#667). #692 filed
+[#691](https://github.com/hherb/kastellan/issues/691), still open. ·
+**DGX DEPLOYED FROM `fb560ab7`** — ⚠️ **and it is now behind `main` in PRODUCTION code, not just
+tests.** #692 bounded `LinuxBwrap::probe` and `linux_cgroup::cgroup_probe`, both of which the
+daemon links, so the header's previous "everything since is tests + scripts + docs, the running
+daemon is unaffected" no longer holds. ⚠️ **Its eight rootfs images were rebuilt 2026-09-08** and
+bake the `--workspace` init (`8a21877a…`).
 
 > **Header convention — CHANGED 2026-09-11, after the third recurrence. Read this before editing
 > the block above.** This header names **PRs and issues only. Never a branch name, never a HEAD
@@ -71,118 +69,91 @@ deploys from `main`.** ⚠️ **Its eight rootfs images were rebuilt 2026-09-08*
 
 ## Current state
 
-### This session: #617 — an oversized dispatch can say what it did
+### Most recently merged: #690 + #689 + #686 — the micro-VM arc closes out ([#692](https://github.com/hherb/kastellan/pull/692))
 
-Branch `fix/617-req-summary`, PR [#694](https://github.com/hherb/kastellan/pull/694). Full prose in
-the ROADMAP entry; what binds:
+Branch `fix/690-689-686-microvm-preflight-timeouts`. The three deferrals #688 filed, taken together
+because they are one theme: **the micro-VM preconditions could fail in ways that said nothing.**
 
-**[#617](https://github.com/hherb/kastellan/issues/617) — `req` was lost wholesale past the payload
-cap**, so a `shell.exec` row past 4 KiB recorded the guard tier's *opinion of* the act and nothing
-about the act. The stated premise — operators want "who did what", not the body — holds for
-`web.fetch` and **fails for `shell.exec`, where the argv IS the audited act**. An over-cap payload
-carrying a request now keeps `req_summary = {head, sha256, len}`: a prefix of the serialised request
-capped at 512 B that still names the interpreter and its first arguments, the digest of the *whole*
-request so two rows compare, and its length so `len` > the head's bytes makes an elision detectable.
+**[#690](https://github.com/hherb/kastellan/issues/690) — no preflight subprocess had a timeout.**
+Every host probe used `Command::output()`, which waits forever. Apple `container` is daemon-backed
+(the CLI talks XPC to `container-apiserver`), so a wedged apiserver made `container system status`
+*block* rather than fail, and `cargo test --workspace` then stalled with **no `[SKIP]`, no `[WARN]`,
+no panic and no message of any kind** — the most opaque form of exactly the failure the module
+exists to prevent.
 
-- ⚠️ **Derived inside `truncate_payload`, NOT at the producer as the issue proposed — the issue's
-  census was one producer and there are two.** `core::scheduler::tool_dispatch` writes `req` too and
-  the issue never mentions it. **The scheduler test proves the central rule by adding nothing to that
-  producer.** Same lesson as #690's 4-vs-10 census and #679's 7-vs-12.
-- ⚠️ **The issue's proposed SHAPE was also wrong.** `argv0`/`argc` is `shell.exec` vocabulary and the
-  chokepoint dispatches every tool — empty noise for the rest, and per-tool knowledge in the one
-  place that must not have it. A byte prefix is generic *and* strictly more informative: it recovers
-  argv0 **and** the head of a 40 KiB heredoc, which `argv0`/`argc` cannot.
-- ⚠️ **The fingerprint is taken strictly BEFORE the summary is inserted**, or two rows for one body
-  stop comparing equal — the one thing the envelope digest exists to do. A test pins that order.
-- ⚠️ **`PRESERVED_KEYS` order is priority order and was moot at one member.** Live at two now:
-  `guard` first and asserted to win — **behaviourally only since the review round below; the
-  original assertion was vacuous** — because it is tiny, irrecoverable, and losing it was the
-  measured live defect that created the allowlist.
-- **Secrets: nothing new is exposed.** `req_for_audit` is the *pre-substitution* snapshot, so the
-  head holds opaque `secret://` refs and never a redeemed plaintext.
-- ⚠️ **No sink double can test any of this** [[audit-sink-doubles-hide-storage-transforms]] — every
-  cross-crate assertion runs the **real** `truncate_payload` over the **real** producer's output.
-- **Also:** `build_tool_audit_payload` lifts the chokepoint's payload construction out of a large
-  async fn into a pure, previously untested function; both producers spell the key as the db crate's
-  own `REQ_KEY`; one shared hex renderer for both digests. `db/src/audit.rs` was split first,
-  movement-only, 1132 → 558 + 581, same 25 `#[test]` names either side.
-- **Filed, deferred: [#693](https://github.com/hherb/kastellan/issues/693)** — an oversized
-  **scheduler** step-failure row loses `tool`/`method`, which live *only* in its payload while the
-  chokepoint's live in the `actor`/`action` **columns**. A `PRESERVED_KEYS` policy call, not a
-  mechanical extension.
+- **New shared vocabulary: `kastellan_sandbox::bounded_command`.** Pure `std`, no new dependency,
+  deliberately **not** `cfg`-gated (same reasoning as `guest_kernel_pin`: both tiers need it and
+  each runs on a different host). `output_within` returns `Bounded::{Exited, TimedOut}`;
+  `probe_output` narrows that to `ProbeFailure::{Spawn, Wedged}`; `timed_out_reason` is the pure
+  renderer. **A non-zero exit is `Exited`, not a timeout** — "no" is an answer, and folding the two
+  would be #684's defect in a new place.
+- ⚠️ **Draining both pipes on their own threads is load-bearing, and that is measured.** A child
+  writing more than one pipe buffer *blocks on the write* until somebody reads, so a poller that
+  does not drain reports a timeout for a process waiting on **us**. Live negative control: with the
+  drains removed, a 512 KiB writer **timed out at the full 60 s budget** and 6 tests went red.
+  Second control: with the budget removed, the suite took **30.01 s instead of 0.50 s** and the two
+  timeout tests failed.
+- ⚠️ **The issue's census was 4 sites; the real one is 10.** Bounded: the three Apple `container`
+  calls (`--version`, `system status`, `image inspect`), `MacosContainer::probe_image` (**missed by
+  the issue, and production**), `LinuxBwrap::probe`, **`linux_cgroup::cgroup_probe` — `systemd-run`
+  is D-Bus-backed, the Linux twin of the wedged apiserver and never mentioned in the issue** —
+  `MacosSeatbelt::probe`, the `debugfs` image read (**also missed**), and three test shell-outs.
+  **Exempt, with the reason at the site:** `mkfs.ext4` on the *spawn* path (a multi-gigabyte image
+  legitimately takes minutes) and `cargo metadata` (it takes cargo's own package lock, which a
+  concurrent build may hold for minutes — a budget there converts a benign wait into a flake).
+- **`PROBE_BUDGET` is 10 s and was measured, not guessed:** on the dev Mac under load average 27 the
+  three `container` calls answer in 10–240 ms, and `debugfs` reads the 398 032-byte guest init out
+  of the **1.3 GB** browser-driver image in ≤ 0.01 s. It is not a latency budget; it converts
+  *forever* into a sentence.
+- **`InspectFault` became `CliFault` and grew a third variant.** A wedge's remedy is `stop` **then**
+  `start`, so `cli_unavailable_reason`'s "start it with `container system start`" is the *wrong*
+  advice appended after the right one — the #684 folding defect in its politest form. One type now
+  serves the probe arm and the inspect arm, and `cli_fault_reason` is the single place a fault
+  becomes prose, so a fourth variant cannot be added with one arm quietly rendering it as something
+  else. `MacosContainer::probe_fault()` is the `*_or_reason` sibling one step further: it returns
+  the fault **classified**, because a flattened `SandboxError` could only be re-classified by
+  matching on prose, which this module forbids everywhere else.
+- **New drift guard: `microvm::subprocess_guard`.** The defect has **no runtime signature** — a
+  process that never returns reaches no assertion — so the only place it is visible is the source.
+  Fail-closed on a *shape*, with a `BOUNDED-EXEMPT: <reason>` marker each exception justifies
+  itself with, a positive control on the file count, and a planted-violation control. ⚠️ **It
+  cannot scan its own definition** (which names the shape it forbids, in a const and in fixtures);
+  that exclusion is by exact file and **the count is asserted**, so a third file cannot join it.
+  ⚠️ It deliberately does **not** reuse `guard.rs`'s string-aware stripper: that stripper models
+  neither raw strings nor `'"'` char literals, both of which occur throughout the production
+  sources scanned here, so it would blank whole files and report them clean.
 
-#### Review round on the same branch (2026-09-12) — two green tests were proving nothing
+**[#689](https://github.com/hherb/kastellan/issues/689) — the macOS Landlock opt-out now has a
+drift detector.** Option (2) from the issue: `macos_container_smoke` boots a real container and
+reads `/sys/kernel/security/lsm`, failing when Landlock appears. ⚠️ **The asymmetry it fixes ran the
+wrong way** — the Firecracker guest kernel is a sha256 pin *this repo controls* whose bump fails a
+test, while Apple's moves on a routine `brew upgrade container`, outside anybody's decision.
+⚠️ **The detector refutes; it does not certify**, and the naming says so (`landlock_in_lsm_list`,
+not `landlock_available`): an *enabled* LSM is not proof that `landlock_create_ruleset` accepts the
+prelude's ABI, and the prelude's probe is what killed this tier before — so a failure means "go
+re-measure with a real worker", never "the opt-out is wrong". Same rule as #687's `NewerThanSources`.
+**Re-measured 2026-09-10 on `container` 1.1.0:** `/sys/kernel/security` exists and is **empty**.
+Live negative control run: with the guest made to report `capability,landlock,bpf`, the test goes
+red with the full operator message.
 
-Five-agent review of #694, then the fixes, on the same branch. **Everything below was green before
-and after; the point is what green was worth.** Both critical findings were established by
-**mutation**, not by reading, and both mutations had previously left the whole suite passing.
+**[#686](https://github.com/hherb/kastellan/issues/686) — the eight rootfs build scripts are
+cwd-independent.** Seven used bare `target/release/…` and died at `install: cannot stat` from any
+other directory; the eighth had solved it a third way. All eight now carry **one byte-identical
+prologue**, asserted against a single const (#669's "count the producers"), and it sits **after**
+the `source` of `lib/guest-kernel.sh` because that line resolves its own relative path and must not
+run post-`cd`.
 
-- ⚠️ **The summary digest was never checked against an over-cap request.** Every digest assertion
-  used a request small enough that `head == text`, so taking the digest over the **head** instead of
-  the whole request passed 48/48. That is the one property the field exists for: two 40 KB generated
-  scripts sharing a 512-byte prefix would have collided, and two rows that must differ would have
-  compared equal. Now caught by two tests, one of them a head-sharing non-collision case.
-- ⚠️ **`the_guard_record_is_admitted_before_the_req_summary` did not test the order.** Its fixture
-  gave the summary a `PAYLOAD_MAX_BYTES`-sized head, which fits in **neither** slot — so the guard
-  won under both orders and the test passed with the array reversed, while its docstring claimed to
-  assert the order "behaviourally rather than by reading the array". Only the literal array pin ever
-  caught a reorder. The fixture is now ~60 % each (fits alone, not together), with a reversed-order
-  control, and a precondition asserting the contention actually exists.
-- **A forged `req_summary` could reach a row.** The overwrite ran only when a summary was *derived*,
-  so a payload carrying the key with **no `req`** had nothing overwrite it and `preserve_onto` copied
-  its forged answer onto the envelope verbatim. The key is now cleared **unconditionally** before
-  derivation. Mutation-proven. This also collapsed a nested `if let` whose two arms tested the same
-  discriminant.
-- **Two prose rules became compile errors.** `REQ_KEY ∉ PRESERVED_KEYS` (the module's central
-  prohibition — allowlisting `req` would carry whole bodies past the cap under an allowlisted name)
-  and the `HEAD_MAX_BYTES` budget relation. Both in the existing `const _: () = {}` block; the first
-  **verified to fire** as `error[E0080]`.
-- ⚠️ **Six doc claims were falsified by #694's own one-line change** from one preserved key to two.
-  The worst (`preserve_onto`'s doc) declared the multi-key half unreachable scaffolding at the exact
-  moment it became production behaviour. The safety conclusions survive, but **for a different
-  reason than stated**: starvation is unreachable by *sizing*, not by cardinality.
-- **Measured, not estimated:** `head` is a prefix of already-serialised JSON and is escaped **again**
-  when stored as a JSON string, so 512 bytes can cost ~1026. The "order of magnitude under the cap"
-  claim was ~3x. The budget-postcondition test carried **no `req` fixture at all** and now carries
-  two, including a quote-dense one.
-- **Filed, not carried in this branch** — all three are policy or cross-module calls:
-  [#695](https://github.com/hherb/kastellan/issues/695) (an oversized tool row cannot say whether the
-  dispatch succeeded, let alone why it failed: `err` is dropped unnamed, so success and failure carry
-  the same key set — the other half of #617's own thesis),
-  [#696](https://github.com/hherb/kastellan/issues/696) (`kastellan-db` defines `sha256_hex` twice;
-  **not** the #591 duplication, and #591's workers-can't-depend-on-db excuse does not cover it),
-  [#697](https://github.com/hherb/kastellan/issues/697) (truncation is never logged or counted).
-- ⚠️ **Process, worth more than any single finding: review subagents mutate the working tree.** Three
-  of the five planted mutants in the primary checkout — twice while a `cargo test` sweep was
-  compiling in it — and **none mentioned it in its report**. The tell was the harness's "file changed
-  on disk" notice. `git status` + `git diff --cached` before trusting any sweep that ran while agents
-  were live; revert by copying the file, never `git checkout --`; run the gate in a `git worktree`
-  the agents cannot reach. [[never-edit-tree-during-a-sweep]]
-
-**Gate (Mac, after the fixes):** clippy `-p kastellan-db -p kastellan-core --all-targets -D warnings`
-exit 0; `kastellan-db` + `kastellan-core --lib` **2339 / 0**, zero warnings, tree clean before and
-after the run. Baseline before the fixes was 2335, so **+4**. The pre-fix gate was run in a
-throwaway worktree at `8ecccb4a` precisely because the primary checkout was being mutated.
-
-**The header stopped asserting VCS state** after `main` shipped this file calling an already-merged
-branch OPEN for the **third** time. A branch name, a HEAD sha and the word OPEN are claims a merge
-falsifies with **no actor in between**; a PR number is not. See the header block.
-
-**#692 (`c5bf5e5f`) — the micro-VM preflight arc closed (#690 + #689 + #686).** What still binds:
-**`kastellan_sandbox::bounded_command` is the shared vocabulary for any host probe** — `output_within`
-→ `Bounded::{Exited, TimedOut}`, `probe_output` → `ProbeFailure::{Spawn, Wedged}`; **a non-zero exit
-is `Exited`, not a timeout**. ⚠️ **A bounded runner must NOT join its drain threads** — a grandchild
-inheriting the pipe blocks the read forever, measured at 17 minutes
-[[bounded-subprocess-must-not-join-drains]]; `Command::output()` has the same bug. ⚠️ **Draining at
-all is load-bearing:** without it a 512 KiB writer times out at the full budget. **Exempt, with the
-reason at the site:** `mkfs.ext4` on the spawn path and `cargo metadata` (it takes cargo's own
-package lock). `microvm::subprocess_guard` keeps it fixed — the defect has **no runtime signature**,
-so the only place it is visible is the source. **#689:** the macOS container guest kernel does not
-enforce Landlock either (`/sys/kernel/security` empty on `container` 1.1.0), so **both** micro-VM
-tiers are seccomp-only by design and `macos_container_smoke` fails the day that changes; it
-**refutes, it does not certify**. **#686:** all eight rootfs scripts carry one byte-identical
-cwd-independent prologue. ⚠️ **`cd ""` exits 0 on bash 3.2.57 and 5.2.21 but 1 on 5.3.15** — a
-premise this repo documented, false on one of its own hosts.
+- ⚠️ **A documented premise turned out to be false on one of the two dev hosts, and the test found
+  it.** `rebuild-all-rootfs.sh` and the issue both state that `cd ""` succeeds in bash. **Measured
+  2026-09-10:** bash **3.2.57** (macOS `/bin/bash`) exit **0**, bash **5.2.21** (DGX) exit **0**,
+  bash **5.3.15** (Homebrew, dev Mac) exit **1**, `cd: null directory`. So the premise holds on two
+  of three and the `[ -z "$REPO_ROOT" ]` guard is load-bearing — but a test asserting *bash's*
+  behaviour passes on one host and fails on the other. The test therefore asserts the **guard's**
+  behaviour, driving the real prologue text down its failure arm by shadowing `dirname` (`cd` and
+  `pwd` are builtins, so `dirname` is the only external it depends on).
+- **First behavioural coverage these eight files have ever had.** Every previous check reads what
+  they *say*; a prologue that parses, contains the right words and lands in the wrong directory
+  would have satisfied all of them.
 
 ### Merged arcs — only what still binds
 
@@ -207,50 +178,75 @@ condition" is not automatically a tightening** — the first fix for the source 
 was **fail-open and strictly narrower** than what it replaced, because the literal it required is
 absent from the brace-grouped `use` form.
 
-**#685 / #683 / #680 — the rootfs-freshness trio.** ⚠️ **Cargo unifies features PER INVOCATION, so
-package selection changes the bytes of an otherwise identical binary**
-[[cargo-package-selection-changes-binary-bytes]] — hence **one producer for `target/release/`,
-`scripts/build-release.sh`, run LAST** (its own second invocation is reversible: a later bare
-`--workspace` re-uplifts the non-featured Matrix worker in 0.32 s with no output).
-`KASTELLAN_MICROVM_REQUIRE_E2E=1` turns **every** unmet micro-VM precondition into a panic —
-⚠️ `||` short-circuits, so the load-bearing test is a **source scanner**; no unit test and no
-Firecracker run can see that false green. ⚠️ **#667 asked for mtimes and mtimes were WRONG** —
-cargo relinks unchanged output [[cargo-relinks-identical-mtime-not-content]], so the reference is
-the **sha256 of the baked copy**, read with `debugfs` (no mount, no root). ⚠️ **A verdict that
-certifies on PARTIAL evidence is the original bug with better manners**, and **every `debugfs`
-failure exits 0**, so benign causes are separated structurally, never by wording.
+**#685 (`0939e80c`) — `target/release/` has one producer (#682).** ⚠️ **Cargo unifies features PER
+INVOCATION, so package selection changes the bytes of an otherwise identical binary**
+[[cargo-package-selection-changes-binary-bytes]] — so after any deploy the #667 gate declared all
+eight *correct* images stale. The ambiguity is removed **at the producer**: all eight rootfs scripts
+call `scripts/build-release.sh`. ⚠️ **That is ONE SCRIPT WITH TWO INVOCATIONS and the second is
+reversible** — a later bare `cargo build --release --workspace` re-uplifts the non-featured Matrix
+worker in **0.32 s with no output but `Finished`**, so **run `build-release.sh` LAST**. ⚠️ Its
+review's reusable lesson: both existing script scanners read **comments as code**, and the first fix
+claimed its error direction *"leaves more text to scan, never less"* — false, exactly where it
+mattered.
+
+**#683 (`ec9a2e94`) — every micro-VM precondition answers to the REQUIRE knob (#679).** `||`
+short-circuits, so on exactly the host the operator cares about control reached
+`skip_if_no_supervisor()`. ⚠️ **The load-bearing test is a source scanner**, because the false green
+appears only on a host where the micro-VM preconditions are MET and a neighbouring one is not —
+which no unit test and no Firecracker run can be. ⚠️ **The Mac compiles none of that code**
+[[mac-compiles-zero-systemd-tests]].
+
+**#680 (`fb560ab7`) — a stale rootfs image can no longer gate anything (#667).** ⚠️ **The issue asked
+for mtimes and mtimes were WRONG here** — six *correct* DGX images read 5 h "older" than an init
+they contained byte-identical copies of, because cargo relinks unchanged output
+[[cargo-relinks-identical-mtime-not-content]]. **The reference is the sha256 of the baked copy**,
+read with `debugfs -R "cat …"` — no mount, no loop device, no root. **Four verdicts, four
+treatments:** `Stale`/`Unusable` panic; `Fresh`-with-caveats and `Indeterminate` `[WARN]` and still
+run. ⚠️ **A verdict that certifies on PARTIAL evidence is the original bug with better manners.**
+⚠️ **Every `debugfs` failure exits 0**, so benign causes are separated *structurally*
+(`ErrorKind::NotFound`), never by matching on wording.
+
+**#681 (`aee2a7f0`) — the Hermes Agent survey.** The number worth remembering: a lean tail plus one
+recovery round-trip scored **68.3 % recall on 49 K tokens** against **45.8 % on 162 K** for the fat
+verbatim tail — **a big verbatim tail is not the safe choice; it is the expensive one that also
+loses the needles.** ⚠️ Their `execute_code` opens an RPC socket from agent-authored Python back into
+the tool dispatcher; for us that turns one compromised worker into every worker.
+
+**#675 (`f831b3d1`) — the micro-VM path can say why it failed.** **A failed boot leaves
+`console.log` in the kept run dir — read that before theorising**
+[[microvm-guest-failures-are-invisible]]. ⚠️ **`bwrap --clearenv` means the launcher has NO
+environment** [[microvm-launcher-knobs-must-be-argv]]; **the release profile is `panic = "abort"`**,
+so RAII cleanup never runs in shipped binaries [[release-profile-panic-abort-kills-raii]].
+
+**#669 (`4955a52c`) — the Firecracker gate.** The backend had been **entirely dead at 0 of 21** since
+the audit merged. **Count the producers, and make the const the only spelling** —
+`build_vmm_jail_argv` was the **third** bwrap argv producer and #661's fix missed it. **The pinned
+guest kernel has no Landlock** [[firecracker-guest-kernel-no-landlock]]; repinning is #668. ⚠️ **A
+non-hex `kastellan.mounts=` fixture fails OPEN, silently**
+[[fail-safe-parsers-make-vacuous-fixtures]]. **`/run` is out of the chown set** and re-adding it
+would be a regression — chowning a *sticky* directory lets the owner unlink entries it does not own.
 
 **#660 (`62d98a00`) — the second pre-release security audit.** 29 fixes, 80 files. What still binds:
 the dispatch chokepoint scrubs every redeemed secret out of **both** result arms; agent-raised
 `l1_insight`s are screened at promotion *and* prompt assembly; every per-spawn `/tmp` dir is minted
 with `create_private_dir` — **a pre-planted name from another uid FAILS THE SPAWN CLOSED; do not
-"fix" it back to `create_dir_all`**; seccomp admits `clone` only without `CLONE_NEW*`.
-⚠️ **Three lockdown behaviours are FAIL-CLOSED and will bite a careless fixture:** a missing
+"fix" it back to `create_dir_all`**; seccomp admits `clone` only without `CLONE_NEW*`. ⚠️ **Three
+lockdown behaviours are FAIL-CLOSED and will bite a careless fixture:** a missing
 `KASTELLAN_SECCOMP_PROFILE` is an error (`none` is the explicit opt-out), an unenforceable Landlock
-ruleset is an error — **which killed the macOS container tier for 69 days** — and a corrupt
+ruleset is an error — **which is what killed the macOS container tier for 69 days** — and a corrupt
 `kastellan.env=` guest token refuses the boot. **Every networked stdio worker builds its handler
-INSIDE `serve_stdio_with`** (Landlock is per-thread). **Run the live-matrix clippy job before
-pushing anything touching `sdk_live.rs`.** CodeQL reads NAMES [[codeql-flags-sanitisers-by-name]].
+INSIDE `serve_stdio_with`** (Landlock is per-thread). **Run the live-matrix clippy job before pushing
+anything touching `sdk_live.rs`.** CodeQL reads NAMES [[codeql-flags-sanitisers-by-name]].
 **Deferred with a reason** (all in the audit doc): brokers not force-routed; the guard tier never
-sees bytes past 64 KiB; `secret://` refs not tool-bound; `Host:` ≠ CONNECT authority; no
-email-replay freshness window; macOS worker-side caps. **Before release: flip force-routing on.**
+sees bytes past 64 KiB; `secret://` refs not tool-bound; `Host:` ≠ CONNECT authority; no email-replay
+freshness window; macOS worker-side caps. **Before release: flip force-routing on.**
 
-**#681, #675, #669, #650/#653/#649 — the one-liners that still bind.** #681: a lean tail plus one
-recovery round-trip scored **68.3 % recall on 49 K tokens** against **45.8 % on 162 K** — **a big
-verbatim tail is not the safe choice; it is the expensive one that also loses the needles.**
-#675: **a failed micro-VM boot leaves `console.log` in the kept run dir — read it before theorising**
-[[microvm-guest-failures-are-invisible]]; `bwrap --clearenv` means the launcher has **no** environment
-[[microvm-launcher-knobs-must-be-argv]]; the release profile is `panic = "abort"`, so RAII cleanup
-never runs in shipped binaries [[release-profile-panic-abort-kills-raii]]. #669: **count the
-producers, and make the const the only spelling** — `build_vmm_jail_argv` was the *third* bwrap argv
-producer and #661's fix missed it; the pinned guest kernel has no Landlock
-[[firecracker-guest-kernel-no-landlock]] (repin is #668); **`/run` is out of the chown set** and
-re-adding it would be a regression (chowning a *sticky* dir lets the owner unlink others' entries);
-⚠️ a non-hex `kastellan.mounts=` fixture fails OPEN, silently [[fail-safe-parsers-make-vacuous-fixtures]].
-#650: **a containment fix must not widen containment**; ⚠️ `Path::components()` strips **interior**
-`.` only [[rust-path-components-normalizes-dot]]; open: #657, #658, #659. #653/#654: **the reusable
-pattern is the `*_or_reason` sibling** — return the reason **without rendering a verdict**; open:
-#664, #665. #649/#651: **the remedy an advisory states can be a no-op that exits 0**
+**#650 / #653 / #649 — three one-line lessons.** #650: **a containment fix must not widen
+containment**; ⚠️ `Path::components()` strips **interior** `.` only
+[[rust-path-components-normalizes-dot]]. Open: #657, #658, #659. #653/#654: **the reusable pattern is
+the `*_or_reason` sibling** — return the reason **without rendering a verdict**, so one caller can
+skip where another must fail; #690's `probe_fault` is its fifth consumer. Open: #664, #665.
+#649/#651: **the remedy an advisory states can be a no-op that exits 0**
 [[uv-lock-upgrade-can-land-still-vulnerable]].
 
 ### The guard tier — what still binds
@@ -286,28 +282,26 @@ Most are also memory notes (auto-loaded); kept here because they change the *fir
 > | xargs touch`; that re-lints all **27** workspace crates. And `cargo check`/`clippy --all-targets`
 > do **not** warm the target dir for `cargo test` — **run the sweep first, lint after.**
 
-> ⚠️ **Force a cold clippy with a dedicated `CARGO_TARGET_DIR`, NOT by touching sources.**
-> `CARGO_TARGET_DIR=$HOME/.cargo-clippy-<topic> cargo clippy --workspace --all-targets --locked --
-> -D warnings` proves the same thing (count the `Checking` lines — it linted all 27) and **mutates
-> no file**, so it cannot falsify the #687 image gate. The old `find … -name main.rs | xargs touch`
-> recipe moves `workers/python-exec/src/main.rs`, which *is* in that gate's source closure, so every
-> container e2e then reports the image stale and **panics under REQUIRE for a file nobody edited** —
-> a false **refusal**, the direction that gets a gate switched off
-> ([#691](https://github.com/hherb/kastellan/issues/691); both recipes measured on both hosts in the
-> issue). The trade is a slower first run: the fresh dir rebuilds dependencies the touch leaves warm
-> (28 m on the Mac), paid once per topic dir.
+> ⚠️ **The forced-cold clippy recipe FALSIFIES the #687 container freshness gate, and the two are
+> both in this file.** `find … -name main.rs | xargs touch` moves
+> `workers/python-exec/src/main.rs`, which is in the gate's source closure, so every container e2e
+> then reports the image stale and **panics under REQUIRE** — naming a ten-minute cross-build as the
+> remedy for a file nobody edited. Measured 2026-09-11: *"image 2026-09-10 16:36 UTC, source
+> 2026-09-10 16:36 UTC"*, the same minute, on an image built from those exact bytes. It is #667's
+> original objection to mtimes, reappearing on the one tier allowed to use them, and it is a false
+> **refusal** — the direction that gets a gate switched off.
+> **Order the two commands: clippy first, then rebuild the image, then run the container tier.**
+> [#691](https://github.com/hherb/kastellan/issues/691) holds the four options and the measurement
+> each needs.
 
 > ⚠️ **A private `CARGO_TARGET_DIR` does not build `examples/`,** so `email_channel_e2e`'s 6 tests
 > fail with `fixture not built` at a perfectly green commit
 > [[custom-cargo-target-dir-breaks-daemon-e2e]]. Read the failure text before believing a regression.
 
-> ⚠️ **rust-analyzer holds `target/debug/.cargo-lock` and will block a sweep indefinitely.**
-> Its `cargo` is a child of the `rust-analyzer` server process, so
-> `ps -eo pid,ppid,command | grep cargo` names it; **a blocked sweep has ZERO rustc children while
-> the IDE's has sixteen**, which settles who holds the lock in one command. Killing that child frees
-> it (the IDE re-runs later). Hit twice this session. For iterating on one crate, a private
-> `CARGO_TARGET_DIR` sidesteps the fight entirely — but only for unit tests, see the `examples/`
-> hazard above.
+> ⚠️ **rust-analyzer holds `target/debug/.cargo-lock` and will block a sweep indefinitely.** The Mac
+> sweep sat at `Blocking waiting for file lock on build directory` for 7 minutes until the IDE's
+> `cargo check --workspace` was killed. Check for a foreign `cargo check --workspace` on the same
+> manifest before concluding a build is slow.
 
 > ⚠️ **Do NOT edit the working tree while a sweep is compiling in it.** A sweep is a gate on one
 > revision; an edit mid-compile makes it a gate on nothing. **Work on a branch in a `git worktree`**
@@ -324,21 +318,10 @@ Most are also memory notes (auto-loaded); kept here because they change the *fir
 > ⚠️ **Squash-merge caveat:** every PR lands as one squash commit, so its *branch-tip* SHA (where the
 > gate ran) is **not** an ancestor of `main`. Check content, not `merge-base`.
 
-> ⚠️ **`syspolicyd` saturates and then NO newly-built binary can start on the Mac** — the cause of
-> the `_dyld_start` wedge this file has recorded only as a symptom. It gatekeeps `exec` of every
-> newly written executable. **Measured 2026-09-11 at 20 days uptime: pid 699 at 69–95 % CPU with
-> 110 hours accumulated; six consecutive suites wedged and a freshly compiled 20-byte C program
-> hung too.** ⚠️ **The tell is CPU TIME, not `%cpu`:** `ps -o pid,etime,time` showing **`0:00.00`
-> against a multi-minute ELAPSED** is conclusive, because contention always accumulates *some*
-> CPU — which is what the 2026-09-02 "the `sample` signature is ambiguous" correction lacked.
-> **Positive control, seconds:** `printf 'int main(){return 7;}' > /tmp/t.c && cc -o /tmp/t /tmp/t.c
-> && /tmp/t`. If *that* hangs, nothing about this repo can explain it. **Fix: ask the operator to
-> run `sudo killall syspolicyd`** — launchd respawns it and exec recovers immediately (verified; a
-> binary hung 52 minutes then ran instantly). Claude Code cannot: sudo has no tty.
-> ⚠️ **It re-saturates for a while afterwards** rebuilding its assessment cache, so a few suites
-> still wedge — a watchdog killing any `target/debug/deps/*` at `0:00.00` CPU past **15 minutes**
-> keeps the sweep moving and names each victim; re-run those suites individually.
-> [[mac-fresh-large-binaries-hang-in-dyld]]
+> ⚠️ **Freshly-linked executables can hang forever in `_dyld_start` on macOS**, so every daemon e2e
+> fails with the daemon's stdout **and** stderr **completely empty** — which reads exactly like a code
+> defect. **Newness, not size**, and `sample` alone does not prove it
+> [[mac-fresh-large-binaries-hang-in-dyld]].
 
 > ⚠️ **`kastellan-worker-egress-proxy` leaks on the Mac** (three orphans still alive after 17 days,
 > across two target dirs — not investigated), and **a `pgrep -f '<cmd>'` wait loop matches itself**
@@ -359,18 +342,16 @@ Most are also memory notes (auto-loaded); kept here because they change the *fir
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
 1. **[#677](https://github.com/hherb/kastellan/issues/677) — the live DM round-trip worked and the
-   answers were wrong, and #617 has now cleared the way to find out why.** #660's last owed gate is
-   discharged (2026-09-05, DGX at `9ace57ad`): two DMs from `@horst` were received, planned and
-   answered (tasks 185/186, both `channel.replied`). **But** task 186 spent three of six plan
-   iterations on near-duplicate searches and a fourth on `shell.exec /usr/bin/ls`, then blamed "the
-   tool-step limit" for not reading the PDF, having never called `mail.get_attachment_text`, which
-   task 185 had used successfully **four minutes earlier**. The two tasks reported **different
-   booking references** for the same question with equal confidence, and **which answer was grounded
-   could not be established**, because both large dispatches were audited `_truncated: true` with
-   `req` dropped wholesale. ⚠️ **That blocker is fixed but the EVIDENCE IS NOT RETROSPECTIVE** — the
-   `req_summary` is computed at write time, so the existing rows for tasks 185/186 are as empty as
-   they ever were. **Re-run the scenario on a deployed daemon carrying #694 and read the new rows;
-   do not go back to the old ones.** Needs the DGX redeploy first.
+   answers were wrong.** #660's last owed gate is discharged (2026-09-05, DGX at `9ace57ad`): two DMs
+   from `@horst` were received, planned and answered (tasks 185/186, both `channel.replied`). **But**
+   task 186 spent three of six plan iterations on near-duplicate searches and a fourth on
+   `shell.exec /usr/bin/ls`, then blamed "the tool-step limit" for not reading the PDF, having never
+   called `mail.get_attachment_text`, which task 185 had used successfully **four minutes earlier**.
+   The two tasks reported **different booking references** for the same question with equal
+   confidence. ⚠️ **Which answer was grounded could not be established**, because both large
+   dispatches were audited `_truncated: true` with `req` and `result` dropped wholesale —
+   [#617](https://github.com/hherb/kastellan/issues/617), the first time it has blocked a real
+   investigation rather than a hypothetical one. **Likely two issues: #617 first, then #677.**
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel built with
@@ -496,56 +477,61 @@ re-derives them: egress #242, #251, #304 (needs a controllable TLS origin), #260
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac + DGX** ([#694](https://github.com/hherb/kastellan/pull/694), #617 — **the gate that stands**) | **`65899e9c`** | **Mac: 4185 / 0 / 29**, **177** suites, **0 `[WARN]`**, 296 `[SKIP]`. **DGX: 4320 / 0 / 61**, 177 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner tier, held), **0 `[WARN]`**. ⚠️ **Both deltas are +30 and reconcile exactly** — 23 in `kastellan-db` (15 `req_summary`, 8 truncation integration) and 7 in `kastellan-core` (6 `post_process`, 1 scheduler). DGX 4290 → 4320; Mac 4155 → 4185. **The host gap stays at −135**, unchanged, which is the one macOS-only smoke test and nothing else. Ignored unchanged on both. ⚠️ **The Mac run needed a host repair first and its `TEST_EXIT` is not 0** — see the `syspolicyd` hazard below. The sweep reported **173 of 177** suites at `TEST_EXIT=101` with **zero failed tests**; the other four (`kastellan_cli` 96, `search_broker_egress_e2e` 1, `asks_e2e` 35, `pairings_e2e` 2 = **134**) were SIGKILLed as wedged and **all four pass on an individual re-run**, which is where 4051 + 134 = 4185 comes from. **A non-zero `TEST_EXIT` with zero failed tests is the signature of that host fault, not of a regression** | **Mac** exit **0**, zero warnings, all **27** workspace crates. **DGX** the same, exit **0**, 27 crates, 345 units. ⚠️ **Both forced cold with a dedicated `CARGO_TARGET_DIR` rather than `xargs touch`** — same proof, and it mutates no file, so it cannot falsify the [#687](https://github.com/hherb/kastellan/issues/687) image gate the way this file's old recipe does ([#691](https://github.com/hherb/kastellan/issues/691), measurement posted there) | **296** Mac, **4** DGX. **0** `[WARN]` |
 | **Mac + DGX** ([#692](https://github.com/hherb/kastellan/pull/692), #690/#689/#686 — **the gate that stands**) | **`499c9488`** (branch tip; squashed to `c5bf5e5f`) | **Mac full sweep:** `cargo test --workspace --no-fail-fast --locked -- --nocapture` **4155 / 0 / 29**, **177** suites, `TEST_EXIT=0`, **0 `[WARN]`**, 339 `[SKIP]` (328 of them the pre-existing absent-Postgres ones). **DGX full sweep: 4290 / 0 / 61**, 177 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner tier, held), **0 `[WARN]`**. ⚠️ **Both deltas reconcile exactly, and against different baselines.** DGX: **+40** over `main`'s 4250 — every new test is cross-platform (`bounded_command` 18, `subprocess_guard` 12, `container_tests` 4, `images` 3, `landlock_lsm` 3). Mac: 4104 at `0fa5b8b6` **+10** (#688's review round, which post-dated that gate) **+41** (the 40 above plus the one macOS-only smoke test) = **4155**. The host gap moved from **−136** to **−135**, which is that one macOS-only test and nothing else. Ignored unchanged on both. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 10 / 0** across all three suites (4 + 1 + 5), every suite exit 0, **0 `[WARN]`**, 4 opt-in gliner `[SKIP]`s. ⚠️ **That tier needed the image rebuilt twice, and the second rebuild is a finding, not a chore** — see [#691](https://github.com/hherb/kastellan/issues/691) below. **Live negative controls, all run:** the budget removed → the suite takes **30.01 s instead of 0.50 s** and both timeout tests fail; the drains removed → a 512 KiB writer **times out at the full 60 s budget** and 6 tests fail; the guard's rule planted with a violation → found and named; the #689 detector fed `capability,landlock,bpf` from a real container → red with the full operator message | **Mac** `--workspace --all-targets --locked -D warnings` exit **0**, zero warnings, all **27** workspace crates from a forced-cold `touch`. **DGX** the same, exit **0**, 27 crates. `kastellan-sandbox` also cross-clippied for `aarch64-unknown-linux-gnu` from the Mac — **which caught a Linux-only unused import the Mac run compiles out** | **339** Mac (328 absent-Postgres), **4** DGX. **0** `[WARN]` |
 | **DGX** (`main`, the sweep #688 owed and never ran) | **`09a4f924`** | Superseded by the row above; kept because it is the only direct measurement of `main`. **4250 / 0 / 61**, 177 suites, `TEST_EXIT=0` | exit 0, 27 crates | **4** |
-Older rows (#688 `0fa5b8b6`, #685 `10cb6761`, #683 `4189`, #680 `4142`, and back to 2950) are in the
+| **Mac + DGX** (#688, the gate that stood) | **`0fa5b8b6`** | Mac **4104 / 0 / 29**, 177 suites, `TEST_EXIT=0`; DGX **4239** measured a commit early at `5afc88cd`, reconciled to **4240**. **Container tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 8 / 0** across all 3 suites, **0 `[SKIP]`, 0 `[WARN]`** — first time they exercised current code since June. Three live negative controls on the real host: the 2026-06-26 image `[SKIP]`ed by default and **panicked** under REQUIRE; `container system stop` produced "start the service", not "rebuild the image"; the rebuilt image turned all four python-exec tests red at `Protocol(EarlyExit)`, which the Landlock injection turned green | Both hosts exit 0; `kastellan-sandbox` also cross-clippied for `aarch64-unknown-linux-gnu` from the Mac | **349** Mac (326 absent-Postgres, pre-existing), **4** DGX |
+| **DGX** (#685/#682) | **`10cb6761`** | **4206 / 0 / 60**, 177 suites, `TEST_EXIT=0`. **Firecracker tier under `KASTELLAN_MICROVM_REQUIRE_E2E=1`: 30 / 0** across all **15** suites (discovered by grep, not hand-listed), run **after a plain `bash scripts/build-release.sh`**. ⚠️ **These tests are `#[ignore]`d and need `-- --ignored`**: the first attempt without it reported `3 passed, 28 ignored` with every suite exit 0 — a green run that booted no VM at all | exit 0 | **4**, gliner |
+Older rows (#683 `4189`, #680 `4142`, #675 `4075`, #669 `4049`, and back to 2950) are in the
 [`archive/`](archive/) snapshots.
 
-⚠️ **`scheduler_ask_expiry_e2e` flakes under a full sweep, and this file's diagnosis was WRONG for
-two gates.** It said "widen the poll deadline"; the evidence says the per-test cluster's unix socket
-went away underneath the test (`claim_one error: … No such file or directory`, past both
-`await_state`s). In isolation it runs 62 s against a 20 s + 90 s budget.
-[#676](https://github.com/hherb/kastellan/issues/676); likely the same ownership problem as
-[#548](https://github.com/hherb/kastellan/issues/548). **The general lesson: a flake attributed once
-gets re-attributed forever — re-read the actual failure text on each recurrence.** (This session it
-wedged in `_dyld_start` instead, a *third* cause — see the `syspolicyd` hazard.)
+⚠️ **`scheduler_ask_expiry_e2e` flakes under a full sweep, and this file's diagnosis of it was WRONG
+for two gates.** It said "widen the poll deadline"; the evidence says otherwise — the panic is past
+both `await_state`s and the next log line is `claim_one error: … No such file or directory`: **the
+per-test cluster's unix socket went away underneath the test**. In isolation it runs 62 s against a
+20 s + 90 s budget. [#676](https://github.com/hherb/kastellan/issues/676); likely the same ownership
+problem as [#548](https://github.com/hherb/kastellan/issues/548). **The general lesson: a flake
+attributed once gets re-attributed forever — re-read the actual failure text on each recurrence.**
 
 ⚠️ **A dropped ephemeral port is NOT a reserved one.** `skip::tests::the_resolve_and_reach_arms_…`
-bound a loopback port, dropped the listener and assumed it was closed; the OS may hand a freed
-ephemeral port straight to another process. Measured: 1 failure in 3 full sweeps, 0 in 40 isolated
-runs. Fixed by *confirming* rather than assuming.
+bound a loopback port, dropped the listener and assumed it was then closed; the OS may hand a freed
+ephemeral port straight to another process. **Measured: 1 failure in 3 full sweeps, 0 in 40 isolated
+runs.** Fixed by *confirming* rather than assuming.
 
 **Both hosts are load-bearing, in opposite directions — always check both.** The two supervisor
-backends compile on one host each: a `launchd_agents.rs` change is invisible to the DGX, and the Mac
-compiles **zero** `systemd_user` tests [[mac-compiles-zero-systemd-tests]]. The mirror is just as
-real — Mac clippy compiles `cfg(target_os = "linux")` items *out*, so an unused cfg-linux helper
-fails only the DGX gate; `cargo clippy --target aarch64-unknown-linux-gnu` from the Mac catches it in
-seconds (pure-Rust crates only; `core` won't cross-compile, `ring` C dep)
-[[cross-clippy-pure-rust-crates]]. ⚠️ **A whole file can be `#![cfg(target_os = "linux")]`**, in
+backends compile on one host each: a `launchd_agents.rs` change is invisible to the DGX and a
+`systemd_user.rs` change is invisible to the Mac, where `cargo test` compiles **zero**
+`systemd_user` tests [[mac-compiles-zero-systemd-tests]]. The mirror is just as real: Mac clippy
+compiles `cfg(target_os = "linux")` items *out*, so an unused cfg-linux helper fails only the DGX
+gate — **this session hit it again**, and a `cargo clippy --target aarch64-unknown-linux-gnu` from
+the Mac caught it in seconds (pure-Rust crates only; `core` won't cross-compile, `ring` C dep)
+[[cross-clippy-pure-rust-crates]]. ⚠️ **And a whole file can be `#![cfg(target_os = "linux")]`**, in
 which case the Mac compiles *nothing* in it, imports included.
 
 **Predict the count, then reconcile the delta exactly.** Every gate above was predicted from the
-diff's new `#[test]` count and investigated when it missed. **Reconcile by diffing PER-SUITE counts,
-not test names:** `--nocapture` interleaves output, and `#[should_panic]` prints
-`- should panic ... ok`, which a bare `… ok` grep reports missing. ⚠️ **An `ignored` delta with no
-new `#[ignore]` is usually a doc-test** [[ignore-fenced-doc-example-moves-ignored-count]].
+diff's new `#[test]` count and investigated when it missed — the cheapest detector for "a test I
+think I added is not being compiled". **Reconcile by diffing PER-SUITE counts, not test names:**
+`--nocapture` interleaves output so a `test … ok` name grep loses lines, and `#[should_panic]` tests
+print `- should panic ... ok`, which a bare `… ok` grep reports missing. ⚠️ **An `ignored` delta with
+no new `#[ignore]` is usually a doc-test**: a ```` ```ignore ```` fence counts, and moving one into a
+`cfg(test)` module removes it from the count [[ignore-fenced-doc-example-moves-ignored-count]].
 
 ⚠️ **A `[SKIP]` can hide a dead fixture for months, and a `[SKIP]` line is evidence nothing may
-fake.** The four gliner-relex venv skips were not "this host is unstaged" — the DGX's `.venv` was a
-**copy of the Mac's**, `bin/python` pointing at a path that cannot exist on Linux. `readlink` before
-believing a skip, and prefer a `REQUIRE_*=1` knob. And since `grep -c '^[SKIP]'` is how a green sweep
-is audited, every `[SKIP]` renders through the pure
-[`tests_common::skip::skip_line`](../../../tests-common/src/skip.rs) — **assert on `skip_line`; call
-the `skip_if_*` wrappers only from real fixtures.**
+fake.** The four gliner-relex venv-shim skips were not "this host is unstaged" — the DGX's `.venv`
+was a **copy of the Mac's**, `bin/python` pointing at a path that cannot exist on Linux: `readlink
+.venv/bin/python` before believing a skip, and prefer a `REQUIRE_*=1` knob. And since
+`grep -c '^\[SKIP\]'` over a `--nocapture` run is how a green sweep is audited, a unit test that
+printed one would inflate exactly the number it protects — every `[SKIP]` renders through the pure
+[`tests_common::skip::skip_line`](../../../tests-common/src/skip.rs), so **assert on `skip_line`;
+call the `skip_if_*` wrappers only from real fixtures.**
 
 **Two standing reading rules.** A green run with `[SKIP]` lines means tests *skipped*, not that the
-sandbox contained anything. And skip-as-pass counts as passed, so counts stay comparable either way.
+sandbox contained anything — re-check with `-- --nocapture`. And skip-as-pass counts as passed, so
+counts stay comparable either way.
 
 **Mac verification runs from the repo's own `target/`, not a private `CARGO_TARGET_DIR`** — the
-private dir breaks daemon e2e (above). If one is unavoidable it must live under `$HOME`, not `/tmp`
-[[dgx-run-logs-tmp-scrubbed]]. Keep gate logs under `$HOME` for the same reason, and **whole** —
-a truncated gate log is not a gate [[truncated-gate-log-is-not-a-gate]].
+private dir breaks daemon e2e (above). If one is unavoidable it must live under `$HOME`, not `/tmp`:
+macOS scrubbed a scratchpad target dir *mid-run* once [[dgx-run-logs-tmp-scrubbed]]. Keep gate logs
+under `$HOME` for the same reason.
 
 ### Build & test
 
@@ -607,9 +593,6 @@ allowlisted endpoints for the *one* compromised tool. Nothing else.
 Newest first; substance is compressed under [Current state](#current-state), full prose in the
 [`archive/`](archive/) snapshots and git history.
 
-- **[#694](https://github.com/hherb/kastellan/pull/694)** — an oversized dispatch still records
-  what ran (#617): a bounded `req_summary` derived inside `truncate_payload`, so every write site
-  past and future is covered by one rule. Filed [#693](https://github.com/hherb/kastellan/issues/693).
 - **[#692](https://github.com/hherb/kastellan/pull/692)** `c5bf5e5f` — every micro-VM
   preflight subprocess answers to a budget (#690), the macOS Landlock opt-out gets a drift detector
   (#689), and all eight rootfs build scripts become cwd-independent (#686). Two-host gate green,
