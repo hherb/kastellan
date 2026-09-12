@@ -196,10 +196,18 @@ impl WorkerCommand {
 ///   `req_summary`**, which the same replacement computes from `req` so an
 ///   oversized dispatch still records what ran rather than only the guard's
 ///   opinion of it (issue #617; shape in
-///   [`kastellan_db::audit::req_summary`]). Without that it was the
-///   large *cleared* documents that lost their score while blocks kept
-///   theirs, which is the wrong half: recording `p` on the cleared side is
-///   what makes production a score source that is not catalogue-selected.
+///   [`kastellan_db::audit::req_summary`]). Without **the `guard`
+///   exemption** it was the large *cleared* documents that lost their score
+///   while blocks kept theirs, which is the wrong half: recording `p` on
+///   the cleared side is what makes production a score source that is not
+///   catalogue-selected. (Naming it rather than writing "without that":
+///   the `req_summary` clause now sits between this sentence and its
+///   referent.)
+///
+///   ⚠️ **`result` and `err` are NOT preserved**, so above the cap a failed
+///   dispatch and a successful one carry the same key set and the reason
+///   for a failure is gone. Tracked as issue #695 — a `PRESERVED_KEYS`
+///   policy call, not an oversight of #617.
 ///   `error_kind` is a **closed discriminant** (never the backend's error
 ///   text) naming *why* a failed adjudication failed, `null` when it did
 ///   not — so `WHERE payload->'guard'->>'error_kind' = 'timeout'` counts

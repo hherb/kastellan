@@ -498,7 +498,13 @@ Per-item detail and commit hashes: [`archive/roadmap_phase0.md`](archive/roadmap
   is accepted in silence), [#616](https://github.com/hherb/kastellan/issues/616) (`guard.state`
   collapses every failure mode, so the fail-open cannot be counted),
   [#617](https://github.com/hherb/kastellan/issues/617) (`req` lost above the cap — for `shell.exec`
-  that is the audited act; **SHIPPED** in PR [#694](https://github.com/hherb/kastellan/pull/694)), [#618](https://github.com/hherb/kastellan/issues/618) (an else-less
+  that is the audited act; **SHIPPED** in PR [#694](https://github.com/hherb/kastellan/pull/694),
+  whose review round then filed [#695](https://github.com/hherb/kastellan/issues/695) — **the other
+  half of the same defect: `err` is still dropped unnamed, so an oversized row cannot say whether the
+  dispatch succeeded, let alone why it failed** — plus
+  [#696](https://github.com/hherb/kastellan/issues/696) and
+  [#697](https://github.com/hherb/kastellan/issues/697)),
+  [#618](https://github.com/hherb/kastellan/issues/618) (an else-less
   `as_object_mut` on a screening path).
   **Gate at `8cb8cfb7`: DGX 175 suites, 3854 / 0 / 55, `TEST_EXIT=0`, cold clippy exit 0 over 245
   `Checking` lines** — squash-merged 2026-08-24 as `45d5f6c2`.

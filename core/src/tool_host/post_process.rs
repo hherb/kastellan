@@ -254,9 +254,12 @@ pub(super) async fn finalize(
     let actor = format!("tool:{tool}");
     // Shape and key spellings live in `build_tool_audit_payload`, which is
     // pure and therefore testable against `kastellan-db`'s truncation rule
-    // without a worker or a database (issue #617). The keys it writes are
-    // that crate's own `const`s, so a rename there is a compile error here
-    // rather than a silent stop to preservation past the payload cap.
+    // without a worker or a database (issue #617). The two keys the db
+    // crate READS BACK (`req`, `guard`) are spelled as that crate's own
+    // `const`s, so a rename there is a compile error here rather than a
+    // silent stop to preservation past the payload cap; `ms`, `result` and
+    // `err` are local literals, because nothing across the crate boundary
+    // looks them up.
     let audit_payload = match &final_result {
         Ok(v) => build_tool_audit_payload(
             req_for_audit,
@@ -366,8 +369,14 @@ pub(super) async fn finalize(
 ///
 /// * `outcome` is `Ok(result)` or `Err(error text)`.
 /// * `guard_audit_value` is the guard tier's verdict when it ran. Passed as
-///   a plain `Value` rather than a `GuardReport` so this function depends on
-///   nothing but `serde_json`, which is what makes it cheap to test.
+///   a plain `Value` rather than a `GuardReport` so a test never has to
+///   *construct* one — which would mean booting a guard tier. (It does not
+///   remove a dependency: `GuardReport` is same-crate, and this function
+///   already names `kastellan_db::audit`'s key `const`s below.)
+///
+/// `outcome` borrows and `guard_audit_value` is owned because that is what
+/// each caller has: [`finalize`] matches on `&final_result`, so it holds
+/// only a borrow, while `GuardReport::audit_value` mints a fresh `Value`.
 ///
 /// The request goes under [`kastellan_db::audit::REQ_KEY`] and the verdict
 /// under [`kastellan_db::audit::GUARD_KEY`] — both `const`s owned by the

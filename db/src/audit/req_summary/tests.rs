@@ -41,18 +41,24 @@ fn char_boundary_prefix_walks_back_off_a_straddling_multibyte_char() {
 
 /// The production cap is not accidentally exempt from the walk.
 ///
-/// `HEAD_MAX_BYTES` is 512 and 512 = 3·170 + 2, so a three-byte character
-/// beginning at byte 510 straddles it. If the cap were ever changed to a
-/// multiple of 3 this test would still pass while the *fixture* stopped
-/// straddling — which is why the fixture asserts the straddle rather than
-/// assuming it.
+/// The fixture is built **relative to the cap** — `cap - 2` filler then a
+/// three-byte character — so byte `cap` is that character's third byte for
+/// any `cap >= 2`. The straddle therefore holds whatever `HEAD_MAX_BYTES`
+/// becomes, and this test keeps meaning the same thing after a cap change.
+///
+/// It does **not** depend on 512 not being a multiple of 3, and an earlier
+/// version of this comment claiming otherwise had it backwards: a
+/// cap-relative fixture straddles regardless of divisibility. Divisibility
+/// matters only for a fixture built as a uniform repeat from offset 0,
+/// which is `a_multibyte_request_head_is_never_cut_mid_character` below —
+/// that is where the `512 = 3·170 + 2` argument belongs and is correct.
+///
+/// No `is_char_boundary` guard here: it could never fire, so it was a
+/// positive control that controlled nothing. The construction is the
+/// guarantee, and the length assertion is what would catch a wrong walk.
 #[test]
 fn char_boundary_prefix_walks_back_at_the_production_cap() {
     let s = format!("{}好", "a".repeat(HEAD_MAX_BYTES - 2));
-    assert!(
-        !s.is_char_boundary(HEAD_MAX_BYTES),
-        "fixture must straddle HEAD_MAX_BYTES for this test to mean anything"
-    );
 
     assert_eq!(char_boundary_prefix(&s, HEAD_MAX_BYTES).len(), HEAD_MAX_BYTES - 2);
 }
@@ -120,6 +126,65 @@ fn an_oversized_request_keeps_a_bounded_head_that_still_names_the_command() {
     assert!(
         summary["len"].as_u64().unwrap() as usize > head.len(),
         "a cut head must be detectable from the record itself"
+    );
+
+    // The digest covers the WHOLE request, not the head. Every other
+    // digest assertion in this file uses a request small enough that
+    // `head == text`, so all of them pass unchanged if the digest is taken
+    // over the head instead — a mutation that leaves the suite green while
+    // destroying the one property the field exists for.
+    assert_eq!(summary["sha256"].as_str().unwrap(), sha256_hex(full.as_bytes()));
+    assert_ne!(
+        summary["sha256"].as_str().unwrap(),
+        sha256_hex(head.as_bytes()),
+        "digesting the head instead of the request must not go unnoticed"
+    );
+}
+
+/// Two over-cap requests that share a head must not share a digest.
+///
+/// This is the case the `sha256` field is *for*: an agent-generated
+/// `bash -c` heredoc is identical for hundreds of bytes and differs deep in
+/// the body, so a digest taken over the 512-byte head would collide for two
+/// genuinely different commands — and two rows that must be distinguishable
+/// would silently compare equal. The whole-request assertion above pins the
+/// value; this pins the consequence.
+#[test]
+fn two_over_cap_requests_sharing_a_head_do_not_share_a_digest() {
+    let shared = "s".repeat(40_000);
+    let a = json!({"argv": ["/bin/bash", "-c", format!("{shared}A")]});
+    let b = json!({"argv": ["/bin/bash", "-c", format!("{shared}B")]});
+
+    let sa = summarize_req(&json!({"req": a})).unwrap();
+    let sb = summarize_req(&json!({"req": b})).unwrap();
+
+    assert_eq!(sa["head"], sb["head"], "the fixture must actually share a head");
+    assert_ne!(
+        sa["sha256"], sb["sha256"],
+        "different requests must not collide just because their heads match"
+    );
+}
+
+/// A request whose serialisation lands exactly on the cap is not cut, and
+/// says so: `len` equal to the head's byte length is the reader's signal
+/// that nothing was elided. One byte more and the signal flips.
+#[test]
+fn the_len_signal_flips_exactly_at_the_cap() {
+    // `{"a":"<pad>"}` is 8 bytes of envelope plus the padding.
+    let exact = json!({"a": "p".repeat(HEAD_MAX_BYTES - 8)});
+    let text = serde_json::to_string(&exact).unwrap();
+    assert_eq!(text.len(), HEAD_MAX_BYTES, "fixture must sit exactly on the cap");
+
+    let at = summarize_req(&json!({"req": exact})).unwrap();
+    assert_eq!(at["len"].as_u64().unwrap() as usize, HEAD_MAX_BYTES);
+    assert_eq!(at["head"].as_str().unwrap().len(), HEAD_MAX_BYTES, "nothing cut at the cap");
+
+    let over = json!({"a": "p".repeat(HEAD_MAX_BYTES - 7)});
+    let so = summarize_req(&json!({"req": over})).unwrap();
+    assert_eq!(so["len"].as_u64().unwrap() as usize, HEAD_MAX_BYTES + 1);
+    assert!(
+        (so["len"].as_u64().unwrap() as usize) > so["head"].as_str().unwrap().len(),
+        "one byte over the cap must be detectable"
     );
 }
 

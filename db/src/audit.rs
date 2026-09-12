@@ -119,12 +119,30 @@ pub const PAYLOAD_MAX_BYTES: usize = 4096;
 ///
 /// **Array order is priority order.** Keys are admitted left to right
 /// against a shared budget, so an earlier member can starve a later one.
-/// Moot at one member; decide it deliberately before adding a second.
+///
+/// **`guard` precedes `req_summary` deliberately (issue #617).** Both meet
+/// criterion 3, so this is a judgement call and not a derivation: the guard
+/// record is ~110 bytes against the summary's ~1.1 KiB worst case, and
+/// losing it was the *measured* live defect that created this list, while
+/// the summary's loss is at least *named* by [`DROPPED_PRESERVED_KEY`] when
+/// it happens. Small, irrecoverable and historically lost beats large and
+/// self-announcing.
+///
+/// Contention is not reachable in production today — a real envelope peaks
+/// near 1.4 KiB against a 4032-byte working budget — so the order is a
+/// standing decision for the member after next rather than a live
+/// tie-break. A re-ordering is caught **twice**: by
+/// `wire_key_literals_are_pinned`, which pins the array itself, and
+/// behaviourally by `the_guard_record_is_admitted_before_the_req_summary`,
+/// whose fixture makes each key fit alone but not both. Verified by
+/// mutation, because the behavioural half was previously vacuous — its
+/// fixture could not fit in either slot, so it passed with the array
+/// reversed while claiming to assert the order.
 pub const PRESERVED_KEYS: &[&str] = &[GUARD_KEY, REQ_SUMMARY_KEY];
 
 /// The payload key under which `core::tool_host::post_process` records the
-/// guard tier's per-dispatch verdict — and the sole member of
-/// [`PRESERVED_KEYS`].
+/// guard tier's per-dispatch verdict — and the first member of
+/// [`PRESERVED_KEYS`], admitted ahead of [`REQ_SUMMARY_KEY`].
 ///
 /// It is a `const` rather than two independent string literals because the
 /// producer lives in another crate. Spelled twice, a rename on either side
@@ -277,6 +295,38 @@ const _: () = {
         drop_marker_worst_case() <= DROP_MARKER_RESERVE,
         "DROP_MARKER_RESERVE no longer covers the marker PRESERVED_KEYS can produce"
     );
+
+    // `req` may never be preserved. This is the single most damaging edit
+    // possible to the list: `req` is unbounded by construction, so
+    // allowlisting it would carry whole request bodies past the cap under
+    // an allowlisted name — defeating the cap outright, which is the one
+    // thing it exists to do. It fails admission criterion 1 and it is the
+    // reason `req_summary` exists at all.
+    //
+    // It was prose in `req_summary`'s module doc, three feet from a block
+    // already const-asserting five weaker invariants. A 3 KB `req` added
+    // to the list would have compiled and shipped with nothing failing.
+    let mut i = 0;
+    while i < PRESERVED_KEYS.len() {
+        assert!(
+            !str_eq(PRESERVED_KEYS[i], REQ_KEY),
+            "req is unbounded by construction and may never join PRESERVED_KEYS; \
+             preserve the derived req_summary instead"
+        );
+        i += 1;
+    }
+
+    // The head must stay small enough that the summary cannot crowd the
+    // budget. Order is what decides who wins under contention (`guard`
+    // first), but order only matters once something does not fit, and a
+    // later bump of HEAD_MAX_BYTES is what would get it there. The factor
+    // of 2 is the worst-case re-escaping expansion documented on
+    // HEAD_MAX_BYTES; 256 covers the fingerprint, the guard record and the
+    // summary's own sub-keys.
+    assert!(
+        HEAD_MAX_BYTES * 2 + 256 + DROP_MARKER_RESERVE <= PAYLOAD_MAX_BYTES,
+        "HEAD_MAX_BYTES is now large enough that a req_summary could starve the guard record"
+    );
 };
 
 /// Payload key that marks a [`truncate_payload`] envelope. This is a **wire
@@ -356,11 +406,13 @@ pub struct AuditRow {
 /// copy does not have: one oversized key cannot take a bounded sibling
 /// down with it, and anything refused can still be *named*, under
 /// [`DROPPED_PRESERVED_KEY`]. Nothing in this workspace can produce an
-/// oversized preserved key — the one producer is
-/// `core::tool_host::post_process`, via `GuardReport::audit_value`, which
-/// emits a fixed handful of small scalars — but the signature permits one,
-/// and
-/// [`preserve_onto`] is tested against multi-key lists that exercise it.
+/// oversized preserved key. There are **two** producers, both bounded:
+/// `core::tool_host::post_process` via `GuardReport::audit_value`, which
+/// emits a fixed handful of small scalars, and **this function itself**,
+/// via `req_summary::summarize_req`, which is bounded by
+/// [`HEAD_MAX_BYTES`] plus a digest and a length. But the signature permits
+/// an oversized one, and [`preserve_onto`] is tested against multi-key
+/// lists that exercise it.
 ///
 /// The budget postcondition is therefore structural rather than checked
 /// after the fact: every admitted key left [`DROP_MARKER_RESERVE`] bytes
@@ -404,13 +456,26 @@ pub fn truncate_payload(mut payload: serde_json::Value) -> serde_json::Value {
     // owned here and about to be dropped, so the insert costs one small
     // value and no clone of the oversized body.
     //
-    // It overwrites any `req_summary` the producer supplied: there is one
-    // producer of this rule by design, and a payload must not be able to
-    // put its own answer on the row.
-    if let Some(summary) = req_summary::summarize_req(&payload) {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert(REQ_SUMMARY_KEY.to_string(), summary);
-        }
+    // The derivation is the SOLE authority for this key, so the key is
+    // cleared unconditionally and then re-derived. An overwrite that ran
+    // only when a summary was produced left one escape: a payload carrying
+    // `req_summary` with no `req` derived nothing, so nothing overwrote it,
+    // and `preserve_onto` then copied the payload's own forged answer onto
+    // the envelope verbatim — indistinguishable from a derived one.
+    //
+    // Computing the summary first also keeps this to a single object check
+    // instead of the two nested ones it used to take, and those two tested
+    // the same discriminant: `summarize_req` returns `Some` only for an
+    // object, so the inner arm could never fail. Unreachable by coincidence
+    // of two predicates is not the same as unreachable by construction, and
+    // the failure it would have hidden — a summary silently evaporating —
+    // is the shape this module exists to eliminate.
+    let summary = req_summary::summarize_req(&payload);
+    if let Some(obj) = payload.as_object_mut() {
+        match summary {
+            Some(s) => obj.insert(REQ_SUMMARY_KEY.to_string(), s),
+            None => obj.remove(REQ_SUMMARY_KEY),
+        };
     }
 
     // Only an object can have keys to preserve; a bare string or array
@@ -429,12 +494,22 @@ pub fn truncate_payload(mut payload: serde_json::Value) -> serde_json::Value {
 /// naming under [`DROPPED_PRESERVED_KEY`] any that would not fit.
 ///
 /// Split out of [`truncate_payload`] so `keys` can be a **parameter**.
-/// With [`PRESERVED_KEYS`] at one member, the interesting half of this
-/// function is unreachable from its only production caller: a running
-/// envelope is indistinguishable from a fixed one, a starved sibling
-/// cannot exist, and [`DROPPED_PRESERVED_KEY`] can never name more than a
-/// single key. Those are the properties [`truncate_payload`]'s doc claims,
-/// so they are tested here against multi-key lists rather than argued.
+///
+/// At two members every branch here is *structurally* live — a running
+/// envelope differs from a fixed one, a starved sibling is expressible,
+/// and [`DROPPED_PRESERVED_KEY`] can name two keys. What keeps the
+/// starvation arm from occurring in production is **sizing, not
+/// cardinality**: a real envelope peaks near 1.4 KiB (fingerprint ~110 B,
+/// guard ~110 B, summary ~1.1 KiB worst case) against a 4032-byte working
+/// budget, and the compile-time block above pins
+/// [`HEAD_MAX_BYTES`] so a later bump cannot quietly change that.
+///
+/// This paragraph used to say the multi-key half was unreachable, which
+/// was true at one member and was falsified by the member added for issue
+/// #617 — while still reading as an invitation to treat the arm as test
+/// scaffolding. The properties are [`truncate_payload`]'s documented
+/// postconditions either way, so they are tested here against multi-key
+/// lists rather than argued.
 ///
 /// Measurement is exact rather than estimated: the candidate is inserted,
 /// the whole object is serialised, and a key that does not fit is taken

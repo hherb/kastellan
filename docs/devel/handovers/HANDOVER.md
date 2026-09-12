@@ -95,7 +95,8 @@ request so two rows compare, and its length so `len` > the head's bytes makes an
 - ⚠️ **The fingerprint is taken strictly BEFORE the summary is inserted**, or two rows for one body
   stop comparing equal — the one thing the envelope digest exists to do. A test pins that order.
 - ⚠️ **`PRESERVED_KEYS` order is priority order and was moot at one member.** Live at two now:
-  `guard` first and asserted to win, because it is tiny, irrecoverable, and losing it was the
+  `guard` first and asserted to win — **behaviourally only since the review round below; the
+  original assertion was vacuous** — because it is tiny, irrecoverable, and losing it was the
   measured live defect that created the allowlist.
 - **Secrets: nothing new is exposed.** `req_for_audit` is the *pre-substitution* snapshot, so the
   head holds opaque `secret://` refs and never a redeemed plaintext.
@@ -109,6 +110,59 @@ request so two rows compare, and its length so `len` > the head's bytes makes an
   **scheduler** step-failure row loses `tool`/`method`, which live *only* in its payload while the
   chokepoint's live in the `actor`/`action` **columns**. A `PRESERVED_KEYS` policy call, not a
   mechanical extension.
+
+#### Review round on the same branch (2026-09-12) — two green tests were proving nothing
+
+Five-agent review of #694, then the fixes, on the same branch. **Everything below was green before
+and after; the point is what green was worth.** Both critical findings were established by
+**mutation**, not by reading, and both mutations had previously left the whole suite passing.
+
+- ⚠️ **The summary digest was never checked against an over-cap request.** Every digest assertion
+  used a request small enough that `head == text`, so taking the digest over the **head** instead of
+  the whole request passed 48/48. That is the one property the field exists for: two 40 KB generated
+  scripts sharing a 512-byte prefix would have collided, and two rows that must differ would have
+  compared equal. Now caught by two tests, one of them a head-sharing non-collision case.
+- ⚠️ **`the_guard_record_is_admitted_before_the_req_summary` did not test the order.** Its fixture
+  gave the summary a `PAYLOAD_MAX_BYTES`-sized head, which fits in **neither** slot — so the guard
+  won under both orders and the test passed with the array reversed, while its docstring claimed to
+  assert the order "behaviourally rather than by reading the array". Only the literal array pin ever
+  caught a reorder. The fixture is now ~60 % each (fits alone, not together), with a reversed-order
+  control, and a precondition asserting the contention actually exists.
+- **A forged `req_summary` could reach a row.** The overwrite ran only when a summary was *derived*,
+  so a payload carrying the key with **no `req`** had nothing overwrite it and `preserve_onto` copied
+  its forged answer onto the envelope verbatim. The key is now cleared **unconditionally** before
+  derivation. Mutation-proven. This also collapsed a nested `if let` whose two arms tested the same
+  discriminant.
+- **Two prose rules became compile errors.** `REQ_KEY ∉ PRESERVED_KEYS` (the module's central
+  prohibition — allowlisting `req` would carry whole bodies past the cap under an allowlisted name)
+  and the `HEAD_MAX_BYTES` budget relation. Both in the existing `const _: () = {}` block; the first
+  **verified to fire** as `error[E0080]`.
+- ⚠️ **Six doc claims were falsified by #694's own one-line change** from one preserved key to two.
+  The worst (`preserve_onto`'s doc) declared the multi-key half unreachable scaffolding at the exact
+  moment it became production behaviour. The safety conclusions survive, but **for a different
+  reason than stated**: starvation is unreachable by *sizing*, not by cardinality.
+- **Measured, not estimated:** `head` is a prefix of already-serialised JSON and is escaped **again**
+  when stored as a JSON string, so 512 bytes can cost ~1026. The "order of magnitude under the cap"
+  claim was ~3x. The budget-postcondition test carried **no `req` fixture at all** and now carries
+  two, including a quote-dense one.
+- **Filed, not carried in this branch** — all three are policy or cross-module calls:
+  [#695](https://github.com/hherb/kastellan/issues/695) (an oversized tool row cannot say whether the
+  dispatch succeeded, let alone why it failed: `err` is dropped unnamed, so success and failure carry
+  the same key set — the other half of #617's own thesis),
+  [#696](https://github.com/hherb/kastellan/issues/696) (`kastellan-db` defines `sha256_hex` twice;
+  **not** the #591 duplication, and #591's workers-can't-depend-on-db excuse does not cover it),
+  [#697](https://github.com/hherb/kastellan/issues/697) (truncation is never logged or counted).
+- ⚠️ **Process, worth more than any single finding: review subagents mutate the working tree.** Three
+  of the five planted mutants in the primary checkout — twice while a `cargo test` sweep was
+  compiling in it — and **none mentioned it in its report**. The tell was the harness's "file changed
+  on disk" notice. `git status` + `git diff --cached` before trusting any sweep that ran while agents
+  were live; revert by copying the file, never `git checkout --`; run the gate in a `git worktree`
+  the agents cannot reach. [[never-edit-tree-during-a-sweep]]
+
+**Gate (Mac, after the fixes):** clippy `-p kastellan-db -p kastellan-core --all-targets -D warnings`
+exit 0; `kastellan-db` + `kastellan-core --lib` **2339 / 0**, zero warnings, tree clean before and
+after the run. Baseline before the fixes was 2335, so **+4**. The pre-fix gate was run in a
+throwaway worktree at `8ecccb4a` precisely because the primary checkout was being mutated.
 
 **The header stopped asserting VCS state** after `main` shipped this file calling an already-merged
 branch OPEN for the **third** time. A branch name, a HEAD sha and the word OPEN are claims a merge

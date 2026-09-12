@@ -299,6 +299,15 @@ const ACTION_HANDOFF_FETCHED: &str = "handoff.fetched";
 /// without a join: when `actor = "scheduler"`, the worker name doesn't
 /// appear in the action.
 ///
+/// ⚠️ **That filter under-counts above [`kastellan_db::audit::PAYLOAD_MAX_BYTES`].**
+/// Neither key is in [`kastellan_db::audit::PRESERVED_KEYS`], so truncation
+/// elides both and `WHERE payload->>'tool' = '…'` silently returns *no*
+/// rows for oversized dispatches rather than erroring — an operator
+/// counting spawn failures misses precisely the large ones. Tracked as
+/// issue #693; it is a `PRESERVED_KEYS` policy call, since unlike the
+/// chokepoint's rows these two live only in the payload and not in the
+/// `actor`/`action` columns.
+///
 /// * `err = None`  → suitable for `step.unknown_tool` (no underlying
 ///   error string; the failure is a missing registration).
 /// * `err = Some`  → suitable for `step.spawn_failed` (`Display`

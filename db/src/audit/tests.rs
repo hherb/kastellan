@@ -347,6 +347,27 @@ fn every_envelope_fits_the_budget() {
         }),
         serde_json::json!({"guard": {"x": "c".repeat(PAYLOAD_MAX_BYTES)}}),
         serde_json::Value::String("d".repeat(PAYLOAD_MAX_BYTES)),
+        // ── The derived key (issue #617). ──
+        //
+        // Without these the one key this function adds itself was never
+        // measured by the only test pinning the size postcondition, so a
+        // `HEAD_MAX_BYTES` bump or a change to how `head` is escaped could
+        // go green here.
+        //
+        // The second fixture is the expensive case: `head` is a prefix of
+        // already-serialised JSON and is escaped AGAIN when stored as a
+        // string, so a quote-dense request costs up to 2x its cap. An
+        // all-ASCII argv does not exercise that.
+        serde_json::json!({
+            REQ_KEY: {"argv": ["/bin/bash", "-c", "e".repeat(PAYLOAD_MAX_BYTES * 10)]},
+            "guard": {"state": "clear", "p": 0.5},
+            "result": "f".repeat(PAYLOAD_MAX_BYTES),
+        }),
+        serde_json::json!({
+            REQ_KEY: {"argv": vec!["\"".repeat(64); 200]},
+            "guard": {"state": "clear", "p": 0.5},
+            "result": "g".repeat(PAYLOAD_MAX_BYTES),
+        }),
     ];
     for v in cases {
         let out = truncate_payload(v.clone());
@@ -362,13 +383,17 @@ fn every_envelope_fits_the_budget() {
 
 // ── The multi-key half of `preserve_onto`. ────────────────────────
 //
-// `PRESERVED_KEYS` has one member, so every property below is
-// unreachable through `truncate_payload` today. They are the
-// properties its doc comment claims, and the mutation that breaks
-// them -- measuring each candidate against a FIXED envelope instead
-// of the running one -- is invisible at N=1 and produces an
-// over-budget row at N=2. Tested through the parameterised helper so
-// they are executed rather than argued.
+// `PRESERVED_KEYS` has TWO members since issue #617, so every property
+// below is structurally reachable through `truncate_payload` — what
+// keeps the starvation arm from occurring in production is now sizing,
+// not cardinality (a real envelope peaks near 1.4 KiB against a
+// 4032-byte budget). They are the properties its doc comment claims,
+// and the mutation that breaks them -- measuring each candidate against
+// a FIXED envelope instead of the running one -- was invisible at N=1
+// and produces an over-budget row at N=2. Tested through the
+// parameterised helper so they are executed rather than argued, and
+// with synthetic keys so they stay independent of how many members the
+// production constant happens to have.
 
 /// Build the bare envelope the way `truncate_payload` does, so these
 /// tests measure the same starting size production does.
@@ -437,9 +462,10 @@ fn preserve_onto_names_all_dropped_keys() {
 /// fixed starting envelope instead of the one already carrying
 /// `alpha`. Two keys that each fit alone but not together would then
 /// both be admitted and the row would land at roughly twice the cap --
-/// breaking the one postcondition `truncate_payload` guarantees, on a
-/// path no production caller can reach until `PRESERVED_KEYS` gains a
-/// second member.
+/// breaking the one postcondition `truncate_payload` guarantees. Since
+/// #617 gave `PRESERVED_KEYS` a second member this is a live shape rather
+/// than a hypothetical one; `the_guard_record_is_admitted_before_the_req_summary`
+/// exercises the same contention over the production constant.
 #[test]
 fn preserve_onto_measures_against_the_running_envelope() {
     // Each ~60% of the budget: either fits alone, together they cannot.
@@ -695,25 +721,66 @@ fn truncation_keeps_both_the_guard_record_and_the_req_summary() {
 
 /// `PRESERVED_KEYS` is **priority order** — keys are admitted left to right
 /// against a shared budget, so an earlier member can starve a later one.
-/// That was moot at one member and is live at two, so the order is asserted
-/// behaviourally rather than by reading the array.
+/// That was moot at one member and is live at two.
 ///
 /// The guard score wins: it is a handful of scalars, it is irrecoverable
 /// (a cleared document writes no second row), and losing it was the measured
 /// live defect that created `PRESERVED_KEYS` in the first place. The summary
 /// is the larger of the two and the one that must yield — and yielding, it
 /// is still *named*.
+///
+/// ⚠️ **The fixture creates real contention, and must keep doing so.** An
+/// earlier version gave the summary a `PAYLOAD_MAX_BYTES`-sized head, which
+/// does not fit in *either* slot — so the guard was admitted and the summary
+/// dropped under both orders, and the test passed with the array reversed.
+/// It was asserting `preserve_onto_drops_only_the_key_that_does_not_fit`
+/// over again while its docstring claimed to assert the order. Here each
+/// candidate fits **alone** and the two together do not, which is the only
+/// shape in which "first wins" is observable.
 #[test]
 fn the_guard_record_is_admitted_before_the_req_summary() {
+    // Each ~60 % of the budget: either fits alone, together they cannot —
+    // the same sizing `preserve_onto_measures_against_the_running_envelope`
+    // uses. 45 % each would leave BOTH fitting and quietly restore the
+    // vacuity this test exists to remove.
+    let half = PAYLOAD_MAX_BYTES * 6 / 10;
     let src = source(&[
-        (GUARD_KEY, serde_json::json!({"state": "clear", "p": 0.5})),
-        (REQ_SUMMARY_KEY, serde_json::json!({"head": "x".repeat(PAYLOAD_MAX_BYTES)})),
+        (GUARD_KEY, serde_json::json!({"state": "clear", "g": "g".repeat(half)})),
+        (REQ_SUMMARY_KEY, serde_json::json!({"head": "x".repeat(half)})),
     ]);
+
+    // Precondition: this is the contention the test is about. Without it
+    // the assertions below hold under either order and prove nothing.
+    let guard_only = preserve_onto(bare_envelope(), &src, &[GUARD_KEY]);
+    let summary_only = preserve_onto(bare_envelope(), &src, &[REQ_SUMMARY_KEY]);
+    assert!(guard_only.get(DROPPED_PRESERVED_KEY).is_none(), "guard must fit alone");
+    assert!(summary_only.get(DROPPED_PRESERVED_KEY).is_none(), "summary must fit alone");
 
     let out = preserve_onto(bare_envelope(), &src, PRESERVED_KEYS);
 
     assert_eq!(out[GUARD_KEY]["state"], "clear", "the guard score must never be starved");
     assert_eq!(out[DROPPED_PRESERVED_KEY], serde_json::json!([REQ_SUMMARY_KEY]));
+}
+
+/// The same contention with the array reversed puts the *summary* through
+/// and drops the guard — which is what makes the test above an assertion
+/// about order rather than about size.
+///
+/// This is the control the original pair lacked: it fails if `preserve_onto`
+/// ever stops being left-to-right, and together with the test above it means
+/// a reversal of `PRESERVED_KEYS` cannot pass both.
+#[test]
+fn reversing_the_priority_order_reverses_who_survives() {
+    let half = PAYLOAD_MAX_BYTES * 6 / 10;
+    let src = source(&[
+        (GUARD_KEY, serde_json::json!({"state": "clear", "g": "g".repeat(half)})),
+        (REQ_SUMMARY_KEY, serde_json::json!({"head": "x".repeat(half)})),
+    ]);
+
+    let out = preserve_onto(bare_envelope(), &src, &[REQ_SUMMARY_KEY, GUARD_KEY]);
+
+    assert!(out.get(REQ_SUMMARY_KEY).is_some(), "the first member survives");
+    assert_eq!(out[DROPPED_PRESERVED_KEY], serde_json::json!([GUARD_KEY]));
 }
 
 /// A summary the producer wrote itself does not win over the derived one.
@@ -733,4 +800,32 @@ fn a_producer_supplied_summary_is_replaced_by_the_derived_one() {
     let head = out[REQ_SUMMARY_KEY]["head"].as_str().unwrap();
     assert!(head.contains("/bin/real"), "the derived summary wins, got: {head}");
     assert!(!head.contains("/bin/fake"));
+}
+
+/// ...and it does not survive by the payload simply omitting `req`.
+///
+/// This is the escape the conditional overwrite left open: with no `req`
+/// there was nothing to derive, so nothing overwrote the supplied key, and
+/// `preserve_onto` copied the payload's own forged answer onto the envelope
+/// verbatim — a row asserting a request it never carried, indistinguishable
+/// from a derived summary. The key is now cleared unconditionally before
+/// the derivation runs, so "no request" means "no summary".
+#[test]
+fn a_supplied_summary_does_not_survive_a_payload_with_no_req() {
+    let payload = serde_json::json!({
+        REQ_SUMMARY_KEY: {"head": "{\"argv\":[\"/bin/fake\"]}", "sha256": "0".repeat(64), "len": 1},
+        "result": "r".repeat(PAYLOAD_MAX_BYTES * 2),
+    });
+
+    let out = truncate_payload(payload);
+
+    assert!(is_truncation_envelope(&out));
+    assert!(
+        out.get(REQ_SUMMARY_KEY).is_none(),
+        "no request means no summary, whatever the payload claimed: {out}"
+    );
+    assert!(
+        out.get(DROPPED_PRESERVED_KEY).is_none(),
+        "a forged key is removed, not reported as a key that would not fit"
+    );
 }
