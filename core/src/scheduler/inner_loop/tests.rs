@@ -740,27 +740,22 @@ fn plans_so_far_summary_ok_handoff_placeholder_surfaces_ref() {
 
 #[test]
 fn plans_so_far_summary_ok_injection_blocked_placeholder_surfaces_marker() {
-    // Blocked content is replaced upstream (tool_host) with a tiny
-    // placeholder; rendering must surface the marker and never raw blocked
-    // text (proves the upstream screen carries through to the prompt).
+    // Blocked content is replaced upstream (tool_host) with a tiny placeholder;
+    // rendering must surface the marker and never raw blocked text. Built with
+    // the real builder, so a change to the placeholder's shape reaches this test.
     let mut c = ctx();
     c.plans.push(PlanRecord::new(
         plan_with_decision("act"),
-        vec![StepOutcome::Ok(serde_json::json!({
-            "injection_blocked": true,
-            "score": 0.91,
-            "reason_codes": ["override"],
-        }))],
+        vec![StepOutcome::Ok(crate::tool_host::injection_blocked_placeholder(0.91, &["override"]))],
     ));
     let s = c.plans_so_far_summary();
     let output = &s[0]["step_outcomes"][0]["output"];
     // Since #677 the planner reads the placeholder with its keys, so it learns
-    // `injection_blocked: true` rather than the bare word "override". Still no
-    // raw blocked content: the upstream screen replaced it with this tiny
-    // placeholder before the step outcome was recorded.
+    // `injection_blocked: true` and the note — but not the audit-only `score`
+    // or `reason_codes`, which would say which defence fired.
     assert_eq!(
         output,
-        &serde_json::json!({"injection_blocked": true, "score": 0.91, "reason_codes": ["override"]})
+        &serde_json::json!({"injection_blocked": true, "note": crate::tool_host::WITHHELD_NOTE})
     );
 }
 

@@ -75,9 +75,12 @@ fn withhold(v: Value, verdict: &crate::cassandra::injection_guard::InjectionVerd
         "data".into(),
         Value::String("[fetched content withheld: failed injection screen]".into()),
     );
-    withheld.insert("injection_blocked".into(), Value::Bool(true));
-    withheld.insert("score".into(), serde_json::json!(verdict.score));
-    withheld.insert("reason_codes".into(), serde_json::json!(verdict.reason_codes));
+    // The same key spellings as `tool_host`'s placeholder, which the
+    // planner-summary render reads to strip the audit-only fields (#677).
+    use crate::tool_host::{INJECTION_BLOCKED_KEY, REASON_CODES_KEY, SCORE_KEY};
+    withheld.insert(INJECTION_BLOCKED_KEY.into(), Value::Bool(true));
+    withheld.insert(SCORE_KEY.into(), serde_json::json!(verdict.score));
+    withheld.insert(REASON_CODES_KEY.into(), serde_json::json!(verdict.reason_codes));
 
     match v {
         // The ordinary path: keep `handoff_ref`, `offset`, `eof` and the

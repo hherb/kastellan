@@ -29,6 +29,7 @@ use serde_json::json;
 use super::result_view;
 use super::StepOutcome;
 use crate::cassandra::types::Plan;
+use crate::tool_host::{INJECTION_BLOCKED_KEY, REASON_CODES_KEY, SCORE_KEY};
 
 /// Max chars of a step error `detail` surfaced back to the agent in
 /// `plans_so_far_summary`. Long worker stderr / RPC messages are clamped so a
@@ -289,7 +290,8 @@ fn sink_screen_blocks(tool: &str, text: &str) -> bool {
 fn render_step_outcome(tool: &str, method: &str, o: &StepOutcome) -> RenderedStep {
     match o {
         StepOutcome::Ok(v) => {
-            let (view, _bytes) = result_view::render(v, ok_summary_cap(method, v));
+            let v = without_screen_audit_fields(v);
+            let (view, _bytes) = result_view::render(&v, ok_summary_cap(method, &v));
             if sink_screen_blocks(tool, &result_view::screen_text(&view)) {
                 // Already tiny and load-bearing: never elide.
                 RenderedStep::new(json!({STATUS_KEY: STATUS_OK, WITHHELD_KEY: WITHHELD_REASON}), false)
@@ -311,6 +313,27 @@ fn render_step_outcome(tool: &str, method: &str, o: &StepOutcome) -> RenderedSte
             };
             RenderedStep::new(json!({STATUS_KEY: STATUS_ERR, CODE_KEY: code, DETAIL_KEY: shown}), false)
         }
+    }
+}
+
+/// `v` without the audit-only fields of an injection-screen placeholder.
+///
+/// Both upstream screens (`tool_host`'s placeholder and
+/// `tool_dispatch::fetch_screen`) replace a blocked result with an object
+/// carrying `injection_blocked: true`, a note, the screen's score and its
+/// reason codes, and on the fetch path the continuation fields. The score and
+/// reason codes are kept there for the audit log. The planner gets neither:
+/// they would tell a compromised planner which defence fired. Any other value
+/// passes through untouched.
+fn without_screen_audit_fields(v: &serde_json::Value) -> std::borrow::Cow<'_, serde_json::Value> {
+    match v {
+        serde_json::Value::Object(map) if map.get(INJECTION_BLOCKED_KEY) == Some(&serde_json::Value::Bool(true)) => {
+            let mut map = map.clone();
+            map.remove(SCORE_KEY);
+            map.remove(REASON_CODES_KEY);
+            std::borrow::Cow::Owned(serde_json::Value::Object(map))
+        }
+        _ => std::borrow::Cow::Borrowed(v),
     }
 }
 

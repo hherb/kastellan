@@ -16,19 +16,33 @@
 //! This module keeps the structure instead: [`prune`] returns a copy of the
 //! value cut down to size with every kept key, number and boolean intact.
 //!
+//! # Two things it will not do
+//!
+//! - **Show a key that could carry a sentence.** Keys never pass the guard
+//!   model, which screens string values only, so only identifier-shaped keys
+//!   are shown ([`is_identifier_key`]); any other key is dropped with its value
+//!   and counted in [`OMITTED_KEYS_KEY`].
+//! - **Cut an identifier.** A string with no whitespace and at most
+//!   [`ATOMIC_MAX`] bytes — an id, a hash, a URL, a path — is shown whole or not
+//!   at all ([`is_atomic`]). The planner is told to copy such values verbatim,
+//!   and half of one is a trap. Found by review on `web.search_batch`, where one
+//!   string cap for everything cut every URL.
+//!
 //! # How the budget is met
 //!
 //! [`render`] looks for caps that fit, trying first the ones that lose the
 //! least useful thing:
 //!
-//! 1. **Containers only.** Default array and object caps, strings whole.
-//! 2. **The highest string cap that fits**, by binary search. Every string is
-//!    cut to the same "water level", so one large document keeps nearly the
+//! 1. **Default containers**, strings whole if that fits; otherwise **the
+//!    highest string cap that fits**, by binary search. Every cuttable string
+//!    is cut to the same "water level", so one large document keeps nearly the
 //!    whole budget, while a list of hits keeps every hit with evenly trimmed
 //!    snippets.
-//! 3. **Narrower containers**, strings at [`LEAF_FLOOR`]: halve the array cap,
-//!    then the object cap.
-//! 4. **A fallback** ([`fallback_view`]) when nothing fits.
+//! 2. **Narrower containers**, only when strings at [`LEAF_FLOOR`] still do not
+//!    fit: lower the array cap one element at a time, then the object cap, and
+//!    at the first size that fits, search the string cap again so the bytes
+//!    freed go back to the strings.
+//! 3. **A fallback** ([`fallback_view`]) when nothing fits.
 //!
 //! Every candidate is **measured** before it is returned, so the size bound
 //! does not depend on any argument about how the caps interact.
@@ -66,6 +80,13 @@ pub(crate) const DEPTH_MARKER: &str = "…nested too deeply to show";
 
 /// Appended to a string that was cut.
 const ELLIPSIS: &str = "…";
+
+/// Longest whitespace-free string that is never cut (see [`is_atomic`]). Long
+/// enough for any realistic URL; a longer blob is data, not an identifier.
+pub(crate) const ATOMIC_MAX: usize = 1024;
+
+/// Longest object key shown to the planner (see [`is_identifier_key`]).
+pub(crate) const KEY_MAX_BYTES: usize = 64;
 
 /// Key of the object [`render`] returns when nothing fits.
 pub(crate) const VIEW_UNAVAILABLE_KEY: &str = "_view_unavailable";
@@ -125,11 +146,16 @@ fn prune_at(value: &Value, limits: PruneLimits, depth: usize) -> Value {
         }
         Value::Object(map) => {
             let mut out = Map::new();
-            // BTreeMap order, so the kept keys are the alphabetically first.
-            for (key, item) in map.iter().take(limits.keys) {
+            let mut dropped = 0;
+            // BTreeMap order, so the kept keys are the alphabetically first
+            // identifier-shaped ones.
+            for (key, item) in map {
+                if !is_identifier_key(key) || out.len() >= limits.keys {
+                    dropped += 1;
+                    continue;
+                }
                 out.insert(key.clone(), prune_at(item, limits, depth + 1));
             }
-            let dropped = map.len().saturating_sub(limits.keys);
             if dropped > 0 {
                 // A worker's own `_omitted_keys` field, if it sent one, is
                 // overwritten. That can only mislabel a count, never reveal
@@ -148,11 +174,29 @@ fn omitted_items_marker(dropped: usize) -> String {
     format!("…{dropped} more items omitted")
 }
 
-/// `s` cut to at most `leaf` bytes plus an ellipsis, but only when that is
-/// strictly shorter than `s`. Cutting a 6-byte string to 4 bytes and adding
-/// the 3-byte ellipsis would make it longer, so such a string is kept whole.
+/// Whether `key` may be shown to the planner: 1 to [`KEY_MAX_BYTES`] bytes of
+/// ASCII letters, digits and `_ . : - @ /`. Such a key can name a field, a
+/// header or a path, but cannot carry a sentence, which matters because the
+/// guard model upstream never sees keys.
+fn is_identifier_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= KEY_MAX_BYTES
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-' | b'@' | b'/'))
+}
+
+/// Whether `s` is an identifier that must be shown whole or not at all: no
+/// whitespace and at most [`ATOMIC_MAX`] bytes. Prose has spaces and survives a
+/// cut; a URL, id or hash does not.
+fn is_atomic(s: &str) -> bool {
+    s.len() <= ATOMIC_MAX && !s.chars().any(char::is_whitespace)
+}
+
+/// `s` cut to at most `leaf` bytes plus an ellipsis, but only when `s` is not
+/// atomic and the cut is strictly shorter than `s`. Cutting a 7-byte string to
+/// 4 bytes and adding the 3-byte ellipsis would not shorten it, so such a
+/// string is kept whole.
 fn cut_leaf(s: &str, leaf: usize) -> String {
-    if s.len() <= leaf {
+    if s.len() <= leaf || is_atomic(s) {
         return s.to_string();
     }
     let end = floor_char_boundary(s, leaf);
@@ -198,53 +242,60 @@ pub(crate) fn fallback_view() -> Value {
 /// For `total >= MIN_VIEW_TOTAL` the returned length never exceeds `total`.
 /// Below that, the fallback is returned even if it does not fit.
 pub(crate) fn render(value: &Value, total: usize) -> (Value, usize) {
-    // 1. Containers only.
-    let full = PruneLimits::DEFAULT;
-    if let Some(found) = fit(value, full, total) {
+    // 1. Default containers.
+    let mut containers = PruneLimits::DEFAULT;
+    if let Some(found) = best_fit_at(value, containers, total) {
         return found;
     }
 
-    // 2. The highest string cap that fits. A cap of `longest_leaf` cuts
-    //    nothing, so it is step 1 again and known not to fit. Each probe is
-    //    measured, and `best` only ever holds a fit.
-    let at_floor = PruneLimits { leaf: LEAF_FLOOR, ..full };
-    if let Some(mut best) = fit(value, at_floor, total) {
-        let (mut fits, mut fails) = (LEAF_FLOOR, longest_leaf(value, 0));
-        while fails > fits + 1 {
-            let mid = fits + (fails - fits) / 2;
-            match fit(value, PruneLimits { leaf: mid, ..full }, total) {
-                Some(found) => {
-                    best = found;
-                    fits = mid;
-                }
-                None => fails = mid,
-            }
-        }
-        return best;
-    }
-
-    // 3. Strings at the floor still do not fit. Narrow lists first: a shorter
-    //    list loses whole entries but keeps each entry's labels. A linear,
-    //    measured walk rather than a search, because the omitted-items marker
-    //    vanishing at a count of zero makes size non-monotone in these caps.
-    let mut limits = at_floor;
-    while limits.items > 1 {
-        limits.items /= 2;
-        if let Some(found) = fit(value, limits, total) {
+    // 2. Strings at the floor still do not fit. Narrow lists first: a shorter
+    //    list loses whole entries but keeps each entry's labels. One step at a
+    //    time, not halving: one cap applies at every nesting level, so halving
+    //    8 queries x 10 hits jumps straight to 5 x 5 and strands most of the
+    //    budget. A measured walk rather than a search, because the omitted-items
+    //    marker vanishing at a count of zero makes size non-monotone in these caps.
+    while containers.items > 1 {
+        containers.items -= 1;
+        if let Some(found) = best_fit_at(value, containers, total) {
             return found;
         }
     }
-    while limits.keys > 1 {
-        limits.keys /= 2;
-        if let Some(found) = fit(value, limits, total) {
+    while containers.keys > 1 {
+        containers.keys -= 1;
+        if let Some(found) = best_fit_at(value, containers, total) {
             return found;
         }
     }
 
-    // 4. Nothing fits.
+    // 3. Nothing fits.
     let fallback = fallback_view();
     let len = serialised_len(&fallback);
     (fallback, len)
+}
+
+/// The best fit with arrays and objects capped as in `containers`: strings
+/// whole if that fits, otherwise the highest string cap from [`LEAF_FLOOR`]
+/// up that fits, found by binary search. `None` when even the floor does not
+/// fit. A cap of `longest_leaf` cuts nothing, so it is the "whole" case and
+/// known not to fit by the time the search runs; every probe is measured, and
+/// `best` only ever holds a fit.
+fn best_fit_at(value: &Value, containers: PruneLimits, total: usize) -> Option<(Value, usize)> {
+    if let Some(found) = fit(value, PruneLimits { leaf: usize::MAX, ..containers }, total) {
+        return Some(found);
+    }
+    let mut best = fit(value, PruneLimits { leaf: LEAF_FLOOR, ..containers }, total)?;
+    let (mut fits, mut fails) = (LEAF_FLOOR, longest_leaf(value, 0));
+    while fails > fits + 1 {
+        let mid = fits + (fails - fits) / 2;
+        match fit(value, PruneLimits { leaf: mid, ..containers }, total) {
+            Some(found) => {
+                best = found;
+                fits = mid;
+            }
+            None => fails = mid,
+        }
+    }
+    Some(best)
 }
 
 /// `value` pruned to `limits`, with its length, if that length is within `total`.
@@ -272,9 +323,12 @@ fn longest_leaf(value: &Value, depth: usize) -> usize {
 /// non-empty string, newline-separated.
 ///
 /// Keys are included because, unlike in the old flattened view, they now
-/// reach the planner, and a worker writes them. Punctuation, numbers,
-/// booleans and null are left out, as `extract_scannable_text` leaves them
-/// out, so the catalogue cannot fire on JSON shape.
+/// reach the planner, and a worker writes them. Each key's separators
+/// (`_ . : - @ /`) become spaces, because the catalogue matches phrases of words
+/// and an identifier key can still spell one (`IGNORE_ALL_PREVIOUS`).
+/// Punctuation, numbers, booleans and null are left out, as
+/// `extract_scannable_text` leaves them out, so the catalogue cannot fire on
+/// JSON shape.
 pub(crate) fn screen_text(view: &Value) -> String {
     let mut parts = Vec::new();
     collect_screen_parts(view, &mut parts, 0);
@@ -282,12 +336,12 @@ pub(crate) fn screen_text(view: &Value) -> String {
 }
 
 /// Recursive helper for [`screen_text`].
-fn collect_screen_parts<'a>(value: &'a Value, parts: &mut Vec<&'a str>, depth: usize) {
+fn collect_screen_parts(value: &Value, parts: &mut Vec<String>, depth: usize) {
     if depth >= MAX_WALK_DEPTH {
         return;
     }
     match value {
-        Value::String(s) if !s.is_empty() => parts.push(s),
+        Value::String(s) if !s.is_empty() => parts.push(s.clone()),
         Value::Array(items) => {
             for item in items {
                 collect_screen_parts(item, parts, depth + 1);
@@ -295,7 +349,7 @@ fn collect_screen_parts<'a>(value: &'a Value, parts: &mut Vec<&'a str>, depth: u
         }
         Value::Object(map) => {
             for (key, item) in map {
-                parts.push(key);
+                parts.push(key.replace(['_', '.', ':', '-', '@', '/'], " "));
                 collect_screen_parts(item, parts, depth + 1);
             }
         }

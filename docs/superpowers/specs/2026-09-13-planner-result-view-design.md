@@ -246,3 +246,34 @@ stop the property regressing.
   filter iteration 3 used. Filed separately; a small change, but a different defect.
 - **`plan.decision` reaching the prompt unscreened**, contradicting `sink_screen_blocks`'s
   documented "single, mandatory sink screen". Filed separately.
+
+## Review round (2026-09-14)
+
+A read-only review of the implemented branch found six things. All were verified against the code
+before acting; each change below has a test watched failing first and a mutant that the test kills.
+
+- **Object keys never pass the guard model.** `tool_host::post_process` builds the source screen's
+  text with `extract_scannable_text`, which drops keys, so neither the catalogue there nor the guard
+  model sees one. Before #677 keys never reached the planner; after it they did. **Decision
+  (operator):** only identifier-shaped keys are shown — 1 to `KEY_MAX_BYTES` (64) bytes of ASCII
+  letters, digits and `_ . : - @ /`. Any other key is dropped with its value and counted in
+  `_omitted_keys`. The sink screen reads identifier keys with separators as spaces, so
+  `IGNORE_ALL_PREVIOUS` still meets the catalogue. The guard tier's input, and so its calibration,
+  is unchanged. Residual: a space-free token of at most 64 bytes that the guard model never saw.
+- **No test screened below depth 1.** Skipping arrays in `screen_text`, or everything below depth 2,
+  left the suite green. Tests now nest the phrase in a list of hits.
+- **Screen placeholders reached the planner as ordinary output**, with the audit-only `score` and
+  `reason_codes` that `post_process` argues must not tell a planner which defence fired. The render
+  now removes both from any object carrying `injection_blocked: true`, keeping the note and the
+  fetch path's continuation fields. The three key spellings are shared constants in
+  `tool_host::injection_placeholder`, used by both placeholder builders and the render.
+- **One string cap for everything cut identifiers.** On a `web.search_batch` result near its 24 KiB
+  ceiling the water level settled near 97 bytes and cut every longer URL, while the prompt tells the
+  planner to copy values verbatim. A string with no whitespace and at most `ATOMIC_MAX` (1024) bytes
+  is now shown whole or not at all.
+- **Narrowing was coarse and left bytes unused.** Two mutants survived in `render`'s narrowing step.
+  It now, at each container size, tries whole strings and then searches the string cap again, and
+  it lowers the caps one step at a time rather than halving — one cap applies at every nesting level,
+  so halving took 8 queries x 10 hits straight to 5 x 5.
+- **Two shapes were undocumented.** The prompt now names `_view_unavailable` and
+  `injection_blocked`, and the drift test checks both.

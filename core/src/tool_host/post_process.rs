@@ -105,11 +105,12 @@ async fn screen_result(
     // that says "clear" can never appear to overturn a decision the catalogue
     // has already made.
     if matches!(verdict.decision, InjectionDecision::Block) {
-        // The placeholder carries a human-readable `note` string — the only
-        // field the planner-summary render surfaces (extract_scannable_text
-        // emits string leaves only), so the planner gets an intelligible
-        // "withheld" signal rather than a silent gap (#340). Structured fields
-        // stay for audit-shape parity with fetch_screen.
+        // The placeholder carries `injection_blocked: true` and a
+        // human-readable `note`, which is what the planner-summary render shows
+        // the planner, so it gets an intelligible "withheld" signal rather than
+        // a silent gap (#340). `score` and `reason_codes` stay for the audit log
+        // and audit-shape parity with fetch_screen; the render removes them
+        // (#677).
         let value = injection_blocked_placeholder(verdict.score, &verdict.reason_codes);
         return ScreenOutcome {
             value,

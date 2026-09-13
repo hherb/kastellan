@@ -31,7 +31,9 @@ pub use audit_sink::{AuditSink, PgAuditSink};
 mod egress_provision;
 
 mod injection_placeholder;
-pub use injection_placeholder::{injection_blocked_placeholder, WITHHELD_NOTE};
+pub use injection_placeholder::{
+    injection_blocked_placeholder, INJECTION_BLOCKED_KEY, REASON_CODES_KEY, SCORE_KEY, WITHHELD_NOTE,
+};
 
 mod post_process;
 
