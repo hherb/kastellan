@@ -17,7 +17,7 @@
 //!
 //! # The budget, measured rather than assumed
 //!
-//! An error reaches the planner as `"err: <CODE>: <detail>"` with `detail`
+//! An error reaches the planner as `{"status": "err", "code": <CODE>, "detail": <detail>}` with `detail`
 //! clamped to [`kastellan_protocol::STEP_ERR_DETAIL_MAX`] = 200 chars, and this
 //! worker's own prefix (`localmail 400: `) is 15 of those. Measured against the
 //! live service on 2026-08-15, the whole envelope for the sort/cursor

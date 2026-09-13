@@ -28,24 +28,24 @@
 //! So the lever that has actually moved this planner is text delivered **where
 //! it reads results**, not text in the advertisement. Hence [`annotate`].
 //!
-//! # Two constraints the wording and the key name have to satisfy
+//! # Two constraints the wording and the key name were chosen under
 //!
-//! A successful step's output does not reach the planner verbatim. `core`'s
-//! `injection_guard::extract_scannable_text` walks the JSON and emits **only
-//! string values, with their keys discarded**, newline-separated, capped at
-//! `STEP_OK_SUMMARY_MAX` (4 KiB) for this method. Therefore:
+//! When this module was written, a successful step reached the planner through
+//! `core`'s `injection_guard::extract_scannable_text`, which kept **only string
+//! values, with their keys discarded**, capped at 4 KiB. Since #677 the planner
+//! reads a pruned copy of the JSON with its keys kept, so neither constraint is
+//! strictly required any more. Both are kept as defence in depth, because the
+//! pruned view still drops an object's alphabetically last keys first when a
+//! budget forces it to narrow one:
 //!
-//! 1. **The advice must be a self-describing sentence.** A tidy
-//!    `"sort_applied": "rank"` would reach the planner as the bare word `rank`
-//!    on a line of its own, with nothing saying what it describes.
-//! 2. **The key must sort before `results`.** `serde_json::Map` is a `BTreeMap`
-//!    here (no `preserve_order` feature in this workspace), so keys serialize
-//!    alphabetically, and a 50-hit `results` array exhausts the 4 KiB budget on
-//!    its own. `ordering_note` < `results`; `sort_applied` would have sorted
-//!    *after* it and been silently clipped — the same trap that swallowed #536's
-//!    repair advice. [`ordering_key_sorts_before_results`] pins this, and
-//!    `core`'s `a_note_keyed_before_results_survives_the_planner_head_cap` proves
-//!    it end-to-end against the real extractor.
+//! 1. **The advice is a self-describing sentence,** so it reads correctly even
+//!    if its key is ever lost again.
+//! 2. **The key sorts before `results`.** `serde_json::Map` is a `BTreeMap`
+//!    here (no `preserve_order` feature in this workspace), so under the
+//!    tightest budget `ordering_note` outlives a key such as `sort_applied`.
+//!    [`ordering_key_sorts_before_results`] pins this, and `core`'s
+//!    `an_ordering_note_reaches_the_planner_wherever_its_key_sorts` proves the
+//!    note reaches the planner end-to-end.
 //!
 //! # Why paging is a third case and not a default
 //!
@@ -255,11 +255,11 @@ mod tests {
     }
 
     /// The placement invariant, pinned locally. `serde_json::Map` is a
-    /// `BTreeMap` in this workspace, so serialization order is key order, and
-    /// anything sorting after `results` is clipped by the planner's 4 KiB head
-    /// cap before it is ever read. `core` proves the same thing end-to-end
-    /// against the real extractor; this test is what fails first, in the crate
-    /// where someone would rename the key.
+    /// `BTreeMap` in this workspace, so key order is alphabetical, and when the
+    /// planner's pruned view (#677) must narrow an object it keeps the first
+    /// keys. Before #677 anything sorting after `results` was clipped outright.
+    /// This test is what fails first, in the crate where someone would rename
+    /// the key.
     #[test]
     fn ordering_key_sorts_before_results() {
         assert!(
