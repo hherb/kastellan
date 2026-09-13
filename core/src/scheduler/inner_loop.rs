@@ -46,6 +46,7 @@ use super::inner_loop_audit::{
 
 mod floor;
 mod invoke_expand;
+mod result_view;
 mod summary;
 
 /// Per-task accumulator state passed to the agent each iteration.
