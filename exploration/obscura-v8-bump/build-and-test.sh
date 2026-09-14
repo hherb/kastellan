@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# NOTE: `pipefail` is load-bearing here, not decoration. Every cargo invocation
+# below is piped into `tee`, and without it `$?` is *tee's* status — so a failed
+# build reports success. That is not hypothetical: the 2026-09-14 re-test read
+# "exit code 0" off a `cargo check` that had emitted 111 errors, purely because
+# the status came from the tail of the pipe. Do not remove it.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -29,9 +34,18 @@ echo ">>> Creating branch: ${BRANCH}"
 git checkout -B "${BRANCH}"
 
 # ── Step 3: Apply Cargo.toml bump ────────────────────────────────────
+#
+# ⚠️ This bump is KNOWN NOT TO COMPILE as of 2026-09-14 (111 errors). It is kept
+# as the starting point for the port, not as a working fix. See README.md
+# "Status of the bump" for the error breakdown before running this.
+#
+# `deno_error` must move in lockstep: deno_core requires >= 0.7 from 0.360
+# onward, and Obscura pins 0.6. Bumping deno_core alone yields 30 additional
+# trait-bound errors that have nothing to do with the real porting work.
 echo ""
 echo ">>> Bumping deno_core 0.350 → 0.405 in crates/obscura-js/Cargo.toml"
 sed -i.bak 's/deno_core = "0\.350"/deno_core = "0.405"/g' crates/obscura-js/Cargo.toml
+sed -i.bak 's/deno_error = "0\.6"/deno_error = "0.7"/g' crates/obscura-js/Cargo.toml
 rm -f crates/obscura-js/Cargo.toml.bak
 
 # Show the change
@@ -55,10 +69,11 @@ if ! cargo build --workspace 2>&1 | tee "${SCRIPT_DIR}/build.log"; then
     echo "  - RuntimeOptions changed → update runtime.rs"
     echo "  - deno_error version mismatch → bump deno_error in Cargo.toml"
     echo ""
-    echo "If too much breakage, try stepping through intermediate versions:"
-    echo "  sed -i 's/0.405/0.370/g' crates/obscura-js/Cargo.toml && cargo build"
-    echo "  sed -i 's/0.370/0.390/g' crates/obscura-js/Cargo.toml && cargo build"
-    echo "  sed -i 's/0.390/0.405/g' crates/obscura-js/Cargo.toml && cargo build"
+    echo "Stepping through intermediate versions does NOT obviously help:"
+    echo "  the smallest possible step (0.360) fails before reaching Obscura's"
+    echo "  own code — deno_core 0.360 pins temporal_rs 0.0.11, which does not"
+    echo "  compile on rustc 1.94.1 and cannot be updated within that tree."
+    echo "  See README.md 'Status of the bump'."
     exit 1
 fi
 
