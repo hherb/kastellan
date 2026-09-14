@@ -6,6 +6,7 @@
 mod attach;
 mod client;
 mod handler;
+mod headers;
 mod ids;
 mod problem;
 mod search_params;

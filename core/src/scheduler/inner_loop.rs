@@ -46,6 +46,7 @@ use super::inner_loop_audit::{
 
 mod floor;
 mod invoke_expand;
+mod result_view;
 mod summary;
 
 /// Per-task accumulator state passed to the agent each iteration.
@@ -807,7 +808,18 @@ pub async fn run_to_terminal(
             ).await?;
         }
 
-        ctx.plans.push(PlanRecord::new(plan, outcomes));
+        let record = PlanRecord::new(plan, outcomes);
+        // A block only the planner-summary sink made is otherwise invisible:
+        // the planner sees `withheld` and no source screen wrote a row (#702
+        // review). Written here, at the one live append point, and never on
+        // resume, which rebuilds records it already recorded. Best-effort, like
+        // `post_process`'s rows: losing the forensic row must not fail the task.
+        for payload in record.sink_block_audit_payloads(ctx.task_id, ctx.plan_count) {
+            if let Err(e) = kastellan_db::audit::insert(pool, "policy", "injection.blocked", payload).await {
+                tracing::error!(task_id = ctx.task_id, error = %e, "sink injection.blocked audit insert failed");
+            }
+        }
+        ctx.plans.push(record);
         // loop back: agent reflects on the outcomes for the next plan
     }
 }

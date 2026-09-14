@@ -293,6 +293,10 @@ fn a_message_id_taken_verbatim_from_a_search_hit_is_accepted() {
 /// pair), so reverting `detail_path` to the old `?full_headers=true` spelling
 /// fails here with a missing `headers` block — the production symptom, not a
 /// string mismatch.
+///
+/// Since #702's review the block is a list of `{name, values}` rather than
+/// localmail's name-keyed object (see `headers.rs`), so this also proves that
+/// reshaping runs on the real stdio path.
 #[test]
 fn asking_for_full_headers_actually_returns_headers() {
     let (base, _mock) = spawn_mock();
@@ -308,9 +312,10 @@ fn asking_for_full_headers_actually_returns_headers() {
 
     let full = rpc(&mut stdin, &mut stdout, 2, "mail.get_message",
         serde_json::json!({"message_id": "7", "full_headers": true}));
-    assert!(
-        full["result"].get("headers").is_some_and(|h| h.as_object().is_some_and(|o| !o.is_empty())),
-        "full_headers: true must produce a non-empty `headers` block: {full}"
+    assert_eq!(
+        full["result"]["headers"],
+        serde_json::json!([{"name": "Message-ID", "values": ["<canned@example.test>"]}]),
+        "full_headers: true must produce the header list, names as values: {full}"
     );
 
     drop(stdin);
