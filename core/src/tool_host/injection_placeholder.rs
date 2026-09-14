@@ -4,20 +4,38 @@
 //! When [`crate::tool_host::dispatch`] blocks a worker result, the raw output
 //! must not reach the planner — but the planner still needs an *intelligible*
 //! signal that content was withheld, otherwise it sees a silent gap and may
-//! re-run the step. The planner-summary render surfaces step output via
-//! `injection_guard::extract_scannable_text`, which emits only **string leaf
-//! values** — so the structured `injection_blocked`/`score`/`reason_codes`
-//! fields are invisible to it. The [`WITHHELD_NOTE`] string is the leaf the
-//! planner actually sees (issue #340; mirrors the `fetch_screen` withheld-note
-//! so both screening chokepoints signal the same way).
+//! re-run the step. Since #677 the planner-summary render shows step output as
+//! labelled JSON, so the planner sees `injection_blocked: true` and the
+//! [`WITHHELD_NOTE`] string together (issue #340; mirrors the `fetch_screen`
+//! withheld-note so both screening chokepoints signal the same way). The render
+//! removes `score` and `reason_codes` first: they stay here for the audit log,
+//! but would tell a compromised planner which defence fired.
 
 use serde_json::Value;
 
 /// Human-readable signal the planner sees when a tool result is withheld for
-/// failing the injection screen. A **string leaf** so the planner-summary
-/// render's `extract_scannable_text` surfaces it (the structured fields are
-/// stripped by that render, see module docs — #340).
+/// failing the injection screen, beside `injection_blocked: true` (#340, #677;
+/// see module docs).
 pub const WITHHELD_NOTE: &str = "[tool output withheld: failed injection screen]";
+
+/// Key whose `true` value marks a result an injection screen replaced. The one
+/// spelling for both placeholder builders (this one and
+/// `scheduler::tool_dispatch::fetch_screen`) and every reader: the
+/// planner-summary render and `kastellan-cli`'s guard corpus capture.
+pub const INJECTION_BLOCKED_KEY: &str = "injection_blocked";
+
+/// Key of the blocking screen's score. Audit-only (see [`AUDIT_ONLY_KEYS`]).
+pub const SCORE_KEY: &str = "score";
+
+/// Key of the blocking screen's reason codes. Audit-only (see [`AUDIT_ONLY_KEYS`]).
+pub const REASON_CODES_KEY: &str = "reason_codes";
+
+/// The placeholder fields kept for the audit log and removed before the planner
+/// sees the placeholder, because they would tell a compromised planner which
+/// defence fired. Declared beside the builders so a field added to both
+/// placeholders is classified here, where it is written, rather than in the
+/// render that strips it.
+pub const AUDIT_ONLY_KEYS: [&str; 2] = [SCORE_KEY, REASON_CODES_KEY];
 
 /// Build the placeholder `Value` substituted for an injection-blocked tool
 /// result.
@@ -27,10 +45,10 @@ pub const WITHHELD_NOTE: &str = "[tool output withheld: failed injection screen]
 ///   with the `fetch_screen` placeholder and for any structured consumer.
 pub fn injection_blocked_placeholder(score: f32, reason_codes: &[&str]) -> Value {
     serde_json::json!({
-        "injection_blocked": true,
-        "note":              WITHHELD_NOTE,
-        "score":             score,
-        "reason_codes":      reason_codes,
+        INJECTION_BLOCKED_KEY: true,
+        "note":                WITHHELD_NOTE,
+        SCORE_KEY:             score,
+        REASON_CODES_KEY:      reason_codes,
     })
 }
 
@@ -41,8 +59,9 @@ mod tests {
     #[test]
     fn placeholder_carries_human_readable_note() {
         let v = injection_blocked_placeholder(0.9, &["instruction_override"]);
-        // The note is a string leaf — the only field the planner-summary render
-        // surfaces (#340). It must clearly signal *withheld*, not look like data.
+        // The note is what tells the planner, in words, that content was
+        // withheld (#340; since #677 it sees `injection_blocked: true` beside
+        // it). It must clearly signal *withheld*, not look like data.
         let note = v["note"].as_str().expect("note is a string");
         assert_eq!(note, WITHHELD_NOTE);
         assert!(note.contains("withheld"), "note must signal content was withheld");

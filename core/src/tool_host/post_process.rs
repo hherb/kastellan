@@ -45,7 +45,9 @@ use crate::secrets::RedemptionEvent;
 /// `policy / injection.blocked` row.
 ///
 /// Both tiers reuse that one event name and carry this as a field rather than
-/// splitting into two event names. The operator-facing question is "what was
+/// splitting into two event names. So does the planner-summary sink screen
+/// (`scheduler::inner_loop::summary::TIER_SINK`, since #702's review), which
+/// can block a result both tiers here allowed because it also screens keys. The operator-facing question is "what was
 /// withheld from the planner", and splitting its answer means every forensic
 /// query written before this slice silently under-reports the moment the tier
 /// is switched on (D5).
@@ -105,11 +107,12 @@ async fn screen_result(
     // that says "clear" can never appear to overturn a decision the catalogue
     // has already made.
     if matches!(verdict.decision, InjectionDecision::Block) {
-        // The placeholder carries a human-readable `note` string — the only
-        // field the planner-summary render surfaces (extract_scannable_text
-        // emits string leaves only), so the planner gets an intelligible
-        // "withheld" signal rather than a silent gap (#340). Structured fields
-        // stay for audit-shape parity with fetch_screen.
+        // The placeholder carries `injection_blocked: true` and a
+        // human-readable `note`, which is what the planner-summary render shows
+        // the planner, so it gets an intelligible "withheld" signal rather than
+        // a silent gap (#340). `score` and `reason_codes` stay for the audit log
+        // and audit-shape parity with fetch_screen; the render removes them
+        // (#677).
         let value = injection_blocked_placeholder(verdict.score, &verdict.reason_codes);
         return ScreenOutcome {
             value,

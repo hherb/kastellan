@@ -31,7 +31,10 @@ pub use audit_sink::{AuditSink, PgAuditSink};
 mod egress_provision;
 
 mod injection_placeholder;
-pub use injection_placeholder::{injection_blocked_placeholder, WITHHELD_NOTE};
+pub use injection_placeholder::{
+    injection_blocked_placeholder, AUDIT_ONLY_KEYS, INJECTION_BLOCKED_KEY, REASON_CODES_KEY, SCORE_KEY,
+    WITHHELD_NOTE,
+};
 
 mod post_process;
 
@@ -170,7 +173,8 @@ impl WorkerCommand {
 ///   its length, the catalogue score and the class codes; never the raw
 ///   scanned body. Since the guard-model wiring slice it also carries
 ///   `tier` (`"catalogue"` or `"guard_model"`), plus `p` and `tau` on
-///   the guard arm.
+///   the guard arm. The scheduler writes the same event with `tier: "sink"`
+///   when the planner-summary screen blocks what both tiers here allowed.
 ///
 /// On a substitution miss the chokepoint writes exactly one row,
 /// `policy / secret.redemption_failed`, and returns

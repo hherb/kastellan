@@ -4,9 +4,37 @@
 //! 500-LOC cap) into a focused, separately-testable module. The single entry
 //! point is [`render_plans_summary`], which `TaskContext::plans_so_far_summary`
 //! delegates to.
+//!
+//! # The shape the planner reads (#677)
+//!
+//! Each plan renders as `{"decision", "step_outcomes"}`, and each step outcome
+//! is an object in one of four shapes:
+//!
+//! | Shape | When |
+//! | --- | --- |
+//! | `{"status": "ok", "output": <view>}` | success; `<view>` is [`result_view::render`]'s pruned, labelled copy of the result |
+//! | `{"status": "ok", "withheld": "failed injection screen"}` | success, but the sink screen blocked the view |
+//! | `{"status": "ok", "elided": "summary budget"}` | an older success dropped by [`apply_summary_budget`] |
+//! | `{"status": "err", "code": <CODE>, "detail": <clamped detail>}` | failure |
+//!
+//! Until #677 an outcome was the string `"ok: <head>"`, where the head was
+//! `extract_scannable_text`'s flattening with every object key, number and
+//! boolean discarded, so the planner could not see which search hit had an
+//! attachment or which bare line was the message id.
+//! `prompts/agent_planner.md` documents these shapes, and
+//! `the_planner_prompt_documents_every_outcome_shape` fails if the prompt stops
+//! naming any key, reason or marker the renderer emits.
 
+use std::borrow::Cow;
+
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+use super::result_view;
 use super::StepOutcome;
+use crate::cassandra::injection_guard::{screen_with_profile, GuardProfile, InjectionDecision};
 use crate::cassandra::types::Plan;
+use crate::tool_host::{AUDIT_ONLY_KEYS, INJECTION_BLOCKED_KEY};
 
 /// Max chars of a step error `detail` surfaced back to the agent in
 /// `plans_so_far_summary`. Long worker stderr / RPC messages are clamped so a
@@ -23,42 +51,69 @@ use crate::cassandra::types::Plan;
 /// with every test on both sides still green.
 pub(crate) use kastellan_protocol::STEP_ERR_DETAIL_MAX;
 
-/// Max bytes of a *successful* step's output head surfaced back to the planner
-/// in `plans_so_far_summary`. The head is screened at the sink (see
-/// [`render_step_outcome`]/[`sink_screen_blocks`]) and bounded here to keep the
-/// always-in-context planner prompt small as successful outputs accumulate
-/// across iterations. A truncated head gets a trailing `…`.
-pub(crate) const STEP_OK_SUMMARY_MAX: usize = 4 * 1024;
+/// Max bytes of a *successful* step's view surfaced back to the planner: the
+/// serialised length of [`result_view::render`]'s output. 16 KiB since #677
+/// (4 KiB before): enough for a ten-hit `mail.search` result to reach the
+/// planner with every hit and every label, its snippets trimmed evenly.
+/// Affordable because DGX plan latency is bound by generation, not context:
+/// cutting `num_ctx` from 262144 to 65536 bought only about 10 %.
+pub(crate) const STEP_OK_SUMMARY_MAX: usize = 16 * 1024;
 
 /// Per-query byte budget contributed by each element of a `web.search_batch`
-/// head. A batch is ONE step but carries N independent queries; scaling the head
-/// cap by the query count (see [`ok_summary_cap`]) lets the planner see more than
-/// the single query that a flat [`STEP_OK_SUMMARY_MAX`] head would surface.
+/// result. A batch is ONE step but carries N independent queries; scaling the
+/// view's budget by the query count (see [`ok_summary_cap`]) lets the planner
+/// see more than a flat [`STEP_OK_SUMMARY_MAX`] would — from six queries up,
+/// since five earn 15 KiB, below the flat budget.
 const BATCH_PER_QUERY_SUMMARY_BYTES: usize = 3 * 1024;
 
-/// Hard ceiling on a `web.search_batch` step's head, so a large batch cannot
+/// Hard ceiling on a `web.search_batch` step's view, so a large batch cannot
 /// claim the entire [`PLANS_SUMMARY_BUDGET`]. 24 KiB = 8 (the default
 /// `KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES`) × [`BATCH_PER_QUERY_SUMMARY_BYTES`],
-/// i.e. 3/4 of the 32 KiB total — leaving headroom for other steps, which the
-/// oldest-first [`apply_summary_budget`] elides if the accumulated total is
-/// exceeded.
+/// a quarter of the 96 KiB total.
 ///
 /// The ceiling is deliberately **independent** of the operator's batch-query cap
 /// (`KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES`, tunable up to 32): it bounds the
-/// planner-prompt cost regardless of how large a batch the operator allows. So
-/// raising the cap above 8 does not grow this head — instead per-query head
-/// visibility scales *down* (the front-loading trade-off documented on
-/// [`ok_summary_cap`]), which is the intended cost/coverage balance.
+/// planner-prompt cost regardless of how large a batch the operator allows.
 const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
 
-/// Byte cap for a successful step's surfaced head, given its `method` and the
-/// result `value`. A `web.search_batch` result is
+/// Total byte budget for the whole rendered `plans_so_far_summary`, counted in
+/// serialised step-outcome bytes. 96 KiB since #677: six times the flat
+/// per-step budget, so a fast-lane task (`DEFAULT_MAX_PLANS_FAST` = 5, plus the
+/// forced-synthesis turn) of one flat-budget step per plan is not pushed into
+/// elision by the ceiling alone. Plans with several steps, `web.search_batch`
+/// steps (up to 24 KiB each) or a long-lane task can still exceed it and elide,
+/// oldest first. The planner's own `decision` strings are not counted, so the
+/// serialised prompt is modestly larger than this value but still bounded.
+const PLANS_SUMMARY_BUDGET: usize = 96 * 1024;
+
+const _: () = {
+    // `usize::clamp` panics when its lower bound exceeds its upper bound, and
+    // `ok_summary_cap` clamps between these two.
+    assert!(STEP_OK_SUMMARY_MAX <= STEP_OK_BATCH_SUMMARY_MAX);
+    // `result_view::render` guarantees its size bound only from MIN_VIEW_TOTAL up.
+    // Module level, not `#[cfg(test)]`, which release builds strip.
+    assert!(STEP_OK_SUMMARY_MAX >= result_view::MIN_VIEW_TOTAL);
+    // Every string of a tool_host result's view lies inside the text its
+    // source screen scanned (the catalogue, plus the guard model where a guard
+    // tier is configured) only because a result larger than that scan window
+    // never reaches this render whole: `tool_dispatch` stashes it behind a
+    // handoff placeholder first, measuring serialised bytes. A string leaf's
+    // flattened text is never longer than its serialised JSON, so a stash cap
+    // within the scan cap keeps the whole view inside the scanned text. The
+    // view trims strings evenly across the whole result rather than keeping a
+    // prefix, so raising the stash cap past the scan cap would show the planner
+    // a tail only this module's sink catalogue had checked (#702 review).
+    // (`fetch_handoff` slices are screened by `fetch_screen`'s catalogue alone.)
+    assert!(crate::handoff::DEFAULT_RESULT_BYTE_CAP <= crate::cassandra::injection_guard::SCAN_BYTE_CAP);
+};
+
+/// Byte budget for a successful step's view, given its `method` and result
+/// `value`. A `web.search_batch` result is
 /// `{results:[{query,results,count}|{query,error}]}` — one element per query — so
-/// its cap scales with the element count, clamped to
+/// its budget scales with the element count, clamped to
 /// `[STEP_OK_SUMMARY_MAX, STEP_OK_BATCH_SUMMARY_MAX]`; every other method keeps
-/// the flat single-step cap. A malformed/absent `results` array counts as zero
-/// elements and clamps up to the flat floor (never larger than a real batch would
-/// earn). Pure — no I/O, deterministic in `(method, value)`.
+/// the flat single-step budget. A malformed/absent `results` array counts as zero
+/// elements and clamps up to the flat floor. Pure — deterministic in `(method, value)`.
 fn ok_summary_cap(method: &str, value: &serde_json::Value) -> usize {
     if method == crate::workers::web_search::WEB_SEARCH_BATCH_METHOD {
         let n = value
@@ -71,40 +126,97 @@ fn ok_summary_cap(method: &str, value: &serde_json::Value) -> usize {
     }
 }
 
-/// Marker rendered in place of step text that the sink screen blocked. A clear,
-/// structured signal to the planner that content was withheld — never raw
-/// blocked content.
+// Keys and fixed values of a step outcome object; see the module docs.
+const STATUS_KEY: &str = "status";
+const STATUS_OK: &str = "ok";
+const STATUS_ERR: &str = "err";
+const OUTPUT_KEY: &str = "output";
+const WITHHELD_KEY: &str = "withheld";
+const ELIDED_KEY: &str = "elided";
+const CODE_KEY: &str = "code";
+const DETAIL_KEY: &str = "detail";
+/// Why a successful step shows no output: the sink screen blocked it.
+const WITHHELD_REASON: &str = "failed injection screen";
+/// Why an older successful step shows no output: the summary budget dropped it.
+const ELIDED_REASON: &str = "summary budget";
+
+/// Replaces a failed step's `detail` when the sink screen blocks it. The
+/// `code` is an internal constant and is always kept, so the planner still
+/// learns why the step failed.
 const WITHHELD_MARKER: &str = "[withheld: failed injection screen]";
 
-/// Total byte budget for the whole rendered `plans_so_far_summary`. Bounds the
-/// always-in-context planner prompt as successful step outputs accumulate
-/// across up to `max_plans` iterations (#339). Per-step heads stay
-/// `STEP_OK_SUMMARY_MAX`; this caps the *accumulated* total over all plans and
-/// steps. It bounds the dominant, otherwise-unbounded term — the step-output
-/// text bytes (`RenderedStep.text`). The small per-step framing (the `"ok: "` /
-/// `"err: …"` prefixes and the JSON array/key punctuation) and the planner's own
-/// `decision` field are not counted, so the fully-serialized prompt is modestly
-/// larger than this value but still bounded.
-const PLANS_SUMMARY_BUDGET: usize = 32 * 1024;
+/// The outcome that replaces an older successful step dropped by
+/// [`apply_summary_budget`] (#339). A clear signal to the planner that output
+/// was dropped for size — distinct from the injection-screen `withheld` shape.
+fn elided_outcome() -> serde_json::Value {
+    json!({STATUS_KEY: STATUS_OK, ELIDED_KEY: ELIDED_REASON})
+}
 
-/// Replacement for an elided `Ok`-output head (#339). A clear, structured
-/// signal to the planner that an older step's output was dropped to keep the
-/// prompt bounded — distinct from the injection [`WITHHELD_MARKER`].
-const OK_ELIDED_MARKER: &str = "ok: [output elided: summary budget]";
+/// Most characters of the plan-authored `tool` and `method` a sink audit row
+/// carries; a longer value is cut and marked with `…`.
+const AUDIT_LABEL_MAX_CHARS: usize = 64;
 
-/// One rendered step plus whether its text is an elidable `Ok`-output head.
-/// `elidable` is `true` only for a successfully-screened `Ok` step carrying
-/// real output (the budget may drop it); `false` for errors and for the
-/// already-tiny withheld/empty `Ok` markers, which carry load-bearing signal
-/// and are never elided.
+/// The `tier` of the `policy / injection.blocked` row written for a block the
+/// planner-summary sink screen made, beside `tool_host::post_process`'s
+/// `catalogue` and `guard_model` on the same event name.
+pub(crate) const TIER_SINK: &str = "sink";
+
+/// What the sink screen recorded about a step it blocked: enough for the
+/// forensic `policy / injection.blocked` row, and never the screened text.
+#[derive(Clone, Debug, PartialEq)]
+struct SinkBlock {
+    score: f32,
+    reason_codes: Vec<&'static str>,
+    body_sha256: String,
+    body_byte_len: usize,
+}
+
+/// One rendered step outcome, its serialised size, whether the budget may
+/// replace it with [`elided_outcome`], and what the sink screen blocked in it.
 ///
-/// `Clone` so [`render_plans_summary`] can copy the memoized renders before
-/// the per-call budget elision mutates them (see [`PlanRecord`]); `Debug` so
+/// Built only through the four named constructors, each of which owns its
+/// shape and its flag, so a withheld or failed step cannot be marked elidable
+/// by a call site passing the wrong `bool`. `bytes` is computed once, at
+/// construction, because it is the unit [`apply_summary_budget`] counts.
+///
+/// `Clone` so [`render_plans_summary`] can copy the memoized renders before the
+/// per-call budget elision mutates them (see [`PlanRecord`]); `Debug` so
 /// [`PlanRecord`] (a field of the `Debug`-deriving `TaskContext`) can derive it.
 #[derive(Clone, Debug)]
 struct RenderedStep {
-    text: String,
+    value: serde_json::Value,
+    bytes: usize,
     elidable: bool,
+    sink_block: Option<SinkBlock>,
+}
+
+impl RenderedStep {
+    fn measured(value: serde_json::Value, elidable: bool, sink_block: Option<SinkBlock>) -> Self {
+        let bytes = result_view::serialised_len(&value);
+        Self { value, bytes, elidable, sink_block }
+    }
+
+    /// A successful step's view: the one shape the budget may elide.
+    fn output(view: serde_json::Value) -> Self {
+        Self::measured(json!({STATUS_KEY: STATUS_OK, OUTPUT_KEY: view}), true, None)
+    }
+
+    /// A successful step whose view the sink screen blocked. Tiny and
+    /// load-bearing, so never elided.
+    fn withheld(block: SinkBlock) -> Self {
+        Self::measured(json!({STATUS_KEY: STATUS_OK, WITHHELD_KEY: WITHHELD_REASON}), false, Some(block))
+    }
+
+    /// A failed step, with `sink_block` set when the screen replaced its
+    /// detail. Never elided: the error is the signal.
+    fn err(code: &str, detail: &str, sink_block: Option<SinkBlock>) -> Self {
+        Self::measured(json!({STATUS_KEY: STATUS_ERR, CODE_KEY: code, DETAIL_KEY: detail}), false, sink_block)
+    }
+
+    /// What [`apply_summary_budget`] puts in place of an elided output.
+    fn elided() -> Self {
+        Self::measured(elided_outcome(), false, None)
+    }
 }
 
 /// A completed plan plus the screened, planner-bound render of its outcomes.
@@ -112,7 +224,7 @@ struct RenderedStep {
 /// `rendered` is computed **once**, at the sole append point
 /// ([`PlanRecord::new`], called from `inner_loop.rs`), rather than being
 /// re-derived on every planner iteration. The sink screen
-/// ([`render_step_outcome`] → [`sink_screen_blocks`]) is a pure, deterministic
+/// ([`render_step_outcome`] → [`sink_screen`]) is a pure, deterministic
 /// function of `(tool, outcome)`, and both inputs are frozen the moment the
 /// record is pushed onto the append-only `TaskContext::plans`. Re-screening
 /// every accumulated outcome on every loop was latent-quadratic in
@@ -155,15 +267,52 @@ impl PlanRecord {
             .iter()
             .enumerate()
             .map(|(i, o)| {
-                let (tool, method) = plan
-                    .steps
-                    .get(i)
-                    .map(|s| (s.tool.as_str(), s.method.as_str()))
-                    .unwrap_or(("", ""));
+                let (tool, method) = step_tool_and_method(&plan, i);
                 render_step_outcome(tool, method, o)
             })
             .collect();
         Self { plan, outcomes, rendered }
+    }
+
+    /// The `policy / injection.blocked` payloads for every step the sink screen
+    /// blocked, in step order, with `tier` [`TIER_SINK`].
+    ///
+    /// Since #677 the sink screens object keys, which no source screen sees, so
+    /// it can block a result the source allowed; until #702's review nothing
+    /// recorded that. Pure, so the one caller (the inner loop's push site) only
+    /// writes rows. A resumed run rebuilds its records with [`PlanRecord::new`]
+    /// and must **not** call this, or it would record the same blocks twice.
+    ///
+    /// Every field is bounded, as `post_process`'s row argues for its own, so the
+    /// row keeps `tier` and `reason_codes` under the audit payload cap:
+    /// `reason_codes` is drawn from the fixed catalogue, `body_sha256` is 64 hex
+    /// characters, and `tool`/`method` — which the planner writes — are clamped
+    /// to [`AUDIT_LABEL_MAX_CHARS`]. The screened text is never written, **but**
+    /// an `UNKNOWN_TOOL` detail echoes the tool name, so a clamped head of a
+    /// hostile name can appear in `tool`; the `step.unknown_tool` row already
+    /// records that name in full.
+    pub fn sink_block_audit_payloads(&self, task_id: i64, plan_count: u32) -> Vec<serde_json::Value> {
+        self.rendered
+            .iter()
+            .enumerate()
+            .filter_map(|(i, step)| {
+                let block = step.sink_block.as_ref()?;
+                let (tool, method) = step_tool_and_method(&self.plan, i);
+                Some(json!({
+                    "tool":          clamp_audit_label(tool),
+                    "method":        clamp_audit_label(method),
+                    "task_id":       task_id,
+                    "plan_count":    plan_count,
+                    "step_index":    i,
+                    "score":         block.score,
+                    "decision":      "block",
+                    "tier":          TIER_SINK,
+                    "reason_codes":  block.reason_codes,
+                    "body_sha256":   block.body_sha256,
+                    "body_byte_len": block.body_byte_len,
+                }))
+            })
+            .collect()
     }
 
     /// The raw outcomes this record was built from, in step order.
@@ -179,31 +328,34 @@ impl PlanRecord {
     }
 }
 
-/// Elide oldest `Ok`-output heads until the total byte size of all step texts
-/// is within `budget`. Walks `plans` oldest→newest (`plans[0]` is the oldest,
-/// pushed first by the inner loop) and steps in order, replacing each
-/// `elidable` head **longer than the marker** with [`OK_ELIDED_MARKER`],
+/// Elide the oldest successful-step outputs until the serialised total of all
+/// step outcomes is within `budget`. Walks `plans` oldest→newest (`plans[0]` is
+/// the oldest, pushed first by the inner loop) and steps in order, replacing
+/// each `elidable` step **larger than the marker** with [`elided_outcome`],
 /// decrementing a running total, and stopping the instant it is within budget.
-/// No-op when already within budget. The `> marker.len()` guard means eliding
-/// can never *grow* a tiny `Ok` (e.g. `"ok: 9"`) and makes the pass idempotent
-/// (an elided step is exactly the marker length, so it is never re-elided).
+/// No-op when already within budget. The `bytes > marker.bytes` guard means
+/// eliding can never *grow* a tiny output and makes the pass idempotent (an
+/// elided step is exactly the marker's size, so it is never re-elided).
 /// Returns the number of steps elided.
 fn apply_summary_budget(plans: &mut [Vec<RenderedStep>], budget: usize) -> usize {
-    let mut total: usize = plans.iter().flatten().map(|s| s.text.len()).sum();
+    // Saturating: `serialised_len` reports an unserialisable value as
+    // `usize::MAX`, and a plain sum would panic in debug and wrap in release.
+    let mut total = plans.iter().flatten().fold(0usize, |t, s| t.saturating_add(s.bytes));
     if total <= budget {
         return 0;
     }
-    let marker_len = OK_ELIDED_MARKER.len();
+    let marker = RenderedStep::elided();
     let mut elided = 0;
     for plan in plans.iter_mut() {
         for step in plan.iter_mut() {
             if total <= budget {
                 return elided;
             }
-            if step.elidable && step.text.len() > marker_len {
-                total -= step.text.len() - marker_len;
-                step.text = OK_ELIDED_MARKER.to_string();
-                step.elidable = false; // now minimal; never touch again
+            if step.elidable && step.bytes > marker.bytes {
+                // Saturating for the same reason as the sum: once it has
+                // saturated, the running total can be below a step's own size.
+                total = total.saturating_sub(step.bytes - marker.bytes);
+                *step = marker.clone(); // now minimal and non-elidable
                 elided += 1;
             }
         }
@@ -211,42 +363,66 @@ fn apply_summary_budget(plans: &mut [Vec<RenderedStep>], budget: usize) -> usize
     elided
 }
 
-/// Screen `text` with `tool`'s own guard profile; `true` if it must be
-/// withheld. The **single, mandatory sink screen**: every string this module
-/// places into the planner prompt passes through here, so the
+/// `s` cut to [`AUDIT_LABEL_MAX_CHARS`] characters plus `…` when longer.
+fn clamp_audit_label(s: &str) -> String {
+    if s.chars().count() <= AUDIT_LABEL_MAX_CHARS {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(AUDIT_LABEL_MAX_CHARS).collect();
+    format!("{head}…")
+}
+
+/// The tool and method of `plan`'s `i`-th step, or `("", "")` when outcomes
+/// outnumber steps (not expected), which selects the fail-closed Strict profile.
+fn step_tool_and_method(plan: &Plan, i: usize) -> (&str, &str) {
+    plan.steps.get(i).map(|s| (s.tool.as_str(), s.method.as_str())).unwrap_or(("", ""))
+}
+
+/// Screen `text` with `tool`'s own guard profile; `Some` if it must be
+/// withheld, carrying what the forensic row needs. The **single, mandatory sink
+/// screen** for step outcomes: every worker-influenced string this module places
+/// into the planner prompt passes through here, so the
 /// "nothing-unscreened-reaches-the-planner" invariant is *enforced* at one
 /// point rather than *relied upon* across the source chokepoints (`tool_host`,
-/// `tool_dispatch::fetch_screen`). For legitimately-allowed content this
-/// re-screen is idempotent (same per-tool profile → Allow) and cannot
-/// over-block a Relaxed-profile doc-fetch worker (issue #142).
-fn sink_screen_blocks(tool: &str, text: &str) -> bool {
-    use crate::cassandra::injection_guard::{screen_with_profile, GuardProfile, InjectionDecision};
-    screen_with_profile(text, GuardProfile::for_tool(tool)).decision == InjectionDecision::Block
+/// `tool_dispatch::fetch_screen`). (The planner's own `plan.decision` does not
+/// pass through here; that is #700.)
+///
+/// Not a pure re-run of the source screen: since #677 the text includes object
+/// keys, which the source never sees, so the sink can block what the source
+/// allowed, and [`PlanRecord::sink_block_audit_payloads`] records it. It uses
+/// the same per-tool profile, so it cannot over-block a Relaxed-profile
+/// doc-fetch worker on quoted chat templates (issue #142).
+fn sink_screen(tool: &str, text: &str) -> Option<SinkBlock> {
+    let verdict = screen_with_profile(text, GuardProfile::for_tool(tool));
+    (verdict.decision == InjectionDecision::Block).then(|| SinkBlock {
+        score: verdict.score,
+        reason_codes: verdict.reason_codes,
+        body_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+        body_byte_len: text.len(),
+    })
 }
 
 /// Render one [`StepOutcome`] for the planner's plan summary, screening the
-/// exact text about to enter the prompt with `tool`'s guard profile. An `Ok`
-/// step surfaces a bounded head of its output as `"ok: <head>"` (#338); an
-/// `Err` surfaces `"err: <CODE>: <detail>"` (#337). On a Block the
-/// worker-influenced text (the `Ok` head, or the `Err` `detail` — the `code`
-/// is an internal constant, always kept) is replaced by [`WITHHELD_MARKER`].
+/// exact content about to enter the prompt with `tool`'s guard profile.
 ///
-/// The `Ok` head length is bounded by [`ok_summary_cap`] (`method`-selected: a
-/// `web.search_batch` step earns a larger, query-count-scaled head). `tool` still
-/// selects the injection guard profile; `method` selects only the cap.
+/// A successful step becomes `{"status":"ok","output":<view>}`, where `<view>`
+/// is [`result_view::render`]'s pruned copy of the result, bounded by
+/// [`ok_summary_cap`] (`method` selects the budget; a `web.search_batch` step
+/// earns more). The screen checks [`result_view::screen_text`] — every key and
+/// string of that view — and on a Block the step becomes the withheld shape.
+///
+/// A failed step becomes `{"status":"err","code":…,"detail":…}` with `detail`
+/// clamped to [`STEP_ERR_DETAIL_MAX`] chars (#337); on a Block the
+/// worker-influenced `detail` is replaced by [`WITHHELD_MARKER`] and the
+/// internal `code` is kept.
 fn render_step_outcome(tool: &str, method: &str, o: &StepOutcome) -> RenderedStep {
     match o {
         StepOutcome::Ok(v) => {
-            let cap = ok_summary_cap(method, v);
-            let (head, truncated) =
-                crate::cassandra::injection_guard::extract_scannable_text(v, cap);
-            if sink_screen_blocks(tool, &head) {
-                // Already-tiny withheld signal: load-bearing, never elide.
-                RenderedStep { text: format!("ok: {WITHHELD_MARKER}"), elidable: false }
-            } else if truncated {
-                RenderedStep { text: format!("ok: {head}…"), elidable: true }
-            } else {
-                RenderedStep { text: format!("ok: {head}"), elidable: true }
+            let v = without_screen_audit_fields(v);
+            let view = result_view::render(&v, ok_summary_cap(method, &v));
+            match sink_screen(tool, &result_view::screen_text(&view)) {
+                Some(block) => RenderedStep::withheld(block),
+                None => RenderedStep::output(view),
             }
         }
         StepOutcome::Err { code, detail } => {
@@ -256,39 +432,65 @@ fn render_step_outcome(tool: &str, method: &str, o: &StepOutcome) -> RenderedSte
             } else {
                 detail.clone()
             };
-            let shown = if sink_screen_blocks(tool, &shown) {
-                WITHHELD_MARKER.to_string()
-            } else {
-                shown
-            };
-            RenderedStep { text: format!("err: {code}: {shown}"), elidable: false }
+            match sink_screen(tool, &shown) {
+                Some(block) => RenderedStep::err(code, WITHHELD_MARKER, Some(block)),
+                None => RenderedStep::err(code, &shown, None),
+            }
         }
     }
 }
 
+/// `v` without the audit-only fields of an injection-screen placeholder.
+///
+/// Both upstream screens (`tool_host`'s placeholder and
+/// `tool_dispatch::fetch_screen`) replace a blocked result with an object
+/// carrying `injection_blocked: true`, a note, the screen's score and its
+/// reason codes, and on the fetch path the continuation fields. The
+/// [`AUDIT_ONLY_KEYS`] are kept there for the audit log. The planner gets none
+/// of them: they would tell a compromised planner which defence fired. Any
+/// other value passes through untouched, borrowed rather than cloned.
+fn without_screen_audit_fields(v: &serde_json::Value) -> Cow<'_, serde_json::Value> {
+    match v {
+        serde_json::Value::Object(map) if map.get(INJECTION_BLOCKED_KEY).and_then(serde_json::Value::as_bool) == Some(true) => {
+            let mut map = map.clone();
+            for key in AUDIT_ONLY_KEYS {
+                map.remove(key);
+            }
+            Cow::Owned(serde_json::Value::Object(map))
+        }
+        _ => Cow::Borrowed(v),
+    }
+}
+
 /// Build the compact per-plan summary for the planner prompt: one
-/// `{ "decision", "step_outcomes": [..] }` object per completed plan.
+/// `{ "decision", "step_outcomes": [..] }` object per completed plan, each
+/// outcome in one of the shapes described in the module docs.
 ///
 /// The step outcomes were **already screened once** when each [`PlanRecord`]
 /// was constructed at push time (issue #344), so this function performs *zero*
-/// injection screening — it clones the memoized renders (cheap string copies,
-/// no catalogue scans) and runs only the per-call size budget over them. The
-/// clone is required because [`apply_summary_budget`] elides in place and must
-/// not mutate the stored, immutable record.
+/// injection screening — it clones the memoized renders and runs only the
+/// per-call size budget over them. The clone is required because
+/// [`apply_summary_budget`] elides in place and must not mutate the stored,
+/// immutable record.
 pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Value> {
     let mut rendered: Vec<Vec<RenderedStep>> =
         plans.iter().map(|r| r.rendered.clone()).collect();
 
     // Bound the accumulated size of the always-in-context summary, eliding the
-    // oldest successful-step output heads first (#339).
-    apply_summary_budget(&mut rendered, PLANS_SUMMARY_BUDGET);
+    // oldest successful-step outputs first (#339).
+    let elided = apply_summary_budget(&mut rendered, PLANS_SUMMARY_BUDGET);
+    if elided > 0 {
+        // Debug, not warn: this runs on every planner iteration once a long
+        // task passes the budget, and the planner itself is told in-band.
+        tracing::debug!(elided, budget = PLANS_SUMMARY_BUDGET, "plan summary elided older step outputs");
+    }
 
     plans
         .iter()
         .zip(rendered)
         .map(|(r, steps)| {
-            let step_outcomes: Vec<String> = steps.into_iter().map(|s| s.text).collect();
-            serde_json::json!({
+            let step_outcomes: Vec<serde_json::Value> = steps.into_iter().map(|s| s.value).collect();
+            json!({
                 "decision":      r.plan.decision,
                 "step_outcomes": step_outcomes,
             })
@@ -297,264 +499,4 @@ pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Valu
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// An elidable `Ok` step carrying `text` of the given size.
-    fn ok(text: &str) -> RenderedStep {
-        RenderedStep { text: format!("ok: {text}"), elidable: true }
-    }
-    /// A (non-elidable) error step.
-    fn err(detail: &str) -> RenderedStep {
-        RenderedStep { text: format!("err: CODE: {detail}"), elidable: false }
-    }
-    fn total(plans: &[Vec<RenderedStep>]) -> usize {
-        plans.iter().flatten().map(|s| s.text.len()).sum()
-    }
-
-    /// #559: `workers/mail` attaches a plain-language ordering note to every
-    /// `mail.search` response, because a successful step reaches the planner as
-    /// [`extract_scannable_text`]'s output — string values only, **keys
-    /// discarded**, capped at [`STEP_OK_SUMMARY_MAX`].
-    ///
-    /// This pins the half that lives in *this* crate: whether such a note is
-    /// readable at all depends entirely on where its key sorts, because
-    /// `serde_json::Map` is a `BTreeMap` here and a full page of hits exhausts
-    /// the 4 KiB budget by itself. `ordering_note` sorts before `results` and
-    /// survives; the tidier-sounding `sort_applied` sorts after it and is
-    /// silently clipped — the same trap that swallowed #536's repair advice.
-    ///
-    /// Deliberately structural rather than a check on the worker's exact
-    /// sentence: `core` owns the cap, `workers/mail` owns the wording, and
-    /// there is no shared constant between them (a leaf worker must not gain a
-    /// dependency edge to `core`). `workers/mail`'s own
-    /// `ordering_key_sorts_before_results` fails first if the key is renamed.
-    #[test]
-    fn a_note_keyed_before_results_survives_the_planner_head_cap() {
-        let hits: Vec<serde_json::Value> = (0..50)
-            .map(|i| {
-                serde_json::json!({
-                    "message_id": format!("{}", 37000 + i),
-                    "subject": "x".repeat(200),
-                    "date": "2026-08-14T12:13:53+00:00",
-                })
-            })
-            .collect();
-        let note = "These results are in rank order, NOT date order.";
-        let v = serde_json::json!({
-            "ordering_note": note,
-            "results": hits,
-            "sort_applied": "clipped-because-it-sorts-after-results",
-        });
-
-        let rendered = render_step_outcome("mail", "mail.search", &StepOutcome::Ok(v));
-
-        assert!(
-            rendered.text.contains(note),
-            "the ordering note must reach the planner; got {} chars starting {:?}",
-            rendered.text.len(),
-            rendered.text.chars().take(120).collect::<String>()
-        );
-        assert!(
-            !rendered.text.contains("clipped-because-it-sorts-after-results"),
-            "a key sorting after `results` should NOT survive — if this now fits, the \
-             cap or the fixture grew and this test has stopped proving anything"
-        );
-    }
-
-    #[test]
-    fn budget_is_a_no_op_when_under() {
-        let mut plans = vec![vec![ok("small"), err("nope")]];
-        let elided = apply_summary_budget(&mut plans, 1024);
-        assert_eq!(elided, 0);
-        assert_eq!(plans[0][0].text, "ok: small");
-        assert_eq!(plans[0][1].text, "err: CODE: nope");
-    }
-
-    #[test]
-    fn budget_elides_oldest_ok_heads_first() {
-        let big = "y".repeat(1000);
-        // plans[0] is the oldest, plans[2] the most recent.
-        let mut plans = vec![vec![ok(&big)], vec![ok(&big)], vec![ok(&big)]];
-        let elided = apply_summary_budget(&mut plans, 1100);
-        assert!(elided >= 1, "expected at least one elision");
-        // Oldest elided, most-recent intact.
-        assert_eq!(plans[0][0].text, OK_ELIDED_MARKER);
-        assert_eq!(plans[2][0].text, format!("ok: {big}"));
-        assert!(total(&plans) <= 1100, "total {} over budget", total(&plans));
-    }
-
-    #[test]
-    fn budget_never_elides_errors_or_decisions() {
-        let big = "z".repeat(1000);
-        // Oldest step is an error (non-elidable); the elidable Ok is newest.
-        let mut plans = vec![vec![err("kept")], vec![ok(&big)]];
-        apply_summary_budget(&mut plans, 50);
-        assert_eq!(plans[0][0].text, "err: CODE: kept", "error must be preserved");
-        assert_eq!(plans[1][0].text, OK_ELIDED_MARKER, "the only elidable head is elided");
-    }
-
-    #[test]
-    fn budget_never_elides_withheld_marker() {
-        let withheld = RenderedStep {
-            text: "ok: [withheld: failed injection screen]".to_string(),
-            elidable: false,
-        };
-        let big = "q".repeat(1000);
-        let mut plans = vec![vec![withheld], vec![ok(&big)]];
-        apply_summary_budget(&mut plans, 50);
-        assert_eq!(plans[0][0].text, "ok: [withheld: failed injection screen]");
-    }
-
-    #[test]
-    fn budget_never_grows_a_tiny_ok() {
-        // "ok: 9" is shorter than the elided marker; eliding would *increase*
-        // size, so the tiny head is left untouched even under a 0 budget.
-        let mut plans = vec![vec![ok("9")]];
-        let elided = apply_summary_budget(&mut plans, 0);
-        assert_eq!(elided, 0);
-        assert_eq!(plans[0][0].text, "ok: 9");
-    }
-
-    #[test]
-    fn budget_is_idempotent() {
-        let big = "y".repeat(1000);
-        let mut plans = vec![vec![ok(&big)], vec![ok(&big)], vec![ok(&big)]];
-        apply_summary_budget(&mut plans, 1100);
-        let snapshot: Vec<Vec<String>> =
-            plans.iter().map(|p| p.iter().map(|s| s.text.clone()).collect()).collect();
-        let elided_again = apply_summary_budget(&mut plans, 1100);
-        assert_eq!(elided_again, 0, "second pass should be a no-op");
-        let after: Vec<Vec<String>> =
-            plans.iter().map(|p| p.iter().map(|s| s.text.clone()).collect()).collect();
-        assert_eq!(snapshot, after);
-    }
-
-    #[test]
-    fn budget_lands_within_budget_when_all_heads_are_elidable() {
-        // Worst case *for the elision pass*: every step is a full-size elidable
-        // Ok head, so the budget can always be met. (A summary made entirely of
-        // non-elidable errors can exceed the budget — by design, since errors
-        // are load-bearing; that path is bounded instead by the per-error
-        // `STEP_ERR_DETAIL_MAX` clamp, not by this pass.)
-        let big = "y".repeat(STEP_OK_SUMMARY_MAX);
-        // 40 plans × one full-size head each — far over a 32 KiB budget.
-        let mut plans: Vec<Vec<RenderedStep>> =
-            (0..40).map(|_| vec![ok(&big)]).collect();
-        apply_summary_budget(&mut plans, PLANS_SUMMARY_BUDGET);
-        assert!(
-            total(&plans) <= PLANS_SUMMARY_BUDGET,
-            "total {} exceeds budget {}",
-            total(&plans),
-            PLANS_SUMMARY_BUDGET
-        );
-    }
-
-    #[test]
-    fn render_step_outcome_marks_ok_elidable_and_err_not() {
-        let ok_step =
-            render_step_outcome("shell-exec", "shell.exec", &StepOutcome::Ok(serde_json::json!("hello")));
-        assert_eq!(ok_step.text, "ok: hello");
-        assert!(ok_step.elidable);
-
-        let err_step = render_step_outcome(
-            "shell-exec",
-            "shell.exec",
-            &StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "no".into() },
-        );
-        assert_eq!(err_step.text, "err: POLICY_DENIED: no");
-        assert!(!err_step.elidable);
-    }
-
-    use crate::workers::web_search::WEB_SEARCH_BATCH_METHOD;
-
-    /// A `web.search_batch`-shaped Ok value with `n` per-query elements.
-    fn batch_value(n: usize) -> serde_json::Value {
-        let elements: Vec<serde_json::Value> = (0..n)
-            .map(|i| serde_json::json!({ "query": format!("q{i}"), "results": [], "count": 0 }))
-            .collect();
-        serde_json::json!({ "results": elements })
-    }
-
-    #[test]
-    fn ok_summary_cap_is_flat_for_non_batch_methods() {
-        let v = batch_value(8); // shape is irrelevant for a non-batch method
-        assert_eq!(ok_summary_cap("web.search", &v), STEP_OK_SUMMARY_MAX);
-        assert_eq!(ok_summary_cap("shell.exec", &v), STEP_OK_SUMMARY_MAX);
-        assert_eq!(ok_summary_cap("", &v), STEP_OK_SUMMARY_MAX);
-    }
-
-    #[test]
-    fn ok_summary_cap_scales_with_query_count() {
-        assert_eq!(
-            ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &batch_value(2)),
-            2 * BATCH_PER_QUERY_SUMMARY_BYTES
-        );
-        assert_eq!(
-            ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &batch_value(8)),
-            STEP_OK_BATCH_SUMMARY_MAX // 8 * 3 KiB == 24 KiB
-        );
-    }
-
-    #[test]
-    fn ok_summary_cap_clamps_low_and_high() {
-        // 1 query → 3 KiB < 4 KiB → clamped up to the single-step floor.
-        assert_eq!(ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &batch_value(1)), STEP_OK_SUMMARY_MAX);
-        // 16 queries → 48 KiB → clamped down to the hard ceiling.
-        assert_eq!(ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &batch_value(16)), STEP_OK_BATCH_SUMMARY_MAX);
-    }
-
-    #[test]
-    fn ok_summary_cap_degrades_to_flat_on_malformed_results() {
-        // Missing `results` → 0 elements → floor.
-        assert_eq!(ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &serde_json::json!({})), STEP_OK_SUMMARY_MAX);
-        // Non-array `results` → 0 → floor.
-        assert_eq!(
-            ok_summary_cap(WEB_SEARCH_BATCH_METHOD, &serde_json::json!({ "results": "nope" })),
-            STEP_OK_SUMMARY_MAX
-        );
-    }
-
-    #[test]
-    fn batch_step_surfaces_more_than_a_single_search_head() {
-        // An 8-query × 10-hit batch whose scannable text far exceeds 4 KiB.
-        let hit = |i: usize| {
-            serde_json::json!({
-                "title": format!("title number {i} about a topic"),
-                "url": format!("https://example.com/results/{i}"),
-                "snippet": "s".repeat(300),
-                "engine": "google",
-            })
-        };
-        let elements: Vec<serde_json::Value> = (0..8)
-            .map(|q| {
-                serde_json::json!({
-                    "query": format!("query number {q}"),
-                    "results": (0..10).map(hit).collect::<Vec<_>>(),
-                    "count": 10,
-                })
-            })
-            .collect();
-        let val = serde_json::json!({ "results": elements });
-
-        let batch =
-            render_step_outcome("web-search", WEB_SEARCH_BATCH_METHOD, &StepOutcome::Ok(val.clone()));
-        let single = render_step_outcome("web-search", "web.search", &StepOutcome::Ok(val));
-
-        // Batch surfaces well over the flat 4 KiB; a single web.search of the
-        // SAME value stays at the flat cap (regression pin: single search
-        // untouched). Framing = "ok: " (4) + "…" (3 bytes) ≤ 8.
-        assert!(
-            batch.text.len() > STEP_OK_SUMMARY_MAX,
-            "batch head {} should exceed 4 KiB",
-            batch.text.len()
-        );
-        assert!(
-            single.text.len() <= STEP_OK_SUMMARY_MAX + 8,
-            "single-search head {} should stay ~4 KiB",
-            single.text.len()
-        );
-        // Batch head is bounded by the hard ceiling (+ framing).
-        assert!(batch.text.len() <= STEP_OK_BATCH_SUMMARY_MAX + 8);
-    }
-}
+mod tests;

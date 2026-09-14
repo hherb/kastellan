@@ -99,7 +99,7 @@ impl AuditSink for NullSink {
 #[must_use = "this answers whether the fetched value is a page at all; \
               dropping it stores the withheld placeholder as a corpus case"]
 fn is_injection_placeholder(v: &serde_json::Value) -> bool {
-    v.get("injection_blocked") == Some(&serde_json::Value::Bool(true))
+    v.get(kastellan_core::tool_host::INJECTION_BLOCKED_KEY) == Some(&serde_json::Value::Bool(true))
 }
 
 /// What one manifest entry produced.

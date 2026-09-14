@@ -10,12 +10,14 @@
 //! had failed — while the extracted text (28 594 chars, containing the GST
 //! figure that was asked for) sat in the database the whole time.
 //!
-//! The core-side head the planner reads is built by
+//! When this was written, the core-side head the planner read was built by
 //! `extract_scannable_text`: string values only, **keys discarded**. So a hash
-//! arrives as an unlabelled 64-char hex blob that the model must first identify
-//! by shape and then transcribe exactly. A `filename` beside a `message_id` is
-//! shorter, self-describing, and — unlike a hash — a value a reader can *check*
-//! against the message it came from.
+//! arrived as an unlabelled 64-char hex blob that the model had to identify by
+//! shape and then transcribe exactly. Since #677 the planner reads labelled
+//! JSON, so the hash sits under `sha256`, but it is still 64 characters to copy
+//! exactly. A `filename` beside a `message_id` is shorter, self-describing, and
+//! — unlike a hash — a value a reader can *check* against the message it came
+//! from.
 //!
 //! So the tool now accepts either form, and this module owns the pure half:
 //! which form was named ([`choose`]), which attachment a filename picks
