@@ -45,7 +45,9 @@ use crate::secrets::RedemptionEvent;
 /// `policy / injection.blocked` row.
 ///
 /// Both tiers reuse that one event name and carry this as a field rather than
-/// splitting into two event names. The operator-facing question is "what was
+/// splitting into two event names. So does the planner-summary sink screen
+/// (`scheduler::inner_loop::summary::TIER_SINK`, since #702's review), which
+/// can block a result both tiers here allowed because it also screens keys. The operator-facing question is "what was
 /// withheld from the planner", and splitting its answer means every forensic
 /// query written before this slice silently under-reports the moment the tier
 /// is switched on (D5).

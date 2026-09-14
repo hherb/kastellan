@@ -708,7 +708,7 @@ fn plans_so_far_summary_truncates_long_ok_output() {
     let outcome = &s[0]["step_outcomes"][0];
     // Bounded so a single chatty success can't blow up the always-in-context
     // prompt: the view fits STEP_OK_SUMMARY_MAX, plus the fixed
-    // `{"output":…,"status":"ok"}` framing (27 bytes) around it.
+    // `{"output":…,"status":"ok"}` framing (25 bytes around an object) around it.
     let len = outcome.to_string().len();
     assert!(len <= STEP_OK_SUMMARY_MAX + 32, "ok output not bounded: {len} bytes");
     let stdout = outcome["output"]["stdout"].as_str().unwrap();
@@ -1045,8 +1045,9 @@ async fn forced_synthesis_at_cap_answers_from_gathered_observations() {
 /// `summary::ok_summary_cap` keys the per-step output cap on
 /// `plan.steps[i].method`; with the completion applied only at the dispatch
 /// site, a plan step written as a bare `search_batch` newly *succeeded* (it
-/// used to fail `-32601`) while its result head was capped at the flat 4 KiB
-/// instead of the batch-scaled 24 KiB — a silent 6× cut in what the planner
+/// used to fail `-32601`) while its result head was capped at the flat budget
+/// instead of the batch-scaled 24 KiB (then 4 KiB, a 6× cut; 16 KiB since
+/// #677, still a third less) — a silent cut in what the planner
 /// then reasons from, on a path this feature created. The audit payloads and
 /// the plan digest read the same field.
 #[tokio::test]

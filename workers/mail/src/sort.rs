@@ -39,13 +39,17 @@
 //! budget forces it to narrow one:
 //!
 //! 1. **The advice is a self-describing sentence,** so it reads correctly even
-//!    if its key is ever lost again.
-//! 2. **The key sorts before `results`.** `serde_json::Map` is a `BTreeMap`
-//!    here (no `preserve_order` feature in this workspace), so under the
-//!    tightest budget `ordering_note` outlives a key such as `sort_applied`.
-//!    [`ordering_key_sorts_before_results`] pins this, and `core`'s
-//!    `an_ordering_note_reaches_the_planner_wherever_its_key_sorts` proves the
-//!    note reaches the planner end-to-end.
+//!    if its key is ever lost again. It is prose, so under budget pressure the
+//!    view may trim it like any snippet: its point belongs in its first words.
+//! 2. **The key sorts early.** `serde_json::Map` is a `BTreeMap` here (no
+//!    `preserve_order` feature in this workspace), and a view narrowing an
+//!    object keeps its alphabetically first keys, so `ordering_note` outlives
+//!    `results` and `sort_applied`. It is not first — `next_cursor` sorts
+//!    before it — so a view narrowed to one key keeps only the cursor.
+//!    [`ordering_key_sorts_before_results`] pins the part this module controls.
+//!    `core`'s `an_ordering_note_reaches_the_planner_wherever_its_key_sorts`
+//!    shows the note reaching the planner at the production budget, where no
+//!    object is narrowed; nothing tests the narrowed case end to end.
 //!
 //! # Why paging is a third case and not a default
 //!
@@ -264,7 +268,7 @@ mod tests {
     fn ordering_key_sorts_before_results() {
         assert!(
             ORDERING_KEY < "results",
-            "{ORDERING_KEY} must sort before `results` or the head cap clips it"
+            "{ORDERING_KEY} must sort before `results`, or a narrowed planner view drops it first"
         );
     }
 

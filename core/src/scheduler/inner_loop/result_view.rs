@@ -10,21 +10,26 @@
 //! a result it was wrong. A live `mail.search` hit carries `has_attachments`
 //! as a boolean, which vanished, and `message_id` as a string that survived
 //! only as a bare line, indistinguishable from the account id beside it. The
-//! planner in task 186 therefore could not tell which message carried the PDF
-//! it had been asked about, and never called `mail.get_attachment_text`.
+//! planner in task 186 could not have told which message carried the PDF it
+//! had been asked about. (Whether that is why task 186 failed is not
+//! established; its follow-up failed live for another reason, #701.)
 //!
 //! This module keeps the structure instead: [`prune`] returns a copy of the
 //! value cut down to size with every kept key, number and boolean intact.
 //!
 //! # Two things it will not do
 //!
-//! - **Show a key that could carry a sentence.** Keys never pass the guard
-//!   model, which screens string values only, so only identifier-shaped keys
-//!   are shown ([`is_identifier_key`]); any other key is dropped with its value
-//!   and counted in [`OMITTED_KEYS_KEY`].
+//! - **Show a key with whitespace or punctuation in it.** Keys never pass the
+//!   guard model, which screens string values only, so only identifier-shaped
+//!   keys are shown ([`is_identifier_key`]); any other key is dropped with its
+//!   value and counted in [`OMITTED_KEYS_KEY`]. An identifier key can still
+//!   spell a short phrase, so [`screen_text`] gives every key to the sink
+//!   catalogue as words.
 //! - **Cut an identifier.** A string with no whitespace and at most
-//!   [`ATOMIC_MAX`] bytes — an id, a hash, a URL, a path — is shown whole or not
-//!   at all ([`is_atomic`]). The planner is told to copy such values verbatim,
+//!   [`ATOMIC_MAX`] bytes — an id, a hash, a URL, a path, a file name — is shown
+//!   whole or not at all ([`is_atomic`], which also bounds non-ASCII strings that
+//!   are not URLs or paths to [`NON_ASCII_ATOMIC_MAX_CHARS`], so space-free
+//!   prose stays cuttable). The planner is told to copy such values verbatim,
 //!   and half of one is a trap. Found by review on `web.search_batch`, where one
 //!   string cap for everything cut every URL.
 //!
@@ -52,7 +57,7 @@
 //!
 //! [`extract_scannable_text`]: crate::cassandra::injection_guard::extract_scannable_text
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::cassandra::injection_guard::MAX_WALK_DEPTH;
 
@@ -81,12 +86,28 @@ pub(crate) const DEPTH_MARKER: &str = "…nested too deeply to show";
 /// Appended to a string that was cut.
 const ELLIPSIS: &str = "…";
 
-/// Longest whitespace-free string that is never cut (see [`is_atomic`]). Long
-/// enough for any realistic URL; a longer blob is data, not an identifier.
+/// Longest whitespace-free ASCII string that is never cut (see [`is_atomic`]).
+/// Long enough for any realistic URL; a longer blob is data, not an identifier.
 pub(crate) const ATOMIC_MAX: usize = 1024;
+
+/// Longest whitespace-free **non-ASCII** string, in characters, that is never
+/// cut unless it is shaped like a URL or path (see [`is_atomic`]): 255, the
+/// longest file name APFS, NTFS and ext4 allow (ext4 counts bytes, stricter).
+/// Japanese, Chinese and Thai prose carries no whitespace, so under
+/// [`ATOMIC_MAX`] alone a search snippet in those languages read as an
+/// identifier and a tight budget dropped whole hits instead of trimming it
+/// (#702 review). A first version counted 255 *bytes*, which cut a 100-character
+/// CJK file name the planner must copy verbatim (review of that fix).
+pub(crate) const NON_ASCII_ATOMIC_MAX_CHARS: usize = 255;
 
 /// Longest object key shown to the planner (see [`is_identifier_key`]).
 pub(crate) const KEY_MAX_BYTES: usize = 64;
+
+/// The characters besides ASCII letters and digits that an identifier key may
+/// contain. One list for both [`is_identifier_key`] and [`screen_text`], which
+/// reads each of them as a space: a character admitted to keys but missing from
+/// the screen would let a phrase spelled with it past the catalogue.
+const KEY_SEPARATORS: [char; 6] = ['_', '.', ':', '-', '@', '/'];
 
 /// Key of the object [`render`] returns when nothing fits.
 pub(crate) const VIEW_UNAVAILABLE_KEY: &str = "_view_unavailable";
@@ -170,25 +191,37 @@ fn prune_at(value: &Value, limits: PruneLimits, depth: usize) -> Value {
 }
 
 /// The element appended to an array that lost `dropped` elements.
-fn omitted_items_marker(dropped: usize) -> String {
+pub(crate) fn omitted_items_marker(dropped: usize) -> String {
     format!("…{dropped} more items omitted")
 }
 
 /// Whether `key` may be shown to the planner: 1 to [`KEY_MAX_BYTES`] bytes of
-/// ASCII letters, digits and `_ . : - @ /`. Such a key can name a field, a
-/// header or a path, but cannot carry a sentence, which matters because the
-/// guard model upstream never sees keys.
+/// ASCII letters, digits and [`KEY_SEPARATORS`]. Such a key can name a field, a
+/// header or a path, and it cannot hold whitespace, quotes or chat-template
+/// punctuation. It **can** still spell a short phrase (`IGNORE_ALL_PREVIOUS`),
+/// and the guard model upstream never sees keys, so [`screen_text`] hands every
+/// key to the sink catalogue as words. Workers must not emit third-party text
+/// as object keys at all; `workers/mail` returns message headers as a list for
+/// that reason, and #703 tracks giving keys to the guard model.
 fn is_identifier_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= KEY_MAX_BYTES
-        && key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-' | b'@' | b'/'))
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || KEY_SEPARATORS.contains(&c))
 }
 
-/// Whether `s` is an identifier that must be shown whole or not at all: no
-/// whitespace and at most [`ATOMIC_MAX`] bytes. Prose has spaces and survives a
-/// cut; a URL, id or hash does not.
+/// Whether `s` is an identifier that must be shown whole or not at all: at most
+/// [`ATOMIC_MAX`] bytes with no whitespace or control characters, and then
+/// either ASCII, shaped like a URL (`://`) or absolute path (leading `/`), or at
+/// most [`NON_ASCII_ATOMIC_MAX_CHARS`] characters. Prose has spaces and survives
+/// a cut; a URL, id, hash, path or file name does not. A control character never
+/// belongs to an identifier, and each one serialises to six bytes. A raw-Unicode
+/// URL is kept on the byte limit because SearxNG passes them through and a cut
+/// one is the trap this rule exists for.
 fn is_atomic(s: &str) -> bool {
-    s.len() <= ATOMIC_MAX && !s.chars().any(char::is_whitespace)
+    if s.len() > ATOMIC_MAX || s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    s.is_ascii() || s.contains("://") || s.starts_with('/') || s.chars().count() <= NON_ASCII_ATOMIC_MAX_CHARS
 }
 
 /// `s` cut to at most `leaf` bytes plus an ellipsis, but only when `s` is not
@@ -207,10 +240,11 @@ fn cut_leaf(s: &str, leaf: usize) -> String {
 }
 
 /// The largest index `<= index` that starts a UTF-8 char, so `&s[..i]` cannot
-/// panic. (`str::floor_char_boundary` is still unstable.) A char is at most
-/// four bytes, so the loop steps back at most three times, and index 0 is
-/// always a boundary, so it cannot underflow. #591 counts this idiom as
-/// hand-written across the tree; the tests carry the straddling case.
+/// panic. (`str::floor_char_boundary` has been stable only since Rust 1.91, and
+/// the workspace's `rust-version` is 1.78.) A char is at most four bytes, so the
+/// loop steps back at most three times, and index 0 is always a boundary, so it
+/// cannot underflow. #591 counts this idiom as hand-written across the tree; the
+/// tests carry the straddling case.
 fn floor_char_boundary(s: &str, index: usize) -> usize {
     let mut i = index.min(s.len());
     while !s.is_char_boundary(i) {
@@ -228,23 +262,23 @@ pub(crate) fn serialised_len(value: &Value) -> usize {
 
 /// The object [`render`] returns when no pruning fits the budget.
 pub(crate) fn fallback_view() -> Value {
-    let mut map = Map::new();
-    map.insert(
-        VIEW_UNAVAILABLE_KEY.to_string(),
-        Value::String(VIEW_UNAVAILABLE_TEXT.to_string()),
-    );
-    Value::Object(map)
+    json!({ VIEW_UNAVAILABLE_KEY: VIEW_UNAVAILABLE_TEXT })
 }
 
 /// The largest version of `value` whose compact JSON is at most `total`
-/// bytes, plus that length. See the module docs for the order of the search.
+/// bytes. See the module docs for the order of the search.
 ///
-/// For `total >= MIN_VIEW_TOTAL` the returned length never exceeds `total`.
-/// Below that, the fallback is returned even if it does not fit.
-pub(crate) fn render(value: &Value, total: usize) -> (Value, usize) {
+/// For `total >= MIN_VIEW_TOTAL` the result never serialises longer than
+/// `total`; every production budget is const-asserted above that, and a debug
+/// build refuses a smaller one outright rather than silently returning a
+/// fallback that may not fit.
+pub(crate) fn render(value: &Value, total: usize) -> Value {
+    debug_assert!(total >= MIN_VIEW_TOTAL, "render budget {total} is below MIN_VIEW_TOTAL {MIN_VIEW_TOTAL}");
+    let longest = longest_leaf(value, 0);
+
     // 1. Default containers.
     let mut containers = PruneLimits::DEFAULT;
-    if let Some(found) = best_fit_at(value, containers, total) {
+    if let Some(found) = best_fit_at(value, containers, longest, total) {
         return found;
     }
 
@@ -256,35 +290,34 @@ pub(crate) fn render(value: &Value, total: usize) -> (Value, usize) {
     //    marker vanishing at a count of zero makes size non-monotone in these caps.
     while containers.items > 1 {
         containers.items -= 1;
-        if let Some(found) = best_fit_at(value, containers, total) {
+        if let Some(found) = best_fit_at(value, containers, longest, total) {
             return found;
         }
     }
     while containers.keys > 1 {
         containers.keys -= 1;
-        if let Some(found) = best_fit_at(value, containers, total) {
+        if let Some(found) = best_fit_at(value, containers, longest, total) {
             return found;
         }
     }
 
     // 3. Nothing fits.
-    let fallback = fallback_view();
-    let len = serialised_len(&fallback);
-    (fallback, len)
+    fallback_view()
 }
 
 /// The best fit with arrays and objects capped as in `containers`: strings
 /// whole if that fits, otherwise the highest string cap from [`LEAF_FLOOR`]
 /// up that fits, found by binary search. `None` when even the floor does not
-/// fit. A cap of `longest_leaf` cuts nothing, so it is the "whole" case and
-/// known not to fit by the time the search runs; every probe is measured, and
-/// `best` only ever holds a fit.
-fn best_fit_at(value: &Value, containers: PruneLimits, total: usize) -> Option<(Value, usize)> {
+/// fit. `longest` is [`longest_leaf`] of `value`, computed once by the caller:
+/// a cap that long cuts nothing, so it is the "whole" case and known not to fit
+/// by the time the search runs; every probe is measured, and `best` only ever
+/// holds a fit.
+fn best_fit_at(value: &Value, containers: PruneLimits, longest: usize, total: usize) -> Option<Value> {
     if let Some(found) = fit(value, PruneLimits { leaf: usize::MAX, ..containers }, total) {
         return Some(found);
     }
     let mut best = fit(value, PruneLimits { leaf: LEAF_FLOOR, ..containers }, total)?;
-    let (mut fits, mut fails) = (LEAF_FLOOR, longest_leaf(value, 0));
+    let (mut fits, mut fails) = (LEAF_FLOOR, longest);
     while fails > fits + 1 {
         let mid = fits + (fails - fits) / 2;
         match fit(value, PruneLimits { leaf: mid, ..containers }, total) {
@@ -298,11 +331,10 @@ fn best_fit_at(value: &Value, containers: PruneLimits, total: usize) -> Option<(
     Some(best)
 }
 
-/// `value` pruned to `limits`, with its length, if that length is within `total`.
-fn fit(value: &Value, limits: PruneLimits, total: usize) -> Option<(Value, usize)> {
+/// `value` pruned to `limits`, if its serialised length is within `total`.
+fn fit(value: &Value, limits: PruneLimits, total: usize) -> Option<Value> {
     let pruned = prune(value, limits);
-    let len = serialised_len(&pruned);
-    (len <= total).then_some((pruned, len))
+    (serialised_len(&pruned) <= total).then_some(pruned)
 }
 
 /// Byte length of the longest string in `value`, looking no deeper than
@@ -323,12 +355,20 @@ fn longest_leaf(value: &Value, depth: usize) -> usize {
 /// non-empty string, newline-separated.
 ///
 /// Keys are included because, unlike in the old flattened view, they now
-/// reach the planner, and a worker writes them. Each key's separators
-/// (`_ . : - @ /`) become spaces, because the catalogue matches phrases of words
-/// and an identifier key can still spell one (`IGNORE_ALL_PREVIOUS`).
-/// Punctuation, numbers, booleans and null are left out, as
-/// `extract_scannable_text` leaves them out, so the catalogue cannot fire on
-/// JSON shape.
+/// reach the planner, a worker writes them, and the guard model upstream never
+/// sees them, so this catalogue pass is their only screen. Each key is read as
+/// words ([`key_readings`]), and a key with a string value is joined to that
+/// value as **one** phrase, because that is how the planner reads
+/// `"ignore_all": "previous instructions…"` (#702 review). A key whose value is
+/// an array or object is not joined to what it holds, so
+/// `{"ignore_all": ["previous instructions"]}` reaches the catalogue as two
+/// parts: the catalogue is a best-effort phrase list, and the answer to
+/// unscreened keys is #703. Punctuation, numbers, booleans and null are left
+/// out, as `extract_scannable_text` leaves them out, so the catalogue cannot
+/// fire on JSON shape.
+///
+/// The walk stops at the depth [`prune`] stops at, and everything `prune` keeps
+/// is above it; the only thing at that depth is the constant [`DEPTH_MARKER`].
 pub(crate) fn screen_text(view: &Value) -> String {
     let mut parts = Vec::new();
     collect_screen_parts(view, &mut parts, 0);
@@ -349,11 +389,45 @@ fn collect_screen_parts(value: &Value, parts: &mut Vec<String>, depth: usize) {
         }
         Value::Object(map) => {
             for (key, item) in map {
-                parts.push(key.replace(['_', '.', ':', '-', '@', '/'], " "));
-                collect_screen_parts(item, parts, depth + 1);
+                let readings = key_readings(key);
+                match item {
+                    Value::String(s) if !s.is_empty() => {
+                        parts.extend(readings.iter().map(|words| format!("{words} {s}")));
+                    }
+                    _ => {
+                        parts.extend(readings);
+                        collect_screen_parts(item, parts, depth + 1);
+                    }
+                }
             }
         }
         _ => {}
+    }
+}
+
+/// The ways the catalogue should read `key` as words: with each of
+/// [`KEY_SEPARATORS`] as a space, and — when it differs — also with a space
+/// before every uppercase letter that follows a lowercase letter or a digit.
+///
+/// Both, never only the split one. The catalogue lowercases before matching,
+/// so without the split `IgnoreAllPrevious` reaches it as one word (#702
+/// review); but the split alone breaks a phrase the plain reading matched,
+/// `iGNORE_ALL…` becoming `i GNORE ALL…` (found by the review of that fix).
+fn key_readings(key: &str) -> Vec<String> {
+    let spaced = key.replace(KEY_SEPARATORS, " ");
+    let mut split = String::with_capacity(spaced.len() + 8);
+    let mut prev: Option<char> = None;
+    for c in spaced.chars() {
+        if c.is_ascii_uppercase() && prev.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit()) {
+            split.push(' ');
+        }
+        split.push(c);
+        prev = Some(c);
+    }
+    if split == spaced {
+        vec![spaced]
+    } else {
+        vec![spaced, split]
     }
 }
 

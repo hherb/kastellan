@@ -1,5 +1,12 @@
 # Planner Result View Implementation Plan
 
+> ⚠️ **Historical — superseded where it disagrees with the code.** This is the plan as written
+> before implementation. Two review rounds changed what shipped: narrowing lowers the caps one step
+> at a time instead of halving, space-free identifiers are atomic, keys are identifier-shaped and
+> screened as words, `render` returns only the view, and more. The spec's two review-round sections
+> (`docs/superpowers/specs/2026-09-13-planner-result-view-design.md`) are the record of what binds;
+> do not transcribe code from this file [[plan-text-is-a-defect-source]].
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
 > **This repo's standing override:** implementer subagents stall on background cargo waits here, so

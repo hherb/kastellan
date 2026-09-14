@@ -39,8 +39,10 @@ of the task, with these fields:
   big, a long string ends in `…`, a long list ends with an element such as
   `"…12 more items omitted"`, and an object that lost fields carries
   `"_omitted_keys": <how many>` (a field is also left out when its *name*
-  is not a plain identifier). Ids, hashes, URLs and other values without
-  spaces are never cut. A result too big to show at all is
+  is not a plain identifier), and anything nested too deeply to show is the
+  string `"…nested too deeply to show"`. Ids, hashes, URLs, paths, file
+  names and other values without spaces are never cut, up to 1 KiB (or 255
+  characters for other non-ASCII text). A result too big to show at all is
   `{"_view_unavailable": "…"}`.
 - `{"status": "ok", "withheld": "failed injection screen"}` — the step
   succeeded but its output was suppressed (see below).
@@ -269,9 +271,11 @@ rules:
     successful step expecting to "see" the result again; you already have
     it. When a later step needs a value from it — a `message_id`, a
     `sha256`, a `filename` — copy the value found under that exact field
-    name, verbatim; never construct one. If a string was cut (trailing
-    `…`) and you need more, use the `handoff` / `fetch_handoff` mechanism
-    rather than re-running the step.
+    name, verbatim; never construct one. When the output is a stashed
+    result carrying a `handoff_ref`, read the rest of it as the `<handoff>`
+    block describes. A value cut anywhere else (trailing `…`) cannot be
+    recovered: never construct a `handoff_ref`, and do not re-run the step
+    expecting more.
   - **A step whose output is withheld** reports back
     `{"status": "ok", "withheld": "failed injection screen"}`, or an
     `output` carrying `"injection_blocked": true` — the worker

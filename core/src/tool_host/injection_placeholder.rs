@@ -18,17 +18,24 @@ use serde_json::Value;
 /// see module docs).
 pub const WITHHELD_NOTE: &str = "[tool output withheld: failed injection screen]";
 
-/// Key whose `true` value marks a result an injection screen replaced. Shared
-/// with `scheduler::tool_dispatch::fetch_screen` and read by the planner-summary
-/// render, so the three agree on one spelling.
+/// Key whose `true` value marks a result an injection screen replaced. The one
+/// spelling for both placeholder builders (this one and
+/// `scheduler::tool_dispatch::fetch_screen`) and every reader: the
+/// planner-summary render and `kastellan-cli`'s guard corpus capture.
 pub const INJECTION_BLOCKED_KEY: &str = "injection_blocked";
 
-/// Key of the blocking screen's score. Audit-only: the planner-summary render
-/// removes it, because it would say which defence fired.
+/// Key of the blocking screen's score. Audit-only (see [`AUDIT_ONLY_KEYS`]).
 pub const SCORE_KEY: &str = "score";
 
-/// Key of the blocking screen's reason codes. Audit-only, like [`SCORE_KEY`].
+/// Key of the blocking screen's reason codes. Audit-only (see [`AUDIT_ONLY_KEYS`]).
 pub const REASON_CODES_KEY: &str = "reason_codes";
+
+/// The placeholder fields kept for the audit log and removed before the planner
+/// sees the placeholder, because they would tell a compromised planner which
+/// defence fired. Declared beside the builders so a field added to both
+/// placeholders is classified here, where it is written, rather than in the
+/// render that strips it.
+pub const AUDIT_ONLY_KEYS: [&str; 2] = [SCORE_KEY, REASON_CODES_KEY];
 
 /// Build the placeholder `Value` substituted for an injection-blocked tool
 /// result.
@@ -52,8 +59,9 @@ mod tests {
     #[test]
     fn placeholder_carries_human_readable_note() {
         let v = injection_blocked_placeholder(0.9, &["instruction_override"]);
-        // The note is a string leaf — the only field the planner-summary render
-        // surfaces (#340). It must clearly signal *withheld*, not look like data.
+        // The note is what tells the planner, in words, that content was
+        // withheld (#340; since #677 it sees `injection_blocked: true` beside
+        // it). It must clearly signal *withheld*, not look like data.
         let note = v["note"].as_str().expect("note is a string");
         assert_eq!(note, WITHHELD_NOTE);
         assert!(note.contains("withheld"), "note must signal content was withheld");
