@@ -7,8 +7,9 @@
 > [`archive/handover_20260914_677_pre-prune.md`](archive/handover_20260914_677_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
-**Last updated:** 2026-09-14 ·
-**Recent PRs, newest first:** [#702](https://github.com/hherb/kastellan/pull/702) (#677, the planner's labelled result view),
+**Last updated:** 2026-09-15 ·
+**Recent PRs, newest first:** [#708](https://github.com/hherb/kastellan/pull/708) (#707, docs only — the Obscura assessment corrected and the V8 bump attempted),
+[#702](https://github.com/hherb/kastellan/pull/702) (#677, the planner's labelled result view),
 [#694](https://github.com/hherb/kastellan/pull/694) (#617, the bounded request summary),
 [#692](https://github.com/hherb/kastellan/pull/692) (#690 + #689 + #686),
 [#688](https://github.com/hherb/kastellan/pull/688) (#684 + #687). **Open issues these filed:**
@@ -19,7 +20,7 @@
 (from #702's second review round); [#693](https://github.com/hherb/kastellan/issues/693),
 [#695](https://github.com/hherb/kastellan/issues/695)–[#697](https://github.com/hherb/kastellan/issues/697)
 (from #694); [#691](https://github.com/hherb/kastellan/issues/691) (from #692). ·
-**DGX RUNS #702's HEAD**, deployed 2026-09-14 for its live acceptance run — the daemon links the new planner view and has loaded the new `agent_planner.md`. ⚠️ **After #702 merges, redeploy from `main` with `scripts/upgrade_from_git.sh`** (its checkout sits on the PR's branch). Rootfs images last rebuilt 2026-09-08.
+**The DGX runs #702's code**, deployed 2026-09-14 from the PR branch for its live acceptance run. #702's branch tip and its squash commit on `main` are **content-identical** (verified 2026-09-15, empty `git diff`), and #708 touched no code, so the running daemon already matches `main`. Only the DGX checkout is off `main`; re-point it with `scripts/upgrade_from_git.sh` at the next deploy. Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -52,7 +53,7 @@
 
 ## Current state
 
-### This session: #677 — the planner reads a tool result as labelled JSON
+### Previous session: #677 — the planner reads a tool result as labelled JSON
 
 PR [#702](https://github.com/hherb/kastellan/pull/702). Design `docs/superpowers/specs/2026-09-13-planner-result-view-design.md` (with a
 review-round addendum), plan `docs/superpowers/plans/2026-09-13-planner-result-view.md`. What binds:
@@ -305,6 +306,12 @@ only the gotchas that are *not* in the issues.
   [#674](https://github.com/hherb/kastellan/issues/674).** An upstream 401/403 is reported as
   `POLICY_DENIED`, so an expired localmail credential reads as a kastellan policy refusal, and
   nothing notices the expiry at all — a failure naming the wrong cause, like most of the above.
+- **Web workers — [#706](https://github.com/hherb/kastellan/issues/706) before any release;
+  [#707](https://github.com/hherb/kastellan/issues/707) blocked upstream.** #706: no rate limiting,
+  backoff, conditional requests or `robots.txt` anywhere; one implementation in `web-common`. #707:
+  Obscura now renders and speaks our IPC, but its V8 is ~15 Chrome milestones stale and it has no
+  internal sandbox; #708 showed the bump is a port, not a patch. ⚠️ **Do not adopt it before the bump
+  lands upstream** — our jail would be its only layer.
 - **Also open, no gotcha beyond the issue text:** #551 (systemd `%` specifier, workspace-wide),
   #519, #554 (needs a live DGX gate — it narrows what a deployed worker may do), #534.
 - **Email channel — slices 2 and 3.** Slice 1 (gated inbound) MERGED, #503 closed its MITM gap. Spec
@@ -495,7 +502,9 @@ allowlisted endpoints for the *one* compromised tool. Nothing else.
 Newest first; substance under [Current state](#current-state), full prose in the
 [`archive/`](archive/) snapshots and git history.
 
-- **[#702](https://github.com/hherb/kastellan/pull/702)** — the planner reads a tool result as pruned, labelled JSON (#677). Filed #698,
+- **[#708](https://github.com/hherb/kastellan/pull/708)** `81c52ace` — docs only: the Obscura assessment
+  corrected and the V8 bump built for the first time (111 errors; a porting project for upstream). #707, #706 open.
+- **[#702](https://github.com/hherb/kastellan/pull/702)** `10164c22` — the planner reads a tool result as pruned, labelled JSON (#677). Filed #698,
   #699, #700, localmail #364; its second review round filed #703, #704, #705.
 - **[#694](https://github.com/hherb/kastellan/pull/694)** `8e0c10f4` — an oversized dispatch still
   records what ran (#617). Filed #693, #695, #696, #697.
