@@ -55,8 +55,9 @@ pub(crate) struct Turn {
 
 /// Load the earlier turns of `dest`'s conversation, oldest first.
 ///
-/// `before` is the asking task's `created_at`, not `now()`: see
-/// [`kastellan_db::tasks::turns`] for why the anchor matters.
+/// `created_at` is the asking task's own arrival time, which anchors the back
+/// edge of the window: see [`kastellan_db::tasks::turns`] for why the window is
+/// anchored there and open at the top.
 ///
 /// A row whose stored `turn_record` will not parse yields a turn with no calls
 /// and a `warn!` — never an error. The record is a convenience for the next
@@ -68,7 +69,7 @@ pub(crate) async fn load_conversation(
     pool: &sqlx::PgPool,
     dest: &crate::channel::ask_message::AskDestination,
     task_id: i64,
-    before: OffsetDateTime,
+    created_at: OffsetDateTime,
 ) -> Result<Vec<Turn>, kastellan_db::DbError> {
     let rows = kastellan_db::tasks::turns::conversation_turns(
         pool,
@@ -76,7 +77,7 @@ pub(crate) async fn load_conversation(
             channel: &dest.channel.0,
             peer: &dest.peer.0,
             conversation: &dest.conversation.0,
-            before,
+            window_anchor: created_at,
             exclude_task_id: task_id,
             window_hours: view::WINDOW_HOURS,
             limit: view::MAX_TURNS,

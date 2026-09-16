@@ -199,7 +199,7 @@ fn the_lookup_takes_the_newest_three_inside_the_window_for_this_peer_only() {
                 channel: "matrix",
                 peer,
                 conversation: room,
-                before: time::OffsetDateTime::now_utc(),
+                window_anchor: time::OffsetDateTime::now_utc(),
                 exclude_task_id: asking,
                 window_hours: 5,
                 limit: 3,
@@ -272,7 +272,7 @@ fn a_crashed_turn_is_returned_and_carries_no_result() {
                 channel: "matrix",
                 peer,
                 conversation: room,
-                before: time::OffsetDateTime::now_utc(),
+                window_anchor: time::OffsetDateTime::now_utc(),
                 exclude_task_id: -1,
                 window_hours: 5,
                 limit: 3,
@@ -285,5 +285,212 @@ fn a_crashed_turn_is_returned_and_carries_no_result() {
         assert_eq!(rows[0].task_id, crashed);
         assert!(rows[0].result.is_none());
         assert!(rows[0].turn_record.is_none());
+    });
+}
+
+/// Bring up a throwaway cluster and hand its admin pool to `body`.
+///
+/// Every test below needs the same three steps (bin dir, cluster, probe), and
+/// repeating them was how the first round of these tests ended up sharing one
+/// over-loaded case that reached none of its own predicates.
+fn with_pg<F>(tag: &str, body: F)
+where
+    F: for<'a> FnOnce(
+        &'a sqlx::PgPool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>,
+{
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let bin_dir = match pg_bin_dir_or_skip() {
+        Some(d) => d,
+        None => return,
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        &format!("{tag}-d"),
+        &format!("{tag}-l"),
+        &format!("kastellan-supervisor-test-pg-{tag}-{suffix}"),
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        kastellan_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"version": "test", "purpose": "conversation"}),
+        )
+        .await
+        .expect("probe run");
+        let pool = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
+            .await
+            .expect("admin pool");
+        body(&pool).await;
+    });
+}
+
+/// The query under test, with the constants every case below shares.
+async fn turns_for(
+    pool: &sqlx::PgPool,
+    peer: &str,
+    room: &str,
+    exclude_task_id: i64,
+) -> Vec<kastellan_db::tasks::turns::ConversationTurnRow> {
+    kastellan_db::tasks::turns::conversation_turns(
+        pool,
+        kastellan_db::tasks::turns::ConversationQuery {
+            channel: "matrix",
+            peer,
+            conversation: room,
+            window_anchor: time::OffsetDateTime::now_utc(),
+            exclude_task_id,
+            window_hours: 5,
+            // Deliberately above MAX_TURNS: these cases are about the
+            // predicates, and a limit of 3 masks them — the first round of
+            // these tests let four mutants survive that way.
+            limit: 10,
+        },
+    )
+    .await
+    .expect("conversation_turns")
+}
+
+#[test]
+fn the_window_reaches_back_exactly_five_hours_from_the_anchor() {
+    // Nothing else in this file reaches the window predicate: with a limit of
+    // 3 and four newer rows, an out-of-window row is excluded by the limit
+    // whether or not the window works. Both mutants that delete or widen the
+    // lower bound survived until this test existed.
+    with_pg("convw", |pool| {
+        Box::pin(async move {
+            let room = "!w:example.org";
+            let peer = "@horst:example.org";
+            let inside = seed_finished(pool, "matrix", peer, room, "inside", "completed", 299).await;
+            let outside =
+                seed_finished(pool, "matrix", peer, room, "outside", "completed", 301).await;
+
+            let ids: Vec<i64> = turns_for(pool, peer, room, -1).await.iter().map(|r| r.task_id).collect();
+            assert!(ids.contains(&inside), "a turn 299 minutes old is inside a 5 h window");
+            assert!(!ids.contains(&outside), "a turn 301 minutes old is outside it");
+        })
+    });
+}
+
+#[test]
+fn a_turn_that_finished_after_the_asking_task_arrived_is_still_a_turn() {
+    // The impatient follow-up: a user who types again while the bot is still
+    // working produces a task whose `created_at` precedes the previous turn's
+    // `finished_at`. An upper bound at the anchor would show that follow-up an
+    // empty conversation — #701 reproducing under its own fix.
+    with_pg("convi", |pool| {
+        Box::pin(async move {
+            let room = "!i:example.org";
+            let peer = "@horst:example.org";
+            // Finished one minute ago; the anchor is an hour before that.
+            let just_finished =
+                seed_finished(pool, "matrix", peer, room, "the turn being followed up", "completed", 1)
+                    .await;
+
+            let rows = kastellan_db::tasks::turns::conversation_turns(
+                pool,
+                kastellan_db::tasks::turns::ConversationQuery {
+                    channel: "matrix",
+                    peer,
+                    conversation: room,
+                    window_anchor: time::OffsetDateTime::now_utc() - time::Duration::hours(1),
+                    exclude_task_id: -1,
+                    window_hours: 5,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("conversation_turns");
+
+            let ids: Vec<i64> = rows.iter().map(|r| r.task_id).collect();
+            assert!(
+                ids.contains(&just_finished),
+                "a turn that finished after the follow-up arrived is exactly the turn \
+                 it is following up on",
+            );
+        })
+    });
+}
+
+#[test]
+fn the_asking_task_never_reads_itself() {
+    // The previous round passed a *pending* task's id, which the state list
+    // and `finished_at IS NOT NULL` already excluded — so deleting the
+    // exclusion clause entirely left every test green.
+    with_pg("convx", |pool| {
+        Box::pin(async move {
+            let room = "!x:example.org";
+            let peer = "@horst:example.org";
+            let sibling = seed_finished(pool, "matrix", peer, room, "sibling", "completed", 30).await;
+            let itself = seed_finished(pool, "matrix", peer, room, "itself", "completed", 20).await;
+
+            let ids: Vec<i64> = turns_for(pool, peer, room, itself).await.iter().map(|r| r.task_id).collect();
+            assert!(!ids.contains(&itself), "a terminal task must not read itself");
+            assert!(ids.contains(&sibling), "and excluding it must not exclude its neighbours");
+        })
+    });
+}
+
+#[test]
+fn every_replied_to_state_is_a_turn_and_an_unfinished_one_is_not() {
+    // The module doc claims this list mirrors `notify_task_completed`. Until
+    // this test, four of the seven states were unpinned and deleting the whole
+    // state clause left the suite green.
+    with_pg("convs", |pool| {
+        Box::pin(async move {
+            let room = "!s:example.org";
+            let peer = "@horst:example.org";
+            let mut expected = Vec::new();
+            for (i, state) in [
+                "completed", "failed", "cancelled", "blocked", "timed_out", "crashed", "refused",
+            ]
+            .iter()
+            .enumerate()
+            {
+                expected.push(
+                    seed_finished(pool, "matrix", peer, room, state, state, 10 + i as i64).await,
+                );
+            }
+            // A task still awaiting an operator, forced to carry a finished_at
+            // so that ONLY the state clause can exclude it.
+            let suspended =
+                seed_finished(pool, "matrix", peer, room, "suspended", "awaiting_operator", 5).await;
+
+            let ids: Vec<i64> = turns_for(pool, peer, room, -1).await.iter().map(|r| r.task_id).collect();
+            for id in &expected {
+                assert!(ids.contains(id), "every replied-to state is a turn; {id} was missing");
+            }
+            assert!(
+                !ids.contains(&suspended),
+                "a task still awaiting an operator was never replied to, so it is not a turn",
+            );
+        })
+    });
+}
+
+#[test]
+fn a_turn_on_another_channel_is_not_this_conversation() {
+    // Same peer, same conversation id, different transport. Nothing pinned
+    // this, so deleting the channel filter left the suite green — and email's
+    // conversation ids become real the day threading ships.
+    with_pg("convch", |pool| {
+        Box::pin(async move {
+            let room = "!ch:example.org";
+            let peer = "@horst:example.org";
+            let matrix_turn = seed_finished(pool, "matrix", peer, room, "matrix", "completed", 30).await;
+            let email_turn = seed_finished(pool, "email", peer, room, "email", "completed", 20).await;
+
+            let ids: Vec<i64> = turns_for(pool, peer, room, -1).await.iter().map(|r| r.task_id).collect();
+            assert!(ids.contains(&matrix_turn));
+            assert!(!ids.contains(&email_turn), "another transport is another conversation");
+        })
     });
 }

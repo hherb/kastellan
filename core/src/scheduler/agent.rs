@@ -345,6 +345,19 @@ fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool) -> String {
         "advisories": ctx.advisories,
         "blocks":     ctx.blocks,
     });
+    // #701: the earlier turns of this conversation, oldest first — already
+    // rendered, screened and budgeted by `scheduler::conversation::view` when
+    // the task was claimed. Added only when non-empty, so a CLI task's
+    // serialised context stays byte-identical to what it was before this
+    // shipped.
+    if !ctx.conversation.is_empty() {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "conversation".to_string(),
+                serde_json::Value::Array(ctx.conversation.clone()),
+            );
+        }
+    }
     // Forced-synthesis turn: append the directive telling the agent to stop
     // gathering and answer from what it already has. Only ever set on the
     // single fallback turn the inner loop spends at the plan cap.
@@ -390,6 +403,45 @@ mod tests {
         let s = serialise_context_for_agent(&ctx(), false);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["instruction"], "what happened in Russia today?");
+    }
+
+    // ── #701: the conversation block ───────────────────────────
+
+    #[test]
+    fn the_conversation_key_is_absent_when_there_are_no_earlier_turns() {
+        // A CLI task's serialised context must be byte-identical to what it
+        // was before #701, so nothing about the non-channel path changes.
+        let s = serialise_context_for_agent(&ctx(), false);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert!(v.get("conversation").is_none());
+    }
+
+    #[test]
+    fn the_conversation_key_carries_the_rendered_turns_in_order() {
+        let mut c = ctx();
+        c.conversation = vec![
+            serde_json::json!({"at": "2026-09-14T14:02:11Z", "user": "older", "answer": "a1"}),
+            serde_json::json!({"at": "2026-09-14T14:06:11Z", "user": "newer", "answer": "a2"}),
+        ];
+        let s = serialise_context_for_agent(&c, false);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["conversation"][0]["user"], "older");
+        assert_eq!(v["conversation"][1]["user"], "newer");
+    }
+
+    #[test]
+    fn the_planner_prompt_documents_the_conversation_block() {
+        // Drift guard, in the shape of #702's
+        // `the_planner_prompt_documents_every_outcome_shape`: every key the
+        // conversation renderer can emit must be named in the prompt, or the
+        // planner is reading a shape nobody told it about.
+        let prompt = include_str!("../../../prompts/agent_planner.md");
+        for key in [
+            "\"conversation\"", "\"at\"", "\"calls\"", "\"answer\"",
+            "_omitted_turns", "withheld",
+        ] {
+            assert!(prompt.contains(key), "agent_planner.md must document {key}");
+        }
     }
 
     #[test]

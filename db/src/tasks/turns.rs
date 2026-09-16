@@ -5,14 +5,26 @@
 //! This is that something: one windowed query, and the only place the
 //! conversation keys are read out of `tasks.payload`.
 //!
-//! # Why the anchor is the caller's timestamp and not `now()`
+//! # Why the window is anchored on the caller's timestamp, and open at the top
 //!
-//! The caller passes `before`, which is the new task's `created_at`. A task
-//! that suspends on an operator ask and resumes hours later then sees the
-//! conversation as it stood when its message arrived, rather than losing turns
-//! (and the classification it inherits from them) or gaining turns that
-//! finished while it waited. Turns are immutable once terminal, so the same
-//! call returns the same rows every time that task runs.
+//! The caller passes `window_anchor`, the new task's `created_at`, and the
+//! window reaches back `window_hours` from there. Anchoring the **back edge**
+//! on the task's own arrival is what keeps a suspended task whole: one that
+//! waits hours on an operator ask and then resumes still sees every turn it
+//! saw at first planning, so it can never lose a turn — or the classification
+//! it inherits from that turn — by being made to wait.
+//!
+//! There is deliberately **no upper bound**. An earlier design bounded turns
+//! at `finished_at <= window_anchor`, which blinds the case this whole feature
+//! exists for: a live turn takes 2.5-4.5 minutes, so a user who types a
+//! follow-up while the bot is still working would produce a task whose
+//! `created_at` precedes the previous turn's `finished_at` — and that
+//! follow-up would see an empty conversation and start from scratch, which is
+//! #701 reproducing under its own fix. Dropping the bound means a resumed task
+//! may *gain* a turn that finished while it was suspended. That direction is
+//! safe: floor inheritance only ever raises, and everything carried reaches
+//! the planner as fenced data. Losing a turn is the defect; gaining one is the
+//! conversation moving on.
 //!
 //! # Why this state list
 //!
@@ -64,16 +76,18 @@ pub struct ConversationQuery<'a> {
     pub channel: &'a str,
     pub peer: &'a str,
     pub conversation: &'a str,
-    /// Anchor: the asking task's `created_at`. See the module docs.
-    pub before: OffsetDateTime,
+    /// The asking task's `created_at`: the window reaches back
+    /// `window_hours` from here. See the module docs for why the back edge is
+    /// anchored here and why there is no forward edge.
+    pub window_anchor: OffsetDateTime,
     /// The task doing the asking. It must never read itself.
     pub exclude_task_id: i64,
     pub window_hours: i64,
     pub limit: i64,
 }
 
-/// Up to `q.limit` turns of `(channel, peer, conversation)` that finished
-/// within `q.window_hours` before `q.before`, newest first.
+/// Up to `q.limit` turns of `(channel, peer, conversation)` that finished no
+/// earlier than `q.window_hours` before `q.window_anchor`, newest first.
 pub async fn conversation_turns(
     pool: &PgPool,
     q: ConversationQuery<'_>,
@@ -89,7 +103,6 @@ pub async fn conversation_turns(
             AND id <> $4 \
             AND state = ANY($5) \
             AND finished_at IS NOT NULL \
-            AND finished_at <= $6 \
             AND finished_at >= $6 - make_interval(hours => $7::int) \
           ORDER BY finished_at DESC \
           LIMIT $8",
@@ -99,7 +112,7 @@ pub async fn conversation_turns(
     .bind(q.conversation)
     .bind(q.exclude_task_id)
     .bind(&states)
-    .bind(q.before)
+    .bind(q.window_anchor)
     .bind(i32::try_from(q.window_hours).unwrap_or(i32::MAX))
     .bind(q.limit)
     .fetch_all(pool)
