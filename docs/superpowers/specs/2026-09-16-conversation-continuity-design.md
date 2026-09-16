@@ -76,11 +76,26 @@ At most `MAX_TURNS = 3` earlier **terminal** tasks of the same
 `(channel, peer, conversation)` that finished within `WINDOW = 5 hours` before
 the new task's `created_at`.
 
-The anchor is the new task's `created_at`, **not** `now()`, so the view is
-deterministic: a task that suspends on an operator ask and resumes hours later
-sees the conversation as it stood when its message arrived, rather than losing
-turns (and their inherited classification) or gaining turns that finished while
-it waited.
+The window's **back edge** is anchored on the new task's `created_at`, not on
+`now()`: a task that suspends on an operator ask and resumes hours later still
+sees every turn it saw at first planning, so it can never *lose* a turn — or the
+classification it inherits from one — by being made to wait.
+
+⚠️ **AMENDED 2026-09-17, during implementation (operator decision).** The
+original rule also bounded turns *above*, at `finished_at <= created_at`. A
+db-layer review found that this blinds the very case the feature exists for: a
+live turn takes **2.5–4.5 minutes** (measured on tasks 185–188), so a user who
+types a follow-up while the bot is still working produces a task whose
+`created_at` precedes the previous turn's `finished_at` — and that follow-up
+would see an empty conversation and start from scratch, which is #701
+reproducing under its own fix. `Lane::Fast` serialisation makes it *more* likely,
+not less, since the follow-up waits for its predecessor either way.
+
+**There is now no upper bound.** A resumed task may therefore *gain* a turn that
+finished while it was suspended. That direction is safe — floor inheritance only
+ever raises, and everything carried reaches the planner as fenced data — whereas
+losing a turn is the defect itself. `a_turn_that_finished_after_the_asking_task_arrived_is_still_a_turn`
+pins the new rule, and a mutant restoring the old bound is killed by it.
 
 `(channel, peer, conversation)` — not `(channel, conversation)` — so that if a
 room ever holds a second paired peer, that peer's turns are never shown.
@@ -204,11 +219,16 @@ SELECT id, payload, result, turn_record, finished_at
    AND id <> $4
    AND state IN ('completed','failed','cancelled','blocked',
                  'timed_out','crashed','refused')
-   AND finished_at <= $5                      -- the new task's created_at
-   AND finished_at >= $5 - interval '5 hours'
+   AND finished_at IS NOT NULL
+   AND finished_at >= $5 - interval '5 hours'   -- $5 = the new task's created_at
  ORDER BY finished_at DESC
  LIMIT 3
 ```
+
+(No upper bound: see the amendment under D2. The parameters travel as a named
+`ConversationQuery` struct rather than positionally — three of them are `&str`,
+and transposing `peer` with `conversation` would hand one peer another peer's
+turns.)
 
 That state list is **exactly the set `notify_task_completed` fires on**
 (migration `0005`, widened with `refused` by `0012`), which is the set the

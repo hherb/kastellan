@@ -319,6 +319,15 @@ EOF
 
 ## Task 2: The windowed lookup
 
+> ⚠️ **AMENDED during execution (2026-09-17, operator decision).** The SQL below
+> still shows the original `finished_at <= $5` upper bound. **That bound was
+> removed**: it blinds a follow-up sent while the previous turn is still running,
+> which is #701 reproducing under its own fix. See the spec's D2 amendment. The
+> shipped query has no upper bound, and its parameters travel as a named
+> `ConversationQuery` struct. Four test gaps a review proved by mutation were
+> also closed here; the shipped tests are the authority, not this task's text.
+
+
 **Files:**
 - Create: `db/src/tasks/turns.rs`
 - Modify: `db/src/tasks.rs` (add `pub mod turns;` near the top, after the `use` block)
