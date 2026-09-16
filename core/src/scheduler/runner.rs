@@ -400,7 +400,12 @@ async fn drain_lane(
         let finished_at = OffsetDateTime::now_utc();
 
         if let Err(e) =
-            tasks::finalize(pool, claimed.id, final_state, final_result_payload, None).await
+            tasks::finalize(
+                pool, claimed.id, final_state, final_result_payload,
+                // #701: what this turn did, for the next turn in the same
+                // conversation to read. `None` for every non-channel task.
+                result.turn_record.clone(),
+            ).await
         {
             tracing::warn!(
                 lane = lane.as_sql(), task_id = claimed.id, error = %e,

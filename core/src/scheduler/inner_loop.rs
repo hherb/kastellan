@@ -46,7 +46,10 @@ use super::inner_loop_audit::{
 
 mod floor;
 mod invoke_expand;
-mod result_view;
+// `pub(crate)` so `scheduler::conversation` can reuse the same pruning,
+// clamping and screen-text extraction for the conversation block (#701).
+// A second copy of that logic is exactly the drift #669 warns about.
+pub(crate) mod result_view;
 mod summary;
 
 /// Per-task accumulator state passed to the agent each iteration.
@@ -112,6 +115,25 @@ impl TaskContext {
     }
 }
 
+/// The `tasks.turn_record` value for a finished task, or `None` when the task
+/// did not come from a channel (#701).
+///
+/// Only a channel task has a conversation for a later turn to read, so only a
+/// channel task stores a record: for a CLI or scheduled task it would be data
+/// nothing can ever look up.
+///
+/// Serialisation of a `TurnRecord` cannot fail (no non-string keys, no NaN); a
+/// failure would mean no record rather than a failed task, because the record
+/// is a convenience for the *next* turn and never a reason to lose this one.
+pub(crate) fn turn_record_for(ctx: &TaskContext) -> Option<serde_json::Value> {
+    ctx.origin.as_ref()?;
+    let record = crate::scheduler::conversation::record::from_plans(
+        &ctx.plans,
+        ctx.classification_floor,
+    );
+    serde_json::to_value(record).ok()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum StepOutcome {
     Ok(serde_json::Value),
@@ -155,6 +177,10 @@ pub struct InnerLoopResult {
     /// grounding gate as `terminal_l3_skill`). The lane runner writes one
     /// `action='l3.crystallised'` (`kind: "python"`) audit row if `Some`.
     pub terminal_python_skill: Option<crate::cassandra::types::PythonSkillCandidate>,
+    /// The conversational-continuity record for a channel task (#701), for the
+    /// lane runner to hand to `tasks::finalize`. `None` for every other task
+    /// kind, and for the pre-loop failure paths, which ran no plans.
+    pub turn_record: Option<serde_json::Value>,
 }
 
 /// Terminal result of the inner loop. The lane runner translates
@@ -363,6 +389,11 @@ pub async fn run_to_terminal(
                 terminal_l1_insight: $insight,
                 terminal_l3_skill: $skill,
                 terminal_python_skill: $pyskill,
+                // Every exit from this loop goes through `finish!`, so the
+                // record is built at each one from the plans accumulated so
+                // far — including the outcomes that are not `Completed`, whose
+                // calls are just as real a referent for the next turn.
+                turn_record: turn_record_for(&ctx),
             })
         };
         // 3-arg form (existing call sites): python skill None.

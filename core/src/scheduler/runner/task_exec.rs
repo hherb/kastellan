@@ -186,6 +186,8 @@ pub(super) async fn run_one(
             terminal_l1_insight: None,
             terminal_l3_skill: None,
             terminal_python_skill: None,
+            // No plans ran, so there is nothing for the next turn to read.
+            turn_record: None,
         };
     }
 
@@ -257,6 +259,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
         terminal_l1_insight: None,
         terminal_l3_skill: None,
         terminal_python_skill: None,
+        turn_record: None,
     }
 }
 
