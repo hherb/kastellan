@@ -698,6 +698,7 @@ async fn tasks_lifecycle_e2e() {
         id,
         "completed",
         Some(serde_json::json!({"kind": "text", "body": "pong"})),
+        None,
     )
     .await
     .expect("finalize");

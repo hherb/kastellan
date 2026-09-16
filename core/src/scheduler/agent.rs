@@ -380,6 +380,8 @@ mod tests {
             max_plans: 5,
             resolved_asks: Vec::new(),
             origin: None,
+            conversation: Vec::new(),
+            conversation_task_ids: Some(Vec::new()),
         }
     }
 

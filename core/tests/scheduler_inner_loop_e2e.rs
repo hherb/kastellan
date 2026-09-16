@@ -206,6 +206,8 @@ fn make_ctx(task_id: i64, max_plans: u32) -> TaskContext {
         max_plans,
         resolved_asks: Vec::new(),
         origin: None,
+        conversation: Vec::new(),
+        conversation_task_ids: Some(Vec::new()),
     }
 }
 

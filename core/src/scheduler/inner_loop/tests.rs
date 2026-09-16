@@ -30,6 +30,8 @@ fn ctx() -> TaskContext {
         max_plans: 3,
         resolved_asks: Vec::new(),
         origin: None,
+        conversation: Vec::new(),
+        conversation_task_ids: Some(Vec::new()),
     }
 }
 
@@ -845,6 +847,8 @@ async fn terminal_python_skill_captured_under_grounding_gate() {
         max_plans: 5,
         resolved_asks: Vec::new(),
         origin: None,
+        conversation: Vec::new(),
+        conversation_task_ids: Some(Vec::new()),
     };
 
     let result = super::run_to_terminal(&pool, formulator, review, dispatcher, ctx, None)
@@ -941,6 +945,8 @@ async fn forced_synthesis_at_cap_answers_from_gathered_observations() {
             max_plans: 1,
             resolved_asks: Vec::new(),
             origin: None,
+            conversation: Vec::new(),
+            conversation_task_ids: Some(Vec::new()),
         }
     }
 

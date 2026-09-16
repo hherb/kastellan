@@ -51,22 +51,32 @@ const REPLIED_STATES: [&str; 7] = [
     "completed", "failed", "cancelled", "blocked", "timed_out", "crashed", "refused",
 ];
 
-/// Up to `limit` turns of `(channel, peer, conversation)` that finished within
-/// `window_hours` before `before`, newest first.
+/// Which conversation to read, and how much of it.
 ///
-/// `exclude_task_id` is the task doing the asking: it must never read itself.
-///
-/// Keyed on `peer` as well as `conversation` so that if a room ever holds a
-/// second paired peer, one peer's turns are never shown to the other.
+/// A struct rather than seven positional parameters, and that is load-bearing
+/// rather than cosmetic: `channel`, `peer` and `conversation` are all `&str`,
+/// so a positional call silently survives any two of them being swapped — and
+/// swapping `peer` with `conversation` would hand one peer another peer's
+/// turns. Named fields make that transposition a compile error. Same reasoning
+/// as `ClassificationProvenance` and #545's `AllowlistDecl`.
+#[derive(Clone, Copy, Debug)]
+pub struct ConversationQuery<'a> {
+    pub channel: &'a str,
+    pub peer: &'a str,
+    pub conversation: &'a str,
+    /// Anchor: the asking task's `created_at`. See the module docs.
+    pub before: OffsetDateTime,
+    /// The task doing the asking. It must never read itself.
+    pub exclude_task_id: i64,
+    pub window_hours: i64,
+    pub limit: i64,
+}
+
+/// Up to `q.limit` turns of `(channel, peer, conversation)` that finished
+/// within `q.window_hours` before `q.before`, newest first.
 pub async fn conversation_turns(
     pool: &PgPool,
-    channel: &str,
-    peer: &str,
-    conversation: &str,
-    before: OffsetDateTime,
-    exclude_task_id: i64,
-    window_hours: i64,
-    limit: i64,
+    q: ConversationQuery<'_>,
 ) -> Result<Vec<ConversationTurnRow>, DbError> {
     let states: Vec<String> = REPLIED_STATES.iter().map(|s| (*s).to_string()).collect();
     let rows = sqlx::query(
@@ -84,14 +94,14 @@ pub async fn conversation_turns(
           ORDER BY finished_at DESC \
           LIMIT $8",
     )
-    .bind(channel)
-    .bind(peer)
-    .bind(conversation)
-    .bind(exclude_task_id)
+    .bind(q.channel)
+    .bind(q.peer)
+    .bind(q.conversation)
+    .bind(q.exclude_task_id)
     .bind(&states)
-    .bind(before)
-    .bind(i32::try_from(window_hours).unwrap_or(i32::MAX))
-    .bind(limit)
+    .bind(q.before)
+    .bind(i32::try_from(q.window_hours).unwrap_or(i32::MAX))
+    .bind(q.limit)
     .fetch_all(pool)
     .await
     .map_err(|e| DbError::Query(format!("tasks conversation_turns: {e}")))?;

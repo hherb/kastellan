@@ -102,6 +102,19 @@ pub struct TaskContext {
     /// path. `None` for a `kastellan-cli ask` or scheduled task, whose ask
     /// is answered through `kastellan-cli inbox`.
     pub origin: Option<crate::channel::ask_message::AskDestination>,
+    /// The earlier turns of this task's conversation, rendered, screened and
+    /// budgeted (#701). Empty for a task that is not channel-originated, that
+    /// has no earlier turns, or whose history could not be read.
+    ///
+    /// Held as rendered JSON rather than as `Turn`s because it is loaded and
+    /// screened **once** per run, in `runner::task_exec::run_one`, and read on
+    /// every planner iteration — the same memoize-at-the-append-point reasoning
+    /// as `PlanRecord::rendered` (#344).
+    pub conversation: Vec<serde_json::Value>,
+    /// The ids of the turns behind `conversation`, for the `plan.formulate`
+    /// row. `Some(vec![])` means there were none; **`None` means the read
+    /// failed** — absence and loss must not render identically.
+    pub conversation_task_ids: Option<Vec<i64>>,
 }
 
 impl TaskContext {

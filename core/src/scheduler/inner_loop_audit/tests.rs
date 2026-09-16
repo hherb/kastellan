@@ -93,6 +93,7 @@ fn build_plan_formulate_payload_carries_full_plan_and_classification_floor() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
 
     // Full Plan JSON round-trips byte-for-byte.
@@ -120,7 +121,7 @@ fn build_plan_formulate_payload_carries_full_plan_and_classification_floor() {
 }
 
 #[test]
-fn build_plan_formulate_payload_pins_twenty_eight_keys_for_default_source() {
+fn build_plan_formulate_payload_pins_twenty_nine_keys_for_default_source() {
     // Slice D (2026-05-17, recall-lane wiring) bumped the
     // default-source key count from 17 to 20 by adding
     // recalled_memory_ids, recall_count, recall_query_sha256.
@@ -133,6 +134,10 @@ fn build_plan_formulate_payload_pins_twenty_eight_keys_for_default_source() {
     // Slice H (2026-06-01, l3-skill-recall-surfacing) bumps to 26 by
     // adding skill_count.
     // L3 autonomous-door (2026-06-04) bumps to 27 by adding invoke_skill.
+    // #506 (2026-08-14) bumps to 28 by adding data_ceiling_source.
+    // #701 (2026-09-16, conversational continuity) bumps to 29 by adding
+    // conversation_task_ids: which earlier turns of this conversation the
+    // plan was built on.
     let meta = FormulationMeta {
         recalled_memory_ids: vec![100, 200],
         recall_count: 2,
@@ -147,6 +152,7 @@ fn build_plan_formulate_payload_pins_twenty_eight_keys_for_default_source() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     let obj = payload.as_object().expect("payload object");
     let got: std::collections::BTreeSet<&str> =
@@ -161,9 +167,10 @@ fn build_plan_formulate_payload_pins_twenty_eight_keys_for_default_source() {
         "recalled_memory_ids", "recall_count", "recall_query_sha256",
         "l1_insight", "l3_skill", "invoke_skill",
         "graph_seed_entity_ids", "graph_seed_count", "graph_seed_source",
+        "conversation_task_ids",
     ].into_iter().collect();
     assert_eq!(got, expected,
-        "default-source payload must carry exactly 28 keys; diff:\n\
+        "default-source payload must carry exactly 29 keys; diff:\n\
          missing = {:?}\nextra = {:?}",
         expected.difference(&got).collect::<Vec<_>>(),
         got.difference(&expected).collect::<Vec<_>>(),
@@ -180,10 +187,11 @@ fn build_plan_formulate_payload_cli_inferred_source_has_29_keys_with_signals() {
             floor_signals: &["patient".to_string(), "pathology".to_string()],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     let obj = payload.as_object().expect("payload object");
-    assert_eq!(obj.len(), 29,
-        "cli_inferred + signals must carry 29 keys (28 default + signals); got {} keys: {:?}",
+    assert_eq!(obj.len(), 30,
+        "cli_inferred + signals must carry 30 keys (29 default + signals); got {} keys: {:?}",
         obj.len(), obj.keys().collect::<Vec<_>>(),
     );
     assert_eq!(
@@ -209,6 +217,7 @@ fn build_plan_formulate_payload_recall_keys_round_trip_through_meta() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     assert_eq!(payload["recalled_memory_ids"], serde_json::json!([42, 99, 7]));
     assert_eq!(payload["recall_count"], 3u64);
@@ -234,6 +243,7 @@ fn build_plan_formulate_payload_graph_seed_keys_round_trip_through_meta() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     assert_eq!(payload["graph_seed_entity_ids"], serde_json::json!([11, 22, 33]));
     assert_eq!(payload["graph_seed_count"], 3u64);
@@ -252,6 +262,7 @@ fn build_plan_formulate_payload_graph_seed_source_serializes_none_as_snake_case(
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     assert_eq!(payload["graph_seed_source"], serde_json::json!("none"));
     assert_eq!(payload["graph_seed_entity_ids"], serde_json::json!([] as [i64; 0]));
@@ -271,6 +282,7 @@ fn build_plan_formulate_payload_recall_query_sha256_is_64_hex_chars_in_empty_def
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     let sha = payload["recall_query_sha256"].as_str().expect("string");
     assert_eq!(sha.len(), 64, "recall_query_sha256 must always be 64 chars; got {sha}");
@@ -288,9 +300,10 @@ fn build_plan_formulate_payload_default_source_omits_signals_key() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     let obj = payload.as_object().expect("payload is an object");
-    assert_eq!(obj.len(), 28);
+    assert_eq!(obj.len(), 29);
     assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
     assert!(obj.get("classification_floor_signals").is_none(),
         "signals key must be ABSENT when source is not cli_inferred");
@@ -314,9 +327,10 @@ fn build_plan_formulate_payload_agent_raised_source_omits_signals() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     let obj = payload.as_object().expect("payload is an object");
-    assert_eq!(obj.len(), 28,
+    assert_eq!(obj.len(), 29,
         "agent_raised should have 28 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
     assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
     assert!(obj.get("classification_floor_signals").is_none());
@@ -336,6 +350,7 @@ fn plan_formulate_payload_carries_l1_insight_when_set() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     assert_eq!(
         payload.get("l1_insight").expect("l1_insight key must be present"),
@@ -355,6 +370,7 @@ fn plan_formulate_payload_carries_explicit_null_l1_insight_when_unset() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     assert_eq!(
         payload.get("l1_insight").expect("l1_insight key must be present even when None"),
@@ -383,6 +399,7 @@ fn build_plan_formulate_payload_l3_skill_compact_shape() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     assert_eq!(payload["l3_skill"], serde_json::json!({
         "name": "summarise_repo_readme", "step_count": 1, "param_count": 1
@@ -397,6 +414,7 @@ fn build_plan_formulate_payload_l3_skill_compact_shape() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     assert_eq!(none_payload["l3_skill"], serde_json::Value::Null);
     assert!(none_payload.as_object().unwrap().contains_key("l3_skill"));
@@ -424,7 +442,63 @@ fn build_plan_formulate_payload_invoke_skill_compact_shape() {
             floor_signals: &[],
             ceiling_source: DataCeilingSource::Declared,
         },
+        None,
     );
     assert_eq!(payload["invoke_skill"]["name"], "summarise_repo_readme");
     assert_eq!(payload["invoke_skill"]["arg_count"], 2);
+}
+
+// ── #701: which earlier turns the plan was built on ────────────
+
+#[test]
+fn the_formulate_payload_names_the_turns_the_plan_was_built_on() {
+    let payload = build_plan_formulate_payload(
+        7, 1, &make_text_plan(), &make_default_meta(),
+        ClassificationProvenance {
+            floor: DataClass::Personal,
+            floor_source: ClassificationFloorSource::ConversationInherited,
+            floor_signals: &[],
+            ceiling_source: DataCeilingSource::Declared,
+        },
+        Some(&[187]),
+    );
+    assert_eq!(payload["conversation_task_ids"], serde_json::json!([187]));
+    assert_eq!(
+        payload["classification_floor_source"], "conversation_inherited",
+        "an operator must be able to see WHY the floor is what it is",
+    );
+}
+
+#[test]
+fn no_earlier_turns_is_an_empty_list_and_a_failed_read_is_null() {
+    // Absence and loss must not render identically: `[]` says the lookup ran
+    // and found nothing, `null` says the lookup failed and this plan was made
+    // blind to its own conversation.
+    let none = build_plan_formulate_payload(
+        1, 0, &make_text_plan(), &make_default_meta(),
+        ClassificationProvenance {
+            floor: DataClass::Public,
+            floor_source: ClassificationFloorSource::Default,
+            floor_signals: &[],
+            ceiling_source: DataCeilingSource::Declared,
+        },
+        Some(&[]),
+    );
+    assert_eq!(none["conversation_task_ids"], serde_json::json!([]));
+
+    let failed = build_plan_formulate_payload(
+        1, 0, &make_text_plan(), &make_default_meta(),
+        ClassificationProvenance {
+            floor: DataClass::Public,
+            floor_source: ClassificationFloorSource::Default,
+            floor_signals: &[],
+            ceiling_source: DataCeilingSource::Declared,
+        },
+        None,
+    );
+    assert_eq!(failed["conversation_task_ids"], serde_json::Value::Null);
+    assert!(
+        failed.as_object().expect("object").contains_key("conversation_task_ids"),
+        "always present, so a JSONB `?` query finds every row",
+    );
 }

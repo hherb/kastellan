@@ -195,13 +195,15 @@ fn the_lookup_takes_the_newest_three_inside_the_window_for_this_peer_only() {
 
         let rows = kastellan_db::tasks::turns::conversation_turns(
             &pool,
-            "matrix",
-            peer,
-            room,
-            time::OffsetDateTime::now_utc(),
-            asking,
-            5,
-            3,
+            kastellan_db::tasks::turns::ConversationQuery {
+                channel: "matrix",
+                peer,
+                conversation: room,
+                before: time::OffsetDateTime::now_utc(),
+                exclude_task_id: asking,
+                window_hours: 5,
+                limit: 3,
+            },
         )
         .await
         .expect("conversation_turns");
@@ -266,13 +268,15 @@ fn a_crashed_turn_is_returned_and_carries_no_result() {
 
         let rows = kastellan_db::tasks::turns::conversation_turns(
             &pool,
-            "matrix",
-            peer,
-            room,
-            time::OffsetDateTime::now_utc(),
-            -1,
-            5,
-            3,
+            kastellan_db::tasks::turns::ConversationQuery {
+                channel: "matrix",
+                peer,
+                conversation: room,
+                before: time::OffsetDateTime::now_utc(),
+                exclude_task_id: -1,
+                window_hours: 5,
+                limit: 3,
+            },
         )
         .await
         .expect("conversation_turns");

@@ -33,6 +33,10 @@ pub enum ClassificationFloorSource {
     AgentRaised,
     /// No inference matched and no operator flag was set.
     Default,
+    /// Raised from the classification an earlier turn of this conversation
+    /// touched (#701). A follow-up carries that turn's data, so it inherits
+    /// that turn's floor.
+    ConversationInherited,
 }
 
 impl ClassificationFloorSource {
@@ -46,6 +50,7 @@ impl ClassificationFloorSource {
             ClassificationFloorSource::CliInferred => "cli_inferred",
             ClassificationFloorSource::AgentRaised => "agent_raised",
             ClassificationFloorSource::Default     => "default",
+            ClassificationFloorSource::ConversationInherited => "conversation_inherited",
         }
     }
 }
