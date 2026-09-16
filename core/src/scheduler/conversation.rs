@@ -34,7 +34,17 @@ pub(crate) mod view;
 
 use time::OffsetDateTime;
 
+/// Most turns of a conversation the planner is shown.
+pub(crate) const MAX_TURNS: i64 = 3;
+
+/// How far back a turn may have finished and still count as part of this
+/// conversation. Five hours: a follow-up is nearly always minutes later, and a
+/// window this size keeps yesterday's topic from steering today's question
+/// without needing an explicit reset command.
+pub(crate) const WINDOW_HOURS: i64 = 5;
+
 use self::record::TurnRecord;
+use crate::cassandra::types::DataClass;
 
 /// One earlier turn of this conversation, assembled from its stored row.
 ///
@@ -49,8 +59,24 @@ pub(crate) struct Turn {
     pub(crate) user: String,
     pub(crate) answer: String,
     /// `None` for a turn that finished before #701 shipped, or whose stored
-    /// record could not be parsed. Such a turn still contributes its text.
+    /// record could not be parsed. Such a turn contributes no calls.
     pub(crate) record: Option<TurnRecord>,
+    /// The most sensitive class this turn touched, parsed **independently of
+    /// `record`** — and the reason that matters is a security one.
+    ///
+    /// The floor a follow-up inherits comes from here, while the text it is
+    /// shown comes from `user`/`answer`. If one field could fail while the
+    /// other survived, a turn's *content* would cross the task boundary while
+    /// its *classification* did not: a clinical answer rendered into a
+    /// follow-up running at `Public`, where rule I2 then admits `Public`
+    /// steps against it. Parsing this key on its own means a future change to
+    /// the shape of `calls` can cost the calls but never the class.
+    ///
+    /// `None` only when the stored record is absent (a turn that finished
+    /// before migration 0026) or carries no readable `data_class`. Such a turn
+    /// is **not shown at all** — see [`view::render`]. A turn we cannot
+    /// classify is strictly worse than a turn we do not carry.
+    pub(crate) data_class: Option<DataClass>,
 }
 
 /// Load the earlier turns of `dest`'s conversation, oldest first.
@@ -79,8 +105,8 @@ pub(crate) async fn load_conversation(
             conversation: &dest.conversation.0,
             window_anchor: created_at,
             exclude_task_id: task_id,
-            window_hours: view::WINDOW_HOURS,
-            limit: view::MAX_TURNS,
+            window_hours: WINDOW_HOURS,
+            limit: MAX_TURNS,
         },
     )
     .await?;
@@ -96,6 +122,19 @@ pub(crate) async fn load_conversation(
 /// One stored row as a [`Turn`]. Split out so the parse-failure arm is
 /// reachable from a unit test without a live Postgres.
 fn turn_from_row(row: kastellan_db::tasks::turns::ConversationTurnRow) -> Turn {
+    // The class first, and on its own: see `Turn::data_class` for why it must
+    // not share a failure mode with the calls.
+    let data_class = row
+        .turn_record
+        .as_ref()
+        .and_then(|v| v.get("data_class"))
+        .and_then(|v| serde_json::from_value::<DataClass>(v.clone()).ok());
+    if row.turn_record.is_some() && data_class.is_none() {
+        tracing::warn!(
+            task_id = row.task_id,
+            "stored turn_record carries no readable data_class; this turn will not be shown"
+        );
+    }
     let record = match row.turn_record {
         None => None,
         Some(value) => match serde_json::from_value::<TurnRecord>(value) {
@@ -110,6 +149,7 @@ fn turn_from_row(row: kastellan_db::tasks::turns::ConversationTurnRow) -> Turn {
         },
     };
     Turn {
+        data_class,
         task_id: row.task_id,
         finished_at: row.finished_at,
         user: row
@@ -125,3 +165,103 @@ fn turn_from_row(row: kastellan_db::tasks::turns::ConversationTurnRow) -> Turn {
 
 #[cfg(test)]
 mod tests;
+
+/// Everything a claimed channel task needs from its own conversation.
+///
+/// Returned as one value rather than a tuple because the three parts must move
+/// together: the rendered turns are what the planner reads, the floor is what
+/// bounds the steps it may plan against them, and the ids are what the audit
+/// row says the plan was built on. Splitting them at the call site is how they
+/// drift.
+pub(crate) struct LoadedConversation {
+    /// Rendered, screened, budgeted turns — oldest first. Empty for a
+    /// non-channel task, a first message, or a failed read.
+    pub(crate) turns: Vec<serde_json::Value>,
+    /// The floor this task should run at, and where that floor came from.
+    pub(crate) floor: (DataClass, crate::scheduler::inner_loop::ClassificationFloorSource),
+    /// The turns' ids for the audit row: `Some(vec![])` when the lookup found
+    /// nothing, **`None` when it failed** — absence and loss must not render
+    /// identically.
+    pub(crate) task_ids: Option<Vec<i64>>,
+    /// Turns the screen blocked, for the forensic rows the caller writes.
+    pub(crate) blocks: Vec<view::ConversationBlock>,
+}
+
+/// Load, screen, budget and classify a claimed task's conversation.
+///
+/// Lifted out of `runner::task_exec::run_one`, which is already over the
+/// 500-line guidance and where this logic could only be exercised through a
+/// live scheduler. Here it is one call with a value in and a value out.
+///
+/// **A failed read fails open**: the task plans with no conversation, exactly
+/// as every channel task did before #701. That is safe precisely because
+/// nothing is carried — there is no content whose classification we would be
+/// guessing at — and `task_ids: None` records the loss.
+pub(crate) async fn load_for_task(
+    pool: &sqlx::PgPool,
+    task: &kastellan_db::tasks::Task,
+    origin: Option<&crate::channel::ask_message::AskDestination>,
+    payload_floor: DataClass,
+    payload_source: crate::scheduler::inner_loop::ClassificationFloorSource,
+) -> LoadedConversation {
+    let Some(dest) = origin else {
+        return LoadedConversation {
+            turns: Vec::new(),
+            floor: (payload_floor, payload_source),
+            task_ids: Some(Vec::new()),
+            blocks: Vec::new(),
+        };
+    };
+
+    let turns = match load_conversation(pool, dest, task.id, task.created_at).await {
+        Ok(turns) => turns,
+        Err(e) => {
+            tracing::warn!(
+                task_id = task.id, error = %e,
+                "could not read this conversation's earlier turns; planning without them"
+            );
+            return LoadedConversation {
+                turns: Vec::new(),
+                floor: (payload_floor, payload_source),
+                task_ids: None,
+                blocks: Vec::new(),
+            };
+        }
+    };
+
+    let task_ids: Vec<i64> = turns.iter().map(|t| t.task_id).collect();
+    // ⚠️ Inherited from every turn LOADED, before the screen and the budget
+    // have their say. Inheriting from the turns that SURVIVED rendering would
+    // let one catalogue phrase in an earlier answer both withhold that turn
+    // and drop the whole conversation's floor — handing an attacker the choice
+    // of what the follow-up may do.
+    let floor = floor::inherit_floor(payload_floor, payload_source, &turns);
+    let rendered = view::render(&turns, view::CONVERSATION_BUDGET);
+
+    LoadedConversation {
+        turns: rendered.turns,
+        floor,
+        task_ids: Some(task_ids),
+        blocks: rendered.blocks,
+    }
+}
+
+/// The `policy / injection.blocked` payload for a turn this screen withheld.
+///
+/// Pure, so the shape is testable without a pool: the caller writes the row.
+/// Carries the hash and the length, never the screened text.
+pub(crate) fn block_audit_payload(
+    task_id: i64,
+    block: &view::ConversationBlock,
+) -> serde_json::Value {
+    serde_json::json!({
+        "task_id":       task_id,
+        "turn_task_id":  block.task_id,
+        "score":         block.score,
+        "decision":      "block",
+        "tier":          view::TIER_CONVERSATION,
+        "reason_codes":  block.reason_codes,
+        "body_sha256":   block.body_sha256,
+        "body_byte_len": block.body_byte_len,
+    })
+}

@@ -60,7 +60,12 @@ when this is the first message. Each turn is one of:
   calls that produced it, each `{"tool", "method", "parameters", "returns"}`.
 - `{"at": "…", "status": "withheld"}` — that turn failed an injection screen.
   It happened; you were not shown it.
-- A leading `{"_omitted_turns": N}` means N older turns did not fit.
+- `{"at": "…", "status": "unclassified"}` — that turn predates this record, or
+  its stored classification could not be read, so its text is not shown to you.
+- `{"at": "…", "status": "too large for the conversation budget"}` — that turn
+  did not fit even on its own.
+- A leading `{"_omitted_turns": N}` means N older turns did not fit, and
+  `"_omitted_calls": N` on a turn means it made N more calls than those listed.
 
 Use it to resolve what the current `instruction` refers to — "those bookings",
 "the same for March", "it". When a `parameters` value there names something you

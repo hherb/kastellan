@@ -222,63 +222,24 @@ pub(super) async fn run_one(
     }
 
     // #701: the earlier turns of this conversation, if this task came from one.
-    //
-    // A failed read FAILS OPEN: the task proceeds with no conversation, which
-    // is exactly the behaviour every channel task had before this shipped.
-    // Nothing is carried, so there is nothing to inherit a classification
-    // from — but the audit row records `null` rather than `[]`, so a loss never
-    // reads as "there were no earlier turns".
+    // Loading, screening, budgeting and classification all live in
+    // `scheduler::conversation`; this is the wiring only.
     let origin = crate::channel::ask_message::destination_from_task_payload(&task.payload);
-    let (conversation_turns, conversation_task_ids) = match origin.as_ref() {
-        None => (Vec::new(), Some(Vec::new())),
-        Some(dest) => match crate::scheduler::conversation::load_conversation(
-            pool, dest, task.id, task.created_at,
-        )
-        .await
-        {
-            Ok(turns) => {
-                let ids = turns.iter().map(|t| t.task_id).collect::<Vec<_>>();
-                (turns, Some(ids))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = task.id, error = %e,
-                    "could not read this conversation's earlier turns; planning without them"
-                );
-                (Vec::new(), None)
-            }
-        },
-    };
-
-    // Inherited from every turn LOADED, including ones the budget drops or the
-    // screen withholds below: a turn absent from the prompt is still what the
-    // user is referring to.
-    let (classification_floor, classification_floor_source) =
-        crate::scheduler::conversation::floor::inherit_floor(
-            classification_floor,
-            classification_floor_source,
-            &conversation_turns,
-        );
-
-    let rendered = crate::scheduler::conversation::view::render(
-        &conversation_turns,
-        crate::scheduler::conversation::view::CONVERSATION_BUDGET,
-    );
+    let loaded = crate::scheduler::conversation::load_for_task(
+        pool,
+        task,
+        origin.as_ref(),
+        classification_floor,
+        classification_floor_source,
+    )
+    .await;
+    let (classification_floor, classification_floor_source) = loaded.floor;
 
     // A block only this screen made is otherwise invisible: the planner sees
     // `withheld` and no other screen wrote a row. Best-effort, like the sink
     // rows — losing a forensic row must not fail the task.
-    for block in &rendered.blocks {
-        let payload = serde_json::json!({
-            "task_id":       task.id,
-            "turn_task_id":  block.task_id,
-            "score":         block.score,
-            "decision":      "block",
-            "tier":          crate::scheduler::conversation::view::TIER_CONVERSATION,
-            "reason_codes":  block.reason_codes,
-            "body_sha256":   block.body_sha256,
-            "body_byte_len": block.body_byte_len,
-        });
+    for block in &loaded.blocks {
+        let payload = crate::scheduler::conversation::block_audit_payload(task.id, block);
         if let Err(e) =
             kastellan_db::audit::insert(pool, "policy", "injection.blocked", payload).await
         {
@@ -303,8 +264,8 @@ pub(super) async fn run_one(
         max_plans: max_plans_for_run,
         resolved_asks,
         origin,
-        conversation: rendered.turns,
-        conversation_task_ids,
+        conversation: loaded.turns,
+        conversation_task_ids: loaded.task_ids,
     };
 
     let task_id = ctx.task_id;

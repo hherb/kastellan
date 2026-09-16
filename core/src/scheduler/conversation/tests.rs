@@ -76,6 +76,35 @@ fn a_well_formed_stored_record_is_parsed() {
 }
 
 #[test]
+fn the_class_survives_a_record_whose_calls_no_longer_parse() {
+    // The class and the calls must not share a failure mode: if a future shape
+    // change to `calls` could throw the class away, a clinical turn would be
+    // rendered into a follow-up running at Public.
+    let turn = turn_from_row(row(
+        Some(serde_json::json!({"kind": "text", "body": "ok"})),
+        Some(serde_json::json!({
+            "calls": "not an array",
+            "data_class": "ClinicalConfidential",
+        })),
+    ));
+    assert!(turn.record.is_none(), "the calls are lost");
+    assert_eq!(
+        turn.data_class,
+        Some(DataClass::ClinicalConfidential),
+        "but the class, which governs what may be done with the text, is not",
+    );
+}
+
+#[test]
+fn a_turn_from_before_the_migration_has_no_class_at_all() {
+    // turn_record IS NULL for every turn that finished before 0026. The view
+    // refuses to show such a turn's text; here we pin that the class is absent
+    // rather than silently defaulting to the bottom of the lattice.
+    let turn = turn_from_row(row(Some(serde_json::json!({"kind": "text", "body": "ok"})), None));
+    assert_eq!(turn.data_class, None);
+}
+
+#[test]
 fn a_malformed_stored_record_renders_without_calls() {
     // Fail-safe, not fail-closed: a schema change must not make a whole
     // conversation unreadable. The test above is the positive control — it

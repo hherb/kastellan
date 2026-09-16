@@ -258,3 +258,25 @@ fn a_record_round_trips_through_json() {
     let back: TurnRecord = serde_json::from_value(value).expect("deserialise");
     assert_eq!(back, record);
 }
+
+#[test]
+fn steps_that_never_ran_are_not_calls() {
+    // The inner loop BREAKS on the first Err, so `outcomes` is shorter than
+    // `steps` on every plan that failed part-way — the common case, and one no
+    // fixture had. Treating a missing outcome as success would tell the next
+    // turn identifiers that were never passed to a tool.
+    let plan = plan_with(vec![
+        step("mail", "mail.search", serde_json::json!({"n": 1}), DataClass::Public),
+        step("mail", "mail.get_message", serde_json::json!({"n": 2}), DataClass::Public),
+        step("mail", "mail.get_attachment_text", serde_json::json!({"n": 3}), DataClass::Public),
+    ]);
+    // Step 1 succeeded, step 2 failed, step 3 never ran.
+    let outcomes = vec![
+        StepOutcome::Ok(serde_json::json!({})),
+        StepOutcome::Err { code: "UPSTREAM".into(), detail: "boom".into() },
+    ];
+    let record = from_plans(&[PlanRecord::new(plan, outcomes)], DataClass::Public);
+
+    assert_eq!(record.calls.len(), 1, "only the step that actually succeeded");
+    assert_eq!(record.calls[0].parameters.get("n").and_then(|v| v.as_u64()), Some(1));
+}

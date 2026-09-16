@@ -9,6 +9,7 @@ fn turn_with_class(task_id: i64, data_class: DataClass) -> Turn {
         finished_at: time::OffsetDateTime::from_unix_timestamp(1_757_000_000).expect("timestamp"),
         user: "q".into(),
         answer: "a".into(),
+        data_class: Some(data_class),
         record: Some(TurnRecord { calls: vec![], omitted_calls: 0, data_class }),
     }
 }

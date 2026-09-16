@@ -432,15 +432,31 @@ mod tests {
     #[test]
     fn the_planner_prompt_documents_the_conversation_block() {
         // Drift guard, in the shape of #702's
-        // `the_planner_prompt_documents_every_outcome_shape`: every key the
-        // conversation renderer can emit must be named in the prompt, or the
-        // planner is reading a shape nobody told it about.
+        // `the_planner_prompt_documents_every_outcome_shape`: every key and
+        // status the conversation renderer can emit must be named in the
+        // prompt, or the planner is reading a shape nobody told it about.
+        //
+        // The markers come from the renderer's own constants, NOT from
+        // literals copied here. A review found that the hand-copied list had
+        // already gone stale: the renderer could emit a "too large" status the
+        // prompt never mentioned, and the test could not tell.
+        use crate::scheduler::conversation::view::{
+            OMITTED_CALLS_KEY, OMITTED_TURNS_KEY, STATUS_TOO_LARGE, STATUS_UNCLASSIFIED,
+            STATUS_WITHHELD,
+        };
         let prompt = include_str!("../../../prompts/agent_planner.md");
-        for key in [
-            "\"conversation\"", "\"at\"", "\"calls\"", "\"answer\"",
-            "_omitted_turns", "withheld",
-        ] {
-            assert!(prompt.contains(key), "agent_planner.md must document {key}");
+        let mut expected: Vec<&str> = vec![
+            "\"conversation\"", "\"at\"", "\"calls\"", "\"answer\"", "\"user\"",
+        ];
+        expected.extend([
+            OMITTED_TURNS_KEY,
+            OMITTED_CALLS_KEY,
+            STATUS_WITHHELD,
+            STATUS_TOO_LARGE,
+            STATUS_UNCLASSIFIED,
+        ]);
+        for marker in expected {
+            assert!(prompt.contains(marker), "agent_planner.md must document {marker}");
         }
     }
 
