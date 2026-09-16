@@ -315,8 +315,10 @@ async fn drain_lane(
                     None
                 }
             };
+            // No turn record: an operator skill run is not a channel turn, so
+            // there is no conversation for a later turn to read it from (#701).
             if let Err(e) =
-                tasks::finalize(pool, claimed.id, "completed", result_payload).await
+                tasks::finalize(pool, claimed.id, "completed", result_payload, None).await
             {
                 tracing::warn!(
                     lane = lane.as_sql(), task_id = claimed.id, error = %e,
@@ -397,7 +399,9 @@ async fn drain_lane(
         // observation-phase latency distribution.
         let finished_at = OffsetDateTime::now_utc();
 
-        if let Err(e) = tasks::finalize(pool, claimed.id, final_state, final_result_payload).await {
+        if let Err(e) =
+            tasks::finalize(pool, claimed.id, final_state, final_result_payload, None).await
+        {
             tracing::warn!(
                 lane = lane.as_sql(), task_id = claimed.id, error = %e,
                 "tasks::finalize UPDATE failed (audit lifecycle row still emitted)"
