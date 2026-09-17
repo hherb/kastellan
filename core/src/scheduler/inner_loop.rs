@@ -402,10 +402,16 @@ pub async fn run_to_terminal(
                 terminal_l1_insight: $insight,
                 terminal_l3_skill: $skill,
                 terminal_python_skill: $pyskill,
-                // Every exit from this loop goes through `finish!`, so the
-                // record is built at each one from the plans accumulated so
-                // far — including the outcomes that are not `Completed`, whose
-                // calls are just as real a referent for the next turn.
+                // Every `InnerLoopResult` is built here, so the record is
+                // built at each one from the plans accumulated so far —
+                // including the outcomes that are not `Completed`, whose calls
+                // are just as real a referent for the next turn.
+                //
+                // NOT every *exit*: the loop also has `?` propagations (a
+                // Postgres blip on `observe_state`, on an audit insert), which
+                // return past this macro and become `failed_result`, whose
+                // `turn_record` is `None` even though `ctx.plans` was
+                // populated. That loss is #710.
                 turn_record: turn_record_for(&ctx),
             })
         };

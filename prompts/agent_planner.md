@@ -58,10 +58,19 @@ when this is the first message. Each turn is one of:
 - `{"at": "…", "user": "…", "calls": [ … ], "answer": "…"}` — `user` is what
   was asked, `answer` is the reply that was sent, and `calls` are the tool
   calls that produced it, each `{"tool", "method", "parameters", "returns"}`.
+  **`calls` may be absent**, which means that turn's calls were not recorded —
+  not that it made none. `user` may be an empty string if the stored message
+  could not be read. Each `parameters` value has been pruned by the same rules
+  as a step `output` above: strings may be cut and end with `…`, keys may be
+  dropped with an `_omitted_keys` count, and a deeply nested value may be
+  replaced by a note. **Identifiers are never cut in half**, so a
+  `message_id` or a file name you find there is safe to pass back verbatim.
 - `{"at": "…", "status": "withheld"}` — that turn failed an injection screen.
   It happened; you were not shown it.
-- `{"at": "…", "status": "unclassified"}` — that turn predates this record, or
-  its stored classification could not be read, so its text is not shown to you.
+- `{"at": "…", "status": "unclassified"}` — that turn's classification could
+  not be read, or it never recorded one (it predates this record, or it
+  crashed, was cancelled, or failed before planning), so its text is not shown
+  to you.
 - `{"at": "…", "status": "too large for the conversation budget"}` — that turn
   did not fit even on its own.
 - A leading `{"_omitted_turns": N}` means N older turns did not fit, and

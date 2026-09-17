@@ -280,3 +280,30 @@ fn steps_that_never_ran_are_not_calls() {
     assert_eq!(record.calls.len(), 1, "only the step that actually succeeded");
     assert_eq!(record.calls[0].parameters.get("n").and_then(|v| v.as_u64()), Some(1));
 }
+
+#[test]
+fn a_returns_note_of_exactly_the_cap_is_not_marked_as_cut() {
+    // The boundary the test above misses: it uses `RETURNS_MAX_CHARS + 50`, so
+    // `<=` -> `<` in `clamp_chars` survives, and an exactly-capped note grows a
+    // spurious `…` — absence and loss rendering identically, one character
+    // wide. Both sides of the boundary, so neither comparison can drift.
+    let note_of = |n: usize| {
+        let mut st = step("mail", "m", serde_json::json!({}), DataClass::Public);
+        st.returns = "x".repeat(n);
+        from_plans(
+            &[PlanRecord::new(plan_with(vec![st]), vec![StepOutcome::Ok(serde_json::json!({}))])],
+            DataClass::Public,
+        )
+        .calls[0]
+            .returns
+            .clone()
+    };
+
+    let exact = note_of(RETURNS_MAX_CHARS);
+    assert_eq!(exact.chars().count(), RETURNS_MAX_CHARS, "exactly at the cap is untouched");
+    assert!(!exact.ends_with('…'), "nothing was cut, so nothing says it was");
+
+    let over = note_of(RETURNS_MAX_CHARS + 1);
+    assert!(over.ends_with('…'), "one character over the cap is cut and says so");
+    assert_eq!(over.chars().count(), RETURNS_MAX_CHARS + 1, "cap plus the ellipsis");
+}

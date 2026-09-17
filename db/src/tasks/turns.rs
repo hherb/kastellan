@@ -3,7 +3,11 @@
 //! A channel message becomes a task carrying only its own sentence (#701), so
 //! a follow-up has no referent unless something hands it the turns before it.
 //! This is that something: one windowed query, and the only place the
-//! conversation keys are read out of `tasks.payload`.
+//! conversation keys are read out of `tasks.payload` **for the conversation
+//! lookup**. They are read elsewhere for other purposes — `asks::…` filters
+//! `channel`/`peer` when routing an operator ask, and
+//! `core::channel::ask_message::destination_from_task_payload` reads all three
+//! to build the `AskDestination` this query is then called with.
 //!
 //! # Why the window is anchored on the caller's timestamp, and open at the top
 //!
@@ -33,8 +37,12 @@
 //! outbound pump replies to. So every row this can return is a turn the peer
 //! actually received a reply for — which is what makes the rendered `answer`
 //! truthful. **If that trigger's list is ever widened, this list moves with
-//! it**; `a_crashed_turn_is_returned_and_carries_no_result` is the test that
-//! names the coupling.
+//! it.** `every_replied_to_state_is_a_turn_and_an_unfinished_one_is_not`
+//! covers all seven plus a negative — but it hand-copies them as literals, so
+//! it catches a NARROWING of this const and is blind to a WIDENING of the SQL
+//! trigger, which is the direction that actually loses turns. **The coupling
+//! is enforced by review, not by a test**; machine-checking it against
+//! `pg_get_functiondef` is #712.
 
 use sqlx::PgPool;
 use sqlx::Row;
@@ -43,6 +51,14 @@ use time::OffsetDateTime;
 use crate::DbError;
 
 /// One earlier turn of a conversation, exactly as stored.
+///
+/// Note the granularity: a decode failure on ANY column of ANY row fails the
+/// whole lookup, which `core::scheduler::conversation::load_for_task` then
+/// fails open on. The per-row fail-safe its docs promise ("a schema change
+/// must not make a whole conversation unreadable") applies to `turn_from_row`
+/// parsing `turn_record`, not to this decode — every column here is a fixed
+/// type on a fixed schema, so a failure means the table shape moved, not that
+/// one row is odd.
 ///
 /// Deliberately raw: rendering an answer out of `result` belongs to
 /// `core::channel::route::reply_body` (the same function the bus used to
@@ -88,10 +104,26 @@ pub struct ConversationQuery<'a> {
 
 /// Up to `q.limit` turns of `(channel, peer, conversation)` that finished no
 /// earlier than `q.window_hours` before `q.window_anchor`, newest first.
+///
+/// `id DESC` breaks a `finished_at` tie so the `LIMIT` cannot cut
+/// non-deterministically between two turns that finished in the same
+/// microsecond. Effectively unreachable with `now()`, and free.
 pub async fn conversation_turns(
     pool: &PgPool,
     q: ConversationQuery<'_>,
 ) -> Result<Vec<ConversationTurnRow>, DbError> {
+    // An out-of-range window is an error, not a fallback. This was
+    // `unwrap_or(i32::MAX)`, which silently turns the window into ~245,000
+    // years — i.e. removes the only bound this parameter exists to impose,
+    // on the argument whose whole job is to keep yesterday's topic out of
+    // today's question. Unreachable (`WINDOW_HOURS` is a const 5), which is
+    // exactly why the fallback direction has to be the safe one.
+    let window_hours = i32::try_from(q.window_hours).map_err(|_| {
+        DbError::Query(format!(
+            "tasks conversation_turns: window_hours {} out of range",
+            q.window_hours,
+        ))
+    })?;
     let states: Vec<String> = REPLIED_STATES.iter().map(|s| (*s).to_string()).collect();
     let rows = sqlx::query(
         "SELECT id, finished_at, payload, result, turn_record \
@@ -104,7 +136,7 @@ pub async fn conversation_turns(
             AND state = ANY($5) \
             AND finished_at IS NOT NULL \
             AND finished_at >= $6 - make_interval(hours => $7::int) \
-          ORDER BY finished_at DESC \
+          ORDER BY finished_at DESC, id DESC \
           LIMIT $8",
     )
     .bind(q.channel)
@@ -113,7 +145,7 @@ pub async fn conversation_turns(
     .bind(q.exclude_task_id)
     .bind(&states)
     .bind(q.window_anchor)
-    .bind(i32::try_from(q.window_hours).unwrap_or(i32::MAX))
+    .bind(window_hours)
     .bind(q.limit)
     .fetch_all(pool)
     .await

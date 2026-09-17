@@ -178,7 +178,7 @@ fn build_plan_formulate_payload_pins_twenty_nine_keys_for_default_source() {
 }
 
 #[test]
-fn build_plan_formulate_payload_cli_inferred_source_has_29_keys_with_signals() {
+fn build_plan_formulate_payload_cli_inferred_source_has_thirty_keys_with_signals() {
     let payload = build_plan_formulate_payload(
         1, 1, &make_text_plan(), &make_default_meta(),
         ClassificationProvenance {

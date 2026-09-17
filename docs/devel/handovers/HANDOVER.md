@@ -18,7 +18,8 @@ continuity for channel tasks), [#708](https://github.com/hherb/kastellan/pull/70
 [#700](https://github.com/hherb/kastellan/issues/700), localmail
 [#364](https://github.com/hherb/localmail/issues/364) (from #677);
 [#703](https://github.com/hherb/kastellan/issues/703)–[#705](https://github.com/hherb/kastellan/issues/705)
-(from #702's second review round); [#693](https://github.com/hherb/kastellan/issues/693),
+(from #702's second review round); [#710](https://github.com/hherb/kastellan/issues/710)–[#716](https://github.com/hherb/kastellan/issues/716)
+(from #709's third review round); [#693](https://github.com/hherb/kastellan/issues/693),
 [#695](https://github.com/hherb/kastellan/issues/695)–[#697](https://github.com/hherb/kastellan/issues/697)
 (from #694); [#691](https://github.com/hherb/kastellan/issues/691) (from #692). ·
 **The DGX runs #702's code**, deployed 2026-09-14 from the PR branch for its live acceptance run. #702's branch tip and its squash commit on `main` are **content-identical** (verified 2026-09-15, empty `git diff`), and #708 touched no code, so the running daemon already matches `main`. Only the DGX checkout is off `main`; re-point it with `scripts/upgrade_from_git.sh` at the next deploy. Rootfs images last rebuilt 2026-09-08.
@@ -79,7 +80,9 @@ renders them screened and budgeted, and inherits their classification.
   **independently of the calls**, so a future shape change to `calls` can cost the calls but never
   the class. Before that fix, a turn with a NULL or unparseable record rendered its *text* while
   contributing nothing to the floor — and **every turn predating migration 0026 has a NULL record**,
-  so the first follow-up in every live room would have hit it.
+  so the first follow-up in every live room would have hit it. ⚠️ **That sentence was true of the
+  renderer and FALSE of the floor until the third review round** — see below; the independent field
+  existed and nothing read it.
 - ⚠️ **The floor is inherited from every turn LOADED**, not from those the screen kept. Otherwise one
   catalogue phrase in an earlier answer would both withhold that turn *and* drop the conversation's
   floor to `Public` — letting an attacker choose what the follow-up may do. New provenance
@@ -104,6 +107,62 @@ renders them screened and budgeted, and inherits their classification.
   Daemon-spawning e2es then fail closed at boot with `Error: building egress force-routing config`
   — 9 failures that look like a regression and are a missing prerequisite. **`cargo build
   --workspace` first**; all 9 passed after it.
+
+#### Third review round on the same branch (2026-09-17) — the split parse was never wired
+
+Five read-only reviewers (code, tests, error handling, type design, comments), each finding the same
+defect independently. Fixes then verified by planting each original defect back and watching the new
+test fail.
+
+- ⚠️ **A security property can be documented, tested, and absent from the code.** `Turn::data_class`
+  was added *specifically* so a record whose `calls` stop parsing still yields a class — with a long
+  comment saying "the floor a follow-up inherits comes from here". **`inherit_floor` read
+  `t.record.data_class` instead**, so for that exact row the text rendered and the floor did not:
+  a `ClinicalConfidential` answer reaching a follow-up planned at `Public`, which is verbatim the
+  scenario the comment said was prevented. `git show ff964274 -- .../conversation/floor.rs` is
+  **empty** — the commit that introduced the field and its rationale never touched the consumer.
+- ⚠️ **The mutation proof defended the bug**, because a test encoded it.
+  `a_turn_with_no_record_contributes_nothing` built the divergent state (`record: None`,
+  `data_class: Some(Secret)`) and asserted the floor stays `Public`; two further tests pinned the
+  other legs in two other files. **Three tests, one property each, none composing them.** A mutant
+  flipping the field would have been *killed*. The fix is one line; the test correction is the real
+  work. New `a_turn_that_renders_its_text_always_contributes_its_class` states it as an invariant
+  over any row — if the rendered turn carries text, the floor must have risen — so a future
+  divergence fails whatever shape it takes. [[mutation-proof-counts-only-mutants-you-tried]]
+- ⚠️ **A denylist over an extensible enum is a guard with an expiry date.** #71's
+  `parse_classification_floor_source_from_payload` rejected `AgentRaised` on a *structural* match,
+  with a comment arguing that binding to the variant survives a rename. It does — and says nothing
+  about an **addition**, so #701's new `ConversationInherited` walked straight through and a producer
+  could stamp a floor as inherited from a conversation never read. **Now an allowlist**
+  (`Operator | CliInferred | Default`), so every future variant is reserved until admitted on
+  purpose, plus a census test that makes the decision compulsory. [[guard-shares-the-census-blind-spot]]
+- ⚠️ **A test helper measured the quantity the production comment disowns.** `render`'s doc says the
+  element sum "does make the doc's bound untrue" and `array_len` exists to measure the array — while
+  `rendered_bytes` in the tests summed elements, so a regression back to element-summing passed.
+  Also fixed: the drop loop measured an omission marker it had not yet earned (`omitted + 1`), so a
+  conversation that fit *exactly* lost its oldest turn to ~22 bytes.
+- Also: conversation `injection.blocked` rows are written on the **first run only** — `run_one` is
+  re-entered on every resume and re-screens the same turns, and `sink_block_audit_payloads`
+  documents that identical hazard one module over; the clamp branch is guarded on `len() == 1`
+  rather than assuming it; `window_hours` out of range now errors instead of becoming a
+  245,000-year window; `ORDER BY` gained an `id DESC` tiebreaker; the silent `calls` serialisation
+  drop now warns and marks `_omitted_calls`; and the prompt documents that `calls` may be **absent**
+  and that `parameters` obeys the `result_view` pruning rules.
+- **Deferred, filed:** [#710](https://github.com/hherb/kastellan/issues/710) (a failed, crashed or
+  denied channel turn leaves no record — so "what went wrong with that?" inherits nothing; the
+  `finish!` comment claiming every exit was corrected),
+  [#711](https://github.com/hherb/kastellan/issues/711) (the prompt drift guard's key names are
+  literals with no constant to bind to — its blind spot is the set its comment claimed),
+  [#712](https://github.com/hherb/kastellan/issues/712) (`REPLIED_STATES` ↔ `notify_task_completed`
+  is enforced by review, and the test is blind to the direction that loses turns),
+  [#713](https://github.com/hherb/kastellan/issues/713) (a resumed task loses its floor, storing a
+  turn record whose class is **wrong** rather than missing — so the renderer cannot withhold it),
+  [#714](https://github.com/hherb/kastellan/issues/714) (no `KASTELLAN_PG_REQUIRE_E2E` knob, so a
+  mis-provisioned host reports the same count having asserted nothing),
+  [#715](https://github.com/hherb/kastellan/issues/715) (the `Admitted` seal ends at `render`'s
+  return; a `ScreenedTurns` newtype would carry it to the prompt),
+  [#716](https://github.com/hherb/kastellan/issues/716) (`conversation_task_ids` names the shown set
+  and holds the loaded one).
 
 ### Previous session: #677 — the planner reads a tool result as labelled JSON
 
@@ -385,6 +444,7 @@ re-derives them: egress #242, #251, #304 (needs a controllable TLS origin), #260
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
+| **Mac** ([#709](https://github.com/hherb/kastellan/pull/709), #701 — **third review round, the gate that stands**) | branch tip after the review fixes | **Mac 4318 / 0 / 29**, 179 suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` exported so every Postgres suite ran for real. ⚠️ **Delta +10 against the 4308 row below, and it reconciles exactly:** 10 new `#[test]` in the diff (3 conversation, 1 floor, 1 record, 2 view, 2 task_exec, 1 db e2e). ⚠️ **The gate was re-run after a post-sweep edit** — the first sweep was green, then the clamp block was re-indented, which made that sweep a gate on a revision that no longer existed [[never-edit-tree-during-a-sweep]]. Both PG suites verified running rather than skipping (`--nocapture`, 7.7 s against a real database), and the two headline fixes were each verified by planting the original defect back and watching the new test fail | **Mac** `--workspace --all-targets -D warnings` exit **0**, zero warnings, all 27 crates. **The DGX leg is still owed** | 15 Mac (PG live) |
 | **Mac + DGX** ([#709](https://github.com/hherb/kastellan/pull/709), #701 — **the gate that stands**) | branch tip `ff964274` | **DGX 4443 / 0 / 61**, 179 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner, held). **Mac 4308 / 0 / 29**, 179 suites, **86 `[SKIP]`**. ⚠️ **Both deltas are +61 and reconcile EXACTLY against a measured baseline, not an estimate:** `cargo test --workspace -- --list` on the DGX gives **4504 on the branch against 4443 on `main`**, and the static count of new `#[test]` + `#[tokio::test]` in the diff is also 61. 179 suites = 177 + the two new test binaries. ⚠️ **And the measurement corrected a carried estimate:** `main`'s DGX total is **4382 runnable + 61 ignored**, where the #702 row above implies ~4360. Extrapolating one row from the next drifts; `-- --list` on both revisions costs one compile and settles it. ⚠️ **The Mac's 86 skips (not ~340) are because `KASTELLAN_PG_BIN_DIR` was exported**, so every Postgres-gated suite ran for real here — including all 10 of this branch's own PG tests. ⚠️ **The Mac sweep first reported `TEST_EXIT=101` with 9 failures in three daemon-spawning suites, and that was a missing PREREQUISITE, not a regression:** a fresh worktree has no worker binaries and `cargo test --workspace` does not build them, so the daemon fails closed at boot (`Error: building egress force-routing config`). After `cargo build --workspace`, all 9 pass (6 + 2 + 1). The DGX, whose checkout had the binaries, was green throughout | **Mac** `--workspace --all-targets --locked -D warnings` exit **0**, zero warnings, all **27** workspace crates, forced cold with `CARGO_TARGET_DIR=$HOME/.cargo-clippy-701` (never by touching sources, which would falsify the #687 image gate). **The DGX clippy run is still owed** | **86** Mac (PG live), **4** DGX |
 | **Mac** ([#702](https://github.com/hherb/kastellan/pull/702) second review round) | the round's commit on the branch | **Full sweep 4244 / 0 / 29**, 177 suites, `TEST_EXIT=0` — exactly the predicted +22 over the row below — run **before** the review of the fix round, whose fixes then added **+3** tests (a full sweep would be **4247**). After those fixes, re-run in full: `kastellan-core --lib` **2090 / 0 / 1**, `kastellan-cli` 96, `kastellan-worker-mail` 141 + 3 e2e. **The DGX was not re-run this round.** | exit **0**, **27** crates, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-702`), after the last source edit | **not audited**: the sweep ran without `--nocapture`, so libtest swallowed the `[SKIP]` lines — do not compare this row's skip column |
 | **Mac + DGX** ([#702](https://github.com/hherb/kastellan/pull/702), #677 — **the gate that stands**) | **`cc555f90`** (branch tip) | **DGX 4357 / 0 / 61**, 177 suites, `TEST_EXIT=0`, 0 `[WARN]`. **Mac 4222 / 0 / 29**, 177 suites, 0 `[WARN]`. **Both exactly as predicted** from the static `#[test]` name diff: +33 over `main` (DGX 4324, Mac 4189) — 28 in `result_view`, 5 net in `summary`; host gap **135**, unchanged. ⚠️ **The Mac `TEST_EXIT` is 101 with one failure that is the host, not the branch:** `syspolicyd` had re-saturated; five suites wedged at exec (killed at 15 min, 0 CPU) and `egress_force_routing_e2e` timed out waiting for its sidecar to start right after the restart. All six pass individually, which is where 4213 + 1 + 8 = 4222 comes from | exit **0** on both, **27** workspace crates each by count of `Checking kastellan` lines; the DGX run forced cold with `CARGO_TARGET_DIR=$HOME/.cargo-clippy-677` after its first pass finished suspiciously in 12 s | **340** Mac (absent-Postgres), **4** DGX (gliner, held) |

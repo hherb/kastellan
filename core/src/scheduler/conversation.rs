@@ -73,9 +73,11 @@ pub(crate) struct Turn {
     /// the shape of `calls` can cost the calls but never the class.
     ///
     /// `None` only when the stored record is absent (a turn that finished
-    /// before migration 0026) or carries no readable `data_class`. Such a turn
-    /// is **not shown at all** — see [`view::render`]. A turn we cannot
-    /// classify is strictly worse than a turn we do not carry.
+    /// before migration 0026) or carries no readable `data_class`. Such a
+    /// turn's **text** is not shown — `view::render` reduces it to
+    /// `{at, status: "unclassified"}`, so the planner learns a turn happened
+    /// and nothing about what was in it. A turn we cannot classify is strictly
+    /// worse than a turn we do not carry.
     pub(crate) data_class: Option<DataClass>,
 }
 
@@ -88,9 +90,10 @@ pub(crate) struct Turn {
 /// A row whose stored `turn_record` will not parse yields a turn with no calls
 /// and a `warn!` — never an error. The record is a convenience for the next
 /// turn, and a schema change must not make a whole conversation unreadable.
-/// `a_malformed_stored_record_renders_without_calls` is the positive control
-/// proving that arm is reachable *and* that a well-formed record does not take
-/// it.
+/// `a_malformed_stored_record_renders_without_calls` proves that arm is
+/// reachable, and its sibling `a_well_formed_stored_record_is_parsed` proves a
+/// well-formed record does not take it — two tests, one property each, so
+/// deleting either one is visibly a loss.
 pub(crate) async fn load_conversation(
     pool: &sqlx::PgPool,
     dest: &crate::channel::ask_message::AskDestination,
@@ -99,15 +102,7 @@ pub(crate) async fn load_conversation(
 ) -> Result<Vec<Turn>, kastellan_db::DbError> {
     let rows = kastellan_db::tasks::turns::conversation_turns(
         pool,
-        kastellan_db::tasks::turns::ConversationQuery {
-            channel: &dest.channel.0,
-            peer: &dest.peer.0,
-            conversation: &dest.conversation.0,
-            window_anchor: created_at,
-            exclude_task_id: task_id,
-            window_hours: WINDOW_HOURS,
-            limit: MAX_TURNS,
-        },
+        conversation_query_for(dest, task_id, created_at),
     )
     .await?;
 
@@ -117,6 +112,35 @@ pub(crate) async fn load_conversation(
     // newest turn sits closest to the current instruction.
     turns.reverse();
     Ok(turns)
+}
+
+/// The query [`load_conversation`] runs, as a value.
+///
+/// Split out for the same reason [`turn_from_row`] is: it is the whole of the
+/// wiring between a claimed task and the lookup, and with it inlined the
+/// wiring could only be exercised through a live scheduler. A review found
+/// every binding here unpinned — swapping `window_anchor` for
+/// `OffsetDateTime::now_utc()` survived the entire suite, although the db
+/// module spends twenty lines on why the anchor must be the asking task's own
+/// arrival, and `window_hours: 0` survived too because the db test passes its
+/// own literal. `the_query_binds_every_field_from_the_asking_task` pins all
+/// seven.
+pub(crate) fn conversation_query_for<'a>(
+    dest: &'a crate::channel::ask_message::AskDestination,
+    task_id: i64,
+    created_at: OffsetDateTime,
+) -> kastellan_db::tasks::turns::ConversationQuery<'a> {
+    kastellan_db::tasks::turns::ConversationQuery {
+        channel: &dest.channel.0,
+        peer: &dest.peer.0,
+        conversation: &dest.conversation.0,
+        // The asking task's own arrival, never `now()`: a task suspended on an
+        // operator ask must see at resume every turn it saw at first planning.
+        window_anchor: created_at,
+        exclude_task_id: task_id,
+        window_hours: WINDOW_HOURS,
+        limit: MAX_TURNS,
+    }
 }
 
 /// One stored row as a [`Turn`]. Split out so the parse-failure arm is
@@ -182,6 +206,13 @@ pub(crate) struct LoadedConversation {
     /// The turns' ids for the audit row: `Some(vec![])` when the lookup found
     /// nothing, **`None` when it failed** — absence and loss must not render
     /// identically.
+    ///
+    /// Two caveats a reader of the audit row needs. `Some(vec![])` also covers
+    /// "this task has no conversation at all" (a CLI or scheduled task), which
+    /// this value does not distinguish from "a conversation with no earlier
+    /// turns". And these are the ids **loaded**, which is what the floor was
+    /// inherited from — not the ids the planner was shown, which is the
+    /// smaller set after the screen and the budget have had their say.
     pub(crate) task_ids: Option<Vec<i64>>,
     /// Turns the screen blocked, for the forensic rows the caller writes.
     pub(crate) blocks: Vec<view::ConversationBlock>,
@@ -189,9 +220,11 @@ pub(crate) struct LoadedConversation {
 
 /// Load, screen, budget and classify a claimed task's conversation.
 ///
-/// Lifted out of `runner::task_exec::run_one`, which is already over the
-/// 500-line guidance and where this logic could only be exercised through a
-/// live scheduler. Here it is one call with a value in and a value out.
+/// Lifted out of `runner::task_exec::run_one`, where this logic could only be
+/// exercised through a live scheduler. Here it is one call with a value in and
+/// a value out, and `conversation_query_for` and `turn_from_row` are reachable
+/// from unit tests. (`task_exec.rs` as a file is also past the 500-line
+/// guidance, which is about files, not functions.)
 ///
 /// **A failed read fails open**: the task plans with no conversation, exactly
 /// as every channel task did before #701. That is safe precisely because

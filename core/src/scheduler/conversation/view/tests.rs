@@ -26,9 +26,16 @@ fn turn(task_id: i64, user: &str, answer: &str) -> Turn {
     }
 }
 
-/// Total serialised size of a rendered conversation, the unit the budget counts.
+/// Total serialised size of a rendered conversation, **measured as the array
+/// it will become** — brackets, commas and the omission marker included.
+///
+/// Summing the elements (as this did until a review caught it) undercounts by
+/// a couple of dozen bytes, which is exactly the measure `render`'s own doc
+/// disowns: "the element sum undercounts ... does make the doc's bound
+/// untrue". Asserting the weaker quantity meant a regression from `array_len`
+/// back to element-summing passed the whole suite.
 fn rendered_bytes(out: &RenderedConversation) -> usize {
-    out.turns.iter().map(serialised_len).sum()
+    serialised_len(&Value::Array(out.turns.clone()))
 }
 
 #[test]
@@ -282,4 +289,46 @@ fn no_turns_renders_nothing_at_all() {
     let out = render(&[], CONVERSATION_BUDGET);
     assert!(out.turns.is_empty());
     assert!(out.blocks.is_empty());
+}
+
+#[test]
+fn the_returned_array_fits_the_budget_at_every_size_that_drops_a_turn() {
+    // The bound `render` actually promises, swept across the band where the
+    // drop loop engages, rather than asserted at one convenient budget. Each
+    // case measures the ARRAY — the thing that goes in the prompt — so the
+    // framing bytes and the omission marker are inside the bound, not beside
+    // it. This is what makes `ARRAY_FRAMING_BYTES` and the `omitted` vs
+    // `omitted + 1` accounting testable at all.
+    let turns = [
+        turn(1, &"a".repeat(300), &"b".repeat(300)),
+        turn(2, &"c".repeat(300), &"d".repeat(300)),
+        turn(3, &"e".repeat(300), &"f".repeat(300)),
+    ];
+    for budget in (600..=3000).step_by(50) {
+        let out = render(&turns, budget);
+        let measured = serialised_len(&Value::Array(out.turns.clone()));
+        assert!(
+            measured <= budget,
+            "budget {budget}: array measured {measured} bytes\n{:#}",
+            Value::Array(out.turns.clone()),
+        );
+        assert!(!out.turns.is_empty(), "budget {budget}: something must survive");
+    }
+}
+
+#[test]
+fn a_conversation_that_fits_exactly_keeps_every_turn() {
+    // The off-by-one a review found: the drop loop measured the array WITH an
+    // omission marker it had not yet earned, so a conversation that fit
+    // exactly lost its oldest turn to ~22 bytes of a marker that would then
+    // not be emitted. Measure the real array, then ask for exactly that.
+    let turns = [turn(1, "first question", "first answer"), turn(2, "second question", "second answer")];
+    let exact = serialised_len(&Value::Array(render(&turns, CONVERSATION_BUDGET).turns));
+
+    let out = render(&turns, exact);
+    assert_eq!(out.turns.len(), 2, "both turns fit in exactly their own size");
+    assert!(
+        out.turns.iter().all(|t| t.get(OMITTED_TURNS_KEY).is_none()),
+        "nothing was dropped, so nothing is marked omitted",
+    );
 }

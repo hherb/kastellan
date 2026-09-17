@@ -317,10 +317,11 @@ impl PlanRecord {
 
     /// The raw outcomes this record was built from, in step order.
     ///
-    /// Two callers. The suspend path (`scheduler::asks::resume_state_from`)
-    /// serialises `plan` and these outcomes so the resumed run can rebuild the
-    /// record with [`PlanRecord::new`]; and `scheduler::conversation::record`
-    /// (#701) reads them only to tell `Ok` from `Err`, never their text.
+    /// Callers read these to reconstruct or to classify, never to render. The
+    /// suspend path (`scheduler::asks::resume_state_from`) serialises `plan`
+    /// and these outcomes so the resumed run can rebuild the record with
+    /// [`PlanRecord::new`]; `scheduler::conversation::record` (#701) reads them
+    /// only to tell `Ok` from `Err`, never their text.
     /// **Not** for building a planner prompt: these are unscreened, and
     /// [`render_plans_summary`] is the only thing that turns an outcome into
     /// planner-bound text.

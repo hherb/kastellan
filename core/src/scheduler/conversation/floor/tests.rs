@@ -72,13 +72,38 @@ fn an_equal_floor_keeps_its_own_provenance() {
 }
 
 #[test]
-fn a_turn_with_no_record_contributes_nothing() {
+fn a_turn_with_no_readable_class_contributes_nothing() {
+    // No class AND no record: `view::render` shows this turn as `unclassified`
+    // and withholds its text, so contributing no floor loses nothing.
     let mut t = turn_with_class(1, DataClass::Secret);
     t.record = None;
+    t.data_class = None;
     let (floor, source) = inherit_floor(DataClass::Public, ClassificationFloorSource::Default, &[t]);
 
     assert_eq!(floor, DataClass::Public);
     assert_eq!(source, ClassificationFloorSource::Default);
+}
+
+#[test]
+fn a_turn_whose_calls_would_not_parse_still_raises_the_floor() {
+    // ⚠️ The regression this file exists to prevent, and the one a review
+    // found shipped: `inherit_floor` read the class out of `record`, so a
+    // stored record whose `calls` no longer deserialise contributed NO floor —
+    // while `view::render`, which gates on `data_class`, still rendered that
+    // turn's text. A clinical answer would reach a follow-up running at
+    // `Public`. The class must come from the independently-parsed field.
+    //
+    // `a_turn_that_renders_its_text_always_contributes_its_class` in
+    // `conversation::tests` composes this with the renderer, so the two halves
+    // can never drift apart again.
+    let mut t = turn_with_class(1, DataClass::ClinicalConfidential);
+    t.record = None;
+    assert!(t.data_class.is_some(), "the split parse keeps the class");
+
+    let (floor, source) = inherit_floor(DataClass::Public, ClassificationFloorSource::Default, &[t]);
+
+    assert_eq!(floor, DataClass::ClinicalConfidential);
+    assert_eq!(source, ClassificationFloorSource::ConversationInherited);
 }
 
 #[test]

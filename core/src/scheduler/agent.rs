@@ -436,10 +436,16 @@ mod tests {
         // status the conversation renderer can emit must be named in the
         // prompt, or the planner is reading a shape nobody told it about.
         //
-        // The markers come from the renderer's own constants, NOT from
-        // literals copied here. A review found that the hand-copied list had
-        // already gone stale: the renderer could emit a "too large" status the
-        // prompt never mentioned, and the test could not tell.
+        // The statuses and `_omitted_*` markers come from the renderer's own
+        // constants, NOT from literals copied here. A review found that the
+        // hand-copied list had already gone stale: the renderer could emit a
+        // "too large" status the prompt never mentioned, and the test could
+        // not tell.
+        //
+        // The five KEY names below are still literals, because `view.rs`
+        // spells them inline too and there is no constant to bind to — so this
+        // guard's blind spot is exactly that set. Renaming a key in
+        // `render_turn` without touching this list still passes. #711.
         use crate::scheduler::conversation::view::{
             OMITTED_CALLS_KEY, OMITTED_TURNS_KEY, STATUS_TOO_LARGE, STATUS_UNCLASSIFIED,
             STATUS_WITHHELD,

@@ -127,3 +127,126 @@ fn a_payload_without_an_instruction_renders_an_empty_user_line() {
     let turn = turn_from_row(r);
     assert_eq!(turn.user, "");
 }
+
+#[test]
+fn a_turn_that_renders_its_text_always_contributes_its_class() {
+    // ⚠️ The cross-check between the two halves of the split parse, and the
+    // regression a review found shipped: `view::render` gates on
+    // `Turn::data_class` while `floor::inherit_floor` read the class out of
+    // `Turn::record`. For a stored record whose `calls` no longer parse those
+    // two disagree — the text was rendered and the class was not inherited,
+    // which is a clinical answer reaching a follow-up running at `Public`.
+    //
+    // Stated as the invariant rather than as the one shape that broke it: for
+    // ANY row, if the rendered turn carries text, the floor must have risen.
+    // A future change that reintroduces the divergence fails here whatever
+    // shape it takes.
+    for record in [
+        // The shape that broke: readable class, unparseable calls.
+        Some(serde_json::json!({"calls": "not an array", "data_class": "ClinicalConfidential"})),
+        // A well-formed record, so the success path is covered by the same rule.
+        Some(serde_json::json!({"calls": [], "data_class": "ClinicalConfidential"})),
+        // No record at all: no class, and no text either.
+        None,
+    ] {
+        let turn = turn_from_row(row(
+            Some(serde_json::json!({"kind": "text", "body": "the CT report says ..."})),
+            record.clone(),
+        ));
+        let rendered = super::view::render(
+            std::slice::from_ref(&turn),
+            super::view::CONVERSATION_BUDGET,
+        );
+        let shows_text = rendered.turns[0].get("answer").is_some();
+        let (floor, source) = super::floor::inherit_floor(
+            DataClass::Public,
+            crate::scheduler::inner_loop::ClassificationFloorSource::Default,
+            std::slice::from_ref(&turn),
+        );
+
+        if shows_text {
+            assert_eq!(
+                floor,
+                DataClass::ClinicalConfidential,
+                "a turn whose text is rendered must raise the floor: {record:?}",
+            );
+            assert_eq!(
+                source,
+                crate::scheduler::inner_loop::ClassificationFloorSource::ConversationInherited,
+            );
+        } else {
+            assert_eq!(floor, DataClass::Public, "nothing shown, nothing inherited");
+        }
+    }
+}
+
+#[test]
+fn the_query_binds_every_field_from_the_asking_task() {
+    // ⚠️ The wiring a review found entirely unpinned. Each of these bindings
+    // had a mutant that survived the whole suite, because the db tests pass
+    // their own literals and never see what the caller actually sends:
+    //
+    //  * `window_anchor` ← the asking task's `created_at`, NOT `now()`. This
+    //    is the one the db module argues for at length: a task suspended on an
+    //    operator ask must see at resume every turn it saw at first planning.
+    //  * `window_hours` ← `WINDOW_HOURS`, not a literal that can drift from it.
+    //  * `limit` ← `MAX_TURNS`, same reason.
+    //  * `exclude_task_id` ← the asking task, so it cannot read itself.
+    //  * the three conversation keys, each in its own field — a transposition
+    //    of `peer` and `conversation` hands one peer another peer's turns, and
+    //    the named-field struct only makes that a compile error if the
+    //    assignment here is right in the first place.
+    use crate::channel::ask_message::AskDestination;
+    use crate::channel::{ChannelId, ConversationId, PeerId};
+
+    let dest = AskDestination {
+        channel: ChannelId("matrix".into()),
+        peer: PeerId("@horst:example.org".into()),
+        conversation: ConversationId("!room:example.org".into()),
+    };
+    let created_at = time::OffsetDateTime::from_unix_timestamp(1_757_000_000).expect("timestamp");
+    let q = super::conversation_query_for(&dest, 187, created_at);
+
+    assert_eq!(q.window_anchor, created_at, "the anchor is the asking task's arrival");
+    assert_eq!(q.window_hours, super::WINDOW_HOURS);
+    assert_eq!(q.limit, super::MAX_TURNS);
+    assert_eq!(q.exclude_task_id, 187);
+    assert_eq!(q.channel, "matrix");
+    assert_eq!(q.peer, "@horst:example.org");
+    assert_eq!(q.conversation, "!room:example.org");
+}
+
+#[test]
+fn a_block_audit_payload_carries_the_forensics_and_never_the_text() {
+    // `block_audit_payload`'s doc says it is "pure, so the shape is testable
+    // without a pool" — and then nothing tested it. Its only coverage was a
+    // PG-gated e2e asserting three of its eight keys, so on any host where
+    // Postgres skips, the function was wholly uncovered. Its sibling
+    // `sink_block_audit_payloads` has three unit tests.
+    let block = super::view::ConversationBlock {
+        task_id: 186,
+        score: 0.93,
+        reason_codes: vec!["instruction_override"],
+        body_sha256: "a".repeat(64),
+        body_byte_len: 4096,
+    };
+    let payload = super::block_audit_payload(187, &block);
+
+    assert_eq!(payload["task_id"], 187, "the task that was planning");
+    assert_eq!(payload["turn_task_id"], 186, "the earlier turn that was blocked");
+    assert_eq!(payload["decision"], "block");
+    assert_eq!(payload["tier"], super::view::TIER_CONVERSATION);
+    assert_eq!(payload["reason_codes"][0], "instruction_override");
+    assert_eq!(payload["body_byte_len"], 4096);
+    assert_eq!(payload["body_sha256"].as_str().map(str::len), Some(64));
+    assert!(payload["score"].as_f64().is_some_and(|s| (s - 0.93).abs() < 1e-6));
+
+    // The screened text itself must never reach the row — the hash and the
+    // length are the whole point of carrying those two fields instead.
+    let serialised = payload.to_string();
+    assert_eq!(
+        serialised.matches("instruction").count(),
+        1,
+        "only the reason code mentions it; no screened body leaked in: {serialised}",
+    );
+}

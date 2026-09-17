@@ -1,7 +1,8 @@
 //! Classification-floor provenance for the inner loop.
 //!
-//! A task's `classification_floor` can be set four ways (operator flag, CLI
-//! keyword inference, an agent mid-task raise, or the default). [`ClassificationFloorSource`]
+//! A task's `classification_floor` can be set five ways (operator flag, CLI
+//! keyword inference, an agent mid-task raise, inheritance from an earlier
+//! turn of the same conversation, or the default). [`ClassificationFloorSource`]
 //! records *which*, and [`apply_floor_raise`] is the one place the agent-raise
 //! path is taken. Both are re-exported from [`super`] so existing paths
 //! (`scheduler::inner_loop::ClassificationFloorSource`) keep resolving.

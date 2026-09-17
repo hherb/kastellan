@@ -7,11 +7,17 @@
 -- and settled on a different booking than the answer it was following up on.
 --
 -- (1) `turn_record` — what THIS task did, for the next turn to read:
---     {"calls": [{"tool","method","parameters","returns"}], "data_class": "..."}
+--     {"calls": [{"tool","method","parameters","returns"}],
+--      "_omitted_calls": <int, present only when calls were dropped>,
+--      "data_class": "..."}
 --     Written by `tasks::finalize` in the same UPDATE that makes the task
 --     terminal, so the record cannot disagree with the task it describes.
---     NULL for every non-channel task and for every task that finished
---     before this migration.
+--     NULL for: every non-channel task; every task that finished before this
+--     migration; and every channel task that never reached `finalize` with a
+--     record — `sweep_crashed` and `mark_cancelled` write state and
+--     finished_at only, and the pre-plan denial and failure paths pass NULL.
+--     The consumer treats NULL as "show that this turn happened, and nothing
+--     about what was in it".
 --
 -- (2) The lookup index. The conversation query filters on three payload keys
 --     and orders by finished_at; `tasks.payload` had no index at all, so
