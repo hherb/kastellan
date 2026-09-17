@@ -8,7 +8,8 @@
 > which holds the verbose pre-prune version of everything summarised here.
 
 **Last updated:** 2026-09-17 ·
-**Recent PRs, newest first:** [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational
+**Recent PRs, newest first:** [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob contract + the positive control: #714, #622, #664),
+[#717](https://github.com/hherb/kastellan/pull/717) (backlog triage + the stale ROADMAP line), [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational
 continuity for channel tasks), [#708](https://github.com/hherb/kastellan/pull/708) (#707, docs only — the Obscura assessment corrected and the V8 bump attempted),
 [#702](https://github.com/hherb/kastellan/pull/702) (#677, the planner's labelled result view),
 [#694](https://github.com/hherb/kastellan/pull/694) (#617, the bounded request summary),
@@ -22,7 +23,7 @@ continuity for channel tasks), [#708](https://github.com/hherb/kastellan/pull/70
 (from #709's third review round); [#693](https://github.com/hherb/kastellan/issues/693),
 [#695](https://github.com/hherb/kastellan/issues/695)–[#697](https://github.com/hherb/kastellan/issues/697)
 (from #694); [#691](https://github.com/hherb/kastellan/issues/691) (from #692). ·
-**The DGX runs #702's code**, deployed 2026-09-14 from the PR branch for its live acceptance run. #702's branch tip and its squash commit on `main` are **content-identical** (verified 2026-09-15, empty `git diff`), and #708 touched no code, so the running daemon already matches `main`. Only the DGX checkout is off `main`; re-point it with `scripts/upgrade_from_git.sh` at the next deploy. Rootfs images last rebuilt 2026-09-08.
+**The DGX runs `main` and carries #709**, redeployed 2026-09-17 via `scripts/upgrade_from_git.sh`. Verified rather than assumed: checkout at `main`, `target/release/kastellan` rebuilt, the installed copy byte-identical to it (matrix worker sha256 matching on both sides), all three units active, and **migration 0026's `tasks.turn_record` column present in the live DB** — that last one is what would silently void a #677 re-measure. Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -55,147 +56,138 @@ continuity for channel tasks), [#708](https://github.com/hherb/kastellan/pull/70
 
 ## Current state
 
-### This session (later, 2026-09-17): backlog triage — 150 open issues
+### This session (2026-09-17): one REQUIRE contract, and a gate that fails on zero tests
 
-No review target existed (clean tree, `main` in sync with `origin`, no PR), so the session became a
-triage of every open issue. Full record with the evidence behind each decision:
-[`notes/2026-09-17-backlog-triage.md`](../notes/2026-09-17-backlog-triage.md).
+PR [#720](https://github.com/hherb/kastellan/pull/720) — closes [#714](https://github.com/hherb/kastellan/issues/714),
+[#622](https://github.com/hherb/kastellan/issues/622), [#664](https://github.com/hherb/kastellan/issues/664).
+The false-green-gate cluster, fixed as **one contract** rather than three patches, because fixing it
+one issue at a time is what kept regenerating it.
+
+> **Every gate needs a REQUIRE knob *and* a positive control that fails when zero tests ran.**
+
+- **`tests_common::require::RequireKnob` is the one vocabulary** — flag dialect, skip/fail split,
+  out-of-dialect warning, and the new `[E2E]` success marker. The knob is **data**
+  (`RequireKnob::new(env, tier)`), so a tier is one `const` and the panic still names the right
+  variable. **Three hand-rolled copies folded in:** gliner (#653), micro-VM (#667), and the new
+  Postgres / sandbox / guard knobs. The micro-VM copy had *already* diverged once — it called
+  `unmet_action` bare while its sibling warned, so `=y` silently degraded to `Skip`.
+- ⚠️ **A knob alone was never enough, and that is the whole of #664.** It fires only from inside a
+  test body, so a **filtered-out** or **renamed-out** run emits no `[SKIP]` and exits 0. Inferring
+  "it ran" from the absence of a `[SKIP]` is unsound. `RequireKnob::announce` emits `[E2E]` on the
+  **success** path and **only under a truthy knob**, so every such line means *a demanded
+  precondition was actually met here* — and `scripts/run-e2e-gate.sh` asserts floors on that count
+  **and** on tests passed.
+- ⚠️ **Measured, both directions, on `guard_tier_e2e` against a host with no Postgres:**
+
+  | | `[SKIP]` | `[E2E]` | result | exit |
+  | --- | --- | --- | --- | --- |
+  | no knob | 11 | 0 | **`21 passed`** | **0** ← the false green |
+  | knob set | 0 | 0 | panics naming the knob | **1** |
+  | healthy host + knob | 0 | **44** | `21 passed` | 0 |
+
+  The 44 reconciles exactly: 11 PG-dependent tests × 4 preconditions; the other 10 are hermetic.
+  **That "21 passed / exit 0" row is precisely what #622 said `bootstrap()` could report.**
+- **Negative control on the control:** a deliberate name-filter typo gives `0 passed; 21 filtered
+  out`, `cargo exit 0` — and `run-e2e-gate.sh` **exits 1** naming #664's shape. Checked the script's
+  own exit status directly, not through a pipe: ⚠️ **the Bash tool runs zsh, whose arrays are
+  1-indexed, so `${PIPESTATUS[0]}` is EMPTY there** and a piped check silently reads `tail`'s status.
+- ⚠️ **Deliberately no umbrella variable.** The two hosts differ in what they can legitimately run —
+  the Mac has no KVM — so one "demand everything" flag would turn honest skips into failures and get
+  exported `=0`. Profiles in the gate script set the right *set*, so the operator still types one
+  command. Knobs: `KASTELLAN_PG_REQUIRE_E2E` (Postgres **and** the supervisor probe — one variable
+  because they gate the same tier at 298/303 near-always-paired call sites, and two would let a
+  half-set gate look armed), `KASTELLAN_SANDBOX_REQUIRE_E2E`, `KASTELLAN_GUARD_REQUIRE_E2E`, plus the
+  two that existed.
+- ⚠️ **The micro-VM profile would have been a false gate as first written**, twice over: it named a
+  `--test microvm_roundtrip_e2e` **that does not exist**, and it omitted `-- --ignored`, without
+  which the whole Firecracker tier reports green having booted no VM. Its suite set is now
+  discovered **by grep**, and the script refuses to run when discovery returns zero.
+- ⚠️ **#691 is a decision, and the decision is already in the tree.** Its trigger — the
+  `xargs touch` cold-clippy recipe — survives only in `archive/` snapshots; the live recipe is a
+  dedicated `CARGO_TARGET_DIR`. Moved from this rolling file into `CLAUDE.md`, where it will not be
+  pruned away. The mtime class itself is *not* removed; see the issue for the options.
+
+⚠️ **The gate found #718 empirically on its first crossing, and there is deliberately NO `sandbox`
+profile because of it.** Run against `-p kastellan-sandbox --all-targets` with the knob set: **147
+tests passed, 0 `[E2E]`, 10 `[SKIP]`.** `kastellan-sandbox` does not depend on `tests-common`, so its
+suites hand-roll their skips and cannot see the knob — **the tier `CLAUDE.md` calls the canonical
+false green is the one that cannot be gated at all.** A profile red on every host trains everyone to
+ignore a red gate, so the measurement is a comment in the script instead; adding the profile is the
+acceptance test for whichever PR closes #718.
+
+⚠️ **A finding much larger than #622 named, filed as [#718](https://github.com/hherb/kastellan/issues/718):**
+**92 hand-rolled `[SKIP]` emissions across 47 files** bypass `skip_line` *and* every knob. This
+file's own claim that "every `[SKIP]` renders through `skip_line`" is **false**. `microvm::guard`
+already refuses that shape — for micro-VM suites only; generalising its scan is the fix, and it is
+too large to bolt onto this PR. [[guard-shares-the-census-blind-spot]]
+
+⚠️ **The Mac sweep is RED on `main`, and it is not this branch:**
+[#719](https://github.com/hherb/kastellan/issues/719) — 3 of 5 `gliner_relex_e2e` host-mode tests
+fail deterministically with a contentless `Protocol(EarlyExit)`. **Proven pre-existing by stashing
+the whole branch and re-running on `6c7fc45d`: identical three failures, 3.20 s vs 3.16 s**; the pop
+restored the branch byte-identically (md5-checked). Ruled out: load flake (fails in isolation), a
+dead `.venv` (the #651 shape — `readlink` gives a real macOS interpreter and `import gliner` works),
+absent weights (1.2 GB staged), a broken worker (spawned by hand it speaks clean JSON-RPC), and a
+stale `kastellan-worker-lockdown-exec` (rebuilt; still fails). **The container variant passes in the
+same run**, so it is specific to the host-mode sandboxed spawn. ⚠️ **And `cargo test --workspace`
+fails FAST, so this one suite aborted the sweep after 39 of ~179 suites** — use `--no-fail-fast`
+until it is fixed, or everything after it is invisible.
+
+**Also this session:** the backlog taxonomy the triage note's step 3 asked for —
+`docs/devel/notes/label-backlog.sh` gives every one of the 137 open issues exactly one `area:*` plus
+the cross-cutting `false-green` / `needs-live-host` / `roadmap` themes, re-runnable, with the
+keyword classifier's ~20 known misreads pinned in an override table (`Guard tool_doc() against
+drift` is a **verb**; `per-task out dir` contains the asks rule's literal `"ask "`).
+
+### Earlier this session (2026-09-17): backlog triage — 150 open issues, now 137
+
+PR [#717](https://github.com/hherb/kastellan/pull/717). Full evidence:
+[`notes/2026-09-17-backlog-triage.md`](../notes/2026-09-17-backlog-triage.md); the actions are the
+two scripts beside it. Executed and re-verified against GitHub: 12 closures, 3 retitles, #655's
+ruleset, and (this session) the label taxonomy.
 
 ⚠️ **The ROADMAP is the accurate source and the GitHub issues are the stale mirror** — the reverse
-of what the six epics assumed. Closure is healthy for PR-driven work (#661–#701 were each closed by
-their fixing PR) and **zero for roadmap-era work: 58 issues (39%) were filed 2026-06 or earlier and
-never touched since.** The cause is mechanical — **~7% of issues carry any label** (10 of 150), so
-the old cluster cannot be filtered for and stays invisible.
+of what the six epics assumed. Closure is healthy for PR-driven work and was **zero for roadmap-era
+work: 58 issues (39%) filed 2026-06 or earlier, untouched.** The cause was mechanical — **~7% of
+issues carried any label** — which the taxonomy now fixes. One real ROADMAP defect found and fixed:
+the Phase 4 `python-exec` micro-VM line had stayed `[ ]` while duplicating two `[x]` entries.
 
-⚠️ **Staged, NOT executed.** The session's sandbox blocked `gh`, so **every issue below is still
-OPEN**: close #227/#215/#216 (shipped, each against a ROADMAP `[x]`), #214/#219 (struck through as
-*rejected 2026-06-12*), #213 (the ROADMAP supersedes the IMAP framing in words; `workers/email-in`
-is a localmail REST client and nothing here speaks IMAP), #203–#208 (epic mirrors whose every link
-still points at `hherb/hhagent`, renamed two days after they were filed), #655. The runnable script
-and the per-issue rationale are in the note.
+### Earlier: #701 — a follow-up reads its own conversation (PR #709, merged)
 
-⚠️ **#655 is the precondition for the whole false-green-gate cluster** (#714, #664, #622, #691, and
-#237's absent macOS leg — against #679, #667, #682, #684, #687 already closed in the same class).
-Verified still true: `protect_main` carries only `deletion` + `non_fast_forward`, so **every CI job
-is advisory** — a gate that cannot block a merge is a notification. Safe to turn on:
-`linux-check.yml` triggers on `pull_request:` with **no `paths` filter**, so all three jobs report
-on every PR and no docs-only PR can deadlock on a check that never reports. Fixing the cluster
-one issue at a time keeps regenerating it; one contract — every gate needs a REQUIRE knob **and** a
-positive control that fails when zero tests ran — retires the class.
+Design + plan under `docs/superpowers/`. What still binds:
 
-**One real ROADMAP defect found and fixed — the only tree change this session made:** the Phase 4
-line for the `python-exec` micro-VM backend had stayed `[ ]` since the original seeding while
-duplicating two `[x]` entries (Firecracker slice 1, PR #364; Apple `container`, 2026-05-21), its
-text still describing the work at "discovery spike … verdict COMMIT" stage.
-
-### Earlier this session: #701 — a follow-up reads its own conversation
-
-Design `docs/superpowers/specs/2026-09-16-conversation-continuity-design.md` (with a D2
-amendment), plan `docs/superpowers/plans/2026-09-16-conversation-continuity.md`. What binds:
-
-**The defect, measured:** every channel message became a task carrying only its own sentence, so
-"from where to where did those bookings go?" had no referent. A finishing channel task now writes
-`tasks.turn_record` = `{calls, data_class}` in the **same `finalize` UPDATE** that makes it
-terminal, and the next task in the same `(channel, peer, conversation)` reads up to 3 such turns,
-renders them screened and budgeted, and inherits their classification.
-
-- **Calls, not results.** A turn carries the successful steps' `{tool, method, parameters,
-  returns}`. The identifier the next turn needs is the one the last turn **passed**
-  (`{message_id, filename}`), so this is both smaller than results and more useful — and no tool
-  output crosses a task boundary.
-- ⚠️ **The window has NO upper bound, and that is a decision, not an oversight.** The back edge is
-  anchored on the asking task's `created_at` (so a task suspended on an operator ask never *loses*
-  turns), but an upper bound at that same instant **blinds the case the feature exists for**: a live
-  turn takes 2.5–4.5 min, so a user typing again while the bot works produces a task whose
-  `created_at` precedes the previous turn's `finished_at`. A mutant restoring the bound is killed by
-  `a_turn_that_finished_after_the_asking_task_arrived_is_still_a_turn`.
-- ⚠️ **A turn we cannot classify is NOT shown** (`status: "unclassified"`). The class is parsed
-  **independently of the calls**, so a future shape change to `calls` can cost the calls but never
-  the class. Before that fix, a turn with a NULL or unparseable record rendered its *text* while
-  contributing nothing to the floor — and **every turn predating migration 0026 has a NULL record**,
-  so the first follow-up in every live room would have hit it. ⚠️ **That sentence was true of the
-  renderer and FALSE of the floor until the third review round** — see below; the independent field
-  existed and nothing read it.
-- ⚠️ **The floor is inherited from every turn LOADED**, not from those the screen kept. Otherwise one
-  catalogue phrase in an earlier answer would both withhold that turn *and* drop the conversation's
-  floor to `Public` — letting an attacker choose what the follow-up may do. New provenance
-  `conversation_inherited`; **rule I2 then requires every step at or above it**, so a follow-up can
-  be stricter than the same sentence sent fresh.
-- **Screening is sealed, not conventional.** `view::admitted::Admitted` has a field private to its
-  inner module, so a candidate that skips the screen does not compile. The earlier free function was
-  bypassable and a mutant proved it: it routed the budget-clamped renderings straight to the output
-  and survived the whole suite.
-- **`plan.formulate` gains `conversation_task_ids`:** `[]` when the lookup found nothing, **`null`
-  when it failed** (a failed read fails open — nothing is carried, so nothing needs classifying).
-  Key-set pin 28 → 29.
-- ⚠️ **Two reviews, 46 mutants, 19 survivors — all now dead.** The db review found the window, the
-  exclude clause, the channel filter and 4 of 7 states untested behind a `LIMIT 3` that excluded the
-  out-of-window row regardless. The core review found the sealed-screen gap, inheritance-over-
-  rendered (**the design's own planned mutant**), an unscreened `user` key, and a last-turn-drop
-  test whose assertion the omission marker itself satisfied.
-- ⚠️ **My own first mutation harness was a false green:** `--exact` with a bare test name matches
-  **nothing** for a lib test, so 9 mutants "survived" against **zero tests**, exit 0. Every mutation
-  run now requires its killer to run and pass on unmutated code first.
-- ⚠️ **A fresh worktree has NO worker binaries, and `cargo test --workspace` does not create them.**
-  Daemon-spawning e2es then fail closed at boot with `Error: building egress force-routing config`
-  — 9 failures that look like a regression and are a missing prerequisite. **`cargo build
-  --workspace` first**; all 9 passed after it.
-
-#### Third review round on the same branch (2026-09-17) — the split parse was never wired
-
-Five read-only reviewers (code, tests, error handling, type design, comments), each finding the same
-defect independently. Fixes then verified by planting each original defect back and watching the new
-test fail.
-
+- **A finishing channel task writes `tasks.turn_record` = `{calls, data_class}`** in the *same*
+  `finalize` UPDATE that makes it terminal; the next task in the same `(channel, peer,
+  conversation)` reads up to 3, renders them screened and budgeted, and inherits their floor.
+- **Calls, not results** — `{tool, method, parameters, returns}`. The identifier the next turn needs
+  is the one the last turn **passed**, so this is smaller than results *and* more useful, and no
+  tool output crosses a task boundary.
+- ⚠️ **The window has NO upper bound, and that is a decision.** A live turn takes 2.5–4.5 min, so a
+  user typing again while the bot works produces a task whose `created_at` precedes the previous
+  turn's `finished_at`. A bound there blinds the case the feature exists for.
+- ⚠️ **The floor is inherited from every turn LOADED, not from those the screen kept** — otherwise
+  one catalogue phrase in an earlier answer both withholds that turn *and* drops the conversation's
+  floor, letting an attacker choose what the follow-up may do.
+- **Screening is sealed, not conventional**: `view::admitted::Admitted` has a module-private field,
+  so a candidate that skips the screen does not compile. The earlier free function was bypassable
+  and a mutant proved it.
 - ⚠️ **A security property can be documented, tested, and absent from the code.** `Turn::data_class`
-  was added *specifically* so a record whose `calls` stop parsing still yields a class — with a long
-  comment saying "the floor a follow-up inherits comes from here". **`inherit_floor` read
-  `t.record.data_class` instead**, so for that exact row the text rendered and the floor did not:
-  a `ClinicalConfidential` answer reaching a follow-up planned at `Public`, which is verbatim the
-  scenario the comment said was prevented. `git show ff964274 -- .../conversation/floor.rs` is
-  **empty** — the commit that introduced the field and its rationale never touched the consumer.
-- ⚠️ **The mutation proof defended the bug**, because a test encoded it.
-  `a_turn_with_no_record_contributes_nothing` built the divergent state (`record: None`,
-  `data_class: Some(Secret)`) and asserted the floor stays `Public`; two further tests pinned the
-  other legs in two other files. **Three tests, one property each, none composing them.** A mutant
-  flipping the field would have been *killed*. The fix is one line; the test correction is the real
-  work. New `a_turn_that_renders_its_text_always_contributes_its_class` states it as an invariant
-  over any row — if the rendered turn carries text, the floor must have risen — so a future
-  divergence fails whatever shape it takes. [[mutation-proof-counts-only-mutants-you-tried]]
-- ⚠️ **A denylist over an extensible enum is a guard with an expiry date.** #71's
-  `parse_classification_floor_source_from_payload` rejected `AgentRaised` on a *structural* match,
-  with a comment arguing that binding to the variant survives a rename. It does — and says nothing
-  about an **addition**, so #701's new `ConversationInherited` walked straight through and a producer
-  could stamp a floor as inherited from a conversation never read. **Now an allowlist**
-  (`Operator | CliInferred | Default`), so every future variant is reserved until admitted on
-  purpose, plus a census test that makes the decision compulsory. [[guard-shares-the-census-blind-spot]]
-- ⚠️ **A test helper measured the quantity the production comment disowns.** `render`'s doc says the
-  element sum "does make the doc's bound untrue" and `array_len` exists to measure the array — while
-  `rendered_bytes` in the tests summed elements, so a regression back to element-summing passed.
-  Also fixed: the drop loop measured an omission marker it had not yet earned (`omitted + 1`), so a
-  conversation that fit *exactly* lost its oldest turn to ~22 bytes.
-- Also: conversation `injection.blocked` rows are written on the **first run only** — `run_one` is
-  re-entered on every resume and re-screens the same turns, and `sink_block_audit_payloads`
-  documents that identical hazard one module over; the clamp branch is guarded on `len() == 1`
-  rather than assuming it; `window_hours` out of range now errors instead of becoming a
-  245,000-year window; `ORDER BY` gained an `id DESC` tiebreaker; the silent `calls` serialisation
-  drop now warns and marks `_omitted_calls`; and the prompt documents that `calls` may be **absent**
-  and that `parameters` obeys the `result_view` pruning rules.
-- **Deferred, filed:** [#710](https://github.com/hherb/kastellan/issues/710) (a failed, crashed or
-  denied channel turn leaves no record — so "what went wrong with that?" inherits nothing; the
-  `finish!` comment claiming every exit was corrected),
-  [#711](https://github.com/hherb/kastellan/issues/711) (the prompt drift guard's key names are
-  literals with no constant to bind to — its blind spot is the set its comment claimed),
-  [#712](https://github.com/hherb/kastellan/issues/712) (`REPLIED_STATES` ↔ `notify_task_completed`
-  is enforced by review, and the test is blind to the direction that loses turns),
-  [#713](https://github.com/hherb/kastellan/issues/713) (a resumed task loses its floor, storing a
-  turn record whose class is **wrong** rather than missing — so the renderer cannot withhold it),
-  [#714](https://github.com/hherb/kastellan/issues/714) (no `KASTELLAN_PG_REQUIRE_E2E` knob, so a
-  mis-provisioned host reports the same count having asserted nothing),
-  [#715](https://github.com/hherb/kastellan/issues/715) (the `Admitted` seal ends at `render`'s
-  return; a `ScreenedTurns` newtype would carry it to the prompt),
-  [#716](https://github.com/hherb/kastellan/issues/716) (`conversation_task_ids` names the shown set
-  and holds the loaded one).
+  existed *specifically* so a record whose `calls` stop parsing still yields a class — and
+  `inherit_floor` read `t.record.data_class` instead, so that row rendered its text with no floor:
+  a `ClinicalConfidential` answer reaching a follow-up planned at `Public`. **The mutation proof
+  defended the bug, because three tests each pinned one leg and none composed them.**
+  [[mutation-proof-counts-only-mutants-you-tried]]
+- ⚠️ **A denylist over an extensible enum is a guard with an expiry date** — #71's floor-source
+  parser rejected `AgentRaised` structurally, said nothing about an *addition*, and #701's new
+  `ConversationInherited` walked straight through. Now an allowlist plus a census test.
+  [[guard-shares-the-census-blind-spot]]
+- ⚠️ **A fresh worktree has NO worker binaries, and `cargo test --workspace` does not create them** —
+  9 daemon e2es then fail closed at boot and look exactly like a regression.
+  [[worktree-has-no-worker-binaries]]
+- **Deferred, filed:** [#710](https://github.com/hherb/kastellan/issues/710)–[#713](https://github.com/hherb/kastellan/issues/713),
+  [#715](https://github.com/hherb/kastellan/issues/715), [#716](https://github.com/hherb/kastellan/issues/716)
+  (#714 closed by #720).
+
 
 ### Previous session: #677 — the planner reads a tool result as labelled JSON
 
@@ -368,9 +360,11 @@ slice (e) is #681's anchor index, which makes `handoff`'s byte-offset recovery p
 Likely subsumes #604 and #612 by removing their premise. ⚠️ **The polarity inverts to fail-closed** —
 today a document past the cap is silently unscreened — which needs its own test.
 
-**THEN, cheap and long overdue:** [#655](https://github.com/hherb/kastellan/issues/655) — `main` has
-**no required status checks**, so clippy, the matrix build and `python-lock-check` can all go red and
-still merge. A repo-settings change, not code.
+**The false-green-gate cluster is now mostly closed** — #655 (required checks), #714, #622, #664 —
+leaving [#691](https://github.com/hherb/kastellan/issues/691) (a decision: the mtime class itself,
+whose trigger is gone) and [#718](https://github.com/hherb/kastellan/issues/718) (**92 hand-rolled
+`[SKIP]`s in 47 files** bypass every knob; generalise `microvm::guard`'s scan). #237's absent macOS
+CI leg is the remaining structural one.
 
 **THEN the guard arc:** [#612](https://github.com/hherb/kastellan/issues/612) — a design call rather
 than a patch; #616 unblocked its favoured option. Beside it, both cheap:
@@ -477,11 +471,10 @@ re-derives them: egress #242, #251, #304 (needs a controllable TLS origin), #260
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
+| **Mac** ([#720](https://github.com/hherb/kastellan/pull/720), the REQUIRE contract — **the gate that stands**) | branch tip | **4322 / 8 / 29**, **179 suites**, `TEST_EXIT=101`, **23 `[SKIP]`**, **0 `[E2E]`** (correct: no knob was set, so the positive control stays silent in a plain run). ⚠️ **Of the 8, five pass individually** — `asks_e2e` 35/35 and `conversation_turns_e2e` 9/9, both failing under the sweep with `Connect("the database system is starting up")`, the per-test-cluster contention of [#548](https://github.com/hherb/kastellan/issues/548)/[#676](https://github.com/hherb/kastellan/issues/676). **The remaining 3 are [#719](https://github.com/hherb/kastellan/issues/719) and are NOT this branch** — proven by stashing the whole branch and re-running on `6c7fc45d`: identical three failures. So the effective result is **4327 / 3 / 29**. ⚠️ **The delta reconciles EXACTLY at +12** over the 4318 row below: **11 new `#[test]` in `require.rs` + 1 new doc-test** (`require.rs - require (line 45) - compile ... ok`) [[ignore-fenced-doc-example-moves-ignored-count]]. ⚠️ **The first sweep of this branch was itself a false green:** `cargo test --workspace` **fails fast**, so `gliner_relex_e2e` aborted it after **39 of 179 suites** — 127 suites invisible at a verdict that looked like a verdict. **Use `--no-fail-fast`.** ⚠️ **The DGX leg is OWED** — both supervisor backends compile on one host each | **exit 0**, zero warnings, all **27** crates by `Checking kastellan` count, forced cold with `CARGO_TARGET_DIR=$HOME/.cargo-clippy-720` — **never** by touching sources, which falsifies the #687 image gate (#691) | **23** |
 | **Mac + DGX** ([#709](https://github.com/hherb/kastellan/pull/709), #701 — **third review round, the gate that stands**) | `d6698013` | **DGX 4453 / 0 / 61**, 179 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (all gliner, opt-in). **Mac 4318 / 0 / 29**, 179 suites, `TEST_EXIT=0`. ⚠️ **Both deltas are +10 and reconcile exactly** against the row below (DGX 4443, Mac 4308): 10 new `#[test]` in the diff (3 conversation, 1 floor, 1 record, 2 view, 2 task_exec, 1 db e2e), and **each of the 10 was grepped out of the DGX log by name as `... ok`** rather than inferred from the total. `KASTELLAN_PG_BIN_DIR` set on both hosts, so every Postgres suite ran for real — on the DGX the proof is that **zero of the 4 skips are PG** (all four are the gliner tier), and the PG-gated `a_task_that_is_not_a_channel_task_is_not_a_turn` passed. ⚠️ **The Mac gate was re-run after a post-sweep edit** — the first sweep was green, then the clamp block was re-indented, which made that sweep a gate on a revision that no longer existed [[never-edit-tree-during-a-sweep]]. Both headline fixes verified by planting the original defect back and watching the new test fail, and the `kind='channel'` mutant killed live against PG | **DGX exit 0** and **Mac exit 0**, `--workspace --all-targets -D warnings`, zero warnings, all 27 crates. **This also clears the DGX clippy run the row below records as owed** | **4** DGX (gliner only), 15 Mac |
 | **Mac + DGX** ([#709](https://github.com/hherb/kastellan/pull/709), #701 — **the gate that stands**) | branch tip `ff964274` | **DGX 4443 / 0 / 61**, 179 suites, `TEST_EXIT=0`, **4 `[SKIP]`** (gliner, held). **Mac 4308 / 0 / 29**, 179 suites, **86 `[SKIP]`**. ⚠️ **Both deltas are +61 and reconcile EXACTLY against a measured baseline, not an estimate:** `cargo test --workspace -- --list` on the DGX gives **4504 on the branch against 4443 on `main`**, and the static count of new `#[test]` + `#[tokio::test]` in the diff is also 61. 179 suites = 177 + the two new test binaries. ⚠️ **And the measurement corrected a carried estimate:** `main`'s DGX total is **4382 runnable + 61 ignored**, where the #702 row above implies ~4360. Extrapolating one row from the next drifts; `-- --list` on both revisions costs one compile and settles it. ⚠️ **The Mac's 86 skips (not ~340) are because `KASTELLAN_PG_BIN_DIR` was exported**, so every Postgres-gated suite ran for real here — including all 10 of this branch's own PG tests. ⚠️ **The Mac sweep first reported `TEST_EXIT=101` with 9 failures in three daemon-spawning suites, and that was a missing PREREQUISITE, not a regression:** a fresh worktree has no worker binaries and `cargo test --workspace` does not build them, so the daemon fails closed at boot (`Error: building egress force-routing config`). After `cargo build --workspace`, all 9 pass (6 + 2 + 1). The DGX, whose checkout had the binaries, was green throughout | **Mac** `--workspace --all-targets --locked -D warnings` exit **0**, zero warnings, all **27** workspace crates, forced cold with `CARGO_TARGET_DIR=$HOME/.cargo-clippy-701` (never by touching sources, which would falsify the #687 image gate). **The DGX clippy run is still owed** | **86** Mac (PG live), **4** DGX |
-| **Mac** ([#702](https://github.com/hherb/kastellan/pull/702) second review round) | the round's commit on the branch | **Full sweep 4244 / 0 / 29**, 177 suites, `TEST_EXIT=0` — exactly the predicted +22 over the row below — run **before** the review of the fix round, whose fixes then added **+3** tests (a full sweep would be **4247**). After those fixes, re-run in full: `kastellan-core --lib` **2090 / 0 / 1**, `kastellan-cli` 96, `kastellan-worker-mail` 141 + 3 e2e. **The DGX was not re-run this round.** | exit **0**, **27** crates, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-702`), after the last source edit | **not audited**: the sweep ran without `--nocapture`, so libtest swallowed the `[SKIP]` lines — do not compare this row's skip column |
 | **Mac + DGX** ([#702](https://github.com/hherb/kastellan/pull/702), #677 — **the gate that stands**) | **`cc555f90`** (branch tip) | **DGX 4357 / 0 / 61**, 177 suites, `TEST_EXIT=0`, 0 `[WARN]`. **Mac 4222 / 0 / 29**, 177 suites, 0 `[WARN]`. **Both exactly as predicted** from the static `#[test]` name diff: +33 over `main` (DGX 4324, Mac 4189) — 28 in `result_view`, 5 net in `summary`; host gap **135**, unchanged. ⚠️ **The Mac `TEST_EXIT` is 101 with one failure that is the host, not the branch:** `syspolicyd` had re-saturated; five suites wedged at exec (killed at 15 min, 0 CPU) and `egress_force_routing_e2e` timed out waiting for its sidecar to start right after the restart. All six pass individually, which is where 4213 + 1 + 8 = 4222 comes from | exit **0** on both, **27** workspace crates each by count of `Checking kastellan` lines; the DGX run forced cold with `CARGO_TARGET_DIR=$HOME/.cargo-clippy-677` after its first pass finished suspiciously in 12 s | **340** Mac (absent-Postgres), **4** DGX (gliner, held) |
-| **Mac + DGX** ([#694](https://github.com/hherb/kastellan/pull/694), #617) | **`65899e9c`** (branch tip; squashed to `8e0c10f4`) | **Mac 4185 / 0 / 29**, **DGX 4320 / 0 / 61**, both 177 suites, 0 `[WARN]`. #694's own review round then added **+4** before merge, so `main` is **DGX 4324** — confirmed by #677's pre-review DGX sweep landing at exactly 4324 + 22 = **4346**. The Mac run needed a `syspolicyd` repair and four suites re-run individually | exit 0 on both, 27 crates | 296 Mac, 4 DGX |
 
 Older rows are in the [`archive/`](archive/) snapshots.
 
@@ -525,9 +518,16 @@ new `#[ignore]` is usually a doc-test** [[ignore-fenced-doc-example-moves-ignore
 fake.** The four gliner-relex venv skips were not "this host is unstaged" — the DGX's `.venv` was a
 **copy of the Mac's**, `bin/python` pointing at a path that cannot exist on Linux. `readlink` before
 believing a skip, and prefer a `REQUIRE_*=1` knob. And since `grep -c '^[SKIP]'` is how a green sweep
-is audited, every `[SKIP]` renders through the pure
+is audited, every `[SKIP]` **should** render through the pure
 [`tests_common::skip::skip_line`](../../../tests-common/src/skip.rs) — **assert on `skip_line`; call
 the `skip_if_*` wrappers only from real fixtures.**
+
+⚠️ **That sentence used to say "does", and it was FALSE — measured 2026-09-17 at 92 hand-written
+`[SKIP]` emissions across 47 files**, each bypassing `skip_line` *and* every REQUIRE knob
+([#718](https://github.com/hherb/kastellan/issues/718)). A hand-written line is miscounted when its
+shape drifts, and answers to no knob — which is #622 generalised, and is how
+`guard_tier_e2e`'s worker-binary check stayed the one precondition in that suite no knob could see.
+92 is a **floor**: the census greps `eprintln!`-shaped emissions only.
 
 **Two standing reading rules.** A green run with `[SKIP]` lines means tests *skipped*, not that the
 sandbox contained anything. And skip-as-pass counts as passed, so counts stay comparable either way.

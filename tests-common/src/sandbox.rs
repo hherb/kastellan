@@ -9,6 +9,8 @@ use std::path::Path;
 
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
+use crate::require::RequireKnob;
+
 /// Why the per-OS sandbox backend is unusable on this host, or `None` when it
 /// is fine. The string is a *reason*, with no `[SKIP]` prefix and no newlines:
 /// the caller decides whether an unmet precondition is a clean skip or a hard
@@ -33,18 +35,44 @@ pub fn sandbox_unavailable_reason() -> Option<String> {
         .map(|e| format!("sandbox-exec probe failed: {e}"))
 }
 
+/// The knob that turns a missing sandbox backend into a failure.
+///
+/// Its own variable rather than the Postgres one ([`crate::skip::PG_KNOB`]),
+/// and deliberately **not** an umbrella covering every tier at once: the two
+/// hosts differ in what they can legitimately run, so a gate recipe has to be
+/// able to say "this host must have a working jail" without also claiming it
+/// must have KVM. An umbrella would make the Mac's honest micro-VM skips into
+/// failures, and a knob that cries wolf is a knob somebody exports `=0`.
+///
+/// This one matters more than most. `CLAUDE.md` records the exact false green
+/// it closes: on Ubuntu 24.04 `kernel.apparmor_restrict_unprivileged_userns=1`
+/// makes `LinuxBwrap::probe()` fail, so **every** sandbox integration test
+/// skips-as-passes — "green CI without containment is a false positive."
+pub const SANDBOX_KNOB: RequireKnob =
+    RequireKnob::new("KASTELLAN_SANDBOX_REQUIRE_E2E", "sandboxed");
+
 /// Returns `true` if the per-OS sandbox backend's probe fails. Caller
 /// should `return` immediately to short-circuit the test.
 ///
 /// The skip-as-pass half of [`sandbox_unavailable_reason`]; cfg-free, because
-/// the per-OS split lives entirely in the probe it wraps.
+/// the per-OS split lives entirely in the probe it wraps. Under a truthy
+/// [`SANDBOX_KNOB`] the skip becomes a panic naming the probe reason, and the
+/// success path emits the `[E2E]` positive control.
+///
+/// # Panics
+///
+/// Under a truthy `KASTELLAN_SANDBOX_REQUIRE_E2E`, naming it and the reason.
 pub fn skip_if_sandbox_unavailable() -> bool {
+    let action = SANDBOX_KNOB.action();
     match sandbox_unavailable_reason() {
         Some(reason) => {
-            eprint!("{}", crate::skip::skip_line(&reason));
+            let _: Option<()> = SANDBOX_KNOB.report_unmet(action, &reason);
             true
         }
-        None => false,
+        None => {
+            SANDBOX_KNOB.announce(action, "per-OS sandbox backend probe succeeded");
+            false
+        }
     }
 }
 

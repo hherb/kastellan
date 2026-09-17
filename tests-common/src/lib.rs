@@ -8,6 +8,12 @@
 //!
 //! # Module layout
 //!
+//! * [`require`] — [`require::RequireKnob`]: the ONE REQUIRE-knob contract
+//!   every gated e2e tier shares. Turns a tier's `[SKIP]`s into failures on an
+//!   operator's demand, and emits the `[E2E]` positive control that
+//!   `scripts/run-e2e-gate.sh` asserts a count over — because `cargo test`
+//!   exits 0 when a name filter matches nothing (#664), so the absence of a
+//!   `[SKIP]` never proved a suite ran.
 //! * [`skip`] — `[SKIP]` early-return helpers wrapping the supervisor +
 //!   pg-binary + sandbox probes. Each returns `bool` (`true` = skip),
 //!   and prints a `[SKIP]` line to stderr so `cargo test -- --nocapture`
@@ -85,6 +91,7 @@ pub mod microvm;
 pub mod mock_localmail;
 pub mod pg;
 pub mod provisioning;
+pub mod require;
 pub mod sandbox;
 pub mod scripted_llm;
 pub mod serial;

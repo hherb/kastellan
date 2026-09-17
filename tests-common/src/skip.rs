@@ -12,6 +12,8 @@ use std::time::Duration;
 use kastellan_db::{find_pg_bin_dir, pg_bin_dir_candidates_with_env_override};
 use kastellan_supervisor::default_probe;
 
+use crate::require::RequireKnob;
+
 /// Render the one `[SKIP] <reason>` line every helper in this crate prints.
 ///
 /// Pure, and that is the point: a `[SKIP]` line is **evidence** in this tree —
@@ -61,6 +63,33 @@ pub fn warn_line(reason: &str) -> String {
     format!("\n[WARN] {}\n", one_line(reason))
 }
 
+/// Render an `[E2E] <tier>: <detail>` line on the same stream as [`skip_line`].
+///
+/// The **positive** control, and the only one of the three markers that says a
+/// precondition was *met*. `[SKIP]` says a test did not run; `[WARN]` says
+/// something about the run was not what you think; a plain pass says nothing at
+/// all — which is the hole [#664] names: with a REQUIRE knob set and one typo
+/// in a `--test` name filter, `cargo test` reports `0 passed; 4 filtered out`
+/// and **exits 0**, having emitted no `[SKIP]` because no test body ran.
+///
+/// Inferring "it ran" from the absence of a `[SKIP]` is therefore unsound.
+/// `grep -c '^\[E2E\]'` over a demanded run is a count a gate can assert
+/// against instead, which is what `scripts/run-e2e-gate.sh` does.
+///
+/// Pure, and one renderer rather than a literal per call site, for the same
+/// reason [`skip_line`] and [`warn_line`] are: the count is evidence, so the
+/// shape must not drift between callers. Flattened to a single line for the
+/// same reason too — an orphan continuation line cannot be attributed to the
+/// marker above it, and it would not be counted.
+///
+/// Emitted by [`crate::require::RequireKnob::announce`], which is where the
+/// rule about *when* lives.
+///
+/// [#664]: https://github.com/hherb/kastellan/issues/664
+pub fn e2e_line(tier: &str, detail: &str) -> String {
+    format!("\n[E2E] {}: {}\n", one_line(tier), one_line(detail))
+}
+
 /// How long to wait for a TCP connect when probing a real origin's reachability.
 ///
 /// Paid **per resolved address**, not per probe: `origin_unreachable_reason_at`
@@ -99,17 +128,60 @@ fn prefix_supervisor_context(rendered: &str) -> String {
 }
 
 
+/// The knob that turns this tree's ~300 Postgres-backed e2e skips into
+/// failures.
+///
+/// # Why one variable covers two different preconditions
+///
+/// [`skip_if_no_supervisor`] and [`pg_bin_dir_or_skip`] guard different things
+/// — a reachable user-level service manager, and a Postgres install to run
+/// `initdb` from. They are nonetheless **one** precondition class in this tree:
+/// 303 call sites use the first and 298 the second, and they are almost always
+/// paired, because a PG-backed suite brings its cluster up *under the
+/// supervisor*. Splitting the knob would mean an operator who set only one of
+/// two variables got back exactly the silent green [#714] is about — and a
+/// half-armed gate is worse than an unarmed one, because it looks armed.
+///
+/// So: one variable, two [`RequireKnob`]s differing only in the phrase they
+/// name in the panic, so the failure still says *which* precondition was unmet.
+///
+/// [#714]: https://github.com/hherb/kastellan/issues/714
+pub const PG_REQUIRE_ENV: &str = "KASTELLAN_PG_REQUIRE_E2E";
+
+/// [`PG_REQUIRE_ENV`] as it applies to the user-level supervisor probe.
+pub const SUPERVISOR_KNOB: RequireKnob = RequireKnob::new(PG_REQUIRE_ENV, "supervisor-backed");
+
+/// [`PG_REQUIRE_ENV`] as it applies to the Postgres install lookup.
+pub const PG_KNOB: RequireKnob = RequireKnob::new(PG_REQUIRE_ENV, "Postgres-backed");
+
 /// Returns `true` if the user-level supervisor probe fails. Caller
 /// should `return` immediately so the test body never runs.
 ///
-/// The skip-as-pass half of [`supervisor_unavailable_reason`].
+/// The skip-as-pass half of [`supervisor_unavailable_reason`] — **unless**
+/// [`PG_REQUIRE_ENV`] is truthy, in which case an unreachable supervisor is a
+/// panic rather than a green test. See [`PG_REQUIRE_ENV`] for why.
+///
+/// On the success path it emits the positive control
+/// ([`crate::require::RequireKnob::announce`]), so a demanded run produces a
+/// `[E2E]` count a gate can assert against instead of inferring that a suite
+/// ran from the absence of a `[SKIP]`.
+///
+/// # Panics
+///
+/// Under a truthy [`PG_REQUIRE_ENV`], naming the variable and the probe reason.
 pub fn skip_if_no_supervisor() -> bool {
+    let action = SUPERVISOR_KNOB.action();
     match supervisor_unavailable_reason() {
         Some(reason) => {
-            eprint!("{}", skip_line(&reason));
+            // Panics under Fail; prints the `[SKIP]` line and yields None under
+            // Skip. The `Option<()>` binding is only to name `T`.
+            let _: Option<()> = SUPERVISOR_KNOB.report_unmet(action, &reason);
             true
         }
-        None => false,
+        None => {
+            SUPERVISOR_KNOB.announce(action, "user-level supervisor probe succeeded");
+            false
+        }
     }
 }
 
@@ -127,14 +199,28 @@ pub fn pg_bin_dir_or_reason() -> Result<PathBuf, String> {
 }
 
 /// The skip-as-pass half of [`pg_bin_dir_or_reason`]: print `[SKIP] <reason>`
-/// and return `None` so test runs stay auditable.
+/// and return `None` so test runs stay auditable — **unless**
+/// [`PG_REQUIRE_ENV`] is truthy, in which case a host with no Postgres install
+/// is a panic rather than ~300 green tests that asserted nothing ([#714]).
+///
+/// On the success path it emits the positive control naming the resolved
+/// `bin/` directory, which is also the cheapest way to catch the *other*
+/// mis-provisioning: a `KASTELLAN_PG_BIN_DIR` pointing at the wrong major
+/// version is invisible in a test count and obvious in an `[E2E]` line.
+///
+/// # Panics
+///
+/// Under a truthy [`PG_REQUIRE_ENV`], naming the variable and the lookup reason.
+///
+/// [#714]: https://github.com/hherb/kastellan/issues/714
 pub fn pg_bin_dir_or_skip() -> Option<PathBuf> {
+    let action = PG_KNOB.action();
     match pg_bin_dir_or_reason() {
-        Ok(dir) => Some(dir),
-        Err(reason) => {
-            eprint!("{}", skip_line(&reason));
-            None
+        Ok(dir) => {
+            PG_KNOB.announce(action, &format!("Postgres bin dir at {}", dir.display()));
+            Some(dir)
         }
+        Err(reason) => PG_KNOB.report_unmet(action, &reason),
     }
 }
 
