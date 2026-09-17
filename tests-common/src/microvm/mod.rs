@@ -165,8 +165,40 @@ pub fn require_action() -> UnmetAction {
 }
 
 /// [`require_action`] with the out-of-dialect `[WARN]` written to `out`.
+///
+/// Reads the variable through [`RequireKnob::env`] rather than naming
+/// [`REQUIRE_ENV`] a second time: the two are the same string today only
+/// because `KNOB` is built from it, and a second literal here is the one place
+/// this module could reintroduce the drift it exists to end.
 pub fn require_action_to(out: &mut dyn std::io::Write) -> UnmetAction {
-    KNOB.action_reporting_to(std::env::var(REQUIRE_ENV).ok(), out)
+    KNOB.action_reporting_to(std::env::var(KNOB.env()).ok(), out)
+}
+
+/// Emit the `[E2E]` positive control for a met micro-VM precondition.
+///
+/// # Why this tier needed one at all
+///
+/// The knob half of the contract fires only from a *failure* path, so it is
+/// structurally blind to a tier that never ran. The gate script closes that by
+/// asserting a floor on `grep -c '^\[E2E\]'` — but this tier emitted **none**,
+/// because every micro-VM combinator's success arm is a bare `false` or
+/// `Ok(value)` with no action in hand. The `microvm` profile's floor of 1 was
+/// therefore unreachable on a perfectly healthy DGX: `❌ POSITIVE CONTROL
+/// FAILED` on a run where all 18 suites booted real VMs and passed.
+///
+/// That is the precise failure the script refuses to ship a `sandbox` profile
+/// for — "a profile red on every host trains everyone to ignore a red gate" —
+/// and it went unnoticed because the profile is Linux-only and the authoring
+/// host is a Mac, which refuses it before running.
+pub fn announce_microvm(detail: &str) {
+    announce_microvm_to(detail, &mut std::io::stderr());
+}
+
+/// [`announce_microvm`] with the `[E2E]` line written to `out`, so a unit test
+/// can prove the line is **emitted** without inflating the count it protects —
+/// the same seam, and the same reason, as [`report_unmet_microvm_to`].
+pub fn announce_microvm_to(detail: &str, out: &mut dyn std::io::Write) {
+    KNOB.announce_demanded_to(detail, out);
 }
 
 /// Abort the run because [`REQUIRE_ENV`] demanded one and a precondition is
@@ -659,7 +691,8 @@ mod linux {
     use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends};
 
     use super::{
-        image_dir, locate_microvm_run, preflight, report_unmet_microvm, skip_if_image_stale,
+        announce_microvm, image_dir, locate_microvm_run, preflight, report_unmet_microvm,
+        skip_if_image_stale,
     };
 
     /// The kernel + rootfs pair for `rootfs` (a bare filename such as
@@ -710,14 +743,27 @@ mod linux {
     /// precondition is unmet and [`super::REQUIRE_ENV`] is truthy — see
     /// [`skip_if_image_stale`].
     pub fn skip_if_no_microvm(rootfs: &str) -> bool {
-        preflight(
+        let skipping = preflight(
             rootfs,
             || LinuxFirecracker::probe(&firecracker_image_for(rootfs)).map_err(|e| e.to_string()),
             locate_microvm_run,
             prepend_launcher_to_path,
             || skip_if_image_stale(rootfs),
             report_unmet_microvm,
-        )
+        );
+        if !skipping {
+            // The tier's own positive control, and the reason it is here rather
+            // than inside `preflight`: `preflight` is pure over injected
+            // closures precisely so its ordering and short-circuit are testable
+            // with no host in the loop, and threading a second callback through
+            // it to say "nothing was unmet" would buy nothing that this line
+            // does not. Naming the rootfs makes each `[E2E]` line say WHICH
+            // image was accepted, which is the cheapest way to catch the #687
+            // shape — a stale image that passed freshness against the wrong
+            // sources.
+            announce_microvm(&format!("micro-VM preflight met for {rootfs}"));
+        }
+        skipping
     }
 
     /// The Firecracker micro-VM backend, resolved through the same

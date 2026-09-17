@@ -11,7 +11,9 @@
 //!   `bin/python` named a path that cannot exist on Linux — four tests read as
 //!   passing while containing nothing, for months ([#651]);
 //! * a macOS container image sat 69 days stale behind eight green e2es
-//!   ([#684]);
+//!   ([#684] + [#687] — #684 is the coverage gap, #687 the freshness gate, and
+//!   the 69 days were measured while closing both, so neither number appears in
+//!   #684 alone);
 //! * `guard_tier_e2e`'s `bootstrap()` returns `None` on any missing
 //!   precondition, so the guard tier's only end-to-end coverage of the stored
 //!   audit row can report a silent PASS ([#622]);
@@ -63,10 +65,11 @@
 //!
 //! [#591]: https://github.com/hherb/kastellan/issues/591
 //! [#622]: https://github.com/hherb/kastellan/issues/622
-//! [#651]: https://github.com/hherb/kastellan/issues/651
+//! [#651]: https://github.com/hherb/kastellan/pull/651
 //! [#653]: https://github.com/hherb/kastellan/issues/653
 //! [#664]: https://github.com/hherb/kastellan/issues/664
 //! [#684]: https://github.com/hherb/kastellan/issues/684
+//! [#687]: https://github.com/hherb/kastellan/issues/687
 //! [#696]: https://github.com/hherb/kastellan/issues/696
 //! [#714]: https://github.com/hherb/kastellan/issues/714
 
@@ -174,7 +177,25 @@ impl RequireKnob {
     /// [`unmet_action`] so the rule *and* the panic path can be unit-tested
     /// without mutating process-wide environment under `env_lock`.
     pub fn action(&self) -> UnmetAction {
-        self.action_reporting_to(std::env::var(self.env).ok(), &mut std::io::stderr())
+        self.action_reporting_to(self.raw(), &mut std::io::stderr())
+    }
+
+    /// This knob's raw value, with a non-UTF-8 setting preserved rather than
+    /// discarded.
+    ///
+    /// `std::env::var(..).ok()` maps [`std::env::VarError::NotUnicode`] to
+    /// `None`, which is indistinguishable from unset — so a knob set to a
+    /// non-UTF-8 value would skip **and** emit no `[WARN]`, because
+    /// [`warn_if_out_of_dialect`] returns early on `None`. A set-but-unhonoured
+    /// knob that leaves no trace at all is the one outcome this type exists to
+    /// abolish, so the lossy rendering is carried through to the dialect check,
+    /// where it is out of dialect and therefore warns.
+    fn raw(&self) -> Option<String> {
+        match std::env::var(self.env) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(raw)) => Some(raw.to_string_lossy().into_owned()),
+        }
     }
 
     /// [`RequireKnob::action`] with the value supplied and the dialect warning
@@ -208,6 +229,15 @@ impl RequireKnob {
     /// the enclosing `fn`'s return type can infer it. That is the strongest
     /// argument for this shape: a non-generic `-> Option<()>` would let a
     /// dropped `return` compile and skip nothing.
+    ///
+    /// ⚠️ **Unless `T` is annotated.** `let _: Option<()> = knob.report_unmet(…);`
+    /// names `T` itself, so the guarantee lapses there — which is exactly the
+    /// spelling a `-> bool` helper needs, and the three in this crate all use
+    /// it. That is safe where the next statement is `true`, and a trap if the
+    /// line is copied into an `-> Option<Rig>` fixture, where a dropped
+    /// `return` would then compile and fall through to the success path having
+    /// printed a `[SKIP]`. Copy [`crate::skip::skip_if_no_supervisor`]'s shape
+    /// rather than the annotation alone.
     ///
     /// # Panics
     ///
@@ -302,7 +332,76 @@ impl RequireKnob {
             let _ = write!(out, "{}", e2e_line(self.tier, detail));
         }
     }
+
+    /// [`RequireKnob::announce`] for a success path that never computed an
+    /// [`UnmetAction`], because nothing was unmet.
+    ///
+    /// The four original `announce` call sites sit in helpers that already
+    /// read the knob to decide the *failure* arm, so passing the action back in
+    /// costs nothing there. A cascade whose success path is a bare `false` or
+    /// `Ok(value)` — every micro-VM combinator is one — would have to read the
+    /// knob solely in order to announce, and the obvious spelling
+    /// (`knob.action()`) re-emits the out-of-dialect `[WARN]` on a path that
+    /// has nothing to warn about, once per precondition per test.
+    ///
+    /// So this reads the knob **without** the dialect warning: the warning
+    /// belongs to the decision, and repeating it on every success line would
+    /// drown the log a gate is grepping.
+    pub fn announce_demanded(&self, detail: &str) {
+        self.announce_demanded_to(detail, &mut std::io::stderr());
+    }
+
+    /// [`RequireKnob::announce_demanded`] writing to `out`, so a test can read
+    /// the bytes back without inflating a real run's `[E2E]` count.
+    pub fn announce_demanded_to(&self, detail: &str, out: &mut dyn std::io::Write) {
+        self.announce_to(unmet_action(self.raw()), detail, out);
+    }
 }
+
+/// The guard tier's knob.
+///
+/// Declared here rather than beside its tier — the exception to the rule the
+/// other five follow — because `core/tests/guard_tier_e2e.rs` is an
+/// integration-test binary, invisible to [`KNOBS`] and so to the test that pins
+/// the vocabulary against the gate script. A knob the census cannot see is a
+/// knob the census cannot defend, which is the whole failure [`KNOBS`] exists
+/// to close.
+///
+/// ⚠️ It covers `bootstrap`'s **worker-binary** check only; the supervisor,
+/// sandbox and Postgres checks beside it answer to their own knobs. See the
+/// warning at its use site.
+pub const GUARD_TIER_KNOB: RequireKnob =
+    RequireKnob::new("KASTELLAN_GUARD_REQUIRE_E2E", "guard-tier");
+
+/// Every REQUIRE knob this workspace defines.
+///
+/// # Why the list exists
+///
+/// `scripts/run-e2e-gate.sh` sets these variables by name, as shell literals;
+/// the Rust side reads them through the consts. Nothing tied the two halves
+/// together, so renaming either one left a profile setting a variable nothing
+/// reads: [`RequireKnob::action`] returns [`UnmetAction::Skip`], the
+/// precondition silently reverts to skip-as-pass, its `[E2E]` lines vanish —
+/// and before the floors were per-tier, the gate still reported `✅`. A guard
+/// sharing its census's blind spot, in the tree's own gate script.
+///
+/// `gate_script_tests` reads the script and pins both directions: every knob
+/// the script names is one of these, and every one of these is named by some
+/// profile — so a new tier cannot be added without a gate that demands it.
+///
+/// ⚠️ One variable can carry two knobs: [`crate::skip::SUPERVISOR_KNOB`] and
+/// [`crate::skip::PG_KNOB`] differ only in the phrase they name, deliberately
+/// (#714). Anything de-duplicating this list must key on
+/// [`RequireKnob::env`], not on the knob — `PartialEq` here is `(env, tier)`
+/// identity and would report two.
+pub const KNOBS: &[RequireKnob] = &[
+    crate::skip::SUPERVISOR_KNOB,
+    crate::skip::PG_KNOB,
+    crate::sandbox::SANDBOX_KNOB,
+    GUARD_TIER_KNOB,
+    crate::microvm::KNOB,
+    crate::gliner_e2e::KNOB,
+];
 
 #[cfg(test)]
 mod tests {
@@ -446,6 +545,80 @@ mod tests {
         let mut sink = Vec::new();
         TEST_KNOB.announce_to(UnmetAction::Skip, "cluster at /tmp/pg", &mut sink);
         assert!(sink.is_empty(), "no [E2E] line without the knob: {sink:?}");
+    }
+
+    /// **The success-path read.** `announce_demanded` exists for cascades whose
+    /// success arm never computed an action, so it must reach the environment
+    /// itself — a constant here would make every micro-VM `[E2E]` line either
+    /// unconditional or absent.
+    #[test]
+    fn announce_demanded_reads_the_environment_not_a_constant() {
+        let _lock = crate::env::env_lock();
+
+        let mut demanded = Vec::new();
+        {
+            let _set = crate::env::EnvVarGuard::set("KASTELLAN_TEST_REQUIRE_E2E", "1");
+            TEST_KNOB.announce_demanded_to("fixture staged", &mut demanded);
+        }
+        let got = String::from_utf8(demanded).expect("utf8");
+        assert!(got.contains("[E2E]"), "a demanded run announces: {got:?}");
+        assert!(got.contains("fixture staged"), "carries the detail: {got:?}");
+
+        let mut undemanded = Vec::new();
+        {
+            let _unset = crate::env::EnvVarGuard::unset("KASTELLAN_TEST_REQUIRE_E2E");
+            TEST_KNOB.announce_demanded_to("fixture staged", &mut undemanded);
+        }
+        assert!(undemanded.is_empty(), "no knob, no line: {undemanded:?}");
+    }
+
+    /// ...and it must NOT warn on the success path. The dialect warning belongs
+    /// to the decision; repeated once per precondition per test it would drown
+    /// the log a gate greps.
+    #[test]
+    fn announce_demanded_does_not_emit_the_dialect_warning() {
+        let _lock = crate::env::env_lock();
+        let _set = crate::env::EnvVarGuard::set("KASTELLAN_TEST_REQUIRE_E2E", "y");
+
+        let mut sink = Vec::new();
+        TEST_KNOB.announce_demanded_to("fixture staged", &mut sink);
+        assert!(sink.is_empty(), "out-of-dialect is not demanded, and does not warn here: {sink:?}");
+    }
+
+    /// A knob set to a non-UTF-8 value must not read as *unset*. `.ok()` would
+    /// discard it, and `warn_if_out_of_dialect` returns early on `None`, so the
+    /// operator would get a silent skip from a knob they demonstrably set.
+    #[test]
+    fn a_non_utf8_knob_value_warns_rather_than_reading_as_unset() {
+        let _lock = crate::env::env_lock();
+
+        let mut sink = Vec::new();
+        let action = TEST_KNOB.action_reporting_to(Some("\u{fffd}".into()), &mut sink);
+        assert_eq!(action, UnmetAction::Skip, "a non-UTF-8 value cannot be truthy");
+        let got = String::from_utf8(sink).expect("utf8");
+        assert!(got.contains("[WARN]"), "it must leave a trace: {got:?}");
+    }
+
+    /// The vocabulary is what `scripts/run-e2e-gate.sh` is pinned against, so a
+    /// stray name or a duplicated tier would weaken that check silently.
+    #[test]
+    fn the_knob_vocabulary_is_well_formed() {
+        assert!(!KNOBS.is_empty(), "an empty vocabulary would make every check over it vacuous");
+        for knob in KNOBS {
+            assert!(knob.env().starts_with("KASTELLAN_"), "{} is not one of ours", knob.env());
+            assert!(knob.env().ends_with("_REQUIRE_E2E"), "{} is not a REQUIRE knob", knob.env());
+            assert!(!knob.tier().is_empty(), "{} has no tier phrase", knob.env());
+        }
+
+        // Tiers must be distinct: the gate script counts `[E2E] <tier>:` lines
+        // per tier, so two knobs sharing a phrase would make one floor
+        // satisfiable by the other's evidence — the very substitution the
+        // per-tier floors exist to prevent.
+        let mut tiers: Vec<&str> = KNOBS.iter().map(RequireKnob::tier).collect();
+        tiers.sort_unstable();
+        let before = tiers.len();
+        tiers.dedup();
+        assert_eq!(before, tiers.len(), "two knobs share a tier phrase: {tiers:?}");
     }
 
     /// `[E2E]`, `[SKIP]` and `[WARN]` are counted separately when a run is

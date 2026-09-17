@@ -48,8 +48,11 @@ pub fn sandbox_unavailable_reason() -> Option<String> {
 /// it closes: on Ubuntu 24.04 `kernel.apparmor_restrict_unprivileged_userns=1`
 /// makes `LinuxBwrap::probe()` fail, so **every** sandbox integration test
 /// skips-as-passes — "green CI without containment is a false positive."
-pub const SANDBOX_KNOB: RequireKnob =
-    RequireKnob::new("KASTELLAN_SANDBOX_REQUIRE_E2E", "sandboxed");
+/// The variable [`SANDBOX_KNOB`] reads, named once so the gate script's copy
+/// can be pinned against it — see [`crate::require::KNOB_ENV_VARS`].
+pub const SANDBOX_REQUIRE_ENV: &str = "KASTELLAN_SANDBOX_REQUIRE_E2E";
+
+pub const SANDBOX_KNOB: RequireKnob = RequireKnob::new(SANDBOX_REQUIRE_ENV, "sandboxed");
 
 /// Returns `true` if the per-OS sandbox backend's probe fails. Caller
 /// should `return` immediately to short-circuit the test.

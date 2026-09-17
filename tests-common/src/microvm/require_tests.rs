@@ -112,6 +112,32 @@ fn skip_unless_ready_is_silent_and_returns_false_when_every_probe_is_met() {
     assert!(sink.is_empty(), "a met precondition prints nothing: {sink:?}");
 }
 
+/// ...but under a DEMANDED run it must announce, and this is the test that
+/// would have caught the `microvm` profile being red by construction.
+///
+/// The tier had no `announce` call site at all, so `grep -c '^\[E2E\]'` over
+/// any `run-e2e-gate.sh microvm` run was 0 — forever, on every host — and the
+/// profile's floor of 1 failed on a DGX where all 15 suites booted real VMs and
+/// passed. That is the outcome the script's own comment refuses to ship a
+/// `sandbox` profile for, and it went unnoticed because the profile is
+/// Linux-only and the Mac refuses it before running.
+///
+/// The paired silence test above is the other half: the marker means "a
+/// **demanded** precondition was met here", so an undemanded run must stay
+/// quiet or the count stops being evidence of anything.
+#[test]
+fn skip_unless_ready_announces_the_positive_control_on_a_demanded_run() {
+    let _lock = env_lock();
+    let _guard = EnvVarGuard::set(REQUIRE_ENV, "1");
+
+    let mut sink: Vec<u8> = Vec::new();
+    let probes: [Probe; 2] = [&met, &met];
+    assert!(!skip_unless_ready_to(&probes, &mut sink));
+    let got = String::from_utf8(sink).expect("utf8");
+    assert!(got.starts_with("\n[E2E] "), "must be a greppable [E2E] line: {got:?}");
+    assert!(got.contains("micro-VM"), "names the tier, so a per-tier floor can count it: {got:?}");
+}
+
 /// The whole point of #679: with the knob truthy, the precondition the
 /// operator did NOT ask about still stops the run. Before this, a host with
 /// KVM, vsock, a built launcher and fresh images but no `enable-linger` gave
@@ -156,6 +182,25 @@ fn dep_or_skip_passes_the_value_through_silently() {
     let got: Option<u32> = dep_or_skip_to(Ok(7), &mut sink);
     assert_eq!(got, Some(7));
     assert!(sink.is_empty(), "a met dependency prints nothing: {sink:?}");
+}
+
+/// ...and under a demanded run the resolved dependency is evidence too.
+///
+/// `dep_or_skip` is how every micro-VM suite takes its Postgres bin dir and its
+/// broker binaries, so without this the tier's `[E2E]` count would come only
+/// from the host-probe combinator — leaving the value dependencies invisible to
+/// the gate in exactly the way the hand-written `[SKIP]`s of #718 are.
+#[test]
+fn dep_or_skip_announces_the_positive_control_on_a_demanded_run() {
+    let _lock = env_lock();
+    let _guard = EnvVarGuard::set(REQUIRE_ENV, "1");
+
+    let mut sink: Vec<u8> = Vec::new();
+    let got: Option<u32> = dep_or_skip_to(Ok(7), &mut sink);
+    assert_eq!(got, Some(7), "the value still passes through");
+    let rendered = String::from_utf8(sink).expect("utf8");
+    assert!(rendered.starts_with("\n[E2E] "), "must announce: {rendered:?}");
+    assert!(rendered.contains("micro-VM"), "names the tier: {rendered:?}");
 }
 
 /// Unset knob: `None` plus the auditable line, so the `let ... else return`

@@ -24,15 +24,32 @@
 #   zero tests ran.
 #
 # This script is the positive control. It sets the profile's knobs, keeps the
-# WHOLE log (a truncated gate log is not a gate), and then asserts two counts
-# that a filtered-out run cannot satisfy:
+# WHOLE log (a truncated gate log is not a gate), and then asserts counts that
+# a filtered-out run cannot satisfy:
 #
-#   1. `[E2E]` lines >= the profile's MIN_E2E. Emitted by
-#      `RequireKnob::announce` on the SUCCESS path of a precondition, and only
-#      under a truthy knob — so each one means "a demanded precondition was
-#      actually met here".
+#   1. a PER-TIER `[E2E]` floor. Emitted by `RequireKnob::announce` on the
+#      SUCCESS path of a precondition, and only under a truthy knob — so each
+#      one means "a demanded precondition was actually met here".
 #   2. libtest's reported `N passed` >= the profile's MIN_PASSED, summed across
 #      the run's suites. This is the one that catches the name-filter typo.
+#   3. an optional per-profile cap on `[SKIP]` lines, and a hard zero on
+#      `[WARN]` lines.
+#
+# ⚠️ **The `[E2E]` floors are per TIER, not per run, and that is load-bearing.**
+# A single total is satisfied by whichever knob happens to be chattiest: the
+# `gliner` profile also sets the Postgres knob, so one `[E2E] Postgres-backed:`
+# line would clear a total floor of 1 while proving nothing whatever about the
+# 1.3 GB model tier — #651's fixture with #714's evidence pasted over it. The
+# tier name is already in the line (`[E2E] <tier>: <detail>`), so counting per
+# tier costs one grep and makes each floor say what it means.
+#
+# ⚠️ **A per-tier floor of 1 is enough, and a bigger number is worse.** Deleting
+# any single `announce` call drops that tier's count to 0 and trips its floor.
+# A floor near the observed total (guard-tier emits 44) would be a second place
+# the test census lives — it rots on the next added test, somebody lowers it,
+# and the gate stops gating. The old single floor of 4 against an observed 44
+# could not detect a lost `announce` at all, which is precisely what its own
+# failure text offered to diagnose.
 #
 # USAGE
 #   bash scripts/run-e2e-gate.sh <profile> [extra cargo args...]
@@ -41,8 +58,22 @@
 # Extra arguments are appended to the cargo invocation, before the `--`.
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+# ⚠️ Not merely a shebang formality. Under zsh — the login shell on both of this
+# repo's hosts — arrays are 1-indexed, so `${PIPESTATUS[0]}` is EMPTY and the
+# "did the test run itself fail?" check silently disappears. `set -u` does not
+# catch it: the array exists, index 0 is just empty. Refuse rather than judge.
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "run-e2e-gate.sh: must run under bash (got ${SHELL:-an unknown shell})." >&2
+  echo "  In zsh \${PIPESTATUS[0]} is empty, so the cargo exit code would go unchecked." >&2
+  echo "  Run: bash scripts/run-e2e-gate.sh <profile>" >&2
+  exit 2
+fi
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || {
+  echo "run-e2e-gate.sh: cannot resolve the repository root" >&2
+  exit 2
+}
+cd "$REPO_ROOT" || { echo "run-e2e-gate.sh: cannot cd to $REPO_ROOT" >&2; exit 2; }
 
 # shellcheck disable=SC1090,SC1091
 source "$HOME/.cargo/env" 2>/dev/null || true
@@ -52,9 +83,11 @@ source "$HOME/.cargo/env" 2>/dev/null || true
 #
 # macOS has no GNU `timeout`, and a classifying pipe swallows the
 # "command not found" so the failure reads as the thing being measured. Check
-# up front, by name, and say which one is missing.
+# up front, by name, and say which one is missing. The list is every external
+# this file invokes — if you add one, add it here; "every" is a claim the
+# preflight either honours or should not make.
 # ---------------------------------------------------------------------------
-for tool in cargo grep awk tee date; do
+for tool in cargo grep awk tee date uname basename mkdir env sort sed; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "run-e2e-gate.sh: required tool not found on PATH: $tool" >&2
     exit 2
@@ -63,15 +96,26 @@ done
 
 # ---------------------------------------------------------------------------
 # Profiles.
-#   name | knobs (space-separated VAR=VAL) | MIN_E2E | MIN_PASSED | cargo args | harness args | os
+#   name | knobs | E2E floors | MIN_PASSED | MAX_SKIP | cargo args | harness args | os
 #
-# MIN_E2E and MIN_PASSED are LOWER BOUNDS, not exact counts, deliberately:
-# an exact count is a second place the test census lives and it goes stale on
-# the next added test, at which point somebody lowers it and the gate stops
-# gating. A floor only ever needs raising, and only when a suite shrinks —
-# which is itself worth noticing.
+# E2E floors are `tier=N[,tier=N...]`, where `tier` is the phrase the knob was
+# constructed with and the string that appears in `[E2E] <tier>: <detail>`:
+#   supervisor-backed  Postgres-backed  sandboxed  guard-tier  micro-VM  gliner-relex
 #
-# ⚠️ A floor of 0 is not a gate. Every profile's MIN_PASSED must be >= 1.
+# MIN_PASSED is a LOWER BOUND, deliberately: an exact count is a second place
+# the test census lives and it goes stale the next time a test is added, at
+# which point somebody lowers it and the gate stops gating. A floor survives
+# every addition untouched; the only thing that disturbs it is a suite
+# SHRINKING, and that is itself worth noticing.
+#
+# ⚠️ A floor of 0 is not a gate. Every profile's MIN_PASSED must be >= 1 and
+# every profile must name at least one E2E floor — enforced at startup by
+# `validate_profiles`, not merely asserted here. (A rule nothing enforces is
+# the exact shape this whole script argues against.)
+#
+# MAX_SKIP is `any` or a number. `guard-tier` is 0: every precondition in its
+# `bootstrap()` is knob-routed, so a `[SKIP]` there is by definition a bypass.
+# The rest stay `any` while #718's 92 hand-written `[SKIP]` sites exist.
 #
 # ⚠️ Harness args are per profile because the Firecracker suites are `#[ignore]`:
 # WITHOUT `--ignored` the whole tier reports green having booted no VM, every
@@ -94,10 +138,10 @@ done
 # somebody stops running. `any` means the profile is host-agnostic.
 # ---------------------------------------------------------------------------
 PROFILES=(
-  "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|4|1|-p kastellan-core --test guard_tier_e2e|--nocapture|any"
-  "pg|KASTELLAN_PG_REQUIRE_E2E=1|2|1|-p kastellan-core --test injection_guard_e2e --test secret_vault_e2e --test conversation_continuity_e2e|--nocapture|any"
-  "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|1|1|-p kastellan-core --test gliner_relex_e2e|--nocapture|any"
-  "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|1|1|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux"
+  "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any"
+  "pg|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1,Postgres-backed=1|1|any|-p kastellan-core --test injection_guard_e2e --test secret_vault_e2e --test conversation_continuity_e2e|--nocapture|any"
+  "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|gliner-relex=1|1|any|-p kastellan-core --test gliner_relex_e2e|--nocapture|any"
+  "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux"
 )
 
 # ⚠️ There is deliberately NO `sandbox` profile yet, and the reason is a
@@ -120,25 +164,110 @@ PROFILES=(
 # `KASTELLAN_SANDBOX_REQUIRE_E2E` itself IS live — the `guard-tier` profile
 # sets it, and `skip_if_sandbox_unavailable` in `tests-common` honours it for
 # every suite that goes through that helper.
+#
+# ⚠️ There is also no `container` profile, for the macOS Apple-`container`
+# tier — the tier of #684, one of the four false greens this contract cites.
+# Its three suites gate through `skip_if_no_container` / `skip_if_image_missing`,
+# which have no knob and no `announce`, so a profile would be red on every Mac
+# for the same reason the `sandbox` one would. Tracked separately; adding it is
+# the acceptance test for whichever PR gives those two helpers a knob.
 
-# Every integration suite that gates on the shared micro-VM preflight, by
+# Every LINUX integration suite that gates on the shared micro-VM preflight, by
 # reading the sources rather than by remembering them.
+#
+# ⚠️ The cfg filter is not cosmetic. Three suites that use this module —
+# `python_exec_container_e2e`, `lifecycle_container_routing_e2e`,
+# `python_exec_warm_idle_e2e` — are `#![cfg(target_os = "macos")]`, so on the
+# Linux host this profile demands they compile to EMPTY test binaries: 0 passed,
+# exit 0. That is the very shape the `os` field above exists to refuse, and
+# selecting them here would have smuggled it back in through the discovery.
 firecracker_suites() {
   local f names=""
   for f in core/tests/*.rs; do
-    if grep -q 'kastellan_tests_common::microvm' "$f"; then
-      names+="--test $(basename "$f" .rs) "
-    fi
+    grep -q 'kastellan_tests_common::microvm' "$f" || continue
+    grep -q '^#!\[cfg(target_os = "macos")\]' "$f" && continue
+    names+="--test $(basename "$f" .rs) "
   done
   printf '%s' "$names"
 }
 
+# The floor below which a shrinking discovery is a bug rather than a deletion.
+#
+# `firecracker_suites` refusing ZERO is not enough: a grep rule that matched 1
+# of 15 would select one suite, clear MIN_PASSED=1, and report ✅ over a tier it
+# 93% did not run — a guard sharing its census's blind spot, one step milder.
+# Raise this deliberately when suites are added; a drop means the rule broke.
+MIN_FIRECRACKER_SUITES=12
+
+# ---------------------------------------------------------------------------
+# Profile hygiene, enforced rather than asserted in a comment.
+#
+# `IFS='|' read -r a b c <<<"x|y"` succeeds with c EMPTY, and `set -u` does not
+# help because the variable IS set. So a profile line that loses a field to a
+# stray `|` silently removes a floor — and an empty operand in `[ "$x" -lt N ]`
+# is a test that ERRORS (status 2) and is therefore read as "floor met".
+# A malformed profile must be a usage error, not a quiet ✅.
+# ---------------------------------------------------------------------------
+validate_profiles() {
+  local spec name knobs e2e_floors min_passed max_skip cargo_args harness_args os extra
+  local bad=0 pair tier floor
+  for spec in "${PROFILES[@]}"; do
+    IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os extra \
+      <<<"$spec"
+    if [ -z "$name" ] || [ -n "$extra" ]; then
+      echo "run-e2e-gate.sh: profile '${name:-<unnamed>}' does not have exactly 8 fields" >&2
+      bad=1
+      continue
+    fi
+    for field in knobs e2e_floors min_passed max_skip cargo_args harness_args os; do
+      if [ -z "${!field}" ]; then
+        echo "run-e2e-gate.sh: profile '$name' has an empty '$field' field" >&2
+        bad=1
+      fi
+    done
+    case "$min_passed" in
+      ''|*[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MIN_PASSED is not a number" >&2; bad=1 ;;
+      *) [ "$min_passed" -ge 1 ] || {
+           echo "run-e2e-gate.sh: profile '$name' MIN_PASSED must be >= 1 (a floor of 0 is not a gate)" >&2
+           bad=1
+         } ;;
+    esac
+    case "$max_skip" in
+      any|'') ;;
+      *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_SKIP must be a number or 'any'" >&2; bad=1 ;;
+    esac
+    [ -n "$e2e_floors" ] || { echo "run-e2e-gate.sh: profile '$name' names no E2E floor" >&2; bad=1; }
+    for pair in ${e2e_floors//,/ }; do
+      tier="${pair%%=*}"
+      floor="${pair#*=}"
+      if [ -z "$tier" ] || [ "$tier" = "$pair" ]; then
+        echo "run-e2e-gate.sh: profile '$name' E2E floor '$pair' is not tier=N" >&2
+        bad=1
+        continue
+      fi
+      case "$floor" in
+        ''|*[!0-9]*) echo "run-e2e-gate.sh: profile '$name' floor for '$tier' is not a number" >&2; bad=1 ;;
+        *) [ "$floor" -ge 1 ] || {
+             echo "run-e2e-gate.sh: profile '$name' floor for '$tier' must be >= 1" >&2
+             bad=1
+           } ;;
+      esac
+    done
+    case "$os" in
+      any|Linux|Darwin) ;;
+      *) echo "run-e2e-gate.sh: profile '$name' has an unknown os '$os'" >&2; bad=1 ;;
+    esac
+  done
+  [ "$bad" -eq 0 ] || { echo "run-e2e-gate.sh: refusing to run with a malformed profile table." >&2; exit 2; }
+}
+validate_profiles
+
 list_profiles() {
   echo "profiles:"
-  local spec name knobs
+  local spec name knobs os
   for spec in "${PROFILES[@]}"; do
-    IFS='|' read -r name knobs _ _ _ _ os <<<"$spec"
-    printf '  %-12s [%-5s] %s\n' "$name" "$os" "$knobs"
+    IFS='|' read -r name knobs _ _ _ _ _ os <<<"$spec"
+    printf '  %-12s [%-6s] %s\n' "$name" "$os" "$knobs"
   done
 }
 
@@ -149,7 +278,7 @@ WANT="$1"; shift
 
 FOUND=""
 for spec in "${PROFILES[@]}"; do
-  IFS='|' read -r name knobs min_e2e min_passed cargo_args harness_args os <<<"$spec"
+  IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os <<<"$spec"
   if [ "$name" = "$WANT" ]; then FOUND=1; break; fi
 done
 [ -n "$FOUND" ] || { echo "run-e2e-gate.sh: unknown profile: $WANT" >&2; list_profiles >&2; exit 2; }
@@ -159,8 +288,15 @@ done
 # "0 tests passed" on a Mac as a broken gate and switching it off.
 HOST_OS="$(uname -s)"
 if [ "$os" != "any" ] && [ "$os" != "$HOST_OS" ]; then
+  # Mapped, not lowercased: `Darwin` lowercases to `darwin`, which is not a
+  # `target_os` value, so the hint would name a cfg that can never match.
+  case "$os" in
+    Linux) target_os="linux" ;;
+    Darwin) target_os="macos" ;;
+    *) target_os="$os" ;;
+  esac
   echo "run-e2e-gate.sh: profile '$WANT' requires $os, this host is $HOST_OS." >&2
-  echo "  Its suites are #![cfg(target_os = \"$(echo "$os" | tr '[:upper:]' '[:lower:]')\")], so here they would" >&2
+  echo "  Its suites are #![cfg(target_os = \"$target_os\")], so here they would" >&2
   echo "  compile to empty test binaries and report 0 passed at exit 0 — which is the" >&2
   echo "  false green this script exists to refuse. Run it on a $os host." >&2
   exit 2
@@ -168,11 +304,14 @@ fi
 
 if [[ "$cargo_args" == *"@FIRECRACKER_SUITES"* ]]; then
   resolved="$(firecracker_suites)"
-  [ -n "$resolved" ] || {
-    echo "run-e2e-gate.sh: discovered ZERO micro-VM suites — the grep rule is stale," >&2
-    echo "  or this is not the workspace root. Refusing to report a gate over nothing." >&2
+  discovered="$(printf '%s' "$resolved" | grep -c -- '--test' || true)"
+  discovered="${discovered:-0}"
+  if [ "$discovered" -lt "$MIN_FIRECRACKER_SUITES" ]; then
+    echo "run-e2e-gate.sh: discovered $discovered micro-VM suites, floor is $MIN_FIRECRACKER_SUITES." >&2
+    echo "  Either the grep rule is stale, this is not the workspace root, or suites" >&2
+    echo "  were deleted. Refusing to report a gate over a tier it mostly did not select." >&2
     exit 2
-  }
+  fi
   cargo_args="${cargo_args/@FIRECRACKER_SUITES/$resolved}"
 fi
 
@@ -183,10 +322,20 @@ fi
 # whose log vanished is a gate nobody can audit. Not piped through `tail`
 # either — `cargo test --workspace | tail -400` once hid the failing suite AND
 # made a ~3800-test run report "230 passed" at exit 101.
+#
+# ⚠️ Both steps are CHECKED, and that is not defensive habit. Every verdict
+# below is an arithmetic `[ "$x" -lt N ]`; when the log cannot be read, the
+# counts come back as the EMPTY STRING (grep exits 2 printing nothing, and the
+# `|| true` that correctly preserves the zero-match case preserves this too),
+# and `[ "" -lt 4 ]` exits 2 — which an `if` reads as FALSE. Every assertion
+# then vanishes and the script prints ✅ at exit 0, having measured nothing.
+# `tee` does not fail the pipeline either: it reports its own error, still
+# relays stdout, and cargo exits 0 — so nothing downstream would notice.
 # ---------------------------------------------------------------------------
 LOG_DIR="$HOME/.local/state/kastellan/gate-logs"
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" || { echo "run-e2e-gate.sh: cannot create $LOG_DIR" >&2; exit 2; }
 LOG="$LOG_DIR/e2e-gate-${WANT}-$(date +%Y%m%d-%H%M%S).log"
+: > "$LOG" || { echo "run-e2e-gate.sh: cannot write $LOG" >&2; exit 2; }
 
 echo "==> profile : $WANT"
 echo "==> knobs   : $knobs"
@@ -200,26 +349,51 @@ echo ""
 # shellcheck disable=SC2086
 env $knobs cargo test $cargo_args "$@" -- $harness_args 2>&1 | tee "$LOG"
 TEST_EXIT="${PIPESTATUS[0]}"
+TEE_EXIT="${PIPESTATUS[1]}"
+
+if [ "${TEE_EXIT:-1}" -ne 0 ]; then
+  echo "run-e2e-gate.sh: tee failed writing $LOG — the run happened but was not recorded," >&2
+  echo "  so there is nothing to assert over. Refusing to report a verdict." >&2
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # The assertions.
 #
-# `grep -c` exits 1 on zero matches, which under `set -e` would abort before
-# the diagnosis is printed — so every count is `|| true`-guarded and the
-# verdict is computed from the numbers, not from grep's exit status. The zero
-# case is precisely the one this script exists to REPORT.
+# `grep -c` exits 1 on zero matches while printing `0`, so every count is
+# `|| true`-guarded: the zero case is precisely the one this script exists to
+# REPORT, not to abort on. `${x:-0}` then covers grep's OTHER non-zero exit —
+# an unreadable file, which prints nothing at all.
 # ---------------------------------------------------------------------------
-E2E_COUNT="$(grep -c '^\[E2E\]' "$LOG" || true)"
-SKIP_COUNT="$(grep -c '^\[SKIP\]' "$LOG" || true)"
-WARN_COUNT="$(grep -c '^\[WARN\]' "$LOG" || true)"
-PASSED_COUNT="$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i == "passed;") s += $(i-1) } END { print s + 0 }' "$LOG")"
+count_e2e_for_tier() {
+  local tier="$1" n
+  n="$(grep -c "^\[E2E\] ${tier}: " "$LOG" || true)"
+  printf '%s' "${n:-0}"
+}
+
+E2E_TOTAL="$(grep -c '^\[E2E\]' "$LOG" || true)"; E2E_TOTAL="${E2E_TOTAL:-0}"
+SKIP_COUNT="$(grep -c '^\[SKIP\]' "$LOG" || true)"; SKIP_COUNT="${SKIP_COUNT:-0}"
+WARN_COUNT="$(grep -c '^\[WARN\]' "$LOG" || true)"; WARN_COUNT="${WARN_COUNT:-0}"
+PASSED_COUNT="$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i == "passed;") s += $(i-1) } END { print s + 0 }' "$LOG" || true)"
+PASSED_COUNT="${PASSED_COUNT:-0}"
+
+# Belt and braces: an operand that is somehow still not a number must refuse a
+# verdict rather than silently satisfy every floor.
+for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT; do
+  case "${!var}" in
+    ''|*[!0-9]*)
+      echo "run-e2e-gate.sh: $var is \"${!var}\", which is not a count — refusing a verdict." >&2
+      exit 3
+      ;;
+  esac
+done
 
 echo ""
 echo "==> evidence"
-echo "    [E2E]  lines : $E2E_COUNT   (floor $min_e2e)"
 echo "    tests passed : $PASSED_COUNT   (floor $min_passed)"
-echo "    [SKIP] lines : $SKIP_COUNT"
-echo "    [WARN] lines : $WARN_COUNT"
+echo "    [E2E]  lines : $E2E_TOTAL   (per-tier floors: $e2e_floors)"
+echo "    [SKIP] lines : $SKIP_COUNT   (max $max_skip)"
+echo "    [WARN] lines : $WARN_COUNT   (max 0)"
 echo "    cargo exit   : $TEST_EXIT"
 
 FAIL=0
@@ -234,21 +408,41 @@ if [ "$PASSED_COUNT" -lt "$min_passed" ]; then
   echo "   collection. This is issue #664's shape."
   FAIL=1
 fi
-if [ "$E2E_COUNT" -lt "$min_e2e" ]; then
-  echo "❌ POSITIVE CONTROL FAILED: $E2E_COUNT [E2E] lines, floor is $min_e2e."
-  echo "   The knobs were set but that many demanded preconditions were never"
-  echo "   reported met. Either the tier did not reach its fixtures, or a"
-  echo "   precondition helper lost its RequireKnob::announce call."
-  FAIL=1
-fi
-if [ "$SKIP_COUNT" -ne 0 ]; then
-  echo "⚠️  $SKIP_COUNT [SKIP] line(s) under a demanded run. Each is a precondition"
-  echo "   that bypassed every knob — the shape issue #622 was filed about."
+for pair in ${e2e_floors//,/ }; do
+  tier="${pair%%=*}"
+  floor="${pair#*=}"
+  got="$(count_e2e_for_tier "$tier")"
+  echo "    [E2E] $tier : $got   (floor $floor)"
+  if [ "$got" -lt "$floor" ]; then
+    echo "❌ POSITIVE CONTROL FAILED: $got '[E2E] $tier' lines, floor is $floor."
+    echo "   The knobs were set but that tier never reported a demanded precondition"
+    echo "   met. Either it did not reach its fixtures, or a precondition helper lost"
+    echo "   its RequireKnob::announce call."
+    FAIL=1
+  fi
+done
+if [ "$max_skip" != "any" ] && [ "$SKIP_COUNT" -gt "$max_skip" ]; then
+  echo "❌ $SKIP_COUNT [SKIP] line(s) under a demanded run, max is $max_skip."
+  echo "   Each is a precondition that bypassed every knob — the shape issue #622"
+  echo "   was filed about."
   grep '^\[SKIP\]' "$LOG" | sort -u | sed 's/^/     /'
+  FAIL=1
+elif [ "$SKIP_COUNT" -ne 0 ]; then
+  echo "⚠️  $SKIP_COUNT [SKIP] line(s) under a demanded run. Each is a precondition"
+  echo "   that bypassed every knob (issue #718's 92 hand-written sites). Not fatal"
+  echo "   for this profile yet — see MAX_SKIP in the profile table."
+  grep '^\[SKIP\]' "$LOG" | sort -u | sed 's/^/     /'
+fi
+if [ "$WARN_COUNT" -ne 0 ]; then
+  echo "❌ $WARN_COUNT [WARN] line(s): a knob was set but NOT honoured, so this run"
+  echo "   was not the demanded one. An out-of-dialect value (=y, =2, =enabled)"
+  echo "   reverts to skip; the gate must not pass on a disarmed knob."
+  grep '^\[WARN\]' "$LOG" | sort -u | sed 's/^/     /'
+  FAIL=1
 fi
 
 if [ "$FAIL" -eq 0 ]; then
-  echo "✅ gate passed as evidence: $PASSED_COUNT tests ran with $E2E_COUNT demanded preconditions met."
+  echo "✅ gate passed as evidence: $PASSED_COUNT tests ran with $E2E_TOTAL demanded preconditions met."
 fi
 echo "    full log: $LOG"
 exit "$FAIL"

@@ -28,7 +28,7 @@ use crate::require::RequireKnob;
 /// (`supervisor/src/systemd_user.rs`, `launchd_agents.rs`), and on macOS
 /// unconditionally — so without this every such skip would emit a `[SKIP]`
 /// line plus orphan continuation lines, and under
-/// [`crate::gliner_e2e::UnmetAction::Fail`] a multi-line panic message. The
+/// [`crate::require::UnmetAction::Fail`] a multi-line panic message. The
 /// grep count survives either way; what does not is being able to say the
 /// reason *is* one line, which the `*_or_reason` docs all promise.
 pub fn skip_line(reason: &str) -> String {
@@ -37,10 +37,14 @@ pub fn skip_line(reason: &str) -> String {
 
 /// Collapse a probe reason to a single line.
 ///
-/// Shared by [`skip_line`] and by [`crate::gliner_e2e::report_unmet_to`]'s
-/// panic arm, so a reason renders the same way whichever verdict a caller puts
-/// on it — a `[SKIP]` line and a demanded-run panic should not disagree about
-/// what the reason *is*.
+/// Shared by [`skip_line`] and by [`crate::require::RequireKnob::panic_unmet`],
+/// so a reason renders the same way whichever verdict a caller puts on it — a
+/// `[SKIP]` line and a demanded-run panic should not disagree about what the
+/// reason *is*.
+///
+/// (It used to name `gliner_e2e::report_unmet_to`'s panic arm. That function is
+/// now a one-line delegate with no panic arm of its own; the link still
+/// *resolved*, which is what made it worth correcting rather than leaving.)
 pub fn one_line(reason: &str) -> String {
     reason.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -136,9 +140,11 @@ fn prefix_supervisor_context(rendered: &str) -> String {
 /// [`skip_if_no_supervisor`] and [`pg_bin_dir_or_skip`] guard different things
 /// — a reachable user-level service manager, and a Postgres install to run
 /// `initdb` from. They are nonetheless **one** precondition class in this tree:
-/// 303 call sites use the first and 298 the second, and they are almost always
-/// paired, because a PG-backed suite brings its cluster up *under the
-/// supervisor*. Splitting the knob would mean an operator who set only one of
+/// each is called from roughly 65 of the same suites, and they are almost
+/// always paired, because a PG-backed suite brings its cluster up *under the
+/// supervisor*. (Deliberately "roughly": an exact call-site count is a second
+/// place the census lives, it rots on the next added suite, and the argument
+/// does not need it.) Splitting the knob would mean an operator who set only one of
 /// two variables got back exactly the silent green [#714] is about — and a
 /// half-armed gate is worse than an unarmed one, because it looks armed.
 ///
@@ -334,6 +340,20 @@ mod tests {
     #[test]
     fn warn_line_flattens_a_multi_line_reason() {
         assert_eq!(warn_line("two\n\n   lines"), "\n[WARN] two lines\n");
+    }
+
+    /// `[E2E]` is the count a gate asserts a floor against, so its shape
+    /// matters more than its siblings', not less. Its two flattenings were the
+    /// only ones in this module with nothing pinning them — droppable with the
+    /// suite still green, and a detail carrying a newline would then split one
+    /// `[E2E]` into a counted line plus an orphan that is attributed to
+    /// nothing.
+    #[test]
+    fn e2e_line_is_greppable_and_flattens_both_of_its_fields() {
+        let rendered = e2e_line("micro-VM", "preflight met for web-fetch.ext4");
+        assert!(rendered.starts_with("\n[E2E] "), "must be its own line: {rendered:?}");
+        assert!(rendered.ends_with('\n'), "must terminate the line: {rendered:?}");
+        assert_eq!(e2e_line("a\nb", "two\n\n   lines"), "\n[E2E] a b: two lines\n");
     }
 
     /// An unreachable origin yields a reason naming the host, whichever arm

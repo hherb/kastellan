@@ -182,6 +182,15 @@ say() { printf '%s\n' "$*"; }
 # with a short backoff turns the common case into a no-op. A call that still
 # fails is reported and the pass CONTINUES: one unlabelled issue named in the
 # output is recoverable; an aborted pass silently missing sixty is not.
+#
+# ⚠️ Continuing is not the same as EXITING 0, and that distinction was missing.
+# `FAILED` was incremented here, never read anywhere, and incremented inside a
+# `while read` on the right-hand side of a pipe — a subshell, so the increments
+# were discarded at the `done` regardless. Every one of ~150 `gh issue edit`
+# calls could exhaust its retries and the script still printed `==> done.` at
+# exit 0, indistinguishable from a clean pass except by reading 300 lines of
+# output. The loop below now reads from a process substitution so the counter
+# survives, and the script exits non-zero when anything gave up.
 run() {
   if [ "$DRY_RUN" = 1 ]; then say "  DRY-RUN: $*"; return 0; fi
   local attempt
@@ -202,8 +211,13 @@ for spec in "${LABELS[@]}"; do
   if gh label list --repo "$REPO" --limit 200 --json name -q '.[].name' | grep -qx "$name"; then
     say "  exists: $name"
   else
+    # Report "created" only if it actually was. `run` always returns 0 so the
+    # pass can continue, so an unconditional `say` here announced a label whose
+    # three attempts had all failed as created — two lines below its own
+    # "GAVE UP". `FAILED` not moving is the only available success signal.
+    before_label="$FAILED"
     run gh label create "$name" --repo "$REPO" --color "$colour" --description "$desc"
-    say "  created: $name"
+    if [ "$FAILED" -eq "$before_label" ]; then say "  created: $name"; fi
   fi
 done
 
@@ -239,8 +253,11 @@ in_list() {
 
 say ""
 say "==> 2. applying labels to open issues"
-gh issue list --repo "$REPO" --state open --limit 300 --json number,title \
-  -q '.[] | "\(.number)\t\(.title)"' | while IFS=$'\t' read -r num title; do
+# Read from a process substitution, NOT `gh … | while`: a pipeline's right-hand
+# side is a subshell, so every `FAILED` increment inside the loop — and the
+# labelled count below — would be discarded at the `done`.
+LABELLED=0
+while IFS=$'\t' read -r num title; do
   area="$(override_for "$num")"
   [ -n "$area" ] || area="$(area_for_title "$title")"
 
@@ -258,9 +275,30 @@ gh issue list --repo "$REPO" --state open --limit 300 --json number,title \
   joined="$(IFS=,; printf '%s' "${labels[*]}")"
   say "  #$num  $joined"
   run gh issue edit "$num" --repo "$REPO" --add-label "$joined"
-done
+  LABELLED=$((LABELLED + 1))
+done < <(gh issue list --repo "$REPO" --state open --limit 300 --json number,title \
+  -q '.[] | "\(.number)\t\(.title)"')
+
+# ⚠️ A zero-row listing is the same false green this repo's gate script exists
+# to refuse. `gh issue list` exits 0 with no rows for a wrong `$REPO`, a repo
+# whose issues are all closed, or a `-q` filter that stops matching after a `gh`
+# upgrade — and the loop body then never runs. Printing "done" over that is
+# indistinguishable from a successful full pass. Same rule as
+# `firecracker_suites`: refuse to report a pass over nothing.
+if [ "$LABELLED" -eq 0 ]; then
+  say ""
+  say "❌ labelled ZERO issues. \`gh issue list\` returned no rows — check \$REPO"
+  say "   ($REPO), that open issues exist, and that the -q filter still matches."
+  exit 1
+fi
 
 say ""
-say "==> done. Verify with:"
+say "==> done: $LABELLED issue(s) labelled."
+if [ "$FAILED" -ne 0 ]; then
+  say "❌ $FAILED gh call(s) gave up after 3 attempts — the backlog is PARTIALLY"
+  say "   labelled. Re-run; it is idempotent (--add-label only ever adds)."
+  exit 1
+fi
+say "    Verify with:"
 say "    gh issue list --state open --limit 300 --json number,labels \\"
 say "      -q '[.[] | select(.labels|length==0) | .number] | length'   # should be 0"

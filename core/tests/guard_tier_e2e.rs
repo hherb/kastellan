@@ -47,7 +47,7 @@ use kastellan_core::tool_host::{dispatch, spawn_worker, WorkerSpec};
 use kastellan_llm_router::RouterConfig;
 use kastellan_tests_common::scripted_llm::props_envelope;
 use kastellan_tests_common::binaries::workspace_binary_or_reason;
-use kastellan_tests_common::require::RequireKnob;
+use kastellan_tests_common::require::GUARD_TIER_KNOB;
 use kastellan_tests_common::{
     backend, bring_up_pg_cluster, pg_bin_dir_or_skip, policy_for_shell_exec, skip_if_no_supervisor,
     skip_if_sandbox_unavailable, unique_suffix, PgCluster,
@@ -345,23 +345,36 @@ struct TestRig {
     worker_bin: PathBuf,
 }
 
-/// This suite's own knob, for the one precondition no shared helper owns.
-///
-/// `skip_if_no_supervisor`, `pg_bin_dir_or_skip` and
-/// `skip_if_sandbox_unavailable` each carry their own knob now
-/// (`KASTELLAN_PG_REQUIRE_E2E`, `KASTELLAN_SANDBOX_REQUIRE_E2E`), so only the
-/// **worker binary** check was left bypassing every one of them — a
-/// hand-written `eprintln!("[SKIP] …")` that no knob could see and that did not
-/// even render through `skip_line`, so `grep -c '^\[SKIP\]'` counted it while
-/// nothing could turn it into a failure.
-///
-/// ⚠️ Three knobs rather than one umbrella is deliberate: the two hosts differ
-/// in what they can legitimately run, and a variable that made the Mac's honest
-/// micro-VM skips into failures is one an operator exports `=0`. The gate
-/// script sets the right set per profile, so the operator still types one
-/// command.
-const GUARD_TIER_KNOB: RequireKnob =
-    RequireKnob::new("KASTELLAN_GUARD_REQUIRE_E2E", "guard-tier");
+// This suite's own knob, for the one precondition no shared helper owns.
+//
+// `skip_if_no_supervisor`, `pg_bin_dir_or_skip` and
+// `skip_if_sandbox_unavailable` each carry their own knob now
+// (`KASTELLAN_PG_REQUIRE_E2E`, `KASTELLAN_SANDBOX_REQUIRE_E2E`), so only the
+// **worker binary** check was left bypassing every one of them — a
+// hand-written `eprintln!("[SKIP] …")` that no knob could see and that did not
+// even render through `skip_line`, so `grep -c '^\[SKIP\]'` counted it while
+// nothing could turn it into a failure.
+//
+// ⚠️ Three knobs rather than one umbrella is deliberate: the two hosts differ
+// in what they can legitimately run, and a variable that made the Mac's honest
+// micro-VM skips into failures is one an operator exports `=0`. The gate
+// script sets the right set per profile, so the operator still types one
+// command.
+//
+// ⚠️ **This knob covers the worker-binary check and nothing else.** The three
+// preconditions above it answer to `KASTELLAN_PG_REQUIRE_E2E` and
+// `KASTELLAN_SANDBOX_REQUIRE_E2E`, so setting *only* this one still lets an
+// unreachable supervisor return `None` from `bootstrap` and report every
+// guard-tier test green — #622's own shape, under a demanded knob. Run the
+// tier through `scripts/run-e2e-gate.sh guard-tier`, which sets all three; the
+// `[E2E]` detail below is deliberately narrowed to what this knob actually
+// established, so the evidence line cannot over-claim on a partial demand.
+//
+// The const itself lives in `tests_common::require` rather than here: this is
+// an integration-test binary, so a knob declared in it is invisible to
+// `require::KNOBS` and therefore to the test that pins the vocabulary against
+// the gate script. A knob the census cannot see is a knob the census cannot
+// defend.
 
 fn bootstrap(label: &str) -> Option<TestRig> {
     let action = GUARD_TIER_KNOB.action();
@@ -378,11 +391,17 @@ fn bootstrap(label: &str) -> Option<TestRig> {
     };
     GUARD_TIER_KNOB.announce(
         action,
-        // Precise about WHAT was established: the cluster is brought up on the
-        // next line, so claiming "Postgres ready" here would be an evidence line
-        // asserting more than it checked — the failing of everything this knob
-        // exists to fix.
-        "supervisor, sandbox, Postgres bin dir and shell-exec worker binary all resolved",
+        // Precise about what THIS knob established, which is the worker binary
+        // and only the worker binary. The three checks above answer to two
+        // other knobs, so naming them here would make the line assert more than
+        // its own condition checked — and on a run that set only
+        // KASTELLAN_GUARD_REQUIRE_E2E it would assert more than was *demanded*.
+        // An evidence line that over-claims is the failing of everything this
+        // knob exists to fix. (The supervisor, sandbox and Postgres
+        // preconditions announce themselves, under their own knobs, from their
+        // own helpers — so a run that demanded them gets four lines here, not
+        // one line claiming four things.)
+        "shell-exec worker binary resolved",
     );
     let suffix = unique_suffix();
     // Labels stay short: the PG socket path must fit macOS's 104-byte

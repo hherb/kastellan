@@ -37,12 +37,21 @@
 //! supervisor probe, the venv shim and the weights snapshot.
 //!
 //! A **sixth** is covered the same way but from outside this module: the
-//! Postgres bring-up. [`crate::skip::pg_bin_dir_or_skip`] and
-//! [`crate::skip::skip_if_no_supervisor`] stay skip-only for their ~70 other
-//! callers, so the three gliner-relex suites call the `*_or_reason` forms and
-//! route them through [`report_unmet`] in their own `bring_up_pg`. Without a
-//! cluster the test body never runs, so leaving it skip-only would have left
-//! the knob reporting green on the exact false premise it exists to abolish.
+//! Postgres bring-up. The three gliner-relex suites call the `*_or_reason`
+//! forms and route them through [`report_unmet`] in their own `bring_up_pg`,
+//! so that an absent cluster answers to **this tier's** knob. Without a cluster
+//! the test body never runs, so leaving that decision elsewhere would have left
+//! [`REQUIRE_ENV`] reporting green on the exact false premise it exists to
+//! abolish.
+//!
+//! ⚠️ **Not because the wrappers are skip-only — they are not, and have not
+//! been since the one-knob contract landed.**
+//! [`crate::skip::pg_bin_dir_or_skip`] and
+//! [`crate::skip::skip_if_no_supervisor`] panic under
+//! `KASTELLAN_PG_REQUIRE_E2E` and announce `[E2E]` on their met path. The
+//! reason to route around them here is that they answer to the *Postgres*
+//! knob, and an operator who demanded a real **gliner** run must not need a
+//! second variable to get one.
 //!
 //! That has a **blast radius worth stating**: `bring_up_pg` is shared with the
 //! mock-extractor tiers, so on a host with no Postgres at all, setting
@@ -112,8 +121,11 @@ pub const KNOB: RequireKnob = RequireKnob::new(REQUIRE_ENV, "gliner-relex");
 
 /// Pure: does this [`REQUIRE_ENV`] value demand a real run?
 ///
-/// Delegates to [`crate::require::unmet_action`]; kept as a named re-export
-/// because this module's own tests and the three suites' docs refer to it.
+/// A delegating wrapper over [`crate::require::unmet_action`], kept under this
+/// name because this module's own tests and the three suites' docs refer to it.
+/// (A wrapper, not a `pub use` — unlike [`UnmetAction`] twelve lines above,
+/// which genuinely is one. Worth distinguishing: only the re-export makes the
+/// two paths name the same item.)
 pub fn unmet_action(require_flag: Option<String>) -> UnmetAction {
     crate::require::unmet_action(require_flag)
 }
@@ -311,6 +323,25 @@ pub fn gliner_host_env(gate: EnableFlag) -> Option<GlinerRelexEnv> {
         weights_dir_or_reason,
     ) {
         Ok((script_path, weights_dir)) => {
+            // The tier's `[E2E]` positive control, naming the two paths that
+            // were resolved. This tier had none, so the `gliner` gate profile's
+            // floor of 1 was unreachable on Linux — the DGX, which is where the
+            // venv and the 1.3 GB of weights actually live and the host #651 was
+            // filed about. It was satisfiable on macOS only, and only by a
+            // *supervisor* announce from `build_test_entry_container`, i.e. by
+            // evidence with nothing to do with gliner.
+            //
+            // Naming the paths is the point, not decoration: #651 was a `.venv`
+            // copied from another host, which a count cannot show and a printed
+            // path can.
+            KNOB.announce(
+                action,
+                &format!(
+                    "venv shim at {}, weights at {}",
+                    script_path.display(),
+                    weights_dir.display()
+                ),
+            );
             // The one impure step left, and deliberately outside `host_env_from`:
             // it calls the PRODUCTION resolver against a real venv on disk (#650),
             // and panics loudly on a venv staged for another host (#651). Keeping

@@ -7,7 +7,7 @@
 > [`archive/handover_20260914_677_pre-prune.md`](archive/handover_20260914_677_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
-**Last updated:** 2026-09-17 ·
+**Last updated:** 2026-09-18 ·
 **Recent PRs, newest first:** [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob contract + the positive control: #714, #622, #664),
 [#717](https://github.com/hherb/kastellan/pull/717) (backlog triage + the stale ROADMAP line), [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational
 continuity for channel tasks), [#708](https://github.com/hherb/kastellan/pull/708) (#707, docs only — the Obscura assessment corrected and the V8 bump attempted),
@@ -22,7 +22,9 @@ continuity for channel tasks), [#708](https://github.com/hherb/kastellan/pull/70
 (from #702's second review round); [#710](https://github.com/hherb/kastellan/issues/710)–[#716](https://github.com/hherb/kastellan/issues/716)
 (from #709's third review round); [#693](https://github.com/hherb/kastellan/issues/693),
 [#695](https://github.com/hherb/kastellan/issues/695)–[#697](https://github.com/hherb/kastellan/issues/697)
-(from #694); [#691](https://github.com/hherb/kastellan/issues/691) (from #692). ·
+(from #694); [#691](https://github.com/hherb/kastellan/issues/691) (from #692);
+[#721](https://github.com/hherb/kastellan/issues/721)–[#724](https://github.com/hherb/kastellan/issues/724)
+(from #720's review round). ·
 **The DGX runs `main` and carries #709**, redeployed 2026-09-17 via `scripts/upgrade_from_git.sh`. Verified rather than assumed: checkout at `main`, `target/release/kastellan` rebuilt, the installed copy byte-identical to it (matrix worker sha256 matching on both sides), all three units active, and **migration 0026's `tasks.turn_record` column present in the live DB** — that last one is what would silently void a #677 re-measure. Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
@@ -68,35 +70,96 @@ one issue at a time is what kept regenerating it.
 - **`tests_common::require::RequireKnob` is the one vocabulary** — flag dialect, skip/fail split,
   out-of-dialect warning, and the new `[E2E]` success marker. The knob is **data**
   (`RequireKnob::new(env, tier)`), so a tier is one `const` and the panic still names the right
-  variable. **Three hand-rolled copies folded in:** gliner (#653), micro-VM (#667), and the new
-  Postgres / sandbox / guard knobs. The micro-VM copy had *already* diverged once — it called
+  variable. **Two hand-rolled copies folded in:** gliner (#653) and micro-VM (#667), plus three tiers that
+  had no knob at all (Postgres, sandbox, guard) — the review round corrected "three copies". The micro-VM copy had *already* diverged once — it called
   `unmet_action` bare while its sibling warned, so `=y` silently degraded to `Skip`.
 - ⚠️ **A knob alone was never enough, and that is the whole of #664.** It fires only from inside a
   test body, so a **filtered-out** or **renamed-out** run emits no `[SKIP]` and exits 0. Inferring
   "it ran" from the absence of a `[SKIP]` is unsound. `RequireKnob::announce` emits `[E2E]` on the
   **success** path and **only under a truthy knob**, so every such line means *a demanded
-  precondition was actually met here* — and `scripts/run-e2e-gate.sh` asserts floors on that count
-  **and** on tests passed.
+  precondition was actually met here* — and `scripts/run-e2e-gate.sh` asserts a **per-tier** floor on
+  that count, plus tests passed, zero `[WARN]`, and a per-profile `[SKIP]` cap.
 - ⚠️ **Measured, both directions, on `guard_tier_e2e` against a host with no Postgres:**
 
   | | `[SKIP]` | `[E2E]` | result | exit |
   | --- | --- | --- | --- | --- |
   | no knob | 11 | 0 | **`21 passed`** | **0** ← the false green |
-  | knob set | 0 | 0 | panics naming the knob | **1** |
+  | knob set | 0 | **22** | `10 passed; 11 failed`, each naming the knob | **101** |
   | healthy host + knob | 0 | **44** | `21 passed` | 0 |
 
   The 44 reconciles exactly: 11 PG-dependent tests × 4 preconditions; the other 10 are hermetic.
   **That "21 passed / exit 0" row is precisely what #622 said `bootstrap()` could report.**
+
+  ⚠️ **The middle row is a REVISED measurement; the first draft had `[E2E] 0` and `exit 1`, and
+  both were wrong.** `bootstrap()` checks supervisor → sandbox → Postgres, so on a host with a
+  working launchd and Seatbelt the first two announce *before* the PG lookup panics: 11 + 11 = 22,
+  with `Postgres-backed` and `guard-tier` at 0. And cargo reports a test-binary failure as **101**,
+  not 1. Re-measured directly with `KASTELLAN_PG_BIN_DIR=/nonexistent/pg/bin` and all three knobs
+  set. The review caught it by reading the ordering against the claim — a reminder that a
+  measurement table is as falsifiable as the code, and this one was the PR's headline evidence.
+  It is also the per-tier floors working as intended: `guard-tier`'s profile demands
+  `Postgres-backed=1` and `guard-tier=1`, both 0 here, so the gate fails for the right reason.
 - **Negative control on the control:** a deliberate name-filter typo gives `0 passed; 21 filtered
   out`, `cargo exit 0` — and `run-e2e-gate.sh` **exits 1** naming #664's shape. Checked the script's
   own exit status directly, not through a pipe: ⚠️ **the Bash tool runs zsh, whose arrays are
   1-indexed, so `${PIPESTATUS[0]}` is EMPTY there** and a piped check silently reads `tail`'s status.
+#### Review round: the PR shipped its own failure mode twice, both fixed in-branch
+
+A five-agent review of #720 (code, tests, silent-failure, type-design, comments) found two defects of
+exactly the class the PR exists to retire. Both were verified before being acted on, and both are
+fixed on this branch.
+
+- ⚠️ **Two of the four profiles could never pass: `microvm` on any host, `gliner` on the DGX.**
+  `RequireKnob::announce` had **four** call sites in the whole tree — `skip.rs` ×2, `sandbox.rs`,
+  `guard_tier_e2e.rs` — and **none** in `microvm/` or `gliner_e2e.rs`. All 18 suites the micro-VM
+  grep selected called zero announcing helpers (that is *enforced*: `microvm::guard`'s
+  `BANNED_HELPERS` is precisely those three helpers). So `grep -c '^\[E2E\]'` was structurally 0 and
+  `MIN_E2E=1` unreachable on a DGX where every VM boots. **It went unnoticed because the profile is
+  `os|Linux` and the authoring host is the Mac, which refuses it at exit 2 before running — the
+  profile had never been crossed.** For `gliner`, the only announce-capable calls sit inside
+  `#[cfg(target_os = "macos")] fn build_test_entry_container()`, so it was red on the one host that
+  has the venv and the weights, and on macOS cleared its floor with one *supervisor* line.
+  **Fixed:** `microvm::announce_microvm` on `skip_if_no_microvm` / `skip_unless_ready` /
+  `dep_or_skip` success paths, and `KNOB.announce` on `gliner_host_env`'s `Ok` arm naming the
+  resolved shim + weights paths.
+- ⚠️ **The gate's verdict failed OPEN.** `set -uo pipefail` without `-e`; `mkdir -p` unchecked and
+  `tee`'s `PIPESTATUS[1]` never read. With the log unwritable every count became the **empty
+  string** (grep exits 2 printing nothing; the `|| true` that correctly preserves the zero-match
+  case preserves this too), and `[ "" -lt 4 ]` **errors with status 2**, which `if` reads as false.
+  All four assertions vanished and the script printed `✅ gate passed as evidence:` at **exit 0**.
+  Reproduced end to end, then fixed: `${x:-0}` on every count, checked `mkdir`, a `: > "$LOG"`
+  writability probe, a `PIPESTATUS[1]` check, a numeric-operand refusal at exit 3, and a `bash`
+  guard (under zsh `${PIPESTATUS[0]}` is empty, so the cargo-exit check silently disappears).
+
+**Also from the review, fixed here:** per-tier `[E2E]` floors (a single total let `gliner` clear its
+floor on a *Postgres* line); `[WARN]` is now fatal to a gate run (a warned knob is a disarmed knob);
+`MAX_SKIP=0` on `guard-tier`; `validate_profiles` enforces the "a floor of 0 is not a gate" rule the
+script only asserted in a comment; the micro-VM discovery now excludes the three
+`#![cfg(target_os = "macos")]` suites it was selecting into a Linux-only profile; and
+`gate_script_tests` (6 tests) pins the script against `require::KNOBS` in both directions.
+
+> ⚠️ **A source-scan guard I wrote for this gave a FALSE PASS on the very defect it was written
+> for.** `every_knob_has_an_announce_call_site` scanned for `.announce` near a knob mention; deleting
+> the micro-VM announce left it green, because the file still mentioned the knob and some *other*
+> file had an announce. Deleted it and replaced it with two **behavioural** tests
+> (`skip_unless_ready_announces_…`, `dep_or_skip_announces_…`) which kill that mutation. The census
+> lesson applies to the guard you write from the census.
+> [[guard-shares-the-census-blind-spot]]
+
+**Deferred, filed:** [#721](https://github.com/hherb/kastellan/issues/721) (seal `UnmetAction` — it
+is a bypassable parameter; plus the `-> bool` reporter so `let _: Option<()>` disappears),
+[#722](https://github.com/hherb/kastellan/issues/722) (the macOS container tier — #684's own tier —
+has no knob and no profile), [#723](https://github.com/hherb/kastellan/issues/723)
+(`warn_if_out_of_dialect`'s "cannot be a hard failure" is a false dichotomy),
+[#724](https://github.com/hherb/kastellan/issues/724) (crate-root re-exports are gliner-bound).
+
 - ⚠️ **Deliberately no umbrella variable.** The two hosts differ in what they can legitimately run —
   the Mac has no KVM — so one "demand everything" flag would turn honest skips into failures and get
   exported `=0`. Profiles in the gate script set the right *set*, so the operator still types one
   command. Knobs: `KASTELLAN_PG_REQUIRE_E2E` (Postgres **and** the supervisor probe — one variable
-  because they gate the same tier at 298/303 near-always-paired call sites, and two would let a
-  half-set gate look armed), `KASTELLAN_SANDBOX_REQUIRE_E2E`, `KASTELLAN_GUARD_REQUIRE_E2E`, plus the
+  because they gate the same tier across ~65 near-always-paired suites each — the "298/303" of the
+  first draft was not reproducible and had the two the wrong way round — and two variables would let
+  a half-set gate look armed), `KASTELLAN_SANDBOX_REQUIRE_E2E`, `KASTELLAN_GUARD_REQUIRE_E2E`, plus the
   two that existed.
 - ⚠️ **The micro-VM profile would have been a false gate as first written**, twice over: it named a
   `--test microvm_roundtrip_e2e` **that does not exist**, and it omitted `-- --ignored`, without

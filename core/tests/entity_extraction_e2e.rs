@@ -60,9 +60,11 @@ use kastellan_tests_common::{
 /// without a cluster the test body never runs, which is the same false green
 /// the knob exists to abolish (#653).
 ///
-/// Both checks are made here, through the require-aware `*_or_reason` forms,
-/// rather than via the skip-only `skip_if_no_supervisor` / `pg_bin_dir_or_skip`
-/// wrappers — those stay skip-only for their ~70 other callers. Keeping the two
+/// Both checks are made here, through the `*_or_reason` forms, rather than via
+/// the `skip_if_no_supervisor` / `pg_bin_dir_or_skip` wrappers — not because
+/// those are skip-only (they answer to `KASTELLAN_PG_REQUIRE_E2E` now), but
+/// because they answer to the *Postgres* knob, and an operator who demanded a
+/// real gliner run must not need a second variable to get one. Keeping the two
 /// under one policy in one place is deliberate: the supervisor check used to be
 /// skip-only while the Postgres check beside it was require-aware, and in the
 /// sibling suite that asymmetry let a demanded run report green.
