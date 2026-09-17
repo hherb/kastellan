@@ -146,9 +146,14 @@ branch-up-to-date would serialize merges for no safety gain at this size.
 
 ## 6. The staged actions
 
-A reviewed, runnable script performing every GitHub action above — 12 closures with evidence-quoting
-comments, 3 retitles, 4 cross-link/re-scope comments, and the #655 ruleset change with verification —
-was produced alongside this note. It was **not run**.
+[`2026-09-17-backlog-triage.sh`](2026-09-17-backlog-triage.sh), next to this note, performs every
+GitHub action above: 12 closures with evidence-quoting comments, 3 retitles, 4 cross-link/re-scope
+comments, and the #655 ruleset change with verification. **It has not been run.** Each step is
+independent, so anything you disagree with can be commented out.
+
+```sh
+bash docs/devel/notes/2026-09-17-backlog-triage.sh
+```
 
 Recommended order:
 
