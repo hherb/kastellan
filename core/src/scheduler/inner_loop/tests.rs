@@ -30,6 +30,8 @@ fn ctx() -> TaskContext {
         max_plans: 3,
         resolved_asks: Vec::new(),
         origin: None,
+        conversation: Vec::new(),
+        conversation_task_ids: Some(Vec::new()),
     }
 }
 
@@ -516,6 +518,7 @@ fn inner_loop_result_terminal_l1_insight_default_is_none() {
         terminal_l1_insight: None,
         terminal_l3_skill: None,
         terminal_python_skill: None,
+        turn_record: None,
     };
     assert!(result.terminal_l1_insight.is_none());
 }
@@ -844,6 +847,8 @@ async fn terminal_python_skill_captured_under_grounding_gate() {
         max_plans: 5,
         resolved_asks: Vec::new(),
         origin: None,
+        conversation: Vec::new(),
+        conversation_task_ids: Some(Vec::new()),
     };
 
     let result = super::run_to_terminal(&pool, formulator, review, dispatcher, ctx, None)
@@ -940,6 +945,8 @@ async fn forced_synthesis_at_cap_answers_from_gathered_observations() {
             max_plans: 1,
             resolved_asks: Vec::new(),
             origin: None,
+            conversation: Vec::new(),
+            conversation_task_ids: Some(Vec::new()),
         }
     }
 
@@ -1096,4 +1103,55 @@ async fn qualify_plan_methods_rewrites_the_step_the_summary_and_audit_will_read(
     qualify_plan_methods(&QualifyingDispatcher, 1, &mut steps);
     let after: Vec<String> = steps.iter().map(|s| s.method.clone()).collect();
     assert_eq!(before, after, "completion must be idempotent");
+}
+
+// ── #701: the conversational-continuity turn record ────────────
+
+/// A channel-originated `TaskContext` carrying one successful `mail` step.
+fn channel_ctx_with_one_call() -> TaskContext {
+    let mut ctx = ctx();
+    ctx.origin = Some(crate::channel::ask_message::AskDestination {
+        channel: crate::channel::ChannelId("matrix".into()),
+        peer: crate::channel::PeerId("@horst:example.org".into()),
+        conversation: crate::channel::ConversationId("!room:example.org".into()),
+    });
+    let mut plan = plan_with_decision("act");
+    plan.steps = vec![step_with_tool("mail")];
+    ctx.plans.push(PlanRecord::new(
+        plan,
+        vec![StepOutcome::Ok(serde_json::json!({"subject": "hi"}))],
+    ));
+    ctx
+}
+
+#[test]
+fn a_channel_task_carries_a_turn_record_and_a_cli_task_does_not() {
+    // The record rides `InnerLoopResult` so the lane runner can hand it to
+    // `tasks::finalize` without re-reading the task's plans.
+    let ctx = channel_ctx_with_one_call();
+    let record = turn_record_for(&ctx).expect("a channel task records its turn");
+    assert_eq!(
+        record.get("calls").and_then(|c| c.as_array()).map(Vec::len),
+        Some(1),
+    );
+
+    let mut cli = channel_ctx_with_one_call();
+    cli.origin = None;
+    assert!(
+        turn_record_for(&cli).is_none(),
+        "a CLI task has no conversation, so a record would be data nothing can look up",
+    );
+}
+
+#[test]
+fn the_turn_record_carries_the_floor_the_task_ended_at() {
+    // Inheritance chains across turns only because the record stores the
+    // FINAL floor: a turn that inherited `Personal` must pass it on.
+    let mut ctx = channel_ctx_with_one_call();
+    ctx.classification_floor = DataClass::ClinicalConfidential;
+    let record = turn_record_for(&ctx).expect("record");
+    assert_eq!(
+        record.get("data_class").and_then(|v| v.as_str()),
+        Some("ClinicalConfidential"),
+    );
 }

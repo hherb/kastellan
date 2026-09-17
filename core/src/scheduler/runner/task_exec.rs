@@ -186,6 +186,8 @@ pub(super) async fn run_one(
             terminal_l1_insight: None,
             terminal_l3_skill: None,
             terminal_python_skill: None,
+            // No plans ran, so there is nothing for the next turn to read.
+            turn_record: None,
         };
     }
 
@@ -219,6 +221,53 @@ pub(super) async fn run_one(
         );
     }
 
+    // #701: the earlier turns of this conversation, if this task came from one.
+    // Loading, screening, budgeting and classification all live in
+    // `scheduler::conversation`; this is the wiring only.
+    let origin = crate::channel::ask_message::destination_from_task_payload(&task.payload);
+    let loaded = crate::scheduler::conversation::load_for_task(
+        pool,
+        task,
+        origin.as_ref(),
+        classification_floor,
+        classification_floor_source,
+    )
+    .await;
+    let (classification_floor, classification_floor_source) = loaded.floor;
+
+    // A block only this screen made is otherwise invisible: the planner sees
+    // `withheld` and no other screen wrote a row. Best-effort, like the sink
+    // rows — losing a forensic row must not fail the task.
+    //
+    // ⚠️ **First run only.** `run_one` is re-entered from the top on every
+    // resume, and `load_for_task` re-loads and re-screens the same turns each
+    // time, so writing these unconditionally records one row per resume for a
+    // single blocked turn — a forensic trail that over-counts an event that
+    // happened once. `PlanRecord::sink_block_audit_payloads` documents the
+    // identical hazard for the sink tier and is structured to avoid it; a
+    // review found this tier had reintroduced it. `restored.plans` is
+    // non-empty exactly on a resumed run, which is the same signal the sink
+    // path keys on.
+    if restored.plans.is_empty() {
+        for block in &loaded.blocks {
+            let payload = crate::scheduler::conversation::block_audit_payload(task.id, block);
+            if let Err(e) =
+                kastellan_db::audit::insert(pool, "policy", "injection.blocked", payload).await
+            {
+                tracing::error!(
+                    task_id = task.id, error = %e,
+                    "conversation injection.blocked audit insert failed"
+                );
+            }
+        }
+    } else if !loaded.blocks.is_empty() {
+        tracing::debug!(
+            task_id = task.id,
+            blocks = loaded.blocks.len(),
+            "resumed run re-screened the conversation; block rows already written at first plan",
+        );
+    }
+
     let ctx = TaskContext {
         task_id: task.id,
         lane: task.lane,
@@ -232,7 +281,9 @@ pub(super) async fn run_one(
         plan_count: start_plan_count,
         max_plans: max_plans_for_run,
         resolved_asks,
-        origin: crate::channel::ask_message::destination_from_task_payload(&task.payload),
+        origin,
+        conversation: loaded.turns,
+        conversation_task_ids: loaded.task_ids,
     };
 
     let task_id = ctx.task_id;
@@ -257,6 +308,7 @@ fn failed_result(detail: String) -> InnerLoopResult {
         terminal_l1_insight: None,
         terminal_l3_skill: None,
         terminal_python_skill: None,
+        turn_record: None,
     }
 }
 
@@ -276,17 +328,27 @@ fn failed_result(detail: String) -> InnerLoopResult {
 ///   `classification_inference` keyword classifier elevated above Public.
 /// - **`"default"`** → `Ok(Default)`. Explicit "no provenance" — same
 ///   semantic as absent.
-/// - **`"agent_raised"`** → `Err`. Reserved for the inner loop's
-///   [`crate::scheduler::inner_loop::apply_floor_raise`]; any producer that writes
-///   it directly is forging audit-trail provenance ([issue #71]).
-///   The producer cannot raise the floor — only the agent can, via
-///   `Plan.floor_request`, and the inner loop is the only legitimate
-///   writer of `AgentRaised`. Fail-closed at entry so the audit-log
+/// - **Any other known variant** → `Err`. Reserved for the inner loop:
+///   `"agent_raised"` for
+///   [`crate::scheduler::inner_loop::apply_floor_raise`], and
+///   `"conversation_inherited"` for
+///   [`crate::scheduler::conversation::floor::inherit_floor`]. Any producer
+///   that writes one directly is forging audit-trail provenance ([issue #71]):
+///   a producer cannot raise the floor — only the agent can, via
+///   `Plan.floor_request` — and it certainly cannot attribute a floor to a
+///   conversation that was never read. Fail-closed at entry so the audit-log
 ///   contract cannot be silently misattributed.
 /// - **Non-string JSON value** → `Err`. Payload shape error.
 /// - **Unknown string** → `Err`. Producer-bug surface; surfaces the
 ///   bad value so a misspelt token is easy to spot in the failure
 ///   message.
+///
+/// ⚠️ The accepted set is an **allowlist**, and that is load-bearing. This was
+/// a denylist matching `AgentRaised` alone until a review found that #701's
+/// new `ConversationInherited` variant had walked straight through it — the
+/// reject binds to the variant, which survives a *rename* but says nothing
+/// about an *addition*. Every future variant is reserved until someone adds it
+/// here on purpose.
 ///
 /// All `Err` variants carry a human-readable diagnostic suitable for
 /// passing straight into [`failed_result`].
@@ -308,21 +370,26 @@ fn parse_classification_floor_source_from_payload(
             "classification_floor_source in payload is not a string: {v:?}"
         ));
     };
-    // Parse first, then reject the `AgentRaised` variant on a structural
-    // match. Binding the reject to the enum variant (rather than a
-    // string literal) means a future rename of `AgentRaised` + its
-    // serde tag + `as_snake_str` continues to be rejected here without
-    // a parallel edit. The dedicated diagnostic is preserved so an
-    // operator grepping the daemon journal for "reserved" still finds
-    // this site.
+    // Parse first, then ADMIT the three producer-settable variants on a
+    // structural match; everything else the enum can ever hold is reserved.
+    // Binding to the variants (rather than to string literals) means a rename
+    // of any of them + its serde tag + `as_snake_str` keeps working without a
+    // parallel edit here, and — unlike the denylist this replaced — a newly
+    // ADDED variant is rejected until someone admits it deliberately. The
+    // dedicated diagnostic is preserved so an operator grepping the daemon
+    // journal for "reserved" still finds this site.
     match serde_json::from_value::<ClassificationFloorSource>(v.clone()) {
-        Ok(ClassificationFloorSource::AgentRaised) => Err(format!(
+        Ok(
+            src @ (ClassificationFloorSource::Operator
+            | ClassificationFloorSource::CliInferred
+            | ClassificationFloorSource::Default),
+        ) => Ok(src),
+        Ok(reserved) => Err(format!(
             "classification_floor_source = {:?} is reserved for the inner \
-             loop's apply_floor_raise — producers must not supply it. \
+             loop — producers must not supply it. \
              Use operator / cli_inferred / default at submission time.",
-            ClassificationFloorSource::AgentRaised.as_snake_str(),
+            reserved.as_snake_str(),
         )),
-        Ok(src) => Ok(src),
         Err(_) => Err(format!(
             "unknown classification_floor_source: {s:?} (expected one of \
              operator, cli_inferred, default)"
@@ -383,6 +450,55 @@ mod tests {
             err.contains("reserved") || err.contains("apply_floor_raise"),
             "error must mention why the value is rejected: {err}",
         );
+    }
+
+    #[test]
+    fn conversation_inherited_string_is_rejected_as_reserved() {
+        // Issue #71, second variant: #701 added `ConversationInherited`, which
+        // only `conversation::floor::inherit_floor` may set. A producer that
+        // could write it would make `plan.formulate` attribute a floor to a
+        // conversation that was never read — and with `conversation_task_ids`
+        // in the same row, a self-contradictory one. This walked through the
+        // denylist that preceded the allowlist; the test is here so the next
+        // variant cannot repeat it silently.
+        let v = json!("conversation_inherited");
+        let err = parse_classification_floor_source_from_payload(Some(&v)).unwrap_err();
+        assert!(
+            err.contains("conversation_inherited"),
+            "error must echo the rejected value: {err}",
+        );
+        assert!(err.contains("reserved"), "error must say why: {err}");
+    }
+
+    #[test]
+    fn every_floor_source_is_either_producer_settable_or_reserved() {
+        // The allowlist's own census, so adding a variant without deciding
+        // which side it falls on is a compile error here rather than a silent
+        // admission. `as_snake_str` is exhaustive, so this list cannot go
+        // stale without the compiler saying so.
+        for src in [
+            ClassificationFloorSource::Operator,
+            ClassificationFloorSource::CliInferred,
+            ClassificationFloorSource::AgentRaised,
+            ClassificationFloorSource::Default,
+            ClassificationFloorSource::ConversationInherited,
+        ] {
+            let v = json!(src.as_snake_str());
+            let got = parse_classification_floor_source_from_payload(Some(&v));
+            let producer_settable = matches!(
+                src,
+                ClassificationFloorSource::Operator
+                    | ClassificationFloorSource::CliInferred
+                    | ClassificationFloorSource::Default
+            );
+            assert_eq!(
+                got.is_ok(),
+                producer_settable,
+                "{} must be {}",
+                src.as_snake_str(),
+                if producer_settable { "accepted" } else { "reserved" },
+            );
+        }
     }
 
     #[test]

@@ -91,8 +91,15 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 /// floor. The old constant default only ever announced itself via a `warn!` in
 /// the daemon log, which is not the oversight record. Deliberately shaped like
 /// `classification_floor_source`, whose reading convention operators already
-/// know. This brings the default-source key count to 28, and
-/// `CliInferred`+signals to 29.
+/// know.
+///
+/// #701 (2026-09-16) added `conversation_task_ids`, always present.
+///
+/// **The running tally that used to live here has been removed.** It had to be
+/// edited in three places for every new key and was already stale when a
+/// review read it — the doc said 28/29 while the tests asserted 29/30. The
+/// counts are pinned by `build_plan_formulate_payload_pins_*_keys_*`, which
+/// cannot go stale because they fail.
 /// The classification facts one `plan.formulate` row records.
 ///
 /// Grouped rather than passed as four positional parameters: they are one
@@ -106,7 +113,9 @@ pub(crate) struct ClassificationProvenance<'a> {
     /// The task's effective floor at the time the plan was formulated —
     /// post-raise, since `apply_floor_raise` runs first.
     pub floor: DataClass,
-    /// How `floor` was set (producer default, CLI inference, agent raise).
+    /// How `floor` was set: operator flag, producer default, CLI inference,
+    /// agent raise, or inheritance from an earlier turn of this conversation.
+    /// The authoritative list is [`ClassificationFloorSource`] itself.
     pub floor_source: ClassificationFloorSource,
     /// Signal tags behind a `CliInferred` floor; empty for every other source.
     pub floor_signals: &'a [String],
@@ -121,6 +130,7 @@ pub(crate) fn build_plan_formulate_payload(
     plan: &Plan,
     meta: &FormulationMeta,
     classification: ClassificationProvenance<'_>,
+    conversation_task_ids: Option<&[i64]>,
 ) -> serde_json::Value {
     let ClassificationProvenance {
         floor: classification_floor,
@@ -159,6 +169,17 @@ pub(crate) fn build_plan_formulate_payload(
         .expect("DataClass serialisation cannot fail (closed enum, no payloads)");
 
     let mut obj = serde_json::Map::new();
+    // #701: which earlier turns of this conversation the plan was built on.
+    // Explicit JSON null (not key-absent) when the read FAILED, `[]` when there
+    // were none — so a JSONB query finds every row, and a loss never reads as
+    // an absence. Mirrors the `l1_insight` / `refused` precedent.
+    obj.insert(
+        "conversation_task_ids".into(),
+        match conversation_task_ids {
+            Some(ids) => serde_json::json!(ids),
+            None => serde_json::Value::Null,
+        },
+    );
     obj.insert("task_id".into(),         serde_json::json!(task_id));
     obj.insert("plan_count".into(),      serde_json::json!(plan_count));
     obj.insert("prompt_name".into(),     serde_json::json!(meta.prompt_name));
@@ -300,6 +321,7 @@ pub(super) async fn write_audit_plan_formulate(
             floor_signals: &ctx.classification_floor_signals,
             ceiling_source: data_ceiling_source,
         },
+        ctx.conversation_task_ids.as_deref(),
     );
     kastellan_db::audit::insert(pool, "agent", "plan.formulate", payload).await?;
     Ok(())

@@ -13,6 +13,8 @@ use time::Duration;
 
 use crate::DbError;
 
+pub mod turns;
+
 /// The two concurrency lanes. `fast` is the default; `long` is opt-in
 /// via the producer (CLI flag, channel adapter default, etc.).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -196,16 +198,24 @@ fn decode_task_row(row: &PgRow) -> Result<Task, DbError> {
 /// (e.g. cancelled out from under the lane runner, or finalised twice).
 /// Returns `Ok(())` either way; the caller does not need to distinguish
 /// "I won the race" from "someone else terminalised this row first."
+///
+/// `turn_record` is the conversational-continuity record for a channel task
+/// (#701): what this task did, for the next turn in the same conversation to
+/// read — see [`turns`]. `None` for every other task kind, which leaves the
+/// column NULL. Written here, in the same UPDATE that makes the task terminal,
+/// so a record can never describe a task that did not finish.
 pub async fn finalize(
     pool: &PgPool,
     task_id: i64,
     state: &str,
     result: Option<serde_json::Value>,
+    turn_record: Option<serde_json::Value>,
 ) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE tasks \
          SET state = $2, \
              result = $3, \
+             turn_record = $4, \
              finished_at = now(), \
              updated_at = now() \
          WHERE id = $1 AND state = 'running'",
@@ -213,6 +223,7 @@ pub async fn finalize(
     .bind(task_id)
     .bind(state)
     .bind(result)
+    .bind(turn_record)
     .execute(pool)
     .await
     .map_err(|e| DbError::Query(format!("tasks finalize: {e}")))?;

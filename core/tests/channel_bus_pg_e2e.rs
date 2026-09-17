@@ -108,6 +108,7 @@ async fn channel_inbound_enqueues_and_completion_routes_a_reply() {
         claimed.id,
         "completed",
         Some(serde_json::json!({"kind": "completed", "message": "You have 2 meetings."})),
+        None,
     )
     .await
     .expect("finalize");

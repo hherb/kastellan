@@ -18,6 +18,7 @@
 pub mod agent;
 pub mod asks;
 pub mod audit;
+pub mod conversation;
 pub mod crash_recovery;
 pub mod inner_loop;
 pub mod inner_loop_audit;

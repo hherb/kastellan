@@ -237,6 +237,8 @@ fn ctx() -> TaskContext {
         max_plans: 3,
         resolved_asks: Vec::new(),
         origin: None,
+        conversation: Vec::new(),
+        conversation_task_ids: Some(Vec::new()),
     }
 }
 

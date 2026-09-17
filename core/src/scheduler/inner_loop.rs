@@ -46,7 +46,10 @@ use super::inner_loop_audit::{
 
 mod floor;
 mod invoke_expand;
-mod result_view;
+// `pub(crate)` so `scheduler::conversation` can reuse the same pruning,
+// clamping and screen-text extraction for the conversation block (#701).
+// A second copy of that logic is exactly the drift #669 warns about.
+pub(crate) mod result_view;
 mod summary;
 
 /// Per-task accumulator state passed to the agent each iteration.
@@ -99,6 +102,19 @@ pub struct TaskContext {
     /// path. `None` for a `kastellan-cli ask` or scheduled task, whose ask
     /// is answered through `kastellan-cli inbox`.
     pub origin: Option<crate::channel::ask_message::AskDestination>,
+    /// The earlier turns of this task's conversation, rendered, screened and
+    /// budgeted (#701). Empty for a task that is not channel-originated, that
+    /// has no earlier turns, or whose history could not be read.
+    ///
+    /// Held as rendered JSON rather than as `Turn`s because it is loaded and
+    /// screened **once** per run, in `runner::task_exec::run_one`, and read on
+    /// every planner iteration — the same memoize-at-the-append-point reasoning
+    /// as `PlanRecord::rendered` (#344).
+    pub conversation: Vec<serde_json::Value>,
+    /// The ids of the turns behind `conversation`, for the `plan.formulate`
+    /// row. `Some(vec![])` means there were none; **`None` means the read
+    /// failed** — absence and loss must not render identically.
+    pub conversation_task_ids: Option<Vec<i64>>,
 }
 
 impl TaskContext {
@@ -110,6 +126,25 @@ impl TaskContext {
     pub fn plans_so_far_summary(&self) -> Vec<serde_json::Value> {
         render_plans_summary(&self.plans)
     }
+}
+
+/// The `tasks.turn_record` value for a finished task, or `None` when the task
+/// did not come from a channel (#701).
+///
+/// Only a channel task has a conversation for a later turn to read, so only a
+/// channel task stores a record: for a CLI or scheduled task it would be data
+/// nothing can ever look up.
+///
+/// Serialisation of a `TurnRecord` cannot fail (no non-string keys, no NaN); a
+/// failure would mean no record rather than a failed task, because the record
+/// is a convenience for the *next* turn and never a reason to lose this one.
+pub(crate) fn turn_record_for(ctx: &TaskContext) -> Option<serde_json::Value> {
+    ctx.origin.as_ref()?;
+    let record = crate::scheduler::conversation::record::from_plans(
+        &ctx.plans,
+        ctx.classification_floor,
+    );
+    serde_json::to_value(record).ok()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -155,6 +190,10 @@ pub struct InnerLoopResult {
     /// grounding gate as `terminal_l3_skill`). The lane runner writes one
     /// `action='l3.crystallised'` (`kind: "python"`) audit row if `Some`.
     pub terminal_python_skill: Option<crate::cassandra::types::PythonSkillCandidate>,
+    /// The conversational-continuity record for a channel task (#701), for the
+    /// lane runner to hand to `tasks::finalize`. `None` for every other task
+    /// kind, and for the pre-loop failure paths, which ran no plans.
+    pub turn_record: Option<serde_json::Value>,
 }
 
 /// Terminal result of the inner loop. The lane runner translates
@@ -363,6 +402,17 @@ pub async fn run_to_terminal(
                 terminal_l1_insight: $insight,
                 terminal_l3_skill: $skill,
                 terminal_python_skill: $pyskill,
+                // Every `InnerLoopResult` is built here, so the record is
+                // built at each one from the plans accumulated so far —
+                // including the outcomes that are not `Completed`, whose calls
+                // are just as real a referent for the next turn.
+                //
+                // NOT every *exit*: the loop also has `?` propagations (a
+                // Postgres blip on `observe_state`, on an audit insert), which
+                // return past this macro and become `failed_result`, whose
+                // `turn_record` is `None` even though `ctx.plans` was
+                // populated. That loss is #710.
+                turn_record: turn_record_for(&ctx),
             })
         };
         // 3-arg form (existing call sites): python skill None.
