@@ -55,7 +55,40 @@ continuity for channel tasks), [#708](https://github.com/hherb/kastellan/pull/70
 
 ## Current state
 
-### This session: #701 — a follow-up reads its own conversation
+### This session (later, 2026-09-17): backlog triage — 150 open issues
+
+No review target existed (clean tree, `main` in sync with `origin`, no PR), so the session became a
+triage of every open issue. Full record with the evidence behind each decision:
+[`notes/2026-09-17-backlog-triage.md`](../notes/2026-09-17-backlog-triage.md).
+
+⚠️ **The ROADMAP is the accurate source and the GitHub issues are the stale mirror** — the reverse
+of what the six epics assumed. Closure is healthy for PR-driven work (#661–#701 were each closed by
+their fixing PR) and **zero for roadmap-era work: 58 issues (39%) were filed 2026-06 or earlier and
+never touched since.** The cause is mechanical — **~7% of issues carry any label** (10 of 150), so
+the old cluster cannot be filtered for and stays invisible.
+
+⚠️ **Staged, NOT executed.** The session's sandbox blocked `gh`, so **every issue below is still
+OPEN**: close #227/#215/#216 (shipped, each against a ROADMAP `[x]`), #214/#219 (struck through as
+*rejected 2026-06-12*), #213 (the ROADMAP supersedes the IMAP framing in words; `workers/email-in`
+is a localmail REST client and nothing here speaks IMAP), #203–#208 (epic mirrors whose every link
+still points at `hherb/hhagent`, renamed two days after they were filed), #655. The runnable script
+and the per-issue rationale are in the note.
+
+⚠️ **#655 is the precondition for the whole false-green-gate cluster** (#714, #664, #622, #691, and
+#237's absent macOS leg — against #679, #667, #682, #684, #687 already closed in the same class).
+Verified still true: `protect_main` carries only `deletion` + `non_fast_forward`, so **every CI job
+is advisory** — a gate that cannot block a merge is a notification. Safe to turn on:
+`linux-check.yml` triggers on `pull_request:` with **no `paths` filter**, so all three jobs report
+on every PR and no docs-only PR can deadlock on a check that never reports. Fixing the cluster
+one issue at a time keeps regenerating it; one contract — every gate needs a REQUIRE knob **and** a
+positive control that fails when zero tests ran — retires the class.
+
+**One real ROADMAP defect found and fixed — the only tree change this session made:** the Phase 4
+line for the `python-exec` micro-VM backend had stayed `[ ]` since the original seeding while
+duplicating two `[x]` entries (Firecracker slice 1, PR #364; Apple `container`, 2026-05-21), its
+text still describing the work at "discovery spike … verdict COMMIT" stage.
+
+### Earlier this session: #701 — a follow-up reads its own conversation
 
 Design `docs/superpowers/specs/2026-09-16-conversation-continuity-design.md` (with a D2
 amendment), plan `docs/superpowers/plans/2026-09-16-conversation-continuity.md`. What binds:
