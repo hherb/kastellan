@@ -92,7 +92,7 @@ items still get their own issues as they become actionable — that part works.
 
 The Phase 4 line for the `python-exec` micro-VM backend had stayed `[ ]` since the original seeding
 while **duplicating two `[x]` entries** — its text still described the work at "discovery spike …
-verdict COMMIT" stage, years of shipping later. Corrected in the same commit as this note.
+verdict COMMIT" stage, three months and two shipped backends later. Corrected alongside this note.
 
 This is the only tree change the triage produced.
 
