@@ -190,12 +190,13 @@ fn build_test_entry() -> Option<ToolEntry> {
 /// Returns the cluster (drop-cleanup wired through `PgCluster::_guards`)
 /// plus a runtime-role-scoped `PgPool` ready for `tool_host::dispatch`.
 ///
-/// Note this is shared with the macOS container tier, whose own two probes stay
-/// skip-only: the cluster is needed either way.
+/// Note this is shared with the macOS container tier, whose own two probes
+/// answer to the sandbox and Postgres knobs: the cluster is needed either way.
 async fn bring_up_pg(label: &str) -> Option<(PgCluster, sqlx::PgPool)> {
-    // The shared `pg_bin_dir_or_skip` stays skip-only — ~70 other suites depend
-    // on that — so the decision is made here, at a call site that must not
-    // silently pass.
+    // The shared `pg_bin_dir_or_skip` answers to `KASTELLAN_PG_REQUIRE_E2E`,
+    // not to this tier's knob, so the decision is made here — at a call site
+    // that must not silently pass for an operator who demanded a real gliner
+    // run and set only the gliner variable.
     let bin_dir = match pg_bin_dir_or_reason() {
         Ok(d) => d,
         Err(reason) => return report_unmet(require_action(), &reason),

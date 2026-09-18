@@ -39,6 +39,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::require::{RequireKnob, UnmetAction};
+
 /// Where the guest kernel and rootfs images live when the operator has
 /// not overridden `KASTELLAN_MICROVM_DIR`.
 ///
@@ -136,31 +138,67 @@ mod rebuild_script_tests;
 /// rootfs image too old to contain the code under test.
 pub const REQUIRE_ENV: &str = "KASTELLAN_MICROVM_REQUIRE_E2E";
 
+/// This tier's knob, as data.
+///
+/// The machinery — the flag dialect, the skip/fail split, the out-of-dialect
+/// warning, the `[E2E]` positive control — is [`crate::require::RequireKnob`],
+/// shared with the gliner-relex and Postgres tiers. It used to be a third
+/// hand-rolled copy here, and the copy had already diverged once: it called
+/// `unmet_action` bare while its sibling warned, so
+/// `KASTELLAN_MICROVM_REQUIRE_E2E=y` silently degraded to `Skip` and handed
+/// back the green run the operator was trying to rule out (#680 review) — the
+/// #654 skew, on the knob whose own doc cites #654.
+///
+/// That is the argument for naming the knob as data rather than re-deriving
+/// it: **a copied guard shares the original's blind spots while diverging from
+/// its fixes.**
+pub const KNOB: RequireKnob = RequireKnob::new(REQUIRE_ENV, "micro-VM");
+
 /// What an unmet micro-VM precondition means for *this* run.
 ///
 /// Reads [`REQUIRE_ENV`] through the one project flag dialect
 /// (`1|true|yes|on`, trimmed, case-insensitive) rather than a strict
 /// `Some("1")` — the strict form is the operator-facing skew #654 was filed
 /// about, and re-deriving it here would reintroduce it.
-pub fn require_action() -> crate::gliner_e2e::UnmetAction {
-    require_action_to(&mut std::io::stderr())
+pub fn require_action() -> UnmetAction {
+    KNOB.action()
 }
 
 /// [`require_action`] with the out-of-dialect `[WARN]` written to `out`.
 ///
-/// The warning is the half the first version dropped (#680 review): it
-/// called `unmet_action` bare while its sibling
-/// [`crate::gliner_e2e::require_action`] routes through the same helper and
-/// *then* warns. So `KASTELLAN_MICROVM_REQUIRE_E2E=y` silently degraded to
-/// `Skip` and handed back the green run the operator was trying to rule
-/// out — the #654 skew, on the knob whose own doc cites #654.
-pub fn require_action_to(out: &mut dyn std::io::Write) -> crate::gliner_e2e::UnmetAction {
-    let raw = std::env::var(REQUIRE_ENV).ok();
-    let action = crate::gliner_e2e::unmet_action(raw.clone());
-    if action == crate::gliner_e2e::UnmetAction::Skip {
-        crate::gliner_e2e::warn_if_out_of_dialect(REQUIRE_ENV, raw.as_deref(), out);
-    }
-    action
+/// Reads the variable through [`RequireKnob::env`] rather than naming
+/// [`REQUIRE_ENV`] a second time: the two are the same string today only
+/// because `KNOB` is built from it, and a second literal here is the one place
+/// this module could reintroduce the drift it exists to end.
+pub fn require_action_to(out: &mut dyn std::io::Write) -> UnmetAction {
+    KNOB.action_reporting_to(std::env::var(KNOB.env()).ok(), out)
+}
+
+/// Emit the `[E2E]` positive control for a met micro-VM precondition.
+///
+/// # Why this tier needed one at all
+///
+/// The knob half of the contract fires only from a *failure* path, so it is
+/// structurally blind to a tier that never ran. The gate script closes that by
+/// asserting a floor on `grep -c '^\[E2E\]'` — but this tier emitted **none**,
+/// because every micro-VM combinator's success arm is a bare `false` or
+/// `Ok(value)` with no action in hand. The `microvm` profile's floor of 1 was
+/// therefore unreachable on a perfectly healthy DGX: `❌ POSITIVE CONTROL
+/// FAILED` on a run where all 18 suites booted real VMs and passed.
+///
+/// That is the precise failure the script refuses to ship a `sandbox` profile
+/// for — "a profile red on every host trains everyone to ignore a red gate" —
+/// and it went unnoticed because the profile is Linux-only and the authoring
+/// host is a Mac, which refuses it before running.
+pub fn announce_microvm(detail: &str) {
+    announce_microvm_to(detail, &mut std::io::stderr());
+}
+
+/// [`announce_microvm`] with the `[E2E]` line written to `out`, so a unit test
+/// can prove the line is **emitted** without inflating the count it protects —
+/// the same seam, and the same reason, as [`report_unmet_microvm_to`].
+pub fn announce_microvm_to(detail: &str, out: &mut dyn std::io::Write) {
+    KNOB.announce_demanded_to(detail, out);
 }
 
 /// Abort the run because [`REQUIRE_ENV`] demanded one and a precondition is
@@ -169,17 +207,15 @@ pub fn require_action_to(out: &mut dyn std::io::Write) -> crate::gliner_e2e::Unm
 /// One renderer for a sentence that used to be written out twice, verbatim,
 /// with only the `KASTELLAN_MICROVM_REQUIRE_E2E` prefix pinned by tests — so
 /// the rest of it could drift silently between the two call sites (#680
-/// review).
+/// review). It now delegates to [`RequireKnob::panic_unmet`] — the diverging
+/// form that exists precisely so a `-> !` caller does not have to write the
+/// sentence out a second time, which is the drift that review caught.
 ///
 /// # Panics
 ///
 /// Always. That is its whole job; the return type says so.
 pub fn require_panic(reason: &str) -> ! {
-    panic!(
-        "{REQUIRE_ENV} demanded a real micro-VM end-to-end run, but a precondition is \
-         unmet: {}",
-        crate::skip::one_line(reason)
-    )
+    KNOB.panic_unmet(reason)
 }
 
 /// Report an unmet micro-VM precondition: `[SKIP]` and return `true`, or
@@ -191,9 +227,9 @@ pub fn require_panic(reason: &str) -> ! {
 ///
 /// # Panics
 ///
-/// Under [`crate::gliner_e2e::UnmetAction::Fail`], naming both the knob (so
-/// the operator reads it as their own demand rather than as a regression)
-/// and the reason (so they know what to fix).
+/// Under [`UnmetAction::Fail`], naming both the knob (so the operator reads it
+/// as their own demand rather than as a regression) and the reason (so they
+/// know what to fix).
 pub fn report_unmet_microvm(reason: &str) -> bool {
     report_unmet_microvm_to(reason, &mut std::io::stderr())
 }
@@ -210,13 +246,10 @@ pub fn report_unmet_microvm(reason: &str) -> bool {
 ///
 /// As [`report_unmet_microvm`].
 pub fn report_unmet_microvm_to(reason: &str, out: &mut dyn std::io::Write) -> bool {
-    match require_action_to(out) {
-        crate::gliner_e2e::UnmetAction::Fail => require_panic(reason),
-        crate::gliner_e2e::UnmetAction::Skip => {
-            let _ = write!(out, "{}", crate::skip::skip_line(reason));
-            true
-        }
-    }
+    let action = require_action_to(out);
+    let _: Option<()> = KNOB.report_unmet_to(action, reason, out);
+    // Only the Skip arm returns; Fail panicked above.
+    true
 }
 
 /// The repository root, derived from this crate's manifest dir.
@@ -658,7 +691,8 @@ mod linux {
     use kastellan_sandbox::{SandboxBackend, SandboxBackendKind, SandboxBackends};
 
     use super::{
-        image_dir, locate_microvm_run, preflight, report_unmet_microvm, skip_if_image_stale,
+        announce_microvm, image_dir, locate_microvm_run, preflight, report_unmet_microvm,
+        skip_if_image_stale,
     };
 
     /// The kernel + rootfs pair for `rootfs` (a bare filename such as
@@ -709,14 +743,27 @@ mod linux {
     /// precondition is unmet and [`super::REQUIRE_ENV`] is truthy — see
     /// [`skip_if_image_stale`].
     pub fn skip_if_no_microvm(rootfs: &str) -> bool {
-        preflight(
+        let skipping = preflight(
             rootfs,
             || LinuxFirecracker::probe(&firecracker_image_for(rootfs)).map_err(|e| e.to_string()),
             locate_microvm_run,
             prepend_launcher_to_path,
             || skip_if_image_stale(rootfs),
             report_unmet_microvm,
-        )
+        );
+        if !skipping {
+            // The tier's own positive control, and the reason it is here rather
+            // than inside `preflight`: `preflight` is pure over injected
+            // closures precisely so its ordering and short-circuit are testable
+            // with no host in the loop, and threading a second callback through
+            // it to say "nothing was unmet" would buy nothing that this line
+            // does not. Naming the rootfs makes each `[E2E]` line say WHICH
+            // image was accepted, which is the cheapest way to catch the #687
+            // shape — a stale image that passed freshness against the wrong
+            // sources.
+            announce_microvm(&format!("micro-VM preflight met for {rootfs}"));
+        }
+        skipping
     }
 
     /// The Firecracker micro-VM backend, resolved through the same

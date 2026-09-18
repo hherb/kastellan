@@ -37,12 +37,21 @@
 //! supervisor probe, the venv shim and the weights snapshot.
 //!
 //! A **sixth** is covered the same way but from outside this module: the
-//! Postgres bring-up. [`crate::skip::pg_bin_dir_or_skip`] and
-//! [`crate::skip::skip_if_no_supervisor`] stay skip-only for their ~70 other
-//! callers, so the three gliner-relex suites call the `*_or_reason` forms and
-//! route them through [`report_unmet`] in their own `bring_up_pg`. Without a
-//! cluster the test body never runs, so leaving it skip-only would have left
-//! the knob reporting green on the exact false premise it exists to abolish.
+//! Postgres bring-up. The three gliner-relex suites call the `*_or_reason`
+//! forms and route them through [`report_unmet`] in their own `bring_up_pg`,
+//! so that an absent cluster answers to **this tier's** knob. Without a cluster
+//! the test body never runs, so leaving that decision elsewhere would have left
+//! [`REQUIRE_ENV`] reporting green on the exact false premise it exists to
+//! abolish.
+//!
+//! ⚠️ **Not because the wrappers are skip-only — they are not, and have not
+//! been since the one-knob contract landed.**
+//! [`crate::skip::pg_bin_dir_or_skip`] and
+//! [`crate::skip::skip_if_no_supervisor`] panic under
+//! `KASTELLAN_PG_REQUIRE_E2E` and announce `[E2E]` on their met path. The
+//! reason to route around them here is that they answer to the *Postgres*
+//! knob, and an operator who demanded a real **gliner** run must not need a
+//! second variable to get one.
 //!
 //! That has a **blast radius worth stating**: `bring_up_pg` is shared with the
 //! mock-extractor tiers, so on a host with no Postgres at all, setting
@@ -68,6 +77,14 @@ use kastellan_core::workers::gliner_relex::GlinerRelexEnv;
 use kastellan_core::workers::interpreter_deps::InterpreterRoot;
 
 use crate::gliner_weights::weights_dir_or_reason;
+// Re-exported, not merely imported: `UnmetAction` was defined here before the
+// contract was shared (#714), and `crate::microvm` plus the three gliner suites
+// already spell it `gliner_e2e::UnmetAction`. Keeping the path alive means
+// hoisting the type costs no call-site churn — and a churn-free hoist is what
+// makes the NEXT tier adopt it rather than copy it.
+pub use crate::require::UnmetAction;
+
+use crate::require::RequireKnob;
 use crate::sandbox::sandbox_unavailable_reason;
 use crate::skip::supervisor_unavailable_reason;
 use crate::venv_interpreter::venv_interpreter_binds;
@@ -92,33 +109,25 @@ pub const VENV_SHIM_SUBPATH: &str =
 /// the third.
 pub const MODEL_ID: &str = "knowledgator/gliner-relex-multi-v1.0";
 
-/// What an unmet precondition means for *this* run.
+/// The knob for this tier, as data.
 ///
-/// The default is [`UnmetAction::Skip`], which is what makes a plain
-/// `cargo test` green on a host that has never staged the venv or the weights.
-/// [`REQUIRE_ENV`] flips it, and that flip is the whole point of this module:
-/// a skip nobody can turn into a failure cannot detect a dead fixture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnmetAction {
-    /// Print `[SKIP] <reason>` and let the calling test return green.
-    Skip,
-    /// Panic naming the unmet precondition — the operator asked for a real run.
-    Fail,
-}
+/// The machinery behind it — the flag dialect, the skip/fail split, the
+/// out-of-dialect warning, the `[E2E]` positive control — lives in
+/// [`crate::require`] and is shared with every other gated tier (#714, #622).
+/// This module keeps its own names as thin delegates because three suites and
+/// their tests already call them, and because the *cascade* below is
+/// gliner-specific even though the knob is not.
+pub const KNOB: RequireKnob = RequireKnob::new(REQUIRE_ENV, "gliner-relex");
 
 /// Pure: does this [`REQUIRE_ENV`] value demand a real run?
 ///
-/// Routed through the one project flag dialect (`1|true|yes|on`, trimmed,
-/// case-insensitive) rather than a strict `Some("1")`, because the strict form
-/// is exactly the skew [#654] was filed about.
-///
-/// [#654]: https://github.com/hherb/kastellan/issues/654
+/// A delegating wrapper over [`crate::require::unmet_action`], kept under this
+/// name because this module's own tests and the three suites' docs refer to it.
+/// (A wrapper, not a `pub use` — unlike [`UnmetAction`] twelve lines above,
+/// which genuinely is one. Worth distinguishing: only the re-export makes the
+/// two paths name the same item.)
 pub fn unmet_action(require_flag: Option<String>) -> UnmetAction {
-    if env_flag_enabled(require_flag) {
-        UnmetAction::Fail
-    } else {
-        UnmetAction::Skip
-    }
+    crate::require::unmet_action(require_flag)
 }
 
 /// Whether a tier's precondition set includes the [`ENABLE_ENV`] opt-in.
@@ -236,90 +245,41 @@ pub fn venv_shim_or_reason() -> Result<PathBuf, String> {
 
 /// Read [`REQUIRE_ENV`] from the process environment.
 ///
-/// The only impure step in the decision, and kept separate from
-/// [`unmet_action`] for a specific reason: it lets the rule *and* the panic
-/// path be unit-tested without mutating process-wide environment under
-/// `env_lock`. (It is not that a call site would otherwise re-read the
-/// environment mid-cascade — the three suites each call this independently and
-/// that is fine, since the value cannot change during a run.)
+/// Delegates to [`RequireKnob::action`], which also emits the out-of-dialect
+/// warning when the value is neither truthy nor a recognised opt-out.
 pub fn require_action() -> UnmetAction {
-    let raw = std::env::var(REQUIRE_ENV).ok();
-    let action = unmet_action(raw.clone());
-    if action == UnmetAction::Skip {
-        warn_if_out_of_dialect(REQUIRE_ENV, raw.as_deref(), &mut std::io::stderr());
-    }
-    action
+    KNOB.action()
 }
-
-/// The spellings that mean "deliberately off" rather than "typo".
-const FALSEY_SPELLINGS: [&str; 4] = ["0", "false", "no", "off"];
 
 /// Warn when `value` is neither truthy nor a recognised opt-out.
 ///
-/// The knob exists to abolish silent skips, so it must not silently no-op on
-/// itself: `KASTELLAN_GLINER_RELEX_REQUIRE_E2E=y` (or `=2`, or `=enabled`) is
-/// operator error, and treating it as "unset" hands back exactly the green run
-/// the operator was trying to rule out. It cannot be a hard failure — `0`/`off`
-/// must keep working as an opt-out — so it is a warning, on the same stream as
-/// the `[SKIP]` lines it is about.
-///
-/// Pure in its output sink so a unit test can read the bytes back.
+/// Delegates to [`crate::require::warn_if_out_of_dialect`]. Kept as a named
+/// re-export because this module's tests pin the rendering through it.
 pub fn warn_if_out_of_dialect(var: &str, value: Option<&str>, out: &mut dyn std::io::Write) {
-    let Some(observed) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return;
-    };
-    if FALSEY_SPELLINGS.contains(&observed.to_ascii_lowercase().as_str()) {
-        return;
-    }
-    let _ = write!(
-        out,
-        "{}",
-        crate::skip::warn_line(&format!(
-            "{var}={observed:?} is not in the flag dialect (1|true|yes|on) \
-             — treating it as unset, so skips will NOT become failures"
-        ))
-    );
+    crate::require::warn_if_out_of_dialect(var, value, out)
 }
 
 /// Act on an unmet precondition: skip cleanly, or fail loudly.
 ///
-/// Returns `None` so a caller inside a `-> Option<_>` fixture can
-/// `return report_unmet(action, &reason);` directly. Generic in the return type
-/// for exactly that reason — the value is never constructed.
+/// Delegates to [`RequireKnob::report_unmet`]. Generic in the return type so a
+/// caller inside a `-> Option<_>` fixture can `return report_unmet(..)`
+/// directly — omitting the `return` is a **compile error** (E0282), not a
+/// silent fall-through.
 ///
 /// `pub` so a suite can route a precondition that is **not** part of
-/// [`gliner_host_env`]'s cascade through the same knob. The supervisor probe
-/// and the Postgres bring-up in the three gliner-relex suites' own
-/// `bring_up_pg` are exactly that: both helpers are shared with ~70 other
-/// suites, so neither can become require-aware in
-/// [`crate::skip`] itself, but for these three a missing cluster means the test
-/// body never runs — the same false green.
-///
-/// Omitting the `return` is a **compile error** (E0282, "type annotations
-/// needed"), not a silent fall-through, because `T` is unbounded and only the
-/// enclosing `fn`'s return type can infer it. That is the strongest argument
-/// for this shape: a non-generic `-> Option<()>` would let a dropped `return`
-/// compile and skip nothing.
+/// [`gliner_host_env`]'s cascade through the same knob.
 ///
 /// # Panics
 ///
-/// Under [`UnmetAction::Fail`], naming both [`REQUIRE_ENV`] and `reason`. Both
-/// halves matter: the knob so an operator reads it as their own demand rather
-/// than as a regression, and the reason so they know what to stage next.
+/// Under [`UnmetAction::Fail`], naming both [`REQUIRE_ENV`] and `reason`.
 pub fn report_unmet<T>(action: UnmetAction, reason: &str) -> Option<T> {
-    report_unmet_to(action, reason, &mut std::io::stderr())
+    KNOB.report_unmet(action, reason)
 }
 
 /// [`report_unmet`] with the skip line written to `out` instead of stderr.
 ///
-/// Exists so a unit test can prove the Skip arm **emits** the line — asserting
-/// on [`crate::skip::skip_line`] alone proves only that the renderer is
-/// correct, and leaves `eprint!` deletable, `print!`-able (stdout, which the
-/// audit never reads) or droppable with the suite still green. That mutation
-/// is worse than the bug #653 fixed: it would make
-/// `grep -c '^\[SKIP\]'` report a *clean* run rather than a misleading one.
-/// A test cannot pin it by calling the stderr form, because emitting a real
-/// `[SKIP]` line would inflate the very count it is protecting.
+/// Exists so a unit test can prove the Skip arm **emits** the line without
+/// inflating the very `[SKIP]` count it is protecting.
 ///
 /// # Panics
 ///
@@ -329,21 +289,7 @@ pub fn report_unmet_to<T>(
     reason: &str,
     out: &mut dyn std::io::Write,
 ) -> Option<T> {
-    match action {
-        UnmetAction::Fail => panic!(
-            "{REQUIRE_ENV} demanded a real gliner-relex end-to-end run, but a \
-             precondition is unmet: {}",
-            // Flattened for the same reason the `[SKIP]` line is: probe errors
-            // embed a `\n\n` operator hint, and a panic whose first line stops
-            // before the reason is exactly the archaeology this knob exists to
-            // spare the operator.
-            crate::skip::one_line(reason)
-        ),
-        UnmetAction::Skip => {
-            let _ = write!(out, "{}", crate::skip::skip_line(reason));
-            None
-        }
-    }
+    KNOB.report_unmet_to(action, reason, out)
 }
 
 /// Build the host-mode [`GlinerRelexEnv`] the three e2e tiers share, or report
@@ -377,6 +323,25 @@ pub fn gliner_host_env(gate: EnableFlag) -> Option<GlinerRelexEnv> {
         weights_dir_or_reason,
     ) {
         Ok((script_path, weights_dir)) => {
+            // The tier's `[E2E]` positive control, naming the two paths that
+            // were resolved. This tier had none, so the `gliner` gate profile's
+            // floor of 1 was unreachable on Linux — the DGX, which is where the
+            // venv and the 1.3 GB of weights actually live and the host #651 was
+            // filed about. It was satisfiable on macOS only, and only by a
+            // *supervisor* announce from `build_test_entry_container`, i.e. by
+            // evidence with nothing to do with gliner.
+            //
+            // Naming the paths is the point, not decoration: #651 was a `.venv`
+            // copied from another host, which a count cannot show and a printed
+            // path can.
+            KNOB.announce(
+                action,
+                &format!(
+                    "venv shim at {}, weights at {}",
+                    script_path.display(),
+                    weights_dir.display()
+                ),
+            );
             // The one impure step left, and deliberately outside `host_env_from`:
             // it calls the PRODUCTION resolver against a real venv on disk (#650),
             // and panics loudly on a venv staged for another host (#651). Keeping

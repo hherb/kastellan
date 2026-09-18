@@ -8,11 +8,22 @@
 //!
 //! # Module layout
 //!
-//! * [`skip`] — `[SKIP]` early-return helpers wrapping the supervisor +
-//!   pg-binary + sandbox probes. Each returns `bool` (`true` = skip),
-//!   and prints a `[SKIP]` line to stderr so `cargo test -- --nocapture`
-//!   makes the skip visible (a green run with `[SKIP]` lines means
-//!   tests skipped, not that the containment actually held).
+//! * [`require`] — [`require::RequireKnob`]: the ONE REQUIRE-knob contract
+//!   every gated e2e tier shares. Turns a tier's `[SKIP]`s into failures on an
+//!   operator's demand, and emits the `[E2E]` positive control that
+//!   `scripts/run-e2e-gate.sh` asserts a count over — because `cargo test`
+//!   exits 0 when a name filter matches nothing (#664), so the absence of a
+//!   `[SKIP]` never proved a suite ran.
+//! * [`skip`] — early-return helpers wrapping the supervisor + pg-binary +
+//!   sandbox probes. `skip_if_*` return `bool` (`true` = skip);
+//!   `pg_bin_dir_or_skip` returns `Option<PathBuf>`. On the unmet path they
+//!   print a `[SKIP]` line to stderr so `cargo test -- --nocapture` makes the
+//!   skip visible (a green run with `[SKIP]` lines means tests skipped, not
+//!   that the containment actually held) — **or panic**, when the tier's
+//!   [`require`] knob says the operator demanded a real run. On the met path
+//!   they emit the `[E2E]` positive control. They have not been skip-only
+//!   since the knob contract landed, and reading them as such is how a gate
+//!   gets assumed toothless.
 //! * [`guards`] — `ServiceGuard` + `PathGuard` RAII cleanup so a
 //!   panicking test cannot leave a stale systemd unit or 200 MB of
 //!   `pg_wal` behind.
@@ -76,6 +87,10 @@ pub mod embedding;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod egress_forcing;
 pub mod env;
+/// `scripts/run-e2e-gate.sh` pinned against [`require::KNOBS`] — see the
+/// module's own header for why a Rust test reads a shell script.
+#[cfg(test)]
+mod gate_script_tests;
 pub mod gliner_e2e;
 pub mod gliner_weights;
 pub mod guard_pin;
@@ -85,6 +100,7 @@ pub mod microvm;
 pub mod mock_localmail;
 pub mod pg;
 pub mod provisioning;
+pub mod require;
 pub mod sandbox;
 pub mod scripted_llm;
 pub mod serial;

@@ -17,8 +17,12 @@
 //! require-aware — which made the supervisor probe the one precondition the
 //! knob could not see: a host without `loginctl enable-linger` reported
 //! `6 passed` having loaded no model at all, with the knob set. Keeping the
-//! skip-only helper un-imported here is what stops that ordering from coming
-//! back.
+//! helper un-imported here is what stops that ordering from coming back.
+//!
+//! (It is no longer *skip-only* — `skip_if_no_supervisor` panics under
+//! `KASTELLAN_PG_REQUIRE_E2E` since the one-knob contract landed. The practice
+//! stands for a different reason: it answers to the Postgres knob, so a run
+//! that demanded only a real gliner run would still skip past it.)
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -70,10 +74,10 @@ async fn upsert_test_entity(pool: &sqlx::PgPool, kind: &str, name: &str) -> i64 
 /// false green the knob exists to abolish (#653).
 ///
 /// Both checks live here rather than at the call sites on purpose. The shared
-/// `skip_if_no_supervisor` / `pg_bin_dir_or_skip` helpers stay skip-only for
-/// their ~70 other callers, so the decision is made in this one function — and
-/// making it in one place is what keeps a skip-only gate from being written
-/// ahead of a require-aware one again.
+/// `skip_if_no_supervisor` / `pg_bin_dir_or_skip` helpers answer to the
+/// *Postgres* knob, so the decision is made in this one function under this
+/// tier's knob instead — and making it in one place is what keeps a gate the
+/// gliner knob cannot see from being written ahead of one it can, again.
 async fn bring_up_pg(label: &str) -> Option<(kastellan_tests_common::PgCluster, sqlx::PgPool)> {
     let action = require_action();
     if let Some(reason) = supervisor_unavailable_reason() {

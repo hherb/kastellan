@@ -177,7 +177,10 @@ pub fn skip_unless_ready(probes: &[Probe]) -> bool {
 pub fn skip_unless_ready_to(probes: &[Probe], out: &mut dyn Write) -> bool {
     match first_unmet(probes) {
         Some(reason) => super::report_unmet_microvm_to(&reason, out),
-        None => false,
+        None => {
+            super::announce_microvm_to("host preconditions met", out);
+            false
+        }
     }
 }
 
@@ -210,7 +213,10 @@ pub fn dep_or_skip<T>(dep: Result<T, String>) -> Option<T> {
 /// As [`skip_unless_ready`].
 pub fn dep_or_skip_to<T>(dep: Result<T, String>, out: &mut dyn Write) -> Option<T> {
     match dep {
-        Ok(value) => Some(value),
+        Ok(value) => {
+            super::announce_microvm_to("dependency resolved", out);
+            Some(value)
+        }
         Err(reason) => {
             super::report_unmet_microvm_to(&reason, out);
             None

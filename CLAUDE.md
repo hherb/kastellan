@@ -69,6 +69,76 @@ unaffected; this is only about `target/release/`.)
 
 There's no `rustfmt` config yet; keep formatting consistent with what's already in the tree. Clippy IS enforced: CI runs `cargo clippy --workspace --all-targets -- -D warnings` and the tree is warning-clean — keep it that way.
 
+⚠️ **To force a genuinely cold clippy run, use a dedicated target dir — never `touch` the
+sources.**
+
+```sh
+CARGO_TARGET_DIR=$HOME/.cargo-clippy-<topic> cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The old recipe (`find . -name main.rs -o -name lib.rs | xargs touch`) proves the same thing and
+**breaks a containment gate**: `workers/python-exec/src/main.rs` is in the #687 container-image
+freshness closure, which compares the image's build time against its sources' **mtimes**. Touching
+it makes every container e2e report the image stale, and under
+`KASTELLAN_MICROVM_REQUIRE_E2E=1` the tier *panics*, naming a ten-minute cross-build as the remedy
+for a file nobody edited ([#691](https://github.com/hherb/kastellan/issues/691) — measured with the
+image and the source stamped the same minute, on an image built from those exact bytes). It is a
+false **refusal**, which is the direction that gets a gate switched off. A dedicated target dir
+mutates no file, so it cannot falsify anything. Exit 0 alone does not prove a full pass either —
+count the `Checking kastellan` lines (**27**).
+
+## Running a gated e2e tier as evidence
+
+Many suites are **skip-as-pass**: absent a fixture they print `[SKIP]` and report green, and the
+test count is identical whether they asserted anything or not. Two things are needed to make such a
+run mean something, and **one without the other is not a gate**:
+
+1. a **REQUIRE knob**, which turns that tier's skips into failures, and
+2. a **positive control**, which fails when zero tests ran — because `cargo test` exits 0 when a
+   name filter matches nothing, so the absence of a `[SKIP]` never proved a suite ran.
+
+Both live behind one command:
+
+```sh
+bash scripts/run-e2e-gate.sh --list          # the profiles and the knobs each sets
+bash scripts/run-e2e-gate.sh guard-tier      # run one as evidence
+```
+
+It sets the profile's knobs, keeps the **whole** log under `~/.local/state/kastellan/gate-logs/`,
+and then asserts: tests passed ≥ the profile's floor, a **per-tier** `[E2E]` floor, zero `[WARN]`,
+and (per profile) a cap on `[SKIP]`. Three evidence markers are greppable in any run: `[SKIP]` (a
+test did not run), `[WARN]` (it ran but something about it was not what you think), and `[E2E]` (a
+**demanded** precondition was actually met — emitted only under a truthy knob).
+
+⚠️ **The `[E2E]` floors are per tier, and a floor of 1 is the right number.** The marker carries its
+tier (`[E2E] <tier>: <detail>`), so each floor counts only its own evidence — a single total is
+satisfied by whichever co-set knob is chattiest, which let the `gliner` profile clear its floor on
+one *Postgres* line. And since deleting an `announce` call takes that tier's count to 0, a floor of
+1 already catches it; a floor near the observed total (guard-tier emits 44) would just be a second
+place the census lives, rotting on the next added test.
+
+The knobs, should you need one directly:
+`KASTELLAN_PG_REQUIRE_E2E` (Postgres install **and** the user-level supervisor probe — one variable
+because they gate the same tier and two would let a half-set gate look armed),
+`KASTELLAN_SANDBOX_REQUIRE_E2E`, `KASTELLAN_GUARD_REQUIRE_E2E`, `KASTELLAN_MICROVM_REQUIRE_E2E`,
+`KASTELLAN_GLINER_RELEX_REQUIRE_E2E`. All take the project dialect (`1|true|yes|on`); an
+out-of-dialect value warns rather than silently reverting to skip.
+
+⚠️ **Two traps when running a knob by hand rather than through the script.** `[E2E]`/`[SKIP]` go to
+**stderr**, which libtest swallows for passing tests — without `-- --nocapture` a perfectly healthy
+demanded run shows you nothing. And `KASTELLAN_GUARD_REQUIRE_E2E` covers `guard_tier_e2e`'s
+worker-binary check *only*: its other three preconditions answer to the PG and sandbox knobs, so
+setting the guard knob alone still lets an unreachable supervisor report the whole tier green. The
+`guard-tier` profile sets all three; prefer it.
+
+⚠️ **Deliberately no umbrella variable.** The two hosts differ in what they can legitimately run —
+the Mac has no KVM — so a single "demand everything" flag would turn honest skips into failures and
+get exported `=0`. Add a tier's knob to a profile instead. A new tier is one
+`const … = RequireKnob::new(…)` beside the tier it gates, plus an entry in
+`tests_common::require::KNOBS` — never another hand-rolled copy of the cascade. `KNOBS` is what
+`gate_script_tests` pins the script against, in both directions: a knob the script names must be one
+the tree reads, and a knob the tree defines must be demanded by some profile.
+
 ## Linux host setup (Ubuntu 24.04+)
 
 bwrap can't create unprivileged user namespaces by default
