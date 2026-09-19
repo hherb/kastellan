@@ -19,7 +19,8 @@ pub(super) const AUDIT_LABEL_MAX_CHARS: usize = 64;
 /// `catalogue` and `guard_model` on the same event name.
 pub(crate) const TIER_SINK: &str = "sink";
 
-/// What the sink screen recorded about a step it blocked: enough for the
+/// What the sink screen recorded about a string it blocked — a plan's
+/// `decision`, a step's call, or a step outcome (#699, #700): enough for the
 /// forensic `policy / injection.blocked` row, and never the screened text.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SinkBlock {
@@ -40,7 +41,7 @@ pub(super) fn clamp_audit_label(s: &str) -> String {
 
 /// Screen `text` with `tool`'s own guard profile; `Some` if it must be
 /// withheld, carrying what the forensic row needs. The **single, mandatory sink
-/// screen** for step outcomes: every worker-influenced string this module places
+/// screen** for step outcomes: every worker-influenced string [`super`] places
 /// into the planner prompt passes through here, so the
 /// "nothing-unscreened-reaches-the-planner" invariant is *enforced* at one
 /// point rather than *relied upon* across the source chokepoints (`tool_host`,

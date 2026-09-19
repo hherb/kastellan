@@ -54,7 +54,9 @@ of the task, with these fields:
 
 Every step outcome also carries `"call"`: the step you submitted that
 produced it, as `{"tool", "method", "parameters"}`, with `parameters` pruned
-by the same rules as `output`. It stays when an old `output` is `"elided"`;
+by the same rules as `output` but to a much smaller budget, so a parameter
+that is never cut (an id, a URL) can leave its siblings showing only under
+`_omitted_keys`. It stays when an old `output` is `"elided"`;
 on a very long task the oldest calls may lose their `parameters` too and show
 `"elided": "summary budget"` beside `tool` and `method`.
 **Compare it with the step you are about to submit** — if you are repeating a

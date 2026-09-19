@@ -55,11 +55,25 @@ pub(super) struct Screened {
 impl Screened {
     /// Screen `value` (every key and string of it, as the step views are
     /// screened) and replace it with [`WITHHELD_MARKER`] on a Block.
-    fn screen(value: Value) -> Self {
-        match sink_screen_with(MODEL_AUTHORED_PROFILE, &result_view::screen_text(&value)) {
-            Some(block) => Self { value: Value::from(WITHHELD_MARKER), sink_block: Some(block) },
-            None => Self { value, sink_block: None },
+    ///
+    /// `also` holds extra screen texts taken from *inside* `value`, screened
+    /// again on their own. [`result_view::screen_text`] stops at
+    /// `MAX_WALK_DEPTH` counted from the value it is handed, while
+    /// [`result_view::render`] prunes from the sub-value's own root, so a
+    /// sub-value nested one level down keeps a deepest level the wrapped walk
+    /// never reaches — rendered for the planner but unscreened (found by
+    /// review; out of reach today only because serde_json's own recursion
+    /// limit is lower). Screening that sub-value at its own root puts the
+    /// level back. Strictly additive: every reading of the whole `value` is
+    /// still taken first, so this can only block more, never less (#702).
+    fn screen(value: Value, also: &[&str]) -> Self {
+        let whole = result_view::screen_text(&value);
+        for text in std::iter::once(whole.as_str()).chain(also.iter().copied()) {
+            if let Some(block) = sink_screen_with(MODEL_AUTHORED_PROFILE, text) {
+                return Self { value: Value::from(WITHHELD_MARKER), sink_block: Some(block) };
+            }
         }
+        Self { value, sink_block: None }
     }
 }
 
@@ -71,11 +85,18 @@ impl Screened {
 /// the same cap and the same identifier-preserving rules #701 uses for an
 /// earlier turn's calls, so a `message_id` is never cut in half.
 pub(super) fn render_call(step: &PlannedStep) -> Screened {
-    Screened::screen(json!({
-        "tool":       clamp_audit_label(&step.tool),
-        "method":     clamp_audit_label(&step.method),
-        PARAMETERS_KEY: result_view::render(&step.parameters, CALL_PARAMS_CAP),
-    }))
+    let parameters = result_view::render(&step.parameters, CALL_PARAMS_CAP);
+    // The parameters are pruned from their own root, so they carry one level
+    // more than the screen of the whole call can walk; see [`Screened::screen`].
+    let deepest = result_view::screen_text(&parameters);
+    Screened::screen(
+        json!({
+            "tool":       clamp_audit_label(&step.tool),
+            "method":     clamp_audit_label(&step.method),
+            PARAMETERS_KEY: parameters,
+        }),
+        &[&deepest],
+    )
 }
 
 /// What `call` adds to the serialised summary once it sits inside its step
@@ -123,9 +144,10 @@ pub(super) fn apply_call_budget(calls: &mut [Vec<Option<Value>>], mut total: usi
 
 /// The plan's `decision`, screened (#700). Not clamped: it is not counted in
 /// the summary budget today (see `PLANS_SUMMARY_BUDGET`), and clamping it is
-/// a separate change from screening it.
+/// a separate change from screening it — filed as #729, which also has the
+/// argument for why an unbounded always-in-context string wants a bound.
 pub(super) fn render_decision(decision: &str) -> Screened {
-    Screened::screen(Value::from(decision))
+    Screened::screen(Value::from(decision), &[])
 }
 
 #[cfg(test)]

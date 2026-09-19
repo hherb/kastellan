@@ -11,7 +11,8 @@
 //! is an object in one of four shapes, plus — since #699 — a `"call"` key
 //! holding `{"tool", "method", "parameters"}` of the step that produced it
 //! (see [`call`]). The call is kept when the budget elides the output: what
-//! the planner asked for is exactly what it needs to see to avoid asking again.
+//! the planner asked for is exactly what it needs to see to avoid asking
+//! again. Its `parameters` go only if the calls alone overrun the budget.
 //! `decision` and `call` are both screened (#700, #699) and become
 //! `"[withheld: failed injection screen]"` on a block.
 //!
@@ -85,16 +86,24 @@ const BATCH_PER_QUERY_SUMMARY_BYTES: usize = 3 * 1024;
 const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
 
 /// Total byte budget for the whole rendered `plans_so_far_summary`, counted in
-/// serialised step-outcome and step-call (#699) bytes. 96 KiB since #677: six times the flat
-/// per-step budget, so a fast-lane task (`DEFAULT_MAX_PLANS_FAST` = 5, plus the
-/// forced-synthesis turn) of one flat-budget step per plan is not pushed into
-/// elision by the ceiling alone. Plans with several steps, `web.search_batch`
-/// steps (up to 24 KiB each) or a long-lane task can still exceed it and elide,
-/// oldest first; if the calls alone overrun it, the oldest calls then lose their
-/// `parameters` (see `call::apply_call_budget`). What cannot be elided — error
-/// and withheld outcomes, and each call's clamped `tool`/`method` — can still
-/// exceed it on a pathological task. The planner's own `decision` strings are
-/// not counted, so the serialised prompt is modestly larger than this value.
+/// serialised step-outcome and step-call (#699) bytes. 96 KiB since #677: six
+/// times the flat per-step budget, chosen so a fast-lane task
+/// (`DEFAULT_MAX_PLANS_FAST` = 5, plus the forced-synthesis turn) of one
+/// flat-budget step per plan is at most marginally pushed into elision by the
+/// ceiling alone — marginally, not never, because each outcome's `{"status",
+/// "output"}` wrapper and its call (up to ~1 KiB, since #699) are counted on
+/// top of the 16 KiB view. Plans with several steps, `web.search_batch` steps
+/// (up to 24 KiB each) or a long-lane task exceed it and elide, oldest first;
+/// if the calls alone overrun it, the oldest calls then lose their
+/// `parameters` (see `call::apply_call_budget`). In that case every elidable
+/// output is already gone, the newest included: the second pass frees room but
+/// does not bring one back, which keeps the two passes independent — a task
+/// that fills the budget with calls alone is one repeating itself, and the
+/// calls are what shows it that. What cannot be elided — error and withheld
+/// outcomes, and each call's clamped `tool`/`method` — can still exceed the
+/// budget on a pathological task. The planner's own `decision` strings are
+/// neither clamped nor counted (#729), so the serialised prompt is modestly
+/// larger than this value.
 const PLANS_SUMMARY_BUDGET: usize = 96 * 1024;
 
 const _: () = {
@@ -244,7 +253,8 @@ pub struct PlanRecord {
     /// `outcomes`.
     outcomes: Vec<StepOutcome>,
     /// Screened renders of `plan`'s step outcomes, one per outcome. Private:
-    /// the only consumer is [`render_plans_summary`], and the screened-once
+    /// the only consumers are [`render_plans_summary`] and
+    /// [`PlanRecord::sink_block_audit_payloads`], and the screened-once
     /// invariant depends on nothing else being able to inject an unscreened
     /// `RenderedStep`.
     rendered: Vec<RenderedStep>,
@@ -261,11 +271,25 @@ impl PlanRecord {
     /// result. The `i`-th outcome is produced by `plan.steps[i]`, so
     /// `plan.steps[i].tool` selects the profile; a missing step (outcomes
     /// longer than steps — not expected) falls back to the fail-closed Strict
-    /// default (`for_tool("")`).
+    /// default (`for_tool("")`) and is logged, because an outcome with no step
+    /// is an invariant break that would otherwise show only as a missing
+    /// `"call"` key in a prompt nobody is reading.
+    ///
+    /// Also renders the call each step made and the plan's own `decision`
+    /// (#699, #700). Those two are planner-authored, so — unlike the outcomes —
+    /// they are screened under a fixed `Strict` profile whatever tool the step
+    /// names; see [`call`].
     ///
     /// Deterministic in `(plan, outcomes)` and free of I/O, which is what
     /// makes it safe to call again when a suspended run is restored.
     pub fn new(plan: Plan, outcomes: Vec<StepOutcome>) -> Self {
+        if outcomes.len() > plan.steps.len() {
+            tracing::warn!(
+                outcomes = outcomes.len(),
+                steps = plan.steps.len(),
+                "plan record has more outcomes than steps; those outcomes reach the planner with no call"
+            );
+        }
         let rendered = outcomes
             .iter()
             .enumerate()
@@ -294,10 +318,12 @@ impl PlanRecord {
     /// row keeps `tier` and `reason_codes` under the audit payload cap:
     /// `reason_codes` is drawn from the fixed catalogue, `body_sha256` is 64 hex
     /// characters, and `tool`/`method` — which the planner writes — are clamped
-    /// to [`AUDIT_LABEL_MAX_CHARS`]. The screened text is never written, **but**
-    /// an `UNKNOWN_TOOL` detail echoes the tool name, so a clamped head of a
-    /// hostile name can appear in `tool`; the `step.unknown_tool` row already
-    /// records that name in full.
+    /// to [`sink::AUDIT_LABEL_MAX_CHARS`]. The screened text is never written,
+    /// **but** the row's `tool`/`method` can be part of it: on an `UNKNOWN_TOOL`
+    /// outcome the detail echoes the invented tool name (the `step.unknown_tool`
+    /// row already records that name in full), and a `"call"` row's screened
+    /// text is `{tool, method, parameters}`, so its clamped labels are a head of
+    /// what was blocked. A call's `parameters` are never written.
     pub fn sink_block_audit_payloads(&self, task_id: i64, plan_count: u32) -> Vec<serde_json::Value> {
         let row = |part: &str, step_index: Option<usize>, block: &SinkBlock| {
             let (tool, method) = step_index.map_or(("", ""), |i| step_tool_and_method(&self.plan, i));
@@ -423,12 +449,12 @@ fn render_step_outcome(tool: &str, method: &str, o: &StepOutcome) -> RenderedSte
 /// `{ "decision", "step_outcomes": [..] }` object per completed plan, each
 /// outcome in one of the shapes described in the module docs.
 ///
-/// The step outcomes were **already screened once** when each [`PlanRecord`]
-/// was constructed at push time (issue #344), so this function performs *zero*
-/// injection screening — it clones the memoized renders and runs only the
-/// per-call size budget over them. The clone is required because
-/// [`apply_summary_budget`] elides in place and must not mutate the stored,
-/// immutable record.
+/// The step outcomes, calls and decisions were **already screened once** when
+/// each [`PlanRecord`] was constructed at push time (issue #344), so this
+/// function performs *zero* injection screening — it clones the memoized
+/// renders and calls, and runs the two size-budget passes over them (outputs
+/// first, then `parameters`). The clone is required because both passes elide
+/// in place and must not mutate the stored, immutable record.
 pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Value> {
     let mut rendered: Vec<Vec<RenderedStep>> =
         plans.iter().map(|r| r.rendered.clone()).collect();
@@ -451,7 +477,12 @@ pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Valu
     if elided + elided_calls > 0 {
         // Debug, not warn: this runs on every planner iteration once a long
         // task passes the budget, and the planner itself is told in-band.
-        tracing::debug!(elided, elided_calls, budget = PLANS_SUMMARY_BUDGET, "plan summary elided older step outputs");
+        tracing::debug!(
+            elided,
+            elided_calls,
+            budget = PLANS_SUMMARY_BUDGET,
+            "plan summary elided older step outputs and/or call parameters"
+        );
     }
 
     plans

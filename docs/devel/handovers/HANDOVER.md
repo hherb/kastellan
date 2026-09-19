@@ -4,7 +4,7 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260919_719_pre-prune.md`](archive/handover_20260919_719_pre-prune.md),
+> [`archive/handover_20260919_699_pre-prune.md`](archive/handover_20260919_699_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
 **Last updated:** 2026-09-19 (#699 + #700: the planner sees its own calls) ·
@@ -77,6 +77,35 @@ beside its status (#699), and the plan's `decision` passes the sink screen (#700
   `tool`/`method` + `"elided": "summary budget"`. Residual, now documented on
   `PLANS_SUMMARY_BUDGET`: error/withheld outcomes and the clamped labels can still exceed it on a
   pathological task (as errors always could).
+- ⚠️ **Second review round (four read-only reviewers: code, tests, silent failures, comments) found
+  one real fail-open and two tests weaker than their names.** All fixed in-branch.
+  - **A call's deepest `parameters` level reached the planner unscreened.** `render` prunes from the
+    parameters' own root; `screen_text` walked them inside the wrapping `{tool, method, parameters}`
+    object, one level down, and both stop at `MAX_WALK_DEPTH` — so the last kept level was rendered
+    and never screened. Out of reach today **only** because serde_json's recursion limit (128) is
+    below `MAX_WALK_DEPTH` (256): the invariant was resting on an unrelated parser's constant.
+    `render_call` now screens the pruned parameters at their own root too — *additive*, never a
+    rewrite of the existing readings (#702's lesson). Positive control: the new test fails on the
+    old code with the phrase visible in full.
+  - **`the_summary_budget_counts_the_calls` was vacuous for its own guard.** It asserted only that
+    the total fits, which the *wrong* order also satisfies: delete the first pass's
+    `saturating_sub(call_bytes)` and the second pass strips ~28 calls' parameters while older
+    outputs survive — total fits, test green. It now also asserts every call is whole; the mutant
+    dies.
+  - **`apply_call_budget`'s `after < before` guard had no test.** A `parameters: {}` call *grows*
+    when dropped (`"parameters":{}` 15 B → the marker 25 B), so without the guard `before - after`
+    underflows — panic in debug, a wrapped total under the release `panic = "abort"`. Reachable via
+    any parameterless method once the calls alone overrun. Pinned, mutant confirmed dying.
+  - Also: `PlanRecord::new` now **logs** when outcomes outnumber steps (was silent, and a resumed
+    run rebuilds records), pinned by a test; plus a multibyte clamp test, a `CALL_FRAMING_BYTES`
+    test, and ~10 doc corrections (this file's archive pointer, `sink.rs`'s "this module" rot after
+    the move, a `cargo doc` link that only resolved under `cfg(test)`, and the
+    `PLANS_SUMMARY_BUDGET` "six times the per-step budget" claim, which the calls' bytes made
+    marginal).
+  - **Deferred: [#729](https://github.com/hherb/kastellan/issues/729)** — `decision` is neither
+    clamped nor counted in the budget, so the one part of the summary that is always present, for
+    every plan, and never elided is unbounded (`max_plans` is operator-overridable). Predates this
+    PR; clamping is a behaviour change to what the planner reads of its own reasoning.
 - Code: `summary/call.rs` (new), `summary/sink.rs` (split out first, movement-only commit),
   `prompts/agent_planner.md` documents `"call"` (pinned by the prompt-shape test). Two mutants
   (budget subtraction, Strict→Relaxed) each killed by a named test.
@@ -341,7 +370,7 @@ is the reusable mechanism.
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac + DGX** ([#728](https://github.com/hherb/kastellan/pull/728), #699/#700 — **the gate that stands**) | `ce8bc49b` (branch tip) | **Mac 4370 / 0 / 29**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — **exactly** #726's 4347 + 5 (#726's later review rounds, grepped: 5 `#[test]` between `64d483e8` and `main`) + 18 new. **DGX** full sweep at `299ce103` (before the review fix's +4): **4501 / 0 / 61**, 179 suites, exit 0 (= 4482 + 5 + 14); core lib at the tip 2170 / 0 / 1 (= Mac's) | exit 0, cold (27 crates, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-699`) at `299ce103`, then warm on the 3 changed crates at the tip | **4** DGX (gliner opt-in) |
+| **Mac + DGX** ([#728](https://github.com/hherb/kastellan/pull/728), #699/#700 — **the gate that stands**) | branch tip (2nd review round) | **Mac 4375 / 0 / 29**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — the round's 4370 + **5** (deep-parameter screen, multibyte clamp, the `{}`-parameters grow guard, the framing constant, the step-less outcome). Round 1 at `ce8bc49b`: Mac **4370 / 0 / 29** = #726's 4347 + 5 (grepped between `64d483e8` and `main`) + 18 new. **DGX** full sweep at `299ce103` (before round 1's +4): **4501 / 0 / 61**, 179 suites, exit 0 (= 4482 + 5 + 14) — ⚠️ **not re-run for round 2** (Mac-only changes, but `summary` is platform-neutral, so the DGX number is simply older) | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-pr728`) at the round-2 tip | **4** DGX (gliner opt-in) |
 | **Mac + DGX** ([#726](https://github.com/hherb/kastellan/pull/726), #719) | `64d483e8` (branch tip) | **DGX 4482 / 0 / 61**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — **exactly** 4453 (#709) + 24 (#720: 23 `#[test]` + 1 doc-test, never run on the DGX until now) + 5 (this PR), each of the 5 grepped `ok` by name. **Mac 4347 / 0 / 29**, 179 suites — **exactly** #720's 4342 + 5. ⚠️ The sweep itself reported **3 gliner failures that were my own mutation testing**: a same-size Python mutant restored within the same second left its `.pyc` cached *and valid*, and the jailed worker (read-only src) ran it — confirmed by disassembling the cached `main()` [[mutation-testing-leaves-stale-pyc]]. With `__pycache__` cleared the **sweep-built** binaries pass 5/5, 16/16, 6/6 under the REQUIRE knob; source unchanged since the sweep built them. **Also:** `gliner` gate profile passes as evidence on both hosts (first time); DGX gliner ENABLE suites 16/16, 6/6; pytest 71 on both | **exit 0 on both hosts**, zero warnings, 27 `Checking kastellan` lines each, dedicated `CARGO_TARGET_DIR` | **4** DGX (gliner opt-in, ENABLE unset), **23** Mac |
 | **Mac** ([#720](https://github.com/hherb/kastellan/pull/720)) | branch tip | **4322 / 8 / 29**, 179 suites, `TEST_EXIT=101`: 3 were #719, 5 were #548/#676 pool contention (pass individually), so effectively **4327 / 3 / 29**. +12 over the row below, reconciled. ⚠️ **Its first sweep was a false green:** `cargo test --workspace` fails fast, and one suite aborted it after 39 of 179 suites. **Use `--no-fail-fast`.** The DGX leg was never run | exit 0, 27 crates, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-720`) | 23 |
 | **Mac + DGX** ([#709](https://github.com/hherb/kastellan/pull/709), third review round) | `d6698013` | **DGX 4453 / 0 / 61**, **Mac 4318 / 0 / 29**, both 179 suites, `TEST_EXIT=0`; +10 on each, each new test grepped out of the DGX log by name | exit 0 on both hosts, 27 crates | 4 DGX (gliner), 15 Mac |
