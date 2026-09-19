@@ -109,6 +109,10 @@ fn run_gate(tag: &str, log: &str, exit_code: i32) -> Output {
         scratch.root.join("bin").display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    // The throwaway `HOME` does two jobs. The gate's log lands in it, and the
+    // script's `source "$HOME/.cargo/env"` finds nothing there. The real env
+    // file would put `~/.cargo/bin` ahead of the fake on `PATH`, and this
+    // "fake" run would quietly become a real `cargo test`.
     Command::new("bash")
         .arg(script_path())
         .arg(PROFILE)
@@ -169,6 +173,68 @@ fn a_failed_test_run_fails_the_gate_even_with_the_evidence_present() {
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("the test run itself failed (exit 101)"),
+        "{}",
+        describe(&out)
+    );
+}
+
+/// The refusal the script prints when a tier's `[E2E]` floor is not met.
+fn tier_floor_refusal() -> String {
+    format!("'[E2E] {PROFILE_TIER}' lines, floor is")
+}
+
+/// The tier [`PROFILE`] demands evidence from. Pinned against the table so a
+/// rename fails here loudly rather than making the floor tests vacuous.
+const PROFILE_TIER: &str = "gliner-relex";
+
+#[test]
+fn the_profile_tier_these_tests_name_is_the_one_the_table_demands() {
+    assert!(
+        e2e_evidence_for_profile().contains(&format!("[E2E] {PROFILE_TIER}: ")),
+        "the `{PROFILE}` profile no longer demands `{PROFILE_TIER}` evidence; update PROFILE_TIER"
+    );
+}
+
+#[test]
+fn a_run_with_no_e2e_evidence_fails_the_gate() {
+    // Tests passed and cargo exited 0, but the demanded tier never announced a
+    // met precondition: the knob reached nothing.
+    let out = run_gate("no-e2e", PASSED_FIVE, 0);
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&tier_floor_refusal()),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn evidence_from_another_tier_does_not_satisfy_the_floor() {
+    // The `gliner` profile also sets the Postgres knob. A floor that counted
+    // every `[E2E]` line cleared on one Postgres line, the defect the per-tier
+    // floors exist to stop.
+    let log = format!("[E2E] Postgres-backed: precondition met (fake cargo)\n{PASSED_FIVE}");
+    let out = run_gate("wrong-tier", &log, 0);
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&tier_floor_refusal()),
+        "a Postgres line must not count as gliner-relex evidence\n{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_warn_line_fails_an_otherwise_healthy_run() {
+    // `[WARN]` means a knob was set but not honoured (an out-of-dialect value),
+    // so the run was not the demanded one, whatever else it shows.
+    let log = format!(
+        "{}[WARN] KASTELLAN_PG_REQUIRE_E2E=y is not a recognised value; treating as unset\n{PASSED_FIVE}",
+        e2e_evidence_for_profile()
+    );
+    let out = run_gate("warn", &log, 0);
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("[WARN] line(s)"),
         "{}",
         describe(&out)
     );

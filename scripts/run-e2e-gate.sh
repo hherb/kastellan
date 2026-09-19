@@ -233,7 +233,8 @@ validate_profiles() {
          } ;;
     esac
     case "$max_skip" in
-      any|'') ;;
+      any) ;;
+      '') echo "run-e2e-gate.sh: profile '$name' MAX_SKIP is empty (write 'any' for no cap)" >&2; bad=1 ;;
       *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_SKIP must be a number or 'any'" >&2; bad=1 ;;
     esac
     [ -n "$e2e_floors" ] || { echo "run-e2e-gate.sh: profile '$name' names no E2E floor" >&2; bad=1; }

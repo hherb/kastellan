@@ -16,11 +16,11 @@ heavy:
 
 The browser-driver worker does the same for Chromium; see its `__main__.py`.
 
-`main()` must call `apply_worker_scratch()` before importing the model, which
-is why `__main__.py` imports the model inside `main()` rather than at the top.
+`main()` calls `apply_worker_scratch()` and only then `_serve()`, which is where
+`__main__.py` imports the model (not at the top of the file).
 """
 import os
-from typing import Dict, Mapping, MutableMapping
+from typing import Dict, Mapping, MutableMapping, Optional
 
 # Per-spawn scratch dir the host grants on macOS. Keep in sync with the Rust
 # constant `kastellan_core::tool_host::ENV_WORKER_SCRATCH`.
@@ -47,6 +47,26 @@ def scratch_overrides(environ: Mapping[str, str]) -> Dict[str, str]:
         "HOME": scratch,
         "TORCHINDUCTOR_CACHE_DIR": os.path.join(scratch, TORCH_CACHE_SUBDIR),
     }
+
+
+def scratch_problem(environ: Mapping[str, str]) -> Optional[str]:
+    """Return why the named scratch dir is unusable, or `None` if it is fine.
+
+    Only a set, non-blank `KASTELLAN_WORKER_SCRATCH` is checked; unset means
+    "no scratch dir" (see `scratch_overrides`). Checking here names the real
+    cause at startup, instead of letting it surface later as an EPERM deep
+    inside `import torch`, with nothing pointing at this variable.
+    """
+    scratch = environ.get(WORKER_SCRATCH_ENV, "").strip()
+    if not scratch:
+        return None
+    if not os.path.isabs(scratch):
+        return f"{WORKER_SCRATCH_ENV}={scratch!r} is not an absolute path"
+    if not os.path.isdir(scratch):
+        return f"{WORKER_SCRATCH_ENV}={scratch!r} is not an existing directory"
+    if not os.access(scratch, os.W_OK):
+        return f"{WORKER_SCRATCH_ENV}={scratch!r} is not writable"
+    return None
 
 
 def apply_worker_scratch(environ: MutableMapping[str, str] = os.environ) -> None:

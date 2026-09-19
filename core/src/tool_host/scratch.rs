@@ -13,8 +13,10 @@ use kastellan_sandbox::SandboxPolicy;
 use crate::tool_host::ToolHostError;
 
 /// Env var carrying the per-spawn scratch dir to a worker process. The worker
-/// uses it for `TMPDIR`/`HOME` (and, in python-exec, its cwd), falling back to
-/// `/tmp` when unset (the Linux tmpfs path). **Keep in sync** with the three
+/// uses it for `TMPDIR`/`HOME` (and, in python-exec, its cwd). When it is unset
+/// (the Linux tmpfs path) the worker keeps its `/tmp` defaults: python-exec and
+/// browser-driver fall back to `/tmp`, and gliner-relex leaves the manifest's
+/// `/tmp`-based torch cache path in place. **Keep in sync** with the three
 /// worker-side copies: `kastellan_worker_python_exec::exec::WORKER_SCRATCH_ENV`
 /// (Rust), and `WORKER_SCRATCH_ENV` in the browser-driver's `__main__.py` and
 /// the gliner-relex worker's `scratch.py` (Python).
@@ -72,8 +74,9 @@ pub fn apply_workspace_out(policy: &mut SandboxPolicy, out_dir: &Path) {
 
 /// RAII owner of a host-created per-spawn scratch dir. `Drop` best-effort
 /// removes the whole subtree — mirrors `crate::egress::net_worker`'s scratch
-/// cleanup. Held inside `SupervisedWorker` so the dir outlives the worker
-/// exactly and no longer.
+/// cleanup — and logs a failure, since a warm gliner-relex worker can leave a
+/// large torch compile cache here that must not leak silently. Held inside
+/// `SupervisedWorker` so the dir outlives the worker exactly and no longer.
 #[must_use = "dropping the guard immediately removes the scratch dir before the worker can use it; bind it to the worker via SupervisedWorker::with_scratch"]
 pub struct EphemeralScratch {
     dir: PathBuf,
@@ -88,7 +91,15 @@ impl EphemeralScratch {
 
 impl Drop for EphemeralScratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        match std::fs::remove_dir_all(&self.dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                dir = %self.dir.display(),
+                error = %e,
+                "could not remove a worker's ephemeral scratch dir; it is leaked until #251's sweep"
+            ),
+        }
     }
 }
 
@@ -160,6 +171,23 @@ mod tests {
         let hits: Vec<_> = p.env.iter().filter(|(k, _)| k == ENV_WORKER_OUT).collect();
         assert_eq!(hits.len(), 1, "exactly one out env entry");
         assert_eq!(hits[0].1, "/tmp/ws/out");
+    }
+
+    /// The Python workers spell the env name out themselves. A rename on one side
+    /// only would leave their hermetic tests green (they import their own
+    /// constant) while the worker silently stops seeing its scratch dir.
+    #[test]
+    fn python_workers_spell_the_scratch_env_like_the_host() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let expected = format!("WORKER_SCRATCH_ENV = \"{ENV_WORKER_SCRATCH}\"");
+        for rel in [
+            "workers/browser-driver/src/kastellan_worker_browser_driver/__main__.py",
+            "workers/gliner-relex/src/kastellan_worker_gliner_relex/scratch.py",
+        ] {
+            let src = std::fs::read_to_string(repo.join(rel))
+                .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            assert!(src.contains(&expected), "{rel} must define `{expected}`");
+        }
     }
 
     #[test]

@@ -24,7 +24,7 @@ import sys
 from typing import NoReturn
 
 from .errors import MODEL_LOAD_FAILED, UNSUPPORTED_DEVICE
-from .scratch import apply_worker_scratch
+from .scratch import apply_worker_scratch, scratch_problem
 from .server import Server
 
 # Spike correction #4: torch.cuda.is_available() returns True even when
@@ -100,6 +100,16 @@ def _resolve_device(requested: str) -> str:
         # Linux/other: existing CUDA probe + cpu fallback.
         try:
             import torch
+        except Exception as e:
+            # Do not fall back to cpu here: `_serve()` would import torch
+            # again, and a second import of a half-initialised torch fails
+            # with an error that names the wrong cause.
+            _exit_with_error(
+                MODEL_LOAD_FAILED,
+                f"import torch failed: {e!r}",
+                status=1,
+            )
+        try:
             if torch.cuda.is_available():
                 try:
                     free, _total = torch.cuda.mem_get_info(0)
@@ -110,6 +120,7 @@ def _resolve_device(requested: str) -> str:
                     # fall through to cpu rather than crash startup.
                     pass
         except Exception:
+            # cuda.is_available() can raise on a broken driver; cpu still works.
             pass
         return "cpu"
 
@@ -181,8 +192,16 @@ def main() -> None:
     _serve()
 
 
+def _check_scratch() -> None:
+    """Exit with `MODEL_LOAD_FAILED` if the host named an unusable scratch dir."""
+    problem = scratch_problem(os.environ)
+    if problem is not None:
+        _exit_with_error(MODEL_LOAD_FAILED, problem, status=1)
+
+
 def _serve() -> None:
-    """Read the config, resolve the device, load the model, run the stdio loop."""
+    """Check the scratch dir, read the config, resolve the device, load the model, serve."""
+    _check_scratch()
     weights_dir = os.environ.get("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR")
     model_id = os.environ.get("KASTELLAN_GLINER_RELEX_MODEL")
     device_requested = os.environ.get("KASTELLAN_GLINER_RELEX_DEVICE", "auto")
@@ -210,7 +229,16 @@ def _serve() -> None:
 
     # Imported here, not at the top of the file: this is what loads torch, and
     # it must happen after `apply_worker_scratch()`, which `main()` runs first.
-    from .model import GlinerModel
+    # On macOS `auto` resolves to cpu without touching torch, so this is where
+    # a #719-shaped failure lands; keep it inside the structured-error path.
+    try:
+        from .model import GlinerModel
+    except Exception as e:
+        _exit_with_error(
+            MODEL_LOAD_FAILED,
+            f"importing the model stack (torch, gliner) failed: {e!r}",
+            status=1,
+        )
 
     try:
         model = GlinerModel.load(

@@ -13,17 +13,24 @@ Nothing here needs torch or the weights: the helpers are pure, the order test
 stubs both steps, and the import check shadows torch with an empty fake. So
 these tests also run in CI's no-project job.
 """
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from kastellan_worker_gliner_relex.errors import MODEL_LOAD_FAILED
 from kastellan_worker_gliner_relex.scratch import (
     TORCH_CACHE_SUBDIR,
     WORKER_SCRATCH_ENV,
     apply_worker_scratch,
     scratch_overrides,
+    scratch_problem,
 )
+
+SRC = Path(__file__).resolve().parent.parent / "src"
 
 SCRATCH = "/var/folders/xy/T/pyexec-4242-0"
 
@@ -69,6 +76,135 @@ def test_without_scratch_the_environment_is_left_alone():
     assert env == {"TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor", "USER": "kastellan"}
 
 
+def test_the_default_target_is_the_real_process_environment(monkeypatch, tmp_path):
+    """Production calls `apply_worker_scratch()` with no argument.
+
+    Every other test passes its own dict, so a default that redirected a COPY
+    of `os.environ` would leave production un-redirected with all of them green.
+    """
+    # setenv/delenv first, so monkeypatch restores all three afterwards.
+    monkeypatch.setenv(WORKER_SCRATCH_ENV, str(tmp_path))
+    monkeypatch.setenv("TMPDIR", "/unchanged")
+    monkeypatch.setenv("HOME", "/unchanged")
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "/tmp/torchinductor")
+    apply_worker_scratch()
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == os.path.join(str(tmp_path), TORCH_CACHE_SUBDIR)
+    assert os.environ["TMPDIR"] == str(tmp_path)
+    assert os.environ["HOME"] == str(tmp_path)
+
+
+def test_an_unset_or_blank_scratch_dir_is_not_a_problem():
+    assert scratch_problem({}) is None
+    assert scratch_problem({WORKER_SCRATCH_ENV: "  "}) is None
+
+
+def test_a_usable_scratch_dir_is_not_a_problem(tmp_path):
+    assert scratch_problem({WORKER_SCRATCH_ENV: str(tmp_path)}) is None
+
+
+def _a_file(path: Path) -> str:
+    path.write_text("")
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    "make, why",
+    [
+        (lambda tmp: "relative/dir", "not an absolute path"),
+        (lambda tmp: str(tmp / "missing"), "not an existing directory"),
+        (lambda tmp: _a_file(tmp / "f"), "not an existing directory"),
+    ],
+    ids=["relative", "missing", "a-file"],
+)
+def test_an_unusable_scratch_dir_is_named(tmp_path, make, why):
+    problem = scratch_problem({WORKER_SCRATCH_ENV: make(tmp_path)})
+    assert problem is not None and WORKER_SCRATCH_ENV in problem and why in problem
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write anywhere")
+def test_a_read_only_scratch_dir_is_named(tmp_path):
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        problem = scratch_problem({WORKER_SCRATCH_ENV: str(ro)})
+    finally:
+        ro.chmod(0o700)
+    assert problem is not None and "not writable" in problem
+
+
+def _stderr_error(stderr: str) -> dict:
+    """The worker's one structured startup-error line (the last stderr line)."""
+    return json.loads(stderr.strip().splitlines()[-1])
+
+
+def test_an_unusable_scratch_dir_fails_startup_with_a_structured_error(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-c", "from kastellan_worker_gliner_relex.__main__ import main; main()"],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(SRC),
+            WORKER_SCRATCH_ENV: str(tmp_path / "gone"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    err = _stderr_error(result.stderr)
+    assert err["code"] == MODEL_LOAD_FAILED
+    assert WORKER_SCRATCH_ENV in err["message"]
+
+
+def test_a_failing_model_import_is_a_structured_error_not_a_traceback(tmp_path):
+    """#719's shape on macOS: `auto` resolves to cpu without torch, so the model
+    import is where torch first loads. If it fails there, the host must get a
+    `MODEL_LOAD_FAILED` line, not a raw traceback and a contentless EarlyExit.
+
+    A fake `gliner` that raises on import stands in for torch dying with EPERM.
+    """
+    fake = tmp_path / "fakes"
+    (fake / "gliner").mkdir(parents=True)
+    (fake / "gliner" / "__init__.py").write_text(
+        "raise PermissionError(1, 'Operation not permitted', '/tmp/torchinductor')\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != WORKER_SCRATCH_ENV}
+    env.update(
+        PYTHONPATH=os.pathsep.join([str(fake), str(SRC)]),
+        KASTELLAN_GLINER_RELEX_WEIGHTS_DIR=str(tmp_path),
+        KASTELLAN_GLINER_RELEX_MODEL="unused",
+        KASTELLAN_GLINER_RELEX_DEVICE="cpu",
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", "from kastellan_worker_gliner_relex.__main__ import main; main()"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "Traceback" not in result.stderr, result.stderr
+    err = _stderr_error(result.stderr)
+    assert err["code"] == MODEL_LOAD_FAILED
+    assert "Operation not permitted" in err["message"]
+
+
+def test_a_failing_torch_import_under_linux_auto_is_reported_not_swallowed(monkeypatch, capsys):
+    """Linux `auto` probes CUDA by importing torch. A failed import must name
+    its cause, not fall back to cpu and let the model import fail again later
+    with an error about a half-initialised module."""
+    import kastellan_worker_gliner_relex.__main__ as entry
+
+    monkeypatch.setattr(entry.sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "torch", None)  # makes `import torch` raise
+    with pytest.raises(SystemExit) as exit_info:
+        entry._resolve_device("auto")
+    assert exit_info.value.code == 1
+    err = _stderr_error(capsys.readouterr().err)
+    assert err["code"] == MODEL_LOAD_FAILED
+    assert "import torch failed" in err["message"]
+
+
 def test_importing_the_entry_point_does_not_import_torch(tmp_path):
     """The redirect is useless if torch is already imported when it runs.
 
@@ -86,7 +222,6 @@ def test_importing_the_entry_point_does_not_import_torch(tmp_path):
     fake_torch = tmp_path / "torch"
     fake_torch.mkdir()
     (fake_torch / "__init__.py").write_text("")
-    src = Path(__file__).resolve().parent.parent / "src"
     code = (
         "import sys\n"
         "import kastellan_worker_gliner_relex.__main__\n"
@@ -94,7 +229,7 @@ def test_importing_the_entry_point_does_not_import_torch(tmp_path):
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
-        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(src)])},
+        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(SRC)])},
         capture_output=True,
         text=True,
         check=False,

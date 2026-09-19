@@ -24,8 +24,9 @@ contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717)
 [#691](https://github.com/hherb/kastellan/issues/691) (from #692). ·
 **The DGX runs `main` as of #709**, redeployed 2026-09-17 via `scripts/upgrade_from_git.sh` and
 verified (installed binaries byte-identical, units active, migration 0026's `tasks.turn_record`
-present). #720 and [#726](https://github.com/hherb/kastellan/pull/726) change nothing the Linux daemon runs — [#726](https://github.com/hherb/kastellan/pull/726)'s runtime changes are macOS-only
-or no-ops on Linux — so no redeploy is owed for them. Rootfs images last rebuilt 2026-09-08.
+present). #720 changes nothing the Linux daemon runs. [#726](https://github.com/hherb/kastellan/pull/726)'s one Linux runtime change is on the gliner
+worker's **startup-failure path only** (a failed `import torch` under `auto` now exits with
+`MODEL_LOAD_FAILED` instead of falling back to cpu); a healthy start is unchanged, so no redeploy is owed. Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -109,6 +110,20 @@ worker before it answered, and each surfaced only as `Protocol(EarlyExit)`.
   manual run created `/tmp/torchinductor` on the host, which made the jailed mutant pass: a false
   green hiding the cause. Settled by disassembling the cached `main()`. **After mutating a `.py`,
   delete its `__pycache__` as part of the restore** [[mutation-testing-leaves-stale-pyc]].
+- **Second review round (4 parallel reviewers; `/fixall`): no bug; everything found is fixed in
+  the PR, nothing filed.** A #719-shaped failure now says so instead of dying as a bare `EarlyExit`:
+  - the model import in `_serve()` sits inside the structured-error path (on macOS `auto` resolves
+    to cpu without touching torch, so *that* import is where torch first loads);
+  - Linux `auto` no longer swallows a failed `import torch` (it fell back to cpu, then the model
+    import failed again naming a half-initialised module);
+  - `scratch.py::scratch_problem` refuses a named scratch dir that is relative, missing or
+    unwritable, at startup. Under Seatbelt `os.access` answers correctly: the `gliner` profile
+    passed as evidence afterwards (Mac 5/5).
+  Also: `EphemeralScratch::drop` logs a failed removal; a core test pins both Python copies of
+  `KASTELLAN_WORKER_SCRATCH` to the Rust constant; `run-e2e-gate.sh` refuses an empty `MAX_SKIP`;
+  `run.rs` gained no-evidence, **wrong-tier evidence** and `[WARN]` cases (the tier-anchor and
+  WARN-rule mutants are killed); two stale comments corrected. Python mutants restored with
+  `__pycache__` cleared. pytest now **81** in the venv, **18** in CI's no-torch job.
 - **ROADMAP 605 → 255 lines**: the 2026-09-14 prune had condensed the guard-tier entry's header and
   left its 351-line body behind. Removed only after checking it **verbatim and contiguous** in
   `archive/roadmap_20260914_pre-prune.md` (0 of 344 non-blank lines missing); its one open item,

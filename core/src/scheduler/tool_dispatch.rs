@@ -147,9 +147,10 @@ pub struct ToolEntry {
     pub lockdown_shim: Option<PathBuf>,
     /// When `true`, the worker is granted a per-spawn writable scratch dir on
     /// macOS (host-created, Seatbelt-granted, RAII-cleaned) — the parity
-    /// counterpart of Linux's bwrap `/tmp` tmpfs. `true` for single-use
-    /// python-exec, browser-driver, and host-mode gliner-relex; `false` for
-    /// everything else. See `tool_host::prepare_ephemeral_scratch`.
+    /// counterpart of Linux's bwrap `/tmp` tmpfs. `true` for the host-mode
+    /// entries of python-exec, browser-driver and gliner-relex; `false` for
+    /// everything else, including their micro-VM and container entries. See
+    /// `tool_host::prepare_ephemeral_scratch`.
     ///
     /// **Isolation is per-spawn only for `SingleUse` workers** (python-exec and
     /// browser-driver): the guard is created at the cold-spawn site, so a fresh

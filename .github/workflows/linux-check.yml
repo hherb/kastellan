@@ -292,11 +292,11 @@ jobs:
       #
       # `test_scratch.py` (#719) runs in a SEPARATE command with `src` on
       # PYTHONPATH, so the first command keeps the "package not importable"
-      # premise above. It needs no torch either: the helpers are pure, and its
-      # import-order test only checks that importing the entry point does NOT
-      # load torch. With no torch installed, a regression that imports it at the
-      # top of `__main__.py` fails here with ImportError, so the test cannot pass
-      # by accident on this runner.
+      # premise above. It needs no torch either. The helpers are pure; of its two
+      # import-order tests one stubs both steps of `main()`, and the other shadows
+      # `torch` with an empty fake package, so a regression that imports torch
+      # early (guarded or not) shows up in `sys.modules` even on this no-torch
+      # runner. The startup-error tests use fake packages the same way.
       - name: pytest (pure guards only; no torch)
         working-directory: workers/gliner-relex
         run: |

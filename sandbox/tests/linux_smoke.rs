@@ -342,7 +342,8 @@ fn worker_starts_in_root_whatever_the_parents_cwd() {
     let stderr = read_to_string(&mut child.stderr);
     assert!(
         status.success(),
-        "getcwd() failed inside the jail ({status:?}): {stderr:?} — see issue #719"
+        "getcwd() failed inside the jail ({status:?}), parent cwd {parent_cwd:?}: \
+         {stderr:?} — see issue #719"
     );
     assert_eq!(
         stdout.trim_end(),
