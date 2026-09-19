@@ -8,7 +8,12 @@
 //! # The shape the planner reads (#677)
 //!
 //! Each plan renders as `{"decision", "step_outcomes"}`, and each step outcome
-//! is an object in one of four shapes:
+//! is an object in one of four shapes, plus — since #699 — a `"call"` key
+//! holding `{"tool", "method", "parameters"}` of the step that produced it
+//! (see [`call`]). The call is kept when the budget elides the output: what
+//! the planner asked for is exactly what it needs to see to avoid asking again.
+//! `decision` and `call` are both screened (#700, #699) and become
+//! `"[withheld: failed injection screen]"` on a block.
 //!
 //! | Shape | When |
 //! | --- | --- |
@@ -25,18 +30,17 @@
 //! `the_planner_prompt_documents_every_outcome_shape` fails if the prompt stops
 //! naming any key, reason or marker the renderer emits.
 
-use std::borrow::Cow;
-
 use serde_json::json;
 
 use super::result_view;
 use super::StepOutcome;
 use crate::cassandra::types::Plan;
-use crate::tool_host::{AUDIT_ONLY_KEYS, INJECTION_BLOCKED_KEY};
 
+mod call;
 mod sink;
+use call::{render_call, render_decision, Screened, CALL_KEY};
 pub(crate) use sink::TIER_SINK;
-use sink::{clamp_audit_label, sink_screen, SinkBlock};
+use sink::{clamp_audit_label, sink_screen, without_screen_audit_fields, SinkBlock};
 #[cfg(test)]
 use sink::AUDIT_LABEL_MAX_CHARS;
 
@@ -81,7 +85,7 @@ const BATCH_PER_QUERY_SUMMARY_BYTES: usize = 3 * 1024;
 const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
 
 /// Total byte budget for the whole rendered `plans_so_far_summary`, counted in
-/// serialised step-outcome bytes. 96 KiB since #677: six times the flat
+/// serialised step-outcome and step-call (#699) bytes. 96 KiB since #677: six times the flat
 /// per-step budget, so a fast-lane task (`DEFAULT_MAX_PLANS_FAST` = 5, plus the
 /// forced-synthesis turn) of one flat-budget step per plan is not pushed into
 /// elision by the ceiling alone. Plans with several steps, `web.search_batch`
@@ -129,6 +133,11 @@ fn ok_summary_cap(method: &str, value: &serde_json::Value) -> usize {
         STEP_OK_SUMMARY_MAX
     }
 }
+
+/// The `part` of a sink audit row: which piece of a plan record was blocked.
+const PART_DECISION: &str = "decision";
+const PART_CALL: &str = "call";
+const PART_OUTCOME: &str = "outcome";
 
 // Keys and fixed values of a step outcome object; see the module docs.
 const STATUS_KEY: &str = "status";
@@ -236,6 +245,12 @@ pub struct PlanRecord {
     /// invariant depends on nothing else being able to inject an unscreened
     /// `RenderedStep`.
     rendered: Vec<RenderedStep>,
+    /// The screened call that produced each outcome, index-aligned with
+    /// `rendered` (#699). `None` only when outcomes outnumber steps (not
+    /// expected), in which case the outcome is shown without a call.
+    calls: Vec<Option<Screened>>,
+    /// The screened `plan.decision` (#700). Private for the same reason.
+    decision: Screened,
 }
 
 impl PlanRecord {
@@ -256,11 +271,15 @@ impl PlanRecord {
                 render_step_outcome(tool, method, o)
             })
             .collect();
-        Self { plan, outcomes, rendered }
+        let calls = (0..outcomes.len()).map(|i| plan.steps.get(i).map(render_call)).collect();
+        let decision = render_decision(&plan.decision);
+        Self { plan, outcomes, rendered, calls, decision }
     }
 
-    /// The `policy / injection.blocked` payloads for every step the sink screen
-    /// blocked, in step order, with `tier` [`TIER_SINK`].
+    /// The `policy / injection.blocked` payloads for everything in this record
+    /// the sink screen blocked, with `tier` [`TIER_SINK`]: the `decision` first
+    /// (`"part": "decision"`, `step_index` null, `tool`/`method` empty), then
+    /// each step in order, its `"call"` before its `"outcome"`.
     ///
     /// Since #677 the sink screens object keys, which no source screen sees, so
     /// it can block a result the source allowed; until #702's review nothing
@@ -277,27 +296,30 @@ impl PlanRecord {
     /// hostile name can appear in `tool`; the `step.unknown_tool` row already
     /// records that name in full.
     pub fn sink_block_audit_payloads(&self, task_id: i64, plan_count: u32) -> Vec<serde_json::Value> {
-        self.rendered
-            .iter()
-            .enumerate()
-            .filter_map(|(i, step)| {
-                let block = step.sink_block.as_ref()?;
-                let (tool, method) = step_tool_and_method(&self.plan, i);
-                Some(json!({
-                    "tool":          clamp_audit_label(tool),
-                    "method":        clamp_audit_label(method),
-                    "task_id":       task_id,
-                    "plan_count":    plan_count,
-                    "step_index":    i,
-                    "score":         block.score,
-                    "decision":      "block",
-                    "tier":          TIER_SINK,
-                    "reason_codes":  block.reason_codes,
-                    "body_sha256":   block.body_sha256,
-                    "body_byte_len": block.body_byte_len,
-                }))
+        let row = |part: &str, step_index: Option<usize>, block: &SinkBlock| {
+            let (tool, method) = step_index.map_or(("", ""), |i| step_tool_and_method(&self.plan, i));
+            json!({
+                "tool":          clamp_audit_label(tool),
+                "method":        clamp_audit_label(method),
+                "task_id":       task_id,
+                "plan_count":    plan_count,
+                "step_index":    step_index,
+                "part":          part,
+                "score":         block.score,
+                "decision":      "block",
+                "tier":          TIER_SINK,
+                "reason_codes":  block.reason_codes,
+                "body_sha256":   block.body_sha256,
+                "body_byte_len": block.body_byte_len,
             })
-            .collect()
+        };
+        let decision = self.decision.sink_block.as_ref().map(|b| row(PART_DECISION, None, b));
+        let steps = self.rendered.iter().zip(&self.calls).enumerate().flat_map(|(i, (step, call))| {
+            let call = call.as_ref().and_then(|c| c.sink_block.as_ref()).map(|b| row(PART_CALL, Some(i), b));
+            let outcome = step.sink_block.as_ref().map(|b| row(PART_OUTCOME, Some(i), b));
+            call.into_iter().chain(outcome)
+        });
+        decision.into_iter().chain(steps).collect()
     }
 
     /// The raw outcomes this record was built from, in step order.
@@ -394,28 +416,6 @@ fn render_step_outcome(tool: &str, method: &str, o: &StepOutcome) -> RenderedSte
     }
 }
 
-/// `v` without the audit-only fields of an injection-screen placeholder.
-///
-/// Both upstream screens (`tool_host`'s placeholder and
-/// `tool_dispatch::fetch_screen`) replace a blocked result with an object
-/// carrying `injection_blocked: true`, a note, the screen's score and its
-/// reason codes, and on the fetch path the continuation fields. The
-/// [`AUDIT_ONLY_KEYS`] are kept there for the audit log. The planner gets none
-/// of them: they would tell a compromised planner which defence fired. Any
-/// other value passes through untouched, borrowed rather than cloned.
-fn without_screen_audit_fields(v: &serde_json::Value) -> Cow<'_, serde_json::Value> {
-    match v {
-        serde_json::Value::Object(map) if map.get(INJECTION_BLOCKED_KEY).and_then(serde_json::Value::as_bool) == Some(true) => {
-            let mut map = map.clone();
-            for key in AUDIT_ONLY_KEYS {
-                map.remove(key);
-            }
-            Cow::Owned(serde_json::Value::Object(map))
-        }
-        _ => Cow::Borrowed(v),
-    }
-}
-
 /// Build the compact per-plan summary for the planner prompt: one
 /// `{ "decision", "step_outcomes": [..] }` object per completed plan, each
 /// outcome in one of the shapes described in the module docs.
@@ -430,9 +430,18 @@ pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Valu
     let mut rendered: Vec<Vec<RenderedStep>> =
         plans.iter().map(|r| r.rendered.clone()).collect();
 
+    // The calls are never elided (they are what stops the planner repeating
+    // itself), so their bytes come off the budget before the outputs compete
+    // for what is left. Each is at most `CALL_PARAMS_CAP` plus two clamped
+    // labels, so they cannot crowd the outputs out on any realistic task.
+    let call_bytes = plans
+        .iter()
+        .flat_map(|r| r.calls.iter().flatten())
+        .fold(0usize, |t, c| t.saturating_add(result_view::serialised_len(&c.value)));
+
     // Bound the accumulated size of the always-in-context summary, eliding the
     // oldest successful-step outputs first (#339).
-    let elided = apply_summary_budget(&mut rendered, PLANS_SUMMARY_BUDGET);
+    let elided = apply_summary_budget(&mut rendered, PLANS_SUMMARY_BUDGET.saturating_sub(call_bytes));
     if elided > 0 {
         // Debug, not warn: this runs on every planner iteration once a long
         // task passes the budget, and the planner itself is told in-band.
@@ -443,14 +452,30 @@ pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Valu
         .iter()
         .zip(rendered)
         .map(|(r, steps)| {
-            let step_outcomes: Vec<serde_json::Value> = steps.into_iter().map(|s| s.value).collect();
+            let step_outcomes: Vec<serde_json::Value> = steps
+                .into_iter()
+                .zip(&r.calls)
+                .map(|(s, call)| with_call(s.value, call.as_ref()))
+                .collect();
             json!({
-                "decision":      r.plan.decision,
+                "decision":      r.decision.value,
                 "step_outcomes": step_outcomes,
             })
         })
         .collect()
 }
 
+/// `outcome` with the screened `call` that produced it under [`CALL_KEY`].
+/// Every outcome shape is an object, so the insert always lands; a call of
+/// `None` leaves the outcome as it was.
+fn with_call(mut outcome: serde_json::Value, call: Option<&Screened>) -> serde_json::Value {
+    if let (Some(obj), Some(call)) = (outcome.as_object_mut(), call) {
+        obj.insert(CALL_KEY.into(), call.value.clone());
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod prior_call_tests;

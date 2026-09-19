@@ -52,6 +52,14 @@ of the task, with these fields:
   dropped to keep this summary bounded.
 - `{"status": "err", "code": "<CODE>", "detail": "…"}` — the step failed.
 
+Every step outcome also carries `"call"`: the step you submitted that
+produced it, as `{"tool", "method", "parameters"}`, with `parameters` pruned
+by the same rules as `output`. It stays when an old `output` is `"elided"`.
+**Compare it with the step you are about to submit** — if you are repeating a
+search, check which filters you passed last time and whether you meant to
+drop any. A `"call"` (or a plan's `"decision"`) that failed the injection
+screen is the string `"[withheld: failed injection screen]"`.
+
 `conversation` is what was already said in this chat, oldest first — absent
 when this is the first message. Each turn is one of:
 
