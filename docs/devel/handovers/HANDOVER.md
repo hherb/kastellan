@@ -7,7 +7,7 @@
 > [`archive/handover_20260919_719_pre-prune.md`](archive/handover_20260919_719_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
-**Last updated:** 2026-09-19 ·
+**Last updated:** 2026-09-19 (#677 + #560 closed live) ·
 **Recent PRs, newest first:** [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
 script that could not pass), [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob
 contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717) (backlog triage),
@@ -16,10 +16,9 @@ contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717)
 [#694](https://github.com/hherb/kastellan/pull/694) (#617). **Open issues these filed:**
 [#725](https://github.com/hherb/kastellan/issues/725) (from #719);
 [#718](https://github.com/hherb/kastellan/issues/718), [#721](https://github.com/hherb/kastellan/issues/721)–[#724](https://github.com/hherb/kastellan/issues/724) (from #720);
-[#710](https://github.com/hherb/kastellan/issues/710)–[#716](https://github.com/hherb/kastellan/issues/716) (from #709);
+[#710](https://github.com/hherb/kastellan/issues/710)–[#713](https://github.com/hherb/kastellan/issues/713), [#715](https://github.com/hherb/kastellan/issues/715), [#716](https://github.com/hherb/kastellan/issues/716) (from #709);
 [#698](https://github.com/hherb/kastellan/issues/698)–[#700](https://github.com/hherb/kastellan/issues/700),
-[#703](https://github.com/hherb/kastellan/issues/703)–[#705](https://github.com/hherb/kastellan/issues/705), localmail
-[#364](https://github.com/hherb/localmail/issues/364) (from #702); [#693](https://github.com/hherb/kastellan/issues/693),
+[#703](https://github.com/hherb/kastellan/issues/703)–[#705](https://github.com/hherb/kastellan/issues/705) (from #702); [#693](https://github.com/hherb/kastellan/issues/693),
 [#695](https://github.com/hherb/kastellan/issues/695)–[#697](https://github.com/hherb/kastellan/issues/697) (from #694);
 [#691](https://github.com/hherb/kastellan/issues/691) (from #692). ·
 **The DGX runs `main` as of #709**, redeployed 2026-09-17 via `scripts/upgrade_from_git.sh` and
@@ -57,7 +56,24 @@ worker's **startup-failure path only** (a failed `import torch` under `auto` now
 
 ## Current state
 
-### This session (2026-09-19): #719 — the gliner tier died at `import torch` on macOS, twice
+### This session (2026-09-19, later): #677 and #560 closed by live measurement — no code change
+
+The operator sent the DMs on the DGX (`main` as of #709; binaries verified byte-identical to
+`target/release/`). **Every figure below is from the `audit_log` rows, not from the replies.**
+
+- **#677 passes its own acceptance.** Task 189 (DM 1): 5 plans, 8 dispatches, all `ok`: 2 searches,
+  3 `mail.get_message` by real id, 3 `mail.get_attachment_text` by exact filename, no `shell.exec`.
+  Task 190 (the follow-up): **1 plan, 0 dispatches, 29 s**, `conversation_task_ids: [189]`, floor
+  `Personal` via `conversation_inherited`. A third follow-up (191, "how much did they cost?") read
+  `[189, 190]`, also 1 plan. The operator confirmed the facts and that the chat looked normal.
+- **#560 did not recur.** Task 192, its original Qantas question, ran in a **fresh room**
+  (`conversation_task_ids: []`, so nothing carried over). It passed a real id first time. Before #702:
+  2 of 2 runs of the Qantas question made up an id. After: 0 of 3 runs across both mail questions
+  (187/189 the flight-bookings one, 192 the Qantas one).
+- ⚠️ **A live re-measure of a single-question issue must use a fresh DM room** (or wait out the 5 h
+  window). Since #709 a same-room question inherits the prior turns' calls, which would void the test.
+
+### Previous (2026-09-19): #719 — the gliner tier died at `import torch` on macOS, twice
 
 PR [#726](https://github.com/hherb/kastellan/pull/726). The Mac sweep had been red on `main` since #651's security bump pinned **torch 2.13**
 (2026-09-02), which does two new things **while `import torch` runs**. Each killed the sandboxed
@@ -247,30 +263,21 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **[#677](https://github.com/hherb/kastellan/issues/677) — re-measure it live; the DGX already
-   carries #709.** ⚠️ **Needs the operator: the two DMs are sent from `@horst`** (the issue's own
-   script: "What are my 3 most recent flight bookings, and how much did they cost?", then "From where
-   to where did the last 3 flight bookings go (details in the pdf attachment!)"). Ask at session
-   start. **Acceptance: the follow-up needs one plan, not six**, and reads the prior turn's calls.
-   Then read `tasks.turn_record`, the follow-up's `conversation_task_ids`, and its `plan.formulate`
-   rows. ⚠️ **Ask how the chat looked before blaming the change under test**
-   [[channel-dm-tasks-are-stateless]]. Until that run passes, #677 stays open.
-
-2. **The #677 follow-ups, each measured by the same live question.** [#699](https://github.com/hherb/kastellan/issues/699)
+1. **The #677 follow-ups** (#677 itself closed live 2026-09-19). [#699](https://github.com/hherb/kastellan/issues/699)
    (the planner never sees its own prior steps' tool/method/parameters), [#698](https://github.com/hherb/kastellan/issues/698)
-   (`mail.search` cannot express a filter-only search; with localmail #364),
-   [#700](https://github.com/hherb/kastellan/issues/700) (`plan.decision` reaches the prompt unscreened).
-   ⚠️ **#560 (fabricated `message_id`) is worth re-measuring, not re-describing** — #702 removed the
-   mechanism its lead named.
+   (`mail.search` cannot express a filter-only search; not exercised by the
+   2026-09-19 run, whose searches all carried a query), [#700](https://github.com/hherb/kastellan/issues/700)
+   (`plan.decision` reaches the prompt unscreened). A live re-measure needs the operator's DMs,
+   and it needs a **fresh room** when the question is meant to stand alone.
 
-3. **#702 follow-ups.** [#703](https://github.com/hherb/kastellan/issues/703) — ⚠️ **the guard model
+2. **#702 follow-ups.** [#703](https://github.com/hherb/kastellan/issues/703) — ⚠️ **the guard model
    never sees object keys**; any new worker passing a third-party JSON object through reopens it
    silently (needs a DGX guard calibration run). [#705](https://github.com/hherb/kastellan/issues/705),
    [#704](https://github.com/hherb/kastellan/issues/704). The localmail changes the operator offered
    (2026-09-14: ordered headers, 4xx on cursor restart, filter-only search, compact hits, attachments
    by `message_id` + name, a distinct expired-credential error) are not yet filed on `hherb/localmail`.
 
-4. **Test-harness honesty, now that the gate itself is tested.** [#725](https://github.com/hherb/kastellan/issues/725)
+3. **Test-harness honesty, now that the gate itself is tested.** [#725](https://github.com/hherb/kastellan/issues/725)
    (a dying worker's last words never reach a failing e2e — the one-line diagnosis of #719, made
    permanent; option 2 fixes every suite in one place). [#718](https://github.com/hherb/kastellan/issues/718)
    (92 hand-rolled `[SKIP]`s — adding the `sandbox` profile is its acceptance test),
@@ -299,9 +306,6 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
 
 **Next up — operator's choice, each roughly one session.** Only the gotchas *not* in the issues:
 
-- **[#560](https://github.com/hherb/kastellan/issues/560)** — do **not** close it by rewriting the
-  parameter description (#536 did, and both later runs still fabricated). Re-measure live first
-  [[tool-output-reaches-planner-key-stripped]] [[opaque-ids-are-unusable-tool-params]].
 - **[#550](https://github.com/hherb/kastellan/issues/550)** — the naive fix is wrong: compare the
   *folded* environment (`fold_env_files`), since the overlay legitimately overrides keys.
 - **[#548](https://github.com/hherb/kastellan/issues/548)** / [#676](https://github.com/hherb/kastellan/issues/676)
@@ -444,6 +448,8 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **[#726](https://github.com/hherb/kastellan/pull/726)** `577e2196` — the gliner worker survives
+  `import torch` on macOS; `run-e2e-gate.sh` can pass (#719). Filed #725.
 - **[#720](https://github.com/hherb/kastellan/pull/720)** `0966a460` — one REQUIRE-knob contract and
   the gate script (#714, #622, #664). Filed #718 (then wrongly auto-closed; reopened), #719, #721–#724.
 - **[#717](https://github.com/hherb/kastellan/pull/717)** `6c7fc45d` — backlog triage, label taxonomy,
