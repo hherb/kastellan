@@ -8,6 +8,15 @@ Startup errors (`MODEL_LOAD_FAILED`, `UNSUPPORTED_DEVICE`) write one
 JSON-encoded line to STDERR and exit with a non-zero status BEFORE
 the stdio loop starts. The slice-2 crash classifier in the Rust side
 maps these to `ClientError::EarlyExit` → "dead".
+
+Import order matters here (issue #719). torch creates its cache directory
+while it is being imported, so on macOS `main()` must first point that cache
+at the host's per-spawn scratch dir (`scratch.apply_worker_scratch`) and only
+then import the model. That is why `GlinerModel` is imported inside
+`_serve()` and not at the top of this file: a top-level import would load
+torch before `main()` runs. `tests/test_scratch.py` checks both halves: that
+importing this module does not load torch, and that `main()` applies the
+redirect before `_serve()`.
 """
 import json
 import os
@@ -15,7 +24,7 @@ import sys
 from typing import NoReturn
 
 from .errors import MODEL_LOAD_FAILED, UNSUPPORTED_DEVICE
-from .model import GlinerModel
+from .scratch import apply_worker_scratch
 from .server import Server
 
 # Spike correction #4: torch.cuda.is_available() returns True even when
@@ -159,6 +168,21 @@ def _resolve_device(requested: str) -> str:
 
 
 def main() -> None:
+    """Console-script entry point: redirect to scratch, then serve.
+
+    Two steps, in this order, and nothing else — so the order is something a
+    test can check (`tests/test_scratch.py`) rather than a line position a
+    later edit could quietly swap. `apply_worker_scratch()` must run before
+    anything imports torch, and everything that can import torch lives in
+    `_serve()` (the device probe and the model load). See the module
+    docstring and `scratch.py` (issue #719).
+    """
+    apply_worker_scratch()
+    _serve()
+
+
+def _serve() -> None:
+    """Read the config, resolve the device, load the model, run the stdio loop."""
     weights_dir = os.environ.get("KASTELLAN_GLINER_RELEX_WEIGHTS_DIR")
     model_id = os.environ.get("KASTELLAN_GLINER_RELEX_MODEL")
     device_requested = os.environ.get("KASTELLAN_GLINER_RELEX_DEVICE", "auto")
@@ -183,6 +207,10 @@ def main() -> None:
         )
 
     device = _resolve_device(device_requested)
+
+    # Imported here, not at the top of the file: this is what loads torch, and
+    # it must happen after `apply_worker_scratch()`, which `main()` runs first.
+    from .model import GlinerModel
 
     try:
         model = GlinerModel.load(

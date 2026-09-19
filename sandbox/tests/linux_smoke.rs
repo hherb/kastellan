@@ -305,6 +305,53 @@ fn tmp_is_per_spawn_ephemeral_tmpfs_under_worker_strict() {
     );
 }
 
+/// Issue #719, Linux half: a jailed worker whose parent's cwd is not mapped
+/// into the jail starts in `/`, and can ask where it is.
+///
+/// The macOS twin in `macos_smoke` pins the same property for Seatbelt, where
+/// it had to be fixed: `sandbox-exec` left the worker in an unreadable
+/// inherited cwd, so `getcwd()` failed with EPERM and torch died at import.
+/// bwrap gets there on its own: it keeps the old cwd only when that path is
+/// mapped into the jail, otherwise tries the jail's `$HOME`, and otherwise
+/// stays in `/`. The strict policy maps neither the crate directory `cargo
+/// test` runs from nor any `$HOME`, so the answer here must be `/`.
+///
+/// `/usr/bin/pwd -P` rather than the shell builtin: `-P` forces a real
+/// `getcwd()` instead of trusting `$PWD` (which the cleared environment lacks).
+#[test]
+fn worker_starts_in_root_whatever_the_parents_cwd() {
+    if skip_if_no_userns() {
+        return;
+    }
+    // Precondition, not a skip: if this process already sits in `/`, an
+    // inherited cwd and a reset one print the same thing.
+    let parent_cwd = std::env::current_dir().expect("read the test process's own cwd");
+    assert_ne!(
+        parent_cwd,
+        std::path::Path::new("/"),
+        "vacuous fixture: the test process already runs in `/`, so it cannot tell \
+         an inherited cwd from a reset one"
+    );
+
+    let backend = LinuxBwrap::new();
+    let mut child = backend
+        .spawn_under_policy(&strict_policy(), "/usr/bin/pwd", &["-P"])
+        .expect("bwrap should spawn /usr/bin/pwd");
+    let status = child.wait().expect("wait");
+    let stdout = read_to_string(&mut child.stdout);
+    let stderr = read_to_string(&mut child.stderr);
+    assert!(
+        status.success(),
+        "getcwd() failed inside the jail ({status:?}): {stderr:?} — see issue #719"
+    );
+    assert_eq!(
+        stdout.trim_end(),
+        "/",
+        "with the parent's cwd ({parent_cwd:?}) unmapped and no $HOME, bwrap must \
+         land the worker in `/`"
+    );
+}
+
 #[test]
 fn relative_policy_paths_are_rejected() {
     let backend = LinuxBwrap::new();

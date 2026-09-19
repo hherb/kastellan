@@ -32,6 +32,29 @@ use std::process::{Child, Command, Stdio};
 
 use crate::{canonicalize_one, SandboxBackend, SandboxError, SandboxPolicy};
 
+/// The working directory every Seatbelt worker starts in (issue #719).
+///
+/// `sandbox-exec` restricts a process but does not move it, so without this the
+/// worker inherits the caller's cwd. On macOS `getcwd()` needs read access to
+/// the directory it names, and the caller's cwd is almost never in the policy's
+/// `fs_read` — so inside the jail `getcwd()` fails with EPERM. Most programs
+/// never ask, but Python does whenever it turns a relative path into an
+/// absolute one (`os.path.abspath`), and torch 2.13 does exactly that during
+/// `import torch`. The gliner-relex worker then died before answering its first
+/// request, and the only symptom was `Protocol(EarlyExit)`.
+///
+/// Production never saw it because launchd starts the daemon in `/` (its unit
+/// sets no `WorkingDirectory`); `cargo test` runs from the crate directory, so
+/// the tests did. Fixing the cwd here makes the two behave the same.
+///
+/// `/` works because the base profile in [`build_profile`] already allows
+/// `file-read*` on the literal `/` path (the kernel's path walk needs it), so
+/// this grants nothing new. bwrap on Linux never has this problem: it keeps the
+/// caller's cwd only when that path is mapped into the jail, otherwise tries the
+/// jail's `$HOME`, and otherwise stays in `/` — and Linux `getcwd()` does not
+/// need read access anyway. `linux_smoke` pins the Linux half.
+const WORKER_CWD: &str = "/";
+
 /// Shell out to `/usr/bin/sandbox-exec` for sandboxing.
 #[derive(Default)]
 pub struct MacosSeatbelt;
@@ -224,6 +247,11 @@ impl SandboxBackend for MacosSeatbelt {
         cmd.arg("-p").arg(&profile);
         cmd.arg(program);
         cmd.args(args);
+
+        // Start the worker in `/` rather than wherever the caller happens to
+        // be (issue #719). See `WORKER_CWD` for why an inherited cwd breaks
+        // `getcwd()` under Seatbelt.
+        cmd.current_dir(WORKER_CWD);
 
         // bwrap's --clearenv equivalent: clear, then re-apply per-policy env.
         cmd.env_clear();

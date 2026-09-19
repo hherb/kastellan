@@ -13,9 +13,11 @@ use kastellan_sandbox::SandboxPolicy;
 use crate::tool_host::ToolHostError;
 
 /// Env var carrying the per-spawn scratch dir to a worker process. The worker
-/// uses it for `TMPDIR`/`HOME`/cwd, falling back to `/tmp` when unset (the
-/// Linux tmpfs path). **Keep in sync** with the worker-side constant
-/// `kastellan_worker_python_exec::exec::WORKER_SCRATCH_ENV`.
+/// uses it for `TMPDIR`/`HOME` (and, in python-exec, its cwd), falling back to
+/// `/tmp` when unset (the Linux tmpfs path). **Keep in sync** with the three
+/// worker-side copies: `kastellan_worker_python_exec::exec::WORKER_SCRATCH_ENV`
+/// (Rust), and `WORKER_SCRATCH_ENV` in the browser-driver's `__main__.py` and
+/// the gliner-relex worker's `scratch.py` (Python).
 pub const ENV_WORKER_SCRATCH: &str = "KASTELLAN_WORKER_SCRATCH";
 
 use std::sync::atomic::{AtomicU64, Ordering};

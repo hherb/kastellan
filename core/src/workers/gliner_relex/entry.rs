@@ -212,7 +212,22 @@ fn host_mode_entry(env: &GlinerRelexEnv, lockdown_shim: Option<PathBuf>) -> Tool
         sandbox_backend: None,
         container_image: None,
         lockdown_shim,
-        ephemeral_scratch: false,
+        // torch 2.13 creates its compile-cache dir during `import torch`
+        // (issue #719), so the worker needs a writable dir from its first
+        // instruction. Linux: bwrap's per-spawn /tmp tmpfs already is one, so
+        // this flag does nothing there. macOS: Seatbelt has no tmpfs, so the
+        // host creates a per-spawn dir, grants it, and names it in
+        // KASTELLAN_WORKER_SCRATCH; the worker points TORCHINDUCTOR_CACHE_DIR
+        // (and TMPDIR/HOME) into it before importing torch.
+        //
+        // This worker is warm-reused, so the dir lives as long as the worker,
+        // not one request — exactly like the tmpfs a warm Linux worker keeps.
+        // Library caches and temp files are what is expected to land there
+        // (that is why TMPDIR/HOME point at it too); by design nothing
+        // request-derived is written to disk, since the worker is stateless.
+        // Even if a library did, it would add no new channel: a warm process
+        // already carries cross-request state in its own memory.
+        ephemeral_scratch: true,
         broker: None,
     }
 }

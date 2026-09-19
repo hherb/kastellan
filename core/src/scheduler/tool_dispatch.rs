@@ -147,16 +147,23 @@ pub struct ToolEntry {
     pub lockdown_shim: Option<PathBuf>,
     /// When `true`, the worker is granted a per-spawn writable scratch dir on
     /// macOS (host-created, Seatbelt-granted, RAII-cleaned) — the parity
-    /// counterpart of Linux's bwrap `/tmp` tmpfs. `false` for every worker
-    /// except python-exec today. See `tool_host::prepare_ephemeral_scratch`.
+    /// counterpart of Linux's bwrap `/tmp` tmpfs. `true` for single-use
+    /// python-exec, browser-driver, and host-mode gliner-relex; `false` for
+    /// everything else. See `tool_host::prepare_ephemeral_scratch`.
     ///
-    /// **Isolation is per-spawn only for `SingleUse` workers** (python-exec is
-    /// one): the guard is created at the cold-spawn site, so a fresh dir is
-    /// minted per dispatch. A *warm-reusable* worker that set this flag would
-    /// keep the dir it was first spawned with across every dispatch routed to
-    /// it — per-worker-lifetime, not per-spawn — so successive invocations on
-    /// the same warm worker would share scratch. No warm-reusable worker opts
-    /// in today; revisit this guarantee before the first one does.
+    /// **Isolation is per-spawn only for `SingleUse` workers** (python-exec and
+    /// browser-driver): the guard is created at the cold-spawn site, so a fresh
+    /// dir is minted per dispatch. A *warm-reusable* worker that sets this flag
+    /// keeps the dir it was first spawned with across every dispatch routed to
+    /// it — per-worker-lifetime, not per-spawn — so successive requests on the
+    /// same warm worker share scratch, exactly as they share bwrap's tmpfs on
+    /// Linux. That is only acceptable for a worker that keeps no request data
+    /// on disk by design. gliner-relex is the one warm worker that opts in,
+    /// deliberately: it is stateless, and what lands in its scratch is library
+    /// caches and temp files (torch's compile cache is why it needs one, #719;
+    /// see `workers::gliner_relex::entry`). A warm process already carries
+    /// cross-request state in memory, so a shared scratch adds no new channel
+    /// there. Check the same property before opting in another.
     pub ephemeral_scratch: bool,
     /// Trusted broker declaration. `None` (every worker except web-research in
     /// broker mode today) — the worker reaches any backend directly (or not at

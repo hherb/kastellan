@@ -304,7 +304,24 @@ fn entry_mounts_weights_and_venv_and_src_read_only_no_writes() {
     );
     assert!(
         entry.policy.fs_write.is_empty(),
-        "stateless worker writes nothing; fs_write must stay empty"
+        "the manifest grants no host writes; fs_write must stay empty (torch's \
+         compile cache goes to the per-spawn scratch, see the test below)"
+    );
+}
+
+/// Issue #719: torch 2.13 creates its compile-cache directory while
+/// `import torch` is still running, so the worker needs a writable directory
+/// before it has done anything else. Linux gets one from bwrap's per-spawn
+/// `/tmp` tmpfs. macOS Seatbelt has no tmpfs, so the host-mode entry asks for
+/// the per-spawn scratch dir (#283), and the worker points
+/// `TORCHINDUCTOR_CACHE_DIR` into it. On Linux the flag is a no-op.
+#[test]
+fn host_mode_entry_requests_a_per_spawn_scratch_dir() {
+    let entry = gliner_relex_entry(&test_env(), None);
+    assert!(
+        entry.ephemeral_scratch,
+        "without a per-spawn scratch dir, torch cannot create its cache on macOS \
+         and the worker dies at import with only `Protocol(EarlyExit)` to show"
     );
 }
 

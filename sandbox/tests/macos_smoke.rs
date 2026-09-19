@@ -394,3 +394,58 @@ fn net_is_unreachable_under_deny() {
         read_to_string(&mut child.stderr)
     );
 }
+
+/// Issue #719: a jailed worker starts in `/`, whatever the parent's cwd is,
+/// and can ask where it is.
+///
+/// `sandbox-exec` restricts a process but does not move it, so the worker used
+/// to inherit the parent's working directory. Under launchd the daemon's cwd is
+/// `/` (its unit sets no `WorkingDirectory`), so production never noticed. Under
+/// `cargo test` it is the crate directory, which no policy grants. On macOS
+/// `getcwd()` needs read access to the directory it names, so the call failed
+/// with EPERM there — and torch 2.13 calls it during `import torch`
+/// (`inspect.getmodule` → `os.path.abspath` → `os.getcwd`). The gliner-relex
+/// host-mode e2e tier died at import and reported only `Protocol(EarlyExit)`.
+///
+/// bwrap gets there on its own on Linux: it keeps the old cwd only when that
+/// path is mapped into the jail, otherwise tries the jail's `$HOME`, and
+/// otherwise stays in `/`. `linux_smoke::worker_starts_in_root_whatever_the_parents_cwd`
+/// pins the Linux half.
+///
+/// `/bin/pwd -P` rather than the shell builtin: `-P` forces a real `getcwd()`
+/// instead of trusting `$PWD` (which the cleared environment lacks anyway).
+#[test]
+fn worker_starts_in_root_whatever_the_parents_cwd() {
+    if skip_if_no_seatbelt() {
+        return;
+    }
+    // Precondition, not a skip: if this process already sits in `/`, the old
+    // and new behaviour print the same thing and the test proves nothing.
+    // `cargo test` always runs from the crate directory, so this holds there.
+    let parent_cwd = std::env::current_dir().expect("read the test process's own cwd");
+    assert_ne!(
+        parent_cwd,
+        std::path::Path::new("/"),
+        "vacuous fixture: the test process already runs in `/`, so it cannot tell \
+         an inherited cwd from a reset one"
+    );
+
+    let backend = MacosSeatbelt::new();
+    let mut child = backend
+        .spawn_under_policy(&strict_policy(), "/bin/pwd", &["-P"])
+        .expect("sandbox-exec should spawn /bin/pwd");
+    let status = child.wait().expect("wait");
+    let stdout = read_to_string(&mut child.stdout);
+    let stderr = read_to_string(&mut child.stderr);
+    assert!(
+        status.success(),
+        "getcwd() failed inside the jail ({status:?}): {stderr:?}. The worker \
+         inherited the parent's cwd ({parent_cwd:?}), which the policy does not \
+         grant — see issue #719."
+    );
+    assert_eq!(
+        stdout.trim_end(),
+        "/",
+        "the worker must start in `/`, not in the parent's cwd ({parent_cwd:?})"
+    );
+}
