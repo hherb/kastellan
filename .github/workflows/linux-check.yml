@@ -289,11 +289,20 @@ jobs:
       # than skip. Relying on "the runner has no weights" would make this step
       # pass for a reason that is not the reason stated. `REQUIRE_E2E` is
       # deliberately unset here, so `conftest.py`'s session guard stays quiet.
-      - name: pytest (weights-resolution guards only; no torch)
+      #
+      # `test_scratch.py` (#719) runs in a SEPARATE command with `src` on
+      # PYTHONPATH, so the first command keeps the "package not importable"
+      # premise above. It needs no torch either. The helpers are pure; of its two
+      # import-order tests one stubs both steps of `main()`, and the other shadows
+      # `torch` with an empty fake package, so a regression that imports torch
+      # early (guarded or not) shows up in `sys.modules` even on this no-torch
+      # runner. The startup-error tests use fake packages the same way.
+      - name: pytest (pure guards only; no torch)
         working-directory: workers/gliner-relex
         run: |
           uv run --no-project --with pytest pytest tests/test_model_live.py -q -rs \
             --deselect tests/test_model_live.py::test_real_model_loads_and_extracts
+          PYTHONPATH=src uv run --no-project --with pytest pytest tests/test_scratch.py -q -rs
 
   # The Matrix worker's live SDK path (`workers/matrix/src/sdk_live.rs`) is
   # behind the optional `live-matrix` feature (`dep:matrix-sdk`). The `check`

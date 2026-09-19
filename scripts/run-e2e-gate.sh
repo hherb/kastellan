@@ -233,7 +233,8 @@ validate_profiles() {
          } ;;
     esac
     case "$max_skip" in
-      any|'') ;;
+      any) ;;
+      '') echo "run-e2e-gate.sh: profile '$name' MAX_SKIP is empty (write 'any' for no cap)" >&2; bad=1 ;;
       *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_SKIP must be a number or 'any'" >&2; bad=1 ;;
     esac
     [ -n "$e2e_floors" ] || { echo "run-e2e-gate.sh: profile '$name' names no E2E floor" >&2; bad=1; }
@@ -348,8 +349,16 @@ echo ""
 # skip on the host into a failure and look like a regression.
 # shellcheck disable=SC2086
 env $knobs cargo test $cargo_args "$@" -- $harness_args 2>&1 | tee "$LOG"
-TEST_EXIT="${PIPESTATUS[0]}"
-TEE_EXIT="${PIPESTATUS[1]}"
+# ⚠️ Copy the WHOLE array in one command, on the line straight after the
+# pipeline. An assignment is itself a command, so `TEST_EXIT="${PIPESTATUS[0]}"`
+# resets PIPESTATUS to that assignment's own single status, and a following
+# `${PIPESTATUS[1]}` is then unset. Under `set -u` that killed the script with
+# "unbound variable" after every run: exit 1 on every profile, whatever the tests
+# did (#719). `tests-common/src/gate_script_tests/run.rs` runs this script and
+# fails if it happens again.
+PIPE_EXITS=("${PIPESTATUS[@]}")
+TEST_EXIT="${PIPE_EXITS[0]:-}"
+TEE_EXIT="${PIPE_EXITS[1]:-}"
 
 if [ "${TEE_EXIT:-1}" -ne 0 ]; then
   echo "run-e2e-gate.sh: tee failed writing $LOG — the run happened but was not recorded," >&2
