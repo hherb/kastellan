@@ -22,7 +22,7 @@
 use serde_json::{json, Value};
 
 use super::sink::{clamp_audit_label, sink_screen_with, SinkBlock};
-use super::WITHHELD_MARKER;
+use super::{ELIDED_KEY, ELIDED_REASON, WITHHELD_MARKER};
 use crate::cassandra::injection_guard::GuardProfile;
 use crate::cassandra::types::PlannedStep;
 use crate::scheduler::conversation::record::CALL_PARAMS_CAP;
@@ -31,6 +31,13 @@ use crate::scheduler::inner_loop::result_view;
 /// The key, inside one step outcome object, under which the call that produced
 /// it is shown: `{"tool", "method", "parameters"}`, or [`WITHHELD_MARKER`].
 pub(super) const CALL_KEY: &str = "call";
+
+/// The key under which a call's pruned parameters are shown.
+const PARAMETERS_KEY: &str = "parameters";
+
+/// What a call adds to its step outcome object beyond its own serialised
+/// value: the `"call":` key and the separating comma.
+const CALL_FRAMING_BYTES: usize = r#","call":"#.len();
 
 /// The profile both screens here use: planner-authored text is held to the
 /// fail-closed default whatever tool it names.
@@ -67,8 +74,51 @@ pub(super) fn render_call(step: &PlannedStep) -> Screened {
     Screened::screen(json!({
         "tool":       clamp_audit_label(&step.tool),
         "method":     clamp_audit_label(&step.method),
-        "parameters": result_view::render(&step.parameters, CALL_PARAMS_CAP),
+        PARAMETERS_KEY: result_view::render(&step.parameters, CALL_PARAMS_CAP),
     }))
+}
+
+/// What `call` adds to the serialised summary once it sits inside its step
+/// outcome object. The unit [`apply_call_budget`] and its caller count in.
+pub(super) fn call_cost(call: &Value) -> usize {
+    result_view::serialised_len(call).saturating_add(CALL_FRAMING_BYTES)
+}
+
+/// `call` with its `parameters` replaced by `"elided": "summary budget"`,
+/// keeping `tool` and `method`; `None` for a call with no parameters to drop
+/// (the withheld marker, or one already elided).
+fn without_parameters(call: &Value) -> Option<Value> {
+    let obj = call.as_object().filter(|o| o.contains_key(PARAMETERS_KEY))?;
+    let mut obj = obj.clone();
+    obj.remove(PARAMETERS_KEY);
+    obj.insert(ELIDED_KEY.into(), Value::from(ELIDED_REASON));
+    Some(Value::Object(obj))
+}
+
+/// Drop the oldest calls' `parameters` until `total` — the summary's current
+/// serialised size, calls included — is within `budget`. Returns how many
+/// calls lost their parameters.
+///
+/// The second pass of the summary budget, run only once the step outputs have
+/// been elided: calls are what stop the planner repeating itself, so they go
+/// last, and even then `tool` and `method` stay. Oldest first (`calls[0]` is
+/// the first plan), stopping the moment the total fits, and only where
+/// dropping actually shrinks the call, so it is idempotent.
+pub(super) fn apply_call_budget(calls: &mut [Vec<Option<Value>>], mut total: usize, budget: usize) -> usize {
+    let mut elided = 0;
+    for call in calls.iter_mut().flatten().flatten() {
+        if total <= budget {
+            break;
+        }
+        let Some(smaller) = without_parameters(call) else { continue };
+        let (before, after) = (call_cost(call), call_cost(&smaller));
+        if after < before {
+            total = total.saturating_sub(before - after);
+            *call = smaller;
+            elided += 1;
+        }
+    }
+    elided
 }
 
 /// The plan's `decision`, screened (#700). Not clamped: it is not counted in

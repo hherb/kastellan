@@ -122,3 +122,30 @@ fn audit_rows_come_decision_first_then_call_before_outcome() {
     let parts: Vec<_> = record.sink_block_audit_payloads(1, 1).iter().map(|r| r["part"].as_str().unwrap().to_owned()).collect();
     assert_eq!(parts, [PART_DECISION, PART_CALL, PART_OUTCOME]);
 }
+
+/// Found by review: calls were never elided, so enough steps with near-cap
+/// parameters overran the budget on their own (64 steps × ~1 KiB per plan, a
+/// few plans). Once the outputs are gone, the oldest calls lose their
+/// `parameters` too, keeping `tool` and `method`, until the summary fits.
+#[test]
+fn the_summary_budget_holds_when_the_calls_alone_exceed_it() {
+    let params = json!({"query": "word ".repeat(400)});
+    let plans: Vec<PlanRecord> = (0..3)
+        .map(|_| {
+            let mut plan = search_plan("d", params.clone());
+            plan.steps = vec![plan.steps[0].clone(); 64];
+            PlanRecord::new(plan, vec![StepOutcome::Ok(json!({"results": []})); 64])
+        })
+        .collect();
+    let summary = render_plans_summary(&plans);
+    let steps: Vec<&serde_json::Value> = summary.iter().flat_map(|p| p["step_outcomes"].as_array().unwrap()).collect();
+    let bytes: usize = steps.iter().map(|o| o.to_string().len()).sum();
+    assert!(bytes <= PLANS_SUMMARY_BUDGET, "{bytes} over {PLANS_SUMMARY_BUDGET}");
+
+    let oldest = &steps[0][CALL_KEY];
+    assert_eq!(oldest[ELIDED_KEY], ELIDED_REASON, "the oldest call kept its parameters: {oldest}");
+    assert_eq!((oldest["tool"].as_str(), oldest["method"].as_str()), (Some("mail"), Some("mail.search")));
+    assert!(oldest.get("parameters").is_none(), "{oldest}");
+    let newest = &steps[steps.len() - 1][CALL_KEY];
+    assert_eq!(newest["parameters"]["query"].as_str().map(|q| q.starts_with("word")), Some(true), "the newest call lost its parameters");
+}

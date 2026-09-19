@@ -94,3 +94,41 @@ fn a_decision_carrying_an_injection_phrase_is_withheld_and_recorded() {
     assert_eq!(d.value, Value::from(WITHHELD_MARKER));
     assert!(d.sink_block.is_some());
 }
+
+fn big_call(i: usize) -> Value {
+    render_call(&step("mail", "mail.search", json!({"query": format!("q{i} {}", "word ".repeat(100))}))).value
+}
+
+/// Oldest first, stopping the moment the total fits; `tool` and `method` stay.
+#[test]
+fn the_call_budget_drops_the_oldest_parameters_first_and_stops_when_within() {
+    let mut calls = vec![vec![Some(big_call(0))], vec![Some(big_call(1))], vec![Some(big_call(2))]];
+    let total: usize = calls.iter().flatten().flatten().map(call_cost).sum();
+    let one = call_cost(&big_call(0));
+    // Just over by less than one call's saving: exactly one must go.
+    let elided = apply_call_budget(&mut calls, total, total - one / 2);
+    assert_eq!(elided, 1);
+    assert_eq!(calls[0][0].as_ref().unwrap(), &json!({"tool": "mail", "method": "mail.search", ELIDED_KEY: ELIDED_REASON}));
+    assert!(calls[1][0].as_ref().unwrap().get(PARAMETERS_KEY).is_some(), "a newer call lost its parameters");
+}
+
+/// The withheld marker has no parameters to drop, and an elided call is never
+/// elided again, so a second pass changes nothing.
+#[test]
+fn the_call_budget_skips_withheld_calls_and_is_idempotent() {
+    let withheld = Value::from(WITHHELD_MARKER);
+    let mut calls = vec![vec![Some(withheld.clone()), None, Some(big_call(1))]];
+    assert_eq!(apply_call_budget(&mut calls, usize::MAX, 0), 1);
+    assert_eq!(calls[0][0].as_ref().unwrap(), &withheld);
+    let snapshot = calls.clone();
+    assert_eq!(apply_call_budget(&mut calls, usize::MAX, 0), 0);
+    assert_eq!(calls, snapshot);
+}
+
+#[test]
+fn the_call_budget_is_a_no_op_when_under() {
+    let mut calls = vec![vec![Some(big_call(0))]];
+    let snapshot = calls.clone();
+    assert_eq!(apply_call_budget(&mut calls, 10, 10), 0);
+    assert_eq!(calls, snapshot);
+}

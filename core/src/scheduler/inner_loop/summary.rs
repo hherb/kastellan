@@ -38,7 +38,7 @@ use crate::cassandra::types::Plan;
 
 mod call;
 mod sink;
-use call::{render_call, render_decision, Screened, CALL_KEY};
+use call::{apply_call_budget, call_cost, render_call, render_decision, Screened, CALL_KEY};
 pub(crate) use sink::TIER_SINK;
 use sink::{clamp_audit_label, sink_screen, without_screen_audit_fields, SinkBlock};
 #[cfg(test)]
@@ -90,8 +90,11 @@ const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
 /// forced-synthesis turn) of one flat-budget step per plan is not pushed into
 /// elision by the ceiling alone. Plans with several steps, `web.search_batch`
 /// steps (up to 24 KiB each) or a long-lane task can still exceed it and elide,
-/// oldest first. The planner's own `decision` strings are not counted, so the
-/// serialised prompt is modestly larger than this value but still bounded.
+/// oldest first; if the calls alone overrun it, the oldest calls then lose their
+/// `parameters` (see `call::apply_call_budget`). What cannot be elided — error
+/// and withheld outcomes, and each call's clamped `tool`/`method` — can still
+/// exceed it on a pathological task. The planner's own `decision` strings are
+/// not counted, so the serialised prompt is modestly larger than this value.
 const PLANS_SUMMARY_BUDGET: usize = 96 * 1024;
 
 const _: () = {
@@ -430,33 +433,34 @@ pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Valu
     let mut rendered: Vec<Vec<RenderedStep>> =
         plans.iter().map(|r| r.rendered.clone()).collect();
 
-    // The calls are never elided (they are what stops the planner repeating
-    // itself), so their bytes come off the budget before the outputs compete
-    // for what is left. Each is at most `CALL_PARAMS_CAP` plus two clamped
-    // labels, so they cannot crowd the outputs out on any realistic task.
-    let call_bytes = plans
+    let mut calls: Vec<Vec<Option<serde_json::Value>>> = plans
         .iter()
-        .flat_map(|r| r.calls.iter().flatten())
-        .fold(0usize, |t, c| t.saturating_add(result_view::serialised_len(&c.value)));
+        .map(|r| r.calls.iter().map(|c| c.as_ref().map(|c| c.value.clone())).collect())
+        .collect();
 
-    // Bound the accumulated size of the always-in-context summary, eliding the
-    // oldest successful-step outputs first (#339).
+    // Bound the accumulated size of the always-in-context summary (#339) in
+    // two passes. The calls are what stop the planner repeating itself (#699),
+    // so their bytes come off the budget first and the oldest successful-step
+    // OUTPUTS are elided to fit what is left. Only if the calls alone still
+    // overrun it do the oldest calls lose their `parameters` (a task of
+    // several 64-step plans with near-cap parameters; found by review).
+    let call_bytes = calls.iter().flatten().flatten().fold(0usize, |t, c| t.saturating_add(call_cost(c)));
     let elided = apply_summary_budget(&mut rendered, PLANS_SUMMARY_BUDGET.saturating_sub(call_bytes));
-    if elided > 0 {
+    let outcome_bytes = rendered.iter().flatten().fold(0usize, |t, s| t.saturating_add(s.bytes));
+    let elided_calls = apply_call_budget(&mut calls, outcome_bytes.saturating_add(call_bytes), PLANS_SUMMARY_BUDGET);
+    if elided + elided_calls > 0 {
         // Debug, not warn: this runs on every planner iteration once a long
         // task passes the budget, and the planner itself is told in-band.
-        tracing::debug!(elided, budget = PLANS_SUMMARY_BUDGET, "plan summary elided older step outputs");
+        tracing::debug!(elided, elided_calls, budget = PLANS_SUMMARY_BUDGET, "plan summary elided older step outputs");
     }
 
     plans
         .iter()
         .zip(rendered)
-        .map(|(r, steps)| {
-            let step_outcomes: Vec<serde_json::Value> = steps
-                .into_iter()
-                .zip(&r.calls)
-                .map(|(s, call)| with_call(s.value, call.as_ref()))
-                .collect();
+        .zip(calls)
+        .map(|((r, steps), calls)| {
+            let step_outcomes: Vec<serde_json::Value> =
+                steps.into_iter().zip(calls).map(|(s, call)| with_call(s.value, call)).collect();
             json!({
                 "decision":      r.decision.value,
                 "step_outcomes": step_outcomes,
@@ -468,9 +472,9 @@ pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Valu
 /// `outcome` with the screened `call` that produced it under [`CALL_KEY`].
 /// Every outcome shape is an object, so the insert always lands; a call of
 /// `None` leaves the outcome as it was.
-fn with_call(mut outcome: serde_json::Value, call: Option<&Screened>) -> serde_json::Value {
+fn with_call(mut outcome: serde_json::Value, call: Option<serde_json::Value>) -> serde_json::Value {
     if let (Some(obj), Some(call)) = (outcome.as_object_mut(), call) {
-        obj.insert(CALL_KEY.into(), call.value.clone());
+        obj.insert(CALL_KEY.into(), call);
     }
     outcome
 }
