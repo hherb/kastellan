@@ -16,10 +16,9 @@ contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717)
 [#694](https://github.com/hherb/kastellan/pull/694) (#617). **Open issues these filed:**
 [#725](https://github.com/hherb/kastellan/issues/725) (from #719);
 [#718](https://github.com/hherb/kastellan/issues/718), [#721](https://github.com/hherb/kastellan/issues/721)–[#724](https://github.com/hherb/kastellan/issues/724) (from #720);
-[#710](https://github.com/hherb/kastellan/issues/710)–[#716](https://github.com/hherb/kastellan/issues/716) (from #709);
+[#710](https://github.com/hherb/kastellan/issues/710)–[#713](https://github.com/hherb/kastellan/issues/713), [#715](https://github.com/hherb/kastellan/issues/715), [#716](https://github.com/hherb/kastellan/issues/716) (from #709);
 [#698](https://github.com/hherb/kastellan/issues/698)–[#700](https://github.com/hherb/kastellan/issues/700),
-[#703](https://github.com/hherb/kastellan/issues/703)–[#705](https://github.com/hherb/kastellan/issues/705), localmail
-[#364](https://github.com/hherb/localmail/issues/364) (from #702); [#693](https://github.com/hherb/kastellan/issues/693),
+[#703](https://github.com/hherb/kastellan/issues/703)–[#705](https://github.com/hherb/kastellan/issues/705) (from #702); [#693](https://github.com/hherb/kastellan/issues/693),
 [#695](https://github.com/hherb/kastellan/issues/695)–[#697](https://github.com/hherb/kastellan/issues/697) (from #694);
 [#691](https://github.com/hherb/kastellan/issues/691) (from #692). ·
 **The DGX runs `main` as of #709**, redeployed 2026-09-17 via `scripts/upgrade_from_git.sh` and
@@ -67,9 +66,10 @@ The operator sent the DMs on the DGX (`main` as of #709; binaries verified byte-
   Task 190 (the follow-up): **1 plan, 0 dispatches, 29 s**, `conversation_task_ids: [189]`, floor
   `Personal` via `conversation_inherited`. A third follow-up (191, "how much did they cost?") read
   `[189, 190]`, also 1 plan. The operator confirmed the facts and that the chat looked normal.
-- **#560 did not recur.** Task 192, its original Qantas question, ran in a **fresh room** (`conv: []`,
-  so nothing carried over). It passed a real id first time. Before #702: 2 of 2 runs made up an id.
-  After: 0 of 3 (tasks 187/189/192).
+- **#560 did not recur.** Task 192, its original Qantas question, ran in a **fresh room**
+  (`conversation_task_ids: []`, so nothing carried over). It passed a real id first time. Before #702:
+  2 of 2 runs of the Qantas question made up an id. After: 0 of 3 runs across both mail questions
+  (187/189 the flight-bookings one, 192 the Qantas one).
 - ⚠️ **A live re-measure of a single-question issue must use a fresh DM room** (or wait out the 5 h
   window). Since #709 a same-room question inherits the prior turns' calls, which would void the test.
 
@@ -265,7 +265,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 1. **The #677 follow-ups** (#677 itself closed live 2026-09-19). [#699](https://github.com/hherb/kastellan/issues/699)
    (the planner never sees its own prior steps' tool/method/parameters), [#698](https://github.com/hherb/kastellan/issues/698)
-   (`mail.search` cannot express a filter-only search; with localmail #364; not exercised by the
+   (`mail.search` cannot express a filter-only search; not exercised by the
    2026-09-19 run, whose searches all carried a query), [#700](https://github.com/hherb/kastellan/issues/700)
    (`plan.decision` reaches the prompt unscreened). A live re-measure needs the operator's DMs,
    and it needs a **fresh room** when the question is meant to stand alone.
