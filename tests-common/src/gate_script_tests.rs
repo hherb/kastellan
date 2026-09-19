@@ -20,7 +20,12 @@
 //!
 //! Neither is reachable from a unit test of the Rust alone, and running the
 //! real gate needs the fixtures the gate exists to demand. Reading the table is
-//! what is left, and it is enough for the drift.
+//! enough for the drift.
+//!
+//! It is NOT enough for the verdict logic, which a table scan never executes:
+//! the script once crashed straight after every test run, so no profile could
+//! pass at all (#719). The child module [`run`] therefore runs the real script
+//! against a fake `cargo` and checks the verdict it prints.
 //!
 //! ⚠️ **Every scan here carries a positive control**, because a scanner that
 //! matches nothing reports a clean tree — the same unsound inference
@@ -33,6 +38,8 @@
 use std::path::PathBuf;
 
 use crate::require::{RequireKnob, KNOBS};
+
+mod run;
 
 /// The gate script's source.
 fn gate_script() -> String {
