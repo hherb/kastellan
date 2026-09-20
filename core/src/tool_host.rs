@@ -584,33 +584,40 @@ impl SupervisedWorker {
     /// dispatch chokepoint scrubs redeemed secrets out of everything that
     /// reaches the planner and the audit row (audit H1). Routing unscrubbed
     /// worker bytes into the returned error would walk straight through that
-    /// guarantee. The daemon log already receives this same stream at `debug`,
-    /// so this changes the LEVEL — from invisible to visible — and nothing
-    /// about where the bytes may go.
+    /// guarantee. The surviving claim is about the *destinations*: these bytes
+    /// never reach a returned error, the planner, or an audit row.
+    ///
+    /// ⚠️ It is no longer true that this changes "nothing about where the bytes
+    /// may go" — that sentence described the pre-#725 code. #725 adds a
+    /// second sink, the process's own fd 2, for binaries with no `tracing`
+    /// subscriber (test binaries and `kastellan-cli`; never the daemon). See
+    /// [`crate::worker_stderr::emit_early_exit_report`], which owns that
+    /// reasoning.
+    ///
+    /// Both arms now render a report string and hand it to the single
+    /// [`crate::worker_stderr::emit_early_exit_report`], which adds the
+    /// no-subscriber stderr fallback (#725). The not-piped arm used to log
+    /// structured `worker` / `method` fields instead of a message; it names
+    /// both in its text now, so that one producer covers every early exit
+    /// rather than only the arm that happened to have a tail.
     fn warn_early_exit(&self, method: &str) {
-        let Some(tail) = self.stderr_tail.as_ref() else {
-            tracing::warn!(
-                worker = %self.program,
-                method = %method,
-                "worker exited before responding; its stderr was not piped, so there is \
-                 nothing to report"
-            );
-            return;
+        let report = match self.stderr_tail.as_ref() {
+            None => crate::worker_stderr::format_unpiped_early_exit_report(&self.program, method),
+            Some(tail) => {
+                // Wait briefly for the drainer to reach EOF. The worker has
+                // already closed stdout, so its stderr is closing too; without
+                // this we would usually snapshot an empty ring and report
+                // "wrote NOTHING" for a worker that explained itself a
+                // millisecond later — the same ambiguity, restored by a race.
+                tail.wait_for_drain(EARLY_EXIT_DRAIN_WAIT);
+                crate::worker_stderr::format_early_exit_report(
+                    &self.program,
+                    method,
+                    &tail.snapshot(),
+                )
+            }
         };
-        // Wait briefly for the drainer to reach EOF. The worker has already
-        // closed stdout, so its stderr is closing too; without this we would
-        // usually snapshot an empty ring and report "wrote NOTHING" for a
-        // worker that explained itself a millisecond later — the same
-        // ambiguity, restored by a race.
-        tail.wait_for_drain(EARLY_EXIT_DRAIN_WAIT);
-        tracing::warn!(
-            "{}",
-            crate::worker_stderr::format_early_exit_report(
-                &self.program,
-                method,
-                &tail.snapshot(),
-            )
-        );
+        crate::worker_stderr::emit_early_exit_report(&report);
     }
 
     /// Close stdin (signals EOF to the worker), wait for it to exit, and

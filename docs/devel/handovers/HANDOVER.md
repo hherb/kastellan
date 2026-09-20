@@ -7,14 +7,14 @@
 > [`archive/handover_20260919_699_pre-prune.md`](archive/handover_20260919_699_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
-**Last updated:** 2026-09-19 (#699 + #700: the planner sees its own calls) ·
-**Recent PRs, newest first:** [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700), [#727](https://github.com/hherb/kastellan/pull/727) (#677/#560 live acceptance, docs), [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
+**Last updated:** 2026-09-20 (#725: a dying worker's last words reach a failing test) ·
+**Recent PRs, newest first:** [#731](https://github.com/hherb/kastellan/pull/731) (#725), [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700), [#727](https://github.com/hherb/kastellan/pull/727) (#677/#560 live acceptance, docs), [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
 script that could not pass), [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob
 contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717) (backlog triage),
 [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational continuity),
 [#702](https://github.com/hherb/kastellan/pull/702) (#677, the planner's labelled result view),
 [#694](https://github.com/hherb/kastellan/pull/694) (#617). **Open issues these filed:**
-[#725](https://github.com/hherb/kastellan/issues/725) (from #719);
+[#730](https://github.com/hherb/kastellan/issues/730), [#732](https://github.com/hherb/kastellan/issues/732)–[#734](https://github.com/hherb/kastellan/issues/734) (from #731);
 [#718](https://github.com/hherb/kastellan/issues/718), [#721](https://github.com/hherb/kastellan/issues/721)–[#724](https://github.com/hherb/kastellan/issues/724) (from #720);
 [#710](https://github.com/hherb/kastellan/issues/710)–[#713](https://github.com/hherb/kastellan/issues/713), [#715](https://github.com/hherb/kastellan/issues/715), [#716](https://github.com/hherb/kastellan/issues/716) (from #709);
 [#698](https://github.com/hherb/kastellan/issues/698)–[#700](https://github.com/hherb/kastellan/issues/700),
@@ -25,7 +25,10 @@ contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717)
 verified (installed binaries byte-identical, units active, migration 0026's `tasks.turn_record`
 present). #720 changes nothing the Linux daemon runs. [#726](https://github.com/hherb/kastellan/pull/726)'s one Linux runtime change is on the gliner
 worker's **startup-failure path only** (a failed `import torch` under `auto` now exits with
-`MODEL_LOAD_FAILED` instead of falling back to cpu); a healthy start is unchanged, so no redeploy is owed. Rootfs images last rebuilt 2026-09-08.
+`MODEL_LOAD_FAILED` instead of falling back to cpu); a healthy start is unchanged, so no redeploy is owed.
+[#731](https://github.com/hherb/kastellan/pull/731) leaves the **daemon** unchanged (it installs a subscriber, so the fallback never fires);
+its only daemon-visible delta is that an early-exit log line is now control-neutralised. `kastellan-cli guard capture`
+does gain the line. No redeploy owed. Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -56,61 +59,117 @@ worker's **startup-failure path only** (a failed `import torch` under `auto` now
 
 ## Current state
 
-### This session (2026-09-19, evening): #699 + #700 — the planner sees what it asked for
+### This session (2026-09-20): #725 — a dying worker's last words reach a failing test
 
-PR [#728](https://github.com/hherb/kastellan/pull/728). `plans_so_far[i].step_outcomes[j]` now carries `"call": {tool, method, parameters}`
-beside its status (#699), and the plan's `decision` passes the sink screen (#700).
+PR [#731](https://github.com/hherb/kastellan/pull/731). `worker_stderr::emit_early_exit_report` is
+the one producer: it logs through `tracing` as before **and** `eprintln!`s the report when
+`tracing::dispatcher::has_been_set()` is false.
 
-- **Parameters reuse #701's rules**: `result_view::render` to `conversation::record::CALL_PARAMS_CAP`
-  (1 KiB), so an id is never cut; `tool`/`method` clamped to 64 chars (an `UNKNOWN_TOOL` step can
-  invent any name). **The call survives elision** — what was asked is what stops a repeat — and the
-  calls' bytes come off `PLANS_SUMMARY_BUDGET` before the outputs compete.
-- ⚠️ **`call` and `decision` are screened `Strict` whatever tool the step names.** They are model
-  text; `web-fetch`'s `Relaxed` chat-template allowance is for what it *returns*. On a block both
-  render `[withheld: failed injection screen]`; the `tier: "sink"` row gains `part:
-  decision|call|outcome` (`step_index` null for a decision). A hostile `UNKNOWN_TOOL` name now
-  yields **two** rows (call + detail).
-- ⚠️ **Review round (one read-only reviewer, own worktree) found the budget was not a bound:** calls
-  were never elided, so several 64-step plans with near-cap parameters overran 96 KiB on the calls
-  alone (215 KB measured), and my budget test never got near it. Fixed: a second pass
-  (`call::apply_call_budget`) drops the **oldest calls' `parameters`** once outputs are gone, keeping
-  `tool`/`method` + `"elided": "summary budget"`. Residual, now documented on
-  `PLANS_SUMMARY_BUDGET`: error/withheld outcomes and the clamped labels can still exceed it on a
-  pathological task (as errors always could).
-- ⚠️ **Second review round (four read-only reviewers: code, tests, silent failures, comments) found
-  one real fail-open and two tests weaker than their names.** All fixed in-branch.
-  - **A call's deepest `parameters` level reached the planner unscreened.** `render` prunes from the
-    parameters' own root; `screen_text` walked them inside the wrapping `{tool, method, parameters}`
-    object, one level down, and both stop at `MAX_WALK_DEPTH` — so the last kept level was rendered
-    and never screened. Out of reach today **only** because serde_json's recursion limit (128) is
-    below `MAX_WALK_DEPTH` (256): the invariant was resting on an unrelated parser's constant.
-    `render_call` now screens the pruned parameters at their own root too — *additive*, never a
-    rewrite of the existing readings (#702's lesson). Positive control: the new test fails on the
-    old code with the phrase visible in full.
-  - **`the_summary_budget_counts_the_calls` was vacuous for its own guard.** It asserted only that
-    the total fits, which the *wrong* order also satisfies: delete the first pass's
-    `saturating_sub(call_bytes)` and the second pass strips ~28 calls' parameters while older
-    outputs survive — total fits, test green. It now also asserts every call is whole; the mutant
-    dies.
-  - **`apply_call_budget`'s `after < before` guard had no test.** A `parameters: {}` call *grows*
-    when dropped (`"parameters":{}` 15 B → the marker 25 B), so without the guard `before - after`
-    underflows — panic in debug, a wrapped total under the release `panic = "abort"`. Reachable via
-    any parameterless method once the calls alone overrun. Pinned, mutant confirmed dying.
-  - Also: `PlanRecord::new` now **logs** when outcomes outnumber steps (was silent, and a resumed
-    run rebuilds records), pinned by a test; plus a multibyte clamp test, a `CALL_FRAMING_BYTES`
-    test, and ~10 doc corrections (this file's archive pointer, `sink.rs`'s "this module" rot after
-    the move, a `cargo doc` link that only resolved under `cfg(test)`, and the
-    `PLANS_SUMMARY_BUDGET` "six times the per-step budget" claim, which the calls' bytes made
-    marginal).
-  - **Deferred: [#729](https://github.com/hherb/kastellan/issues/729)** — `decision` is neither
-    clamped nor counted in the budget, so the one part of the summary that is always present, for
-    every plan, and never elided is unbounded (`max_plans` is operator-overridable). Predates this
-    PR; clamping is a behaviour change to what the planner reads of its own reasoning.
-- Code: `summary/call.rs` (new), `summary/sink.rs` (split out first, movement-only commit),
-  `prompts/agent_planner.md` documents `"call"` (pinned by the prompt-shape test). Two mutants
-  (budget subtraction, Strict→Relaxed) each killed by a named test.
-- **Not yet measured live.** Re-run a multi-search mail question in a **fresh DM room** and read
-  the next plan's prompt / behaviour; task 186's dropped `has_attachment` is the shape to look for.
+- ⚠️ **`eprintln!` is load-bearing, not style.** libtest captures through
+  `std::io::set_output_capture`, which the `print!`/`eprint!` **macros** consult and the
+  `Stdout`/`Stderr` handles do not — a `writeln!(std::io::stderr(), …)` never appears under the
+  failing test that needs it.
+- ⚠️ **The marker `[worker-early-exit]` must not begin with `[SKIP]`/`[WARN]`/`[E2E]`.**
+  `run-e2e-gate.sh` greps those anchored at line start and asserts zero `[WARN]`, and every profile
+  passes `--nocapture`, so a borrowed marker would turn profiles red for working suites.
+- ⚠️ **"Production" is not "the daemon".** The daemon installs a subscriber first thing in `main`,
+  so it is unchanged — but `kastellan-cli` installs none anywhere and `guard capture` dispatches the
+  real web-fetch worker, so **that shipped binary gains the line** (intended: no log to read).
+- The whole report is now `neutralise_controls`'d. The tail was already stripped entering the ring,
+  but `program`/`method` are interpolated raw and **`method` can be model-authored**
+  (`qualified_method` returns `None` outside the advertised set, then the planner's string passes
+  verbatim) — a `\n` could have forged a column-0 line in a gate log.
+- ⚠️ **Review round (three read-only reviewers, own worktrees) found the suite could not prove its
+  own central claim.** It merged the child's stdout and stderr, but a **captured `eprintln!` returns
+  on stdout** (libtest reprints it into the failure block) and a `writeln!(stderr)` on **stderr** —
+  so that mutant **survived**. Streams are read separately now; it dies. Also fixed in-branch: the
+  census was **29 of 30**, not the issue's 27 of 28; `RUST_TEST_NOCAPTURE` is inherited and read as
+  `!= "0"` (even empty disables capture) so the child `env_remove`s it; the `#[ignore]`d
+  fail-on-purpose fixtures would have shown as two red tests under the documented
+  `cargo test -- --ignored` recipe, so they are env-guarded too; the marker had **no** end-to-end
+  pin; and the gate-marker test used `assert_ne!` where the gate greps a line-start prefix.
+- ⚠️ **`block_in_place` does NOT hand off to another thread** — it runs the closure on the current
+  one. Measured: under `rt.block_on` it reports the **test thread's** `ThreadId`; under
+  `tokio::spawn` it differs. So the old #666 comment claiming otherwise is wrong, and the fixture now
+  dispatches from a spawned task to cross the boundary at all. **That wrong comment is now also
+  corrected in the tree** (`worker_early_exit_diagnostic_e2e.rs`) — the second review round found
+  the refutation had been written into HANDOVER while the comment itself sat untouched two files
+  away, which is the shape that makes a known-wrong claim outlive the session that disproved it.
+
+#### Second review round (2026-09-20, four reviewers + controller verification)
+
+⚠️ **The PR's central *security* claim was untested, and the mutant SURVIVED.** Deleting
+`neutralise_controls` from `emit_early_exit_report` passed every test in the branch — proved by
+running it, not by reading. The fixture's method was the literal `"anything"`, so no test anywhere
+fed a control character down the one path that is interpolated raw. Now closed both ways:
+
+- The e2e dispatches a **`HOSTILE_METHOD`** (`ESC[31m` + `\n[WARN] …FORGED-GATE-LINE`) and **both**
+  parents assert, on their own channel, that the text survives while its *effects* do not — a
+  **positive control** (the text arrived, so the other checks cannot pass vacuously), no ESC, and
+  no forged **column-0** line. Checking *position*, not absence: neutralisation maps the class to a
+  space, so the correct outcome is the phrase sitting mid-line.
+- ⚠️ **`format_early_exit_stderr_fallback` now neutralises too.** The one-line property belonged to
+  `emit_early_exit_report`'s *call order*, but the formatter is `pub` — and
+  [#730](https://github.com/hherb/kastellan/issues/730) is a second producer already filed. Same
+  drift-between-copies shape as the bwrap-argv pair.
+- The marker's own **value** had no assertion: `EARLY_EXIT_STDERR_MARKER = ""` passed all four of
+  its tests (`"".starts_with("")`, `contains("")`). Pinned now.
+- `contains("1 failed")` also matches `"11 failed"` and **`"1 passed; 1 failed"`** — the last would
+  have defeated the one-child-per-fixture rule. Now the full libtest phrase.
+- `let _ = set_global_default(…)` → `expect`; `result.is_err()` → `matches!(Protocol(EarlyExit))`
+  (the only variant reaching `warn_early_exit`); `is_the_child()` now honours the `1|true|yes|on`
+  dialect, so an exported `…FIXTURE=0` no longer *arms* two fail-on-purpose tests.
+
+⚠️ **Two reviewer findings were WRONG and were checked before being carried** —
+[[handover-claims-verify-before-carrying]]. One recounted the census as "30 of 31" and flagged four
+files: its grep did not strip comments, and `scheduler_step_dispatch_e2e.rs` matches `dispatch (`
+only in prose. **29 of 30 is correct.** Another rated the discarded `wait_for_drain` bool CRITICAL
+and blocking; `git show main:core/src/tool_host.rs` has the identical line, so it is pre-existing
+(#666) and now filed rather than fixed here.
+
+**Mutation proof (4/4 killed, each run):** drop `neutralise_controls` from `emit_early_exit_report`
+→ dies on the `tracing` channel; drop it from the formatter → dies on the new unit test; marker
+`""` → dies; marker `"[WARN] early-exit"` → dies. Restores verified by **sha256**, and the git
+**index** checked clean [[mutation-testing-contaminates-the-index]].
+
+**Filed, not fixed here:** [#732](https://github.com/hherb/kastellan/issues/732) (a timed-out drain
+is reported as "wrote NOTHING", pre-existing #666),
+[#733](https://github.com/hherb/kastellan/issues/733) (`eprintln!` SIGABRTs a release
+`kastellan-cli` on a broken pipe — `panic = "abort"`),
+[#734](https://github.com/hherb/kastellan/issues/734) (**`has_been_set()` asks whether a subscriber
+exists, not whether the WARN will be delivered** — a target-scoped `RUST_LOG` in the operator
+overlay silences *both* channels; verified against tracing-subscriber 0.3.23, whose default
+directive applies only to an *empty* env string).
+- **No security fail-open** (reviewer A): the tail is fully neutralised via `push_trimmed`, a
+  compromised worker cannot forge an evidence line, and nothing new reaches the planner, a returned
+  error, or an audit row.
+- `format_unpiped_early_exit_report`'s arm is **unreachable today** (all four backends pipe stderr) —
+  said outright in the doc so its unit test is not mistaken for coverage of the arm.
+- **Filed: [#730](https://github.com/hherb/kastellan/issues/730)** — the persistent-worker death
+  report (`worker_lifecycle/persistent.rs`) has the same defect one layer over, so **Matrix and
+  egress workers still die silently in a test binary**.
+
+### Previous (2026-09-19): #699 + #700 — the planner sees what it asked for
+
+PR [#728](https://github.com/hherb/kastellan/pull/728). Each `plans_so_far` step outcome carries
+`"call": {tool, method, parameters}`; `call` and `decision` pass the sink screen under `Strict`
+whatever tool the step names (they are model text), rendering `[withheld: failed injection screen]`
+on a block, with `tier: "sink"` rows gaining `part: decision|call|outcome`.
+
+- **The call survives elision** — what was asked is what stops a repeat — and calls' bytes come off
+  `PLANS_SUMMARY_BUDGET` before outputs compete; `call::apply_call_budget` then drops the **oldest
+  calls' `parameters`** if the calls alone still overrun.
+- ⚠️ **Two review rounds found one real fail-open and two tests weaker than their names.** A call's
+  deepest `parameters` level was rendered but never screened (`render` prunes from the parameters'
+  root, `screen_text` walked them one level down, both stop at `MAX_WALK_DEPTH`) — out of reach only
+  because serde_json's recursion limit (128) sits below it, i.e. **the invariant rested on an
+  unrelated parser's constant**. A hardening that rewrites screened text must **ADD readings, never
+  replace them**. The budget test was satisfied by the *wrong* order too, and `apply_call_budget`'s
+  `after < before` guard (a `parameters: {}` call *grows* when dropped) had no test.
+- **Deferred: [#729](https://github.com/hherb/kastellan/issues/729)** — `decision` is neither clamped
+  nor counted, so the one always-present part of the summary is unbounded.
+- **Not yet measured live.** Re-run a multi-search mail question in a **fresh DM room**; task 186's
+  dropped `has_attachment` is the shape to look for.
 
 ### Previous (2026-09-19, later): #677 and #560 closed by live measurement — no code change
 
@@ -273,9 +332,10 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    (2026-09-14: ordered headers, 4xx on cursor restart, filter-only search, compact hits, attachments
    by `message_id` + name, a distinct expired-credential error) are not yet filed on `hherb/localmail`.
 
-3. **Test-harness honesty, now that the gate itself is tested.** [#725](https://github.com/hherb/kastellan/issues/725)
-   (a dying worker's last words never reach a failing e2e — the one-line diagnosis of #719, made
-   permanent; option 2 fixes every suite in one place). [#718](https://github.com/hherb/kastellan/issues/718)
+3. **Test-harness honesty, now that the gate itself is tested.** [#730](https://github.com/hherb/kastellan/issues/730)
+   (the **persistent**-worker death report still never reaches a failing test, so Matrix and egress
+   workers die silently — #725's defect one layer over; reuse the `emit_early_exit_report` shape).
+   [#718](https://github.com/hherb/kastellan/issues/718)
    (92 hand-rolled `[SKIP]`s — adding the `sandbox` profile is its acceptance test),
    [#722](https://github.com/hherb/kastellan/issues/722) (container tier knob + profile),
    [#721](https://github.com/hherb/kastellan/issues/721), [#723](https://github.com/hherb/kastellan/issues/723),
@@ -370,7 +430,9 @@ is the reusable mechanism.
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac + DGX** ([#728](https://github.com/hherb/kastellan/pull/728), #699/#700 — **the gate that stands**) | branch tip (2nd review round) | **Mac 4375 / 0 / 29**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — the round's 4370 + **5** (deep-parameter screen, multibyte clamp, the `{}`-parameters grow guard, the framing constant, the step-less outcome). Round 1 at `ce8bc49b`: Mac **4370 / 0 / 29** = #726's 4347 + 5 (grepped between `64d483e8` and `main`) + 18 new. **DGX** full sweep at `299ce103` (before round 1's +4): **4501 / 0 / 61**, 179 suites, exit 0 (= 4482 + 5 + 14) — ⚠️ **not re-run for round 2** (Mac-only changes, but `summary` is platform-neutral, so the DGX number is simply older) | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-pr728`) at the round-2 tip | **4** DGX (gliner opt-in) |
+| **Mac** ([#731](https://github.com/hherb/kastellan/pull/731), #725 — **post-`/fixall`, the gate that stands**) | branch tip (2nd review round) | **4381 / 0 / 31**, 180 suites, `TEST_EXIT=0`, 0 `[WARN]`, **`[SKIP]` 12**. +1 over the row below, reconciled exactly: the one new unit test (`the_stderr_fallback_neutralises_a_model_authored_control_character`); the round's other work added **assertions**, not tests, so `ignored` is unchanged at 31. ⚠️ **`[SKIP]` 23 → 12 is an improvement, not drift** — run with `KASTELLAN_PG_BIN_DIR` set, so **zero** "no Postgres install found" (the false-green tell); the 12 remaining are all legitimately opt-in or unavailable (Apple `container` ×8, gliner ×4). Skip-as-pass means those 11 newly-*running* tests move no count, which is exactly why the count alone was never the evidence. Sources **sha256-verified unchanged across the whole sweep** [[never-edit-tree-during-a-sweep]] — an earlier sweep was killed and restarted after two files were edited mid-run. DGX not re-run this round (no Linux-only code touched) | exit 0, cold (27 `Checking kastellan` lines, dedicated `CARGO_TARGET_DIR`), zero warnings | **12** Mac |
+| **Mac + DGX** ([#731](https://github.com/hherb/kastellan/pull/731), #725 — 1st review round; superseded by the row above) | branch tip (post-review) | **Mac 4380 / 0 / 31**, 180 suites, `TEST_EXIT=0`, 0 `[WARN]`, **`[SKIP]` 23** (baseline parity). **DGX 4515 / 0 / 63**, 180 suites, `TEST_EXIT=0`, `[SKIP]` 4. Both = +5 passed / +2 ignored, reconciled exactly: Mac 4375+5; DGX 4501 + 4 (#728 round 1) + 5 (round 2) + 5. ⚠️ **The first Mac sweep was a false green** — it matched the predicted total while **339 of its 361 `[SKIP]`s were "no Postgres install found"**, because skip-as-pass counts as passed. Set `KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"` on the Mac or the sweep is not evidence | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-725`), zero warnings | **23** Mac, **4** DGX (gliner opt-in) |
+| **Mac + DGX** ([#728](https://github.com/hherb/kastellan/pull/728), #699/#700) | branch tip (2nd review round) | **Mac 4375 / 0 / 29**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — the round's 4370 + **5** (deep-parameter screen, multibyte clamp, the `{}`-parameters grow guard, the framing constant, the step-less outcome). Round 1 at `ce8bc49b`: Mac **4370 / 0 / 29** = #726's 4347 + 5 (grepped between `64d483e8` and `main`) + 18 new. **DGX** full sweep at `299ce103` (before round 1's +4): **4501 / 0 / 61**, 179 suites, exit 0 (= 4482 + 5 + 14) — ⚠️ **not re-run for round 2** (Mac-only changes, but `summary` is platform-neutral, so the DGX number is simply older) | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-pr728`) at the round-2 tip | **4** DGX (gliner opt-in) |
 | **Mac + DGX** ([#726](https://github.com/hherb/kastellan/pull/726), #719) | `64d483e8` (branch tip) | **DGX 4482 / 0 / 61**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — **exactly** 4453 (#709) + 24 (#720: 23 `#[test]` + 1 doc-test, never run on the DGX until now) + 5 (this PR), each of the 5 grepped `ok` by name. **Mac 4347 / 0 / 29**, 179 suites — **exactly** #720's 4342 + 5. ⚠️ The sweep itself reported **3 gliner failures that were my own mutation testing**: a same-size Python mutant restored within the same second left its `.pyc` cached *and valid*, and the jailed worker (read-only src) ran it — confirmed by disassembling the cached `main()` [[mutation-testing-leaves-stale-pyc]]. With `__pycache__` cleared the **sweep-built** binaries pass 5/5, 16/16, 6/6 under the REQUIRE knob; source unchanged since the sweep built them. **Also:** `gliner` gate profile passes as evidence on both hosts (first time); DGX gliner ENABLE suites 16/16, 6/6; pytest 71 on both | **exit 0 on both hosts**, zero warnings, 27 `Checking kastellan` lines each, dedicated `CARGO_TARGET_DIR` | **4** DGX (gliner opt-in, ENABLE unset), **23** Mac |
 | **Mac** ([#720](https://github.com/hherb/kastellan/pull/720)) | branch tip | **4322 / 8 / 29**, 179 suites, `TEST_EXIT=101`: 3 were #719, 5 were #548/#676 pool contention (pass individually), so effectively **4327 / 3 / 29**. +12 over the row below, reconciled. ⚠️ **Its first sweep was a false green:** `cargo test --workspace` fails fast, and one suite aborted it after 39 of 179 suites. **Use `--no-fail-fast`.** The DGX leg was never run | exit 0, 27 crates, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-720`) | 23 |
 | **Mac + DGX** ([#709](https://github.com/hherb/kastellan/pull/709), third review round) | `d6698013` | **DGX 4453 / 0 / 61**, **Mac 4318 / 0 / 29**, both 179 suites, `TEST_EXIT=0`; +10 on each, each new test grepped out of the DGX log by name | exit 0 on both hosts, 27 crates | 4 DGX (gliner), 15 Mac |
@@ -445,7 +507,9 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#728](https://github.com/hherb/kastellan/pull/728)** — the planner sees each prior step's call; `decision` screened (#699, #700).
+- **[#731](https://github.com/hherb/kastellan/pull/731)** — a dying worker's last words reach a
+  failing test, not just a daemon (#725). Filed #730.
+- **[#728](https://github.com/hherb/kastellan/pull/728)** `40c4adc4` — the planner sees each prior step's call; `decision` screened (#699, #700).
 - **[#727](https://github.com/hherb/kastellan/pull/727)** `eb1c76ea` — #677/#560 live acceptance (docs only).
 - **[#726](https://github.com/hherb/kastellan/pull/726)** `577e2196` — the gliner worker survives
   `import torch` on macOS; `run-e2e-gate.sh` can pass (#719). Filed #725.
