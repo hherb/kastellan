@@ -261,6 +261,13 @@ pub fn format_early_exit_report(program: &str, method: &str, stderr_tail: &[Stri
 /// on the micro-VM path the process that exits is `kastellan-microvm-run` and
 /// the tool is whatever ran inside the guest, so "which worker" is not
 /// recoverable from the caller's tool name.
+///
+/// ⚠️ **Defensive, and currently unreachable.** Its caller's `None` arm fires
+/// only when `SupervisedWorker` has no stderr tail, and all four sandbox
+/// backends spawn with `stderr(Stdio::piped())` while `spawn_worker` is the
+/// only constructor. So the test below pins this wording, not a reachable
+/// path — worth stating plainly rather than letting a future reader mistake
+/// coverage here for coverage of the arm.
 pub fn format_unpiped_early_exit_report(program: &str, method: &str) -> String {
     format!(
         "worker {program} exited before responding to {method}; its stderr was not piped, \
@@ -274,9 +281,15 @@ pub fn format_unpiped_early_exit_report(program: &str, method: &str) -> String {
 ///
 /// Deliberately **not** one of this tree's three evidence markers (`[SKIP]`,
 /// `[WARN]`, `[E2E]`). `scripts/run-e2e-gate.sh` asserts **zero** `[WARN]`
-/// lines in a profile run, and several suites — this fallback's own fixtures
-/// among them — provoke an early exit on purpose. Borrowing `[WARN]` here
-/// would make every gate profile red for tests that are working correctly.
+/// lines in a profile run, and every profile passes `--nocapture`, so a line
+/// this function emits during a gate run reaches the gate log even from a
+/// passing test. Any suite that provoked an early exit deliberately would then
+/// turn every profile red. Nothing in a profile does so today — the separation
+/// is cheap insurance, not a description of current suites.
+///
+/// ⚠️ The gate's greps are **anchored at line start**, so the test beside this
+/// asserts the marker does not *begin with* one of the three — equality would
+/// let `[WARN] …` through.
 pub const EARLY_EXIT_STDERR_MARKER: &str = "[worker-early-exit]";
 
 /// The exact bytes the stderr fallback writes. Pure, so the rendering can be
@@ -288,26 +301,33 @@ pub fn format_early_exit_stderr_fallback(report: &str) -> String {
 /// Report a worker's early exit through `tracing`, **and** through the
 /// process's own stderr when no `tracing` subscriber is installed.
 ///
-/// The one producer, so every caller gets both channels (#725). The daemon
-/// installs a subscriber before it dispatches anything (`core/src/main.rs`),
-/// so in production this is exactly the `tracing::warn!` it has always been
-/// and the fallback never fires.
+/// The one producer, so every caller gets both channels (#725).
 ///
-/// **Test binaries install none**, and that is what this exists for: 27 of the
-/// 28 `core/tests/*.rs` suites that dispatch to a real worker never call
-/// `tracing_subscriber`, so #666's report went nowhere in precisely the place
-/// a human was reading. #719 is the worked example — a session spent ruling
-/// out five hypotheses, then one `tracing_subscriber` line in the failing test
-/// and the next run printed the Python traceback that named the cause.
+/// **Who gets the fallback.** The daemon installs a subscriber as the first
+/// statement of `main` (`core/src/main.rs`), before any dispatch, so it never
+/// fires there and the daemon's behaviour is unchanged. It is *not* limited to
+/// tests, though: `kastellan-cli` installs no subscriber anywhere, and
+/// `kastellan-cli guard capture` dispatches the real web-fetch worker
+/// (`core/src/bin/kastellan-cli/guard_capture.rs`). That command gains the
+/// line, which is the intent — it is operator-facing and has no log for the
+/// report to reach.
+///
+/// **Test binaries install none**, and that is the case this exists for: 29 of
+/// the 30 `core/tests/*.rs` suites that dispatch to a real worker never call
+/// `tracing_subscriber` (count: suites calling `dispatch`/`dispatch_with_sink`,
+/// the only path here), so #666's report went nowhere in precisely the place a
+/// human was reading. #719 is the worked example — a session spent on it with
+/// the cause still unknown, then one `tracing_subscriber` line in the failing
+/// test and the next run printed the Python traceback that named it.
 ///
 /// ⚠️ **`eprintln!`, not `writeln!(std::io::stderr(), …)`.** libtest captures a
-/// test's output through `std::io::set_output_capture`, which only the
-/// `print!`/`eprint!` **macros** consult; writing to the `Stderr` handle
-/// directly goes to the real file descriptor, bypasses the capture, and so
-/// never appears under the failing test that needs it. The capture is
-/// inherited at thread-spawn time, which is why this reaches the test even
-/// though `dispatch` runs the blocking call on a tokio worker thread via
-/// `block_in_place` — pinned end-to-end by
+/// test's output through `std::io::set_output_capture`, which the
+/// `print!`/`eprint!` **macros** consult and the `Stdout`/`Stderr` handles do
+/// not. (The default panic hook consults it too, which is why a panic message
+/// also lands in the captured block.) Writing to the handle directly goes to
+/// the real file descriptor, bypasses the capture, and so never appears under
+/// the failing test that needs it. Pinned end-to-end — by reading the child's
+/// two streams *separately* — in
 /// `core/tests/worker_early_exit_stderr_fallback_e2e.rs`.
 ///
 /// Log-only in both channels, and deliberately so: the tail is raw worker
@@ -316,18 +336,40 @@ pub fn format_early_exit_stderr_fallback(report: &str) -> String {
 /// bytes go to the process's own stderr and nowhere else — never into a
 /// returned error, the planner, or an audit row.
 ///
+/// ⚠️ **The whole report is neutralised here, not just the tail.** Tail lines
+/// are already control-stripped as they enter the ring (`push_trimmed`), but
+/// `program` and `method` are interpolated raw by the formatters above, and
+/// `method` can be **model-authored**: `qualified_method` returns `None` for a
+/// method outside the tool's advertised set and the caller then passes the
+/// planner's string verbatim. Without this, a `\n` in it could forge a
+/// column-0 line in a gate log and an ESC could drive the terminal reading it.
+/// `neutralise_controls` is idempotent, so the already-clean tail is
+/// unaffected, and it keeps the report to exactly one line.
+///
 /// ⚠️ **One subscriber anywhere in a binary silences the fallback for all of
-/// it.** [`tracing::dispatcher::has_been_set`] is a process-global
-/// `AtomicBool` that `with_default` sets as well as `set_global_default`, so
-/// it cannot distinguish "this thread has a subscriber" from "some other test
-/// installed one earlier". That is the conservative direction — a binary with
-/// a subscriber loses nothing, it just reads the report through `tracing` —
-/// but a suite that installs one in one test and expects the fallback in
-/// another will not get it.
+/// it.** `tracing::dispatcher::has_been_set` is a process-global `AtomicBool`
+/// that `with_default` sets as well as `set_global_default`, and which is
+/// **never cleared** — dropping a scoped guard does not re-enable the
+/// fallback. So it cannot distinguish "this thread has a subscriber" from
+/// "some other test installed one earlier". That is the conservative
+/// direction — a binary with a subscriber loses nothing, it just reads the
+/// report through `tracing` — but a suite that installs one in one test and
+/// expects the fallback in another will not get it.
+///
+/// ⚠️ `has_been_set` is `#[doc(hidden)]` in `tracing` and carries no stability
+/// guarantee. It is the only way to ask the question, and its removal would be
+/// a compile error rather than a silent behaviour change; a change in its
+/// meaning would be caught by the e2e above.
+///
+/// ⚠️ `eprintln!` panics if the write fails (a closed or broken stderr). That
+/// is unreachable in the daemon, which is excluded by the guard, and the one
+/// non-test binary it can reach already prints with the same macros
+/// throughout. Worth knowing because the release profile is `panic = "abort"`.
 pub fn emit_early_exit_report(report: &str) {
+    let report = crate::untrusted_text::neutralise_controls(report);
     tracing::warn!("{report}");
     if !tracing::dispatcher::has_been_set() {
-        eprintln!("{}", format_early_exit_stderr_fallback(report));
+        eprintln!("{}", format_early_exit_stderr_fallback(&report));
     }
 }
 
@@ -481,10 +523,14 @@ mod tests {
         // module's own e2e fixtures among them. Borrowing one of the three
         // evidence markers here would turn every such test into a gate
         // failure, so the separation is load-bearing rather than cosmetic.
+        // `starts_with`, not equality: the gate's greps are anchored at line
+        // start (`grep -c '^\[WARN\]'`), so a marker of `"[WARN] early-exit"`
+        // would pass an inequality check and still trip the assertion.
         for marker in ["[SKIP]", "[WARN]", "[E2E]"] {
-            assert_ne!(
-                EARLY_EXIT_STDERR_MARKER, marker,
-                "the fallback marker must not collide with a gate evidence marker"
+            assert!(
+                !EARLY_EXIT_STDERR_MARKER.starts_with(marker),
+                "the fallback marker must not BEGIN with the gate evidence marker {marker}: \
+                 the gate greps them anchored at line start"
             );
         }
     }
