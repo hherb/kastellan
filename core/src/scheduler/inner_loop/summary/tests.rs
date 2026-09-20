@@ -5,7 +5,7 @@
 //! `use super::*` reaches every private item of `summary`.
 
 use super::*;
-use crate::tool_host::{REASON_CODES_KEY, SCORE_KEY};
+use crate::tool_host::{INJECTION_BLOCKED_KEY, REASON_CODES_KEY, SCORE_KEY};
 
 /// An elidable successful step whose output is the string `text`.
 fn ok(text: &str) -> RenderedStep {
@@ -233,7 +233,7 @@ fn the_planner_prompt_documents_every_outcome_shape() {
     p.push("prompts/agent_planner.md");
     let prompt = std::fs::read_to_string(&p).expect("agent_planner.md readable");
 
-    for key in [STATUS_KEY, OUTPUT_KEY, WITHHELD_KEY, ELIDED_KEY, CODE_KEY, DETAIL_KEY] {
+    for key in [STATUS_KEY, OUTPUT_KEY, WITHHELD_KEY, ELIDED_KEY, CODE_KEY, DETAIL_KEY, CALL_KEY] {
         assert!(
             prompt.contains(&format!("\"{key}\"")),
             "the prompt never names the `{key}` key the renderer emits"
@@ -241,6 +241,7 @@ fn the_planner_prompt_documents_every_outcome_shape() {
     }
     for value in [
         WITHHELD_REASON,
+        WITHHELD_MARKER,
         ELIDED_REASON,
         result_view::OMITTED_KEYS_KEY,
         result_view::VIEW_UNAVAILABLE_KEY,
@@ -359,14 +360,19 @@ fn a_sink_audit_row_clamps_the_plan_authored_tool_and_method() {
         vec![StepOutcome::Err { code: "UNKNOWN_TOOL".into(), detail: format!("tool '{long}' not registered") }],
     );
     let rows = record.sink_block_audit_payloads(1, 1);
-    assert_eq!(rows.len(), 1, "control: the detail must be blocked: {rows:?}");
-    for field in ["tool", "method"] {
-        let shown = rows[0][field].as_str().unwrap();
-        assert!(shown.chars().count() <= AUDIT_LABEL_MAX_CHARS + 1, "{field} not clamped: {} chars", shown.chars().count());
-        assert!(shown.ends_with('…'), "{field} cut without a marker: {shown}");
-    }
+    // Since #699 the hostile name also blocks the step's own call, so the call
+    // and the detail each yield a row, and both must be clamped.
+    let parts: Vec<_> = rows.iter().map(|r| r["part"].as_str().unwrap()).collect();
+    assert_eq!(parts, [PART_CALL, PART_OUTCOME], "control: the call and the detail must both be blocked: {rows:?}");
     let head: String = long.chars().take(AUDIT_LABEL_MAX_CHARS).collect();
-    assert_eq!(rows[0]["tool"], format!("{head}…"));
+    for row in &rows {
+        for field in ["tool", "method"] {
+            let shown = row[field].as_str().unwrap();
+            assert!(shown.chars().count() <= AUDIT_LABEL_MAX_CHARS + 1, "{field} not clamped: {} chars", shown.chars().count());
+            assert!(shown.ends_with('…'), "{field} cut without a marker: {shown}");
+        }
+        assert_eq!(row["tool"], format!("{head}…"));
+    }
 }
 
 /// A blocked error detail was as silent as a blocked output.
@@ -432,7 +438,7 @@ fn budget_survives_a_step_whose_size_measured_as_unbounded() {
 }
 
 /// A plan whose single step calls `tool`/`method`.
-fn plan_calling(tool: &str, method: &str) -> Plan {
+pub(super) fn plan_calling(tool: &str, method: &str) -> Plan {
     use crate::cassandra::types::{DataClass, PlannedStep};
     Plan {
         context: "c".into(),
@@ -475,7 +481,7 @@ fn the_planner_summary_is_held_to_its_accumulated_budget() {
         .map(|o| o.to_string().len())
         .sum();
     assert!(outcome_bytes <= PLANS_SUMMARY_BUDGET, "{outcome_bytes} over {PLANS_SUMMARY_BUDGET}");
-    assert_eq!(summary[0]["step_outcomes"][0], elided_outcome(), "the oldest output was kept");
+    assert_eq!(summary[0]["step_outcomes"][0][ELIDED_KEY], ELIDED_REASON, "the oldest output was kept");
     assert!(summary[9]["step_outcomes"][0].get(OUTPUT_KEY).is_some(), "the newest output was elided");
 }
 

@@ -4,11 +4,11 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260919_699_pre-prune.md`](archive/handover_20260919_699_pre-prune.md),
+> [`archive/handover_20260919_719_pre-prune.md`](archive/handover_20260919_719_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
-**Last updated:** 2026-09-19 (#699 + #700: the planner sees its own calls) ·
-**Recent PRs, newest first:** [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700), [#727](https://github.com/hherb/kastellan/pull/727) (#677/#560 live acceptance, docs), [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
+**Last updated:** 2026-09-19 (#677 + #560 closed live) ·
+**Recent PRs, newest first:** [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
 script that could not pass), [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob
 contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717) (backlog triage),
 [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational continuity),
@@ -56,63 +56,7 @@ worker's **startup-failure path only** (a failed `import torch` under `auto` now
 
 ## Current state
 
-### This session (2026-09-19, evening): #699 + #700 — the planner sees what it asked for
-
-PR [#728](https://github.com/hherb/kastellan/pull/728). `plans_so_far[i].step_outcomes[j]` now carries `"call": {tool, method, parameters}`
-beside its status (#699), and the plan's `decision` passes the sink screen (#700).
-
-- **Parameters reuse #701's rules**: `result_view::render` to `conversation::record::CALL_PARAMS_CAP`
-  (1 KiB), so an id is never cut; `tool`/`method` clamped to 64 chars (an `UNKNOWN_TOOL` step can
-  invent any name). **The call survives elision** — what was asked is what stops a repeat — and the
-  calls' bytes come off `PLANS_SUMMARY_BUDGET` before the outputs compete.
-- ⚠️ **`call` and `decision` are screened `Strict` whatever tool the step names.** They are model
-  text; `web-fetch`'s `Relaxed` chat-template allowance is for what it *returns*. On a block both
-  render `[withheld: failed injection screen]`; the `tier: "sink"` row gains `part:
-  decision|call|outcome` (`step_index` null for a decision). A hostile `UNKNOWN_TOOL` name now
-  yields **two** rows (call + detail).
-- ⚠️ **Review round (one read-only reviewer, own worktree) found the budget was not a bound:** calls
-  were never elided, so several 64-step plans with near-cap parameters overran 96 KiB on the calls
-  alone (215 KB measured), and my budget test never got near it. Fixed: a second pass
-  (`call::apply_call_budget`) drops the **oldest calls' `parameters`** once outputs are gone, keeping
-  `tool`/`method` + `"elided": "summary budget"`. Residual, now documented on
-  `PLANS_SUMMARY_BUDGET`: error/withheld outcomes and the clamped labels can still exceed it on a
-  pathological task (as errors always could).
-- ⚠️ **Second review round (four read-only reviewers: code, tests, silent failures, comments) found
-  one real fail-open and two tests weaker than their names.** All fixed in-branch.
-  - **A call's deepest `parameters` level reached the planner unscreened.** `render` prunes from the
-    parameters' own root; `screen_text` walked them inside the wrapping `{tool, method, parameters}`
-    object, one level down, and both stop at `MAX_WALK_DEPTH` — so the last kept level was rendered
-    and never screened. Out of reach today **only** because serde_json's recursion limit (128) is
-    below `MAX_WALK_DEPTH` (256): the invariant was resting on an unrelated parser's constant.
-    `render_call` now screens the pruned parameters at their own root too — *additive*, never a
-    rewrite of the existing readings (#702's lesson). Positive control: the new test fails on the
-    old code with the phrase visible in full.
-  - **`the_summary_budget_counts_the_calls` was vacuous for its own guard.** It asserted only that
-    the total fits, which the *wrong* order also satisfies: delete the first pass's
-    `saturating_sub(call_bytes)` and the second pass strips ~28 calls' parameters while older
-    outputs survive — total fits, test green. It now also asserts every call is whole; the mutant
-    dies.
-  - **`apply_call_budget`'s `after < before` guard had no test.** A `parameters: {}` call *grows*
-    when dropped (`"parameters":{}` 15 B → the marker 25 B), so without the guard `before - after`
-    underflows — panic in debug, a wrapped total under the release `panic = "abort"`. Reachable via
-    any parameterless method once the calls alone overrun. Pinned, mutant confirmed dying.
-  - Also: `PlanRecord::new` now **logs** when outcomes outnumber steps (was silent, and a resumed
-    run rebuilds records), pinned by a test; plus a multibyte clamp test, a `CALL_FRAMING_BYTES`
-    test, and ~10 doc corrections (this file's archive pointer, `sink.rs`'s "this module" rot after
-    the move, a `cargo doc` link that only resolved under `cfg(test)`, and the
-    `PLANS_SUMMARY_BUDGET` "six times the per-step budget" claim, which the calls' bytes made
-    marginal).
-  - **Deferred: [#729](https://github.com/hherb/kastellan/issues/729)** — `decision` is neither
-    clamped nor counted in the budget, so the one part of the summary that is always present, for
-    every plan, and never elided is unbounded (`max_plans` is operator-overridable). Predates this
-    PR; clamping is a behaviour change to what the planner reads of its own reasoning.
-- Code: `summary/call.rs` (new), `summary/sink.rs` (split out first, movement-only commit),
-  `prompts/agent_planner.md` documents `"call"` (pinned by the prompt-shape test). Two mutants
-  (budget subtraction, Strict→Relaxed) each killed by a named test.
-- **Not yet measured live.** Re-run a multi-search mail question in a **fresh DM room** and read
-  the next plan's prompt / behaviour; task 186's dropped `has_attachment` is the shape to look for.
-
-### Previous (2026-09-19, later): #677 and #560 closed by live measurement — no code change
+### This session (2026-09-19, later): #677 and #560 closed by live measurement — no code change
 
 The operator sent the DMs on the DGX (`main` as of #709; binaries verified byte-identical to
 `target/release/`). **Every figure below is from the `audit_log` rows, not from the replies.**
@@ -129,26 +73,84 @@ The operator sent the DMs on the DGX (`main` as of #709; binaries verified byte-
 - ⚠️ **A live re-measure of a single-question issue must use a fresh DM room** (or wait out the 5 h
   window). Since #709 a same-room question inherits the prior turns' calls, which would void the test.
 
-### Earlier (2026-09-19): #719 — the gliner tier died at `import torch` on macOS, twice
+### Previous (2026-09-19): #719 — the gliner tier died at `import torch` on macOS, twice
 
-PR [#726](https://github.com/hherb/kastellan/pull/726) (full prose:
-[`archive/handover_20260919_699_pre-prune.md`](archive/handover_20260919_699_pre-prune.md)).
+PR [#726](https://github.com/hherb/kastellan/pull/726). The Mac sweep had been red on `main` since #651's security bump pinned **torch 2.13**
+(2026-09-02), which does two new things **while `import torch` runs**. Each killed the sandboxed
+worker before it answered, and each surfaced only as `Protocol(EarlyExit)`.
 
-- **Two causes, both inside `import torch` (torch 2.13):** `os.getcwd()` → EPERM under Seatbelt
-  (fix: `macos_seatbelt::WORKER_CWD = "/"`, pinned on both backends by
-  `worker_starts_in_root_whatever_the_parents_cwd`), and torch's compile cache at import
-  (fix: host-mode gliner opts into `ephemeral_scratch`; `scratch.py` points
-  `TORCHINDUCTOR_CACHE_DIR`/`TMPDIR`/`HOME` there). The second would have broken production
-  host-mode gliner on macOS too.
-- ⚠️ **Import order is load-bearing:** `main()` is exactly `apply_worker_scratch(); _serve()`, and
-  the model import lives inside `_serve()`; `tests/test_scratch.py` pins both halves.
-- ⚠️ **gliner is the first WARM worker on `ephemeral_scratch`** — acceptable only because it keeps
-  no request data on disk; check the same property before opting in another.
-- ⚠️ **`run-e2e-gate.sh` could never pass** (`PIPESTATUS` reset by the assignment); fixed and now
-  run for real against a fake `cargo` by `gate_script_tests/run.rs`.
-- ⚠️ **After mutating a `.py`, delete its `__pycache__`** — a same-size mutant restored within
-  the same second left a *valid* `.pyc` the jailed worker ran [[mutation-testing-leaves-stale-pyc]].
-- Diagnosis took one line each (a temporary `tracing_subscriber`); making that permanent is #725.
+- **Cause 1 — `os.getcwd()` → EPERM under Seatbelt.** `sandbox-exec` restricts but does not move a
+  process, so the worker inherited the parent's cwd. On macOS `getcwd()` needs read access to the
+  directory it names; under `cargo test` the cwd is the crate dir, which no policy grants. **Fix:**
+  `macos_seatbelt::WORKER_CWD = "/"` (`cmd.current_dir`). Grants nothing new — the base profile
+  already allows `file-read*` on the literal `/`. Production never saw it: launchd starts the daemon
+  in `/` (its spec sets no `working_dir`); bwrap keeps the old cwd only if it is mapped, else tries
+  the jail's `$HOME`, else `/` — and Linux `getcwd()` needs no read access anyway. Pinned on **both**
+  backends by `{macos,linux}_smoke::worker_starts_in_root_whatever_the_parents_cwd`, each refusing to
+  run from `/` (a vacuous fixture) rather than pass.
+- **Cause 2 — torch creates its compile cache at import.** `TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor`
+  works on Linux (bwrap's per-spawn tmpfs) and is unwritable under Seatbelt. **This one would also
+  have broken production host-mode gliner on macOS.** **Fix:** the existing #283 mechanism — the
+  host-mode entry sets `ephemeral_scratch: true` (a no-op on Linux), and the worker's new pure
+  `scratch.py` points `TORCHINDUCTOR_CACHE_DIR`/`TMPDIR`/`HOME` into `KASTELLAN_WORKER_SCRATCH`.
+  ⚠️ **Import order is load-bearing:** `main()` is now exactly `apply_worker_scratch(); _serve()`, and
+  `from .model import GlinerModel` lives inside `_serve()`. `tests/test_scratch.py` pins both halves
+  (importing `__main__` loads no torch — checked against a fake `torch` shadowing the real one — and
+  the call order); CI's no-torch job runs it too.
+- ⚠️ **gliner is the first WARM worker to opt into `ephemeral_scratch`.** Its dir lives as long as the
+  worker, not one request — the same as the tmpfs a warm Linux worker keeps. Acceptable because the
+  worker keeps no request data on disk by design (library caches and temp files land there), and a
+  warm process already carries cross-request state in memory, so it adds no new channel. The
+  `ToolEntry.ephemeral_scratch` doc says so and says to check the same property before opting in another.
+- ⚠️ **`scripts/run-e2e-gate.sh` could never pass, on any profile.** `TEST_EXIT="${PIPESTATUS[0]}"` is
+  itself a command, so it reset `PIPESTATUS`, and the next line's `${PIPESTATUS[1]}` died under
+  `set -u` straight after every run. Nothing ever ran the script: `gate_script_tests` only parses
+  its table. **Fixed** (copy the array once) and pinned by `gate_script_tests/run.rs`, which runs the
+  real script against a fake `cargo` on `PATH` — pass, zero-tests (#664's shape) and cargo-failed.
+  The mutant reading tee's status instead of cargo's is killed. **The `gliner` profile then passed as
+  evidence for the first time — Mac 5 tests, DGX 4 (the container variant is macOS-only) — and the
+  DGX gliner tier, a held `[SKIP]` in every recent gate, ran for real (16/16, 6/6 with ENABLE).**
+- **Review round (one read-only reviewer, own worktree): no bug, no security regression — but one
+  false comment and two surviving mutants.** The false comment claimed a `linux_smoke` twin that did
+  not exist; it does now, and passes under real bwrap. ⚠️ **Both mutants were in the import-order
+  guard:** a *guarded* `try: import torch` passed on CI's no-torch runner (the `sys.modules` check is
+  trivially true there), and swapping the two calls in `main()` passed everywhere. Killed by
+  shadowing torch with an empty fake package on the subprocess's `PYTHONPATH` (a real signal on
+  every host) and by splitting `main()` into `apply_worker_scratch(); _serve()` with an order test.
+- ⚠️ **My own mutation testing then turned the full Mac sweep red — through the bytecode cache.**
+  Mutant B swapped two lines (same size) and was restored by `cp` within the same second, so the
+  `.pyc` the mutant run wrote still matched the restored source (a pyc checks **whole-second** mtime
+  + size). The jailed worker cannot rewrite bytecode, so every sandboxed spawn ran the mutant and
+  died exactly like the original bug. I first blamed feature unification (different test-binary
+  hashes) — wrong; running the *older* binary showed the build was irrelevant. Then an unsandboxed
+  manual run created `/tmp/torchinductor` on the host, which made the jailed mutant pass: a false
+  green hiding the cause. Settled by disassembling the cached `main()`. **After mutating a `.py`,
+  delete its `__pycache__` as part of the restore** [[mutation-testing-leaves-stale-pyc]].
+- **Second review round (4 parallel reviewers; `/fixall`): no bug; everything found is fixed in
+  the PR, nothing filed.** A #719-shaped failure now says so instead of dying as a bare `EarlyExit`:
+  - the model import in `_serve()` sits inside the structured-error path (on macOS `auto` resolves
+    to cpu without touching torch, so *that* import is where torch first loads);
+  - Linux `auto` no longer swallows a failed `import torch` (it fell back to cpu, then the model
+    import failed again naming a half-initialised module);
+  - `scratch.py::scratch_problem` refuses a named scratch dir that is relative, missing or
+    unwritable, at startup. Under Seatbelt `os.access` answers correctly: the `gliner` profile
+    passed as evidence afterwards (Mac 5/5).
+  Also: `EphemeralScratch::drop` logs a failed removal; a core test pins both Python copies of
+  `KASTELLAN_WORKER_SCRATCH` to the Rust constant; `run-e2e-gate.sh` refuses an empty `MAX_SKIP`;
+  `run.rs` gained no-evidence, **wrong-tier evidence** and `[WARN]` cases (the tier-anchor and
+  WARN-rule mutants are killed); two stale comments corrected. Python mutants restored with
+  `__pycache__` cleared. pytest now **81** in the venv, **18** in CI's no-torch job.
+- **ROADMAP 605 → 255 lines**: the 2026-09-14 prune had condensed the guard-tier entry's header and
+  left its 351-line body behind. Removed only after checking it **verbatim and contiguous** in
+  `archive/roadmap_20260914_pre-prune.md` (0 of 344 non-blank lines missing); its one open item,
+  #597, moved into the summary line.
+- **Diagnosis took one line each**: a temporary `tracing_subscriber` in the failing test printed the
+  worker's full traceback, which #666 already logs at `WARN` — but 27 of 28 worker e2e suites
+  install no subscriber, so it goes nowhere. Filed as [#725](https://github.com/hherb/kastellan/issues/725),
+  with the trap the obvious fix walks into (a hidden subscriber breaks
+  `worker_early_exit_diagnostic_e2e`).
+- **Also:** #718 reopened (see the header); rust-analyzer's `cargo check` held the build lock
+  again — kill that child, not the IDE.
 
 ### Previous: #720 — one REQUIRE contract, and a gate that fails on zero tests
 
@@ -261,10 +263,12 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **The last #677 follow-up:** [#698](https://github.com/hherb/kastellan/issues/698) (`mail.search`
-   cannot express a filter-only search; check what localmail `/v1/search` does with an empty query
-   first, and note localmail ignores `has_attachment` today). #699/#700 shipped in PR [#728](https://github.com/hherb/kastellan/pull/728) —
-   **its live re-measure is owed** (operator DMs, a **fresh room**).
+1. **The #677 follow-ups** (#677 itself closed live 2026-09-19). [#699](https://github.com/hherb/kastellan/issues/699)
+   (the planner never sees its own prior steps' tool/method/parameters), [#698](https://github.com/hherb/kastellan/issues/698)
+   (`mail.search` cannot express a filter-only search; not exercised by the
+   2026-09-19 run, whose searches all carried a query), [#700](https://github.com/hherb/kastellan/issues/700)
+   (`plan.decision` reaches the prompt unscreened). A live re-measure needs the operator's DMs,
+   and it needs a **fresh room** when the question is meant to stand alone.
 
 2. **#702 follow-ups.** [#703](https://github.com/hherb/kastellan/issues/703) — ⚠️ **the guard model
    never sees object keys**; any new worker passing a third-party JSON object through reopens it
@@ -370,8 +374,7 @@ is the reusable mechanism.
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac + DGX** ([#728](https://github.com/hherb/kastellan/pull/728), #699/#700 — **the gate that stands**) | branch tip (2nd review round) | **Mac 4375 / 0 / 29**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — the round's 4370 + **5** (deep-parameter screen, multibyte clamp, the `{}`-parameters grow guard, the framing constant, the step-less outcome). Round 1 at `ce8bc49b`: Mac **4370 / 0 / 29** = #726's 4347 + 5 (grepped between `64d483e8` and `main`) + 18 new. **DGX** full sweep at `299ce103` (before round 1's +4): **4501 / 0 / 61**, 179 suites, exit 0 (= 4482 + 5 + 14) — ⚠️ **not re-run for round 2** (Mac-only changes, but `summary` is platform-neutral, so the DGX number is simply older) | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-pr728`) at the round-2 tip | **4** DGX (gliner opt-in) |
-| **Mac + DGX** ([#726](https://github.com/hherb/kastellan/pull/726), #719) | `64d483e8` (branch tip) | **DGX 4482 / 0 / 61**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — **exactly** 4453 (#709) + 24 (#720: 23 `#[test]` + 1 doc-test, never run on the DGX until now) + 5 (this PR), each of the 5 grepped `ok` by name. **Mac 4347 / 0 / 29**, 179 suites — **exactly** #720's 4342 + 5. ⚠️ The sweep itself reported **3 gliner failures that were my own mutation testing**: a same-size Python mutant restored within the same second left its `.pyc` cached *and valid*, and the jailed worker (read-only src) ran it — confirmed by disassembling the cached `main()` [[mutation-testing-leaves-stale-pyc]]. With `__pycache__` cleared the **sweep-built** binaries pass 5/5, 16/16, 6/6 under the REQUIRE knob; source unchanged since the sweep built them. **Also:** `gliner` gate profile passes as evidence on both hosts (first time); DGX gliner ENABLE suites 16/16, 6/6; pytest 71 on both | **exit 0 on both hosts**, zero warnings, 27 `Checking kastellan` lines each, dedicated `CARGO_TARGET_DIR` | **4** DGX (gliner opt-in, ENABLE unset), **23** Mac |
+| **Mac + DGX** ([#726](https://github.com/hherb/kastellan/pull/726), #719 — **the gate that stands**) | `64d483e8` (branch tip) | **DGX 4482 / 0 / 61**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — **exactly** 4453 (#709) + 24 (#720: 23 `#[test]` + 1 doc-test, never run on the DGX until now) + 5 (this PR), each of the 5 grepped `ok` by name. **Mac 4347 / 0 / 29**, 179 suites — **exactly** #720's 4342 + 5. ⚠️ The sweep itself reported **3 gliner failures that were my own mutation testing**: a same-size Python mutant restored within the same second left its `.pyc` cached *and valid*, and the jailed worker (read-only src) ran it — confirmed by disassembling the cached `main()` [[mutation-testing-leaves-stale-pyc]]. With `__pycache__` cleared the **sweep-built** binaries pass 5/5, 16/16, 6/6 under the REQUIRE knob; source unchanged since the sweep built them. **Also:** `gliner` gate profile passes as evidence on both hosts (first time); DGX gliner ENABLE suites 16/16, 6/6; pytest 71 on both | **exit 0 on both hosts**, zero warnings, 27 `Checking kastellan` lines each, dedicated `CARGO_TARGET_DIR` | **4** DGX (gliner opt-in, ENABLE unset), **23** Mac |
 | **Mac** ([#720](https://github.com/hherb/kastellan/pull/720)) | branch tip | **4322 / 8 / 29**, 179 suites, `TEST_EXIT=101`: 3 were #719, 5 were #548/#676 pool contention (pass individually), so effectively **4327 / 3 / 29**. +12 over the row below, reconciled. ⚠️ **Its first sweep was a false green:** `cargo test --workspace` fails fast, and one suite aborted it after 39 of 179 suites. **Use `--no-fail-fast`.** The DGX leg was never run | exit 0, 27 crates, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-720`) | 23 |
 | **Mac + DGX** ([#709](https://github.com/hherb/kastellan/pull/709), third review round) | `d6698013` | **DGX 4453 / 0 / 61**, **Mac 4318 / 0 / 29**, both 179 suites, `TEST_EXIT=0`; +10 on each, each new test grepped out of the DGX log by name | exit 0 on both hosts, 27 crates | 4 DGX (gliner), 15 Mac |
 
@@ -445,8 +448,6 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#728](https://github.com/hherb/kastellan/pull/728)** — the planner sees each prior step's call; `decision` screened (#699, #700).
-- **[#727](https://github.com/hherb/kastellan/pull/727)** `eb1c76ea` — #677/#560 live acceptance (docs only).
 - **[#726](https://github.com/hherb/kastellan/pull/726)** `577e2196` — the gliner worker survives
   `import torch` on macOS; `run-e2e-gate.sh` can pass (#719). Filed #725.
 - **[#720](https://github.com/hherb/kastellan/pull/720)** `0966a460` — one REQUIRE-knob contract and
