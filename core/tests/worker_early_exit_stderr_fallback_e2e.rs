@@ -24,6 +24,14 @@
 //!    test's `---- <name> stdout ----` block rather than on the raw fd;
 //! 3. it does **not** double-report in a binary that did install one.
 //!
+//! A fourth rides along, because this is the only place it can be observed end
+//! to end: the report is **control-neutralised on both channels**. The fixture
+//! dispatches [`HOSTILE_METHOD`] — a model-authored `method` is the one part of
+//! the report interpolated raw — so an ESC or a forged column-0 `[WARN]` line
+//! shows up in a child stream the parent can read. Without it, dropping the
+//! `neutralise_controls` call in `emit_early_exit_report` passed every test in
+//! this file.
+//!
 //! ⚠️ **Point 2 is why the two child streams are read separately and never
 //! merged.** It is the whole reason the producer must use `eprintln!` rather
 //! than `writeln!(std::io::stderr(), …)`: libtest captures through
@@ -88,6 +96,42 @@ const LAST_WORDS: &str = "kastellan-test: refusing to serve, relay socket unreac
 /// unrelated one (a missing worker binary, a poisoned runtime).
 const DELIBERATE: &str = "deliberate failure: this fixture exists to be read from its parent";
 
+/// The method the fixture dispatches, carrying the two control characters a
+/// **model-authored** method can really contain.
+///
+/// ⚠️ **This is a hostile input, not decoration.** `method` reaches
+/// `format_early_exit_report` interpolated **raw** — unlike tail lines, which
+/// are neutralised as they enter the ring (`push_trimmed`) — and it is
+/// attacker-influenced: `qualified_method` returns `None` for anything outside
+/// the tool's advertised set, and `scheduler::tool_dispatch` then puts the
+/// planner's own string on the wire verbatim
+/// (`let method = qualified.as_deref().unwrap_or(&step.method);`). So the
+/// planner writes these bytes and `emit_early_exit_report` is the only thing
+/// standing between them and a gate log.
+///
+/// Two payloads, because they fail differently:
+/// - `\u{1b}[31m` — an ANSI sequence executing in the terminal of whoever reads
+///   the failing test.
+/// - a `\n` followed by [`FORGED_LINE_START`] — a forged **column-0** line.
+///   `scripts/run-e2e-gate.sh` greps `^\[WARN\]` and asserts zero matches, so
+///   this is the shape that turns someone else's green gate red.
+const HOSTILE_METHOD: &str = "anything\u{1b}[31m\n[WARN] kastellan-test: FORGED-GATE-LINE";
+
+/// The forgery attempt inside [`HOSTILE_METHOD`].
+///
+/// ⚠️ **It must survive as text and must never begin a line.**
+/// `neutralise_controls` maps the class to `' '`, so the correct outcome is
+/// this phrase sitting mid-line behind a space — not the phrase disappearing.
+/// Asserting its absence would pass just as well if `method` never reached the
+/// report at all, which is why the assertions below check *position* and pair
+/// it with [`FORGED_TEXT`] as the positive control.
+const FORGED_LINE_START: &str = "[WARN] kastellan-test: FORGED-GATE-LINE";
+
+/// The part of [`FORGED_LINE_START`] that no neutralisation touches. Its
+/// presence proves the hostile method actually reached the rendered report, so
+/// "no forged line" cannot be satisfied by the method going missing.
+const FORGED_TEXT: &str = "FORGED-GATE-LINE";
+
 /// Set by the parent on the child it launches. The inner fixtures do nothing
 /// unless they see it.
 ///
@@ -136,7 +180,7 @@ fn dispatch_to_a_worker_that_dies_first() {
                 None,
                 &mut worker,
                 "early-exit-fixture",
-                "anything",
+                HOSTILE_METHOD,
                 serde_json::json!({}),
             )
             .await;
@@ -147,15 +191,38 @@ fn dispatch_to_a_worker_that_dies_first() {
         .expect("the spawned dispatch task must not panic")
     });
 
+    // The VARIANT, not just `is_err()`. Only `Protocol(EarlyExit)` reaches
+    // `warn_early_exit` (`core/src/tool_host.rs`), so a wall-clock kill, a
+    // spawn refusal or a params failure would all satisfy `is_err()` while
+    // exercising none of the code under test — and the parent would then
+    // report "the report did not appear", blaming the producer from several
+    // process boundaries away.
+    let err = result.expect_err("the fixture never answers, so the dispatch must fail");
     assert!(
-        result.is_err(),
-        "the fixture never answers, so the dispatch must fail: {result:?}"
+        matches!(
+            err,
+            kastellan_core::tool_host::ToolHostError::Protocol(
+                kastellan_protocol::client::ClientError::EarlyExit
+            )
+        ),
+        "the fixture must fail with Protocol(EarlyExit) — the ONLY variant that reaches \
+         `warn_early_exit`. Anything else means this fixture stopped exercising the early-exit \
+         path and the parent's assertions are about a report nothing produced. Got: {err:?}"
     );
 }
 
 /// `true` when this process was launched by [`run_inner_fixture`].
+///
+/// ⚠️ Presence is **not** enough: these fixtures fail on purpose, so an
+/// operator who exported `KASTELLAN_EARLY_EXIT_FIXTURE=0` believing that
+/// disabled them would get two red tests from the documented
+/// `cargo test … -- --ignored` recipe, reading exactly like a regression. The
+/// tree's knob dialect is `1|true|yes|on`; this honours it rather than
+/// inventing a second one.
 fn is_the_child() -> bool {
-    std::env::var_os(FIXTURE_ENV).is_some()
+    std::env::var(FIXTURE_ENV).is_ok_and(|v| {
+        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    })
 }
 
 /// Inner fixture: no subscriber, so the stderr fallback is the only channel.
@@ -194,7 +261,15 @@ fn inner_fixture_early_exit_with_a_subscriber() {
         .with_max_level(tracing::Level::WARN)
         .with_ansi(false)
         .finish();
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    // `expect`, not `let _`: an `Err` here means a subscriber was ALREADY
+    // installed, which is precisely the hazard this file documents
+    // (`has_been_set()` is never cleared and `with_default` sets it too).
+    // Swallowing it would leave the parent asserting "the report must arrive
+    // on stderr exactly once" against a fixture whose own setup failed — and
+    // if that pre-existing subscriber happened to write WARN to stderr, the
+    // count would be 1 and the test would PASS having proven nothing.
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("install the fixture's global subscriber; a prior install would void this test");
 
     dispatch_to_a_worker_that_dies_first();
     panic!("{DELIBERATE}");
@@ -248,15 +323,60 @@ fn assert_one_deliberate_failure(name: &str, run: &ChildRun) {
         "the child must FAIL — `{name}` panics on purpose. A passing child means the filter \
          matched nothing (`--exact` on a misspelled name exits 0) or the fixture no-op'd.\n{both}"
     );
+    // The FULL libtest phrase, not `contains("1 failed")`: that substring is
+    // also in "11 failed", "21 failed" and — the one that matters — in
+    // "1 passed; 1 failed". Two tests running in one child would defeat the
+    // one-child-per-fixture rule the module doc explains, because
+    // `has_been_set()` is a never-cleared process global and the first fixture
+    // would pin the branch for the second.
     assert!(
-        run.stdout.contains("1 failed"),
+        run.stdout.contains("test result: FAILED. 0 passed; 1 failed;"),
         "exactly one test must have run and failed in the child; anything else means the \
-         name filter did not select `{name}`.\n{both}"
+         name filter did not select `{name}`, or more than one test ran and they can no \
+         longer answer for themselves.\n{both}"
     );
     assert!(
         run.stdout.contains(DELIBERATE),
         "the child must have reached the fixture's own panic, not died earlier for an \
          unrelated reason.\n{both}"
+    );
+}
+
+/// Assert the channel named by `channel` carries the hostile method's text but
+/// neither of its control characters' effects.
+///
+/// Both channels are checked, by their respective parents, because
+/// `emit_early_exit_report` neutralises **once** and then feeds both — so a
+/// mutant that drops the neutralisation has to be caught wherever the report
+/// actually lands. The no-subscriber run proves it for the `eprintln!`
+/// fallback; the with-subscriber run proves it for `tracing`, whose `fmt`
+/// layer writes the message through `Debug for Arguments` (i.e. Display, no
+/// escaping), so an un-neutralised `\n` really does break the line there.
+fn assert_the_hostile_method_was_defanged(channel: &str, stream: &str, both: &str) {
+    assert!(
+        stream.contains(FORGED_TEXT),
+        "POSITIVE CONTROL: the hostile method never reached {channel} at all, so the \
+         checks below would pass vacuously. Either `method` stopped being interpolated into the \
+         report, or the dispatch failed before `warn_early_exit`.\n{both}"
+    );
+    assert!(
+        !stream.contains('\u{1b}'),
+        "an ESC from a MODEL-AUTHORED `method` reached {channel} unneutralised — it is an ANSI \
+         sequence executing in the terminal of whoever reads this failure. \
+         `emit_early_exit_report` must `neutralise_controls` the WHOLE report, not just the \
+         tail (tail lines are already stripped by `push_trimmed`; `program`/`method` are \
+         interpolated raw).\n{both}"
+    );
+    let forged: Vec<&str> = stream
+        .lines()
+        .filter(|l| l.starts_with(FORGED_LINE_START))
+        .collect();
+    assert!(
+        forged.is_empty(),
+        "a `\\n` in a model-authored `method` forged a COLUMN-0 line on {channel}: {forged:?}. \
+         `scripts/run-e2e-gate.sh` greps `^\\[WARN\\]` and asserts zero matches, so this turns \
+         an unrelated profile red — the planner would be able to fail someone else's gate.\n\
+         {both}"
     );
 }
 
@@ -270,18 +390,32 @@ fn a_failing_test_with_no_subscriber_shows_the_workers_last_words() {
     assert_one_deliberate_failure(name, &run);
     let both = format!("--- child stdout ---\n{}\n--- child stderr ---\n{}", run.stdout, run.stderr);
 
-    assert!(
-        run.stdout.contains(LAST_WORDS),
-        "a test binary installs no `tracing` subscriber, so `tracing::warn!` discards the \
-         report and the failure reads only `Protocol(EarlyExit)` — the shrug that cost #719 a \
-         session. The dying worker's own explanation must appear in the failing test's \
-         CAPTURED output (#725).\n{both}"
+    // ONE line carrying BOTH, not two independent `contains` over the whole
+    // stream: the property is "the marked fallback line carries the worker's
+    // explanation". Searched separately, a producer that emitted the marker on
+    // its own line and the report on another would satisfy both — and so would
+    // one that let the report break across lines, which is exactly what an
+    // un-neutralised `\n` does.
+    let marked: Vec<&str> = run
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with(EARLY_EXIT_STDERR_MARKER))
+        .collect();
+    assert_eq!(
+        marked.len(),
+        1,
+        "expected exactly ONE `{EARLY_EXIT_STDERR_MARKER}` line in the failing test's CAPTURED \
+         output. None means `tracing::warn!` swallowed the report as it did before #725 — the \
+         shrug that cost #719 a session, leaving only `Protocol(EarlyExit)`. More than one \
+         means the report broke across lines.\ngot: {marked:?}\n{both}"
     );
     assert!(
-        run.stdout.contains(EARLY_EXIT_STDERR_MARKER),
-        "the report must carry its marker, which is what makes the fallback greppable and \
-         tells a reader which channel produced it.\n{both}"
+        marked[0].contains(LAST_WORDS),
+        "the marked fallback line must CARRY the dying worker's own explanation — that report \
+         is the entire point of the line (#725).\ngot: {}\n{both}",
+        marked[0]
     );
+    assert_the_hostile_method_was_defanged("the captured fallback", &run.stdout, &both);
     assert!(
         !run.stderr.contains(LAST_WORDS),
         "the report must go through `eprintln!`, which libtest's capture intercepts — NOT to \
@@ -313,4 +447,8 @@ fn a_binary_that_installed_a_subscriber_does_not_get_the_report_twice() {
          the captured stream too means the `has_been_set()` guard is not holding, which \
          would double every early-exit report in the daemon's own log.\n{both}"
     );
+    // The `tracing` half of the same property. The daemon takes this channel
+    // and nothing else, so neutralisation has to hold here too — and this is
+    // the only fixture in which the report reaches a subscriber at all.
+    assert_the_hostile_method_was_defanged("the `tracing` channel", &run.stderr, &both);
 }

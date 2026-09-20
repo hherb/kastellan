@@ -294,8 +294,27 @@ pub const EARLY_EXIT_STDERR_MARKER: &str = "[worker-early-exit]";
 
 /// The exact bytes the stderr fallback writes. Pure, so the rendering can be
 /// pinned without a process that has no subscriber.
+///
+/// ⚠️ **Neutralises here, not only in the caller.** The one-line property the
+/// marker doc above argues for — that this can never produce a second, column-0
+/// line a gate grep reads as `[SKIP]`/`[WARN]`/`[E2E]` — has to belong to the
+/// function that *renders the line*, not to the call order inside
+/// [`emit_early_exit_report`]. This is `pub`, and the obvious second producer
+/// already exists: the persistent-worker death report
+/// ([#730](https://github.com/hherb/kastellan/issues/730)) has the same defect
+/// one layer over. A caller that reached for this formatter and neutralised
+/// nothing would hand a model-authored `\n` straight to a gate log — the
+/// drift-between-copies shape CLAUDE.md's bwrap-argv note names, where the
+/// incomplete copy is the one that breaks.
+///
+/// `neutralise_controls` is idempotent and length-preserving, so
+/// `emit_early_exit_report` neutralising first costs nothing and both orders
+/// give identical bytes.
 pub fn format_early_exit_stderr_fallback(report: &str) -> String {
-    format!("{EARLY_EXIT_STDERR_MARKER} {report}")
+    format!(
+        "{EARLY_EXIT_STDERR_MARKER} {}",
+        crate::untrusted_text::neutralise_controls(report)
+    )
 }
 
 /// Report a worker's early exit through `tracing`, **and** through the
@@ -346,6 +365,12 @@ pub fn format_early_exit_stderr_fallback(report: &str) -> String {
 /// `neutralise_controls` is idempotent, so the already-clean tail is
 /// unaffected, and it keeps the report to exactly one line.
 ///
+/// This call covers the **`tracing`** channel.
+/// [`format_early_exit_stderr_fallback`] neutralises again for its own line —
+/// deliberately not relying on this one, because it is `pub` and a second
+/// producer must not be able to bypass the property by calling it directly.
+/// Both orders give identical bytes.
+///
 /// ⚠️ **One subscriber anywhere in a binary silences the fallback for all of
 /// it.** `tracing::dispatcher::has_been_set` is a process-global `AtomicBool`
 /// that `with_default` sets as well as `set_global_default`, and which is
@@ -356,15 +381,29 @@ pub fn format_early_exit_stderr_fallback(report: &str) -> String {
 /// report through `tracing` — but a suite that installs one in one test and
 /// expects the fallback in another will not get it.
 ///
+/// ⚠️ **It also asks the wrong question.** "Is a subscriber installed" is not
+/// "will this WARN be recorded": an installed subscriber that *filters the
+/// event out* drops it on both channels, silently. That is reachable in the
+/// deployed daemon through a target-scoped `RUST_LOG` in the operator overlay.
+/// [#734](https://github.com/hherb/kastellan/issues/734) tracks moving to a
+/// delivery check (`event_enabled!`).
+///
 /// ⚠️ `has_been_set` is `#[doc(hidden)]` in `tracing` and carries no stability
 /// guarantee. It is the only way to ask the question, and its removal would be
 /// a compile error rather than a silent behaviour change; a change in its
 /// meaning would be caught by the e2e above.
 ///
-/// ⚠️ `eprintln!` panics if the write fails (a closed or broken stderr). That
-/// is unreachable in the daemon, which is excluded by the guard, and the one
-/// non-test binary it can reach already prints with the same macros
-/// throughout. Worth knowing because the release profile is `panic = "abort"`.
+/// ⚠️ `eprintln!` panics if the write fails (a closed or broken stderr), and
+/// the guard is `!has_been_set()` — *not* "am I the daemon". So the exposed set
+/// is every binary without a subscriber: the test binaries, and
+/// `kastellan-cli`. `kastellan-cli guard capture … 2>&1 | head` gives the
+/// reader an `EPIPE` (Rust sets `SIGPIPE` to `SIG_IGN`), and under
+/// `panic = "abort"` that is a silent `SIGABRT` rather than a message. It is
+/// not a regression — `guard_capture` already prints with these macros
+/// throughout, so the same pipeline already aborts on its very first
+/// diagnostic — but this line is on an ERROR path, where losing the run costs
+/// more. Tracked in
+/// [#733](https://github.com/hherb/kastellan/issues/733).
 pub fn emit_early_exit_report(report: &str) {
     let report = crate::untrusted_text::neutralise_controls(report);
     tracing::warn!("{report}");
@@ -517,12 +556,19 @@ mod tests {
     }
 
     #[test]
-    fn the_stderr_fallback_marker_is_not_one_of_the_gate_evidence_markers() {
+    fn the_stderr_fallback_marker_is_distinctive_and_not_a_gate_evidence_marker() {
         // `scripts/run-e2e-gate.sh` asserts ZERO `[WARN]` lines in a profile
-        // run, and several suites provoke an early exit deliberately — this
-        // module's own e2e fixtures among them. Borrowing one of the three
-        // evidence markers here would turn every such test into a gate
-        // failure, so the separation is load-bearing rather than cosmetic.
+        // run, and every profile passes `--nocapture`, so a line this module
+        // emits reaches the gate log even from a PASSING test. Borrowing one of
+        // the three evidence markers would therefore turn a profile red for a
+        // suite that was working.
+        //
+        // ⚠️ No profile selects an early-exit suite today — see the const's own
+        // doc, which is the accurate statement. This is insurance against the
+        // profile that adds one, not a description of current suites; an
+        // earlier version of this comment claimed the opposite and contradicted
+        // the const two hundred lines up.
+        //
         // `starts_with`, not equality: the gate's greps are anchored at line
         // start (`grep -c '^\[WARN\]'`), so a marker of `"[WARN] early-exit"`
         // would pass an inequality check and still trip the assertion.
@@ -533,6 +579,56 @@ mod tests {
                  the gate greps them anchored at line start"
             );
         }
+        // Without this the check above is vacuous: `""` — and any marker that
+        // is a strict prefix of all three, like `"["` — satisfies every
+        // `starts_with` in this file, and `stdout.contains("")` in the e2e is
+        // true of any output at all. Every other assertion on the marker reads
+        // the const, so this is the only place its VALUE is pinned.
+        assert!(
+            EARLY_EXIT_STDERR_MARKER.starts_with("[worker-")
+                && EARLY_EXIT_STDERR_MARKER.ends_with(']')
+                && EARLY_EXIT_STDERR_MARKER.len() > "[worker-]".len(),
+            "the marker must be a non-trivial bracketed `[worker-…]` token; an empty or \
+             single-character marker passes every other check in this file vacuously, \
+             including `contains` in the e2e. Got: {EARLY_EXIT_STDERR_MARKER:?}"
+        );
+    }
+
+    #[test]
+    fn the_stderr_fallback_neutralises_a_model_authored_control_character() {
+        // `program` and `method` are interpolated RAW by the formatters above
+        // (tail lines are already stripped by `push_trimmed`), and `method` is
+        // model-authored: `qualified_method` returns `None` outside the tool's
+        // advertised set and the planner's string then goes through verbatim.
+        //
+        // This pins the property on the PUB formatter rather than on
+        // `emit_early_exit_report`'s call order, so a second producer — #730's
+        // persistent-worker death report is the one already filed — cannot
+        // render an un-neutralised line by reaching for this function.
+        let report = format_early_exit_report(
+            "w",
+            "m\u{1b}[31m\n[WARN] forged-gate-line",
+            &["last words".to_string()],
+        );
+        let line = format_early_exit_stderr_fallback(&report);
+        assert!(
+            !line.contains('\u{1b}'),
+            "an ESC would be an ANSI sequence executing in the reader's terminal: {line:?}"
+        );
+        assert_eq!(
+            line.lines().count(),
+            1,
+            "the fallback must be exactly ONE line — a `\\n` here forges a column-0 line that \
+             `run-e2e-gate.sh`'s `^\\[WARN\\]` grep counts, failing an unrelated profile: \
+             {line:?}"
+        );
+        // Neutralisation maps the class to a space, so the text must SURVIVE —
+        // mid-line. A check that merely asserted its absence would also pass if
+        // `method` stopped reaching the report at all.
+        assert!(
+            line.contains("forged-gate-line"),
+            "the text must survive as text; only its line-forging effect is removed: {line:?}"
+        );
     }
 
     #[test]

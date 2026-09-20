@@ -71,10 +71,21 @@ fn a_worker_that_dies_before_responding_gets_its_last_words_into_the_log() {
     }
 
     let captured = CapturedLog::default();
-    // Process-wide, not thread-local: `dispatch` runs the synchronous
-    // `worker.call` inside `tokio::task::block_in_place`, i.e. on a different
-    // thread from this one, so a scoped subscriber would capture nothing and
-    // the test would fail for the wrong reason.
+    // Process-wide, not thread-local — but NOT for the reason this comment
+    // used to give.
+    //
+    // ⚠️ `block_in_place` does **not** hand off to another thread. It runs the
+    // closure on the CURRENT one and migrates the other tasks away, and from a
+    // bare `rt.block_on` caller (which is what this fixture uses, below) it
+    // takes tokio's `allow_block_in_place` arm and returns early with no
+    // migration at all. Measured: under `rt.block_on` it reports the same
+    // `ThreadId` as the test thread; only under `tokio::spawn` does it differ.
+    // So a scoped subscriber WOULD have been in scope here.
+    //
+    // Global anyway, because it is the shape that survives someone later
+    // rewriting the fixture to dispatch from a spawned task — which is exactly
+    // what `worker_early_exit_stderr_fallback_e2e` does, and there the
+    // distinction is real.
     let subscriber = tracing_subscriber::fmt()
         .with_writer(captured.clone())
         .with_max_level(tracing::Level::WARN)

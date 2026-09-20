@@ -584,9 +584,15 @@ impl SupervisedWorker {
     /// dispatch chokepoint scrubs redeemed secrets out of everything that
     /// reaches the planner and the audit row (audit H1). Routing unscrubbed
     /// worker bytes into the returned error would walk straight through that
-    /// guarantee. The daemon log already receives this same stream at `debug`,
-    /// so this changes the LEVEL — from invisible to visible — and nothing
-    /// about where the bytes may go.
+    /// guarantee. The surviving claim is about the *destinations*: these bytes
+    /// never reach a returned error, the planner, or an audit row.
+    ///
+    /// ⚠️ It is no longer true that this changes "nothing about where the bytes
+    /// may go" — that sentence described the pre-#725 code. #725 adds a
+    /// second sink, the process's own fd 2, for binaries with no `tracing`
+    /// subscriber (test binaries and `kastellan-cli`; never the daemon). See
+    /// [`crate::worker_stderr::emit_early_exit_report`], which owns that
+    /// reasoning.
     ///
     /// Both arms now render a report string and hand it to the single
     /// [`crate::worker_stderr::emit_early_exit_report`], which adds the

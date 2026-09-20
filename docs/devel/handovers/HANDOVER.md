@@ -14,7 +14,7 @@ contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717)
 [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational continuity),
 [#702](https://github.com/hherb/kastellan/pull/702) (#677, the planner's labelled result view),
 [#694](https://github.com/hherb/kastellan/pull/694) (#617). **Open issues these filed:**
-[#730](https://github.com/hherb/kastellan/issues/730) (from #731);
+[#730](https://github.com/hherb/kastellan/issues/730), [#732](https://github.com/hherb/kastellan/issues/732)–[#734](https://github.com/hherb/kastellan/issues/734) (from #731);
 [#718](https://github.com/hherb/kastellan/issues/718), [#721](https://github.com/hherb/kastellan/issues/721)–[#724](https://github.com/hherb/kastellan/issues/724) (from #720);
 [#710](https://github.com/hherb/kastellan/issues/710)–[#713](https://github.com/hherb/kastellan/issues/713), [#715](https://github.com/hherb/kastellan/issues/715), [#716](https://github.com/hherb/kastellan/issues/716) (from #709);
 [#698](https://github.com/hherb/kastellan/issues/698)–[#700](https://github.com/hherb/kastellan/issues/700),
@@ -91,7 +91,55 @@ the one producer: it logs through `tracing` as before **and** `eprintln!`s the r
 - ⚠️ **`block_in_place` does NOT hand off to another thread** — it runs the closure on the current
   one. Measured: under `rt.block_on` it reports the **test thread's** `ThreadId`; under
   `tokio::spawn` it differs. So the old #666 comment claiming otherwise is wrong, and the fixture now
-  dispatches from a spawned task to cross the boundary at all.
+  dispatches from a spawned task to cross the boundary at all. **That wrong comment is now also
+  corrected in the tree** (`worker_early_exit_diagnostic_e2e.rs`) — the second review round found
+  the refutation had been written into HANDOVER while the comment itself sat untouched two files
+  away, which is the shape that makes a known-wrong claim outlive the session that disproved it.
+
+#### Second review round (2026-09-20, four reviewers + controller verification)
+
+⚠️ **The PR's central *security* claim was untested, and the mutant SURVIVED.** Deleting
+`neutralise_controls` from `emit_early_exit_report` passed every test in the branch — proved by
+running it, not by reading. The fixture's method was the literal `"anything"`, so no test anywhere
+fed a control character down the one path that is interpolated raw. Now closed both ways:
+
+- The e2e dispatches a **`HOSTILE_METHOD`** (`ESC[31m` + `\n[WARN] …FORGED-GATE-LINE`) and **both**
+  parents assert, on their own channel, that the text survives while its *effects* do not — a
+  **positive control** (the text arrived, so the other checks cannot pass vacuously), no ESC, and
+  no forged **column-0** line. Checking *position*, not absence: neutralisation maps the class to a
+  space, so the correct outcome is the phrase sitting mid-line.
+- ⚠️ **`format_early_exit_stderr_fallback` now neutralises too.** The one-line property belonged to
+  `emit_early_exit_report`'s *call order*, but the formatter is `pub` — and
+  [#730](https://github.com/hherb/kastellan/issues/730) is a second producer already filed. Same
+  drift-between-copies shape as the bwrap-argv pair.
+- The marker's own **value** had no assertion: `EARLY_EXIT_STDERR_MARKER = ""` passed all four of
+  its tests (`"".starts_with("")`, `contains("")`). Pinned now.
+- `contains("1 failed")` also matches `"11 failed"` and **`"1 passed; 1 failed"`** — the last would
+  have defeated the one-child-per-fixture rule. Now the full libtest phrase.
+- `let _ = set_global_default(…)` → `expect`; `result.is_err()` → `matches!(Protocol(EarlyExit))`
+  (the only variant reaching `warn_early_exit`); `is_the_child()` now honours the `1|true|yes|on`
+  dialect, so an exported `…FIXTURE=0` no longer *arms* two fail-on-purpose tests.
+
+⚠️ **Two reviewer findings were WRONG and were checked before being carried** —
+[[handover-claims-verify-before-carrying]]. One recounted the census as "30 of 31" and flagged four
+files: its grep did not strip comments, and `scheduler_step_dispatch_e2e.rs` matches `dispatch (`
+only in prose. **29 of 30 is correct.** Another rated the discarded `wait_for_drain` bool CRITICAL
+and blocking; `git show main:core/src/tool_host.rs` has the identical line, so it is pre-existing
+(#666) and now filed rather than fixed here.
+
+**Mutation proof (4/4 killed, each run):** drop `neutralise_controls` from `emit_early_exit_report`
+→ dies on the `tracing` channel; drop it from the formatter → dies on the new unit test; marker
+`""` → dies; marker `"[WARN] early-exit"` → dies. Restores verified by **sha256**, and the git
+**index** checked clean [[mutation-testing-contaminates-the-index]].
+
+**Filed, not fixed here:** [#732](https://github.com/hherb/kastellan/issues/732) (a timed-out drain
+is reported as "wrote NOTHING", pre-existing #666),
+[#733](https://github.com/hherb/kastellan/issues/733) (`eprintln!` SIGABRTs a release
+`kastellan-cli` on a broken pipe — `panic = "abort"`),
+[#734](https://github.com/hherb/kastellan/issues/734) (**`has_been_set()` asks whether a subscriber
+exists, not whether the WARN will be delivered** — a target-scoped `RUST_LOG` in the operator
+overlay silences *both* channels; verified against tracing-subscriber 0.3.23, whose default
+directive applies only to an *empty* env string).
 - **No security fail-open** (reviewer A): the tail is fully neutralised via `push_trimmed`, a
   compromised worker cannot forge an evidence line, and nothing new reaches the planner, a returned
   error, or an audit row.
@@ -382,7 +430,8 @@ is the reusable mechanism.
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac + DGX** ([#731](https://github.com/hherb/kastellan/pull/731), #725 — **the gate that stands**) | branch tip (post-review) | **Mac 4380 / 0 / 31**, 180 suites, `TEST_EXIT=0`, 0 `[WARN]`, **`[SKIP]` 23** (baseline parity). **DGX 4515 / 0 / 63**, 180 suites, `TEST_EXIT=0`, `[SKIP]` 4. Both = +5 passed / +2 ignored, reconciled exactly: Mac 4375+5; DGX 4501 + 4 (#728 round 1) + 5 (round 2) + 5. ⚠️ **The first Mac sweep was a false green** — it matched the predicted total while **339 of its 361 `[SKIP]`s were "no Postgres install found"**, because skip-as-pass counts as passed. Set `KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"` on the Mac or the sweep is not evidence | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-725`), zero warnings | **23** Mac, **4** DGX (gliner opt-in) |
+| **Mac** ([#731](https://github.com/hherb/kastellan/pull/731), #725 — **post-`/fixall`, the gate that stands**) | branch tip (2nd review round) | **4381 / 0 / 31**, 180 suites, `TEST_EXIT=0`, 0 `[WARN]`, **`[SKIP]` 12**. +1 over the row below, reconciled exactly: the one new unit test (`the_stderr_fallback_neutralises_a_model_authored_control_character`); the round's other work added **assertions**, not tests, so `ignored` is unchanged at 31. ⚠️ **`[SKIP]` 23 → 12 is an improvement, not drift** — run with `KASTELLAN_PG_BIN_DIR` set, so **zero** "no Postgres install found" (the false-green tell); the 12 remaining are all legitimately opt-in or unavailable (Apple `container` ×8, gliner ×4). Skip-as-pass means those 11 newly-*running* tests move no count, which is exactly why the count alone was never the evidence. Sources **sha256-verified unchanged across the whole sweep** [[never-edit-tree-during-a-sweep]] — an earlier sweep was killed and restarted after two files were edited mid-run. DGX not re-run this round (no Linux-only code touched) | exit 0, cold (27 `Checking kastellan` lines, dedicated `CARGO_TARGET_DIR`), zero warnings | **12** Mac |
+| **Mac + DGX** ([#731](https://github.com/hherb/kastellan/pull/731), #725 — 1st review round; superseded by the row above) | branch tip (post-review) | **Mac 4380 / 0 / 31**, 180 suites, `TEST_EXIT=0`, 0 `[WARN]`, **`[SKIP]` 23** (baseline parity). **DGX 4515 / 0 / 63**, 180 suites, `TEST_EXIT=0`, `[SKIP]` 4. Both = +5 passed / +2 ignored, reconciled exactly: Mac 4375+5; DGX 4501 + 4 (#728 round 1) + 5 (round 2) + 5. ⚠️ **The first Mac sweep was a false green** — it matched the predicted total while **339 of its 361 `[SKIP]`s were "no Postgres install found"**, because skip-as-pass counts as passed. Set `KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"` on the Mac or the sweep is not evidence | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-725`), zero warnings | **23** Mac, **4** DGX (gliner opt-in) |
 | **Mac + DGX** ([#728](https://github.com/hherb/kastellan/pull/728), #699/#700) | branch tip (2nd review round) | **Mac 4375 / 0 / 29**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — the round's 4370 + **5** (deep-parameter screen, multibyte clamp, the `{}`-parameters grow guard, the framing constant, the step-less outcome). Round 1 at `ce8bc49b`: Mac **4370 / 0 / 29** = #726's 4347 + 5 (grepped between `64d483e8` and `main`) + 18 new. **DGX** full sweep at `299ce103` (before round 1's +4): **4501 / 0 / 61**, 179 suites, exit 0 (= 4482 + 5 + 14) — ⚠️ **not re-run for round 2** (Mac-only changes, but `summary` is platform-neutral, so the DGX number is simply older) | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-pr728`) at the round-2 tip | **4** DGX (gliner opt-in) |
 | **Mac + DGX** ([#726](https://github.com/hherb/kastellan/pull/726), #719) | `64d483e8` (branch tip) | **DGX 4482 / 0 / 61**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — **exactly** 4453 (#709) + 24 (#720: 23 `#[test]` + 1 doc-test, never run on the DGX until now) + 5 (this PR), each of the 5 grepped `ok` by name. **Mac 4347 / 0 / 29**, 179 suites — **exactly** #720's 4342 + 5. ⚠️ The sweep itself reported **3 gliner failures that were my own mutation testing**: a same-size Python mutant restored within the same second left its `.pyc` cached *and valid*, and the jailed worker (read-only src) ran it — confirmed by disassembling the cached `main()` [[mutation-testing-leaves-stale-pyc]]. With `__pycache__` cleared the **sweep-built** binaries pass 5/5, 16/16, 6/6 under the REQUIRE knob; source unchanged since the sweep built them. **Also:** `gliner` gate profile passes as evidence on both hosts (first time); DGX gliner ENABLE suites 16/16, 6/6; pytest 71 on both | **exit 0 on both hosts**, zero warnings, 27 `Checking kastellan` lines each, dedicated `CARGO_TARGET_DIR` | **4** DGX (gliner opt-in, ENABLE unset), **23** Mac |
 | **Mac** ([#720](https://github.com/hherb/kastellan/pull/720)) | branch tip | **4322 / 8 / 29**, 179 suites, `TEST_EXIT=101`: 3 were #719, 5 were #548/#676 pool contention (pass individually), so effectively **4327 / 3 / 29**. +12 over the row below, reconciled. ⚠️ **Its first sweep was a false green:** `cargo test --workspace` fails fast, and one suite aborted it after 39 of 179 suites. **Use `--no-fail-fast`.** The DGX leg was never run | exit 0, 27 crates, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-720`) | 23 |
