@@ -37,6 +37,35 @@ dependencies = [
     # accidental wheel-resolution surprise (CUDA version mismatch) is
     # caught at uv sync time rather than at model load.
     "torch>=2.13.0",
+    # anyio is a SECURITY FLOOR on a transitive dependency, not an import.
+    # Nothing in this worker imports it; it arrives as
+    #   gliner/transformers -> huggingface_hub -> httpx -> anyio
+    # and it is declared here for the same reason `transformers` is: so the
+    # vulnerable range is *unsatisfiable* rather than merely unlocked. Bumping
+    # `uv.lock` alone is not enough -- see the transformers note above, where
+    # exactly that left the package inside the CVE range while exiting 0.
+    #
+    # Both advisories are fixed in 4.14.2, and both list `< 4.14.2` as the
+    # vulnerable range, so this one floor closes both:
+    #
+    #   * GHSA-82r6-8w77-94w6 (critical) -- `TLSStream` encodes host names with
+    #     IDNA 2003, which can map a hostile name onto a different one and so
+    #     enable TLS certificate spoofing:
+    #     https://github.com/advisories/GHSA-82r6-8w77-94w6
+    #   * GHSA-5p39-cfhj-2xmp (medium) -- an anyio process-pool worker can block
+    #     indefinitely on undrained stderr:
+    #     https://github.com/advisories/GHSA-5p39-cfhj-2xmp
+    #
+    # Reachability, recorded so the next reader need not re-derive it: the
+    # gliner worker runs under `Net::Deny` in BOTH entries (host mode and the
+    # macOS container mode) with `HF_HUB_OFFLINE=1` + `TRANSFORMERS_OFFLINE=1`,
+    # so no TLS is spoken from inside the jail at all. The exposure was
+    # provisioning-time only: the one-off model download, which runs
+    # unsandboxed through `huggingface_hub` -> `httpx` -> `anyio`. (`uv sync`
+    # is not a path to it -- uv is Rust and never loads this anyio.) That
+    # lowers the urgency; it does not make the floor optional, because
+    # provisioning is exactly when the weights arrive.
+    "anyio>=4.14.2",
 ]
 
 [project.optional-dependencies]
