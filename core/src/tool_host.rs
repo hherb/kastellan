@@ -9,19 +9,11 @@
 //! restart-on-crash supervision, and per-worker UDS multiplexing are
 //! follow-on work.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use kastellan_protocol::client::{Client, ClientError};
 
-/// How long the `EarlyExit` path waits for the stderr drainer to reach EOF
-/// before reporting what it has.
-///
-/// Paid only when a worker has already failed, so it costs nothing on the happy
-/// path. Small because the pipe is already closing — the worker exited — and a
-/// larger budget would only add latency to an error that is about to be
-/// returned anyway. Its floor is set by the alternative: reporting "wrote
-/// NOTHING" for a worker that in fact explained itself.
-const EARLY_EXIT_DRAIN_WAIT: Duration = Duration::from_millis(250);
+use crate::worker_lifecycle::idle_timeout::WorkerRetirementCause;
 
 use kastellan_sandbox::{SandboxBackend, SandboxError, SandboxPolicy};
 
@@ -62,8 +54,39 @@ mod tests;
 pub enum ToolHostError {
     #[error("sandbox: {0}")]
     Sandbox(#[from] SandboxError),
+    /// Our own IO failure **before the worker is serving**: sidecar
+    /// provisioning, a scratch dir, a piped-stdio wiring bug.
+    ///
+    /// ⚠️ **No `#[from]`, deliberately** (#737). While it had one, any `?` on an
+    /// `io::Error` in a function returning [`ToolHostError`] joined this bucket
+    /// silently — and `worker_lifecycle::idle_timeout::dispatch_indicates_worker_dead`
+    /// reads the bucket to decide whether a worker died. An implicitly-added
+    /// post-spawn producer would have made that classification wrong with no
+    /// diff to review. Construct it explicitly and the census stays complete by
+    /// construction rather than by a grep.
+    ///
+    /// The absence is enforced, not merely asserted — this fails to compile,
+    /// and would not have before #737:
+    ///
+    /// ```compile_fail
+    /// use kastellan_core::tool_host::ToolHostError;
+    /// fn implicit_conversion() -> Result<(), ToolHostError> {
+    ///     Err(std::io::Error::other("a post-spawn io failure"))?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// Constructing it deliberately is of course still fine:
+    ///
+    /// ```
+    /// use kastellan_core::tool_host::ToolHostError;
+    /// fn explicit_construction() -> Result<(), ToolHostError> {
+    ///     Err(ToolHostError::Io(std::io::Error::other("provisioning failed")))
+    /// }
+    /// assert!(explicit_construction().is_err());
+    /// ```
     #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
     #[error("protocol: {0}")]
     Protocol(#[from] ClientError),
 
@@ -480,7 +503,7 @@ where
         .stderr
         .take()
         .map(|stderr| crate::worker_stderr::spawn_drain_with_tail(pid, stderr));
-    let client = Client::from_child(child)?;
+    let client = Client::from_child(child).map_err(ToolHostError::Io)?;
     // Build the re-armable watchdog in the DISARMED state. It is armed only for
     // the duration of each `SupervisedWorker::call` (see that method), so a warm
     // worker sitting idle in the IdleTimeout slot is never under a kill timer.
@@ -572,52 +595,71 @@ impl SupervisedWorker {
         let _arm = self.watchdog.as_ref().map(watchdog::Watchdog::arm_scope);
         let method = cmd.method.clone();
         let result = self.client.call(&cmd.method, cmd.params);
-        if matches!(result, Err(ClientError::EarlyExit)) {
-            self.warn_early_exit(&method);
+        // #737: keyed on the CENSUS, not on one variant. `EarlyExit` used to be
+        // the only failure that said anything; the other four fatal variants
+        // were retired with their captured stderr discarded and nothing written
+        // on any channel — in the daemon as well as in test binaries. Asking
+        // the same classifier that decides to retire the worker means a variant
+        // cannot be fatal-but-unreportable.
+        if let Err(e) = &result {
+            if let Some(cause) = WorkerRetirementCause::from_client_error(e) {
+                self.report_retirement(&method, cause);
+            }
         }
         result
     }
 
-    /// Log why the worker went away, at `warn`, using its own retained stderr.
+    /// Report why the worker is being retired, using its own retained stderr.
     ///
     /// Log-only, and deliberately so: the tail is raw worker output, and the
     /// dispatch chokepoint scrubs redeemed secrets out of everything that
     /// reaches the planner and the audit row (audit H1). Routing unscrubbed
     /// worker bytes into the returned error would walk straight through that
     /// guarantee. The surviving claim is about the *destinations*: these bytes
-    /// never reach a returned error, the planner, or an audit row.
+    /// reach the process's own log and fd 2 and nowhere else — never a
+    /// returned error, the planner, or an audit row.
     ///
-    /// ⚠️ It is no longer true that this changes "nothing about where the bytes
-    /// may go" — that sentence described the pre-#725 code. #725 adds a
-    /// second sink, the process's own fd 2, for binaries with no `tracing`
-    /// subscriber (test binaries and `kastellan-cli`; never the daemon). See
-    /// [`crate::worker_stderr::emit_early_exit_report`], which owns that
+    /// Two sinks, not one: `tracing`, plus the process's own stderr for
+    /// binaries with no subscriber (test binaries and `kastellan-cli`; never
+    /// the daemon). See
+    /// [`crate::worker_stderr::emit_worker_failure_report`], which owns that
     /// reasoning.
     ///
-    /// Both arms now render a report string and hand it to the single
-    /// [`crate::worker_stderr::emit_early_exit_report`], which adds the
-    /// no-subscriber stderr fallback (#725). The not-piped arm used to log
-    /// structured `worker` / `method` fields instead of a message; it names
-    /// both in its text now, so that one producer covers every early exit
-    /// rather than only the arm that happened to have a tail.
-    fn warn_early_exit(&self, method: &str) {
-        let report = match self.stderr_tail.as_ref() {
-            None => crate::worker_stderr::format_unpiped_early_exit_report(&self.program, method),
-            Some(tail) => {
-                // Wait briefly for the drainer to reach EOF. The worker has
-                // already closed stdout, so its stderr is closing too; without
-                // this we would usually snapshot an empty ring and report
-                // "wrote NOTHING" for a worker that explained itself a
-                // millisecond later — the same ambiguity, restored by a race.
-                tail.wait_for_drain(EARLY_EXIT_DRAIN_WAIT);
-                crate::worker_stderr::format_early_exit_report(
-                    &self.program,
-                    method,
-                    &tail.snapshot(),
-                )
-            }
-        };
-        crate::worker_stderr::emit_early_exit_report(&report);
+    /// ⚠️ **Called for all five fatal causes since #737, not just `EarlyExit`.**
+    ///
+    /// ⚠️ **The drain wait stays UNCONDITIONAL, and that was a deliberate
+    /// reversal.** #737 first made it conditional on the worker's pipe actually
+    /// closing, reasoning that three of the five causes (`Undecodable`,
+    /// `IdMismatch`, `ResponseTooLarge`) leave the worker *running* — it
+    /// answered, just not usably — so its stderr never closes and the wait
+    /// would cost its whole cap rather than the usual ~2 ms.
+    ///
+    /// What it buys is up to 250 ms on a path that is already failing and about
+    /// to return an error to a planner working in seconds. What it costs is the
+    /// report: whether the worker's explanation has reached the ring yet is a
+    /// **race**, and losing it renders `wrote NOTHING` for a worker that did
+    /// explain itself — the contentless line #730 exists to remove. Trading
+    /// that back for a quarter second on a rare error is the wrong way round.
+    ///
+    /// ⚠️ **How often the race is actually lost is NOT measured, and the
+    /// honest statement is the conditional one.** The `Decode` e2e's fixture
+    /// wins it every time (its stderr is written first and drained long before
+    /// the decode fails), so that suite does not demonstrate the loss. What
+    /// demonstrates it is `worker_stderr`'s unit test, which stages a slow
+    /// drainer deliberately — and until that test existed, deleting this wait
+    /// survived every suite in the tree.
+    fn report_retirement(&self, method: &str, cause: WorkerRetirementCause) {
+        // `collect_tail_after_drain` is the one copy of "wait, then snapshot",
+        // shared with the persistent path since #737 — see its doc for why the
+        // wait is load-bearing and why it lives there rather than here.
+        let tail = self.stderr_tail.as_ref().map(crate::worker_stderr::collect_tail_after_drain);
+        let report = crate::worker_stderr::format_worker_failure_report(
+            &self.program,
+            method,
+            cause,
+            tail.as_deref(),
+        );
+        crate::worker_stderr::emit_worker_failure_report(&report);
     }
 
     /// Close stdin (signals EOF to the worker), wait for it to exit, and

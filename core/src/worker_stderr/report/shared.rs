@@ -5,8 +5,8 @@
 //! exist in exactly one place. Two copies that agree today are the drift shape
 //! CLAUDE.md's bwrap-argv note names, and #730 is this tree's worked example.
 
-use super::persistent::WORKER_DEATH_STDERR_MARKER;
-use super::tool_worker::EARLY_EXIT_STDERR_MARKER;
+use super::persistent::{WORKER_DEATH_STDERR_MARKER, WORKER_DOWN_STDERR_MARKER};
+use super::tool_worker::WORKER_FAILED_STDERR_MARKER;
 
 /// Every marker this module can put at the start of a fallback line.
 ///
@@ -18,8 +18,11 @@ use super::tool_worker::EARLY_EXIT_STDERR_MARKER;
 /// it: a third `pub const` that never joins this array is a line in a gate log
 /// that no test ever looked at. The tests below are the only enforcement, and
 /// they can only check what the array holds.
-pub const STDERR_FALLBACK_MARKERS: [&str; 2] =
-    [EARLY_EXIT_STDERR_MARKER, WORKER_DEATH_STDERR_MARKER];
+pub const STDERR_FALLBACK_MARKERS: [&str; 3] = [
+    WORKER_FAILED_STDERR_MARKER,
+    WORKER_DEATH_STDERR_MARKER,
+    WORKER_DOWN_STDERR_MARKER,
+];
 
 /// Pure: the exact bytes a marked stderr-fallback line carries.
 ///
@@ -43,7 +46,7 @@ pub(super) fn format_stderr_fallback(marker: &str, report: &str) -> String {
 /// Write `report` to the process's own stderr, marked, **when no `tracing`
 /// subscriber is installed** — the shared second channel behind both emitters.
 ///
-/// See [`emit_early_exit_report`] for the full argument about who gets this and
+/// See [`emit_worker_failure_report`] for the full argument about who gets this and
 /// why it must be `eprintln!`; that doc is the canonical one and is not repeated
 /// here. The short version: libtest captures through `std::io::set_output_capture`,
 /// which the `print!`/`eprint!` **macros** consult and the `Stdout`/`Stderr`
@@ -98,14 +101,16 @@ mod tests {
     }
 
     #[test]
-    fn the_two_stderr_fallback_markers_are_distinct() {
-        // An early exit and a persistent-worker death point at different places to
-        // look — a single call's jail versus a long-lived worker that stopped and is
-        // being respawned. One marker for both would make a gate log unable to say
-        // which happened, which is the entire reason #730 got its own rather than
-        // reusing `EARLY_EXIT_STDERR_MARKER`.
+    fn the_stderr_fallback_markers_are_distinct() {
+        // The three events point at three different places to look: a single
+        // call's jail (`[worker-failed]`), a long-lived worker that stopped and
+        // is being respawned (`[worker-death]`), and one the supervisor is NOT
+        // getting back (`[worker-down]`). One marker for any two of them would
+        // make a gate log unable to say which happened — the reason #730 gave
+        // the death its own rather than reusing the tool-worker marker, and
+        // #738 the same again.
         //
-        // Reads the ARRAY, not the two consts, so a third marker that duplicated an
+        // Reads the ARRAY, not the consts, so a fourth marker that duplicated an
         // existing one is caught here too.
         let mut seen = STDERR_FALLBACK_MARKERS.to_vec();
         seen.sort_unstable();

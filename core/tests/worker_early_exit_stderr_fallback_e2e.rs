@@ -29,7 +29,7 @@
 //! dispatches [`HOSTILE_METHOD`] — a model-authored `method` is the one part of
 //! the report interpolated raw — so an ESC or a forged column-0 `[WARN]` line
 //! shows up in a child stream the parent can read. Without it, dropping the
-//! `neutralise_controls` call in `emit_early_exit_report` passed every test in
+//! `neutralise_controls` call in `emit_worker_failure_report` passed every test in
 //! this file.
 //!
 //! ⚠️ **Point 2 is why the two child streams are read separately and never
@@ -75,7 +75,7 @@ use std::process::Command;
 
 use kastellan_core::secrets::Vault;
 use kastellan_core::tool_host::{dispatch_with_sink, spawn_worker, WorkerSpec};
-use kastellan_core::worker_stderr::EARLY_EXIT_STDERR_MARKER;
+use kastellan_core::worker_stderr::WORKER_FAILED_STDERR_MARKER;
 use kastellan_sandbox::{Net, SandboxPolicy};
 use kastellan_tests_common::{backend, skip_if_sandbox_unavailable, NoopAuditSink};
 
@@ -100,13 +100,13 @@ const DELIBERATE: &str = "deliberate failure: this fixture exists to be read fro
 /// **model-authored** method can really contain.
 ///
 /// ⚠️ **This is a hostile input, not decoration.** `method` reaches
-/// `format_early_exit_report` interpolated **raw** — unlike tail lines, which
+/// `format_worker_failure_report` interpolated **raw** — unlike tail lines, which
 /// are neutralised as they enter the ring (`push_trimmed`) — and it is
 /// attacker-influenced: `qualified_method` returns `None` for anything outside
 /// the tool's advertised set, and `scheduler::tool_dispatch` then puts the
 /// planner's own string on the wire verbatim
 /// (`let method = qualified.as_deref().unwrap_or(&step.method);`). So the
-/// planner writes these bytes and `emit_early_exit_report` is the only thing
+/// planner writes these bytes and `emit_worker_failure_report` is the only thing
 /// standing between them and a gate log.
 ///
 /// Two payloads, because they fail differently:
@@ -346,7 +346,7 @@ fn assert_one_deliberate_failure(name: &str, run: &ChildRun) {
 /// neither of its control characters' effects.
 ///
 /// Both channels are checked, by their respective parents, because
-/// `emit_early_exit_report` neutralises **once** and then feeds both — so a
+/// `emit_worker_failure_report` neutralises **once** and then feeds both — so a
 /// mutant that drops the neutralisation has to be caught wherever the report
 /// actually lands. The no-subscriber run proves it for the `eprintln!`
 /// fallback; the with-subscriber run proves it for `tracing`, whose `fmt`
@@ -363,7 +363,7 @@ fn assert_the_hostile_method_was_defanged(channel: &str, stream: &str, both: &st
         !stream.contains('\u{1b}'),
         "an ESC from a MODEL-AUTHORED `method` reached {channel} unneutralised — it is an ANSI \
          sequence executing in the terminal of whoever reads this failure. \
-         `emit_early_exit_report` must `neutralise_controls` the WHOLE report, not just the \
+         `emit_worker_failure_report` must `neutralise_controls` the WHOLE report, not just the \
          tail (tail lines are already stripped by `push_trimmed`; `program`/`method` are \
          interpolated raw).\n{both}"
     );
@@ -399,12 +399,12 @@ fn a_failing_test_with_no_subscriber_shows_the_workers_last_words() {
     let marked: Vec<&str> = run
         .stdout
         .lines()
-        .filter(|l| l.starts_with(EARLY_EXIT_STDERR_MARKER))
+        .filter(|l| l.starts_with(WORKER_FAILED_STDERR_MARKER))
         .collect();
     assert_eq!(
         marked.len(),
         1,
-        "expected exactly ONE `{EARLY_EXIT_STDERR_MARKER}` line in the failing test's CAPTURED \
+        "expected exactly ONE `{WORKER_FAILED_STDERR_MARKER}` line in the failing test's CAPTURED \
          output. None means `tracing::warn!` swallowed the report as it did before #725 — the \
          shrug that cost #719 a session, leaving only `Protocol(EarlyExit)`. More than one \
          means the report broke across lines.\ngot: {marked:?}\n{both}"

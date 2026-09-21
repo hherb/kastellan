@@ -16,13 +16,14 @@
 //! the place a human was reading it. Each emitter here therefore logs through
 //! `tracing` *and* `eprintln!`s a marked line when no subscriber exists.
 //!
-//! There are two such events, and they get **distinct markers** so a grep can
-//! tell them apart:
+//! There are three such events, and they get **distinct markers** so a grep
+//! can tell them apart:
 //!
 //! | Event | Marker | Emitter |
 //! | --- | --- | --- |
-//! | a tool worker exits before answering | [`EARLY_EXIT_STDERR_MARKER`] | [`emit_early_exit_report`] |
+//! | a tool worker fails a call and is retired | [`WORKER_FAILED_STDERR_MARKER`] | [`emit_worker_failure_report`] |
 //! | a persistent worker dies mid-service | [`WORKER_DEATH_STDERR_MARKER`] | [`emit_persistent_death_report`] |
+//! | a persistent worker is NOT coming back | [`WORKER_DOWN_STDERR_MARKER`] | [`emit_persistent_down_report`] |
 //!
 //! ⚠️ **The shared half is shared on purpose.** Both emitters go through the
 //! same private [`format_stderr_fallback`] and [`emit_to_stderr_when_unheard`],
@@ -37,11 +38,13 @@ mod shared;
 mod tool_worker;
 
 pub use persistent::{
-    emit_persistent_death_report, format_death_report, format_persistent_death_line,
-    format_persistent_death_stderr_fallback, WORKER_DEATH_STDERR_MARKER,
+    emit_persistent_death_report, emit_persistent_down_report, format_death_report,
+    format_persistent_death_line, format_persistent_death_stderr_fallback,
+    format_persistent_down_line, format_persistent_down_stderr_fallback,
+    WORKER_DEATH_STDERR_MARKER, WORKER_DOWN_STDERR_MARKER,
 };
 pub use shared::STDERR_FALLBACK_MARKERS;
 pub use tool_worker::{
-    emit_early_exit_report, format_early_exit_report, format_early_exit_stderr_fallback,
-    format_unpiped_early_exit_report, EARLY_EXIT_STDERR_MARKER,
+    emit_worker_failure_report, format_worker_failure_report,
+    format_worker_failure_stderr_fallback, WORKER_FAILED_STDERR_MARKER,
 };

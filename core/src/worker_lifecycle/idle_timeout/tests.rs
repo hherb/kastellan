@@ -12,8 +12,6 @@ use super::*;
 // rather than via a `#[cfg(test)]` re-export on the parent so the structural
 // home of the helper is explicit at the import site.
 use super::release::replace_idle_teardown_handle;
-use kastellan_protocol::RpcError;
-use std::io;
 
 #[test]
 fn restart_backoff_default_starts_at_one_second() {
@@ -55,78 +53,6 @@ fn restart_backoff_custom_cap_honoured() {
     assert_eq!(bo.next_delay(3), Duration::from_secs(4));
     assert_eq!(bo.next_delay(4), Duration::from_secs(5));
     assert_eq!(bo.next_delay(10), Duration::from_secs(5));
-}
-
-#[test]
-fn dispatch_classifier_ok_is_alive() {
-    let r: Result<(), ToolHostError> = Ok(());
-    assert!(!dispatch_indicates_worker_dead(&r));
-}
-
-#[test]
-fn dispatch_classifier_rpc_error_is_alive() {
-    // Worker returned a structured RPC error; it's still listening on stdio.
-    let r: Result<(), ToolHostError> = Err(ToolHostError::Protocol(
-        ClientError::Rpc(RpcError {
-            code: -32001,
-            message: "POLICY_DENIED".into(),
-            data: None,
-        }),
-    ));
-    assert!(!dispatch_indicates_worker_dead(&r));
-}
-
-#[test]
-fn dispatch_classifier_io_error_is_dead() {
-    let r: Result<(), ToolHostError> = Err(ToolHostError::Io(io::Error::new(
-        io::ErrorKind::BrokenPipe,
-        "stdio closed",
-    )));
-    assert!(dispatch_indicates_worker_dead(&r));
-}
-
-#[test]
-fn dispatch_classifier_protocol_io_is_dead() {
-    let r: Result<(), ToolHostError> = Err(ToolHostError::Protocol(ClientError::Io(
-        io::Error::new(io::ErrorKind::UnexpectedEof, "eof"),
-    )));
-    assert!(dispatch_indicates_worker_dead(&r));
-}
-
-#[test]
-fn dispatch_classifier_early_exit_is_dead() {
-    let r: Result<(), ToolHostError> = Err(ToolHostError::Protocol(
-        ClientError::EarlyExit,
-    ));
-    assert!(dispatch_indicates_worker_dead(&r));
-}
-
-#[test]
-fn dispatch_classifier_secret_redemption_failed_is_not_a_crash() {
-    // Item 31 — SecretRedemptionFailed surfaces from the substitution
-    // chokepoint BEFORE worker.call is invoked. The worker is never
-    // contacted, so this MUST NOT be classified as a worker crash —
-    // otherwise the lifecycle backoff counter would tick incorrectly
-    // on a planner-side error and degrade the warm-worker hit rate.
-    use crate::secrets::{MissingReason, SubstituteError};
-    use crate::tool_host::ToolHostError;
-
-    let err = ToolHostError::SecretRedemptionFailed(SubstituteError::MissingRef {
-        ref_hash: "test-hash".to_string(),
-        reason: MissingReason::NotFound,
-    });
-    assert!(!dispatch_indicates_worker_dead(&Err::<(), _>(err)));
-}
-
-#[test]
-fn dispatch_classifier_sandbox_is_not_a_warm_worker_crash() {
-    // Sandbox errors come from a failed spawn — no worker existed; this is the
-    // SPAWN_FAILED path, not a warm-worker crash. The classifier returns false so
-    // the restart-backoff counter doesn't increment.
-    let r: Result<(), ToolHostError> = Err(ToolHostError::Sandbox(
-        kastellan_sandbox::SandboxError::Backend("test".into()),
-    ));
-    assert!(!dispatch_indicates_worker_dead(&r));
 }
 
 #[test]

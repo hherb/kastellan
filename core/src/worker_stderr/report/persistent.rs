@@ -11,6 +11,11 @@ use std::process::ExitStatus;
 use super::shared::{emit_to_stderr_when_unheard, format_stderr_fallback};
 #[allow(unused_imports)] // referenced by the marker doc's intra-doc link
 use super::shared::STDERR_FALLBACK_MARKERS;
+#[allow(unused_imports)] // referenced by this module's doc links
+use super::tool_worker::{
+    emit_worker_failure_report, format_worker_failure_stderr_fallback,
+    WORKER_FAILED_STDERR_MARKER,
+};
 
 /// Human-readable one-line summary of a worker's death for the daemon log: the
 /// exit status (which distinguishes a clean `exit status: 1` — a deliberate
@@ -31,7 +36,7 @@ pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &[String]) -
 /// Marker prefixing every line [`emit_persistent_death_report`] writes to the
 /// process's own stderr.
 ///
-/// Deliberately **distinct from** [`EARLY_EXIT_STDERR_MARKER`], because the two
+/// Deliberately **distinct from** [`WORKER_FAILED_STDERR_MARKER`], because the two
 /// events point somewhere different. An early exit says a tool worker never
 /// answered a *specific call* — look at that call's jail, its arguments, its
 /// wall clock. A persistent-worker death says a *long-lived* worker that had
@@ -58,7 +63,7 @@ pub fn format_persistent_death_line(label: &str, report: &str) -> String {
     format!("persistent worker {label} died: {report}")
 }
 
-/// The [`format_early_exit_stderr_fallback`] counterpart for a persistent
+/// The [`format_worker_failure_stderr_fallback`] counterpart for a persistent
 /// worker's death report.
 ///
 /// ⚠️ **Takes an ALREADY-FOLDED line, not a raw `death_report()` string — the
@@ -77,7 +82,7 @@ pub fn format_persistent_death_stderr_fallback(report: &str) -> String {
 /// Report a persistent worker's death through `tracing`, **and** through the
 /// process's own stderr when no subscriber is installed.
 ///
-/// The one producer for that event (#730), mirroring [`emit_early_exit_report`]
+/// The one producer for that event (#730), mirroring [`emit_worker_failure_report`]
 /// for the early-exit one. Before this, `worker_lifecycle::persistent`'s driver
 /// called `tracing::warn!` directly — a hand-rolled copy of the `tracing`-only
 /// half that inherited none of #725's work. The persistent path is how the
@@ -105,6 +110,70 @@ pub fn emit_persistent_death_report(label: &str, report: &str) {
     ));
     tracing::warn!(%label, "{line}");
     emit_to_stderr_when_unheard(WORKER_DEATH_STDERR_MARKER, &line);
+}
+
+/// Marker prefixing every line [`emit_persistent_down_report`] writes to the
+/// process's own stderr.
+///
+/// **Distinct from [`WORKER_DEATH_STDERR_MARKER`], and the distinction is the
+/// point** ([#738](https://github.com/hherb/kastellan/issues/738)). A death says
+/// a worker that had been serving stopped and the supervisor is respawning it —
+/// an event that is often benign and always transient. This one says the
+/// supervisor is **not getting it back**: the respawn failed, it is crash-
+/// looping, or the driver thread itself is gone. "Died once and came back" and
+/// "the Matrix channel has been down for an hour" are different pages, and a
+/// reader who can only grep for one of them gets the wrong one.
+///
+/// Shares the `[worker-…]` shape so a reader who wants *any* of them can grep
+/// `^\[worker-`; see [`STDERR_FALLBACK_MARKERS`] for the whole set.
+pub const WORKER_DOWN_STDERR_MARKER: &str = "[worker-down]";
+
+/// Pure: the "this worker is not coming back" line, with `label` folded in.
+///
+/// Mirrors [`format_persistent_death_line`], and for the same reason: the
+/// stderr fallback carries no `tracing` fields, so a label kept only in a field
+/// leaves the reader of a fallback line unable to tell `matrix` from `email`.
+pub fn format_persistent_down_line(label: &str, reason: &str) -> String {
+    format!("persistent worker {label} is down: {reason}")
+}
+
+/// The [`format_persistent_death_stderr_fallback`] counterpart for the
+/// not-coming-back event.
+///
+/// ⚠️ **Takes an ALREADY-FOLDED line**, exactly like its death sibling — see
+/// that function's warning. A caller who passes a bare reason gets a
+/// `[worker-down]` line naming no worker.
+pub fn format_persistent_down_stderr_fallback(report: &str) -> String {
+    format_stderr_fallback(WORKER_DOWN_STDERR_MARKER, report)
+}
+
+/// Report that a persistent worker is **not coming back** — through `tracing`,
+/// and through the process's own stderr when no subscriber is installed.
+///
+/// The one producer for that event (#738). Before this, the driver's
+/// respawn-failure and rate-alarm lines were bare `tracing::warn!`s — the exact
+/// hand-rolled-second-copy shape #730 removed one layer down, and with the same
+/// consequence: after #730 a persistent worker whose factory can *never* succeed
+/// produced exactly one `[worker-death]` line in a subscriber-less binary and
+/// then looped forever in silence.
+///
+/// ⚠️ **Not a death report, and deliberately not marked as one.** See
+/// [`WORKER_DOWN_STDERR_MARKER`].
+///
+/// Goes through the same `emit_to_stderr_when_unheard` as both other
+/// emitters, so the `has_been_set()` guard and the control neutralisation still
+/// exist in exactly one copy. `reason` is neutralised here on its own account,
+/// because the three callers include one whose input is a **panic payload**
+/// (`worker_lifecycle::persistent`'s join), and a panic message is arbitrary
+/// text from arbitrary code.
+///
+pub fn emit_persistent_down_report(label: &str, reason: &str) {
+    let label = crate::untrusted_text::neutralise_controls(label);
+    let line = crate::untrusted_text::neutralise_controls(&format_persistent_down_line(
+        &label, reason,
+    ));
+    tracing::warn!(%label, "{line}");
+    emit_to_stderr_when_unheard(WORKER_DOWN_STDERR_MARKER, &line);
 }
 
 #[cfg(test)]
@@ -188,6 +257,60 @@ mod tests {
         // Neutralisation maps the class to a space, so the text must SURVIVE —
         // mid-line. A check that merely asserted its absence would also pass if the
         // report stopped reaching the line at all.
+        assert!(
+            line.contains("forged-gate-line"),
+            "the text must survive as text; only its line-forging effect is removed: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_down_line_names_which_worker_and_carries_the_reason() {
+        // Same argument as the death line's: the stderr fallback carries no
+        // `tracing` fields, so a label kept only in a field leaves an operator
+        // reading "a persistent worker is down" with `matrix` and `email` both
+        // live.
+        let line = format_persistent_down_line("matrix", "respawn attempt 3 failed: ENOENT");
+        assert!(line.contains("matrix"), "{line}");
+        assert!(line.contains("respawn attempt 3 failed: ENOENT"), "{line}");
+    }
+
+    #[test]
+    fn a_death_and_a_down_do_not_read_the_same() {
+        // #738's whole argument in one assertion: "died once and came back" and
+        // "is not coming back" are different events, and a reader must be able
+        // to tell them apart from the line alone, not just from the marker.
+        let death = format_persistent_death_line("matrix", "worker exited (signal: 9)");
+        let down = format_persistent_down_line("matrix", "worker exited (signal: 9)");
+        assert_ne!(death, down);
+        assert!(
+            format_persistent_down_stderr_fallback(&down)
+                .starts_with(WORKER_DOWN_STDERR_MARKER),
+            "the marker must lead so a grep anchored at line start finds it"
+        );
+        assert!(
+            !format_persistent_down_stderr_fallback(&down)
+                .starts_with(WORKER_DEATH_STDERR_MARKER),
+            "a down line must not be collected as a death line"
+        );
+    }
+
+    #[test]
+    fn the_down_fallback_neutralises_a_hostile_reason() {
+        // The reason reaching `emit_persistent_down_report` includes a PANIC
+        // PAYLOAD (#739's join path), which is arbitrary text from arbitrary
+        // code — a genuinely untrusted input, unlike the death report's, whose
+        // neutralisation is defence-in-depth at a trait boundary.
+        let hostile = "boom\u{1b}[31m\n[WARN] forged-gate-line";
+        let line = format_persistent_down_stderr_fallback(&format_persistent_down_line(
+            "matrix", hostile,
+        ));
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        assert_eq!(
+            line.lines().count(),
+            1,
+            "a `\\n` here forges a column-0 line that `run-e2e-gate.sh`'s `^\\[WARN\\]` grep \
+             counts, failing an unrelated profile: {line:?}"
+        );
         assert!(
             line.contains("forged-gate-line"),
             "the text must survive as text; only its line-forging effect is removed: {line:?}"

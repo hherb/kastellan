@@ -61,7 +61,7 @@ use kastellan_core::worker_lifecycle::force_route::env_flag_enabled;
 use kastellan_core::worker_lifecycle::{
     PersistentFactory, PersistentHandle, PersistentTransport, PersistentWorker, RestartBackoff,
 };
-use kastellan_core::worker_stderr::{EARLY_EXIT_STDERR_MARKER, WORKER_DEATH_STDERR_MARKER};
+use kastellan_core::worker_stderr::{WORKER_FAILED_STDERR_MARKER, WORKER_DEATH_STDERR_MARKER};
 
 /// The supervisor label the fixture's worker runs under — what an operator
 /// reads first to know *which* worker died. Shaped like the two real ones
@@ -523,7 +523,7 @@ fn a_failing_test_with_no_subscriber_shows_the_dead_workers_report() {
     // would make a gate log unable to say whether a tool worker failed one call
     // or a long-lived worker stopped and is being respawned.
     assert!(
-        !run.stdout.contains(EARLY_EXIT_STDERR_MARKER),
+        !run.stdout.contains(WORKER_FAILED_STDERR_MARKER),
         "a persistent-worker death must NOT be reported under the early-exit marker — they \
          point at different places to look.\n{both}"
     );
@@ -580,5 +580,349 @@ fn a_binary_that_installed_a_subscriber_does_not_get_the_report_twice() {
         run.stderr.contains(FORGED_LABEL_TEXT),
         "POSITIVE CONTROL for the hostile LABEL on the `tracing` channel: it never arrived, so \
          the defanging checks above say nothing about the label's own neutralisation.\n{both}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #738 / #739 — the supervisor's OTHER two things to say
+//
+// #730 gave the driver's death report a second channel. Its two siblings on the
+// same thread kept their bare `tracing::warn!`, so after #730 a persistent
+// worker whose factory can never succeed produced exactly ONE `[worker-death]`
+// line in a subscriber-less binary and then looped forever in silence (#738) —
+// and a driver that *panicked* said nothing at all while every later call
+// returned "persistent driver gone" for the life of the process (#739).
+//
+// Both use the same child-process machinery above, for the same reason: the
+// claim is about what an operator sees, which a test cannot observe about
+// itself.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use kastellan_core::worker_stderr::WORKER_DOWN_STDERR_MARKER;
+
+/// The label for the down/panic fixtures. Distinct from [`LABEL`] and free of
+/// control characters — those are pinned by the death fixtures above, and
+/// repeating them here would only make the assertions harder to read.
+const DOWN_LABEL: &str = "kastellan-test-738";
+
+/// What [`PanickingReportTransport::death_report`] panics with.
+///
+/// ⚠️ Carries a control character on purpose. A panic payload is arbitrary text
+/// from arbitrary code — the one genuinely untrusted input any of these three
+/// emitters receives — and it reaches `emit_persistent_down_report` through
+/// `panic_payload_text`. If that path skipped the neutralisation, a
+/// `PersistentTransport` implementor could forge a column-0 gate line by
+/// panicking.
+const PANIC_MESSAGE: &str = "fixture death_report panics\u{1b}[31m\n[WARN] FORGED-PANIC-LINE";
+
+/// The part of [`PANIC_MESSAGE`] no neutralisation touches — the positive
+/// control, so "no forged line" cannot be satisfied by the payload never
+/// arriving.
+const PANIC_TEXT: &str = "FORGED-PANIC-LINE";
+
+/// How many consecutive respawn *failures* the down fixture provokes.
+///
+/// A fixed number rather than "sleep and see": the driver's respawn loop is
+/// unbounded, so a time-based fixture would emit a machine-dependent number of
+/// lines and the parent could only assert `>= 1`. With a factory that fails
+/// exactly this many times and then succeeds, the parent asserts an exact
+/// count — which is what catches an emitter that fires twice per attempt, or
+/// once per storm instead of once per attempt.
+const RESPAWN_FAILURES: usize = 3;
+
+/// The transport the fixture's factory finally succeeds with.
+///
+/// Unlike [`SurvivingTransport`] it **answers**, which is what makes recovery
+/// observable: the fixture polls until a call returns `Ok`, and that is the
+/// only way to know the failing attempts before it actually ran. A transport
+/// that errors would be indistinguishable from one that is still down.
+struct RecoveredTransport;
+
+impl PersistentTransport for RecoveredTransport {
+    fn call(&mut self, _m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!("pong"))
+    }
+}
+
+/// A transport whose `death_report()` **panics**, killing the driver thread.
+///
+/// The production shapes this stands in for are a panicking
+/// `PersistentTransport` implementation and a panicking `eprintln!` on a broken
+/// pipe (#733/#739). Either way `join()` returns `Err` and, before this change,
+/// both `shutdown()` and `Drop` discarded it with `let _ =`.
+struct PanickingReportTransport;
+
+impl PersistentTransport for PanickingReportTransport {
+    fn call(&mut self, _m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("{SIMULATED_DEATH}")
+    }
+
+    fn death_report(&mut self) -> Option<String> {
+        panic!("{PANIC_MESSAGE}")
+    }
+}
+
+/// Drive five successful respawns (arming the rate alarm), then
+/// [`RESPAWN_FAILURES`] failed ones, then let it recover.
+///
+/// ⚠️ **The two #738 sites need opposite factories**, which is why one fixture
+/// does both in sequence rather than one testing each: the rate alarm fires
+/// only when a respawn **succeeds**, and the respawn-failure line only when one
+/// **fails**. A fixture with a single factory can reach exactly one of them —
+/// and #740's review is this tree's worked example of a claim about two call
+/// sites with a gate behind only one.
+fn drive_a_persistent_worker_until_it_stays_down() {
+    // `ALARM_THRESHOLD` is 5 and the alarm latches, so five successful respawns
+    // produce exactly one alarm line however many deaths follow.
+    const SUCCESSFUL_RESPAWNS: usize = 5;
+    let mut spawns = 0usize;
+    let factory: PersistentFactory = Box::new(move || {
+        spawns += 1;
+        // 1 = the initial spawn; 2..=6 = the five respawns that arm the alarm.
+        if spawns <= SUCCESSFUL_RESPAWNS + 1 {
+            return Ok(Box::new(DyingTransport) as Box<dyn PersistentTransport>);
+        }
+        // The next few respawn attempts fail outright: a worker that cannot
+        // come back. This is the unbounded-silence half of #738.
+        if spawns <= SUCCESSFUL_RESPAWNS + 1 + RESPAWN_FAILURES {
+            anyhow::bail!("fixture factory refuses to spawn");
+        }
+        Ok(Box::new(RecoveredTransport) as Box<dyn PersistentTransport>)
+    });
+    let h = PersistentWorker::spawn_with_backoff(DOWN_LABEL, factory, fast_backoff())
+        .expect("spawn the fixture's persistent worker");
+
+    // Each call kills the live transport and provokes one respawn. The last of
+    // these is the death the failing factory cannot recover from immediately.
+    for _ in 0..=SUCCESSFUL_RESPAWNS {
+        kill_one_transport(&h, SIMULATED_DEATH);
+    }
+
+    // ⚠️ **Wait for the recovery, do not just shut down.** `kill_one_transport`
+    // returns the moment the *caller* is answered, and the driver replies
+    // before it respawns — so shutting down here drops `req_tx`, the respawn
+    // loop's `try_recv` sees `Disconnected` on its very first pass, and it
+    // returns having never called the factory. The first draft did exactly
+    // that and observed ZERO respawn-failure lines while looking like it had
+    // driven them. Polling until the recovered transport answers proves every
+    // failing attempt in between actually ran.
+    let mut recovered = false;
+    for _ in 0..1000 {
+        if h.call("ping", serde_json::json!({})).is_ok() {
+            recovered = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        recovered,
+        "the fixture's worker never came back, so the {RESPAWN_FAILURES} failing respawn \
+         attempts the parent counts may not all have happened"
+    );
+    h.shutdown();
+}
+
+/// Drive one death whose `death_report()` panics, then shut down.
+///
+/// ⚠️ **`shutdown()` is the site under test**, not the call. The driver replies
+/// to the in-flight caller *before* asking for the death report, so the call
+/// returns normally and the thread dies afterwards; only the join observes it.
+fn drive_a_persistent_worker_until_its_driver_panics() {
+    let factory: PersistentFactory =
+        Box::new(|| Ok(Box::new(PanickingReportTransport) as Box<dyn PersistentTransport>));
+    let h = PersistentWorker::spawn_with_backoff(DOWN_LABEL, factory, fast_backoff())
+        .expect("spawn the fixture's persistent worker");
+
+    // This call is answered (with the transport's error) and *then* the driver
+    // panics asking for the report.
+    let first = h.call("ping", serde_json::json!({}));
+    assert!(first.is_err(), "the fixture's transport must never answer a call");
+
+    // Wait until the driver is observably gone, so the join below is the one
+    // that reports rather than a race with a thread still winding down.
+    let mut gone = false;
+    for _ in 0..500 {
+        if let Err(e) = h.call("ping", serde_json::json!({})) {
+            if format!("{e:#}").contains("driver gone") {
+                gone = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        gone,
+        "the fixture's driver never died, so `shutdown()` will join a healthy thread and every \
+         assertion in the parent would be vacuous"
+    );
+
+    h.shutdown();
+}
+
+/// Inner fixture: no subscriber, a worker that crash-loops and then cannot come
+/// back at all.
+#[test]
+#[ignore = "inner fixture: fails on purpose; run by its parent test in a child process"]
+fn inner_fixture_persistent_down_without_a_subscriber() {
+    if !is_the_child() {
+        return;
+    }
+    drive_a_persistent_worker_until_it_stays_down();
+    panic!("{DELIBERATE}");
+}
+
+/// Inner fixture: no subscriber, a driver thread that panics.
+#[test]
+#[ignore = "inner fixture: fails on purpose; run by its parent test in a child process"]
+fn inner_fixture_persistent_driver_panic_without_a_subscriber() {
+    if !is_the_child() {
+        return;
+    }
+    drive_a_persistent_worker_until_its_driver_panics();
+    panic!("{DELIBERATE}");
+}
+
+/// Every `[worker-down]` line in `stream`, marker-anchored at column 0.
+fn down_lines(stream: &str) -> Vec<&str> {
+    stream.lines().filter(|l| l.starts_with(WORKER_DOWN_STDERR_MARKER)).collect()
+}
+
+#[test]
+fn a_crash_looping_worker_that_cannot_come_back_says_so_on_both_counts() {
+    let name = "inner_fixture_persistent_down_without_a_subscriber";
+    let run = run_inner_fixture(name);
+    assert_one_deliberate_failure(name, &run);
+    let both = run.both();
+
+    let down = down_lines(&run.stdout);
+    assert!(
+        !down.is_empty(),
+        "no `{WORKER_DOWN_STDERR_MARKER}` line at all in the failing test's CAPTURED output. \
+         That is #738 exactly: after #730 a worker that cannot come back emitted one \
+         `[worker-death]` and then looped forever in silence.\n{both}"
+    );
+
+    // Each line must name WHICH worker, for the same reason the death line must:
+    // the fallback channel carries no `tracing` fields to recover it from, and
+    // `matrix` and `email` are both live in production.
+    for line in &down {
+        assert!(
+            line.contains(DOWN_LABEL),
+            "a `{WORKER_DOWN_STDERR_MARKER}` line that does not name the worker is unusable \
+             when two channels run: {line}\n{both}"
+        );
+    }
+
+    // The rate alarm — "it comes back but does not stay up". Exactly one,
+    // because `RespawnRateAlarm` latches for the duration of a storm; an
+    // emitter moved outside the `if let Some(n)` would fire on every respawn.
+    let alarms: Vec<_> = down.iter().filter(|l| l.contains("respawn-rate alarm")).collect();
+    assert_eq!(
+        alarms.len(),
+        1,
+        "expected exactly ONE respawn-rate alarm line — the alarm latches per storm.\n\
+         got: {alarms:?}\n{both}"
+    );
+
+    // The respawn failures — "it is not coming back". Exactly
+    // `RESPAWN_FAILURES`, which is why the fixture's factory counts rather than
+    // sleeping: a `>= 1` assertion would pass for an emitter that fired once
+    // per storm instead of once per attempt, which is the opposite policy.
+    let failures: Vec<_> = down.iter().filter(|l| l.contains("respawn attempt")).collect();
+    assert_eq!(
+        failures.len(),
+        RESPAWN_FAILURES,
+        "expected exactly {RESPAWN_FAILURES} respawn-failure lines, one per failed attempt.\n\
+         got: {failures:?}\n{both}"
+    );
+    assert!(
+        failures.iter().any(|l| l.contains("fixture factory refuses to spawn")),
+        "a respawn-failure line must carry the factory's OWN error — without it the operator \
+         learns that it failed and nothing about why.\ngot: {failures:?}\n{both}"
+    );
+
+    // A down is not a death: the events must stay greppable apart (#738).
+    let deaths: Vec<&str> =
+        run.stdout.lines().filter(|l| l.starts_with(WORKER_DEATH_STDERR_MARKER)).collect();
+    assert!(
+        !deaths.is_empty(),
+        "POSITIVE CONTROL: the fixture's workers must also have DIED, or the down lines above \
+         were produced by something other than the path under test.\n{both}"
+    );
+    assert!(
+        deaths.iter().all(|l| !down.contains(l)),
+        "a death line was collected as a down line; the two markers must not overlap.\n{both}"
+    );
+}
+
+#[test]
+fn a_panicking_driver_thread_is_reported_instead_of_swallowed_by_the_join() {
+    let name = "inner_fixture_persistent_driver_panic_without_a_subscriber";
+    let run = run_inner_fixture(name);
+    assert_one_deliberate_failure(name, &run);
+    let both = run.both();
+
+    let down = down_lines(&run.stdout);
+    assert_eq!(
+        down.len(),
+        1,
+        "expected exactly ONE `{WORKER_DOWN_STDERR_MARKER}` line for a panicked driver. None \
+         means `shutdown()`/`Drop` still discard the join's `Err` with `let _ =` (#739), which \
+         leaves every later call returning \"persistent driver gone\" forever with nothing \
+         said. More than one means `join_driver` is not idempotent and `Drop` reported the \
+         same panic after `shutdown()` already had.\ngot: {down:?}\n{both}"
+    );
+    assert!(
+        down[0].contains("PANICKED"),
+        "the line must say the driver PANICKED — a generic 'down' would send the reader to the \
+         respawn loop, which is not where the problem is.\ngot: {}\n{both}",
+        down[0]
+    );
+    assert!(
+        down[0].contains(DOWN_LABEL),
+        "the line must name WHICH channel is permanently gone.\ngot: {}\n{both}",
+        down[0]
+    );
+    assert!(
+        down[0].contains("fixture death_report panics"),
+        "the line must carry the PANIC MESSAGE. Without downcasting the payload the report can \
+         only say that a panic happened, which is the shrug this whole arc exists to \
+         remove.\ngot: {}\n{both}",
+        down[0]
+    );
+
+    // The panic payload is arbitrary text from arbitrary code — the one
+    // genuinely untrusted input these emitters take.
+    assert!(
+        run.stdout.contains(PANIC_TEXT),
+        "POSITIVE CONTROL: the panic payload never reached the output, so the defanging checks \
+         below would pass vacuously.\n{both}"
+    );
+    assert!(
+        !down[0].contains('\u{1b}'),
+        "an ESC from a panic payload reached the report unneutralised.\ngot: {}\n{both}",
+        down[0]
+    );
+    assert_eq!(
+        down[0].lines().count(),
+        1,
+        "a `\\n` in a panic payload must not break the report into a second, COLUMN-0 line — \
+         `scripts/run-e2e-gate.sh` greps `^\\[WARN\\]` and asserts zero matches.\ngot: {:?}\n{both}",
+        down[0]
+    );
+
+    // ⚠️ **Scoped to the report line, NOT to the whole stream, and that is a
+    // finding rather than a convenience.** Rust's default panic hook prints the
+    // payload verbatim before anything here runs, so this child's output really
+    // does contain a column-0 `[WARN] FORGED-PANIC-LINE` — emitted by the
+    // runtime, not by us. Asserting over the whole stream would be asserting
+    // against `std`. The property this suite owns is that *our* line is intact;
+    // the hook's is filed separately. Reading the whole-stream version as a
+    // failure of the emitter would be attributing someone else's output.
+    assert!(
+        run.stdout.lines().any(|l| l.starts_with("[WARN] FORGED-PANIC-LINE")),
+        "POSITIVE CONTROL for the note above: the default panic hook is expected to print the \
+         raw payload at column 0. If it no longer does, this scoping is over-cautious and the \
+         whole-stream assertion could be restored.\n{both}"
     );
 }

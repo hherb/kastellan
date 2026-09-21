@@ -13,27 +13,13 @@
 //! Matrix channel used before adopting this shared supervisor).
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use kastellan_protocol::client::Client;
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
 use crate::channel::respawn_alarm::RespawnRateAlarm;
 use crate::worker_lifecycle::RestartBackoff;
-
-/// How long [`ClientTransport::death_report`] waits for the stderr drainer to
-/// reach EOF before snapshotting the tail.
-///
-/// The same 250 ms `tool_host::EARLY_EXIT_DRAIN_WAIT` uses, and deliberately so:
-/// both are "the worker just closed its pipes; give the drain thread a moment to
-/// finish" and there is no reason for a persistent worker's last words to be
-/// collected less patiently than a tool worker's. A separate const rather than a
-/// shared one only because the two live in unrelated modules; if a third appears,
-/// hoist them.
-///
-/// ⚠️ **This is a cap, not a cost.** `StderrTail::wait_for_drain` returns as soon
-/// as `mark_drained` lands, so a worker whose stderr has already closed costs ~2 ms.
-const DEATH_DRAIN_WAIT: Duration = Duration::from_millis(250);
 
 // ── ClientTransport ──────────────────────────────────────────────────────────
 
@@ -112,7 +98,7 @@ impl PersistentTransport for ClientTransport {
     }
 
     fn death_report(&mut self) -> Option<String> {
-        let tail = collect_death_tail(self.stderr_tail.as_ref()?);
+        let tail = crate::worker_stderr::collect_tail_after_drain(self.stderr_tail.as_ref()?);
         // A SINGLE non-blocking reap, deliberately: unlike the drain above there
         // is no flag to wait on, so this would be an unbounded poll loop against
         // a slow-exiting VM launcher. `format_death_report` renders a `None`
@@ -121,37 +107,6 @@ impl PersistentTransport for ClientTransport {
         let status = self.client.try_wait().ok().flatten();
         Some(crate::worker_stderr::format_death_report(status, &tail))
     }
-}
-
-/// Wait for the stderr drainer to finish, then snapshot the tail.
-///
-/// ⚠️ **A free function, not an inlined pair of calls, so the wait is reachable
-/// from a unit test.** The decision it encodes — *wait before snapshotting* —
-/// otherwise lives inside `ClientTransport::death_report`, which needs a real
-/// `Client` over a spawned child to construct, so no test could reach the
-/// accepting branch and a mutant deleting the wait would survive. Extracting it
-/// until a unit test can reach it is what the test below depends on.
-fn collect_death_tail(tail_ring: &crate::worker_stderr::StderrTail) -> Vec<String> {
-    // ⚠️ **Wait for the drainer before snapshotting, exactly as the
-    // tool-worker path does** (`tool_host::warn_early_exit`). The worker has
-    // already closed stdout, so its stderr is closing too; without this we
-    // usually snapshot an EMPTY ring and report "no stderr captured" for a
-    // worker that explained itself a millisecond later. That turns #730's
-    // whole point — routing this report to a channel a human reads — into a
-    // contentless line.
-    //
-    // ⚠️ **This costs the supervisor nothing, which is why the earlier
-    // "would stall the driver" reasoning was wrong.** The wait is bounded,
-    // and it returns the instant `mark_drained` lands (`wait_for_drain`
-    // polls a flag every 2 ms, so the common case is ~2 ms, not the cap).
-    // More decisively: the driver's very next act on this path is
-    // `thread::sleep(backoff.next_delay(0))`, and BOTH production users
-    // configure `base: Duration::from_secs(1)` (`channel::matrix`,
-    // `channel::email`). The driver is about to sleep a full second
-    // regardless — spending a fraction of it collecting the explanation
-    // delays no respawn at all.
-    tail_ring.wait_for_drain(DEATH_DRAIN_WAIT);
-    tail_ring.snapshot()
 }
 
 impl Drop for ClientTransport {
@@ -189,6 +144,13 @@ pub struct PersistentWorker;
 pub struct PersistentHandle {
     req_tx: Option<mpsc::Sender<Job>>,
     driver: Option<thread::JoinHandle<()>>,
+    /// Which worker this drives (`matrix`, `email`, …).
+    ///
+    /// Kept on the handle solely so [`Self::join_driver`] can name it when the
+    /// driver thread dies ([#739](https://github.com/hherb/kastellan/issues/739)).
+    /// Before that the handle carried no label at all, so the one event an
+    /// operator most needs named — "this channel is gone" — could not say which.
+    label: String,
 }
 
 const ALARM_THRESHOLD: usize = 5;
@@ -205,6 +167,9 @@ impl PersistentWorker {
         backoff: RestartBackoff,
     ) -> anyhow::Result<PersistentHandle> {
         let label = label.into();
+        // The driver closure below MOVES `label`; the handle needs its own copy
+        // so a join that observes a panicked driver can still name the worker.
+        let handle_label: String = String::clone(&label);
         let (req_tx, req_rx) = mpsc::channel::<Job>();
         let (init_tx, init_rx) = mpsc::channel::<anyhow::Result<()>>();
         let driver = thread::spawn(move || {
@@ -289,12 +254,37 @@ impl PersistentWorker {
                                     thread::spawn(move || drop(dead));
                                     tracing::info!(%label, "persistent worker respawned");
                                     if let Some(n) = alarm.record(Instant::now()) {
-                                        tracing::warn!(%label, respawns = n, "persistent worker respawn-rate alarm");
+                                        // #738: NOT a bare `tracing::warn!`. It
+                                        // came back, but it is crash-looping —
+                                        // and in a subscriber-less binary that
+                                        // was said nowhere.
+                                        crate::worker_stderr::emit_persistent_down_report(
+                                            &label,
+                                            &format!(
+                                                "respawn-rate alarm: {n} respawns within \
+                                                 {}s — it comes back but does not stay up",
+                                                ALARM_WINDOW.as_secs()
+                                            ),
+                                        );
                                     }
                                     break;
                                 }
                                 Err(e) => {
-                                    tracing::warn!(%label, error = %format!("{e:#}"), "respawn failed; backing off");
+                                    // #738: the worker CANNOT come back, and
+                                    // this loop is unbounded. After #730 a
+                                    // persistent worker whose factory can never
+                                    // succeed emitted exactly one
+                                    // `[worker-death]` line and then looped
+                                    // forever in silence — the more
+                                    // operationally important half of the same
+                                    // defect, one level up.
+                                    crate::worker_stderr::emit_persistent_down_report(
+                                        &label,
+                                        &format!(
+                                            "respawn attempt {} failed, backing off: {e:#}",
+                                            restarts + 1
+                                        ),
+                                    );
                                     restarts += 1;
                                 }
                             }
@@ -307,7 +297,7 @@ impl PersistentWorker {
         });
         init_rx.recv()
             .map_err(|_| anyhow::anyhow!("persistent driver exited before initial spawn"))??;
-        Ok(PersistentHandle { req_tx: Some(req_tx), driver: Some(driver) })
+        Ok(PersistentHandle { req_tx: Some(req_tx), driver: Some(driver), label: handle_label })
     }
 }
 
@@ -322,14 +312,73 @@ impl PersistentHandle {
 
     pub fn shutdown(mut self) {
         self.req_tx.take(); // drop sender → driver loop exits → transport teardown
-        if let Some(d) = self.driver.take() { let _ = d.join(); }
+        self.join_driver();
+    }
+
+    /// Join the driver thread and **report it if it panicked** (#739).
+    ///
+    /// One copy, called by both [`Self::shutdown`] and [`Drop`]. Those were two
+    /// hand-rolled `let _ = d.join();` lines, and discarding that `Err` is not a
+    /// style detail: when the driver thread dies, `req_rx` drops and every later
+    /// [`Self::call`] returns `"persistent driver gone"` **forever, with no
+    /// respawn** — a permanently dead Matrix or email channel. Nothing said so.
+    ///
+    /// ⚠️ **Wider than the `eprintln!` #739 was filed about.** *Any* panic on
+    /// that thread does this: a panicking [`PersistentTransport`] implementation,
+    /// a panicking factory closure, an arithmetic bug in the backoff. Keying the
+    /// report on the join result rather than on a suspected cause covers all of
+    /// them.
+    ///
+    /// ⚠️ **Reported from the JOINING thread, which is what dissolves the
+    /// recursion the issue worried about.** #739 asks how a report about a
+    /// failed `eprintln!` can itself use `eprintln!`. It does not have to: this
+    /// runs on whichever thread is dropping the handle, so a write failure here
+    /// panics that caller like any other and cannot take a supervisor with it.
+    ///
+    /// Idempotent — `driver.take()` means the second call (`Drop` after
+    /// `shutdown`) is a no-op, so a panic is reported once.
+    fn join_driver(&mut self) {
+        let Some(d) = self.driver.take() else { return };
+        if let Err(payload) = d.join() {
+            crate::worker_stderr::emit_persistent_down_report(
+                &self.label,
+                &format!(
+                    "driver thread PANICKED ({}); every later call will fail with \
+                     \"persistent driver gone\" and NOTHING will respawn it",
+                    panic_payload_text(payload.as_ref())
+                ),
+            );
+        }
+    }
+}
+
+/// Pure: render a panicked thread's payload as text.
+///
+/// `Box<dyn Any>` is whatever was passed to `panic!`. In practice the standard
+/// formatting machinery produces a `String`, and a bare `panic!("literal")`
+/// produces a `&'static str`; anything else is a custom payload we can only
+/// acknowledge. Downcasting both common shapes is the difference between
+/// naming the bug and reporting that one happened.
+///
+/// ⚠️ **The output is untrusted text** — a panic message comes from arbitrary
+/// code, including a third-party [`PersistentTransport`] implementation. The
+/// caller passes it to `emit_persistent_down_report`, which neutralises control
+/// characters; this function deliberately does not, so the neutralisation keeps
+/// living in exactly one place.
+fn panic_payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 
 impl Drop for PersistentHandle {
     fn drop(&mut self) {
         self.req_tx.take();
-        if let Some(d) = self.driver.take() { let _ = d.join(); }
+        self.join_driver();
     }
 }
 
@@ -341,40 +390,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn collecting_a_death_tail_waits_for_the_drainer_instead_of_racing_it() {
-        // The property #735 restored: a worker that has just closed its pipes
-        // has usually NOT been drained yet, so snapshotting immediately yields
-        // an empty ring and `format_death_report` renders "no stderr captured"
-        // for a worker that explained itself a millisecond later. That is the
-        // contentless line #730's whole point was to avoid.
-        //
-        // The drainer here lands its line AFTER this thread has already called
-        // `collect_death_tail`, which is exactly the race in production. Deleting
-        // the `wait_for_drain` makes this return empty and the test fails.
-        let tail = crate::worker_stderr::StderrTail::new(8);
-        let writer = tail.clone();
-        let drain = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(30));
-            crate::worker_stderr::drain_reader(
-                0,
-                std::io::Cursor::new(b"matrix sync failed, refusing to continue\n".to_vec()),
-                Some(&writer),
-            );
-            writer.mark_drained();
-        });
-
-        let collected = collect_death_tail(&tail);
-        drain.join().expect("the fixture's drain thread");
-
-        assert_eq!(
-            collected,
-            vec!["matrix sync failed, refusing to continue".to_string()],
-            "the dying worker's explanation must be collected, not raced — an empty tail here \
-             is the `no stderr captured` line that made #730's fix contentless"
-        );
-    }
-
-    #[test]
     fn collecting_a_death_tail_gives_up_rather_than_hanging_on_a_drainer_that_never_finishes() {
         // The other half: the wait is a CAP. A drainer that never marks itself
         // done (a worker still alive and chatting, a drain thread wedged) must
@@ -382,16 +397,16 @@ mod tests {
         // Without a bound this would hang the whole test binary.
         let tail = crate::worker_stderr::StderrTail::new(8);
         let started = Instant::now();
-        let collected = collect_death_tail(&tail);
+        let collected = crate::worker_stderr::collect_tail_after_drain(&tail);
         let waited = started.elapsed();
 
         assert!(collected.is_empty(), "nothing was ever drained: {collected:?}");
         assert!(
-            waited >= DEATH_DRAIN_WAIT,
+            waited >= crate::worker_stderr::TAIL_DRAIN_WAIT,
             "it must actually wait the cap before giving up, or it is racing again: {waited:?}"
         );
         assert!(
-            waited < DEATH_DRAIN_WAIT * 4,
+            waited < crate::worker_stderr::TAIL_DRAIN_WAIT * 4,
             "the wait must be BOUNDED — the driver is about to respawn and cannot block on a \
              drainer that never finishes: {waited:?}"
         );

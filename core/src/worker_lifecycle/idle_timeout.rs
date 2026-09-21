@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use kastellan_protocol::client::ClientError;
 use kastellan_sandbox::SandboxBackend;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
@@ -72,46 +71,8 @@ impl RestartBackoff {
     }
 }
 
-/// Pure: classify a dispatch error as "worker died" or "worker still alive".
-///
-/// The spec's "Cap-check semantics" §"Mid-flight termination" §2 says a worker process
-/// reported dead by the OS triggers restart; v1 slice 2 detects death *passively* on
-/// the next dispatch attempt, classifying error variants:
-///
-/// | Variant                                          | Classification |
-/// | ------------------------------------------------ | -------------- |
-/// | `Ok(_)`                                          | alive          |
-/// | `Err(Sandbox(_))`                                | n/a (no worker exists; pre-spawn) |
-/// | `Err(Io(_))`                                     | dead           |
-/// | `Err(Protocol(Rpc(_)))`                          | alive (worker rejected the call) |
-/// | `Err(Protocol(Io(_)))`                           | dead           |
-/// | `Err(Protocol(Decode(_)))`                       | dead           |
-/// | `Err(Protocol(EarlyExit))`                       | dead           |
-/// | `Err(Protocol(IdMismatch { .. }))`               | dead           |
-pub fn dispatch_indicates_worker_dead<T>(result: &Result<T, ToolHostError>) -> bool {
-    match result {
-        Ok(_) => false,
-        Err(ToolHostError::Sandbox(_)) => false, // pre-spawn; no worker to be dead
-        Err(ToolHostError::Io(_)) => true,
-        // Exhaustive on `ClientError` so any future variant added to `kastellan-protocol`
-        // breaks the build here and forces a deliberate classification decision rather
-        // than silently inheriting the "dead" default.
-        Err(ToolHostError::Protocol(ClientError::Rpc(_))) => false,
-        Err(ToolHostError::Protocol(ClientError::Io(_))) => true,
-        Err(ToolHostError::Protocol(ClientError::Decode(_))) => true,
-        Err(ToolHostError::Protocol(ClientError::EarlyExit)) => true,
-        Err(ToolHostError::Protocol(ClientError::IdMismatch { .. })) => true,
-        // A response over the record cap means the worker flooded the pipe;
-        // the read stream is desynced and untrustworthy — retire the worker.
-        Err(ToolHostError::Protocol(ClientError::ResponseTooLarge { .. })) => true,
-        // SecretRedemptionFailed fires before the worker is called —
-        // the worker process was never contacted, so it is not dead.
-        Err(ToolHostError::SecretRedemptionFailed(_)) => false,
-        // EgressProvisionFailed (slice #3b, #268) also fires before the worker
-        // is called — worker process was never contacted, not dead.
-        Err(ToolHostError::EgressProvisionFailed(_)) => false,
-    }
-}
+mod liveness;
+pub use liveness::{dispatch_indicates_worker_dead, WorkerRetirementCause};
 
 /// Pure: has this warm worker hit `max_requests`?
 ///
