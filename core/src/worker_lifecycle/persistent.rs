@@ -174,7 +174,15 @@ impl PersistentWorker {
                         // panicking death_report cannot prevent the reply.
                         let _ = job.reply.send(Err(e));
                         if let Some(r) = transport.death_report() {
-                            tracing::warn!(%label, "persistent worker died: {r}");
+                            // NOT a bare `tracing::warn!` (#730). This driver
+                            // runs the Matrix and email channel workers, and
+                            // 29 of the 30 `core/tests` suites that dispatch
+                            // to a real worker install no subscriber — so a
+                            // `tracing`-only report is discarded in exactly
+                            // the place a human is reading. The emitter owns
+                            // both channels, the marker and the
+                            // neutralisation; see `worker_stderr::report`.
+                            crate::worker_stderr::emit_persistent_death_report(&label, &r);
                         }
                         // Respawn with backoff.  IMPORTANT fix: after each
                         // sleep/attempt we poll req_rx so that a concurrent

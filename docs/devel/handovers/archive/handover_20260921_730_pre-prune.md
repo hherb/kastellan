@@ -7,14 +7,14 @@
 > [`archive/handover_20260919_699_pre-prune.md`](archive/handover_20260919_699_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
-**Last updated:** 2026-09-21 (#730: the persistent worker's death report reaches a failing test) ·
-**Recent PRs, newest first:** PR-for-#730 (#730, + a movement-only `worker_stderr` split), [#731](https://github.com/hherb/kastellan/pull/731) (#725), [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700), [#727](https://github.com/hherb/kastellan/pull/727) (#677/#560 live acceptance, docs), [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
+**Last updated:** 2026-09-20 (#725: a dying worker's last words reach a failing test) ·
+**Recent PRs, newest first:** [#731](https://github.com/hherb/kastellan/pull/731) (#725), [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700), [#727](https://github.com/hherb/kastellan/pull/727) (#677/#560 live acceptance, docs), [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
 script that could not pass), [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob
 contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717) (backlog triage),
 [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational continuity),
 [#702](https://github.com/hherb/kastellan/pull/702) (#677, the planner's labelled result view),
 [#694](https://github.com/hherb/kastellan/pull/694) (#617). **Open issues these filed:**
-[#732](https://github.com/hherb/kastellan/issues/732)–[#734](https://github.com/hherb/kastellan/issues/734) (from #731; #730 closed by this session);
+[#730](https://github.com/hherb/kastellan/issues/730), [#732](https://github.com/hherb/kastellan/issues/732)–[#734](https://github.com/hherb/kastellan/issues/734) (from #731);
 [#718](https://github.com/hherb/kastellan/issues/718), [#721](https://github.com/hherb/kastellan/issues/721)–[#724](https://github.com/hherb/kastellan/issues/724) (from #720);
 [#710](https://github.com/hherb/kastellan/issues/710)–[#713](https://github.com/hherb/kastellan/issues/713), [#715](https://github.com/hherb/kastellan/issues/715), [#716](https://github.com/hherb/kastellan/issues/716) (from #709);
 [#698](https://github.com/hherb/kastellan/issues/698)–[#700](https://github.com/hherb/kastellan/issues/700),
@@ -23,10 +23,12 @@ contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717)
 [#691](https://github.com/hherb/kastellan/issues/691) (from #692). ·
 **The DGX runs `main` as of #709**, redeployed 2026-09-17 via `scripts/upgrade_from_git.sh` and
 verified (installed binaries byte-identical, units active, migration 0026's `tasks.turn_record`
-present). **No redeploy is owed for anything merged since** — #720/#726/#728/#731 and #730 touch
-only test-harness surface, docs, or a worker's startup-failure path; #730's sole daemon-visible
-delta is that a persistent worker's death line is now control-neutralised and carries its label
-inline. Rootfs images last rebuilt 2026-09-08.
+present). #720 changes nothing the Linux daemon runs. [#726](https://github.com/hherb/kastellan/pull/726)'s one Linux runtime change is on the gliner
+worker's **startup-failure path only** (a failed `import torch` under `auto` now exits with
+`MODEL_LOAD_FAILED` instead of falling back to cpu); a healthy start is unchanged, so no redeploy is owed.
+[#731](https://github.com/hherb/kastellan/pull/731) leaves the **daemon** unchanged (it installs a subscriber, so the fallback never fires);
+its only daemon-visible delta is that an early-exit log line is now control-neutralised. `kastellan-cli guard capture`
+does gain the line. No redeploy owed. Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -40,9 +42,10 @@ inline. Rootfs images last rebuilt 2026-09-08.
 > `KASTELLAN_GLINER_RELEX_ENABLE=1`. [[issue-as-filed-can-carry-a-regression]]
 
 > ⚠️ **A fix for a reviewer's finding can carry the next defect.** #677's approved spec capped
-> strings at 512 B, breaking the question that worked [[plan-text-is-a-defect-source]]; #720's review
-> closed a fail-*open* hole with a check that made it fail *always* (fixed in #726). **A passing
-> mutation proof is not a review either** [[mutation-proof-counts-only-mutants-you-tried]].
+> strings at 512 B, which would have broken the question that worked [[plan-text-is-a-defect-source]];
+> #720's review round closed the gate script's fail-*open* hole with a `PIPESTATUS[1]` check that made
+> it fail *always* (fixed in [#726](https://github.com/hherb/kastellan/pull/726)). **A passing mutation proof is not a review either**
+> [[mutation-proof-counts-only-mutants-you-tried]].
 
 > ⚠️ **A forward reference auto-closed issue #718.** #720's body said the gate profile is the acceptance
 > test for "whichever PR <closing-keyword> #718", and GitHub's scanner matched it — the fifth
@@ -56,153 +59,196 @@ inline. Rootfs images last rebuilt 2026-09-08.
 
 ## Current state
 
-### This session (2026-09-21): #730 — the persistent worker's death report reaches a failing test
+### This session (2026-09-20): #725 — a dying worker's last words reach a failing test
 
-PR-for-#730. #725 fixed the **tool**-worker early-exit path; the **persistent** path kept its own
-hand-rolled `tracing::warn!` and inherited none of it. That path runs the **Matrix** and **email**
-channel workers, so in a test binary those died in silence — tail captured, report rendered, then
-discarded because nothing was listening. `worker_stderr::emit_persistent_death_report` is now the
-one producer. Every constraint in the #725 section below binds it too.
-
-- **Two markers, one renderer.** `[worker-death]` is deliberately **not** `[worker-early-exit]`: an
-  early exit says a tool worker never answered *one call*; a death says a long-lived worker stopped
-  and is being respawned. Both go through the private `format_stderr_fallback` /
-  `emit_to_stderr_when_unheard`, so the neutralisation and the `has_been_set()` guard exist in
-  **one** copy — the bwrap-argv drift shape, where the incomplete copy is the one that breaks.
-- ⚠️ **The label is in the message text AND the `tracing` field.** The daemon's subscriber is
-  `fmt().json()`, so `%label` is a queryable field worth keeping — but the fallback carries no
-  fields, and a label kept only there leaves an operator reading "persistent worker died" with
-  `matrix` and `email` both live.
-- ⚠️ **Neutralisation here is defence-in-depth at a PUBLIC TRAIT BOUNDARY, not a live hole — and the
-  code says so.** Nothing reaching it today is attacker-controlled (an `ExitStatus`, a tail
-  `push_trimmed` already stripped, literal labels). What earns it is that
-  `PersistentTransport::death_report` is a `pub` trait method — any implementor is a producer, and
-  `egress::persistent_net` already delegates through it.
-- ⚠️ **`shutdown()` joins the driver thread, and that join is the only proof the report was
-  emitted.** The driver replies to the in-flight caller *first*, then reports — so returning from
-  `h.call(…)` proves nothing, and a fixture asserting without the join is a race that passes on an
-  idle machine.
-- **The e2e is hermetic** — no sandbox, so unlike its #725 sibling it has **no `[SKIP]` path and
-  runs on every host**. A skip is the worse trade in a suite whose subject is a report that goes
-  missing.
-- **Census read from the rows, not the issue** [[issue-as-filed-can-carry-a-regression]]:
-  `persistent.rs:177` is the only emit site. The issue said "Matrix and egress"; the two production
-  `PersistentWorker` users are **`matrix` and `email`**.
-
-**Mutation proof (6/6 killed):** drop the fallback → e2e dies; reuse the early-exit marker → e2e
-dies; drop `neutralise_controls` from the shared renderer → **only the unit tests die**; marker `""`
-→ both; drop the label → both; revert the call site to a bare `tracing::warn!` → e2e dies. Restores
-sha256-verified, git **index** clean [[mutation-testing-contaminates-the-index]].
-
-⚠️ **The third mutant is the keeper: a `pub` renderer's guarantee is reachable from a unit test and
-nowhere else.** Dropping neutralisation from `format_stderr_fallback` leaves *both* e2e suites
-green, because each emitter neutralises its own line first and masks it. An e2e-only suite would
-have called that mutant survived. Recorded in the test's own comment.
-
-**Also fixed in-branch:** two doc claims this change made stale (`format_early_exit_stderr_fallback`
-still called #730 an unfixed "second producer"). Same shape as #725's `block_in_place` comment — a
-known-wrong claim outliving the session that disproved it, because the refutation went into HANDOVER
-and not into the tree.
-
-**Preceded by a movement-only split** (`7facab48`): `worker_stderr.rs` 697 lines → `worker_stderr/`
-`mod.rs` (capture) + `report.rs` (formatters, markers, emitters), `pub use` so **no call site
-changed**. ⚠️ **Proven, not asserted:** all five moved regions **byte-identical** to `main`'s ranges,
-`fn`-name set identical 19 = 19.
-
-### Previous (2026-09-20): #725 — a dying tool worker's last words reach a failing test
-
-PR [#731](https://github.com/hherb/kastellan/pull/731). `worker_stderr::emit_early_exit_report` logs
-through `tracing` **and** `eprintln!`s the report when `has_been_set()` is false. #730 above is the
-same fix one layer over, and the constraints below bind both.
+PR [#731](https://github.com/hherb/kastellan/pull/731). `worker_stderr::emit_early_exit_report` is
+the one producer: it logs through `tracing` as before **and** `eprintln!`s the report when
+`tracing::dispatcher::has_been_set()` is false.
 
 - ⚠️ **`eprintln!` is load-bearing, not style.** libtest captures through
   `std::io::set_output_capture`, which the `print!`/`eprint!` **macros** consult and the
   `Stdout`/`Stderr` handles do not — a `writeln!(std::io::stderr(), …)` never appears under the
-  failing test that needs it. A captured `eprintln!` comes back on the child's **stdout**, so a
-  suite that merges the child's two streams cannot tell the two apart and stops testing its own
-  claim. **Read them separately.**
-- ⚠️ **A fallback marker must not begin with `[SKIP]`/`[WARN]`/`[E2E]`.** `run-e2e-gate.sh` greps
-  those anchored at line start and asserts zero `[WARN]`, and every profile passes `--nocapture`.
-- ⚠️ **"Production" is not "the daemon".** The daemon installs a subscriber first thing in `main`;
-  `kastellan-cli` installs none anywhere and `guard capture` dispatches a real worker, so **that
-  shipped binary gains the line** (intended).
-- ⚠️ **Two review rounds each found the suite unable to prove its own central claim** — first the
-  merged streams, then the *security* claim: deleting `neutralise_controls` passed every test,
-  because the fixture's method was the literal `"anything"`. Both closed; the e2e now dispatches a
-  hostile method and asserts on **position**, with a positive control.
-- ⚠️ **`block_in_place` does NOT hand off to another thread** — measured. It runs the closure on the
-  current one, so an `rt.block_on` fixture crosses no boundary.
-- **Filed:** [#732](https://github.com/hherb/kastellan/issues/732) (a timed-out drain reported as
-  "wrote NOTHING", pre-existing #666), [#733](https://github.com/hherb/kastellan/issues/733)
-  (`eprintln!` SIGABRTs a release `kastellan-cli` on a broken pipe under `panic = "abort"`),
-  [#734](https://github.com/hherb/kastellan/issues/734) (**`has_been_set()` asks whether a subscriber
-  exists, not whether the WARN will be delivered** — a target-scoped `RUST_LOG` silences *both*
-  channels).
+  failing test that needs it.
+- ⚠️ **The marker `[worker-early-exit]` must not begin with `[SKIP]`/`[WARN]`/`[E2E]`.**
+  `run-e2e-gate.sh` greps those anchored at line start and asserts zero `[WARN]`, and every profile
+  passes `--nocapture`, so a borrowed marker would turn profiles red for working suites.
+- ⚠️ **"Production" is not "the daemon".** The daemon installs a subscriber first thing in `main`,
+  so it is unchanged — but `kastellan-cli` installs none anywhere and `guard capture` dispatches the
+  real web-fetch worker, so **that shipped binary gains the line** (intended: no log to read).
+- The whole report is now `neutralise_controls`'d. The tail was already stripped entering the ring,
+  but `program`/`method` are interpolated raw and **`method` can be model-authored**
+  (`qualified_method` returns `None` outside the advertised set, then the planner's string passes
+  verbatim) — a `\n` could have forged a column-0 line in a gate log.
+- ⚠️ **Review round (three read-only reviewers, own worktrees) found the suite could not prove its
+  own central claim.** It merged the child's stdout and stderr, but a **captured `eprintln!` returns
+  on stdout** (libtest reprints it into the failure block) and a `writeln!(stderr)` on **stderr** —
+  so that mutant **survived**. Streams are read separately now; it dies. Also fixed in-branch: the
+  census was **29 of 30**, not the issue's 27 of 28; `RUST_TEST_NOCAPTURE` is inherited and read as
+  `!= "0"` (even empty disables capture) so the child `env_remove`s it; the `#[ignore]`d
+  fail-on-purpose fixtures would have shown as two red tests under the documented
+  `cargo test -- --ignored` recipe, so they are env-guarded too; the marker had **no** end-to-end
+  pin; and the gate-marker test used `assert_ne!` where the gate greps a line-start prefix.
+- ⚠️ **`block_in_place` does NOT hand off to another thread** — it runs the closure on the current
+  one. Measured: under `rt.block_on` it reports the **test thread's** `ThreadId`; under
+  `tokio::spawn` it differs. So the old #666 comment claiming otherwise is wrong, and the fixture now
+  dispatches from a spawned task to cross the boundary at all. **That wrong comment is now also
+  corrected in the tree** (`worker_early_exit_diagnostic_e2e.rs`) — the second review round found
+  the refutation had been written into HANDOVER while the comment itself sat untouched two files
+  away, which is the shape that makes a known-wrong claim outlive the session that disproved it.
+
+#### Second review round (2026-09-20, four reviewers + controller verification)
+
+⚠️ **The PR's central *security* claim was untested, and the mutant SURVIVED.** Deleting
+`neutralise_controls` from `emit_early_exit_report` passed every test in the branch — proved by
+running it, not by reading. The fixture's method was the literal `"anything"`, so no test anywhere
+fed a control character down the one path that is interpolated raw. Now closed both ways:
+
+- The e2e dispatches a **`HOSTILE_METHOD`** (`ESC[31m` + `\n[WARN] …FORGED-GATE-LINE`) and **both**
+  parents assert, on their own channel, that the text survives while its *effects* do not — a
+  **positive control** (the text arrived, so the other checks cannot pass vacuously), no ESC, and
+  no forged **column-0** line. Checking *position*, not absence: neutralisation maps the class to a
+  space, so the correct outcome is the phrase sitting mid-line.
+- ⚠️ **`format_early_exit_stderr_fallback` now neutralises too.** The one-line property belonged to
+  `emit_early_exit_report`'s *call order*, but the formatter is `pub` — and
+  [#730](https://github.com/hherb/kastellan/issues/730) is a second producer already filed. Same
+  drift-between-copies shape as the bwrap-argv pair.
+- The marker's own **value** had no assertion: `EARLY_EXIT_STDERR_MARKER = ""` passed all four of
+  its tests (`"".starts_with("")`, `contains("")`). Pinned now.
+- `contains("1 failed")` also matches `"11 failed"` and **`"1 passed; 1 failed"`** — the last would
+  have defeated the one-child-per-fixture rule. Now the full libtest phrase.
+- `let _ = set_global_default(…)` → `expect`; `result.is_err()` → `matches!(Protocol(EarlyExit))`
+  (the only variant reaching `warn_early_exit`); `is_the_child()` now honours the `1|true|yes|on`
+  dialect, so an exported `…FIXTURE=0` no longer *arms* two fail-on-purpose tests.
+
+⚠️ **Two reviewer findings were WRONG and were checked before being carried** —
+[[handover-claims-verify-before-carrying]]. One recounted the census as "30 of 31" and flagged four
+files: its grep did not strip comments, and `scheduler_step_dispatch_e2e.rs` matches `dispatch (`
+only in prose. **29 of 30 is correct.** Another rated the discarded `wait_for_drain` bool CRITICAL
+and blocking; `git show main:core/src/tool_host.rs` has the identical line, so it is pre-existing
+(#666) and now filed rather than fixed here.
+
+**Mutation proof (4/4 killed, each run):** drop `neutralise_controls` from `emit_early_exit_report`
+→ dies on the `tracing` channel; drop it from the formatter → dies on the new unit test; marker
+`""` → dies; marker `"[WARN] early-exit"` → dies. Restores verified by **sha256**, and the git
+**index** checked clean [[mutation-testing-contaminates-the-index]].
+
+**Filed, not fixed here:** [#732](https://github.com/hherb/kastellan/issues/732) (a timed-out drain
+is reported as "wrote NOTHING", pre-existing #666),
+[#733](https://github.com/hherb/kastellan/issues/733) (`eprintln!` SIGABRTs a release
+`kastellan-cli` on a broken pipe — `panic = "abort"`),
+[#734](https://github.com/hherb/kastellan/issues/734) (**`has_been_set()` asks whether a subscriber
+exists, not whether the WARN will be delivered** — a target-scoped `RUST_LOG` in the operator
+overlay silences *both* channels; verified against tracing-subscriber 0.3.23, whose default
+directive applies only to an *empty* env string).
+- **No security fail-open** (reviewer A): the tail is fully neutralised via `push_trimmed`, a
+  compromised worker cannot forge an evidence line, and nothing new reaches the planner, a returned
+  error, or an audit row.
+- `format_unpiped_early_exit_report`'s arm is **unreachable today** (all four backends pipe stderr) —
+  said outright in the doc so its unit test is not mistaken for coverage of the arm.
+- **Filed: [#730](https://github.com/hherb/kastellan/issues/730)** — the persistent-worker death
+  report (`worker_lifecycle/persistent.rs`) has the same defect one layer over, so **Matrix and
+  egress workers still die silently in a test binary**.
+
 ### Previous (2026-09-19): #699 + #700 — the planner sees what it asked for
 
 PR [#728](https://github.com/hherb/kastellan/pull/728). Each `plans_so_far` step outcome carries
 `"call": {tool, method, parameters}`; `call` and `decision` pass the sink screen under `Strict`
-whatever tool the step names, rendering `[withheld: failed injection screen]` on a block.
+whatever tool the step names (they are model text), rendering `[withheld: failed injection screen]`
+on a block, with `tier: "sink"` rows gaining `part: decision|call|outcome`.
 
 - **The call survives elision** — what was asked is what stops a repeat — and calls' bytes come off
   `PLANS_SUMMARY_BUDGET` before outputs compete; `call::apply_call_budget` then drops the **oldest
-  calls' `parameters`**.
+  calls' `parameters`** if the calls alone still overrun.
 - ⚠️ **Two review rounds found one real fail-open and two tests weaker than their names.** A call's
-  deepest `parameters` level was rendered but never screened — out of reach only because
-  serde_json's recursion limit sits below `MAX_WALK_DEPTH`, i.e. **the invariant rested on an
-  unrelated parser's constant**. ⚠️ **A hardening that rewrites screened text must ADD readings,
-  never replace them.**
-- **Deferred: [#729](https://github.com/hherb/kastellan/issues/729)** — `decision` is neither
-  clamped nor counted. ⚠️ **Not yet measured live:** re-run a multi-search mail question in a
-  **fresh DM room**; task 186's dropped `has_attachment` is the shape to look for.
+  deepest `parameters` level was rendered but never screened (`render` prunes from the parameters'
+  root, `screen_text` walked them one level down, both stop at `MAX_WALK_DEPTH`) — out of reach only
+  because serde_json's recursion limit (128) sits below it, i.e. **the invariant rested on an
+  unrelated parser's constant**. A hardening that rewrites screened text must **ADD readings, never
+  replace them**. The budget test was satisfied by the *wrong* order too, and `apply_call_budget`'s
+  `after < before` guard (a `parameters: {}` call *grows* when dropped) had no test.
+- **Deferred: [#729](https://github.com/hherb/kastellan/issues/729)** — `decision` is neither clamped
+  nor counted, so the one always-present part of the summary is unbounded.
+- **Not yet measured live.** Re-run a multi-search mail question in a **fresh DM room**; task 186's
+  dropped `has_attachment` is the shape to look for.
+
 ### Previous (2026-09-19, later): #677 and #560 closed by live measurement — no code change
 
-Every figure from `audit_log` rows, not from the replies. **#677 passes its own acceptance:** task
-189 = 5 plans, 8 dispatches, all `ok`, no `shell.exec`; the follow-up 190 = **1 plan, 0 dispatches**,
-`conversation_task_ids: [189]`, floor `Personal` via `conversation_inherited`. **#560 did not
-recur:** before #702, 2 of 2 runs made up an id; after, 0 of 3 across both mail questions.
+The operator sent the DMs on the DGX (`main` as of #709; binaries verified byte-identical to
+`target/release/`). **Every figure below is from the `audit_log` rows, not from the replies.**
 
-⚠️ **A live re-measure of a single-question issue must use a fresh DM room** (or wait out the 5 h
-window) — since #709 a same-room question inherits the prior turns' calls, which would void the test.
+- **#677 passes its own acceptance.** Task 189 (DM 1): 5 plans, 8 dispatches, all `ok`: 2 searches,
+  3 `mail.get_message` by real id, 3 `mail.get_attachment_text` by exact filename, no `shell.exec`.
+  Task 190 (the follow-up): **1 plan, 0 dispatches, 29 s**, `conversation_task_ids: [189]`, floor
+  `Personal` via `conversation_inherited`. A third follow-up (191, "how much did they cost?") read
+  `[189, 190]`, also 1 plan. The operator confirmed the facts and that the chat looked normal.
+- **#560 did not recur.** Task 192, its original Qantas question, ran in a **fresh room**
+  (`conversation_task_ids: []`, so nothing carried over). It passed a real id first time. Before #702:
+  2 of 2 runs of the Qantas question made up an id. After: 0 of 3 runs across both mail questions
+  (187/189 the flight-bookings one, 192 the Qantas one).
+- ⚠️ **A live re-measure of a single-question issue must use a fresh DM room** (or wait out the 5 h
+  window). Since #709 a same-room question inherits the prior turns' calls, which would void the test.
+
 ### Earlier (2026-09-19): #719 — the gliner tier died at `import torch` on macOS, twice
 
-PR [#726](https://github.com/hherb/kastellan/pull/726). **Two causes, both inside `import torch`:**
-`os.getcwd()` → EPERM under Seatbelt (fix: Seatbelt workers start in `/`, pinned on both backends),
-and torch's compile cache at import (fix: host-mode gliner opts into `ephemeral_scratch`). The
-second would have broken production host-mode gliner on macOS too. ⚠️ **A sandbox that restricts but
-does not relocate leaks the caller's context into the jail** — when a worker dies at startup only on
-one OS, diff what the two backends do *implicitly* (cwd, `/tmp`, `$HOME`), not what the policy
-grants. ⚠️ **gliner is the first WARM worker on `ephemeral_scratch`** — check the same property
-(keeps no request data on disk) before opting in another. ⚠️ **After mutating a `.py`, delete its
-`__pycache__`** [[mutation-testing-leaves-stale-pyc]].
+PR [#726](https://github.com/hherb/kastellan/pull/726) (full prose:
+[`archive/handover_20260919_699_pre-prune.md`](archive/handover_20260919_699_pre-prune.md)).
 
-### Previous: #720 / #717 / #709 — the REQUIRE contract, the triage, and conversational continuity
+- **Two causes, both inside `import torch` (torch 2.13):** `os.getcwd()` → EPERM under Seatbelt
+  (fix: `macos_seatbelt::WORKER_CWD = "/"`, pinned on both backends by
+  `worker_starts_in_root_whatever_the_parents_cwd`), and torch's compile cache at import
+  (fix: host-mode gliner opts into `ephemeral_scratch`; `scratch.py` points
+  `TORCHINDUCTOR_CACHE_DIR`/`TMPDIR`/`HOME` there). The second would have broken production
+  host-mode gliner on macOS too.
+- ⚠️ **Import order is load-bearing:** `main()` is exactly `apply_worker_scratch(); _serve()`, and
+  the model import lives inside `_serve()`; `tests/test_scratch.py` pins both halves.
+- ⚠️ **gliner is the first WARM worker on `ephemeral_scratch`** — acceptable only because it keeps
+  no request data on disk; check the same property before opting in another.
+- ⚠️ **`run-e2e-gate.sh` could never pass** (`PIPESTATUS` reset by the assignment); fixed and now
+  run for real against a fake `cargo` by `gate_script_tests/run.rs`.
+- ⚠️ **After mutating a `.py`, delete its `__pycache__`** — a same-size mutant restored within
+  the same second left a *valid* `.pyc` the jailed worker ran [[mutation-testing-leaves-stale-pyc]].
+- Diagnosis took one line each (a temporary `tracing_subscriber`); making that permanent is #725.
 
-**#720** (closed #714, #622, #664). What binds:
+### Previous: #720 — one REQUIRE contract, and a gate that fails on zero tests
+
+PR [#720](https://github.com/hherb/kastellan/pull/720) closed #714, #622, #664. What binds:
 
 > **Every gate needs a REQUIRE knob *and* a positive control that fails when zero tests ran.**
 
-`tests_common::require::RequireKnob` is the one vocabulary, and the knob is **data**, so a tier is
-one `const`. ⚠️ **A knob alone was never enough (#664):** it fires only inside a test body, so a
-filtered-out run emits no `[SKIP]` and exits 0 — hence `[E2E]` markers and per-tier floors in
-`scripts/run-e2e-gate.sh`. **Use it whenever a run is meant to be evidence.** ⚠️ **No `sandbox` or
-`container` profile yet — both would be red on every host** (#718: **92 sites in 47 files** bypass
-`skip_line`; #722: the container helpers have no knob).
+- **`tests_common::require::RequireKnob` is the one vocabulary** (flag dialect, skip/fail split,
+  out-of-dialect warning, `[E2E]` success marker); the knob is **data**, so a tier is one `const`.
+  Knobs: `KASTELLAN_PG_REQUIRE_E2E` (Postgres **and** supervisor), `_SANDBOX_`, `_GUARD_`, `_GLINER_RELEX_`,
+  `_MICROVM_`. ⚠️ **Deliberately no umbrella variable** — the Mac has no KVM.
+- ⚠️ **A knob alone was never enough (#664):** it fires only inside a test body, so a filtered-out run
+  emits no `[SKIP]` and exits 0. `RequireKnob::announce` emits `[E2E]` on the success path under a
+  truthy knob, and `scripts/run-e2e-gate.sh <profile>` asserts per-tier `[E2E]` floors, tests passed,
+  zero `[WARN]`, and a per-profile `[SKIP]` cap. **Use it whenever a run is meant to be evidence.**
+- ⚠️ **No `sandbox` or `container` profile yet — both would be red on every host.**
+  `kastellan-sandbox`'s suites hand-roll their skips (#718: **92 sites in 47 files** bypass
+  `skip_line` and every knob), and the container helpers have no knob (#722).
 
-**#717.** ⚠️ **The ROADMAP is the accurate source; GitHub issues are the stale mirror.** Every open
-issue now carries one `area:*` label; `main` has required status checks (#655).
+### Earlier (2026-09-17): #717 backlog triage, #709 conversational continuity
+
+**#717.** ⚠️ **The ROADMAP is the accurate source; GitHub issues are the stale mirror.** 58 roadmap-era
+issues had gone untouched because ~7 % carried a label; `docs/devel/notes/label-backlog.sh` now gives
+every open issue one `area:*` plus the `false-green` / `needs-live-host` / `roadmap` themes. `main`
+has required status checks (#655).
 
 **#709 (#701).** A finishing channel task writes `tasks.turn_record` = `{calls, data_class}` in the
 *same* `finalize` UPDATE; the next task in the same `(channel, peer, conversation)` reads up to 3,
 screened and budgeted, and inherits their floor. **Calls, not results** — no tool output crosses a
-task boundary. ⚠️ **The window has NO upper bound, deliberately.** ⚠️ **The floor comes from every
-turn LOADED, not those the screen kept.** ⚠️ **A security property can be documented, tested, and
-absent** — `inherit_floor` read the wrong field while three one-leg tests defended it. **Email is
-still stateless.** Deferred: #710–#713, #715, #716.
+task boundary. ⚠️ **The window has NO upper bound, deliberately** (a user typing while the bot works
+makes a task older than the turn it follows). ⚠️ **The floor comes from every turn LOADED, not those
+the screen kept.** Screening is sealed (`view::admitted::Admitted`). ⚠️ **A security property can be
+documented, tested, and absent** — `inherit_floor` read the wrong field while three one-leg tests
+defended it. **Email is still stateless** (its `conversation` is the message id). Deferred:
+#710–#713, #715, #716.
 
 **#702 (#677).** `inner_loop/result_view` is the planner's view of a successful step — pruned,
-labelled JSON. ⚠️ **Keys never reach the guard model** (#703). Budgets: 16 KiB per step, 96 KiB
-accumulated.
+labelled JSON; identifiers atomic, keys identifier-shaped or absent. ⚠️ **Keys never reach the guard
+model** (#703). ⚠️ **A hardening that rewrites screened text must ADD readings, never replace them.**
+Budgets: 16 KiB per step, 96 KiB accumulated.
+
 ### Merged arcs — only what still binds
 
 **#694 (#617).** `truncate_payload` derives `req_summary = {head, sha256, len}` centrally; the digest
@@ -219,8 +265,9 @@ reference is the **sha256 of the baked copy** [[cargo-relinks-identical-mtime-no
 fixtures (missing `KASTELLAN_SECCOMP_PROFILE`, an unenforceable Landlock ruleset, a corrupt guest env
 token). Per-spawn dirs via `create_private_dir` — **do not "fix" back to `create_dir_all`**.
 **Before release: flip force-routing on.** Deferred list in `docs/security-audit-2026-09-02.md`.
-**One-liners.** #681: a lean tail plus recovery beat a fat verbatim tail (68.3 % vs 45.8 %). #675: a
-failed micro-VM boot leaves `console.log` in the kept run dir [[microvm-guest-failures-are-invisible]];
+
+**One-liners.** #681: a lean tail plus recovery beat a fat verbatim tail (68.3 % vs 45.8 % recall).
+#675: a failed micro-VM boot leaves `console.log` in the kept run dir [[microvm-guest-failures-are-invisible]];
 the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `panic = "abort"`
 [[release-profile-panic-abort-kills-raii]]. #669: count the producers, make the const the only spelling.
 
@@ -285,7 +332,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    (2026-09-14: ordered headers, 4xx on cursor restart, filter-only search, compact hits, attachments
    by `message_id` + name, a distinct expired-credential error) are not yet filed on `hherb/localmail`.
 
-3. **Test-harness honesty, now that the gate itself is tested.**
+3. **Test-harness honesty, now that the gate itself is tested.** [#730](https://github.com/hherb/kastellan/issues/730)
+   (the **persistent**-worker death report still never reaches a failing test, so Matrix and egress
+   workers die silently — #725's defect one layer over; reuse the `emit_early_exit_report` shape).
    [#718](https://github.com/hherb/kastellan/issues/718)
    (92 hand-rolled `[SKIP]`s — adding the `sandbox` profile is its acceptance test),
    [#722](https://github.com/hherb/kastellan/issues/722) (container tier knob + profile),
@@ -339,16 +388,15 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
   MITM-of-browser via an NSS trust-store import, **not** `--ignore-certificate-errors-*`.
 
 **File-split backlog (Item 9b)** — **`wc -l` before picking; the numbers drift.** Split **before** the
-change that grows a file, in a movement-only commit. ⚠️ **Prove the movement, don't assert it** —
-#730's split checked that every moved region was **byte-identical** to its range on `main` and that
-the `fn`-name set matched, which a diff cannot show on its own. Pure test-lifts:
-`core/src/channel/ask_message.rs` 956, `workers/mail/src/handler.rs` 670,
+change that grows a file, in a movement-only commit whose `#[test]` name set is verifiable either
+side. Pure test-lifts: `core/src/channel/ask_message.rs` 956, `workers/mail/src/handler.rs` 670,
 `sandbox/src/linux_firecracker/plan.rs` ~1160 (DGX-gated), `core/tests/guard_tier_e2e.rs` 1558+
 (#639), `core/src/workers/gliner_relex/tests.rs` 1177. Clean seam: `core/src/scheduler/asks.rs` 801.
 Judgement first: `db/src/asks.rs` 1127, `db/graph.rs` 926, `llm-router/src/config.rs` 843. Also over
 cap: `core/src/scheduler/inner_loop.rs`, `core/src/channel/bus.rs`, `workers/matrix/src/sdk_live.rs`,
-`llm-router/src/messages.rs`, `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`,
-`tests-common/src/require.rs` 635, `sandbox/tests/macos_smoke.rs` ~450.
+`llm-router/src/messages.rs`, `core/src/main.rs`, `tests-common/src/microvm/mod.rs`,
+`tests-common/src/microvm/container.rs`, `tests-common/src/require.rs` 635, `sandbox/tests/macos_smoke.rs`
+~450.
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
 (seam exists in `confine.rs`); python-exec Phase 4 curated wheels; web-research polish; an ANN index
@@ -382,11 +430,12 @@ is the reusable mechanism.
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (PR-for-#730 — **the gate that stands**) | branch tip | **4386 / 0 / 33**, **181** suites, `TEST_EXIT=0`, 0 `[WARN]`, **`[SKIP]` 12**. +5 passed / +2 ignored over the row below, **predicted before the run and reconciled exactly**: 3 new `worker_stderr` unit tests (17 → 20, one of the 17 replaced by its generalised form) and the new hermetic e2e's 2 parents + 2 `#[ignore]`d fixtures; +1 suite is that file. `KASTELLAN_PG_BIN_DIR` set, so zero "no Postgres install found" — the false-green tell. Zero column-0 `[worker-death]`/`[worker-early-exit]` lines in the whole log, so the new marker does not leak into a gate. Sources **sha256-verified unchanged across the sweep** (663 files) [[never-edit-tree-during-a-sweep]]. DGX not re-run (no Linux-only code touched; the change is platform-neutral, so the DGX number is simply older) | exit 0, cold (**214** total `Checking` lines — a cached crate prints none — of which 27 `Checking kastellan`), zero warnings, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-730` | **12** Mac |
 | **Mac** ([#731](https://github.com/hherb/kastellan/pull/731), #725 — **post-`/fixall`, the gate that stands**) | branch tip (2nd review round) | **4381 / 0 / 31**, 180 suites, `TEST_EXIT=0`, 0 `[WARN]`, **`[SKIP]` 12**. +1 over the row below, reconciled exactly: the one new unit test (`the_stderr_fallback_neutralises_a_model_authored_control_character`); the round's other work added **assertions**, not tests, so `ignored` is unchanged at 31. ⚠️ **`[SKIP]` 23 → 12 is an improvement, not drift** — run with `KASTELLAN_PG_BIN_DIR` set, so **zero** "no Postgres install found" (the false-green tell); the 12 remaining are all legitimately opt-in or unavailable (Apple `container` ×8, gliner ×4). Skip-as-pass means those 11 newly-*running* tests move no count, which is exactly why the count alone was never the evidence. Sources **sha256-verified unchanged across the whole sweep** [[never-edit-tree-during-a-sweep]] — an earlier sweep was killed and restarted after two files were edited mid-run. DGX not re-run this round (no Linux-only code touched) | exit 0, cold (27 `Checking kastellan` lines, dedicated `CARGO_TARGET_DIR`), zero warnings | **12** Mac |
 | **Mac + DGX** ([#731](https://github.com/hherb/kastellan/pull/731), #725 — 1st review round; superseded by the row above) | branch tip (post-review) | **Mac 4380 / 0 / 31**, 180 suites, `TEST_EXIT=0`, 0 `[WARN]`, **`[SKIP]` 23** (baseline parity). **DGX 4515 / 0 / 63**, 180 suites, `TEST_EXIT=0`, `[SKIP]` 4. Both = +5 passed / +2 ignored, reconciled exactly: Mac 4375+5; DGX 4501 + 4 (#728 round 1) + 5 (round 2) + 5. ⚠️ **The first Mac sweep was a false green** — it matched the predicted total while **339 of its 361 `[SKIP]`s were "no Postgres install found"**, because skip-as-pass counts as passed. Set `KASTELLAN_PG_BIN_DIR="/Applications/Postgres 2.app/Contents/Versions/18/bin"` on the Mac or the sweep is not evidence | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-725`), zero warnings | **23** Mac, **4** DGX (gliner opt-in) |
 | **Mac + DGX** ([#728](https://github.com/hherb/kastellan/pull/728), #699/#700) | branch tip (2nd review round) | **Mac 4375 / 0 / 29**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — the round's 4370 + **5** (deep-parameter screen, multibyte clamp, the `{}`-parameters grow guard, the framing constant, the step-less outcome). Round 1 at `ce8bc49b`: Mac **4370 / 0 / 29** = #726's 4347 + 5 (grepped between `64d483e8` and `main`) + 18 new. **DGX** full sweep at `299ce103` (before round 1's +4): **4501 / 0 / 61**, 179 suites, exit 0 (= 4482 + 5 + 14) — ⚠️ **not re-run for round 2** (Mac-only changes, but `summary` is platform-neutral, so the DGX number is simply older) | exit 0, cold (27 `Checking kastellan` lines, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-pr728`) at the round-2 tip | **4** DGX (gliner opt-in) |
 | **Mac + DGX** ([#726](https://github.com/hherb/kastellan/pull/726), #719) | `64d483e8` (branch tip) | **DGX 4482 / 0 / 61**, 179 suites, `TEST_EXIT=0`, 0 `[WARN]` — **exactly** 4453 (#709) + 24 (#720: 23 `#[test]` + 1 doc-test, never run on the DGX until now) + 5 (this PR), each of the 5 grepped `ok` by name. **Mac 4347 / 0 / 29**, 179 suites — **exactly** #720's 4342 + 5. ⚠️ The sweep itself reported **3 gliner failures that were my own mutation testing**: a same-size Python mutant restored within the same second left its `.pyc` cached *and valid*, and the jailed worker (read-only src) ran it — confirmed by disassembling the cached `main()` [[mutation-testing-leaves-stale-pyc]]. With `__pycache__` cleared the **sweep-built** binaries pass 5/5, 16/16, 6/6 under the REQUIRE knob; source unchanged since the sweep built them. **Also:** `gliner` gate profile passes as evidence on both hosts (first time); DGX gliner ENABLE suites 16/16, 6/6; pytest 71 on both | **exit 0 on both hosts**, zero warnings, 27 `Checking kastellan` lines each, dedicated `CARGO_TARGET_DIR` | **4** DGX (gliner opt-in, ENABLE unset), **23** Mac |
+| **Mac** ([#720](https://github.com/hherb/kastellan/pull/720)) | branch tip | **4322 / 8 / 29**, 179 suites, `TEST_EXIT=101`: 3 were #719, 5 were #548/#676 pool contention (pass individually), so effectively **4327 / 3 / 29**. +12 over the row below, reconciled. ⚠️ **Its first sweep was a false green:** `cargo test --workspace` fails fast, and one suite aborted it after 39 of 179 suites. **Use `--no-fail-fast`.** The DGX leg was never run | exit 0, 27 crates, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-720`) | 23 |
+| **Mac + DGX** ([#709](https://github.com/hherb/kastellan/pull/709), third review round) | `d6698013` | **DGX 4453 / 0 / 61**, **Mac 4318 / 0 / 29**, both 179 suites, `TEST_EXIT=0`; +10 on each, each new test grepped out of the DGX log by name | exit 0 on both hosts, 27 crates | 4 DGX (gliner), 15 Mac |
 
 Older rows are in the [`archive/`](archive/) snapshots.
 
@@ -458,10 +507,8 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **PR-for-#730** — the **persistent** worker's death report reaches a failing test too (#730);
-  preceded by a movement-only split of `worker_stderr` into its capture and reporting halves.
-- **[#731](https://github.com/hherb/kastellan/pull/731)** `579ac01a` — a dying tool worker's last
-  words reach a failing test, not just a daemon (#725). Filed #730, #732–#734.
+- **[#731](https://github.com/hherb/kastellan/pull/731)** — a dying worker's last words reach a
+  failing test, not just a daemon (#725). Filed #730.
 - **[#728](https://github.com/hherb/kastellan/pull/728)** `40c4adc4` — the planner sees each prior step's call; `decision` screened (#699, #700).
 - **[#727](https://github.com/hherb/kastellan/pull/727)** `eb1c76ea` — #677/#560 live acceptance (docs only).
 - **[#726](https://github.com/hherb/kastellan/pull/726)** `577e2196` — the gliner worker survives
