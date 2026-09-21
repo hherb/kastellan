@@ -7,19 +7,39 @@
 //! Draining the pipe to EOF on a detached thread prevents both: the worker can't
 //! stall, and each chunk surfaces at `debug` for troubleshooting.
 //!
-//! Two consumers share this:
-//! - `tool_host::spawn_worker` drains tool-worker stderr ([`spawn_drain`]).
-//! - the Matrix channel worker additionally retains a bounded **tail** of recent
-//!   lines ([`spawn_drain_with_tail`]) so the driver can log the worker's death
-//!   cause + exit status when it dies (#348).
+//! **Four** call sites share this — counted from the rows, not from memory
+//! (this list said "two consumers" and named the wrong one until the #735
+//! review):
+//!
+//! | call site | what it takes |
+//! | --- | --- |
+//! | `tool_host::spawn_worker` | [`spawn_drain_with_tail`] — tool workers |
+//! | `egress::spawn` | [`spawn_drain_with_tail`] — the egress proxy sidecar |
+//! | `worker_lifecycle::persistent::ClientTransport` | [`spawn_drain_with_tail`] — persistent workers |
+//! | `broker::spawn` | [`spawn_drain`] — the trusted brokers, no tail retained |
+//!
+//! The **tail** ([`spawn_drain_with_tail`]) is what makes a death report
+//! possible: it retains a bounded window of recent lines so the worker's own
+//! explanation survives the process (#348).
+//!
+//! ⚠️ **`ClientTransport` — not "the Matrix channel worker" — is the persistent
+//! consumer**, and it serves BOTH production long-lived workers (`matrix` and
+//! `email`). The Matrix channel had its own supervisor historically and no
+//! longer does.
+//!
+//! ⚠️ **The driver no longer logs the death cause itself** (#730). It hands the
+//! rendered report to [`emit_persistent_death_report`], which owns the marker,
+//! the neutralisation and both output channels.
 //!
 //! # Layout
 //!
 //! This module is the **capture** half: the bounded [`StderrTail`] ring and the
 //! drain threads that fill it. What is then *said* about a dead worker — the
 //! report formatters, the stderr-fallback markers and the emitters that write
-//! to both channels — lives in [`report`], whose items are re-exported here so
-//! `worker_stderr::` remains the one public path for both halves.
+//! to both channels — lives in `report.rs`, whose items are re-exported here so
+//! `worker_stderr::` remains the one public path for both halves. (Named as a
+//! file, not linked: `mod report` is private, and a `[`report`]` link makes
+//! rustdoc warn that public documentation points at a private item.)
 
 mod report;
 pub use report::*;
@@ -72,7 +92,14 @@ impl StderrTail {
     }
 
     /// Mark the pipe as read to EOF. Called by the drain thread when it returns.
-    fn mark_drained(&self) {
+    ///
+    /// `pub(crate)`, not `pub`: outside this crate the flag is the drain
+    /// thread's to set, and a caller that set it early would make
+    /// [`Self::wait_for_drain`] lie. In-crate it is reachable so a test can
+    /// stand in for the drain thread — `worker_lifecycle::persistent`'s
+    /// death-tail test needs to land a line *after* the collector is already
+    /// waiting, which is the production race and cannot be staged without it.
+    pub(crate) fn mark_drained(&self) {
         self.drained.store(true, Ordering::Release);
     }
 

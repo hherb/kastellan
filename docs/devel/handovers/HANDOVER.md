@@ -4,7 +4,7 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260919_699_pre-prune.md`](archive/handover_20260919_699_pre-prune.md),
+> [`archive/handover_20260921_730_pre-prune.md`](archive/handover_20260921_730_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 
 **Last updated:** 2026-09-21 (#730: the persistent worker's death report reaches a failing test) ·
@@ -14,6 +14,7 @@ contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717)
 [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational continuity),
 [#702](https://github.com/hherb/kastellan/pull/702) (#677, the planner's labelled result view),
 [#694](https://github.com/hherb/kastellan/pull/694) (#617). **Open issues these filed:**
+[#737](https://github.com/hherb/kastellan/issues/737)–[#739](https://github.com/hherb/kastellan/issues/739) (from #735's review round);
 [#732](https://github.com/hherb/kastellan/issues/732)–[#734](https://github.com/hherb/kastellan/issues/734) (from #731; #730 closed by this session);
 [#718](https://github.com/hherb/kastellan/issues/718), [#721](https://github.com/hherb/kastellan/issues/721)–[#724](https://github.com/hherb/kastellan/issues/724) (from #720);
 [#710](https://github.com/hherb/kastellan/issues/710)–[#713](https://github.com/hherb/kastellan/issues/713), [#715](https://github.com/hherb/kastellan/issues/715), [#716](https://github.com/hherb/kastellan/issues/716) (from #709);
@@ -24,9 +25,10 @@ contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717)
 **The DGX runs `main` as of #709**, redeployed 2026-09-17 via `scripts/upgrade_from_git.sh` and
 verified (installed binaries byte-identical, units active, migration 0026's `tasks.turn_record`
 present). **No redeploy is owed for anything merged since** — #720/#726/#728/#731 and #730 touch
-only test-harness surface, docs, or a worker's startup-failure path; #730's sole daemon-visible
-delta is that a persistent worker's death line is now control-neutralised and carries its label
-inline. Rootfs images last rebuilt 2026-09-08.
+only test-harness surface, docs, or a worker's startup-failure path; #730's daemon-visible deltas are
+that a persistent worker's death line is now control-neutralised, carries its label inline, and —
+since the review round — **waits for the stderr drain**, so it carries the dead worker's own words
+instead of `no stderr captured`. Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -58,11 +60,14 @@ inline. Rootfs images last rebuilt 2026-09-08.
 
 ### This session (2026-09-21): #730 — the persistent worker's death report reaches a failing test
 
-[#735](https://github.com/hherb/kastellan/pull/735). #725 fixed the **tool**-worker early-exit path; the **persistent** path kept its own
-hand-rolled `tracing::warn!` and inherited none of it. That path runs the **Matrix** and **email**
-channel workers, so in a test binary those died in silence — tail captured, report rendered, then
-discarded because nothing was listening. `worker_stderr::emit_persistent_death_report` is now the
-one producer. Every constraint in the #725 section below binds it too.
+[#735](https://github.com/hherb/kastellan/pull/735). #725 fixed the **tool**-worker early-exit path;
+the **persistent** path kept its own hand-rolled `tracing::warn!` and inherited none of it. That path
+runs the **Matrix** and **email** channel workers, so in a test binary those died in silence — tail
+captured, report rendered, then discarded because nothing was listening.
+`worker_stderr::emit_persistent_death_report` is now the one producer. Every constraint in the #725
+section below binds it too. Written, then **reviewed hard and materially changed** — the review
+findings are folded in below rather than appended, because several of them refute what the first
+draft claimed.
 
 - **Two markers, one renderer.** `[worker-death]` is deliberately **not** `[worker-early-exit]`: an
   early exit says a tool worker never answered *one call*; a death says a long-lived worker stopped
@@ -70,44 +75,72 @@ one producer. Every constraint in the #725 section below binds it too.
   `emit_to_stderr_when_unheard`, so the neutralisation and the `has_been_set()` guard exist in
   **one** copy — the bwrap-argv drift shape, where the incomplete copy is the one that breaks.
 - ⚠️ **The label is in the message text AND the `tracing` field.** The daemon's subscriber is
-  `fmt().json()`, so `%label` is a queryable field worth keeping — but the fallback carries no
-  fields, and a label kept only there leaves an operator reading "persistent worker died" with
-  `matrix` and `email` both live.
+  `fmt().with_env_filter(…).json()`, so `%label` is a queryable field worth keeping — but the
+  fallback carries no fields, and a label kept only there leaves an operator reading "persistent
+  worker died" with `matrix` and `email` both live.
 - ⚠️ **Neutralisation here is defence-in-depth at a PUBLIC TRAIT BOUNDARY, not a live hole — and the
-  code says so.** Nothing reaching it today is attacker-controlled (an `ExitStatus`, a tail
-  `push_trimmed` already stripped, literal labels). What earns it is that
+  code says so.** Nothing reaching it today is attacker-controlled. What earns it is that
   `PersistentTransport::death_report` is a `pub` trait method — any implementor is a producer, and
   `egress::persistent_net` already delegates through it.
 - ⚠️ **`shutdown()` joins the driver thread, and that join is the only proof the report was
   emitted.** The driver replies to the in-flight caller *first*, then reports — so returning from
-  `h.call(…)` proves nothing, and a fixture asserting without the join is a race that passes on an
-  idle machine.
+  `h.call(…)` proves nothing, and a fixture asserting without the join is a race.
 - **The e2e is hermetic** — no sandbox, so unlike its #725 sibling it has **no `[SKIP]` path and
   runs on every host**. A skip is the worse trade in a suite whose subject is a report that goes
   missing.
-- **Census read from the rows, not the issue** [[issue-as-filed-can-carry-a-regression]]:
-  `persistent.rs:177` is the only emit site. The issue said "Matrix and egress"; the two production
-  `PersistentWorker` users are **`matrix` and `email`**.
+- **Census read from the rows** [[issue-as-filed-can-carry-a-regression]]: the issue said "Matrix
+  and egress"; the two production `PersistentWorker` users are **`matrix` and `email`**.
 
-**Mutation proof (6/6 killed):** drop the fallback → e2e dies; reuse the early-exit marker → e2e
-dies; drop `neutralise_controls` from the shared renderer → **only the unit tests die**; marker `""`
-→ both; drop the label → both; revert the call site to a bare `tracing::warn!` → e2e dies. Restores
-sha256-verified, git **index** clean [[mutation-testing-contaminates-the-index]].
+⚠️ **The review's biggest finding: the report this PR routes to stderr would usually have been
+EMPTY.** `ClientTransport::death_report` snapshotted the tail with **no `wait_for_drain`**, unlike
+`tool_host::warn_early_exit` — so it would normally render `no stderr captured` for a worker that
+explained itself a millisecond later, the contentless line #730 exists to avoid. The in-code
+justification ("a poll loop would stall the driver up to half a second") was refuted by measurement:
+the driver's next act is `thread::sleep(backoff.next_delay(0))` and **both** production users set
+`base: 1s`, so the wait delays no respawn at all. Fixed; the decision is now the free function
+`collect_death_tail` **only so a unit test can reach it**
+[[unreachable-success-path-proves-nothing]] — inside `death_report` it needs a real `Client` over a
+spawned child, and no test could stage the race.
 
-⚠️ **The third mutant is the keeper: a `pub` renderer's guarantee is reachable from a unit test and
-nowhere else.** Dropping neutralisation from `format_stderr_fallback` leaves *both* e2e suites
-green, because each emitter neutralises its own line first and masks it. An e2e-only suite would
-have called that mutant survived. Recorded in the test's own comment.
+⚠️ **Mutation: the shared-renderer keeper still holds, but the 6/6 counted only the mutants the
+author thought of** [[mutation-proof-counts-only-mutants-you-tried]]. Dropping `neutralise_controls`
+from `format_stderr_fallback` leaves *both* e2es green (each emitter neutralises first and masks it)
+and dies only in the unit tests — **but say what that mutant IS**: both `format_*_stderr_fallback`
+wrappers have **zero callers** outside those tests, so it is a `pub` API contract test for a future
+caller, not evidence the e2es have a hole. Review found **four** further survivors, all now killed
+(**5/5**, restores sha256-verified, index clean): the `if let Some(r)` **`None` arm was never
+executed** (no fixture returned `None` — the e2e now drives a *second* death through such a
+transport and asserts exactly one marked line); swapping the label/report interpolations passed every
+`contains` (pinned by `assert_eq!` on the whole line now); and **both** the label's own
+`neutralise_controls` and the `%label` field were untested, because the label was a clean literal and
+the message text carries it too — the fixture's label is hostile now, the only way to reach either.
 
-**Also fixed in-branch:** two doc claims this change made stale (`format_early_exit_stderr_fallback`
-still called #730 an unfixed "second producer"). Same shape as #725's `block_in_place` comment — a
-known-wrong claim outliving the session that disproved it, because the refutation went into HANDOVER
-and not into the tree.
+⚠️ **Three doc claims were false, two of them this tree's own recorded failure mode.** The emit site
+cited the **dispatch** census to defend a line the dispatch suites cannot reach — measured
+**disjoint**; the honest figure is **8 of the 9** `PersistentWorker` suites. `worker_stderr/mod.rs`
+said "two consumers" (**four**), named the wrong one (`ClientTransport`, serving matrix *and* email),
+and said "the driver can log the death cause" — which **this PR made false**
+[[guard-shares-the-census-blind-spot]]. `29 of the 30` was stale too: #731's own suite joined **both**
+sides, so it is 29 of **31**. Smaller: `neutralise_controls` is **char-count** preserving, not
+byte-length (U+2028 is 3 bytes → 1); `from_client` promised "exit status only" from a path returning
+`None` outright (the `?` fires before `try_wait`); the e2e hand-rolled a **third** copy of the
+`1|true|yes|on` dialect while claiming it did not — now `env_flag_enabled`.
 
 **Preceded by a movement-only split** (`7facab48`): `worker_stderr.rs` 697 lines → `worker_stderr/`
 `mod.rs` (capture) + `report.rs` (formatters, markers, emitters), `pub use` so **no call site
-changed**. ⚠️ **Proven, not asserted:** all five moved regions **byte-identical** to `main`'s ranges,
-`fn`-name set identical 19 = 19.
+changed**. ⚠️ **Proven, not asserted:** a sorted-line multiset diff against `main` shows **zero
+removals**. ⚠️ **Known wart, deliberately not rewritten:** that commit's new module doc documents
+four items that only exist in `3f66ae8a`, so it carries two dangling rustdoc links — the *code* is
+movement-only, the *docs* forward-reference. HEAD is consistent, so the cost is `cargo doc` and
+bisect on one intermediate commit; rewriting a pushed PR branch was judged the worse trade.
+
+**Filed for a later session:** [#737](https://github.com/hherb/kastellan/issues/737) — **five of the
+six** `ClientError` variants `dispatch_indicates_worker_dead` calls dead are reported *nowhere*, in
+the daemon as well as in tests; wider than #730 itself.
+[#738](https://github.com/hherb/kastellan/issues/738) — the same driver's respawn-failure and
+rate-alarm lines are still `tracing`-only, so a worker that **cannot come back** loops in silence.
+[#739](https://github.com/hherb/kastellan/issues/739) — an `eprintln!` EPIPE panic on the **driver
+thread** permanently kills a channel, and both joins swallow it (extends #733).
 
 ### Previous (2026-09-20): #725 — a dying tool worker's last words reach a failing test
 
@@ -138,43 +171,33 @@ same fix one layer over, and the constraints below bind both.
   [#734](https://github.com/hherb/kastellan/issues/734) (**`has_been_set()` asks whether a subscriber
   exists, not whether the WARN will be delivered** — a target-scoped `RUST_LOG` silences *both*
   channels).
-### Previous (2026-09-19): #699 + #700 — the planner sees what it asked for
+### Previous (2026-09-19): #699 + #700, #677/#560, #719
 
-PR [#728](https://github.com/hherb/kastellan/pull/728). Each `plans_so_far` step outcome carries
-`"call": {tool, method, parameters}`; `call` and `decision` pass the sink screen under `Strict`
-whatever tool the step names, rendering `[withheld: failed injection screen]` on a block.
+Condensed at the #735 review; full text in
+[`archive/handover_20260921_730_pre-prune.md`](archive/handover_20260921_730_pre-prune.md).
 
-- **The call survives elision** — what was asked is what stops a repeat — and calls' bytes come off
-  `PLANS_SUMMARY_BUDGET` before outputs compete; `call::apply_call_budget` then drops the **oldest
-  calls' `parameters`**.
-- ⚠️ **Two review rounds found one real fail-open and two tests weaker than their names.** A call's
-  deepest `parameters` level was rendered but never screened — out of reach only because
-  serde_json's recursion limit sits below `MAX_WALK_DEPTH`, i.e. **the invariant rested on an
-  unrelated parser's constant**. ⚠️ **A hardening that rewrites screened text must ADD readings,
-  never replace them.**
-- **Deferred: [#729](https://github.com/hherb/kastellan/issues/729)** — `decision` is neither
-  clamped nor counted. ⚠️ **Not yet measured live:** re-run a multi-search mail question in a
-  **fresh DM room**; task 186's dropped `has_attachment` is the shape to look for.
-### Previous (2026-09-19, later): #677 and #560 closed by live measurement — no code change
+**#699 + #700** (PR [#728](https://github.com/hherb/kastellan/pull/728)) — each `plans_so_far` step
+carries a screened `"call": {tool, method, parameters}`; calls' bytes come off
+`PLANS_SUMMARY_BUDGET` first, then the **oldest calls' `parameters`** drop. ⚠️ Review found a real
+fail-open: a call's deepest `parameters` level was rendered but never screened, out of reach only
+because serde_json's recursion limit sits below `MAX_WALK_DEPTH` — **the invariant rested on an
+unrelated parser's constant**. ⚠️ **A hardening that rewrites screened text must ADD readings, never
+replace them** [[screen-hardening-must-add-readings]]. Deferred:
+[#729](https://github.com/hherb/kastellan/issues/729). ⚠️ **Not yet measured live** — re-run a
+multi-search mail question in a **fresh DM room**; task 186's dropped `has_attachment` is the shape.
 
-Every figure from `audit_log` rows, not from the replies. **#677 passes its own acceptance:** task
-189 = 5 plans, 8 dispatches, all `ok`, no `shell.exec`; the follow-up 190 = **1 plan, 0 dispatches**,
-`conversation_task_ids: [189]`, floor `Personal` via `conversation_inherited`. **#560 did not
-recur:** before #702, 2 of 2 runs made up an id; after, 0 of 3 across both mail questions.
+**#677 / #560 closed by live measurement, no code change** — every figure from `audit_log` rows, not
+the replies. ⚠️ **A live re-measure of a single-question issue needs a fresh DM room**: since #709 a
+same-room question inherits the prior turns' calls, which voids the test.
 
-⚠️ **A live re-measure of a single-question issue must use a fresh DM room** (or wait out the 5 h
-window) — since #709 a same-room question inherits the prior turns' calls, which would void the test.
-### Earlier (2026-09-19): #719 — the gliner tier died at `import torch` on macOS, twice
-
-PR [#726](https://github.com/hherb/kastellan/pull/726). **Two causes, both inside `import torch`:**
-`os.getcwd()` → EPERM under Seatbelt (fix: Seatbelt workers start in `/`, pinned on both backends),
-and torch's compile cache at import (fix: host-mode gliner opts into `ephemeral_scratch`). The
-second would have broken production host-mode gliner on macOS too. ⚠️ **A sandbox that restricts but
-does not relocate leaks the caller's context into the jail** — when a worker dies at startup only on
-one OS, diff what the two backends do *implicitly* (cwd, `/tmp`, `$HOME`), not what the policy
-grants. ⚠️ **gliner is the first WARM worker on `ephemeral_scratch`** — check the same property
-(keeps no request data on disk) before opting in another. ⚠️ **After mutating a `.py`, delete its
-`__pycache__`** [[mutation-testing-leaves-stale-pyc]].
+**#719** (PR [#726](https://github.com/hherb/kastellan/pull/726)) — both causes inside `import
+torch`: `getcwd()` → EPERM under Seatbelt (workers now start in `/`), and torch's compile cache at
+import (host-mode gliner opts into `ephemeral_scratch`); the second would have broken production
+macOS host-mode too. ⚠️ **A sandbox that restricts but does not relocate leaks the caller's context
+into the jail** — when a worker dies at startup on one OS only, diff what the backends do
+*implicitly* (cwd, `/tmp`, `$HOME`), not what the policy grants. ⚠️ **gliner is the first WARM worker
+on `ephemeral_scratch`.** ⚠️ **After mutating a `.py`, delete its `__pycache__`**
+[[mutation-testing-leaves-stale-pyc]].
 
 ### Previous: #720 / #717 / #709 — the REQUIRE contract, the triage, and conversational continuity
 

@@ -125,8 +125,10 @@ pub const EARLY_EXIT_STDERR_MARKER: &str = "[worker-early-exit]";
 /// The exact bytes the early-exit stderr fallback writes. Pure, so the
 /// rendering can be pinned without a process that has no subscriber.
 ///
-/// ⚠️ **Neutralises — in [`format_stderr_fallback`], which it delegates to, not
-/// in its callers.** The one-line property the marker doc above argues for —
+/// ⚠️ **Neutralises — in `format_stderr_fallback`, which it delegates to, not
+/// in its callers.** (Named, not linked: that renderer is private, and linking
+/// to it from a `pub` item's docs makes rustdoc warn.) The one-line property
+/// the marker doc above argues for —
 /// that this can never produce a second, column-0 line a gate grep reads as
 /// `[SKIP]`/`[WARN]`/`[E2E]` — belongs to the function that *renders the line*,
 /// never to a caller's call order. This is `pub`, so a caller that reached for
@@ -140,9 +142,13 @@ pub const EARLY_EXIT_STDERR_MARKER: &str = "[worker-early-exit]";
 /// that is the drift-between-copies shape CLAUDE.md's bwrap-argv note names,
 /// where the incomplete copy is the one that breaks.
 ///
-/// `neutralise_controls` is idempotent and length-preserving, so
-/// [`emit_early_exit_report`] neutralising first costs nothing and both orders
-/// give identical bytes.
+/// `neutralise_controls` is idempotent (it maps the class to `' '`, which is
+/// not in the class), so [`emit_early_exit_report`] neutralising first costs
+/// nothing and both orders give identical bytes.
+///
+/// ⚠️ It is **char-count** preserving, not byte-length preserving — U+2028 is
+/// 3 bytes in and 1 out. This said "length-preserving", which in Rust reads as
+/// `.len()` and is false; the conclusion above needs only idempotency.
 pub fn format_early_exit_stderr_fallback(report: &str) -> String {
     format_stderr_fallback(EARLY_EXIT_STDERR_MARKER, report)
 }
@@ -162,10 +168,21 @@ pub fn format_early_exit_stderr_fallback(report: &str) -> String {
 /// report to reach.
 ///
 /// **Test binaries install none**, and that is the case this exists for: 29 of
-/// the 30 `core/tests/*.rs` suites that dispatch to a real worker never call
+/// the 31 `core/tests/*.rs` suites that dispatch to a real worker never call
 /// `tracing_subscriber` (count: suites calling `dispatch`/`dispatch_with_sink`,
 /// the only path here), so #666's report went nowhere in precisely the place a
-/// human was reading. #719 is the worked example — a session spent on it with
+/// human was reading.
+///
+/// ⚠️ **Re-count the denominator when adding a suite; this one went stale
+/// once already.** It read "29 of the 30" until the #735 review measured it:
+/// #731 added `worker_early_exit_stderr_fallback_e2e.rs`, which both dispatches
+/// *and* installs a subscriber, so it joined **both** sides and the ratio moved
+/// 29/30 → 29/31 while the numerator stayed coincidentally right. The
+/// persistent-worker emitter below deliberately cites a **different** census
+/// (`PersistentWorker::spawn*` suites), because the two populations are
+/// disjoint — see `worker_lifecycle::persistent`'s emit site.
+///
+/// #719 is the worked example — a session spent on it with
 /// the cause still unknown, then one `tracing_subscriber` line in the failing
 /// test and the next run printed the Python traceback that named it.
 ///
@@ -279,8 +296,10 @@ pub const STDERR_FALLBACK_MARKERS: [&str; 2] =
 /// that a fallback can never produce a second, column-0 line a gate grep reads
 /// as `[SKIP]`/`[WARN]`/`[E2E]` — has to belong to the function that *renders
 /// the line*, not to any caller's call order. `neutralise_controls` is
-/// idempotent and length-preserving, so a caller that also neutralises (both do,
-/// for their `tracing` half) costs nothing and both orders give identical bytes.
+/// idempotent, so a caller that also neutralises (both do, for their `tracing`
+/// half) costs nothing and both orders give identical bytes. (Idempotent and
+/// char-count preserving — NOT byte-length preserving; U+2028 is 3 bytes in,
+/// 1 out.)
 fn format_stderr_fallback(marker: &str, report: &str) -> String {
     format!("{marker} {}", crate::untrusted_text::neutralise_controls(report))
 }
@@ -303,7 +322,9 @@ fn emit_to_stderr_when_unheard(marker: &str, report: &str) {
 /// Pure: the persistent-worker death line, with `label` folded into the text.
 ///
 /// ⚠️ **The label is in the message, not only in a `tracing` field.** The daemon's
-/// subscriber is `tracing_subscriber::fmt().json()` (`core/src/main.rs`), so
+/// subscriber is `tracing_subscriber::fmt().with_env_filter(…).json()`
+/// (`core/src/main.rs`) — the filter half named explicitly because it is what
+/// #734 below is about, and omitting it let two notes in this file disagree. So
 /// `%label` is a queryable JSON field worth keeping — but the stderr fallback
 /// carries no fields at all. A label that lived only in the field would leave the
 /// fallback saying "persistent worker died" without naming *which*, and the two
@@ -315,6 +336,16 @@ pub fn format_persistent_death_line(label: &str, report: &str) -> String {
 
 /// The [`format_early_exit_stderr_fallback`] counterpart for a persistent
 /// worker's death report.
+///
+/// ⚠️ **Takes an ALREADY-FOLDED line, not a raw `death_report()` string — the
+/// two counterparts are not symmetric.** The early-exit formatter is handed a
+/// self-contained report that already names its worker. This one is not: the
+/// label is folded in by [`format_persistent_death_line`], and
+/// [`emit_persistent_death_report`] passes *that* result here. A caller who
+/// passes a bare `death_report()` string instead gets
+/// `[worker-death] worker exited (…)` with **no label** — precisely the failure
+/// `format_persistent_death_line`'s own doc argues must never happen, since the
+/// fallback channel carries no `tracing` fields to recover it from.
 pub fn format_persistent_death_stderr_fallback(report: &str) -> String {
     format_stderr_fallback(WORKER_DEATH_STDERR_MARKER, report)
 }
@@ -423,111 +454,148 @@ mod tests {
         assert!(line.contains(&report), "the report must not be altered: {line}");
     }
 
-#[test]
-fn every_stderr_fallback_marker_is_distinctive_and_not_a_gate_evidence_marker() {
-    // `scripts/run-e2e-gate.sh` asserts ZERO `[WARN]` lines in a profile run,
-    // and every profile passes `--nocapture`, so a line this module emits
-    // reaches the gate log even from a PASSING test. Borrowing one of the three
-    // evidence markers would therefore turn a profile red for a suite that was
-    // working.
-    //
-    // ⚠️ No profile selects an early-exit or worker-death suite today — see the
-    // consts' own docs, which are the accurate statement. This is insurance
-    // against the profile that adds one, not a description of current suites.
-    for marker in STDERR_FALLBACK_MARKERS {
-        // `starts_with`, not equality: the gate's greps are anchored at line
-        // start (`grep -c '^\[WARN\]'`), so a marker of `"[WARN] early-exit"`
-        // would pass an inequality check and still trip the assertion.
-        for evidence in ["[SKIP]", "[WARN]", "[E2E]"] {
+    #[test]
+    fn every_stderr_fallback_marker_is_distinctive_and_not_a_gate_evidence_marker() {
+        // `scripts/run-e2e-gate.sh` asserts ZERO `[WARN]` lines in a profile run,
+        // and every profile passes `--nocapture`, so a line this module emits
+        // reaches the gate log even from a PASSING test. Borrowing one of the three
+        // evidence markers would therefore turn a profile red for a suite that was
+        // working.
+        //
+        // ⚠️ No profile selects an early-exit or worker-death suite today — see the
+        // consts' own docs, which are the accurate statement. This is insurance
+        // against the profile that adds one, not a description of current suites.
+        for marker in STDERR_FALLBACK_MARKERS {
+            // `starts_with`, not equality: the gate's greps are anchored at line
+            // start (`grep -c '^\[WARN\]'`), so a marker of `"[WARN] early-exit"`
+            // would pass an inequality check and still trip the assertion.
+            for evidence in ["[SKIP]", "[WARN]", "[E2E]"] {
+                assert!(
+                    !marker.starts_with(evidence),
+                    "the fallback marker {marker:?} must not BEGIN with the gate evidence marker \
+                     {evidence}: the gate greps them anchored at line start"
+                );
+            }
+            // Without this the check above is vacuous: `""` — and any marker that
+            // is a strict prefix of all three, like `"["` — satisfies every
+            // `starts_with` in this file, and `stdout.contains("")` in the e2es is
+            // true of any output at all. Every other assertion on a marker reads
+            // the const, so this is the only place their VALUES are pinned.
             assert!(
-                !marker.starts_with(evidence),
-                "the fallback marker {marker:?} must not BEGIN with the gate evidence marker \
-                 {evidence}: the gate greps them anchored at line start"
+                marker.starts_with("[worker-")
+                    && marker.ends_with(']')
+                    && marker.len() > "[worker-]".len(),
+                "each marker must be a non-trivial bracketed `[worker-…]` token; an empty or \
+                 single-character marker passes every other check in this file vacuously, \
+                 including `contains` in the e2es. Got: {marker:?}"
             );
         }
-        // Without this the check above is vacuous: `""` — and any marker that
-        // is a strict prefix of all three, like `"["` — satisfies every
-        // `starts_with` in this file, and `stdout.contains("")` in the e2es is
-        // true of any output at all. Every other assertion on a marker reads
-        // the const, so this is the only place their VALUES are pinned.
+    }
+
+    #[test]
+    fn the_two_stderr_fallback_markers_are_distinct() {
+        // An early exit and a persistent-worker death point at different places to
+        // look — a single call's jail versus a long-lived worker that stopped and is
+        // being respawned. One marker for both would make a gate log unable to say
+        // which happened, which is the entire reason #730 got its own rather than
+        // reusing `EARLY_EXIT_STDERR_MARKER`.
+        //
+        // Reads the ARRAY, not the two consts, so a third marker that duplicated an
+        // existing one is caught here too.
+        let mut seen = STDERR_FALLBACK_MARKERS.to_vec();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(
+            seen.len(), before,
+            "every fallback marker must be distinct, or a reader cannot tell the events apart: \
+             {STDERR_FALLBACK_MARKERS:?}"
+        );
+
+        // ⚠️ **Distinct is not enough — no marker may PREFIX another.** Both
+        // e2e suites collect their lines with `line.starts_with(MARKER)`, so a
+        // pair like `[worker-death]` / `[worker-death-persistent]` would be
+        // unequal (passing the dedup above) while silently folding one suite's
+        // lines into the other's `marked` vector, and a `marked.len() == 1`
+        // assertion would then be counting someone else's output. Equality is
+        // the wrong relation to test when every consumer uses prefixes.
+        for (i, a) in STDERR_FALLBACK_MARKERS.iter().enumerate() {
+            for (j, b) in STDERR_FALLBACK_MARKERS.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    !b.starts_with(a),
+                    "fallback marker {b:?} begins with {a:?}; every consumer matches these with \
+                     `starts_with`, so one suite's lines would be collected as the other's"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_persistent_death_line_names_which_worker_died_and_carries_the_report() {
+        // The fallback channel carries no `tracing` fields, so a label that lived
+        // only in `%label` would leave the stderr line saying "persistent worker
+        // died" without naming which — and the two production users are `matrix`
+        // and `email`, i.e. exactly the distinction an operator needs first.
+        let report = "worker exited (exit status: 1); recent stderr: boom";
+        let line = format_persistent_death_line("matrix", report);
+        assert!(line.contains("matrix"), "the line must name WHICH worker died: {line}");
         assert!(
-            marker.starts_with("[worker-") && marker.ends_with(']') && marker.len() > "[worker-]".len(),
-            "each marker must be a non-trivial bracketed `[worker-…]` token; an empty or \
-             single-character marker passes every other check in this file vacuously, \
-             including `contains` in the e2es. Got: {marker:?}"
+            line.contains("boom"),
+            "the report must survive intact — it is the point: {line}"
+        );
+        assert!(line.contains("died"), "the line must say what happened: {line}");
+        // ⚠️ The SHAPE, not just the ingredients. Three `contains` checks pass
+        // just as well on `"persistent worker {report} died: {label}"` — the
+        // two interpolations swapped — which compiles (both are `&str`) and
+        // renders an operator a line naming the exit status as the worker and
+        // the worker as the cause. That mutant survived the whole suite until
+        // the #735 review; this is what kills it.
+        assert_eq!(
+            line,
+            format!("persistent worker matrix died: {report}"),
+            "the label and the report must land in their own slots: {line}"
         );
     }
-}
 
-#[test]
-fn the_two_stderr_fallback_markers_are_distinct() {
-    // An early exit and a persistent-worker death point at different places to
-    // look — a single call's jail versus a long-lived worker that stopped and is
-    // being respawned. One marker for both would make a gate log unable to say
-    // which happened, which is the entire reason #730 got its own rather than
-    // reusing `EARLY_EXIT_STDERR_MARKER`.
-    //
-    // Reads the ARRAY, not the two consts, so a third marker that duplicated an
-    // existing one is caught here too.
-    let mut seen = STDERR_FALLBACK_MARKERS.to_vec();
-    seen.sort_unstable();
-    let before = seen.len();
-    seen.dedup();
-    assert_eq!(
-        seen.len(), before,
-        "every fallback marker must be distinct, or a reader cannot tell the events apart: \
-         {STDERR_FALLBACK_MARKERS:?}"
-    );
-}
-
-#[test]
-fn the_persistent_death_line_names_which_worker_died_and_carries_the_report() {
-    // The fallback channel carries no `tracing` fields, so a label that lived
-    // only in `%label` would leave the stderr line saying "persistent worker
-    // died" without naming which — and the two production users are `matrix`
-    // and `email`, i.e. exactly the distinction an operator needs first.
-    let line = format_persistent_death_line("matrix", "worker exited (exit status: 1); recent stderr: boom");
-    assert!(line.contains("matrix"), "the line must name WHICH worker died: {line}");
-    assert!(line.contains("boom"), "the report must survive intact — it is the point: {line}");
-    assert!(line.contains("died"), "the line must say what happened: {line}");
-}
-
-#[test]
-fn the_persistent_death_fallback_neutralises_a_hostile_report() {
-    // ⚠️ Defence-in-depth at a PUBLIC TRAIT BOUNDARY, not a live hole — the
-    // emitter's doc says so plainly and this test does not claim otherwise.
-    // Nothing reaching this today is attacker-controlled (an `ExitStatus`, plus
-    // a tail already stripped by `push_trimmed`), but
-    // `PersistentTransport::death_report` is `pub` and `egress::persistent_net`
-    // already delegates through it, so any implementor is a producer of this
-    // string. Pinning the property on the PUB formatter — rather than on
-    // `emit_persistent_death_report`'s call order — is what stops such an
-    // implementor rendering an un-neutralised line by reaching for it directly.
-    let line = format_persistent_death_stderr_fallback(
-        "worker exited\u{1b}[31m\n[WARN] forged-gate-line",
-    );
-    assert!(
-        line.starts_with(WORKER_DEATH_STDERR_MARKER),
-        "the marker must lead, so a grep anchored at line start finds it: {line}"
-    );
-    assert!(
-        !line.contains('\u{1b}'),
-        "an ESC would be an ANSI sequence executing in the reader's terminal: {line:?}"
-    );
-    assert_eq!(
-        line.lines().count(),
-        1,
-        "the fallback must be exactly ONE line — a `\\n` here forges a column-0 line that \
-         `run-e2e-gate.sh`'s `^\\[WARN\\]` grep counts, failing an unrelated profile: {line:?}"
-    );
-    // Neutralisation maps the class to a space, so the text must SURVIVE —
-    // mid-line. A check that merely asserted its absence would also pass if the
-    // report stopped reaching the line at all.
-    assert!(
-        line.contains("forged-gate-line"),
-        "the text must survive as text; only its line-forging effect is removed: {line:?}"
-    );
-}
+    #[test]
+    fn the_persistent_death_fallback_neutralises_a_hostile_report() {
+        // ⚠️ Defence-in-depth at a PUBLIC TRAIT BOUNDARY, not a live hole — the
+        // emitter's doc says so plainly and this test does not claim otherwise.
+        // Nothing reaching this today is attacker-controlled (an `ExitStatus`, plus
+        // a tail already stripped by `push_trimmed`), but
+        // `PersistentTransport::death_report` is `pub` and `egress::persistent_net`
+        // already delegates through it, so any implementor is a producer of this
+        // string. Pinning the property on the PUB formatter — rather than on
+        // `emit_persistent_death_report`'s call order — is what stops such an
+        // implementor rendering an un-neutralised line by reaching for it directly.
+        let line = format_persistent_death_stderr_fallback(
+            "worker exited\u{1b}[31m\n[WARN] forged-gate-line",
+        );
+        assert!(
+            line.starts_with(WORKER_DEATH_STDERR_MARKER),
+            "the marker must lead, so a grep anchored at line start finds it: {line}"
+        );
+        assert!(
+            !line.contains('\u{1b}'),
+            "an ESC would be an ANSI sequence executing in the reader's terminal: {line:?}"
+        );
+        assert_eq!(
+            line.lines().count(),
+            1,
+            "the fallback must be exactly ONE line — a `\\n` here forges a column-0 line that \
+             `run-e2e-gate.sh`'s `^\\[WARN\\]` grep counts, failing an unrelated profile: {line:?}"
+        );
+        // Neutralisation maps the class to a space, so the text must SURVIVE —
+        // mid-line. A check that merely asserted its absence would also pass if the
+        // report stopped reaching the line at all.
+        assert!(
+            line.contains("forged-gate-line"),
+            "the text must survive as text; only its line-forging effect is removed: {line:?}"
+        );
+    }
 
     #[test]
     fn the_stderr_fallback_neutralises_a_model_authored_control_character() {
@@ -545,6 +613,15 @@ fn the_persistent_death_fallback_neutralises_a_hostile_report() {
         // because each emitter neutralises its own line first and masks it.
         // Only this pair of unit tests dies. A `pub` renderer's guarantee is
         // reachable from a unit test and from nowhere else.
+        //
+        // ⚠️ **Say what that mutant is, plainly: near-equivalent today.** Both
+        // `format_*_stderr_fallback` wrappers have ZERO callers outside these
+        // tests — `emit_to_stderr_when_unheard` calls the private renderer
+        // directly — so the neutralisation these two tests defend is redundant
+        // belt-and-braces in every shipped binary. That makes this a test of a
+        // `pub` API's contract for a future caller, which is worth having, and
+        // NOT evidence that the e2e suites have a hole. Reading it the other
+        // way would overstate what the pair proves.
         let report = format_early_exit_report(
             "w",
             "m\u{1b}[31m\n[WARN] forged-gate-line",

@@ -13,13 +13,27 @@
 //! Matrix channel used before adopting this shared supervisor).
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kastellan_protocol::client::Client;
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
 use crate::channel::respawn_alarm::RespawnRateAlarm;
 use crate::worker_lifecycle::RestartBackoff;
+
+/// How long [`ClientTransport::death_report`] waits for the stderr drainer to
+/// reach EOF before snapshotting the tail.
+///
+/// The same 250 ms `tool_host::EARLY_EXIT_DRAIN_WAIT` uses, and deliberately so:
+/// both are "the worker just closed its pipes; give the drain thread a moment to
+/// finish" and there is no reason for a persistent worker's last words to be
+/// collected less patiently than a tool worker's. A separate const rather than a
+/// shared one only because the two live in unrelated modules; if a third appears,
+/// hoist them.
+///
+/// ⚠️ **This is a cap, not a cost.** `StderrTail::wait_for_drain` returns as soon
+/// as `mark_drained` lands, so a worker whose stderr has already closed costs ~2 ms.
+const DEATH_DRAIN_WAIT: Duration = Duration::from_millis(250);
 
 // ── ClientTransport ──────────────────────────────────────────────────────────
 
@@ -71,8 +85,16 @@ impl ClientTransport {
     }
 
     /// Wrap an ALREADY-CONNECTED client (no sandbox spawn) — the hermetic-test
-    /// path over a plain child process. No stderr tail ⇒ death reports carry
-    /// exit status only.
+    /// path over a plain child process.
+    ///
+    /// ⚠️ **No stderr tail ⇒ `death_report` returns `None` entirely** — not "a
+    /// report carrying the exit status only", which is what this said until the
+    /// #735 review read the code: `death_report`'s first statement is
+    /// `self.stderr_tail.as_ref()?`, which short-circuits *before* the
+    /// `try_wait()` that would supply the status. So a worker wrapped this way
+    /// dies with no report on any channel. That is acceptable here because this
+    /// constructor is the hermetic-test path, but it is a different statement
+    /// from the one it replaced.
     pub fn from_client(client: Client) -> Self {
         Self { client, stderr_tail: None }
     }
@@ -90,19 +112,46 @@ impl PersistentTransport for ClientTransport {
     }
 
     fn death_report(&mut self) -> Option<String> {
-        // Snapshot the tail (non-blocking; the drain thread owns the push side).
-        let tail = self.stderr_tail.as_ref()?.snapshot();
-        // A SINGLE non-blocking reap. This runs on the supervisor's driver
-        // thread, which cannot observe a concurrent shutdown() or start the
-        // respawn while it is here — a poll loop with sleeps (the Matrix
-        // channel's approach) would stall the driver up to half a second per
-        // death just to enrich a log line, and a slow-exiting VM launcher would
-        // hit the full stall every time. `format_death_report` already renders a
-        // `None` status as "not yet reaped", so an un-exited child degrades the
+        let tail = collect_death_tail(self.stderr_tail.as_ref()?);
+        // A SINGLE non-blocking reap, deliberately: unlike the drain above there
+        // is no flag to wait on, so this would be an unbounded poll loop against
+        // a slow-exiting VM launcher. `format_death_report` renders a `None`
+        // status as "not yet reaped", so an un-exited child degrades the
         // message, not the supervisor's responsiveness.
         let status = self.client.try_wait().ok().flatten();
         Some(crate::worker_stderr::format_death_report(status, &tail))
     }
+}
+
+/// Wait for the stderr drainer to finish, then snapshot the tail.
+///
+/// ⚠️ **A free function, not an inlined pair of calls, so the wait is reachable
+/// from a unit test.** The decision it encodes — *wait before snapshotting* —
+/// otherwise lives inside `ClientTransport::death_report`, which needs a real
+/// `Client` over a spawned child to construct, so no test could reach the
+/// accepting branch and a mutant deleting the wait would survive. Extracting it
+/// until a unit test can reach it is what the test below depends on.
+fn collect_death_tail(tail_ring: &crate::worker_stderr::StderrTail) -> Vec<String> {
+    // ⚠️ **Wait for the drainer before snapshotting, exactly as the
+    // tool-worker path does** (`tool_host::warn_early_exit`). The worker has
+    // already closed stdout, so its stderr is closing too; without this we
+    // usually snapshot an EMPTY ring and report "no stderr captured" for a
+    // worker that explained itself a millisecond later. That turns #730's
+    // whole point — routing this report to a channel a human reads — into a
+    // contentless line.
+    //
+    // ⚠️ **This costs the supervisor nothing, which is why the earlier
+    // "would stall the driver" reasoning was wrong.** The wait is bounded,
+    // and it returns the instant `mark_drained` lands (`wait_for_drain`
+    // polls a flag every 2 ms, so the common case is ~2 ms, not the cap).
+    // More decisively: the driver's very next act on this path is
+    // `thread::sleep(backoff.next_delay(0))`, and BOTH production users
+    // configure `base: Duration::from_secs(1)` (`channel::matrix`,
+    // `channel::email`). The driver is about to sleep a full second
+    // regardless — spending a fraction of it collecting the explanation
+    // delays no respawn at all.
+    tail_ring.wait_for_drain(DEATH_DRAIN_WAIT);
+    tail_ring.snapshot()
 }
 
 impl Drop for ClientTransport {
@@ -176,12 +225,23 @@ impl PersistentWorker {
                         if let Some(r) = transport.death_report() {
                             // NOT a bare `tracing::warn!` (#730). This driver
                             // runs the Matrix and email channel workers, and
-                            // 29 of the 30 `core/tests` suites that dispatch
-                            // to a real worker install no subscriber — so a
+                            // 8 of the 9 `core/tests` suites that drive a
+                            // `PersistentWorker` install no subscriber — so a
                             // `tracing`-only report is discarded in exactly
                             // the place a human is reading. The emitter owns
                             // both channels, the marker and the
-                            // neutralisation; see `worker_stderr::report`.
+                            // neutralisation; see
+                            // `worker_stderr::emit_persistent_death_report`
+                            // (the re-exported item — `worker_stderr::report`
+                            // is a private module and resolves to nothing).
+                            //
+                            // ⚠️ The census is of `PersistentWorker::spawn*`
+                            // suites, NOT the `dispatch` suites the
+                            // early-exit emitter cites. The #735 review
+                            // measured the two populations DISJOINT: no suite
+                            // does both, so the dispatch figure — true as it
+                            // is — would be evidence about tests that cannot
+                            // reach this line.
                             crate::worker_stderr::emit_persistent_death_report(&label, &r);
                         }
                         // Respawn with backoff.  IMPORTANT fix: after each
@@ -279,6 +339,63 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn collecting_a_death_tail_waits_for_the_drainer_instead_of_racing_it() {
+        // The property #735 restored: a worker that has just closed its pipes
+        // has usually NOT been drained yet, so snapshotting immediately yields
+        // an empty ring and `format_death_report` renders "no stderr captured"
+        // for a worker that explained itself a millisecond later. That is the
+        // contentless line #730's whole point was to avoid.
+        //
+        // The drainer here lands its line AFTER this thread has already called
+        // `collect_death_tail`, which is exactly the race in production. Deleting
+        // the `wait_for_drain` makes this return empty and the test fails.
+        let tail = crate::worker_stderr::StderrTail::new(8);
+        let writer = tail.clone();
+        let drain = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            crate::worker_stderr::drain_reader(
+                0,
+                std::io::Cursor::new(b"matrix sync failed, refusing to continue\n".to_vec()),
+                Some(&writer),
+            );
+            writer.mark_drained();
+        });
+
+        let collected = collect_death_tail(&tail);
+        drain.join().expect("the fixture's drain thread");
+
+        assert_eq!(
+            collected,
+            vec!["matrix sync failed, refusing to continue".to_string()],
+            "the dying worker's explanation must be collected, not raced — an empty tail here \
+             is the `no stderr captured` line that made #730's fix contentless"
+        );
+    }
+
+    #[test]
+    fn collecting_a_death_tail_gives_up_rather_than_hanging_on_a_drainer_that_never_finishes() {
+        // The other half: the wait is a CAP. A drainer that never marks itself
+        // done (a worker still alive and chatting, a drain thread wedged) must
+        // not stall the supervisor's driver — it degrades the message instead.
+        // Without a bound this would hang the whole test binary.
+        let tail = crate::worker_stderr::StderrTail::new(8);
+        let started = Instant::now();
+        let collected = collect_death_tail(&tail);
+        let waited = started.elapsed();
+
+        assert!(collected.is_empty(), "nothing was ever drained: {collected:?}");
+        assert!(
+            waited >= DEATH_DRAIN_WAIT,
+            "it must actually wait the cap before giving up, or it is racing again: {waited:?}"
+        );
+        assert!(
+            waited < DEATH_DRAIN_WAIT * 4,
+            "the wait must be BOUNDED — the driver is about to respawn and cannot block on a \
+             drainer that never finishes: {waited:?}"
+        );
+    }
 
     /// Fake transport that answers `die_after` calls, then errors (simulating
     /// worker death). Each spawn gets a fresh counter.

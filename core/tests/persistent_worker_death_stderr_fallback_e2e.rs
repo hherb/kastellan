@@ -57,6 +57,7 @@
 use std::process::Command;
 use std::time::Duration;
 
+use kastellan_core::worker_lifecycle::force_route::env_flag_enabled;
 use kastellan_core::worker_lifecycle::{
     PersistentFactory, PersistentHandle, PersistentTransport, PersistentWorker, RestartBackoff,
 };
@@ -65,7 +66,26 @@ use kastellan_core::worker_stderr::{EARLY_EXIT_STDERR_MARKER, WORKER_DEATH_STDER
 /// The supervisor label the fixture's worker runs under — what an operator
 /// reads first to know *which* worker died. Shaped like the two real ones
 /// (`matrix`, `email`) and distinctive enough that finding it cannot be chance.
-const LABEL: &str = "kastellan-test-730";
+///
+/// ⚠️ **Hostile on purpose, and the ONLY way to reach the label's own
+/// neutralisation** (#735 review). `emit_persistent_death_report` neutralises
+/// `label` separately *and then* neutralises the whole folded line, so the
+/// second pass masks the first for the **message** — dropping the label's own
+/// `neutralise_controls` changes nothing a message assertion can see. What it
+/// still protects is the `%label` **tracing field**, which carries the raw
+/// value. With a clean literal here that mutant survived the entire suite; with
+/// this, the with-subscriber fixture's `tracing`-channel check kills it.
+const LABEL: &str = "kastellan-test-730\u{1b}[31m\n[WARN] FORGED-LABEL-LINE";
+
+/// The part of [`LABEL`] that survives neutralisation — what a rendered line
+/// must actually contain. Asserting on `LABEL` itself would fail by
+/// construction, since its control characters become spaces.
+const LABEL_TEXT: &str = "kastellan-test-730";
+
+/// The forgery attempt inside [`LABEL`], for the same positive-control reason
+/// [`FORGED_TEXT`] exists: "no forged line" must not be satisfiable by the
+/// label never reaching the output at all.
+const FORGED_LABEL_TEXT: &str = "FORGED-LABEL-LINE";
 
 /// The dying worker's own explanation, as `ClientTransport::death_report` would
 /// have rendered it from a real worker's retained stderr tail.
@@ -130,9 +150,27 @@ const FIXTURE_ENV: &str = "KASTELLAN_PERSISTENT_DEATH_FIXTURE";
 /// explains itself when the driver asks why.
 struct DyingTransport;
 
+/// [`DyingTransport`]'s own error text. Asserted on, so a fixture that stopped
+/// reaching the transport under test (a call answered by the driver's
+/// "persistent worker is restarting" arm instead) fails *here* rather than
+/// surfacing as "the report never appeared" from two process boundaries away.
+const SIMULATED_DEATH: &str = "simulated worker death";
+
+/// [`SilentlyDyingTransport`]'s error text.
+///
+/// ⚠️ **Neither of these two may CONTAIN the other**, because
+/// [`kill_one_transport`] matches with `contains`. The first draft of this used
+/// `"simulated worker death with no report"`, which has [`SIMULATED_DEATH`] as a
+/// prefix — so a call answered by the *silent* transport would satisfy a wait
+/// for the *reporting* one, and the fixture could skip a death while looking
+/// like it drove both. Same shape as `contains("1 failed")` also matching
+/// `"1 passed; 1 failed"`. The assertion below pins it rather than trusting the
+/// next editor to notice.
+const SILENT_DEATH: &str = "fixture transport dying WITHOUT a report";
+
 impl PersistentTransport for DyingTransport {
     fn call(&mut self, _m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        anyhow::bail!("simulated worker death")
+        anyhow::bail!("{SIMULATED_DEATH}")
     }
 
     fn death_report(&mut self) -> Option<String> {
@@ -140,11 +178,40 @@ impl PersistentTransport for DyingTransport {
     }
 }
 
-/// The replacement the supervisor respawns. Never called — the fixture shuts
-/// down immediately — and it exists only so the respawn **succeeds**. A factory
-/// that returned `Err` instead would send the driver round its back-off loop
-/// emitting `respawn failed; backing off` warnings, i.e. noise on the very
-/// stream the parent counts occurrences in.
+/// The transport the supervisor respawns after [`DyingTransport`]: it dies the
+/// same way but answers `death_report()` with **`None`**.
+///
+/// ⚠️ **This is the arm that had no coverage at all** (#735 review). The emit
+/// site is `if let Some(r) = transport.death_report()`, and with only a
+/// `Some`-returning transport in the fixture the `None` branch was never
+/// executed — so replacing the `if let` with
+/// `death_report().unwrap_or_default()` passed the whole suite while making
+/// production emit `[worker-death] persistent worker X died: ` with an empty
+/// report. Driving a second death through this transport and then asserting
+/// **exactly one** marked line kills that mutant.
+struct SilentlyDyingTransport;
+
+impl PersistentTransport for SilentlyDyingTransport {
+    fn call(&mut self, _m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("{SILENT_DEATH}")
+    }
+    // `death_report` deliberately NOT overridden: the `PersistentTransport`
+    // default returns `None`, which is exactly the production shape this arm
+    // stands in for (any implementor that does not override it, and
+    // `ClientTransport` whenever stderr was never piped).
+}
+
+/// The replacement the supervisor respawns last. Never called — the fixture
+/// shuts down once both deaths are done — and it exists only so the final
+/// respawn **succeeds**.
+///
+/// ⚠️ **Not because a failing factory would be "noise on the counted stream"**,
+/// which is what this said until the #735 review: a bare `tracing::warn!` with
+/// no subscriber emits nothing at all, and the parent counts marked lines and
+/// `LAST_WORDS`, neither of which a `respawn failed` warning contains. The real
+/// reason is plainer — the fixture asserts on a *settled* state, and an
+/// always-failing factory leaves the driver spinning its back-off loop while
+/// the assertions run.
 struct SurvivingTransport;
 
 impl PersistentTransport for SurvivingTransport {
@@ -177,21 +244,57 @@ fn drive_a_persistent_worker_to_its_death() {
     let mut spawns = 0usize;
     let factory: PersistentFactory = Box::new(move || {
         spawns += 1;
-        Ok(if spawns == 1 {
-            Box::new(DyingTransport) as Box<dyn PersistentTransport>
-        } else {
-            Box::new(SurvivingTransport) as Box<dyn PersistentTransport>
+        Ok(match spawns {
+            1 => Box::new(DyingTransport) as Box<dyn PersistentTransport>,
+            2 => Box::new(SilentlyDyingTransport) as Box<dyn PersistentTransport>,
+            _ => Box::new(SurvivingTransport) as Box<dyn PersistentTransport>,
         })
     });
     let h: PersistentHandle = PersistentWorker::spawn_with_backoff(LABEL, factory, fast_backoff())
         .expect("spawn the fixture's persistent worker");
-    assert!(
-        h.call("ping", serde_json::json!({})).is_err(),
-        "the fixture's first transport must die on its first call — if it answered, the driver \
-         never reached `death_report()` and the parent's assertions are about a report nothing \
-         produced"
-    );
+
+    // Death 1: a transport that DOES answer `death_report()`. One marked line.
+    kill_one_transport(&h, SIMULATED_DEATH);
+    // Death 2: a transport whose `death_report()` is `None`. No marked line —
+    // and the parent's `marked.len() == 1` is what turns that into an assertion.
+    kill_one_transport(&h, SILENT_DEATH);
+
     h.shutdown();
+}
+
+/// Drive exactly one call into the currently-live transport and assert it died
+/// the way `expected` says.
+///
+/// ⚠️ **Retries, because "the call failed" is not "the transport failed."** A
+/// call landing while the driver is between transports is answered by its
+/// `"persistent worker is restarting"` arm without ever reaching
+/// `death_report()`. A bare `is_err()` would accept that and the fixture would
+/// silently stop exercising the emit site. Looping until the *transport's own*
+/// error comes back makes the intended path the only way to pass.
+fn kill_one_transport(h: &PersistentHandle, expected: &str) {
+    assert!(
+        !SILENT_DEATH.contains(SIMULATED_DEATH) && !SIMULATED_DEATH.contains(SILENT_DEATH),
+        "the two transports' error texts must not contain one another — this helper matches with \
+         `contains`, so a substring pair lets a wait for one death be satisfied by the other and \
+         the fixture silently skips a death: {SIMULATED_DEATH:?} vs {SILENT_DEATH:?}"
+    );
+    for _ in 0..200 {
+        let err = match h.call("ping", serde_json::json!({})) {
+            Ok(v) => panic!("the fixture's transports must never answer a call; got {v:?}"),
+            Err(e) => format!("{e:#}"),
+        };
+        if err.contains(expected) {
+            return;
+        }
+        assert!(
+            err.contains("restarting"),
+            "unexpected error from the fixture's worker: {err:?} (wanted {expected:?}, or the \
+             driver's transient `restarting` answer)"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("the fixture never reached a transport answering {expected:?} — the emit site under \
+            test was not exercised and every assertion downstream would be vacuous");
 }
 
 /// `true` when this process was launched by [`run_inner_fixture`].
@@ -199,12 +302,16 @@ fn drive_a_persistent_worker_to_its_death() {
 /// ⚠️ Presence is **not** enough: these fixtures fail on purpose, so an operator
 /// who exported `KASTELLAN_PERSISTENT_DEATH_FIXTURE=0` believing that disabled
 /// them would get two red tests from the documented `cargo test … -- --ignored`
-/// recipe, reading exactly like a regression. The tree's knob dialect is
-/// `1|true|yes|on`; this honours it rather than inventing a second one.
+/// recipe, reading exactly like a regression.
+///
+/// ⚠️ **Calls the tree's one implementation of the `1|true|yes|on` dialect
+/// rather than re-spelling it.** This said it "honours the dialect rather than
+/// inventing a second one" while inventing a second one — the drift shape
+/// `worker_stderr::report`'s own module doc invokes to justify its shared
+/// renderer. `env_flag_enabled` is the copy `tests_common::require`,
+/// `gliner_e2e` and the micro-VM harness already route through.
 fn is_the_child() -> bool {
-    std::env::var(FIXTURE_ENV).is_ok_and(|v| {
-        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-    })
+    env_flag_enabled(std::env::var(FIXTURE_ENV).ok())
 }
 
 /// Inner fixture: no subscriber, so the stderr fallback is the only channel.
@@ -330,10 +437,20 @@ fn assert_one_deliberate_failure(name: &str, run: &ChildRun) {
 /// Assert the channel named by `channel` carries the hostile report's text but
 /// neither of its control characters' effects.
 ///
-/// Both channels are checked, by their respective parents, because
-/// `emit_persistent_death_report` neutralises **once** and then feeds both — so
-/// a mutant that drops the neutralisation has to be caught wherever the line
-/// actually lands. The no-subscriber run proves it for the `eprintln!`
+/// Both channels are checked, by their respective parents, because a mutant
+/// that drops a neutralisation has to be caught wherever the line actually
+/// lands.
+///
+/// ⚠️ **Three passes, not "once", and the difference is what the mutation
+/// measurement turns on.** `emit_persistent_death_report` neutralises the
+/// `label`, then the whole folded line — and the fallback branch neutralises a
+/// *third* time inside the shared `format_stderr_fallback`. So the `tracing`
+/// half gets one pass and the stderr half gets two, which is exactly why a
+/// mutant in the shared renderer survives **both** e2es and dies only in
+/// `worker_stderr::report`'s unit tests. Saying "once" here contradicted that
+/// measurement, recorded in those tests' own comments.
+///
+/// The no-subscriber run proves the property for the `eprintln!`
 /// fallback; the with-subscriber run proves it for `tracing`, whose `fmt` layer
 /// writes the message through `Debug for Arguments` (i.e. Display, no
 /// escaping), so an un-neutralised `\n` really does break the line there.
@@ -389,13 +506,18 @@ fn a_failing_test_with_no_subscriber_shows_the_dead_workers_report() {
         marked[0]
     );
     assert!(
-        marked[0].contains(LABEL),
+        marked[0].contains(LABEL_TEXT),
         "the marked fallback line must name WHICH worker died. The fallback channel carries no \
          `tracing` fields, so a label kept only in `%label` leaves an operator reading \
          `persistent worker died` with `matrix` and `email` both live.\ngot: {}\n{both}",
         marked[0]
     );
     assert_the_hostile_report_was_defanged("the captured fallback", &run.stdout, &both);
+    assert!(
+        run.stdout.contains(FORGED_LABEL_TEXT),
+        "POSITIVE CONTROL for the hostile LABEL: it never reached the fallback at all, so the \
+         defanging checks above say nothing about the label's own neutralisation.\n{both}"
+    );
 
     // The two events must stay distinguishable. Reusing the early-exit marker
     // would make a gate log unable to say whether a tool worker failed one call
@@ -436,5 +558,27 @@ fn a_binary_that_installed_a_subscriber_does_not_get_the_report_twice() {
     // The `tracing` half of the same property. The daemon takes this channel
     // and nothing else, so neutralisation has to hold here too — and this is
     // the only fixture in which the report reaches a subscriber at all.
+    //
+    // ⚠️ This is also the ONLY place the `label`'s own neutralisation is
+    // reachable: the message text is neutralised a second time as a whole,
+    // which masks it, but the `%label` FIELD below carries the raw value. See
+    // `LABEL`'s doc.
     assert_the_hostile_report_was_defanged("the `tracing` channel", &run.stderr, &both);
+
+    // The `%label` structured field must still be emitted. The daemon's
+    // subscriber is `fmt().json()`, so this field is what makes a death
+    // queryable by worker — a property the emitter's doc argues for and that
+    // nothing asserted until the #735 review: the label is ALSO folded into the
+    // message text, so dropping `%label` changed nothing any other check saw.
+    assert!(
+        run.stderr.contains("label="),
+        "the `tracing` record must carry the `%label` FIELD, not only the label folded into the \
+         message text — the daemon's `fmt().json()` subscriber is what makes a worker death \
+         queryable by worker.\n{both}"
+    );
+    assert!(
+        run.stderr.contains(FORGED_LABEL_TEXT),
+        "POSITIVE CONTROL for the hostile LABEL on the `tracing` channel: it never arrived, so \
+         the defanging checks above say nothing about the label's own neutralisation.\n{both}"
+    );
 }
