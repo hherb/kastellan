@@ -1,0 +1,47 @@
+//! What the system *says* about a worker that died: the report formatters, the
+//! stderr-fallback markers, and the emitters that write to both channels.
+//!
+//! Split out of [`super`] (the capture half) because the two answer different
+//! questions. That module keeps a dying worker's bytes; this one turns them
+//! into a line a human reads. Every item here is re-exported by the parent, so
+//! `worker_stderr::` is still the one public path and no call site names
+//! `report` directly.
+//!
+//! # Two channels, one producer per event
+//!
+//! A worker's last words have to reach whoever is looking, and *who* that is
+//! differs by binary. The daemon installs a `tracing` subscriber as the first
+//! statement of `main`; **test binaries and `kastellan-cli` install none**, so
+//! before #725 a report logged through `tracing` alone went nowhere in exactly
+//! the place a human was reading it. Each emitter here therefore logs through
+//! `tracing` *and* `eprintln!`s a marked line when no subscriber exists.
+//!
+//! There are two such events, and they get **distinct markers** so a grep can
+//! tell them apart:
+//!
+//! | Event | Marker | Emitter |
+//! | --- | --- | --- |
+//! | a tool worker exits before answering | [`EARLY_EXIT_STDERR_MARKER`] | [`emit_early_exit_report`] |
+//! | a persistent worker dies mid-service | [`WORKER_DEATH_STDERR_MARKER`] | [`emit_persistent_death_report`] |
+//!
+//! ⚠️ **The shared half is shared on purpose.** Both emitters go through the
+//! same private [`format_stderr_fallback`] and [`emit_to_stderr_when_unheard`],
+//! so neither the neutralisation nor the `has_been_set()` guard exists in two
+//! copies that can drift. That drift is the shape CLAUDE.md's bwrap-argv note
+//! names, where the incomplete copy is the one that breaks — and #730 is the
+//! worked example: the persistent-worker report was a hand-rolled second copy
+//! of the `tracing`-only half and inherited none of #725's fixes.
+
+mod persistent;
+mod shared;
+mod tool_worker;
+
+pub use persistent::{
+    emit_persistent_death_report, format_death_report, format_persistent_death_line,
+    format_persistent_death_stderr_fallback, WORKER_DEATH_STDERR_MARKER,
+};
+pub use shared::STDERR_FALLBACK_MARKERS;
+pub use tool_worker::{
+    emit_early_exit_report, format_early_exit_report, format_early_exit_stderr_fallback,
+    format_unpiped_early_exit_report, EARLY_EXIT_STDERR_MARKER,
+};
