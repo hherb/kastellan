@@ -8,7 +8,7 @@
 > which holds the verbose pre-prune version of everything summarised here.
 
 **Last updated:** 2026-09-21 (#736: an `anyio` security floor in the gliner worker) ·
-**Recent PRs, newest first:** this session's #736 PR (the `anyio` floor), [#735](https://github.com/hherb/kastellan/pull/735) (#730, + a movement-only `worker_stderr` split), [#731](https://github.com/hherb/kastellan/pull/731) (#725), [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700), [#727](https://github.com/hherb/kastellan/pull/727) (#677/#560 live acceptance, docs), [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
+**Recent PRs, newest first:** [#740](https://github.com/hherb/kastellan/pull/740) (#736, the `anyio` security floor), [#735](https://github.com/hherb/kastellan/pull/735) (#730, + a movement-only `worker_stderr` split), [#731](https://github.com/hherb/kastellan/pull/731) (#725), [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700), [#727](https://github.com/hherb/kastellan/pull/727) (#677/#560 live acceptance, docs), [#726](https://github.com/hherb/kastellan/pull/726) (#719, the gliner tier's two macOS import-time deaths + a gate
 script that could not pass), [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob
 contract: #714, #622, #664), [#717](https://github.com/hherb/kastellan/pull/717) (backlog triage),
 [#709](https://github.com/hherb/kastellan/pull/709) (#701, conversational continuity),
@@ -60,7 +60,7 @@ instead of `no stderr captured`. Rootfs images last rebuilt 2026-09-08.
 
 ### This session (2026-09-21, second): #736 — a security floor for `anyio`, not just a lock bump
 
-Dependabot raised two advisories against `anyio 4.13.0` in
+[#740](https://github.com/hherb/kastellan/pull/740). Dependabot raised two advisories against `anyio 4.13.0` in
 `workers/gliner-relex/uv.lock`. Both are patched in **4.14.2** and both list `< 4.14.2` as the
 vulnerable range, so **one floor closes both**: **GHSA-82r6-8w77-94w6 (critical)** — `TLSStream`
 encodes host names with IDNA 2003, which can map a hostile name onto a different one and so enable
@@ -454,7 +454,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#736** — an `anyio>=4.14.2` **security floor** in `workers/gliner-relex/pyproject.toml` (not just a
+- **[#740](https://github.com/hherb/kastellan/pull/740)** — an `anyio>=4.14.2` **security floor** in `workers/gliner-relex/pyproject.toml` (not just a
   lock bump), closing GHSA-82r6-8w77-94w6 (critical, TLS spoofing) + GHSA-5p39-cfhj-2xmp. Exposure was
   provisioning-only: the worker is `Net::Deny` in both entries.
 - **[#735](https://github.com/hherb/kastellan/pull/735)** — the **persistent** worker's death report reaches a failing test too (#730);
