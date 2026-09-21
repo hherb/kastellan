@@ -37,6 +37,45 @@ dependencies = [
     # accidental wheel-resolution surprise (CUDA version mismatch) is
     # caught at uv sync time rather than at model load.
     "torch>=2.13.0",
+    # anyio is a SECURITY FLOOR on a transitive dependency, not an import.
+    # Nothing in this worker imports it; it arrives as
+    #   gliner/transformers -> huggingface_hub -> httpx -> anyio
+    # and it is declared here for the same reason `transformers` is (see
+    # above): a declared floor makes the vulnerable range a hard conflict
+    # rather than something a resolution can quietly satisfy.
+    #
+    # Both advisories are fixed in 4.14.2, and both list `< 4.14.2` as the
+    # vulnerable range, so this one floor closes both:
+    #
+    #   * GHSA-82r6-8w77-94w6 (critical) -- `TLSStream` encodes host names with
+    #     IDNA 2003, which can map a hostile name onto a different one and so
+    #     enable TLS certificate spoofing:
+    #     https://github.com/advisories/GHSA-82r6-8w77-94w6
+    #   * GHSA-5p39-cfhj-2xmp (medium) -- an anyio process-pool worker can block
+    #     indefinitely on undrained stderr:
+    #     https://github.com/advisories/GHSA-5p39-cfhj-2xmp
+    #
+    # Why the floor and not just the lock bump: the macOS container image is
+    # installed from THIS FILE, never from `uv.lock`. `Containerfile` copies
+    # the lock, but then runs `uv pip install --system --no-cache .`, which
+    # resolves from the `[project] dependencies` here -- so a lock-only bump
+    # would have been entirely inert for that image.
+    #
+    # Reachability, recorded so the next reader need not re-derive it: runtime
+    # exposure inside the jail is nil. Every entry that
+    # `core/src/workers/gliner_relex/entry.rs` can produce -- host mode and
+    # the macOS container mode -- sets `Net::Deny` alongside `HF_HUB_OFFLINE=1`
+    # and `TRANSFORMERS_OFFLINE=1`, so no TLS is spoken from inside the jail at
+    # all. (Both modes are pinned by `entry_denies_network*` in that module's
+    # tests, so this sentence has a gate behind it.)
+    #
+    # Note what this floor does NOT govern, lest the next reader assume it:
+    # the one-off weights download in `scripts/workers/gliner-relex/install.sh`
+    # invokes a **PATH** `hf`, resolved at pre-flight before `uv sync` has even
+    # created the venv -- so that is some other huggingface_hub, and some other
+    # anyio. (`uv sync` is not a path to it either: uv is Rust and never loads
+    # the anyio it installs.)
+    "anyio>=4.14.2",
 ]
 
 [project.optional-dependencies]
