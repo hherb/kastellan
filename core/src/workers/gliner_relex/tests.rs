@@ -185,6 +185,47 @@ fn entry_denies_network() {
     }
 }
 
+/// The containment claim is about EVERY entry `gliner_relex_entry` can
+/// produce, not just the host one — `workers/gliner-relex/pyproject.toml`
+/// records "no TLS is spoken from inside the jail at all" as the reachability
+/// argument for the `anyio` security floor, and a census in prose rots the
+/// moment one branch changes. `test_env()` hardcodes `use_container_backend:
+/// false`, so without this the container branch (`entry.rs`) could drop
+/// `Net::Deny` and no gliner test would notice.
+///
+/// macOS-only: container mode is gated to macOS (issue #144).
+#[cfg(target_os = "macos")]
+#[test]
+fn entry_denies_network_in_container_mode() {
+    let env = GlinerRelexEnv {
+        use_container_backend: true,
+        ..test_env()
+    };
+    let entry = gliner_relex_entry(&env, None);
+    match entry.policy.net {
+        Net::Deny => {}
+        other => panic!("expected Net::Deny in container mode, got {other:?}"),
+    }
+    // The offline vars are the other half of the same claim: `Net::Deny`
+    // removes the route, these stop the library from reaching for it.
+    let env_map: std::collections::HashMap<&str, &str> = entry
+        .policy
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(
+        env_map.get("HF_HUB_OFFLINE"),
+        Some(&"1"),
+        "container mode must carry HF_HUB_OFFLINE=1, not just host mode"
+    );
+    assert_eq!(
+        env_map.get("TRANSFORMERS_OFFLINE"),
+        Some(&"1"),
+        "container mode must carry TRANSFORMERS_OFFLINE=1, not just host mode"
+    );
+}
+
 #[test]
 fn entry_uses_ml_client_profile() {
     let env = test_env();
