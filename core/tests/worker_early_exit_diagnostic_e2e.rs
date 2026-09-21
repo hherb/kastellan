@@ -8,7 +8,7 @@
 //! said why each time, on the stream nobody was reading.
 //!
 //! The pure halves of the fix are unit-tested next to their code
-//! (`worker_stderr::format_early_exit_report`, the drain-completion flag, the
+//! (`worker_stderr::format_worker_failure_report`, the drain-completion flag, the
 //! control-character neutralisation). What only an end-to-end run can show is
 //! the **wiring**: that the tail-retaining drainer is actually attached at
 //! spawn, that the dispatch path notices `EarlyExit`, and that the worker's

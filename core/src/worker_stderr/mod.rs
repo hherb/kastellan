@@ -208,7 +208,7 @@ pub fn drain_reader<R: Read>(pid: u32, mut reader: R, tail: Option<&StderrTail>)
 ///
 /// **This is where the tail's text is neutralised**, and the placement is
 /// load-bearing: the tail feeds `format_death_report` and
-/// [`format_early_exit_report`], both of which log at warn — visible in an
+/// [`format_worker_failure_report`], both of which log at warn — visible in an
 /// operator's terminal by default — and doing it any earlier would eat the `\n`
 /// the caller splits on. Line endings are stripped first, so the neutralisation
 /// only ever sees the interior of a line.
@@ -239,6 +239,41 @@ pub fn spawn_drain_with_tail(pid: u32, stderr: std::process::ChildStderr) -> Std
         thread_tail.mark_drained();
     });
     tail
+}
+
+/// How long a caller reporting a worker failure waits for the stderr drainer to
+/// reach EOF before snapshotting the tail.
+///
+/// ⚠️ **A cap, not a cost.** [`StderrTail::wait_for_drain`] returns as soon as
+/// `mark_drained` lands, so a worker whose stderr has already closed costs the
+/// ~2 ms poll interval rather than this.
+pub const TAIL_DRAIN_WAIT: Duration = Duration::from_millis(250);
+
+/// Snapshot a worker's stderr tail, **waiting for the drainer first**.
+///
+/// The one copy for both reporting paths (#737). It was two: `tool_host`'s
+/// `EARLY_EXIT_DRAIN_WAIT` + inline wait for a tool worker, and
+/// `worker_lifecycle::persistent`'s `DEATH_DRAIN_WAIT` + `collect_death_tail`
+/// for a persistent one — identical values doing an identical job, with the
+/// latter's own doc saying "if a third appears, hoist them". #737 was that
+/// third caller.
+///
+/// ⚠️ **The wait is the whole function, and it is not an optimisation.** A
+/// worker that has just closed its pipes has usually NOT been drained yet, so
+/// snapshotting immediately yields an empty ring and the report renders
+/// "wrote NOTHING" / "no stderr captured" for a worker that explained itself a
+/// millisecond later. That contentless line is the exact defect #730 exists to
+/// remove, and #735's review found this path had silently lost the wait.
+///
+/// ⚠️ **Extracted so a test can reach the decision at all.** In its two
+/// callers the wait sits behind a real `Client` over a spawned child, which no
+/// unit test can construct — so a mutant deleting it survived every suite in
+/// the tree, measured. That is why this is a free function over a
+/// [`StderrTail`] rather than a line inside each caller
+/// [[unreachable-success-path-proves-nothing]].
+pub fn collect_tail_after_drain(tail: &StderrTail) -> Vec<String> {
+    tail.wait_for_drain(TAIL_DRAIN_WAIT);
+    tail.snapshot()
 }
 
 #[cfg(test)]
@@ -354,7 +389,7 @@ mod tests {
     #[test]
     fn drain_reader_neutralises_terminal_controls_before_they_reach_the_log() {
         // A compromised worker is in scope, and this stream now reaches the
-        // daemon log at WARN via `format_early_exit_report` — i.e. visible in
+        // daemon log at WARN via `format_worker_failure_report` — i.e. visible in
         // an operator's terminal by default rather than only under `debug`.
         // An ESC here would be an ANSI sequence executing in that terminal.
         let tail = StderrTail::new(10);
@@ -380,4 +415,38 @@ mod tests {
             got[0]
         );
     }
+    #[test]
+    fn collecting_a_worker_tail_waits_for_the_drainer_instead_of_racing_it() {
+        // The property #735 restored: a worker that has just closed its pipes
+        // has usually NOT been drained yet, so snapshotting immediately yields
+        // an empty ring and `format_death_report` renders "no stderr captured"
+        // for a worker that explained itself a millisecond later. That is the
+        // contentless line #730's whole point was to avoid.
+        //
+        // The drainer here lands its line AFTER this thread has already called
+        // `collect_tail_after_drain`, which is exactly the race in production. Deleting
+        // the `wait_for_drain` makes this return empty and the test fails.
+        let tail = StderrTail::new(8);
+        let writer = tail.clone();
+        let drain = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            drain_reader(
+                0,
+                std::io::Cursor::new(b"matrix sync failed, refusing to continue\n".to_vec()),
+                Some(&writer),
+            );
+            writer.mark_drained();
+        });
+
+        let collected = collect_tail_after_drain(&tail);
+        drain.join().expect("the fixture's drain thread");
+
+        assert_eq!(
+            collected,
+            vec!["matrix sync failed, refusing to continue".to_string()],
+            "the dying worker's explanation must be collected, not raced — an empty tail here \
+             is the `no stderr captured` line that made #730's fix contentless"
+        );
+    }
+
 }
