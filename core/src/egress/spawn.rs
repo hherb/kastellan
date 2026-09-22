@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
+use crate::worker_stderr::{TailState, TAIL_DRAIN_WAIT};
+
 /// Env keys the sidecar binary reads (must match `egress-proxy::main`).
 const ENV_UDS: &str = "KASTELLAN_EGRESS_PROXY_UDS";
 const ENV_ALLOWLIST: &str = "KASTELLAN_EGRESS_PROXY_ALLOWLIST";
@@ -34,13 +36,6 @@ pub(crate) const CA_FILE_NAME: &str = "ca.pem";
 /// How long `spawn_sidecar` waits for the proxy to `bind()` its UDS.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(25);
-
-/// How long a bring-up failure waits for the stderr drain thread to flush before
-/// reporting. `try_wait` can observe the exit before the drain thread has read
-/// the bytes the proxy wrote on its way out, so snapshotting the tail
-/// immediately would drop the very message we want (the fail-closed reason).
-/// Only ever paid on a path that is already failing.
-const STDERR_SETTLE: Duration = Duration::from_millis(250);
 
 /// Cumulative CPU budget (ms → ceil-div RLIMIT_CPU seconds) for a **short-lived**
 /// per-tool-call sidecar. Matches the web-fetch worker's own `cpu_ms` (the
@@ -271,27 +266,77 @@ fn check_upstream_extra_ca(mitm: Mitm<'_>) -> anyhow::Result<()> {
 }
 
 /// One-line stderr summary for a sidecar bring-up failure, waiting up to
-/// [`STDERR_SETTLE`] for the drain thread to flush.
+/// [`TAIL_DRAIN_WAIT`] for the drain thread to reach EOF.
 ///
 /// The proxy's fail-closed startup aborts (a malformed pin set, an unreadable
 /// upstream extra CA) are reported only as `Err` out of `main`, i.e. on its
 /// stderr — a pipe the host drains to `debug` and nothing else reads. Without
 /// folding it into the error, a mistyped operator CA path surfaces as a bare
 /// readiness timeout that blames the UDS bind.
+///
+/// # This was the third renderer of the same tail ([#746])
+///
+/// It had both of the defects #732 removed from the other two:
+///
+/// 1. **It waited for non-empty, not for EOF.** It never consulted
+///    `wait_for_drain`, so an empty result after the settle period was
+///    ambiguous in exactly the #732 way — and it rendered as `no stderr
+///    captured`, a claim about the *proxy*, when the only thing established
+///    was a fact about *us*. A proxy that fails closed on a malformed pin set
+///    a few milliseconds late got the operator `no stderr captured` plus a
+///    bare readiness timeout blaming the UDS bind — precisely what this
+///    function exists to prevent.
+/// 2. **It collapsed the `None` arm into the same string.** "our spawn path
+///    piped no stderr" and "the proxy was silent" point a reader at different
+///    places; `tool_worker.rs` has an explicit test forbidding that collapse.
+///
+/// Both call sites reach this after the child is **dead** — one observed its
+/// exit via `try_wait`, the other killed and reaped it — so the pipe really
+/// does close and the wait is a cap rather than a cost.
+///
+/// [#746]: https://github.com/hherb/kastellan/issues/746
 fn stderr_note(tail: Option<&crate::worker_stderr::StderrTail>) -> String {
     let Some(tail) = tail else {
-        return "no stderr captured".to_string();
+        // NOT "no stderr captured": that is a claim about the proxy, and this
+        // is a fact about our own spawn path.
+        return "its stderr was not piped, so there is nothing to report".to_string();
     };
-    let deadline = Instant::now() + STDERR_SETTLE;
-    let mut lines = tail.snapshot();
-    while lines.is_empty() && Instant::now() < deadline {
-        std::thread::sleep(READY_POLL);
-        lines = tail.snapshot();
-    }
-    if lines.is_empty() {
-        "no stderr captured".to_string()
-    } else {
-        format!("recent stderr: {}", lines.join(" | "))
+    render_stderr_note(&crate::worker_stderr::collect_tail_after_drain(tail))
+}
+
+/// Pure: the sidecar bring-up note for one captured tail.
+///
+/// Separated from the wait so every state can be unit-tested without a child
+/// process — the same reason `format_worker_failure_report` is pure. Matches
+/// [`TailState`] exhaustively, so a state added to the system cannot silently
+/// inherit whichever arm happens to be last.
+fn render_stderr_note(tail: &crate::worker_stderr::CapturedTail) -> String {
+    let ms = TAIL_DRAIN_WAIT.as_millis();
+    match tail.state() {
+        // The one state that licenses a claim about the PROXY.
+        TailState::KnownSilent => "no stderr captured".to_string(),
+        TailState::LastWords(lines) => format!("recent stderr: {}", lines.join(" | ")),
+        TailState::NothingCapturedYet => format!(
+            "its stderr drain did not reach EOF within {ms} ms, so nothing was captured YET \
+             — a PARTIAL capture, not evidence that the proxy was silent"
+        ),
+        TailState::FirstWords(lines) => format!(
+            "stderr so far (drain incomplete after {ms} ms, so these may be its FIRST lines \
+             rather than its most recent): {}",
+            lines.join(" | ")
+        ),
+        // #747: our read of the pipe failed, so the emptiness is ours.
+        TailState::DrainFailedSilent => {
+            "our read of its stderr FAILED before anything arrived, so nothing was captured \
+             — our pipe, not evidence that the proxy was silent"
+                .to_string()
+        }
+        TailState::DrainFailedWords(lines) => format!(
+            "stderr up to the point our read of the pipe FAILED (so these may be its FIRST \
+             lines rather than its most recent, and there may have been more we could never \
+             read): {}",
+            lines.join(" | ")
+        ),
     }
 }
 

@@ -9,6 +9,7 @@
 //! compiled under `#[cfg(test)]`.
 
 use super::*;
+use crate::worker_stderr::CapturedTail;
 
 /// A `SidecarSpawn` with everything defaulted except the posture, so each test
 /// states only what it is about.
@@ -246,15 +247,32 @@ fn check_upstream_extra_ca_accepts_both_postures_without_an_anchor() {
 }
 
 /// With no drain thread there is nothing to report, and the note must say so
-/// rather than claim a clean startup. (The populated case is covered by the
-/// sandbox-gated `sidecar_with_unreadable_extra_ca_fails_fast_with_reason`
-/// in `core/tests/egress_proxy_e2e.rs`, which needs a real proxy binary.)
+/// **without borrowing the sentence that describes a silent proxy** (#746).
+///
+/// "our spawn path piped no stderr" and "the proxy was silent" point a reader
+/// at different places; `tool_worker.rs` has an explicit test forbidding the
+/// same collapse, and this renderer used to have it.
 #[test]
-fn stderr_note_without_a_tail_says_nothing_was_captured() {
-    assert_eq!(stderr_note(None), "no stderr captured");
+fn an_unpiped_sidecar_and_a_silent_one_read_differently() {
+    let unpiped = stderr_note(None);
+    let silent = render_stderr_note(&CapturedTail::complete(vec![]));
+    assert_ne!(
+        unpiped, silent,
+        "collapsing these tells an operator the proxy was quiet when in fact we never \
+         listened — a claim about the proxy standing in for a fact about us"
+    );
+    assert!(
+        unpiped.contains("not piped"),
+        "the no-tail arm must name OUR omission: {unpiped}"
+    );
+    assert!(
+        silent.contains("no stderr captured"),
+        "POSITIVE CONTROL: a proxy that really did reach EOF saying nothing keeps the \
+         original sentence: {silent}"
+    );
 }
 
-/// A tail that already has lines is reported immediately — the settle poll
+/// A tail that already has lines is reported immediately — the drain wait
 /// must not delay the common case where the drain already flushed.
 #[test]
 fn stderr_note_reports_captured_lines() {
@@ -267,6 +285,117 @@ fn stderr_note_reports_captured_lines() {
     tail.mark_drained(end);
     let note = stderr_note(Some(&tail));
     assert!(note.contains("upstream extra CA"), "note lost the reason: {note}");
+}
+
+/// #746's headline: a drain that merely TIMED OUT must not be rendered as
+/// "no stderr captured".
+///
+/// The old renderer polled for a non-empty snapshot and gave up, so a proxy
+/// that fails closed on a malformed pin set a few milliseconds late handed the
+/// operator `no stderr captured` plus a readiness timeout blaming the UDS
+/// bind — the exact misdirection this note exists to prevent.
+#[test]
+fn a_partial_sidecar_capture_never_claims_the_proxy_was_silent() {
+    let timed_out = render_stderr_note(&CapturedTail::partial(vec![]));
+    assert!(
+        !timed_out.contains("no stderr captured"),
+        "a PARTIAL capture must not state the proxy wrote nothing: {timed_out}"
+    );
+    assert!(
+        timed_out.contains("PARTIAL"),
+        "the note must SAY the capture was partial, or a reader cannot tell it from a \
+         complete one: {timed_out}"
+    );
+
+    // #747's sibling state, through this renderer too.
+    let failed = render_stderr_note(&CapturedTail::drain_failed(vec![]));
+    assert!(
+        !failed.contains("no stderr captured"),
+        "a FAILED drain must not state the proxy wrote nothing: {failed}"
+    );
+    assert!(failed.contains("FAILED"), "the note must name the read failure: {failed}");
+}
+
+/// Incomplete captures must not be labelled the proxy's most recent output:
+/// the ring evicts OLDEST first, so they are its FIRST lines.
+#[test]
+fn an_incomplete_sidecar_capture_does_not_call_its_lines_recent() {
+    let lines = vec!["proxy booting".to_string()];
+    for tail in [CapturedTail::partial(lines.clone()), CapturedTail::drain_failed(lines.clone())] {
+        let note = render_stderr_note(&tail);
+        assert!(!note.contains("recent stderr"), "incomplete tail mislabelled: {note}");
+        assert!(note.contains("proxy booting"), "POSITIVE CONTROL: lines must survive: {note}");
+        assert!(note.contains("FIRST"), "the note must say which end these came from: {note}");
+    }
+    assert!(
+        render_stderr_note(&CapturedTail::complete(lines)).contains("recent stderr"),
+        "a COMPLETE tail really is the most recent output and must still say so"
+    );
+}
+
+/// The wait is the point, not the rendering: a note taken before the drainer
+/// has flushed reports nothing for a proxy that explained itself.
+///
+/// ⚠️ Without this, deleting the `collect_tail_after_drain` call survives every
+/// other test here — they all hand it a tail that is already drained, so the
+/// wait returns instantly and its absence is invisible. That is the same hole
+/// #737 found one layer over.
+#[test]
+fn stderr_note_waits_for_the_drainer_instead_of_racing_it() {
+    let tail = crate::worker_stderr::StderrTail::new(4);
+    let writer = tail.clone();
+    // The line lands AFTER this thread has already called `stderr_note`,
+    // which is the production race: `try_wait` observes the proxy's exit
+    // before the drain thread has read what it wrote on the way out.
+    let drain = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let end = crate::worker_stderr::drain_reader(
+            0,
+            std::io::Cursor::new(b"Error: malformed pin set\n".to_vec()),
+            Some(&writer),
+        );
+        writer.mark_drained(end);
+    });
+    let note = stderr_note(Some(&tail));
+    drain.join().expect("drain thread");
+    assert!(
+        note.contains("malformed pin set"),
+        "the note must wait for the proxy's own fail-closed reason rather than racing it — \
+         losing it is what leaves an operator with a bare readiness timeout blaming the UDS \
+         bind: {note}"
+    );
+    assert!(
+        !note.contains("no stderr captured"),
+        "and it must certainly not claim the proxy said nothing: {note}"
+    );
+}
+
+/// Seven states, seven sentences — the same discipline the other two renderers
+/// are held to. Any two that render alike have collapsed a distinction.
+#[test]
+fn the_seven_sidecar_note_states_all_read_differently() {
+    let lines = vec!["boom".to_string()];
+    let mut rendered: Vec<String> = [
+        CapturedTail::complete(lines.clone()),
+        CapturedTail::complete(vec![]),
+        CapturedTail::partial(lines.clone()),
+        CapturedTail::partial(vec![]),
+        CapturedTail::drain_failed(lines),
+        CapturedTail::drain_failed(vec![]),
+    ]
+    .iter()
+    .map(render_stderr_note)
+    .collect();
+    rendered.push(stderr_note(None));
+    let mut seen = rendered.clone();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(
+        seen.len(),
+        rendered.len(),
+        "every state must read differently, or the note cannot tell an operator which one \
+         happened: {rendered:#?}"
+    );
 }
 
 /// Dropping a bare [`SidecarHandle`] must kill the child process (#502).
