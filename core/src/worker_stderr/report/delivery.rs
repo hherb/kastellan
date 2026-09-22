@@ -157,6 +157,44 @@ fn is_open(fd: RawFd) -> bool {
     flags >= 0
 }
 
+/// Is this process's own stderr writable? The [`is_writable`] probe, exported
+/// for `kastellan-tests-common`'s panic hook
+/// ([#749](https://github.com/hherb/kastellan/issues/749)).
+///
+/// That hook renders a panic with `eprintln!` for the same libtest-capture
+/// reason this module does, and inherits the same #733 hazard — worse, in
+/// fact: an `eprintln!` that panics *inside a panic hook* is a panic while
+/// panicking, which aborts immediately with **no output at all**. Measured on
+/// this Mac: unguarded, signal 6 and nothing on any stream; guarded, a clean
+/// exit 101 with libtest still reporting the failure itself.
+///
+/// ⚠️ **What the guard saves is the ACCOUNT of the failure, not the panic
+/// text.** On a broken fd 2 the message is exactly what cannot be written, and
+/// the hook drops it — the guard's whole job. What survives is the process, and
+/// with it libtest's own `test result: FAILED` line, which a SIGABRT destroys.
+/// That is the difference from the #733 case this borrows the probe from:
+/// there a report went missing, here the entire account of the failure would.
+///
+/// ⚠️ **Takes no `fd`, deliberately.** The one mutant #745's review found
+/// surviving even `-D warnings` was probing `STDOUT_FILENO` instead of
+/// `STDERR_FILENO` — stdout is writable in every test binary, so nothing
+/// catches it. A parameterless export cannot be called wrongly that way.
+///
+/// ⚠️ **`#[doc(hidden)]`, deliberately**, for the same reason
+/// [`crate::untrusted_text`] is: `kastellan-core` is published, and a bare
+/// `pub` here would be a permanent semver commitment taken on for one
+/// dev-dependency's benefit. The alternative — hand-copying [`is_writable`]
+/// and its `is_open` helper into `tests-common`, with the per-host `POLLERR` /
+/// `POLLHUP` / `POLLNVAL` reasoning that goes with them — is the
+/// drift-between-copies shape CLAUDE.md's
+/// bwrap-argv note names, and this probe has already needed one host-specific
+/// correction (`POLLNVAL` on macOS character devices) that a copy would not
+/// have received.
+#[doc(hidden)]
+pub fn stderr_is_writable() -> bool {
+    is_writable(libc::STDERR_FILENO)
+}
+
 /// Write `line` to the process's own stderr, unless stderr is already broken.
 ///
 /// The one place `eprintln!` is called for a worker report. Returns whether the

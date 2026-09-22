@@ -58,6 +58,8 @@ pub use persistent::{
     format_persistent_down_line, format_persistent_down_stderr_fallback,
     WORKER_DEATH_STDERR_MARKER, WORKER_DOWN_STDERR_MARKER,
 };
+#[doc(hidden)]
+pub use delivery::stderr_is_writable;
 pub use shared::STDERR_FALLBACK_MARKERS;
 pub use tool_worker::{
     emit_worker_failure_report, format_worker_failure_report,

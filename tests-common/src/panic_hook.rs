@@ -118,6 +118,44 @@ static INSTALLED: Once = Once::new();
 pub fn install_once() {
     INSTALLED.call_once(|| {
         std::panic::set_hook(Box::new(|info| {
+            // ⚠️ **The guard comes first, and it is not defensive tidiness**
+            // (#749). Everything below writes with `eprintln!`, which PANICS
+            // when the write fails — and a panic inside a panic hook is a
+            // panic while panicking, which aborts the process immediately with
+            // **no output on any stream** — including libtest's own
+            // `test result: FAILED` line, because the process never reaches it.
+            // That is strictly worse than the #733 case this borrows the probe
+            // from: there a report was lost, here the whole ACCOUNT of the
+            // failure is.
+            //
+            // Measured on this Mac, a child whose fd 2 is the write end of a
+            // pipe with no reader:
+            //
+            // | hook | outcome |
+            // | --- | --- |
+            // | unguarded | **signal 6 (SIGABRT)**, nothing on any stream |
+            // | guarded | exit 101, libtest still reports the failure |
+            //
+            // ⚠️ **The panic TEXT is dropped either way** — on this fd nothing
+            // can be written, and returning early is what the guard is for.
+            // What it buys is the process surviving to be accounted for. Do
+            // not read the row above as "the message survives"; #750's review
+            // found that claim in three places and it was wrong in all three.
+            //
+            // ⚠️ A merely CLOSED fd 2 (`2>&-`) is harmless — `std` swallows
+            // `EBADF` on stdio via `handle_ebadf` — so the fixture needs a
+            // broken pipe, measured rather than assumed. `EPIPE` is the
+            // motivating errno but not the only one: a pty slave whose master
+            // has closed returns `EIO`, and `eprintln!` panics on any write
+            // error, so the probe (not the errno) is what this turns on.
+            //
+            // The probe is `kastellan-core`'s, not a copy: it has already
+            // needed one host-specific correction (macOS sets `POLLNVAL` on
+            // live character devices) that a second copy would not have
+            // received.
+            if !kastellan_core::worker_stderr::stderr_is_writable() {
+                return;
+            }
             let line = render_panic_line(
                 std::thread::current().name(),
                 info.location().map(|l| l.to_string()).as_deref(),
@@ -132,6 +170,12 @@ pub fn install_once() {
             // The default hook's backtrace behaviour, preserved. Indented
             // frames cannot forge a column-0 marker, so this needs no
             // neutralisation of its own.
+            //
+            // ⚠️ `RUST_BACKTRACE=0` and *unset* share an arm because the real
+            // default hook prints the note for BOTH — measured on this
+            // toolchain, against a child that simply panics. #749 records this
+            // as a divergence from the default; it is not one, and "fixing" it
+            // to print nothing at `=0` would CREATE the divergence.
             match std::env::var("RUST_BACKTRACE").as_deref() {
                 Ok("0") | Err(_) => {
                     eprintln!("note: run with `RUST_BACKTRACE=1` for a backtrace");

@@ -70,3 +70,23 @@ rcgen            = { version = "0.13", default-features = false, features = ["pe
 tokio-rustls     = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls           = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-pki-types = { version = "1",    features = ["std"] }
+
+# `tests/panic_hook_broken_stderr_e2e.rs` (#749) breaks its own fd 2 with
+# `pipe`/`dup2` to reproduce the abort this crate's panic hook used to cause.
+#
+# Needed because `libc` is NOT a dependency of this package at all — it reaches
+# us only transitively (via kastellan-core / kastellan-sandbox), and a
+# transitive dependency is not nameable as an extern crate. `[dev-dependencies]`
+# rather than `[dependencies]` because only the test needs it. Same workspace
+# pin `core` uses, so nothing new enters the graph.
+#
+# ⚠️ NOT because "integration tests do not inherit [dependencies]" — that rule
+# is false and #750's review caught this comment asserting it. Cargo makes a
+# package's [dependencies] available to all its targets, integration tests
+# included; `core/tests/*.rs` name `serde_json`, which core declares only under
+# [dependencies]. The same false rule justifies two genuinely redundant entries
+# in core/Cargo.toml's [dev-dependencies] (`url`, `libc` — both already in its
+# [dependencies]); those are harmless, and are left alone here rather than
+# deleted in an unrelated PR.
+[dev-dependencies]
+libc = { workspace = true }
