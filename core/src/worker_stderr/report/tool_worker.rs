@@ -13,6 +13,7 @@
 use crate::worker_lifecycle::idle_timeout::WorkerRetirementCause;
 
 use super::delivery::warn_and_fall_back;
+use crate::worker_stderr::CapturedTail;
 use super::shared::format_stderr_fallback;
 #[allow(unused_imports)] // referenced by the marker doc's intra-doc link
 use super::shared::STDERR_FALLBACK_MARKERS;
@@ -96,13 +97,22 @@ fn silent_hint(cause: WorkerRetirementCause) -> &'static str {
 ///
 /// | Value | Means | Reads |
 /// | --- | --- | --- |
-/// | `Some(lines)` | the worker explained itself | "its last words: …" |
-/// | `Some(&[])` | the worker ran and said nothing | "wrote NOTHING …" + a per-cause hint |
+/// | `Some` complete, lines | the worker explained itself | "its last words: …" |
+/// | `Some` complete, empty | the worker ran and said nothing | "wrote NOTHING …" + a per-cause hint |
+/// | `Some` PARTIAL, lines | it was still talking when we stopped listening | "its stderr so far … may be its FIRST lines" |
+/// | `Some` PARTIAL, empty | we did not wait long enough to know | "PARTIAL capture … absence is NOT evidence" |
 /// | `None` | our own spawn path piped no stderr | "its stderr was not piped …" |
 ///
-/// The middle one is a diagnosis (a hard kill, a jail refused before the worker
-/// ran, a guest that never booted) and points somewhere different from the last,
-/// which is a statement about *us* and not about the worker.
+/// The second is a diagnosis (a hard kill, a jail refused before the worker
+/// ran, a guest that never booted) and points somewhere different from the
+/// first, which is a statement about *us* and not about the worker.
+///
+/// ⚠️ **The two PARTIAL rows are #732, and they are the reason this takes a
+/// [`CapturedTail`] rather than a slice.** With only the lines to go on, an
+/// empty tail whose drain timed out is indistinguishable from a worker that
+/// stayed silent — and this function would then print the "suspect a kill"
+/// diagnosis for a worker that explained itself 10 ms after we stopped
+/// listening. Never collapse the flag back into the slice.
 ///
 /// ⚠️ **The `None` arm is defensive and currently unreachable.** It fires only
 /// when `SupervisedWorker` has no stderr tail, and all four sandbox backends
@@ -119,13 +129,33 @@ pub fn format_worker_failure_report(
     program: &str,
     method: &str,
     cause: WorkerRetirementCause,
-    stderr_tail: Option<&[String]>,
+    stderr_tail: Option<&CapturedTail>,
 ) -> String {
     let what = happened_clause(cause, program, method);
+    let ms = crate::worker_stderr::TAIL_DRAIN_WAIT.as_millis();
     match stderr_tail {
         None => format!("{what}; its stderr was not piped, so there is nothing to report"),
-        Some([]) => format!("{what}, and wrote NOTHING to stderr — {}", silent_hint(cause)),
-        Some(tail) => format!("{what}; its last words: {}", tail.join(" | ")),
+        // KNOWN silent — the drain reached EOF and there was nothing in it. Only
+        // here may the report name a cause.
+        Some(t) if t.is_known_silent() => {
+            format!("{what}, and wrote NOTHING to stderr — {}", silent_hint(cause))
+        }
+        // Nothing arrived, but we stopped waiting. Saying "wrote NOTHING" here
+        // sends the reader after a kill/seccomp/OOM fault that may not exist.
+        Some(t) if t.lines.is_empty() => format!(
+            "{what}, and its stderr drain did not reach EOF within {ms} ms, so NOTHING was \
+             captured yet — this is a PARTIAL capture, and the absence of a reason here is \
+             NOT evidence that there was none"
+        ),
+        // Some lines, but more may have been coming. The ring evicts OLDEST
+        // first, so an incomplete tail holds the worker's FIRST words, not its
+        // last — calling them "last words" points the reader at startup noise.
+        Some(t) if !t.complete => format!(
+            "{what}; its stderr so far (the drain did not reach EOF within {ms} ms, so these \
+             may be its FIRST lines rather than its last): {}",
+            t.lines.join(" | ")
+        ),
+        Some(t) => format!("{what}; its last words: {}", t.lines.join(" | ")),
     }
 }
 
@@ -330,12 +360,114 @@ mod tests {
                 "kastellan-microvm-run",
                 "python.exec",
                 cause,
-                Some(&["microvm-init: relay UDS bind failed".to_string()]),
+                Some(&CapturedTail::complete(vec!["microvm-init: relay UDS bind failed".to_string()])),
             );
             assert!(r.contains("kastellan-microvm-run"), "{cause:?}: {r}");
             assert!(r.contains("python.exec"), "{cause:?}: {r}");
             assert!(r.contains("relay UDS bind failed"), "{cause:?}: {r}");
         }
+    }
+
+    #[test]
+    fn a_partial_capture_never_claims_the_worker_was_silent() {
+        // #732's headline defect. `silent_hint` is a DIAGNOSIS — "suspect a
+        // kill (wall-clock/OOM/seccomp) or a sandbox that refused the spawn" —
+        // and rendering it for a drain that merely timed out sends the operator
+        // to audit cgroup limits and seccomp profiles for a fault that was in
+        // the guest's Python. That is #719 reproduced with the report actively
+        // pointing the wrong way.
+        for cause in ALL_CAUSES {
+            let partial = CapturedTail::partial(vec![]);
+            let r = format_worker_failure_report("w", "m", cause, Some(&partial));
+            assert!(
+                !r.contains("wrote NOTHING"),
+                "{cause:?}: a PARTIAL capture must not state the worker wrote nothing — we \
+                 stopped listening, which is a fact about us: {r}"
+            );
+            assert!(
+                !r.contains(silent_hint(cause)),
+                "{cause:?}: a PARTIAL capture must not carry the per-cause diagnosis; it is \
+                 only earned once the drain reached EOF: {r}"
+            );
+            assert!(
+                r.contains("PARTIAL"),
+                "{cause:?}: the report must SAY the capture was partial, or the reader cannot \
+                 tell this from a complete one — rendering the two identically is the whole \
+                 defect: {r}"
+            );
+            // POSITIVE CONTROL: the same cause with a COMPLETE empty tail must
+            // still produce the diagnosis. Without this, a renderer that had
+            // simply deleted `silent_hint` would satisfy every assertion above.
+            let complete = CapturedTail::complete(vec![]);
+            let known = format_worker_failure_report("w", "m", cause, Some(&complete));
+            assert!(
+                known.contains(silent_hint(cause)) && known.contains("wrote NOTHING"),
+                "{cause:?}: a COMPLETE empty tail is the worker genuinely saying nothing, and \
+                 must still get its diagnosis — otherwise #732's fix has thrown away the \
+                 signal it was protecting: {known}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_capture_does_not_call_its_lines_the_workers_last_words() {
+        // The quieter half of #732. The ring evicts OLDEST first, so under a
+        // complete drain the tail really is the last thing the worker said —
+        // but under an incomplete one it is the FIRST thing, the boot lines. An
+        // operator correlating "last words" against the moment of death then
+        // reads startup noise.
+        let c = WorkerRetirementCause::ExitedBeforeResponding;
+        let partial = CapturedTail::partial(vec!["worker booting".into()]);
+        let r = format_worker_failure_report("w", "m", c, Some(&partial));
+        assert!(
+            !r.contains("last words"),
+            "an incomplete tail holds the worker's FIRST lines; calling them its last words \
+             mislabels startup noise as the moment of death: {r}"
+        );
+        assert!(
+            r.contains("worker booting"),
+            "POSITIVE CONTROL: the lines must still be REPORTED — an incomplete drain is not \
+             a reason to discard what did arrive: {r}"
+        );
+        assert!(
+            r.contains("FIRST"),
+            "the report must warn the reader which end of the stream these came from: {r}"
+        );
+        // And the complete case is unchanged, which is what makes the contrast
+        // above a contrast rather than a blanket reword.
+        let complete = CapturedTail::complete(vec!["worker booting".into()]);
+        assert!(
+            format_worker_failure_report("w", "m", c, Some(&complete)).contains("last words"),
+            "a COMPLETE tail really is the worker's last words and must still say so"
+        );
+    }
+
+    #[test]
+    fn the_four_tail_states_all_read_differently() {
+        // Four states, four sentences. Any two that render alike have silently
+        // collapsed a distinction the caller went to trouble to preserve — the
+        // same failure `no_two_causes_read_the_same` guards for causes.
+        let c = WorkerRetirementCause::ExitedBeforeResponding;
+        let lines = vec!["boom".to_string()];
+        let rendered: Vec<String> = [
+            Some(CapturedTail::complete(lines.clone())),
+            Some(CapturedTail::complete(vec![])),
+            Some(CapturedTail::partial(lines)),
+            Some(CapturedTail::partial(vec![])),
+            None,
+        ]
+        .iter()
+        .map(|t| format_worker_failure_report("w", "m", c, t.as_ref()))
+        .collect();
+        let mut seen = rendered.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            rendered.len(),
+            "every tail state must read differently, or the report cannot tell a reader which \
+             one happened: {rendered:#?}"
+        );
     }
 
     #[test]
@@ -368,7 +500,7 @@ mod tests {
             WorkerRetirementCause::IdMismatch,
             WorkerRetirementCause::ResponseTooLarge,
         ] {
-            let r = format_worker_failure_report("w", "m", cause, Some(&[]));
+            let r = format_worker_failure_report("w", "m", cause, Some(&CapturedTail::complete(vec![])));
             assert!(!r.contains("exited"), "{cause:?} did not exit: {r}");
             assert!(r.contains("answered"), "{cause:?} must say it answered: {r}");
         }
@@ -382,11 +514,11 @@ mod tests {
         // in production and already read by a human in #666 and #719.
         let c = WorkerRetirementCause::ExitedBeforeResponding;
         assert_eq!(
-            format_worker_failure_report("w", "m", c, Some(&["boom".into()])),
+            format_worker_failure_report("w", "m", c, Some(&CapturedTail::complete(vec!["boom".into()]))),
             "worker w exited before responding to m; its last words: boom"
         );
         assert_eq!(
-            format_worker_failure_report("w", "m", c, Some(&[])),
+            format_worker_failure_report("w", "m", c, Some(&CapturedTail::complete(vec![]))),
             "worker w exited before responding to m, and wrote NOTHING to stderr — suspect a \
              kill (wall-clock/OOM/seccomp) or a sandbox that refused the spawn before the \
              worker ran, rather than the worker's own logic"
@@ -404,8 +536,8 @@ mod tests {
         // refused spawn, while "not piped" is a statement about OUR spawn path
         // and says nothing about the worker at all.
         let c = WorkerRetirementCause::ExitedBeforeResponding;
-        let spoke = format_worker_failure_report("w", "m", c, Some(&["last words".into()]));
-        let silent = format_worker_failure_report("w", "m", c, Some(&[]));
+        let spoke = format_worker_failure_report("w", "m", c, Some(&CapturedTail::complete(vec!["last words".into()])));
+        let silent = format_worker_failure_report("w", "m", c, Some(&CapturedTail::complete(vec![])));
         let unpiped = format_worker_failure_report("w", "m", c, None);
         assert!(spoke.contains("last words"), "{spoke}");
         assert!(silent.contains("NOTHING"), "{silent}");
@@ -424,7 +556,7 @@ mod tests {
             "w",
             "m",
             WorkerRetirementCause::ExitedBeforeResponding,
-            Some(&["last words".to_string()]),
+            Some(&CapturedTail::complete(vec!["last words".to_string()])),
         );
         let line = format_worker_failure_stderr_fallback(&report);
         assert!(
@@ -463,7 +595,7 @@ mod tests {
             "w",
             "m\u{1b}[31m\n[WARN] forged-gate-line",
             WorkerRetirementCause::ExitedBeforeResponding,
-            Some(&["last words".to_string()]),
+            Some(&CapturedTail::complete(vec!["last words".to_string()])),
         );
         let line = format_worker_failure_stderr_fallback(&report);
         assert!(

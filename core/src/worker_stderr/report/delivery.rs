@@ -45,14 +45,27 @@ use std::os::fd::RawFd;
 ///
 /// ## The three bits, and why all three
 ///
-/// * `POLLHUP` — measured on macOS for the write end of a pipe whose read end
-///   closed (a real `write_all` on that same descriptor returns `BrokenPipe`).
-/// * `POLLERR` — what Linux sets for that same case; `poll(2)` names it
-///   explicitly for "the write end of a pipe when the read end has been
-///   closed". Testing only the bit the development host happens to set is the
-///   shape that ships a guard which is inert on the deployment host.
+/// ⚠️ **The two pipe bits are host-specific, and the split is measured, not
+/// assumed.** `a_pipe_whose_reader_is_gone_is_not_writable` was run against a
+/// mask with each bit deleted in turn, on both hosts:
+///
+/// | mutant | macOS (arm64) | Linux (aarch64) |
+/// | --- | --- | --- |
+/// | drop `POLLERR` | **SURVIVED** | KILLED |
+/// | drop `POLLHUP` | KILLED | **SURVIVED** |
+///
+/// So macOS reports a broken pipe write-end as `POLLHUP` and Linux as
+/// `POLLERR`, each bit is load-bearing on exactly one host, and **neither host
+/// alone can prove this mask**. A reviewer who sees the surviving mutant on one
+/// machine and deletes the "dead" bit breaks the other platform silently —
+/// which is the cross-platform rule in CLAUDE.md with a concrete price tag.
+///
+/// * `POLLERR` / `POLLHUP` — the write end of a pipe whose read end has closed.
+///   In both cases a real `write_all` on that same descriptor returns
+///   `BrokenPipe`, which the test asserts as ground truth before believing the
+///   probe.
 /// * `POLLNVAL` — the descriptor is not open at all, which is what `2>&-`
-///   leaves behind.
+///   leaves behind. Not host-specific.
 ///
 /// ⚠️ **This is a race, and it is meant to be one.** The reader can close
 /// between the probe and the write. The probe removes the *reproducible*
@@ -266,7 +279,7 @@ mod tests {
     /// The point of the nesting: this module's path differs from
     /// `…::report::delivery`, where a "simplified" shared check would live. A
     /// filter that enables one and not the other therefore tells the two
-    /// designs apart, which is what [`the_check_answers_for_the_EMITTERS_target`]
+    /// designs apart, which is what [`the_check_answers_for_the_emitters_own_target`]
     /// does.
     mod pretend_emitter {
         pub fn emit(line: &str) -> bool {
@@ -332,8 +345,7 @@ mod tests {
     const PROBE_LINE: &str = "kastellan-test: delivery probe";
 
     #[test]
-    #[allow(non_snake_case)]
-    fn the_check_answers_for_the_EMITTERS_target() {
+    fn the_check_answers_for_the_emitters_own_target() {
         // The regression this pins: someone "simplifies" the macro away into a
         // helper function in THIS module. `event_enabled!` would then carry
         // `…::report::delivery` as its target instead of the emitter's, and a

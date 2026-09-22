@@ -657,7 +657,7 @@ impl SupervisedWorker {
             &self.program,
             method,
             cause,
-            tail.as_deref(),
+            tail.as_ref(),
         );
         crate::worker_stderr::emit_worker_failure_report(&report);
     }
