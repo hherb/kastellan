@@ -1,9 +1,15 @@
-//! The half both events share: the marker census, the one line renderer, and
-//! the no-subscriber guard.
+//! The half all three events share: the marker census and the one line
+//! renderer.
 //!
-//! Kept in its own module so the neutralisation and the `has_been_set()` check
-//! exist in exactly one place. Two copies that agree today are the drift shape
-//! CLAUDE.md's bwrap-argv note names, and #730 is this tree's worked example.
+//! Kept in its own module so the neutralisation exists in exactly one place.
+//! Two copies that agree today are the drift shape CLAUDE.md's bwrap-argv note
+//! names, and #730 is this tree's worked example.
+//!
+//! ⚠️ **The emit half deliberately does NOT live here** — it is
+//! [`super::delivery::warn_and_fall_back`], a macro, because the delivery check
+//! has to expand in the emitter's own module to answer for the emitter's
+//! target. A version of it written here answered `true` for events `EnvFilter`
+//! had dropped; the measured table is on that macro.
 
 use super::persistent::{WORKER_DEATH_STDERR_MARKER, WORKER_DOWN_STDERR_MARKER};
 use super::tool_worker::WORKER_FAILED_STDERR_MARKER;
@@ -39,23 +45,8 @@ pub const STDERR_FALLBACK_MARKERS: [&str; 3] = [
 /// half) costs nothing and both orders give identical bytes. (Idempotent and
 /// char-count preserving — NOT byte-length preserving; U+2028 is 3 bytes in,
 /// 1 out.)
-pub(super) fn format_stderr_fallback(marker: &str, report: &str) -> String {
+pub(crate) fn format_stderr_fallback(marker: &str, report: &str) -> String {
     format!("{marker} {}", crate::untrusted_text::neutralise_controls(report))
-}
-
-/// Write `report` to the process's own stderr, marked, **when no `tracing`
-/// subscriber is installed** — the shared second channel behind both emitters.
-///
-/// See [`emit_worker_failure_report`] for the full argument about who gets this and
-/// why it must be `eprintln!`; that doc is the canonical one and is not repeated
-/// here. The short version: libtest captures through `std::io::set_output_capture`,
-/// which the `print!`/`eprint!` **macros** consult and the `Stdout`/`Stderr`
-/// handles do not, so `writeln!(std::io::stderr(), …)` would never appear under
-/// the failing test that needs it.
-pub(super) fn emit_to_stderr_when_unheard(marker: &str, report: &str) {
-    if !tracing::dispatcher::has_been_set() {
-        eprintln!("{}", format_stderr_fallback(marker, report));
-    }
 }
 
 #[cfg(test)]

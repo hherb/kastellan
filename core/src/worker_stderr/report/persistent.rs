@@ -8,7 +8,8 @@
 
 use std::process::ExitStatus;
 
-use super::shared::{emit_to_stderr_when_unheard, format_stderr_fallback};
+use super::delivery::warn_and_fall_back;
+use super::shared::format_stderr_fallback;
 #[allow(unused_imports)] // referenced by the marker doc's intra-doc link
 use super::shared::STDERR_FALLBACK_MARKERS;
 #[allow(unused_imports)] // referenced by this module's doc links
@@ -103,13 +104,15 @@ pub fn format_persistent_death_stderr_fallback(report: &str) -> String {
 /// implementors.
 ///
 /// [`PersistentTransport::death_report`]: crate::worker_lifecycle::PersistentTransport::death_report
-pub fn emit_persistent_death_report(label: &str, report: &str) {
+///
+/// Returns whether the stderr fallback line was written; see
+/// [`emit_worker_failure_report`] for why that value exists.
+pub fn emit_persistent_death_report(label: &str, report: &str) -> bool {
     let label = crate::untrusted_text::neutralise_controls(label);
     let line = crate::untrusted_text::neutralise_controls(&format_persistent_death_line(
         &label, report,
     ));
-    tracing::warn!(%label, "{line}");
-    emit_to_stderr_when_unheard(WORKER_DEATH_STDERR_MARKER, &line);
+    warn_and_fall_back!(WORKER_DEATH_STDERR_MARKER, &line, label = &label)
 }
 
 /// Marker prefixing every line [`emit_persistent_down_report`] writes to the
@@ -160,20 +163,21 @@ pub fn format_persistent_down_stderr_fallback(report: &str) -> String {
 /// ⚠️ **Not a death report, and deliberately not marked as one.** See
 /// [`WORKER_DOWN_STDERR_MARKER`].
 ///
-/// Goes through the same `emit_to_stderr_when_unheard` as both other
-/// emitters, so the `has_been_set()` guard and the control neutralisation still
-/// exist in exactly one copy. `reason` is neutralised here on its own account,
+/// Goes through the same `warn_and_fall_back!` as both other emitters, so the
+/// delivery check and the control neutralisation still exist in exactly one
+/// copy. `reason` is neutralised here on its own account,
 /// because the three callers include one whose input is a **panic payload**
 /// (`worker_lifecycle::persistent`'s join), and a panic message is arbitrary
 /// text from arbitrary code.
 ///
-pub fn emit_persistent_down_report(label: &str, reason: &str) {
+/// Returns whether the stderr fallback line was written; see
+/// [`emit_worker_failure_report`] for why that value exists.
+pub fn emit_persistent_down_report(label: &str, reason: &str) -> bool {
     let label = crate::untrusted_text::neutralise_controls(label);
     let line = crate::untrusted_text::neutralise_controls(&format_persistent_down_line(
         &label, reason,
     ));
-    tracing::warn!(%label, "{line}");
-    emit_to_stderr_when_unheard(WORKER_DOWN_STDERR_MARKER, &line);
+    warn_and_fall_back!(WORKER_DOWN_STDERR_MARKER, &line, label = &label)
 }
 
 #[cfg(test)]

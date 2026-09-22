@@ -12,7 +12,8 @@
 
 use crate::worker_lifecycle::idle_timeout::WorkerRetirementCause;
 
-use super::shared::{emit_to_stderr_when_unheard, format_stderr_fallback};
+use super::delivery::warn_and_fall_back;
+use super::shared::format_stderr_fallback;
 #[allow(unused_imports)] // referenced by the marker doc's intra-doc link
 use super::shared::STDERR_FALLBACK_MARKERS;
 #[allow(unused_imports)] // referenced by this module's doc links
@@ -274,10 +275,21 @@ pub fn format_worker_failure_stderr_fallback(report: &str) -> String {
 /// diagnostic — but this line is on an ERROR path, where losing the run costs
 /// more. Tracked in
 /// [#733](https://github.com/hherb/kastellan/issues/733).
-pub fn emit_worker_failure_report(report: &str) {
+///
+/// Returns **whether the stderr fallback line was written** — that is, whether
+/// `tracing` was not going to carry this report. Every production caller
+/// discards it with a `;`.
+///
+/// ⚠️ **The return value exists so the REAL emitter is testable, and that is
+/// not a nicety.** The macro's placement tests use a stand-in emitter in their
+/// own module, which proves the mechanism but says nothing about *this*
+/// function — a refactor that replaced the macro here with a plain call would
+/// pass every one of them. A guard that only ever examines its own fixture
+/// shares that fixture's blind spot; returning the verdict lets a test point at
+/// the function that actually ships.
+pub fn emit_worker_failure_report(report: &str) -> bool {
     let report = crate::untrusted_text::neutralise_controls(report);
-    tracing::warn!("{report}");
-    emit_to_stderr_when_unheard(WORKER_FAILED_STDERR_MARKER, &report);
+    warn_and_fall_back!(WORKER_FAILED_STDERR_MARKER, &report)
 }
 
 #[cfg(test)]
