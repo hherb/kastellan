@@ -259,11 +259,12 @@ fn stderr_note_without_a_tail_says_nothing_was_captured() {
 #[test]
 fn stderr_note_reports_captured_lines() {
     let tail = crate::worker_stderr::StderrTail::new(4);
-    crate::worker_stderr::drain_reader(
+    let end = crate::worker_stderr::drain_reader(
         0,
         std::io::Cursor::new(b"Error: build upstream TLS config: upstream extra CA: read\n"),
         Some(&tail),
     );
+    tail.mark_drained(end);
     let note = stderr_note(Some(&tail));
     assert!(note.contains("upstream extra CA"), "note lost the reason: {note}");
 }

@@ -9,7 +9,7 @@
 use std::process::ExitStatus;
 
 use super::delivery::warn_and_fall_back;
-use crate::worker_stderr::CapturedTail;
+use crate::worker_stderr::{CapturedTail, TailState};
 use super::shared::format_stderr_fallback;
 #[allow(unused_imports)] // referenced by the marker doc's intra-doc link
 use super::shared::STDERR_FALLBACK_MARKERS;
@@ -24,35 +24,56 @@ use super::tool_worker::{
 /// fail-loud exit — from a `signal: 6 (SIGABRT)` — a crash) plus the recent
 /// stderr lines, joined for a single log record.
 ///
-/// ⚠️ **Takes a [`CapturedTail`], not a slice, and the flag is load-bearing**
-/// ([#732](https://github.com/hherb/kastellan/issues/732)). "no stderr
-/// captured" is a claim about the *worker*; an empty tail whose drain timed out
-/// only supports a claim about *us*. Rendering the two identically is the
-/// contentless-line defect #730 exists to remove, wearing a confident sentence.
+/// ⚠️ **Takes a [`CapturedTail`], not a slice, and its state is load-bearing**
+/// ([#732](https://github.com/hherb/kastellan/issues/732),
+/// [#747](https://github.com/hherb/kastellan/issues/747)). "no stderr
+/// captured" is a claim about the *worker*; an empty tail whose drain timed
+/// out — or whose drain *failed* — only supports a claim about *us*. Rendering
+/// them identically is the contentless-line defect #730 exists to remove,
+/// wearing a confident sentence.
+///
+/// ⚠️ **Matches [`CapturedTail::state`] exhaustively**, so a state added to
+/// the system cannot quietly inherit whichever arm happens to be last. See
+/// [`TailState`] for why that replaced an order-dependent guard chain.
 pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTail) -> String {
     let status_str = match status {
         Some(s) => s.to_string(),
         None => "exit status unknown (not yet reaped)".to_string(),
     };
     let ms = crate::worker_stderr::TAIL_DRAIN_WAIT.as_millis();
-    match stderr_tail {
+    match stderr_tail.state() {
         // KNOWN silent: the drain reached EOF and there was nothing in it.
-        t if t.is_known_silent() => format!("worker exited ({status_str}); no stderr captured"),
+        TailState::KnownSilent => format!("worker exited ({status_str}); no stderr captured"),
         // Nothing arrived, but we stopped waiting. "No stderr captured" would
         // be a claim about the WORKER; this is a fact about US (#732).
-        t if t.lines().is_empty() => format!(
+        TailState::NothingCapturedYet => format!(
             "worker exited ({status_str}); the stderr drain did not reach EOF within {ms} ms, \
              so nothing was captured YET — a PARTIAL capture, not evidence that the worker \
              was silent"
         ),
+        // Our read of the pipe failed at byte 0 (#747). Also a fact about us,
+        // but a different one: waiting longer would not have helped.
+        TailState::DrainFailedSilent => format!(
+            "worker exited ({status_str}); our read of its stderr FAILED before anything \
+             arrived, so nothing was captured — our pipe, not evidence that the worker was \
+             silent"
+        ),
         // The ring evicts oldest first, so an incomplete tail is the FIRST
         // lines, not the most recent ones. "recent stderr" would mislabel them.
-        t if !t.is_complete() => format!(
+        TailState::FirstWords(lines) => format!(
             "worker exited ({status_str}); stderr so far (drain incomplete after {ms} ms, so \
              these may be its FIRST lines rather than its most recent): {}",
-            t.lines().join(" | ")
+            lines.join(" | ")
         ),
-        t => format!("worker exited ({status_str}); recent stderr: {}", t.lines().join(" | ")),
+        TailState::DrainFailedWords(lines) => format!(
+            "worker exited ({status_str}); stderr up to the point our read of the pipe FAILED \
+             (so these may be its FIRST lines rather than its most recent, and there may \
+             have been more we could never read): {}",
+            lines.join(" | ")
+        ),
+        TailState::LastWords(lines) => {
+            format!("worker exited ({status_str}); recent stderr: {}", lines.join(" | "))
+        }
     }
 }
 
@@ -251,6 +272,58 @@ mod tests {
             format_death_report(None, &CapturedTail::complete(vec!["boom".into()]))
                 .contains("recent stderr"),
             "a COMPLETE tail really is the most recent output and must still say so"
+        );
+    }
+
+    #[test]
+    fn a_failed_death_drain_does_not_claim_no_stderr() {
+        // #747 for the persistent path. A Matrix or email worker whose stderr
+        // fd dies on teardown must not be reported as having written nothing —
+        // that sends an operator after a kill that never happened.
+        let r = format_death_report(None, &CapturedTail::drain_failed(vec![]));
+        assert!(
+            !r.contains("no stderr captured"),
+            "a FAILED drain must not report the worker as having written nothing: {r}"
+        );
+        assert!(
+            r.contains("FAILED"),
+            "the line must say our read failed, or a reader cannot tell it from a genuinely \
+             silent worker: {r}"
+        );
+        // POSITIVE CONTROL, as above: the complete case keeps its sentence.
+        assert!(
+            format_death_report(None, &CapturedTail::complete(vec![])).contains("no stderr captured"),
+            "a COMPLETE empty tail really is a silent worker and must still say so"
+        );
+    }
+
+    #[test]
+    fn the_seven_death_tail_states_all_read_differently() {
+        // The persistent renderer's version of the tool-worker discipline:
+        // every state the caller can hand us must produce a distinguishable
+        // sentence, or the type's distinctions die at the last step. Six
+        // CapturedTail states; `format_death_report` has no `None` arm (a
+        // persistent worker always has a tail), so six is the whole space.
+        let lines = vec!["boom".to_string()];
+        let rendered: Vec<String> = [
+            CapturedTail::complete(lines.clone()),
+            CapturedTail::complete(vec![]),
+            CapturedTail::partial(lines.clone()),
+            CapturedTail::partial(vec![]),
+            CapturedTail::drain_failed(lines),
+            CapturedTail::drain_failed(vec![]),
+        ]
+        .iter()
+        .map(|t| format_death_report(None, t))
+        .collect();
+        let mut seen = rendered.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            rendered.len(),
+            "every tail state must read differently, or the report cannot tell a reader which \
+             one happened: {rendered:#?}"
         );
     }
 
