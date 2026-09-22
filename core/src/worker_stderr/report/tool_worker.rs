@@ -90,7 +90,7 @@ fn silent_hint(cause: WorkerRetirementCause) -> &'static str {
 /// session (#666). The worker almost always *did* say why, on the stream nobody
 /// was reading — this turns that stream into the message.
 ///
-/// # The three tails are three different statements
+/// # The seven tails are seven different statements
 ///
 /// `stderr_tail` is a **seven**-state input, and collapsing any two of them
 /// loses a diagnosis:
@@ -105,9 +105,12 @@ fn silent_hint(cause: WorkerRetirementCause) -> &'static str {
 /// | [`TailState::DrainFailedSilent`] | our read of its pipe failed at byte 0 | "the silence is in our pipe …" |
 /// | `None` | our own spawn path piped no stderr | "its stderr was not piped …" |
 ///
-/// `KnownSilent` is a diagnosis (a hard kill, a jail refused before the worker
-/// ran, a guest that never booted) and points somewhere different from the
-/// first, which is a statement about *us* and not about the worker.
+/// `KnownSilent` is the only **diagnosis** here (a hard kill, a jail refused
+/// before the worker ran, a guest that never booted). It points somewhere
+/// quite different from the three empty states below it —
+/// [`TailState::NothingCapturedYet`], [`TailState::DrainFailedSilent`] and the
+/// `None` arm — each of which renders an identical *absence* of lines but is a
+/// statement about **us**, not about the worker.
 ///
 /// ⚠️ **The four non-EOF rows are #732 and #747, and they are the reason this
 /// takes a [`CapturedTail`] rather than a slice.** With only the lines to go
@@ -614,10 +617,13 @@ mod tests {
     }
 
     #[test]
-    fn the_three_tail_states_are_three_different_statements() {
-        // Collapsing any two loses a diagnosis: "said nothing" is a kill or a
-        // refused spawn, while "not piped" is a statement about OUR spawn path
-        // and says nothing about the worker at all.
+    fn the_three_headline_tail_states_are_three_different_statements() {
+        // The three states that predate #732/#747, kept as their own focused
+        // test: collapsing any two loses a diagnosis: "said nothing" is a kill
+        // or a refused spawn, while "not piped" is a statement about OUR spawn
+        // path and says nothing about the worker at all. The WHOLE space is
+        // seven and is covered by `the_seven_tail_states_all_read_differently`
+        // — this name says "headline" so it is not mistaken for the census.
         let c = WorkerRetirementCause::ExitedBeforeResponding;
         let spoke = format_worker_failure_report("w", "m", c, Some(&CapturedTail::complete(vec!["last words".into()])));
         let silent = format_worker_failure_report("w", "m", c, Some(&CapturedTail::complete(vec![])));

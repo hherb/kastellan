@@ -9,7 +9,7 @@
 //! Re-exported by the parent, so `worker_stderr::CapturedTail` remains the one
 //! public path and no call site names this module.
 //!
-//! # The three questions, and why they are one type
+//! # The four questions, and why they are one type
 //!
 //! A renderer wants to say one of a handful of things about a dead worker, and
 //! every one of them is a *different claim*:
@@ -143,14 +143,27 @@ pub enum TailState<'a> {
 /// transaction. What changes is what may be *claimed* about it.
 ///
 /// ⚠️ **The fields are PRIVATE, and that is the difference between this type
-/// and a tuple with a good doc comment.** With a public flag, a caller could
-/// forge the one claim the type exists to gate — which is exactly the door
-/// [`StderrTail::mark_drained`](super::StderrTail::mark_drained) is
-/// `pub(crate)` to keep shut one layer down. Read access goes through
-/// [`CapturedTail::lines`] and [`CapturedTail::state`]; construction goes
-/// through the three named constructors or
-/// [`collect_tail_after_drain`](super::collect_tail_after_drain), all of which
-/// state the claim being made.
+/// and a tuple with a good doc comment** — but be precise about what that
+/// buys, because it is less than "the claim cannot be forged". `complete`
+/// asserts EOF that may never have been observed, and `from_drain` takes the
+/// outcome as an argument, so any caller can assert `KnownSilent` in one call.
+/// What private fields actually prevent is (i) *post-hoc* mutation of a value
+/// you received from elsewhere — the `t.complete = true` #745's review found —
+/// (ii) a struct-literal or `Default` path that sets the flag by accident or
+/// omission, and (iii) a construction that does not read as an assertion at
+/// the point of assertion. That is a clarity boundary, not a security one; the
+/// security-shaped door is `mark_drained` (named, not linked: it is
+/// `pub(crate)` and a link from a `pub` item makes rustdoc warn), which is
+/// shut so a *caller* cannot pre-empt the drain thread one layer down.
+///
+/// Read access goes through [`CapturedTail::lines`] and
+/// [`CapturedTail::state`]; construction goes through the four constructors —
+/// [`Self::complete`], [`Self::partial`], [`Self::drain_failed`] and
+/// [`Self::from_drain`] — or
+/// [`collect_tail_after_drain`](super::collect_tail_after_drain). The first
+/// three state the claim in the verb; `from_drain` states it in an argument,
+/// and exists because the production path has an `Option<DrainEnd>` in hand
+/// and must not re-derive the mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedTail {
     /// The lines that had arrived when the snapshot was taken.
@@ -267,11 +280,44 @@ mod tests {
         );
     }
 
+    /// The variant a state is, as a name.
+    ///
+    /// ⚠️ **An exhaustive `match`, not `format!("{s:?}")`, and that is the
+    /// whole point of this helper.** The census below must break when a
+    /// [`TailState`] variant is added, and a `Debug`-string split cannot: it
+    /// would go on producing however many names it was handed. Here the
+    /// compiler refuses the new variant, in the same spirit as the renderers'
+    /// exhaustive matches.
+    fn variant_name(s: &TailState<'_>) -> &'static str {
+        match s {
+            TailState::KnownSilent => "KnownSilent",
+            TailState::LastWords(_) => "LastWords",
+            TailState::NothingCapturedYet => "NothingCapturedYet",
+            TailState::FirstWords(_) => "FirstWords",
+            TailState::DrainFailedSilent => "DrainFailedSilent",
+            TailState::DrainFailedWords(_) => "DrainFailedWords",
+        }
+    }
+
+    /// Every variant, spelled out. Paired with [`variant_name`]'s exhaustive
+    /// match, so a new state breaks the build here **and** leaves this list
+    /// visibly one short — rather than a bare `6` that keeps passing while the
+    /// new arm is reachable from no constructor at all.
+    const ALL_STATES: &[&str] = &[
+        "KnownSilent",
+        "LastWords",
+        "NothingCapturedYet",
+        "FirstWords",
+        "DrainFailedSilent",
+        "DrainFailedWords",
+    ];
+
     #[test]
     fn every_tail_state_is_reachable_from_a_constructor() {
         // A state no constructor can produce is a renderer arm no test can
-        // reach, which is how an unreachable success path ships. Six states,
-        // three constructors, two line-shapes each.
+        // reach, which is how an unreachable success path ships. Three
+        // constructors, two line-shapes each, and the result must be the WHOLE
+        // of `TailState` — not merely six of something.
         let empty: Vec<String> = vec![];
         let full = vec!["x".to_string()];
         // Bound first: `state()` borrows the tail, so building these inline
@@ -288,17 +334,15 @@ mod tests {
         // Compared by variant NAME rather than by value: two `LastWords`
         // holding different slices are different values but the same state,
         // and it is the states we are counting.
-        let mut kinds: Vec<String> = reached
-            .iter()
-            .map(|s| format!("{s:?}").split('(').next().unwrap().to_string())
-            .collect();
-        kinds.sort();
+        let mut kinds: Vec<&'static str> = reached.iter().map(variant_name).collect();
+        kinds.sort_unstable();
         kinds.dedup();
+        let mut expected: Vec<&'static str> = ALL_STATES.to_vec();
+        expected.sort_unstable();
         assert_eq!(
-            kinds.len(),
-            6,
-            "all six TailState variants must be constructible, or an arm exists that no test \
-             can reach: {reached:#?}"
+            kinds, expected,
+            "every TailState variant must be constructible, or an arm exists that no test can \
+             reach: {reached:#?}"
         );
     }
 

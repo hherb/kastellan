@@ -122,9 +122,11 @@ pub fn install_once() {
             // (#749). Everything below writes with `eprintln!`, which PANICS
             // when the write fails — and a panic inside a panic hook is a
             // panic while panicking, which aborts the process immediately with
-            // **no output on any stream**. That is strictly worse than the
-            // #733 case this borrows the probe from: there a report was lost,
-            // here the panic message explaining the failure is lost too.
+            // **no output on any stream** — including libtest's own
+            // `test result: FAILED` line, because the process never reaches it.
+            // That is strictly worse than the #733 case this borrows the probe
+            // from: there a report was lost, here the whole ACCOUNT of the
+            // failure is.
             //
             // Measured on this Mac, a child whose fd 2 is the write end of a
             // pipe with no reader:
@@ -132,11 +134,20 @@ pub fn install_once() {
             // | hook | outcome |
             // | --- | --- |
             // | unguarded | **signal 6 (SIGABRT)**, nothing on any stream |
-            // | guarded | exit 101, message intact |
+            // | guarded | exit 101, libtest still reports the failure |
             //
-            // ⚠️ Only `EPIPE` does this. A merely CLOSED fd 2 (`2>&-`) is
-            // harmless — `std` swallows `EBADF` on stdio via `handle_ebadf` —
-            // so this needs a broken pipe, measured rather than assumed.
+            // ⚠️ **The panic TEXT is dropped either way** — on this fd nothing
+            // can be written, and returning early is what the guard is for.
+            // What it buys is the process surviving to be accounted for. Do
+            // not read the row above as "the message survives"; #750's review
+            // found that claim in three places and it was wrong in all three.
+            //
+            // ⚠️ A merely CLOSED fd 2 (`2>&-`) is harmless — `std` swallows
+            // `EBADF` on stdio via `handle_ebadf` — so the fixture needs a
+            // broken pipe, measured rather than assumed. `EPIPE` is the
+            // motivating errno but not the only one: a pty slave whose master
+            // has closed returns `EIO`, and `eprintln!` panics on any write
+            // error, so the probe (not the errno) is what this turns on.
             //
             // The probe is `kastellan-core`'s, not a copy: it has already
             // needed one host-specific correction (macOS sets `POLLNVAL` on

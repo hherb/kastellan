@@ -90,7 +90,10 @@ than fixed. Full prose in the ROADMAP entry and the commit messages.
   *inside a panic hook* is a panic while panicking: immediate abort, **no output on any stream**,
   and libtest's own `test result: FAILED` line lost too. Strictly worse than #733, where only a
   report went missing. Measured on this Mac: unguarded → **signal 6, nothing anywhere**; guarded →
-  exit 101, message intact. Fixed by reusing the ONE probe, exported as
+  exit 101 with **libtest still reporting the failure**. ⚠️ **Not "message intact"** — on that fd
+  the panic text is exactly what cannot be written, and dropping it is the guard's whole job. What
+  survives is the *account* of the failure. The review round below found that wrong phrasing in
+  three places in the tree plus this line. Fixed by reusing the ONE probe, exported as
   `#[doc(hidden)] pub fn worker_stderr::stderr_is_writable()` the way `untrusted_text` already is.
 - ⚠️ **It takes no `fd`, deliberately.** The mutant #745's review found surviving even
   `-D warnings` was probing `STDOUT_FILENO` — stdout is writable in every test binary. A
@@ -100,9 +103,12 @@ than fixed. Full prose in the ROADMAP entry and the commit messages.
   `DrainEnd::Eof` (i.e. #747 in full) survives every suite until the extraction. Same shape #737
   hit [[unreachable-success-path-proves-nothing]].
 - ⚠️ **The movement-only commit introduced a real bug and one test caught it.** Binding
-  `let lines = tail.snapshot();` above the wait reads as a harmless reorder and *is* #730. Only
-  `collecting_a_worker_tail_waits_for_the_drainer_instead_of_racing_it` pins that order; it now
-  says so at the site.
+  `let lines = tail.snapshot();` above the wait reads as a harmless reorder and *is* #730. **Two**
+  tests pin that order, and both stage the race with a drainer that writes 30 ms late:
+  `collecting_a_worker_tail_waits_for_the_drainer_instead_of_racing_it` (#735) and
+  `stderr_note_waits_for_the_drainer_instead_of_racing_it` (#746, added by this PR). The site said
+  "the only thing in the tree" until the review round below; a freshly-written claim its own PR
+  contradicted.
 - **Mutants: 14/14 (#747), 5/5 (#746), 4/4 across the host PAIR (#749).** ⚠️ The last is why both
   hosts ran: pruning `POLLHUP` is **KILLED on the Mac and SURVIVES on Linux**, pruning `POLLERR`
   the mirror image — measured on both this session. **Neither host alone can prove that mask.**
@@ -111,6 +117,82 @@ than fixed. Full prose in the ROADMAP entry and the commit messages.
 - **Files:** `worker_stderr/mod.rs` was 617 lines against the 500 cap, so `CapturedTail` moved to
   `captured.rs` in a **movement-only commit first**, proven by byte-identity of both moved regions
   plus a negative control. mod.rs is now 578.
+
+### Same session, #750's own review round (five reviewers + verification)
+
+Findings applied on the branch. No correctness defect was found in the production code; the
+cluster that mattered was **confidently-worded comments that were false**, which in this tree is
+what the next session builds on.
+
+- ⚠️ **A "flake" that was an ARTEFACT OF TWO AGENTS SHARING ONE WORKTREE.** A reviewer reported
+  the new #749 e2e aborting with SIGABRT four times, then passing 140+ — and read it as a possible
+  real flake blocking merge. It was not: a *second* reviewer was concurrently running a mutation
+  test in the same worktree and target dir, with the guard deleted. Settled on a verified-clean
+  tree: **200/200 inner fixture, 100/100 parent, zero aborts.** ⚠️ **The "same binary, mtime
+  unchanged" reasoning does not rule this out** — `…-c4860b16b9d14aba` is Cargo's *metadata* hash
+  and is stable across content changes. This is [[never-edit-tree-during-a-sweep]] with a new
+  shape: not a sweep, but two reviewers. **Give a mutating reviewer its own worktree.**
+- **Six factually wrong comments, fixed.** "message intact" (3 copies + this file); `Integration
+  tests do not inherit the library's [dependencies]` (**false** — disproven in-tree: `core/tests/*`
+  name `serde_json`, declared only under `[dependencies]`; the real reason the dev-dep is needed
+  is that `libc` is only *transitive* in `tests-common` and so not nameable — and the same false
+  rule justifies two genuinely **redundant** entries in `core/Cargo.toml`, now labelled);
+  `collect_tail_after_drain` "two callers" (**three** since #746, and the third is not behind a
+  `Client`); "the three named constructors" (**four**); "the only thing in the tree that pins this
+  order" (**two**, the second added by the same PR); and a dangling "points somewhere different
+  from the first" whose referent moved when the table grew.
+- ⚠️ **"The fields are PRIVATE so the claim cannot be forged" OVERSTATED what the API delivers.**
+  `complete(vec![])` forges `KnownSilent` in one call, and `from_drain` takes the outcome as an
+  argument. What private fields actually buy is no post-hoc mutation, no accidental struct-literal
+  or `Default` path, and a construction that reads as an assertion at the site — a **clarity**
+  boundary, not a security one. The doc now says so; `mark_drained` is the security-shaped door.
+- **A census that was not tied to what it counted.** `every_tail_state_is_reachable_from_a_constructor`
+  asserted a hard-coded `6` against `format!("{s:?}")` names, so a seventh `TailState` variant
+  would leave it green while the new arm was reachable from no constructor. Now an **exhaustive
+  match** helper plus an `ALL_STATES` list: a new variant breaks both halves.
+  [[guard-shares-the-census-blind-spot]]
+- **A test named for seven states that covered six** (`format_death_report`). Six is correct, and
+  for a stronger reason than the comment gave: the renderer takes `&CapturedTail` (the `Option` is
+  on the exit *status*) and `death_report` returns `None` outright when there is no tail, so the
+  "not piped" state cannot reach it. Renamed, reason recorded.
+- **The #749 e2e could not see its own mutant.** `stderr_is_writable() -> false` passed the whole
+  file — no signal ✓, `test result: FAILED` ✓, payload absent ✓ — because there silence is the
+  *expected* outcome. Only a suite in a **different crate** killed it. Added
+  `a_panic_with_a_healthy_stderr_still_renders_the_message`, and **verified by mutation that it
+  kills while the pre-existing test still passes.** Also: the "payload not on stderr" assertion
+  cannot fail (the fixture's own `dup2` guarantees it) — kept, but relabelled as the statement of
+  cost it is rather than the fixture control it claimed to be; and both `close()` calls are now
+  checked, since a failed `close(read)` would silently make the property vacuous.
+- **The discarded `io::Error` now reaches the log** (`tracing::warn!` with `error` + `kind`). It
+  existed nowhere else, and the renderers hard-code "suspect the transport … not the worker" —
+  right for `EIO`, misleading for `EBADF`, where the fault is our own fd handling. `spawn_drain`
+  likewise warns: after a read error **nothing is draining that pipe**, which is the deadlock the
+  module exists to prevent. `decode_drain_end`'s unknown-byte arm is now loud for the same reason
+  (deliberately **not** a `debug_assert!` — that would make the fail-safe property untestable and
+  diverge debug from release).
+- **Evidence.** Post-review sweep **4452 / 0 / 42 over 185 suites, `TEST_EXIT=0`, `[WARN]` 0**
+  (`--no-fail-fast`, full log under `$HOME`, default target dir
+  [[custom-cargo-target-dir-breaks-daemon-e2e]] [[a-truncated-gate-log-is-not-a-gate]]). Delta vs
+  #750's own 4451/0/41 over 185 reconciles **exactly by name**: +1 passed
+  (`a_panic_with_a_healthy_stderr_still_renders_the_message`), +1 ignored
+  (`inner_fixture_panics_with_a_healthy_stderr`), suite count unchanged. Cold clippy **27/27
+  crates, exit 0, 0 warnings** (fresh target dir — an incremental re-run showed only **3**
+  `Checking kastellan` lines and would have been no proof at all); rustdoc **0 warnings in any
+  touched file** (142 pre-existing elsewhere) — #750 had introduced one `private_intra_doc_links`
+  by linking `pub(crate) mark_drained` from a `pub` type, now named rather than linked.
+  ⚠️ **`egress_proxy_e2e` was skip-as-pass in a fresh worktree** (no proxy binary), so the one
+  real-child proof of the rewritten `stderr_note` had not run. Built it and ran the tier:
+  `sidecar_with_unreadable_extra_ca_fails_fast_with_reason` **passes for real**, with
+  `[E2E] sandboxed` markers. [[stale-fixture-turns-a-gate-into-a-formality]]
+- **Deferred, filed not fixed:** [#751](https://github.com/hherb/kastellan/issues/751) (the guard
+  probes fd 2, but libtest's capture does not write there — a measured *silent swallow* under
+  capture; needs a `println!` fallback and a capture-on test),
+  [#752](https://github.com/hherb/kastellan/issues/752) (`OnceLock<DrainEnd>` over the hand-rolled
+  `AtomicU8`; unblocks `ReadError(ErrorKind)`),
+  [#753](https://github.com/hherb/kastellan/issues/753) (public surface wider than any consumer on
+  a **published** crate; the non-`#[non_exhaustive]` choice is an unstated semver-major commitment),
+  [#754](https://github.com/hherb/kastellan/issues/754) (no real-child `ReadError` coverage; three
+  remaining `try_wait`/read conflations of the same shape).
 
 ### Previous (2026-09-20/22): the #725 → #745 worker-report arc
 

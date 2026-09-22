@@ -298,12 +298,17 @@ mod tests {
     }
 
     #[test]
-    fn the_seven_death_tail_states_all_read_differently() {
+    fn the_six_death_tail_states_all_read_differently() {
         // The persistent renderer's version of the tool-worker discipline:
         // every state the caller can hand us must produce a distinguishable
-        // sentence, or the type's distinctions die at the last step. Six
-        // CapturedTail states; `format_death_report` has no `None` arm (a
-        // persistent worker always has a tail), so six is the whole space.
+        // sentence, or the type's distinctions die at the last step.
+        //
+        // SIX, not seven, and the signature is why: this takes `&CapturedTail`
+        // (the `Option` in it is on the exit STATUS), and
+        // `PersistentTransport::death_report` returns `None` outright when
+        // there is no tail, so it never calls this renderer at all. The "its
+        // stderr was not piped" state cannot reach here — unlike the tool-worker
+        // and sidecar renderers, whose censuses really are seven.
         let lines = vec!["boom".to_string()];
         let rendered: Vec<String> = [
             CapturedTail::complete(lines.clone()),

@@ -91,11 +91,33 @@ fn encode_drain_end(end: DrainEnd) -> u8 {
 /// one, whose fail direction matters: an unrecognised byte must read as *still
 /// draining*, so a caller waits rather than claiming a completeness it has not
 /// established.
+///
+/// ⚠️ **The unknown-byte arm is LOUD, and that is the difference between this
+/// and the collapses #732/#746/#747 were.** [`encode_drain_end`] matches
+/// exhaustively, so adding a [`DrainEnd`] variant breaks it and forces the
+/// author to pick a byte — but this arm would go on compiling and map the new
+/// byte to "still draining", which costs a caller the full [`TAIL_DRAIN_WAIT`]
+/// and then renders as `NothingCapturedYet`: a fact about *waiting* standing in
+/// for a fact about the *encoding*. Failing safe is right; failing safe in
+/// silence is how the state gets lost.
 fn decode_drain_end(raw: u8) -> Option<DrainEnd> {
     match raw {
         DRAIN_EOF => Some(DrainEnd::Eof),
         DRAIN_READ_ERROR => Some(DrainEnd::ReadError),
-        _ => None,
+        DRAIN_IN_PROGRESS => None,
+        // Deliberately NOT a `debug_assert!`: the fail-safe `None` is the
+        // property worth pinning, and panicking on it would make
+        // `the_drain_end_encoding_round_trips_and_fails_safe` unable to assert
+        // the thing it exists for — and would diverge debug from release on a
+        // failure path.
+        other => {
+            tracing::error!(
+                raw = other,
+                "unrecognised drain_end encoding; treating as still-draining, so a caller \
+                 will now burn the full stderr drain wait and report a PARTIAL capture"
+            );
+            None
+        }
     }
 }
 
@@ -254,7 +276,24 @@ pub fn drain_reader<R: Read>(pid: u32, mut reader: R, tail: Option<&StderrTail>)
             // A genuine read error. The pipe is gone and there is nothing left
             // to drain — but this is emphatically NOT the same as EOF, because
             // we do not know what the worker wrote after it (#747).
-            Err(_) => break DrainEnd::ReadError,
+            //
+            // ⚠️ **Logged here because this is the only place the errno
+            // exists.** `DrainEnd` is `Copy` and lives in an `AtomicU8`, so it
+            // cannot carry the error, and the renderers' "suspect the
+            // transport (a torn-down guest's vsock/pty fd)" sentence is a
+            // hard-coded guess. It is right for `EIO`; for `EBADF` the fault
+            // is a double-close in OUR fd handling and that sentence sends the
+            // operator to audit a guest that is fine. Dropping the kind here
+            // would leave nothing anywhere to tell the two apart.
+            Err(e) => {
+                tracing::warn!(
+                    worker_pid = pid,
+                    error = %e,
+                    kind = ?e.kind(),
+                    "worker stderr drain ended on a READ ERROR; the remainder is unrecoverable"
+                );
+                break DrainEnd::ReadError;
+            }
         }
     };
     // Flush a trailing partial line (output with no terminating newline).
@@ -283,10 +322,21 @@ fn push_trimmed(tail: &StderrTail, line: &str) {
 /// the pipe empty so the worker can't deadlock writing to a full stderr buffer;
 /// the thread ends when the worker's stderr closes (process exit).
 pub fn spawn_drain(pid: u32, stderr: std::process::ChildStderr) {
-    // The outcome is deliberately discarded: with no tail there is no report
-    // to qualify, and this exists only to keep the pipe from filling.
     std::thread::spawn(move || {
-        let _ = drain_reader(pid, stderr, None);
+        // With no tail there is no *report* to qualify — but a `ReadError` is
+        // still operator-actionable here, and in a way the tailed paths are
+        // not. This thread is the only thing keeping the pipe empty (see the
+        // module header: a worker past the ~64 KiB buffer "would then block on
+        // write and deadlock"). After a read error that protection is gone and
+        // the thread exits, so the sidecar can hang on its next large write
+        // with nothing in the log pointing at the pipe.
+        if drain_reader(pid, stderr, None) == DrainEnd::ReadError {
+            tracing::warn!(
+                worker_pid = pid,
+                "stderr drain ended on a READ ERROR; this stderr is no longer drained and \
+                 the process may block writing to a full pipe"
+            );
+        }
     });
 }
 
@@ -323,19 +373,24 @@ pub fn spawn_drain_with_tail(pid: u32, stderr: std::process::ChildStderr) -> Std
 /// How long a caller reporting a worker failure waits for the stderr drainer to
 /// reach EOF before snapshotting the tail.
 ///
-/// ⚠️ **A cap, not a cost.** [`StderrTail::wait_for_drain`] returns as soon as
-/// `mark_drained` lands, so a worker whose stderr has already closed costs the
-/// ~2 ms poll interval rather than this.
+/// ⚠️ **A cap, not a cost.** [`StderrTail::wait_for_drain`] checks the flag
+/// *before* its first sleep, so a worker whose stderr has already been drained
+/// costs ~0 rather than this — not even the 2 ms poll interval.
 pub const TAIL_DRAIN_WAIT: Duration = Duration::from_millis(250);
 
 /// Snapshot a worker's stderr tail, **waiting for the drainer first**.
 ///
-/// The one copy for both reporting paths (#737). It was two: `tool_host`'s
+/// The one copy for every reporting path (#737). It was two: `tool_host`'s
 /// `EARLY_EXIT_DRAIN_WAIT` + inline wait for a tool worker, and
 /// `worker_lifecycle::persistent`'s `DEATH_DRAIN_WAIT` + `collect_death_tail`
 /// for a persistent one — identical values doing an identical job, with the
 /// latter's own doc saying "if a third appears, hoist them". #737 was that
-/// third caller.
+/// third caller, and hoisting is what made #746 a three-line change rather
+/// than a fourth copy.
+///
+/// There are now **three** production callers: `tool_host::spawn_worker`,
+/// `worker_lifecycle::persistent`, and the egress sidecar bring-up
+/// (`egress::spawn::stderr_note`, added by #746).
 ///
 /// ⚠️ **The wait is the whole function, and it is not an optimisation.** A
 /// worker that has just closed its pipes has usually NOT been drained yet, so
@@ -344,19 +399,24 @@ pub const TAIL_DRAIN_WAIT: Duration = Duration::from_millis(250);
 /// millisecond later. That contentless line is the exact defect #730 exists to
 /// remove, and #735's review found this path had silently lost the wait.
 ///
-/// ⚠️ **Extracted so a test can reach the decision at all.** In its two
-/// callers the wait sits behind a real `Client` over a spawned child, which no
-/// unit test can construct — so a mutant deleting it survived every suite in
-/// the tree, measured. That is why this is a free function over a
-/// [`StderrTail`] rather than a line inside each caller
+/// ⚠️ **Extracted so a test can reach the decision at all.** In every caller
+/// the wait sits behind a spawned child no unit test can construct — a real
+/// `Client` in the two worker paths, a sidecar `Child` observed via `try_wait`
+/// in the egress one — so a mutant deleting it survived every suite in the
+/// tree, measured. That is why this is a free function over a [`StderrTail`]
+/// rather than a line inside each caller
 /// [[unreachable-success-path-proves-nothing]].
 pub fn collect_tail_after_drain(tail: &StderrTail) -> CapturedTail {
     // ⚠️ **Wait FIRST, snapshot SECOND.** Hoisting the snapshot above the wait
     // reads as a harmless reorder and is the whole defect: it captures the ring
     // as it was before the drainer had flushed, so a worker that explained
-    // itself is reported as having said nothing. Caught by
-    // `collecting_a_worker_tail_waits_for_the_drainer_instead_of_racing_it`,
-    // which is the only thing in the tree that pins this order.
+    // itself is reported as having said nothing. Two tests pin this order, and
+    // both stage the real race with a drainer that writes 30 ms late:
+    // `collecting_a_worker_tail_waits_for_the_drainer_instead_of_racing_it`
+    // (below, #735) and `egress::spawn::tests::
+    // stderr_note_waits_for_the_drainer_instead_of_racing_it` (#746). Under a
+    // hoisted snapshot the first sees `KnownSilent` where it asserts the
+    // worker's line, and the second renders "no stderr captured".
     let end = tail.wait_for_drain(TAIL_DRAIN_WAIT);
     let lines = tail.snapshot();
     // `from_drain` rather than a struct literal: `CapturedTail`'s fields are
