@@ -70,3 +70,11 @@ rcgen            = { version = "0.13", default-features = false, features = ["pe
 tokio-rustls     = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls           = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-pki-types = { version = "1",    features = ["std"] }
+
+# `tests/panic_hook_broken_stderr_e2e.rs` (#749) breaks its own fd 2 with
+# `pipe`/`dup2` to reproduce the abort this crate's panic hook used to cause.
+# Integration tests do not inherit the library's [dependencies], so libc is
+# named again here; same workspace pin `core` uses, so nothing new enters the
+# graph.
+[dev-dependencies]
+libc = { workspace = true }

@@ -157,6 +157,35 @@ fn is_open(fd: RawFd) -> bool {
     flags >= 0
 }
 
+/// Is this process's own stderr writable? The [`is_writable`] probe, exported
+/// for `kastellan-tests-common`'s panic hook
+/// ([#749](https://github.com/hherb/kastellan/issues/749)).
+///
+/// That hook renders a panic with `eprintln!` for the same libtest-capture
+/// reason this module does, and inherits the same #733 hazard — worse, in
+/// fact: an `eprintln!` that panics *inside a panic hook* is a panic while
+/// panicking, which aborts immediately with **no output at all**. Measured on
+/// this Mac: signal 6, nothing on any stream; with this guard, a clean exit
+/// 101 and the message intact.
+///
+/// ⚠️ **Takes no `fd`, deliberately.** The one mutant #745's review found
+/// surviving even `-D warnings` was probing `STDOUT_FILENO` instead of
+/// `STDERR_FILENO` — stdout is writable in every test binary, so nothing
+/// catches it. A parameterless export cannot be called wrongly that way.
+///
+/// ⚠️ **`#[doc(hidden)]`, deliberately**, for the same reason
+/// [`crate::untrusted_text`] is: `kastellan-core` is published, and a bare
+/// `pub` here would be a permanent semver commitment taken on for one
+/// dev-dependency's benefit. The alternative — hand-copying the eight-line
+/// probe into `tests-common` — is the drift-between-copies shape CLAUDE.md's
+/// bwrap-argv note names, and this probe has already needed one host-specific
+/// correction (`POLLNVAL` on macOS character devices) that a copy would not
+/// have received.
+#[doc(hidden)]
+pub fn stderr_is_writable() -> bool {
+    is_writable(libc::STDERR_FILENO)
+}
+
 /// Write `line` to the process's own stderr, unless stderr is already broken.
 ///
 /// The one place `eprintln!` is called for a worker report. Returns whether the
