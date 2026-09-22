@@ -8,7 +8,9 @@
 
 use std::process::ExitStatus;
 
-use super::shared::{emit_to_stderr_when_unheard, format_stderr_fallback};
+use super::delivery::warn_and_fall_back;
+use crate::worker_stderr::CapturedTail;
+use super::shared::format_stderr_fallback;
 #[allow(unused_imports)] // referenced by the marker doc's intra-doc link
 use super::shared::STDERR_FALLBACK_MARKERS;
 #[allow(unused_imports)] // referenced by this module's doc links
@@ -21,15 +23,36 @@ use super::tool_worker::{
 /// exit status (which distinguishes a clean `exit status: 1` — a deliberate
 /// fail-loud exit — from a `signal: 6 (SIGABRT)` — a crash) plus the recent
 /// stderr lines, joined for a single log record.
-pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &[String]) -> String {
+///
+/// ⚠️ **Takes a [`CapturedTail`], not a slice, and the flag is load-bearing**
+/// ([#732](https://github.com/hherb/kastellan/issues/732)). "no stderr
+/// captured" is a claim about the *worker*; an empty tail whose drain timed out
+/// only supports a claim about *us*. Rendering the two identically is the
+/// contentless-line defect #730 exists to remove, wearing a confident sentence.
+pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTail) -> String {
     let status_str = match status {
         Some(s) => s.to_string(),
         None => "exit status unknown (not yet reaped)".to_string(),
     };
-    if stderr_tail.is_empty() {
-        format!("worker exited ({status_str}); no stderr captured")
-    } else {
-        format!("worker exited ({status_str}); recent stderr: {}", stderr_tail.join(" | "))
+    let ms = crate::worker_stderr::TAIL_DRAIN_WAIT.as_millis();
+    match stderr_tail {
+        // KNOWN silent: the drain reached EOF and there was nothing in it.
+        t if t.is_known_silent() => format!("worker exited ({status_str}); no stderr captured"),
+        // Nothing arrived, but we stopped waiting. "No stderr captured" would
+        // be a claim about the WORKER; this is a fact about US (#732).
+        t if t.lines().is_empty() => format!(
+            "worker exited ({status_str}); the stderr drain did not reach EOF within {ms} ms, \
+             so nothing was captured YET — a PARTIAL capture, not evidence that the worker \
+             was silent"
+        ),
+        // The ring evicts oldest first, so an incomplete tail is the FIRST
+        // lines, not the most recent ones. "recent stderr" would mislabel them.
+        t if !t.is_complete() => format!(
+            "worker exited ({status_str}); stderr so far (drain incomplete after {ms} ms, so \
+             these may be its FIRST lines rather than its most recent): {}",
+            t.lines().join(" | ")
+        ),
+        t => format!("worker exited ({status_str}); recent stderr: {}", t.lines().join(" | ")),
     }
 }
 
@@ -79,8 +102,8 @@ pub fn format_persistent_death_stderr_fallback(report: &str) -> String {
     format_stderr_fallback(WORKER_DEATH_STDERR_MARKER, report)
 }
 
-/// Report a persistent worker's death through `tracing`, **and** through the
-/// process's own stderr when no subscriber is installed.
+/// Report a persistent worker's death on whichever channel will carry it:
+/// `tracing` when it will record the event, the marked stderr line when not.
 ///
 /// The one producer for that event (#730), mirroring [`emit_worker_failure_report`]
 /// for the early-exit one. Before this, `worker_lifecycle::persistent`'s driver
@@ -103,13 +126,15 @@ pub fn format_persistent_death_stderr_fallback(report: &str) -> String {
 /// implementors.
 ///
 /// [`PersistentTransport::death_report`]: crate::worker_lifecycle::PersistentTransport::death_report
-pub fn emit_persistent_death_report(label: &str, report: &str) {
+///
+/// Returns whether the stderr fallback line was written; see
+/// [`emit_worker_failure_report`] for why that value exists.
+pub fn emit_persistent_death_report(label: &str, report: &str) -> bool {
     let label = crate::untrusted_text::neutralise_controls(label);
     let line = crate::untrusted_text::neutralise_controls(&format_persistent_death_line(
         &label, report,
     ));
-    tracing::warn!(%label, "{line}");
-    emit_to_stderr_when_unheard(WORKER_DEATH_STDERR_MARKER, &line);
+    warn_and_fall_back!(WORKER_DEATH_STDERR_MARKER, &line, label = &label)
 }
 
 /// Marker prefixing every line [`emit_persistent_down_report`] writes to the
@@ -147,8 +172,8 @@ pub fn format_persistent_down_stderr_fallback(report: &str) -> String {
     format_stderr_fallback(WORKER_DOWN_STDERR_MARKER, report)
 }
 
-/// Report that a persistent worker is **not coming back** — through `tracing`,
-/// and through the process's own stderr when no subscriber is installed.
+/// Report that a persistent worker is **not coming back**, on whichever
+/// channel will actually carry it.
 ///
 /// The one producer for that event (#738). Before this, the driver's
 /// respawn-failure and rate-alarm lines were bare `tracing::warn!`s — the exact
@@ -160,20 +185,21 @@ pub fn format_persistent_down_stderr_fallback(report: &str) -> String {
 /// ⚠️ **Not a death report, and deliberately not marked as one.** See
 /// [`WORKER_DOWN_STDERR_MARKER`].
 ///
-/// Goes through the same `emit_to_stderr_when_unheard` as both other
-/// emitters, so the `has_been_set()` guard and the control neutralisation still
-/// exist in exactly one copy. `reason` is neutralised here on its own account,
+/// Goes through the same `warn_and_fall_back!` as both other emitters, so the
+/// delivery check and the control neutralisation still exist in exactly one
+/// copy. `reason` is neutralised here on its own account,
 /// because the three callers include one whose input is a **panic payload**
 /// (`worker_lifecycle::persistent`'s join), and a panic message is arbitrary
 /// text from arbitrary code.
 ///
-pub fn emit_persistent_down_report(label: &str, reason: &str) {
+/// Returns whether the stderr fallback line was written; see
+/// [`emit_worker_failure_report`] for why that value exists.
+pub fn emit_persistent_down_report(label: &str, reason: &str) -> bool {
     let label = crate::untrusted_text::neutralise_controls(label);
     let line = crate::untrusted_text::neutralise_controls(&format_persistent_down_line(
         &label, reason,
     ));
-    tracing::warn!(%label, "{line}");
-    emit_to_stderr_when_unheard(WORKER_DOWN_STDERR_MARKER, &line);
+    warn_and_fall_back!(WORKER_DOWN_STDERR_MARKER, &line, label = &label)
 }
 
 #[cfg(test)]
@@ -181,8 +207,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_partial_death_capture_does_not_claim_no_stderr() {
+        // #732 for the persistent path — the one that runs the Matrix and
+        // email channel workers. "no stderr captured" is a claim about the
+        // WORKER; an empty tail whose drain timed out only supports a claim
+        // about us.
+        let r = format_death_report(None, &CapturedTail::partial(vec![]));
+        assert!(
+            !r.contains("no stderr captured"),
+            "a PARTIAL capture must not report the worker as having written nothing: {r}"
+        );
+        assert!(
+            r.contains("PARTIAL"),
+            "the line must say the capture was partial, or a reader cannot tell it from a \
+             complete one: {r}"
+        );
+        // POSITIVE CONTROL: the complete case must keep the original sentence,
+        // or this test would also pass against a renderer that simply deleted
+        // it.
+        let known = format_death_report(None, &CapturedTail::complete(vec![]));
+        assert!(
+            known.contains("no stderr captured"),
+            "a COMPLETE empty tail really is a silent worker and must still say so: {known}"
+        );
+    }
+
+    #[test]
+    fn a_partial_death_capture_does_not_call_its_lines_recent() {
+        // The ring evicts oldest first, so an incomplete tail is the FIRST
+        // lines. "recent stderr" would point a reader correlating against the
+        // crash at the worker's boot messages instead.
+        let partial = CapturedTail::partial(vec!["worker booting".into()]);
+        let r = format_death_report(None, &partial);
+        assert!(
+            !r.contains("recent stderr"),
+            "an incomplete tail holds the FIRST lines, not the most recent ones: {r}"
+        );
+        assert!(
+            r.contains("worker booting"),
+            "POSITIVE CONTROL: whatever arrived must still be reported: {r}"
+        );
+        assert!(
+            format_death_report(None, &CapturedTail::complete(vec!["boom".into()]))
+                .contains("recent stderr"),
+            "a COMPLETE tail really is the most recent output and must still say so"
+        );
+    }
+
+    #[test]
     fn death_report_no_status_no_stderr() {
-        let report = format_death_report(None, &[]);
+        let report = format_death_report(None, &CapturedTail::complete(vec![]));
         assert!(report.contains("exit status unknown"), "{report}");
         assert!(report.contains("no stderr captured"), "{report}");
     }
@@ -194,7 +268,7 @@ mod tests {
         let status = std::process::Command::new("false")
             .status()
             .expect("spawn /usr/bin/false");
-        let report = format_death_report(Some(status), &["boom".into(), "trace".into()]);
+        let report = format_death_report(Some(status), &CapturedTail::complete(vec!["boom".into(), "trace".into()]));
         assert!(report.contains("exit status"), "{report}");
         assert!(report.contains("boom | trace"), "{report}");
     }

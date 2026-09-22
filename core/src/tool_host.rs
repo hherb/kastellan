@@ -619,9 +619,10 @@ impl SupervisedWorker {
     /// reach the process's own log and fd 2 and nowhere else — never a
     /// returned error, the planner, or an audit row.
     ///
-    /// Two sinks, not one: `tracing`, plus the process's own stderr for
-    /// binaries with no subscriber (test binaries and `kastellan-cli`; never
-    /// the daemon). See
+    /// Two sinks, one report: `tracing` when it will record the event, the
+    /// process's own stderr when it will not. ⚠️ **The daemon is NOT exempt** —
+    /// a target-scoped `RUST_LOG` in the operator overlay makes it take the
+    /// stderr line like any test binary, which is #734. See
     /// [`crate::worker_stderr::emit_worker_failure_report`], which owns that
     /// reasoning.
     ///
@@ -657,7 +658,7 @@ impl SupervisedWorker {
             &self.program,
             method,
             cause,
-            tail.as_deref(),
+            tail.as_ref(),
         );
         crate::worker_stderr::emit_worker_failure_report(&report);
     }

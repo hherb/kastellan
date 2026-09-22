@@ -34,7 +34,21 @@ pub mod secrets;
 pub mod tool_host;
 /// One definition of the dangerous-character class in untrusted text, shared
 /// by the prompt escaper and the daemon-log neutraliser.
-mod untrusted_text;
+/// Pure text neutralisation for anything a log line, a report or a gate log
+/// interpolates from an untrusted source.
+///
+/// `pub` since #742: `kastellan-tests-common`'s panic hook has to neutralise a
+/// panic payload the same way the worker reports neutralise theirs, and a
+/// second copy of the character class is the drift shape CLAUDE.md's bwrap-argv
+/// note names.
+///
+/// ⚠️ **`#[doc(hidden)]`, deliberately.** `kastellan-core` is published, so a
+/// bare `pub` here would be a permanent semver commitment taken on for one
+/// dev-dependency's benefit. Hiding it gives `kastellan-tests-common` the
+/// access it needs while saying plainly that this is not committed API — the
+/// cheapest available option, and it costs the in-tree callers nothing.
+#[doc(hidden)]
+pub mod untrusted_text;
 pub mod worker_manifest;
 pub mod worker_lifecycle;
 pub mod worker_stderr;

@@ -206,11 +206,23 @@ impl RequireKnob {
     /// renderer is correct and leaves the call deletable, with the suite still
     /// green — and a deleted dialect warning restores the exact silent skip
     /// #654 was filed about.
+    ///
+    /// ⚠️ **This, not [`RequireKnob::action`], is where #742's panic hook is
+    /// installed — because `action` is not the only door.** The first version
+    /// installed from `action`, and the **`microvm` gate profile bypassed it
+    /// entirely**: `microvm::skip_unless_ready` → `report_unmet_microvm_to` →
+    /// `require_action_to` calls *this* method directly, so a micro-VM suite
+    /// reached its knob without ever touching `action`. It was covered only
+    /// when some co-set knob (the profile also sets the PG and sandbox ones)
+    /// happened to be read first — coverage by accident, which is precisely
+    /// what `install_once`'s doc claims to have replaced. Every path that
+    /// reads a knob funnels through here, so here is the real chokepoint.
     pub fn action_reporting_to(
         &self,
         raw: Option<String>,
         out: &mut dyn std::io::Write,
     ) -> UnmetAction {
+        crate::panic_hook::install_once();
         let action = unmet_action(raw.clone());
         if action == UnmetAction::Skip {
             warn_if_out_of_dialect(self.env, raw.as_deref(), out);

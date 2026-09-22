@@ -98,6 +98,9 @@ pub mod guards;
 pub mod installable;
 pub mod microvm;
 pub mod mock_localmail;
+/// A panic hook whose payload cannot forge a gate evidence line (#742).
+/// Installed from [`require::RequireKnob::action`], not by each suite.
+pub mod panic_hook;
 pub mod pg;
 pub mod provisioning;
 pub mod require;

@@ -3,7 +3,7 @@
 //!
 //! #666 routed a dead worker's own stderr into `tracing::warn!`. That is the
 //! right channel for the daemon, which always installs a subscriber
-//! (`core/src/main.rs`). **Test binaries install none**, so in 29 of the 30
+//! (`core/src/main.rs`). **Test binaries install none**, so in 29 of the 31
 //! `core/tests/*.rs` suites that dispatch to a real worker the report goes
 //! nowhere and the failure prints only `Protocol(EarlyExit)` — the least
 //! informative error this system produces.
@@ -16,16 +16,19 @@
 //! ## Why this suite re-executes itself
 //!
 //! The property is about what an operator **sees when a test fails**, and a
-//! test cannot observe its own failure output. Three things have to be true at
-//! once and none of them is visible from inside the test that triggers them:
+//! test cannot observe its own failure output. **Four** things have to be true
+//! at once — one per fixture, plus the third state #734 added — and none of
+//! them is visible from inside the test that triggers them:
 //!
 //! 1. the fallback fires at all when no subscriber is installed;
 //! 2. **libtest's capture reaches it**, so the report lands in the failing
 //!    test's `---- <name> stdout ----` block rather than on the raw fd;
-//! 3. it does **not** double-report in a binary that did install one.
+//! 3. it does **not** double-report in a binary that did install one;
+//! 4. it **still** fires when a subscriber exists but `EnvFilter` drops the
+//!    event — the #734 state, which neither 1 nor 3 can reach.
 //!
-//! A fourth rides along, because this is the only place it can be observed end
-//! to end: the report is **control-neutralised on both channels**. The fixture
+//! A fifth rides along, because this is the only place it can be observed end
+//! to end: the report is **control-neutralised on every channel**. The fixture
 //! dispatches [`HOSTILE_METHOD`] — a model-authored `method` is the one part of
 //! the report interpolated raw — so an ESC or a forged column-0 `[WARN]` line
 //! shows up in a child stream the parent can read. Without it, dropping the
@@ -58,11 +61,17 @@
 //! different one. The fixture therefore dispatches from inside a spawned task,
 //! which is both the stronger test and the shape the daemon actually runs.
 //!
-//! ⚠️ **One child process per fixture.** `tracing::dispatcher::has_been_set()`
-//! is a process-global `AtomicBool` that `with_default` sets as well as
-//! `set_global_default`, and which is never cleared — so one subscriber
-//! anywhere in a binary pins the branch for every later test in it. Running
-//! both fixtures in one process would make the second answer for the first.
+//! ⚠️ **One child process per fixture.** The fixtures install their
+//! subscribers with `set_global_default`, which succeeds **once per process**
+//! and cannot be undone — so a second fixture in the same binary could not
+//! install its own, and would silently answer for the first.
+//!
+//! ⚠️ **This rule used to be justified by `has_been_set()`**, a never-cleared
+//! process-global `AtomicBool` that pinned the fallback branch for a whole
+//! binary. #734 replaced that guard with a per-event `event_enabled!` check,
+//! so that hazard is **gone** — a scoped `with_default` no longer leaks into
+//! later tests. The rule survives it for the reason above; the old reason is
+//! recorded here so nobody re-derives it, finds it false, and drops the rule.
 //!
 //! ⚠️ **Every child run asserts `1 failed`.** A libtest name filter exits 0
 //! when it matches nothing, so "the child's output lacks the phrase" and "the
@@ -131,6 +140,25 @@ const FORGED_LINE_START: &str = "[WARN] kastellan-test: FORGED-GATE-LINE";
 /// presence proves the hostile method actually reached the rendered report, so
 /// "no forged line" cannot be satisfied by the method going missing.
 const FORGED_TEXT: &str = "FORGED-GATE-LINE";
+
+/// The `RUST_LOG` an operator writes when debugging the scheduler — which
+/// names a real target and therefore enables **nothing** for the worker-report
+/// emitter.
+///
+/// ⚠️ `EnvFilter`'s default directive applies only when the env string is
+/// **empty**, so a non-empty target-scoped string like this leaves every other
+/// target disabled. That is the whole mechanism of #734.
+const FILTERED_AWAY_DIRECTIVE: &str = "kastellan_core::scheduler=debug";
+
+/// The module the early-exit `tracing::warn!` is written in, and therefore the
+/// target its event carries.
+///
+/// ⚠️ **Spelled out rather than derived, on purpose.** The fix for #734 turns
+/// on the emitter's target being the one the delivery check asks about, so a
+/// test that computed this from the same source as the code could not notice
+/// them drifting apart. If the emitter moves module, this const must move with
+/// it — and the fixture's positive control is what says so out loud.
+const EMITTER_TARGET: &str = "kastellan_core::worker_stderr::report::tool_worker";
 
 /// Set by the parent on the child it launches. The inner fixtures do nothing
 /// unless they see it.
@@ -263,13 +291,64 @@ fn inner_fixture_early_exit_with_a_subscriber() {
         .finish();
     // `expect`, not `let _`: an `Err` here means a subscriber was ALREADY
     // installed, which is precisely the hazard this file documents
-    // (`has_been_set()` is never cleared and `with_default` sets it too).
+    // (`set_global_default` succeeds once per process and cannot be undone).
     // Swallowing it would leave the parent asserting "the report must arrive
     // on stderr exactly once" against a fixture whose own setup failed — and
     // if that pre-existing subscriber happened to write WARN to stderr, the
     // count would be 1 and the test would PASS having proven nothing.
     tracing::subscriber::set_global_default(subscriber)
         .expect("install the fixture's global subscriber; a prior install would void this test");
+
+    dispatch_to_a_worker_that_dies_first();
+    panic!("{DELIBERATE}");
+}
+
+/// Inner fixture: a subscriber is installed that **filters this event out**.
+///
+/// The [#734](https://github.com/hherb/kastellan/issues/734) case, and the one
+/// the other two fixtures cannot reach between them. "No subscriber" takes the
+/// fallback and "a subscriber that records WARN" takes `tracing`; this is the
+/// third state, where a subscriber exists and the report still goes **nowhere**.
+///
+/// ⚠️ **This is not a contrived filter.** `core/src/main.rs` builds the
+/// daemon's subscriber from `EnvFilter::try_from_default_env()`, and
+/// `supervisor/src/specs.rs` documents `RUST_LOG` as operator-settable through
+/// the `kastellan.env.local` overlay. An operator debugging the scheduler
+/// writes exactly the directive below — and before #734 that silenced the most
+/// valuable diagnostic in the system while they were trying to debug it, with
+/// nothing saying so.
+///
+/// The directive names a **real** target that is not this one, rather than
+/// `off`: `off` would also be silenced by a fix that merely checked the max
+/// level, and the point is that the filter is *target-scoped*.
+#[test]
+#[ignore = "inner fixture: fails on purpose; run by its parent test in a child process"]
+fn inner_fixture_early_exit_with_a_filtering_subscriber() {
+    if !is_the_child() || skip_if_sandbox_unavailable() {
+        return;
+    }
+    // Global, and to the raw stderr handle, for the same reasons as the
+    // with-subscriber fixture: the report is written from a spawned task, and
+    // the raw handle is how the parent tells the two channels apart.
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::new(FILTERED_AWAY_DIRECTIVE))
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("install the fixture's global subscriber; a prior install would void this test");
+
+    // POSITIVE CONTROL, inside the child, before anything else runs: prove the
+    // filter really does drop a WARN from the emitter's target. Without it a
+    // typo in the directive (or a `tracing-subscriber` change that made
+    // `with_env_filter` permissive) would leave the parent asserting the
+    // presence of a fallback line that fired for a completely different
+    // reason, and the suite would pass while testing nothing.
+    assert!(
+        !tracing::event_enabled!(target: EMITTER_TARGET, tracing::Level::WARN),
+        "the fixture's own filter must DROP a WARN from `{EMITTER_TARGET}`, or this fixture is \
+         not the #734 state at all. Directive: {FILTERED_AWAY_DIRECTIVE}"
+    );
 
     dispatch_to_a_worker_that_dies_first();
     panic!("{DELIBERATE}");
@@ -327,8 +406,8 @@ fn assert_one_deliberate_failure(name: &str, run: &ChildRun) {
     // also in "11 failed", "21 failed" and — the one that matters — in
     // "1 passed; 1 failed". Two tests running in one child would defeat the
     // one-child-per-fixture rule the module doc explains, because
-    // `has_been_set()` is a never-cleared process global and the first fixture
-    // would pin the branch for the second.
+    // `set_global_default` succeeds only once per process and the first
+    // fixture would have consumed it.
     assert!(
         run.stdout.contains("test result: FAILED. 0 passed; 1 failed;"),
         "exactly one test must have run and failed in the child; anything else means the \
@@ -444,11 +523,56 @@ fn a_binary_that_installed_a_subscriber_does_not_get_the_report_twice() {
     assert!(
         !run.stdout.contains(LAST_WORDS),
         "the fallback must stay QUIET when a subscriber is installed. Seeing the report in \
-         the captured stream too means the `has_been_set()` guard is not holding, which \
-         would double every early-exit report in the daemon's own log.\n{both}"
+         the captured stream too means the delivery check is not holding, which would \
+         double every early-exit report in the daemon's own log.\n{both}"
     );
     // The `tracing` half of the same property. The daemon takes this channel
     // and nothing else, so neutralisation has to hold here too — and this is
     // the only fixture in which the report reaches a subscriber at all.
     assert_the_hostile_method_was_defanged("the `tracing` channel", &run.stderr, &both);
+}
+
+#[test]
+fn a_subscriber_that_filters_the_event_out_still_gets_the_fallback() {
+    if skip_if_sandbox_unavailable() {
+        return;
+    }
+    let name = "inner_fixture_early_exit_with_a_filtering_subscriber";
+    let run = run_inner_fixture(name);
+    assert_one_deliberate_failure(name, &run);
+    let both = format!("--- child stdout ---\n{}\n--- child stderr ---\n{}", run.stdout, run.stderr);
+
+    // The `tracing` channel must genuinely be silent. This is the half that
+    // makes the assertion below meaningful: if the subscriber HAD recorded the
+    // event, a fallback line would be a double-report bug rather than the fix.
+    assert!(
+        !run.stderr.contains(LAST_WORDS),
+        "the fixture's filter must drop the `tracing` event — finding the report on the \
+         child's raw stderr means the subscriber recorded it after all, and this suite is no \
+         longer testing the #734 state.\n{both}"
+    );
+
+    let marked: Vec<&str> = run
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with(WORKER_FAILED_STDERR_MARKER))
+        .collect();
+    assert_eq!(
+        marked.len(),
+        1,
+        "expected exactly ONE `{WORKER_FAILED_STDERR_MARKER}` line. NONE is #734: a subscriber \
+         exists, so the old `has_been_set()` guard suppressed the fallback, while `EnvFilter` \
+         dropped the `tracing` event — the report reached nobody at all and nothing said so. \
+         An operator hits this by setting a target-scoped `RUST_LOG` in the \
+         `kastellan.env.local` overlay while debugging.\ngot: {marked:?}\n{both}"
+    );
+    assert!(
+        marked[0].contains(LAST_WORDS),
+        "the fallback line must CARRY the dying worker's own explanation.\ngot: {}\n{both}",
+        marked[0]
+    );
+    // The neutralisation has to hold on this path too — it is a third route to
+    // the same line, and a fix that rendered it anywhere but through
+    // `format_stderr_fallback` would bypass the guarantee.
+    assert_the_hostile_method_was_defanged("the filtered-away fallback", &run.stdout, &both);
 }
