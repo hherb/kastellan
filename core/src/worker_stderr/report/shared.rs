@@ -21,8 +21,8 @@ use super::tool_worker::WORKER_FAILED_STDERR_MARKER;
 /// rather than over one name that a second marker could quietly fail to join.
 ///
 /// ⚠️ **A new marker must be added here as well as declared.** Nothing forces
-/// it: a third `pub const` that never joins this array is a line in a gate log
-/// that no test ever looked at. The tests below are the only enforcement, and
+/// it: a **fourth** `pub const` that never joins this array is a line in a gate
+/// log that no test ever looked at. The tests below are the only enforcement, and
 /// they can only check what the array holds.
 pub const STDERR_FALLBACK_MARKERS: [&str; 3] = [
     WORKER_FAILED_STDERR_MARKER,
@@ -32,7 +32,7 @@ pub const STDERR_FALLBACK_MARKERS: [&str; 3] = [
 
 /// Pure: the exact bytes a marked stderr-fallback line carries.
 ///
-/// **The one renderer for both markers.** Parameterising the marker rather than
+/// **The one renderer for all three markers.** Parameterising the marker rather than
 /// writing a second `format!` is the point: the neutralisation below then exists
 /// in exactly one place, and a future third marker inherits it by construction
 /// instead of by whoever adds it remembering.

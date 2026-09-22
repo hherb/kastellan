@@ -142,7 +142,7 @@ pub fn format_worker_failure_report(
         }
         // Nothing arrived, but we stopped waiting. Saying "wrote NOTHING" here
         // sends the reader after a kill/seccomp/OOM fault that may not exist.
-        Some(t) if t.lines.is_empty() => format!(
+        Some(t) if t.lines().is_empty() => format!(
             "{what}, and its stderr drain did not reach EOF within {ms} ms, so NOTHING was \
              captured yet — this is a PARTIAL capture, and the absence of a reason here is \
              NOT evidence that there was none"
@@ -150,12 +150,12 @@ pub fn format_worker_failure_report(
         // Some lines, but more may have been coming. The ring evicts OLDEST
         // first, so an incomplete tail holds the worker's FIRST words, not its
         // last — calling them "last words" points the reader at startup noise.
-        Some(t) if !t.complete => format!(
+        Some(t) if !t.is_complete() => format!(
             "{what}; its stderr so far (the drain did not reach EOF within {ms} ms, so these \
              may be its FIRST lines rather than its last): {}",
-            t.lines.join(" | ")
+            t.lines().join(" | ")
         ),
-        Some(t) => format!("{what}; its last words: {}", t.lines.join(" | ")),
+        Some(t) => format!("{what}; its last words: {}", t.lines().join(" | ")),
     }
 }
 
@@ -207,15 +207,25 @@ pub fn format_worker_failure_stderr_fallback(report: &str) -> String {
     format_stderr_fallback(WORKER_FAILED_STDERR_MARKER, report)
 }
 
-/// Report a worker's early exit through `tracing`, **and** through the
-/// process's own stderr when no `tracing` subscriber is installed.
+/// Report a worker's early exit on whichever channel will actually carry it:
+/// `tracing` when it will record the event, the marked stderr line when it
+/// will not.
 ///
-/// The one producer, so every caller gets both channels (#725).
+/// The one producer, so every caller gets a channel (#725), and exactly one
+/// (#734) — the two are mutually exclusive, so no reader sees the report
+/// twice.
 ///
 /// **Who gets the fallback.** The daemon installs a subscriber as the first
-/// statement of `main` (`core/src/main.rs`), before any dispatch, so it never
-/// fires there and the daemon's behaviour is unchanged. It is *not* limited to
-/// tests, though: `kastellan-cli` installs no subscriber anywhere, and
+/// statement of `main` (`core/src/main.rs`), before any dispatch — but ⚠️ **it
+/// is no longer exempt, and that is the whole of #734.** `main` builds that
+/// subscriber from `EnvFilter::try_from_default_env()`, and `EnvFilter`
+/// applies its default directive only when the env string is **empty**. So an
+/// operator who sets a target-scoped `RUST_LOG` through the
+/// `kastellan.env.local` overlay — `kastellan_core::scheduler=debug`, while
+/// debugging the scheduler — makes the daemon fall through to this line like
+/// any test binary. Before #734 that silenced the report on *both* channels.
+/// It is *not* limited to tests either: `kastellan-cli` installs no subscriber
+/// anywhere, and
 /// `kastellan-cli guard capture` dispatches the real web-fetch worker
 /// (`core/src/bin/kastellan-cli/guard_capture.rs`). That command gains the
 /// line, which is the intent — it is operator-facing and has no log for the
@@ -272,39 +282,19 @@ pub fn format_worker_failure_stderr_fallback(report: &str) -> String {
 /// producer must not be able to bypass the property by calling it directly.
 /// Both orders give identical bytes.
 ///
-/// ⚠️ **One subscriber anywhere in a binary silences the fallback for all of
-/// it.** `tracing::dispatcher::has_been_set` is a process-global `AtomicBool`
-/// that `with_default` sets as well as `set_global_default`, and which is
-/// **never cleared** — dropping a scoped guard does not re-enable the
-/// fallback. So it cannot distinguish "this thread has a subscriber" from
-/// "some other test installed one earlier". That is the conservative
-/// direction — a binary with a subscriber loses nothing, it just reads the
-/// report through `tracing` — but a suite that installs one in one test and
-/// expects the fallback in another will not get it.
-///
-/// ⚠️ **It also asks the wrong question.** "Is a subscriber installed" is not
-/// "will this WARN be recorded": an installed subscriber that *filters the
-/// event out* drops it on both channels, silently. That is reachable in the
-/// deployed daemon through a target-scoped `RUST_LOG` in the operator overlay.
-/// [#734](https://github.com/hherb/kastellan/issues/734) tracks moving to a
-/// delivery check (`event_enabled!`).
-///
-/// ⚠️ `has_been_set` is `#[doc(hidden)]` in `tracing` and carries no stability
-/// guarantee. It is the only way to ask the question, and its removal would be
-/// a compile error rather than a silent behaviour change; a change in its
-/// meaning would be caught by the e2e above.
-///
-/// ⚠️ `eprintln!` panics if the write fails (a closed or broken stderr), and
-/// the guard is `!has_been_set()` — *not* "am I the daemon". So the exposed set
-/// is every binary without a subscriber: the test binaries, and
-/// `kastellan-cli`. `kastellan-cli guard capture … 2>&1 | head` gives the
-/// reader an `EPIPE` (Rust sets `SIGPIPE` to `SIG_IGN`), and under
-/// `panic = "abort"` that is a silent `SIGABRT` rather than a message. It is
-/// not a regression — `guard_capture` already prints with these macros
-/// throughout, so the same pipeline already aborts on its very first
-/// diagnostic — but this line is on an ERROR path, where losing the run costs
-/// more. Tracked in
-/// [#733](https://github.com/hherb/kastellan/issues/733).
+/// ⚠️ **The delivery decision and the abort guard both live in
+/// `report/delivery.rs`, and this doc deliberately does not restate them.**
+/// (Named as a file, not linked: `mod delivery` is private, and a link from
+/// this `pub fn` makes rustdoc warn — the same rule `worker_stderr`'s module
+/// doc states for `report/`.)
+/// That module owns `warn_and_fall_back!` (why the check must expand at *this*
+/// callsite, and why every field the `warn!` carries — `message` included —
+/// must be named in it) and `is_writable` (why a broken stderr is probed
+/// before `eprintln!`, and the measured `EBADF`-vs-`EPIPE` split). Two copies
+/// of that reasoning is the drift shape CLAUDE.md's bwrap-argv note names, and
+/// this block was previously a worked example of it: it described the
+/// `has_been_set()` guard for a whole release after that guard was deleted,
+/// and cited #734 and #733 as open after both had shipped.
 ///
 /// Returns **whether the stderr fallback line was written** — that is, whether
 /// `tracing` was not going to carry this report. Every production caller
@@ -443,8 +433,8 @@ mod tests {
     }
 
     #[test]
-    fn the_four_tail_states_all_read_differently() {
-        // Four states, four sentences. Any two that render alike have silently
+    fn the_five_tail_states_all_read_differently() {
+        // Five states, five sentences. Any two that render alike have silently
         // collapsed a distinction the caller went to trouble to preserve — the
         // same failure `no_two_causes_read_the_same` guards for causes.
         let c = WorkerRetirementCause::ExitedBeforeResponding;
@@ -585,8 +575,9 @@ mod tests {
         //
         // ⚠️ **Say what that mutant is, plainly: near-equivalent today.** The
         // `format_*_stderr_fallback` wrappers have ZERO callers outside these
-        // tests — `emit_to_stderr_when_unheard` calls the private renderer
-        // directly — so the neutralisation these tests defend is redundant
+        // tests — `delivery::warn_and_fall_back!` expands to a
+        // `format_stderr_fallback` call on the private renderer directly — so
+        // the neutralisation these tests defend is redundant
         // belt-and-braces in every shipped binary. That makes this a test of a
         // `pub` API's contract for a future caller, which is worth having, and
         // NOT evidence that the e2e suites have a hole. Reading it the other

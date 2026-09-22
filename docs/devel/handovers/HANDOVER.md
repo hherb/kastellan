@@ -10,7 +10,8 @@
 > session wrote no snapshot at all, and #743's left this pointing two snapshots back.
 
 **Last updated:** 2026-09-22 (#734/#733/#732/#742: the worker report ARRIVES, and a partial
-capture says so) ·
+capture says so — **plus the review round**, which found the fix had reopened #734 on the implicit
+`message` field and had made `is_writable` fail CLOSED on macOS character devices) ·
 **Recent PRs, newest first:** [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736, the `anyio` security floor),
@@ -77,7 +78,8 @@ in the ROADMAP entry and the commit messages.
   Measured: hoisted into the shared helper, `…::shared=warn` makes it report **delivered** for an
   event that was **not recorded** — #734 reproduced *inside its own fix*. ⚠️ The two `%label`
   emitters declare the field on the check too, or `warn,<target>[{label}]=off` is fail-open.
-  Tables in the macro's doc.
+  Tables in the macro's doc. ⚠️ **And `message` is a field too** — see the review round below,
+  where forgetting it reopened #734 inside its own fix for a second time.
 - **#733 ships in the same commit because #734 CREATES it.** Before #734 the daemon always took the
   `tracing` branch, so it could never reach the `eprintln!` that panics on a broken pipe
   (`panic = "abort"` → silent `SIGABRT`). `eprintln!` **stays** — libtest capture depends on the
@@ -92,13 +94,14 @@ in the ROADMAP entry and the commit messages.
   stated the opposite of what the system knew. Empty-and-timed-out read as "wrote NOTHING — suspect
   a kill (wall-clock/OOM/seccomp)", a **diagnosis**, for a worker that explained itself at 260 ms;
   non-empty-and-timed-out read as "its last words" when the ring evicts **oldest** first, so it held
-  the **FIRST** lines. Now `CapturedTail {lines, complete}`. ⚠️ **`is_known_silent()` is the only
-  predicate a renderer may ask** — testing `lines.is_empty()` is exactly how "we stopped listening"
-  became "the worker said nothing". Five states, and a test that all five read differently.
-  Pre-existing, from #666.
-- **#742 — a neutralising panic hook**, installed from `RequireKnob::action`, so gate-profile
-  coverage follows **by construction** (a profile suite must consult its knob) rather than from a
-  30-file census. ⚠️ **Suites with no knob are NOT covered, deliberately** — they are in no profile.
+  the **FIRST** lines. Now `CapturedTail {lines, complete}` with **private fields**.
+  ⚠️ **`is_known_silent()` is the only predicate that licenses a DIAGNOSIS** — both renderers match
+  it *first*, so their later `lines().is_empty()` arm can only be a partial. That ordering is a
+  convention the compiler does not check, and the doc used to claim more (see the review round).
+  Five states, and a test that all five read differently. Pre-existing, from #666.
+- **#742 — a neutralising panic hook**, installed from `RequireKnob::action_reporting_to` (NOT
+  `action` — see the review round), so gate-profile coverage follows **by construction** (a profile
+  suite must consult its knob) rather than from a 30-file census. ⚠️ **Suites with no knob are NOT covered, deliberately** — they are in no profile.
   ⚠️ **The issue's own fix cannot work:** `PanicHookInfo` is borrowed from the runtime and
   unmodifiable, so "neutralise then delegate" hands the default the **raw** payload. Rendering it
   ourselves **costs libtest nothing** — it accounts for failures through `catch_unwind`, not the
@@ -115,6 +118,80 @@ in the ROADMAP entry and the commit messages.
   1.81 against `rust-version = "1.78"`** (`clippy::incompatible_msrv`) — its predecessor
   `PanicInfo` is deprecated on current toolchains, so the type is **not named at all**
   (`payload_of` takes `&(dyn Any + Send)`). **Clippy here is a correctness gate, not a style pass.**
+
+#### Review round on #745 — five reviewers, and the fix had reopened its own bug twice
+
+Everything below is **measured on this Mac**, not argued. Nine findings fixed in-tree, four filed.
+
+- ⚠️ **`message` is a field, and the check did not declare it — #734, reopened INSIDE its own
+  fix.** A `warn!("{line}")` always carries an implicit `message` field. The checks declared
+  `label` (second arm) or nothing (first), so under `warn,<target>[{message}]=off` **both** arms
+  went silent on **both** channels. This is the *same* hole the `label` arm exists to close, one
+  field further along, and the macro's own doc had already tabulated the lesson. **The rule, now
+  stated as a rule: every field the `warn!` carries must be named in the check, implicit ones
+  included.** With `message` declared, `fell_back` tracks `recorded` exactly across all seven
+  directives on both arms.
+- ⚠️ **`is_writable` failed CLOSED on macOS character devices**, which is the one direction the
+  module's own doc forbids. Darwin's `poll` sets `POLLNVAL` on a live `/dev/null`, so **any process
+  run `2>/dev/null` suppressed every worker report** while a real write succeeded. `POLLNVAL` is
+  now believed only when `fcntl(F_GETFD)` agrees. The doc's "Not host-specific" was false: this is
+  the *third* bit's version of the `POLLERR`/`POLLHUP` split, and it escaped the scrutiny the other
+  two got.
+- ⚠️ **`2>&-` is NOT part of #733's crash story, and the PR said it was.** Measured: `std` swallows
+  `EBADF` on stdio (`handle_ebadf`), so `eprintln!` to a **closed** fd 2 returns `Ok` and does not
+  panic. Only `EPIPE` panics. So the abort is reachable through the **broken-pipe** shape only —
+  the one the issue actually names — and the `POLLNVAL` arm prevents a *pointless write*, not a
+  crash. Which is why getting it wrong cost **reports** rather than crashes.
+- ⚠️ **A new test failed 10/10 under the command CLAUDE.md documents, and 0/10 in a sweep.**
+  `a_descriptor_that_was_never_open_is_not_writable` closed a `pipe(2)` and polled fds **3 and 4**;
+  `open(2)` hands out the lowest free descriptor and libtest's parallel threads reclaimed fd 3.
+  `cargo test -p kastellan-core --lib worker_stderr` → **10 failures in 10**; the full sweep → 0,
+  because fd 3 is long taken. **A sweep-only green is how this would have shipped.** Now `dup2`s
+  onto fd 900, which the lowest-free rule cannot hand back.
+- ⚠️ **#733's fix had NO test**, and the mutant that matters survives the dead-code warning.
+  Deleting the guard left the whole unit suite green; *probing `STDOUT_FILENO` instead of
+  `STDERR_FILENO`* survived even `-D warnings`, because stdout is writable in every test binary.
+  New `core/tests/worker_report_broken_stderr_e2e.rs` re-execs with a real broken fd 2 in both
+  shapes. **2 mutants, 2 killed, each by both tests.** ⚠️ It needs `--nocapture`: libtest's capture
+  is exactly what has to be out of the way for the bug to be reachable.
+- ⚠️ **The panic hook's "coverage by construction" was coverage by ACCIDENT for the whole `microvm`
+  profile.** `microvm::skip_unless_ready` → `report_unmet_microvm_to` → `require_action_to` calls
+  `action_reporting_to` **directly**, bypassing `action` where the install lived. It worked only
+  because the profile co-sets the PG and sandbox knobs. Moved one level down, to the chokepoint
+  every knob read really funnels through [[guard-shares-the-census-blind-spot]]. ⚠️ **Residual and
+  now documented:** the install is lazy, so a test that panics before *any* knob read still gets
+  the default hook.
+- ⚠️ **The hook flattened every multi-line panic message**, paying for the gate with the thing the
+  gate protects. **59** assertion messages in `core/tests` interpolate a whole child transcript
+  (`\n{both}`); each failure became one multi-kilobyte line. The property is "**no line but the
+  first begins at column 0**", not "one line" — continuation lines are now indented.
+- **`CapturedTail`'s fields are private.** `t.complete = true` compiled and forged the one claim
+  the type exists to gate — the door `StderrTail::mark_drained` is `pub(crate)` to keep shut one
+  layer down. The doc also claimed an enforcement it did not have ("the distinction *cannot* be
+  lost"); it now says what is true.
+- **~12 stale doc sites**, including a **33-line canonical block** on `emit_worker_failure_report`
+  still describing the deleted `has_been_set()` guard and citing #734 and #733 as **open** — the
+  doc `shared.rs` and `persistent.rs` point readers at. Also `tool_host.rs`'s "never the daemon",
+  which #734 made false, and the `has_been_set()` rationale in both e2e suites (the one-child rule
+  survives, for a *different* reason: `set_global_default` is once-per-process).
+- Plus `.log_internal_errors(true)` on the daemon subscriber (the `fmt` layer silently discards its
+  writer's `Result`, so a full disk drops every report on the one channel that could complain), and
+  `#[doc(hidden)]` on the newly-`pub` `untrusted_text` — `kastellan-core` is published, and a bare
+  `pub` is a permanent semver commitment taken on for one dev-dependency.
+- **Filed:** [#746](https://github.com/hherb/kastellan/issues/746) (`egress::spawn::stderr_note`
+  is a **third** renderer of the same tail, still rendering an un-drained empty tail as "no stderr
+  captured" *and* collapsing the `None` arm into it — #732 in the egress path),
+  [#747](https://github.com/hherb/kastellan/issues/747) (a drain that ends in a **read error** is
+  marked complete, so an empty tail earns the "suspect a kill" diagnosis),
+  [#748](https://github.com/hherb/kastellan/issues/748) (the worker-report e2e suites are in **no
+  gate profile**; nothing enforces that a profiled suite reads a knob; `[panic]` is counted by
+  nothing), [#749](https://github.com/hherb/kastellan/issues/749) (the hook's own `eprintln!` is
+  unguarded, so a broken stderr turns a panic into a message-less abort).
+- **Post-review sweep: 4434 / 0 / 40 over 184 suites**, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` 23
+  (unchanged: 19 Apple container + 4 gliner opt-in), `[panic]` 19. Clippy
+  `--workspace --all-targets -D warnings` clean. Delta against the pre-review 4427/1/38 over 183
+  reconciles exactly: +1 suite, +2 ignored (the two new inner fixtures), +6 new tests, +1 from the
+  **#744** flake passing this time (it is load-dependent; this branch touches no scheduler file).
 
 ### Previous (2026-09-22): #737 + #738 + #739 — say it when a worker is gone
 

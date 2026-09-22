@@ -1,8 +1,11 @@
 //! Whether a report actually **reaches** someone, and whether writing it can
 //! kill the process.
 //!
-//! Two questions that the three emitters in this module all have to answer the
-//! same way, and which used to be answered by one line —
+//! Two questions that the three emitters in `report`'s sibling modules
+//! (`tool_worker`, `persistent`) all have to answer the same way — none of them
+//! lives here, which is the entire point: see [`warn_and_fall_back`] for why
+//! the check must expand at *their* callsites and not in this module. They used
+//! to be answered by one line —
 //! `if !tracing::dispatcher::has_been_set() { eprintln!(…) }`. That line was
 //! wrong in both halves:
 //!
@@ -64,8 +67,44 @@ use std::os::fd::RawFd;
 ///   In both cases a real `write_all` on that same descriptor returns
 ///   `BrokenPipe`, which the test asserts as ground truth before believing the
 ///   probe.
-/// * `POLLNVAL` — the descriptor is not open at all, which is what `2>&-`
-///   leaves behind. Not host-specific.
+/// * `POLLNVAL` — **corroborated with `fcntl(F_GETFD)`**, the descriptor is
+///   not open at all, which is what `2>&-` leaves behind.
+///
+/// ⚠️ **Only the pipe bits prevent an abort; the `POLLNVAL` arm prevents a
+/// pointless write.** Measured: `std` swallows `EBADF` on stdio
+/// (`handle_ebadf` in `library/std/src/io/stdio.rs`), so `eprintln!` to a
+/// **closed** fd 2 returns `Ok` and does **not** panic — only `EPIPE` does.
+///
+/// | stderr shape | `std::io::stderr().write` | `eprintln!` |
+/// | --- | --- | --- |
+/// | closed (`2>&-`) | `Ok(1)` — swallowed | does **not** panic |
+/// | pipe, reader gone | `Err(BrokenPipe)` | **panics** |
+///
+/// So #733's `SIGABRT` is reachable through the broken-pipe shape only — the
+/// one the issue names. That does not make the `POLLNVAL` arm optional, but it
+/// does change what it is for, and it is why getting it wrong cost *reports*
+/// rather than *crashes* on macOS. Both shapes are driven end to end by
+/// `core/tests/worker_report_broken_stderr_e2e.rs`.
+///
+/// ⚠️ **`POLLNVAL` alone does NOT mean "not open" on macOS, and reading it
+/// that way was a fail-CLOSED bug.** Darwin's `poll` reports `POLLNVAL` for
+/// perfectly usable **character devices**, which the bare mask then read as
+/// unusable. Measured on macOS 27 (arm64), `events = POLLOUT`, zero timeout:
+///
+/// | fd | `revents` | bare mask said | a real `write` |
+/// | --- | --- | --- | --- |
+/// | `/dev/null`, `O_WRONLY` | `0x20` `POLLNVAL` | **unwritable** | **succeeds** |
+/// | genuinely closed fd | `0x20` `POLLNVAL` | unwritable | `EBADF` |
+///
+/// So any process run `2>/dev/null` — a CLI invocation, a developer's
+/// `cargo test … 2>/dev/null` — suppressed **every** worker report on macOS,
+/// which is the one direction this module's own doc forbids. Linux does not
+/// share the quirk, so this is the third bit's version of the `POLLERR` /
+/// `POLLHUP` split below: one host cannot prove it. `fcntl(F_GETFD)` answers
+/// "is this open" authoritatively and portably, so `POLLNVAL` is now believed
+/// only when `fcntl` agrees. Pinned by
+/// [`a_character_device_is_writable`] and
+/// [`a_descriptor_that_was_never_open_is_not_writable`], which must both stay.
 ///
 /// ⚠️ **This is a race, and it is meant to be one.** The reader can close
 /// between the probe and the write. The probe removes the *reproducible*
@@ -94,7 +133,28 @@ pub(super) fn is_writable(fd: RawFd) -> bool {
         // do not suppress the report.
         return true;
     }
-    pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0
+    // A broken pipe/socket: conclusive on both hosts, one bit per host.
+    if pfd.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+        return false;
+    }
+    // `POLLNVAL` only counts when `fcntl` agrees the descriptor is not open —
+    // on macOS it also fires for live character devices. See this function's
+    // doc for the measured table.
+    if pfd.revents & libc::POLLNVAL != 0 && !is_open(fd) {
+        return false;
+    }
+    true
+}
+
+/// Is `fd` an open descriptor at all?
+///
+/// `fcntl(F_GETFD)` is the portable, authoritative answer — it touches no
+/// data, cannot block, and returns `-1`/`EBADF` for exactly the `2>&-` case.
+/// It exists as its own function so [`is_writable`]'s corroboration step is
+/// nameable from a test.
+fn is_open(fd: RawFd) -> bool {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    flags >= 0
 }
 
 /// Write `line` to the process's own stderr, unless stderr is already broken.
@@ -117,7 +177,13 @@ pub(super) fn write_fallback_line(line: &str) -> bool {
     true
 }
 
-/// Emit `report` on **both** channels from the **caller's** module.
+/// Emit `$line` on whichever channel will actually carry it, deciding from the
+/// **caller's** module.
+///
+/// The two channels are mutually exclusive by construction — `tracing` when it
+/// will record the event, the marked stderr line when it will not — so a
+/// reader never sees the same report twice. Pinned by
+/// [`a_recorded_event_does_not_also_fall_back`].
 ///
 /// Evaluates to `true` when the stderr fallback line was written — i.e. when
 /// `tracing` was **not** going to record the event. Production call sites
@@ -164,6 +230,23 @@ pub(super) fn write_fallback_line(line: &str) -> bool {
 /// `event_enabled!` made the check track `recorded` exactly across all seven
 /// directives tried, which is why the two arms below exist rather than one.
 ///
+/// ⚠️ **`message` counts as a field, and forgetting it reopened #734 in the
+/// first version of this macro.** A `warn!("{line}")` always carries an
+/// implicit `message` field; the checks originally declared `label` and not
+/// `message`, so **both** arms went silent on both channels under a
+/// `[{message}]` predicate — the same hole the `label` arm exists to close,
+/// one field further along. Measured on the same harness:
+///
+/// | directive | check without `message` | check with `message` | actually recorded |
+/// | --- | --- | --- | --- |
+/// | `warn,…[{message}]=off` (bare arm) | **true** | false | **false** |
+/// | `warn,…[{message}]=off` (labelled arm) | **true** | false | **false** |
+///
+/// With `message` declared, `fell_back` tracks `recorded` exactly across all
+/// seven directives on **both** arms. The rule this keeps proving: **every
+/// field the `warn!` carries must be named in the check**, implicit ones
+/// included. Pinned by [`a_message_scoped_off_directive_fools_neither_arm`].
+///
 /// ⚠️ **The two callsites are still not the same callsite** — they differ in
 /// line number, and nothing stops a future `EnvFilter` from discriminating on
 /// that. They agree on everything `EnvFilter` matches on today (target, level,
@@ -179,7 +262,7 @@ macro_rules! warn_and_fall_back {
         // Expands HERE, in the caller's module, for the reasons in this
         // macro's doc. Moving it into a helper function silently reintroduces
         // #734.
-        if !::tracing::event_enabled!(::tracing::Level::WARN) {
+        if !::tracing::event_enabled!(::tracing::Level::WARN, message) {
             $crate::worker_stderr::report::delivery::write_fallback_line(
                 &$crate::worker_stderr::report::shared::format_stderr_fallback($marker, line),
             )
@@ -194,7 +277,7 @@ macro_rules! warn_and_fall_back {
         let line: &str = $line;
         let label: &str = $label;
         ::tracing::warn!(%label, "{line}");
-        if !::tracing::event_enabled!(::tracing::Level::WARN, label) {
+        if !::tracing::event_enabled!(::tracing::Level::WARN, label, message) {
             $crate::worker_stderr::report::delivery::write_fallback_line(
                 &$crate::worker_stderr::report::shared::format_stderr_fallback($marker, line),
             )
@@ -436,6 +519,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_message_scoped_off_directive_fools_neither_arm() {
+        // The hole #745's own review found in #745's fix, and the reason this
+        // test covers BOTH arms where the `label` one covers only the second.
+        //
+        // A `warn!("{line}")` carries an implicit `message` field. The checks
+        // originally declared `label` (second arm) or nothing (first arm), so
+        // under a `[{message}]` predicate `event_enabled!` answered `true`
+        // while `EnvFilter` dropped the event — both channels silent, which is
+        // #734 verbatim, one field further along than the version the macro's
+        // doc already tabulated.
+        let directive = format!("warn,{}[{{message}}]=off", pretend_emitter::target());
+        for (arm, fired) in [
+            ("bare", Box::new(|| pretend_emitter::emit(PROBE_LINE)) as Box<dyn Fn() -> bool>),
+            (
+                "labelled",
+                Box::new(|| pretend_emitter::emit_with_label(PROBE_LINE, "matrix")),
+            ),
+        ] {
+            let (fell_back, recorded) = under(&directive, fired);
+            assert!(
+                !recorded,
+                "POSITIVE CONTROL for the {arm} arm: `{directive}` must DROP the warn, or this \
+                 test is not exercising the disagreement it exists for"
+            );
+            assert!(
+                fell_back,
+                "the {arm} arm's check must declare the implicit `message` field its `warn!` \
+                 carries. Without it `event_enabled!` answers `true` under `{directive}` while \
+                 the event is dropped, and the report reaches NOBODY. Every field the `warn!` \
+                 carries must be named in the check — `message` included."
+            );
+        }
+    }
+
 
     /// Every emitter that actually ships, with the module its `warn!` is
     /// written in.
@@ -506,6 +624,51 @@ mod tests {
             "there is exactly one shipping emitter per fallback marker; if a fourth marker was \
              added, its emitter must join `shipping_emitters` or it is unguarded"
         );
+        // ⚠️ **Counts alone are not the census.** A count check is satisfied by
+        // two emitters sharing one marker, or by the same emitter listed
+        // twice — both of which leave a marker with no emitter actually
+        // driven. Comparing the marker each emitter PRODUCES against the
+        // declared set closes that, which is the difference between a guard
+        // and a tally [[guard-shares-the-census-blind-spot]].
+        let mut produced: Vec<String> = shipping_emitters()
+            .into_iter()
+            .map(|(name, _, emit)| {
+                // No subscriber in scope ⇒ the fallback fires ⇒ the marked
+                // line is written. Capturing it is not possible here (libtest
+                // swallows a passing test's stderr), so the marker is taken
+                // from the renderer the emitter is required to use.
+                let (fell_back, _) = under("off", &emit);
+                assert!(fell_back, "{name} must fall back under an `off` directive");
+                marker_of(name).to_string()
+            })
+            .collect();
+        produced.sort();
+        produced.dedup();
+        let mut declared: Vec<String> =
+            STDERR_FALLBACK_MARKERS.iter().map(|m| m.to_string()).collect();
+        declared.sort();
+        assert_eq!(
+            produced, declared,
+            "every declared fallback marker must have exactly one emitter in \
+             `shipping_emitters`, and no two emitters may share one. Counts agreeing is not \
+             enough: two rows carrying the same marker pass a length check while leaving a \
+             marker undriven"
+        );
+    }
+
+    /// The marker each shipping emitter is required to write, named beside the
+    /// emitter rather than derived from it — a census the test can disagree
+    /// with is a census worth having.
+    fn marker_of(emitter: &str) -> &'static str {
+        match emitter {
+            "emit_worker_failure_report" => crate::worker_stderr::WORKER_FAILED_STDERR_MARKER,
+            "emit_persistent_death_report" => crate::worker_stderr::WORKER_DEATH_STDERR_MARKER,
+            "emit_persistent_down_report" => crate::worker_stderr::WORKER_DOWN_STDERR_MARKER,
+            other => panic!(
+                "a new shipping emitter `{other}` must name the marker it writes here, or \
+                 `every_shipping_emitter_is_covered` cannot tell whether it is guarded"
+            ),
+        }
     }
 
     #[test]
@@ -562,22 +725,95 @@ mod tests {
         );
     }
 
+    /// A descriptor number that was open, is now closed, and that no
+    /// concurrently running test can reclaim.
+    ///
+    /// ⚠️ **The NUMBER is the whole fixture, and the obvious version of this
+    /// test is flaky.** Its first draft closed a `pipe(2)` and probed fds 3
+    /// and 4. `open(2)` hands out the **lowest free** descriptor and libtest
+    /// runs this module's other fixtures on parallel threads —
+    /// [`a_live_pipe_is_writable`] opens a pipe,
+    /// [`a_regular_file_is_writable`] a tempfile — so fd 3 was routinely
+    /// reopened between the close and the probe, and `poll` then correctly
+    /// reported a live descriptor. Measured on macOS: **10 failures in 10**
+    /// runs of `cargo test -p kastellan-core --lib worker_stderr`, the narrow
+    /// form CLAUDE.md documents, and **0 in 10** full-workspace sweeps, where
+    /// fd 3 is long since taken. A sweep-only green is exactly how this would
+    /// have shipped. The lowest-free rule cannot hand back a number this high
+    /// while the binary holds a few dozen descriptors.
+    const UNRECLAIMABLE_FD: RawFd = 900;
+
+    /// Open [`UNRECLAIMABLE_FD`], prove it is open, then close it.
+    fn a_closed_descriptor() -> RawFd {
+        let p = Pipe::new();
+        assert!(
+            unsafe { libc::dup2(p.write, UNRECLAIMABLE_FD) } >= 0,
+            "the test needs to place a descriptor at fd {UNRECLAIMABLE_FD}; this is a host \
+             problem, not a code one"
+        );
+        // Ground truth in the other direction: it really is open right now, so
+        // the assertion below is about the CLOSE and not about a number that
+        // was never valid.
+        assert!(
+            is_open(UNRECLAIMABLE_FD),
+            "fd {UNRECLAIMABLE_FD} must be open before we close it, or this fixture never \
+             created the transition it is testing"
+        );
+        unsafe { libc::close(UNRECLAIMABLE_FD) };
+        assert!(
+            !is_open(UNRECLAIMABLE_FD),
+            "fd {UNRECLAIMABLE_FD} must be closed after `close`; if it is not, another thread \
+             reclaimed it and this fixture is racing"
+        );
+        UNRECLAIMABLE_FD
+    }
+
     #[test]
     fn a_descriptor_that_was_never_open_is_not_writable() {
         // `2>&-` leaves fd 2 closed. `poll` reports POLLNVAL rather than an
-        // error, so this is a distinct arm from the broken-pipe one.
-        let (read, write) = {
-            let p = Pipe::new();
-            let fds = (p.read, p.write);
-            drop(p); // closes both
-            fds
-        };
-        for fd in [read, write] {
-            assert!(
-                !is_writable(fd),
-                "a closed descriptor ({fd}) must be reported UNwritable; `2>&-` is the shape"
-            );
-        }
+        // error, so this is a distinct arm from the broken-pipe one — and
+        // since #745's review, POLLNVAL is believed only when `fcntl` agrees,
+        // so this also pins the corroboration step.
+        let fd = a_closed_descriptor();
+        assert!(
+            !is_writable(fd),
+            "a closed descriptor ({fd}) must be reported UNwritable; `2>&-` is the shape"
+        );
+    }
+
+    #[test]
+    fn a_character_device_is_writable() {
+        // ⚠️ REGRESSION GUARD, macOS-specific and measured. Darwin's `poll`
+        // sets POLLNVAL on a perfectly usable character device, so the
+        // original bare `POLLNVAL` arm reported `/dev/null` UNwritable while a
+        // real write to it succeeded — fail-CLOSED, which suppressed every
+        // worker report in any process run `2>/dev/null`. That is the one
+        // direction this module's doc forbids.
+        //
+        // Linux does not share the quirk, so on Linux this test passes with or
+        // without the corroboration and cannot prove it. It is still the right
+        // place for the assertion: the mask is one piece of code and it has to
+        // be correct on both hosts. Same argument as the POLLERR/POLLHUP
+        // split, which `is_writable`'s doc tabulates.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .expect("/dev/null must be openable");
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+        // Ground truth FIRST: the kernel really will accept a write here, so a
+        // `false` below is the probe being wrong rather than the fixture.
+        assert!(
+            (&file).write(b"x").is_ok(),
+            "ground truth: a real write to /dev/null must succeed, or this fixture is not \
+             testing what it claims"
+        );
+        assert!(
+            is_writable(fd),
+            "/dev/null must be reported writable. On macOS `poll` answers POLLNVAL for a live \
+             character device, so a bare POLLNVAL arm suppresses every report from a process \
+             run `2>/dev/null` — the silence this module exists to remove. POLLNVAL must stay \
+             corroborated by `fcntl(F_GETFD)`"
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! What the system *says* about a worker that died: the report formatters, the
-//! stderr-fallback markers, and the emitters that write to both channels.
+//! stderr-fallback markers, and the emitters that choose a channel for them.
 //!
 //! Split out of [`super`] (the capture half) because the two answer different
 //! questions. That module keeps a dying worker's bytes; this one turns them
@@ -7,14 +7,21 @@
 //! `worker_stderr::` is still the one public path and no call site names
 //! `report` directly.
 //!
-//! # Two channels, one producer per event
+//! # Two channels, one producer per event, exactly one channel per report
 //!
 //! A worker's last words have to reach whoever is looking, and *who* that is
 //! differs by binary. The daemon installs a `tracing` subscriber as the first
 //! statement of `main`; **test binaries and `kastellan-cli` install none**, so
 //! before #725 a report logged through `tracing` alone went nowhere in exactly
 //! the place a human was reading it. Each emitter here therefore logs through
-//! `tracing` *and* `eprintln!`s a marked line when no subscriber exists.
+//! `tracing` **or** `eprintln!`s a marked line — whichever will actually be
+//! read, decided per event by [`delivery::warn_and_fall_back`].
+//!
+//! ⚠️ **"Has a subscriber" is not the question, and the daemon is not exempt**
+//! (#734). `main` builds its subscriber from `EnvFilter::try_from_default_env()`,
+//! so a target-scoped `RUST_LOG` in the operator overlay leaves a subscriber
+//! installed that records nothing from these targets — and the report then
+//! needs the stderr line exactly as a test binary does.
 //!
 //! There are three such events, and they get **distinct markers** so a grep
 //! can tell them apart:

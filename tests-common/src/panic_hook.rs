@@ -38,7 +38,7 @@
 //!
 //! # Why this hook does not delegate to the default
 //!
-//! [#742] suggests neutralising "before delegating to the default". **Measured:
+//! The issue suggests neutralising "before delegating to the default". **Measured:
 //! that cannot work.** `std::panic::set_hook` gives the next hook a
 //! `PanicHookInfo` borrowed from the runtime, which no caller can construct or
 //! modify — so delegating hands the default the *original* payload and it
@@ -74,19 +74,28 @@ static INSTALLED: Once = Once::new();
 
 /// Install the neutralising panic hook, at most once per process.
 ///
-/// Idempotent by [`Once`], because the chokepoints that call it
-/// ([`crate::require::RequireKnob::action`]) run many times per binary and a
-/// hook that reinstalled itself on every knob read would leak a boxed closure
-/// per call.
+/// Idempotent by [`Once`], because the chokepoint that calls it
+/// ([`crate::require::RequireKnob::action_reporting_to`]) runs many times per
+/// binary and a hook that reinstalled itself on every knob read would leak a
+/// boxed closure per call.
 ///
 /// ## Why it is called from the REQUIRE-knob path rather than by each suite
 ///
 /// There is no way to run code automatically at the start of every test
 /// binary, so *something* has to call this — and "every suite remembers to" is
-/// the property that decays. `RequireKnob::action` is the one call every gated
-/// tier already makes, by construction: a suite that is in a gate profile must
-/// consult its knob to decide whether to skip, so it cannot be in a profile and
-/// bypass this.
+/// the property that decays. Every gated tier reads its knob to decide whether
+/// to skip, and every path that reads a knob funnels through
+/// `action_reporting_to`, so a suite cannot be in a gate profile and bypass
+/// this.
+///
+/// ⚠️ **It is installed from `action_reporting_to` and NOT from `action`,
+/// because `action` is not the only door.** The first version used `action`
+/// and the whole **`microvm` profile** went round it —
+/// `microvm::skip_unless_ready` reaches the knob through `require_action_to`.
+/// It was covered only when a co-set knob happened to be read first, which is
+/// coverage by accident dressed as coverage by construction
+/// [[guard-shares-the-census-blind-spot]]. Moving one level down fixed it;
+/// picking the chokepoint by reading one call site is what did not.
 ///
 /// ⚠️ **It is a side effect of a knob read, which is surprising, and that is
 /// the trade.** The alternative — an explicit `install()` in each of ~30
@@ -98,6 +107,14 @@ static INSTALLED: Once = Once::new();
 /// than complete: they are also not in any gate profile, which is where the
 /// forged line does damage. A suite that joins a profile gains a knob and
 /// gains this in the same change.
+///
+/// ⚠️ **The guarantee is "installed before the first knob read", not
+/// "installed for the whole binary".** libtest runs tests in parallel, so a
+/// test that panics *before* any knob has been read anywhere in the process
+/// is still rendered by the **default** hook. Every suite in a gate profile
+/// reads its knob in its first fixture, so the window is small — but it is a
+/// window, and a suite whose knob read is buried behind a slow probe widens
+/// it. This is the residual limitation; it is not closed.
 pub fn install_once() {
     INSTALLED.call_once(|| {
         std::panic::set_hook(Box::new(|info| {
@@ -145,25 +162,59 @@ fn payload_of(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("<panic payload was not a string>")
 }
 
-/// Pure: the **single** line this hook prints for one panic.
+/// Pure: what this hook prints for one panic.
 ///
 /// Pure and separate from the hook so the rendering can be pinned without
 /// panicking a test process — the same reason [`crate::skip::skip_line`] is a
 /// renderer rather than a printer.
 ///
-/// ⚠️ **One line, and that is the entire point.** Every interpolated part —
-/// payload, location, and the thread name, which `std::thread::Builder::name`
-/// lets a caller choose — goes through `neutralise_controls`, which maps the
-/// control class to a space rather than deleting it. So a `\n` in a payload
-/// becomes a space and the text that followed it stays on *this* line, where it
-/// cannot be counted as a marker. Deleting instead of replacing would silently
-/// join the tokens on either side, and a panic message is evidence.
+/// ⚠️ **The property is "no line begins at column 0 but the first", NOT "one
+/// line" — and the difference is a diagnostic this tree depends on.** The
+/// first version flattened the whole payload with `neutralise_controls`,
+/// mapping every `\n` to a space. That is safe but expensive: **59** assertion
+/// messages in `core/tests` alone interpolate a whole child-process transcript
+/// (`\n{both}`), and once the hook is installed in every gated suite, each of
+/// those failures renders as a single unbroken multi-kilobyte line. The arc
+/// this hook belongs to exists to make worker failures *readable*; flattening
+/// the messages that report them pays for the gate with the thing the gate is
+/// protecting.
+///
+/// So a payload's own newlines are kept as line breaks and every continuation
+/// line is **indented**. `scripts/run-e2e-gate.sh` greps its markers anchored
+/// at line start (`^\[WARN\]`), so an indented line cannot be counted no
+/// matter what it says — while the reader gets the transcript back.
+///
+/// Every *other* control character still maps to a space, and every
+/// interpolated part goes through that — payload, location, and the thread
+/// name, which `std::thread::Builder::name` lets a caller choose. Replacing
+/// rather than deleting is deliberate: deleting would silently join the tokens
+/// on either side, and a panic message is evidence.
 pub fn render_panic_line(thread: Option<&str>, location: Option<&str>, payload: &str) -> String {
     let clean = |s: &str| kastellan_core::untrusted_text::neutralise_controls(s);
     let thread = clean(thread.unwrap_or("<unnamed>"));
     let location = clean(location.unwrap_or("<unknown location>"));
-    format!("{PANIC_MARKER} thread '{thread}' panicked at {location}: {}", clean(payload))
+    // `lines()` splits on `\n` and strips a trailing `\r`; every remaining
+    // control character (including the `\u{2028}`-class separators, which
+    // `lines()` does NOT split on) is neutralised to a space per line. So the
+    // only line breaks in the output are ones this function put there, each
+    // followed by an indent.
+    let mut out = payload.lines().map(clean);
+    let first = out.next().unwrap_or_default();
+    let mut rendered =
+        format!("{PANIC_MARKER} thread '{thread}' panicked at {location}: {first}");
+    for line in out {
+        rendered.push_str(&format!("\n{CONTINUATION_INDENT}{line}"));
+    }
+    rendered
 }
+
+/// What every line of a rendered panic after the first begins with.
+///
+/// ⚠️ **It must be non-empty, and a test asserts that.** The entire
+/// anti-forgery property of a multi-line rendering is that a continuation line
+/// does not start at column 0; an empty indent silently gives the payload back
+/// the forgery it just lost.
+pub const CONTINUATION_INDENT: &str = "    ";
 
 #[cfg(test)]
 mod tests {
@@ -187,11 +238,61 @@ mod tests {
             "a panic payload forged a column-0 evidence line, which \
              `scripts/run-e2e-gate.sh` counts: {forged:?}\nrendered: {rendered:?}"
         );
+        // The general form of the same property, and the one that still holds
+        // now the renderer keeps a payload's own line breaks: EVERY line after
+        // the first begins with the indent, so none of them is at column 0 —
+        // whatever it says. Checking only the three known markers above would
+        // let a fourth marker added to the gate script sail through.
+        let unindented: Vec<&str> = rendered
+            .lines()
+            .skip(1)
+            .filter(|l| !l.starts_with(CONTINUATION_INDENT))
+            .collect();
+        assert!(
+            unindented.is_empty(),
+            "every continuation line must be INDENTED — an unindented one sits at column 0, \
+             where `run-e2e-gate.sh`'s anchored greps count it, and is where a forgery hides. \
+             Offenders: {unindented:?}\nrendered: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_message_keeps_its_line_breaks() {
+        // ⚠️ REGRESSION GUARD for the fix's own cost. The first version mapped
+        // every `\n` to a space, which is safe and unreadable: 59 assertion
+        // messages in `core/tests` interpolate a whole child-process
+        // transcript, and flattening them turns each failure into one
+        // multi-kilobyte line. The anti-forgery property only needs column 0
+        // kept clear, which an indent does.
+        let payload = "first assertion line\nsecond line\nthird line";
+        let rendered = render_panic_line(Some("t"), Some("f.rs:1:1"), payload);
         assert_eq!(
             rendered.lines().count(),
-            1,
-            "the whole rendering must be ONE line — a continuation line cannot be attributed \
-             to the marker above it, and is where a forgery hides: {rendered:?}"
+            3,
+            "a three-line panic message must still render as three lines, or the transcript \
+             this tree's assertions carry is unreadable: {rendered:?}"
+        );
+        for fragment in ["first assertion line", "second line", "third line"] {
+            assert!(rendered.contains(fragment), "line lost: {fragment:?} in {rendered:?}");
+        }
+        // And the property that makes keeping them safe.
+        assert!(
+            rendered.lines().skip(1).all(|l| l.starts_with(CONTINUATION_INDENT)),
+            "kept line breaks are only safe while every continuation line is indented: \
+             {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn the_continuation_indent_is_not_empty() {
+        // Without this the multi-line rendering is a forgery vector again: an
+        // empty indent makes `starts_with(CONTINUATION_INDENT)` true of every
+        // line, including one at column 0, so the assertions above would pass
+        // while the gate became forgeable.
+        assert!(
+            !CONTINUATION_INDENT.is_empty()
+                && CONTINUATION_INDENT.chars().all(char::is_whitespace),
+            "the continuation indent must be non-empty whitespace: {CONTINUATION_INDENT:?}"
         );
     }
 
@@ -228,11 +329,17 @@ mod tests {
         // name is an interpolated input like any other. Checked separately
         // because a renderer that neutralised only the payload would pass every
         // test above.
+        //
+        // ⚠️ Unlike the payload, a thread name's `\n` is still FLATTENED to a
+        // space: only the payload's own breaks are kept, because only the
+        // payload is the diagnostic a reader needs laid out. A thread name
+        // that could open a line would be a forgery vector with no upside.
         let rendered = render_panic_line(Some("t\n[WARN] FORGED-VIA-THREAD-NAME"), None, "boom");
         assert_eq!(
             rendered.lines().count(),
             1,
-            "a thread name is interpolated too and must be neutralised: {rendered:?}"
+            "a thread name is interpolated too and must be FLATTENED, not line-broken: \
+             {rendered:?}"
         );
         assert!(rendered.contains("FORGED-VIA-THREAD-NAME"), "positive control: {rendered}");
     }
@@ -240,9 +347,10 @@ mod tests {
     #[test]
     fn a_hostile_location_cannot_forge_a_line_either() {
         // Defence in depth: today a location comes from the compiler and is
-        // safe. It is neutralised anyway, because the one-line property should
+        // safe. It is neutralised anyway, because the column-0 property should
         // belong to this function rather than to an audit of its inputs — the
-        // same argument `format_stderr_fallback` makes.
+        // same argument `format_stderr_fallback` makes. Flattened like the
+        // thread name, for the same reason: only the payload earns line breaks.
         let rendered = render_panic_line(None, Some("f.rs:1:1\n[WARN] FORGED-VIA-LOCATION"), "boom");
         assert_eq!(rendered.lines().count(), 1, "location must be neutralised: {rendered:?}");
     }

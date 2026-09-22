@@ -400,7 +400,7 @@ mod tests {
         let collected = crate::worker_stderr::collect_tail_after_drain(&tail);
         let waited = started.elapsed();
 
-        assert!(collected.lines.is_empty(), "nothing was ever drained: {collected:?}");
+        assert!(collected.lines().is_empty(), "nothing was ever drained: {collected:?}");
         assert!(
             waited >= crate::worker_stderr::TAIL_DRAIN_WAIT,
             "it must actually wait the cap before giving up, or it is racing again: {waited:?}"

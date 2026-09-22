@@ -227,6 +227,14 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        // ⚠️ The `fmt` layer DISCARDS its writer's `Result` unless this is set.
+        // Without it a full disk or a restarted journal makes every worker
+        // death, channel-down and retirement report vanish with nothing said —
+        // and the delivery check (#734) cannot see it, because the event WAS
+        // enabled; it is the write that failed. That is the one remaining way
+        // for a report to reach nobody silently, and this is the only channel
+        // left that can complain about it.
+        .log_internal_errors(true)
         .json()
         .init();
 

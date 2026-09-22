@@ -3,7 +3,7 @@
 //!
 //! #666 routed a dead worker's own stderr into `tracing::warn!`. That is the
 //! right channel for the daemon, which always installs a subscriber
-//! (`core/src/main.rs`). **Test binaries install none**, so in 29 of the 30
+//! (`core/src/main.rs`). **Test binaries install none**, so in 29 of the 31
 //! `core/tests/*.rs` suites that dispatch to a real worker the report goes
 //! nowhere and the failure prints only `Protocol(EarlyExit)` — the least
 //! informative error this system produces.
@@ -16,16 +16,19 @@
 //! ## Why this suite re-executes itself
 //!
 //! The property is about what an operator **sees when a test fails**, and a
-//! test cannot observe its own failure output. Three things have to be true at
-//! once and none of them is visible from inside the test that triggers them:
+//! test cannot observe its own failure output. **Four** things have to be true
+//! at once — one per fixture, plus the third state #734 added — and none of
+//! them is visible from inside the test that triggers them:
 //!
 //! 1. the fallback fires at all when no subscriber is installed;
 //! 2. **libtest's capture reaches it**, so the report lands in the failing
 //!    test's `---- <name> stdout ----` block rather than on the raw fd;
-//! 3. it does **not** double-report in a binary that did install one.
+//! 3. it does **not** double-report in a binary that did install one;
+//! 4. it **still** fires when a subscriber exists but `EnvFilter` drops the
+//!    event — the #734 state, which neither 1 nor 3 can reach.
 //!
-//! A fourth rides along, because this is the only place it can be observed end
-//! to end: the report is **control-neutralised on both channels**. The fixture
+//! A fifth rides along, because this is the only place it can be observed end
+//! to end: the report is **control-neutralised on every channel**. The fixture
 //! dispatches [`HOSTILE_METHOD`] — a model-authored `method` is the one part of
 //! the report interpolated raw — so an ESC or a forged column-0 `[WARN]` line
 //! shows up in a child stream the parent can read. Without it, dropping the
@@ -58,11 +61,17 @@
 //! different one. The fixture therefore dispatches from inside a spawned task,
 //! which is both the stronger test and the shape the daemon actually runs.
 //!
-//! ⚠️ **One child process per fixture.** `tracing::dispatcher::has_been_set()`
-//! is a process-global `AtomicBool` that `with_default` sets as well as
-//! `set_global_default`, and which is never cleared — so one subscriber
-//! anywhere in a binary pins the branch for every later test in it. Running
-//! both fixtures in one process would make the second answer for the first.
+//! ⚠️ **One child process per fixture.** The fixtures install their
+//! subscribers with `set_global_default`, which succeeds **once per process**
+//! and cannot be undone — so a second fixture in the same binary could not
+//! install its own, and would silently answer for the first.
+//!
+//! ⚠️ **This rule used to be justified by `has_been_set()`**, a never-cleared
+//! process-global `AtomicBool` that pinned the fallback branch for a whole
+//! binary. #734 replaced that guard with a per-event `event_enabled!` check,
+//! so that hazard is **gone** — a scoped `with_default` no longer leaks into
+//! later tests. The rule survives it for the reason above; the old reason is
+//! recorded here so nobody re-derives it, finds it false, and drops the rule.
 //!
 //! ⚠️ **Every child run asserts `1 failed`.** A libtest name filter exits 0
 //! when it matches nothing, so "the child's output lacks the phrase" and "the
@@ -282,7 +291,7 @@ fn inner_fixture_early_exit_with_a_subscriber() {
         .finish();
     // `expect`, not `let _`: an `Err` here means a subscriber was ALREADY
     // installed, which is precisely the hazard this file documents
-    // (`has_been_set()` is never cleared and `with_default` sets it too).
+    // (`set_global_default` succeeds once per process and cannot be undone).
     // Swallowing it would leave the parent asserting "the report must arrive
     // on stderr exactly once" against a fixture whose own setup failed — and
     // if that pre-existing subscriber happened to write WARN to stderr, the
@@ -397,8 +406,8 @@ fn assert_one_deliberate_failure(name: &str, run: &ChildRun) {
     // also in "11 failed", "21 failed" and — the one that matters — in
     // "1 passed; 1 failed". Two tests running in one child would defeat the
     // one-child-per-fixture rule the module doc explains, because
-    // `has_been_set()` is a never-cleared process global and the first fixture
-    // would pin the branch for the second.
+    // `set_global_default` succeeds only once per process and the first
+    // fixture would have consumed it.
     assert!(
         run.stdout.contains("test result: FAILED. 0 passed; 1 failed;"),
         "exactly one test must have run and failed in the child; anything else means the \
@@ -514,8 +523,8 @@ fn a_binary_that_installed_a_subscriber_does_not_get_the_report_twice() {
     assert!(
         !run.stdout.contains(LAST_WORDS),
         "the fallback must stay QUIET when a subscriber is installed. Seeing the report in \
-         the captured stream too means the `has_been_set()` guard is not holding, which \
-         would double every early-exit report in the daemon's own log.\n{both}"
+         the captured stream too means the delivery check is not holding, which would \
+         double every early-exit report in the daemon's own log.\n{both}"
     );
     // The `tracing` half of the same property. The daemon takes this channel
     // and nothing else, so neutralisation has to hold here too — and this is

@@ -29,17 +29,19 @@
 //!
 //! ⚠️ **The driver no longer logs the death cause itself** (#730). It hands the
 //! rendered report to [`emit_persistent_death_report`], which owns the marker,
-//! the neutralisation and both output channels.
+//! the neutralisation and the choice of output channel.
 //!
 //! # Layout
 //!
 //! This module is the **capture** half: the bounded [`StderrTail`] ring and the
 //! drain threads that fill it. What is then *said* about a dead worker — the
-//! report formatters, the stderr-fallback markers and the emitters that write
-//! to both channels — lives in `report.rs`, whose items are re-exported here so
-//! `worker_stderr::` remains the one public path for both halves. (Named as a
-//! file, not linked: `mod report` is private, and a `[`report`]` link makes
-//! rustdoc warn that public documentation points at a private item.)
+//! report formatters, the stderr-fallback markers and the emitters that choose
+//! a channel — lives in the `report/` directory
+//! (`{mod,shared,delivery,tool_worker,persistent}.rs`), whose items are
+//! re-exported here so `worker_stderr::` remains the one public path for both
+//! halves. (Named as files, not linked: `mod report` is private, and a
+//! `[`report`]` link makes rustdoc warn that public documentation points at a
+//! private item.)
 
 mod report;
 pub use report::*;
@@ -306,13 +308,22 @@ pub fn collect_tail_after_drain(tail: &StderrTail) -> CapturedTail {
 /// ⚠️ **`complete: false` is not "no data".** Whatever arrived before the cap
 /// is still here and still worth printing; the tail is a bounded ring, not a
 /// transaction. What changes is what may be *claimed* about it.
+/// ⚠️ **The fields are PRIVATE, and that is the difference between this type
+/// and a tuple with a good doc comment.** With `pub complete`, a caller could
+/// write `t.complete = true` and forge the one claim the type exists to gate —
+/// which is exactly the door [`StderrTail::mark_drained`] is `pub(crate)` to
+/// keep shut one layer down. Read access goes through [`CapturedTail::lines`],
+/// [`CapturedTail::is_complete`] and [`CapturedTail::is_known_silent`];
+/// construction goes through [`CapturedTail::complete`] /
+/// [`CapturedTail::partial`] or [`collect_tail_after_drain`], all of which
+/// state the claim being made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedTail {
     /// The lines that had arrived when the snapshot was taken.
-    pub lines: Vec<String>,
+    lines: Vec<String>,
     /// `true` when the drain thread reached EOF within [`TAIL_DRAIN_WAIT`], so
     /// these lines are the worker's complete retained stderr.
-    pub complete: bool,
+    complete: bool,
 }
 
 impl CapturedTail {
@@ -330,13 +341,37 @@ impl CapturedTail {
         Self { lines, complete: false }
     }
 
+    /// The lines that had arrived, whether or not that is all of them.
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    /// `true` when the drain reached EOF, so these lines are the worker's
+    /// complete retained stderr and really are its most recent ones.
+    ///
+    /// ⚠️ **Asking this is not the same as asking [`Self::is_known_silent`].**
+    /// It answers "may I call these the *last* words", not "may I say the
+    /// worker was silent" — a renderer needs both, and needs them in that
+    /// order. See [`crate::worker_stderr::format_worker_failure_report`] for
+    /// the four-arm shape that gets it right.
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
     /// `true` when the worker is **known** to have written nothing.
     ///
-    /// ⚠️ **Not the same as `lines.is_empty()`, and that is the whole point.**
-    /// An empty *partial* tail is "we did not wait long enough to find out",
-    /// which must never be rendered as the worker having stayed silent. Every
-    /// renderer asks this rather than testing the vector, so the distinction
-    /// cannot be lost by whoever writes the next one.
+    /// ⚠️ **Not the same as `lines().is_empty()`, and that is the whole
+    /// point.** An empty *partial* tail is "we did not wait long enough to
+    /// find out", which must never be rendered as the worker having stayed
+    /// silent.
+    ///
+    /// ⚠️ **This is the only predicate that licenses a *diagnosis*** — the
+    /// "suspect a kill (wall-clock/OOM/seccomp)" sentence and "no stderr
+    /// captured". Both renderers match it **first**, so their later
+    /// `lines().is_empty()` arm can only be a partial. That ordering is a
+    /// convention the compiler does not check: a new renderer that tests the
+    /// vector on its own will silently lose the distinction, which is what
+    /// #732 was. Copy the existing arm order.
     pub fn is_known_silent(&self) -> bool {
         self.lines.is_empty() && self.complete
     }
@@ -536,13 +571,13 @@ mod tests {
         let waited = started.elapsed();
 
         assert!(
-            !collected.complete,
+            !collected.is_complete(),
             "a drain that never reached EOF must be reported INCOMPLETE; saying otherwise lets \
              `format_death_report` call a boot line the worker's most recent output"
         );
         assert_eq!(
-            collected.lines,
-            vec!["worker booting".to_string()],
+            collected.lines(),
+            ["worker booting".to_string()],
             "an incomplete drain still yields whatever arrived — the tail is a bounded ring, \
              not a transaction. Dropping the lines would trade one wrong report for another"
         );

@@ -40,19 +40,19 @@ pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTai
         t if t.is_known_silent() => format!("worker exited ({status_str}); no stderr captured"),
         // Nothing arrived, but we stopped waiting. "No stderr captured" would
         // be a claim about the WORKER; this is a fact about US (#732).
-        t if t.lines.is_empty() => format!(
+        t if t.lines().is_empty() => format!(
             "worker exited ({status_str}); the stderr drain did not reach EOF within {ms} ms, \
              so nothing was captured YET — a PARTIAL capture, not evidence that the worker \
              was silent"
         ),
         // The ring evicts oldest first, so an incomplete tail is the FIRST
         // lines, not the most recent ones. "recent stderr" would mislabel them.
-        t if !t.complete => format!(
+        t if !t.is_complete() => format!(
             "worker exited ({status_str}); stderr so far (drain incomplete after {ms} ms, so \
              these may be its FIRST lines rather than its most recent): {}",
-            t.lines.join(" | ")
+            t.lines().join(" | ")
         ),
-        t => format!("worker exited ({status_str}); recent stderr: {}", t.lines.join(" | ")),
+        t => format!("worker exited ({status_str}); recent stderr: {}", t.lines().join(" | ")),
     }
 }
 
@@ -102,8 +102,8 @@ pub fn format_persistent_death_stderr_fallback(report: &str) -> String {
     format_stderr_fallback(WORKER_DEATH_STDERR_MARKER, report)
 }
 
-/// Report a persistent worker's death through `tracing`, **and** through the
-/// process's own stderr when no subscriber is installed.
+/// Report a persistent worker's death on whichever channel will carry it:
+/// `tracing` when it will record the event, the marked stderr line when not.
 ///
 /// The one producer for that event (#730), mirroring [`emit_worker_failure_report`]
 /// for the early-exit one. Before this, `worker_lifecycle::persistent`'s driver
@@ -172,8 +172,8 @@ pub fn format_persistent_down_stderr_fallback(report: &str) -> String {
     format_stderr_fallback(WORKER_DOWN_STDERR_MARKER, report)
 }
 
-/// Report that a persistent worker is **not coming back** — through `tracing`,
-/// and through the process's own stderr when no subscriber is installed.
+/// Report that a persistent worker is **not coming back**, on whichever
+/// channel will actually carry it.
 ///
 /// The one producer for that event (#738). Before this, the driver's
 /// respawn-failure and rate-alarm lines were bare `tracing::warn!`s — the exact

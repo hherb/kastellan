@@ -41,6 +41,13 @@ pub mod tool_host;
 /// panic payload the same way the worker reports neutralise theirs, and a
 /// second copy of the character class is the drift shape CLAUDE.md's bwrap-argv
 /// note names.
+///
+/// ⚠️ **`#[doc(hidden)]`, deliberately.** `kastellan-core` is published, so a
+/// bare `pub` here would be a permanent semver commitment taken on for one
+/// dev-dependency's benefit. Hiding it gives `kastellan-tests-common` the
+/// access it needs while saying plainly that this is not committed API — the
+/// cheapest available option, and it costs the in-tree callers nothing.
+#[doc(hidden)]
 pub mod untrusted_text;
 pub mod worker_manifest;
 pub mod worker_lifecycle;
