@@ -52,7 +52,7 @@
 /// silently join the tokens on either side (`a<U+202E>b` → `ab`), and one rule
 /// for the whole class is one fewer thing to get wrong than a per-character
 /// policy.
-pub(crate) fn is_neutralised_control(c: char) -> bool {
+pub fn is_neutralised_control(c: char) -> bool {
     // 1. Category Cc — C0, DEL, C1 (which contains U+0085 NEL and U+009B CSI).
     c.is_control()
         // 2. The line separators that sit outside Cc.
@@ -74,7 +74,7 @@ pub(crate) fn is_neutralised_control(c: char) -> bool {
 /// A space rather than a deletion, deliberately: removing the character would
 /// silently join two tokens into one that never appeared in the worker's
 /// output, and a log line is evidence.
-pub(crate) fn neutralise_controls(s: &str) -> String {
+pub fn neutralise_controls(s: &str) -> String {
     s.chars()
         .map(|c| if is_neutralised_control(c) { ' ' } else { c })
         .collect()

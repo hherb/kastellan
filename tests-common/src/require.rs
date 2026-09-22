@@ -177,6 +177,13 @@ impl RequireKnob {
     /// [`unmet_action`] so the rule *and* the panic path can be unit-tested
     /// without mutating process-wide environment under `env_lock`.
     pub fn action(&self) -> UnmetAction {
+        // The chokepoint for #742's panic hook. Every gated tier reaches this
+        // to decide whether to skip, so installing here covers every suite that
+        // can appear in a gate profile — by construction, rather than by ~30
+        // `tests/*.rs` files each remembering an `install()` call. Idempotent;
+        // see `panic_hook::install_once` for why it lives here and what it
+        // deliberately does NOT cover.
+        crate::panic_hook::install_once();
         self.action_reporting_to(self.raw(), &mut std::io::stderr())
     }
 
