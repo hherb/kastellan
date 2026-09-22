@@ -84,6 +84,20 @@ fn encode_drain_end(end: DrainEnd) -> u8 {
     }
 }
 
+/// Pure: is `raw` a value [`encode_drain_end`] can actually produce?
+///
+/// ⚠️ **Exists so the warning can live OUTSIDE [`decode_drain_end`].** Both an
+/// in-progress drain and a corrupt byte decode to `None` — correctly, since
+/// both mean "we may not claim completeness" — but only the second is worth
+/// telling anyone about, and [`StderrTail::wait_for_drain`] calls the decoder
+/// **every 2 ms for the full [`TAIL_DRAIN_WAIT`]**. A `tracing::error!` inside
+/// the decoder is therefore ~125 identical lines per worker failure, on the one
+/// path that has to stay readable. Splitting the question keeps the decoder
+/// pure and lets the waiter warn exactly once.
+fn is_known_drain_byte(raw: u8) -> bool {
+    matches!(raw, DRAIN_IN_PROGRESS | DRAIN_EOF | DRAIN_READ_ERROR)
+}
+
 /// Pure: decode the atomic back into "how the drain ended, if it has".
 ///
 /// A free function rather than an inline `match` so the encoding has exactly
@@ -92,32 +106,26 @@ fn encode_drain_end(end: DrainEnd) -> u8 {
 /// draining*, so a caller waits rather than claiming a completeness it has not
 /// established.
 ///
-/// ⚠️ **The unknown-byte arm is LOUD, and that is the difference between this
-/// and the collapses #732/#746/#747 were.** [`encode_drain_end`] matches
+/// ⚠️ **An unrecognised byte must fail SAFE, and it must not be silent — but
+/// the noise belongs to the caller, not here.** [`encode_drain_end`] matches
 /// exhaustively, so adding a [`DrainEnd`] variant breaks it and forces the
-/// author to pick a byte — but this arm would go on compiling and map the new
-/// byte to "still draining", which costs a caller the full [`TAIL_DRAIN_WAIT`]
-/// and then renders as `NothingCapturedYet`: a fact about *waiting* standing in
-/// for a fact about the *encoding*. Failing safe is right; failing safe in
-/// silence is how the state gets lost.
+/// author to pick a byte; *this* arm would go on compiling and map the new byte
+/// to "still draining", which costs a caller the full [`TAIL_DRAIN_WAIT`] and
+/// then renders as `NothingCapturedYet` — a fact about *waiting* standing in
+/// for a fact about the *encoding*, which is the collapse #732/#746/#747 were.
+/// [`StderrTail::wait_for_drain`] says so once, using [`is_known_drain_byte`].
+///
+/// ⚠️ **Stays pure, and the doc line above is load-bearing.** Logging here
+/// looks equivalent and is not: the waiter calls this every 2 ms for the whole
+/// cap, so a `tracing::error!` in this function is ~125 identical lines per
+/// worker failure. Deliberately not a `debug_assert!` either — that would make
+/// the fail-safe `None` untestable and diverge debug from release on a failure
+/// path.
 fn decode_drain_end(raw: u8) -> Option<DrainEnd> {
     match raw {
         DRAIN_EOF => Some(DrainEnd::Eof),
         DRAIN_READ_ERROR => Some(DrainEnd::ReadError),
-        DRAIN_IN_PROGRESS => None,
-        // Deliberately NOT a `debug_assert!`: the fail-safe `None` is the
-        // property worth pinning, and panicking on it would make
-        // `the_drain_end_encoding_round_trips_and_fails_safe` unable to assert
-        // the thing it exists for — and would diverge debug from release on a
-        // failure path.
-        other => {
-            tracing::error!(
-                raw = other,
-                "unrecognised drain_end encoding; treating as still-draining, so a caller \
-                 will now burn the full stderr drain wait and report a PARTIAL capture"
-            );
-            None
-        }
+        _ => None,
     }
 }
 
@@ -185,9 +193,26 @@ impl StderrTail {
     /// [#747]: https://github.com/hherb/kastellan/issues/747
     pub fn wait_for_drain(&self, timeout: Duration) -> Option<DrainEnd> {
         let deadline = Instant::now() + timeout;
+        // ⚠️ Once per WAIT, not once per poll: this loop runs every 2 ms for the
+        // whole cap, so an unconditional log here is ~125 identical lines on a
+        // worker-failure path. The flag is the whole reason the warning is not
+        // inside `decode_drain_end`.
+        let mut warned = false;
         loop {
-            if let Some(end) = decode_drain_end(self.drain_end.load(Ordering::Acquire)) {
+            let raw = self.drain_end.load(Ordering::Acquire);
+            if let Some(end) = decode_drain_end(raw) {
                 return Some(end);
+            }
+            // Unrecognised is NOT the same as in-progress, though both wait.
+            // Only the first means something is wrong with us.
+            if !warned && !is_known_drain_byte(raw) {
+                warned = true;
+                tracing::error!(
+                    raw,
+                    "unrecognised drain_end encoding; treating as still-draining, so this \
+                     caller will burn the full stderr drain wait and then report a PARTIAL \
+                     capture for a worker whose drain may well have finished"
+                );
             }
             if Instant::now() >= deadline {
                 return None;
@@ -573,6 +598,30 @@ mod tests {
             "an empty tail whose drain FAILED must never reach a renderer as KnownSilent — \
              that is the one state licensed to print a diagnosis"
         );
+    }
+
+    #[test]
+    fn an_unrecognised_drain_byte_is_distinguishable_from_a_drain_still_in_progress() {
+        // Both decode to `None` — that is the fail-safe, and it is right — but a
+        // caller must be able to tell "not finished yet" from "this encoding is
+        // broken", because the second deserves a log line and the first must
+        // never produce one. Without this split the warning would have to live
+        // inside `decode_drain_end`, which `wait_for_drain` calls every 2 ms for
+        // the full 250 ms cap: ~125 identical error lines per worker failure,
+        // on the one path that must stay readable.
+        for known in [DRAIN_IN_PROGRESS, DRAIN_EOF, DRAIN_READ_ERROR] {
+            assert!(
+                is_known_drain_byte(known),
+                "{known} is part of the encoding and must never be reported as corrupt"
+            );
+        }
+        for unknown in [3u8, 99, 255] {
+            assert!(
+                !is_known_drain_byte(unknown),
+                "{unknown} is not a value `encode_drain_end` can produce, so a tail holding it \
+                 means the encoding has drifted and someone must be told"
+            );
+        }
     }
 
     #[test]

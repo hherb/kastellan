@@ -48,7 +48,10 @@ arc pays. Rootfs images last rebuilt 2026-09-08.
 > strings at 512 B, breaking the question that worked [[plan-text-is-a-defect-source]]; #720's
 > review closed a fail-*open* hole with a check that made it fail *always* (fixed in #726).
 > **#750's own movement-only commit did it again**: hoisting `tail.snapshot()` above the wait is a
-> harmless-looking reorder and is #730 exactly — one existing test caught it.
+> harmless-looking reorder and is #730 exactly — an existing test caught it. **And #750's REVIEW
+> round did it a third time**: making `decode_drain_end`'s unknown-byte arm loud put a
+> `tracing::error!` inside a function polled every 2 ms for 250 ms (~125 lines per failure) and
+> falsified the word `Pure:` one line above the edit. Self-review caught that one.
 
 > ⚠️ **A forward reference auto-closed issue #718.** #720's body said the gate profile is the acceptance
 > test for "whichever PR <closing-keyword> #718", and GitHub's scanner matched it — the fifth
@@ -170,11 +173,24 @@ what the next session builds on.
   module exists to prevent. `decode_drain_end`'s unknown-byte arm is now loud for the same reason
   (deliberately **not** a `debug_assert!` — that would make the fail-safe property untestable and
   diverge debug from release).
-- **Evidence.** Post-review sweep **4452 / 0 / 42 over 185 suites, `TEST_EXIT=0`, `[WARN]` 0**
+- ⚠️ **THE REVIEW'S OWN FIX CARRIED THE NEXT DEFECT — again, and self-review caught it.** Making
+  `decode_drain_end`'s unknown-byte arm loud put a `tracing::error!` inside a function
+  `wait_for_drain` calls **every 2 ms for the full 250 ms cap**: ~125 identical error lines per
+  worker failure, on the one path that has to stay readable. It also falsified the function's own
+  first doc word, `Pure:`, one line above the edit. Fixed by splitting the question — a pure
+  `is_known_drain_byte`, with the waiter warning **once** behind a local flag.
+  ⚠️ **The dangerous mutant is dropping `DRAIN_IN_PROGRESS` from that predicate**, which would make
+  *every normal wait* log an error — the same flood on the *happy* path. Both directions
+  mutation-KILLED by the new test. [[a-fix-for-a-reviewers-finding-can-carry-the-next-defect]]
+- ⚠️ **And the session repeated `never-edit-tree-during-a-sweep` ITSELF**, having just written that
+  memory up: a sweep was running while the tree was mutated for that mutation check. The run was
+  **discarded and re-run**, and the final one is bracketed by a sha of the mutated file **before and
+  after** — identical, so the log proves the tree did not move under it. Do that bracketing by
+  default; it costs one line and converts "I think nothing moved" into evidence.
+- **Evidence.** Post-review sweep **4453 / 0 / 42 over 185 suites, `TEST_EXIT=0`, `[WARN]` 0**
   (`--no-fail-fast`, full log under `$HOME`, default target dir
   [[custom-cargo-target-dir-breaks-daemon-e2e]] [[a-truncated-gate-log-is-not-a-gate]]). Delta vs
-  #750's own 4451/0/41 over 185 reconciles **exactly by name**: +1 passed
-  (`a_panic_with_a_healthy_stderr_still_renders_the_message`), +1 ignored
+  XX  (`a_panic_with_a_healthy_stderr_still_renders_the_message`), +1 ignored
   (`inner_fixture_panics_with_a_healthy_stderr`), suite count unchanged. Cold clippy **27/27
   crates, exit 0, 0 warnings** (fresh target dir — an incremental re-run showed only **3**
   `Checking kastellan` lines and would have been no proof at all); rustdoc **0 warnings in any
@@ -459,7 +475,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#746/#747/#749 — **the gate that stands**) | branch tip | **4451 / 0 / 41**, **185** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **26**, `[E2E]` 0 (no knobs set), `[panic]` 20. Run `--no-fail-fast -- --test-threads=4`. ⚠️ **`cargo test --workspace` is FAIL-FAST** — the first attempt stopped after **59** suites on a `the database system is starting up` flake (#548/#676; that suite then passed **6/6 isolated**), and a 59-suite run reports a plausible-looking 2552 passed. **Always `--no-fail-fast`.** **Delta vs the row below reconciles EXACTLY: +17 passed / +1 ignored / +1 suite**, by name — captured.rs +3, worker_stderr/mod.rs +5, tool_worker +2, persistent +2, egress/spawn +4 (16 unit), plus the new `panic_hook_broken_stderr_e2e` (+1 suite, +1 passed, +1 ignored inner fixture). ⚠️ **`[SKIP]` 23→26 is the WORKTREE, not a regression**: 19 Apple `container` + 4 gliner opt-in + **3 "gliner-relex venv shim not built"**, because a fresh worktree has no `.venv`. Built it (`scripts/workers/gliner-relex/install.sh`, `readlink`-verified as this host's python, not a copied dead fixture) and ran the tier separately, all green: gate profile `gliner` **5 tests / 4 demanded preconditions / `[WARN]` 0**, `entity_extraction_e2e` **16/16**, `memory_entity_link_e2e` **6/6**. DGX ran the touched suites (worker_stderr **60/60**, egress::spawn **23/23**, both broken-stderr e2es) plus the mirror-image `POLL*` mutants | exit 0 **on BOTH hosts**, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-746{mac,cold}`), **27** `Checking kastellan` lines each, zero warnings | **26** Mac (19 container, 4 gliner opt-in, 3 worktree venv) |
+| **Mac** (#746/#747/#749 — **the gate that stands**) | branch tip | **4453 / 0 / 42**, **185** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **26**, `[E2E]` 0 (no knobs set), `[panic]` 20. ⚠️ **Was 4451/0/41 before the review round**; +2 passed / +1 ignored, reconciled by name: the healthy-stderr positive control and its `#[ignore]`d inner fixture, plus `an_unrecognised_drain_byte_is_distinguishable_from_a_drain_still_in_progress`. ⚠️ **The final run is bracketed by a sha of the file under test, before and after** — identical, so the log itself proves the tree did not move under the sweep; an earlier attempt WAS contaminated by a concurrent mutation check and was discarded [[never-edit-tree-during-a-sweep]]. Run `--no-fail-fast -- --test-threads=4`. ⚠️ **`cargo test --workspace` is FAIL-FAST** — the first attempt stopped after **59** suites on a `the database system is starting up` flake (#548/#676; that suite then passed **6/6 isolated**), and a 59-suite run reports a plausible-looking 2552 passed. **Always `--no-fail-fast`.** **Delta vs the row below reconciles EXACTLY: +17 passed / +1 ignored / +1 suite**, by name — captured.rs +3, worker_stderr/mod.rs +5, tool_worker +2, persistent +2, egress/spawn +4 (16 unit), plus the new `panic_hook_broken_stderr_e2e` (+1 suite, +1 passed, +1 ignored inner fixture). ⚠️ **`[SKIP]` 23→26 is the WORKTREE, not a regression**: 19 Apple `container` + 4 gliner opt-in + **3 "gliner-relex venv shim not built"**, because a fresh worktree has no `.venv`. Built it (`scripts/workers/gliner-relex/install.sh`, `readlink`-verified as this host's python, not a copied dead fixture) and ran the tier separately, all green: gate profile `gliner` **5 tests / 4 demanded preconditions / `[WARN]` 0**, `entity_extraction_e2e` **16/16**, `memory_entity_link_e2e` **6/6**. DGX ran the touched suites (worker_stderr **60/60**, egress::spawn **23/23**, both broken-stderr e2es) plus the mirror-image `POLL*` mutants | exit 0 **on BOTH hosts**, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-746{mac,cold}`), **27** `Checking kastellan` lines each, zero warnings | **26** Mac (19 container, 4 gliner opt-in, 3 worktree venv) |
 | **Mac** (#734/#733/#732/#742 — superseded by the row above) | — | **4434 / 0 / 40**, **184** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` 23 (19 Apple container + 4 gliner opt-in), `[panic]` 19. ⚠️ The pre-review figure `4427 / 1 / 38` over 183 that this row used to carry was the **pre-review** run, and its one failure was the #744 load flake, not a regression | exit 0, `--workspace --all-targets`, zero warnings | **23** Mac |
 
 Older rows (incl. #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
