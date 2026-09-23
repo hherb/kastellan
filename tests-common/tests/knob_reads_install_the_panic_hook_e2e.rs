@@ -73,8 +73,11 @@ fn inner_fixture_action() {
     });
 }
 
-/// The micro-VM decision door, which reads the environment itself and hands
-/// the value to `action_reporting_to`.
+/// The micro-VM decision route. Since #755 it reads the value through `raw()`
+/// and hands it to `action_reporting_to`, so it passes BOTH doors and pins
+/// neither on its own — it stays as coverage of the route the `microvm`
+/// profile's unmet path takes. The `action_reporting_to` door is pinned alone
+/// by [`inner_fixture_action_reporting_to`].
 #[test]
 #[ignore = "inner fixture: needs a fresh process; run by its parent"]
 fn inner_fixture_microvm_require_action() {
@@ -84,6 +87,24 @@ fn inner_fixture_microvm_require_action() {
     prove_the_door_installs(|| {
         let mut sink = Vec::new();
         let _ = kastellan_tests_common::microvm::require_action_to(&mut sink);
+    });
+}
+
+/// The supplied-value door, `RequireKnob::action_reporting_to`, reached WITHOUT
+/// `raw()`: the value is handed in, so the environment is never read. Until
+/// #755 the micro-VM route pinned this door; once that route went through
+/// `raw()` first, deleting the install from `action_reporting_to` would have
+/// stayed green — hence a fixture that reaches it alone.
+#[test]
+#[ignore = "inner fixture: needs a fresh process; run by its parent"]
+fn inner_fixture_action_reporting_to() {
+    if !is_the_child() {
+        return;
+    }
+    prove_the_door_installs(|| {
+        let mut sink = Vec::new();
+        let _ = kastellan_tests_common::require::GUARD_TIER_KNOB
+            .action_reporting_to(Some("1".into()), &mut sink);
     });
 }
 
@@ -123,4 +144,10 @@ fn the_action_door_installs_the_hook() {
 fn the_microvm_decision_door_installs_the_hook() {
     kastellan_tests_common::panic_hook::install_once();
     assert_door_installs("inner_fixture_microvm_require_action");
+}
+
+#[test]
+fn the_supplied_value_door_installs_the_hook() {
+    kastellan_tests_common::panic_hook::install_once();
+    assert_door_installs("inner_fixture_action_reporting_to");
 }

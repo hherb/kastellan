@@ -91,6 +91,9 @@ pub mod env;
 /// module's own header for why a Rust test reads a shell script.
 #[cfg(test)]
 mod gate_script_tests;
+/// A per-`write` recording sink, for the one-write marker tests (#755).
+#[cfg(test)]
+mod write_recorder;
 pub mod gliner_e2e;
 pub mod gliner_weights;
 pub mod guard_pin;

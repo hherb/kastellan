@@ -4,20 +4,21 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260923_755_pre-prune.md`](archive/handover_20260923_755_pre-prune.md),
+> [`archive/handover_20260923_748_pre-prune.md`](archive/handover_20260923_748_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-23 (#755: the gate refuses a marker stranded mid-line; the issue's
-census was wrong, the fix is structural) ·
-**Recent PRs, newest first:** the #755 PR, [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Last updated:** 2026-09-23 (#748: a `worker-report` gate profile, a run-time check that every
+profiled test binary reached the panic hook, and a measured `[panic]` cap) ·
+**Recent PRs, newest first:** [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
 [#731](https://github.com/hherb/kastellan/pull/731) (#725), [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700),
 [#726](https://github.com/hherb/kastellan/pull/726) (#719), [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob contract).
 **The #725 → #748 worker-report arc is closed**, #748 being its last piece. Its review residue
-is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/) snapshots;
+is filed as #751–#754, and #748 filed **#755** (evidence markers landing mid-line — `[WARN]` and
+`[SKIP]` fail open). Older filings are in the [`archive/`](archive/) snapshots;
 **`gh issue list --state open` is the live answer** and the only one worth trusting. ·
 **The DGX runs `main` as of #709**, redeployed 2026-09-17. **A redeploy is owed for #743 + #745 +
 #750** (diagnostics only; #748 is test-harness only and needs none). Rootfs images last rebuilt
@@ -59,49 +60,66 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
 
 ## Current state
 
-### This session (2026-09-23, later): #755 — a marker stranded mid-line is refused
+### This session (2026-09-23): #748 — the last piece of the worker-report arc
 
-- ⚠️ **#755's census was wrong — the sixth time.** It said `[WARN]`/`[SKIP]`/`[E2E]` were emitted
-  unframed. `skip_line`/`warn_line`/`e2e_line` have rendered `\n<marker> …\n` since #663/#720,
-  every emitter writes that in **one** `write!(out, "{}", …)`, every hand-written `[SKIP]` in a
-  *profiled* suite starts with `\n`, and the capped profiles have none. **No live false green.**
-  [[issue-as-filed-can-carry-a-regression]]
-- **So the fix is structural, not per-emitter.** `run-e2e-gate.sh` refuses a counted marker
-  (`[SKIP]`/`[WARN]`/`[E2E]`/`[panic]`/`[panic-hook]`) as **the first `[` on a `test <name> ... `
-  line**; grep exit 2 refuses a verdict (exit 3). The counts stay anchored — a neutralised hostile
-  payload carries `[WARN]` mid-line legitimately. ⚠️ **libtest leaves TWO gaps**: before the result
-  word, and between it and its `\n` (separate flushed writes) — `ok[WARN]…`. The first version
-  caught only the first; the reviewer found the second. Tests in `gate_script_tests/mid_line.rs`.
-- **Emitter-level one-write tests** (`write_recorder::WriteRecorder` records each `write` call):
-  a `Vec<u8>` sink cannot tell `writeln!` (two writes) from one framed `write!`.
-- ⚠️ **A real fail-open found on the way:** `microvm::require_action_to` read its knob with
-  `std::env::var(..).ok()` — a non-UTF-8 value read as unset and skipped with **no `[WARN]`**,
-  the exact defect `RequireKnob::raw()` documents. Now `KNOB.action_reporting_to(KNOB.raw(), out)`.
-  ⚠️ **That fix un-pinned a door**: the micro-VM fixture was the only isolated proof that
-  `action_reporting_to` installs the hook; now it passes `raw()` first. A new
-  `inner_fixture_action_reporting_to` pins it alone (the reviewer's mutant now dies).
-- `require.rs` tests split out first (movement only, byte-identical by `cmp`). **Mutants: 15 of 15
-  killed** (7 script, 5 emitter, 3 review-round). #718's unframed `[SKIP]`s outside every profile
-  (e.g. `net_demo_egress_e2e`, `egress_force_routing_e2e`) would now be **refused** the day a
-  profile selects them — frame them when you do.
+Three gaps in what `scripts/run-e2e-gate.sh` demanded. Full prose in the commit message.
 
-### Previous (2026-09-23): #748 — the last piece of the worker-report arc
-
-Full prose in [`archive/handover_20260923_755_pre-prune.md`](archive/handover_20260923_755_pre-prune.md).
-What still binds:
-
-- **A `worker-report` profile** (5 suites, two packages, sandbox knob only) runs on **both hosts**.
-- **Every profiled test binary must reach the panic hook, checked at RUN time** (a `[panic-hook]`
-  line per cargo `Running` section). ⚠️ **A hermetic suite in a profile must call
-  `panic_hook::install_once()` first in every parent test** — it has no knob to do it implicitly.
-  A static scan was abandoned: it needs a census of helper names [[guard-shares-the-census-blind-spot]].
-- **`MAX_PANIC`, measured 0 on all five profiles.** ⚠️ No floor is possible; the per-binary hook
-  check is what makes the cap sound, and it is blind to a panic before the first knob read (#757).
-- ⚠️ **A knob has TWO doors that install the hook** — `raw()` and `action_reporting_to`, each
-  pinned in its own child by `knob_reads_install_the_panic_hook_e2e`.
-- ⚠️ **The `microvm` profile refused every run from #720 to #748**: `grep -c` counts lines, and
-  discovery emits 15 `--test`s on one line [[grep-c-counts-lines-not-matches]].
-- ⚠️ **`KASTELLAN_PG_BIN_DIR` for the `pg`/`gliner` profiles on this Mac** [[postgres-app-bin-paths]].
+- **A `worker-report` profile** selects the five suites that prove a dying worker's last words
+  reach a failing test, across **two packages** (`-p kastellan-core -p kastellan-tests-common`;
+  cargo accepts it, measured). Only the sandbox knob — one suite needs a sandbox, four are
+  hermetic, none needs PG or a guard backend — so unlike `guard-tier` it runs on **both hosts**.
+  ⚠️ The issue proposed appending to `guard-tier`; that would have run them only where Shieldstral is.
+- **Every test binary a profile runs must reach the neutralising panic hook, checked at RUN time.**
+  `install_once()` prints one `[panic-hook]` line per process; the gate splits its log at cargo's
+  `Running` headers and refuses any section without one. ⚠️ **A static source scan was the
+  approved design and was abandoned mid-task**: suites reach the knob through a dozen indirect
+  `tests_common` helpers, so "references a knob helper" needs a list of helper names — a census
+  [[guard-shares-the-census-blind-spot]]. The real profile, run **before** the hermetic suites were
+  fixed, refused **exactly the four** binaries that never read a knob — including
+  `panic_hook_gate_safety_e2e`, whose *child* reads one and whose parent does not.
+  ⚠️ **A hermetic suite in a profile must call `panic_hook::install_once()` as the first statement
+  of every parent test.** It has no knob to do it implicitly.
+- **A 9th profile field, `MAX_PANIC`.** No suite any profile selects has a `#[should_panic]` (the
+  issue's ~22 baseline is `src/` unit tests, which `--test` never selects). **Measured 0 on all
+  five profiles**: `worker-report`, `pg`, `gliner` (Mac), `guard-tier` and `microvm` (DGX).
+  ⚠️ **The cap has no floor and cannot have one** — a binary whose panics went through the
+  *default* hook also counts zero. The per-binary hook check is what makes the cap sound.
+- ⚠️ **A marker can land MID-LINE under `--nocapture`, and the anchored grep then misses it.**
+  libtest's `test <name> ... ` (stdout, no newline yet) and our stderr share one merged pipe. It
+  flaked the new check once — one run green, the next identical run red — and for `[panic]` it
+  would be a false **green** against the cap. Fixed for the two markers #748 owns:
+  `panic_hook::own_line` frames each as `\n<line>\n`, emitted as **one** `write_str` (a single
+  write under `PIPE_BUF` to a pipe is atomic). ⚠️ **`eprintln!("\n{x}")` is TWO writes** — literal
+  piece and argument — so the frame is built first and printed with `eprint!("{framed}")`. The
+  pre-existing `[WARN]`/`[SKIP]`/`[E2E]` share the exposure: **#755**, where `[WARN]` fails open.
+- ⚠️ **Found on the way: the `microvm` profile had refused EVERY run since #720** (2026-09-17).
+  `firecracker_suites` emits all 15 `--test` targets on **one line**, and the floor check counted
+  them with `grep -c`, which counts **lines** — so discovery read 1 against a floor of 12 and the
+  script exited 2 before running anything. **No `microvm` gate log existed on either host.** Never
+  reached on the Mac (the `os` check refuses first); no test ran it. Fixed (`count_test_targets`
+  counts tokens), and `gate_script_tests` now runs the script's **real** discovery through the
+  **real** count on the real tree — with the old body it reproduces the DGX refusal on the Mac.
+  [[grep-c-counts-lines-not-matches]]
+- ⚠️ **And the runtime check then caught a hole in #745's own hook, on its first real run.** The
+  `microvm` profile (once runnable) refused **all 15** binaries while printing 65 knob-gated
+  `[E2E]` lines: a healthy micro-VM host meets every precondition, never reaches
+  `action_reporting_to`, and reads the knob only to announce — via `announce_demanded_to` →
+  `raw()`, which did not install the hook. So **every green micro-VM gate run had the default
+  hook**, while the docs claimed one chokepoint covered every read. **A knob has TWO doors**
+  (`raw()`, `action_reporting_to`); both install now, and `knob_reads_install_the_panic_hook_e2e`
+  proves each in its own child (the install is a per-process `Once`). A static scan would have
+  passed all 15 — this is the case for choosing the runtime check.
+- **Mutants: 7 of 8 killed.** The survivor is `worker-report`'s cap reverting to `any` — kept
+  unpinned deliberately, since pinning a measured number in a test is a second copy of the census.
+- ⚠️ **On this Mac the `pg`/`gliner` profiles need `KASTELLAN_PG_BIN_DIR`** set to Postgres.app
+  v18, or they fail "no Postgres install found" — the memory note says so, and it was still
+  forgotten on the first run [[postgres-app-bin-paths]].
+- **#756's review.** ⚠️ **The `[panic]` cap is blind to a panic that beats its binary's first knob
+  read** — filed **#757**; fixing it needs a *measured* default-hook count per profile, DGX too.
+  Four surviving mutants now killed: unframed `eprintln!` in the hook (fixture on a **merged**
+  stream), `-gt 0`, no awk exit check (fake `awk`), no `MAX_PANIC` validation — cap tests run an
+  **edited copy** of the table, since every committed cap is 0. The announcement left the `Once`
+  (a failed write inside `call_once` poisoned it).
 
 ### Previous (2026-09-22): #750 — #746, #747, #749 and its review round
 
@@ -241,8 +259,12 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    cursor restart, filter-only search, compact hits, attachments by `message_id` + name, a distinct
    expired-credential error) are **not yet filed** on `hherb/localmail`.
 
-3. **The #750 residue, #751–#754, and #757** (the `[panic]` cap's blind spot before the first knob
-   read — needs a *measured* default-hook count per profile, DGX too).
+3. **#755 first — it is the one false-green left in the gate itself.** `[WARN]` (hard zero) and
+   `[SKIP]` (capped at 0 on two profiles) can land mid-line and go uncounted. The fix exists
+   (`panic_hook::own_line`); route `RequireKnob::announce*`, `skip_line` and
+   `warn_if_out_of_dialect` through it, each with an emitter-level "starts with `\n`" test. ⚠️
+   `warn_if_out_of_dialect` takes a `&mut dyn Write`, so `writeln!` there is two writes — one
+   `write_all` of the framed string. Then the #750 residue, #751–#754.
 
 4. **Test-harness honesty, now that the gate itself is tested.**
    [#718](https://github.com/hherb/kastellan/issues/718)
@@ -344,8 +366,8 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#755 — **the gate that stands**) | branch tip | **4486 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container — the Apple `container` service was not running — 4 gliner opt-in), `[panic]` 21 (all `#[should_panic]` unit tests, uncounted by any profile), **mid-line matches 0**, source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY per suite: +15 / +2** — this PR's +10 lib and `knob_reads…` +1/+1, **plus +3 lib and `panic_hook_broken_stderr_e2e` +1/+1 from #756's review round, which the row below never measured** (its log is 17:56, the merge 19:58). ⚠️ Two container `[SKIP]` lines had libtest's `test … ok` spliced INTO their reason — a multi-piece hand-written `eprintln!`; the marker stays at column 0, so cosmetic (#718). **Gate:** `worker-report` ✅ 13 passed / 3 `[E2E]` / 5 of 5 hooked (Mac) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-755`), **27** `Checking kastellan` lines, zero warnings (Mac only — tests-common links core, so no cross-clippy; CI covers Linux) | **23** Mac |
-| **Mac** (#748 — superseded; predates #756's review round) | branch tip | **4471 / 0 / 45**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **12** (8 container, 4 gliner opt-in), `[panic]` **0**, source sha **identical before and after**. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4`, primary checkout. **Delta vs the row below reconciles EXACTLY: +18 passed / +3 ignored / +1 suite** — `panic_hook` +3, `gate_script_tests` +6, `run.rs` +6, and `knob_reads_install_the_panic_hook_e2e` (+1 suite, +3 passed, +3 ignored fixtures). ⚠️ **`[SKIP]` 26→12 is environment** (primary checkout has the gliner `.venv`; container skips 19→8, helpers untouched). ⚠️ **The row below's `[panic]` 20 is not reproducible from any log on disk** — both #750-era sweep logs count 0, anchored or not — so it is recorded as unverified, not as a delta. ⚠️ **Two earlier sweeps this session were DISCARDED**: one had a test file appended under it (the sha bracket caught it, `a5e5…`→`cc49…`), the next was superseded by the two-door fix. **Gate profiles:** `worker-report` ✅ both hosts (Mac 3/3 consecutive after the framing fix), `pg` ✅ 19, `gliner` ✅ 5 (Mac), `guard-tier` ✅ 21 / 44 `[E2E]` (DGX), `microvm` ✅ **30 / 65 `[E2E]` / 15 of 15 hooked** (DGX — its first passing gated run ever). **Every profile's `[panic]` measured 0** | exit 0 **on BOTH hosts**, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-748`), **27** `Checking kastellan` lines each, zero warnings. The DGX run predates the movement-only `panic_hook/tests.rs` split, which the Mac re-linted | **12** Mac |
+| **Mac** (#748 — **the gate that stands**) | branch tip | **4471 / 0 / 45**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **12** (8 container, 4 gliner opt-in), `[panic]` **0**, source sha **identical before and after**. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4`, primary checkout. **Delta vs the row below reconciles EXACTLY: +18 passed / +3 ignored / +1 suite** — `panic_hook` +3, `gate_script_tests` +6, `run.rs` +6, and `knob_reads_install_the_panic_hook_e2e` (+1 suite, +3 passed, +3 ignored fixtures). ⚠️ **`[SKIP]` 26→12 is environment** (primary checkout has the gliner `.venv`; container skips 19→8, helpers untouched). ⚠️ **The row below's `[panic]` 20 is not reproducible from any log on disk** — both #750-era sweep logs count 0, anchored or not — so it is recorded as unverified, not as a delta. ⚠️ **Two earlier sweeps this session were DISCARDED**: one had a test file appended under it (the sha bracket caught it, `a5e5…`→`cc49…`), the next was superseded by the two-door fix. **Gate profiles:** `worker-report` ✅ both hosts (Mac 3/3 consecutive after the framing fix), `pg` ✅ 19, `gliner` ✅ 5 (Mac), `guard-tier` ✅ 21 / 44 `[E2E]` (DGX), `microvm` ✅ **30 / 65 `[E2E]` / 15 of 15 hooked** (DGX — its first passing gated run ever). **Every profile's `[panic]` measured 0** | exit 0 **on BOTH hosts**, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-748`), **27** `Checking kastellan` lines each, zero warnings. The DGX run predates the movement-only `panic_hook/tests.rs` split, which the Mac re-linted | **12** Mac |
+| **Mac** (#746/#747/#749 — superseded) | — | **4453 / 0 / 42**, **185** suites, `TEST_EXIT=0`, `[WARN]` 0, `[SKIP]` 26 (19 container, 4 gliner opt-in, 3 worktree venv), `[panic]` 20 (unverified, see above). Full row in the archive snapshot | exit 0 both hosts, cold, 27 `Checking kastellan` lines | **26** Mac |
 
 Older rows (incl. #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -425,9 +447,6 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#755** — the gate refuses a counted marker stranded mid-line after libtest's `test <name> ... `
-  (both gaps); emitter one-write tests; `microvm::require_action_to` no longer skips a non-UTF-8
-  knob silently. The issue's "unframed emitters" premise was wrong.
 - **#748** — a `worker-report` gate profile; the gate refuses any test binary that never reached
   the panic hook (checked at run time); a measured `[panic]` cap (`MAX_PANIC`, measured 0 on all five profiles); a knob read installs the hook through **two** doors, not one; the `microvm` profile runs for the first time since #720.
   Filed #755.

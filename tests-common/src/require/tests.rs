@@ -225,3 +225,63 @@ fn the_three_evidence_markers_are_mutually_distinguishable() {
     assert!(!skip_line("r").contains("[E2E]"), "a skip is not a success");
     assert!(!warn_line("r").contains("[E2E]"), "a warning is not a success");
 }
+
+// ---------------------------------------------------------------------------
+// #755: every emitter writes its marker as ONE framed write.
+//
+// The renderers (`skip_line`, `warn_line`, `e2e_line`) already frame their
+// lines, and `skip.rs` pins that. What these pin is the EMITTER: that it hands
+// the framed string over in a single write, rather than, say, `writeln!` of a
+// trimmed copy — two writes, the second of which another thread can precede.
+// ---------------------------------------------------------------------------
+
+use crate::write_recorder::WriteRecorder;
+
+#[test]
+fn the_dialect_warning_is_one_framed_write() {
+    let mut out = WriteRecorder::default();
+    warn_if_out_of_dialect("KASTELLAN_TEST_REQUIRE_E2E", Some("y"), &mut out);
+    out.assert_one_framed_line("[WARN]");
+}
+
+#[test]
+fn the_skip_line_is_one_framed_write() {
+    let mut out = WriteRecorder::default();
+    let _: Option<()> = TEST_KNOB.report_unmet_to(UnmetAction::Skip, "fixture absent", &mut out);
+    out.assert_one_framed_line("[SKIP]");
+}
+
+#[test]
+fn the_e2e_announcement_is_one_framed_write() {
+    let mut out = WriteRecorder::default();
+    TEST_KNOB.announce_to(UnmetAction::Fail, "fixture staged", &mut out);
+    out.assert_one_framed_line("[E2E]");
+}
+
+#[test]
+fn the_microvm_caveat_is_one_framed_write() {
+    let _lock = crate::env::env_lock();
+    let _unset = crate::env::EnvVarGuard::unset(crate::microvm::REQUIRE_ENV);
+    let mut out = WriteRecorder::default();
+    crate::microvm::report_caveat_microvm_to("image freshness unknown", &mut out);
+    out.assert_one_framed_line("[WARN]");
+}
+
+/// The micro-VM tier reads its knob itself (`require_action_to`), not through
+/// [`RequireKnob::action`], so it must not bring back the lossy read `raw()`
+/// was written to retire: `std::env::var(..).ok()` turns a non-UTF-8 value
+/// into `None`, which skips with no `[WARN]` — a knob the operator set, and no
+/// trace that it was ignored.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_microvm_knob_warns_rather_than_reading_as_unset() {
+    use std::os::unix::ffi::OsStrExt;
+    let _lock = crate::env::env_lock();
+    let _restore = crate::env::EnvVarGuard::unset(crate::microvm::REQUIRE_ENV);
+    std::env::set_var(crate::microvm::REQUIRE_ENV, std::ffi::OsStr::from_bytes(b"\xff"));
+
+    let mut out = WriteRecorder::default();
+    let action = crate::microvm::require_action_to(&mut out);
+    assert_eq!(action, UnmetAction::Skip, "a non-UTF-8 value cannot be truthy");
+    out.assert_one_framed_line("[WARN]");
+}

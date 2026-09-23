@@ -173,8 +173,9 @@ pub fn is_installed() -> bool {
 ///
 /// ⚠️ **Before that it was installed from `action`, which is not a door at
 /// all** (#745) — `action` merely calls both. The whole **`microvm` profile**
-/// went round it: `microvm::skip_unless_ready` reaches the knob through
-/// `require_action_to` → `action_reporting_to`. It was covered only when a
+/// went round it: `microvm::skip_unless_ready` reached the knob through
+/// `require_action_to` → `action_reporting_to` (since #755 it calls `raw()`
+/// first, so it passes both doors). It was covered only when a
 /// co-set knob happened to be read first, which is coverage by accident
 /// dressed as coverage by construction [[guard-shares-the-census-blind-spot]].
 /// Moving the install one level down, into `action_reporting_to`, closed THAT
