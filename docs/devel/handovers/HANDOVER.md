@@ -10,7 +10,7 @@
 
 **Last updated:** 2026-09-23 (#755: the gate refuses a marker stranded mid-line; the issue's
 census was wrong, the fix is structural) ·
-**Recent PRs, newest first:** the #755 PR, [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Recent PRs, newest first:** [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -425,7 +425,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#755** — the gate refuses a counted marker stranded mid-line after libtest's `test <name> ... `
+- **[#758](https://github.com/hherb/kastellan/pull/758)** (#755) — the gate refuses a counted marker stranded mid-line after libtest's `test <name> ... `
   (both gaps); emitter one-write tests; `microvm::require_action_to` no longer skips a non-UTF-8
   knob silently. The issue's "unframed emitters" premise was wrong.
 - **#748** — a `worker-report` gate profile; the gate refuses any test binary that never reached
