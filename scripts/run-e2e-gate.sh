@@ -161,7 +161,7 @@ PROFILES=(
   "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0"
   "pg|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1,Postgres-backed=1|1|any|-p kastellan-core --test injection_guard_e2e --test secret_vault_e2e --test conversation_continuity_e2e|--nocapture|any|0"
   "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|gliner-relex=1|1|any|-p kastellan-core --test gliner_relex_e2e|--nocapture|any|0"
-  "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux|any"
+  "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux|0"
   "worker-report|KASTELLAN_SANDBOX_REQUIRE_E2E=1|sandboxed=1|1|0|-p kastellan-core -p kastellan-tests-common --test worker_early_exit_stderr_fallback_e2e --test persistent_worker_death_stderr_fallback_e2e --test panic_hook_gate_safety_e2e --test worker_report_broken_stderr_e2e --test panic_hook_broken_stderr_e2e|--nocapture|any|0"
 )
 
