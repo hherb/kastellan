@@ -10,21 +10,27 @@
 //! ```
 //!
 //! Every count in the gate is anchored at column 0, so that line is invisible
-//! to it. For `[WARN]` (a hard zero) and a capped `[SKIP]` that is a false
-//! GREEN; for `[E2E]` a false red. Anchoring is deliberate — a neutralised
-//! hostile payload legitimately carries `[WARN]` mid-line — so the fix is not
-//! to unanchor the counts but to refuse the shape only libtest produces: a
-//! counted marker as the first `[` on a `test <name> ... ` line.
+//! to it. For `[WARN]` (a hard zero), a capped `[SKIP]` and a `[panic]` under
+//! `MAX_PANIC` that is a false GREEN; for `[E2E]` a false red, and for
+//! `[panic-hook]` a binary reported unhooked when it was not. Anchoring is
+//! deliberate — a neutralised hostile payload legitimately carries `[WARN]`
+//! mid-line — so the fix is not to unanchor the counts but to refuse the
+//! shape only libtest produces: a counted marker as the first `[` on a
+//! `test <name> ... ` line.
 //!
-//! Every emitter in the suites the profiles select frames its line as
-//! `\n<line>\n` in one write (`skip_line`, `warn_line`, `e2e_line`,
-//! `panic_hook::own_line`, or a hand-written `eprintln!("\n[SKIP] …\n")`), so
-//! today this check should never fire. It is not true of the whole tree —
+//! Every emitter in the suites the profiles select puts the leading `\n` and
+//! its marker in the same write, so today this check should never fire. The
+//! renderers (`skip_line`, `warn_line`, `e2e_line`, `panic_hook::own_line`)
+//! are printed whole in one write; a hand-written `eprintln!("\n[SKIP] …: {e}")`
+//! is several writes, but its first literal piece carries both the `\n` and
+//! the marker, which is the part that matters. It is not true of the whole tree —
 //! #718's hand-written `[SKIP]`s include unframed ones outside every profile —
 //! and the check is here for the day one of those joins a profile: fail-closed
 //! on a shape rather than trusting a census of emitters.
 
-use super::run::{describe, healthy_log_for, run_gate, run_gate_with, GateEdits, PROFILE};
+use super::run::{
+    describe, healthy_log_for, run_gate, run_gate_bytes, run_gate_with, GateEdits, PROFILE,
+};
 use crate::panic_hook::{install_line, PANIC_MARKER};
 use crate::skip::{e2e_line, skip_line, warn_line};
 
@@ -117,7 +123,7 @@ fn a_neutralised_payload_carrying_a_marker_mid_line_is_not_refused() {
     // the mid-line shape.
     //
     // The payloads also spell the prefix themselves — `a ... [WARN]` and
-    // `test x ... [WARN]` — so a pattern that let the name span a `[`, or that
+    // `test forged ... [WARN]` — so a pattern that let the name span a `[`, or that
     // was not anchored at column 0, would match them and fail this test.
     let log = format!(
         "test fake_suite::a_test ... [worker-failed] method=\"anything\\u{{1b}}[31m\\n\
@@ -142,4 +148,60 @@ fn a_failing_mid_line_scan_refuses_a_verdict() {
         "{}",
         describe(&out)
     );
+}
+
+/// Assert the gate refused `log` for a mid-line marker, quoting `quoted`.
+fn assert_refused_mid_line(tag: &str, log: &[u8], quoted: &str, env: &[(&str, &str)]) {
+    let edits = GateEdits { env, ..Default::default() };
+    let out = run_gate_bytes(PROFILE, tag, log, 0, &edits);
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("landed mid-line"), "{}", describe(&out));
+    assert!(
+        stdout.contains(quoted),
+        "the refusal must quote the offending line, not a grep notice\n{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_nul_byte_elsewhere_in_the_log_does_not_blind_the_scan() {
+    // Measured on GNU grep 3.11 (the DGX): one NUL anywhere makes the log
+    // "binary", grep prints NOTHING and exits 0 — "matched" by status, "clean"
+    // by output. A verdict read off the output passed a stranded `[WARN]`.
+    // BSD grep prints `Binary file … matches` instead, which refused only by
+    // accident, quoting the notice rather than the line.
+    let warn = warn_line("KASTELLAN_PG_REQUIRE_E2E=\"y\" is not in the flag dialect");
+    let mut log = landed_mid_line(&warn).into_bytes();
+    log.extend_from_slice(b"a worker echoed a raw \0 byte\n");
+    log.extend_from_slice(healthy_log_for(PROFILE).as_bytes());
+    assert_refused_mid_line("nul", &log, warn.trim(), &[]);
+}
+
+#[test]
+fn an_invalid_utf8_byte_on_the_stranded_line_does_not_hide_it() {
+    // Under a UTF-8 locale `[^[]*` does not match a byte that is not a
+    // character, so the line never matches (GNU grep: exit 1, "clean"). The
+    // scan must read bytes whatever the operator's locale.
+    let warn = warn_line("KASTELLAN_PG_REQUIRE_E2E=\"y\" is not in the flag dialect");
+    let mut log = b"test fake_suite::a_test ... ignored, \xffx".to_vec();
+    log.extend_from_slice(warn.trim().as_bytes());
+    log.push(b'\n');
+    log.extend_from_slice(healthy_log_for(PROFILE).as_bytes());
+    let utf8 = [("LC_ALL", "en_US.UTF-8"), ("LANG", "en_US.UTF-8")];
+    assert_refused_mid_line("invalid-utf8", &log, warn.trim(), &utf8);
+}
+
+#[test]
+fn a_stray_non_utf8_byte_does_not_fail_a_healthy_run() {
+    // The same byte on an ordinary line must not turn the gate red: under a
+    // UTF-8 locale macOS awk dies on it ("towc: multibyte conversion
+    // failure"), which refused every run whose log held one — a false red, the
+    // kind that gets a gate switched off.
+    let mut log = b"a worker echoed \xff raw\n".to_vec();
+    log.extend_from_slice(healthy_log_for(PROFILE).as_bytes());
+    let env = [("LC_ALL", "en_US.UTF-8"), ("LANG", "en_US.UTF-8")];
+    let edits = GateEdits { env: &env, ..Default::default() };
+    let out = run_gate_bytes(PROFILE, "stray-byte", &log, 0, &edits);
+    assert!(out.status.success(), "{}", describe(&out));
 }

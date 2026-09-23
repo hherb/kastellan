@@ -62,7 +62,7 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
 ### This session (2026-09-23, later): #755 — a marker stranded mid-line is refused
 
 - ⚠️ **#755's census was wrong — the sixth time.** It said `[WARN]`/`[SKIP]`/`[E2E]` were emitted
-  unframed. `skip_line`/`warn_line`/`e2e_line` have rendered `\n<marker> …\n` since #663/#720,
+  unframed. `skip_line`/`warn_line`/`e2e_line` have rendered `\n<marker> …\n` since #663/#680/#720,
   every emitter writes that in **one** `write!(out, "{}", …)`, every hand-written `[SKIP]` in a
   *profiled* suite starts with `\n`, and the capped profiles have none. **No live false green.**
   [[issue-as-filed-can-carry-a-regression]]
@@ -84,6 +84,19 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
   killed** (7 script, 5 emitter, 3 review-round). #718's unframed `[SKIP]`s outside every profile
   (e.g. `net_demo_egress_e2e`, `egress_force_routing_e2e`) would now be **refused** the day a
   profile selects them — frame them when you do.
+- ⚠️ **Review round: the new scan itself failed open on Linux** — measured on the DGX (GNU grep
+  3.11). One NUL anywhere in the log makes grep call it "binary": it prints **nothing** and exits
+  **0**, and the scan read its verdict off the (empty) output. And under a UTF-8 locale `[^[]*`
+  will not match a non-UTF-8 byte, hiding the line it sits on. Now `grep -a`, verdict from the
+  **exit status**, and the whole assertion block runs under `export LC_ALL=C` (set after the
+  cargo run, so tests keep the operator's locale) — which also stops macOS awk dying
+  (`towc: multibyte conversion failure`) on such a byte and refusing every run. The Mac's grep
+  hid the NUL case entirely; only the DGX run showed it. The fake-cargo harness now `cat`s a
+  byte file (`run_gate_bytes`) instead of a heredoc, so tests can carry those bytes. Also:
+  `panic_hook::emit_own_line` goes through a `Write` seam, so its one-write promise is now
+  pinned (a split-write mutant dies). **+5 lib tests** beyond the Mac sweep row below, which
+  predates this round. Deferred hardening (a `MarkerLine` newtype, a real-libtest control,
+  shapes the scan cannot see): [#759](https://github.com/hherb/kastellan/issues/759).
 
 ### Previous (2026-09-23): #748 — the last piece of the worker-report arc
 
@@ -427,7 +440,9 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
 
 - **[#758](https://github.com/hherb/kastellan/pull/758)** (#755) — the gate refuses a counted marker stranded mid-line after libtest's `test <name> ... `
   (both gaps); emitter one-write tests; `microvm::require_action_to` no longer skips a non-UTF-8
-  knob silently. The issue's "unframed emitters" premise was wrong.
+  knob silently. The issue's "unframed emitters" premise was wrong. Review round: the scan reads
+  bytes (`grep -a`, `LC_ALL=C`) and decides on grep's exit status — a NUL had blinded it on GNU
+  grep. Follow-ups filed as #759.
 - **#748** — a `worker-report` gate profile; the gate refuses any test binary that never reached
   the panic hook (checked at run time); a measured `[panic]` cap (`MAX_PANIC`, measured 0 on all five profiles); a knob read installs the hook through **two** doors, not one; the `microvm` profile runs for the first time since #720.
   Filed #755.

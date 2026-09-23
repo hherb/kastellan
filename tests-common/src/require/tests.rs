@@ -285,3 +285,16 @@ fn a_non_utf8_microvm_knob_warns_rather_than_reading_as_unset() {
     assert_eq!(action, UnmetAction::Skip, "a non-UTF-8 value cannot be truthy");
     out.assert_one_framed_line("[WARN]");
 }
+
+/// The micro-VM unmet path can write TWO markers — the dialect `[WARN]` from
+/// `require_action_to`, then the `[SKIP]` — and each must still be its own
+/// framed write; the per-emitter tests above pin each half alone.
+#[test]
+fn the_microvm_unmet_path_frames_its_warning_and_its_skip_separately() {
+    let _lock = crate::env::env_lock();
+    let _knob = crate::env::EnvVarGuard::set(crate::microvm::REQUIRE_ENV, "y");
+
+    let mut out = WriteRecorder::default();
+    assert!(crate::microvm::report_unmet_microvm_to("fixture absent", &mut out));
+    out.assert_framed_lines(&["[WARN]", "[SKIP]"]);
+}

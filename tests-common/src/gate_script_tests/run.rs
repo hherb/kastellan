@@ -129,6 +129,8 @@ pub(super) struct GateEdits<'a> {
     pub(super) max_panic: Option<(&'a str, &'a str)>,
     /// Extra fake tools, `(name, sh body)`, put on `PATH` beside the fake cargo.
     pub(super) tools: &'a [(&'a str, &'a str)],
+    /// Extra environment for the gate script, e.g. a UTF-8 locale.
+    pub(super) env: &'a [(&'a str, &'a str)],
 }
 
 /// The gate script's text with `profile`'s MAX_PANIC field replaced.
@@ -166,6 +168,18 @@ fn write_executable(path: &std::path::Path, body: &str) {
 
 /// [`run_gate_profile`] with [`GateEdits`] applied.
 pub(super) fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32, edits: &GateEdits) -> Output {
+    run_gate_bytes(profile, tag, log.as_bytes(), exit_code, edits)
+}
+
+/// [`run_gate_with`] for a log that is not valid UTF-8 or carries a NUL — the
+/// bytes a real run can contain and a `&str` cannot.
+pub(super) fn run_gate_bytes(
+    profile: &str,
+    tag: &str,
+    log: &[u8],
+    exit_code: i32,
+    edits: &GateEdits,
+) -> Output {
     let scratch = Scratch::new(tag);
     for (name, body) in edits.tools {
         write_executable(&scratch.root.join("bin").join(name), &format!("#!/bin/sh\n{body}\n"));
@@ -183,10 +197,13 @@ pub(super) fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32,
         }
     };
     let fake_cargo = scratch.root.join("bin/cargo");
-    // A quoted heredoc prints the log byte for byte (no expansion of `$`).
-    let body = format!(
-        "#!/bin/sh\ncat <<'KASTELLAN_FAKE_CARGO_EOF'\n{log}\nKASTELLAN_FAKE_CARGO_EOF\nexit {exit_code}\n"
-    );
+    // The log is `cat` from a file rather than a heredoc, so it reaches the
+    // gate byte for byte — a NUL or a non-UTF-8 byte included (#755).
+    let canned = scratch.root.join("fake-cargo.log");
+    let mut bytes = log.to_vec();
+    bytes.push(b'\n');
+    std::fs::write(&canned, bytes).expect("write the canned log");
+    let body = format!("#!/bin/sh\ncat '{}'\nexit {exit_code}\n", canned.display());
     write_executable(&fake_cargo, &body);
     let path = format!(
         "{}:{}",
@@ -202,6 +219,7 @@ pub(super) fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32,
         .arg(profile)
         .env("HOME", &scratch.root)
         .env("PATH", path)
+        .envs(edits.env.iter().copied())
         .output()
         .expect("run the gate script under bash")
 }

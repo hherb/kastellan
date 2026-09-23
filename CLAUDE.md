@@ -109,8 +109,9 @@ and then asserts: tests passed ≥ the profile's floor, a **per-tier** `[E2E]` f
 (per profile) a cap on `[SKIP]`, and no marker stranded mid-line where the anchored counts miss it
 (#755 — build any new marker line with `skip_line`/`warn_line`/`e2e_line`/`panic_hook::own_line`,
 which start with `\n`, and print it in **one** write). Three evidence markers are greppable in any
-run: `[SKIP]` (a test did not run), `[WARN]` (it ran but something about it was not what you think), and `[E2E]` (a
-**demanded** precondition was actually met — emitted only under a truthy knob).
+run: `[SKIP]` (a test did not run), `[WARN]` (it ran but something about it was not what you
+think), and `[E2E]` (a **demanded** precondition was actually met — emitted only under a truthy
+knob).
 
 ⚠️ **The `[E2E]` floors are per tier, and a floor of 1 is the right number.** The marker carries its
 tier (`[E2E] <tier>: <detail>`), so each floor counts only its own evidence — a single total is

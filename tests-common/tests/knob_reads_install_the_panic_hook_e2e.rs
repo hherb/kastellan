@@ -1,4 +1,4 @@
-//! Every door that reads a REQUIRE knob installs the neutralising panic hook
+//! Every door a REQUIRE knob value passes through installs the neutralising panic hook
 //! ([#748](https://github.com/hherb/kastellan/issues/748)).
 //!
 //! #745 installed the hook from `RequireKnob::action_reporting_to`, documented
@@ -61,7 +61,8 @@ fn inner_fixture_announce_demanded() {
     });
 }
 
-/// The decision door, `RequireKnob::action()`.
+/// The decision route, `RequireKnob::action()` — not itself a door: it calls
+/// both, and is pinned here as the route most suites take.
 #[test]
 #[ignore = "inner fixture: needs a fresh process; run by its parent"]
 fn inner_fixture_action() {
@@ -135,13 +136,13 @@ fn the_met_precondition_announcement_installs_the_hook() {
 }
 
 #[test]
-fn the_action_door_installs_the_hook() {
+fn the_action_route_installs_the_hook() {
     kastellan_tests_common::panic_hook::install_once();
     assert_door_installs("inner_fixture_action");
 }
 
 #[test]
-fn the_microvm_decision_door_installs_the_hook() {
+fn the_microvm_decision_route_installs_the_hook() {
     kastellan_tests_common::panic_hook::install_once();
     assert_door_installs("inner_fixture_microvm_require_action");
 }

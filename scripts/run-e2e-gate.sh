@@ -421,6 +421,14 @@ fi
 # ---------------------------------------------------------------------------
 # The assertions.
 #
+# ⚠️ Every tool below reads the log in the C locale: as BYTES, not characters.
+# The log is whatever the tests wrote, and one byte that is not valid UTF-8
+# (#755, measured) makes macOS awk die ("towc: multibyte conversion failure"),
+# so every gate run refuses; and makes GNU grep's `[^[]*` fail to match, so the
+# mid-line scan passes the line the byte sits on. Set only here, after the run,
+# so the tests themselves still get the operator's locale.
+export LC_ALL=C
+#
 # `grep -c` exits 1 on zero matches while printing `0`, so every count is
 # `|| true`-guarded: the zero case is precisely the one this script exists to
 # REPORT, not to abort on. `${x:-0}` then covers grep's OTHER non-zero exit —
@@ -487,23 +495,33 @@ fi
 # counted marker as the FIRST `[` after `test <name> ... `. That covers both
 # gaps libtest leaves open: before the result word, and between the result word
 # (`ok`, `FAILED`, `ignored, <msg>`) and its `\n`, which are separate flushed
-# writes. Every emitter in the suites the profiles select frames its line as
-# `\n<line>\n` in one write, so this should never fire; it is here for the
-# emitter that does not — the tree still has unframed hand-written `[SKIP]`s
-# outside every profile (#718) — and it catches that one without anybody
-# having to list the emitters.
+# writes. Every emitter in the suites the profiles select puts the leading `\n`
+# and its marker in the same write, so this should never fire; it is here for
+# the emitter that does not — the tree still has unframed hand-written `[SKIP]`s
+# outside every profile (#718). It catches one stranded behind libtest's own
+# prefix without anybody listing the emitters; a marker stranded behind a
+# test's own unterminated `print!`, or behind a non-pretty `--format`, is NOT
+# this shape and is not caught.
 #
-# grep exits 1 on no match (the healthy case) and 2 on error; only 2 refuses.
-MID_LINE="$(grep -E '^test [^[]+ \.\.\. [^[]*\[(SKIP|WARN|E2E|panic|panic-hook)\]' "$LOG")"
+# The verdict is grep's EXIT STATUS, never its output. Measured on GNU grep
+# 3.11: a single NUL anywhere makes the log "binary", and grep then prints
+# nothing and exits 0 — matched, yet empty. `-a` reads it as text anyway (and
+# the C locale above lets `[^[]*` match a byte that is not a character).
+# grep exits 0 on a match, 1 on none (the healthy case) and 2 on error.
+MID_LINE="$(grep -aE '^test [^[]+ \.\.\. [^[]*\[(SKIP|WARN|E2E|panic|panic-hook)\]' "$LOG")"
 MID_LINE_EXIT=$?
-if [ "$MID_LINE_EXIT" -gt 1 ]; then
-  echo "run-e2e-gate.sh: grep failed ($MID_LINE_EXIT) scanning $LOG for mid-line markers — refusing a verdict." >&2
-  exit 3
-fi
+case "$MID_LINE_EXIT" in
+  0) MID_LINE_FOUND=1 ;;
+  1) MID_LINE_FOUND=0 ;;
+  *)
+    echo "run-e2e-gate.sh: grep failed ($MID_LINE_EXIT) scanning $LOG for mid-line markers — refusing a verdict." >&2
+    exit 3
+    ;;
+esac
 
 # Belt and braces: an operand that is somehow still not a number must refuse a
 # verdict rather than silently satisfy every floor.
-for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT PANIC_COUNT BINARY_COUNT; do
+for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND; do
   case "${!var}" in
     ''|*[!0-9]*)
       echo "run-e2e-gate.sh: $var is \"${!var}\", which is not a count — refusing a verdict." >&2
@@ -575,7 +593,7 @@ if [ "$PASSED_COUNT" -gt 0 ] && [ "$BINARY_COUNT" -eq 0 ]; then
   echo "   changed, or the log is not a cargo log. Refusing rather than passing vacuously."
   FAIL=1
 fi
-if [ -n "$MID_LINE" ]; then
+if [ "$MID_LINE_FOUND" -eq 1 ]; then
   echo "❌ evidence marker(s) landed mid-line, after libtest's \`test <name> ... \`, where"
   echo "   no anchored count can see them — so every total above may be wrong. The"
   echo "   emitter printed without a leading newline: build the line with"

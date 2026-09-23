@@ -195,15 +195,14 @@ impl RequireKnob {
     /// (#748). The other is [`RequireKnob::action_reporting_to`], for callers
     /// that supply the value themselves. `microvm::require_action_to` is the
     /// one production caller: until #755 it read the environment itself, with
-    /// the lossy `.ok()` above; it now reads through here and passes the value
-    /// on, so it goes through BOTH doors. Each door is pinned alone, in its own
-    /// process, by `knob_reads_install_the_panic_hook_e2e`. A
+    /// the lossy `std::env::var(..).ok()` this method replaces; it now reads
+    /// through here and passes the value on, so it goes through BOTH doors. A
     /// knob read that goes through neither would leave the process on the
     /// default hook — which is exactly what the met-precondition path did:
     /// [`RequireKnob::announce_demanded`] reaches the knob only through here,
     /// never through `action_reporting_to`, so on a healthy micro-VM host every
     /// green gate run had the default hook. `knob_reads_install_the_panic_hook_e2e`
-    /// proves each door in its own process.
+    /// pins each door alone, in its own process.
     pub(crate) fn raw(&self) -> Option<String> {
         crate::panic_hook::install_once();
         match std::env::var(self.env) {

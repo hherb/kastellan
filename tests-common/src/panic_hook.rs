@@ -122,15 +122,32 @@ pub fn own_line(line: &str) -> String {
     format!("\n{line}\n")
 }
 
-/// Print [`own_line`]`(line)` to stderr as a single `write_str`.
-///
-/// `eprint!("{s}")` with one argument and no literal pieces formats to one
-/// `write_str` call — unlike `eprintln!("\n{line}")`, whose literal `\n` and
-/// argument are separate writes that something else could land between.
-/// Still a `print` MACRO, so libtest's capture sees it.
+/// Print [`own_line`]`(line)` to stderr as a single write.
 fn emit_own_line(line: &str) {
-    let framed = own_line(line);
-    eprint!("{framed}");
+    emit_own_line_to(line, &mut EprintSink);
+}
+
+/// [`emit_own_line`] with the destination supplied, so a test can count the
+/// writes (#755) — a `Vec<u8>` cannot tell one framed write from
+/// `eprintln!("\n{line}")`'s two, and only the first is safe.
+fn emit_own_line_to(line: &str, out: &mut dyn std::io::Write) {
+    let _ = out.write_all(own_line(line).as_bytes());
+}
+
+/// Stderr through the `eprint!` MACRO, so libtest's capture sees it: one
+/// `eprint!("{}", s)` per `write`, and one argument with no literal pieces
+/// formats to one `write_str`.
+struct EprintSink;
+
+impl std::io::Write for EprintSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        eprint!("{}", String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 static INSTALLED: Once = Once::new();
@@ -174,8 +191,8 @@ pub fn is_installed() -> bool {
 /// ⚠️ **Before that it was installed from `action`, which is not a door at
 /// all** (#745) — `action` merely calls both. The whole **`microvm` profile**
 /// went round it: `microvm::skip_unless_ready` reached the knob through
-/// `require_action_to` → `action_reporting_to` (since #755 it calls `raw()`
-/// first, so it passes both doors). It was covered only when a
+/// `require_action_to` → `action_reporting_to` (since #755 `require_action_to`
+/// calls `raw()` first, so the route passes both doors). It was covered only when a
 /// co-set knob happened to be read first, which is coverage by accident
 /// dressed as coverage by construction [[guard-shares-the-census-blind-spot]].
 /// Moving the install one level down, into `action_reporting_to`, closed THAT

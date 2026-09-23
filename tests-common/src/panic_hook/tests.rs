@@ -227,3 +227,14 @@ fn installing_twice_is_harmless() {
     install_once();
     install_once();
 }
+
+/// #755: the hook's own lines reach stderr as ONE framed write. The renderer
+/// test above pins the frame; this pins that the emitter does not split it —
+/// `eprintln!("\n{line}")` is the two-write spelling that lets another
+/// thread's output land between the newline and the marker.
+#[test]
+fn the_hook_emits_its_own_line_as_one_framed_write() {
+    let mut out = crate::write_recorder::WriteRecorder::default();
+    emit_own_line_to(&install_line(), &mut out);
+    out.assert_one_framed_line(HOOK_INSTALLED_MARKER);
+}
