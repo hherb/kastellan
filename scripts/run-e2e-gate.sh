@@ -118,6 +118,8 @@ done
 #
 # MAX_SKIP is `any` or a number. `guard-tier` is 0: every precondition in its
 # `bootstrap()` is knob-routed, so a `[SKIP]` there is by definition a bypass.
+# `worker-report` is 0 for the same reason: its one precondition is
+# `skip_if_sandbox_unavailable`, and the other four suites are hermetic.
 # The rest stay `any` while #718's 92 hand-written `[SKIP]` sites exist.
 #
 # ⚠️ Harness args are per profile because the Firecracker suites are `#[ignore]`:
