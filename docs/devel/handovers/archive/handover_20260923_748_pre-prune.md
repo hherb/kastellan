@@ -4,25 +4,31 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260923_748_pre-prune.md`](archive/handover_20260923_748_pre-prune.md),
+> [`archive/handover_20260922_745_pre-prune.md`](archive/handover_20260922_745_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-23 (#748: a `worker-report` gate profile, a run-time check that every
-profiled test binary reached the panic hook, and a measured `[panic]` cap) ·
-**Recent PRs, newest first:** [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Last updated:** 2026-09-22 (#746/#747/#749: the review round's three code follow-ups —
+a read-error drain stops earning the "suspect a kill" diagnosis, the **third** renderer of the
+same tail is fixed, and the panic hook can no longer SIGABRT) ·
+**Recent PRs, newest first:** [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
-[#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
-[#731](https://github.com/hherb/kastellan/pull/731) (#725), [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700),
-[#726](https://github.com/hherb/kastellan/pull/726) (#719), [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob contract).
-**The #725 → #748 worker-report arc is closed**, #748 being its last piece. Its review residue
-is filed as #751–#754, and #748 filed **#755** (evidence markers landing mid-line — `[WARN]` and
-`[SKIP]` fail open). Older filings are in the [`archive/`](archive/) snapshots;
-**`gh issue list --state open` is the live answer** and the only one worth trusting. ·
-**The DGX runs `main` as of #709**, redeployed 2026-09-17. **A redeploy is owed for #743 + #745 +
-#750** (diagnostics only; #748 is test-harness only and needs none). Rootfs images last rebuilt
-2026-09-08.
+[#740](https://github.com/hherb/kastellan/pull/740) (#736, the `anyio` security floor),
+[#735](https://github.com/hherb/kastellan/pull/735) (#730), [#731](https://github.com/hherb/kastellan/pull/731) (#725),
+[#728](https://github.com/hherb/kastellan/pull/728) (#699, #700), [#726](https://github.com/hherb/kastellan/pull/726) (#719),
+[#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob contract),
+[#709](https://github.com/hherb/kastellan/pull/709) (#701), [#702](https://github.com/hherb/kastellan/pull/702) (#677).
+**The whole #725 → #750 worker-report arc is now closed**, including its review residue:
+#725, #730, #732, #733, #734, #737, #738, #739, #742, #746, #747 and #749 are all shipped.
+**#748 is the one piece left** (the worker-report e2e suites are in no gate profile).
+Older filings are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the
+live answer** and the only one worth trusting. ·
+**The DGX runs `main` as of #709**, redeployed 2026-09-17 and verified. **A redeploy is owed for
+#743 + #745 + #750** — #743 added daemon-visible failure reporting, #745 made those reports survive
+an operator's `RUST_LOG`, and #750 stops three of them asserting more than they know. Not urgent
+(diagnostics only), but the DGX is where the Matrix and email channels run, so it is where this
+arc pays. Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -60,125 +66,227 @@ is filed as #751–#754, and #748 filed **#755** (evidence markers landing mid-l
 
 ## Current state
 
-### This session (2026-09-23): #748 — the last piece of the worker-report arc
+### This session (2026-09-22, third): #746 + #747 + #749 — the review round's code residue
 
-Three gaps in what `scripts/run-e2e-gate.sh` demanded. Full prose in the commit message.
+PR [#750](https://github.com/hherb/kastellan/pull/750). Three defects #745's review filed rather
+than fixed. Full prose in the ROADMAP entry and the commit messages.
 
-- **A `worker-report` profile** selects the five suites that prove a dying worker's last words
-  reach a failing test, across **two packages** (`-p kastellan-core -p kastellan-tests-common`;
-  cargo accepts it, measured). Only the sandbox knob — one suite needs a sandbox, four are
-  hermetic, none needs PG or a guard backend — so unlike `guard-tier` it runs on **both hosts**.
-  ⚠️ The issue proposed appending to `guard-tier`; that would have run them only where Shieldstral is.
-- **Every test binary a profile runs must reach the neutralising panic hook, checked at RUN time.**
-  `install_once()` prints one `[panic-hook]` line per process; the gate splits its log at cargo's
-  `Running` headers and refuses any section without one. ⚠️ **A static source scan was the
-  approved design and was abandoned mid-task**: suites reach the knob through a dozen indirect
-  `tests_common` helpers, so "references a knob helper" needs a list of helper names — a census
-  [[guard-shares-the-census-blind-spot]]. The real profile, run **before** the hermetic suites were
-  fixed, refused **exactly the four** binaries that never read a knob — including
-  `panic_hook_gate_safety_e2e`, whose *child* reads one and whose parent does not.
-  ⚠️ **A hermetic suite in a profile must call `panic_hook::install_once()` as the first statement
-  of every parent test.** It has no knob to do it implicitly.
-- **A 9th profile field, `MAX_PANIC`.** No suite any profile selects has a `#[should_panic]` (the
-  issue's ~22 baseline is `src/` unit tests, which `--test` never selects). **Measured 0 on all
-  five profiles**: `worker-report`, `pg`, `gliner` (Mac), `guard-tier` and `microvm` (DGX).
-  ⚠️ **The cap has no floor and cannot have one** — a binary whose panics went through the
-  *default* hook also counts zero. The per-binary hook check is what makes the cap sound.
-- ⚠️ **A marker can land MID-LINE under `--nocapture`, and the anchored grep then misses it.**
-  libtest's `test <name> ... ` (stdout, no newline yet) and our stderr share one merged pipe. It
-  flaked the new check once — one run green, the next identical run red — and for `[panic]` it
-  would be a false **green** against the cap. Fixed for the two markers #748 owns:
-  `panic_hook::own_line` frames each as `\n<line>\n`, emitted as **one** `write_str` (a single
-  write under `PIPE_BUF` to a pipe is atomic). ⚠️ **`eprintln!("\n{x}")` is TWO writes** — literal
-  piece and argument — so the frame is built first and printed with `eprint!("{framed}")`. The
-  pre-existing `[WARN]`/`[SKIP]`/`[E2E]` share the exposure: **#755**, where `[WARN]` fails open.
-- ⚠️ **Found on the way: the `microvm` profile had refused EVERY run since #720** (2026-09-17).
-  `firecracker_suites` emits all 15 `--test` targets on **one line**, and the floor check counted
-  them with `grep -c`, which counts **lines** — so discovery read 1 against a floor of 12 and the
-  script exited 2 before running anything. **No `microvm` gate log existed on either host.** Never
-  reached on the Mac (the `os` check refuses first); no test ran it. Fixed (`count_test_targets`
-  counts tokens), and `gate_script_tests` now runs the script's **real** discovery through the
-  **real** count on the real tree — with the old body it reproduces the DGX refusal on the Mac.
-  [[grep-c-counts-lines-not-matches]]
-- ⚠️ **And the runtime check then caught a hole in #745's own hook, on its first real run.** The
-  `microvm` profile (once runnable) refused **all 15** binaries while printing 65 knob-gated
-  `[E2E]` lines: a healthy micro-VM host meets every precondition, never reaches
-  `action_reporting_to`, and reads the knob only to announce — via `announce_demanded_to` →
-  `raw()`, which did not install the hook. So **every green micro-VM gate run had the default
-  hook**, while the docs claimed one chokepoint covered every read. **A knob has TWO doors**
-  (`raw()`, `action_reporting_to`); both install now, and `knob_reads_install_the_panic_hook_e2e`
-  proves each in its own child (the install is a per-process `Once`). A static scan would have
-  passed all 15 — this is the case for choosing the runtime check.
-- **Mutants: 7 of 8 killed.** The survivor is `worker-report`'s cap reverting to `any` — kept
-  unpinned deliberately, since pinning a measured number in a test is a second copy of the census.
-- ⚠️ **On this Mac the `pg`/`gliner` profiles need `KASTELLAN_PG_BIN_DIR`** set to Postgres.app
-  v18, or they fail "no Postgres install found" — the memory note says so, and it was still
-  forgotten on the first run [[postgres-app-bin-paths]].
-- **#756's review.** ⚠️ **The `[panic]` cap is blind to a panic that beats its binary's first knob
-  read** — filed **#757**; fixing it needs a *measured* default-hook count per profile, DGX too.
-  Four surviving mutants now killed: unframed `eprintln!` in the hook (fixture on a **merged**
-  stream), `-gt 0`, no awk exit check (fake `awk`), no `MAX_PANIC` validation — cap tests run an
-  **edited copy** of the table, since every committed cap is 0. The announcement left the `Once`
-  (a failed write inside `call_once` poisoned it).
+- **#747 — a drain that ends in a READ ERROR is not a silent worker.** `mark_drained()` after a
+  failed read is deliberate (a waiter must not burn the 250 ms cap because the pipe broke), but
+  recording it as **EOF** made `is_known_silent()` true for an empty tail, so the report printed
+  the one sentence only a *known* silence earns. A guest fd returning `EIO` on teardown therefore
+  sent an operator to audit cgroups and seccomp for a worker that spoke fine into a pipe we lost.
+  `drain_reader` now returns `DrainEnd::{Eof, ReadError}` (`#[must_use]`) and the tail stores it.
+- ⚠️ **The predicate pair is GONE, replaced by an exhaustive `TailState`.** `is_complete()` +
+  `is_known_silent()` + `lines()` carried their combining rule in a **doc comment** — *match
+  `is_known_silent()` first* — and that convention had failed **twice out of three** renderers
+  (#732 was one, #746 the other). All three renderers now match `CapturedTail::state()`, so a
+  forgotten case does not compile. **Deliberately not `#[non_exhaustive]`**: breaking every
+  renderer when a state is added is the entire point.
+- **#746 — the third renderer.** `egress::spawn::stderr_note` polled for a *non-empty* snapshot
+  rather than for EOF, and collapsed the `None` (unpiped) arm into the same "no stderr captured"
+  string that describes a silent proxy. Now routed through `collect_tail_after_drain` with the
+  full seven-state rendering. `STDERR_SETTLE` is deleted — it was a second spelling of
+  `TAIL_DRAIN_WAIT` (both 250 ms), so **the issue's "the wait semantics differ" caveat is about
+  the PREDICATE, not the duration**.
+- **#749 — the panic hook could SIGABRT.** Its `eprintln!` panics on a failed write, and a panic
+  *inside a panic hook* is a panic while panicking: immediate abort, **no output on any stream**,
+  and libtest's own `test result: FAILED` line lost too. Strictly worse than #733, where only a
+  report went missing. Measured on this Mac: unguarded → **signal 6, nothing anywhere**; guarded →
+  exit 101 with **libtest still reporting the failure**. ⚠️ **Not "message intact"** — on that fd
+  the panic text is exactly what cannot be written, and dropping it is the guard's whole job. What
+  survives is the *account* of the failure. The review round below found that wrong phrasing in
+  three places in the tree plus this line. Fixed by reusing the ONE probe, exported as
+  `#[doc(hidden)] pub fn worker_stderr::stderr_is_writable()` the way `untrusted_text` already is.
+- ⚠️ **It takes no `fd`, deliberately.** The mutant #745's review found surviving even
+  `-D warnings` was probing `STDOUT_FILENO` — stdout is writable in every test binary. A
+  parameterless export cannot be called wrongly that way.
+- ⚠️ **`spawn_drain_with_tail`'s closure had to be extracted (`drain_and_mark`) to be testable at
+  all** — its reader is a `ChildStderr` no unit test can construct, so a mutant hard-coding
+  `DrainEnd::Eof` (i.e. #747 in full) survives every suite until the extraction. Same shape #737
+  hit [[unreachable-success-path-proves-nothing]].
+- ⚠️ **The movement-only commit introduced a real bug and one test caught it.** Binding
+  `let lines = tail.snapshot();` above the wait reads as a harmless reorder and *is* #730. **Two**
+  tests pin that order, and both stage the race with a drainer that writes 30 ms late:
+  `collecting_a_worker_tail_waits_for_the_drainer_instead_of_racing_it` (#735) and
+  `stderr_note_waits_for_the_drainer_instead_of_racing_it` (#746, added by this PR). The site said
+  "the only thing in the tree" until the review round below; a freshly-written claim its own PR
+  contradicted.
+- **Mutants: 14/14 (#747), 5/5 (#746), 4/4 across the host PAIR (#749).** ⚠️ The last is why both
+  hosts ran: pruning `POLLHUP` is **KILLED on the Mac and SURVIVES on Linux**, pruning `POLLERR`
+  the mirror image — measured on both this session. **Neither host alone can prove that mask.**
+- ⚠️ **One mutant needed a fixture that stages the production race.** Deleting `stderr_note`'s
+  wait survives every *other* test in that file, because they all hand it an already-drained tail.
+- **Files:** `worker_stderr/mod.rs` was 617 lines against the 500 cap, so `CapturedTail` moved to
+  `captured.rs` in a **movement-only commit first**, proven by byte-identity of both moved regions
+  plus a negative control. mod.rs is now 578.
 
-### Previous (2026-09-22): #750 — #746, #747, #749 and its review round
+### Same session, #750's own review round (five reviewers + verification)
 
-Full prose in [`archive/handover_20260923_748_pre-prune.md`](archive/handover_20260923_748_pre-prune.md).
-What still binds:
+Findings applied on the branch. No correctness defect was found in the production code; the
+cluster that mattered was **confidently-worded comments that were false**, which in this tree is
+what the next session builds on.
 
-- ⚠️ **Renderers match an exhaustive `TailState`**, deliberately **not** `#[non_exhaustive]`: the
-  documented arm-order convention it replaced failed twice out of three renderers.
-- ⚠️ **`stderr_is_writable()` takes no fd, deliberately** — a surviving mutant probed `STDOUT_FILENO`,
-  which is writable in every test binary. **`POLLERR`/`POLLHUP` are one bit per host**: neither host
-  alone proves that mask.
-- ⚠️ **A fix for a reviewer's finding carried the next defect, twice**: a harmless-looking hoist of
-  `tail.snapshot()` *was* #730; a loud arm put ~125 `error!` lines per failure in a 2 ms poll loop.
-  [[a-fix-for-a-reviewers-finding-can-carry-the-next-defect]]
-- ⚠️ **Two reviewers in one worktree fabricated a "flake"** (one ran a mutant while the other
-  tested). Cargo's `…-c4860b16…` suffix is a *metadata* hash, stable across content changes, so
-  "same binary" proves nothing. **Give a mutating reviewer its own worktree, and bracket every sweep
-  with a sha of the sources** [[never-edit-tree-during-a-sweep]].
-- ⚠️ **Confidently-worded comments were the defect class** (six false ones fixed): the private
-  fields of `CapturedTail` are a **clarity** boundary, not a security one — `complete(vec![])`
-  forges `KnownSilent` in one call.
+- ⚠️ **A "flake" that was an ARTEFACT OF TWO AGENTS SHARING ONE WORKTREE.** A reviewer reported
+  the new #749 e2e aborting with SIGABRT four times, then passing 140+ — and read it as a possible
+  real flake blocking merge. It was not: a *second* reviewer was concurrently running a mutation
+  test in the same worktree and target dir, with the guard deleted. Settled on a verified-clean
+  tree: **200/200 inner fixture, 100/100 parent, zero aborts.** ⚠️ **The "same binary, mtime
+  unchanged" reasoning does not rule this out** — `…-c4860b16b9d14aba` is Cargo's *metadata* hash
+  and is stable across content changes. This is [[never-edit-tree-during-a-sweep]] with a new
+  shape: not a sweep, but two reviewers. **Give a mutating reviewer its own worktree.**
+- **Six factually wrong comments, fixed.** "message intact" (3 copies + this file); `Integration
+  tests do not inherit the library's [dependencies]` (**false** — disproven in-tree: `core/tests/*`
+  name `serde_json`, declared only under `[dependencies]`; the real reason the dev-dep is needed
+  is that `libc` is only *transitive* in `tests-common` and so not nameable — and the same false
+  rule justifies two genuinely **redundant** entries in `core/Cargo.toml`, now labelled);
+  `collect_tail_after_drain` "two callers" (**three** since #746, and the third is not behind a
+  `Client`); "the three named constructors" (**four**); "the only thing in the tree that pins this
+  order" (**two**, the second added by the same PR); and a dangling "points somewhere different
+  from the first" whose referent moved when the table grew.
+- ⚠️ **"The fields are PRIVATE so the claim cannot be forged" OVERSTATED what the API delivers.**
+  `complete(vec![])` forges `KnownSilent` in one call, and `from_drain` takes the outcome as an
+  argument. What private fields actually buy is no post-hoc mutation, no accidental struct-literal
+  or `Default` path, and a construction that reads as an assertion at the site — a **clarity**
+  boundary, not a security one. The doc now says so; `mark_drained` is the security-shaped door.
+- **A census that was not tied to what it counted.** `every_tail_state_is_reachable_from_a_constructor`
+  asserted a hard-coded `6` against `format!("{s:?}")` names, so a seventh `TailState` variant
+  would leave it green while the new arm was reachable from no constructor. Now an **exhaustive
+  match** helper plus an `ALL_STATES` list: a new variant breaks both halves.
+  [[guard-shares-the-census-blind-spot]]
+- **A test named for seven states that covered six** (`format_death_report`). Six is correct, and
+  for a stronger reason than the comment gave: the renderer takes `&CapturedTail` (the `Option` is
+  on the exit *status*) and `death_report` returns `None` outright when there is no tail, so the
+  "not piped" state cannot reach it. Renamed, reason recorded.
+- **The #749 e2e could not see its own mutant.** `stderr_is_writable() -> false` passed the whole
+  file — no signal ✓, `test result: FAILED` ✓, payload absent ✓ — because there silence is the
+  *expected* outcome. Only a suite in a **different crate** killed it. Added
+  `a_panic_with_a_healthy_stderr_still_renders_the_message`, and **verified by mutation that it
+  kills while the pre-existing test still passes.** Also: the "payload not on stderr" assertion
+  cannot fail (the fixture's own `dup2` guarantees it) — kept, but relabelled as the statement of
+  cost it is rather than the fixture control it claimed to be; and both `close()` calls are now
+  checked, since a failed `close(read)` would silently make the property vacuous.
+- **The discarded `io::Error` now reaches the log** (`tracing::warn!` with `error` + `kind`). It
+  existed nowhere else, and the renderers hard-code "suspect the transport … not the worker" —
+  right for `EIO`, misleading for `EBADF`, where the fault is our own fd handling. `spawn_drain`
+  likewise warns: after a read error **nothing is draining that pipe**, which is the deadlock the
+  module exists to prevent. `decode_drain_end`'s unknown-byte arm is now loud for the same reason
+  (deliberately **not** a `debug_assert!` — that would make the fail-safe property untestable and
+  diverge debug from release).
+- ⚠️ **THE REVIEW'S OWN FIX CARRIED THE NEXT DEFECT — again, and self-review caught it.** Making
+  `decode_drain_end`'s unknown-byte arm loud put a `tracing::error!` inside a function
+  `wait_for_drain` calls **every 2 ms for the full 250 ms cap**: ~125 identical error lines per
+  worker failure, on the one path that has to stay readable. It also falsified the function's own
+  first doc word, `Pure:`, one line above the edit. Fixed by splitting the question — a pure
+  `is_known_drain_byte`, with the waiter warning **once** behind a local flag.
+  ⚠️ **The dangerous mutant is dropping `DRAIN_IN_PROGRESS` from that predicate**, which would make
+  *every normal wait* log an error — the same flood on the *happy* path. Both directions
+  mutation-KILLED by the new test. [[a-fix-for-a-reviewers-finding-can-carry-the-next-defect]]
+- ⚠️ **And the session repeated `never-edit-tree-during-a-sweep` ITSELF**, having just written that
+  memory up: a sweep was running while the tree was mutated for that mutation check. The run was
+  **discarded and re-run**, and the final one is bracketed by a sha of the mutated file **before and
+  after** — identical, so the log proves the tree did not move under it. Do that bracketing by
+  default; it costs one line and converts "I think nothing moved" into evidence.
+- **Evidence.** Post-review sweep **4453 / 0 / 42 over 185 suites, `TEST_EXIT=0`, `[WARN]` 0**
+  (`--no-fail-fast`, full log under `$HOME`, default target dir
+  [[custom-cargo-target-dir-breaks-daemon-e2e]] [[a-truncated-gate-log-is-not-a-gate]]). Delta vs
+  XX  (`a_panic_with_a_healthy_stderr_still_renders_the_message`), +1 ignored
+  (`inner_fixture_panics_with_a_healthy_stderr`), suite count unchanged. Cold clippy **27/27
+  crates, exit 0, 0 warnings** (fresh target dir — an incremental re-run showed only **3**
+  `Checking kastellan` lines and would have been no proof at all); rustdoc **0 warnings in any
+  touched file** (142 pre-existing elsewhere) — #750 had introduced one `private_intra_doc_links`
+  by linking `pub(crate) mark_drained` from a `pub` type, now named rather than linked.
+  ⚠️ **`egress_proxy_e2e` was skip-as-pass in a fresh worktree** (no proxy binary), so the one
+  real-child proof of the rewritten `stderr_note` had not run. Built it and ran the tier:
+  `sidecar_with_unreadable_extra_ca_fails_fast_with_reason` **passes for real**, with
+  `[E2E] sandboxed` markers. [[stale-fixture-turns-a-gate-into-a-formality]]
+- **Deferred, filed not fixed:** [#751](https://github.com/hherb/kastellan/issues/751) (the guard
+  probes fd 2, but libtest's capture does not write there — a measured *silent swallow* under
+  capture; needs a `println!` fallback and a capture-on test),
+  [#752](https://github.com/hherb/kastellan/issues/752) (`OnceLock<DrainEnd>` over the hand-rolled
+  `AtomicU8`; unblocks `ReadError(ErrorKind)`),
+  [#753](https://github.com/hherb/kastellan/issues/753) (public surface wider than any consumer on
+  a **published** crate; the non-`#[non_exhaustive]` choice is an unstated semver-major commitment),
+  [#754](https://github.com/hherb/kastellan/issues/754) (no real-child `ReadError` coverage; three
+  remaining `try_wait`/read conflations of the same shape).
 
 ### Previous (2026-09-20/22): the #725 → #745 worker-report arc
 
-PRs #731, #735, #743, #745. What still binds:
+PRs [#731](https://github.com/hherb/kastellan/pull/731) (#725),
+[#735](https://github.com/hherb/kastellan/pull/735) (#730),
+[#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
+[#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742). Full prose in
+[`archive/handover_20260922_745_pre-prune.md`](archive/handover_20260922_745_pre-prune.md) and its
+siblings. What still binds:
 
 - ⚠️ **The delivery check must expand at the EMITTER's callsite — `warn_and_fall_back!` is a MACRO
-  and must stay one**, and every field the `warn!` carries must be named in the check, **`message`
-  included** (forgetting it reopened #734 inside its own fix).
+  and must stay one.** `event_enabled!` carries the `module_path!` of wherever it is *written* and
+  `EnvFilter` matches exactly that, so a hoisted check reports "delivered" for a dropped event.
+  ⚠️ **Every field the `warn!` carries must be named in the check, implicit ones included** — a
+  `warn!("{line}")` always carries `message`, and forgetting it reopened #734 *inside its own fix*.
+- ⚠️ **`is_known_silent()` used to be the only predicate licensing a DIAGNOSIS; since #750 that is
+  `TailState::KnownSilent`**, and the renderers are exhaustive rather than order-dependent.
 - ⚠️ **`eprintln!` is load-bearing, not style** [[libtest-capture-only-print-macros]], and a
-  *captured* one returns on the child's **stdout** — read a child's two streams separately.
-- ⚠️ **No marker may begin with `[SKIP]`/`[WARN]`/`[E2E]`** — hence `[worker-failed]`,
-  `[worker-death]`, `[worker-down]`, `[panic]` and now `[panic-hook]` (disjoint both ways, tested).
+  *captured* one returns on the child's **stdout** — a suite that merges the child's two streams
+  cannot test its own claim. **Read them separately.**
+- ⚠️ **No marker may begin with `[SKIP]`/`[WARN]`/`[E2E]`** — `run-e2e-gate.sh` greps those anchored
+  at line start and asserts zero `[WARN]`. Hence `[worker-failed]`, `[worker-death]`,
+  `[worker-down]` and `[panic]`: one renderer, one delivery check, one neutralisation.
+- ⚠️ **"Production" is not "the daemon".** `kastellan-cli` installs no subscriber anywhere.
 - ⚠️ **`shutdown()` joins the driver thread, and that join is the only proof the report was
-  emitted.** `WorkerRetirementCause::from_client_error` is THE census; `ToolHostError::Io` is
-  pre-spawn, pinned by a `compile_fail` doctest. `PanicHookInfo` cannot be named (MSRV 1.78), and
-  the hook is installed from `action_reporting_to`, **not `action`**.
+  emitted** — a fixture asserting on `h.call(…)` returning is a race that passes on an idle machine.
+- ⚠️ **`WorkerRetirementCause::from_client_error` is THE census** and `dispatch_indicates_worker_dead`
+  delegates to it, so a variant cannot be fatal-but-unreportable. `ToolHostError::Io` is **pre-spawn**
+  and lost its blanket `#[from]`, pinned by a `compile_fail` doctest.
+- ⚠️ **`PanicHookInfo` cannot be named** (stable 1.81 vs `rust-version = "1.78"`), and the hook is
+  installed from `RequireKnob::action_reporting_to` — **not `action`**, which the whole `microvm`
+  profile goes round. ⚠️ Suites with **no knob are not covered**, deliberately.
+- ⚠️ **Review rounds repeatedly found suites unable to prove their own central claim** — merged
+  streams; a deleted `neutralise_controls` passing on a clean literal; a `None` arm no fixture
+  executed; a report that never waited for the drain [[mutation-proof-counts-only-mutants-you-tried]].
 
-### Previous (2026-09-17/19): #699/#700, #719, #720, #717, #709, #702
+### Previous (2026-09-19): #699 + #700, #677/#560, #719
 
 Full text in [`archive/handover_20260921_730_pre-prune.md`](archive/handover_20260921_730_pre-prune.md).
 
-- **#699 + #700** (PR #728) — each `plans_so_far` step carries a screened `"call"`; the **oldest
-  calls' `parameters`** drop first under budget. ⚠️ **Hardening that rewrites screened text must ADD
-  readings** [[screen-hardening-must-add-readings]]. ⚠️ **Not yet measured live** — needs a
-  multi-search mail question in a **fresh DM room** (a same-room one inherits prior calls since #709).
-- **#719** (PR #726) — workers start in `/` (Seatbelt `getcwd()` EPERM); host-mode gliner opts into
-  `ephemeral_scratch`. ⚠️ **A sandbox that restricts but does not relocate leaks the caller's
-  context into the jail.** Delete `__pycache__` after mutating a `.py` [[mutation-testing-leaves-stale-pyc]].
-- **#720** — **Every gate needs a REQUIRE knob *and* a positive control that fails when zero tests
-  ran.** One `RequireKnob` vocabulary; a tier is one `const`. ⚠️ **No `sandbox`/`container`
-  profile yet — both would be red on every host** (#718: 92 hand-rolled `[SKIP]`s; #722).
-- **#717** — ⚠️ **the ROADMAP is the accurate source; GitHub issues are the stale mirror.**
-- **#709 (#701)** — a channel task writes `tasks.turn_record` = `{calls, data_class}`; the next task
-  in the same conversation reads up to 3, screened, and inherits their floor — from every turn
-  **loaded**, not those the screen kept. ⚠️ **A security property can be documented, tested, and
-  absent** (`inherit_floor` read the wrong field). Email is still stateless.
-- **#702 (#677)** — `result_view` is the planner's pruned, labelled JSON view of a step.
-  ⚠️ **Keys never reach the guard model** (#703).
+**#699 + #700** (PR #728) — each `plans_so_far` step carries a screened
+`"call": {tool, method, parameters}`; calls' bytes come off `PLANS_SUMMARY_BUDGET` first, then the
+**oldest calls' `parameters`** drop. ⚠️ **A hardening that rewrites screened text must ADD
+readings, never replace them** [[screen-hardening-must-add-readings]]. Deferred: #729.
+⚠️ **Not yet measured live** — re-run a multi-search mail question in a **fresh DM room**, which
+is also what #677/#560's live re-measure needs: since #709 a same-room question inherits the prior
+turns' calls, voiding the test.
+
+**#719** (PR #726) — both causes inside `import torch`: `getcwd()` → EPERM under Seatbelt (workers
+now start in `/`), and torch's compile cache at import (host-mode gliner opts into
+`ephemeral_scratch`). ⚠️ **A sandbox that restricts but does not relocate leaks the caller's context
+into the jail.** ⚠️ **gliner is the first WARM worker on `ephemeral_scratch`.** ⚠️ **After mutating
+a `.py`, delete its `__pycache__`** [[mutation-testing-leaves-stale-pyc]].
+
+### Previous: #720 / #717 / #709 / #702 — contract, triage, continuity, result view
+
+**#720** (closed #714, #622, #664):
+
+> **Every gate needs a REQUIRE knob *and* a positive control that fails when zero tests ran.**
+
+`tests_common::require::RequireKnob` is the one vocabulary and the knob is **data**, so a tier is one
+`const`. ⚠️ **A knob alone was never enough (#664):** it fires only inside a test body, so a
+filtered-out run emits no `[SKIP]` and exits 0 — hence `[E2E]` markers and per-tier floors in
+`scripts/run-e2e-gate.sh`. **Use it whenever a run is meant to be evidence.** ⚠️ **No `sandbox` or
+`container` profile yet — both would be red on every host** (#718: **92 sites in 47 files** bypass
+`skip_line`; #722: the container helpers have no knob).
+
+**#717.** ⚠️ **The ROADMAP is the accurate source; GitHub issues are the stale mirror.** Every open
+issue carries one `area:*` label; `main` has required status checks (#655).
+
+**#709 (#701).** A finishing channel task writes `tasks.turn_record` = `{calls, data_class}` in the
+*same* `finalize` UPDATE; the next task in the same `(channel, peer, conversation)` reads up to 3,
+screened and budgeted, and inherits their floor. **Calls, not results.** ⚠️ **No upper bound on the
+window, deliberately**, and **the floor comes from every turn LOADED, not those the screen kept.**
+⚠️ **A security property can be documented, tested, and absent** — `inherit_floor` read the wrong
+field while three one-leg tests defended it. **Email is still stateless.** Deferred: #710–#713,
+#715, #716. **#702 (#677):** `inner_loop/result_view` is the planner's view of a successful step —
+pruned, labelled JSON. ⚠️ **Keys never reach the guard model** (#703). Budgets 16 KiB/step, 96 KiB.
 
 ### Merged arcs — only what still binds
 
@@ -259,12 +367,15 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    cursor restart, filter-only search, compact hits, attachments by `message_id` + name, a distinct
    expired-credential error) are **not yet filed** on `hherb/localmail`.
 
-3. **#755 first — it is the one false-green left in the gate itself.** `[WARN]` (hard zero) and
-   `[SKIP]` (capped at 0 on two profiles) can land mid-line and go uncounted. The fix exists
-   (`panic_hook::own_line`); route `RequireKnob::announce*`, `skip_line` and
-   `warn_if_out_of_dialect` through it, each with an emitter-level "starts with `\n`" test. ⚠️
-   `warn_if_out_of_dialect` takes a `&mut dyn Write`, so `writeln!` there is two writes — one
-   `write_all` of the framed string. Then the #750 residue, #751–#754.
+3. **The worker-report arc is CLOSED except [#748](https://github.com/hherb/kastellan/issues/748)**
+   (the worker-report e2e suites are in **no gate profile**; nothing enforces that a profiled suite
+   reads a knob; `[panic]` is counted by nothing). #750's own new suite,
+   `tests-common/tests/panic_hook_broken_stderr_e2e.rs`, joins that list — it is in no profile
+   either. What the arc leaves behind is four standing rules, each of which cost a session: a
+   delivery check must expand at the **emitter's** callsite; every field the `warn!` carries must
+   be named in the check, **`message` included**; `POLLERR`/`POLLHUP` are **one bit per host** and
+   neither host alone proves the mask; and a renderer must match an **exhaustive** `TailState`,
+   because the documented arm-order convention failed twice out of three.
 
 4. **Test-harness honesty, now that the gate itself is tested.**
    [#718](https://github.com/hherb/kastellan/issues/718)
@@ -331,9 +442,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `core/src/channel/bus.rs`, `workers/matrix/src/sdk_live.rs`, `llm-router/src/messages.rs`,
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`.
 ⚠️ **#743 and #745 both grew files already over cap without splitting them** (`tool_host.rs`,
-`worker_lifecycle/persistent.rs`); #750 split `worker_stderr/mod.rs` **first** instead. #748
-pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it also grew
-`scripts/run-e2e-gate.sh` to 561 (shell, not split) and `require.rs` 647→661 (already over).
+`worker_lifecycle/persistent.rs`); #750 split `worker_stderr/mod.rs` **first** instead.
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
 (seam in `confine.rs`); python-exec Phase 4 curated wheels; web-research polish; an ANN index on
@@ -366,8 +475,8 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#748 — **the gate that stands**) | branch tip | **4471 / 0 / 45**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **12** (8 container, 4 gliner opt-in), `[panic]` **0**, source sha **identical before and after**. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4`, primary checkout. **Delta vs the row below reconciles EXACTLY: +18 passed / +3 ignored / +1 suite** — `panic_hook` +3, `gate_script_tests` +6, `run.rs` +6, and `knob_reads_install_the_panic_hook_e2e` (+1 suite, +3 passed, +3 ignored fixtures). ⚠️ **`[SKIP]` 26→12 is environment** (primary checkout has the gliner `.venv`; container skips 19→8, helpers untouched). ⚠️ **The row below's `[panic]` 20 is not reproducible from any log on disk** — both #750-era sweep logs count 0, anchored or not — so it is recorded as unverified, not as a delta. ⚠️ **Two earlier sweeps this session were DISCARDED**: one had a test file appended under it (the sha bracket caught it, `a5e5…`→`cc49…`), the next was superseded by the two-door fix. **Gate profiles:** `worker-report` ✅ both hosts (Mac 3/3 consecutive after the framing fix), `pg` ✅ 19, `gliner` ✅ 5 (Mac), `guard-tier` ✅ 21 / 44 `[E2E]` (DGX), `microvm` ✅ **30 / 65 `[E2E]` / 15 of 15 hooked** (DGX — its first passing gated run ever). **Every profile's `[panic]` measured 0** | exit 0 **on BOTH hosts**, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-748`), **27** `Checking kastellan` lines each, zero warnings. The DGX run predates the movement-only `panic_hook/tests.rs` split, which the Mac re-linted | **12** Mac |
-| **Mac** (#746/#747/#749 — superseded) | — | **4453 / 0 / 42**, **185** suites, `TEST_EXIT=0`, `[WARN]` 0, `[SKIP]` 26 (19 container, 4 gliner opt-in, 3 worktree venv), `[panic]` 20 (unverified, see above). Full row in the archive snapshot | exit 0 both hosts, cold, 27 `Checking kastellan` lines | **26** Mac |
+| **Mac** (#746/#747/#749 — **the gate that stands**) | branch tip | **4453 / 0 / 42**, **185** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **26**, `[E2E]` 0 (no knobs set), `[panic]` 20. ⚠️ **Was 4451/0/41 before the review round**; +2 passed / +1 ignored, reconciled by name: the healthy-stderr positive control and its `#[ignore]`d inner fixture, plus `an_unrecognised_drain_byte_is_distinguishable_from_a_drain_still_in_progress`. ⚠️ **The final run is bracketed by a sha of the file under test, before and after** — identical, so the log itself proves the tree did not move under the sweep; an earlier attempt WAS contaminated by a concurrent mutation check and was discarded [[never-edit-tree-during-a-sweep]]. Run `--no-fail-fast -- --test-threads=4`. ⚠️ **`cargo test --workspace` is FAIL-FAST** — the first attempt stopped after **59** suites on a `the database system is starting up` flake (#548/#676; that suite then passed **6/6 isolated**), and a 59-suite run reports a plausible-looking 2552 passed. **Always `--no-fail-fast`.** **Delta vs the row below reconciles EXACTLY: +17 passed / +1 ignored / +1 suite**, by name — captured.rs +3, worker_stderr/mod.rs +5, tool_worker +2, persistent +2, egress/spawn +4 (16 unit), plus the new `panic_hook_broken_stderr_e2e` (+1 suite, +1 passed, +1 ignored inner fixture). ⚠️ **`[SKIP]` 23→26 is the WORKTREE, not a regression**: 19 Apple `container` + 4 gliner opt-in + **3 "gliner-relex venv shim not built"**, because a fresh worktree has no `.venv`. Built it (`scripts/workers/gliner-relex/install.sh`, `readlink`-verified as this host's python, not a copied dead fixture) and ran the tier separately, all green: gate profile `gliner` **5 tests / 4 demanded preconditions / `[WARN]` 0**, `entity_extraction_e2e` **16/16**, `memory_entity_link_e2e` **6/6**. DGX ran the touched suites (worker_stderr **60/60**, egress::spawn **23/23**, both broken-stderr e2es) plus the mirror-image `POLL*` mutants | exit 0 **on BOTH hosts**, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-746{mac,cold}`), **27** `Checking kastellan` lines each, zero warnings | **26** Mac (19 container, 4 gliner opt-in, 3 worktree venv) |
+| **Mac** (#734/#733/#732/#742 — superseded by the row above) | — | **4434 / 0 / 40**, **184** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` 23 (19 Apple container + 4 gliner opt-in), `[panic]` 19. ⚠️ The pre-review figure `4427 / 1 / 38` over 183 that this row used to carry was the **pre-review** run, and its one failure was the #744 load flake, not a regression | exit 0, `--workspace --all-targets`, zero warnings | **23** Mac |
 
 Older rows (incl. #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -427,13 +536,13 @@ Only the rows that tell you *where to look when something goes red*.
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
 | `sandbox` (`linux_smoke` / `macos_smoke` / `macos_container_smoke`) | 10 / 13 / 10 | **real** jails: fs invisibility, net deny, relative-path reject, OOM-kill, per-spawn `/tmp`, fresh session leader, **worker starts in `/` on both backends** (#719), the Firecracker VMM jail launching (#671), the #689 Landlock drift detector |
-| `core` Firecracker (15 suites, `#[ignore]`, DGX) | 30 | **real KVM** round-trips, mem cap, net deny, warm idle, VMM confinement, egress + broker channels, persistent store. `bash scripts/run-e2e-gate.sh microvm` |
+| `core` Firecracker (14 suites, `#[ignore]`, DGX) | 29 | **real KVM** round-trips, mem cap, net deny, warm idle, VMM confinement, egress + broker channels, persistent store. `bash scripts/run-e2e-gate.sh microvm` |
 | `core` gliner (`gliner_relex_e2e`, `entity_extraction_e2e`, `memory_entity_link_e2e`) | 5 / 16 / 6 | the real model under the real sandbox; the latter two only with `KASTELLAN_GLINER_RELEX_ENABLE=1`. `bash scripts/run-e2e-gate.sh gliner` |
 | `core` (`shell_exec_e2e`, `python_exec_e2e`, `python_exec_container_e2e`) | 4 / 4 / 4 | **real** core→sandbox→worker round-trips; per-spawn scratch; secret-scrub |
 | `core` (`egress_proxy_e2e`, `egress_force_routing_e2e`, `email_mitm_e2e`) | 3 / 4 / 2 | real sidecar + CONNECT; Linux no-direct-route; hermetic MITM |
 | `core` (`injection_guard_e2e`, `secret_vault_e2e`, `guard_boot_row_e2e`) | 10 / 9 / 1 | **PG-required** policy rows, privacy invariant, fail-closed redemption |
-| worker-report (5 suites, 2 crates) | 13 | a dying worker's last words reach a failing test; a real broken fd 2, re-exec'd. `bash scripts/run-e2e-gate.sh worker-report` (both hosts) |
-| `tests-common` `gate_script_tests` | 27 | the gate script's table **and** its verdict (floors, caps, per-binary hook check), run against a fake `cargo` |
+| broken-stderr e2es (`core/tests/worker_report_…`, `tests-common/tests/panic_hook_…`) | 2 / 1 | a real broken fd 2, re-exec'd; **need `--nocapture`**, and are in no gate profile (#748) |
+| `tests-common` `gate_script_tests` | 8 | the gate script's table **and** its verdict, run against a fake `cargo` |
 
 ## Key design decisions locked in
 
@@ -447,9 +556,6 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#748** — a `worker-report` gate profile; the gate refuses any test binary that never reached
-  the panic hook (checked at run time); a measured `[panic]` cap (`MAX_PANIC`, measured 0 on all five profiles); a knob read installs the hook through **two** doors, not one; the `microvm` profile runs for the first time since #720.
-  Filed #755.
 - **[#750](https://github.com/hherb/kastellan/pull/750)** — a read-error drain stops earning the
   "suspect a kill" diagnosis, the **third** renderer of the same tail is fixed, and the panic hook
   can no longer SIGABRT on a broken stderr (#747, #746, #749). The order-dependent

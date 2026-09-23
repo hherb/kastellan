@@ -34,6 +34,9 @@
 #      the run's suites. This is the one that catches the name-filter typo.
 #   3. an optional per-profile cap on `[SKIP]` lines, and a hard zero on
 #      `[WARN]` lines.
+#   4. every test binary the run started reached the neutralising panic hook
+#      (a `[panic-hook]` line inside its cargo `Running` section), and an
+#      optional per-profile cap on `[panic]` lines (#748).
 #
 # ⚠️ **The `[E2E]` floors are per TIER, not per run, and that is load-bearing.**
 # A single total is satisfied by whichever knob happens to be chattiest: the
@@ -96,7 +99,7 @@ done
 
 # ---------------------------------------------------------------------------
 # Profiles.
-#   name | knobs | E2E floors | MIN_PASSED | MAX_SKIP | cargo args | harness args | os
+#   name | knobs | E2E floors | MIN_PASSED | MAX_SKIP | cargo args | harness args | os | MAX_PANIC
 #
 # E2E floors are `tier=N[,tier=N...]`, where `tier` is the phrase the knob was
 # constructed with and the string that appears in `[E2E] <tier>: <detail>`:
@@ -115,6 +118,8 @@ done
 #
 # MAX_SKIP is `any` or a number. `guard-tier` is 0: every precondition in its
 # `bootstrap()` is knob-routed, so a `[SKIP]` there is by definition a bypass.
+# `worker-report` is 0 for the same reason: its one precondition is
+# `skip_if_sandbox_unavailable`, and the other four suites' parents read no knob.
 # The rest stay `any` while #718's 92 hand-written `[SKIP]` sites exist.
 #
 # ⚠️ Harness args are per profile because the Firecracker suites are `#[ignore]`:
@@ -136,12 +141,33 @@ done
 # profile on the Mac fails its own floor with "0 tests passed", which reads as a
 # broken gate rather than as "wrong host" — and a gate that cries wolf is a gate
 # somebody stops running. `any` means the profile is host-agnostic.
+#
+# MAX_PANIC is `any` or a number, like MAX_SKIP, and counts `[panic]` lines —
+# the neutralising hook's rendering of a panic (#742). A panicking TEST already
+# fails the run; what this catches is a panic inside a PASSING one (a caught
+# panic, a panic on a non-test thread). No suite any profile selects has a
+# `#[should_panic]`, so 0 is reachable. ⚠️ **Only write a number you MEASURED
+# on a real run of that profile** — an unmeasured 0 is a gate that cries wolf.
+#
+# ⚠️ **The cap has no floor and cannot have one.** Zero `[panic]` lines from a
+# binary whose panics went through the DEFAULT hook looks exactly like zero
+# from one that never panicked. The per-binary `[panic-hook]` check below is
+# what separates the two — the cap is only sound because that check exists.
+# ⚠️ And only for panics AFTER the install: a panic that beats its binary's
+# first knob read (libtest runs tests in parallel) is still the default hook's,
+# in a section that nonetheless reads as hooked. Neither check sees it (#757).
+#
+# `worker-report` (#748) demands the suites that prove a dying worker's last
+# words reach a failing test. Only the sandbox knob: one suite needs a sandbox,
+# the rest are hermetic, and none needs Postgres or a guard backend — so unlike
+# `guard-tier` it runs on both hosts.
 # ---------------------------------------------------------------------------
 PROFILES=(
-  "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any"
-  "pg|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1,Postgres-backed=1|1|any|-p kastellan-core --test injection_guard_e2e --test secret_vault_e2e --test conversation_continuity_e2e|--nocapture|any"
-  "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|gliner-relex=1|1|any|-p kastellan-core --test gliner_relex_e2e|--nocapture|any"
-  "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux"
+  "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0"
+  "pg|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1,Postgres-backed=1|1|any|-p kastellan-core --test injection_guard_e2e --test secret_vault_e2e --test conversation_continuity_e2e|--nocapture|any|0"
+  "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|gliner-relex=1|1|any|-p kastellan-core --test gliner_relex_e2e|--nocapture|any|0"
+  "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux|0"
+  "worker-report|KASTELLAN_SANDBOX_REQUIRE_E2E=1|sandboxed=1|1|0|-p kastellan-core -p kastellan-tests-common --test worker_early_exit_stderr_fallback_e2e --test persistent_worker_death_stderr_fallback_e2e --test panic_hook_gate_safety_e2e --test worker_report_broken_stderr_e2e --test panic_hook_broken_stderr_e2e|--nocapture|any|0"
 )
 
 # ⚠️ There is deliberately NO `sandbox` profile yet, and the reason is a
@@ -191,6 +217,23 @@ firecracker_suites() {
   printf '%s' "$names"
 }
 
+# How many `--test <name>` targets a cargo argument string names.
+#
+# ⚠️ Counts TOKENS, not lines. It was `grep -c -- '--test'`, which counts LINES,
+# and `firecracker_suites` emits every target on ONE line — so it read 1 on
+# every host, under the floor of 12, and the `microvm` profile refused every run
+# from #720 until #748 found it. Never reached on the Mac (the `os` check
+# refuses first). `gate_script_tests` now runs this against the real discovery.
+count_test_targets() {
+  local n=0 tok
+  # Unquoted on purpose: word-splitting IS the tokeniser. Target names are
+  # file stems, so they contain no whitespace or glob characters.
+  for tok in $1; do
+    [ "$tok" = "--test" ] && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
 # The floor below which a shrinking discovery is a bug rather than a deletion.
 #
 # `firecracker_suites` refusing ZERO is not enough: a grep rule that matched 1
@@ -209,17 +252,17 @@ MIN_FIRECRACKER_SUITES=12
 # A malformed profile must be a usage error, not a quiet ✅.
 # ---------------------------------------------------------------------------
 validate_profiles() {
-  local spec name knobs e2e_floors min_passed max_skip cargo_args harness_args os extra
+  local spec name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic extra
   local bad=0 pair tier floor
   for spec in "${PROFILES[@]}"; do
-    IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os extra \
+    IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic extra \
       <<<"$spec"
     if [ -z "$name" ] || [ -n "$extra" ]; then
-      echo "run-e2e-gate.sh: profile '${name:-<unnamed>}' does not have exactly 8 fields" >&2
+      echo "run-e2e-gate.sh: profile '${name:-<unnamed>}' does not have exactly 9 fields" >&2
       bad=1
       continue
     fi
-    for field in knobs e2e_floors min_passed max_skip cargo_args harness_args os; do
+    for field in knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic; do
       if [ -z "${!field}" ]; then
         echo "run-e2e-gate.sh: profile '$name' has an empty '$field' field" >&2
         bad=1
@@ -236,6 +279,11 @@ validate_profiles() {
       any) ;;
       '') echo "run-e2e-gate.sh: profile '$name' MAX_SKIP is empty (write 'any' for no cap)" >&2; bad=1 ;;
       *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_SKIP must be a number or 'any'" >&2; bad=1 ;;
+    esac
+    case "$max_panic" in
+      any) ;;
+      '') ;;  # already reported as an empty field above
+      *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_PANIC must be a number or 'any'" >&2; bad=1 ;;
     esac
     [ -n "$e2e_floors" ] || { echo "run-e2e-gate.sh: profile '$name' names no E2E floor" >&2; bad=1; }
     for pair in ${e2e_floors//,/ }; do
@@ -267,8 +315,10 @@ list_profiles() {
   echo "profiles:"
   local spec name knobs os
   for spec in "${PROFILES[@]}"; do
-    IFS='|' read -r name knobs _ _ _ _ _ os <<<"$spec"
-    printf '  %-12s [%-6s] %s\n' "$name" "$os" "$knobs"
+    # The trailing `_` is load-bearing: `read` puts the REST of the line in its
+    # last variable, so without it `os` would read as `any|<MAX_PANIC>`.
+    IFS='|' read -r name knobs _ _ _ _ _ os _ <<<"$spec"
+    printf '  %-14s [%-6s] %s\n' "$name" "$os" "$knobs"
   done
 }
 
@@ -279,7 +329,8 @@ WANT="$1"; shift
 
 FOUND=""
 for spec in "${PROFILES[@]}"; do
-  IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os <<<"$spec"
+  IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic \
+    <<<"$spec"
   if [ "$name" = "$WANT" ]; then FOUND=1; break; fi
 done
 [ -n "$FOUND" ] || { echo "run-e2e-gate.sh: unknown profile: $WANT" >&2; list_profiles >&2; exit 2; }
@@ -305,8 +356,7 @@ fi
 
 if [[ "$cargo_args" == *"@FIRECRACKER_SUITES"* ]]; then
   resolved="$(firecracker_suites)"
-  discovered="$(printf '%s' "$resolved" | grep -c -- '--test' || true)"
-  discovered="${discovered:-0}"
+  discovered="$(count_test_targets "$resolved")"
   if [ "$discovered" -lt "$MIN_FIRECRACKER_SUITES" ]; then
     echo "run-e2e-gate.sh: discovered $discovered micro-VM suites, floor is $MIN_FIRECRACKER_SUITES." >&2
     echo "  Either the grep rule is stale, this is not the workspace root, or suites" >&2
@@ -373,6 +423,13 @@ fi
 # `|| true`-guarded: the zero case is precisely the one this script exists to
 # REPORT, not to abort on. `${x:-0}` then covers grep's OTHER non-zero exit —
 # an unreadable file, which prints nothing at all.
+#
+# ⚠️ That default makes an unreadable log read as zero `[SKIP]`/`[WARN]`/
+# `[panic]` lines, which every CAP accepts; it is the floors that go red on it
+# (0 passed). And before any verdict, the UNHOOKED awk below reads the same
+# file with its exit status CHECKED, so an unreadable log is refused outright
+# rather than judged — which is also why the not-a-count loop further down can
+# never see an empty count.
 # ---------------------------------------------------------------------------
 count_e2e_for_tier() {
   local tier="$1" n
@@ -385,10 +442,39 @@ SKIP_COUNT="$(grep -c '^\[SKIP\]' "$LOG" || true)"; SKIP_COUNT="${SKIP_COUNT:-0}
 WARN_COUNT="$(grep -c '^\[WARN\]' "$LOG" || true)"; WARN_COUNT="${WARN_COUNT:-0}"
 PASSED_COUNT="$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i == "passed;") s += $(i-1) } END { print s + 0 }' "$LOG" || true)"
 PASSED_COUNT="${PASSED_COUNT:-0}"
+PANIC_COUNT="$(grep -c '^\[panic\]' "$LOG" || true)"; PANIC_COUNT="${PANIC_COUNT:-0}"
+BINARY_COUNT="$(grep -cE '^[[:space:]]+Running ' "$LOG" || true)"; BINARY_COUNT="${BINARY_COUNT:-0}"
+
+# Every test binary must have reached the neutralising panic hook (#748).
+#
+# Cargo prints `     Running tests/<suite>.rs (…)` before it starts each test
+# binary, and the binary's own output follows on the same stream, so the log
+# splits cleanly into one section per binary. A binary that read a REQUIRE knob
+# (or called `panic_hook::install_once` itself) prints exactly one
+# `[panic-hook]` line in its section. A section without one is a binary that
+# got neither the REQUIRE semantics nor the hook — its panics went through the
+# DEFAULT hook, unneutralised and invisible to the `[panic]` cap.
+#
+# Measured at run time rather than read off the source, because suites reach
+# the knob through a dozen indirect helpers and a list of their names would be
+# a census that rots.
+#
+# ⚠️ The awk exit is CHECKED: a failed awk prints nothing, which reads as "every
+# binary was hooked" — the empty-operand false green in another costume.
+UNHOOKED="$(awk '
+  /^[[:space:]]+Running / { if (cur != "" && !hooked) print cur; cur = $0; hooked = 0; next }
+  /^\[panic-hook\]/ { hooked = 1 }
+  END { if (cur != "" && !hooked) print cur }
+' "$LOG")"
+AWK_EXIT=$?
+if [ "$AWK_EXIT" -ne 0 ]; then
+  echo "run-e2e-gate.sh: awk failed ($AWK_EXIT) splitting $LOG by binary — refusing a verdict." >&2
+  exit 3
+fi
 
 # Belt and braces: an operand that is somehow still not a number must refuse a
 # verdict rather than silently satisfy every floor.
-for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT; do
+for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT PANIC_COUNT BINARY_COUNT; do
   case "${!var}" in
     ''|*[!0-9]*)
       echo "run-e2e-gate.sh: $var is \"${!var}\", which is not a count — refusing a verdict." >&2
@@ -403,6 +489,8 @@ echo "    tests passed : $PASSED_COUNT   (floor $min_passed)"
 echo "    [E2E]  lines : $E2E_TOTAL   (per-tier floors: $e2e_floors)"
 echo "    [SKIP] lines : $SKIP_COUNT   (max $max_skip)"
 echo "    [WARN] lines : $WARN_COUNT   (max 0)"
+echo "    [panic] lines: $PANIC_COUNT   (max $max_panic)"
+echo "    test binaries: $BINARY_COUNT"
 echo "    cargo exit   : $TEST_EXIT"
 
 FAIL=0
@@ -448,6 +536,32 @@ if [ "$WARN_COUNT" -ne 0 ]; then
   echo "   reverts to skip; the gate must not pass on a disarmed knob."
   grep '^\[WARN\]' "$LOG" | sort -u | sed 's/^/     /'
   FAIL=1
+fi
+
+# Tests passed but not one `Running` header: there is nothing to attribute a
+# hook announcement to, so "no binary lacked the hook" would be vacuously true.
+if [ "$PASSED_COUNT" -gt 0 ] && [ "$BINARY_COUNT" -eq 0 ]; then
+  echo "❌ $PASSED_COUNT tests passed but the log has no \`Running\` lines, so the"
+  echo "   per-binary panic-hook check has nothing to check. Cargo's output format"
+  echo "   changed, or the log is not a cargo log. Refusing rather than passing vacuously."
+  FAIL=1
+fi
+if [ -n "$UNHOOKED" ]; then
+  echo "❌ test binaries that never reached the panic hook (no [panic-hook] line in"
+  echo "   their section). Each got neither its REQUIRE knob nor the neutralising"
+  echo "   hook: read a knob through tests_common, or call panic_hook::install_once()"
+  echo "   first thing in every test of a hermetic suite."
+  printf '%s\n' "$UNHOOKED" | sed 's/^[[:space:]]*/     /'
+  FAIL=1
+fi
+if [ "$max_panic" != "any" ] && [ "$PANIC_COUNT" -gt "$max_panic" ]; then
+  echo "❌ $PANIC_COUNT [panic] line(s), max is $max_panic. A panic inside a test that"
+  echo "   still passed — caught, or on a non-test thread. Read each one."
+  grep '^\[panic\]' "$LOG" | sort -u | sed 's/^/     /'
+  FAIL=1
+elif [ "$PANIC_COUNT" -ne 0 ]; then
+  echo "⚠️  $PANIC_COUNT [panic] line(s) (max $max_panic):"
+  grep '^\[panic\]' "$LOG" | sort -u | sed 's/^/     /'
 fi
 
 if [ "$FAIL" -eq 0 ]; then

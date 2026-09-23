@@ -59,17 +59,22 @@ impl Drop for Scratch {
 
 /// One `[E2E] <tier>: …` line for every unit of every floor in [`PROFILE`] —
 /// the evidence a healthy run of that profile produces.
+fn e2e_evidence_for_profile() -> String {
+    e2e_evidence_for(PROFILE)
+}
+
+/// [`e2e_evidence_for_profile`] for any `os = any` profile.
 ///
 /// Derived from the profile table rather than written out, so renaming a tier
 /// or adding a floor does not turn these tests into tests of a stale copy.
-fn e2e_evidence_for_profile() -> String {
+fn e2e_evidence_for(name: &str) -> String {
     let profile = profiles()
         .into_iter()
-        .find(|p| p.name == PROFILE)
-        .unwrap_or_else(|| panic!("no `{PROFILE}` profile in the gate script"));
+        .find(|p| p.name == name)
+        .unwrap_or_else(|| panic!("no `{name}` profile in the gate script"));
     assert_eq!(
         profile.os, "any",
-        "the `{PROFILE}` profile must run on any host, or the script refuses it before \
+        "the `{name}` profile must run on any host, or the script refuses it before \
          the verdict these tests check"
     );
     let mut lines = String::new();
@@ -84,26 +89,105 @@ fn e2e_evidence_for_profile() -> String {
             lines.push_str(&format!("[E2E] {tier}: precondition met (fake cargo)\n"));
         }
     }
-    assert!(!lines.is_empty(), "the `{PROFILE}` profile names no E2E floor");
+    assert!(!lines.is_empty(), "the `{name}` profile names no E2E floor");
     lines
+}
+
+/// Cargo's header for one test binary, followed by the hook's announcement —
+/// the section a binary that reached the panic hook produces (#748).
+fn hooked_binary(name: &str) -> String {
+    format!("{}{}\n", unhooked_binary(name), crate::panic_hook::install_line())
+}
+
+/// Cargo's header for one test binary, with NO announcement after it.
+fn unhooked_binary(name: &str) -> String {
+    format!("     Running tests/{name}.rs (target/debug/deps/{name}-0123456789abcdef)\n")
+}
+
+/// A healthy run of `profile`: one hooked binary, every floor met, 5 passed.
+fn healthy_log_for(profile: &str) -> String {
+    format!("{}{}{PASSED_FIVE}", hooked_binary("fake_suite_e2e"), e2e_evidence_for(profile))
 }
 
 /// Run the real gate script for [`PROFILE`], with a fake `cargo` that prints
 /// `log` and exits with `exit_code`.
 fn run_gate(tag: &str, log: &str, exit_code: i32) -> Output {
+    run_gate_profile(PROFILE, tag, log, exit_code)
+}
+
+/// [`run_gate`] for a named profile.
+fn run_gate_profile(profile: &str, tag: &str, log: &str, exit_code: i32) -> Output {
+    run_gate_with(profile, tag, log, exit_code, &GateEdits::default())
+}
+
+/// What a test changes about the gate's world beyond the canned log.
+#[derive(Default)]
+struct GateEdits<'a> {
+    /// Replace the LAST `|`-field (MAX_PANIC) of this profile's row in a COPY
+    /// of the script. The committed table has every cap at 0, so without a
+    /// copy no test can reach a cap above zero, `any`, or a malformed value.
+    max_panic: Option<(&'a str, &'a str)>,
+    /// Extra fake tools, `(name, sh body)`, put on `PATH` beside the fake cargo.
+    tools: &'a [(&'a str, &'a str)],
+}
+
+/// The gate script's text with `profile`'s MAX_PANIC field replaced.
+fn script_with_max_panic(profile: &str, value: &str) -> String {
+    let text = std::fs::read_to_string(script_path()).expect("read the gate script");
+    let prefix = format!("  \"{profile}|");
+    let mut hits = 0;
+    let edited: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if !line.starts_with(&prefix) {
+                return line.to_string();
+            }
+            hits += 1;
+            let (head, _) = line
+                .trim_end_matches('"')
+                .rsplit_once('|')
+                .unwrap_or_else(|| panic!("profile row has no `|`: {line}"));
+            format!("{head}|{value}\"")
+        })
+        .collect();
+    assert_eq!(hits, 1, "expected exactly one `{profile}` row in the gate script");
+    edited.join("\n") + "\n"
+}
+
+fn write_executable(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("chmod {}: {e}", path.display()));
+    }
+}
+
+/// [`run_gate_profile`] with [`GateEdits`] applied.
+fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32, edits: &GateEdits) -> Output {
     let scratch = Scratch::new(tag);
+    for (name, body) in edits.tools {
+        write_executable(&scratch.root.join("bin").join(name), &format!("#!/bin/sh\n{body}\n"));
+    }
+    // An edited table runs from a copy under `<scratch>/scripts/`. The script
+    // `cd`s to its own `..`, which is then the scratch root: harmless, since
+    // cargo is fake and the log goes under `$HOME`.
+    let script = match edits.max_panic {
+        None => script_path(),
+        Some((row, value)) => {
+            let copy = scratch.root.join("scripts/run-e2e-gate.sh");
+            std::fs::create_dir_all(copy.parent().unwrap()).expect("mkdir scripts/");
+            std::fs::write(&copy, script_with_max_panic(row, value)).expect("write the edited script");
+            copy
+        }
+    };
     let fake_cargo = scratch.root.join("bin/cargo");
     // A quoted heredoc prints the log byte for byte (no expansion of `$`).
     let body = format!(
         "#!/bin/sh\ncat <<'KASTELLAN_FAKE_CARGO_EOF'\n{log}\nKASTELLAN_FAKE_CARGO_EOF\nexit {exit_code}\n"
     );
-    std::fs::write(&fake_cargo, body).expect("write the fake cargo");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake_cargo, std::fs::Permissions::from_mode(0o755))
-            .expect("make the fake cargo executable");
-    }
+    write_executable(&fake_cargo, &body);
     let path = format!(
         "{}:{}",
         scratch.root.join("bin").display(),
@@ -114,8 +198,8 @@ fn run_gate(tag: &str, log: &str, exit_code: i32) -> Output {
     // file would put `~/.cargo/bin` ahead of the fake on `PATH`, and this
     // "fake" run would quietly become a real `cargo test`.
     Command::new("bash")
-        .arg(script_path())
-        .arg(PROFILE)
+        .arg(script)
+        .arg(profile)
         .env("HOME", &scratch.root)
         .env("PATH", path)
         .output()
@@ -137,7 +221,7 @@ const PASSED_FIVE: &str =
 
 #[test]
 fn a_run_that_meets_every_floor_passes_the_gate() {
-    let log = format!("{}{PASSED_FIVE}", e2e_evidence_for_profile());
+    let log = healthy_log_for(PROFILE);
     let out = run_gate("healthy", &log, 0);
     assert!(
         out.status.success(),
@@ -168,7 +252,7 @@ fn a_run_that_selected_zero_tests_fails_the_gate() {
 fn a_failed_test_run_fails_the_gate_even_with_the_evidence_present() {
     // Every floor met, but cargo itself exited 101. This pins that the gate
     // reads cargo's status (the pipeline's FIRST exit code), not tee's.
-    let log = format!("{}{PASSED_FIVE}", e2e_evidence_for_profile());
+    let log = healthy_log_for(PROFILE);
     let out = run_gate("cargo-failed", &log, 101);
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
     assert!(
@@ -199,7 +283,8 @@ fn the_profile_tier_these_tests_name_is_the_one_the_table_demands() {
 fn a_run_with_no_e2e_evidence_fails_the_gate() {
     // Tests passed and cargo exited 0, but the demanded tier never announced a
     // met precondition: the knob reached nothing.
-    let out = run_gate("no-e2e", PASSED_FIVE, 0);
+    let log = format!("{}{PASSED_FIVE}", hooked_binary("fake_suite_e2e"));
+    let out = run_gate("no-e2e", &log, 0);
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
     assert!(
         String::from_utf8_lossy(&out.stdout).contains(&tier_floor_refusal()),
@@ -213,7 +298,10 @@ fn evidence_from_another_tier_does_not_satisfy_the_floor() {
     // The `gliner` profile also sets the Postgres knob. A floor that counted
     // every `[E2E]` line cleared on one Postgres line, the defect the per-tier
     // floors exist to stop.
-    let log = format!("[E2E] Postgres-backed: precondition met (fake cargo)\n{PASSED_FIVE}");
+    let log = format!(
+        "{}[E2E] Postgres-backed: precondition met (fake cargo)\n{PASSED_FIVE}",
+        hooked_binary("fake_suite_e2e")
+    );
     let out = run_gate("wrong-tier", &log, 0);
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
     assert!(
@@ -228,7 +316,8 @@ fn a_warn_line_fails_an_otherwise_healthy_run() {
     // `[WARN]` means a knob was set but not honoured (an out-of-dialect value),
     // so the run was not the demanded one, whatever else it shows.
     let log = format!(
-        "{}[WARN] KASTELLAN_PG_REQUIRE_E2E=y is not a recognised value; treating as unset\n{PASSED_FIVE}",
+        "{}{}[WARN] KASTELLAN_PG_REQUIRE_E2E=y is not a recognised value; treating as unset\n{PASSED_FIVE}",
+        hooked_binary("fake_suite_e2e"),
         e2e_evidence_for_profile()
     );
     let out = run_gate("warn", &log, 0);
@@ -238,4 +327,172 @@ fn a_warn_line_fails_an_otherwise_healthy_run() {
         "{}",
         describe(&out)
     );
+}
+
+// ---------------------------------------------------------------------------
+// #748: every binary reached the panic hook, and `[panic]` is counted.
+// ---------------------------------------------------------------------------
+
+/// The profile the `[panic]`-cap tests drive: the first host-agnostic profile
+/// whose MAX_PANIC is a number. Derived, so the tests follow the table.
+fn capped_profile() -> (String, u32) {
+    profiles()
+        .into_iter()
+        .filter(|p| p.os == "any")
+        .find_map(|p| p.max_panic.parse::<u32>().ok().map(|cap| (p.name, cap)))
+        .expect("some `os = any` profile caps MAX_PANIC — see at_least_one_profile_caps_panic_lines")
+}
+
+#[test]
+fn a_binary_that_never_reached_the_panic_hook_fails_the_gate() {
+    // Two binaries; the second announced no hook. Its panics would have gone
+    // through the DEFAULT hook — unneutralised, and invisible to the `[panic]`
+    // cap — and it had no REQUIRE knob to turn its skips into failures.
+    let log = format!(
+        "{}{}{}{PASSED_FIVE}",
+        hooked_binary("reached_e2e"),
+        unhooked_binary("never_reached_e2e"),
+        e2e_evidence_for_profile()
+    );
+    let out = run_gate("unhooked", &log, 0);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    // Only the refusal block, not the whole stdout: the script tees the log to
+    // stdout, so every binary's `Running` line appears above the verdict.
+    let refusal = stdout
+        .split_once("never reached the panic hook")
+        .map(|(_, rest)| rest.split("full log:").next().unwrap_or(rest))
+        .unwrap_or_else(|| panic!("no hook refusal\n{}", describe(&out)));
+    assert!(
+        refusal.contains("never_reached_e2e") && !refusal.contains("tests/reached_e2e.rs"),
+        "the refusal must name the unhooked binary and only that one\n{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn the_hook_check_is_per_binary_not_per_run() {
+    // One announcement from the FIRST binary must not cover the second: the
+    // total would be 1 either way, so a run-wide count would pass this.
+    let log = format!(
+        "{}{}{}{PASSED_FIVE}",
+        hooked_binary("first_e2e"),
+        unhooked_binary("second_e2e"),
+        e2e_evidence_for_profile()
+    );
+    let out = run_gate("per-binary", &log, 0);
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let refusal = stdout.split_once("never reached the panic hook").map(|(_, r)| r);
+    assert!(
+        refusal.is_some_and(|r| r.contains("second_e2e") && !r.contains("tests/first_e2e.rs")),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_log_with_passed_tests_but_no_running_lines_is_refused() {
+    // Without cargo's `Running` headers there is nothing to attribute an
+    // announcement to, and "no binary lacked the hook" would be vacuously
+    // true. That is a refusal to judge, not a pass.
+    let log = format!("{}{PASSED_FIVE}", e2e_evidence_for_profile());
+    let out = run_gate("no-running", &log, 0);
+    assert_ne!(out.status.code(), Some(0), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("no `Running` lines")
+            || String::from_utf8_lossy(&out.stderr).contains("no `Running` lines"),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn panic_lines_over_the_cap_fail_the_gate() {
+    let (profile, cap) = capped_profile();
+    let panics: String = (0..=cap)
+        .map(|i| format!("[panic] thread 'caught' panicked at f.rs:{i}:1: swallowed\n"))
+        .collect();
+    let log = format!("{panics}{}", healthy_log_for(&profile));
+    let out = run_gate_profile(&profile, "panic-over", &log, 0);
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("[panic] line(s)"),
+        "{}",
+        describe(&out)
+    );
+}
+
+/// `n` distinct `[panic]` lines, as the hook renders them.
+fn panic_lines(n: u32) -> String {
+    (0..n)
+        .map(|i| format!("[panic] thread 'caught' panicked at f.rs:{i}:1: expected\n"))
+        .collect()
+}
+
+#[test]
+fn a_cap_above_zero_allows_exactly_that_many_panics() {
+    // The boundary, on a COPY of the table with the cap raised to 2: every
+    // committed cap is 0, where `-gt` and `-ge` and a hard-coded `-gt 0` all
+    // agree, so only a cap above zero can tell them apart.
+    let edits = GateEdits { max_panic: Some((PROFILE, "2")), ..Default::default() };
+    let at = run_gate_with(PROFILE, "panic-at-cap", &format!("{}{}", panic_lines(2), healthy_log_for(PROFILE)), 0, &edits);
+    assert!(at.status.success(), "a cap of 2 must allow 2\n{}", describe(&at));
+    let over = run_gate_with(PROFILE, "panic-cap-over", &format!("{}{}", panic_lines(3), healthy_log_for(PROFILE)), 0, &edits);
+    assert_eq!(over.status.code(), Some(1), "a cap of 2 must refuse 3\n{}", describe(&over));
+    assert!(String::from_utf8_lossy(&over.stdout).contains("3 [panic] line(s), max is 2"), "{}", describe(&over));
+}
+
+#[test]
+fn an_uncapped_profile_reports_its_panics_and_passes() {
+    // `any` is "no cap", not "not counted": the lines are still shown.
+    let edits = GateEdits { max_panic: Some((PROFILE, "any")), ..Default::default() };
+    let out = run_gate_with(PROFILE, "panic-any", &format!("{}{}", panic_lines(2), healthy_log_for(PROFILE)), 0, &edits);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("2 [panic] line(s) (max any)"), "{}", describe(&out));
+}
+
+#[test]
+fn a_malformed_max_panic_is_refused_before_anything_runs() {
+    // The script's own validation, not the Rust mirror of it in the parent
+    // module: that one checks only the committed table.
+    let edits = GateEdits { max_panic: Some((PROFILE, "zero")), ..Default::default() };
+    let out = run_gate_with(PROFILE, "panic-malformed", &healthy_log_for(PROFILE), 0, &edits);
+    assert!(!out.status.success(), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("profile '{PROFILE}' MAX_PANIC must be a number or 'any'")),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("==> evidence"),
+        "a malformed table must stop the script before the test run\n{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_failing_awk_refuses_a_verdict() {
+    // A failed awk prints nothing, and "nothing" is exactly what "every binary
+    // reached the hook" looks like. The exit status is what tells them apart.
+    let edits = GateEdits { tools: &[("awk", "exit 2")], ..Default::default() };
+    let out = run_gate_with(PROFILE, "awk-fails", &healthy_log_for(PROFILE), 0, &edits);
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("awk failed (2) splitting"),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn the_install_announcement_is_not_counted_as_a_panic() {
+    // `[panic-hook]` begins with `[panic`, so an unanchored or bracket-less
+    // grep would count every announcement as a panic and fail every healthy
+    // run of a capped profile.
+    let (profile, cap) = capped_profile();
+    let extra: String = (0..=cap).map(|_| format!("{}\n", crate::panic_hook::install_line())).collect();
+    let log = format!("{}{extra}", healthy_log_for(&profile));
+    let out = run_gate_profile(&profile, "announce-not-panic", &log, 0);
+    assert!(out.status.success(), "{}", describe(&out));
 }

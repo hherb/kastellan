@@ -484,6 +484,11 @@ fn assert_the_hostile_report_was_defanged(channel: &str, stream: &str, both: &st
 
 #[test]
 fn a_failing_test_with_no_subscriber_shows_the_dead_workers_report() {
+    // #748: this parent reads no REQUIRE knob, so nothing else installs the
+    // neutralising panic hook in this process — and the `worker-report` gate
+    // profile refuses any binary that never announces it. First statement, so
+    // a panic anywhere below is rendered by it.
+    kastellan_tests_common::panic_hook::install_once();
     let name = "inner_fixture_persistent_death_without_a_subscriber";
     let run = run_inner_fixture(name);
     assert_one_deliberate_failure(name, &run);
@@ -544,6 +549,7 @@ fn a_failing_test_with_no_subscriber_shows_the_dead_workers_report() {
 
 #[test]
 fn a_binary_that_installed_a_subscriber_does_not_get_the_report_twice() {
+    kastellan_tests_common::panic_hook::install_once();
     let name = "inner_fixture_persistent_death_with_a_subscriber";
     let run = run_inner_fixture(name);
     assert_one_deliberate_failure(name, &run);
@@ -795,6 +801,7 @@ fn down_lines(stream: &str) -> Vec<&str> {
 
 #[test]
 fn a_crash_looping_worker_that_cannot_come_back_says_so_on_both_counts() {
+    kastellan_tests_common::panic_hook::install_once();
     let name = "inner_fixture_persistent_down_without_a_subscriber";
     let run = run_inner_fixture(name);
     assert_one_deliberate_failure(name, &run);
@@ -863,6 +870,7 @@ fn a_crash_looping_worker_that_cannot_come_back_says_so_on_both_counts() {
 
 #[test]
 fn a_panicking_driver_thread_is_reported_instead_of_swallowed_by_the_join() {
+    kastellan_tests_common::panic_hook::install_once();
     let name = "inner_fixture_persistent_driver_panic_without_a_subscriber";
     let run = run_inner_fixture(name);
     assert_one_deliberate_failure(name, &run);
