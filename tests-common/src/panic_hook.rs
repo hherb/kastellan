@@ -131,6 +131,17 @@ fn emit_own_line(line: &str) {
 
 static INSTALLED: Once = Once::new();
 
+/// Whether [`install_once`] has run in this process.
+///
+/// For tests only: `knob_reads_install_the_panic_hook_e2e` asserts, in a fresh
+/// child per door, that the hook goes from absent to present across ONE knob
+/// read. Hidden rather than private because an integration test is another
+/// crate; it is not an API.
+#[doc(hidden)]
+pub fn is_installed() -> bool {
+    INSTALLED.is_completed()
+}
+
 /// Install the neutralising panic hook, at most once per process.
 ///
 /// Idempotent by [`Once`], because the chokepoint that calls it
@@ -142,10 +153,18 @@ static INSTALLED: Once = Once::new();
 ///
 /// There is no way to run code automatically at the start of every test
 /// binary, so *something* has to call this — and "every suite remembers to" is
-/// the property that decays. Every gated tier reads its knob to decide whether
-/// to skip, and every path that reads a knob funnels through
-/// `action_reporting_to`, so a suite cannot be in a gate profile and bypass
-/// this.
+/// the property that decays. Every gated tier reads its knob, and a knob is
+/// read from the environment through exactly two doors — `RequireKnob::raw()`
+/// and `RequireKnob::action_reporting_to` — both of which install this.
+///
+/// ⚠️ **This paragraph used to name ONE door, and it was wrong from the day
+/// it was written** (#745 → #748). A healthy micro-VM host meets every
+/// precondition, so it never reaches `action_reporting_to`; it reads the knob
+/// only to announce `[E2E]`, through `raw()`. #748's run-time gate check found
+/// it on its first real run — all 15 micro-VM binaries refused while printing
+/// 65 knob-gated lines. A static reading of the call sites would not have: it
+/// is exactly the census that argued for one chokepoint. The gate's per-binary
+/// `[panic-hook]` check, not this comment, is what now keeps it true.
 ///
 /// ⚠️ **It is installed from `action_reporting_to` and NOT from `action`,
 /// because `action` is not the only door.** The first version used `action`

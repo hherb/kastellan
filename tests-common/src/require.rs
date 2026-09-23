@@ -190,7 +190,18 @@ impl RequireKnob {
     /// knob that leaves no trace at all is the one outcome this type exists to
     /// abolish, so the lossy rendering is carried through to the dialect check,
     /// where it is out of dialect and therefore warns.
+    ///
+    /// ⚠️ **This is one of the TWO doors that install #742's panic hook**
+    /// (#748). The other is [`RequireKnob::action_reporting_to`], for callers
+    /// that read the environment themselves (`microvm::require_action_to`). A
+    /// knob read that goes through neither would leave the process on the
+    /// default hook — which is exactly what the met-precondition path did:
+    /// [`RequireKnob::announce_demanded`] reaches the knob only through here,
+    /// never through `action_reporting_to`, so on a healthy micro-VM host every
+    /// green gate run had the default hook. `knob_reads_install_the_panic_hook_e2e`
+    /// proves each door in its own process.
     fn raw(&self) -> Option<String> {
+        crate::panic_hook::install_once();
         match std::env::var(self.env) {
             Ok(value) => Some(value),
             Err(std::env::VarError::NotPresent) => None,
@@ -207,16 +218,19 @@ impl RequireKnob {
     /// green — and a deleted dialect warning restores the exact silent skip
     /// #654 was filed about.
     ///
-    /// ⚠️ **This, not [`RequireKnob::action`], is where #742's panic hook is
-    /// installed — because `action` is not the only door.** The first version
+    /// ⚠️ **This is one of the two doors that install #742's panic hook — the
+    /// other is `raw()` (#748).** `action` is not the only door. The first version
     /// installed from `action`, and the **`microvm` gate profile bypassed it
     /// entirely**: `microvm::skip_unless_ready` → `report_unmet_microvm_to` →
     /// `require_action_to` calls *this* method directly, so a micro-VM suite
     /// reached its knob without ever touching `action`. It was covered only
     /// when some co-set knob (the profile also sets the PG and sandbox ones)
     /// happened to be read first — coverage by accident, which is precisely
-    /// what `install_once`'s doc claims to have replaced. Every path that
-    /// reads a knob funnels through here, so here is the real chokepoint.
+    /// what `install_once`'s doc claims to have replaced.
+    ///
+    /// ⚠️ **"Every knob read funnels through here" was the claim, and it was
+    /// false** (#748): the met-precondition announcement reads the knob via
+    /// `raw()` and never comes here. Hence the second door.
     pub fn action_reporting_to(
         &self,
         raw: Option<String>,
