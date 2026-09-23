@@ -158,7 +158,7 @@ done
 # `guard-tier` it runs on both hosts.
 # ---------------------------------------------------------------------------
 PROFILES=(
-  "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|any"
+  "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0"
   "pg|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1,Postgres-backed=1|1|any|-p kastellan-core --test injection_guard_e2e --test secret_vault_e2e --test conversation_continuity_e2e|--nocapture|any|0"
   "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|gliner-relex=1|1|any|-p kastellan-core --test gliner_relex_e2e|--nocapture|any|0"
   "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux|any"
@@ -210,6 +210,23 @@ firecracker_suites() {
     names+="--test $(basename "$f" .rs) "
   done
   printf '%s' "$names"
+}
+
+# How many `--test <name>` targets a cargo argument string names.
+#
+# ⚠️ Counts TOKENS, not lines. It was `grep -c -- '--test'`, which counts LINES,
+# and `firecracker_suites` emits every target on ONE line — so it read 1 on
+# every host, under the floor of 12, and the `microvm` profile refused every run
+# from #720 until #748 found it. Never reached on the Mac (the `os` check
+# refuses first). `gate_script_tests` now runs this against the real discovery.
+count_test_targets() {
+  local n=0 tok
+  # Unquoted on purpose: word-splitting IS the tokeniser. Target names are
+  # file stems, so they contain no whitespace or glob characters.
+  for tok in $1; do
+    [ "$tok" = "--test" ] && n=$((n + 1))
+  done
+  printf '%s' "$n"
 }
 
 # The floor below which a shrinking discovery is a bug rather than a deletion.
@@ -334,8 +351,7 @@ fi
 
 if [[ "$cargo_args" == *"@FIRECRACKER_SUITES"* ]]; then
   resolved="$(firecracker_suites)"
-  discovered="$(printf '%s' "$resolved" | grep -c -- '--test' || true)"
-  discovered="${discovered:-0}"
+  discovered="$(count_test_targets "$resolved")"
   if [ "$discovered" -lt "$MIN_FIRECRACKER_SUITES" ]; then
     echo "run-e2e-gate.sh: discovered $discovered micro-VM suites, floor is $MIN_FIRECRACKER_SUITES." >&2
     echo "  Either the grep rule is stale, this is not the workspace root, or suites" >&2
