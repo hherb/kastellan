@@ -117,19 +117,77 @@ fn run_gate(tag: &str, log: &str, exit_code: i32) -> Output {
 
 /// [`run_gate`] for a named profile.
 fn run_gate_profile(profile: &str, tag: &str, log: &str, exit_code: i32) -> Output {
+    run_gate_with(profile, tag, log, exit_code, &GateEdits::default())
+}
+
+/// What a test changes about the gate's world beyond the canned log.
+#[derive(Default)]
+struct GateEdits<'a> {
+    /// Replace the LAST `|`-field (MAX_PANIC) of this profile's row in a COPY
+    /// of the script. The committed table has every cap at 0, so without a
+    /// copy no test can reach a cap above zero, `any`, or a malformed value.
+    max_panic: Option<(&'a str, &'a str)>,
+    /// Extra fake tools, `(name, sh body)`, put on `PATH` beside the fake cargo.
+    tools: &'a [(&'a str, &'a str)],
+}
+
+/// The gate script's text with `profile`'s MAX_PANIC field replaced.
+fn script_with_max_panic(profile: &str, value: &str) -> String {
+    let text = std::fs::read_to_string(script_path()).expect("read the gate script");
+    let prefix = format!("  \"{profile}|");
+    let mut hits = 0;
+    let edited: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if !line.starts_with(&prefix) {
+                return line.to_string();
+            }
+            hits += 1;
+            let (head, _) = line
+                .trim_end_matches('"')
+                .rsplit_once('|')
+                .unwrap_or_else(|| panic!("profile row has no `|`: {line}"));
+            format!("{head}|{value}\"")
+        })
+        .collect();
+    assert_eq!(hits, 1, "expected exactly one `{profile}` row in the gate script");
+    edited.join("\n") + "\n"
+}
+
+fn write_executable(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("chmod {}: {e}", path.display()));
+    }
+}
+
+/// [`run_gate_profile`] with [`GateEdits`] applied.
+fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32, edits: &GateEdits) -> Output {
     let scratch = Scratch::new(tag);
+    for (name, body) in edits.tools {
+        write_executable(&scratch.root.join("bin").join(name), &format!("#!/bin/sh\n{body}\n"));
+    }
+    // An edited table runs from a copy under `<scratch>/scripts/`. The script
+    // `cd`s to its own `..`, which is then the scratch root: harmless, since
+    // cargo is fake and the log goes under `$HOME`.
+    let script = match edits.max_panic {
+        None => script_path(),
+        Some((row, value)) => {
+            let copy = scratch.root.join("scripts/run-e2e-gate.sh");
+            std::fs::create_dir_all(copy.parent().unwrap()).expect("mkdir scripts/");
+            std::fs::write(&copy, script_with_max_panic(row, value)).expect("write the edited script");
+            copy
+        }
+    };
     let fake_cargo = scratch.root.join("bin/cargo");
     // A quoted heredoc prints the log byte for byte (no expansion of `$`).
     let body = format!(
         "#!/bin/sh\ncat <<'KASTELLAN_FAKE_CARGO_EOF'\n{log}\nKASTELLAN_FAKE_CARGO_EOF\nexit {exit_code}\n"
     );
-    std::fs::write(&fake_cargo, body).expect("write the fake cargo");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake_cargo, std::fs::Permissions::from_mode(0o755))
-            .expect("make the fake cargo executable");
-    }
+    write_executable(&fake_cargo, &body);
     let path = format!(
         "{}:{}",
         scratch.root.join("bin").display(),
@@ -140,7 +198,7 @@ fn run_gate_profile(profile: &str, tag: &str, log: &str, exit_code: i32) -> Outp
     // file would put `~/.cargo/bin` ahead of the fake on `PATH`, and this
     // "fake" run would quietly become a real `cargo test`.
     Command::new("bash")
-        .arg(script_path())
+        .arg(script)
         .arg(profile)
         .env("HOME", &scratch.root)
         .env("PATH", path)
@@ -365,17 +423,66 @@ fn panic_lines_over_the_cap_fail_the_gate() {
     );
 }
 
-#[test]
-fn a_capped_profile_passes_at_exactly_its_cap() {
-    // The boundary: a cap of N allows N. Without this, a `-ge` for `-gt` in the
-    // script would refuse every healthy run of a profile capped above zero.
-    let (profile, cap) = capped_profile();
-    let panics: String = (0..cap)
+/// `n` distinct `[panic]` lines, as the hook renders them.
+fn panic_lines(n: u32) -> String {
+    (0..n)
         .map(|i| format!("[panic] thread 'caught' panicked at f.rs:{i}:1: expected\n"))
-        .collect();
-    let log = format!("{panics}{}", healthy_log_for(&profile));
-    let out = run_gate_profile(&profile, "panic-at-cap", &log, 0);
+        .collect()
+}
+
+#[test]
+fn a_cap_above_zero_allows_exactly_that_many_panics() {
+    // The boundary, on a COPY of the table with the cap raised to 2: every
+    // committed cap is 0, where `-gt` and `-ge` and a hard-coded `-gt 0` all
+    // agree, so only a cap above zero can tell them apart.
+    let edits = GateEdits { max_panic: Some((PROFILE, "2")), ..Default::default() };
+    let at = run_gate_with(PROFILE, "panic-at-cap", &format!("{}{}", panic_lines(2), healthy_log_for(PROFILE)), 0, &edits);
+    assert!(at.status.success(), "a cap of 2 must allow 2\n{}", describe(&at));
+    let over = run_gate_with(PROFILE, "panic-cap-over", &format!("{}{}", panic_lines(3), healthy_log_for(PROFILE)), 0, &edits);
+    assert_eq!(over.status.code(), Some(1), "a cap of 2 must refuse 3\n{}", describe(&over));
+    assert!(String::from_utf8_lossy(&over.stdout).contains("3 [panic] line(s), max is 2"), "{}", describe(&over));
+}
+
+#[test]
+fn an_uncapped_profile_reports_its_panics_and_passes() {
+    // `any` is "no cap", not "not counted": the lines are still shown.
+    let edits = GateEdits { max_panic: Some((PROFILE, "any")), ..Default::default() };
+    let out = run_gate_with(PROFILE, "panic-any", &format!("{}{}", panic_lines(2), healthy_log_for(PROFILE)), 0, &edits);
     assert!(out.status.success(), "{}", describe(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("2 [panic] line(s) (max any)"), "{}", describe(&out));
+}
+
+#[test]
+fn a_malformed_max_panic_is_refused_before_anything_runs() {
+    // The script's own validation, not the Rust mirror of it in the parent
+    // module: that one checks only the committed table.
+    let edits = GateEdits { max_panic: Some((PROFILE, "zero")), ..Default::default() };
+    let out = run_gate_with(PROFILE, "panic-malformed", &healthy_log_for(PROFILE), 0, &edits);
+    assert!(!out.status.success(), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("profile '{PROFILE}' MAX_PANIC must be a number or 'any'")),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("==> evidence"),
+        "a malformed table must stop the script before the test run\n{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_failing_awk_refuses_a_verdict() {
+    // A failed awk prints nothing, and "nothing" is exactly what "every binary
+    // reached the hook" looks like. The exit status is what tells them apart.
+    let edits = GateEdits { tools: &[("awk", "exit 2")], ..Default::default() };
+    let out = run_gate_with(PROFILE, "awk-fails", &healthy_log_for(PROFILE), 0, &edits);
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("awk failed (2) splitting"),
+        "{}",
+        describe(&out)
+    );
 }
 
 #[test]

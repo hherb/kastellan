@@ -114,6 +114,12 @@ Three gaps in what `scripts/run-e2e-gate.sh` demanded. Full prose in the commit 
 - ⚠️ **On this Mac the `pg`/`gliner` profiles need `KASTELLAN_PG_BIN_DIR`** set to Postgres.app
   v18, or they fail "no Postgres install found" — the memory note says so, and it was still
   forgotten on the first run [[postgres-app-bin-paths]].
+- **#756's review.** ⚠️ **The `[panic]` cap is blind to a panic that beats its binary's first knob
+  read** — filed **#757**; fixing it needs a *measured* default-hook count per profile, DGX too.
+  Four surviving mutants now killed: unframed `eprintln!` in the hook (fixture on a **merged**
+  stream), `-gt 0`, no awk exit check (fake `awk`), no `MAX_PANIC` validation — cap tests run an
+  **edited copy** of the table, since every committed cap is 0. The announcement left the `Once`
+  (a failed write inside `call_once` poisoned it).
 
 ### Previous (2026-09-22): #750 — #746, #747, #749 and its review round
 
@@ -421,13 +427,13 @@ Only the rows that tell you *where to look when something goes red*.
 | Suite | Tests | What's verified |
 | ----- | ----- | --------------- |
 | `sandbox` (`linux_smoke` / `macos_smoke` / `macos_container_smoke`) | 10 / 13 / 10 | **real** jails: fs invisibility, net deny, relative-path reject, OOM-kill, per-spawn `/tmp`, fresh session leader, **worker starts in `/` on both backends** (#719), the Firecracker VMM jail launching (#671), the #689 Landlock drift detector |
-| `core` Firecracker (14 suites, `#[ignore]`, DGX) | 29 | **real KVM** round-trips, mem cap, net deny, warm idle, VMM confinement, egress + broker channels, persistent store. `bash scripts/run-e2e-gate.sh microvm` |
+| `core` Firecracker (15 suites, `#[ignore]`, DGX) | 30 | **real KVM** round-trips, mem cap, net deny, warm idle, VMM confinement, egress + broker channels, persistent store. `bash scripts/run-e2e-gate.sh microvm` |
 | `core` gliner (`gliner_relex_e2e`, `entity_extraction_e2e`, `memory_entity_link_e2e`) | 5 / 16 / 6 | the real model under the real sandbox; the latter two only with `KASTELLAN_GLINER_RELEX_ENABLE=1`. `bash scripts/run-e2e-gate.sh gliner` |
 | `core` (`shell_exec_e2e`, `python_exec_e2e`, `python_exec_container_e2e`) | 4 / 4 / 4 | **real** core→sandbox→worker round-trips; per-spawn scratch; secret-scrub |
 | `core` (`egress_proxy_e2e`, `egress_force_routing_e2e`, `email_mitm_e2e`) | 3 / 4 / 2 | real sidecar + CONNECT; Linux no-direct-route; hermetic MITM |
 | `core` (`injection_guard_e2e`, `secret_vault_e2e`, `guard_boot_row_e2e`) | 10 / 9 / 1 | **PG-required** policy rows, privacy invariant, fail-closed redemption |
-| worker-report (5 suites, 2 crates) | 12 | a dying worker's last words reach a failing test; a real broken fd 2, re-exec'd. `bash scripts/run-e2e-gate.sh worker-report` (both hosts) |
-| `tests-common` `gate_script_tests` | 22 | the gate script's table **and** its verdict (floors, caps, per-binary hook check), run against a fake `cargo` |
+| worker-report (5 suites, 2 crates) | 13 | a dying worker's last words reach a failing test; a real broken fd 2, re-exec'd. `bash scripts/run-e2e-gate.sh worker-report` (both hosts) |
+| `tests-common` `gate_script_tests` | 27 | the gate script's table **and** its verdict (floors, caps, per-binary hook check), run against a fake `cargo` |
 
 ## Key design decisions locked in
 

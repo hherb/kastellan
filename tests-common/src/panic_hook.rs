@@ -77,8 +77,9 @@ pub const PANIC_MARKER: &str = "[panic]";
 ///
 /// `scripts/run-e2e-gate.sh` checks that **every test binary a profile runs
 /// reached this hook**. That cannot be read off the source: suites reach it
-/// indirectly, through a dozen `tests_common` helpers that all funnel into
-/// [`crate::require::RequireKnob::action_reporting_to`], so a static scan would
+/// indirectly, through a dozen `tests_common` helpers that each end at one of
+/// the two knob-read doors (`RequireKnob::raw()` and
+/// [`crate::require::RequireKnob::action_reporting_to`]), so a static scan would
 /// need a list of helper names — a census, and a stale one the day a helper is
 /// added. The announcement measures what actually happened instead: the gate
 /// splits its log at cargo's `Running …` lines and refuses any binary whose
@@ -87,10 +88,13 @@ pub const PANIC_MARKER: &str = "[panic]";
 /// That check is also what makes the gate's `[panic]` cap mean anything. A
 /// cap of 0 is satisfied just as well by a binary whose panics went through
 /// the **default** hook — no marker, nothing counted — as by one that never
-/// panicked. Proving the hook was installed is what separates the two.
+/// panicked. Proving the hook was installed is what separates the two — for
+/// panics AFTER the install. A panic that beats the first knob read in its
+/// binary is still the default hook's, and neither check sees it; see
+/// [`install_once`]'s last paragraph.
 ///
 /// ⚠️ **Disjoint from every counted marker, in both directions** — asserted
-/// in the tests below. It is printed with `eprintln!`, so an ordinary
+/// in the tests below. It is printed with `eprint!`, so an ordinary
 /// capturing `cargo test` swallows it; only `--nocapture` runs (every gate
 /// profile) show it.
 pub const HOOK_INSTALLED_MARKER: &str = "[panic-hook]";
@@ -144,8 +148,9 @@ pub fn is_installed() -> bool {
 
 /// Install the neutralising panic hook, at most once per process.
 ///
-/// Idempotent by [`Once`], because the chokepoint that calls it
-/// ([`crate::require::RequireKnob::action_reporting_to`]) runs many times per
+/// Idempotent by [`Once`], because the two knob-read doors that call it
+/// (`RequireKnob::raw()` and
+/// [`crate::require::RequireKnob::action_reporting_to`]) run many times per
 /// binary and a hook that reinstalled itself on every knob read would leak a
 /// boxed closure per call.
 ///
@@ -166,14 +171,15 @@ pub fn is_installed() -> bool {
 /// is exactly the census that argued for one chokepoint. The gate's per-binary
 /// `[panic-hook]` check, not this comment, is what now keeps it true.
 ///
-/// ⚠️ **It is installed from `action_reporting_to` and NOT from `action`,
-/// because `action` is not the only door.** The first version used `action`
-/// and the whole **`microvm` profile** went round it —
-/// `microvm::skip_unless_ready` reaches the knob through `require_action_to`.
-/// It was covered only when a co-set knob happened to be read first, which is
-/// coverage by accident dressed as coverage by construction
-/// [[guard-shares-the-census-blind-spot]]. Moving one level down fixed it;
-/// picking the chokepoint by reading one call site is what did not.
+/// ⚠️ **Before that it was installed from `action`, which is not a door at
+/// all** (#745) — `action` merely calls both. The whole **`microvm` profile**
+/// went round it: `microvm::skip_unless_ready` reaches the knob through
+/// `require_action_to` → `action_reporting_to`. It was covered only when a
+/// co-set knob happened to be read first, which is coverage by accident
+/// dressed as coverage by construction [[guard-shares-the-census-blind-spot]].
+/// Moving the install one level down, into `action_reporting_to`, closed THAT
+/// route and left `raw()` open — the paragraph above. Picking a door by
+/// reading call sites is what failed, twice.
 ///
 /// ⚠️ **It is a side effect of a knob read, which is surprising, and that is
 /// the trade.** The alternative — an explicit `install()` in each of ~30
@@ -192,9 +198,17 @@ pub fn is_installed() -> bool {
 /// is still rendered by the **default** hook. Every suite in a gate profile
 /// reads its knob in its first fixture, so the window is small — but it is a
 /// window, and a suite whose knob read is buried behind a slow probe widens
-/// it. This is the residual limitation; it is not closed.
+/// it. This is the residual limitation; it is not closed, and the gate's
+/// `[panic]` cap cannot see through it (#757).
+///
+/// The same holds for a later `std::panic::set_hook`/`take_hook` anywhere in
+/// the process: the `[panic-hook]` line records that this hook was installed,
+/// not that it is still the one in place. Nothing in `core/tests` or
+/// `tests_common` replaces it today.
 pub fn install_once() {
+    let mut installed_now = false;
     INSTALLED.call_once(|| {
+        installed_now = true;
         std::panic::set_hook(Box::new(|info| {
             // ⚠️ **The guard comes first, and it is not defensive tidiness**
             // (#749). Everything below writes with `eprintln!`, which PANICS
@@ -264,19 +278,26 @@ pub fn install_once() {
                 Ok(_) => eprintln!("{}", std::backtrace::Backtrace::force_capture()),
             }
         }));
-        // Announce the install (#748) — AFTER `set_hook`, so the line is only
-        // ever printed by a process that really has the hook. Inside the
-        // `Once`, so the chokepoint's many calls produce one line per process.
-        //
-        // Guarded by the same probe as the hook, for the same reason:
-        // `eprintln!` panics on a failed write, and a knob read in a process
-        // whose stderr is a dead pipe must not turn into a test panic here.
-        // Skipping the line is the safe direction — the gate then reports that
-        // binary as unreached, a false RED, never a false green.
-        if kastellan_core::worker_stderr::stderr_is_writable() {
-            emit_own_line(&install_line());
-        }
     });
+    // Announce the install (#748) — AFTER `set_hook`, so the line is only ever
+    // printed by a process that really has the hook, and only by the call that
+    // installed it, so the doors' many calls produce one line per process.
+    //
+    // Guarded by the same probe as the hook, for the same reason: `eprint!`
+    // panics on a failed write, and a knob read in a process whose stderr is a
+    // dead pipe must not turn into a test panic here. Skipping the line is the
+    // safe direction — the gate then reports that binary as unreached, a false
+    // RED, never a false green.
+    //
+    // ⚠️ **Outside the `Once`, deliberately.** The probe and the write are two
+    // steps, so a stderr that breaks between them still panics the write. Inside
+    // `call_once` that panic POISONS the `Once`, and every later knob read in
+    // the binary then panics with "Once instance has previously been poisoned"
+    // instead of its own error. Out here it is one test's panic, rendered by the
+    // hook that is already installed.
+    if installed_now && kastellan_core::worker_stderr::stderr_is_writable() {
+        emit_own_line(&install_line());
+    }
 }
 
 /// The panic payload as a string, for the two types `panic!` can produce.

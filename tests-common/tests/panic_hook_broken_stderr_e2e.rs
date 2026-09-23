@@ -138,7 +138,7 @@ fn inner_fixture_panics_with_a_healthy_stderr() {
         return;
     }
     kastellan_tests_common::panic_hook::install_once();
-    // Twice on purpose: the chokepoint installs on EVERY knob read, so the
+    // Twice on purpose: the knob-read doors install on EVERY knob read, so the
     // announcement must be once per process, not once per call — or a gate log
     // fills with it. The parent counts exactly one.
     kastellan_tests_common::panic_hook::install_once();
@@ -274,4 +274,75 @@ fn a_panic_with_a_broken_stderr_does_not_abort_the_process() {
          fixture's own `dup2` should have made impossible — the test's model of the \
          plumbing is wrong.\n{both}"
     );
+}
+
+/// Written to **stdout** with no newline, right before each marker line in
+/// [`inner_fixture_prints_markers_after_a_partial_line`]: libtest's
+/// `test <name> ... ` under `--nocapture`, reproduced on purpose.
+const PARTIAL_LINE: &str = "kastellan-test: partial line with no newline yet ... ";
+
+/// Inner fixture: stderr MERGED into stdout, as a gate log's one pipe is, and a
+/// partial line pending on it each time the hook writes.
+///
+/// The healthy-stderr fixture above cannot see the framing: its parent reads
+/// stderr on its own pipe, where nothing ever precedes a marker, so a hook that
+/// dropped `own_line`'s leading newline would still put `[panic]` at column 0
+/// there. In a gate log it would not — the #755 false green, one layer down
+/// (#756's review).
+#[test]
+#[ignore = "inner fixture: panics on purpose; run by its parent in a child process"]
+fn inner_fixture_prints_markers_after_a_partial_line() {
+    use std::io::Write;
+    if !is_the_child() {
+        return;
+    }
+    // fd 2 := fd 1. `eprint!` is unbuffered and stdout is not, so every partial
+    // line is flushed before the hook's write can race it.
+    assert!(unsafe { libc::dup2(libc::STDOUT_FILENO, libc::STDERR_FILENO) } >= 0, "dup2 1 onto 2");
+    print!("{PARTIAL_LINE}");
+    std::io::stdout().flush().expect("flush stdout");
+    kastellan_tests_common::panic_hook::install_once();
+    println!();
+    println!("{ABOUT_TO_PANIC}");
+    print!("{PARTIAL_LINE}");
+    std::io::stdout().flush().expect("flush stdout");
+    panic!("{PAYLOAD}");
+}
+
+/// The hook's two markers start a line even when a partial line precedes them
+/// on the same stream — the condition every `--nocapture` gate log has.
+#[test]
+fn the_hooks_markers_start_a_line_on_a_merged_stream() {
+    kastellan_tests_common::panic_hook::install_once();
+    let out = run_inner_fixture("inner_fixture_prints_markers_after_a_partial_line");
+    let merged = String::from_utf8_lossy(&out.stdout).into_owned();
+    let both = format!(
+        "--- child stdout (stderr merged in) ---\n{merged}\n--- child stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // POSITIVE CONTROL: the fixture ran to its panic, and the partial line that
+    // makes this test mean anything is really in the stream (twice).
+    assert!(merged.contains(ABOUT_TO_PANIC), "the fixture never reached its panic.\n{both}");
+    assert_eq!(
+        merged.matches(PARTIAL_LINE).count(),
+        2,
+        "both partial lines must be in the merged stream, or nothing preceded the markers.\n{both}"
+    );
+    for marker in [
+        kastellan_tests_common::panic_hook::HOOK_INSTALLED_MARKER,
+        kastellan_tests_common::panic_hook::PANIC_MARKER,
+    ] {
+        assert!(
+            // `[panic-hook]` does not start with `[panic]`, so each check
+            // counts only its own marker.
+            merged.lines().any(|l| l.starts_with(marker)),
+            "no line STARTS with `{marker}`: the hook wrote it mid-line, where the gate's \
+             anchored grep cannot see it. `own_line`'s leading newline, in one write, is \
+             what prevents this (#748, #755).\n{both}"
+        );
+        assert!(
+            merged.contains(marker),
+            "`{marker}` is absent altogether, so the column-0 check above proves nothing.\n{both}"
+        );
+    }
 }

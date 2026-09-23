@@ -221,7 +221,7 @@ fn an_emitted_line_owns_its_own_column_zero() {
 
 #[test]
 fn installing_twice_is_harmless() {
-    // The chokepoint calls this on every knob read, which is many times per
+    // The knob-read doors call this on every knob read, which is many times per
     // binary. `Once` is what makes that free; without it each call would
     // leak a boxed closure.
     install_once();

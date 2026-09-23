@@ -219,8 +219,8 @@ impl RequireKnob {
     /// #654 was filed about.
     ///
     /// ⚠️ **This is one of the two doors that install #742's panic hook — the
-    /// other is `raw()` (#748).** `action` is not the only door. The first version
-    /// installed from `action`, and the **`microvm` gate profile bypassed it
+    /// other is `raw()` (#748).** Neither is `action`, which merely calls both.
+    /// The first version installed from `action`, and the **`microvm` gate profile bypassed it
     /// entirely**: `microvm::skip_unless_ready` → `report_unmet_microvm_to` →
     /// `require_action_to` calls *this* method directly, so a micro-VM suite
     /// reached its knob without ever touching `action`. It was covered only

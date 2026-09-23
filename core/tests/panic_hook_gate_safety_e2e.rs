@@ -3,15 +3,20 @@
 //! `tests_common::panic_hook`'s unit tests pin the **renderer**. They cannot
 //! pin the thing that actually matters — that the hook is *installed* in a real
 //! test binary — because a test cannot observe its own panic output. Deleting
-//! the `panic_hook::install_once()` call from `RequireKnob::action` survives
-//! every one of them.
+//! the `panic_hook::install_once()` calls from both knob-read doors
+//! (`RequireKnob::raw()` and `RequireKnob::action_reporting_to`) survives every
+//! one of them.
+//!
+//! ⚠️ This suite reads its knob through `RequireKnob::action`, which passes
+//! through BOTH doors, so deleting only one of them still passes here. Each door
+//! is proved on its own by `tests-common/tests/knob_reads_install_the_panic_hook_e2e.rs`.
 //!
 //! So this suite re-executes itself, exactly as the two `*_stderr_fallback_e2e`
 //! suites do, and reads a deliberately panicking child's streams from outside.
 //!
 //! ## What the child does, and why in that order
 //!
-//! 1. consults a REQUIRE knob — the chokepoint that installs the hook, and the
+//! 1. consults a REQUIRE knob — the knob-read doors install the hook, and it is the
 //!    call every gated tier already makes;
 //! 2. panics with a payload carrying an ESC and a `\n[WARN] …`.
 //!
@@ -82,7 +87,8 @@ fn inner_fixture_panics_with_a_forged_gate_line() {
     }
     // THE PROPERTY. This is an ordinary gated-suite preflight and nothing else
     // — no `panic_hook::install_once()` anywhere in this file. The hook must
-    // arrive through `RequireKnob::action`, which this calls, or the ~30 suites
+    // arrive through a knob read (`RequireKnob::action` → `raw()` /
+    // `action_reporting_to`, the two doors that install it), or the ~30 suites
     // that likewise never mention the hook are unprotected and this suite would
     // be lying about them.
     //
@@ -167,8 +173,9 @@ fn a_panicking_test_cannot_forge_a_column_zero_gate_line() {
             "a panic payload forged a COLUMN-0 line on the child's {label}: {forged:?}. \
              `scripts/run-e2e-gate.sh` greps `^\\[WARN\\]` and asserts zero matches over a \
              profile run with `--nocapture`, so this turns an unrelated profile red. The hook \
-             must be installed — check that `RequireKnob::action` still calls \
-             `panic_hook::install_once` (#742).\n{both}"
+             must be installed — check that `RequireKnob::raw` and \
+             `RequireKnob::action_reporting_to` still call `panic_hook::install_once` \
+             (#742, #748).\n{both}"
         );
     }
 

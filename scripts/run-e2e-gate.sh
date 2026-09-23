@@ -119,7 +119,7 @@ done
 # MAX_SKIP is `any` or a number. `guard-tier` is 0: every precondition in its
 # `bootstrap()` is knob-routed, so a `[SKIP]` there is by definition a bypass.
 # `worker-report` is 0 for the same reason: its one precondition is
-# `skip_if_sandbox_unavailable`, and the other four suites are hermetic.
+# `skip_if_sandbox_unavailable`, and the other four suites' parents read no knob.
 # The rest stay `any` while #718's 92 hand-written `[SKIP]` sites exist.
 #
 # ⚠️ Harness args are per profile because the Firecracker suites are `#[ignore]`:
@@ -153,6 +153,9 @@ done
 # binary whose panics went through the DEFAULT hook looks exactly like zero
 # from one that never panicked. The per-binary `[panic-hook]` check below is
 # what separates the two — the cap is only sound because that check exists.
+# ⚠️ And only for panics AFTER the install: a panic that beats its binary's
+# first knob read (libtest runs tests in parallel) is still the default hook's,
+# in a section that nonetheless reads as hooked. Neither check sees it (#757).
 #
 # `worker-report` (#748) demands the suites that prove a dying worker's last
 # words reach a failing test. Only the sandbox knob: one suite needs a sandbox,
@@ -420,6 +423,13 @@ fi
 # `|| true`-guarded: the zero case is precisely the one this script exists to
 # REPORT, not to abort on. `${x:-0}` then covers grep's OTHER non-zero exit —
 # an unreadable file, which prints nothing at all.
+#
+# ⚠️ That default makes an unreadable log read as zero `[SKIP]`/`[WARN]`/
+# `[panic]` lines, which every CAP accepts; it is the floors that go red on it
+# (0 passed). And before any verdict, the UNHOOKED awk below reads the same
+# file with its exit status CHECKED, so an unreadable log is refused outright
+# rather than judged — which is also why the not-a-count loop further down can
+# never see an empty count.
 # ---------------------------------------------------------------------------
 count_e2e_for_tier() {
   local tier="$1" n
