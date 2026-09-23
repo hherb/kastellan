@@ -234,6 +234,11 @@ fn assert_the_emitter_survives(name: &str, shape: &str) {
 /// wrong in the *other* direction, suppressing live character devices.
 #[test]
 fn the_emitter_suppresses_the_line_on_a_closed_stderr() {
+    // #748: this parent reads no REQUIRE knob, so nothing else installs the
+    // neutralising panic hook in this process — and the `worker-report` gate
+    // profile refuses any binary that never announces it. First statement, so
+    // a panic anywhere below is rendered by it.
+    kastellan_tests_common::panic_hook::install_once();
     assert_the_emitter_survives("inner_fixture_stderr_is_closed", "CLOSED");
 }
 
@@ -243,6 +248,7 @@ fn the_emitter_suppresses_the_line_on_a_closed_stderr() {
 /// `panic = "abort"` really is a silent `SIGABRT`.
 #[test]
 fn the_emitter_survives_a_pipe_whose_reader_is_gone() {
+    kastellan_tests_common::panic_hook::install_once();
     assert_the_emitter_survives(
         "inner_fixture_stderr_is_a_pipe_with_no_reader",
         "BROKEN-PIPE",

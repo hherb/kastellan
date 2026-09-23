@@ -37,6 +37,7 @@
 
 use std::path::PathBuf;
 
+use crate::panic_hook::{HOOK_INSTALLED_MARKER, PANIC_MARKER};
 use crate::require::{RequireKnob, KNOBS};
 
 mod run;
@@ -89,7 +90,10 @@ struct Profile {
     e2e_floors: String,
     min_passed: String,
     max_skip: String,
+    cargo_args: String,
+    harness_args: String,
     os: String,
+    max_panic: String,
     fields: usize,
 }
 
@@ -102,7 +106,10 @@ fn parse(spec: &str) -> Profile {
         e2e_floors: at(2),
         min_passed: at(3),
         max_skip: at(4),
+        cargo_args: at(5),
+        harness_args: at(6),
         os: at(7),
+        max_panic: at(8),
         fields: f.len(),
     }
 }
@@ -126,7 +133,7 @@ fn profiles() -> Vec<Profile> {
 #[test]
 fn every_profile_row_is_well_formed() {
     for p in profiles() {
-        assert_eq!(p.fields, 8, "profile '{}' has {} fields, want 8", p.name, p.fields);
+        assert_eq!(p.fields, 9, "profile '{}' has {} fields, want 9", p.name, p.fields);
         assert!(!p.name.is_empty(), "a profile has no name");
         assert!(!p.knobs.is_empty(), "profile '{}' sets no knob", p.name);
 
@@ -143,6 +150,12 @@ fn every_profile_row_is_well_formed() {
             "profile '{}' MAX_SKIP must be a number or 'any', got {:?}",
             p.name,
             p.max_skip
+        );
+        assert!(
+            p.max_panic == "any" || p.max_panic.parse::<u32>().is_ok(),
+            "profile '{}' MAX_PANIC must be a number or 'any', got {:?}",
+            p.name,
+            p.max_panic
         );
         assert!(
             matches!(p.os.as_str(), "any" | "Linux" | "Darwin"),
@@ -265,4 +278,114 @@ fn the_guard_tier_profile_sets_every_knob_its_bootstrap_consults() {
              three knobs, and a partial demand reports green (#622)"
         );
     }
+}
+
+/// The script greps the markers the hook ACTUALLY prints (#748).
+///
+/// Both counts are anchored literals in shell, while the markers are Rust
+/// constants. Rename either constant and the script silently counts zero
+/// forever: a `[panic]` cap that can never trip, or — the loud direction — a
+/// hook check that refuses every binary. Pinned here as the knob names are.
+#[test]
+fn the_script_greps_the_markers_the_panic_hook_prints() {
+    let src = gate_script();
+    for marker in [PANIC_MARKER, HOOK_INSTALLED_MARKER] {
+        // Unquoted: `[panic]` is a quoted grep argument, `[panic-hook]` an awk
+        // regex between slashes. The anchored, escaped form is common to both.
+        let pattern = format!("^{}", marker.replace('[', "\\[").replace(']', "\\]"));
+        assert!(
+            src.contains(&pattern),
+            "{} does not grep {pattern}, the anchored form of the marker \
+             `tests_common::panic_hook` prints. Either the constant was renamed and the \
+             script not updated, or the count was deleted.",
+            script_path().display()
+        );
+    }
+}
+
+/// At least one profile CAPS `[panic]` with a measured number.
+///
+/// A column every row fills with `any` is decoration: the count is printed and
+/// nothing is ever refused on it, which is #748's third finding restated.
+#[test]
+fn at_least_one_profile_caps_panic_lines() {
+    let capped: Vec<String> = profiles()
+        .into_iter()
+        .filter(|p| p.max_panic.parse::<u32>().is_ok())
+        .map(|p| p.name)
+        .collect();
+    assert!(
+        !capped.is_empty(),
+        "no profile caps MAX_PANIC, so the `[panic]` count gates nothing"
+    );
+}
+
+/// The suites that prove the worker-report guarantee are demanded by a
+/// profile (#748's first finding).
+///
+/// They were in NONE: `worker_early_exit_stderr_fallback_e2e` is skip-as-pass
+/// without a sandbox, and nothing ever set the knob that turns that skip into
+/// a failure. The list is hand-written on purpose — it is the issue's
+/// deliverable, and a suite dropped from the profile must fail here by name.
+#[test]
+fn the_worker_report_profile_demands_every_worker_report_suite() {
+    let p = profiles()
+        .into_iter()
+        .find(|p| p.name == "worker-report")
+        .expect("a `worker-report` profile exists (#748)");
+    for suite in [
+        "worker_early_exit_stderr_fallback_e2e",
+        "persistent_worker_death_stderr_fallback_e2e",
+        "panic_hook_gate_safety_e2e",
+        "worker_report_broken_stderr_e2e",
+        "panic_hook_broken_stderr_e2e",
+    ] {
+        assert!(
+            p.cargo_args.split_whitespace().any(|t| t == suite),
+            "the worker-report profile does not select `{suite}`"
+        );
+    }
+    assert!(
+        p.knobs.contains("KASTELLAN_SANDBOX_REQUIRE_E2E=1"),
+        "worker_early_exit_stderr_fallback_e2e skips without a sandbox; only the sandbox \
+         knob turns that skip into a failure"
+    );
+    // Every one of these suites puts its evidence on stderr, which libtest
+    // swallows for a passing test.
+    assert!(p.harness_args.contains("--nocapture"), "the profile must pass --nocapture");
+}
+
+/// Every `--test` a profile names is a real integration-test file.
+///
+/// Cargo errors loudly on a missing target, so this is not about a false
+/// green; it is about finding the typo in CI rather than on the one host that
+/// can run the profile. `@FIRECRACKER_SUITES` is resolved by the script at run
+/// time and skipped here.
+#[test]
+fn every_test_target_a_profile_names_exists() {
+    let root = script_path().parent().and_then(|p| p.parent()).map(PathBuf::from).unwrap();
+    let mut checked = 0usize;
+    for p in profiles() {
+        let tokens: Vec<&str> = p.cargo_args.split_whitespace().collect();
+        let packages: Vec<&str> = tokens
+            .windows(2)
+            .filter(|w| w[0] == "-p")
+            .map(|w| w[1])
+            .collect();
+        for target in tokens.windows(2).filter(|w| w[0] == "--test").map(|w| w[1]) {
+            let found = packages.iter().any(|pkg| {
+                let dir = pkg.strip_prefix("kastellan-").unwrap_or(pkg);
+                root.join(dir).join("tests").join(format!("{target}.rs")).is_file()
+            });
+            assert!(
+                found,
+                "profile '{}' selects `--test {target}`, which is not a tests/*.rs file in any \
+                 of its packages {packages:?}",
+                p.name
+            );
+            checked += 1;
+        }
+    }
+    // Positive control: a tokeniser that found no `--test` would pass above.
+    assert!(checked >= 9, "only {checked} --test targets parsed — the table shape changed");
 }

@@ -127,6 +127,11 @@ fn run_inner_fixture(name: &str) -> ChildRun {
 
 #[test]
 fn a_panicking_test_cannot_forge_a_column_zero_gate_line() {
+    // #748: this parent reads no REQUIRE knob, so nothing else installs the
+    // neutralising panic hook in this process — and the `worker-report` gate
+    // profile refuses any binary that never announces it. First statement, so
+    // a panic anywhere below is rendered by it.
+    kastellan_tests_common::panic_hook::install_once();
     let name = "inner_fixture_panics_with_a_forged_gate_line";
     let run = run_inner_fixture(name);
     let both =

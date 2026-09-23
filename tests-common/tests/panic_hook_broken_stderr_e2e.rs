@@ -138,6 +138,10 @@ fn inner_fixture_panics_with_a_healthy_stderr() {
         return;
     }
     kastellan_tests_common::panic_hook::install_once();
+    // Twice on purpose: the chokepoint installs on EVERY knob read, so the
+    // announcement must be once per process, not once per call — or a gate log
+    // fills with it. The parent counts exactly one.
+    kastellan_tests_common::panic_hook::install_once();
     println!("{ABOUT_TO_PANIC}");
     panic!("{PAYLOAD}");
 }
@@ -166,6 +170,11 @@ fn run_inner_fixture(test_name: &str) -> std::process::Output {
 /// test cannot see, because there the silence is the expected outcome.
 #[test]
 fn a_panic_with_a_healthy_stderr_still_renders_the_message() {
+    // #748: this parent reads no REQUIRE knob, so nothing else installs the
+    // neutralising panic hook in this process — and the `worker-report` gate
+    // profile refuses any binary that never announces it. First statement, so
+    // a panic anywhere below is rendered by it.
+    kastellan_tests_common::panic_hook::install_once();
     let out = run_inner_fixture("inner_fixture_panics_with_a_healthy_stderr");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -188,12 +197,26 @@ fn a_panic_with_a_healthy_stderr_still_renders_the_message() {
         "the panic payload never reached stderr, so the hook is silent on a stream it can \
          perfectly well write to.\n{both}"
     );
+    // #748: installing the hook ANNOUNCES it, once, at column 0. The gate
+    // script's "every test binary reached the hook" check counts exactly this
+    // line, so a hook that installs silently would make every profile red —
+    // and one that announced without installing would make that check a lie.
+    // Here both halves are visible in one child: the announcement, and the
+    // `[panic]` rendering above that only an installed hook produces.
+    let marker = kastellan_tests_common::panic_hook::HOOK_INSTALLED_MARKER;
+    let announcements = stderr.lines().filter(|l| l.starts_with(marker)).count();
+    assert_eq!(
+        announcements, 1,
+        "installing the hook must print exactly one column-0 `{marker}` line (the fixture \
+         calls `install_once` twice; `Once` must keep the second call silent).\n{both}"
+    );
 }
 
 /// The property: a panic with a broken stderr is still a *reported* test
 /// failure, not an abort.
 #[test]
 fn a_panic_with_a_broken_stderr_does_not_abort_the_process() {
+    kastellan_tests_common::panic_hook::install_once();
     let out = run_inner_fixture("inner_fixture_panics_with_a_broken_stderr_pipe");
     let signalled: Option<i32> = std::os::unix::process::ExitStatusExt::signal(&out.status);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

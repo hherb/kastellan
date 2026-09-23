@@ -70,6 +70,65 @@ use std::sync::Once;
 /// in the tests below rather than left to whoever edits this string.
 pub const PANIC_MARKER: &str = "[panic]";
 
+/// Marker prefixing the ONE line [`install_once`] prints when it installs the
+/// hook ([#748](https://github.com/hherb/kastellan/issues/748)).
+///
+/// # Why installing the hook announces itself
+///
+/// `scripts/run-e2e-gate.sh` checks that **every test binary a profile runs
+/// reached this hook**. That cannot be read off the source: suites reach it
+/// indirectly, through a dozen `tests_common` helpers that all funnel into
+/// [`crate::require::RequireKnob::action_reporting_to`], so a static scan would
+/// need a list of helper names — a census, and a stale one the day a helper is
+/// added. The announcement measures what actually happened instead: the gate
+/// splits its log at cargo's `Running …` lines and refuses any binary whose
+/// section carries no `[panic-hook]` line.
+///
+/// That check is also what makes the gate's `[panic]` cap mean anything. A
+/// cap of 0 is satisfied just as well by a binary whose panics went through
+/// the **default** hook — no marker, nothing counted — as by one that never
+/// panicked. Proving the hook was installed is what separates the two.
+///
+/// ⚠️ **Disjoint from every counted marker, in both directions** — asserted
+/// in the tests below. It is printed with `eprintln!`, so an ordinary
+/// capturing `cargo test` swallows it; only `--nocapture` runs (every gate
+/// profile) show it.
+pub const HOOK_INSTALLED_MARKER: &str = "[panic-hook]";
+
+/// The announcement [`install_once`] prints, as a pure function so its shape
+/// (one line, marker at column 0) can be unit-tested.
+pub fn install_line() -> String {
+    format!("{HOOK_INSTALLED_MARKER} neutralising panic hook installed in this process")
+}
+
+/// `line`, framed so it starts at column 0 whatever else shares the stream.
+///
+/// ⚠️ **Measured, and it is why this exists (#748).** Under `--nocapture`
+/// libtest writes `test <name> ... ` to stdout with no newline yet, and a gate
+/// log merges stdout and stderr into one pipe. An unframed line printed at
+/// that moment lands mid-line, and the gate's anchored grep does not see it:
+/// the hook check refused a binary that had installed the hook, and a
+/// `[panic]` line would have slipped under the cap — a false green.
+///
+/// The frame is `\n<line>\n`, emitted as ONE write (see [`emit_own_line`]).
+/// The leading newline ends any partial line; a single `write` of at most
+/// `PIPE_BUF` bytes (POSIX minimum 512) to a pipe is atomic, so nothing else
+/// can land inside it. The cost is an occasional blank line.
+pub fn own_line(line: &str) -> String {
+    format!("\n{line}\n")
+}
+
+/// Print [`own_line`]`(line)` to stderr as a single `write_str`.
+///
+/// `eprint!("{s}")` with one argument and no literal pieces formats to one
+/// `write_str` call — unlike `eprintln!("\n{line}")`, whose literal `\n` and
+/// argument are separate writes that something else could land between.
+/// Still a `print` MACRO, so libtest's capture sees it.
+fn emit_own_line(line: &str) {
+    let framed = own_line(line);
+    eprint!("{framed}");
+}
+
 static INSTALLED: Once = Once::new();
 
 /// Install the neutralising panic hook, at most once per process.
@@ -161,12 +220,15 @@ pub fn install_once() {
                 info.location().map(|l| l.to_string()).as_deref(),
                 payload_of(info.payload()),
             );
-            // `eprintln!`, not `writeln!(std::io::stderr(), …)`: libtest
-            // captures through `std::io::set_output_capture`, which only the
-            // `print!`/`eprint!` macros consult. A panic message written
-            // through the handle would not appear beneath the failing test
-            // that needs it — the same property `worker_stderr` depends on.
-            eprintln!("{line}");
+            // The `eprint!` macro, not `writeln!(std::io::stderr(), …)`:
+            // libtest captures through `std::io::set_output_capture`, which
+            // only the `print!`/`eprint!` macros consult. A panic message
+            // written through the handle would not appear beneath the failing
+            // test that needs it — the same property `worker_stderr` depends
+            // on. Framed onto its own line so the gate's `[panic]` count sees
+            // it (#748); a panic longer than PIPE_BUF loses the atomicity half
+            // of that guarantee, but not the leading newline.
+            emit_own_line(&line);
             // The default hook's backtrace behaviour, preserved. Indented
             // frames cannot forge a column-0 marker, so this needs no
             // neutralisation of its own.
@@ -183,6 +245,18 @@ pub fn install_once() {
                 Ok(_) => eprintln!("{}", std::backtrace::Backtrace::force_capture()),
             }
         }));
+        // Announce the install (#748) — AFTER `set_hook`, so the line is only
+        // ever printed by a process that really has the hook. Inside the
+        // `Once`, so the chokepoint's many calls produce one line per process.
+        //
+        // Guarded by the same probe as the hook, for the same reason:
+        // `eprintln!` panics on a failed write, and a knob read in a process
+        // whose stderr is a dead pipe must not turn into a test panic here.
+        // Skipping the line is the safe direction — the gate then reports that
+        // binary as unreached, a false RED, never a false green.
+        if kastellan_core::worker_stderr::stderr_is_writable() {
+            emit_own_line(&install_line());
+        }
     });
 }
 
@@ -419,6 +493,65 @@ mod tests {
             PANIC_MARKER.starts_with('[') && PANIC_MARKER.ends_with(']') && PANIC_MARKER.len() > 2,
             "the marker must be a non-trivial bracketed token: {PANIC_MARKER:?}"
         );
+    }
+
+    #[test]
+    fn the_install_marker_is_disjoint_from_every_marker_the_gate_counts() {
+        // The gate counts `^\[panic-hook\]` per test binary (#748) and ALSO
+        // counts `^\[panic\]`, `^\[SKIP\]`, `^\[WARN\]` and `^\[E2E\]`. If
+        // either marker were a prefix of the other, one grep would count the
+        // other's lines: an install announcement would trip the `[panic]` cap
+        // in every healthy run, or a panic line would satisfy the hook check.
+        // Both directions, because `starts_with` is not symmetric.
+        for counted in ["[SKIP]", "[WARN]", "[E2E]", PANIC_MARKER] {
+            assert!(
+                !HOOK_INSTALLED_MARKER.starts_with(counted),
+                "the install marker must not BEGIN with {counted}"
+            );
+            assert!(
+                !counted.starts_with(HOOK_INSTALLED_MARKER),
+                "{counted} must not begin with the install marker"
+            );
+        }
+        // Non-vacuity, as for PANIC_MARKER above.
+        assert!(
+            HOOK_INSTALLED_MARKER.starts_with('[')
+                && HOOK_INSTALLED_MARKER.ends_with(']')
+                && HOOK_INSTALLED_MARKER.len() > 2,
+            "the marker must be a non-trivial bracketed token: {HOOK_INSTALLED_MARKER:?}"
+        );
+    }
+
+    #[test]
+    fn the_install_line_starts_at_column_zero_with_its_marker_and_is_one_line() {
+        // The gate's grep is anchored at line start, so a leading space or a
+        // second line would make the announcement invisible to it.
+        let line = install_line();
+        assert!(line.starts_with(HOOK_INSTALLED_MARKER), "{line:?}");
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+    }
+
+    #[test]
+    fn an_emitted_line_owns_its_own_column_zero() {
+        // Measured, not hypothetical (#748): under `--nocapture` libtest writes
+        // `test <name> ... ` to STDOUT with no newline yet, and our STDERR line
+        // shares the same merged pipe in a gate log. An unprefixed line landed
+        // mid-line there, the anchored grep missed it, and the hook check
+        // refused a binary that HAD installed the hook. For `[panic]` the same
+        // interleaving is a false GREEN against the cap.
+        //
+        // So every line is emitted as `\n<line>\n`: the leading newline ends
+        // any partial line, and one write under PIPE_BUF is atomic on a pipe.
+        for line in [install_line(), render_panic_line(None, None, "boom")] {
+            let emitted = own_line(&line);
+            assert!(emitted.starts_with('\n'), "must end any partial line first: {emitted:?}");
+            assert!(emitted.ends_with('\n'), "{emitted:?}");
+            assert_eq!(emitted.trim_matches('\n'), line, "the line itself must be unchanged");
+            // Atomicity is only guaranteed up to PIPE_BUF, whose POSIX minimum
+            // is 512 bytes. The install line is fixed; a panic line is not, so
+            // this pins only the one whose length we control.
+        }
+        assert!(own_line(&install_line()).len() <= 512, "the announcement must fit one atomic pipe write");
     }
 
     #[test]
