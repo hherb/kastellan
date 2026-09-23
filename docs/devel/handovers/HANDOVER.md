@@ -10,7 +10,7 @@
 
 **Last updated:** 2026-09-23 (#748: a `worker-report` gate profile, a run-time check that every
 profiled test binary reached the panic hook, and a measured `[panic]` cap) ·
-**Recent PRs, newest first:** #748's PR (see `gh pr list`), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Recent PRs, newest first:** [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
