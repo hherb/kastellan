@@ -253,6 +253,11 @@ fn vm_bot_factory(
 /// Shared gate: returns the live config or `None` (skip-as-pass), after checking the
 /// opt-in env, the micro-VM readiness, and the peer + proxy binaries.
 fn gate() -> Option<(String, Account, Account, String, PathBuf, PathBuf)> {
+    // #748: the opt-in exit below returns BEFORE any knob is read, so without
+    // this the binary would stay on the default panic hook — and the `microvm`
+    // gate profile refuses any binary that never announces the neutralising
+    // one. First, so every path out of here has it.
+    kastellan_tests_common::panic_hook::install_once();
     // GATE is this tier's OPT-IN, not a host precondition. An operator demanding
     // a real micro-VM run (KASTELLAN_MICROVM_REQUIRE_E2E) has not thereby asked
     // for a live homeserver round-trip with credentials only they can supply —
