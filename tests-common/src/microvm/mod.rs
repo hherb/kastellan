@@ -166,12 +166,17 @@ pub fn require_action() -> UnmetAction {
 
 /// [`require_action`] with the out-of-dialect `[WARN]` written to `out`.
 ///
-/// Reads the variable through [`RequireKnob::env`] rather than naming
+/// Reads the variable through `RequireKnob::raw` rather than naming
 /// [`REQUIRE_ENV`] a second time: the two are the same string today only
 /// because `KNOB` is built from it, and a second literal here is the one place
 /// this module could reintroduce the drift it exists to end.
+///
+/// ⚠️ **Not `std::env::var(..).ok()`**, which is what this used to be (#755).
+/// That maps a non-UTF-8 value to `None`, the same as unset, so a knob the
+/// operator set skipped with no `[WARN]` — the silent no-op `raw()` was written
+/// to retire, reintroduced by the one caller that read the environment itself.
 pub fn require_action_to(out: &mut dyn std::io::Write) -> UnmetAction {
-    KNOB.action_reporting_to(std::env::var(KNOB.env()).ok(), out)
+    KNOB.action_reporting_to(KNOB.raw(), out)
 }
 
 /// Emit the `[E2E]` positive control for a met micro-VM precondition.

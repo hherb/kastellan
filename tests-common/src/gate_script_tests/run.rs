@@ -27,7 +27,7 @@ use super::{profiles, script_path};
 
 /// The profile these tests drive. It must run on any host (`os` = `any`), so
 /// the script does not refuse it before reaching the verdict; checked below.
-const PROFILE: &str = "gliner";
+pub(super) const PROFILE: &str = "gliner";
 
 /// A throwaway directory used as `$HOME` (so the gate's log lands here, not in
 /// the real home) and holding the fake `cargo`. Removed on drop.
@@ -105,13 +105,13 @@ fn unhooked_binary(name: &str) -> String {
 }
 
 /// A healthy run of `profile`: one hooked binary, every floor met, 5 passed.
-fn healthy_log_for(profile: &str) -> String {
+pub(super) fn healthy_log_for(profile: &str) -> String {
     format!("{}{}{PASSED_FIVE}", hooked_binary("fake_suite_e2e"), e2e_evidence_for(profile))
 }
 
 /// Run the real gate script for [`PROFILE`], with a fake `cargo` that prints
 /// `log` and exits with `exit_code`.
-fn run_gate(tag: &str, log: &str, exit_code: i32) -> Output {
+pub(super) fn run_gate(tag: &str, log: &str, exit_code: i32) -> Output {
     run_gate_profile(PROFILE, tag, log, exit_code)
 }
 
@@ -122,13 +122,15 @@ fn run_gate_profile(profile: &str, tag: &str, log: &str, exit_code: i32) -> Outp
 
 /// What a test changes about the gate's world beyond the canned log.
 #[derive(Default)]
-struct GateEdits<'a> {
+pub(super) struct GateEdits<'a> {
     /// Replace the LAST `|`-field (MAX_PANIC) of this profile's row in a COPY
     /// of the script. The committed table has every cap at 0, so without a
     /// copy no test can reach a cap above zero, `any`, or a malformed value.
-    max_panic: Option<(&'a str, &'a str)>,
+    pub(super) max_panic: Option<(&'a str, &'a str)>,
     /// Extra fake tools, `(name, sh body)`, put on `PATH` beside the fake cargo.
-    tools: &'a [(&'a str, &'a str)],
+    pub(super) tools: &'a [(&'a str, &'a str)],
+    /// Extra environment for the gate script, e.g. a UTF-8 locale.
+    pub(super) env: &'a [(&'a str, &'a str)],
 }
 
 /// The gate script's text with `profile`'s MAX_PANIC field replaced.
@@ -165,7 +167,19 @@ fn write_executable(path: &std::path::Path, body: &str) {
 }
 
 /// [`run_gate_profile`] with [`GateEdits`] applied.
-fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32, edits: &GateEdits) -> Output {
+pub(super) fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32, edits: &GateEdits) -> Output {
+    run_gate_bytes(profile, tag, log.as_bytes(), exit_code, edits)
+}
+
+/// [`run_gate_with`] for a log that is not valid UTF-8 or carries a NUL — the
+/// bytes a real run can contain and a `&str` cannot.
+pub(super) fn run_gate_bytes(
+    profile: &str,
+    tag: &str,
+    log: &[u8],
+    exit_code: i32,
+    edits: &GateEdits,
+) -> Output {
     let scratch = Scratch::new(tag);
     for (name, body) in edits.tools {
         write_executable(&scratch.root.join("bin").join(name), &format!("#!/bin/sh\n{body}\n"));
@@ -183,10 +197,13 @@ fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32, edits: &Ga
         }
     };
     let fake_cargo = scratch.root.join("bin/cargo");
-    // A quoted heredoc prints the log byte for byte (no expansion of `$`).
-    let body = format!(
-        "#!/bin/sh\ncat <<'KASTELLAN_FAKE_CARGO_EOF'\n{log}\nKASTELLAN_FAKE_CARGO_EOF\nexit {exit_code}\n"
-    );
+    // The log is `cat` from a file rather than a heredoc, so it reaches the
+    // gate byte for byte — a NUL or a non-UTF-8 byte included (#755).
+    let canned = scratch.root.join("fake-cargo.log");
+    let mut bytes = log.to_vec();
+    bytes.push(b'\n');
+    std::fs::write(&canned, bytes).expect("write the canned log");
+    let body = format!("#!/bin/sh\ncat '{}'\nexit {exit_code}\n", canned.display());
     write_executable(&fake_cargo, &body);
     let path = format!(
         "{}:{}",
@@ -202,12 +219,13 @@ fn run_gate_with(profile: &str, tag: &str, log: &str, exit_code: i32, edits: &Ga
         .arg(profile)
         .env("HOME", &scratch.root)
         .env("PATH", path)
+        .envs(edits.env.iter().copied())
         .output()
         .expect("run the gate script under bash")
 }
 
 /// Render an [`Output`] for an assertion message.
-fn describe(out: &Output) -> String {
+pub(super) fn describe(out: &Output) -> String {
     format!(
         "exit {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
         out.status.code(),

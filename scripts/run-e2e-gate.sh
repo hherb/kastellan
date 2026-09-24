@@ -37,6 +37,8 @@
 #   4. every test binary the run started reached the neutralising panic hook
 #      (a `[panic-hook]` line inside its cargo `Running` section), and an
 #      optional per-profile cap on `[panic]` lines (#748).
+#   5. no counted marker landed MID-LINE, after libtest's `test <name> ... `,
+#      where every anchored count above is blind to it (#755).
 #
 # ⚠️ **The `[E2E]` floors are per TIER, not per run, and that is load-bearing.**
 # A single total is satisfied by whichever knob happens to be chattiest: the
@@ -419,6 +421,14 @@ fi
 # ---------------------------------------------------------------------------
 # The assertions.
 #
+# ⚠️ Every tool below reads the log in the C locale: as BYTES, not characters.
+# The log is whatever the tests wrote, and one byte that is not valid UTF-8
+# (#755, measured) makes macOS awk die ("towc: multibyte conversion failure"),
+# so every gate run refuses; and makes GNU grep's `[^[]*` fail to match, so the
+# mid-line scan passes the line the byte sits on. Set only here, after the run,
+# so the tests themselves still get the operator's locale.
+export LC_ALL=C
+#
 # `grep -c` exits 1 on zero matches while printing `0`, so every count is
 # `|| true`-guarded: the zero case is precisely the one this script exists to
 # REPORT, not to abort on. `${x:-0}` then covers grep's OTHER non-zero exit —
@@ -472,9 +482,46 @@ if [ "$AWK_EXIT" -ne 0 ]; then
   exit 3
 fi
 
+# No counted marker may have landed MID-LINE (#755).
+#
+# Under `--nocapture` libtest writes `test <name> ... ` to stdout with no
+# newline yet, and this script merges stdout and stderr into one pipe. A marker
+# printed to stderr at that moment lands on the same line, after the prefix,
+# and every count above — anchored at column 0 — misses it. For `[WARN]` (max 0)
+# and a capped `[SKIP]` that is a false GREEN.
+#
+# The counts stay anchored on purpose: a neutralised hostile payload carries
+# `[WARN]` mid-line legitimately. So this refuses only libtest's shape — a
+# counted marker as the FIRST `[` after `test <name> ... `. That covers both
+# gaps libtest leaves open: before the result word, and between the result word
+# (`ok`, `FAILED`, `ignored, <msg>`) and its `\n`, which are separate flushed
+# writes. Every emitter in the suites the profiles select puts the leading `\n`
+# and its marker in the same write, so this should never fire; it is here for
+# the emitter that does not — the tree still has unframed hand-written `[SKIP]`s
+# outside every profile (#718). It catches one stranded behind libtest's own
+# prefix without anybody listing the emitters; a marker stranded behind a
+# test's own unterminated `print!`, or behind a non-pretty `--format`, is NOT
+# this shape and is not caught.
+#
+# The verdict is grep's EXIT STATUS, never its output. Measured on GNU grep
+# 3.11: a single NUL anywhere makes the log "binary", and grep then prints
+# nothing and exits 0 — matched, yet empty. `-a` reads it as text anyway (and
+# the C locale above lets `[^[]*` match a byte that is not a character).
+# grep exits 0 on a match, 1 on none (the healthy case) and 2 on error.
+MID_LINE="$(grep -aE '^test [^[]+ \.\.\. [^[]*\[(SKIP|WARN|E2E|panic|panic-hook)\]' "$LOG")"
+MID_LINE_EXIT=$?
+case "$MID_LINE_EXIT" in
+  0) MID_LINE_FOUND=1 ;;
+  1) MID_LINE_FOUND=0 ;;
+  *)
+    echo "run-e2e-gate.sh: grep failed ($MID_LINE_EXIT) scanning $LOG for mid-line markers — refusing a verdict." >&2
+    exit 3
+    ;;
+esac
+
 # Belt and braces: an operand that is somehow still not a number must refuse a
 # verdict rather than silently satisfy every floor.
-for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT PANIC_COUNT BINARY_COUNT; do
+for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND; do
   case "${!var}" in
     ''|*[!0-9]*)
       echo "run-e2e-gate.sh: $var is \"${!var}\", which is not a count — refusing a verdict." >&2
@@ -544,6 +591,15 @@ if [ "$PASSED_COUNT" -gt 0 ] && [ "$BINARY_COUNT" -eq 0 ]; then
   echo "❌ $PASSED_COUNT tests passed but the log has no \`Running\` lines, so the"
   echo "   per-binary panic-hook check has nothing to check. Cargo's output format"
   echo "   changed, or the log is not a cargo log. Refusing rather than passing vacuously."
+  FAIL=1
+fi
+if [ "$MID_LINE_FOUND" -eq 1 ]; then
+  echo "❌ evidence marker(s) landed mid-line, after libtest's \`test <name> ... \`, where"
+  echo "   no anchored count can see them — so every total above may be wrong. The"
+  echo "   emitter printed without a leading newline: build the line with"
+  echo "   panic_hook::own_line (or skip_line/warn_line/e2e_line) and print it in ONE"
+  echo "   write (#755)."
+  printf '%s\n' "$MID_LINE" | sed 's/^/     /'
   FAIL=1
 fi
 if [ -n "$UNHOOKED" ]; then
