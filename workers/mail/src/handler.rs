@@ -32,7 +32,12 @@ impl MailHandler {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct P {
-            query: String,
+            // Optional (#698): a filter-only search — "every message with an
+            // attachment" — has no text, and localmail serves it as a
+            // date-ordered walk over the filtered archive. Absent and `null`
+            // both mean "no text" and are sent as `""`.
+            #[serde(default)]
+            query: Option<String>,
             #[serde(default)]
             filters: Option<serde_json::Value>,
             // Accepted at the top level as well as inside `filters`, because
@@ -51,7 +56,8 @@ impl MailHandler {
             cursor: Option<String>,
         }
         let p: P = parse_params(params)?;
-        let mut body = serde_json::json!({ "query": p.query });
+        let query = p.query.unwrap_or_default();
+        let mut body = serde_json::json!({ "query": query });
         let filters = search_params::normalize_filters(p.filters, p.account_ids, p.folder_ids)
             .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
         if let Some(f) = filters {
@@ -61,9 +67,11 @@ impl MailHandler {
         // it is decided up front rather than inferred from a field we may not
         // have sent. `plan_sort` also decides *whether* to send one at all: on a
         // paging request the cursor already carries the ordering, and defaulting
-        // one there contradicts it (#561). Needs the cursor before the body is
-        // built, hence the early `is_some`.
-        let plan = sort::plan_sort(p.sort.as_deref(), p.cursor.is_some());
+        // one there contradicts it (#561). And a blank query defaults to `date`,
+        // because localmail refuses a stated `rank` it has no text to rank
+        // (#698). Needs the cursor before the body is built, hence the early
+        // `is_some`.
+        let plan = sort::plan_sort(p.sort.as_deref(), p.cursor.is_some(), &query);
         if let sort::SortPlan::Send(s) = plan {
             body["sort"] = serde_json::json!(s);
         }

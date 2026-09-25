@@ -187,3 +187,50 @@ fn search_without_id_filters_sends_no_filters_key() {
     let out = h.call("mail.search", serde_json::json!({"query": "flight"})).unwrap();
     assert!(out["sent"].get("filters").is_none(), "sent: {}", out["sent"]);
 }
+
+// --- mail.search: a filter-only search (#698) ---
+
+/// The live failure (DGX audit row 3777, 2026-09-05): every message with an
+/// attachment, as `filters` and no `query`. It was refused with `missing field
+/// query` and cost a plan iteration. It must now reach localmail as a textless
+/// search with the ordering localmail serves such a query with.
+#[test]
+fn a_filter_only_search_needs_no_query_and_is_sent_date_ordered() {
+    let mut h = MailHandler::with_client(client_with(Box::new(BodyEchoFake)));
+    let out = h
+        .call("mail.search", serde_json::json!({"filters": {"has_attachment": true}}))
+        .unwrap();
+    assert_eq!(out["sent"]["query"], serde_json::json!(""));
+    assert_eq!(out["sent"]["sort"], serde_json::json!("date"));
+    assert_eq!(out["sent"]["filters"]["has_attachment"], serde_json::json!(true));
+    let note = out[crate::sort::ORDERING_KEY].as_str().unwrap();
+    assert!(note.contains("date order"), "{note}");
+}
+
+/// A planner that writes `"query": null` for "no text" means the same thing.
+#[test]
+fn a_null_query_is_a_filter_only_search() {
+    let mut h = MailHandler::with_client(client_with(Box::new(BodyEchoFake)));
+    let out = h
+        .call("mail.search", serde_json::json!({"query": null, "account_ids": [1]}))
+        .unwrap();
+    assert_eq!(out["sent"]["query"], serde_json::json!(""));
+    assert_eq!(out["sent"]["sort"], serde_json::json!("date"));
+}
+
+/// Whitespace is no text to localmail either, and a defaulted `rank` would be
+/// refused there.
+#[test]
+fn a_whitespace_query_is_sent_date_ordered() {
+    let mut h = MailHandler::with_client(client_with(Box::new(BodyEchoFake)));
+    let out = h.call("mail.search", serde_json::json!({"query": "  "})).unwrap();
+    assert_eq!(out["sent"]["sort"], serde_json::json!("date"));
+}
+
+/// The fix must not move the default for a query that has text.
+#[test]
+fn a_query_with_text_still_defaults_to_rank() {
+    let mut h = MailHandler::with_client(client_with(Box::new(BodyEchoFake)));
+    let out = h.call("mail.search", serde_json::json!({"query": "flight"})).unwrap();
+    assert_eq!(out["sent"]["sort"], serde_json::json!("rank"));
+}

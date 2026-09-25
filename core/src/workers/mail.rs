@@ -116,7 +116,12 @@ impl WorkerManifest for MailManifest {
                           date range, from/to, subject, has_attachment, account/folder. Page \
                           forward with next_cursor.",
                 params: &[
-                    ToolParam { name: "query", description: "free-text search query", required: true },
+                    ToolParam {
+                        name: "query",
+                        description: "free-text search query. For a filter-only search (e.g. every \
+                                      message with an attachment) omit query and pass filters.",
+                        required: false,
+                    },
                     ToolParam {
                         name: "account_ids",
                         description: "restrict to these account ids, e.g. [1] — same place as on \
@@ -138,7 +143,8 @@ impl WorkerManifest for MailManifest {
                         description: "'rank' (default, best match first) or 'date' (newest \
                                       first). Rank order is NOT date order: the top hits are \
                                       whatever matched best, from any year. A 'most recent' / \
-                                      'latest' question must pass sort: \"date\".",
+                                      'latest' question must pass sort: \"date\". With no query \
+                                      there is nothing to rank: results are date-ordered.",
                         required: false,
                     },
                     ToolParam { name: "limit", description: "max hits (default 50)", required: false },
@@ -376,6 +382,31 @@ mod tests {
                 "mail.get_attachment_text",
                 "mail.get_attachment",
             ]
+        );
+    }
+
+    /// #698: a filter-only search ("every message with an attachment") is a
+    /// search, and the worker accepts it with no `query`. Advertising `query`
+    /// as required told the planner otherwise — and when it tried anyway (DGX
+    /// audit row 3777) the old worker refused it and cost a plan iteration.
+    /// The description has to say how to write one, or the planner invents
+    /// a query text to satisfy a slot it believes it must fill.
+    #[test]
+    fn search_advertises_query_as_optional_and_says_how_to_filter_only() {
+        let docs = MailManifest.tool_docs();
+        let d = docs.iter().find(|d| d.method == "mail.search").expect("mail.search");
+        let query = d.params.iter().find(|p| p.name == "query").expect("query");
+        assert!(!query.required, "a filter-only search needs no query");
+        assert!(
+            query.description.contains("filters") && query.description.contains("omit"),
+            "must say a filter-only search omits query: {:?}",
+            query.description
+        );
+        let sort = d.params.iter().find(|p| p.name == "sort").expect("sort");
+        assert!(
+            sort.description.contains("no query"),
+            "must say what ordering a filter-only search gets: {:?}",
+            sort.description
         );
     }
 
