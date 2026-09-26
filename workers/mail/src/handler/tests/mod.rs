@@ -118,7 +118,9 @@ fn ungated_tools_work_against_an_older_localmail() {
     let mut h = MailHandler::with_client_unverified(client_with(Box::new(VersionFake(Some(SLICE_D_ONLY)))));
     h.call("mail.list_accounts", serde_json::json!({})).expect("list_accounts is not gated");
     let msg = h.call("mail.get_message", serde_json::json!({"message_id": 5})).expect("a compact read is not gated");
-    assert_eq!(msg["id"], "5", "{msg}");
+    // No tool output in the message: CodeQL taints everything `call` returns
+    // (one arm is `list_accounts`) and flags formatting it as cleartext logging.
+    assert!(msg["id"] == "5", "a compact get_message did not return the fake's message");
 }
 
 /// A `full_headers` that is not a JSON bool is invalid params — never coerced
