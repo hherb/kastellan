@@ -4,13 +4,13 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260926_698_pre-prune.md`](archive/handover_20260926_698_pre-prune.md),
+> [`archive/handover_20260923_755_pre-prune.md`](archive/handover_20260923_755_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-26 (#698: `mail.search` takes a filter-only search; #561 measured
-fixed upstream) ·
-**Recent PRs, newest first:** [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Last updated:** 2026-09-23 (#755: the gate refuses a marker stranded mid-line; the issue's
+census was wrong, the fix is structural) ·
+**Recent PRs, newest first:** [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -59,57 +59,83 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
 
 ## Current state
 
-### This session (2026-09-26): #698 — `mail.search` takes a filter-only search
+### This session (2026-09-23, later): #755 — a marker stranded mid-line is refused
 
-- **`query` is optional** (absent/`null` → `""`), and a blank query with no named `sort` and no
-  cursor defaults to **`date`** (`sort::TEXTLESS_SORT`), not `rank`. ⚠️ **The issue understated
-  it:** localmail refuses a *stated* `rank` on a textless query (HTTP 400, measured on the DGX), so
-  the old worker failed on **every** textless search — `query: ""` included — not just the one
-  with the field missing. localmail itself ignores nothing now: `has_attachment` is honoured both
-  ways (measured).
-- ⚠️ **`sort::is_textless` cannot see an operator-only query** (`has:attachment`): the worker does
-  not parse localmail's DSL. That still defaults to `rank`, gets the 400, and the 400's detail
-  names `sort='date'` as the repair. The advertised shape is `filters` with no `query`.
-- **#561 is fixed upstream, measured:** a cursor plus a contradicting `sort` is now a 400 naming
-  the fix, and omitting `sort` continues the walk (which is what `DeferToCursor` sends). Closed by
-  this PR.
-- `handler.rs` 1368 → 437: its tests moved to `handler/tests/{mod,search,messages,attachments}.rs`
-  **first**, movement only (lines 1–428 `cmp`-identical; moved lines the same multiset bar three
-  `use super::*;`; the 141 test names identical, with a negative control).
-- ⚠️ **The Mac's localmail token has expired** (`401 /problems/invalid-token`) — #673/#674 live.
-  The DGX's works. localmail shipped slices D/E; adopting them is filed as
-  [#760](https://github.com/hherb/kastellan/issues/760).
+- ⚠️ **#755's census was wrong — the sixth time.** It said `[WARN]`/`[SKIP]`/`[E2E]` were emitted
+  unframed. `skip_line`/`warn_line`/`e2e_line` have rendered `\n<marker> …\n` since #663/#680/#720,
+  every emitter writes that in **one** `write!(out, "{}", …)`, every hand-written `[SKIP]` in a
+  *profiled* suite starts with `\n`, and the capped profiles have none. **No live false green.**
+  [[issue-as-filed-can-carry-a-regression]]
+- **So the fix is structural, not per-emitter.** `run-e2e-gate.sh` refuses a counted marker
+  (`[SKIP]`/`[WARN]`/`[E2E]`/`[panic]`/`[panic-hook]`) as **the first `[` on a `test <name> ... `
+  line**; grep exit 2 refuses a verdict (exit 3). The counts stay anchored — a neutralised hostile
+  payload carries `[WARN]` mid-line legitimately. ⚠️ **libtest leaves TWO gaps**: before the result
+  word, and between it and its `\n` (separate flushed writes) — `ok[WARN]…`. The first version
+  caught only the first; the reviewer found the second. Tests in `gate_script_tests/mid_line.rs`.
+- **Emitter-level one-write tests** (`write_recorder::WriteRecorder` records each `write` call):
+  a `Vec<u8>` sink cannot tell `writeln!` (two writes) from one framed `write!`.
+- ⚠️ **A real fail-open found on the way:** `microvm::require_action_to` read its knob with
+  `std::env::var(..).ok()` — a non-UTF-8 value read as unset and skipped with **no `[WARN]`**,
+  the exact defect `RequireKnob::raw()` documents. Now `KNOB.action_reporting_to(KNOB.raw(), out)`.
+  ⚠️ **That fix un-pinned a door**: the micro-VM fixture was the only isolated proof that
+  `action_reporting_to` installs the hook; now it passes `raw()` first. A new
+  `inner_fixture_action_reporting_to` pins it alone (the reviewer's mutant now dies).
+- `require.rs` tests split out first (movement only, byte-identical by `cmp`). **Mutants: 15 of 15
+  killed** (7 script, 5 emitter, 3 review-round). #718's unframed `[SKIP]`s outside every profile
+  (e.g. `net_demo_egress_e2e`, `egress_force_routing_e2e`) would now be **refused** the day a
+  profile selects them — frame them when you do.
+- ⚠️ **Review round: the new scan itself failed open on Linux** — measured on the DGX (GNU grep
+  3.11). One NUL anywhere in the log makes grep call it "binary": it prints **nothing** and exits
+  **0**, and the scan read its verdict off the (empty) output. And under a UTF-8 locale `[^[]*`
+  will not match a non-UTF-8 byte, hiding the line it sits on. Now `grep -a`, verdict from the
+  **exit status**, and the whole assertion block runs under `export LC_ALL=C` (set after the
+  cargo run, so tests keep the operator's locale) — which also stops macOS awk dying
+  (`towc: multibyte conversion failure`) on such a byte and refusing every run. The Mac's grep
+  hid the NUL case entirely; only the DGX run showed it. The fake-cargo harness now `cat`s a
+  byte file (`run_gate_bytes`) instead of a heredoc, so tests can carry those bytes. Also:
+  `panic_hook::emit_own_line` goes through a `Write` seam, so its one-write promise is now
+  pinned (a split-write mutant dies). **+5 lib tests** beyond the Mac sweep row below, which
+  predates this round. Deferred hardening (a `MarkerLine` newtype, a real-libtest control,
+  shapes the scan cannot see): [#759](https://github.com/hherb/kastellan/issues/759).
 
-### Previous (2026-09-23, later): #755 — a marker stranded mid-line is refused
+### Previous (2026-09-23): #748 — the last piece of the worker-report arc
 
-Full prose in [`archive/handover_20260926_698_pre-prune.md`](archive/handover_20260926_698_pre-prune.md).
+Full prose in [`archive/handover_20260923_755_pre-prune.md`](archive/handover_20260923_755_pre-prune.md).
 What still binds:
 
-- **The fix is structural:** `run-e2e-gate.sh` refuses a counted marker as the first `[` on a
-  `test <name> ... ` line — ⚠️ libtest leaves **two** gaps (before the result word, and between it
-  and its `\n`). Counts stay anchored. Tests in `gate_script_tests/mid_line.rs`.
-- ⚠️ **#718's unframed `[SKIP]`s outside every profile would be refused** the day a profile selects
-  them — frame them when you do.
-- ⚠️ **The scan reads bytes:** `grep -a`, verdict from the **exit status**, assertions under
-  `LC_ALL=C`. One NUL made GNU grep print nothing and exit 0 (the Mac hid it)
-  [[gnu-grep-binary-file-prints-nothing-exit-0]]. Deferred hardening: #759.
+- **A `worker-report` profile** (5 suites, two packages, sandbox knob only) runs on **both hosts**.
+- **Every profiled test binary must reach the panic hook, checked at RUN time** (a `[panic-hook]`
+  line per cargo `Running` section). ⚠️ **A hermetic suite in a profile must call
+  `panic_hook::install_once()` first in every parent test** — it has no knob to do it implicitly.
+  A static scan was abandoned: it needs a census of helper names [[guard-shares-the-census-blind-spot]].
+- **`MAX_PANIC`, measured 0 on all five profiles.** ⚠️ No floor is possible; the per-binary hook
+  check is what makes the cap sound, and it is blind to a panic before the first knob read (#757).
+- ⚠️ **A knob has TWO doors that install the hook** — `raw()` and `action_reporting_to`, each
+  pinned in its own child by `knob_reads_install_the_panic_hook_e2e`.
+- ⚠️ **The `microvm` profile refused every run from #720 to #748**: `grep -c` counts lines, and
+  discovery emits 15 `--test`s on one line [[grep-c-counts-lines-not-matches]].
+- ⚠️ **`KASTELLAN_PG_BIN_DIR` for the `pg`/`gliner` profiles on this Mac** [[postgres-app-bin-paths]].
 
-### Previous (2026-09-22/23): #748 and #750
+### Previous (2026-09-22): #750 — #746, #747, #749 and its review round
 
-Full prose in [`archive/handover_20260923_755_pre-prune.md`](archive/handover_20260923_755_pre-prune.md)
-and [`archive/handover_20260923_748_pre-prune.md`](archive/handover_20260923_748_pre-prune.md).
+Full prose in [`archive/handover_20260923_748_pre-prune.md`](archive/handover_20260923_748_pre-prune.md).
 What still binds:
 
-- **Every profiled test binary must reach the panic hook, checked at RUN time.** ⚠️ A hermetic
-  suite in a profile must call `panic_hook::install_once()` first in every parent test. A knob has
-  **two** doors that install it (`raw()`, `action_reporting_to`). `MAX_PANIC` measured 0 on all five
-  profiles; blind before the first knob read (#757).
-- ⚠️ **`grep -c` counts lines** — the `microvm` profile refused every run from #720 to #748
-  [[grep-c-counts-lines-not-matches]]. `KASTELLAN_PG_BIN_DIR` for `pg`/`gliner` on this Mac.
-- ⚠️ **Renderers match an exhaustive `TailState`**, deliberately not `#[non_exhaustive]`.
-  `stderr_is_writable()` takes no fd, deliberately.
-- ⚠️ **Give a mutating reviewer its own worktree, and bracket every sweep with a sha of the
-  sources** — two reviewers in one worktree fabricated a "flake" [[never-edit-tree-during-a-sweep]].
+- ⚠️ **Renderers match an exhaustive `TailState`**, deliberately **not** `#[non_exhaustive]`: the
+  documented arm-order convention it replaced failed twice out of three renderers.
+- ⚠️ **`stderr_is_writable()` takes no fd, deliberately** — a surviving mutant probed `STDOUT_FILENO`,
+  which is writable in every test binary. **`POLLERR`/`POLLHUP` are one bit per host**: neither host
+  alone proves that mask.
+- ⚠️ **A fix for a reviewer's finding carried the next defect, twice**: a harmless-looking hoist of
+  `tail.snapshot()` *was* #730; a loud arm put ~125 `error!` lines per failure in a 2 ms poll loop.
+  [[a-fix-for-a-reviewers-finding-can-carry-the-next-defect]]
+- ⚠️ **Two reviewers in one worktree fabricated a "flake"** (one ran a mutant while the other
+  tested). Cargo's `…-c4860b16…` suffix is a *metadata* hash, stable across content changes, so
+  "same binary" proves nothing. **Give a mutating reviewer its own worktree, and bracket every sweep
+  with a sha of the sources** [[never-edit-tree-during-a-sweep]].
+- ⚠️ **Confidently-worded comments were the defect class** (six false ones fixed): the private
+  fields of `CapturedTail` are a **clarity** boundary, not a security one — `complete(vec![])`
+  forges `KnownSilent` in one call.
 
 ### Previous (2026-09-20/22): the #725 → #745 worker-report arc
 
@@ -217,16 +243,16 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **Mail worker catch-up with localmail:** [#760](https://github.com/hherb/kastellan/issues/760)
-   (slices D/E: attachments by position with paged text, compact search hits — gate each on
-   `/v1/version`'s `api_minor`), then #673/#674 (the Mac token has already expired). **#728's live
-   re-measure is still owed** (operator DMs, a **fresh room**) — a filter-only question ("mail
-   with attachments from last week") now exercises #698 in the same run.
+1. **The last #677 follow-up:** [#698](https://github.com/hherb/kastellan/issues/698) (`mail.search`
+   cannot express a filter-only search; check what localmail `/v1/search` does with an empty query
+   first — it ignores `has_attachment` today). **#728's live re-measure is still owed** (operator
+   DMs, a **fresh room**).
 
 2. **#702 follow-ups: #703, #704, #705.** ⚠️ **The guard model never sees object keys** (#703) — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
-   calibration run. The localmail changes the operator offered on 2026-09-14 have **shipped
-   upstream** (slices A–E); the worker's side is #760.
+   calibration run. The localmail changes the operator offered (2026-09-14: ordered headers, 4xx on
+   cursor restart, filter-only search, compact hits, attachments by `message_id` + name, a distinct
+   expired-credential error) are **not yet filed** on `hherb/localmail`.
 
 3. **The #750 residue, #751–#754, and #757** (the `[panic]` cap's blind spot before the first knob
    read — needs a *measured* default-hook count per profile, DGX too).
@@ -291,7 +317,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 1558+ (#639), `core/src/workers/gliner_relex/tests.rs`, `db/src/asks.rs`,
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
 `llm-router/src/config.rs`, `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
-`workers/mail/src/attach.rs` (1046), `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
+`workers/mail/src/handler.rs`, `tests-common/src/require.rs`,
 `core/src/worker_lifecycle/persistent.rs`, `core/src/scheduler/inner_loop.rs`,
 `core/src/channel/bus.rs`, `workers/matrix/src/sdk_live.rs`, `llm-router/src/messages.rs`,
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`.
@@ -331,8 +357,8 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#698 — **the gate that stands**) | branch tip | **4498 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY: +12** — +5 lib from #758's review round (which that row never measured) and +7 from this PR (mail worker +6, core +1) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-698`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
-| **Mac** (#755 — superseded) | branch tip | **4486 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container — the Apple `container` service was not running — 4 gliner opt-in), `[panic]` 21 (all `#[should_panic]` unit tests, uncounted by any profile), **mid-line matches 0**, source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY per suite: +15 / +2** — this PR's +10 lib and `knob_reads…` +1/+1, **plus +3 lib and `panic_hook_broken_stderr_e2e` +1/+1 from #756's review round, which the row below never measured** (its log is 17:56, the merge 19:58). ⚠️ Two container `[SKIP]` lines had libtest's `test … ok` spliced INTO their reason — a multi-piece hand-written `eprintln!`; the marker stays at column 0, so cosmetic (#718). **Gate:** `worker-report` ✅ 13 passed / 3 `[E2E]` / 5 of 5 hooked (Mac) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-755`), **27** `Checking kastellan` lines, zero warnings (Mac only — tests-common links core, so no cross-clippy; CI covers Linux) | **23** Mac |
+| **Mac** (#755 — **the gate that stands**) | branch tip | **4486 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container — the Apple `container` service was not running — 4 gliner opt-in), `[panic]` 21 (all `#[should_panic]` unit tests, uncounted by any profile), **mid-line matches 0**, source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY per suite: +15 / +2** — this PR's +10 lib and `knob_reads…` +1/+1, **plus +3 lib and `panic_hook_broken_stderr_e2e` +1/+1 from #756's review round, which the row below never measured** (its log is 17:56, the merge 19:58). ⚠️ Two container `[SKIP]` lines had libtest's `test … ok` spliced INTO their reason — a multi-piece hand-written `eprintln!`; the marker stays at column 0, so cosmetic (#718). **Gate:** `worker-report` ✅ 13 passed / 3 `[E2E]` / 5 of 5 hooked (Mac) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-755`), **27** `Checking kastellan` lines, zero warnings (Mac only — tests-common links core, so no cross-clippy; CI covers Linux) | **23** Mac |
+| **Mac** (#748 — superseded; predates #756's review round) | branch tip | **4471 / 0 / 45**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **12** (8 container, 4 gliner opt-in), `[panic]` **0**, source sha **identical before and after**. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4`, primary checkout. **Delta vs the row below reconciles EXACTLY: +18 passed / +3 ignored / +1 suite** — `panic_hook` +3, `gate_script_tests` +6, `run.rs` +6, and `knob_reads_install_the_panic_hook_e2e` (+1 suite, +3 passed, +3 ignored fixtures). ⚠️ **`[SKIP]` 26→12 is environment** (primary checkout has the gliner `.venv`; container skips 19→8, helpers untouched). ⚠️ **The row below's `[panic]` 20 is not reproducible from any log on disk** — both #750-era sweep logs count 0, anchored or not — so it is recorded as unverified, not as a delta. ⚠️ **Two earlier sweeps this session were DISCARDED**: one had a test file appended under it (the sha bracket caught it, `a5e5…`→`cc49…`), the next was superseded by the two-door fix. **Gate profiles:** `worker-report` ✅ both hosts (Mac 3/3 consecutive after the framing fix), `pg` ✅ 19, `gliner` ✅ 5 (Mac), `guard-tier` ✅ 21 / 44 `[E2E]` (DGX), `microvm` ✅ **30 / 65 `[E2E]` / 15 of 15 hooked** (DGX — its first passing gated run ever). **Every profile's `[panic]` measured 0** | exit 0 **on BOTH hosts**, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-748`), **27** `Checking kastellan` lines each, zero warnings. The DGX run predates the movement-only `panic_hook/tests.rs` split, which the Mac re-linted | **12** Mac |
 
 Older rows (incl. #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -412,9 +438,6 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#761](https://github.com/hherb/kastellan/pull/761)** (#698, #561) — `mail.search` takes a filter-only search: `query` optional, a
-  blank query defaults to `sort: "date"` (localmail 400s a stated `rank` there, measured). #561
-  measured fixed upstream. `handler.rs` tests split out first. Filed #760.
 - **[#758](https://github.com/hherb/kastellan/pull/758)** (#755) — the gate refuses a counted marker stranded mid-line after libtest's `test <name> ... `
   (both gaps); emitter one-write tests; `microvm::require_action_to` no longer skips a non-UTF-8
   knob silently. The issue's "unframed emitters" premise was wrong. Review round: the scan reads

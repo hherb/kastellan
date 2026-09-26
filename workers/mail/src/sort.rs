@@ -80,6 +80,29 @@ use serde_json::Value;
 /// the ordering truthfully without assuming anything about the server.
 pub const DEFAULT_SORT: &str = "rank";
 
+/// The sort this worker asks for when the planner names none, is not paging,
+/// **and the query is blank** — a filter-only search (#698).
+///
+/// Not a preference: localmail has nothing to rank a textless query against,
+/// always answers it date-ordered, and refuses a *stated* `rank` for it with a
+/// 400. So defaulting [`DEFAULT_SORT`] here would turn every filter-only search
+/// into an error. `date` is the ordering such a query is served with anyway.
+pub const TEXTLESS_SORT: &str = "date";
+
+/// Whether `query` has no free text, in the sense localmail uses to pick its
+/// textless ordering (`free_text.strip()` is empty there).
+///
+/// **It cannot see a query made only of search operators** (`has:attachment`,
+/// `subject:invoice`): localmail lifts those out before judging, and this
+/// worker deliberately does not parse localmail's query language. Such a query
+/// still gets [`DEFAULT_SORT`], localmail refuses it, and its refusal — which
+/// names `sort: "date"` as the fix — reaches the planner as a repairable error.
+/// The advertised way to write a filter-only search is `filters` with no
+/// `query`, which this function does see.
+pub fn is_textless(query: &str) -> bool {
+    query.trim().is_empty()
+}
+
 /// Response key carrying [`ordering_note`]'s sentence.
 ///
 /// **Must sort lexicographically before `"results"`** — see the module docs.
@@ -97,10 +120,10 @@ pub enum SortPlan<'a> {
     DeferToCursor,
 }
 
-/// Decide the `sort` field for a request, given what the planner asked for and
-/// whether it is paging.
+/// Decide the `sort` field for a request, given what the planner asked for,
+/// whether it is paging, and the query text.
 ///
-/// Pure. Three cases:
+/// Pure. Four cases, checked in this order:
 ///
 /// - **Planner named a sort** → send it verbatim, cursor or not. An explicit
 ///   request is never second-guessed; unknown values are passed through rather
@@ -115,6 +138,9 @@ pub enum SortPlan<'a> {
 ///   contradiction by discarding the cursor and silently restarting at page one
 ///   ([#561](https://github.com/hherb/kastellan/issues/561)); sending nothing
 ///   leaves the service free to honour its own cursor.
+/// - **Neither, and the query is blank** → [`TEXTLESS_SORT`] (#698). A
+///   filter-only search has nothing to rank, and localmail refuses a stated
+///   `rank` for it, so the default below would make it an error.
 /// - **Neither** → the advertised default, so what we advertise and what we
 ///   request are the same fact rather than one inherited from another service.
 ///
@@ -123,10 +149,11 @@ pub enum SortPlan<'a> {
 /// only by parsing an opaque paging token whose shape is localmail's private
 /// business and can change with no notice, which would fail silently and late.
 /// That check belongs to the service that owns the format (#561).
-pub fn plan_sort<'a>(requested: Option<&'a str>, has_cursor: bool) -> SortPlan<'a> {
+pub fn plan_sort<'a>(requested: Option<&'a str>, has_cursor: bool, query: &str) -> SortPlan<'a> {
     match requested {
         Some(s) if !s.is_empty() => SortPlan::Send(s),
         _ if has_cursor => SortPlan::DeferToCursor,
+        _ if is_textless(query) => SortPlan::Send(TEXTLESS_SORT),
         _ => SortPlan::Send(DEFAULT_SORT),
     }
 }
@@ -193,15 +220,15 @@ mod tests {
 
     #[test]
     fn absent_or_empty_sort_resolves_to_the_advertised_default() {
-        assert_eq!(plan_sort(None, false), SortPlan::Send("rank"));
-        assert_eq!(plan_sort(Some(""), false), SortPlan::Send("rank"));
+        assert_eq!(plan_sort(None, false, "qantas"), SortPlan::Send("rank"));
+        assert_eq!(plan_sort(Some(""), false, "qantas"), SortPlan::Send("rank"));
     }
 
     #[test]
     fn an_explicit_sort_is_passed_through() {
-        assert_eq!(plan_sort(Some("date"), false), SortPlan::Send("date"));
+        assert_eq!(plan_sort(Some("date"), false, "q"), SortPlan::Send("date"));
         // Not corrected here — localmail 422s an unknown sort (measured live).
-        assert_eq!(plan_sort(Some("newest"), false), SortPlan::Send("newest"));
+        assert_eq!(plan_sort(Some("newest"), false, "q"), SortPlan::Send("newest"));
     }
 
     /// #561: on a paging request the cursor already carries the ordering, so a
@@ -209,8 +236,10 @@ mod tests {
     /// the cursor. Send nothing.
     #[test]
     fn paging_without_a_named_sort_defers_to_the_cursor() {
-        assert_eq!(plan_sort(None, true), SortPlan::DeferToCursor);
-        assert_eq!(plan_sort(Some(""), true), SortPlan::DeferToCursor);
+        assert_eq!(plan_sort(None, true, "q"), SortPlan::DeferToCursor);
+        assert_eq!(plan_sort(Some(""), true, "q"), SortPlan::DeferToCursor);
+        // A textless page defers too: the cursor still carries the ordering.
+        assert_eq!(plan_sort(None, true, ""), SortPlan::DeferToCursor);
     }
 
     /// An explicit sort is still honoured while paging — the planner may
@@ -218,7 +247,27 @@ mod tests {
     /// mismatch (that needs the cursor's format, which is localmail's).
     #[test]
     fn an_explicit_sort_wins_over_a_cursor() {
-        assert_eq!(plan_sort(Some("date"), true), SortPlan::Send("date"));
+        assert_eq!(plan_sort(Some("date"), true, "q"), SortPlan::Send("date"));
+    }
+
+    /// #698: a filter-only search has no text to rank, and localmail refuses
+    /// a *stated* `rank` for it. Defaulting `rank` there turned every
+    /// filter-only search into an error, so a blank query defaults to `date` —
+    /// the ordering localmail would serve it with anyway.
+    #[test]
+    fn a_blank_query_without_a_named_sort_resolves_to_date() {
+        for blank in ["", "   ", "\t\n"] {
+            assert_eq!(plan_sort(None, false, blank), SortPlan::Send("date"), "{blank:?}");
+            assert_eq!(plan_sort(Some(""), false, blank), SortPlan::Send("date"), "{blank:?}");
+        }
+    }
+
+    /// The blank-query default must not override the planner: an explicit
+    /// `rank` on a blank query is sent as asked, and localmail's refusal —
+    /// which names `sort: "date"` as the repair — reaches the planner.
+    #[test]
+    fn an_explicit_sort_on_a_blank_query_is_still_passed_through() {
+        assert_eq!(plan_sort(Some("rank"), false, ""), SortPlan::Send("rank"));
     }
 
     /// The paging note must not name an ordering it cannot know.
