@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the localmail wire-shape drift gate against the REAL service.
 #
-# `core/tests/mail_daemon_e2e.rs::mock_localmail_shapes_match_real_localmail` is
+# `core/tests/mail_live_shape_e2e.rs::mock_localmail_shapes_match_real_localmail` is
 # the only test in the tree that talks to a live localmail. It is the half of
 # #527/#500's protection that the hermetic tests structurally cannot provide:
 # every other mail test asserts our fixtures agree with our code, which is true
@@ -74,5 +74,5 @@ export KASTELLAN_MAIL_ENDPOINT KASTELLAN_MAIL_TOKEN
 echo "==> live localmail: $KASTELLAN_MAIL_ENDPOINT"
 # --nocapture so a [SKIP]/[NOTE] line is visible: a silent green here would be
 # indistinguishable from the gate having checked nothing.
-exec cargo test -p kastellan-core --test mail_daemon_e2e \
+exec cargo test -p kastellan-core --test mail_live_shape_e2e \
   mock_localmail_shapes_match_real_localmail -- --ignored --nocapture
