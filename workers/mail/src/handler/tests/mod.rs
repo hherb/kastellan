@@ -112,7 +112,8 @@ fn ungated_tools_work_against_an_older_localmail() {
         ("mail.get_message", serde_json::json!({"message_id": 5, "full_headers": false})),
     ];
     for (method, params) in &calls {
-        assert!(!Tool::from_method(method).unwrap().needs_current_api(params), "{method} {params}");
+        let req = Request::parse(Tool::from_method(method).unwrap(), params.clone()).unwrap();
+        assert!(!req.needs_current_api(), "{method} {params}");
     }
     let mut h = MailHandler::with_client_unverified(client_with(Box::new(VersionFake(Some(SLICE_D_ONLY)))));
     h.call("mail.list_accounts", serde_json::json!({})).expect("list_accounts is not gated");
@@ -120,17 +121,61 @@ fn ungated_tools_work_against_an_older_localmail() {
     assert_eq!(msg["id"], "5", "{msg}");
 }
 
-/// A `full_headers` that is not JSON `true` skips the version gate
-/// (`needs_current_api` reads it with `as_bool`), which is safe only because
-/// `get_message` then refuses it as invalid params rather than coercing it to
-/// true and sending `?headers=list` to a server nobody checked. Pins that
-/// ordering: a lenient parse would fail this test.
+/// A `full_headers` that is not a JSON bool is invalid params — never coerced
+/// to true and sent as `?headers=list` to a server nobody checked, and never
+/// coerced to false and served compact. Since #765 it is refused before the
+/// gate (so against any localmail); a lenient parse would fail this test.
 #[test]
 fn a_non_bool_full_headers_is_invalid_params_not_an_ungated_header_read() {
     for bad in [serde_json::json!("true"), serde_json::json!(1), serde_json::json!(null)] {
         let mut h = MailHandler::with_client_unverified(client_with(Box::new(VersionFake(Some(SLICE_D_ONLY)))));
         let err = h.call("mail.get_message", serde_json::json!({"message_id": 5, "full_headers": bad})).unwrap_err();
         assert_eq!(err.code, codes::INVALID_PARAMS, "{bad}: {}", err.message);
+    }
+}
+
+/// A transport that fails the test on ANY request — so a call that reaches it
+/// has done network work (the version gate included) before refusing.
+struct NoNetwork;
+impl HttpGet for NoNetwork {
+    fn get(&self, url: &Url) -> Result<RawResponse, String> { panic!("unexpected GET {url}") }
+    fn transport_kind(&self) -> &'static str { "no-network" }
+    fn get_authed(&self, url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
+        panic!("params must be refused before any request; got GET {url}")
+    }
+    fn post_authed(&self, url: &Url, _: &str, _: &str, _: &[u8], _: usize) -> Result<RawResponse, String> {
+        panic!("params must be refused before any request; got POST {url}")
+    }
+}
+
+/// #765: invalid params are `INVALID_PARAMS` whatever localmail is — checked
+/// before the version gate, and before any other request. When the gate ran
+/// first, an old or unreachable localmail turned each of these into "upgrade
+/// localmail" (or a transport fault), and the planner retried a call it should
+/// have corrected.
+#[test]
+fn invalid_params_are_refused_before_the_version_gate() {
+    let calls = [
+        // get_message asking for headers (the gated form), without a usable id.
+        ("mail.get_message", serde_json::json!({"full_headers": true})),
+        ("mail.get_message", serde_json::json!({"message_id": "abc", "full_headers": true})),
+        ("mail.get_message", serde_json::json!({"message_id": 5, "full_headers": true, "x": 1})),
+        // search: an unknown key, a wrong-typed field, and a bad filter.
+        ("mail.search", serde_json::json!({"query": "q", "nope": 1})),
+        ("mail.search", serde_json::json!({"query": 7})),
+        ("mail.search", serde_json::json!({"query": "q", "filters": "not-an-object"})),
+        // both attachment tools: nothing named, index without a message, a bad hash.
+        ("mail.get_attachment_text", serde_json::json!({})),
+        ("mail.get_attachment_text", serde_json::json!({"index": 0})),
+        ("mail.get_attachment_text", serde_json::json!({"sha256": "../../etc/passwd"})),
+        ("mail.get_attachment", serde_json::json!({"filename": "a.pdf"})),
+        ("mail.get_attachment", serde_json::json!({"sha256": "A".repeat(64)})),
+    ];
+    for (method, params) in calls {
+        let mut h = MailHandler::with_client_unverified(client_with(Box::new(NoNetwork)));
+        let err = h.call(method, params.clone()).unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS, "{method} {params}: {}", err.message);
+        assert!(!err.message.contains("upgrade localmail"), "{method} {params}: {}", err.message);
     }
 }
 

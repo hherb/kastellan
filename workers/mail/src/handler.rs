@@ -1,5 +1,7 @@
-//! JSON-RPC dispatch for the six read-only `mail.*` tools. Each arm validates
-//! params, calls the localmail REST client, and maps failures to `RpcError`.
+//! JSON-RPC dispatch for the six read-only `mail.*` tools. Params are read and
+//! checked first, by the pure [`request`] module; then the version gate runs
+//! if the call needs it; then each arm calls the localmail REST client and
+//! maps failures to `RpcError`.
 //! Attachments come back either as extracted text (`get_attachment_text`) or as
 //! original-format files written to the task workspace `out/` (`get_attachment`).
 
@@ -10,12 +12,15 @@ use kastellan_protocol::{codes, server::Handler, RpcError};
 
 use crate::attach;
 use crate::client::{MailClient, MailError};
-use crate::ids::{self, LocalmailId};
+use crate::ids::LocalmailId;
 use crate::problem;
 use crate::search_params;
 use crate::sort;
 use crate::text_page;
 use crate::version;
+
+mod request;
+use request::{Request, Tool};
 
 pub struct MailHandler {
     client: MailClient,
@@ -24,60 +29,6 @@ pub struct MailHandler {
     /// again, so if this worker is ever made long-lived (it is `SingleUse`
     /// today), a localmail upgraded under it is picked up.
     api_ok: OnceCell<()>,
-}
-
-/// The six tools, parsed from the JSON-RPC method name once so that dispatch
-/// and the version gate read the same value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tool {
-    Search,
-    GetMessage,
-    ListMessages,
-    ListAccounts,
-    GetAttachmentText,
-    GetAttachment,
-}
-
-impl Tool {
-    fn from_method(method: &str) -> Option<Self> {
-        Some(match method {
-            "mail.search" => Self::Search,
-            "mail.get_message" => Self::GetMessage,
-            "mail.list_messages" => Self::ListMessages,
-            "mail.list_accounts" => Self::ListAccounts,
-            "mail.get_attachment_text" => Self::GetAttachmentText,
-            "mail.get_attachment" => Self::GetAttachment,
-            _ => return None,
-        })
-    }
-
-    /// Does this call use a route or request field localmail added after
-    /// `/v1` began (see [`version`]), and so must not run against an older
-    /// server? The rest use routes every `/v1` serves, and keep working
-    /// against one — a mail worker that could still list accounts is more use
-    /// to an operator diagnosing an upgrade than one that refuses everything.
-    ///
-    /// `mail.get_message` is gated only when it asks for headers: it then sends
-    /// `?headers=list`, which an older server answers with a 200 and **no**
-    /// `headers` key rather than an error. A compact read works everywhere.
-    /// Read from the raw `params` so the decision stays here, beside every
-    /// other tool's. The only input `get_message`'s `full_headers: bool` reads
-    /// as true is JSON `true` (serde does not coerce a string or number, and
-    /// `null` is an error), so `== Some(true)` gates exactly the calls that
-    /// will send `?headers=list`; anything else that skips the gate is refused
-    /// as invalid params.
-    ///
-    /// Exhaustive on purpose (no `_` arm): a new tool does not compile until
-    /// someone decides whether it is gated. When this was a string `matches!`
-    /// beside the dispatch `match`, a new slice D/E tool left off it would
-    /// have skipped the gate silently.
-    fn needs_current_api(self, params: &serde_json::Value) -> bool {
-        match self {
-            Self::Search | Self::GetAttachmentText | Self::GetAttachment => true,
-            Self::GetMessage => params.get("full_headers").and_then(serde_json::Value::as_bool) == Some(true),
-            Self::ListMessages | Self::ListAccounts => false,
-        }
-    }
 }
 
 impl MailHandler {
@@ -123,39 +74,10 @@ impl MailHandler {
         Ok(())
     }
 
-    fn search(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct P {
-            // Optional (#698): a filter-only search — "every message with an
-            // attachment" — has no text, and localmail serves it as a
-            // date-ordered walk over the filtered archive. Absent and `null`
-            // both mean "no text" and are sent as `""`.
-            #[serde(default)]
-            query: Option<String>,
-            #[serde(default)]
-            filters: Option<serde_json::Value>,
-            // Accepted at the top level as well as inside `filters`, because
-            // `mail.list_messages` takes them there and the planner carried the
-            // shape across (twice, in one live task). `search_params` folds them
-            // inward and fixes their type.
-            #[serde(default, deserialize_with = "ids::account_ids")]
-            account_ids: Option<Vec<LocalmailId>>,
-            #[serde(default, deserialize_with = "ids::folder_ids")]
-            folder_ids: Option<Vec<LocalmailId>>,
-            #[serde(default)]
-            sort: Option<String>,
-            #[serde(default)]
-            limit: Option<u32>,
-            #[serde(default)]
-            cursor: Option<String>,
-        }
-        let p: P = parse_params(params)?;
-        let query = p.query.unwrap_or_default();
+    fn search(&self, p: request::Search) -> Result<serde_json::Value, RpcError> {
+        let query = p.query;
         let mut body = serde_json::json!({ "query": query });
-        let filters = search_params::normalize_filters(p.filters, p.account_ids, p.folder_ids)
-            .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
-        if let Some(f) = filters {
+        if let Some(f) = p.filters {
             body["filters"] = f;
         }
         // The ordering is the one property the response gets annotated with, so
@@ -188,39 +110,17 @@ impl MailHandler {
         Ok(out)
     }
 
-    fn get_message(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct P {
-            #[serde(deserialize_with = "ids::message_id")]
-            message_id: LocalmailId,
-            #[serde(default)]
-            full_headers: bool,
-        }
-        let p: P = parse_params(params)?;
-        let msg = self.client.get_json(&detail_path(p.message_id, p.full_headers)).map_err(mail_err_to_rpc)?;
+    fn get_message(&self, message_id: LocalmailId, full_headers: bool) -> Result<serde_json::Value, RpcError> {
+        let msg = self.client.get_json(&detail_path(message_id, full_headers)).map_err(mail_err_to_rpc)?;
         // Checked, never reshaped: see `headers` for why a wrong shape is a
         // fault rather than something to convert.
-        if let Some(why) = crate::headers::header_list_error(&msg, p.full_headers) {
+        if let Some(why) = crate::headers::header_list_error(&msg, full_headers) {
             return Err(RpcError::new(codes::OPERATION_FAILED, why));
         }
         Ok(crate::detail::number_attachments(msg))
     }
 
-    fn list_messages(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct P {
-            #[serde(default, deserialize_with = "ids::account_ids")]
-            account_ids: Option<Vec<LocalmailId>>,
-            #[serde(default, deserialize_with = "ids::folder_ids")]
-            folder_ids: Option<Vec<LocalmailId>>,
-            #[serde(default)]
-            limit: Option<u32>,
-            #[serde(default)]
-            cursor: Option<String>,
-        }
-        let p: P = parse_params(params)?;
+    fn list_messages(&self, p: request::ListMessages) -> Result<serde_json::Value, RpcError> {
         let mut q: Vec<String> = Vec::new();
         if let Some(a) = &p.account_ids {
             q.push(format!("account_ids={}", join_ids(a)));
@@ -254,11 +154,10 @@ impl MailHandler {
     /// unlabelled, in a key-stripped prompt head.
     fn resolve_attachment(&self, selector: attach::Selector) -> Result<attach::Picked, RpcError> {
         match selector {
-            // Fallible construction is the whole guard: `from_planner_sha` is
-            // the only way into `Picked` from here, so the traversal check on
-            // the `{sha256}` URL segment cannot be forgotten at a call site.
-            attach::Selector::Sha(sha256) => attach::Picked::from_planner_sha(&sha256)
-                .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m)),
+            // Checked when the params were read: `attach::choose` builds this
+            // arm only through `Picked::from_planner_sha`, the fallible
+            // constructor that guards the `{sha256}` URL segment.
+            attach::Selector::Sha(picked) => Ok(picked),
             attach::Selector::InMessage { message_id, filename, expect_sha, index } => {
                 // Compact headers: only `attachments` is read here, and full
                 // headers would multiply the response for nothing.
@@ -304,33 +203,13 @@ impl MailHandler {
         }
     }
 
-    fn get_attachment_text(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct P {
-            #[serde(default)]
-            sha256: Option<String>,
-            #[serde(default, deserialize_with = "ids::opt_message_id")]
-            message_id: Option<LocalmailId>,
-            #[serde(default)]
-            filename: Option<String>,
-            #[serde(default)]
-            index: Option<usize>,
-            /// Where the page starts, in characters: `0` (or absent) for the
-            /// first page, else a `next_offset` a previous page returned.
-            #[serde(default)]
-            offset: Option<u64>,
-        }
-        let p: P = parse_params(params)?;
-        let selector = attach::choose(p.sha256, p.message_id, p.filename, p.index)
-            .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
+    fn get_attachment_text(&self, selector: attach::Selector, offset: u64) -> Result<serde_json::Value, RpcError> {
         // Whether the planner typed the hash decides which repair a 404 gets;
         // read it before `resolve_attachment` consumes the selector.
         let planner_supplied = matches!(selector, attach::Selector::Sha(_));
         let picked = self.resolve_attachment(selector)?;
         // `get_bytes` (the higher attachment cap, not the JSON cap) — a page is
         // small, but the cap is the attachment tools' one ceiling.
-        let offset = p.offset.unwrap_or(0);
         let (_ct, bytes) = self
             .client
             .get_bytes(&picked.text_path(offset, text_page::TEXT_PAGE_CHARS))
@@ -349,28 +228,11 @@ impl MailHandler {
             .map_err(|m| RpcError::new(codes::OPERATION_FAILED, m))
     }
 
-    fn get_attachment(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct P {
-            #[serde(default)]
-            sha256: Option<String>,
-            #[serde(default, deserialize_with = "ids::opt_message_id")]
-            message_id: Option<LocalmailId>,
-            #[serde(default)]
-            filename: Option<String>,
-            #[serde(default)]
-            index: Option<usize>,
-        }
-        let p: P = parse_params(params)?;
-        // `filename` does double duty here, and the two jobs do not conflict:
-        // with `message_id` it *selects* the attachment, and the file is then
-        // saved under the name the archive actually has for it; with `sha256`
-        // (which already selects one) it names the output, exactly as before.
-        // Kept before `choose` consumes it, because the sha form needs it.
-        let requested_name = p.filename.clone();
-        let selector = attach::choose(p.sha256, p.message_id, p.filename, p.index)
-            .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
+    fn get_attachment(
+        &self,
+        selector: attach::Selector,
+        requested_name: Option<String>,
+    ) -> Result<serde_json::Value, RpcError> {
         // Same rule as `get_attachment_text`: a hash this worker resolved out of
         // a message is right by construction, so a 404 on it must not send the
         // planner to re-copy it.
@@ -447,23 +309,21 @@ impl Handler for MailHandler {
                 format!("unknown method {method}"),
             ));
         };
-        if tool.needs_current_api(&params) {
+        // Params first, gate second (#765): a call that is invalid whatever
+        // localmail is must be told so, not told to upgrade localmail.
+        let req = Request::parse(tool, params)?;
+        if req.needs_current_api() {
             self.require_current_api()?;
         }
-        match tool {
-            Tool::Search => self.search(params),
-            Tool::GetMessage => self.get_message(params),
-            Tool::ListMessages => self.list_messages(params),
-            Tool::ListAccounts => self.list_accounts(),
-            Tool::GetAttachmentText => self.get_attachment_text(params),
-            Tool::GetAttachment => self.get_attachment(params),
+        match req {
+            Request::Search(p) => self.search(p),
+            Request::GetMessage { message_id, full_headers } => self.get_message(message_id, full_headers),
+            Request::ListMessages(p) => self.list_messages(p),
+            Request::ListAccounts => self.list_accounts(),
+            Request::GetAttachmentText { selector, offset } => self.get_attachment_text(selector, offset),
+            Request::GetAttachment { selector, requested_name } => self.get_attachment(selector, requested_name),
         }
     }
-}
-
-fn parse_params<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T, RpcError> {
-    serde_json::from_value(params)
-        .map_err(|e| RpcError::new(codes::INVALID_PARAMS, format!("bad params: {e}")))
 }
 
 fn mail_err_to_rpc(e: MailError) -> RpcError {

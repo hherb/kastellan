@@ -106,6 +106,7 @@ done
 # E2E floors are `tier=N[,tier=N...]`, where `tier` is the phrase the knob was
 # constructed with and the string that appears in `[E2E] <tier>: <detail>`:
 #   supervisor-backed  Postgres-backed  sandboxed  guard-tier  micro-VM  gliner-relex
+#   live-localmail
 #
 # MIN_PASSED is a LOWER BOUND, deliberately: an exact count is a second place
 # the test census lives and it goes stale the next time a test is added, at
@@ -163,6 +164,14 @@ done
 # words reach a failing test. Only the sandbox knob: one suite needs a sandbox,
 # the rest are hermetic, and none needs Postgres or a guard backend — so unlike
 # `guard-tier` it runs on both hosts.
+#
+# `mail-live` (#763) demands the live localmail shape gate — the one test that
+# checks our reading of localmail against the real service. It needs
+# KASTELLAN_MAIL_ENDPOINT + KASTELLAN_MAIL_TOKEN exported, which this script does
+# NOT set: run it through `scripts/mail/live-shape-gate.sh`, which reads them
+# from the daemon's config and then runs this profile. `--ignored` for the same
+# reason as `microvm`: the test is `#[ignore]`d so a plain sweep never talks to
+# the live service, and without the flag the profile would select nothing.
 # ---------------------------------------------------------------------------
 PROFILES=(
   "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0"
@@ -170,6 +179,7 @@ PROFILES=(
   "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|gliner-relex=1|1|any|-p kastellan-core --test gliner_relex_e2e|--nocapture|any|0"
   "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux|0"
   "worker-report|KASTELLAN_SANDBOX_REQUIRE_E2E=1|sandboxed=1|1|0|-p kastellan-core -p kastellan-tests-common --test worker_early_exit_stderr_fallback_e2e --test persistent_worker_death_stderr_fallback_e2e --test panic_hook_gate_safety_e2e --test worker_report_broken_stderr_e2e --test panic_hook_broken_stderr_e2e|--nocapture|any|0"
+  "mail-live|KASTELLAN_MAIL_LIVE_REQUIRE_E2E=1|live-localmail=1|1|0|-p kastellan-core --test mail_live_shape_e2e|--nocapture --ignored|any|0"
 )
 
 # ⚠️ There is deliberately NO `sandbox` profile yet, and the reason is a

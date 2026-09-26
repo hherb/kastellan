@@ -8,9 +8,9 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-26 (#760's last piece: `mail.get_message` serves localmail's
-per-occurrence `headers=list`, checked fail-closed) ·
-**Recent PRs, newest first:** [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Last updated:** 2026-09-27 (#763: the live localmail shape gate joins the evidence machinery;
+#765: mail params are checked before the version gate) ·
+**Recent PRs, newest first:** [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -59,30 +59,28 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
 
 ## Current state
 
-### This session (2026-09-26, latest): #760's last piece — `headers=list`
+### This session (2026-09-27, latest): #763 + #765 — the mail gate and param order
 
-- `full_headers: true` now sends **`?headers=list`** (localmail #381, `api_minor` ≥ 1): one
-  `{name, value}` per occurrence, wire order, case variants interleaved. `headers.rs` no longer
-  reshapes; `header_list_error` **checks** and fails closed — a name-keyed object (whatever was
-  asked), a missing block when asked (#500's symptom), or an entry that is not exactly two strings
-  is an `OPERATION_FAILED` fault. Converting an object instead would keep "working" the day the
-  request spelling broke, and would reopen #703 if it ever passed through.
-- `get_message` is **gated only when `full_headers` is JSON `true`** — `Tool::needs_current_api`
-  now reads the raw params (equivalent: the only input serde's `bool` reads as true is JSON `true`;
-  a string, number or `null` is `INVALID_PARAMS` — pinned by a test). Still exhaustive.
-- Mocks: `mock_localmail` serves `full` (email-in) **and** `list`, and 400s an unknown mode as
-  localmail now does. Live gate: a `?headers=list` leg pinning the exact key set — ✅ green on the
-  Mac, zero `[NOTE]`. Tool description updated in `core/src/workers/mail.rs`.
-- **Review fix-up:** a refusal now names its structural cause (JSON type, entry index, which key
-  is missing, key count) and never quotes served text; a shape mismatch says "update one of them"
-  instead of "service fault" (an additive localmail change passes the `>=` gate); a header-less
-  answer names a rolled-back localmail. Both mocks serve a repeated, interleaved `Received`, and
-  the **live gate now checks one entry per occurrence** — `list` count and each name's value order
-  against `full` — ✅ green on the Mac. Comments corrected: an older localmail sends *no* headers,
-  not a name-keyed object. Filed #765 (gate runs before param validation).
-- **#760 is done.** Still owed: the **live planner re-measure** (Next TODO 1) and #763.
+- **#763, the live shape gate is evidence now.** It moved to its own suite,
+  `core/tests/mail_live_shape_e2e.rs` (movement-only commit, byte-identical). New knob
+  `KASTELLAN_MAIL_LIVE_REQUIRE_E2E` (tier `live-localmail`, in `KNOBS`) via
+  `tests_common::live_localmail::credentials_or_skip`, plus a **`mail-live` profile** (floor 1,
+  `MAX_SKIP` 0, `MAX_PANIC` 0 *measured*, `--ignored`). `scripts/mail/live-shape-gate.sh`
+  finds the credentials and then **runs the profile**; the profile itself sets no credentials.
+  ✅ Green as evidence on the Mac. The negative control holds: with no credentials the run fails
+  on the knob, the pass floor and the `[E2E]` floor. **Not yet run on the DGX.**
+- **#763, no hand copies.** `API_MAJOR`/`MIN_API_MINOR`/`HIT_FIELDS`/`SNIPPET_CHARS` live in
+  `workers/mail/src/localmail_contract.rs`, which the live gate and `mock_localmail`'s tests
+  `include!`. ⚠️ **It is compiled three times: `pub const`s only, no `use`, no `//!`.** The live
+  gate does not allow dead code, so an unchecked wire constant is a `-D warnings` error (verified).
+- **#765** — `handler/request.rs` (pure) parses every call into a typed `Request` **before** the
+  version gate; `needs_current_api` is on `Request` and reads the parsed `full_headers`;
+  `attach::choose` validates a planner sha (`Selector::Sha(Picked)`). `handler.rs` 555→415.
+- ⚠️ **A new `*_or_skip` helper must be classified** in `microvm/guard.rs` (`BANNED_HELPERS` or
+  `REQUIRE_AWARE`) — `the_banned_roster_matches_the_helpers_that_actually_exist` refuses it
+  otherwise. It caught `credentials_or_skip`.
 
-### Previous (2026-09-26): #760 slices D/E (PR #762) and #698 (PR #761) — what still binds
+### Previous (2026-09-26): #760 (PRs #762, #764) and #698 (PR #761) — what still binds
 
 Full prose in git history (PR bodies) and the ROADMAP.
 
@@ -91,6 +89,7 @@ Full prose in git history (PR bodies) and the ROADMAP.
   loudly). A pass is cached per worker; a refusal is asked again. `Tool` is an exhaustive enum.
 - **Slice E:** every search sends `fields` = `search_params::HIT_FIELDS` + `snippet_chars: 120`.
   ⚠️ **A 50-hit page is still ~18 KB, over the 16 KiB step view.**
+- **Headers (#764):** `?headers=list`, checked fail-closed — never reshaped.
 - **Slice D:** `get_message` writes `index` into each attachment; a message-resolved attachment
   is fetched **by position** and its bytes **hashed against the listed sha** (`Picked::verify_bytes`).
 - **Paged text:** 8,000-char pages; `next_offset` is **copied, never computed** (code points); a
@@ -100,7 +99,7 @@ Full prose in git history (PR bodies) and the ROADMAP.
   400s a stated `rank` there). ⚠️ `sort::is_textless` cannot see an operator-only query.
 - Live gate: `scripts/mail/live-shape-gate.sh` (reads `kastellan.env.local`; runs with nothing
   exported). Its attachment leg falls back to a `has_attachment` search and **fails** if it finds
-  none. No REQUIRE knob yet (#763).
+  none. Now a gate profile (`mail-live`, #763).
 
 ### Previous (2026-09-23, later): #755 — a marker stranded mid-line is refused
 
@@ -239,10 +238,12 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **Mail worker — #763, a live re-measure, then credentials.** #760 is complete. #763 (the live
-   shape gate's REQUIRE knob + hand-copied constants), and the small #765. Then #673/#674 (both hosts use non-expiring API keys; #674 is about noticing a revocation).
-   **A live planner re-measure is owed** (operator DMs, a **fresh room**): #728's multi-search
-   question, a filter-only one (#698), and a long PDF read across pages (#760).
+1. **Mail worker — a live re-measure, then credentials.** #760, #763 and #765 are done. Run
+   `bash scripts/mail/live-shape-gate.sh` **on the DGX** once (only the Mac has run the `mail-live`
+   profile). **A live planner re-measure is owed** (operator DMs, a **fresh room**): #728's
+   multi-search question, a filter-only one (#698), and a long PDF read across pages (#760). Then
+   #673/#674 (both hosts use non-expiring API keys; #674 is about noticing a revocation), and #538
+   (the mail worker's second, hand-rolled localmail mock).
 
 2. **#702 follow-ups: #703, #704, #705.** ⚠️ **The guard model never sees object keys** (#703) — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
@@ -352,10 +353,9 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#764 review fix-up — **the gate that stands**) | branch tip | **4560 / 2 / 47**, **186** suites, `TEST_EXIT=101`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. Same recipe. The **2 failures are the known per-test-cluster flake** (`the database system is starting up`: `memory_l0_seed_e2e`, `python_exec_e2e`) — both suites green on an isolated re-run (13/13, 5/5). **Delta reconciles EXACTLY: +4** — mail worker +2 (197→199: `headers` 6→7, handler +1), tests-common +2 (`mock_localmail` 19→21). Live shape gate green on the Mac with the new per-occurrence check | exit 0 (workspace, incremental after a full per-crate run of mail/tests-common/core), zero warnings | **23** Mac |
+| **Mac** (#763 + #765 — **the gate that stands**) | branch tip | **4572 / 0 / 47**, **187** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, after `cargo build --workspace`. **Delta reconciles EXACTLY against the row below (4560 + its 2 flakes = 4562 run): +10** — mail worker +2 (199→201: attach +1, handler +1), tests-common +8 (`live_localmail`); **+1 suite** (`mail_live_shape_e2e`, its one test `#[ignore]`d, moved from `mail_daemon_e2e` — ignored unchanged). Plus `mail-live` gate green on the Mac | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-763`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
+| **Mac** (#764 review fix-up — superseded) | branch tip | **4560 / 2 / 47**, **186** suites, `TEST_EXIT=101`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. Same recipe. The **2 failures are the known per-test-cluster flake** (`the database system is starting up`: `memory_l0_seed_e2e`, `python_exec_e2e`) — both suites green on an isolated re-run (13/13, 5/5). **Delta reconciles EXACTLY: +4** — mail worker +2 (197→199: `headers` 6→7, handler +1), tests-common +2 (`mock_localmail` 19→21). Live shape gate green on the Mac with the new per-occurrence check | exit 0 (workspace, incremental after a full per-crate run of mail/tests-common/core), zero warnings | **23** Mac |
 | **Mac** (#760 `headers=list` — superseded) | branch tip | **4558 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. Same recipe as below. **Delta reconciles EXACTLY: +7** — mail worker +5 (192→197 unit: `headers` 3→6, handler messages +2), tests-common +2 (`mock_localmail` 17→19). Live shape gate green on the Mac with the new `?headers=list` leg | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760h`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
-| **Mac** (#760 review fix-up — superseded) | branch tip | **4551 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +15** — mail worker +12 (180→192 unit), tests-common +3 (`mock_localmail` 14→17). Live shape gate green on the Mac (now with the hash check). 8 mutants tried on the new guards, 7 killed; the 8th exposed a no-op guard, removed | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-762`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
-| **Mac** (#760 — superseded) | branch tip | **4536 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +38** — mail worker +33 (147→180 unit), core lib +2 (`workers::mail` 10→12), tests-common +3 (`mock_localmail` 11→14); no new suites. Plus the **live** shape gate green against the Mac's localmail (1 passed, zero `[NOTE]`), and on the **DGX** (real bwrap, 0 `[SKIP]`): mail worker 180+3, tests-common 428, core `workers::mail` 12, `mail_e2e` 5 (+1 ignored live tier) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -421,6 +421,7 @@ Only the rows that tell you *where to look when something goes red*.
 | `core` (`egress_proxy_e2e`, `egress_force_routing_e2e`, `email_mitm_e2e`) | 3 / 4 / 2 | real sidecar + CONNECT; Linux no-direct-route; hermetic MITM |
 | `core` (`injection_guard_e2e`, `secret_vault_e2e`, `guard_boot_row_e2e`) | 10 / 9 / 1 | **PG-required** policy rows, privacy invariant, fail-closed redemption |
 | worker-report (5 suites, 2 crates) | 13 | a dying worker's last words reach a failing test; a real broken fd 2, re-exec'd. `bash scripts/run-e2e-gate.sh worker-report` (both hosts) |
+| `core` `mail_live_shape_e2e` (`#[ignore]`) | 1 | our reading of localmail against the **live** service. `bash scripts/mail/live-shape-gate.sh` (Mac; DGX not yet) |
 | `tests-common` `gate_script_tests` | 27 | the gate script's table **and** its verdict (floors, caps, per-binary hook check), run against a fake `cargo` |
 
 ## Key design decisions locked in
@@ -435,6 +436,9 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **[#766](https://github.com/hherb/kastellan/pull/766)** (#763, #765) — the live localmail shape gate gets its own
+  suite, a REQUIRE knob and a `mail-live` profile, and reads the worker's wire constants from one
+  `include!`d file; mail params are parsed (pure `handler/request.rs`) before the version gate.
 - **[#764](https://github.com/hherb/kastellan/pull/764)** (#760, last piece) — `mail.get_message` asks localmail for `?headers=list` and
   passes the per-occurrence list on after a fail-closed shape check; the `{name, values}` reshaping
   is gone; the headers path joins the version gate.
@@ -470,19 +474,8 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
   `RUST_LOG` would have dropped it, cannot `SIGABRT` on a broken pipe, and stops calling a
   timed-out drain "the worker wrote NOTHING"; plus a panic hook that cannot forge a gate line
   (#734, #733, #732, #742). Closes the #725 → #745 arc.
-- **[#740](https://github.com/hherb/kastellan/pull/740)** — an `anyio>=4.14.2` **security floor** in `workers/gliner-relex/pyproject.toml` (not just a
-  lock bump), closing GHSA-82r6-8w77-94w6 (critical, TLS spoofing) + GHSA-5p39-cfhj-2xmp. Exposure was
-  provisioning-only: the worker is `Net::Deny` in both entries.
-- **[#735](https://github.com/hherb/kastellan/pull/735)** — the **persistent** worker's death report reaches a failing test too (#730);
-  preceded by a movement-only split of `worker_stderr` into its capture and reporting halves.
-- **[#731](https://github.com/hherb/kastellan/pull/731)** `579ac01a` — a dying tool worker's last
-  words reach a failing test, not just a daemon (#725). Filed #730, #732–#734.
-- **[#728](https://github.com/hherb/kastellan/pull/728)** `40c4adc4` — the planner sees each prior step's call; `decision` screened (#699, #700).
-- **[#726](https://github.com/hherb/kastellan/pull/726)** `577e2196` — the gliner worker survives `import torch` on macOS (#719).
-- **[#720](https://github.com/hherb/kastellan/pull/720)** `0966a460` — one REQUIRE-knob contract and the
-  gate script (#714, #622, #664). Filed #718 (then wrongly auto-closed; reopened), #719, #721–#724.
-- **#727, #717, #709, #708, #702, #694, #692, #688, #685** and earlier — see git history and the
-  [`archive/`](archive/) snapshots.
+- **#740, #735, #731, #728, #726, #720, #727, #717, #709, #708, #702, #694, #692, #688, #685** and
+  earlier — see git history and the [`archive/`](archive/) snapshots.
 
 ---
 
