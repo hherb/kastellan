@@ -80,14 +80,7 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
   `REQUIRE_AWARE`) — `the_banned_roster_matches_the_helpers_that_actually_exist` refuses it
   otherwise. It caught `credentials_or_skip`.
 
-### Previous (2026-09-26): #760's last piece — `headers=list` (PR #764)
-
-- `full_headers: true` sends `?headers=list` (per occurrence, wire order); `header_list_error`
-  **checks and fails closed** (a name-keyed object, a missing block, or a non-`{name,value}` entry
-  is a fault; refusals name the structural cause, never served text). The live gate checks one
-  entry per occurrence against `full`.
-
-### Previous (2026-09-26): #760 slices D/E (PR #762) and #698 (PR #761) — what still binds
+### Previous (2026-09-26): #760 (PRs #762, #764) and #698 (PR #761) — what still binds
 
 Full prose in git history (PR bodies) and the ROADMAP.
 
@@ -96,6 +89,7 @@ Full prose in git history (PR bodies) and the ROADMAP.
   loudly). A pass is cached per worker; a refusal is asked again. `Tool` is an exhaustive enum.
 - **Slice E:** every search sends `fields` = `search_params::HIT_FIELDS` + `snippet_chars: 120`.
   ⚠️ **A 50-hit page is still ~18 KB, over the 16 KiB step view.**
+- **Headers (#764):** `?headers=list`, checked fail-closed — never reshaped.
 - **Slice D:** `get_message` writes `index` into each attachment; a message-resolved attachment
   is fetched **by position** and its bytes **hashed against the listed sha** (`Picked::verify_bytes`).
 - **Paged text:** 8,000-char pages; `next_offset` is **copied, never computed** (code points); a
