@@ -124,7 +124,9 @@ The knobs, should you need one directly:
 `KASTELLAN_PG_REQUIRE_E2E` (Postgres install **and** the user-level supervisor probe — one variable
 because they gate the same tier and two would let a half-set gate look armed),
 `KASTELLAN_SANDBOX_REQUIRE_E2E`, `KASTELLAN_GUARD_REQUIRE_E2E`, `KASTELLAN_MICROVM_REQUIRE_E2E`,
-`KASTELLAN_GLINER_RELEX_REQUIRE_E2E`. All take the project dialect (`1|true|yes|on`); an
+`KASTELLAN_GLINER_RELEX_REQUIRE_E2E`, `KASTELLAN_MAIL_LIVE_REQUIRE_E2E` (the live localmail shape
+gate — run it as `scripts/mail/live-shape-gate.sh`, which finds the credentials and then runs the
+`mail-live` profile). All take the project dialect (`1|true|yes|on`); an
 out-of-dialect value warns rather than silently reverting to skip.
 
 ⚠️ **Two traps when running a knob by hand rather than through the script.** `[E2E]`/`[SKIP]` go to

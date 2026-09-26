@@ -99,6 +99,7 @@ pub mod gliner_weights;
 pub mod guard_pin;
 pub mod guards;
 pub mod installable;
+pub mod live_localmail;
 pub mod microvm;
 pub mod mock_localmail;
 /// A panic hook whose payload cannot forge a gate evidence line (#742).

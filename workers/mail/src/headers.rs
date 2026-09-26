@@ -58,7 +58,7 @@ const NO_HEADERS: &str = "localmail returned no headers although they were asked
 ///
 /// An empty list passes: it is a message with no header lines. The one guard
 /// against a server that wrongly serves `[]` for every message is the live
-/// gate's non-empty check in `core/tests/mail_daemon_e2e.rs`.
+/// gate's non-empty check in `core/tests/mail_live_shape_e2e.rs`.
 pub(crate) fn header_list_error(message: &Value, requested: bool) -> Option<String> {
     match message.get(HEADERS_KEY) {
         None | Some(Value::Null) if requested => Some(NO_HEADERS.to_string()),

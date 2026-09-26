@@ -83,7 +83,7 @@ fn get_message_reports_headers_missing_when_they_were_asked_for() {
 /// string — so it cannot catch "our reading of localmail is wrong". The two
 /// tests that can are `mail_e2e::asking_for_full_headers_actually_returns_headers`
 /// (behavioural, hermetic) and the live gate's `?headers=` legs in
-/// `core/tests/mail_daemon_e2e.rs` (behavioural, against the real service).
+/// `core/tests/mail_live_shape_e2e.rs` (behavioural, against the real service).
 #[test]
 fn get_message_asks_for_the_header_list_the_way_localmail_reads_it() {
     let mut h = MailHandler::with_client(client_with(Box::new(PathFake("/v1/messages/5?headers=list"))));

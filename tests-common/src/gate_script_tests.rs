@@ -391,6 +391,70 @@ fn every_test_target_a_profile_names_exists() {
     assert!(checked >= 9, "only {checked} --test targets parsed — the table shape changed");
 }
 
+/// `(tests, ignored)`: how many `#[test]` fns a source file holds, and how many
+/// of those also carry an `#[ignore…]` in the same attribute block.
+fn count_ignored_tests(src: &str) -> (usize, usize) {
+    let (mut tests, mut ignored) = (0, 0);
+    let (mut is_test, mut is_ignored) = (false, false);
+    for line in src.lines().map(str::trim) {
+        if line.starts_with("#[") {
+            is_test |= line == "#[test]";
+            is_ignored |= line.starts_with("#[ignore");
+        } else if !line.starts_with("//") {
+            // The attribute block ended at an item (or at anything else).
+            tests += usize::from(is_test);
+            ignored += usize::from(is_test && is_ignored);
+            (is_test, is_ignored) = (false, false);
+        }
+    }
+    (tests, ignored)
+}
+
+/// A profile whose suites hold only `#[ignore]`d tests must pass `--ignored`.
+/// Without it the profile selects nothing — and that is caught only when
+/// someone runs it on a host with the fixture (the floors), never in CI. The
+/// Firecracker tier hid exactly that way; `mail-live` (#763) is the other
+/// all-ignored profile. `@FIRECRACKER_SUITES` is resolved at run time, and
+/// that profile's `--ignored` is pinned by its own floors.
+#[test]
+fn a_profile_of_only_ignored_tests_passes_ignored() {
+    let root = script_path().parent().and_then(|p| p.parent()).map(PathBuf::from).unwrap();
+    let mut all_ignored_targets = 0usize;
+    for p in profiles() {
+        let tokens: Vec<&str> = p.cargo_args.split_whitespace().collect();
+        let packages: Vec<&str> = tokens.windows(2).filter(|w| w[0] == "-p").map(|w| w[1]).collect();
+        let (mut tests, mut ignored) = (0, 0);
+        for target in tokens.windows(2).filter(|w| w[0] == "--test").map(|w| w[1]) {
+            for pkg in &packages {
+                let dir = pkg.strip_prefix("kastellan-").unwrap_or(pkg);
+                if let Ok(src) = std::fs::read_to_string(root.join(dir).join("tests").join(format!("{target}.rs"))) {
+                    let (t, i) = count_ignored_tests(&src);
+                    tests += t;
+                    ignored += i;
+                    all_ignored_targets += usize::from(t > 0 && t == i);
+                }
+            }
+        }
+        if tests > 0 && tests == ignored {
+            assert!(
+                p.harness_args.split_whitespace().any(|a| a == "--ignored"),
+                "profile '{}' selects only #[ignore]d tests ({tests}) but does not pass \
+                 `--ignored`, so it would run none of them",
+                p.name
+            );
+        }
+    }
+    // Positive control: a counter that never recognised an ignored test would
+    // make the assert above unreachable. `mail_live_shape_e2e` is one.
+    assert!(all_ignored_targets >= 1, "no all-#[ignore] --test target found — the counter is blind");
+}
+
+#[test]
+fn count_ignored_tests_reads_the_attribute_block() {
+    let src = "#[test]\nfn a() {}\n\n/// doc\n#[test]\n#[ignore = \"live\"]\nfn b() {}\n#[ignore]\n#[test]\nfn c() {}\n#[cfg(test)]\nmod m {}\n";
+    assert_eq!(count_ignored_tests(src), (3, 2));
+}
+
 /// Run a snippet of bash with the gate script's `count_test_targets` and
 /// `firecracker_suites` functions defined, from the repository root.
 ///

@@ -9,6 +9,7 @@ mod detail;
 mod handler;
 mod headers;
 mod ids;
+mod localmail_contract;
 mod problem;
 mod search_params;
 mod sort;

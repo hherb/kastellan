@@ -2,7 +2,7 @@
 //! endpoints the mail worker hits in localmail's REAL response shapes (as #487
 //! corrected them: search → `results`, attachment text → `application/json
 //! {"text": …}`). Response SHAPES are pinned against real localmail by the
-//! Mac-only contract test in `core/tests/mail_daemon_e2e.rs`.
+//! live contract test in `core/tests/mail_live_shape_e2e.rs`.
 //!
 //! Also serves the **three** endpoints `workers/email-in` (the email fallback
 //! channel's worker) hits — `GET /v1/changes?subscription=<name>`,
@@ -360,7 +360,7 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
         // and stays.
         //
         // The hit is the **projected** shape (slice E, `api_minor` 3): the mail
-        // worker sends `fields` = `search_params::HIT_FIELDS` on every search,
+        // worker sends `fields` = `localmail_contract::HIT_FIELDS` on every search,
         // so real localmail answers it with exactly those keys — including a
         // plain-text `snippet` rather than the default `snippet_html`. This
         // mock does not read the request body, so it serves that shape

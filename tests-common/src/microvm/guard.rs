@@ -146,6 +146,9 @@ pub(crate) const BANNED_HELPERS: &[&str] = &[
     "egress_proxy_bin_or_skip",
     "resolve_weights_dir_or_skip",
     "skip_line",
+    // `live_localmail`'s (#763): answers to KASTELLAN_MAIL_LIVE_REQUIRE_E2E,
+    // and no micro-VM suite talks to a live localmail.
+    "credentials_or_skip",
 ];
 
 /// The marker that exempts a hand-written `[SKIP]` from [`bypassed_gates`].
