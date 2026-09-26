@@ -36,7 +36,29 @@ pub fn rpc_code_name(code: i32) -> &'static str {
         codes::INTERNAL_ERROR => "INTERNAL_ERROR",
         codes::POLICY_DENIED => "POLICY_DENIED",
         codes::OPERATION_FAILED => "OPERATION_FAILED",
+        codes::UPSTREAM_AUTH_FAILED => "UPSTREAM_AUTH_FAILED",
         _ => "RPC_ERROR",
+    }
+}
+
+/// The worker's detail when `outcome` is an upstream credential refusal
+/// ([`codes::UPSTREAM_AUTH_FAILED`]), else `None`. Pure.
+///
+/// Why the dispatcher asks (#674): an expired credential is an **operator**
+/// problem that no plan can fix, yet the only party told about it is the
+/// planner. On the DGX a localmail token expired and nothing noticed for five
+/// days. The dispatcher uses this to put one operator-facing line in the
+/// daemon log per refused call; the tool's own audit row already carries the
+/// worker's message and the numeric code.
+///
+/// Compared through [`rpc_code_name`], not a second string literal, so the
+/// mnemonic has one spelling.
+pub fn upstream_auth_failure_detail(outcome: &StepOutcome) -> Option<&str> {
+    match outcome {
+        StepOutcome::Err { code, detail } if code == rpc_code_name(codes::UPSTREAM_AUTH_FAILED) => {
+            Some(detail)
+        }
+        _ => None,
     }
 }
 

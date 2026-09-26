@@ -237,12 +237,14 @@ fn parse_params<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Re
 fn email_err_to_rpc(e: EmailError) -> RpcError {
     match e {
         EmailError::BadParams(m) => RpcError::new(codes::INVALID_PARAMS, m),
-        EmailError::Upstream { status: 401 | 403, .. } => RpcError::new(
-            codes::POLICY_DENIED,
-            "localmail auth/permission denied (check token / api-user grant)".to_string(),
-        ),
+        // A 401/403 is localmail refusing the channel's credential, not
+        // kastellan refusing anything: `UPSTREAM_AUTH_FAILED`, never the core's
+        // own `POLICY_DENIED` (#673). The core's polled driver recognises this
+        // code and says "credential refused" rather than "worker died" (#674).
         EmailError::Upstream { status, body } => {
-            RpcError::new(codes::OPERATION_FAILED, format!("localmail {status}: {body}"))
+            kastellan_protocol::upstream_auth_refusal("localmail", status).unwrap_or_else(|| {
+                RpcError::new(codes::OPERATION_FAILED, format!("localmail {status}: {body}"))
+            })
         }
         EmailError::Transport(m) => {
             RpcError::new(codes::OPERATION_FAILED, format!("transport: {m}"))

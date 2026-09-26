@@ -633,3 +633,18 @@ fn handler_recording_requests() -> (crate::handler::EmailInHandler, Arc<Mutex<Ve
     );
     (h, log)
 }
+
+/// #673: an expired or under-granted channel credential (401/403) is reported
+/// as `UPSTREAM_AUTH_FAILED` — the code the core's polled driver recognises as
+/// "credential refused" — never as the core's own `POLICY_DENIED`.
+#[test]
+fn a_401_or_403_maps_to_upstream_auth_failed_never_policy_denied() {
+    for status in [401u16, 403] {
+        let e = email_err_to_rpc(EmailError::Upstream { status, body: "unauthorized".into() });
+        assert_eq!(e.code, codes::UPSTREAM_AUTH_FAILED, "status {status}: {}", e.message);
+        assert!(e.message.starts_with("localmail "), "names the upstream: {}", e.message);
+    }
+    let e = email_err_to_rpc(EmailError::Upstream { status: 500, body: "boom".into() });
+    assert_eq!(e.code, codes::OPERATION_FAILED, "only the credential statuses moved");
+    assert_eq!(e.message, "localmail 500: boom");
+}

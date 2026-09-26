@@ -70,6 +70,7 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
 
+use kastellan_protocol::{codes, RpcError};
 use tokio::sync::mpsc as tok_mpsc;
 
 use crate::worker_lifecycle::persistent::PersistentHandle;
@@ -279,7 +280,7 @@ fn run(
                 }
                 Err(e) => {
                     if !down {
-                        tracing::warn!(label = spec.label, error = %e, "send failed; retrying after respawn");
+                        report_call_failure(spec.label, &e, "send failed; retrying after respawn");
                     }
                     errored = true;
                     break;
@@ -410,7 +411,7 @@ fn run(
                 }
                 Err(e) => {
                     if !down {
-                        tracing::warn!(label = spec.label, error = %e, "poll failed (worker died or restarting)");
+                        report_call_failure(spec.label, &e, "poll failed (worker died or restarting)");
                     }
                     errored = true;
                 }
@@ -427,6 +428,38 @@ fn run(
             }
             thread::sleep(RETRY_SLICE);
         }
+    }
+}
+
+/// True when a worker call failed because the worker's **upstream refused its
+/// credential** ([`codes::UPSTREAM_AUTH_FAILED`]) rather than because the
+/// worker died. Pure.
+///
+/// Readable because [`PersistentHandle::call`] keeps a structured refusal's
+/// [`RpcError`] type (see `client_error_to_anyhow` in
+/// `worker_lifecycle::persistent`); any other error — a death, a respawn in
+/// progress, a flattened transport failure — is not one.
+fn is_upstream_auth_refusal(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<RpcError>().is_some_and(|rpc| rpc.code == codes::UPSTREAM_AUTH_FAILED)
+}
+
+/// Log the first failed call of an outage (the caller's `down` latch keeps it
+/// to one line per outage).
+///
+/// #674: when the email channel's localmail credential expired, this said
+/// "worker died or restarting" — true of the respawn that followed, false of
+/// the cause — so an operator reading it looked for a crash. A credential
+/// refusal now says what it is, at ERROR, and what to do; every other failure
+/// keeps the caller's own wording at WARN.
+fn report_call_failure(label: &str, e: &anyhow::Error, otherwise: &str) {
+    if is_upstream_auth_refusal(e) {
+        tracing::error!(
+            label, error = %e,
+            "operator action needed: the channel's upstream refused its credential \
+             (expired, revoked, or missing a grant); nothing arrives until it is renewed"
+        );
+    } else {
+        tracing::warn!(label, error = %e, "{otherwise}");
     }
 }
 

@@ -668,3 +668,21 @@ fn audit_ack_only_is_not_called_when_the_same_batchs_events_fail_to_decode() {
         "audit must not fire for a skipped id whose batch's events failed to decode"
     );
 }
+
+/// #674: only a structured `UPSTREAM_AUTH_FAILED` refusal reads as "the
+/// credential was refused"; a death, a respawn in progress or any other
+/// worker refusal keeps the old "worker died or restarting" wording.
+#[test]
+fn only_an_upstream_auth_refusal_is_reported_as_a_credential_problem() {
+    let refused = anyhow::Error::from(kastellan_protocol::upstream_auth_refusal("localmail", 401).unwrap());
+    assert!(is_upstream_auth_refusal(&refused));
+
+    let other_rpc = anyhow::Error::from(RpcError::new(codes::OPERATION_FAILED, "localmail 500: boom"));
+    let restarting = anyhow::anyhow!("persistent worker is restarting");
+    // The pre-#674 shape: an auth refusal flattened to text is NOT recognised,
+    // which is why `client_error_to_anyhow` keeps the type.
+    let flattened = anyhow::anyhow!("{refused}");
+    for e in [other_rpc, restarting, flattened] {
+        assert!(!is_upstream_auth_refusal(&e), "{e}");
+    }
+}

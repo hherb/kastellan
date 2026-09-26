@@ -147,10 +147,19 @@ because it asks localmail to filter by nothing.
 
 ## One-time operator setup
 
-1. **localmail — a dedicated agent API user.** Create an API user, grant it the
-   accounts/folders the agent may read (this ACL *is* the agent's mail scope),
-   and mint a bearer token for it (see the localmail CLI / admin UI). Localmail
-   enforces the ACL server-side per token.
+1. **localmail — a dedicated agent API key.** Mint a key for the agent and
+   grant it the accounts the agent may read (this grant *is* the agent's mail
+   scope; localmail enforces it server-side per key):
+
+   ```sh
+   localmail add-api-key kastellan-mail --grant work --grant personal   # stdout = the key
+   ```
+
+   ⚠️ **Use an API key, not a login token.** A token from `POST /v1/auth/login`
+   is a *session* token that expires after 30 days; an API key never expires
+   (rotate it with `localmail revoke-api-key` + `add-api-key`). The DGX ran on a
+   login token until it expired on 2026-08-30, and mail search stopped working
+   silently for five days (#674).
 
 2. **kastellan — the token file.** Write the token to a **`0600`** file, e.g.:
 
@@ -231,6 +240,10 @@ because it asks localmail to filter by nothing.
   binary can't be found → *misconfigured* (logged at ERROR; the daemon still
   starts). A `localhost`-**name** endpoint under force-routing is refused by the
   generic endpoint guard — use a literal `127.0.0.1` for loopback.
-- **Auth failures** (401/403 from localmail) surface to the agent as a distinct
-  "auth/permission denied" message so you know to re-provision the token or fix
-  the API user's ACL.
+- **Auth failures** (401/403 from localmail) surface as
+  `UPSTREAM_AUTH_FAILED` — never as `POLICY_DENIED`, which is the core's own
+  policy verdict (#673). A 401 says the credential may have expired or been
+  revoked; a 403 says it lacks a grant. The planner is told this is not a
+  kastellan refusal and that retrying will not help, and the daemon logs an
+  ERROR line (`operator action needed: …`) for every refused call, so renew
+  the key or fix its grant.

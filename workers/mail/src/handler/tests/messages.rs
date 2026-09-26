@@ -229,3 +229,47 @@ fn get_message_numbers_its_attachments() {
     assert_eq!(out["attachments"][0]["index"], 0);
     assert_eq!(out["attachments"][1]["index"], 1);
 }
+
+// --- #673: an upstream credential refusal is not a kastellan policy refusal ---
+
+/// Answers every authenticated GET with one fixed status, as a localmail whose
+/// token has expired (401) or whose API user lacks a grant (403) would.
+struct StatusFake(u16);
+impl HttpGet for StatusFake {
+    fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
+    fn transport_kind(&self) -> &'static str { "fake" }
+    fn get_authed(&self, _: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
+        Ok(RawResponse {
+            status: self.0,
+            location: None,
+            content_type: "application/json".into(),
+            body: br#"{"detail":"Not authenticated"}"#.to_vec(),
+        })
+    }
+}
+
+/// The DGX incident (#673): an expired localmail token answered 401 and the
+/// worker called it `POLICY_DENIED`, the core's own policy verdict, so the
+/// planner blamed kastellan's permissions and re-planned around them.
+#[test]
+fn a_401_or_403_is_upstream_auth_failed_never_policy_denied() {
+    for status in [401u16, 403] {
+        let mut h = MailHandler::with_client(client_with(Box::new(StatusFake(status))));
+        let err = h.call("mail.list_accounts", serde_json::json!({})).unwrap_err();
+        assert_eq!(err.code, codes::UPSTREAM_AUTH_FAILED, "status {status}: {}", err.message);
+        assert!(err.message.starts_with("localmail "), "names the upstream: {}", err.message);
+        assert!(err.message.contains(&format!("HTTP {status}")), "{}", err.message);
+    }
+}
+
+/// Every other upstream status keeps its old mapping — only the two
+/// credential statuses moved.
+#[test]
+fn other_upstream_statuses_stay_operation_failed() {
+    for status in [404u16, 500, 502] {
+        let mut h = MailHandler::with_client(client_with(Box::new(StatusFake(status))));
+        let err = h.call("mail.list_accounts", serde_json::json!({})).unwrap_err();
+        assert_eq!(err.code, codes::OPERATION_FAILED, "status {status}: {}", err.message);
+        assert_eq!(err.message, format!("localmail {status}: Not authenticated"));
+    }
+}

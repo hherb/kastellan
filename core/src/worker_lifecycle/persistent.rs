@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
-use kastellan_protocol::client::Client;
+use kastellan_protocol::client::{Client, ClientError};
 use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
 use crate::channel::respawn_alarm::RespawnRateAlarm;
@@ -86,15 +86,37 @@ impl ClientTransport {
     }
 }
 
+/// How a [`ClientTransport`] call error becomes the `anyhow::Error` every
+/// [`PersistentHandle::call`] caller sees. Pure.
+///
+/// A structured refusal keeps its type (#674): a caller can
+/// `downcast_ref::<RpcError>()` and read the code. The polled channel driver
+/// uses that to tell "the upstream refused the worker's credential" from "the
+/// worker died". Its Display is the text the flattening below would have given
+/// (`ClientError::Rpc` is `#[error(transparent)]`), so no log line changes.
+///
+/// Everything else stays flattened to its Display, exactly as before.
+/// `ClientError::Io` carries a `source`, and keeping it would print the io
+/// text twice wherever this error is rendered with `{e:#}` (the channel boot
+/// supervisor does).
+///
+/// ⚠️ This does **not** change what the driver does with the error: every
+/// call error still triggers a respawn, a live worker's refusal included
+/// (#769 — deliberately separate, since Matrix may rely on it to recover).
+fn client_error_to_anyhow(e: ClientError) -> anyhow::Error {
+    match e {
+        ClientError::Rpc(rpc) => anyhow::Error::from(rpc),
+        other => anyhow::anyhow!("{other}"),
+    }
+}
+
 impl PersistentTransport for ClientTransport {
     fn call(
         &mut self,
         method: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        self.client
-            .call(method, params)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        self.client.call(method, params).map_err(client_error_to_anyhow)
     }
 
     fn death_report(&mut self) -> Option<String> {
@@ -388,6 +410,33 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    // ----- client_error_to_anyhow (#674) -----
+
+    #[test]
+    fn an_rpc_refusal_stays_downcastable_and_renders_unchanged() {
+        let rpc = kastellan_protocol::RpcError::new(kastellan_protocol::codes::UPSTREAM_AUTH_FAILED, "no");
+        let flattened = format!("{}", ClientError::Rpc(rpc.clone()));
+        let e = client_error_to_anyhow(ClientError::Rpc(rpc));
+        let got = e.downcast_ref::<kastellan_protocol::RpcError>().expect("RpcError survives");
+        assert_eq!(got.code, kastellan_protocol::codes::UPSTREAM_AUTH_FAILED);
+        assert_eq!(format!("{e}"), flattened, "Display unchanged");
+        assert_eq!(format!("{e:#}"), flattened, "alternate Display unchanged");
+    }
+
+    #[test]
+    fn every_other_client_error_renders_exactly_as_before() {
+        let io = || ClientError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe gone"));
+        let flattened = format!("{}", io());
+        let e = client_error_to_anyhow(io());
+        assert_eq!(format!("{e}"), flattened);
+        // The case that decided the design: a preserved `Io` would print its
+        // source a second time under `{e:#}`.
+        assert_eq!(format!("{e:#}"), flattened, "no duplicated io text");
+        assert!(e.downcast_ref::<kastellan_protocol::RpcError>().is_none());
+        let early = client_error_to_anyhow(ClientError::EarlyExit);
+        assert_eq!(format!("{early:#}"), "worker exited before responding");
+    }
 
     #[test]
     fn collecting_a_death_tail_gives_up_rather_than_hanging_on_a_drainer_that_never_finishes() {

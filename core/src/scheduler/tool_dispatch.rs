@@ -262,7 +262,7 @@ pub use crate::workers::shell_exec::shell_exec_entry;
 // and this module's own `dispatch_step` call to `map_dispatch_result`
 // resolve byte-for-byte unchanged.
 mod result_mapping;
-pub use result_mapping::{map_dispatch_result, rpc_code_name};
+pub use result_mapping::{map_dispatch_result, rpc_code_name, upstream_auth_failure_detail};
 
 mod fetch_screen;
 use fetch_screen::screen_fetched_data;
@@ -702,7 +702,18 @@ impl StepDispatcher for ToolHostStepDispatcher {
             passthrough => passthrough,
         };
 
-        map_dispatch_result(result)
+        let outcome = map_dispatch_result(result);
+        // #674: an upstream credential refusal needs the OPERATOR, and until
+        // now only the planner heard about it. Log it once per refused call,
+        // at ERROR, saying what to do — the audit row alone was not noticed.
+        if let Some(detail) = upstream_auth_failure_detail(&outcome) {
+            tracing::error!(
+                tool = %step.tool, method = %method, detail = %detail,
+                "operator action needed: this tool's upstream refused its credential \
+                 (expired, revoked, or missing a grant) — renew it; the agent cannot"
+            );
+        }
+        outcome
     }
 }
 
