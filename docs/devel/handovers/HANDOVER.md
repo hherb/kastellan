@@ -10,7 +10,7 @@
 
 **Last updated:** 2026-09-26 (#760's last piece: `mail.get_message` serves localmail's
 per-occurrence `headers=list`, checked fail-closed) ·
-**Recent PRs, newest first:** [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Recent PRs, newest first:** [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -426,7 +426,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **This PR** (#760, last piece) — `mail.get_message` asks localmail for `?headers=list` and
+- **[#764](https://github.com/hherb/kastellan/pull/764)** (#760, last piece) — `mail.get_message` asks localmail for `?headers=list` and
   passes the per-occurrence list on after a fail-closed shape check; the `{name, values}` reshaping
   is gone; the headers path joins the version gate.
 
