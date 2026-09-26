@@ -76,8 +76,9 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
 - `handler.rs` 1368 → 437: its tests moved to `handler/tests/{mod,search,messages,attachments}.rs`
   **first**, movement only (lines 1–428 `cmp`-identical; moved lines the same multiset bar three
   `use super::*;`; the 141 test names identical, with a negative control).
-- ⚠️ **The Mac's localmail token has expired** (`401 /problems/invalid-token`) — #673/#674 live.
-  The DGX's works. localmail shipped slices D/E; adopting them is filed as
+- The Mac's expired session token was replaced by a non-expiring API key (principal
+  `kastellan-mac-key`) the same day — **verified 200 on 2026-09-26**; both hosts' localmail report
+  `api_minor` 3. localmail shipped slices D/E; adopting them is
   [#760](https://github.com/hherb/kastellan/issues/760).
 
 ### Previous (2026-09-23, later): #755 — a marker stranded mid-line is refused
@@ -219,7 +220,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 1. **Mail worker catch-up with localmail:** [#760](https://github.com/hherb/kastellan/issues/760)
    (slices D/E: attachments by position with paged text, compact search hits — gate each on
-   `/v1/version`'s `api_minor`), then #673/#674 (the Mac token has already expired). **#728's live
+   `/v1/version`'s `api_minor`), then #673/#674 (both hosts now use non-expiring API keys; #674 is about noticing a revocation). **#728's live
    re-measure is still owed** (operator DMs, a **fresh room**) — a filter-only question ("mail
    with attachments from last week") now exercises #698 in the same run.
 
