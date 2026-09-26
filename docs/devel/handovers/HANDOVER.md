@@ -68,10 +68,18 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
   is an `OPERATION_FAILED` fault. Converting an object instead would keep "working" the day the
   request spelling broke, and would reopen #703 if it ever passed through.
 - `get_message` is **gated only when `full_headers` is JSON `true`** — `Tool::needs_current_api`
-  now reads the raw params (equivalent: serde's `bool` accepts only `true`). Still exhaustive.
+  now reads the raw params (equivalent: the only input serde's `bool` reads as true is JSON `true`;
+  a string, number or `null` is `INVALID_PARAMS` — pinned by a test). Still exhaustive.
 - Mocks: `mock_localmail` serves `full` (email-in) **and** `list`, and 400s an unknown mode as
   localmail now does. Live gate: a `?headers=list` leg pinning the exact key set — ✅ green on the
   Mac, zero `[NOTE]`. Tool description updated in `core/src/workers/mail.rs`.
+- **Review fix-up:** a refusal now names its structural cause (JSON type, entry index, which key
+  is missing, key count) and never quotes served text; a shape mismatch says "update one of them"
+  instead of "service fault" (an additive localmail change passes the `>=` gate); a header-less
+  answer names a rolled-back localmail. Both mocks serve a repeated, interleaved `Received`, and
+  the **live gate now checks one entry per occurrence** — `list` count and each name's value order
+  against `full` — ✅ green on the Mac. Comments corrected: an older localmail sends *no* headers,
+  not a name-keyed object. Filed #765 (gate runs before param validation).
 - **#760 is done.** Still owed: the **live planner re-measure** (Next TODO 1) and #763.
 
 ### Previous (2026-09-26): #760 slices D/E (PR #762) and #698 (PR #761) — what still binds
@@ -231,8 +239,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **Mail worker — a live re-measure, then credentials.** #760 is complete. #763 (the live shape
-   gate's REQUIRE knob + hand-copied constants). Then #673/#674 (both hosts use non-expiring API keys; #674 is about noticing a revocation).
+1. **Mail worker — #763, a live re-measure, then credentials.** #760 is complete. #763 (the live
+   shape gate's REQUIRE knob + hand-copied constants), and the small #765. Then #673/#674 (both hosts use non-expiring API keys; #674 is about noticing a revocation).
    **A live planner re-measure is owed** (operator DMs, a **fresh room**): #728's multi-search
    question, a filter-only one (#698), and a long PDF read across pages (#760).
 
@@ -344,7 +352,8 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#760 `headers=list` — **the gate that stands**) | branch tip | **4558 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. Same recipe as below. **Delta reconciles EXACTLY: +7** — mail worker +5 (192→197 unit: `headers` 3→6, handler messages +2), tests-common +2 (`mock_localmail` 17→19). Live shape gate green on the Mac with the new `?headers=list` leg | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760h`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
+| **Mac** (#764 review fix-up — **the gate that stands**) | branch tip | **4560 / 2 / 47**, **186** suites, `TEST_EXIT=101`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. Same recipe. The **2 failures are the known per-test-cluster flake** (`the database system is starting up`: `memory_l0_seed_e2e`, `python_exec_e2e`) — both suites green on an isolated re-run (13/13, 5/5). **Delta reconciles EXACTLY: +4** — mail worker +2 (197→199: `headers` 6→7, handler +1), tests-common +2 (`mock_localmail` 19→21). Live shape gate green on the Mac with the new per-occurrence check | exit 0 (workspace, incremental after a full per-crate run of mail/tests-common/core), zero warnings | **23** Mac |
+| **Mac** (#760 `headers=list` — superseded) | branch tip | **4558 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. Same recipe as below. **Delta reconciles EXACTLY: +7** — mail worker +5 (192→197 unit: `headers` 3→6, handler messages +2), tests-common +2 (`mock_localmail` 17→19). Live shape gate green on the Mac with the new `?headers=list` leg | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760h`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
 | **Mac** (#760 review fix-up — superseded) | branch tip | **4551 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +15** — mail worker +12 (180→192 unit), tests-common +3 (`mock_localmail` 14→17). Live shape gate green on the Mac (now with the hash check). 8 mutants tried on the new guards, 7 killed; the 8th exposed a no-op guard, removed | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-762`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
 | **Mac** (#760 — superseded) | branch tip | **4536 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +38** — mail worker +33 (147→180 unit), core lib +2 (`workers::mail` 10→12), tests-common +3 (`mock_localmail` 11→14); no new suites. Plus the **live** shape gate green against the Mac's localmail (1 passed, zero `[NOTE]`), and on the **DGX** (real bwrap, 0 `[SKIP]`): mail worker 180+3, tests-common 428, core `workers::mail` 12, `mail_e2e` 5 (+1 ignored live tier) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
 

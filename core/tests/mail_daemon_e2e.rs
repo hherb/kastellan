@@ -616,6 +616,36 @@ fn mock_localmail_shapes_match_real_localmail() {
                      (headers::header_list_error refuses anything else); got keys {keys:?}"
                 );
             }
+            // #760's point is one entry PER OCCURRENCE: the shape check above
+            // would pass a server that kept one value per name, or dropped the
+            // `Received` chain. `full` holds every occurrence grouped by name,
+            // so `list` must hold exactly as many, and each name's values in
+            // the same order.
+            let grouped = full["headers"].as_object().expect("checked non-empty above");
+            let occurrences: usize = grouped.values().map(|v| v.as_array().map_or(0, Vec::len)).sum();
+            assert_eq!(
+                entries.len(),
+                occurrences,
+                "#760: `?headers=list` must carry one entry per occurrence — `?headers=full` \
+                 holds {occurrences} across {} names; message {id}",
+                grouped.len()
+            );
+            for (name, values) in grouped {
+                let from_list: Vec<&serde_json::Value> =
+                    entries.iter().filter(|e| e["name"].as_str() == Some(name.as_str())).map(|e| &e["value"]).collect();
+                let from_full: Vec<&serde_json::Value> =
+                    values.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+                assert_eq!(
+                    from_list.len(),
+                    from_full.len(),
+                    "#760: a header's occurrence count differs between `list` and `full`; message {id}"
+                );
+                assert!(
+                    from_list == from_full,
+                    "#760: a header's values differ, or are in a different order, between `list` \
+                     and `full`; message {id}"
+                );
+            }
             let wrong = ok_json(
                 "/v1/messages/{id}?full_headers=true",
                 curl("GET", &format!("/v1/messages/{id}?full_headers=true"), None),
@@ -677,7 +707,7 @@ fn mock_localmail_shapes_match_real_localmail() {
     assert!(
         header_spelling_checked,
         "the #500 header-spelling check never ran — no message detail was fetched, so \
-         `?headers=full` vs `?full_headers=true` was verified against nothing"
+         `?headers=full`, `?headers=list` and `?full_headers=true` were verified against nothing"
     );
     // A leg that never ran must not read as a leg that passed — the same rule
     // as the two asserts above. This used to print a `[NOTE]` and return, which

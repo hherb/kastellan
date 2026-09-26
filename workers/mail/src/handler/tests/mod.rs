@@ -57,6 +57,10 @@ impl HttpGet for VersionFake {
                 None => RawResponse { status: 404, location: None, content_type: "application/json".into(), body: br#"{"detail":"Not Found"}"#.to_vec() },
             });
         }
+        if url.path().starts_with("/v1/messages/") {
+            // Message-shaped, so a compact `get_message` is a real read.
+            return Ok(json_resp(br#"{"id":"5","subject":"s"}"#));
+        }
         Ok(json_resp(br#"[{"id":"1"}]"#))
     }
     fn post_authed(&self, _: &Url, _: &str, _: &str, _: &[u8], _: usize) -> Result<RawResponse, String> {
@@ -73,16 +77,18 @@ fn a_current_localmail_passes_the_gate() {
     h.call("mail.search", serde_json::json!({"query": "q"})).expect("1.3 is current");
 }
 
-/// Every tool that uses a slice D/E route is refused against an older server,
-/// with the upgrade named — never a misleading 404 or a whole unpaged text.
+/// Every gated tool — the slice D/E routes, and `get_message` asking for
+/// headers — is refused against an older server, with the upgrade named —
+/// never a misleading 404, a whole unpaged text or a header-less message.
 #[test]
 fn every_gated_tool_is_refused_against_an_older_localmail() {
     let calls = [
         ("mail.search", serde_json::json!({"query": "q"})),
         ("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})),
         ("mail.get_attachment", serde_json::json!({"sha256": "a".repeat(64)})),
-        // `?headers=list` (api_minor 1): an old server answers it with a
-        // header-less 200, not an error.
+        // Gated with the rest, by the one minimum (1.3). `?headers=list`
+        // itself is api_minor 1, which an older server answers with a
+        // header-less 200 rather than an error.
         ("mail.get_message", serde_json::json!({"message_id": 5, "full_headers": true})),
     ];
     for (method, params) in calls {
@@ -110,6 +116,22 @@ fn ungated_tools_work_against_an_older_localmail() {
     }
     let mut h = MailHandler::with_client_unverified(client_with(Box::new(VersionFake(Some(SLICE_D_ONLY)))));
     h.call("mail.list_accounts", serde_json::json!({})).expect("list_accounts is not gated");
+    let msg = h.call("mail.get_message", serde_json::json!({"message_id": 5})).expect("a compact read is not gated");
+    assert_eq!(msg["id"], "5", "{msg}");
+}
+
+/// A `full_headers` that is not JSON `true` skips the version gate
+/// (`needs_current_api` reads it with `as_bool`), which is safe only because
+/// `get_message` then refuses it as invalid params rather than coercing it to
+/// true and sending `?headers=list` to a server nobody checked. Pins that
+/// ordering: a lenient parse would fail this test.
+#[test]
+fn a_non_bool_full_headers_is_invalid_params_not_an_ungated_header_read() {
+    for bad in [serde_json::json!("true"), serde_json::json!(1), serde_json::json!(null)] {
+        let mut h = MailHandler::with_client_unverified(client_with(Box::new(VersionFake(Some(SLICE_D_ONLY)))));
+        let err = h.call("mail.get_message", serde_json::json!({"message_id": 5, "full_headers": bad})).unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS, "{bad}: {}", err.message);
+    }
 }
 
 /// A refusal is not remembered: a localmail upgraded under a long-lived worker

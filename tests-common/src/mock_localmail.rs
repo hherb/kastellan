@@ -11,8 +11,9 @@
 //! alongside the task-9 hermetic channel e2e, which itself does not use this
 //! mock — that test's fake worker speaks JSON-RPC directly, with no localmail
 //! HTTP involved at all). The message-detail route is shared with the mail
-//! tool, which reads only `attachments`; `email-in` additionally reads
-//! `from.address`, `body_text` and (only under `?headers=full`) `headers` —
+//! tool, which reads `attachments` and (under `?headers=list`, #760) the
+//! per-occurrence `headers` list; `email-in` reads `from.address`,
+//! `body_text` and (under `?headers=full`) the name-keyed `headers` object —
 //! see [`route`] for the source-confirmed shapes.
 //!
 //! Two spawn flavours, same request routing/response bodies, different
@@ -73,8 +74,13 @@ pub const CANNED_MESSAGE_ID_HEADER: &str = "<mid-7@example.test>";
 /// that configures this as its trusted authserv-id gets `dmarc_pass: true`.
 pub const CANNED_AUTHSERV_ID: &str = "mx.example.net";
 /// The canned `Authentication-Results` header value: a genuine `dmarc=pass`
-/// stamped by [`CANNED_AUTHSERV_ID`]. Only ever served under `?headers=full`.
+/// stamped by [`CANNED_AUTHSERV_ID`]. Served under `?headers=full` and
+/// `?headers=list`, never in the compact default.
 pub const CANNED_AUTH_RESULTS: &str = "mx.example.net; dmarc=pass";
+/// The canned message's two `Received` headers, in wire order. A repeated
+/// name is what `?headers=full` groups and `?headers=list` keeps apart, so the
+/// mock serves one — with `Authentication-Results` between them in the list.
+pub const CANNED_RECEIVED: [&str; 2] = ["by mx.example.net", "from relay.example.org"];
 
 /// A live plain-HTTP localmail mock. Aborts its listener task on drop.
 pub struct MockLocalmail {
@@ -436,14 +442,17 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
         match header_mode(path) {
             Some("full") => {
                 msg["headers"] = serde_json::json!({
-                    "Message-ID": [CANNED_MESSAGE_ID_HEADER],
+                    "Received": CANNED_RECEIVED,
                     "Authentication-Results": [CANNED_AUTH_RESULTS],
+                    "Message-ID": [CANNED_MESSAGE_ID_HEADER],
                 });
             }
             Some("list") => {
                 msg["headers"] = serde_json::json!([
-                    {"name": "Message-ID", "value": CANNED_MESSAGE_ID_HEADER},
+                    {"name": "Received", "value": CANNED_RECEIVED[0]},
                     {"name": "Authentication-Results", "value": CANNED_AUTH_RESULTS},
+                    {"name": "Received", "value": CANNED_RECEIVED[1]},
+                    {"name": "Message-ID", "value": CANNED_MESSAGE_ID_HEADER},
                 ]);
             }
             Some(_) => {}

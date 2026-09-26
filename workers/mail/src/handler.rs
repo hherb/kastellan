@@ -61,8 +61,11 @@ impl Tool {
     /// `?headers=list`, which an older server answers with a 200 and **no**
     /// `headers` key rather than an error. A compact read works everywhere.
     /// Read from the raw `params` so the decision stays here, beside every
-    /// other tool's; `full_headers` deserializes from JSON `true` and nothing
-    /// else, so `== Some(true)` is exactly the value `get_message` will see.
+    /// other tool's. The only input `get_message`'s `full_headers: bool` reads
+    /// as true is JSON `true` (serde does not coerce a string or number, and
+    /// `null` is an error), so `== Some(true)` gates exactly the calls that
+    /// will send `?headers=list`; anything else that skips the gate is refused
+    /// as invalid params.
     ///
     /// Exhaustive on purpose (no `_` arm): a new tool does not compile until
     /// someone decides whether it is gated. When this was a string `matches!`

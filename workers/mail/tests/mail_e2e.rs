@@ -44,13 +44,21 @@ fn text_page(text: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The header list the mock serves: a repeated name (`Received`, in two case
+/// spellings) interleaved with others, so the stdio path proves occurrences,
+/// their order and their spelling survive — #760's point.
+const HEADER_LIST: &str = r#"[{"name":"Received","value":"by mx.example.test"},{"name":"Message-ID","value":"<canned@example.test>"},{"name":"received","value":"from relay.example.test"}]"#;
+
 /// Does this request-target's query carry the exact pair `headers=list`?
 ///
-/// Mirrors localmail's own reading — the `headers` parameter's VALUE picks the
-/// shape — rather than a loose substring check, so a client sending some
-/// *other* spelling gets the same header-less 200 the real service would give
-/// it. That asymmetry is #500, and a mock that ignored the query could not
-/// reproduce it. `list` since #760 (localmail #381).
+/// A deliberate simplification of localmail, not a mirror of it: exactly
+/// `list` gets headers and anything else gets a header-less 200. Real
+/// localmail serves a name-keyed object for `full` and a 400 for an unknown
+/// mode (since #381) — `tests_common::mock_localmail::header_mode` is the
+/// faithful model. What this keeps is the one asymmetry these tests need: the
+/// VALUE is read by exact pair, not a loose substring, so a client that sent
+/// some other spelling gets no headers — #500 — and the worker reports it.
+/// `list` since #760 (localmail #381).
 fn wants_header_list(query: &str) -> bool {
     query.split('&').any(|pair| pair == "headers=list")
 }
@@ -131,9 +139,9 @@ fn spawn_mock() -> (String, std::thread::JoinHandle<()>) {
                     // `headers` appears ONLY for the exact `?headers=list`
                     // spelling — the #500 asymmetry, modelled rather than hidden.
                     let headers = if wants_header_list(query) {
-                        r#","headers":[{"name":"Message-ID","value":"<canned@example.test>"}]"#
+                        format!(r#","headers":{HEADER_LIST}"#)
                     } else {
-                        ""
+                        String::new()
                     };
                     (
                         "200 OK",
@@ -362,10 +370,10 @@ fn asking_for_full_headers_actually_returns_headers() {
 
     let full = rpc(&mut stdin, &mut stdout, 2, "mail.get_message",
         serde_json::json!({"message_id": "7", "full_headers": true}));
+    let served: serde_json::Value = serde_json::from_str(HEADER_LIST).unwrap();
     assert_eq!(
-        full["result"]["headers"],
-        serde_json::json!([{"name": "Message-ID", "value": "<canned@example.test>"}]),
-        "full_headers: true must produce the header list, names as values: {full}"
+        full["result"]["headers"], served,
+        "full_headers: true must produce the header list unchanged — every occurrence, in order: {full}"
     );
 
     drop(stdin);

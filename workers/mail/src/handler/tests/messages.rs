@@ -50,8 +50,9 @@ fn get_message_passes_localmails_per_occurrence_header_list_through() {
 }
 
 /// The fail-closed half of the above: a name-keyed object — what
-/// `?headers=full` and an old server's reading of it serve — is a fault,
-/// never converted and never passed on, so its keys cannot reach the planner.
+/// `?headers=full` serves (e.g. if `detail_path` regressed to it) — is a
+/// fault, never converted and never passed on, so its keys cannot reach the
+/// planner.
 #[test]
 fn get_message_refuses_a_name_keyed_header_object() {
     let mut h = MailHandler::with_client(client_with(Box::new(BodyFake(
