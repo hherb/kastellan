@@ -166,7 +166,7 @@ impl WorkerManifest for MailManifest {
                                       output, not a placeholder.",
                         required: true,
                     },
-                    ToolParam { name: "full_headers", description: "include full headers, as a list of {name, values} (default false)", required: false },
+                    ToolParam { name: "full_headers", description: "include full headers, one {name, value} per occurrence in wire order (default false)", required: false },
                 ],
             },
             ToolDoc {

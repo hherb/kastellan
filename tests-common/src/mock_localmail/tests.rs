@@ -118,9 +118,9 @@ fn changes_ack_is_204_with_empty_body() {
     assert!(body.is_empty(), "204 must have an empty body, got: {body:?}");
 }
 
-/// One raw `GET /v1/messages/{id}` against the mock, with and without
-/// `?headers=full`; returns the parsed body.
-fn message_detail(query: &str) -> serde_json::Value {
+/// One raw `GET /v1/messages/{id}{query}` against the mock; returns the
+/// status line's code and the body text.
+fn message_detail_raw(query: &str) -> (String, String) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mock = rt.block_on(spawn_mock_localmail());
     let addr = mock.base_url.strip_prefix("http://").unwrap().to_string();
@@ -133,8 +133,15 @@ fn message_detail(query: &str) -> serde_json::Value {
     .unwrap();
     let mut resp = String::new();
     s.read_to_string(&mut resp).unwrap();
-    assert!(resp.starts_with("HTTP/1.1 200"), "resp: {resp}");
-    serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    let status = resp.split_whitespace().nth(1).unwrap_or("").to_string();
+    (status, resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+}
+
+/// [`message_detail_raw`], asserting a 200 and parsing the body.
+fn message_detail(query: &str) -> serde_json::Value {
+    let (status, body) = message_detail_raw(query);
+    assert_eq!(status, "200", "body: {body}");
+    serde_json::from_str(&body).unwrap()
 }
 
 /// `GET /v1/messages/{id}` must serve `from` as an address OBJECT and the
@@ -160,13 +167,14 @@ fn message_detail_serves_from_as_an_address_object_and_body_text() {
     assert!(v["id"].is_string(), "id must be a JSON string; got {}", v["id"]);
 }
 
-/// `headers` is served only under `?headers=full`, exactly as localmail
-/// gates it (`full_headers=(headers == "full")`), and each value is an
+/// The compact default carries no `headers`, and `?headers=full` — the shape
+/// `email-in` reads — serves a name-keyed object whose every value is an
 /// ARRAY of that header's wire occurrences. Both halves matter: without the
 /// gate the mock would hide the "wrong query spelling ⇒ no
 /// Authentication-Results ⇒ every message fails DMARC closed" trap, and
 /// without the array shape `email-in`'s `header_values` would fall through
-/// to its defensive string arm rather than the real path.
+/// to its defensive string arm rather than the real path. The third mode,
+/// `list`, and the 400 for an unknown one have their own tests below.
 #[test]
 fn message_detail_gates_headers_on_the_full_query_pair() {
     let compact = message_detail("");
@@ -185,6 +193,64 @@ fn message_detail_gates_headers_on_the_full_query_pair() {
         full["headers"]["Message-ID"],
         serde_json::json!([CANNED_MESSAGE_ID_HEADER])
     );
+    assert_eq!(full["headers"]["Received"], serde_json::json!(CANNED_RECEIVED), "a repeated name groups");
+}
+
+/// `?headers=list` serves one `{name, value}` per occurrence in wire order —
+/// localmail #381's shape, which the mail worker asks for (#760) and checks
+/// entry by entry, so the mock must serve exactly those two keys. The
+/// repeated `Received` is split around `Authentication-Results`, the order
+/// `full` loses.
+#[test]
+fn message_detail_serves_the_per_occurrence_header_list() {
+    let list = message_detail("?headers=list");
+    assert_eq!(
+        list["headers"],
+        serde_json::json!([
+            {"name": "Received", "value": CANNED_RECEIVED[0]},
+            {"name": "Authentication-Results", "value": CANNED_AUTH_RESULTS},
+            {"name": "Received", "value": CANNED_RECEIVED[1]},
+            {"name": "Message-ID", "value": CANNED_MESSAGE_ID_HEADER},
+        ])
+    );
+}
+
+/// `list` and `full` describe the same message: flattening `full`'s arrays
+/// gives `list`'s entries as a multiset. The live gate asserts the same of
+/// real localmail, so the mock must satisfy it too.
+#[test]
+fn message_detail_list_and_full_hold_the_same_occurrences() {
+    let mut from_list: Vec<(String, String)> = message_detail("?headers=list")["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["name"].as_str().unwrap().into(), e["value"].as_str().unwrap().into()))
+        .collect();
+    let mut from_full: Vec<(String, String)> = message_detail("?headers=full")["headers"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .flat_map(|(k, vs)| vs.as_array().unwrap().iter().map(move |v| (k.clone(), v.as_str().unwrap().into())))
+        .collect();
+    from_list.sort();
+    from_full.sort();
+    assert_eq!(from_list, from_full);
+}
+
+/// An explicit `?headers=compact` is the default spelled out: a 200 with no
+/// `headers` key, not the 400 an unknown mode gets.
+#[test]
+fn message_detail_serves_explicit_compact_like_the_default() {
+    assert!(message_detail("?headers=compact").get("headers").is_none());
+}
+
+/// Since localmail #381 an unknown mode is a 400, not a silent compact 200 —
+/// and #500's old *parameter name* is still ignored, not refused.
+#[test]
+fn message_detail_refuses_an_unknown_header_mode_but_ignores_an_unknown_parameter() {
+    let (status, body) = message_detail_raw("?headers=bogus");
+    assert_eq!(status, "400", "body: {body}");
+    assert!(message_detail("?full_headers=true").get("headers").is_none());
 }
 
 /// A request with no bearer is refused (auth wiring is exercised).

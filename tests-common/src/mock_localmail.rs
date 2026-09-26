@@ -11,8 +11,9 @@
 //! alongside the task-9 hermetic channel e2e, which itself does not use this
 //! mock — that test's fake worker speaks JSON-RPC directly, with no localmail
 //! HTTP involved at all). The message-detail route is shared with the mail
-//! tool, which reads only `attachments`; `email-in` additionally reads
-//! `from.address`, `body_text` and (only under `?headers=full`) `headers` —
+//! tool, which reads `attachments` and (under `?headers=list`, #760) the
+//! per-occurrence `headers` list; `email-in` reads `from.address`,
+//! `body_text` and (under `?headers=full`) the name-keyed `headers` object —
 //! see [`route`] for the source-confirmed shapes.
 //!
 //! Two spawn flavours, same request routing/response bodies, different
@@ -73,8 +74,13 @@ pub const CANNED_MESSAGE_ID_HEADER: &str = "<mid-7@example.test>";
 /// that configures this as its trusted authserv-id gets `dmarc_pass: true`.
 pub const CANNED_AUTHSERV_ID: &str = "mx.example.net";
 /// The canned `Authentication-Results` header value: a genuine `dmarc=pass`
-/// stamped by [`CANNED_AUTHSERV_ID`]. Only ever served under `?headers=full`.
+/// stamped by [`CANNED_AUTHSERV_ID`]. Served under `?headers=full` and
+/// `?headers=list`, never in the compact default.
 pub const CANNED_AUTH_RESULTS: &str = "mx.example.net; dmarc=pass";
+/// The canned message's two `Received` headers, in wire order. A repeated
+/// name is what `?headers=full` groups and `?headers=list` keeps apart, so the
+/// mock serves one — with `Authentication-Results` between them in the list.
+pub const CANNED_RECEIVED: [&str; 2] = ["by mx.example.net", "from relay.example.org"];
 
 /// A live plain-HTTP localmail mock. Aborts its listener task on drop.
 pub struct MockLocalmail {
@@ -224,13 +230,18 @@ fn content_length(head: &str) -> usize {
     0
 }
 
-/// Does this request-target's query string carry the exact pair `headers=full`?
-/// Matches localmail's own test (`full_headers=(headers == "full")`) rather
-/// than a loose substring check, so a client sending some *other* spelling gets
-/// the same header-less 200 a real localmail would give it.
-fn wants_full_headers(path: &str) -> bool {
-    path.split_once('?')
-        .is_some_and(|(_, query)| query.split('&').any(|pair| pair == "headers=full"))
+/// Which header shape a message-detail request-target asks for — localmail's
+/// `headers` query parameter (`compact` when absent), read as the real
+/// service reads it: by the exact pair, not a substring, so a client sending
+/// some *other* parameter name (#500's `full_headers=true`) gets the same
+/// header-less compact 200 a real localmail would give it.
+///
+/// `None` for a value localmail refuses: since localmail #381 an unknown mode
+/// is a 400, where it used to be a silent compact 200.
+fn header_mode(path: &str) -> Option<&str> {
+    let query = path.split_once('?').map_or("", |(_, q)| q);
+    let mode = query.split('&').find_map(|pair| pair.strip_prefix("headers=")).unwrap_or("compact");
+    ["compact", "full", "list"].contains(&mode).then_some(mode)
 }
 
 /// localmail's text-route body since slice D (`api_minor` 2): one page plus
@@ -405,14 +416,16 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
         //     unread: since #536, `workers/mail/tests/mail_e2e.rs` asserts on it
         //     to check the id survived a search → get_message round trip.
         //   * `headers` exists ONLY when the request carried `?headers=full`
-        //     (`serve/routes/messages.py::detail` maps that query pair to
-        //     `full_headers=(headers == "full")`), and every value is an ARRAY
-        //     of that exact-cased header's occurrences in wire order. Gating it
-        //     here keeps the mock honest about a real trap: a client that asks
-        //     with the wrong query spelling gets a 200 with no headers at all,
-        //     hence no `Authentication-Results`, hence a fail-closed DMARC
-        //     verdict for every message — which looks like a delivery bug.
-        // The mail tool reads only `attachments`, which is unchanged.
+        //     or `?headers=list` (see `header_mode`). Under `full` it is an
+        //     object whose every value is an ARRAY of that exact-cased
+        //     header's occurrences in wire order (email-in reads this); under
+        //     `list` (localmail #381, `api_minor` 1) it is one
+        //     `{name, value}` per occurrence in wire order (the mail worker
+        //     reads this, #760). Gating it here keeps the mock honest about a
+        //     real trap: a client that asks with the wrong query spelling gets
+        //     a 200 with no headers at all, hence no `Authentication-Results`,
+        //     hence a fail-closed DMARC verdict for every message — which
+        //     looks like a delivery bug.
         let mut msg = serde_json::json!({
             "id": CANNED_MESSAGE_ID.to_string(),
             "subject": "invoice",
@@ -426,11 +439,30 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
                 "size": CANNED_ATTACHMENT_BYTES.len()
             }]
         });
-        if wants_full_headers(path) {
-            msg["headers"] = serde_json::json!({
-                "Message-ID": [CANNED_MESSAGE_ID_HEADER],
-                "Authentication-Results": [CANNED_AUTH_RESULTS],
-            });
+        match header_mode(path) {
+            Some("full") => {
+                msg["headers"] = serde_json::json!({
+                    "Received": CANNED_RECEIVED,
+                    "Authentication-Results": [CANNED_AUTH_RESULTS],
+                    "Message-ID": [CANNED_MESSAGE_ID_HEADER],
+                });
+            }
+            Some("list") => {
+                msg["headers"] = serde_json::json!([
+                    {"name": "Received", "value": CANNED_RECEIVED[0]},
+                    {"name": "Authentication-Results", "value": CANNED_AUTH_RESULTS},
+                    {"name": "Received", "value": CANNED_RECEIVED[1]},
+                    {"name": "Message-ID", "value": CANNED_MESSAGE_ID_HEADER},
+                ]);
+            }
+            Some(_) => {}
+            None => {
+                return (
+                    "400 Bad Request",
+                    "application/problem+json",
+                    br#"{"detail":"headers must be one of compact, full, list"}"#.to_vec(),
+                )
+            }
         }
         json(msg.to_string())
     } else if path.starts_with("/v1/messages") {
