@@ -10,7 +10,7 @@
 
 **Last updated:** 2026-09-26 (#760: the mail worker adopts localmail slices D and E — a version
 gate, compact search hits, attachments by position, paged text) ·
-**Recent PRs, newest first:** #760's PR (this session), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Recent PRs, newest first:** [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -346,7 +346,7 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#760 — **the gate that stands**) | branch tip | **4536 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +38** — mail worker +33 (147→180 unit), core lib +2 (`workers::mail` 10→12), tests-common +3 (`mock_localmail` 11→14); no new suites. Plus the **live** shape gate green against the Mac's localmail (1 passed, zero `[NOTE]`) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
+| **Mac** (#760 — **the gate that stands**) | branch tip | **4536 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +38** — mail worker +33 (147→180 unit), core lib +2 (`workers::mail` 10→12), tests-common +3 (`mock_localmail` 11→14); no new suites. Plus the **live** shape gate green against the Mac's localmail (1 passed, zero `[NOTE]`), and on the **DGX** (real bwrap, 0 `[SKIP]`): mail worker 180+3, tests-common 428, core `workers::mail` 12, `mail_e2e` 5 (+1 ignored live tier) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
 | **Mac** (#698 — superseded) | branch tip | **4498 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY: +12** — +5 lib from #758's review round (which that row never measured) and +7 from this PR (mail worker +6, core +1) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-698`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
@@ -427,7 +427,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#760's PR** — the mail worker adopts localmail slices D and E: a `/v1/version` gate (≥ 1.3, no
+- **[#762](https://github.com/hherb/kastellan/pull/762)** (#760) — the mail worker adopts localmail slices D and E: a `/v1/version` gate (≥ 1.3, no
   fallback), `fields`/`snippet_chars` on every search, `index` on attachments (written by
   `get_message`, taken by both attachment tools, fetched by position), and 8,000-char paged text
   with localmail's `next_offset`. Three movement-only splits first. `headers=list` left on #760.
