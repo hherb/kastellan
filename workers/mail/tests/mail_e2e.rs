@@ -25,6 +25,25 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 /// wire: a STRING.
 const CANNED_MESSAGE_ID: &str = "7";
 
+/// Bytes the index route serves for message 7's one attachment — distinct from
+/// the hash route's, so step 5 can tell which route ran.
+const BY_POSITION_BYTES: &[u8] = b"%PDF-1.7 by position";
+
+/// The hash of message 7's one attachment: the real sha256 of
+/// [`BY_POSITION_BYTES`], because the worker refuses bytes fetched by position
+/// that do not hash to what the listing said (#760).
+const CANNED_SHA: &str = "d9f1ba869130eabb6ea6cf19011d7fb7546f5cbcbfa39536eb62fa41a915f251";
+
+/// localmail's paged text envelope (slice D): one page, which for these short
+/// fixtures is the whole and last one.
+fn text_page(text: &str) -> Vec<u8> {
+    format!(
+        r#"{{"text":"{text}","offset":0,"limit":8000,"total":{},"next_offset":null}}"#,
+        text.len()
+    )
+    .into_bytes()
+}
+
 /// Does this request-target's query carry the exact pair `headers=full`?
 ///
 /// Mirrors localmail's own `full_headers=(headers == "full")` rather than a
@@ -69,6 +88,13 @@ fn spawn_mock() -> (String, std::thread::JoinHandle<()>) {
             let (path, query) = target.split_once('?').unwrap_or((target, ""));
 
             let (status, ctype, body): (&str, &str, Vec<u8>) = match (method, path) {
+                // Unauthenticated on the real service; the worker's version gate
+                // (#760) asks before every slice D/E tool.
+                ("GET", "/v1/version") => (
+                    "200 OK",
+                    "application/json",
+                    br#"{"api_major":1,"api_minor":3,"server_version":"0.3.0"}"#.to_vec(),
+                ),
                 // Live localmail serves ids as STRINGS on every route.
                 ("GET", "/v1/accounts") => (
                     "200 OK",
@@ -82,16 +108,19 @@ fn spawn_mock() -> (String, std::thread::JoinHandle<()>) {
                 ("POST", "/v1/search") => (
                     "200 OK",
                     "application/json",
-                    format!(r#"{{"results":[{{"message_id":"{CANNED_MESSAGE_ID}"}}],"next_cursor":null}}"#)
+                    format!(r#"{{"results":[{{"message_id":"{CANNED_MESSAGE_ID}","snippet":"…"}}],"next_cursor":null}}"#)
                         .into_bytes(),
                 ),
                 ("GET", p) if p.starts_with("/v1/attachments/") && p.ends_with("/text") => {
-                    // Real localmail returns application/json {"text": "..."}.
-                    (
-                        "200 OK",
-                        "application/json",
-                        br#"{"text":"extracted booking text"}"#.to_vec(),
-                    )
+                    // Real localmail returns application/json {"text": "...", paging}.
+                    ("200 OK", "application/json", text_page("extracted booking text"))
+                }
+                // By position within message 7 (slice D): its one attachment.
+                ("GET", "/v1/messages/7/attachments/0/text") => {
+                    ("200 OK", "application/json", text_page("extracted by position"))
+                }
+                ("GET", "/v1/messages/7/attachments/0") => {
+                    ("200 OK", "application/pdf", BY_POSITION_BYTES.to_vec())
                 }
                 ("GET", p) if p.starts_with("/v1/attachments/") => {
                     ("200 OK", "application/pdf", b"%PDF-1.7 fake booking".to_vec())
@@ -108,7 +137,9 @@ fn spawn_mock() -> (String, std::thread::JoinHandle<()>) {
                     (
                         "200 OK",
                         "application/json",
-                        format!(r#"{{"id":"{id}","subject":"invoice","attachments":[]{headers}}}"#)
+                        format!(
+                            r#"{{"id":"{id}","subject":"invoice","attachments":[{{"filename":"booking.pdf","sha256":"{CANNED_SHA}","content_type":"application/pdf","size":20}}]{headers}}}"#
+                        )
                             .into_bytes(),
                     )
                 }
@@ -232,8 +263,26 @@ fn mail_worker_stdio_roundtrip_against_mock() {
     assert_eq!(r["result"]["content_type"], "application/pdf");
     assert!(r["result"].get("data_base64").is_none(), "no inline bytes");
 
-    // 5. unknown method → JSON-RPC error (-32601).
-    let r = rpc(&mut stdin, &mut stdout, 5, "mail.nope", serde_json::json!({}));
+    // 5. By position (#760): get_message numbers the attachment, and both
+    //    attachment tools fetch it through the index route — the mock serves
+    //    distinct bodies there, so reading them back proves which route ran.
+    let r = rpc(&mut stdin, &mut stdout, 5, "mail.get_message", serde_json::json!({"message_id": "7"}));
+    let index = r["result"]["attachments"][0]["index"].clone();
+    assert_eq!(index, 0, "resp: {r}");
+    let r = rpc(&mut stdin, &mut stdout, 6, "mail.get_attachment_text",
+        serde_json::json!({"message_id": "7", "index": index}));
+    assert_eq!(r["result"]["text"], "extracted by position", "resp: {r}");
+    assert_eq!(r["result"]["filename"], "booking.pdf", "resp: {r}");
+    assert!(r["result"]["next_offset"].is_null(), "resp: {r}");
+    let r = rpc(&mut stdin, &mut stdout, 7, "mail.get_attachment",
+        serde_json::json!({"message_id": "7", "index": 0}));
+    let path = r["result"]["path"].as_str().expect("path in result");
+    assert_eq!(std::fs::read(path).unwrap(), BY_POSITION_BYTES);
+    assert_eq!(r["result"]["sha256"], CANNED_SHA, "resp: {r}");
+    assert_eq!(r["result"]["index"], 0, "resp: {r}");
+
+    // 6. unknown method → JSON-RPC error (-32601).
+    let r = rpc(&mut stdin, &mut stdout, 8, "mail.nope", serde_json::json!({}));
     assert_eq!(r["error"]["code"], -32601, "resp: {r}");
 
     drop(stdin); // EOF → worker exits its stdio loop.

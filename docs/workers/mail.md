@@ -11,12 +11,12 @@ attachments delivered as extracted text **or** as original-format files.
 
 | Tool | Purpose |
 | --- | --- |
-| `mail.search` | Hybrid semantic + full-text search. Filter by `date_from`/`date_to`/`from`/`to`/`subject`/`has_attachment`/`account_ids`/`folder_ids`/`lang`; `sort` = `rank`\|`date`; page with `cursor`/`next_cursor`. |
-| `mail.get_message` | One message: headers, plaintext body, attachment list `[{filename, sha256, content_type, size}]`. |
+| `mail.search` | Hybrid semantic + full-text search. Filter by `date_from`/`date_to`/`from`/`to`/`subject`/`has_attachment`/`account_ids`/`folder_ids`/`lang`; `sort` = `rank`\|`date`; page with `cursor`/`next_cursor`. Each hit is projected to `message_id, account, subject, from, date, has_attachments, snippet` (120-char snippet). |
+| `mail.get_message` | One message: headers, plaintext body, attachment list `[{index, filename, sha256, content_type, size}]` — `index` is written in by the worker. |
 | `mail.list_messages` | Browse newest-first; `account_ids`/`folder_ids` filters; `cursor`. |
 | `mail.list_accounts` | Accounts this agent may read. |
-| `mail.get_attachment_text` | Server-extracted text of an attachment. Use to **read** it. Address it by `{message_id, filename}` — or by `{sha256}`, but see *Addressing an attachment* below. |
-| `mail.get_attachment` | Save an attachment in its **original format** (PDF, etc.) to the task output dir; returns `{path, size, content_type, filename}`. Use to **deliver** a file. |
+| `mail.get_attachment_text` | Server-extracted text of an attachment, **one 8,000-character page at a time** (`offset` + the returned `next_offset`/`total`). Use to **read** it. Address it by `{message_id, filename}` or `{message_id, index}` — or by `{sha256}`, but see *Addressing an attachment* below. |
+| `mail.get_attachment` | Save an attachment in its **original format** (PDF, etc.) to the task output dir; returns `{path, size, content_type, filename, sha256, index}` (`index` is `null` for a bare-`sha256` fetch). Use to **deliver** a file. |
 
 The agent does the reasoning (e.g. extracting flight-booking fields into a CSV);
 the worker only searches and retrieves. Files delivered by `mail.get_attachment`
@@ -28,13 +28,18 @@ retention/cleanup of delivered files is an operator concern.
 
 ### Addressing an attachment
 
-`mail.get_attachment_text` takes **either** `{message_id, filename}` **or**
-`{sha256}`, and the first form is the one to prefer.
+`mail.get_attachment_text` takes **either** `{message_id, filename}` /
+`{message_id, index}` **or** `{sha256}`, and the message forms are the ones to
+prefer. A message-form attachment is fetched from localmail **by position**
+(`/v1/messages/{id}/attachments/{index}`, #760), which re-checks the message's
+ACL and serves the entry's own filename; a bare `{sha256}` keeps the hash routes.
 
-A planner reaches a successful step's output through `extract_scannable_text`:
-string values only, **keys discarded**, capped at 4 KiB
-(`core::scheduler::inner_loop::summary`). A sha256 therefore arrives as an
-unlabelled 64-character hex blob that the model must identify by shape and then
+When this form was added, a planner reached a successful step's output through
+`extract_scannable_text`: string values only, **keys discarded**, capped at
+4 KiB (`core::scheduler::inner_loop::summary`). (Since #677/#702 it reads pruned,
+labelled JSON through a 16 KiB step view instead — see *Paged text* below — but a
+hash is still 64 characters to copy exactly.) A sha256 then arrived as an
+unlabelled 64-character hex blob that the model had to identify by shape and then
 transcribe exactly — and on 2026-08-17 (task 160) it did not. The correct hash
 was the 6th string in that head, at roughly byte 120; the planner emitted a
 different 64 hex chars, localmail answered its `404 no extracted text for
@@ -49,6 +54,10 @@ So:
   case-insensitive, then a *unique* case-insensitive substring, so
   `e-ticket-DQXK68.pdf` finds `Download 470989752-e-ticket-DQXK68.pdf`. An
   ambiguous name is refused with the candidates listed, never guessed.
+- `{message_id, index}` picks by position — the `index` `mail.get_message`
+  writes into each attachment entry. It is the exact, short key for the case a
+  filename cannot settle (below). A `filename` or `sha256` beside it must name
+  the same attachment, or the call is refused.
 - `{sha256}` still works, and is right when the hash is copied verbatim from a
   previous step's output in the same task.
 - `{message_id, sha256}` together is **not** an error. The hash selects — it is
@@ -63,8 +72,9 @@ Not every message can be addressed by filename. Two parts of one message may
 share a name (`image001.png` is the usual case) or carry none at all, and there
 a repair that said "copy one exactly" would list two identical strings — advice
 the planner cannot act on, so it re-sends the same value until the iteration
-cap. In those messages the refusal lists **12-char sha prefixes** instead and
-asks for `sha256`, because that is the key that actually discriminates.
+cap. In those messages the refusal lists the attachments' **`index`** values
+instead, because that is the key that actually discriminates. (It listed 12-char
+sha prefixes before #760; a unique prefix still selects.)
 
 Three upstream states are also kept distinct, because they need opposite
 repairs and localmail returns the same 404 for several of them: a message with
@@ -85,6 +95,39 @@ Both attachment tools translate localmail's 404 into advice whose wording
 depends on **where the hash came from**: one the planner typed is most often
 mistyped, while one this worker resolved out of a message is right by
 construction and must not send the planner to re-copy it.
+
+Bytes fetched **by position** are hashed and compared with the `sha256` the
+message listed at that position, and refused as a service fault — with nothing
+saved — if they differ. A fetch by hash was self-verifying; a fetch by position
+is not, and without the check a localmail whose positions disagreed with its own
+listing would put one document on disk under another's hash and name. Extracted
+text carries no hash to compare, so a `get_attachment_text` result's `sha256` is
+the one the listing gave.
+
+### Paged text
+
+Extracted text is served **one page of 8,000 characters** at a time
+(`workers/mail/src/text_page.rs`), with localmail's `offset`, `total` and
+`next_offset`, plus a `more` note naming the next call while text remains. A
+whole text (up to 2.1 MB live) used to overflow the planner's 16 KiB step view
+and fall into the truncation path (#678). `next_offset` is **copied from
+localmail, never computed** — offsets count code points, and arithmetic on the
+returned text skips text on documents with characters above U+FFFF. A text body
+without the paging fields is refused as a service fault rather than served as a
+complete page, and so is one whose paging is inconsistent: an `offset` other than
+the one requested (a server ignoring it would serve page one forever), or a
+`next_offset` that does not advance strictly within `total`.
+
+### localmail version
+
+Search and both attachment tools first ask `GET /v1/version` and refuse — naming
+the upgrade — unless localmail reports `api_major` 1 and `api_minor` ≥ 3 (slice
+D's index routes and paging, slice E's `fields`/`snippet_chars`). There is no
+fallback to the older routes: an older server answers the index route with the
+same 404 as a missing message and ignores paging, so trying would give wrong
+answers rather than an error. The other three tools keep working against an
+older localmail. A pass is remembered for the worker's lifetime; a refusal is
+asked again.
 
 ### Naming the accounts to search
 

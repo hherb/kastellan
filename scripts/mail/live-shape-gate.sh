@@ -22,22 +22,34 @@
 #   KASTELLAN_MAIL_TOKEN      a localmail api-user login token
 #
 # If they are unset, this script reads them from the daemon's own config rather
-# than making you retype them: KASTELLAN_MAIL_ENDPOINT out of kastellan.env, and
-# the token out of the file KASTELLAN_MAIL_TOKEN_FILE points at.
+# than making you retype them: KASTELLAN_MAIL_ENDPOINT out of kastellan.env (or
+# its operator overlay kastellan.env.local, which wins — on the Mac that is
+# where both mail keys live), and the token out of the file
+# KASTELLAN_MAIL_TOKEN_FILE points at.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
 env_file="${KASTELLAN_ENV_FILE:-$HOME/.config/kastellan/kastellan.env}"
+overlay_file="${env_file}.local"
 
 # Pull a KEY=value out of an env file without sourcing it — the file legitimately
 # contains JSON whose inner quotes shell quote-removal would eat (the extra-CA
-# key), and sourcing it has broken a hand-run daemon before.
+# key), and sourcing it has broken a hand-run daemon before. The overlay is read
+# first, since the daemon loads it after kastellan.env and it overrides; an
+# empty value there is skipped here rather than treated as "unset".
 read_env_key() {
-  local key="$1"
-  [ -r "$env_file" ] || return 1
-  sed -n "s/^${key}=//p" "$env_file" | tail -n 1
+  local key="$1" f v
+  for f in "$overlay_file" "$env_file"; do
+    [ -r "$f" ] || continue
+    v="$(sed -n "s/^${key}=//p" "$f" | tail -n 1)"
+    if [ -n "$v" ]; then
+      printf '%s\n' "$v"
+      return 0
+    fi
+  done
+  return 1
 }
 
 if [ -z "${KASTELLAN_MAIL_ENDPOINT:-}" ]; then
@@ -52,7 +64,7 @@ fi
 
 if [ -z "${KASTELLAN_MAIL_ENDPOINT:-}" ] || [ -z "${KASTELLAN_MAIL_TOKEN:-}" ]; then
   echo "error: KASTELLAN_MAIL_ENDPOINT and KASTELLAN_MAIL_TOKEN are required." >&2
-  echo "       Neither was in the environment, and $env_file did not supply them." >&2
+  echo "       Neither was in the environment, and $env_file (+ .local) did not supply them." >&2
   echo "       Without them the gate skips as PASS, which is why this script refuses" >&2
   echo "       to run rather than invoking cargo and reporting a green that means nothing." >&2
   exit 2

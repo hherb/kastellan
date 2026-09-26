@@ -29,10 +29,14 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// 64 lowercase hex — the attachment sha the canned message advertises and the
-/// attachment endpoints key on (the worker validates sha256 shape).
+/// The attachment sha the canned message advertises and the attachment
+/// endpoints key on: the **real** sha256 of [`CANNED_ATTACHMENT_BYTES`], as
+/// localmail's own is of the blob's bytes. It has to be — since #760 the mail
+/// worker hashes bytes fetched by position and refuses any that disagree with
+/// the listing, so a placeholder here would fail every message-resolved
+/// `mail.get_attachment`. Pinned by a test in `mock_localmail/tests.rs`.
 pub const CANNED_SHA256: &str =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    "8635c9b562b665d3ee8c3d02775c0745a9857ec29535e75715f6de2f3f9ded49";
 /// Extracted text surfaced by `mail.get_attachment_text`.
 pub const CANNED_ATTACHMENT_TEXT: &str = "NORTH COAST AREA HEALTH SERVICE invoice total 42.00";
 /// Original-format bytes delivered by `mail.get_attachment`.
@@ -229,6 +233,32 @@ fn wants_full_headers(path: &str) -> bool {
         .is_some_and(|(_, query)| query.split('&').any(|pair| pair == "headers=full"))
 }
 
+/// localmail's text-route body since slice D (`api_minor` 2): one page plus
+/// its paging fields. The canned text is short, so every window holds all
+/// that is left of it and is the last page (`next_offset: null`).
+///
+/// `offset` is **echoed** from the request, as localmail does
+/// (`text_window.py`): the mail worker refuses a page whose offset is not the
+/// one it asked for, so a mock that always said `0` would hide a server
+/// ignoring the parameter — or fail a worker that is right.
+fn text_page_body(path: &str) -> String {
+    let offset: usize = path
+        .split_once('?')
+        .and_then(|(_, q)| q.split('&').find_map(|kv| kv.strip_prefix("offset=")))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let total = CANNED_ATTACHMENT_TEXT.chars().count();
+    let text: String = CANNED_ATTACHMENT_TEXT.chars().skip(offset).collect();
+    serde_json::json!({
+        "text": text,
+        "offset": offset,
+        "limit": 8000,
+        "total": total,
+        "next_offset": null
+    })
+    .to_string()
+}
+
 /// Pure request-line/headers → (status, content-type, body). Asserts a
 /// non-empty bearer so the auth wiring is exercised, then routes by path.
 fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
@@ -261,7 +291,28 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
     // Order matters: the more specific /v1/changes/ack must be checked before
     // the more general /v1/changes prefix (an ack path also starts with it),
     // and both before the attachment/message paths below.
-    if path.starts_with("/v1/changes/ack") {
+    // Message-scoped attachment routes (slice D, `api_minor` 2): the canned
+    // message's one attachment sits at index 0. Anything else under the prefix
+    // is localmail's shared 404.
+    let by_index = format!("/v1/messages/{CANNED_MESSAGE_ID}/attachments/");
+    let by_index_rest = path.split('?').next().and_then(|p| p.strip_prefix(&by_index));
+
+    if path.starts_with("/v1/version") {
+        // Unauthenticated on the real service (reached here only with a bearer,
+        // which every client of this mock sends). The mail worker's version
+        // gate (#760) asks before every tool that uses a slice D/E feature.
+        json(serde_json::json!({
+            "api_major": 1, "api_minor": 3, "server_version": "0.3.0",
+            "build_hash": null, "build_source": "wheel", "version_source": "installed"
+        }).to_string())
+    } else if let Some(rest) = by_index_rest {
+        match rest {
+            "0/text" => json(text_page_body(path)),
+            "0" => ("200 OK", "application/pdf", CANNED_ATTACHMENT_BYTES.to_vec()),
+            _ => ("404 Not Found", "application/problem+json",
+                  br#"{"type":"/problems/not-found","title":"Not found","status":404}"#.to_vec()),
+        }
+    } else if path.starts_with("/v1/changes/ack") {
         ("204 No Content", "text/plain", Vec::new())
     } else if path.starts_with("/v1/changes") {
         // Shape confirmed against the real localmail route (task-1-report.md's
@@ -295,8 +346,14 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
         // `mail.get_message` dispatches failed on exactly this (of 14 failures
         // in all, across three causes — #527): the worker's `i64` agreed with
         // the mock and not with the service. `results` (not `hits`) is correct
-        // and stays, and the snippet field is `snippet_html`
-        // (`api/search.py::_to_api_result`), not `snippet`.
+        // and stays.
+        //
+        // The hit is the **projected** shape (slice E, `api_minor` 3): the mail
+        // worker sends `fields` = `search_params::HIT_FIELDS` on every search,
+        // so real localmail answers it with exactly those keys — including a
+        // plain-text `snippet` rather than the default `snippet_html`. This
+        // mock does not read the request body, so it serves that shape
+        // unconditionally; the mail worker is the only client of this route.
         //
         // `next_cursor` deliberately still serves the base64 `CANNED_NEXT_CURSOR`
         // shape, not the hex format /v1/search actually uses live (e.g.
@@ -310,7 +367,10 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
                 "message_id": CANNED_MESSAGE_ID.to_string(),
                 "account": {"id": CANNED_ACCOUNT_ID, "name": serde_json::Value::Null},
                 "subject": "invoice",
-                "snippet_html": "…"
+                "from": {"address": CANNED_FROM_ADDRESS, "name": "Billing"},
+                "date": "2026-07-28T00:00:00+00:00",
+                "has_attachments": true,
+                "snippet": "…"
             }],
             "next_cursor": CANNED_NEXT_CURSOR
         }).to_string())
@@ -320,7 +380,7 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
             {"id": CANNED_ACCOUNT_ID, "name": CANNED_ACCOUNT_NAME}
         ]).to_string())
     } else if path.contains("/text") && path.starts_with("/v1/attachments/") {
-        json(serde_json::json!({"text": CANNED_ATTACHMENT_TEXT}).to_string())
+        json(text_page_body(path))
     } else if path.starts_with("/v1/attachments/") {
         ("200 OK", "application/pdf", CANNED_ATTACHMENT_BYTES.to_vec())
     } else if is_message_by_id {
@@ -391,297 +451,4 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-
-    /// Drive one raw GET /v1/accounts against the mock and confirm it answers
-    /// with the localmail accounts array shape (a JSON list).
-    #[test]
-    fn serves_accounts_as_a_json_array() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mock = rt.block_on(spawn_mock_localmail());
-        let addr = mock.base_url.strip_prefix("http://").unwrap().to_string();
-        let mut s = TcpStream::connect(&addr).unwrap();
-        write!(
-            s,
-            "GET /v1/accounts HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut resp = String::new();
-        s.read_to_string(&mut resp).unwrap();
-        assert!(resp.starts_with("HTTP/1.1 200"), "resp: {resp}");
-        let body = resp.split("\r\n\r\n").nth(1).unwrap();
-        let v: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert!(v.is_array(), "accounts must be a JSON array, got {v}");
-    }
-
-    /// The attachment-text endpoint must return the localmail envelope shape
-    /// `application/json {"text": …}` (the #487 contract), NOT plain text.
-    #[test]
-    fn attachment_text_is_json_text_envelope() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mock = rt.block_on(spawn_mock_localmail());
-        let addr = mock.base_url.strip_prefix("http://").unwrap().to_string();
-        let mut s = TcpStream::connect(&addr).unwrap();
-        write!(
-            s,
-            "GET /v1/attachments/{CANNED_SHA256}/text HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut resp = String::new();
-        s.read_to_string(&mut resp).unwrap();
-        assert!(resp.contains("application/json"), "content-type: {resp}");
-        let body = resp.split("\r\n\r\n").nth(1).unwrap();
-        let v: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(v["text"], CANNED_ATTACHMENT_TEXT);
-    }
-
-    /// `GET /v1/changes` must return `message_id` (and `next_cursor`) as JSON
-    /// STRINGS, matching the real localmail contract confirmed in
-    /// `task-1-report.md`'s "Final response shapes" — `workers/email-in`'s
-    /// handler reads `message_id` via `serde_json::Value::as_str`, which
-    /// returns `None` for a JSON number and silently SKIPS the message
-    /// (`handler.rs::poll`'s `let Some(message_id) = … else { continue }`),
-    /// never erroring loudly. `is_string` is the assertion that actually
-    /// catches that regression — a looser "the field is present" check would
-    /// not have. Chosen over a full `workers/email-in`-driven e2e (this
-    /// crate's own test module, not a new integration test elsewhere) because
-    /// `kastellan-worker-email-in` currently has zero dev-dependencies
-    /// (neither `tokio` nor `kastellan-tests-common`), and pulling both in
-    /// just to exercise one mock route is disproportionate to the fix; this
-    /// still fails loudly on exactly the bug that shipped.
-    #[test]
-    fn changes_returns_message_id_and_next_cursor_as_strings() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mock = rt.block_on(spawn_mock_localmail());
-        let addr = mock.base_url.strip_prefix("http://").unwrap().to_string();
-        let mut s = TcpStream::connect(&addr).unwrap();
-        write!(
-            s,
-            "GET /v1/changes?subscription=test HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut resp = String::new();
-        s.read_to_string(&mut resp).unwrap();
-        assert!(resp.starts_with("HTTP/1.1 200"), "resp: {resp}");
-        let body = resp.split("\r\n\r\n").nth(1).unwrap();
-        let v: serde_json::Value = serde_json::from_str(body).unwrap();
-        let messages = v["new_messages"].as_array().expect("new_messages must be an array");
-        assert_eq!(messages.len(), 1);
-        assert!(
-            messages[0]["message_id"].is_string(),
-            "message_id must be a JSON string, not a number, or email-in's handler silently \
-             drops every message via .as_str() == None; got {}",
-            messages[0]["message_id"]
-        );
-        assert_eq!(messages[0]["message_id"], CANNED_MESSAGE_ID.to_string());
-        assert!(
-            v["next_cursor"].is_string(),
-            "next_cursor must be a JSON string; got {}",
-            v["next_cursor"]
-        );
-    }
-
-    /// `POST /v1/changes/ack` must answer `204 No Content` with an empty
-    /// body — the real contract confirmed in `task-1-report.md`;
-    /// `EmailClient::ack` never parses the body, only checks the status.
-    #[test]
-    fn changes_ack_is_204_with_empty_body() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mock = rt.block_on(spawn_mock_localmail());
-        let addr = mock.base_url.strip_prefix("http://").unwrap().to_string();
-        let mut s = TcpStream::connect(&addr).unwrap();
-        let payload = br#"{"subscription":"test","cursor":"7"}"#;
-        write!(
-            s,
-            "POST /v1/changes/ack HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\n\
-             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            payload.len()
-        )
-        .unwrap();
-        s.write_all(payload).unwrap();
-        let mut resp = Vec::new();
-        s.read_to_end(&mut resp).unwrap();
-        let resp = String::from_utf8_lossy(&resp);
-        assert!(resp.starts_with("HTTP/1.1 204"), "resp: {resp}");
-        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
-        assert!(body.is_empty(), "204 must have an empty body, got: {body:?}");
-    }
-
-    /// One raw `GET /v1/messages/{id}` against the mock, with and without
-    /// `?headers=full`; returns the parsed body.
-    fn message_detail(query: &str) -> serde_json::Value {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mock = rt.block_on(spawn_mock_localmail());
-        let addr = mock.base_url.strip_prefix("http://").unwrap().to_string();
-        let mut s = TcpStream::connect(&addr).unwrap();
-        write!(
-            s,
-            "GET /v1/messages/{CANNED_MESSAGE_ID}{query} HTTP/1.1\r\nHost: x\r\n\
-             Authorization: Bearer t\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut resp = String::new();
-        s.read_to_string(&mut resp).unwrap();
-        assert!(resp.starts_with("HTTP/1.1 200"), "resp: {resp}");
-        serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap()
-    }
-
-    /// `GET /v1/messages/{id}` must serve `from` as an address OBJECT and the
-    /// plain-text body as `body_text` — the real localmail contract
-    /// (`api/messages.py::get_message`). `email-in`'s `build_event` reads
-    /// `from.address`; against a bare `"from": "a@b"` string it returns `None`
-    /// and the message becomes a `skipped` entry instead of an inbound event,
-    /// with no error anywhere. `is_string()` on the nested address is the
-    /// assertion that catches that regression — "the field is present" would not.
-    #[test]
-    fn message_detail_serves_from_as_an_address_object_and_body_text() {
-        let v = message_detail("");
-        assert!(
-            v["from"]["address"].is_string(),
-            "from must be an address object, not a bare string, or email-in's build_event \
-             silently skips every message; got from = {}",
-            v["from"]
-        );
-        assert_eq!(v["from"]["address"], CANNED_FROM_ADDRESS);
-        assert_eq!(v["body_text"], CANNED_BODY_TEXT);
-        // Same numeric-vs-string trap `changes_returns_message_id_and_next_cursor_as_strings`
-        // guards one route over: localmail serves `"id": str(mid)`.
-        assert!(v["id"].is_string(), "id must be a JSON string; got {}", v["id"]);
-    }
-
-    /// `headers` is served only under `?headers=full`, exactly as localmail
-    /// gates it (`full_headers=(headers == "full")`), and each value is an
-    /// ARRAY of that header's wire occurrences. Both halves matter: without the
-    /// gate the mock would hide the "wrong query spelling ⇒ no
-    /// Authentication-Results ⇒ every message fails DMARC closed" trap, and
-    /// without the array shape `email-in`'s `header_values` would fall through
-    /// to its defensive string arm rather than the real path.
-    #[test]
-    fn message_detail_gates_headers_on_the_full_query_pair() {
-        let compact = message_detail("");
-        assert!(
-            compact.get("headers").is_none(),
-            "a compact request must get NO headers key; got {}",
-            compact
-        );
-
-        let full = message_detail("?headers=full");
-        let auth = full["headers"]["Authentication-Results"]
-            .as_array()
-            .expect("Authentication-Results must be an ARRAY of wire occurrences");
-        assert_eq!(auth, &vec![serde_json::json!(CANNED_AUTH_RESULTS)]);
-        assert_eq!(
-            full["headers"]["Message-ID"],
-            serde_json::json!([CANNED_MESSAGE_ID_HEADER])
-        );
-    }
-
-    /// A request with no bearer is refused (auth wiring is exercised).
-    #[test]
-    fn missing_bearer_is_401() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mock = rt.block_on(spawn_mock_localmail());
-        let addr = mock.base_url.strip_prefix("http://").unwrap().to_string();
-        let mut s = TcpStream::connect(&addr).unwrap();
-        write!(s, "GET /v1/accounts HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
-        let mut resp = String::new();
-        s.read_to_string(&mut resp).unwrap();
-        assert!(resp.starts_with("HTTP/1.1 401"), "no-bearer must 401, got: {resp}");
-    }
-
-    /// The TLS mock serves the same `/v1/search` `results` shape as the plain mock,
-    /// over TLS, to a client trusting only the returned cert — the exact trust path
-    /// the force-routed MITM e2e relies on (proxy upstream extra CA), without a sandbox.
-    #[test]
-    fn tls_mock_serves_search_results_over_tls() {
-        use rustls_pki_types::pem::PemObject;
-        use rustls_pki_types::{CertificateDer, ServerName};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpStream;
-        use tokio_rustls::TlsConnector;
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (mock, cert_pem) = spawn_mock_localmail_tls().await;
-            let port: u16 = mock.base_url.rsplit(':').next().unwrap().parse().unwrap();
-
-            let mut roots = rustls::RootCertStore::empty();
-            roots.add(CertificateDer::from_pem_slice(cert_pem.as_bytes()).unwrap()).unwrap();
-            let cfg = rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            let connector = TlsConnector::from(std::sync::Arc::new(cfg));
-
-            let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-            let sni = ServerName::IpAddress(std::net::Ipv4Addr::LOCALHOST.into());
-            let mut tls = connector.connect(sni, tcp).await.expect("tls handshake");
-            tls.write_all(
-                b"POST /v1/search HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer t\r\n\
-                  Content-Length: 0\r\nConnection: close\r\n\r\n",
-            ).await.unwrap();
-            let mut resp = Vec::new();
-            tls.read_to_end(&mut resp).await.unwrap();
-            let resp = String::from_utf8_lossy(&resp);
-            assert!(resp.starts_with("HTTP/1.1 200"), "resp: {resp}");
-            let body = resp.split("\r\n\r\n").nth(1).unwrap();
-            let v: serde_json::Value = serde_json::from_str(body).unwrap();
-            assert!(v["results"].is_array(), "expected results array, got {v}");
-        });
-    }
-
-    /// Drive the pure router with a minimal well-formed request head.
-    /// `route` refuses a request with no non-empty bearer, so one is supplied.
-    fn routed(request_line: &str) -> serde_json::Value {
-        let head = format!("{request_line}\r\nHost: x\r\nAuthorization: Bearer t\r\n");
-        let (status, ctype, body) = route(&head);
-        assert!(status.starts_with("200"), "unexpected status {status} for {request_line}");
-        assert_eq!(ctype, "application/json", "for {request_line}");
-        serde_json::from_slice(&body).expect("json body")
-    }
-
-    /// `/v1/search` must serve `message_id` as a JSON string. The mock served a
-    /// NUMBER until 2026-08-09, which is precisely why no hermetic test caught
-    /// #527: `mail.get_message` takes an `i64`, so the mock agreed with the
-    /// worker while the real service disagreed with both.
-    #[test]
-    fn search_returns_message_id_as_a_string() {
-        let v = routed("POST /v1/search HTTP/1.1");
-        assert!(
-            v["results"][0]["message_id"].is_string(),
-            "search message_id must be a JSON string (live localmail serves \"20973\"); got {}",
-            v["results"][0]["message_id"]
-        );
-    }
-
-    /// The list route keys rows under `messages` and serves string ids. It used
-    /// `results` + a number, disagreeing with the live service on both counts.
-    #[test]
-    fn list_messages_keys_rows_under_messages_with_string_ids() {
-        let v = routed("GET /v1/messages?limit=50 HTTP/1.1");
-        assert!(
-            v["messages"].is_array(),
-            "list route must key rows under `messages` (that is the live shape; \
-             `results` is the SEARCH route); got keys {:?}",
-            v.as_object().map(|o| o.keys().collect::<Vec<_>>())
-        );
-        assert!(
-            v["messages"][0]["message_id"].is_string(),
-            "list message_id must be a JSON string; got {}",
-            v["messages"][0]["message_id"]
-        );
-    }
-
-    /// `/v1/accounts` serves `id` as a string, like every other id localmail emits.
-    #[test]
-    fn accounts_return_id_as_a_string() {
-        let v = routed("GET /v1/accounts HTTP/1.1");
-        assert!(
-            v[0]["id"].is_string(),
-            "account id must be a JSON string; got {}",
-            v[0]["id"]
-        );
-    }
-}
+mod tests;

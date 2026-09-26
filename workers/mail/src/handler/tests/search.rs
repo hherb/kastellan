@@ -234,3 +234,19 @@ fn a_query_with_text_still_defaults_to_rank() {
     let out = h.call("mail.search", serde_json::json!({"query": "flight"})).unwrap();
     assert_eq!(out["sent"]["sort"], serde_json::json!("rank"));
 }
+
+/// Slice E (#760): every search asks for compact hits — on the first page and
+/// on a continuation alike, since localmail projects per request.
+#[test]
+fn every_search_asks_for_compact_hits() {
+    for params in [
+        serde_json::json!({"query": "q"}),
+        serde_json::json!({"query": "q", "cursor": "abc"}),
+        serde_json::json!({"filters": {"has_attachment": true}}),
+    ] {
+        let mut h = MailHandler::with_client(client_with(Box::new(BodyEchoFake)));
+        let out = h.call("mail.search", params.clone()).unwrap();
+        assert_eq!(out["sent"]["fields"], serde_json::json!(search_params::HIT_FIELDS), "{params}");
+        assert_eq!(out["sent"]["snippet_chars"], search_params::SNIPPET_CHARS, "{params}");
+    }
+}

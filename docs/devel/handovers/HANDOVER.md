@@ -8,9 +8,9 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-26 (#698: `mail.search` takes a filter-only search; #561 measured
-fixed upstream) ·
-**Recent PRs, newest first:** [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Last updated:** 2026-09-26 (#760: the mail worker adopts localmail slices D and E — a version
+gate, compact search hits, attachments by position, paged text) ·
+**Recent PRs, newest first:** [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -59,26 +59,56 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
 
 ## Current state
 
-### This session (2026-09-26): #698 — `mail.search` takes a filter-only search
+### This session (2026-09-26, later): #760 — the mail worker adopts localmail slices D and E
 
-- **`query` is optional** (absent/`null` → `""`), and a blank query with no named `sort` and no
-  cursor defaults to **`date`** (`sort::TEXTLESS_SORT`), not `rank`. ⚠️ **The issue understated
-  it:** localmail refuses a *stated* `rank` on a textless query (HTTP 400, measured on the DGX), so
-  the old worker failed on **every** textless search — `query: ""` included — not just the one
-  with the field missing. localmail itself ignores nothing now: `has_attachment` is honoured both
-  ways (measured).
-- ⚠️ **`sort::is_textless` cannot see an operator-only query** (`has:attachment`): the worker does
-  not parse localmail's DSL. That still defaults to `rank`, gets the 400, and the 400's detail
-  names `sort='date'` as the repair. The advertised shape is `filters` with no `query`.
-- **#561 is fixed upstream, measured:** a cursor plus a contradicting `sort` is now a 400 naming
-  the fix, and omitting `sort` continues the walk (which is what `DeferToCursor` sends). Closed by
-  this PR.
-- `handler.rs` 1368 → 437: its tests moved to `handler/tests/{mod,search,messages,attachments}.rs`
-  **first**, movement only (lines 1–428 `cmp`-identical; moved lines the same multiset bar three
-  `use super::*;`; the 141 test names identical, with a negative control).
-- ⚠️ **The Mac's localmail token has expired** (`401 /problems/invalid-token`) — #673/#674 live.
-  The DGX's works. localmail shipped slices D/E; adopting them is filed as
-  [#760](https://github.com/hherb/kastellan/issues/760).
+- **Version gate.** `mail.search` and both attachment tools ask `GET /v1/version` first and refuse,
+  naming the upgrade, below API **1.3** (`workers/mail/src/version.rs`). **No fallback** (operator's
+  call): an older server 404s the index route like a missing message and ignores paging, so trying
+  gives wrong answers, not errors. A pass is cached per worker; a refusal is asked again. The other
+  three tools stay ungated. Both hosts serve 1.3 (measured).
+- **Slice E.** Every search sends `fields` = `search_params::HIT_FIELDS` (message_id, account,
+  subject, from, date, has_attachments, snippet) + `snippet_chars: 120`. Two live 50-hit pages went
+  25.8/26.6 KB → 18.1/18.8 KB — ⚠️ **still over the 16 KiB step view at `limit: 50`**.
+- **Slice D.** `mail.get_message` writes `index` into each attachment (`detail.rs`); both attachment
+  tools take `index`; a message-resolved attachment is fetched **by position**
+  (`Picked::blob_path`/`text_path`), a bare sha keeps the hash routes. Non-discriminating names now
+  get `index` advice (was 12-char sha prefixes; a prefix still selects).
+- **Paged text.** `get_attachment_text` returns one **8,000-char** page + localmail's
+  `offset`/`total`/`next_offset` and a `more` note; takes `offset`. ⚠️ `next_offset` is **copied,
+  never computed** (code points). A body without the paging fields is now a **fault**, not a raw
+  fallback. ⚠️ 8,000 chars guarantees the 16 KiB view only for Latin text — CJK or
+  newline-only pages overflow into core's oversized-result path, as whole texts always did.
+- **Live gate extended** (`mail_daemon_e2e::mock_localmail_shapes_match_real_localmail`): version,
+  the projected hit's exact key set, index text paging, index bytes route — ✅ green on the Mac with
+  zero `[NOTE]`s. `scripts/mail/live-shape-gate.sh` now also reads `kastellan.env.local` (where the
+  Mac keeps both mail keys), so it runs with nothing exported.
+- **Review round (5 agents) → fix-up commit.**
+  - **Bytes fetched by position are hashed** against the listed sha (`Picked::verify_bytes`) —
+    fetch-by-hash was self-verifying, fetch-by-position is not; a mismatch saves nothing.
+  - **Paging must be consistent**: echoed `offset` == requested, `next_offset` null or strictly
+    advancing within `total`.
+  - **The gate list is an exhaustive `Tool` enum**, so a new tool cannot compile ungated.
+  - The advertised `index` is pinned at positions 2/3 (0/1 could not tell array position from list
+    ordinal).
+  - Fixtures now carry **real** sha256s of the bytes they serve (`CANNED_SHA256` changed); mocks
+    echo the requested offset.
+  - ⚠️ **The live gate's attachment leg had gone vacuous on the Mac**: the 50 newest messages carry
+    no stored attachment, so it `[NOTE]`-returned. It now falls back to a `has_attachment` search
+    and *fails* if it still finds none — and it proves live that the index route's bytes hash to the
+    listed sha.
+  - Filed **#763**: the gate has no REQUIRE knob/profile, and hand-copies `HIT_FIELDS`/`MIN_API_MINOR`.
+- Three movement-only splits first: `workers/mail/src/attach.rs`, `core/src/workers/mail.rs`,
+  `tests-common/src/mock_localmail.rs` — all byte-proved.
+- **Not done, left on #760:** `headers=list` (#381) — whether `headers.rs`'s `{name, values}`
+  reshaping can follow localmail's per-occurrence list. **Live planner re-measure owed** (with #728's).
+
+### Previous (2026-09-26): #698 — `mail.search` takes a filter-only search
+
+- `query` optional; a blank query with no named `sort` and no cursor defaults to **`date`** —
+  localmail 400s a *stated* `rank` on any textless query (measured). ⚠️ `sort::is_textless` cannot
+  see an operator-only query (`has:attachment`); the advertised shape is `filters` with no `query`.
+- #561 measured fixed upstream. The Mac's mail credential is a non-expiring API key
+  (`kastellan-mac-key`, verified 200); both hosts' localmail report `api_minor` 3.
 
 ### Previous (2026-09-23, later): #755 — a marker stranded mid-line is refused
 
@@ -217,11 +247,11 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **Mail worker catch-up with localmail:** [#760](https://github.com/hherb/kastellan/issues/760)
-   (slices D/E: attachments by position with paged text, compact search hits — gate each on
-   `/v1/version`'s `api_minor`), then #673/#674 (the Mac token has already expired). **#728's live
-   re-measure is still owed** (operator DMs, a **fresh room**) — a filter-only question ("mail
-   with attachments from last week") now exercises #698 in the same run.
+1. **Mail worker — the rest of #760 and a live re-measure.** #760's `headers=list` (#381) check is
+   still open (can `headers.rs`'s `{name, values}` reshape follow localmail's per-occurrence list?).
+   Then #673/#674 (both hosts use non-expiring API keys; #674 is about noticing a revocation).
+   **A live planner re-measure is owed** (operator DMs, a **fresh room**): #728's multi-search
+   question, a filter-only one (#698), and a long PDF read across pages (#760).
 
 2. **#702 follow-ups: #703, #704, #705.** ⚠️ **The guard model never sees object keys** (#703) — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
@@ -291,7 +321,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 1558+ (#639), `core/src/workers/gliner_relex/tests.rs`, `db/src/asks.rs`,
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
 `llm-router/src/config.rs`, `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
-`workers/mail/src/attach.rs` (1046), `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
+`workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `core/src/worker_lifecycle/persistent.rs`, `core/src/scheduler/inner_loop.rs`,
 `core/src/channel/bus.rs`, `workers/matrix/src/sdk_live.rs`, `llm-router/src/messages.rs`,
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`.
@@ -331,10 +361,11 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#698 — **the gate that stands**) | branch tip | **4498 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY: +12** — +5 lib from #758's review round (which that row never measured) and +7 from this PR (mail worker +6, core +1) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-698`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
-| **Mac** (#755 — superseded) | branch tip | **4486 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container — the Apple `container` service was not running — 4 gliner opt-in), `[panic]` 21 (all `#[should_panic]` unit tests, uncounted by any profile), **mid-line matches 0**, source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY per suite: +15 / +2** — this PR's +10 lib and `knob_reads…` +1/+1, **plus +3 lib and `panic_hook_broken_stderr_e2e` +1/+1 from #756's review round, which the row below never measured** (its log is 17:56, the merge 19:58). ⚠️ Two container `[SKIP]` lines had libtest's `test … ok` spliced INTO their reason — a multi-piece hand-written `eprintln!`; the marker stays at column 0, so cosmetic (#718). **Gate:** `worker-report` ✅ 13 passed / 3 `[E2E]` / 5 of 5 hooked (Mac) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-755`), **27** `Checking kastellan` lines, zero warnings (Mac only — tests-common links core, so no cross-clippy; CI covers Linux) | **23** Mac |
+| **Mac** (#760 review fix-up — **the gate that stands**) | branch tip | **4551 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +15** — mail worker +12 (180→192 unit), tests-common +3 (`mock_localmail` 14→17). Live shape gate green on the Mac (now with the hash check). 8 mutants tried on the new guards, 7 killed; the 8th exposed a no-op guard, removed | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-762`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
+| **Mac** (#760 — superseded) | branch tip | **4536 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +38** — mail worker +33 (147→180 unit), core lib +2 (`workers::mail` 10→12), tests-common +3 (`mock_localmail` 11→14); no new suites. Plus the **live** shape gate green against the Mac's localmail (1 passed, zero `[NOTE]`), and on the **DGX** (real bwrap, 0 `[SKIP]`): mail worker 180+3, tests-common 428, core `workers::mail` 12, `mail_e2e` 5 (+1 ignored live tier) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
+| **Mac** (#698 — superseded) | branch tip | **4498 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY: +12** — +5 lib from #758's review round (which that row never measured) and +7 from this PR (mail worker +6, core +1) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-698`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
 
-Older rows (incl. #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
+Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
 **Both hosts are load-bearing, in opposite directions — always check both.** A `launchd_agents.rs`
 change is invisible to the DGX; the Mac compiles **zero** `systemd_user` tests
@@ -412,6 +443,12 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **[#762](https://github.com/hherb/kastellan/pull/762)** (#760) — the mail worker adopts localmail slices D and E: a `/v1/version` gate (≥ 1.3, no
+  fallback), `fields`/`snippet_chars` on every search, `index` on attachments (written by
+  `get_message`, taken by both attachment tools, fetched by position), and 8,000-char paged text
+  with localmail's `next_offset`. Three movement-only splits first. `headers=list` left on #760.
+  Review fix-up: position-fetched bytes hashed against the listing, paging consistency enforced,
+  exhaustive gate enum, live gate un-vacuoused. Filed #763.
 - **[#761](https://github.com/hherb/kastellan/pull/761)** (#698, #561) — `mail.search` takes a filter-only search: `query` optional, a
   blank query defaults to `sort: "date"` (localmail 400s a stated `rank` there, measured). #561
   measured fixed upstream. `handler.rs` tests split out first. Filed #760.
