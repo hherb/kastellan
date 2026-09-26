@@ -1,7 +1,7 @@
 //! Which localmail this worker can talk to.
 //!
 //! localmail numbers its `/v1` additions with `api_minor` (served by the
-//! unauthenticated `GET /v1/version`), and three of them are ones this worker
+//! unauthenticated `GET /v1/version`), and two of them are ones this worker
 //! now depends on (#760):
 //!
 //! | `api_minor` | what it added | what uses it here |

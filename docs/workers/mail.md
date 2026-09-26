@@ -16,7 +16,7 @@ attachments delivered as extracted text **or** as original-format files.
 | `mail.list_messages` | Browse newest-first; `account_ids`/`folder_ids` filters; `cursor`. |
 | `mail.list_accounts` | Accounts this agent may read. |
 | `mail.get_attachment_text` | Server-extracted text of an attachment, **one 8,000-character page at a time** (`offset` + the returned `next_offset`/`total`). Use to **read** it. Address it by `{message_id, filename}` or `{message_id, index}` — or by `{sha256}`, but see *Addressing an attachment* below. |
-| `mail.get_attachment` | Save an attachment in its **original format** (PDF, etc.) to the task output dir; returns `{path, size, content_type, filename}`. Use to **deliver** a file. |
+| `mail.get_attachment` | Save an attachment in its **original format** (PDF, etc.) to the task output dir; returns `{path, size, content_type, filename, sha256, index}` (`index` is `null` for a bare-`sha256` fetch). Use to **deliver** a file. |
 
 The agent does the reasoning (e.g. extracting flight-booking fields into a CSV);
 the worker only searches and retrieves. Files delivered by `mail.get_attachment`
@@ -34,10 +34,12 @@ prefer. A message-form attachment is fetched from localmail **by position**
 (`/v1/messages/{id}/attachments/{index}`, #760), which re-checks the message's
 ACL and serves the entry's own filename; a bare `{sha256}` keeps the hash routes.
 
-A planner reaches a successful step's output through `extract_scannable_text`:
-string values only, **keys discarded**, capped at 4 KiB
-(`core::scheduler::inner_loop::summary`). A sha256 therefore arrives as an
-unlabelled 64-character hex blob that the model must identify by shape and then
+When this form was added, a planner reached a successful step's output through
+`extract_scannable_text`: string values only, **keys discarded**, capped at
+4 KiB (`core::scheduler::inner_loop::summary`). (Since #677/#702 it reads pruned,
+labelled JSON through a 16 KiB step view instead — see *Paged text* below — but a
+hash is still 64 characters to copy exactly.) A sha256 then arrived as an
+unlabelled 64-character hex blob that the model had to identify by shape and then
 transcribe exactly — and on 2026-08-17 (task 160) it did not. The correct hash
 was the 6th string in that head, at roughly byte 120; the planner emitted a
 different 64 hex chars, localmail answered its `404 no extracted text for
@@ -94,6 +96,14 @@ depends on **where the hash came from**: one the planner typed is most often
 mistyped, while one this worker resolved out of a message is right by
 construction and must not send the planner to re-copy it.
 
+Bytes fetched **by position** are hashed and compared with the `sha256` the
+message listed at that position, and refused as a service fault — with nothing
+saved — if they differ. A fetch by hash was self-verifying; a fetch by position
+is not, and without the check a localmail whose positions disagreed with its own
+listing would put one document on disk under another's hash and name. Extracted
+text carries no hash to compare, so a `get_attachment_text` result's `sha256` is
+the one the listing gave.
+
 ### Paged text
 
 Extracted text is served **one page of 8,000 characters** at a time
@@ -104,7 +114,9 @@ and fall into the truncation path (#678). `next_offset` is **copied from
 localmail, never computed** — offsets count code points, and arithmetic on the
 returned text skips text on documents with characters above U+FFFF. A text body
 without the paging fields is refused as a service fault rather than served as a
-complete page.
+complete page, and so is one whose paging is inconsistent: an `offset` other than
+the one requested (a server ignoring it would serve page one forever), or a
+`next_offset` that does not advance strictly within `total`.
 
 ### localmail version
 

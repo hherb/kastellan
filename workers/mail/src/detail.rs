@@ -29,6 +29,13 @@ pub const INDEX_KEY: &str = "index";
 /// the reader who might diagnose it. A message without an `attachments` array
 /// is returned unchanged for the same reason — `attach` refuses it loudly when
 /// an attachment tool actually needs one.
+///
+/// An `index` key localmail served itself would be **overwritten**, knowingly:
+/// the position is what `attach::pick` and the index route resolve, so it is
+/// the only value the planner can safely copy back — a served `index` meaning
+/// anything else would be a trap. The live shape gate
+/// (`mock_localmail_shapes_match_real_localmail`) pins the served key set, so a
+/// localmail that starts sending one is noticed there rather than here.
 pub fn number_attachments(mut message: Value) -> Value {
     if let Some(Value::Array(entries)) = message.get_mut("attachments") {
         for (i, entry) in entries.iter_mut().enumerate() {

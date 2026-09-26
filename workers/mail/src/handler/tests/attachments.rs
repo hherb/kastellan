@@ -5,15 +5,22 @@ use super::search::BodyEchoFake;
 
 /// Answers every text request with a page whose text is the request's own
 /// path and query, so a test reads back exactly what the worker asked for.
+/// The page's `offset` echoes the requested one, as localmail's does.
 struct TextFake;
 impl HttpGet for TextFake {
     fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
     fn transport_kind(&self) -> &'static str { "fake" }
     fn get_authed(&self, url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
         let asked = format!("{}?{}", url.path(), url.query().unwrap_or(""));
+        let offset: u64 = url
+            .query_pairs()
+            .find(|(k, _)| k == "offset")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0);
         Ok(json_resp(
             serde_json::json!({
-                "text": asked, "offset": 0, "limit": 8000, "total": 20000, "next_offset": 8000
+                "text": asked, "offset": offset, "limit": 8000, "total": 20000,
+                "next_offset": offset + 8000
             })
             .to_string()
             .as_bytes(),
@@ -43,6 +50,21 @@ fn get_attachment_text_forwards_the_planners_offset() {
         .call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64), "offset": 8000}))
         .unwrap();
     assert!(out["text"].as_str().unwrap().contains("offset=8000&"), "{out}");
+    assert_eq!(out["offset"], 8000, "{out}");
+}
+
+/// A server that ignores the requested offset hands back page one every time,
+/// which the planner would read as the next page. Refused as a service fault.
+#[test]
+fn a_page_at_another_offset_than_requested_is_a_service_fault() {
+    let body: &'static [u8] =
+        br#"{"text":"page one","offset":0,"limit":8000,"total":20000,"next_offset":8000}"#;
+    let mut h = MailHandler::with_client(client_with(Box::new(RawBodyFake(body))));
+    let err = h
+        .call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64), "offset": 8000}))
+        .unwrap_err();
+    assert_eq!(err.code, codes::OPERATION_FAILED, "{}", err.message);
+    assert!(err.message.contains("inconsistent paging"), "{}", err.message);
 }
 
 /// A body that is not localmail's paged text envelope is a service fault. It
@@ -78,8 +100,14 @@ fn bad_sha256_is_invalid_params() {
 
 // --- get_attachment_text addressed by message rather than by hash ---
 
-/// The sha256 that message 37413 really carries in the live archive.
-const LIVE_SHA: &str = "71aac4580932cffe7649dda9c4cc10e2997de81d80105eafd448a64763f4a73b";
+/// Stand-in bytes for message 37413's e-ticket PDF.
+const LIVE_BLOB: &[u8] = b"%PDF-1.7 e-ticket DQXK68";
+/// The sha256 of [`LIVE_BLOB`]. It stands in for the hash message 37413
+/// carries in the live archive (`71aac458…`), and must be the **real** hash of
+/// the bytes the fake serves: `get_attachment` checks bytes fetched by
+/// position against the listed sha (#760). Pinned by
+/// `fixture_hashes_are_the_hashes_of_the_fixture_bytes`.
+const LIVE_SHA: &str = "dcc902027f81f9a335a773822d274e2448419f267fe945496705250f339a7234";
 /// Its filename there, download prefix and all.
 const LIVE_NAME: &str = "Download 470989752-e-ticket-DQXK68.pdf";
 /// A second attachment, so that `filename` is load-bearing rather than
@@ -87,8 +115,16 @@ const LIVE_NAME: &str = "Download 470989752-e-ticket-DQXK68.pdf";
 /// none at all — resolves to the same sha, and a test written against that
 /// fixture passes whether or not the worker reads the parameter.
 const DECOY_NAME: &str = "boarding-pass.pdf";
-const DECOY_SHA: &str =
-    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const DECOY_BLOB: &[u8] = b"%PDF-1.7 boarding pass";
+/// The sha256 of [`DECOY_BLOB`], for the same reason as [`LIVE_SHA`].
+const DECOY_SHA: &str = "bf3cca43d72bc9fc454aaca65a54f0ca917d90eb132a660de9c8513e246c394d";
+
+#[test]
+fn fixture_hashes_are_the_hashes_of_the_fixture_bytes() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(format!("{:x}", Sha256::digest(LIVE_BLOB)), LIVE_SHA);
+    assert_eq!(format!("{:x}", Sha256::digest(DECOY_BLOB)), DECOY_SHA);
+}
 /// Distinguishable bodies, so a test can tell *which* attachment was read.
 const E_TICKET_TEXT: &str = "GST Paid 146.81 AUD";
 const DECOY_TEXT: &str = "boarding pass only";
@@ -114,6 +150,12 @@ struct ArchiveFake {
     attachments_malformed: bool,
     /// `(filename, sha256)` pairs the message carries.
     attachments: Vec<(String, String)>,
+    /// Serve the *other* attachment's bytes on the index blob route — a
+    /// localmail whose positions disagree with its own listing.
+    index_route_swapped: bool,
+    /// Every path asked for, in order, so a test can pin which route ran.
+    /// Shared, because the fake itself is moved into the client.
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 impl ArchiveFake {
     fn new(text_status: u16, attachments: Vec<(String, String)>) -> Self {
@@ -123,6 +165,8 @@ impl ArchiveFake {
             message_status: 200,
             attachments_malformed: false,
             attachments,
+            index_route_swapped: false,
+            asked: Default::default(),
         }
     }
     /// Two attachments, so a filename has work to do.
@@ -154,6 +198,9 @@ impl ArchiveFake {
     }
     fn attachments_not_an_array() -> Self {
         Self { attachments_malformed: true, ..Self::single() }
+    }
+    fn index_route_swapped() -> Self {
+        Self { index_route_swapped: true, ..Self::ok() }
     }
     fn not_found(detail: &str) -> RawResponse {
         RawResponse {
@@ -190,7 +237,7 @@ impl ArchiveFake {
                 status: 200,
                 location: None,
                 content_type: "application/pdf".into(),
-                body: b"%PDF-1.7 body".to_vec(),
+                body: if sha == LIVE_SHA { LIVE_BLOB } else { DECOY_BLOB }.to_vec(),
             },
         }
     }
@@ -201,6 +248,7 @@ impl HttpGet for ArchiveFake {
     fn transport_kind(&self) -> &'static str { "fake" }
     fn get_authed(&self, url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
         let path = url.path().to_string();
+        self.asked.lock().unwrap().push(path.clone());
         // Text route and blob route are distinct upstream 404s needing
         // opposite repairs, so the fake has to tell them apart too.
         if let Some(rest) = path.strip_prefix("/v1/attachments/") {
@@ -220,6 +268,10 @@ impl HttpGet for ArchiveFake {
             };
             let entry = i.parse::<usize>().ok().and_then(|i| self.attachments.get(i));
             return Ok(match entry {
+                Some((_, sha)) if self.index_route_swapped && !text => {
+                    let other = if sha == LIVE_SHA { DECOY_SHA } else { LIVE_SHA };
+                    self.serve_attachment(other, false)
+                }
                 Some((_, sha)) => self.serve_attachment(sha, text),
                 None => Self::not_found(&format!("attachment {i} of message 37413 not found")),
             });
@@ -433,6 +485,50 @@ fn get_attachment_resolves_a_message_and_filename() {
             name.contains("Download") || name.contains("470989752"),
             "archive name: {name}"
         );
+    });
+}
+
+/// The common selector — message + filename — must fetch **by position** for
+/// both tools: that route re-checks the message's ACL and carries the entry's
+/// own filename (#760). The fake serves identical bodies on both routes, so
+/// only the request log can tell them apart.
+#[test]
+fn a_filename_selected_attachment_is_fetched_by_position_by_both_tools() {
+    with_out_dir("mailroute", |_dir| {
+        let fake = ArchiveFake::ok();
+        let asked = fake.asked.clone();
+        let mut h = MailHandler::with_client(client_with(Box::new(fake)));
+        let sel = serde_json::json!({"message_id": 37413, "filename": "e-ticket-DQXK68.pdf"});
+        let text = h.call("mail.get_attachment_text", sel.clone()).unwrap();
+        assert_eq!(text["index"], 1, "{text}");
+        let file = h.call("mail.get_attachment", sel).unwrap();
+        assert_eq!(file["index"], 1, "the saved file names its position: {file}");
+        let asked = asked.lock().unwrap();
+        assert!(asked.iter().all(|p| !p.starts_with("/v1/attachments/")), "hash route used: {asked:?}");
+        assert!(asked.iter().any(|p| p == "/v1/messages/37413/attachments/1/text"), "{asked:?}");
+        assert!(asked.iter().any(|p| p == "/v1/messages/37413/attachments/1"), "{asked:?}");
+    });
+}
+
+/// Bytes fetched by position that do not hash to the listed sha are refused,
+/// and nothing is written: otherwise one document lands on disk under the
+/// other's hash and archive name, reported as success (#760).
+#[test]
+fn bytes_that_do_not_match_the_listed_sha_are_refused_and_not_saved() {
+    with_out_dir("mailswap", |dir| {
+        let mut h =
+            MailHandler::with_client(client_with(Box::new(ArchiveFake::index_route_swapped())));
+        let err = h
+            .call(
+                "mail.get_attachment",
+                serde_json::json!({"message_id": 37413, "filename": "e-ticket-DQXK68.pdf"}),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, codes::OPERATION_FAILED, "{}", err.message);
+        assert!(err.message.contains("service fault"), "{}", err.message);
+        assert!(err.message.chars().count() <= kastellan_protocol::STEP_ERR_DETAIL_MAX, "{}", err.message);
+        let left: Vec<_> = std::fs::read_dir(dir).unwrap().collect();
+        assert!(left.is_empty(), "nothing may be saved: {left:?}");
     });
 }
 

@@ -327,3 +327,40 @@ fn the_index_route_serves_position_zero_and_404s_past_the_end() {
     let (status, _, _) = route(&head(&format!("/v1/messages/{CANNED_MESSAGE_ID}/attachments/1")));
     assert!(status.starts_with("404"), "{status}");
 }
+
+/// `CANNED_SHA256` is the real hash of the canned bytes, as localmail's is of
+/// a blob's. The mail worker checks bytes fetched by position against it
+/// (#760), so a placeholder would fail every message-resolved fetch.
+#[test]
+fn the_canned_sha_is_the_hash_of_the_canned_bytes() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(format!("{:x}", Sha256::digest(CANNED_ATTACHMENT_BYTES)), CANNED_SHA256);
+}
+
+/// The text routes echo the requested `offset`, as localmail does; the mail
+/// worker refuses a page whose offset is not the one it asked for.
+#[test]
+fn text_routes_echo_the_requested_offset() {
+    let line = format!(
+        "GET /v1/messages/{CANNED_MESSAGE_ID}/attachments/0/text?offset=5&limit=8000 HTTP/1.1"
+    );
+    let v = routed(&line);
+    assert_eq!(v["offset"], 5, "{v}");
+    let rest: String = CANNED_ATTACHMENT_TEXT.chars().skip(5).collect();
+    assert_eq!(v["text"], rest, "{v}");
+    assert!(v["next_offset"].is_null(), "{v}");
+}
+
+/// A search hit carries exactly the keys the mail worker projects to — the
+/// shape real localmail serves it (the live gate pins that side).
+#[test]
+fn search_hits_are_the_projected_shape() {
+    let v = routed("POST /v1/search HTTP/1.1");
+    let mut got: Vec<&str> =
+        v["results"][0].as_object().unwrap().keys().map(String::as_str).collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        ["account", "date", "from", "has_attachments", "message_id", "snippet", "subject"]
+    );
+}

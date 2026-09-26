@@ -21,3 +21,6 @@ serde                    = { workspace = true }
 serde_json               = { workspace = true }
 anyhow                   = { workspace = true }
 url                      = { workspace = true }
+# sha2: #760 — a blob fetched by its position in a message is checked against
+# the sha256 that message listed, which the index route no longer guarantees.
+sha2                     = { workspace = true }

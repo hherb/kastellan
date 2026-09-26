@@ -25,8 +25,14 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 /// wire: a STRING.
 const CANNED_MESSAGE_ID: &str = "7";
 
-/// The hash of message 7's one attachment.
-const CANNED_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+/// Bytes the index route serves for message 7's one attachment — distinct from
+/// the hash route's, so step 5 can tell which route ran.
+const BY_POSITION_BYTES: &[u8] = b"%PDF-1.7 by position";
+
+/// The hash of message 7's one attachment: the real sha256 of
+/// [`BY_POSITION_BYTES`], because the worker refuses bytes fetched by position
+/// that do not hash to what the listing said (#760).
+const CANNED_SHA: &str = "d9f1ba869130eabb6ea6cf19011d7fb7546f5cbcbfa39536eb62fa41a915f251";
 
 /// localmail's paged text envelope (slice D): one page, which for these short
 /// fixtures is the whole and last one.
@@ -114,7 +120,7 @@ fn spawn_mock() -> (String, std::thread::JoinHandle<()>) {
                     ("200 OK", "application/json", text_page("extracted by position"))
                 }
                 ("GET", "/v1/messages/7/attachments/0") => {
-                    ("200 OK", "application/pdf", b"%PDF-1.7 by position".to_vec())
+                    ("200 OK", "application/pdf", BY_POSITION_BYTES.to_vec())
                 }
                 ("GET", p) if p.starts_with("/v1/attachments/") => {
                     ("200 OK", "application/pdf", b"%PDF-1.7 fake booking".to_vec())
@@ -271,7 +277,9 @@ fn mail_worker_stdio_roundtrip_against_mock() {
     let r = rpc(&mut stdin, &mut stdout, 7, "mail.get_attachment",
         serde_json::json!({"message_id": "7", "index": 0}));
     let path = r["result"]["path"].as_str().expect("path in result");
-    assert_eq!(std::fs::read(path).unwrap(), b"%PDF-1.7 by position");
+    assert_eq!(std::fs::read(path).unwrap(), BY_POSITION_BYTES);
+    assert_eq!(r["result"]["sha256"], CANNED_SHA, "resp: {r}");
+    assert_eq!(r["result"]["index"], 0, "resp: {r}");
 
     // 6. unknown method → JSON-RPC error (-32601).
     let r = rpc(&mut stdin, &mut stdout, 8, "mail.nope", serde_json::json!({}));

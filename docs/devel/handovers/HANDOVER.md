@@ -80,8 +80,23 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
   newline-only pages overflow into core's oversized-result path, as whole texts always did.
 - **Live gate extended** (`mail_daemon_e2e::mock_localmail_shapes_match_real_localmail`): version,
   the projected hit's exact key set, index text paging, index bytes route — ✅ green on the Mac with
-  zero `[NOTE]`s. ⚠️ `scripts/mail/live-shape-gate.sh` needs `KASTELLAN_MAIL_ENDPOINT` exported on
-  the Mac (`https://127.0.0.1:8443`) — the Mac's `kastellan.env` does not carry it.
+  zero `[NOTE]`s. `scripts/mail/live-shape-gate.sh` now also reads `kastellan.env.local` (where the
+  Mac keeps both mail keys), so it runs with nothing exported.
+- **Review round (5 agents) → fix-up commit.**
+  - **Bytes fetched by position are hashed** against the listed sha (`Picked::verify_bytes`) —
+    fetch-by-hash was self-verifying, fetch-by-position is not; a mismatch saves nothing.
+  - **Paging must be consistent**: echoed `offset` == requested, `next_offset` null or strictly
+    advancing within `total`.
+  - **The gate list is an exhaustive `Tool` enum**, so a new tool cannot compile ungated.
+  - The advertised `index` is pinned at positions 2/3 (0/1 could not tell array position from list
+    ordinal).
+  - Fixtures now carry **real** sha256s of the bytes they serve (`CANNED_SHA256` changed); mocks
+    echo the requested offset.
+  - ⚠️ **The live gate's attachment leg had gone vacuous on the Mac**: the 50 newest messages carry
+    no stored attachment, so it `[NOTE]`-returned. It now falls back to a `has_attachment` search
+    and *fails* if it still finds none — and it proves live that the index route's bytes hash to the
+    listed sha.
+  - Filed **#763**: the gate has no REQUIRE knob/profile, and hand-copies `HIT_FIELDS`/`MIN_API_MINOR`.
 - Three movement-only splits first: `workers/mail/src/attach.rs`, `core/src/workers/mail.rs`,
   `tests-common/src/mock_localmail.rs` — all byte-proved.
 - **Not done, left on #760:** `headers=list` (#381) — whether `headers.rs`'s `{name, values}`
@@ -346,7 +361,8 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#760 — **the gate that stands**) | branch tip | **4536 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +38** — mail worker +33 (147→180 unit), core lib +2 (`workers::mail` 10→12), tests-common +3 (`mock_localmail` 11→14); no new suites. Plus the **live** shape gate green against the Mac's localmail (1 passed, zero `[NOTE]`), and on the **DGX** (real bwrap, 0 `[SKIP]`): mail worker 180+3, tests-common 428, core `workers::mail` 12, `mail_e2e` 5 (+1 ignored live tier) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
+| **Mac** (#760 review fix-up — **the gate that stands**) | branch tip | **4551 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +15** — mail worker +12 (180→192 unit), tests-common +3 (`mock_localmail` 14→17). Live shape gate green on the Mac (now with the hash check). 8 mutants tried on the new guards, 7 killed; the 8th exposed a no-op guard, removed | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-762`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
+| **Mac** (#760 — superseded) | branch tip | **4536 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta reconciles EXACTLY: +38** — mail worker +33 (147→180 unit), core lib +2 (`workers::mail` 10→12), tests-common +3 (`mock_localmail` 11→14); no new suites. Plus the **live** shape gate green against the Mac's localmail (1 passed, zero `[NOTE]`), and on the **DGX** (real bwrap, 0 `[SKIP]`): mail worker 180+3, tests-common 428, core `workers::mail` 12, `mail_e2e` 5 (+1 ignored live tier) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-760`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
 | **Mac** (#698 — superseded) | branch tip | **4498 / 0 / 47**, **186** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, primary checkout. **Delta vs the row below reconciles EXACTLY: +12** — +5 lib from #758's review round (which that row never measured) and +7 from this PR (mail worker +6, core +1) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-698`), **27** `Checking kastellan` lines, zero warnings (Mac only; CI covers Linux) | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
@@ -431,6 +447,8 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
   fallback), `fields`/`snippet_chars` on every search, `index` on attachments (written by
   `get_message`, taken by both attachment tools, fetched by position), and 8,000-char paged text
   with localmail's `next_offset`. Three movement-only splits first. `headers=list` left on #760.
+  Review fix-up: position-fetched bytes hashed against the listing, paging consistency enforced,
+  exhaustive gate enum, live gate un-vacuoused. Filed #763.
 - **[#761](https://github.com/hherb/kastellan/pull/761)** (#698, #561) — `mail.search` takes a filter-only search: `query` optional, a
   blank query defaults to `sort: "date"` (localmail 400s a stated `rank` there, measured). #561
   measured fixed upstream. `handler.rs` tests split out first. Filed #760.

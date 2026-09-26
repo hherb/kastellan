@@ -21,17 +21,52 @@ pub struct MailHandler {
     client: MailClient,
     /// Set once localmail has shown it serves an `api_minor` this worker can
     /// use (see [`version`]). Only a success is remembered: a refusal is asked
-    /// again, so a localmail upgraded under a persistent worker is picked up.
+    /// again, so if this worker is ever made long-lived (it is `SingleUse`
+    /// today), a localmail upgraded under it is picked up.
     api_ok: OnceCell<()>,
 }
 
-/// The tools that use a route or request field localmail added in slice D or
-/// E, and so must not run against an older server. The rest use routes every
-/// `/v1` serves, and keep working against one — a mail worker that could still
-/// list accounts is more use to an operator diagnosing an upgrade than one
-/// that refuses everything.
-fn needs_current_api(method: &str) -> bool {
-    matches!(method, "mail.search" | "mail.get_attachment_text" | "mail.get_attachment")
+/// The six tools, parsed from the JSON-RPC method name once so that dispatch
+/// and the version gate read the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    Search,
+    GetMessage,
+    ListMessages,
+    ListAccounts,
+    GetAttachmentText,
+    GetAttachment,
+}
+
+impl Tool {
+    fn from_method(method: &str) -> Option<Self> {
+        Some(match method {
+            "mail.search" => Self::Search,
+            "mail.get_message" => Self::GetMessage,
+            "mail.list_messages" => Self::ListMessages,
+            "mail.list_accounts" => Self::ListAccounts,
+            "mail.get_attachment_text" => Self::GetAttachmentText,
+            "mail.get_attachment" => Self::GetAttachment,
+            _ => return None,
+        })
+    }
+
+    /// Does this tool use a route or request field localmail added in slice D
+    /// or E, and so must not run against an older server? The rest use routes
+    /// every `/v1` serves, and keep working against one — a mail worker that
+    /// could still list accounts is more use to an operator diagnosing an
+    /// upgrade than one that refuses everything.
+    ///
+    /// Exhaustive on purpose (no `_` arm): a new tool does not compile until
+    /// someone decides whether it is gated. When this was a string `matches!`
+    /// beside the dispatch `match`, a new slice D/E tool left off it would
+    /// have skipped the gate silently.
+    fn needs_current_api(self) -> bool {
+        match self {
+            Self::Search | Self::GetAttachmentText | Self::GetAttachment => true,
+            Self::GetMessage | Self::ListMessages | Self::ListAccounts => false,
+        }
+    }
 }
 
 impl MailHandler {
@@ -282,9 +317,10 @@ impl MailHandler {
         let picked = self.resolve_attachment(selector)?;
         // `get_bytes` (the higher attachment cap, not the JSON cap) — a page is
         // small, but the cap is the attachment tools' one ceiling.
+        let offset = p.offset.unwrap_or(0);
         let (_ct, bytes) = self
             .client
-            .get_bytes(&picked.text_path(p.offset.unwrap_or(0), text_page::TEXT_PAGE_CHARS))
+            .get_bytes(&picked.text_path(offset, text_page::TEXT_PAGE_CHARS))
             // localmail answers 404 both for a blob it has never seen and for
             // one whose text is not extracted yet, and the two need opposite
             // repairs. Forwarding its sentence verbatim is what told the live
@@ -296,7 +332,7 @@ impl MailHandler {
                 ),
                 other => mail_err_to_rpc(other),
             })?;
-        text_page::page_result(&picked, &bytes)
+        text_page::page_result(&picked, offset, &bytes)
             .map_err(|m| RpcError::new(codes::OPERATION_FAILED, m))
     }
 
@@ -349,6 +385,9 @@ impl MailHandler {
                 ),
                 other => mail_err_to_rpc(other),
             })?;
+        // Checked before anything touches disk: a mismatch must not leave a
+        // file behind under the wrong hash and name.
+        picked.verify_bytes(&bytes).map_err(|m| RpcError::new(codes::OPERATION_FAILED, m))?;
         // The archive's own name wins over the planner's: a substring match may
         // have selected `Download 470989752-e-ticket-DQXK68.pdf` for a request
         // that said `e-ticket-DQXK68.pdf`, and the file on disk should carry the
@@ -389,20 +428,22 @@ impl Handler for MailHandler {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcError> {
-        if needs_current_api(method) {
-            self.require_current_api()?;
-        }
-        match method {
-            "mail.search" => self.search(params),
-            "mail.get_message" => self.get_message(params),
-            "mail.list_messages" => self.list_messages(params),
-            "mail.list_accounts" => self.list_accounts(),
-            "mail.get_attachment_text" => self.get_attachment_text(params),
-            "mail.get_attachment" => self.get_attachment(params),
-            _ => Err(RpcError::new(
+        let Some(tool) = Tool::from_method(method) else {
+            return Err(RpcError::new(
                 codes::METHOD_NOT_FOUND,
                 format!("unknown method {method}"),
-            )),
+            ));
+        };
+        if tool.needs_current_api() {
+            self.require_current_api()?;
+        }
+        match tool {
+            Tool::Search => self.search(params),
+            Tool::GetMessage => self.get_message(params),
+            Tool::ListMessages => self.list_messages(params),
+            Tool::ListAccounts => self.list_accounts(),
+            Tool::GetAttachmentText => self.get_attachment_text(params),
+            Tool::GetAttachment => self.get_attachment(params),
         }
     }
 }

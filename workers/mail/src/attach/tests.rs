@@ -600,3 +600,81 @@ fn a_planner_sha_fetches_by_hash() {
     assert_eq!(p.blob_path(), format!("/v1/attachments/{SHA_A}"));
     assert_eq!(p.text_path(0, 10), format!("/v1/attachments/{SHA_A}/text?offset=0&limit=10"));
 }
+
+/// The advertised index must be the entry's position in the **served array**,
+/// not its place among the candidates or among the usable entries. At
+/// positions 0 and 1 all three agree, so the tests above cannot tell them
+/// apart; here an unrelated attachment and an unstored one come first, so a
+/// candidate-ordinal list would say `0, 1` and a usable-ordinal one `1, 2` —
+/// and either would send the planner to fetch a different document.
+#[test]
+fn the_advertised_index_is_the_array_position_and_round_trips() {
+    const SHA_C: &str = "c0ffee0000000000000000000000000000000000000000000000000000000000";
+    let atts = [
+        att("x.pdf", SHA_A),
+        json!({ "filename": "image001.png", "sha256": null }),
+        att("image001.png", SHA_B),
+        att("image001.png", SHA_C),
+    ];
+    let e = pick(&atts, Some("image001.png"), None, None, id(37413)).unwrap_err();
+    assert_survives_the_clamp(&e, &["`index`", ": 2, 3"]);
+    // Sending back what was advertised yields the entry it was advertised for.
+    let p = pick(&atts, None, None, Some(2), id(37413)).unwrap();
+    assert_eq!((p.sha256(), p.index()), (SHA_B, Some(2)));
+    assert_eq!(p.blob_path(), "/v1/messages/37413/attachments/2");
+    assert_eq!(pick(&atts, None, None, Some(3), id(37413)).unwrap().sha256(), SHA_C);
+}
+
+/// An empty `filename` beside an index names nothing, so it cannot contradict
+/// the index and must not be refused; the index alone selects. (`contains("")`
+/// is what makes it agree, so no separate guard is needed.)
+#[test]
+fn an_empty_filename_beside_an_index_is_no_second_opinion() {
+    let atts = [att(LIVE_NAME, SHA_A), att("boarding-pass.pdf", SHA_B)];
+    assert_eq!(pick(&atts, Some(""), None, Some(1), id(1)).unwrap().sha256(), SHA_B);
+}
+
+/// A correct but too-short sha prefix beside an index is told it is too short,
+/// not that it names a different attachment — which would send the planner to
+/// drop a selector that was right.
+#[test]
+fn a_too_short_but_correct_prefix_beside_an_index_says_it_is_too_short() {
+    let atts = [att(LIVE_NAME, SHA_A), att("boarding-pass.pdf", SHA_B)];
+    let e = pick(&atts, None, Some(&SHA_A[..4]), Some(0), id(1)).unwrap_err();
+    assert_survives_the_clamp(&e, &["at least 8 characters", "`index` alone"]);
+    assert!(!e.contains("different attachments"), "{e}");
+    // A short prefix of the *other* attachment is still a disagreement.
+    let e = pick(&atts, None, Some(&SHA_B[..4]), Some(0), id(1)).unwrap_err();
+    assert!(e.contains("different attachments"), "{e}");
+}
+
+/// Bytes fetched by position must hash to the listed sha (#760): the index
+/// route no longer guarantees it the way a fetch by hash did.
+#[test]
+fn verify_bytes_checks_a_message_resolved_pick_against_its_listing() {
+    use sha2::{Digest, Sha256};
+    let body = b"%PDF-1.7 the real bytes";
+    let sha = format!("{:x}", Sha256::digest(body));
+    let atts = [att("a.pdf", &sha), att("b.pdf", SHA_B)];
+    let p = pick(&atts, None, None, Some(0), id(37413)).unwrap();
+    p.verify_bytes(body).expect("matching bytes pass");
+    let e = p.verify_bytes(b"some other document").unwrap_err();
+    assert_survives_the_clamp(&e, &["attachment 0 of message 37413", "service fault", &sha[..SHA_HEAD]]);
+    assert!(e.chars().count() <= kastellan_protocol::STEP_ERR_DETAIL_MAX, "{e}");
+}
+
+/// A planner-typed hash was fetched *by* that hash, so localmail has already
+/// matched it; it is not re-hashed.
+#[test]
+fn verify_bytes_leaves_a_planner_typed_hash_alone() {
+    Picked::from_planner_sha(SHA_A).unwrap().verify_bytes(b"anything").unwrap();
+}
+
+/// The repair for a mistyped hash names `index`, the key that always
+/// discriminates — a `filename` alone cannot tell two `image001.png` apart.
+#[test]
+fn the_mistyped_hash_advice_names_index() {
+    for e in [missing_text_advice(SHA_A, true), missing_blob_advice(SHA_A, true)] {
+        assert_survives_the_clamp(&e, &["`message_id` + `index`", "`filename`"]);
+    }
+}

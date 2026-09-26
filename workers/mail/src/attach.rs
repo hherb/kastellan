@@ -46,9 +46,10 @@ pub enum Selector {
     /// message. It selects (a hash is exact), but is checked against that
     /// message's attachments first, so a hallucinated one is caught by the
     /// message rather than by localmail's ambiguous 404. A **unique prefix**
-    /// of at least [`SHA_PREFIX_MIN`] chars selects too — that is what makes
-    /// the sha a usable repair when `filename` cannot discriminate, since the
-    /// planner then copies 12 chars rather than 64.
+    /// of at least [`SHA_PREFIX_MIN`] chars selects too, so the 12-char stem
+    /// `mail.get_attachment` prefixes saved files with is enough. (It used to
+    /// be the advertised repair when `filename` cannot discriminate; since
+    /// #760 that repair is `index`.)
     ///
     /// `index` is the attachment's position in that message's `attachments`
     /// array — the `index` key `mail.get_message` writes into each entry
@@ -91,9 +92,9 @@ const MAX_LISTED: usize = 3;
 
 /// Shortest sha256 prefix [`pick`] will accept beside a `message_id`.
 ///
-/// Twelve is what the repair text lists and what `mail.get_attachment` already
-/// prefixes saved files with, so it is a key the planner has seen in this
-/// worker's own output. Short enough to transcribe, and it must still resolve
+/// Below the 12 chars `mail.get_attachment` prefixes saved files with, so that
+/// stem — a key the planner has seen in this worker's own output — always
+/// qualifies. Short enough to transcribe, and it must still resolve
 /// to exactly one attachment *of that message* — a collision inside one
 /// message is refused, not guessed.
 const SHA_PREFIX_MIN: usize = 8;
@@ -197,8 +198,45 @@ impl Picked {
 
     /// Where localmail serves one page of the extracted text: `limit`
     /// characters from character `offset`. Both text routes page the same way.
+    ///
+    /// Unlike [`Self::verify_bytes`], nothing checks that a page fetched by
+    /// position belongs to [`Self::sha256`]: extracted text carries no hash to
+    /// compare. The `sha256` a text result reports for a message-resolved pick
+    /// is therefore the one the message *listed* — sound while localmail's
+    /// index route resolves positions in `get_message`'s order, which it
+    /// documents (`serve/routes/messages.py::message_attachment_text`).
     pub fn text_path(&self, offset: u64, limit: u32) -> String {
         format!("{}/text?offset={offset}&limit={limit}", self.blob_path())
+    }
+
+    /// Check that bytes fetched from [`Self::blob_path`] are the blob this pick
+    /// names. `Err` is planner-facing service-fault text.
+    ///
+    /// Before slice D every fetch was by hash, so the `sha256` reported beside
+    /// the saved file was true by construction. A message-resolved pick is now
+    /// fetched **by position**, and the hash is only what the listing said sat
+    /// there — so a localmail whose index route ever counted differently from
+    /// `get_message`, or a message that changed between the two requests,
+    /// would put one document on disk under another's hash and filename, and
+    /// report success. localmail stores a blob under the sha256 of its bytes
+    /// (`attachments.py`), so hashing them restores the guarantee.
+    ///
+    /// A planner-typed hash is fetched *by* that hash, so localmail has already
+    /// matched it; it is not re-hashed.
+    pub fn verify_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        use sha2::{Digest, Sha256};
+        let Some((message_id, index)) = self.at else {
+            return Ok(());
+        };
+        if format!("{:x}", Sha256::digest(bytes)) == self.sha256 {
+            return Ok(());
+        }
+        let prefix: String = self.sha256.chars().take(SHA_HEAD).collect();
+        Err(format!(
+            "localmail served attachment {index} of message {message_id} with bytes that are \
+             not the sha256 its listing gave — a service fault, nothing was saved. Tell the \
+             operator. Listed: {prefix}"
+        ))
     }
 }
 
@@ -333,7 +371,16 @@ pub fn pick(
         // the sha/filename pair below must: two selectors that disagree are two
         // requests, and serving one of them silently is a wrong answer.
         if let Some(want_sha) = expect_sha {
-            if find_by_sha(&[c], &want_sha.to_ascii_lowercase()).is_none() {
+            let want = want_sha.to_ascii_lowercase();
+            // A correct but too-short prefix is not a disagreement, and calling
+            // it one sends the planner to drop the wrong selector.
+            if want.len() < SHA_PREFIX_MIN && !want.is_empty() && c.sha.starts_with(&want) {
+                return Err(format!(
+                    "a `sha256` prefix needs at least {SHA_PREFIX_MIN} characters — `index` \
+                     alone already selects attachment {i} of message {message_id}."
+                ));
+            }
+            if find_by_sha(&[c], &want).is_none() {
                 return Err(format!(
                     "`index` and `sha256` name different attachments of message {message_id} \
                      — pass one, not both. `index` {i} is {}.",
@@ -341,6 +388,9 @@ pub fn pick(
                 ));
             }
         }
+        // An empty filename "agrees" with every entry (`contains("")`), which
+        // is the right answer rather than a gap: it names nothing, so it cannot
+        // contradict the index, and the index alone selects.
         if let Some(want_name) = filename {
             if !c.name.to_lowercase().contains(&want_name.to_lowercase()) {
                 return Err(format!(
@@ -547,7 +597,7 @@ pub fn missing_text_advice(sha256: &str, planner_supplied: bool) -> String {
     if planner_supplied {
         format!(
             "No extracted text for that sha256 — most often a mistyped hash. Retry with \
-             `message_id` + `filename` from the mail.get_message step rather than copying a \
+             `message_id` + `index` (or `filename`) from the mail.get_message step, not a \
              hash. Got: {prefix}"
         )
     } else {
@@ -575,8 +625,8 @@ pub fn missing_blob_advice(sha256: &str, planner_supplied: bool) -> String {
     if planner_supplied {
         format!(
             "localmail has no attachment with that sha256 — most often a mistyped hash. Retry \
-             with `message_id` + `filename` from the mail.get_message step rather than copying \
-             a hash. Got: {prefix}"
+             with `message_id` + `index` (or `filename`) from the mail.get_message step, not a \
+             hash. Got: {prefix}"
         )
     } else {
         format!(
@@ -590,8 +640,8 @@ pub fn missing_blob_advice(sha256: &str, planner_supplied: bool) -> String {
 /// eliding the rest with `…`.
 ///
 /// Each is rendered under the key that actually selects it ([`how_to_name`]):
-/// its filename when the names discriminate, its `index` when they do not — so the list is always something the planner can send back and have
-/// resolve.
+/// its filename when the names discriminate, its `index` when they do not —
+/// so the list is always something the planner can send back and have resolve.
 ///
 /// The budget is *derived* from [`kastellan_protocol::STEP_ERR_DETAIL_MAX`]
 /// rather than arithmetic done once in a comment, so lengthening the prose or

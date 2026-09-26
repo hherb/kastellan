@@ -97,7 +97,7 @@ fn every_gated_tool_is_refused_against_an_older_localmail() {
 #[test]
 fn ungated_tools_work_against_an_older_localmail() {
     for method in ["mail.list_accounts", "mail.list_messages", "mail.get_message"] {
-        assert!(!needs_current_api(method), "{method}");
+        assert!(!Tool::from_method(method).unwrap().needs_current_api(), "{method}");
     }
     let mut h = MailHandler::with_client_unverified(client_with(Box::new(VersionFake(Some(SLICE_D_ONLY)))));
     h.call("mail.list_accounts", serde_json::json!({})).expect("list_accounts is not gated");

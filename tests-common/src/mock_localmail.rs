@@ -29,10 +29,14 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// 64 lowercase hex — the attachment sha the canned message advertises and the
-/// attachment endpoints key on (the worker validates sha256 shape).
+/// The attachment sha the canned message advertises and the attachment
+/// endpoints key on: the **real** sha256 of [`CANNED_ATTACHMENT_BYTES`], as
+/// localmail's own is of the blob's bytes. It has to be — since #760 the mail
+/// worker hashes bytes fetched by position and refuses any that disagree with
+/// the listing, so a placeholder here would fail every message-resolved
+/// `mail.get_attachment`. Pinned by a test in `mock_localmail/tests.rs`.
 pub const CANNED_SHA256: &str =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    "8635c9b562b665d3ee8c3d02775c0745a9857ec29535e75715f6de2f3f9ded49";
 /// Extracted text surfaced by `mail.get_attachment_text`.
 pub const CANNED_ATTACHMENT_TEXT: &str = "NORTH COAST AREA HEALTH SERVICE invoice total 42.00";
 /// Original-format bytes delivered by `mail.get_attachment`.
@@ -229,22 +233,34 @@ fn wants_full_headers(path: &str) -> bool {
         .is_some_and(|(_, query)| query.split('&').any(|pair| pair == "headers=full"))
 }
 
-/// Pure request-line/headers → (status, content-type, body). Asserts a
-/// non-empty bearer so the auth wiring is exercised, then routes by path.
 /// localmail's text-route body since slice D (`api_minor` 2): one page plus
-/// its paging fields. The canned text is short, so it is the whole and last
-/// page (`next_offset: null`) whatever window was asked for.
-fn text_page_body() -> String {
+/// its paging fields. The canned text is short, so every window holds all
+/// that is left of it and is the last page (`next_offset: null`).
+///
+/// `offset` is **echoed** from the request, as localmail does
+/// (`text_window.py`): the mail worker refuses a page whose offset is not the
+/// one it asked for, so a mock that always said `0` would hide a server
+/// ignoring the parameter — or fail a worker that is right.
+fn text_page_body(path: &str) -> String {
+    let offset: usize = path
+        .split_once('?')
+        .and_then(|(_, q)| q.split('&').find_map(|kv| kv.strip_prefix("offset=")))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let total = CANNED_ATTACHMENT_TEXT.chars().count();
+    let text: String = CANNED_ATTACHMENT_TEXT.chars().skip(offset).collect();
     serde_json::json!({
-        "text": CANNED_ATTACHMENT_TEXT,
-        "offset": 0,
+        "text": text,
+        "offset": offset,
         "limit": 8000,
-        "total": CANNED_ATTACHMENT_TEXT.chars().count(),
+        "total": total,
         "next_offset": null
     })
     .to_string()
 }
 
+/// Pure request-line/headers → (status, content-type, body). Asserts a
+/// non-empty bearer so the auth wiring is exercised, then routes by path.
 fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
     // Bearer presence (auth wiring). A request with no non-empty bearer is a 401.
     let has_bearer = head.lines().any(|l| {
@@ -291,7 +307,7 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
         }).to_string())
     } else if let Some(rest) = by_index_rest {
         match rest {
-            "0/text" => json(text_page_body()),
+            "0/text" => json(text_page_body(path)),
             "0" => ("200 OK", "application/pdf", CANNED_ATTACHMENT_BYTES.to_vec()),
             _ => ("404 Not Found", "application/problem+json",
                   br#"{"type":"/problems/not-found","title":"Not found","status":404}"#.to_vec()),
@@ -330,8 +346,14 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
         // `mail.get_message` dispatches failed on exactly this (of 14 failures
         // in all, across three causes — #527): the worker's `i64` agreed with
         // the mock and not with the service. `results` (not `hits`) is correct
-        // and stays, and the snippet field is `snippet_html`
-        // (`api/search.py::_to_api_result`), not `snippet`.
+        // and stays.
+        //
+        // The hit is the **projected** shape (slice E, `api_minor` 3): the mail
+        // worker sends `fields` = `search_params::HIT_FIELDS` on every search,
+        // so real localmail answers it with exactly those keys — including a
+        // plain-text `snippet` rather than the default `snippet_html`. This
+        // mock does not read the request body, so it serves that shape
+        // unconditionally; the mail worker is the only client of this route.
         //
         // `next_cursor` deliberately still serves the base64 `CANNED_NEXT_CURSOR`
         // shape, not the hex format /v1/search actually uses live (e.g.
@@ -345,7 +367,10 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
                 "message_id": CANNED_MESSAGE_ID.to_string(),
                 "account": {"id": CANNED_ACCOUNT_ID, "name": serde_json::Value::Null},
                 "subject": "invoice",
-                "snippet_html": "…"
+                "from": {"address": CANNED_FROM_ADDRESS, "name": "Billing"},
+                "date": "2026-07-28T00:00:00+00:00",
+                "has_attachments": true,
+                "snippet": "…"
             }],
             "next_cursor": CANNED_NEXT_CURSOR
         }).to_string())
@@ -355,7 +380,7 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
             {"id": CANNED_ACCOUNT_ID, "name": CANNED_ACCOUNT_NAME}
         ]).to_string())
     } else if path.contains("/text") && path.starts_with("/v1/attachments/") {
-        json(text_page_body())
+        json(text_page_body(path))
     } else if path.starts_with("/v1/attachments/") {
         ("200 OK", "application/pdf", CANNED_ATTACHMENT_BYTES.to_vec())
     } else if is_message_by_id {

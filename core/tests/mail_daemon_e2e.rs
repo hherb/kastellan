@@ -485,8 +485,10 @@ fn mock_localmail_shapes_match_real_localmail() {
     );
 
     // 3. attachment text → application/json {"text": …} (NOT text/plain). Find a
-    //    real attachment sha via list → message; skip this leg (printed note) if
-    //    the archive carries no attachment.
+    //    real attachment sha via list → message, then via a filter-only
+    //    `has_attachment` search (#698) — the 50 newest messages can easily
+    //    carry none, which is how this leg once checked nothing while passing.
+    //    Finding none at all is a failure, asserted below the loop.
     let list = ok_json("/v1/messages", curl("GET", "/v1/messages?limit=50", None));
     // The LIST route keys rows under `messages` and the SEARCH route under
     // `results` — they differ, and this gate asserted `results` for both until
@@ -507,6 +509,15 @@ fn mock_localmail_shapes_match_real_localmail() {
         "real localmail /v1/messages[0].message_id must be a STRING (measured live: \"37477\"), \
          not a bare JSON number; got {first_message_id:?}"
     );
+    let with_attachments = ok_json(
+        "/v1/search (has_attachment)",
+        curl(
+            "POST",
+            "/v1/search",
+            Some(r#"{"query":"","filters":{"has_attachment":true},"sort":"date","limit":20}"#),
+        ),
+    );
+    let attachment_rows = with_attachments["results"].as_array().cloned().unwrap_or_default();
     let mut sha: Option<String> = None;
     // The same attachment by position: (message id, index), for slice D's route.
     let mut at: Option<(String, usize)> = None;
@@ -514,7 +525,7 @@ fn mock_localmail_shapes_match_real_localmail() {
     let mut detail_shape_checked = false;
     // Checked once, alongside the detail shape.
     let mut header_spelling_checked = false;
-    for row in rows {
+    for row in rows.iter().chain(attachment_rows.iter()) {
         // localmail serves ids as STRINGS. `as_i64()` alone returns None for
         // every row, so this loop used to skip the whole archive and exercise
         // nothing — the silent pass the assert below the loop exists to catch.
@@ -598,6 +609,19 @@ fn mock_localmail_shapes_match_real_localmail() {
             );
         }
 
+        // #760: the worker writes each entry's position in as `index`
+        // (`detail::number_attachments`), overwriting any `index` the service
+        // served. Pinned here, where a localmail that starts sending one of its
+        // own would first be seen.
+        if let Some(atts) = msg.as_ref().and_then(|m| m["attachments"].as_array()) {
+            assert!(
+                atts.iter().all(|a| a.get("index").is_none()),
+                "#760: localmail now serves its own `index` in attachment entries, which \
+                 detail::number_attachments overwrites with the position — check it means \
+                 the same thing; message {id}"
+            );
+        }
+
         if let Some((i, s)) = msg
             .as_ref()
             .and_then(|m| m.get("attachments"))
@@ -635,10 +659,15 @@ fn mock_localmail_shapes_match_real_localmail() {
         "the #500 header-spelling check never ran — no message detail was fetched, so \
          `?headers=full` vs `?full_headers=true` was verified against nothing"
     );
-    let Some(sha) = sha else {
-        eprintln!("[NOTE] no attachment in the archive; skipping the attachment-text shape check");
-        return;
-    };
+    // A leg that never ran must not read as a leg that passed — the same rule
+    // as the two asserts above. This used to print a `[NOTE]` and return, which
+    // no marker count sees, so an archive without a stored attachment passed
+    // the whole attachment half (and #760's slice D leg) having checked nothing.
+    let sha = sha.expect(
+        "no message among the listed rows carries a stored attachment, so the attachment \
+         text and slice D index-route checks verified nothing — point the gate at an archive \
+         (or token) that can see one",
+    );
     let (status, head, text) = curl("GET", &format!("/v1/attachments/{sha}/text"), None);
     assert_eq!(status, 200, "attachment text must answer 200, headers:\n{head}");
     assert!(
@@ -665,4 +694,24 @@ fn mock_localmail_shapes_match_real_localmail() {
     assert_eq!(page["next_offset"], want_next, "#760: next_offset for a 5-char window: {page}");
     let (status, head, _) = curl("GET", &format!("/v1/messages/{id}/attachments/{i}"), None);
     assert_eq!(status, 200, "#760: the index bytes route must answer 200, headers:\n{head}");
+
+    // #760: the worker checks bytes fetched by position against the sha256 the
+    // listing gave (`attach::Picked::verify_bytes`), on the premise that
+    // localmail stores a blob under the hash of exactly the bytes this route
+    // serves. Proven here against the real service — a hermetic fixture can
+    // only agree with whoever wrote it. Raw bytes, so not through `curl` above
+    // (which reads the body as lossy UTF-8).
+    let raw = Command::new("curl")
+        .args(["-skf", "-H", &format!("Authorization: Bearer {token}")])
+        .arg(format!("{endpoint}/v1/messages/{id}/attachments/{i}"))
+        .output()
+        .expect("curl");
+    assert!(raw.status.success(), "#760: raw fetch of the index bytes route failed");
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&raw.stdout)),
+        sha,
+        "#760: the index route's bytes must hash to the sha256 get_message listed at that \
+         position, or verify_bytes refuses every message-resolved get_attachment"
+    );
 }
