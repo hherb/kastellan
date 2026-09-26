@@ -431,6 +431,7 @@ pub const KNOBS: &[RequireKnob] = &[
     GUARD_TIER_KNOB,
     crate::microvm::KNOB,
     crate::gliner_e2e::KNOB,
+    crate::live_localmail::KNOB,
 ];
 
 #[cfg(test)]

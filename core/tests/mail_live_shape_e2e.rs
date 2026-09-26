@@ -8,6 +8,17 @@
 
 use std::process::Command;
 
+use kastellan_tests_common::live_localmail;
+
+/// The mail worker's own wire constants — the values it actually sends and
+/// requires — compiled in from its source rather than copied (#763). The mail
+/// crate is bin-only, so this test cannot import them; a hand-copied list here
+/// once meant a change to `HIT_FIELDS` would leave this gate checking the old
+/// one, and passing. The file's own header says what it may contain.
+mod contract {
+    include!("../../workers/mail/src/localmail_contract.rs");
+}
+
 /// Fidelity gate: assert real localmail's `/v1` response SHAPES still match
 /// `tests-common::mock_localmail`, so the hermetic mock cannot silently drift
 /// (the #487 failure mode: mock served `hits`/`text-plain` while reality served
@@ -22,20 +33,18 @@ use std::process::Command;
 /// the same reading of the service, so a consistent misreading passes all of
 /// them. #527 and #500 were both exactly that.
 ///
-/// Run it via `scripts/mail/live-shape-gate.sh`, which refuses to run without
-/// the env rather than letting the skip-as-pass below report a meaningless
-/// green. That matters: this gate had itself drifted undetected for months
-/// (asserting `results` for the list route, and reading string ids with
-/// `as_i64()` so every row was skipped), and correcting its assertions without
-/// changing how often it runs would leave the next rot equally invisible.
+/// Run it via `scripts/mail/live-shape-gate.sh`, which finds the credentials
+/// and runs the `mail-live` gate profile. That matters: this gate had itself
+/// drifted undetected for months (asserting `results` for the list route, and
+/// reading string ids with `as_i64()` so every row was skipped), and correcting
+/// its assertions without changing how often it runs would leave the next rot
+/// equally invisible. Under the profile's `KASTELLAN_MAIL_LIVE_REQUIRE_E2E` a
+/// missing credential fails instead of skipping, and the `[E2E]` line it
+/// announces is what the profile counts to prove the test ran at all (#763).
 #[test]
-#[ignore = "needs real localmail (KASTELLAN_MAIL_ENDPOINT + KASTELLAN_MAIL_TOKEN); Mac-only"]
+#[ignore = "needs a live localmail — run scripts/mail/live-shape-gate.sh"]
 fn mock_localmail_shapes_match_real_localmail() {
-    let (Ok(endpoint), Ok(token)) = (
-        std::env::var("KASTELLAN_MAIL_ENDPOINT"),
-        std::env::var("KASTELLAN_MAIL_TOKEN"),
-    ) else {
-        eprintln!("\n[SKIP] set KASTELLAN_MAIL_ENDPOINT + KASTELLAN_MAIL_TOKEN to the live localmail\n");
+    let Some(live_localmail::Credentials { endpoint, token }) = live_localmail::credentials_or_skip() else {
         return;
     };
 
@@ -119,23 +128,38 @@ fn mock_localmail_shapes_match_real_localmail() {
         first_hit.get("message_id")
     );
 
-    // 1b. #760: the worker refuses a localmail below API 1.3 and projects every
-    //     search to exactly these keys. Both are claims about the live service,
-    //     so they are pinned here (the worker crate is bin-only; its
-    //     `version::MIN_API_MINOR` and `search_params::HIT_FIELDS` are mirrored).
+    // 1b. #760: the worker refuses a localmail below its minimum API and
+    //     projects every search to exactly `HIT_FIELDS`, with `SNIPPET_CHARS`.
+    //     All are claims about the live service, so they are pinned here —
+    //     with the worker's own values (see `contract` above), so the gate
+    //     checks what the worker sends rather than a copy of it.
     let version = ok_json("/v1/version", curl("GET", "/v1/version", None));
-    assert_eq!(version["api_major"], 1, "#760: the mail worker speaks API 1.x: {version}");
-    assert!(
-        version["api_minor"].as_u64().is_some_and(|m| m >= 3),
-        "#760: the mail worker needs api_minor >= 3 (slice E); got {version}"
+    assert_eq!(
+        version["api_major"].as_u64(),
+        Some(contract::API_MAJOR),
+        "#760: the mail worker speaks API {}.x: {version}",
+        contract::API_MAJOR
     );
-    let fields = ["message_id", "account", "subject", "from", "date", "has_attachments", "snippet"];
+    assert!(
+        version["api_minor"].as_u64().is_some_and(|m| m >= contract::MIN_API_MINOR),
+        "#760: the mail worker needs api_minor >= {}; got {version}",
+        contract::MIN_API_MINOR
+    );
+    let fields = contract::HIT_FIELDS;
     let projected = ok_json(
         "/v1/search with fields",
         curl(
             "POST",
             "/v1/search",
-            Some(&serde_json::json!({"query": "invoice", "limit": 3, "fields": fields, "snippet_chars": 120}).to_string()),
+            Some(
+                &serde_json::json!({
+                    "query": "invoice",
+                    "limit": 3,
+                    "fields": fields,
+                    "snippet_chars": contract::SNIPPET_CHARS,
+                })
+                .to_string(),
+            ),
         ),
     );
     let hit = projected["results"].get(0).and_then(|h| h.as_object()).unwrap_or_else(|| {

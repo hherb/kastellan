@@ -29,13 +29,7 @@
 
 use serde_json::Value;
 
-/// The `api_major` this worker speaks. A different major is a different API.
-pub const API_MAJOR: u64 = 1;
-
-/// The oldest `api_minor` this worker works against — slice E's `fields` /
-/// `snippet_chars`, which is also the newest thing it uses. Compared with `>=`,
-/// the way localmail's own clients pin it, so a later additive bump is fine.
-pub const MIN_API_MINOR: u64 = 3;
+pub use crate::localmail_contract::{API_MAJOR, MIN_API_MINOR};
 
 /// `None` when the server described by `body` (a `GET /v1/version` response)
 /// is one this worker can use; otherwise the planner-facing reason.

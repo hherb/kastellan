@@ -13,6 +13,12 @@
 # `results` (live: `messages`) and read ids with `as_i64()` (live: strings, so
 # every row was skipped and its last two assertions never executed at all).
 #
+# So this script does not call cargo itself (#763). It finds the credentials and
+# then runs the `mail-live` profile of `scripts/run-e2e-gate.sh`, which sets
+# KASTELLAN_MAIL_LIVE_REQUIRE_E2E (a missing credential FAILS rather than
+# skips), keeps the whole log, and refuses a run in which the test did not
+# pass, did not announce `[E2E] live-localmail`, or printed any `[SKIP]`.
+#
 # Run this after any localmail upgrade, and before trusting `mock_localmail`.
 #
 #   scripts/mail/live-shape-gate.sh
@@ -72,7 +78,4 @@ fi
 export KASTELLAN_MAIL_ENDPOINT KASTELLAN_MAIL_TOKEN
 
 echo "==> live localmail: $KASTELLAN_MAIL_ENDPOINT"
-# --nocapture so a [SKIP]/[NOTE] line is visible: a silent green here would be
-# indistinguishable from the gate having checked nothing.
-exec cargo test -p kastellan-core --test mail_live_shape_e2e \
-  mock_localmail_shapes_match_real_localmail -- --ignored --nocapture
+exec bash "$repo_root/scripts/run-e2e-gate.sh" mail-live

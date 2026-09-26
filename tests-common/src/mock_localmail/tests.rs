@@ -4,6 +4,15 @@ use super::*;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
+/// The mail worker's wire constants, compiled in from its source (#763) — the
+/// mail crate is bin-only, so they cannot be imported, and a copy here would
+/// let the mock keep serving an old shape after the worker changed.
+/// `SNIPPET_CHARS` is not modelled: this mock serves a fixed snippet.
+mod contract {
+    #![allow(dead_code)]
+    include!("../../../workers/mail/src/localmail_contract.rs");
+}
+
 /// Drive one raw GET /v1/accounts against the mock and confirm it answers
 /// with the localmail accounts array shape (a JSON list).
 #[test]
@@ -364,8 +373,8 @@ fn accounts_return_id_as_a_string() {
 #[test]
 fn version_reports_an_api_the_mail_worker_accepts() {
     let v = routed("GET /v1/version HTTP/1.1");
-    assert_eq!(v["api_major"], 1);
-    assert!(v["api_minor"].as_u64().is_some_and(|m| m >= 3), "{v}");
+    assert_eq!(v["api_major"].as_u64(), Some(contract::API_MAJOR), "{v}");
+    assert!(v["api_minor"].as_u64().is_some_and(|m| m >= contract::MIN_API_MINOR), "{v}");
 }
 
 /// Slice D: text comes with its paging fields on both text routes.
@@ -425,8 +434,7 @@ fn search_hits_are_the_projected_shape() {
     let mut got: Vec<&str> =
         v["results"][0].as_object().unwrap().keys().map(String::as_str).collect();
     got.sort_unstable();
-    assert_eq!(
-        got,
-        ["account", "date", "from", "has_attachments", "message_id", "snippet", "subject"]
-    );
+    let mut want = contract::HIT_FIELDS.to_vec();
+    want.sort_unstable();
+    assert_eq!(got, want);
 }
