@@ -164,12 +164,21 @@ fn invalid_params_are_refused_before_the_version_gate() {
         ("mail.search", serde_json::json!({"query": "q", "nope": 1})),
         ("mail.search", serde_json::json!({"query": 7})),
         ("mail.search", serde_json::json!({"query": "q", "filters": "not-an-object"})),
-        // both attachment tools: nothing named, index without a message, a bad hash.
+        // both attachment tools: nothing named, index without a message, a hash
+        // no attachment could match (in either form), a wrong-typed or unknown key.
         ("mail.get_attachment_text", serde_json::json!({})),
         ("mail.get_attachment_text", serde_json::json!({"index": 0})),
         ("mail.get_attachment_text", serde_json::json!({"sha256": "../../etc/passwd"})),
+        ("mail.get_attachment_text", serde_json::json!({"message_id": 5, "sha256": "../zz"})),
+        ("mail.get_attachment_text", serde_json::json!({"message_id": 5, "offset": "0"})),
+        ("mail.get_attachment_text", serde_json::json!({"message_id": 5, "page": 2})),
+        ("mail.get_attachment", serde_json::json!({})),
+        ("mail.get_attachment", serde_json::json!({"index": 0})),
         ("mail.get_attachment", serde_json::json!({"filename": "a.pdf"})),
         ("mail.get_attachment", serde_json::json!({"sha256": "A".repeat(64)})),
+        ("mail.get_attachment", serde_json::json!({"message_id": 5, "sha256": ""})),
+        // list_accounts takes no params: a filter it would ignore is refused.
+        ("mail.list_accounts", serde_json::json!({"account_ids": [3]})),
     ];
     for (method, params) in calls {
         let mut h = MailHandler::with_client_unverified(client_with(Box::new(NoNetwork)));

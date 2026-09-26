@@ -307,7 +307,7 @@ mod tests {
     /// planner prompt (`core::scheduler::inner_loop::summary`), and that
     /// `detail` is the worker's `RpcError.message` verbatim
     /// (`core::scheduler::tool_dispatch::result_mapping`) — which for this
-    /// module is `"bad params: " + explain(...)` (see `handler::parse_params`).
+    /// module is `"bad params: " + explain(...)` (see `handler::request::from_params`).
     /// So only this much of `explain`'s output is ever delivered.
     ///
     /// The const is imported, not mirrored. It used to be a hand-synced copy

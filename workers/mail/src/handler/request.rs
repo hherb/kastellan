@@ -1,17 +1,21 @@
 //! What one `mail.*` call asks for, read out of its JSON params — the pure
 //! half of dispatch.
 //!
-//! [`Request::parse`] finds **every** params error, and sends nothing. The
-//! handler runs the localmail version gate only on a call that parsed, and
-//! only then talks to localmail (#765). When the gate ran first, a call with a
-//! missing `message_id` or a malformed `sha256`, made against an old or
-//! unreachable localmail, came back as "upgrade localmail" or a transport
-//! fault instead of `INVALID_PARAMS`: the planner retried a call it should
-//! have corrected, and the operator was sent to upgrade a service for a call
-//! that was never valid.
+//! [`Request::parse`] finds every params error that can be found without
+//! asking localmail, and sends nothing. The handler runs the localmail version
+//! gate only on a call that parsed, and only then talks to localmail (#765).
+//! When the gate ran first, a call with a missing `message_id` or a malformed
+//! `sha256`, made against an old or unreachable localmail, came back as
+//! "upgrade localmail" or a transport fault instead of `INVALID_PARAMS`: the
+//! planner retried a call it should have corrected, and the operator was sent
+//! to upgrade a service for a call that was never valid.
 //!
-//! What is left for the handler after parsing cannot fail on the params:
-//! building a URL or a request body from values already checked here.
+//! What the handler can still refuse as `INVALID_PARAMS`, after the gate, is
+//! what only the archive can answer: a `message_id` it cannot read, or a
+//! `filename`/`index`/`sha256` prefix that matches no attachment of that
+//! message (`attach::pick`). Values localmail alone defines — `sort` (passed
+//! through on purpose, see `crate::sort`), `cursor`, the `limit` range, and
+//! the keys inside `filters` — are not checked here at all.
 
 use kastellan_protocol::{codes, RpcError};
 
@@ -19,8 +23,8 @@ use crate::attach;
 use crate::ids::{self, LocalmailId};
 use crate::search_params;
 
-/// The six tools, parsed from the JSON-RPC method name once so that parsing,
-/// the version gate and dispatch all read the same value.
+/// The six tools, from the JSON-RPC method name. [`Request::parse`] turns one
+/// into a [`Request`], which the version gate and dispatch then both read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tool {
     Search,
@@ -86,8 +90,9 @@ pub(super) enum Request {
     },
     GetAttachment {
         selector: attach::Selector,
-        /// What the planner passed as `filename`, kept for the output name:
-        /// with a `sha256` it names the saved file (see `get_attachment`).
+        /// What the planner passed as `filename`, kept for the output name
+        /// when the archive supplies none: always for the `sha256` form, and
+        /// for a nameless entry in the message form (see `get_attachment`).
         requested_name: Option<String>,
     },
 }
@@ -111,8 +116,21 @@ impl Request {
                 Ok(Self::GetMessage { message_id: p.message_id, full_headers: p.full_headers })
             }
             Tool::ListMessages => from_params(params).map(Self::ListMessages),
-            // Takes no params, and has never looked at them.
-            Tool::ListAccounts => Ok(Self::ListAccounts),
+            Tool::ListAccounts => {
+                // Takes no params. It used to ignore any it was sent, so a
+                // planner that carried `account_ids` over from list_messages
+                // got every account back and believed it had filtered.
+                let empty = params.is_null() || params.as_object().is_some_and(|o| o.is_empty());
+                if !empty {
+                    return Err(RpcError::new(
+                        codes::INVALID_PARAMS,
+                        "mail.list_accounts takes no params — it lists every account this \
+                         agent may read. Filter by account in mail.list_messages or mail.search."
+                            .to_string(),
+                    ));
+                }
+                Ok(Self::ListAccounts)
+            }
             Tool::GetAttachmentText => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]

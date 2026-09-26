@@ -67,18 +67,20 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
   `tests_common::live_localmail::credentials_or_skip`, plus a **`mail-live` profile** (floor 1,
   `MAX_SKIP` 0, `MAX_PANIC` 0 *measured*, `--ignored`). `scripts/mail/live-shape-gate.sh`
   finds the credentials and then **runs the profile**; the profile itself sets no credentials.
-  ✅ Green as evidence on the Mac. The negative control holds: with no credentials the run fails
-  on the knob, the pass floor and the `[E2E]` floor. **Not yet run on the DGX.**
+  ✅ Green as evidence on the Mac; with no credentials it fails. **Not yet run on the DGX.**
 - **#763, no hand copies.** `API_MAJOR`/`MIN_API_MINOR`/`HIT_FIELDS`/`SNIPPET_CHARS` live in
   `workers/mail/src/localmail_contract.rs`, which the live gate and `mock_localmail`'s tests
   `include!`. ⚠️ **It is compiled three times: `pub const`s only, no `use`, no `//!`.** The live
   gate does not allow dead code, so an unchecked wire constant is a `-D warnings` error (verified).
 - **#765** — `handler/request.rs` (pure) parses every call into a typed `Request` **before** the
-  version gate; `needs_current_api` is on `Request` and reads the parsed `full_headers`;
-  `attach::choose` validates a planner sha (`Selector::Sha(Picked)`). `handler.rs` 555→415.
+  gate, which takes `&Request` (order in the signature); `attach::choose` validates a planner sha
+  *and* shape-checks one beside a `message_id`. `handler.rs` 555→415.
+- **Review fix-up:** the live gate names curl's own failure (not "token expiry"), checks the detail
+  status and `snippet_chars`, reads `HEADER_LIST_QUERY` from the contract; `list_accounts` refuses
+  params. +4 tests (mail 201→203, tests-common +2); `mail-live` green; **no full sweep since**.
+  Filed #767 (route spellings into the contract) and #768 (small type hardening).
 - ⚠️ **A new `*_or_skip` helper must be classified** in `microvm/guard.rs` (`BANNED_HELPERS` or
-  `REQUIRE_AWARE`) — `the_banned_roster_matches_the_helpers_that_actually_exist` refuses it
-  otherwise. It caught `credentials_or_skip`.
+  `REQUIRE_AWARE`) or the roster test refuses it. It caught `credentials_or_skip`.
 
 ### Previous (2026-09-26): #760 (PRs #762, #764) and #698 (PR #761) — what still binds
 
@@ -86,8 +88,9 @@ Full prose in git history (PR bodies) and the ROADMAP.
 
 - **Version gate:** `mail.search`, both attachment tools and now header reads refuse below API
   **1.3**, naming the upgrade — **no fallback** (operator's call; an old server answers wrong, not
-  loudly). A pass is cached per worker; a refusal is asked again. `Tool` is an exhaustive enum.
-- **Slice E:** every search sends `fields` = `search_params::HIT_FIELDS` + `snippet_chars: 120`.
+  loudly). A pass is cached per worker; a refusal is asked again. `Request::needs_current_api` is an
+  exhaustive match on the *parsed* request, and the gate takes that `&Request` — params first (#765).
+- **Slice E:** every search sends `fields` = `localmail_contract::HIT_FIELDS` + `snippet_chars: 120`.
   ⚠️ **A 50-hit page is still ~18 KB, over the 16 KiB step view.**
 - **Headers (#764):** `?headers=list`, checked fail-closed — never reshaped.
 - **Slice D:** `get_message` writes `index` into each attachment; a message-resolved attachment
@@ -436,9 +439,8 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#766](https://github.com/hherb/kastellan/pull/766)** (#763, #765) — the live localmail shape gate gets its own
-  suite, a REQUIRE knob and a `mail-live` profile, and reads the worker's wire constants from one
-  `include!`d file; mail params are parsed (pure `handler/request.rs`) before the version gate.
+- **[#766](https://github.com/hherb/kastellan/pull/766)** (#763, #765) — live shape gate: own suite, knob, `mail-live` profile,
+  shared `localmail_contract.rs`; mail params parsed (pure `handler/request.rs`) before the gate.
 - **[#764](https://github.com/hherb/kastellan/pull/764)** (#760, last piece) — `mail.get_message` asks localmail for `?headers=list` and
   passes the per-occurrence list on after a fail-closed shape check; the `{name, values}` reshaping
   is gone; the headers path joins the version gate.

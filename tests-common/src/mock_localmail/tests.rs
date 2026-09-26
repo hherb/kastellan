@@ -212,7 +212,7 @@ fn message_detail_gates_headers_on_the_full_query_pair() {
 /// `full` loses.
 #[test]
 fn message_detail_serves_the_per_occurrence_header_list() {
-    let list = message_detail("?headers=list");
+    let list = message_detail(&format!("?{}", contract::HEADER_LIST_QUERY));
     assert_eq!(
         list["headers"],
         serde_json::json!([
@@ -229,7 +229,7 @@ fn message_detail_serves_the_per_occurrence_header_list() {
 /// real localmail, so the mock must satisfy it too.
 #[test]
 fn message_detail_list_and_full_hold_the_same_occurrences() {
-    let mut from_list: Vec<(String, String)> = message_detail("?headers=list")["headers"]
+    let mut from_list: Vec<(String, String)> = message_detail(&format!("?{}", contract::HEADER_LIST_QUERY))["headers"]
         .as_array()
         .unwrap()
         .iter()

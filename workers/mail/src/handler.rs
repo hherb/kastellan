@@ -51,12 +51,17 @@ impl MailHandler {
         Self { client, api_ok: OnceCell::new() }
     }
 
-    /// Refuse, with the upgrade named, unless localmail's `/v1/version` is one
-    /// [`version::version_error`] accepts. One GET per worker (the mail worker
-    /// is single-use, so in practice one per gated call) to an unauthenticated
-    /// route on the same origin.
-    fn require_current_api(&self) -> Result<(), RpcError> {
-        if self.api_ok.get().is_some() {
+    /// Refuse `req`, with the upgrade named, if it needs a route or field newer
+    /// than the `/v1` localmail serves ([`Request::needs_current_api`]) and
+    /// localmail's `/v1/version` is not one [`version::version_error`]
+    /// accepts. One GET per worker (the mail worker is single-use, so in
+    /// practice one per gated call) to an unauthenticated route on the same
+    /// origin.
+    ///
+    /// Takes the parsed [`Request`] so that "params first, gate second" (#765)
+    /// is in the signature: there is no gate to call before the params parsed.
+    fn require_current_api(&self, req: &Request) -> Result<(), RpcError> {
+        if !req.needs_current_api() || self.api_ok.get().is_some() {
             return Ok(());
         }
         let body = self.client.get_json("/v1/version").map_err(|e| match e {
@@ -98,7 +103,7 @@ impl MailHandler {
         if let Some(c) = p.cursor {
             body["cursor"] = serde_json::json!(c);
         }
-        // Compact hits (slice E): see `search_params::HIT_FIELDS` for what is
+        // Compact hits (slice E): see `localmail_contract::HIT_FIELDS` for what is
         // dropped and why. Sent on every page — localmail projects per request,
         // not per cursor.
         body["fields"] = serde_json::json!(search_params::HIT_FIELDS);
@@ -154,9 +159,10 @@ impl MailHandler {
     /// unlabelled, in a key-stripped prompt head.
     fn resolve_attachment(&self, selector: attach::Selector) -> Result<attach::Picked, RpcError> {
         match selector {
-            // Checked when the params were read: `attach::choose` builds this
-            // arm only through `Picked::from_planner_sha`, the fallible
-            // constructor that guards the `{sha256}` URL segment.
+            // Nothing to check: a `Picked` cannot hold an unvetted hash (every
+            // constructor validates — see `attach::Picked`). This one was built
+            // by `from_planner_sha` inside `attach::choose`, while the params
+            // were read (#765).
             attach::Selector::Sha(picked) => Ok(picked),
             attach::Selector::InMessage { message_id, filename, expect_sha, index } => {
                 // Compact headers: only `attachments` is read here, and full
@@ -312,9 +318,7 @@ impl Handler for MailHandler {
         // Params first, gate second (#765): a call that is invalid whatever
         // localmail is must be told so, not told to upgrade localmail.
         let req = Request::parse(tool, params)?;
-        if req.needs_current_api() {
-            self.require_current_api()?;
-        }
+        self.require_current_api(&req)?;
         match req {
             Request::Search(p) => self.search(p),
             Request::GetMessage { message_id, full_headers } => self.get_message(message_id, full_headers),
@@ -392,7 +396,7 @@ fn safe_attachment_name(requested: Option<&str>, sha256: &str) -> String {
 /// guard structural instead of positional.
 fn detail_path(message_id: LocalmailId, full_headers: bool) -> String {
     if full_headers {
-        format!("/v1/messages/{message_id}?headers=list")
+        format!("/v1/messages/{message_id}?{}", crate::localmail_contract::HEADER_LIST_QUERY)
     } else {
         format!("/v1/messages/{message_id}")
     }

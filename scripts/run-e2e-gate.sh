@@ -123,7 +123,9 @@ done
 # `bootstrap()` is knob-routed, so a `[SKIP]` there is by definition a bypass.
 # `worker-report` is 0 for the same reason: its one precondition is
 # `skip_if_sandbox_unavailable`, and the other four suites' parents read no knob.
-# The rest stay `any` while #718's 92 hand-written `[SKIP]` sites exist.
+# `mail-live` is 0: its one precondition, `live_localmail::credentials_or_skip`,
+# is knob-routed, and `scripts/mail/live-shape-gate.sh` refuses to start
+# without the credentials. The rest stay `any` while #718's 92 hand-written `[SKIP]` sites exist.
 #
 # ⚠️ Harness args are per profile because the Firecracker suites are `#[ignore]`:
 # WITHOUT `--ignored` the whole tier reports green having booted no VM, every
@@ -166,7 +168,7 @@ done
 # `guard-tier` it runs on both hosts.
 #
 # `mail-live` (#763) demands the live localmail shape gate — the one test that
-# checks our reading of localmail against the real service. It needs
+# checks our reading of localmail's wire shapes against the real service. It needs
 # KASTELLAN_MAIL_ENDPOINT + KASTELLAN_MAIL_TOKEN exported, which this script does
 # NOT set: run it through `scripts/mail/live-shape-gate.sh`, which reads them
 # from the daemon's config and then runs this profile. `--ignored` for the same

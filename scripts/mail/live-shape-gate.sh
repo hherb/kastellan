@@ -2,7 +2,9 @@
 # Run the localmail wire-shape drift gate against the REAL service.
 #
 # `core/tests/mail_live_shape_e2e.rs::mock_localmail_shapes_match_real_localmail` is
-# the only test in the tree that talks to a live localmail. It is the half of
+# the only test in the tree that checks our reading of localmail's wire shapes
+# against the live service (`mail_e2e`'s force-routed DGX leg also reaches one,
+# but tests the MITM/extra-CA path, not the shapes). It is the half of
 # #527/#500's protection that the hermetic tests structurally cannot provide:
 # every other mail test asserts our fixtures agree with our code, which is true
 # whether or not either agrees with the service.
@@ -21,9 +23,11 @@
 #
 # Run this after any localmail upgrade, and before trusting `mock_localmail`.
 #
-#   scripts/mail/live-shape-gate.sh
+#   scripts/mail/live-shape-gate.sh [extra cargo args...]
 #
-# Env (both required — the test prints [SKIP] and passes without them):
+# Env (both required — a bare `cargo test -- --ignored` prints [SKIP] and passes
+# without them; under the `mail-live` profile this script runs, their absence
+# fails):
 #   KASTELLAN_MAIL_ENDPOINT   e.g. https://10.0.0.3:8443
 #   KASTELLAN_MAIL_TOKEN      a localmail api-user login token
 #
@@ -45,11 +49,21 @@ overlay_file="${env_file}.local"
 # key), and sourcing it has broken a hand-run daemon before. The overlay is read
 # first, since the daemon loads it after kastellan.env and it overrides; an
 # empty value there is skipped here rather than treated as "unset".
+#
+# One pair of surrounding quotes is stripped: the overlay is hand-written and
+# humans quote, and the daemon reads `KEY="x"` as `x`
+# (`kastellan_supervisor::env_file::unquote`, which also covers systemd's rarer
+# forms — this is only the common subset). Left on, the quotes reached curl as
+# part of the URL.
 read_env_key() {
   local key="$1" f v
   for f in "$overlay_file" "$env_file"; do
     [ -r "$f" ] || continue
     v="$(sed -n "s/^${key}=//p" "$f" | tail -n 1)"
+    case "$v" in
+      \"*\") v="${v#\"}"; v="${v%\"}" ;;
+      \'*\') v="${v#\'}"; v="${v%\'}" ;;
+    esac
     if [ -n "$v" ]; then
       printf '%s\n' "$v"
       return 0
@@ -63,19 +77,25 @@ if [ -z "${KASTELLAN_MAIL_ENDPOINT:-}" ]; then
 fi
 if [ -z "${KASTELLAN_MAIL_TOKEN:-}" ]; then
   token_file="${KASTELLAN_MAIL_TOKEN_FILE:-$(read_env_key KASTELLAN_MAIL_TOKEN_FILE || true)}"
-  if [ -n "${token_file:-}" ] && [ -r "$token_file" ]; then
+  if [ -n "${token_file:-}" ]; then
+    # Named on its own: the generic "not supplied" below would be false here —
+    # the config DID name a token file, and it is that file that is the problem.
+    if [ ! -r "$token_file" ]; then
+      echo "error: KASTELLAN_MAIL_TOKEN_FILE is $token_file, which is not a readable file." >&2
+      exit 2
+    fi
     KASTELLAN_MAIL_TOKEN="$(tr -d '\r\n' < "$token_file")"
   fi
 fi
 
 if [ -z "${KASTELLAN_MAIL_ENDPOINT:-}" ] || [ -z "${KASTELLAN_MAIL_TOKEN:-}" ]; then
   echo "error: KASTELLAN_MAIL_ENDPOINT and KASTELLAN_MAIL_TOKEN are required." >&2
-  echo "       Neither was in the environment, and $env_file (+ .local) did not supply them." >&2
-  echo "       Without them the gate skips as PASS, which is why this script refuses" >&2
-  echo "       to run rather than invoking cargo and reporting a green that means nothing." >&2
+  echo "       The environment and $env_file (+ .local) did not supply both." >&2
+  echo "       Refusing now, so the failure names the config to fix rather than" >&2
+  echo "       ending a cargo build in the REQUIRE knob's panic." >&2
   exit 2
 fi
 export KASTELLAN_MAIL_ENDPOINT KASTELLAN_MAIL_TOKEN
 
 echo "==> live localmail: $KASTELLAN_MAIL_ENDPOINT"
-exec bash "$repo_root/scripts/run-e2e-gate.sh" mail-live
+exec bash "$repo_root/scripts/run-e2e-gate.sh" mail-live "$@"

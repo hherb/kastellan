@@ -29,6 +29,8 @@
 
 use serde_json::Value;
 
+// Defined in `localmail_contract`, which the live gate and the mock `include!`
+// (#763); re-exported so callers keep this path.
 pub use crate::localmail_contract::{API_MAJOR, MIN_API_MINOR};
 
 /// `None` when the server described by `body` (a `GET /v1/version` response)

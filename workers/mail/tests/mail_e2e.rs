@@ -10,7 +10,7 @@
 //! transport. Runs on both hosts, and — since #536 — in CI on every PR.
 //!
 //! The wire shapes below mirror `kastellan_tests_common::mock_localmail`, which
-//! the live drift gate in `core/tests/mail_daemon_e2e.rs` pins against the real
+//! the live drift gate in `core/tests/mail_live_shape_e2e.rs` pins against the real
 //! service. They are a SECOND copy of that contract, kept here because
 //! `workers/mail` is a bin-only crate with no dev-dependency on `tests-common`
 //! (taking one would put `kastellan-core` in a leaf worker's dev graph). When

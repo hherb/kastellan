@@ -53,7 +53,8 @@ pub enum Selector {
     /// of at least [`SHA_PREFIX_MIN`] chars selects too, so the 12-char stem
     /// `mail.get_attachment` prefixes saved files with is enough. (It used to
     /// be the advertised repair when `filename` cannot discriminate; since
-    /// #760 that repair is `index`.)
+    /// #760 that repair is `index`.) A value no attachment could match — empty,
+    /// over 64 chars, not hex — never gets here: [`choose`] refuses it (#765).
     ///
     /// `index` is the attachment's position in that message's `attachments`
     /// array — the `index` key `mail.get_message` writes into each entry
@@ -148,11 +149,12 @@ impl Picked {
 
     /// A hash the **planner** typed, with no message to vouch for it.
     ///
-    /// The only entry point from outside this module, and it is fallible — so
-    /// the traversal guard on the `{sha256}` URL segment is structural rather
-    /// than a rule each call site has to remember. There is no archive
-    /// filename here: the planner named a hash, not a message, so there is
-    /// nothing authoritative to save it under.
+    /// The only public constructor, reached in production through [`choose`]
+    /// so that a malformed hash is refused while the params are read (#765).
+    /// It is fallible so the traversal guard on the `{sha256}` URL segment is
+    /// structural rather than a rule each call site has to remember. There is
+    /// no archive filename here: the planner named a hash, not a message, so
+    /// there is nothing authoritative to save it under.
     pub fn from_planner_sha(sha256: &str) -> Result<Self, String> {
         if is_sha256(sha256) {
             Ok(Self { sha256: sha256.to_string(), filename: None, at: None })
@@ -287,6 +289,9 @@ pub fn choose(
 ) -> Result<Selector, String> {
     match (sha256, message_id) {
         (expect_sha, Some(message_id)) => {
+            if let Some(why) = expect_sha.as_deref().and_then(expect_sha_error) {
+                return Err(why);
+            }
             Ok(Selector::InMessage { message_id, filename, expect_sha, index })
         }
         (_, None) if index.is_some() => Err(
@@ -306,6 +311,27 @@ pub fn choose(
                 .to_string(),
         ),
     }
+}
+
+/// Why a `sha256` sent beside a `message_id` can match no attachment of any
+/// message, or `None` when only that message can say (#765).
+///
+/// [`find_by_sha`] accepts the full hash or a hex prefix of it, and every
+/// candidate is 64 hex chars — so a value that is empty, longer than 64, or not
+/// hex is refused here, while the params are read, rather than after the
+/// version gate and a GET of the message. What stays with [`pick`] is what
+/// depends on the archive: a prefix below [`SHA_PREFIX_MIN`] (whose refusal
+/// says whether it was the *right* prefix) and a hash the message does not
+/// hold. Either case is accepted: [`pick`] lowercases, and did before this.
+fn expect_sha_error(sha: &str) -> Option<String> {
+    if !sha.is_empty() && sha.len() <= 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!(
+        "`sha256` beside a `message_id` must be the attachment's hash or a hex prefix of it, \
+         got {:?} — or drop it: `index` selects within the message.",
+        sha.chars().take(8).collect::<String>()
+    ))
 }
 
 /// Pick one attachment out of a `mail.get_message` `attachments` array, given

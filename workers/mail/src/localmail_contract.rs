@@ -12,9 +12,11 @@
 //   needs this crate's other modules.
 // * Every constant here must be USED by the live gate. The gate does not
 //   silence dead code (the mock's tests do, deliberately), so a constant it
-//   ignores is a compile warning there, which CI's `-D warnings` turns into an
-//   error — adding a wire fact here without checking it against the live
-//   service does not build.
+//   ignores is a `dead_code` warning there, which CI's
+//   `cargo clippy … -D warnings` refuses — a wire fact added here without the
+//   live gate referencing it does not pass CI. (`cargo build`/`test` only
+//   warn.) Referenced is not asserted: review that the new use actually checks
+//   the value against the service, not merely sends it.
 
 /// The `api_major` this worker speaks. A different major is a different API.
 pub const API_MAJOR: u64 = 1;
@@ -50,3 +52,11 @@ pub const HIT_FIELDS: [&str; 7] =
 /// 25.8 KB / 26.6 KB to 18.1 KB / 18.8 KB (Mac archive, 2026-09-26). Must stay within
 /// localmail's `1 ..= snippet_max_chars` (default 1000), or every search 400s.
 pub const SNIPPET_CHARS: u32 = 120;
+
+/// The query `mail.get_message` adds to ask for the header list: localmail's
+/// `headers` parameter, whose VALUE picks the shape — `list` is one
+/// `{name, value}` per occurrence, in wire order (#760, localmail #381). The
+/// parameter's NAME is the #500 lesson: this worker once sent
+/// `full_headers=true`, which localmail silently drops, and every test agreed
+/// with it because each was written from the same reading.
+pub const HEADER_LIST_QUERY: &str = "headers=list";

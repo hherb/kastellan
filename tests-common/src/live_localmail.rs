@@ -1,7 +1,7 @@
-//! The live-localmail tier: the one test that checks our reading of localmail
-//! against the real service (#763).
+//! The live-localmail tier: the one test that checks our reading of localmail's
+//! wire shapes against the real service (#763).
 //!
-//! `core/tests/mail_daemon_e2e.rs::mock_localmail_shapes_match_real_localmail`
+//! `core/tests/mail_live_shape_e2e.rs::mock_localmail_shapes_match_real_localmail`
 //! is the only proof of several claims the mail worker is built on — the
 //! minimum `api_minor`, the exact projected search hit, the paging fields,
 //! the per-occurrence header list, the index route's bytes hashing to the
@@ -28,6 +28,11 @@ use std::io::Write;
 use crate::require::{RequireKnob, UnmetAction};
 
 /// Turns the live gate's skips into failures.
+///
+/// Covers only `mail_live_shape_e2e`. The other `KASTELLAN_MAIL_LIVE_*` tiers —
+/// `mail_e2e`'s force-routed DGX leg (`KASTELLAN_MAIL_LIVE_{ENDPOINT,CA,TOKEN}`)
+/// and `mail_daemon_e2e`'s live-LLM leg — read their own variables and still
+/// skip-as-pass with this knob set.
 pub const KNOB: RequireKnob = RequireKnob::new("KASTELLAN_MAIL_LIVE_REQUIRE_E2E", "live-localmail");
 
 /// The base URL of the live localmail, e.g. `https://10.0.0.3:8443`.
@@ -87,11 +92,18 @@ pub fn credentials_from(endpoint: Option<String>, token: Option<String>) -> Resu
 /// When [`KNOB`] is set and a credential is missing, naming it.
 pub fn credentials_or_skip() -> Option<Credentials> {
     let action = KNOB.action();
-    decide(
-        action,
-        credentials_from(std::env::var(ENDPOINT_ENV).ok(), std::env::var(TOKEN_ENV).ok()),
-        &mut std::io::stderr(),
-    )
+    // A set-but-not-UTF-8 value is named as such: `.ok()` would report it as
+    // unset, and send the operator to set a variable that is already set.
+    let read = |name: &str| match std::env::var(name) {
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("no live localmail: {name} is set but is not UTF-8")),
+    };
+    let found = match (read(ENDPOINT_ENV), read(TOKEN_ENV)) {
+        (Ok(endpoint), Ok(token)) => credentials_from(endpoint, token),
+        (Err(why), _) | (_, Err(why)) => Err(why),
+    };
+    decide(action, found, &mut std::io::stderr())
 }
 
 /// [`credentials_or_skip`] after the environment is read, writing its marker

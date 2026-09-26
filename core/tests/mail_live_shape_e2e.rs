@@ -19,16 +19,21 @@ mod contract {
     include!("../../workers/mail/src/localmail_contract.rs");
 }
 
-/// Fidelity gate: assert real localmail's `/v1` response SHAPES still match
-/// `tests-common::mock_localmail`, so the hermetic mock cannot silently drift
+/// Fidelity gate: assert real localmail's `/v1` response SHAPES are the ones
+/// `tests-common::mock_localmail` serves (the mock's own unit tests pin the same
+/// shapes, and since #763 read the same `contract` constants), so the hermetic
+/// mock cannot silently drift
 /// (the #487 failure mode: mock served `hits`/`text-plain` while reality served
 /// `results`/JSON, masking a real decode bug). Uses `curl -k` because the
 /// dev-Mac localmail is HTTPS self-signed and the worker's transport is
 /// webpki-only (that TLS path is NOT what this test checks).
 ///
-/// **This is the only test in the tree that talks to the live service, and so
-/// the only one that can catch "our belief about localmail is wrong" rather than
-/// "our fixtures disagree with our code".** Everything else — the mock's own
+/// **This is the only test in the tree that checks our reading of localmail's
+/// wire shapes against the live service, and so the only one that can catch
+/// "our belief about localmail is wrong" rather than "our fixtures disagree with
+/// our code".** (`mail_e2e`'s `force_routed_search_against_real_localmail` also
+/// reaches a live localmail, but tests the MITM/extra-CA path, not the shapes.)
+/// Everything else — the mock's own
 /// unit tests, the `PathFake` query assertions, the worker e2e — is written from
 /// the same reading of the service, so a consistent misreading passes all of
 /// them. #527 and #500 were both exactly that.
@@ -51,6 +56,11 @@ fn mock_localmail_shapes_match_real_localmail() {
     // `curl -k` a path; return (status code, lowercased response headers,
     // parsed-JSON-or-none).
     //
+    // curl's own failure — refused connection, DNS, TLS, a malformed URL — is
+    // a panic here, with curl's exit code and its stderr (`-S`). Without that
+    // it came back as status 0, and `ok_json` below blamed the token for a
+    // localmail that was simply down.
+    //
     // The status is returned — and checked at every leg via `ok_json` — because
     // discarding it misattributes every failure. An expired token makes
     // `/v1/messages` answer `{"detail":"Not authenticated"}`, and the shape
@@ -59,7 +69,7 @@ fn mock_localmail_shapes_match_real_localmail() {
     let curl = |method: &str, path: &str, body: Option<&str>| -> (u16, String, Option<serde_json::Value>) {
         let mut cmd = Command::new("curl");
         cmd.args([
-            "-sk", "-D", "-",
+            "-sSk", "-D", "-",
             "-X", method,
             "-H", &format!("Authorization: Bearer {token}"),
             "-H", "Content-Type: application/json",
@@ -69,6 +79,13 @@ fn mock_localmail_shapes_match_real_localmail() {
         }
         cmd.arg(format!("{endpoint}{path}"));
         let out = cmd.output().expect("curl");
+        assert!(
+            out.status.success(),
+            "curl could not reach {endpoint}{path} ({}): {} — localmail is down, unreachable, \
+             or refusing TLS; NOT an auth problem and NOT schema drift",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let (head, body_text) = match text.split_once("\r\n\r\n") {
             Some((h, b)) => (h.to_string(), b.to_string()),
@@ -83,8 +100,9 @@ fn mock_localmail_shapes_match_real_localmail() {
         (status, head.to_lowercase(), serde_json::from_str(&body_text).ok())
     };
 
-    // A non-200 is a transport/auth/endpoint problem, not schema drift, and has
-    // to say so rather than surfacing as a confusing shape assertion.
+    // A non-200 is an auth/endpoint problem, not schema drift, and has to say
+    // so rather than surfacing as a confusing shape assertion. (A transport
+    // failure never gets here: `curl` above panics on it.)
     let ok_json = |what: &str, r: (u16, String, Option<serde_json::Value>)| -> serde_json::Value {
         let (status, _head, json) = r;
         assert_eq!(
@@ -170,6 +188,22 @@ fn mock_localmail_shapes_match_real_localmail() {
     got.sort_unstable();
     want.sort_unstable();
     assert_eq!(got, want, "#760: a projected hit must carry exactly the named keys");
+    // …and `snippet_chars` must be honoured, not merely accepted: a localmail
+    // that ignored it would serve its default window (200) and quietly undo
+    // #760's payload saving while every key check above still passed. It may
+    // add a `…` at each end, hence the 2.
+    let snippets: Vec<&str> =
+        projected["results"].as_array().into_iter().flatten().filter_map(|h| h["snippet"].as_str()).collect();
+    assert!(!snippets.is_empty(), "#760: no projected hit carried a string `snippet`: {projected}");
+    for s in snippets {
+        assert!(
+            s.chars().count() <= contract::SNIPPET_CHARS as usize + 2,
+            "#760: localmail must cut `snippet` to snippet_chars = {} (+ an ellipsis each end); \
+             got {} chars",
+            contract::SNIPPET_CHARS,
+            s.chars().count()
+        );
+    }
 
     // 2. accounts → JSON array.
     let accounts = ok_json("/v1/accounts", curl("GET", "/v1/accounts", None));
@@ -218,7 +252,11 @@ fn mock_localmail_shapes_match_real_localmail() {
             Some(r#"{"query":"","filters":{"has_attachment":true},"sort":"date","limit":20}"#),
         ),
     );
-    let attachment_rows = with_attachments["results"].as_array().cloned().unwrap_or_default();
+    // Asserted rather than defaulted: an empty fallback here would surface
+    // below as "the archive has no attachment", blaming the data for drift.
+    let attachment_rows = with_attachments["results"].as_array().cloned().unwrap_or_else(|| {
+        panic!("filter-only /v1/search must key hits under `results`: {with_attachments}")
+    });
     let mut sha: Option<String> = None;
     // The same attachment by position: (message id, index), for slice D's route.
     let mut at: Option<(String, usize)> = None;
@@ -237,7 +275,9 @@ fn mock_localmail_shapes_match_real_localmail() {
         else {
             continue;
         };
-        let (_status, _h, msg) = curl("GET", &format!("/v1/messages/{id}"), None);
+        // Through `ok_json` like every other leg: an auth error body here used
+        // to reach the shape asserts below and fail as "schema drift".
+        let msg = ok_json("/v1/messages/{id}", curl("GET", &format!("/v1/messages/{id}"), None));
 
         // 3a. get_message's own field shape. Previously this loop used the
         // detail response only to discover an attachment sha, so the
@@ -250,23 +290,21 @@ fn mock_localmail_shapes_match_real_localmail() {
         // message as `skipped` rather than erroring. Both asserts below
         // fail loudly on exactly that shape — indexing a JSON string with
         // `["address"]` yields `Null`, so `is_string()` is `false`.
-        if let Some(msg) = msg.as_ref() {
-            if !detail_shape_checked {
-                detail_shape_checked = true;
-                assert!(
-                    msg["from"]["address"].is_string(),
-                    "real localmail /v1/messages/{{id}} must serve `from` as an ADDRESS \
-                     OBJECT (`_address()` → {{address, name}}), not a bare string — \
-                     email-in reads `from.address`; got from = {}",
-                    msg["from"]
-                );
-                assert!(
-                    msg.get("body_text").is_some(),
-                    "real localmail /v1/messages/{{id}} must name the plain-text body \
-                     `body_text` (not `body`); got keys {:?}",
-                    msg.as_object().map(|o| o.keys().collect::<Vec<_>>())
-                );
-            }
+        if !detail_shape_checked {
+            detail_shape_checked = true;
+            assert!(
+                msg["from"]["address"].is_string(),
+                "real localmail /v1/messages/{{id}} must serve `from` as an ADDRESS \
+                 OBJECT (`_address()` → {{address, name}}), not a bare string — \
+                 email-in reads `from.address`; got from = {}",
+                msg["from"]
+            );
+            assert!(
+                msg.get("body_text").is_some(),
+                "real localmail /v1/messages/{{id}} must name the plain-text body \
+                 `body_text` (not `body`); got keys {:?}",
+                msg.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
         }
 
         // 3b. #500, pinned against the live service for the first time.
@@ -286,7 +324,7 @@ fn mock_localmail_shapes_match_real_localmail() {
         // every `full_headers` read into a fault. And the spelling the worker
         // used to send must still NOT work — if it starts to, the service
         // gained an alias and `detail_path`'s translation deserves review.
-        if !header_spelling_checked && msg.is_some() {
+        if !header_spelling_checked {
             header_spelling_checked = true;
             let full = ok_json(
                 "/v1/messages/{id}?headers=full",
@@ -298,9 +336,11 @@ fn mock_localmail_shapes_match_real_localmail() {
                  non-empty `headers` object; got keys {:?}",
                 full.as_object().map(|o| o.keys().collect::<Vec<_>>())
             );
+            // The worker's own spelling, from `contract` — #500 was a query
+            // spelling this gate had copied by hand.
             let list = ok_json(
                 "/v1/messages/{id}?headers=list",
-                curl("GET", &format!("/v1/messages/{id}?headers=list"), None),
+                curl("GET", &format!("/v1/messages/{id}?{}", contract::HEADER_LIST_QUERY), None),
             );
             let entries = list.get("headers").and_then(|h| h.as_array()).cloned().unwrap_or_default();
             assert!(
@@ -364,7 +404,7 @@ fn mock_localmail_shapes_match_real_localmail() {
         // (`detail::number_attachments`), overwriting any `index` the service
         // served. Pinned here, where a localmail that starts sending one of its
         // own would first be seen.
-        if let Some(atts) = msg.as_ref().and_then(|m| m["attachments"].as_array()) {
+        if let Some(atts) = msg["attachments"].as_array() {
             assert!(
                 atts.iter().all(|a| a.get("index").is_none()),
                 "#760: localmail now serves its own `index` in attachment entries, which \
@@ -374,8 +414,7 @@ fn mock_localmail_shapes_match_real_localmail() {
         }
 
         if let Some((i, s)) = msg
-            .as_ref()
-            .and_then(|m| m.get("attachments"))
+            .get("attachments")
             .and_then(|a| a.as_array())
             .and_then(|atts| {
                 atts.iter()
@@ -396,12 +435,13 @@ fn mock_localmail_shapes_match_real_localmail() {
     // returned zero rows, or every per-id `GET` above failed (`msg` is
     // `None`), the loop runs to completion having exercised nothing and the
     // test would still report success — exactly the silent pass this gate is
-    // meant to prevent. Fail loudly instead.
+    // meant to prevent. Fail loudly instead. (A failed per-id GET now fails at
+    // its own `ok_json`, so what is left to catch here is a loop with no row.)
     assert!(
         detail_shape_checked,
-        "the message-detail shape check never ran (zero rows from /v1/messages, or every \
-         per-id GET to /v1/messages/{{id}} failed) — this anti-drift gate checked nothing; \
-         see the mock_localmail drift this test exists to catch"
+        "the message-detail shape check never ran (no row with an id from /v1/messages or \
+         the has_attachment search) — this anti-drift gate checked nothing; see the \
+         mock_localmail drift this test exists to catch"
     );
     // Same reasoning as `detail_shape_checked` above, for #500's half: a leg
     // that never ran must not read as a leg that passed.

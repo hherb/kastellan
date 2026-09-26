@@ -85,6 +85,8 @@ pub fn normalize_filters(
     Ok(if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) })
 }
 
+// Defined in `localmail_contract`, which the live gate and the mock `include!`
+// (#763); re-exported so the handler and its tests keep this path.
 pub use crate::localmail_contract::{HIT_FIELDS, SNIPPET_CHARS};
 
 #[cfg(test)]
