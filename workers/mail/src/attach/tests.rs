@@ -62,7 +62,7 @@ fn a_message_id_alone_is_accepted_and_defers_the_choice_to_pick() {
 fn a_sha256_alone_still_works() {
     // Backward compatibility: the original form is not withdrawn, and the
     // e2e suites still drive it.
-    assert_eq!(choose(Some(SHA_A.into()), None, None, None).unwrap(), Selector::Sha(SHA_A.into()));
+    assert_eq!(choose(Some(SHA_A.into()), None, None, None).unwrap(), Selector::Sha(planner_sha(SHA_A)));
 }
 
 #[test]
@@ -71,7 +71,23 @@ fn a_sha256_beside_a_filename_keeps_the_sha_and_ignores_the_name() {
     // carrying it across is confused about the parameter, not about which
     // file it wants — and the sha already addresses one attachment.
     let got = choose(Some(SHA_A.into()), None, Some("whatever.pdf".into()), None).unwrap();
-    assert_eq!(got, Selector::Sha(SHA_A.into()));
+    assert_eq!(got, Selector::Sha(planner_sha(SHA_A)));
+}
+
+/// #765: a malformed planner-typed hash is refused while the params are being
+/// read — before the handler's version gate asks localmail anything — so the
+/// planner is told to fix the hash, not to upgrade localmail.
+#[test]
+fn a_malformed_sha256_alone_is_refused_by_choose() {
+    for bad in ["", "../../etc/passwd", &SHA_A[..63], &SHA_A.to_uppercase()] {
+        let e = choose(Some(bad.into()), None, None, None).unwrap_err();
+        assert!(e.contains("64 lowercase hex"), "{bad:?}: {e}");
+    }
+}
+
+/// A planner-typed hash as `choose` wraps it.
+fn planner_sha(sha: &str) -> Picked {
+    Picked::from_planner_sha(sha).expect("a well-formed sha256")
 }
 
 #[test]

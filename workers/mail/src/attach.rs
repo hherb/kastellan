@@ -38,7 +38,11 @@ pub enum Selector {
     /// A sha256 copied verbatim by the planner. May well be wrong — see the
     /// module docs — so a 404 on this form gets [`missing_text_advice`]'s
     /// hash-suspicion arm.
-    Sha(String),
+    ///
+    /// Already through [`Picked::from_planner_sha`]: a malformed hash is a
+    /// params error, found while the params are read and before the handler
+    /// asks localmail anything (#765) — not at the first use of the hash.
+    Sha(Picked),
     /// A message plus (optionally) a filename within it. The sha256 is
     /// resolved from the message itself, so it cannot be mistyped.
     ///
@@ -252,7 +256,7 @@ pub fn is_sha256(s: &str) -> bool {
 /// Decide which form the planner used.
 ///
 /// `Err` is the planner-facing repair text for a params object that names no
-/// attachment, or names two.
+/// attachment, names two, or names one by a malformed `sha256`.
 ///
 /// A `sha256` **with** a `filename` is accepted, and the filename ignored: the
 /// two cannot contradict each other without fetching the message, the sha
@@ -290,7 +294,7 @@ pub fn choose(
              mail.get_message step that listed the attachment."
                 .to_string(),
         ),
-        (Some(sha256), None) => Ok(Selector::Sha(sha256)),
+        (Some(sha256), None) => Picked::from_planner_sha(&sha256).map(Selector::Sha),
         (None, None) if filename.is_some() => Err(
             "`filename` alone cannot address an attachment — add the `message_id` of the \
              mail.get_message step that listed it."
