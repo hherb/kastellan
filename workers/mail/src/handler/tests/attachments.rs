@@ -1,65 +1,72 @@
 use super::*;
 use super::search::BodyEchoFake;
 
-// --- get_attachment_text returns text ---
+// --- get_attachment_text returns one page of text ---
+
+/// Answers every text request with a page whose text is the request's own
+/// path and query, so a test reads back exactly what the worker asked for.
 struct TextFake;
 impl HttpGet for TextFake {
     fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
     fn transport_kind(&self) -> &'static str { "fake" }
     fn get_authed(&self, url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
-        assert!(url.path().ends_with("/text"), "path {}", url.path());
-        // Real localmail returns application/json `{"text": "..."}`, NOT
-        // text/plain — the worker must surface the inner text, not the envelope.
-        Ok(RawResponse {
-            status: 200,
-            location: None,
-            content_type: "application/json".into(),
-            body: br#"{"text":"extracted body"}"#.to_vec(),
-        })
+        let asked = format!("{}?{}", url.path(), url.query().unwrap_or(""));
+        Ok(json_resp(
+            serde_json::json!({
+                "text": asked, "offset": 0, "limit": 8000, "total": 20000, "next_offset": 8000
+            })
+            .to_string()
+            .as_bytes(),
+        ))
     }
 }
 
 #[test]
-fn get_attachment_text_returns_text() {
+fn get_attachment_text_asks_for_the_first_page_and_returns_it_with_its_paging_fields() {
     let mut h = MailHandler::with_client(client_with(Box::new(TextFake)));
-    let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})).unwrap();
-    assert_eq!(out["text"], "extracted body");
+    let sha = "a".repeat(64);
+    let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": sha})).unwrap();
+    assert_eq!(
+        out["text"],
+        format!("/v1/attachments/{sha}/text?offset=0&limit={}", text_page::TEXT_PAGE_CHARS)
+    );
+    assert_eq!(out["total"], 20000);
+    assert_eq!(out["next_offset"], 8000);
+    assert!(out["more"].as_str().unwrap().contains("offset: 8000"), "{out}");
 }
 
-/// A non-JSON `/text` body (defensive fallback) is surfaced verbatim.
-struct PlainTextFake;
-impl HttpGet for PlainTextFake {
+/// The planner continues by sending back the `next_offset` it was given.
+#[test]
+fn get_attachment_text_forwards_the_planners_offset() {
+    let mut h = MailHandler::with_client(client_with(Box::new(TextFake)));
+    let out = h
+        .call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64), "offset": 8000}))
+        .unwrap();
+    assert!(out["text"].as_str().unwrap().contains("offset=8000&"), "{out}");
+}
+
+/// A body that is not localmail's paged text envelope is a service fault. It
+/// used to be surfaced raw, which is how a server that does not page would
+/// hand the planner a whole document looking like one complete page.
+struct RawBodyFake(&'static [u8]);
+impl HttpGet for RawBodyFake {
     fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
     fn transport_kind(&self) -> &'static str { "fake" }
     fn get_authed(&self, _url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
-        Ok(RawResponse { status: 200, location: None, content_type: "text/plain".into(), body: b"raw text".to_vec() })
+        Ok(RawResponse { status: 200, location: None, content_type: "text/plain".into(), body: self.0.to_vec() })
     }
 }
 
 #[test]
-fn get_attachment_text_falls_back_to_raw_for_non_json() {
-    let mut h = MailHandler::with_client(client_with(Box::new(PlainTextFake)));
-    let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})).unwrap();
-    assert_eq!(out["text"], "raw text");
-}
-
-/// Valid JSON but without a `text` key → surfaced verbatim (same fallback as
-/// non-JSON: we only unwrap the envelope when the expected `text` field is a
-/// string, never a partial/foreign shape).
-struct NoTextKeyFake;
-impl HttpGet for NoTextKeyFake {
-    fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
-    fn transport_kind(&self) -> &'static str { "fake" }
-    fn get_authed(&self, _url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
-        Ok(RawResponse { status: 200, location: None, content_type: "application/json".into(), body: br#"{"other":"x"}"#.to_vec() })
+fn a_text_body_that_is_not_a_paged_envelope_is_an_operation_failure() {
+    for body in [&b"raw text"[..], br#"{"other":"x"}"#, br#"{"text":"whole, unpaged"}"#] {
+        let mut h = MailHandler::with_client(client_with(Box::new(RawBodyFake(body))));
+        let err = h
+            .call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)}))
+            .unwrap_err();
+        assert_eq!(err.code, codes::OPERATION_FAILED, "{}", err.message);
+        assert!(err.message.contains("service fault"), "{}", err.message);
     }
-}
-
-#[test]
-fn get_attachment_text_falls_back_when_json_lacks_text_key() {
-    let mut h = MailHandler::with_client(client_with(Box::new(NoTextKeyFake)));
-    let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})).unwrap();
-    assert_eq!(out["text"], r#"{"other":"x"}"#);
 }
 
 #[test]
@@ -157,31 +164,64 @@ impl ArchiveFake {
         }
     }
 }
+/// localmail's text-route body: one page, with its paging fields (slice D).
+/// These fixtures' texts are short, so every page is the whole and last one.
+fn text_page_body(text: &str) -> RawResponse {
+    json_resp(
+        serde_json::json!({
+            "text": text, "offset": 0, "limit": 8000,
+            "total": text.chars().count(), "next_offset": null
+        })
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+impl ArchiveFake {
+    /// Serve the text or blob route for one attachment. Both routes — by hash
+    /// and by position — land here, so a test's assertions hold whichever the
+    /// worker used; which one it used is pinned separately.
+    fn serve_attachment(&self, sha: &str, text: bool) -> RawResponse {
+        match text {
+            true if self.text_status == 404 => Self::not_found("no extracted text for attachment"),
+            true => text_page_body(if sha == LIVE_SHA { E_TICKET_TEXT } else { DECOY_TEXT }),
+            false if self.blob_status == 404 => Self::not_found(&format!("attachment {sha} not found")),
+            false => RawResponse {
+                status: 200,
+                location: None,
+                content_type: "application/pdf".into(),
+                body: b"%PDF-1.7 body".to_vec(),
+            },
+        }
+    }
+}
+
 impl HttpGet for ArchiveFake {
     fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
     fn transport_kind(&self) -> &'static str { "fake" }
     fn get_authed(&self, url: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
         let path = url.path().to_string();
+        // Text route and blob route are distinct upstream 404s needing
+        // opposite repairs, so the fake has to tell them apart too.
         if let Some(rest) = path.strip_prefix("/v1/attachments/") {
-            // Text route and blob route are distinct upstream 404s needing
-            // opposite repairs, so the fake has to tell them apart too.
-            return Ok(match rest.strip_suffix("/text") {
-                Some(_) if self.text_status == 404 => {
-                    Self::not_found("no extracted text for attachment")
-                }
-                Some(sha) => {
-                    let text = if sha == LIVE_SHA { E_TICKET_TEXT } else { DECOY_TEXT };
-                    json_resp(format!(r#"{{"text":"{text}"}}"#).as_bytes())
-                }
-                None if self.blob_status == 404 => {
-                    Self::not_found(&format!("attachment {rest} not found"))
-                }
-                None => RawResponse {
-                    status: 200,
-                    location: None,
-                    content_type: "application/pdf".into(),
-                    body: b"%PDF-1.7 body".to_vec(),
-                },
+            let (sha, text) = match rest.strip_suffix("/text") {
+                Some(sha) => (sha, true),
+                None => (rest, false),
+            };
+            return Ok(self.serve_attachment(sha, text));
+        }
+        if let Some(rest) = path.strip_prefix("/v1/messages/37413/attachments/") {
+            if self.message_status == 404 {
+                return Ok(Self::not_found("message not found"));
+            }
+            let (i, text) = match rest.strip_suffix("/text") {
+                Some(i) => (i, true),
+                None => (rest, false),
+            };
+            let entry = i.parse::<usize>().ok().and_then(|i| self.attachments.get(i));
+            return Ok(match entry {
+                Some((_, sha)) => self.serve_attachment(sha, text),
+                None => Self::not_found(&format!("attachment {i} of message 37413 not found")),
             });
         }
         if self.message_status == 404 {

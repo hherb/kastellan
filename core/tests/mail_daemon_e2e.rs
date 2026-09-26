@@ -442,6 +442,34 @@ fn mock_localmail_shapes_match_real_localmail() {
         first_hit.get("message_id")
     );
 
+    // 1b. #760: the worker refuses a localmail below API 1.3 and projects every
+    //     search to exactly these keys. Both are claims about the live service,
+    //     so they are pinned here (the worker crate is bin-only; its
+    //     `version::MIN_API_MINOR` and `search_params::HIT_FIELDS` are mirrored).
+    let version = ok_json("/v1/version", curl("GET", "/v1/version", None));
+    assert_eq!(version["api_major"], 1, "#760: the mail worker speaks API 1.x: {version}");
+    assert!(
+        version["api_minor"].as_u64().is_some_and(|m| m >= 3),
+        "#760: the mail worker needs api_minor >= 3 (slice E); got {version}"
+    );
+    let fields = ["message_id", "account", "subject", "from", "date", "has_attachments", "snippet"];
+    let projected = ok_json(
+        "/v1/search with fields",
+        curl(
+            "POST",
+            "/v1/search",
+            Some(&serde_json::json!({"query": "invoice", "limit": 3, "fields": fields, "snippet_chars": 120}).to_string()),
+        ),
+    );
+    let hit = projected["results"].get(0).and_then(|h| h.as_object()).unwrap_or_else(|| {
+        panic!("#760: projected /v1/search for `invoice` matched nothing: {projected}")
+    });
+    let mut got: Vec<&str> = hit.keys().map(String::as_str).collect();
+    let mut want = fields.to_vec();
+    got.sort_unstable();
+    want.sort_unstable();
+    assert_eq!(got, want, "#760: a projected hit must carry exactly the named keys");
+
     // 2. accounts → JSON array.
     let accounts = ok_json("/v1/accounts", curl("GET", "/v1/accounts", None));
     assert!(accounts.is_array(), "real localmail /v1/accounts must be a JSON array");
@@ -480,6 +508,8 @@ fn mock_localmail_shapes_match_real_localmail() {
          not a bare JSON number; got {first_message_id:?}"
     );
     let mut sha: Option<String> = None;
+    // The same attachment by position: (message id, index), for slice D's route.
+    let mut at: Option<(String, usize)> = None;
     // Checked once, on the first detail actually fetched (see below).
     let mut detail_shape_checked = false;
     // Checked once, alongside the detail shape.
@@ -568,13 +598,18 @@ fn mock_localmail_shapes_match_real_localmail() {
             );
         }
 
-        if let Some(s) = msg
+        if let Some((i, s)) = msg
             .as_ref()
             .and_then(|m| m.get("attachments"))
             .and_then(|a| a.as_array())
-            .and_then(|atts| atts.iter().find_map(|a| a.get("sha256").and_then(|s| s.as_str())))
+            .and_then(|atts| {
+                atts.iter()
+                    .enumerate()
+                    .find_map(|(i, a)| a.get("sha256").and_then(|s| s.as_str()).map(|s| (i, s)))
+            })
         {
             sha = Some(s.to_string());
+            at = Some((id.clone(), i));
             break;
         }
     }
@@ -614,4 +649,20 @@ fn mock_localmail_shapes_match_real_localmail() {
         text.and_then(|v| v.get("text").map(|t| t.is_string())).unwrap_or(false),
         "attachment text must be a JSON {{\"text\": …}} envelope"
     );
+
+    // #760 (slice D): the same attachment by position, paged. The worker
+    // copies `next_offset` rather than computing it, and treats a body missing
+    // any paging field as a fault — so all four must be on the wire.
+    let (id, i) = at.expect("set beside sha");
+    let page = ok_json(
+        "/v1/messages/{id}/attachments/{index}/text",
+        curl("GET", &format!("/v1/messages/{id}/attachments/{i}/text?offset=0&limit=5"), None),
+    );
+    assert!(page["text"].is_string(), "#760: paged text must carry `text`: {page}");
+    assert_eq!(page["offset"], 0, "#760: {page}");
+    let total = page["total"].as_u64().unwrap_or_else(|| panic!("#760: `total` must be a count: {page}"));
+    let want_next = if total > 5 { serde_json::json!(5) } else { serde_json::Value::Null };
+    assert_eq!(page["next_offset"], want_next, "#760: next_offset for a 5-char window: {page}");
+    let (status, head, _) = curl("GET", &format!("/v1/messages/{id}/attachments/{i}"), None);
+    assert_eq!(status, 200, "#760: the index bytes route must answer 200, headers:\n{head}");
 }

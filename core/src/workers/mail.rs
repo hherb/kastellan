@@ -113,8 +113,9 @@ impl WorkerManifest for MailManifest {
                 name: TOOL_NAME,
                 method: "mail.search",
                 summary: "Search the mail archive (hybrid semantic + full-text). Filter by \
-                          date range, from/to, subject, has_attachment, account/folder. Page \
-                          forward with next_cursor.",
+                          date range, from/to, subject, has_attachment, account/folder. Each \
+                          hit: message_id, account, subject, from, date, has_attachments, a \
+                          short snippet. Page forward with next_cursor.",
                 params: &[
                     ToolParam {
                         name: "query",
@@ -155,7 +156,7 @@ impl WorkerManifest for MailManifest {
                 name: TOOL_NAME,
                 method: "mail.get_message",
                 summary: "Fetch one message: headers, plaintext body, and attachment list \
-                          [{filename, sha256, content_type, size}].",
+                          [{index, filename, sha256, content_type, size}].",
                 params: &[
                     ToolParam {
                         name: "message_id",
@@ -188,10 +189,11 @@ impl WorkerManifest for MailManifest {
             ToolDoc {
                 name: TOOL_NAME,
                 method: "mail.get_attachment_text",
-                summary: "Extracted text of an attachment (server-side PDF/office extraction). \
-                          Use to READ an attachment's contents. Name it by message_id \
-                          (+ filename when the message has more than one attachment); \
-                          do NOT retype a sha256.",
+                summary: "Extracted text of an attachment (server-side PDF/office extraction), \
+                          one page at a time. Use to READ an attachment's contents. Name it by \
+                          message_id (+ filename or index when the message has more than one \
+                          attachment); do NOT retype a sha256. When next_offset is not null, \
+                          call again with offset: next_offset for the next page.",
                 params: &[
                     ToolParam {
                         name: "message_id",
@@ -208,12 +210,26 @@ impl WorkerManifest for MailManifest {
                         required: false,
                     },
                     ToolParam {
+                        name: "index",
+                        description: "which attachment, by its `index` in the mail.get_message \
+                                      output (0, 1, …). Exact and short: use it when two \
+                                      attachments share a filename, or have none.",
+                        required: false,
+                    },
+                    ToolParam {
                         name: "sha256",
                         description: "instead of, or alongside, message_id: the attachment's \
                                       hash, only ever copied verbatim from a previous step's \
                                       output — never reconstructed from memory. Beside a \
                                       message_id it is checked against that message, and a \
                                       12-char prefix is enough.",
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "offset",
+                        description: "where the page starts: omit for the first page, else the \
+                                      next_offset the previous page returned — copied, never \
+                                      computed.",
                         required: false,
                     },
                 ],
@@ -224,7 +240,7 @@ impl WorkerManifest for MailManifest {
                 summary: "Save an attachment in its ORIGINAL format (PDF, etc.) to the task \
                           output dir; returns its path, size and content_type. Use to DELIVER \
                           a file. Named the same way as mail.get_attachment_text: by message_id \
-                          (+ filename); do NOT retype a sha256.",
+                          (+ filename or index); do NOT retype a sha256.",
                 params: &[
                     ToolParam {
                         name: "message_id",
@@ -238,6 +254,13 @@ impl WorkerManifest for MailManifest {
                         description: "with message_id, which attachment to save (a distinctive \
                                       part of the name is enough) — it is then saved under the \
                                       archive's own name. With sha256, the name to save it as.",
+                        required: false,
+                    },
+                    ToolParam {
+                        name: "index",
+                        description: "which attachment, by its `index` in the mail.get_message \
+                                      output (0, 1, …). Exact and short: use it when two \
+                                      attachments share a filename, or have none.",
                         required: false,
                     },
                     ToolParam {

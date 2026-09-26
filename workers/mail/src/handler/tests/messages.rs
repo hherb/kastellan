@@ -190,3 +190,22 @@ fn list_accounts_builds_path() {
     let mut h = MailHandler::with_client(client_with(Box::new(PathFake("/v1/accounts"))));
     h.call("mail.list_accounts", serde_json::json!({})).unwrap();
 }
+
+/// #760: `mail.get_message` writes each attachment's position into it, so the
+/// planner has an `index` to hand the attachment tools.
+struct OneAttachmentFake;
+impl HttpGet for OneAttachmentFake {
+    fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
+    fn transport_kind(&self) -> &'static str { "fake" }
+    fn get_authed(&self, _: &Url, _b: &str, _m: usize) -> Result<RawResponse, String> {
+        Ok(json_resp(br#"{"id":"7","attachments":[{"filename":"a"},{"filename":"a"}]}"#))
+    }
+}
+
+#[test]
+fn get_message_numbers_its_attachments() {
+    let mut h = MailHandler::with_client(client_with(Box::new(OneAttachmentFake)));
+    let out = h.call("mail.get_message", serde_json::json!({"message_id": 7})).unwrap();
+    assert_eq!(out["attachments"][0]["index"], 0);
+    assert_eq!(out["attachments"][1]["index"], 1);
+}

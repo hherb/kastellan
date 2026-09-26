@@ -135,7 +135,7 @@ fn get_attachment_text_offers_the_message_form_first_and_demands_no_hash() {
     let names: Vec<&str> = d.params.iter().map(|p| p.name).collect();
     assert_eq!(
         names,
-        vec!["message_id", "filename", "sha256"],
+        vec!["message_id", "filename", "index", "sha256", "offset"],
         "the form that needs no hash must be read first"
     );
     assert!(
@@ -167,7 +167,7 @@ fn get_attachment_offers_the_message_form_and_explains_the_double_duty_filename(
         .find(|d| d.method == "mail.get_attachment")
         .expect("mail.get_attachment must be advertised");
     let names: Vec<&str> = d.params.iter().map(|p| p.name).collect();
-    assert_eq!(names, vec!["message_id", "filename", "sha256"]);
+    assert_eq!(names, vec!["message_id", "filename", "index", "sha256"]);
     assert!(d.params.iter().all(|p| !p.required), "either form suffices");
     let fname = d.params.iter().find(|p| p.name == "filename").expect("filename");
     assert!(
@@ -223,4 +223,35 @@ fn message_id_description_names_the_field_and_rules_out_the_two_live_mistakes() 
         d.contains("not a placeholder") || d.contains("literal"),
         "must forbid a template placeholder: {d:?}"
     );
+}
+
+/// #760: the attachment tools take an `index`, and the schema has to say
+/// where it comes from (mail.get_message) and when it is the key to use —
+/// otherwise the planner keeps reaching for a hash when names collide.
+#[test]
+fn attachment_tools_advertise_index_and_get_message_lists_it() {
+    let docs = MailManifest.tool_docs();
+    for method in ["mail.get_attachment_text", "mail.get_attachment"] {
+        let d = docs.iter().find(|d| d.method == method).expect(method);
+        let index = d.params.iter().find(|p| p.name == "index").expect("index");
+        assert!(!index.required);
+        assert!(
+            index.description.contains("mail.get_message") && index.description.contains("share"),
+            "{method}: {:?}",
+            index.description
+        );
+    }
+    let get = docs.iter().find(|d| d.method == "mail.get_message").expect("get_message");
+    assert!(get.summary.contains("index"), "{:?}", get.summary);
+}
+
+/// Text is paged since #760, so the planner must learn that a page may not
+/// be the whole document and how to get the next one.
+#[test]
+fn get_attachment_text_says_how_to_read_the_next_page() {
+    let docs = MailManifest.tool_docs();
+    let d = docs.iter().find(|d| d.method == "mail.get_attachment_text").expect("text");
+    assert!(d.summary.contains("next_offset") && d.summary.contains("offset"), "{:?}", d.summary);
+    let offset = d.params.iter().find(|p| p.name == "offset").expect("offset");
+    assert!(offset.description.contains("next_offset"), "{:?}", offset.description);
 }

@@ -231,6 +231,20 @@ fn wants_full_headers(path: &str) -> bool {
 
 /// Pure request-line/headers → (status, content-type, body). Asserts a
 /// non-empty bearer so the auth wiring is exercised, then routes by path.
+/// localmail's text-route body since slice D (`api_minor` 2): one page plus
+/// its paging fields. The canned text is short, so it is the whole and last
+/// page (`next_offset: null`) whatever window was asked for.
+fn text_page_body() -> String {
+    serde_json::json!({
+        "text": CANNED_ATTACHMENT_TEXT,
+        "offset": 0,
+        "limit": 8000,
+        "total": CANNED_ATTACHMENT_TEXT.chars().count(),
+        "next_offset": null
+    })
+    .to_string()
+}
+
 fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
     // Bearer presence (auth wiring). A request with no non-empty bearer is a 401.
     let has_bearer = head.lines().any(|l| {
@@ -261,7 +275,28 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
     // Order matters: the more specific /v1/changes/ack must be checked before
     // the more general /v1/changes prefix (an ack path also starts with it),
     // and both before the attachment/message paths below.
-    if path.starts_with("/v1/changes/ack") {
+    // Message-scoped attachment routes (slice D, `api_minor` 2): the canned
+    // message's one attachment sits at index 0. Anything else under the prefix
+    // is localmail's shared 404.
+    let by_index = format!("/v1/messages/{CANNED_MESSAGE_ID}/attachments/");
+    let by_index_rest = path.split('?').next().and_then(|p| p.strip_prefix(&by_index));
+
+    if path.starts_with("/v1/version") {
+        // Unauthenticated on the real service (reached here only with a bearer,
+        // which every client of this mock sends). The mail worker's version
+        // gate (#760) asks before every tool that uses a slice D/E feature.
+        json(serde_json::json!({
+            "api_major": 1, "api_minor": 3, "server_version": "0.3.0",
+            "build_hash": null, "build_source": "wheel", "version_source": "installed"
+        }).to_string())
+    } else if let Some(rest) = by_index_rest {
+        match rest {
+            "0/text" => json(text_page_body()),
+            "0" => ("200 OK", "application/pdf", CANNED_ATTACHMENT_BYTES.to_vec()),
+            _ => ("404 Not Found", "application/problem+json",
+                  br#"{"type":"/problems/not-found","title":"Not found","status":404}"#.to_vec()),
+        }
+    } else if path.starts_with("/v1/changes/ack") {
         ("204 No Content", "text/plain", Vec::new())
     } else if path.starts_with("/v1/changes") {
         // Shape confirmed against the real localmail route (task-1-report.md's
@@ -320,7 +355,7 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
             {"id": CANNED_ACCOUNT_ID, "name": CANNED_ACCOUNT_NAME}
         ]).to_string())
     } else if path.contains("/text") && path.starts_with("/v1/attachments/") {
-        json(serde_json::json!({"text": CANNED_ATTACHMENT_TEXT}).to_string())
+        json(text_page_body())
     } else if path.starts_with("/v1/attachments/") {
         ("200 OK", "application/pdf", CANNED_ATTACHMENT_BYTES.to_vec())
     } else if is_message_by_id {

@@ -5,12 +5,15 @@
 
 mod attach;
 mod client;
+mod detail;
 mod handler;
 mod headers;
 mod ids;
 mod problem;
 mod search_params;
 mod sort;
+mod text_page;
+mod version;
 
 use kastellan_worker_prelude::serve_stdio_with;
 

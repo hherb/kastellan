@@ -292,3 +292,38 @@ fn accounts_return_id_as_a_string() {
         v[0]["id"]
     );
 }
+
+/// #760: the mail worker refuses a localmail older than API 1.3, so the
+/// mock must claim one it accepts — and in localmail's own field types.
+#[test]
+fn version_reports_an_api_the_mail_worker_accepts() {
+    let v = routed("GET /v1/version HTTP/1.1");
+    assert_eq!(v["api_major"], 1);
+    assert!(v["api_minor"].as_u64().is_some_and(|m| m >= 3), "{v}");
+}
+
+/// Slice D: text comes with its paging fields on both text routes.
+#[test]
+fn both_text_routes_serve_a_paged_envelope() {
+    for line in [
+        format!("GET /v1/attachments/{CANNED_SHA256}/text?offset=0&limit=8000 HTTP/1.1"),
+        format!("GET /v1/messages/{CANNED_MESSAGE_ID}/attachments/0/text?offset=0&limit=8000 HTTP/1.1"),
+    ] {
+        let v = routed(&line);
+        assert_eq!(v["text"], CANNED_ATTACHMENT_TEXT, "{line}");
+        assert_eq!(v["offset"], 0, "{line}");
+        assert!(v["total"].is_u64() && v["next_offset"].is_null(), "{line}: {v}");
+    }
+}
+
+/// The canned message has one attachment, so index 0 serves its bytes and
+/// index 1 is localmail's shared 404.
+#[test]
+fn the_index_route_serves_position_zero_and_404s_past_the_end() {
+    let head = |t: &str| format!("GET {t} HTTP/1.1\r\nAuthorization: Bearer t\r\n");
+    let (status, ctype, body) = route(&head(&format!("/v1/messages/{CANNED_MESSAGE_ID}/attachments/0")));
+    assert!(status.starts_with("200") && ctype == "application/pdf");
+    assert_eq!(body, CANNED_ATTACHMENT_BYTES);
+    let (status, _, _) = route(&head(&format!("/v1/messages/{CANNED_MESSAGE_ID}/attachments/1")));
+    assert!(status.starts_with("404"), "{status}");
+}

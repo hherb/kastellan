@@ -49,11 +49,29 @@ pub enum Selector {
     /// of at least [`SHA_PREFIX_MIN`] chars selects too — that is what makes
     /// the sha a usable repair when `filename` cannot discriminate, since the
     /// planner then copies 12 chars rather than 64.
+    ///
+    /// `index` is the attachment's position in that message's `attachments`
+    /// array — the `index` key `mail.get_message` writes into each entry
+    /// ([`crate::detail`]) and the segment localmail's
+    /// `/v1/messages/{id}/attachments/{index}` route takes. It selects outright,
+    /// and is the one key that tells apart two attachments sharing a filename.
     InMessage {
         message_id: LocalmailId,
         filename: Option<String>,
         expect_sha: Option<String>,
+        index: Option<usize>,
     },
+}
+
+/// One usable attachment of a message: its position in the served
+/// `attachments` array (which counts unusable entries too, because localmail's
+/// index route does), its filename (`""` when it has none) and its vetted
+/// sha256.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cand<'a> {
+    index: usize,
+    name: &'a str,
+    sha: &'a str,
 }
 
 /// Longest filename this module will quote back. Filenames in the live archive
@@ -106,16 +124,20 @@ pub struct Picked {
     sha256: String,
     /// localmail's own filename for the blob; `None` when the entry carried none.
     filename: Option<String>,
+    /// Where it sits: the message and the position within it. `None` for a
+    /// planner-typed hash, which names bytes rather than a message entry.
+    at: Option<(LocalmailId, usize)>,
 }
 
 impl Picked {
-    /// A hash resolved out of a message's own attachment list, which
+    /// An entry resolved out of a message's own attachment list, whose hash
     /// [`pick`] has already vetted with [`is_sha256`].
-    fn resolved(sha256: &str, filename: &str) -> Self {
-        debug_assert!(is_sha256(sha256), "pick must only yield vetted hashes");
+    fn resolved(message_id: LocalmailId, c: Cand<'_>) -> Self {
+        debug_assert!(is_sha256(c.sha), "pick must only yield vetted hashes");
         Self {
-            sha256: sha256.to_string(),
-            filename: (!filename.is_empty()).then(|| filename.to_string()),
+            sha256: c.sha.to_string(),
+            filename: (!c.name.is_empty()).then(|| c.name.to_string()),
+            at: Some((message_id, c.index)),
         }
     }
 
@@ -128,7 +150,7 @@ impl Picked {
     /// nothing authoritative to save it under.
     pub fn from_planner_sha(sha256: &str) -> Result<Self, String> {
         if is_sha256(sha256) {
-            Ok(Self { sha256: sha256.to_string(), filename: None })
+            Ok(Self { sha256: sha256.to_string(), filename: None, at: None })
         } else {
             Err(format!(
                 "sha256 must be 64 lowercase hex chars, got {:?}",
@@ -147,6 +169,36 @@ impl Picked {
     /// sha-derived stem).
     pub fn save_name(&self) -> Option<&str> {
         self.filename.as_deref()
+    }
+
+    /// The entry's position in its message, when it was resolved from one.
+    pub fn index(&self) -> Option<usize> {
+        self.at.map(|(_, i)| i)
+    }
+
+    /// Where localmail serves the original bytes.
+    ///
+    /// An entry resolved from a message is fetched **by position**
+    /// (slice D): that route re-checks the message's ACL and sends the entry's
+    /// own filename, where the hash route sends whichever name the *earliest*
+    /// carrying message used — wrong for 1,109 live blobs that carry more than
+    /// one. A planner-typed hash has no message, so it keeps the hash route.
+    ///
+    /// Every segment is interpolated from a validated type (`LocalmailId`, a
+    /// `usize`, a vetted sha), so no string the planner wrote reaches a path.
+    pub fn blob_path(&self) -> String {
+        match self.at {
+            Some((message_id, index)) => {
+                format!("/v1/messages/{message_id}/attachments/{index}")
+            }
+            None => format!("/v1/attachments/{}", self.sha256),
+        }
+    }
+
+    /// Where localmail serves one page of the extracted text: `limit`
+    /// characters from character `offset`. Both text routes page the same way.
+    pub fn text_path(&self, offset: u64, limit: u32) -> String {
+        format!("{}/text?offset={offset}&limit={limit}", self.blob_path())
     }
 }
 
@@ -181,15 +233,25 @@ pub fn is_sha256(s: &str) -> bool {
 /// attachments, which is strictly stronger than either alone: a hallucinated
 /// hash is caught by the message it does not belong to, and the file still gets
 /// the archive's own name.
+///
+/// An `index` without a `message_id` is refused: it is a position *within* one
+/// message and means nothing on its own — and silently ignoring it beside a
+/// `sha256` would fetch by hash while the planner believes it chose by position.
 pub fn choose(
     sha256: Option<String>,
     message_id: Option<LocalmailId>,
     filename: Option<String>,
+    index: Option<usize>,
 ) -> Result<Selector, String> {
     match (sha256, message_id) {
         (expect_sha, Some(message_id)) => {
-            Ok(Selector::InMessage { message_id, filename, expect_sha })
+            Ok(Selector::InMessage { message_id, filename, expect_sha, index })
         }
+        (_, None) if index.is_some() => Err(
+            "`index` is a position within one message — add the `message_id` of the \
+             mail.get_message step that listed the attachment."
+                .to_string(),
+        ),
         (Some(sha256), None) => Ok(Selector::Sha(sha256)),
         (None, None) if filename.is_some() => Err(
             "`filename` alone cannot address an attachment — add the `message_id` of the \
@@ -205,25 +267,29 @@ pub fn choose(
 }
 
 /// Pick one attachment out of a `mail.get_message` `attachments` array, given
-/// the filename and/or hash the planner named.
+/// the index, hash and/or filename the planner named.
 ///
-/// Resolution order: an `expect_sha` (exact, or a unique prefix — see
-/// [`find_by_sha`]) selects, because a hash is the exact identifier and the
-/// message has vouched for it; otherwise the `filename` ladder runs (see
-/// [`pick_by_filename`]); a lone attachment needs neither. Ambiguity is refused
-/// rather than guessed, and so is a `filename` that *contradicts* the hash:
-/// serving a document the planner did not ask for is the failure this module
-/// exists to end, and a wrong answer is worse than a repairable error.
+/// Resolution order: an `index` selects outright (see [`pick_by_index`]), and
+/// any hash or filename beside it is a second opinion that must agree; then an
+/// `expect_sha` (exact, or a unique prefix — see [`find_by_sha`]) selects,
+/// because a hash is the exact identifier and the message has vouched for it;
+/// otherwise the `filename` ladder runs (see [`pick_by_filename`]); a lone
+/// attachment needs none of them. Ambiguity is refused rather than guessed, and
+/// so is a second opinion that *contradicts* the selector: serving a document
+/// the planner did not ask for is the failure this module exists to end, and a
+/// wrong answer is worse than a repairable error.
 ///
 /// Every refusal names a key that actually selects the candidates it lists —
 /// see [`how_to_name`] for why a filename is not always one.
 ///
-/// `message_id` is quoted in the repair text only — the planner has to be able
-/// to match the advice to the step it wrote.
+/// `message_id` goes into the repair text — the planner has to be able to match
+/// the advice to the step it wrote — and into the [`Picked`], which fetches by
+/// position within that message.
 pub fn pick(
     attachments: &[serde_json::Value],
     filename: Option<&str>,
     expect_sha: Option<&str>,
+    index: Option<usize>,
     message_id: LocalmailId,
 ) -> Result<Picked, String> {
     // An entry is usable only if it carries a sha256 of the right shape. A
@@ -231,13 +297,14 @@ pub fn pick(
     // blob was never stored); a malformed one would reach a URL path. The
     // unusable names are kept rather than dropped: they are in the message the
     // planner just read, so "no attachment has that filename" about one of
-    // them is a false statement about an entry it can see.
-    let mut usable: Vec<(&str, &str)> = Vec::new();
+    // them is a false statement about an entry it can see. Positions count
+    // *every* entry, usable or not, because localmail's index route does.
+    let mut usable: Vec<Cand<'_>> = Vec::new();
     let mut unstored: Vec<&str> = Vec::new();
-    for a in attachments {
+    for (i, a) in attachments.iter().enumerate() {
         let name = a.get("filename").and_then(serde_json::Value::as_str).unwrap_or("");
         match a.get("sha256").and_then(serde_json::Value::as_str) {
-            Some(sha) if is_sha256(sha) => usable.push((name, sha)),
+            Some(sha) if is_sha256(sha) => usable.push(Cand { index: i, name, sha }),
             _ => unstored.push(name),
         }
     }
@@ -258,6 +325,32 @@ pub fn pick(
                 attachments.len()
             )
         });
+    }
+
+    if let Some(i) = index {
+        let c = pick_by_index(attachments.len(), &usable, i, message_id)?;
+        // Second opinions beside an index must agree with it, for the reason
+        // the sha/filename pair below must: two selectors that disagree are two
+        // requests, and serving one of them silently is a wrong answer.
+        if let Some(want_sha) = expect_sha {
+            if find_by_sha(&[c], &want_sha.to_ascii_lowercase()).is_none() {
+                return Err(format!(
+                    "`index` and `sha256` name different attachments of message {message_id} \
+                     — pass one, not both. `index` {i} is {}.",
+                    head(c.name)
+                ));
+            }
+        }
+        if let Some(want_name) = filename {
+            if !c.name.to_lowercase().contains(&want_name.to_lowercase()) {
+                return Err(format!(
+                    "`index` and `filename` name different attachments of message \
+                     {message_id} — pass one, not both. `index` {i} is {}.",
+                    head(c.name)
+                ));
+            }
+        }
+        return Ok(Picked::resolved(message_id, c));
     }
 
     // A hash the planner supplied beside the message selects exactly, once the
@@ -284,21 +377,21 @@ pub fn pick(
         // report success.
         if let Some(want_name) = filename {
             if let Ok(by_name) = pick_by_filename(&usable, want_name) {
-                if by_name.1 != by_sha.1 {
+                if by_name.index != by_sha.index {
                     return Err(format!(
                         "`sha256` and `filename` name different attachments of message \
                          {message_id} — pass one, not both. The `filename` names {}.",
-                        head(by_name.0)
+                        head(by_name.name)
                     ));
                 }
             }
         }
-        return Ok(Picked::resolved(by_sha.1, by_sha.0));
+        return Ok(Picked::resolved(message_id, by_sha));
     }
 
     let Some(want) = filename else {
-        if let [(name, sha)] = usable[..] {
-            return Ok(Picked::resolved(sha, name));
+        if let [only] = usable[..] {
+            return Ok(Picked::resolved(message_id, only));
         }
         return Err(with_candidates(
             &format!(
@@ -311,7 +404,7 @@ pub fn pick(
     };
 
     match pick_by_filename(&usable, want) {
-        Ok((name, sha)) => Ok(Picked::resolved(sha, name)),
+        Ok(hit) => Ok(Picked::resolved(message_id, hit)),
         Err(candidates) if !candidates.is_empty() => Err(with_candidates(
             &format!(
                 "`filename` matches {} attachments in message {message_id} — {}, exactly one of:",
@@ -335,6 +428,31 @@ pub fn pick(
     }
 }
 
+/// The usable entry at position `i` of a message with `len` attachments.
+///
+/// Out of range and unstored are told apart, because they need different
+/// repairs: one is a wrong number, the other a real entry with nothing behind
+/// it (the planner can see it listed, so "no such attachment" would be false).
+fn pick_by_index<'a>(
+    len: usize,
+    usable: &[Cand<'a>],
+    i: usize,
+    message_id: LocalmailId,
+) -> Result<Cand<'a>, String> {
+    if i >= len {
+        return Err(format!(
+            "message {message_id} has {len} attachment(s), numbered from 0 — `index` {i} is \
+             past the end. Copy an `index` from the mail.get_message step."
+        ));
+    }
+    usable.iter().find(|c| c.index == i).copied().ok_or_else(|| {
+        format!(
+            "attachment {i} of message {message_id} is listed but its content was never \
+             stored, so it cannot be read."
+        )
+    })
+}
+
 /// Resolve `want` against the attachment list by filename.
 ///
 /// `Err` carries the ambiguous candidate set — empty when nothing matched at
@@ -356,15 +474,12 @@ pub fn pick(
 /// credited with: `receipt.pdf` beside `flight-receipt.pdf` resolves rather
 /// than being refused, because the exact tier holds one name while the
 /// substring tier holds two.
-fn pick_by_filename<'a>(
-    usable: &[(&'a str, &'a str)],
-    want: &str,
-) -> Result<(&'a str, &'a str), Vec<(&'a str, &'a str)>> {
+fn pick_by_filename<'a>(usable: &[Cand<'a>], want: &str) -> Result<Cand<'a>, Vec<Cand<'a>>> {
     let lower = want.to_lowercase();
-    let exact: Vec<_> = usable.iter().filter(|(n, _)| *n == want).copied().collect();
-    let ci: Vec<_> = usable.iter().filter(|(n, _)| n.to_lowercase() == lower).copied().collect();
+    let exact: Vec<_> = usable.iter().filter(|c| c.name == want).copied().collect();
+    let ci: Vec<_> = usable.iter().filter(|c| c.name.to_lowercase() == lower).copied().collect();
     let sub: Vec<_> =
-        usable.iter().filter(|(n, _)| n.to_lowercase().contains(&lower)).copied().collect();
+        usable.iter().filter(|c| c.name.to_lowercase().contains(&lower)).copied().collect();
     for tier in [&exact, &ci, &sub] {
         if let [hit] = tier[..] {
             return Ok(hit);
@@ -376,19 +491,20 @@ fn pick_by_filename<'a>(
 /// Exact sha match, else a **unique** prefix of at least [`SHA_PREFIX_MIN`]
 /// hex chars. `want` must already be lowercased.
 ///
-/// The prefix arm is what makes [`how_to_name`]'s sha advice honest: it lists
-/// 12-char keys, so 12-char keys have to work. Resolution is still against
+/// The prefix arm is what lets the planner repair with a 12-char key rather
+/// than 64 chars — the length `mail.get_attachment` prefixes saved files with
+/// and the tool schema advertises. Resolution is still against
 /// *this message's* attachments, and a prefix shared by two of them is refused
 /// by the uniqueness check rather than guessed — so the widening cannot select
 /// an attachment the planner did not name.
-fn find_by_sha<'a>(usable: &[(&'a str, &'a str)], want: &str) -> Option<(&'a str, &'a str)> {
-    if let Some(hit) = usable.iter().find(|(_, sha)| *sha == want) {
+fn find_by_sha<'a>(usable: &[Cand<'a>], want: &str) -> Option<Cand<'a>> {
+    if let Some(hit) = usable.iter().find(|c| c.sha == want) {
         return Some(*hit);
     }
     if want.len() < SHA_PREFIX_MIN || !want.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    let mut hits = usable.iter().filter(|(_, sha)| sha.starts_with(want));
+    let mut hits = usable.iter().filter(|c| c.sha.starts_with(want));
     let first = *hits.next()?;
     hits.next().is_none().then_some(first)
 }
@@ -401,14 +517,15 @@ fn find_by_sha<'a>(usable: &[(&'a str, &'a str)], want: &str) -> Option<(&'a str
 /// canonical case) or carry none at all, and there "copy one exactly" is
 /// advice the planner cannot act on: it copies the name it was given, gets a
 /// byte-identical error, and repeats to the iteration cap — the exact loop
-/// this module exists to end. The sha256 prefix is the only key that
-/// discriminates in those messages, so it is what gets listed.
-fn how_to_name(cands: &[(&str, &str)]) -> (&'static str, bool) {
-    let names: std::collections::HashSet<&str> = cands.iter().map(|(n, _)| *n).collect();
-    if cands.iter().all(|(n, _)| !n.is_empty()) && names.len() == cands.len() {
+/// this module exists to end. The position is the key that always
+/// discriminates — 1–2 digits, where it used to be a 12-char sha prefix, which
+/// also discriminates but has to be transcribed exactly (#760).
+fn how_to_name(cands: &[Cand<'_>]) -> (&'static str, bool) {
+    let names: std::collections::HashSet<&str> = cands.iter().map(|c| c.name).collect();
+    if cands.iter().all(|c| !c.name.is_empty()) && names.len() == cands.len() {
         ("copy its `filename`", true)
     } else {
-        ("pass its `sha256` (a 12-char prefix is enough)", false)
+        ("pass its `index`", false)
     }
 }
 
@@ -473,8 +590,7 @@ pub fn missing_blob_advice(sha256: &str, planner_supplied: bool) -> String {
 /// eliding the rest with `…`.
 ///
 /// Each is rendered under the key that actually selects it ([`how_to_name`]):
-/// its filename when the names discriminate, its 12-char sha prefix when they
-/// do not — so the list is always something the planner can send back and have
+/// its filename when the names discriminate, its `index` when they do not — so the list is always something the planner can send back and have
 /// resolve.
 ///
 /// The budget is *derived* from [`kastellan_protocol::STEP_ERR_DETAIL_MAX`]
@@ -485,15 +601,14 @@ pub fn missing_blob_advice(sha256: &str, planner_supplied: bool) -> String {
 /// the listing branches; the zero-listed branch appends only 2 chars and is
 /// bounded by the prose itself, whose longest arm is ~115 chars even with a
 /// 19-digit id.
-fn with_candidates(prose: &str, cands: &[(&str, &str)]) -> String {
+fn with_candidates(prose: &str, cands: &[Cand<'_>]) -> String {
     const ELISION: &str = ", …";
     let by_name = how_to_name(cands).1;
     let budget = kastellan_protocol::STEP_ERR_DETAIL_MAX;
     let mut out = prose.to_string();
     let mut listed = 0usize;
-    for (name, sha) in cands.iter().take(MAX_LISTED) {
-        let shown =
-            if by_name { head(name) } else { sha.chars().take(SHA_HEAD).collect::<String>() };
+    for c in cands.iter().take(MAX_LISTED) {
+        let shown = if by_name { head(c.name) } else { c.index.to_string() };
         let sep = if listed == 0 { " " } else { ", " };
         let need = sep.chars().count() + shown.chars().count() + ELISION.chars().count();
         if out.chars().count() + need > budget {

@@ -3,6 +3,7 @@
 //! Attachments come back either as extracted text (`get_attachment_text`) or as
 //! original-format files written to the task workspace `out/` (`get_attachment`).
 
+use std::cell::OnceCell;
 use std::path::Path;
 
 use kastellan_protocol::{codes, server::Handler, RpcError};
@@ -13,19 +14,67 @@ use crate::ids::{self, LocalmailId};
 use crate::problem;
 use crate::search_params;
 use crate::sort;
+use crate::text_page;
+use crate::version;
 
 pub struct MailHandler {
     client: MailClient,
+    /// Set once localmail has shown it serves an `api_minor` this worker can
+    /// use (see [`version`]). Only a success is remembered: a refusal is asked
+    /// again, so a localmail upgraded under a persistent worker is picked up.
+    api_ok: OnceCell<()>,
+}
+
+/// The tools that use a route or request field localmail added in slice D or
+/// E, and so must not run against an older server. The rest use routes every
+/// `/v1` serves, and keep working against one — a mail worker that could still
+/// list accounts is more use to an operator diagnosing an upgrade than one
+/// that refuses everything.
+fn needs_current_api(method: &str) -> bool {
+    matches!(method, "mail.search" | "mail.get_attachment_text" | "mail.get_attachment")
 }
 
 impl MailHandler {
     pub fn from_env() -> anyhow::Result<Self> {
-        Ok(Self { client: MailClient::from_env()? })
+        Ok(Self { client: MailClient::from_env()?, api_ok: OnceCell::new() })
+    }
+
+    /// A handler whose localmail is taken to be current, so a fake transport
+    /// need not serve `/v1/version`. The gate itself is tested through
+    /// [`Self::with_client_unverified`].
+    #[cfg(test)]
+    pub fn with_client(client: MailClient) -> Self {
+        let api_ok = OnceCell::new();
+        let _ = api_ok.set(());
+        Self { client, api_ok }
     }
 
     #[cfg(test)]
-    pub fn with_client(client: MailClient) -> Self {
-        Self { client }
+    pub fn with_client_unverified(client: MailClient) -> Self {
+        Self { client, api_ok: OnceCell::new() }
+    }
+
+    /// Refuse, with the upgrade named, unless localmail's `/v1/version` is one
+    /// [`version::version_error`] accepts. One GET per worker (the mail worker
+    /// is single-use, so in practice one per gated call) to an unauthenticated
+    /// route on the same origin.
+    fn require_current_api(&self) -> Result<(), RpcError> {
+        if self.api_ok.get().is_some() {
+            return Ok(());
+        }
+        let body = self.client.get_json("/v1/version").map_err(|e| match e {
+            // Only a localmail older than every `api_minor` lacks the route.
+            MailError::Upstream { status: 404, .. } => RpcError::new(
+                codes::OPERATION_FAILED,
+                version::too_old("one with no /v1/version route"),
+            ),
+            other => mail_err_to_rpc(other),
+        })?;
+        if let Some(why) = version::version_error(&body) {
+            return Err(RpcError::new(codes::OPERATION_FAILED, why));
+        }
+        let _ = self.api_ok.set(());
+        Ok(())
     }
 
     fn search(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
@@ -81,6 +130,11 @@ impl MailHandler {
         if let Some(c) = p.cursor {
             body["cursor"] = serde_json::json!(c);
         }
+        // Compact hits (slice E): see `search_params::HIT_FIELDS` for what is
+        // dropped and why. Sent on every page — localmail projects per request,
+        // not per cursor.
+        body["fields"] = serde_json::json!(search_params::HIT_FIELDS);
+        body["snippet_chars"] = serde_json::json!(search_params::SNIPPET_CHARS);
         // `smart` (LLM query rewrite) deliberately never set — workers do not
         // call the LLM. The planner already decomposes/rewrites queries.
         let mut out = self.client.post_json("/v1/search", &body).map_err(mail_err_to_rpc)?;
@@ -101,6 +155,7 @@ impl MailHandler {
         self.client
             .get_json(&detail_path(p.message_id, p.full_headers))
             .map(crate::headers::header_names_as_values)
+            .map(crate::detail::number_attachments)
             .map_err(mail_err_to_rpc)
     }
 
@@ -156,7 +211,7 @@ impl MailHandler {
             // the `{sha256}` URL segment cannot be forgotten at a call site.
             attach::Selector::Sha(sha256) => attach::Picked::from_planner_sha(&sha256)
                 .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m)),
-            attach::Selector::InMessage { message_id, filename, expect_sha } => {
+            attach::Selector::InMessage { message_id, filename, expect_sha, index } => {
                 // Compact headers: only `attachments` is read here, and full
                 // headers would multiply the response for nothing.
                 let msg = self
@@ -195,7 +250,7 @@ impl MailHandler {
                         ))
                     }
                 };
-                attach::pick(attachments, filename.as_deref(), expect_sha.as_deref(), message_id)
+                attach::pick(attachments, filename.as_deref(), expect_sha.as_deref(), index, message_id)
                     .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))
             }
         }
@@ -211,19 +266,25 @@ impl MailHandler {
             message_id: Option<LocalmailId>,
             #[serde(default)]
             filename: Option<String>,
+            #[serde(default)]
+            index: Option<usize>,
+            /// Where the page starts, in characters: `0` (or absent) for the
+            /// first page, else a `next_offset` a previous page returned.
+            #[serde(default)]
+            offset: Option<u64>,
         }
         let p: P = parse_params(params)?;
-        let selector = attach::choose(p.sha256, p.message_id, p.filename)
+        let selector = attach::choose(p.sha256, p.message_id, p.filename, p.index)
             .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
         // Whether the planner typed the hash decides which repair a 404 gets;
         // read it before `resolve_attachment` consumes the selector.
         let planner_supplied = matches!(selector, attach::Selector::Sha(_));
-        let sha256 = self.resolve_attachment(selector)?.sha256().to_string();
-        // `get_bytes` (the higher attachment cap, not the JSON cap) — extracted
-        // text of a large document can exceed the JSON-response ceiling.
+        let picked = self.resolve_attachment(selector)?;
+        // `get_bytes` (the higher attachment cap, not the JSON cap) — a page is
+        // small, but the cap is the attachment tools' one ceiling.
         let (_ct, bytes) = self
             .client
-            .get_bytes(&format!("/v1/attachments/{sha256}/text"))
+            .get_bytes(&picked.text_path(p.offset.unwrap_or(0), text_page::TEXT_PAGE_CHARS))
             // localmail answers 404 both for a blob it has never seen and for
             // one whose text is not extracted yet, and the two need opposite
             // repairs. Forwarding its sentence verbatim is what told the live
@@ -231,20 +292,12 @@ impl MailHandler {
             .map_err(|e| match e {
                 MailError::Upstream { status: 404, .. } => RpcError::new(
                     codes::OPERATION_FAILED,
-                    attach::missing_text_advice(&sha256, planner_supplied),
+                    attach::missing_text_advice(picked.sha256(), planner_supplied),
                 ),
                 other => mail_err_to_rpc(other),
             })?;
-        // localmail returns `application/json {"text": "..."}`; surface the inner
-        // text so the agent gets the extracted content, not a JSON envelope
-        // double-encoded as a string. Fall back to the raw body for a non-JSON
-        // response (defensive — the API contract is JSON, but this keeps a
-        // plain-text body usable rather than failing).
-        let text = serde_json::from_slice::<serde_json::Value>(&bytes)
-            .ok()
-            .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_owned))
-            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
-        Ok(serde_json::json!({ "sha256": sha256, "text": text }))
+        text_page::page_result(&picked, &bytes)
+            .map_err(|m| RpcError::new(codes::OPERATION_FAILED, m))
     }
 
     fn get_attachment(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
@@ -257,6 +310,8 @@ impl MailHandler {
             message_id: Option<LocalmailId>,
             #[serde(default)]
             filename: Option<String>,
+            #[serde(default)]
+            index: Option<usize>,
         }
         let p: P = parse_params(params)?;
         // `filename` does double duty here, and the two jobs do not conflict:
@@ -265,7 +320,7 @@ impl MailHandler {
         // (which already selects one) it names the output, exactly as before.
         // Kept before `choose` consumes it, because the sha form needs it.
         let requested_name = p.filename.clone();
-        let selector = attach::choose(p.sha256, p.message_id, p.filename)
+        let selector = attach::choose(p.sha256, p.message_id, p.filename, p.index)
             .map_err(|m| RpcError::new(codes::INVALID_PARAMS, m))?;
         // Same rule as `get_attachment_text`: a hash this worker resolved out of
         // a message is right by construction, so a 404 on it must not send the
@@ -281,7 +336,7 @@ impl MailHandler {
         })?;
         let (content_type, bytes) = self
             .client
-            .get_bytes(&format!("/v1/attachments/{}", picked.sha256()))
+            .get_bytes(&picked.blob_path())
             // localmail answers 404 here for "no such blob" *and* for an ACL
             // denial, exactly as it does for extracted text. This tool used to
             // forward that sentence verbatim — the ambiguous upstream 404 the
@@ -319,6 +374,7 @@ impl MailHandler {
         })?;
         Ok(serde_json::json!({
             "sha256": picked.sha256(),
+            "index": picked.index(),
             "filename": name,
             "content_type": content_type,
             "size": bytes.len(),
@@ -333,6 +389,9 @@ impl Handler for MailHandler {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcError> {
+        if needs_current_api(method) {
+            self.require_current_api()?;
+        }
         match method {
             "mail.search" => self.search(params),
             "mail.get_message" => self.get_message(params),

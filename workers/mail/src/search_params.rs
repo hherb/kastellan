@@ -85,9 +85,69 @@ pub fn normalize_filters(
     Ok(if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) })
 }
 
+/// The keys each `mail.search` hit is projected to — localmail's `fields`
+/// (slice E, `api_minor` 3), sent on every search (#760).
+///
+/// Every hit used to carry eleven keys, and the planner reads a step through a
+/// 16 KiB pruned view: #677's real searches came back at 27 KB and 17 KB, so
+/// the tail of a `limit: 50` page never reached it. Dropped, with the reason:
+///
+/// * `folder`, `to` — always `null` / `[]` on the search path (localmail's own
+///   census, and seen live 2026-09-26);
+/// * `score`, `matched_arms` — ranking internals nothing downstream reads;
+/// * `snippet_html` — replaced by `snippet`, the same plain text under an
+///   honest name (it never held HTML).
+///
+/// Kept: the id to fetch with, the account (the search filters on it), and
+/// what a reader needs to pick a message — subject, sender, date, whether it
+/// has attachments, and a snippet. localmail refuses an unknown name with a
+/// 400, so a typo here fails every search loudly rather than dropping a key.
+pub const HIT_FIELDS: [&str; 7] =
+    ["message_id", "account", "subject", "from", "date", "has_attachments", "snippet"];
+
+/// Snippet window, in characters, sent as `snippet_chars`. localmail's default
+/// is 200 and it may add a `…` at each end. 120 keeps enough of a sentence to
+/// recognise a message; with [`HIT_FIELDS`] it took two live 50-hit pages from
+/// 25.8 KB / 26.6 KB to 18.1 KB / 18.8 KB (Mac archive, 2026-09-26). Must stay within
+/// localmail's `1 ..= snippet_max_chars` (default 1000), or every search 400s.
+pub const SNIPPET_CHARS: u32 = 120;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// localmail's permitted names (`api/search_projection.py::HIT_FIELDS`,
+    /// slice E spec). An entry outside this set is a 400 on every search.
+    const LOCALMAIL_HIT_FIELDS: [&str; 12] = [
+        "message_id", "account", "folder", "subject", "from", "to", "date", "snippet_html",
+        "has_attachments", "score", "matched_arms", "snippet",
+    ];
+
+    #[test]
+    fn every_projected_field_is_one_localmail_accepts() {
+        for f in HIT_FIELDS {
+            assert!(LOCALMAIL_HIT_FIELDS.contains(&f), "localmail would refuse {f:?}");
+        }
+    }
+
+    /// `message_id` is not implied by localmail's projection (decision 4 of its
+    /// spec): leave it out and every hit loses the one value the next step needs.
+    #[test]
+    fn the_projection_keeps_the_id_every_follow_up_call_needs() {
+        assert!(HIT_FIELDS.contains(&"message_id"));
+    }
+
+    #[test]
+    fn the_projection_drops_the_keys_that_are_always_empty_or_duplicated() {
+        for dropped in ["folder", "to", "score", "matched_arms", "snippet_html"] {
+            assert!(!HIT_FIELDS.contains(&dropped), "{dropped} should not be sent");
+        }
+    }
+
+    #[test]
+    fn the_snippet_width_is_inside_localmails_default_range() {
+        assert!((1..=1000).contains(&SNIPPET_CHARS));
+    }
     use serde_json::json;
 
     /// Build validated ids the way the params struct does.
