@@ -1,13 +1,16 @@
 //! Which localmail this worker can talk to.
 //!
 //! localmail numbers its `/v1` additions with `api_minor` (served by the
-//! unauthenticated `GET /v1/version`), and two of them are ones this worker
+//! unauthenticated `GET /v1/version`), and three of them are ones this worker
 //! now depends on (#760):
 //!
 //! | `api_minor` | what it added | what uses it here |
 //! | --- | --- | --- |
+//! | 1 | `?headers=list` on `/v1/messages/{id}` — one `{name, value}` per occurrence, in wire order | `mail.get_message` with `full_headers: true` |
 //! | 2 | `/v1/messages/{id}/attachments/{index}[/text]`, and `offset`/`limit` paging on both text routes | both attachment tools |
 //! | 3 | `fields` + `snippet_chars` on `POST /v1/search` | `mail.search` |
+//!
+//! One minimum covers all three (a later minor includes every earlier one).
 //!
 //! Why ask rather than just try: an older server answers the index route with
 //! the same 404 it gives a missing message, and **ignores** `offset`/`limit`,

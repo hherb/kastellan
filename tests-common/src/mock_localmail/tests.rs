@@ -118,9 +118,9 @@ fn changes_ack_is_204_with_empty_body() {
     assert!(body.is_empty(), "204 must have an empty body, got: {body:?}");
 }
 
-/// One raw `GET /v1/messages/{id}` against the mock, with and without
-/// `?headers=full`; returns the parsed body.
-fn message_detail(query: &str) -> serde_json::Value {
+/// One raw `GET /v1/messages/{id}{query}` against the mock; returns the
+/// status line's code and the body text.
+fn message_detail_raw(query: &str) -> (String, String) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mock = rt.block_on(spawn_mock_localmail());
     let addr = mock.base_url.strip_prefix("http://").unwrap().to_string();
@@ -133,8 +133,15 @@ fn message_detail(query: &str) -> serde_json::Value {
     .unwrap();
     let mut resp = String::new();
     s.read_to_string(&mut resp).unwrap();
-    assert!(resp.starts_with("HTTP/1.1 200"), "resp: {resp}");
-    serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    let status = resp.split_whitespace().nth(1).unwrap_or("").to_string();
+    (status, resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+}
+
+/// [`message_detail_raw`], asserting a 200 and parsing the body.
+fn message_detail(query: &str) -> serde_json::Value {
+    let (status, body) = message_detail_raw(query);
+    assert_eq!(status, "200", "body: {body}");
+    serde_json::from_str(&body).unwrap()
 }
 
 /// `GET /v1/messages/{id}` must serve `from` as an address OBJECT and the
@@ -185,6 +192,30 @@ fn message_detail_gates_headers_on_the_full_query_pair() {
         full["headers"]["Message-ID"],
         serde_json::json!([CANNED_MESSAGE_ID_HEADER])
     );
+}
+
+/// `?headers=list` serves one `{name, value}` per occurrence in wire order —
+/// localmail #381's shape, which the mail worker asks for (#760) and checks
+/// entry by entry, so the mock must serve exactly those two keys.
+#[test]
+fn message_detail_serves_the_per_occurrence_header_list() {
+    let list = message_detail("?headers=list");
+    assert_eq!(
+        list["headers"],
+        serde_json::json!([
+            {"name": "Message-ID", "value": CANNED_MESSAGE_ID_HEADER},
+            {"name": "Authentication-Results", "value": CANNED_AUTH_RESULTS},
+        ])
+    );
+}
+
+/// Since localmail #381 an unknown mode is a 400, not a silent compact 200 —
+/// and #500's old *parameter name* is still ignored, not refused.
+#[test]
+fn message_detail_refuses_an_unknown_header_mode_but_ignores_an_unknown_parameter() {
+    let (status, body) = message_detail_raw("?headers=bogus");
+    assert_eq!(status, "400", "body: {body}");
+    assert!(message_detail("?full_headers=true").get("headers").is_none());
 }
 
 /// A request with no bearer is refused (auth wiring is exercised).

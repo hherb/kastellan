@@ -81,6 +81,9 @@ fn every_gated_tool_is_refused_against_an_older_localmail() {
         ("mail.search", serde_json::json!({"query": "q"})),
         ("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})),
         ("mail.get_attachment", serde_json::json!({"sha256": "a".repeat(64)})),
+        // `?headers=list` (api_minor 1): an old server answers it with a
+        // header-less 200, not an error.
+        ("mail.get_message", serde_json::json!({"message_id": 5, "full_headers": true})),
     ];
     for (method, params) in calls {
         for body in [Some(SLICE_D_ONLY), None] {
@@ -96,8 +99,14 @@ fn every_gated_tool_is_refused_against_an_older_localmail() {
 /// even ask — so an operator diagnosing an old localmail still has them.
 #[test]
 fn ungated_tools_work_against_an_older_localmail() {
-    for method in ["mail.list_accounts", "mail.list_messages", "mail.get_message"] {
-        assert!(!Tool::from_method(method).unwrap().needs_current_api(), "{method}");
+    let calls = [
+        ("mail.list_accounts", serde_json::json!({})),
+        ("mail.list_messages", serde_json::json!({})),
+        ("mail.get_message", serde_json::json!({"message_id": 5})),
+        ("mail.get_message", serde_json::json!({"message_id": 5, "full_headers": false})),
+    ];
+    for (method, params) in &calls {
+        assert!(!Tool::from_method(method).unwrap().needs_current_api(params), "{method} {params}");
     }
     let mut h = MailHandler::with_client_unverified(client_with(Box::new(VersionFake(Some(SLICE_D_ONLY)))));
     h.call("mail.list_accounts", serde_json::json!({})).expect("list_accounts is not gated");

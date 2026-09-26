@@ -570,19 +570,20 @@ fn mock_localmail_shapes_match_real_localmail() {
 
         // 3b. #500, pinned against the live service for the first time.
         //
-        // localmail reads a differently NAMED query parameter and derives
-        // the flag from its VALUE (`serve/routes/messages.py::detail` →
-        // `full_headers=(headers == "full")`, with `headers: str =
-        // Query("compact")`). Until now that claim lived in a code comment
-        // and in fixtures written from the same reading — our own mock
-        // modelling the gate, and a unit test pinning the model. A
+        // localmail reads a differently NAMED query parameter, `headers`,
+        // whose VALUE picks the shape (`serve/routes/messages.py::detail`,
+        // `headers: str = Query("compact")`). Until #500 that claim lived in a
+        // code comment and in fixtures written from the same reading — our
+        // own mock modelling the gate, and a unit test pinning the model. A
         // consistent misreading passed every test in the tree.
         //
-        // It is an unvalidated bare string with a default, so a rename or a
-        // changed sentinel makes localmail answer a header-less 200 and the
-        // mail tool silently stops delivering headers. Both directions are
-        // asserted: the spelling we send must work, and the spelling we used
-        // to send must still NOT — if that one starts working, the service
+        // Two spellings are live: email-in sends `?headers=full` (a name-keyed
+        // object for its DMARC check) and the mail worker `?headers=list`
+        // (#760, localmail #381: one `{name, value}` per occurrence, in wire
+        // order). Both must deliver, the list with exactly the two keys
+        // `headers::header_list_error` accepts — a third key there would turn
+        // every `full_headers` read into a fault. And the spelling the worker
+        // used to send must still NOT work — if it starts to, the service
         // gained an alias and `detail_path`'s translation deserves review.
         if !header_spelling_checked && msg.is_some() {
             header_spelling_checked = true;
@@ -592,10 +593,29 @@ fn mock_localmail_shapes_match_real_localmail() {
             );
             assert!(
                 full.get("headers").and_then(|h| h.as_object()).map(|o| !o.is_empty()).unwrap_or(false),
-                "#500: `?headers=full` — the spelling handler::detail_path sends — must \
-                 return a non-empty `headers` block; got keys {:?}",
+                "#500: `?headers=full` — the spelling email-in sends — must return a \
+                 non-empty `headers` object; got keys {:?}",
                 full.as_object().map(|o| o.keys().collect::<Vec<_>>())
             );
+            let list = ok_json(
+                "/v1/messages/{id}?headers=list",
+                curl("GET", &format!("/v1/messages/{id}?headers=list"), None),
+            );
+            let entries = list.get("headers").and_then(|h| h.as_array()).cloned().unwrap_or_default();
+            assert!(
+                !entries.is_empty(),
+                "#760: `?headers=list` — the spelling handler::detail_path sends — must \
+                 return a non-empty `headers` array; got keys {:?}",
+                list.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
+            for e in &entries {
+                let keys: Vec<&String> = e.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                assert!(
+                    keys.len() == 2 && e["name"].is_string() && e["value"].is_string(),
+                    "#760: every `?headers=list` entry must be exactly {{name, value}} strings \
+                     (headers::header_list_error refuses anything else); got keys {keys:?}"
+                );
+            }
             let wrong = ok_json(
                 "/v1/messages/{id}?full_headers=true",
                 curl("GET", &format!("/v1/messages/{id}?full_headers=true"), None),

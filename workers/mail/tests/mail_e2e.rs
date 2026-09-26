@@ -44,14 +44,15 @@ fn text_page(text: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Does this request-target's query carry the exact pair `headers=full`?
+/// Does this request-target's query carry the exact pair `headers=list`?
 ///
-/// Mirrors localmail's own `full_headers=(headers == "full")` rather than a
-/// loose substring check, so a client sending some *other* spelling gets the
-/// same header-less 200 the real service would give it. That asymmetry is #500,
-/// and a mock that ignored the query could not reproduce it.
-fn wants_full_headers(query: &str) -> bool {
-    query.split('&').any(|pair| pair == "headers=full")
+/// Mirrors localmail's own reading — the `headers` parameter's VALUE picks the
+/// shape — rather than a loose substring check, so a client sending some
+/// *other* spelling gets the same header-less 200 the real service would give
+/// it. That asymmetry is #500, and a mock that ignored the query could not
+/// reproduce it. `list` since #760 (localmail #381).
+fn wants_header_list(query: &str) -> bool {
+    query.split('&').any(|pair| pair == "headers=list")
 }
 
 /// Minimal HTTP/1.1 mock: one request per connection (`Connection: close`),
@@ -127,10 +128,10 @@ fn spawn_mock() -> (String, std::thread::JoinHandle<()>) {
                 }
                 ("GET", p) if p.starts_with("/v1/messages/") => {
                     let id = p.trim_start_matches("/v1/messages/");
-                    // `headers` appears ONLY for the exact `?headers=full`
+                    // `headers` appears ONLY for the exact `?headers=list`
                     // spelling — the #500 asymmetry, modelled rather than hidden.
-                    let headers = if wants_full_headers(query) {
-                        r#","headers":{"Message-ID":"<canned@example.test>"}"#
+                    let headers = if wants_header_list(query) {
+                        r#","headers":[{"name":"Message-ID","value":"<canned@example.test>"}]"#
                     } else {
                         ""
                     };
@@ -334,18 +335,18 @@ fn a_message_id_taken_verbatim_from_a_search_hit_is_accepted() {
 
 /// #500, asserted BEHAVIOURALLY rather than by string-equality on a URL.
 ///
-/// The other #500 tests check that the worker *sends* `?headers=full`, against a
+/// The other #500 tests check that the worker *sends* `?headers=list`, against a
 /// fake that was handed that same string — they cannot catch "our reading of
 /// localmail is wrong". This one asserts the thing the tool actually promises:
 /// ask for full headers, get headers back. The mock reproduces the real
-/// service's asymmetry (`headers` appears only for the exact `headers=full`
+/// service's asymmetry (`headers` appears only for the exact `headers=list`
 /// pair), so reverting `detail_path` to the old `?full_headers=true` spelling
-/// fails here with a missing `headers` block — the production symptom, not a
-/// string mismatch.
+/// fails here — with the worker's "no headers although asked" fault, the
+/// production symptom made loud, not a string mismatch.
 ///
-/// Since #702's review the block is a list of `{name, values}` rather than
-/// localmail's name-keyed object (see `headers.rs`), so this also proves that
-/// reshaping runs on the real stdio path.
+/// Since #760 the block is localmail's own per-occurrence list (names as
+/// values, see `headers.rs`), passed through after a shape check that runs
+/// on the real stdio path.
 #[test]
 fn asking_for_full_headers_actually_returns_headers() {
     let (base, _mock) = spawn_mock();
@@ -363,7 +364,7 @@ fn asking_for_full_headers_actually_returns_headers() {
         serde_json::json!({"message_id": "7", "full_headers": true}));
     assert_eq!(
         full["result"]["headers"],
-        serde_json::json!([{"name": "Message-ID", "values": ["<canned@example.test>"]}]),
+        serde_json::json!([{"name": "Message-ID", "value": "<canned@example.test>"}]),
         "full_headers: true must produce the header list, names as values: {full}"
     );
 

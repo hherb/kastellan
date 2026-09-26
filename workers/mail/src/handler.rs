@@ -51,20 +51,28 @@ impl Tool {
         })
     }
 
-    /// Does this tool use a route or request field localmail added in slice D
-    /// or E, and so must not run against an older server? The rest use routes
-    /// every `/v1` serves, and keep working against one — a mail worker that
-    /// could still list accounts is more use to an operator diagnosing an
-    /// upgrade than one that refuses everything.
+    /// Does this call use a route or request field localmail added after
+    /// `/v1` began (see [`version`]), and so must not run against an older
+    /// server? The rest use routes every `/v1` serves, and keep working
+    /// against one — a mail worker that could still list accounts is more use
+    /// to an operator diagnosing an upgrade than one that refuses everything.
+    ///
+    /// `mail.get_message` is gated only when it asks for headers: it then sends
+    /// `?headers=list`, which an older server answers with a 200 and **no**
+    /// `headers` key rather than an error. A compact read works everywhere.
+    /// Read from the raw `params` so the decision stays here, beside every
+    /// other tool's; `full_headers` deserializes from JSON `true` and nothing
+    /// else, so `== Some(true)` is exactly the value `get_message` will see.
     ///
     /// Exhaustive on purpose (no `_` arm): a new tool does not compile until
     /// someone decides whether it is gated. When this was a string `matches!`
     /// beside the dispatch `match`, a new slice D/E tool left off it would
     /// have skipped the gate silently.
-    fn needs_current_api(self) -> bool {
+    fn needs_current_api(self, params: &serde_json::Value) -> bool {
         match self {
             Self::Search | Self::GetAttachmentText | Self::GetAttachment => true,
-            Self::GetMessage | Self::ListMessages | Self::ListAccounts => false,
+            Self::GetMessage => params.get("full_headers").and_then(serde_json::Value::as_bool) == Some(true),
+            Self::ListMessages | Self::ListAccounts => false,
         }
     }
 }
@@ -187,11 +195,13 @@ impl MailHandler {
             full_headers: bool,
         }
         let p: P = parse_params(params)?;
-        self.client
-            .get_json(&detail_path(p.message_id, p.full_headers))
-            .map(crate::headers::header_names_as_values)
-            .map(crate::detail::number_attachments)
-            .map_err(mail_err_to_rpc)
+        let msg = self.client.get_json(&detail_path(p.message_id, p.full_headers)).map_err(mail_err_to_rpc)?;
+        // Checked, never reshaped: see `headers` for why a wrong shape is a
+        // fault rather than something to convert.
+        if let Some(why) = crate::headers::header_list_error(&msg, p.full_headers) {
+            return Err(RpcError::new(codes::OPERATION_FAILED, why));
+        }
+        Ok(crate::detail::number_attachments(msg))
     }
 
     fn list_messages(&self, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
@@ -434,7 +444,7 @@ impl Handler for MailHandler {
                 format!("unknown method {method}"),
             ));
         };
-        if tool.needs_current_api() {
+        if tool.needs_current_api(&params) {
             self.require_current_api()?;
         }
         match tool {
@@ -499,11 +509,15 @@ fn safe_attachment_name(requested: Option<&str>, sha256: &str) -> String {
 ///
 /// The tool's public parameter is the boolean `full_headers` and stays that way
 /// — it is the advertised schema. The service, however, reads a differently
-/// *named* query parameter and derives the flag from its *value*
-/// (`serve/routes/messages.py::detail`: `full_headers=(headers == "full")`), so
-/// FastAPI silently dropped the `?full_headers=<bool>` this worker used to send
-/// and every response came back without `headers`. Translating here keeps the
-/// mismatch at the one boundary where it belongs.
+/// *named* query parameter, `headers`, whose *value* picks the shape
+/// (`compact` / `full` / `list`). FastAPI silently dropped the
+/// `?full_headers=<bool>` this worker used to send, and every response came
+/// back without `headers` (#500). Translating here keeps the mismatch at the
+/// one boundary where it belongs.
+///
+/// `list` (#760), not `full`: one `{name, value}` per occurrence in wire order
+/// — see `headers` for what `full`'s name-keyed object loses and why a
+/// name-keyed object must not reach the planner at all.
 ///
 /// Compact is the service's default, so the parameter is omitted rather than
 /// sent as `headers=compact`.
@@ -515,7 +529,7 @@ fn safe_attachment_name(requested: Option<&str>, sha256: &str) -> String {
 /// guard structural instead of positional.
 fn detail_path(message_id: LocalmailId, full_headers: bool) -> String {
     if full_headers {
-        format!("/v1/messages/{message_id}?headers=full")
+        format!("/v1/messages/{message_id}?headers=list")
     } else {
         format!("/v1/messages/{message_id}")
     }
