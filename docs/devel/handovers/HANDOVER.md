@@ -8,8 +8,8 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-27, latest (#773 + #774: the thinking switch works on Ollama; a
-slow planning call no longer discards the task) ·
+**Last updated:** 2026-09-27, latest (#776 deployed to the DGX; the operator is running the live
+re-measure) ·
 **Recent PRs, newest first:** [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
@@ -19,16 +19,19 @@ slow planning call no longer discards the task) ·
 **The #725 → #748 worker-report arc is closed**, #748 being its last piece. Its review residue
 is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/) snapshots;
 **`gh issue list --state open` is the live answer** and the only one worth trusting. ·
-**The DGX runs `main` as of #770**, redeployed 2026-09-27 via `scripts/upgrade_from_git.sh` (15
-binaries, `.local` overlay byte-identical, Matrix channel up) — this covers #743 + #745 + #750 too.
-Post-deploy on the DGX: full sweep **187/187 suites, 4729 passed / 0 failed / 79 ignored**, 0
+**The DGX runs `main` as of #776**, redeployed 2026-09-27 (evening) via `scripts/upgrade_from_git.sh`
+(15 binaries; generated env **and** `.local` overlay byte-identical to the pre-deploy backups
+`~/kastellan.env*.bak-pre776`; Matrix channel up; `NRestarts=0`). The live process's environ has
+`KASTELLAN_LLM_DISABLE_THINKING=0`, `KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort`,
+`KASTELLAN_LLM_TIMEOUT_MS=600000`, and the boot line reads `"disable_thinking":false,
+"thinking_switch":"reasoning_effort"` — so planning **thinks** (deliberately) and the #774 synthesis
+retry can drop it. No sweep was re-run for #776 on the DGX beyond its PR gate (core `scheduler::`
+369, llm-router 116 + 6, cold clippy, 0 `[SKIP]`). The #770 deploy's post-deploy full sweep: **187/187 suites, 4729 passed / 0 failed / 79 ignored**, 0
 `[WARN]`, 4 `[SKIP]` (all the opt-in GLiNER tier); `mail-live` gate green as evidence; the
 force-routed live round trip green with the real key and, with a **bogus key**, failing as
 `-32004` "localmail rejected kastellan's credential (HTTP 401) … retrying will not help" through the
 real sandboxed worker + MITM proxy. Rootfs images last rebuilt
-2026-09-08. ⚠️ **The DGX does NOT yet run #776**; its `kastellan.env.local` already carries
-`KASTELLAN_LLM_DISABLE_THINKING=0` + `KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort` (inert on
-#770; backup `…bak-20260927-thinking`) and `KASTELLAN_LLM_TIMEOUT_MS=600000`.
+2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -222,9 +225,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **Deploy #776 to the DGX, then the live re-measure** (operator DMs, a **fresh room**).
-   `scripts/upgrade_from_git.sh`; the overlay is already set (thinking ON, `reasoning_effort`
-   dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
+1. **The live re-measure — the operator is running it** (DMs, a **fresh room**; #776 is deployed,
+   thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
    out on the synthesis turn), then read each plan's cost in one query:
    `select action, payload->'llm_usage', payload->>'latency_ms', payload->>'error' from audit_log
    where action in ('plan.formulate','plan.formulate_failed') and payload->>'task_id'='<id>' order by id`. Then #728's multi-search question, a filter-only one (#698), a
