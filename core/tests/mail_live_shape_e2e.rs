@@ -493,8 +493,16 @@ fn mock_localmail_shapes_match_real_localmail() {
         assert_eq!(page["offset"], AT, "#760: {blob}/text must echo the offset: {page}");
         let total = page["total"].as_u64().unwrap_or_else(|| panic!("#760: `total` must be a count: {page}"));
         let end = AT + u64::from(WINDOW);
-        let want_next = if total > end { serde_json::json!(end) } else { serde_json::Value::Null };
-        assert_eq!(page["next_offset"], want_next, "#760: next_offset for a {WINDOW}-char window at {AT}: {page}");
+        // Without this, a text that ends inside the window has `next_offset:
+        // null` whether or not `limit` was honoured, and the leg below would
+        // pass having checked nothing about it.
+        assert!(
+            total > end,
+            "{blob}/text holds only {total} chars, so a dropped `limit` could not be told apart \
+             from an honoured one — point the gate at an archive whose first stored attachment \
+             has more than {end} chars of text"
+        );
+        assert_eq!(page["next_offset"], end, "#760: next_offset for a {WINDOW}-char window at {AT}: {page}");
     }
 
     // The bytes routes. localmail stores a blob under the sha256 of exactly

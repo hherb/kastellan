@@ -68,6 +68,9 @@ pub const HEADER_LIST_QUERY: &str = "headers=list";
 /// The worker fetches every message-resolved attachment this way
 /// (`attach::Picked::blob_path`): the route re-checks the message's ACL and
 /// serves that entry's own filename. `/text` under it is the extracted text.
+///
+/// ⚠️ Validates nothing: the worker calls it only from `Picked`, whose
+/// constructors vet every segment. Don't hand it a planner string.
 pub fn attachment_by_index_path(message_id: impl std::fmt::Display, index: usize) -> String {
     format!("/v1/messages/{message_id}/attachments/{index}")
 }
@@ -75,6 +78,9 @@ pub fn attachment_by_index_path(message_id: impl std::fmt::Display, index: usize
 /// localmail's route for the original bytes of a stored blob, **by its
 /// sha256** — used only for a hash the planner typed, which names no message.
 /// `/text` under it is the extracted text.
+///
+/// ⚠️ Validates nothing — the sha is interpolated into the path as given. The
+/// worker calls it only from `Picked`, whose sha is vetted by `is_sha256`.
 pub fn attachment_by_sha_path(sha256: &str) -> String {
     format!("/v1/attachments/{sha256}")
 }

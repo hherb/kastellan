@@ -127,7 +127,10 @@ fn the_environment_is_read_by_the_two_documented_names() {
 }
 
 /// The action is passed through, not re-derived: a demanded run with a
-/// missing variable fails, naming it.
+/// missing variable fails, naming it. (That `credentials_or_skip` passes
+/// `KNOB.action()` in is the one line left untested here — testing it would
+/// mean mutating the process env — and the `mail-live` profile's `MAX_SKIP=0`
+/// catches it at run time.)
 #[test]
 #[should_panic(expected = "KASTELLAN_MAIL_TOKEN")]
 fn a_demanded_run_with_a_missing_variable_fails_naming_it() {
