@@ -177,7 +177,8 @@ fn invalid_params_are_refused_before_the_version_gate() {
         ("mail.get_attachment", serde_json::json!({})),
         ("mail.get_attachment", serde_json::json!({"index": 0})),
         ("mail.get_attachment", serde_json::json!({"filename": "a.pdf"})),
-        ("mail.get_attachment", serde_json::json!({"sha256": "A".repeat(64)})),
+        // Not hex. (Uppercase hex is no longer invalid: #768 lowercases it.)
+        ("mail.get_attachment", serde_json::json!({"sha256": "g".repeat(64)})),
         ("mail.get_attachment", serde_json::json!({"message_id": 5, "sha256": ""})),
         // list_accounts takes no params: a filter it would ignore is refused.
         ("mail.list_accounts", serde_json::json!({"account_ids": [3]})),

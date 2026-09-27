@@ -40,6 +40,7 @@ use std::path::PathBuf;
 use crate::panic_hook::{HOOK_INSTALLED_MARKER, PANIC_MARKER};
 use crate::require::{RequireKnob, KNOBS};
 
+mod callers;
 mod mid_line;
 mod run;
 

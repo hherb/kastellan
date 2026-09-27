@@ -33,7 +33,7 @@
 use crate::ids::LocalmailId;
 
 mod picked;
-pub use picked::{is_sha256, Picked};
+pub use picked::{is_sha256, Picked, ShaPrefix};
 
 /// Which attachment the planner named, and how.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,9 +67,18 @@ pub enum Selector {
     InMessage {
         message_id: LocalmailId,
         filename: Option<String>,
-        expect_sha: Option<String>,
+        expect_sha: Option<ShaPrefix>,
         index: Option<usize>,
     },
+}
+
+impl Selector {
+    /// Did the planner type the hash this selector fetches by? Only then can a
+    /// localmail 404 mean "you mistyped it" (see [`missing_text_advice`]); a
+    /// hash resolved out of the message's own listing cannot be mistyped.
+    pub fn is_planner_typed(&self) -> bool {
+        matches!(self, Self::Sha(_))
+    }
 }
 
 /// One usable attachment of a message: its position in the served
@@ -145,9 +154,7 @@ pub fn choose(
 ) -> Result<Selector, String> {
     match (sha256, message_id) {
         (expect_sha, Some(message_id)) => {
-            if let Some(why) = expect_sha.as_deref().and_then(expect_sha_error) {
-                return Err(why);
-            }
+            let expect_sha = expect_sha.as_deref().map(ShaPrefix::parse).transpose()?;
             Ok(Selector::InMessage { message_id, filename, expect_sha, index })
         }
         (_, None) if index.is_some() => Err(
@@ -167,27 +174,6 @@ pub fn choose(
                 .to_string(),
         ),
     }
-}
-
-/// Why a `sha256` sent beside a `message_id` can match no attachment of any
-/// message, or `None` when only that message can say (#765).
-///
-/// [`find_by_sha`] accepts the full hash or a hex prefix of it, and every
-/// candidate is 64 hex chars — so a value that is empty, longer than 64, or not
-/// hex is refused here, while the params are read, rather than after the
-/// version gate and a GET of the message. What stays with [`pick`] is what
-/// depends on the archive: a prefix below [`SHA_PREFIX_MIN`] (whose refusal
-/// says whether it was the *right* prefix) and a hash the message does not
-/// hold. Either case is accepted: [`pick`] lowercases, and did before this.
-fn expect_sha_error(sha: &str) -> Option<String> {
-    if !sha.is_empty() && sha.len() <= 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(format!(
-        "`sha256` beside a `message_id` must be the attachment's hash or a hex prefix of it, \
-         got {:?} — or drop it: `index` selects within the message.",
-        sha.chars().take(8).collect::<String>()
-    ))
 }
 
 /// Pick one attachment out of a `mail.get_message` `attachments` array, given
@@ -212,7 +198,7 @@ fn expect_sha_error(sha: &str) -> Option<String> {
 pub fn pick(
     attachments: &[serde_json::Value],
     filename: Option<&str>,
-    expect_sha: Option<&str>,
+    expect_sha: Option<&ShaPrefix>,
     index: Option<usize>,
     message_id: LocalmailId,
 ) -> Result<Picked, String> {
@@ -257,16 +243,16 @@ pub fn pick(
         // the sha/filename pair below must: two selectors that disagree are two
         // requests, and serving one of them silently is a wrong answer.
         if let Some(want_sha) = expect_sha {
-            let want = want_sha.to_ascii_lowercase();
+            let want = want_sha.as_str();
             // A correct but too-short prefix is not a disagreement, and calling
             // it one sends the planner to drop the wrong selector.
-            if want.len() < SHA_PREFIX_MIN && !want.is_empty() && c.sha.starts_with(&want) {
+            if want.len() < SHA_PREFIX_MIN && !want.is_empty() && c.sha.starts_with(want) {
                 return Err(format!(
                     "a `sha256` prefix needs at least {SHA_PREFIX_MIN} characters — `index` \
                      alone already selects attachment {i} of message {message_id}."
                 ));
             }
-            if find_by_sha(&[c], &want).is_none() {
+            if find_by_sha(&[c], want).is_none() {
                 return Err(format!(
                     "`index` and `sha256` name different attachments of message {message_id} \
                      — pass one, not both. `index` {i} is {}.",
@@ -294,8 +280,8 @@ pub fn pick(
     // is at most a second opinion — but a second opinion that *contradicts* is
     // refused rather than overridden.
     if let Some(want_sha) = expect_sha {
-        let want = want_sha.to_ascii_lowercase();
-        let Some(by_sha) = find_by_sha(&usable, &want) else {
+        let want = want_sha.as_str();
+        let Some(by_sha) = find_by_sha(&usable, want) else {
             return Err(with_candidates(
                 &format!(
                     "that `sha256` is not an attachment of message {message_id} — {}, \

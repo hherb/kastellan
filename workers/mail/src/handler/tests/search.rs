@@ -250,3 +250,28 @@ fn every_search_asks_for_compact_hits() {
         assert_eq!(out["sent"]["snippet_chars"], search_params::SNIPPET_CHARS, "{params}");
     }
 }
+
+/// #768: a blank `sort` is no sort, decided while the params are read — the
+/// way a blank `query` is — rather than surviving as `Some("")` for
+/// `sort::plan_sort` to reinterpret. (The value itself stays a pass-through:
+/// any non-empty string reaches localmail, which owns the vocabulary.)
+#[test]
+fn a_blank_sort_parses_as_no_sort() {
+    let parse = |params: serde_json::Value| match Request::parse(Tool::Search, params).unwrap() {
+        Request::Search(s) => s.sort,
+        other => panic!("not a search: {other:?}"),
+    };
+    assert_eq!(parse(serde_json::json!({"query": "q", "sort": ""})), None);
+    assert_eq!(parse(serde_json::json!({"query": "q", "sort": "date"})), Some("date".to_string()));
+    assert_eq!(parse(serde_json::json!({"query": "q"})), None);
+}
+
+/// #768: `Search.filters` is the normalised object by type, not by comment —
+/// the only way to hold one is through `search_params::normalize_filters`.
+#[test]
+fn parsed_filters_are_the_normalised_object() {
+    let req = Request::parse(Tool::Search, serde_json::json!({"query": "q", "account_ids": [3]})).unwrap();
+    let Request::Search(s) = req else { panic!("not a search") };
+    let filters: search_params::NormalizedFilters = s.filters.expect("the folded id filter");
+    assert_eq!(filters.into_value(), serde_json::json!({"account_ids": ["3"]}));
+}

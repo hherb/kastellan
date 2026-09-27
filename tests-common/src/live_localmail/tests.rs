@@ -19,7 +19,7 @@ fn written(f: impl FnOnce(&mut Vec<u8>)) -> String {
 #[test]
 fn both_credentials_present_are_returned_trimmed() {
     let c = credentials_from(some(" https://10.0.0.3:8443\n"), some("tok\n")).unwrap();
-    assert_eq!(c, Credentials { endpoint: URL.into(), token: "tok".into() });
+    assert_eq!((c.endpoint(), c.token()), (URL, "tok"));
 }
 
 /// The reason names exactly the variables that are missing, so the operator
@@ -46,7 +46,7 @@ fn a_blank_credential_is_missing() {
 
 #[test]
 fn debug_never_prints_the_token() {
-    let c = Credentials { endpoint: URL.into(), token: TOKEN.into() };
+    let c = credentials_from(some(URL), some(TOKEN)).unwrap();
     let shown = format!("{c:?}");
     assert!(!shown.contains(TOKEN), "{shown}");
     assert!(shown.contains(URL), "{shown}");
@@ -73,7 +73,7 @@ fn missing_credentials_fail_when_demanded() {
 fn a_demanded_run_with_credentials_announces_the_endpoint_not_the_token() {
     let got = written(|out| {
         let c = decide(UnmetAction::Fail, credentials_from(some(URL), some(TOKEN)), out);
-        assert_eq!(c.map(|c| c.endpoint), Some(URL.to_string()));
+        assert_eq!(c.as_ref().map(Credentials::endpoint), Some(URL));
     });
     assert_eq!(got, format!("\n[E2E] live-localmail: credentials for {URL}\n"));
     assert!(!got.contains(TOKEN));
@@ -87,4 +87,64 @@ fn an_undemanded_run_with_credentials_prints_nothing() {
         assert!(decide(UnmetAction::Skip, credentials_from(some(URL), some(TOKEN)), out).is_some());
     });
     assert!(got.is_empty(), "{got:?}");
+}
+
+// --- #768: the wiring between the environment and `decide` ---
+
+/// A fake environment: the variables it holds, and every name it was asked for.
+struct FakeEnv {
+    vars: Vec<(&'static str, Result<String, std::env::VarError>)>,
+    asked: std::cell::RefCell<Vec<String>>,
+}
+
+impl FakeEnv {
+    fn new(vars: Vec<(&'static str, Result<String, std::env::VarError>)>) -> Self {
+        Self { vars, asked: std::cell::RefCell::new(Vec::new()) }
+    }
+
+    fn var(&self, name: &str) -> Result<String, std::env::VarError> {
+        self.asked.borrow_mut().push(name.to_string());
+        self.vars
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Err(std::env::VarError::NotPresent))
+    }
+}
+
+/// `credentials_or_skip` reads exactly the two documented variables — the
+/// names `scripts/mail/live-shape-gate.sh` exports — and hands what it found
+/// to `decide`. Before #768 only the `mail-live` profile's run-time floors
+/// could notice a misread name.
+#[test]
+fn the_environment_is_read_by_the_two_documented_names() {
+    let env = FakeEnv::new(vec![(ENDPOINT_ENV, Ok(URL.into())), (TOKEN_ENV, Ok(TOKEN.into()))]);
+    let got = credentials_from_env(UnmetAction::Skip, |n| env.var(n), &mut Vec::new());
+    assert_eq!(got.as_ref().map(|c| (c.endpoint(), c.token())), Some((URL, TOKEN)));
+    let mut asked = env.asked.into_inner();
+    asked.sort();
+    assert_eq!(asked, [ENDPOINT_ENV, TOKEN_ENV]);
+}
+
+/// The action is passed through, not re-derived: a demanded run with a
+/// missing variable fails, naming it.
+#[test]
+#[should_panic(expected = "KASTELLAN_MAIL_TOKEN")]
+fn a_demanded_run_with_a_missing_variable_fails_naming_it() {
+    let env = FakeEnv::new(vec![(ENDPOINT_ENV, Ok(URL.into()))]);
+    let _ = credentials_from_env(UnmetAction::Fail, |n| env.var(n), &mut Vec::new());
+}
+
+/// A set-but-not-UTF-8 variable is named as that, not as unset — which would
+/// send the operator to set a variable that is already set.
+#[test]
+fn a_non_utf8_variable_is_named_as_set_but_unreadable() {
+    let env = FakeEnv::new(vec![
+        (ENDPOINT_ENV, Err(std::env::VarError::NotUnicode(std::ffi::OsString::from("x")))),
+        (TOKEN_ENV, Ok(TOKEN.into())),
+    ]);
+    let got = written(|out| {
+        assert!(credentials_from_env(UnmetAction::Skip, |n| env.var(n), out).is_none());
+    });
+    assert!(got.contains(&format!("{ENDPOINT_ENV} is set but is not UTF-8")), "{got:?}");
 }

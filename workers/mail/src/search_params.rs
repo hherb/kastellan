@@ -36,7 +36,7 @@ pub fn normalize_filters(
     filters: Option<serde_json::Value>,
     account_ids: Option<Vec<LocalmailId>>,
     folder_ids: Option<Vec<LocalmailId>>,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Result<Option<NormalizedFilters>, String> {
     let mut obj = match filters {
         None => serde_json::Map::new(),
         Some(serde_json::Value::Object(m)) => m,
@@ -82,7 +82,25 @@ pub fn normalize_filters(
         }
     }
 
-    Ok(if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) })
+    Ok(if obj.is_empty() { None } else { Some(NormalizedFilters(obj)) })
+}
+
+/// A `filters` object that has been through [`normalize_filters`]: a JSON
+/// object, never empty, with any id filters folded in from the top level and
+/// coerced to digit strings.
+///
+/// The field is private and `normalize_filters` is the only constructor, so a
+/// value of this type *is* that guarantee (#768). As a bare
+/// `Option<serde_json::Value>` the guarantee lived in a doc comment, and any
+/// future caller could have put an un-normalised object in its place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalizedFilters(serde_json::Map<String, serde_json::Value>);
+
+impl NormalizedFilters {
+    /// The object to send as the request body's `filters`.
+    pub fn into_value(self) -> serde_json::Value {
+        serde_json::Value::Object(self.0)
+    }
 }
 
 // Defined in `localmail_contract`, which the live gate and the mock `include!`
@@ -146,13 +164,13 @@ mod tests {
     /// `mail.list_messages` takes it. It is now folded into `filters`.
     #[test]
     fn top_level_account_ids_are_folded_into_filters() {
-        let out = normalize_filters(None, Some(ids(&[1])), None).unwrap().unwrap();
+        let out = normalize_filters(None, Some(ids(&[1])), None).unwrap().unwrap().into_value();
         assert_eq!(out["account_ids"], json!(["1"]));
     }
 
     #[test]
     fn top_level_folder_ids_are_folded_into_filters() {
-        let out = normalize_filters(None, None, Some(ids(&[7, 9]))).unwrap().unwrap();
+        let out = normalize_filters(None, None, Some(ids(&[7, 9]))).unwrap().unwrap().into_value();
         assert_eq!(out["folder_ids"], json!(["7", "9"]));
     }
 
@@ -162,7 +180,8 @@ mod tests {
     fn numeric_ids_already_inside_filters_are_coerced_to_strings() {
         let out = normalize_filters(Some(json!({"account_ids": [1, 2]})), None, None)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .into_value();
         assert_eq!(out["account_ids"], json!(["1", "2"]));
     }
 
@@ -170,7 +189,8 @@ mod tests {
     fn string_ids_inside_filters_are_left_as_strings() {
         let out = normalize_filters(Some(json!({"account_ids": ["1"]})), None, None)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .into_value();
         assert_eq!(out["account_ids"], json!(["1"]));
     }
 
@@ -184,7 +204,8 @@ mod tests {
             None,
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .into_value();
         assert_eq!(out["has_attachment"], json!(true));
         assert_eq!(out["subject"], json!("flight"));
         assert_eq!(out["account_ids"], json!(["1"]));
@@ -257,7 +278,8 @@ mod tests {
             .is_none());
         let out = normalize_filters(Some(json!({"account_ids": null, "subject": "flight"})), None, None)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .into_value();
         assert_eq!(out["subject"], json!("flight"));
         assert!(out.get("account_ids").is_none(), "no null on the wire: {out}");
     }
@@ -269,7 +291,8 @@ mod tests {
     fn a_null_nested_filter_does_not_collide_with_the_top_level_form() {
         let out = normalize_filters(Some(json!({"account_ids": null})), Some(ids(&[2])), None)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .into_value();
         assert_eq!(out["account_ids"], json!(["2"]));
     }
 

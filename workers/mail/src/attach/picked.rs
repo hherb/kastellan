@@ -4,6 +4,8 @@
 
 use super::{Cand, SHA_HEAD};
 use crate::ids::LocalmailId;
+// The route spellings, shared with the live shape gate (#767).
+use crate::localmail_contract as contract;
 
 /// One attachment, as localmail itself names it.
 ///
@@ -52,12 +54,18 @@ impl Picked {
     /// structural rather than a rule each call site has to remember. There is
     /// no archive filename here: the planner named a hash, not a message, so
     /// there is nothing authoritative to save it under.
+    ///
+    /// Uppercase hex is accepted and lowercased first (#768): it is the same
+    /// hash, and the `message_id` form ([`ShaPrefix`]) has always taken it, so
+    /// refusing it here made the same 64 characters valid in one form and not
+    /// the other. The traversal guard is [`is_sha256`], applied *after*.
     pub fn from_planner_sha(sha256: &str) -> Result<Self, String> {
-        if is_sha256(sha256) {
-            Ok(Self { sha256: sha256.to_string(), filename: None, at: None })
+        let sha256 = sha256.to_ascii_lowercase();
+        if is_sha256(&sha256) {
+            Ok(Self { sha256, filename: None, at: None })
         } else {
             Err(format!(
-                "sha256 must be 64 lowercase hex chars, got {:?}",
+                "sha256 must be 64 hex chars, got {:?}",
                 sha256.chars().take(8).collect::<String>()
             ))
         }
@@ -92,10 +100,8 @@ impl Picked {
     /// `usize`, a vetted sha), so no string the planner wrote reaches a path.
     pub fn blob_path(&self) -> String {
         match self.at {
-            Some((message_id, index)) => {
-                format!("/v1/messages/{message_id}/attachments/{index}")
-            }
-            None => format!("/v1/attachments/{}", self.sha256),
+            Some((message_id, index)) => contract::attachment_by_index_path(message_id, index),
+            None => contract::attachment_by_sha_path(&self.sha256),
         }
     }
 
@@ -109,7 +115,7 @@ impl Picked {
     /// index route resolves positions in `get_message`'s order, which it
     /// documents (`serve/routes/messages.py::message_attachment_text`).
     pub fn text_path(&self, offset: u64, limit: u32) -> String {
-        format!("{}/text?offset={offset}&limit={limit}", self.blob_path())
+        contract::text_page_path(&self.blob_path(), offset, limit)
     }
 
     /// Check that bytes fetched from [`Self::blob_path`] are the blob this pick
@@ -150,4 +156,38 @@ impl Picked {
 /// an entry). Two copies of a traversal guard is one copy too many.
 pub fn is_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A hash, or a hex prefix of one, that the planner sent **beside** a
+/// `message_id` — lowercased, and of a shape some attachment could match.
+///
+/// Built only by [`ShaPrefix::parse`], while the params are read
+/// ([`super::choose`]), so a value no attachment could ever match is refused
+/// before the version gate and a GET of the message (#765), and every later
+/// reader sees one spelling (#768). Whether it is the *right* prefix, and long
+/// enough to select, only that message can say: [`super::pick`] decides.
+///
+/// Not a [`Picked`]: a prefix is not safe to interpolate into a URL, and is
+/// never used as one — it only selects among the message's own vetted hashes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShaPrefix(String);
+
+impl ShaPrefix {
+    /// `Err` is planner-facing repair text, and never echoes more than 8
+    /// chars of what was sent (it may be a path).
+    pub fn parse(sha: &str) -> Result<Self, String> {
+        if !sha.is_empty() && sha.len() <= 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(Self(sha.to_ascii_lowercase()));
+        }
+        Err(format!(
+            "`sha256` beside a `message_id` must be the attachment's hash or a hex prefix of it, \
+             got {:?} — or drop it: `index` selects within the message.",
+            sha.chars().take(8).collect::<String>()
+        ))
+    }
+
+    /// The lowercase hex.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
