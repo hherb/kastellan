@@ -259,6 +259,17 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `UPSTREAM_AUTH_FAILED` instead of re-planning. The DGX runs #770 (redeployed 2026-09-27), and the
    worker-level mapping is already proven live there with a bogus key; what is left is the
    **planner's** reaction, which needs an operator DM.
+   ⚠️ **A many-email mail task times out on the DGX** (tasks 193 + 194, 2026-09-26/27: the
+   forced-synthesis call hit the 180 s LLM timeout after 5 good plans; 13 such failures since
+   July). Root cause measured: **`KASTELLAN_LLM_DISABLE_THINKING` is a no-op on Ollama**, which
+   ignores the vLLM-style `chat_template_kwargs` switch, so gemma4 thinks freely on every plan
+   call; prefill is ~1,760 tok/s, decode ~42 tok/s, so the time is hidden reasoning, not prompt
+   size — [#773](https://github.com/hherb/kastellan/issues/773). A synthesis-turn timeout
+   discards the whole task and no plan row records token usage —
+   [#774](https://github.com/hherb/kastellan/issues/774). **Mitigation live:** the DGX's
+   `kastellan.env.local` has `KASTELLAN_LLM_TIMEOUT_MS=600000` (was 180000; backup
+   `kastellan.env.local.bak-20260927-timeout180`). Re-ask the Qantas question as the first
+   measurement of the re-measure.
    Then #769 (persistent respawn on an RPC refusal — check Matrix recovery first), #767/#768, and
    #538 (the mail worker's second, hand-rolled localmail mock).
 
