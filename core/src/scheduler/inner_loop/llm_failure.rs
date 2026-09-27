@@ -8,16 +8,16 @@
 //! `KASTELLAN_LLM_TIMEOUT_MS`, and the user got a raw transport error after
 //! nine minutes and nothing else.
 //!
-//! Three changes, the decisions for all of which live here as pure
-//! functions so they are testable without a model or a database:
+//! Three changes. [`formulate_turn`] is the thin async shell the loop calls
+//! (it talks to the formulator and writes audit rows); every *decision* it
+//! makes is a pure function here, testable without a model or a database:
 //!
 //! 1. **A timed-out planning call after tools have gathered results jumps
 //!    straight to the forced-synthesis turn** ([`should_force_synthesis`])
 //!    instead of failing: the work is in hand, so ask for an answer from it.
 //! 2. **A timed-out synthesis turn is retried once with thinking
-//!    suppressed** — decided in the loop, because only the formulator knows
-//!    whether a cheaper attempt exists
-//!    (`PlanFormulator::formulate_synthesis_without_thinking`).
+//!    suppressed** — only the formulator knows whether a cheaper attempt
+//!    exists (`PlanFormulator::formulate_synthesis_without_thinking`).
 //! 3. **A timeout that still ends the task says so in words**
 //!    ([`timeout_failure_detail`]): the model ran out of time, what had been
 //!    gathered, and what to try. The raw router error stays on the end, both
@@ -29,7 +29,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{PlanRecord, StepOutcome};
+use super::{PlanRecord, StepOutcome, TaskContext};
+use crate::cassandra::types::Plan;
+use crate::scheduler::agent::{FormulationMeta, PlanFormulator};
 
 /// Should a failed planning call be answered by spending the
 /// forced-synthesis turn now, rather than failing the task?
@@ -177,6 +179,124 @@ pub(super) fn formulate_failed_payload(
         "request_timeout": request_timeout,
         "error": error.chars().take(FAILED_ROW_ERROR_CHARS).collect::<String>(),
     })
+}
+
+/// What one planning turn produced.
+pub(super) enum Turn {
+    /// A plan to act on.
+    Planned(Plan, FormulationMeta),
+    /// The call timed out after tools had gathered results: spend the
+    /// forced-synthesis turn next instead of failing ([`should_force_synthesis`]).
+    ForceSynthesis,
+    /// The task fails with this user-facing detail.
+    Failed(String),
+}
+
+/// The three loop facts the recovery decisions read.
+pub(super) struct TurnState {
+    /// This is the forced-synthesis turn.
+    pub synth_turn: bool,
+    /// At least one tool step has succeeded, so there is something to answer from.
+    pub gathered: bool,
+    /// The forced-synthesis turn has been spent (or is this one).
+    pub synth_attempted: bool,
+}
+
+/// Run one planning turn, with #774's timeout recovery around it.
+///
+/// Every failed formulator call — the first attempt, and a synthesis retry
+/// — adds one to `failed_llm_calls` and writes exactly one
+/// `plan.formulate_failed` row; `failure_recorded` is what stops the final
+/// match from writing a second row for the one error already recorded on
+/// the no-retry path.
+pub(super) async fn formulate_turn(
+    pool: &sqlx::PgPool,
+    formulator: &dyn PlanFormulator,
+    ctx: &TaskContext,
+    state: TurnState,
+    failed_llm_calls: &mut u32,
+) -> Turn {
+    let TurnState { synth_turn, gathered, synth_attempted } = state;
+    let first = if synth_turn {
+        formulator.formulate_synthesis(ctx).await
+    } else {
+        formulator.formulate_plan(ctx).await
+    };
+    // A synthesis turn that ran out of time gets one more attempt with
+    // thinking suppressed, when the formulator has such an attempt. Every
+    // failed call is counted and gets an audit row exactly once:
+    // `failure_recorded` stops the row below from repeating one already
+    // written here.
+    let mut retried = false;
+    let mut failure_recorded = false;
+    let formulation = match first {
+        Err(e) if synth_turn && e.is_request_timeout() => {
+            *failed_llm_calls = failed_llm_calls.saturating_add(1);
+            record_failed_formulation(
+                pool, ctx.task_id, ctx.plan_count, true, false, &e,
+            ).await;
+            match formulator.formulate_synthesis_without_thinking(ctx).await {
+                Some(retry) => {
+                    tracing::warn!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        retry_ok = retry.is_ok(),
+                        "forced-synthesis call timed out; retried once with thinking suppressed"
+                    );
+                    retried = true;
+                    retry
+                }
+                None => {
+                    tracing::warn!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        "forced-synthesis call timed out; no cheaper retry exists \
+                         (thinking is already suppressed by config)"
+                    );
+                    failure_recorded = true;
+                    Err(e)
+                }
+            }
+        }
+        other => other,
+    };
+    let (plan, mut meta) = match formulation {
+        Ok(x) => x,
+        Err(e) => {
+            if !failure_recorded {
+                *failed_llm_calls = failed_llm_calls.saturating_add(1);
+                record_failed_formulation(
+                    pool, ctx.task_id, ctx.plan_count, synth_turn, retried, &e,
+                ).await;
+            }
+            let timed_out = e.is_request_timeout();
+            if should_force_synthesis(timed_out, gathered, synth_attempted) {
+                tracing::warn!(
+                    task_id = ctx.task_id,
+                    plan_count = ctx.plan_count,
+                    error = %e,
+                    "planning call timed out after tools had gathered results; \
+                     spending the forced-synthesis turn now instead of failing the task"
+                );
+                return Turn::ForceSynthesis;
+            }
+            let detail = if timed_out {
+                timeout_failure_detail(
+                    &GatheredWork::from_plans(&ctx.plans),
+                    &e.to_string(),
+                )
+            } else {
+                format!("llm: {e}")
+            };
+            return Turn::Failed(detail);
+        }
+    };
+    // The retry's `plan.formulate` row says it was one: the existing
+    // `retry_count` column, which the formulator itself leaves at 0.
+    if retried {
+        meta.retry_count = meta.retry_count.saturating_add(1);
+    }
+    Turn::Planned(plan, meta)
 }
 
 /// Write the `agent/plan.formulate_failed` row for one failed formulator

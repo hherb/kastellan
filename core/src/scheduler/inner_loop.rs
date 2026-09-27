@@ -483,87 +483,19 @@ pub async fn run_to_terminal(
         // No general loop-level retry: replanning IS the retry shape (the
         // agent sees the prior failure on the next iteration, bounded by
         // `max_plans`). The one exception is a REQUEST TIMEOUT (#774), the
-        // failure a cheaper request can beat — see `llm_failure`.
-        let first = if synth_turn {
-            formulator.formulate_synthesis(&ctx).await
-        } else {
-            formulator.formulate_plan(&ctx).await
-        };
-        // A synthesis turn that ran out of time gets one more attempt with
-        // thinking suppressed, when the formulator has such an attempt. Every
-        // failed call is counted and gets an audit row exactly once:
-        // `failure_recorded` stops the row below from repeating one already
-        // written here.
-        let mut retried = false;
-        let mut failure_recorded = false;
-        let formulation = match first {
-            Err(e) if synth_turn && e.is_request_timeout() => {
-                failed_llm_calls = failed_llm_calls.saturating_add(1);
-                llm_failure::record_failed_formulation(
-                    pool, ctx.task_id, ctx.plan_count, true, false, &e,
-                ).await;
-                match formulator.formulate_synthesis_without_thinking(&ctx).await {
-                    Some(retry) => {
-                        tracing::warn!(
-                            task_id = ctx.task_id,
-                            plan_count = ctx.plan_count,
-                            retry_ok = retry.is_ok(),
-                            "forced-synthesis call timed out; retried once with thinking suppressed"
-                        );
-                        retried = true;
-                        retry
-                    }
-                    None => {
-                        tracing::warn!(
-                            task_id = ctx.task_id,
-                            plan_count = ctx.plan_count,
-                            "forced-synthesis call timed out; no cheaper retry exists \
-                             (thinking is already suppressed by config)"
-                        );
-                        failure_recorded = true;
-                        Err(e)
-                    }
-                }
+        // failure a cheaper request can beat — `llm_failure::formulate_turn`
+        // owns that recovery, and the counting/audit of every failed call.
+        let turn = llm_failure::TurnState { synth_turn, gathered, synth_attempted };
+        let (mut plan, meta) = match llm_failure::formulate_turn(
+            pool, formulator.as_ref(), &ctx, turn, &mut failed_llm_calls,
+        ).await {
+            llm_failure::Turn::Planned(plan, meta) => (plan, meta),
+            llm_failure::Turn::ForceSynthesis => {
+                force_synth = true;
+                continue;
             }
-            other => other,
+            llm_failure::Turn::Failed(detail) => return finish!(Outcome::Failed(detail)),
         };
-        let (mut plan, mut meta) = match formulation {
-            Ok(x) => x,
-            Err(e) => {
-                if !failure_recorded {
-                    failed_llm_calls = failed_llm_calls.saturating_add(1);
-                    llm_failure::record_failed_formulation(
-                        pool, ctx.task_id, ctx.plan_count, synth_turn, retried, &e,
-                    ).await;
-                }
-                let timed_out = e.is_request_timeout();
-                if llm_failure::should_force_synthesis(timed_out, gathered, synth_attempted) {
-                    tracing::warn!(
-                        task_id = ctx.task_id,
-                        plan_count = ctx.plan_count,
-                        error = %e,
-                        "planning call timed out after tools had gathered results; \
-                         spending the forced-synthesis turn now instead of failing the task"
-                    );
-                    force_synth = true;
-                    continue;
-                }
-                let detail = if timed_out {
-                    llm_failure::timeout_failure_detail(
-                        &llm_failure::GatheredWork::from_plans(&ctx.plans),
-                        &e.to_string(),
-                    )
-                } else {
-                    format!("llm: {e}")
-                };
-                return finish!(Outcome::Failed(detail));
-            }
-        };
-        // The retry's `plan.formulate` row says it was one: the existing
-        // `retry_count` column, which the formulator itself leaves at 0.
-        if retried {
-            meta.retry_count = meta.retry_count.saturating_add(1);
-        }
 
         ctx.plan_count += 1;
         // Best-effort mirror — the in-memory `ctx.plan_count` is the
