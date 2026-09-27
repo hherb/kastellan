@@ -87,7 +87,8 @@ pub fn normalize_filters(
 
 /// A `filters` object that has been through [`normalize_filters`]: a JSON
 /// object, never empty, with any id filters folded in from the top level and
-/// coerced to digit strings.
+/// coerced to digit strings. It vouches for the id keys only: every other key
+/// passes through as the planner sent it, for localmail to validate.
 ///
 /// The field is private and `normalize_filters` is the only constructor, so a
 /// value of this type *is* that guarantee (#768). As a bare

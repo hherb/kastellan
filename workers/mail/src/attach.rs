@@ -57,7 +57,8 @@ pub enum Selector {
     /// `mail.get_attachment` prefixes saved files with is enough. (It used to
     /// be the advertised repair when `filename` cannot discriminate; since
     /// #760 that repair is `index`.) A value no attachment could match — empty,
-    /// over 64 chars, not hex — never gets here: [`choose`] refuses it (#765).
+    /// over 64 chars, not hex — cannot be held here: `expect_sha` is a
+    /// [`ShaPrefix`], which [`choose`] builds while the params are read (#765).
     ///
     /// `index` is the attachment's position in that message's `attachments`
     /// array — the `index` key `mail.get_message` writes into each entry
@@ -70,15 +71,6 @@ pub enum Selector {
         expect_sha: Option<ShaPrefix>,
         index: Option<usize>,
     },
-}
-
-impl Selector {
-    /// Did the planner type the hash this selector fetches by? Only then can a
-    /// localmail 404 mean "you mistyped it" (see [`missing_text_advice`]); a
-    /// hash resolved out of the message's own listing cannot be mistyped.
-    pub fn is_planner_typed(&self) -> bool {
-        matches!(self, Self::Sha(_))
-    }
 }
 
 /// One usable attachment of a message: its position in the served
@@ -246,13 +238,13 @@ pub fn pick(
             let want = want_sha.as_str();
             // A correct but too-short prefix is not a disagreement, and calling
             // it one sends the planner to drop the wrong selector.
-            if want.len() < SHA_PREFIX_MIN && !want.is_empty() && c.sha.starts_with(want) {
+            if want.len() < SHA_PREFIX_MIN && c.sha.starts_with(want) {
                 return Err(format!(
                     "a `sha256` prefix needs at least {SHA_PREFIX_MIN} characters — `index` \
                      alone already selects attachment {i} of message {message_id}."
                 ));
             }
-            if find_by_sha(&[c], want).is_none() {
+            if find_by_sha(&[c], want_sha).is_none() {
                 return Err(format!(
                     "`index` and `sha256` name different attachments of message {message_id} \
                      — pass one, not both. `index` {i} is {}.",
@@ -280,8 +272,7 @@ pub fn pick(
     // is at most a second opinion — but a second opinion that *contradicts* is
     // refused rather than overridden.
     if let Some(want_sha) = expect_sha {
-        let want = want_sha.as_str();
-        let Some(by_sha) = find_by_sha(&usable, want) else {
+        let Some(by_sha) = find_by_sha(&usable, want_sha) else {
             return Err(with_candidates(
                 &format!(
                     "that `sha256` is not an attachment of message {message_id} — {}, \
@@ -411,7 +402,7 @@ fn pick_by_filename<'a>(usable: &[Cand<'a>], want: &str) -> Result<Cand<'a>, Vec
 }
 
 /// Exact sha match, else a **unique** prefix of at least [`SHA_PREFIX_MIN`]
-/// hex chars. `want` must already be lowercased.
+/// hex chars. `want` is a [`ShaPrefix`], so it is already lowercase hex.
 ///
 /// The prefix arm is what lets the planner repair with a 12-char key rather
 /// than 64 chars — the length `mail.get_attachment` prefixes saved files with
@@ -419,11 +410,12 @@ fn pick_by_filename<'a>(usable: &[Cand<'a>], want: &str) -> Result<Cand<'a>, Vec
 /// *this message's* attachments, and a prefix shared by two of them is refused
 /// by the uniqueness check rather than guessed — so the widening cannot select
 /// an attachment the planner did not name.
-fn find_by_sha<'a>(usable: &[Cand<'a>], want: &str) -> Option<Cand<'a>> {
+fn find_by_sha<'a>(usable: &[Cand<'a>], want: &ShaPrefix) -> Option<Cand<'a>> {
+    let want = want.as_str();
     if let Some(hit) = usable.iter().find(|c| c.sha == want) {
         return Some(*hit);
     }
-    if want.len() < SHA_PREFIX_MIN || !want.chars().all(|c| c.is_ascii_hexdigit()) {
+    if want.len() < SHA_PREFIX_MIN {
         return None;
     }
     let mut hits = usable.iter().filter(|c| c.sha.starts_with(want));

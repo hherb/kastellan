@@ -6,7 +6,7 @@ use super::search::BodyEchoFake;
 /// Answers every text request with a page whose text is the request's own
 /// path and query, so a test reads back exactly what the worker asked for.
 /// The page's `offset` echoes the requested one, as localmail's does.
-struct TextFake;
+pub(super) struct TextFake;
 impl HttpGet for TextFake {
     fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
     fn transport_kind(&self) -> &'static str { "fake" }

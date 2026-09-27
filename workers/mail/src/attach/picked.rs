@@ -1,6 +1,6 @@
 //! [`Picked`]: one attachment, validated — the hash every URL path is built
-//! from. Split out of `attach.rs` (movement only) so that file stays near the
-//! 500-line cap; the selection logic that produces a `Picked` stays there.
+//! from. Split out of `attach.rs` to bring that file back toward the 500-line
+//! cap; the selection logic that produces a `Picked` stays there.
 
 use super::{Cand, SHA_HEAD};
 use crate::ids::LocalmailId;
@@ -16,7 +16,8 @@ use crate::localmail_contract as contract;
 /// `Download 470989752-e-ticket-DQXK68.pdf`. Saving under what was typed rather
 /// than what was found would put a file on disk under a name the archive does
 /// not use.
-/// Both fields are **private**, and every constructor validates the hash. That
+///
+/// Every field is **private**, and every constructor validates the hash. That
 /// is the `LocalmailId` rule applied to the other URL segment: a `Picked` that
 /// exists is one whose `sha256` is safe to interpolate. It matters because the
 /// fields used to be `pub` while the constructor was private, so `handler` —
@@ -37,8 +38,12 @@ pub struct Picked {
 impl Picked {
     /// An entry resolved out of a message's own attachment list, whose hash
     /// [`super::pick`] has already vetted with [`is_sha256`].
+    ///
+    /// Re-checked with `assert!`, not `debug_assert!`: this hash goes into a
+    /// URL path, and a release build strips the debug form, leaving the guard
+    /// a rule the one caller has to keep remembering.
     pub(super) fn resolved(message_id: LocalmailId, c: Cand<'_>) -> Self {
-        debug_assert!(is_sha256(c.sha), "pick must only yield vetted hashes");
+        assert!(is_sha256(c.sha), "pick must only yield vetted hashes");
         Self {
             sha256: c.sha.to_string(),
             filename: (!c.name.is_empty()).then(|| c.name.to_string()),
@@ -60,15 +65,26 @@ impl Picked {
     /// refusing it here made the same 64 characters valid in one form and not
     /// the other. The traversal guard is [`is_sha256`], applied *after*.
     pub fn from_planner_sha(sha256: &str) -> Result<Self, String> {
-        let sha256 = sha256.to_ascii_lowercase();
-        if is_sha256(&sha256) {
-            Ok(Self { sha256, filename: None, at: None })
+        let lower = sha256.to_ascii_lowercase();
+        if is_sha256(&lower) {
+            Ok(Self { sha256: lower, filename: None, at: None })
         } else {
+            // What the planner sent, not the lowercased copy: the repair text
+            // should quote its own input back to it.
             Err(format!(
                 "sha256 must be 64 hex chars, got {:?}",
                 sha256.chars().take(8).collect::<String>()
             ))
         }
+    }
+
+    /// Did the planner type this hash? Only then can a localmail 404 mean "you
+    /// mistyped it" (see [`super::missing_text_advice`]); a hash resolved out
+    /// of the message's own listing cannot be mistyped. Asked of the pick
+    /// itself — the value actually fetched — rather than of the selector that
+    /// produced it.
+    pub fn is_planner_typed(&self) -> bool {
+        self.at.is_none()
     }
 
     /// The hash to interpolate. 64 lowercase hex chars by construction.

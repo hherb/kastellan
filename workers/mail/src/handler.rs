@@ -210,9 +210,6 @@ impl MailHandler {
     }
 
     fn get_attachment_text(&self, selector: attach::Selector, offset: u64) -> Result<serde_json::Value, RpcError> {
-        // Whether the planner typed the hash decides which repair a 404 gets;
-        // read it before `resolve_attachment` consumes the selector.
-        let planner_supplied = selector.is_planner_typed();
         let picked = self.resolve_attachment(selector)?;
         // `get_bytes` (the higher attachment cap, not the JSON cap) — a page is
         // small, but the cap is the attachment tools' one ceiling.
@@ -226,7 +223,7 @@ impl MailHandler {
             .map_err(|e| match e {
                 MailError::Upstream { status: 404, .. } => RpcError::new(
                     codes::OPERATION_FAILED,
-                    attach::missing_text_advice(picked.sha256(), planner_supplied),
+                    attach::missing_text_advice(picked.sha256(), picked.is_planner_typed()),
                 ),
                 other => mail_err_to_rpc(other),
             })?;
@@ -239,10 +236,6 @@ impl MailHandler {
         selector: attach::Selector,
         requested_name: Option<String>,
     ) -> Result<serde_json::Value, RpcError> {
-        // Same rule as `get_attachment_text`: a hash this worker resolved out of
-        // a message is right by construction, so a 404 on it must not send the
-        // planner to re-copy it.
-        let planner_supplied = selector.is_planner_typed();
         let picked = self.resolve_attachment(selector)?;
         let out_dir = std::env::var("KASTELLAN_WORKER_OUT").map_err(|_| {
             RpcError::new(
@@ -262,7 +255,7 @@ impl MailHandler {
             .map_err(|e| match e {
                 MailError::Upstream { status: 404, .. } => RpcError::new(
                     codes::OPERATION_FAILED,
-                    attach::missing_blob_advice(picked.sha256(), planner_supplied),
+                    attach::missing_blob_advice(picked.sha256(), picked.is_planner_typed()),
                 ),
                 other => mail_err_to_rpc(other),
             })?;

@@ -454,7 +454,7 @@ fn is_sha256_pins_both_length_and_charset() {
     assert!(!is_sha256(""), "an empty hash would build /v1/attachments//text");
     assert!(!is_sha256(&"a".repeat(63)), "too short");
     assert!(!is_sha256(&"a".repeat(65)), "too long");
-    assert!(!is_sha256(&"A".repeat(64)), "uppercase — the error text promises lowercase");
+    assert!(!is_sha256(&"A".repeat(64)), "uppercase — the vetted form is lowercase; callers lowercase first");
     assert!(!is_sha256(&"g".repeat(64)), "not hex");
     assert!(!is_sha256("../../etc/passwd"));
 }
@@ -602,7 +602,7 @@ fn an_index_selects_among_attachments_that_share_a_name_and_fetches_by_position(
     assert_eq!(picked.index(), Some(1));
     assert_eq!(picked.save_name(), Some("attachment"));
     assert_eq!(picked.blob_path(), "/v1/messages/37413/attachments/1");
-    assert_eq!(picked.text_path(8000, 8000), "/v1/messages/37413/attachments/1/text?offset=8000&limit=8000");
+    assert_eq!(picked.text_path(8000, 700), "/v1/messages/37413/attachments/1/text?offset=8000&limit=700");
 }
 
 /// Positions count every served entry, the unusable ones included, because

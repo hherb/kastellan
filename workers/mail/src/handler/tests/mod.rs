@@ -217,3 +217,16 @@ fn a_refusal_is_asked_again_and_a_pass_is_remembered() {
     h.call("mail.search", q.clone()).expect("upgraded to 1.3");
     h.call("mail.search", q).expect("remembered; the fake panics on a third ask");
 }
+
+/// #768 end to end: an uppercase `sha256` is accepted by the bare form and
+/// fetched by its lowercase spelling — the only one the traversal guard
+/// vouches for. Pinned at the handler, not just at `attach::choose`, so a
+/// pre-check added in `request` cannot quietly refuse it again.
+#[test]
+fn an_uppercase_planner_hash_is_fetched_lowercased() {
+    let mut h = MailHandler::with_client(client_with(Box::new(attachments::TextFake)));
+    let sha = "ab".repeat(32);
+    let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": sha.to_uppercase()})).unwrap();
+    assert!(out["text"].as_str().unwrap().starts_with(&format!("/v1/attachments/{sha}/text?")), "{out}");
+    assert_eq!(out["sha256"], sha, "{out}");
+}

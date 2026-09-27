@@ -253,8 +253,9 @@ fn every_search_asks_for_compact_hits() {
 
 /// #768: a blank `sort` is no sort, decided while the params are read — the
 /// way a blank `query` is — rather than surviving as `Some("")` for
-/// `sort::plan_sort` to reinterpret. (The value itself stays a pass-through:
-/// any non-empty string reaches localmail, which owns the vocabulary.)
+/// `sort::plan_sort` to reinterpret. Whitespace is blank too: `" "` used to
+/// reach localmail as a sort key. (Otherwise the value stays a pass-through,
+/// trimmed: localmail owns the vocabulary.)
 #[test]
 fn a_blank_sort_parses_as_no_sort() {
     let parse = |params: serde_json::Value| match Request::parse(Tool::Search, params).unwrap() {
@@ -262,6 +263,8 @@ fn a_blank_sort_parses_as_no_sort() {
         other => panic!("not a search: {other:?}"),
     };
     assert_eq!(parse(serde_json::json!({"query": "q", "sort": ""})), None);
+    assert_eq!(parse(serde_json::json!({"query": "q", "sort": " \t"})), None, "whitespace is blank too");
+    assert_eq!(parse(serde_json::json!({"query": "q", "sort": " date "})), Some("date".to_string()));
     assert_eq!(parse(serde_json::json!({"query": "q", "sort": "date"})), Some("date".to_string()));
     assert_eq!(parse(serde_json::json!({"query": "q"})), None);
 }
