@@ -50,7 +50,9 @@ async fn real_request_timeout() -> AgentError {
 
 /// One scripted formulator call.
 enum Next {
-    Plan(Plan),
+    /// Boxed: `Plan` is ~440 bytes and the other variants carry nothing
+    /// (`clippy::large_enum_variant`).
+    Plan(Box<Plan>),
     Timeout,
     /// A non-timeout failure — must keep the old `llm: …` behaviour.
     Decode,
@@ -80,7 +82,7 @@ impl TimeoutScript {
 
 async fn resolve(next: Option<Next>) -> Result<(Plan, FormulationMeta), AgentError> {
     match next {
-        Some(Next::Plan(p)) => Ok((p, meta())),
+        Some(Next::Plan(p)) => Ok((*p, meta())),
         Some(Next::Timeout) => Err(real_request_timeout().await),
         Some(Next::Decode) | None => Err(AgentError::Decode {
             detail: "scripted decode failure".into(),
@@ -218,9 +220,9 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     // ── 1. A normal turn times out after a gather → synthesis turn, answered.
     let f = TimeoutScript::new(
         vec![
-            Next::Plan(one_step_plan()),
+            Next::Plan(Box::new(one_step_plan())),
             Next::Timeout,
-            Next::Plan(terminal_plan("Five bookings: …")),
+            Next::Plan(Box::new(terminal_plan("Five bookings: …"))),
         ],
         None,
     );
@@ -232,8 +234,8 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
 
     // ── 2. The synthesis turn itself times out → one retry, which answers.
     let f = TimeoutScript::new(
-        vec![Next::Plan(one_step_plan()), Next::Timeout, Next::Timeout],
-        Some(Next::Plan(terminal_plan("from the retry"))),
+        vec![Next::Plan(Box::new(one_step_plan())), Next::Timeout, Next::Timeout],
+        Some(Next::Plan(Box::new(terminal_plan("from the retry")))),
     );
     let r = run(&pool, f.clone()).await;
     assert_eq!(completed_body(&r), "from the retry");
@@ -241,7 +243,7 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
 
     // ── 3. Synthesis times out and no cheaper attempt exists → a worded failure.
     let f = TimeoutScript::new(
-        vec![Next::Plan(one_step_plan()), Next::Timeout, Next::Timeout],
+        vec![Next::Plan(Box::new(one_step_plan())), Next::Timeout, Next::Timeout],
         None,
     );
     let r = run(&pool, f.clone()).await;
@@ -253,7 +255,7 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
 
     // ── 4. The retry times out too → the same worded failure, after exactly one retry.
     let f = TimeoutScript::new(
-        vec![Next::Plan(one_step_plan()), Next::Timeout, Next::Timeout],
+        vec![Next::Plan(Box::new(one_step_plan())), Next::Timeout, Next::Timeout],
         Some(Next::Timeout),
     );
     let r = run(&pool, f.clone()).await;
@@ -261,7 +263,7 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     assert_eq!(f.retry_calls.load(Ordering::SeqCst), 1);
 
     // ── 5. A timeout before anything was gathered → worded failure, no synthesis.
-    let f = TimeoutScript::new(vec![Next::Timeout], Some(Next::Plan(terminal_plan("unused"))));
+    let f = TimeoutScript::new(vec![Next::Timeout], Some(Next::Plan(Box::new(terminal_plan("unused")))));
     let r = run(&pool, f.clone()).await;
     let d = failed_detail(&r);
     assert!(d.contains("no tool was called"), "{d}");
@@ -269,7 +271,7 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     assert_eq!(f.retry_calls.load(Ordering::SeqCst), 0, "the retry is for synthesis turns only");
 
     // ── 6. A NON-timeout failure after a gather is unchanged: `llm: …`, no synthesis.
-    let f = TimeoutScript::new(vec![Next::Plan(one_step_plan()), Next::Decode], None);
+    let f = TimeoutScript::new(vec![Next::Plan(Box::new(one_step_plan())), Next::Decode], None);
     let r = run(&pool, f.clone()).await;
     assert!(failed_detail(&r).starts_with("llm: plan decode failed"), "{}", failed_detail(&r));
     assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 0);
