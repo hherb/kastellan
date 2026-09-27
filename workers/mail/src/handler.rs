@@ -333,19 +333,25 @@ impl Handler for MailHandler {
 fn mail_err_to_rpc(e: MailError) -> RpcError {
     match e {
         MailError::BadParams(m) => RpcError::new(codes::INVALID_PARAMS, m),
-        MailError::Upstream { status: 401 | 403, .. } => RpcError::new(
-            codes::POLICY_DENIED,
-            "localmail auth/permission denied (check token / account ACL)".to_string(),
-        ),
-        // localmail reports a caller error as problem+json, where only `detail`
-        // is written for the caller. Forwarding the whole envelope spent 91 of
-        // the planner's 200-char budget on `type`/`title`/`status` and pushed
-        // the sort/cursor advice 7 chars over the clamp, truncating it mid-word
-        // — measured live, see `problem`. Fall back to the raw body for
-        // anything that is not problem+json.
+        // A 401/403 is localmail refusing the operator's credential, not
+        // kastellan refusing the call — so it is `UPSTREAM_AUTH_FAILED`, never
+        // the core's own `POLICY_DENIED` (#673: an expired token read as a
+        // policy refusal and the planner routed around a policy that did not
+        // exist). `upstream_auth_refusal` owns which statuses those are, and
+        // the wording, shared with the email channel's worker.
+        //
+        // Every other status: localmail reports a caller error as
+        // problem+json, where only `detail` is written for the caller.
+        // Forwarding the whole envelope spent 91 of the planner's 200-char
+        // budget on `type`/`title`/`status` and pushed the sort/cursor advice 7
+        // chars over the clamp, truncating it mid-word — measured live, see
+        // `problem`. Fall back to the raw body for anything that is not
+        // problem+json.
         MailError::Upstream { status, body } => {
-            let shown = problem::problem_detail(&body).unwrap_or(body);
-            RpcError::new(codes::OPERATION_FAILED, format!("localmail {status}: {shown}"))
+            kastellan_protocol::upstream_auth_refusal("localmail", status).unwrap_or_else(|| {
+                let shown = problem::problem_detail(&body).unwrap_or(body);
+                RpcError::new(codes::OPERATION_FAILED, format!("localmail {status}: {shown}"))
+            })
         }
         MailError::Transport(m) => {
             RpcError::new(codes::OPERATION_FAILED, format!("transport: {m}"))

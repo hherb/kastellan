@@ -11,6 +11,9 @@
 
 pub mod client;
 pub mod server;
+pub mod upstream_auth;
+
+pub use upstream_auth::upstream_auth_refusal;
 
 use std::io::{self, BufRead, Read};
 
@@ -137,6 +140,16 @@ pub mod codes {
     pub const POLICY_DENIED: i32 = -32001;
     /// The underlying operation failed (worker reached the system call but it errored).
     pub const OPERATION_FAILED: i32 = -32002;
+    /// The worker's own upstream service refused the worker's credential
+    /// (HTTP 401/403): expired, revoked, or missing a grant. **Not** a
+    /// kastellan policy verdict — that is [`POLICY_DENIED`] — and not
+    /// retryable by the agent; the operator must renew the credential (#673).
+    /// Built by [`crate::upstream_auth_refusal`], which owns the wording.
+    ///
+    /// `-32004`, not `-32003`: two Python workers already use `-32003`
+    /// privately (gliner-relex `INFERENCE_FAILED`, browser-driver
+    /// `RENDER_FAILED`).
+    pub const UPSTREAM_AUTH_FAILED: i32 = -32004;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

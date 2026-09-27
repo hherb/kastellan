@@ -68,11 +68,14 @@
 use std::collections::VecDeque;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc as tok_mpsc;
 
 use crate::worker_lifecycle::persistent::PersistentHandle;
+
+mod outage;
+use outage::{is_upstream_auth_refusal, report_call_failure, OutageLog};
 
 use super::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId};
 
@@ -250,9 +253,10 @@ fn run(
     cid: ChannelId,
 ) {
     let mut pending: VecDeque<OutgoingMessage> = VecDeque::new();
-    // True while the last worker call failed — logs the down/up transitions
-    // once instead of once per retry slice.
-    let mut down = false;
+    // Latches the down/up transitions so they log once per outage instead of
+    // once per retry slice — except a credential refusal, which has its own
+    // cadence (see `OutageLog`).
+    let mut outage = OutageLog::default();
     loop {
         // 1) Pull newly-queued replies into the local buffer (non-blocking).
         loop {
@@ -271,16 +275,14 @@ fn run(
         while let Some(out) = pending.front() {
             match calls.call(spec.send_method, encode_send(out)) {
                 Ok(_) => {
-                    if down {
+                    if outage.on_success() {
                         tracing::info!(label = spec.label, "worker back up; polled driver resumed");
-                        down = false;
                     }
                     pending.pop_front();
                 }
                 Err(e) => {
-                    if !down {
-                        tracing::warn!(label = spec.label, error = %e, "send failed; retrying after respawn");
-                    }
+                    let line = outage.on_failure(is_upstream_auth_refusal(&e), Instant::now());
+                    report_call_failure(spec.label, &e, "send failed; retrying after respawn", line);
                     errored = true;
                     break;
                 }
@@ -291,9 +293,8 @@ fn run(
         if !errored {
             match calls.call(spec.poll_method, serde_json::json!({ "timeout_ms": spec.poll_timeout_ms })) {
                 Ok(v) => {
-                    if down {
+                    if outage.on_success() {
                         tracing::info!(label = spec.label, "worker back up; polled driver resumed");
-                        down = false;
                     }
                     // Extracted BEFORE `parse_poll` consumes `v` by value —
                     // both extractors see the identical raw poll result.
@@ -409,9 +410,8 @@ fn run(
                     }
                 }
                 Err(e) => {
-                    if !down {
-                        tracing::warn!(label = spec.label, error = %e, "poll failed (worker died or restarting)");
-                    }
+                    let line = outage.on_failure(is_upstream_auth_refusal(&e), Instant::now());
+                    report_call_failure(spec.label, &e, "poll failed (worker died or restarting)", line);
                     errored = true;
                 }
             }
@@ -420,7 +420,6 @@ fn run(
         // 4) Worker down: the supervisor owns respawn/backoff/alarm; just wait
         //    a short, shutdown-responsive slice and retry.
         if errored {
-            down = true;
             if inbound_tx.is_closed() {
                 tracing::info!(label = spec.label, "inbound receiver closed during retry; polled driver exiting");
                 return;

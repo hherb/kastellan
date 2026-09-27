@@ -321,6 +321,11 @@ pub fn render_email_help() -> String {
 #KASTELLAN_EMAIL_SUBSCRIPTION=kastellan
 #KASTELLAN_EMAIL_ADDRESS=kastellan@example.org
 #KASTELLAN_EMAIL_TOKEN_FILE=/home/hherb/.config/kastellan/localmail-channel.token
+# The token file must hold a localmail API KEY, minted with
+#   localmail add-api-key <name> --grant <account>
+# NOT a POST /v1/auth/login token: that one expires after 30 days, and the
+# channel then hears nothing. A refused credential is logged at ERROR as
+# "operator action needed: ... refused its credential".
 #
 # TRAP 1: KASTELLAN_EMAIL_AUTHSERV_ID must be your own MX's identifier
 # EXACTLY as it appears in the Authentication-Results headers it writes.
@@ -1181,6 +1186,10 @@ mod tests {
         assert!(help.contains("TOPMOST"), "must state only the topmost header is trusted: {help}");
         // Trap 2: pairing is operator-only, never in-channel.
         assert!(help.contains("pair issue-token"), "must name the pairing command: {help}");
+        // #674: the channel's localmail credential must be a non-expiring API
+        // key — a login session token expired on the DGX after 30 days.
+        assert!(help.contains("localmail add-api-key"), "must name the key command: {help}");
+        assert!(help.contains("expires after 30 days"), "must say why not a login token: {help}");
         assert!(help.contains("in-channel pairing"), "must state there is no in-channel pairing: {help}");
         // The token is read only from the text body, so an HTML-only sender is
         // rejected `no_token` however correctly they are paired — an operator

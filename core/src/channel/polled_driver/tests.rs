@@ -1,12 +1,14 @@
 //! Unit tests for the channel-generic polled-worker driver, against a scripted
 //! in-process fake — no worker process, no supervisor, no sandbox.
+use super::outage::{FailureLine, CREDENTIAL_REFUSAL_REPEAT};
 use super::*;
+use kastellan_protocol::{codes, RpcError};
 use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Scripted fake worker: a `*.init` method returns a fixed identity, `*.poll`
 /// pops the next canned poll RESULT (empty batch when none queued), `*.send`
@@ -667,4 +669,67 @@ fn audit_ack_only_is_not_called_when_the_same_batchs_events_fail_to_decode() {
         !audited.lock().unwrap().iter().any(|(id, _)| id == "77"),
         "audit must not fire for a skipped id whose batch's events failed to decode"
     );
+}
+
+/// #674: only a structured `UPSTREAM_AUTH_FAILED` refusal reads as "the
+/// credential was refused"; a death, a respawn in progress or any other
+/// worker refusal keeps the old "worker died or restarting" wording.
+#[test]
+fn only_an_upstream_auth_refusal_is_reported_as_a_credential_problem() {
+    let refused = anyhow::Error::from(kastellan_protocol::upstream_auth_refusal("localmail", 401).unwrap());
+    assert!(is_upstream_auth_refusal(&refused));
+
+    let other_rpc = anyhow::Error::from(RpcError::new(codes::OPERATION_FAILED, "localmail 500: boom"));
+    let restarting = anyhow::anyhow!("persistent worker is restarting");
+    // The pre-#674 shape: an auth refusal flattened to text is NOT recognised,
+    // which is why `client_error_to_anyhow` keeps the type.
+    let flattened = anyhow::anyhow!("{refused}");
+    for e in [other_rpc, restarting, flattened] {
+        assert!(!is_upstream_auth_refusal(&e), "{e}");
+    }
+}
+
+// ----- OutageLog (#674, #770 review) -----
+
+/// The plain case: the first failure of an outage warns, the rest are silent,
+/// and a success ends the outage (and says so exactly once).
+#[test]
+fn an_ordinary_outage_warns_once_and_reports_recovery_once() {
+    let mut log = OutageLog::default();
+    let t = Instant::now();
+    assert!(!log.on_success(), "no outage to end yet");
+    assert_eq!(log.on_failure(false, t), FailureLine::Warn);
+    assert_eq!(log.on_failure(false, t), FailureLine::Silent);
+    assert!(log.on_success(), "the outage ends");
+    assert!(!log.on_success(), "and only once");
+    assert_eq!(log.on_failure(false, t), FailureLine::Warn, "a new outage warns again");
+}
+
+/// The review's scenario: an outage that begins as a restart and comes back
+/// as a 401 must still reach ERROR — the single up/down latch hid it.
+#[test]
+fn a_credential_refusal_is_reported_even_when_the_outage_began_otherwise() {
+    let mut log = OutageLog::default();
+    let t = Instant::now();
+    assert_eq!(log.on_failure(false, t), FailureLine::Warn);
+    assert_eq!(log.on_failure(true, t), FailureLine::CredentialError);
+}
+
+/// Every refusal respawns the worker (#769), so a lasting refusal alternates
+/// with "restarting" failures: neither may re-log each cycle, but the ERROR
+/// comes back after `CREDENTIAL_REFUSAL_REPEAT` so it is not buried.
+#[test]
+fn a_lasting_credential_refusal_repeats_on_its_interval_and_not_per_cycle() {
+    let mut log = OutageLog::default();
+    let t0 = Instant::now();
+    assert_eq!(log.on_failure(true, t0), FailureLine::CredentialError);
+    let almost = t0 + CREDENTIAL_REFUSAL_REPEAT - Duration::from_secs(1);
+    assert_eq!(log.on_failure(false, almost), FailureLine::Silent, "the respawn's restarting error");
+    assert_eq!(log.on_failure(true, almost), FailureLine::Silent, "not yet due");
+    let due = t0 + CREDENTIAL_REFUSAL_REPEAT;
+    assert_eq!(log.on_failure(true, due), FailureLine::CredentialError, "due again");
+    assert_eq!(log.on_failure(true, due), FailureLine::Silent, "and re-armed from then");
+    // A success resets the cadence: the next refusal is a new outage.
+    assert!(log.on_success());
+    assert_eq!(log.on_failure(true, due), FailureLine::CredentialError);
 }

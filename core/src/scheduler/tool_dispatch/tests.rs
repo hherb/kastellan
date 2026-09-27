@@ -34,6 +34,54 @@ fn rpc_code_name_maps_known_codes() {
     assert_eq!(rpc_code_name(codes::INTERNAL_ERROR), "INTERNAL_ERROR");
     assert_eq!(rpc_code_name(codes::POLICY_DENIED), "POLICY_DENIED");
     assert_eq!(rpc_code_name(codes::OPERATION_FAILED), "OPERATION_FAILED");
+    assert_eq!(rpc_code_name(codes::UPSTREAM_AUTH_FAILED), "UPSTREAM_AUTH_FAILED");
+}
+
+// ----- upstream_auth_failure_detail (#673/#674) -----
+
+#[test]
+fn an_upstream_auth_rpc_error_is_named_and_flagged_for_the_operator() {
+    // The worker's structured refusal must reach the planner under its own
+    // mnemonic (not RPC_ERROR, and never POLICY_DENIED), and the dispatcher
+    // must be able to pick it out to tell the operator.
+    let rpc = kastellan_protocol::upstream_auth_refusal("localmail", 401).unwrap();
+    let message = rpc.message.clone();
+    let out = map_dispatch_result(Err(ToolHostError::Protocol(ClientError::Rpc(rpc))));
+    match &out {
+        StepOutcome::Err { code, detail } => {
+            assert_eq!(code, "UPSTREAM_AUTH_FAILED");
+            assert_eq!(detail, &message);
+        }
+        other => panic!("expected Err, got {other:?}"),
+    }
+    // An honest refusal reaches the operator's line unchanged.
+    assert_eq!(upstream_auth_failure_detail(&out), Some(message));
+}
+
+/// The detail is worker-written and a compromised worker is in scope: it must
+/// not be able to forge log lines inside the operator's ERROR, nor flood it.
+#[test]
+fn a_hostile_upstream_auth_detail_is_neutralised_and_clamped_for_the_log() {
+    let forged = StepOutcome::Err {
+        code: "UPSTREAM_AUTH_FAILED".into(),
+        detail: "x\nERROR forged line\u{2028}\u{1b}[31m\u{202e}".into(),
+    };
+    let shown = upstream_auth_failure_detail(&forged).unwrap();
+    assert_eq!(shown, "x ERROR forged line  [31m ");
+
+    let huge = StepOutcome::Err { code: "UPSTREAM_AUTH_FAILED".into(), detail: "é".repeat(10_000) };
+    let shown = upstream_auth_failure_detail(&huge).unwrap();
+    assert_eq!(shown.chars().count(), kastellan_protocol::STEP_ERR_DETAIL_MAX);
+}
+
+#[test]
+fn no_other_outcome_is_flagged_as_an_upstream_auth_failure() {
+    let policy = StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "argv not allowlisted".into() };
+    let failed = StepOutcome::Err { code: "OPERATION_FAILED".into(), detail: "localmail 500".into() };
+    let ok = StepOutcome::Ok(serde_json::json!({"ok": true}));
+    for outcome in [&policy, &failed, &ok] {
+        assert_eq!(upstream_auth_failure_detail(outcome), None, "{outcome:?}");
+    }
 }
 
 #[test]
