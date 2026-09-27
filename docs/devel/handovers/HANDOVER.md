@@ -19,8 +19,13 @@
 **The #725 → #748 worker-report arc is closed**, #748 being its last piece. Its review residue
 is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/) snapshots;
 **`gh issue list --state open` is the live answer** and the only one worth trusting. ·
-**The DGX runs `main` as of #709**, redeployed 2026-09-17. **A redeploy is owed for #743 + #745 +
-#750 + #770** (diagnostics and error codes; #748 is test-harness only and needs none). Rootfs images last rebuilt
+**The DGX runs `main` as of #770**, redeployed 2026-09-27 via `scripts/upgrade_from_git.sh` (15
+binaries, `.local` overlay byte-identical, Matrix channel up) — this covers #743 + #745 + #750 too.
+Post-deploy on the DGX: full sweep **187/187 suites, 4729 passed / 0 failed / 79 ignored**, 0
+`[WARN]`, 4 `[SKIP]` (all the opt-in GLiNER tier); `mail-live` gate green as evidence; the
+force-routed live round trip green with the real key and, with a **bogus key**, failing as
+`-32004` "localmail rejected kastellan's credential (HTTP 401) … retrying will not help" through the
+real sandboxed worker + MITM proxy. Rootfs images last rebuilt
 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
@@ -251,7 +256,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    is green on both hosts. **A live planner re-measure is owed** (operator DMs, a **fresh room**):
    #728's multi-search question, a filter-only one (#698), a long PDF read across pages (#760) —
    and, now cheap, point the DGX mail token file at a revoked key once to watch the planner report
-   `UPSTREAM_AUTH_FAILED` instead of re-planning. **The DGX daemon needs a redeploy for that.**
+   `UPSTREAM_AUTH_FAILED` instead of re-planning. The DGX runs #770 (redeployed 2026-09-27), and the
+   worker-level mapping is already proven live there with a bogus key; what is left is the
+   **planner's** reaction, which needs an operator DM.
    Then #769 (persistent respawn on an RPC refusal — check Matrix recovery first), #767/#768, and
    #538 (the mail worker's second, hand-rolled localmail mock).
 
