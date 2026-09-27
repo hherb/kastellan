@@ -49,6 +49,7 @@ fn make_default_meta() -> FormulationMeta {
         graph_seed_entity_ids: Vec::new(),
         graph_seed_count: 0,
         graph_seed_source: crate::entity_extraction::SeedSource::None,
+        usage: Default::default(),
     }
 }
 
@@ -121,7 +122,7 @@ fn build_plan_formulate_payload_carries_full_plan_and_classification_floor() {
 }
 
 #[test]
-fn build_plan_formulate_payload_pins_twenty_nine_keys_for_default_source() {
+fn build_plan_formulate_payload_pins_thirty_keys_for_default_source() {
     // Slice D (2026-05-17, recall-lane wiring) bumped the
     // default-source key count from 17 to 20 by adding
     // recalled_memory_ids, recall_count, recall_query_sha256.
@@ -138,6 +139,8 @@ fn build_plan_formulate_payload_pins_twenty_nine_keys_for_default_source() {
     // #701 (2026-09-16, conversational continuity) bumps to 29 by adding
     // conversation_task_ids: which earlier turns of this conversation the
     // plan was built on.
+    // #774 (2026-09-27) bumps to 30 by adding llm_usage: the completion's
+    // token accounting.
     let meta = FormulationMeta {
         recalled_memory_ids: vec![100, 200],
         recall_count: 2,
@@ -167,10 +170,10 @@ fn build_plan_formulate_payload_pins_twenty_nine_keys_for_default_source() {
         "recalled_memory_ids", "recall_count", "recall_query_sha256",
         "l1_insight", "l3_skill", "invoke_skill",
         "graph_seed_entity_ids", "graph_seed_count", "graph_seed_source",
-        "conversation_task_ids",
+        "conversation_task_ids", "llm_usage",
     ].into_iter().collect();
     assert_eq!(got, expected,
-        "default-source payload must carry exactly 29 keys; diff:\n\
+        "default-source payload must carry exactly 30 keys; diff:\n\
          missing = {:?}\nextra = {:?}",
         expected.difference(&got).collect::<Vec<_>>(),
         got.difference(&expected).collect::<Vec<_>>(),
@@ -178,7 +181,7 @@ fn build_plan_formulate_payload_pins_twenty_nine_keys_for_default_source() {
 }
 
 #[test]
-fn build_plan_formulate_payload_cli_inferred_source_has_thirty_keys_with_signals() {
+fn build_plan_formulate_payload_cli_inferred_source_has_thirty_one_keys_with_signals() {
     let payload = build_plan_formulate_payload(
         1, 1, &make_text_plan(), &make_default_meta(),
         ClassificationProvenance {
@@ -190,8 +193,8 @@ fn build_plan_formulate_payload_cli_inferred_source_has_thirty_keys_with_signals
         None,
     );
     let obj = payload.as_object().expect("payload object");
-    assert_eq!(obj.len(), 30,
-        "cli_inferred + signals must carry 30 keys (29 default + signals); got {} keys: {:?}",
+    assert_eq!(obj.len(), 31,
+        "cli_inferred + signals must carry 31 keys (30 default + signals); got {} keys: {:?}",
         obj.len(), obj.keys().collect::<Vec<_>>(),
     );
     assert_eq!(
@@ -233,6 +236,7 @@ fn build_plan_formulate_payload_graph_seed_keys_round_trip_through_meta() {
         graph_seed_entity_ids: vec![11, 22, 33],
         graph_seed_count: 3,
         graph_seed_source: crate::entity_extraction::SeedSource::GlinerRelex,
+        usage: Default::default(),
         ..make_default_meta()
     };
     let payload = build_plan_formulate_payload(
@@ -303,7 +307,7 @@ fn build_plan_formulate_payload_default_source_omits_signals_key() {
         None,
     );
     let obj = payload.as_object().expect("payload is an object");
-    assert_eq!(obj.len(), 29);
+    assert_eq!(obj.len(), 30);
     assert_eq!(obj["classification_floor_source"], serde_json::Value::String("default".into()));
     assert!(obj.get("classification_floor_signals").is_none(),
         "signals key must be ABSENT when source is not cli_inferred");
@@ -330,8 +334,8 @@ fn build_plan_formulate_payload_agent_raised_source_omits_signals() {
         None,
     );
     let obj = payload.as_object().expect("payload is an object");
-    assert_eq!(obj.len(), 29,
-        "agent_raised should have 28 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
+    assert_eq!(obj.len(), 30,
+        "agent_raised should have 30 keys (no signals); got: {:?}", obj.keys().collect::<Vec<_>>());
     assert_eq!(obj["classification_floor_source"], serde_json::Value::String("agent_raised".into()));
     assert!(obj.get("classification_floor_signals").is_none());
 }
@@ -501,4 +505,38 @@ fn no_earlier_turns_is_an_empty_list_and_a_failed_read_is_null() {
         failed.as_object().expect("object").contains_key("conversation_task_ids"),
         "always present, so a JSONB `?` query finds every row",
     );
+}
+
+/// #774: the row carries what the completion cost, with explicit nulls for
+/// what the backend did not report — Ollama gives token totals and
+/// reasoning text, but no reasoning-token count.
+#[test]
+fn build_plan_formulate_payload_carries_llm_usage_with_explicit_nulls() {
+    let meta = FormulationMeta {
+        usage: kastellan_llm_router::CompletionStats {
+            prompt_tokens: Some(20_800),
+            completion_tokens: Some(3_900),
+            reasoning_chars: 14_000,
+            finish_reason: Some("stop".into()),
+            ..Default::default()
+        },
+        ..make_default_meta()
+    };
+    let payload = build_plan_formulate_payload(
+        1, 1, &make_text_plan(), &meta,
+        ClassificationProvenance {
+            floor: DataClass::Public,
+            floor_source: ClassificationFloorSource::Default,
+            floor_signals: &[],
+            ceiling_source: DataCeilingSource::Declared,
+        },
+        None,
+    );
+    let u = &payload["llm_usage"];
+    assert_eq!(u["prompt_tokens"], 20_800);
+    assert_eq!(u["completion_tokens"], 3_900);
+    assert_eq!(u["reasoning_chars"], 14_000);
+    assert_eq!(u["finish_reason"], "stop");
+    assert!(u["reasoning_tokens"].is_null(), "unreported must be null, not absent or 0: {u}");
+    assert!(u["cached_prompt_tokens"].is_null(), "{u}");
 }

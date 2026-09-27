@@ -313,6 +313,7 @@ async fn main() -> Result<()> {
         embedding_model = %router_cfg.embedding_model,
         timeout_ms = router_cfg.timeout.as_millis() as u64,
         disable_thinking = router_cfg.disable_thinking,
+        thinking_switch = router_cfg.thinking_switch.as_str(),
         "llm router configured"
     );
 

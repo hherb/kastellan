@@ -95,6 +95,9 @@ use super::inner_loop::{ClassificationFloorSource, InnerLoopError, TaskContext};
 ///
 /// #701 (2026-09-16) added `conversation_task_ids`, always present.
 ///
+/// #774 (2026-09-27) added `llm_usage`, always present: the completion's
+/// token accounting ([`kastellan_llm_router::CompletionStats`]).
+///
 /// **The running tally that used to live here has been removed.** It had to be
 /// edited in three places for every new key and was already stale when a
 /// review read it — the doc said 28/29 while the tests asserted 29/30. The
@@ -187,6 +190,15 @@ pub(crate) fn build_plan_formulate_payload(
     obj.insert("llm_model".into(),       serde_json::json!(meta.llm_model));
     obj.insert("llm_backend".into(),     serde_json::json!(meta.llm_backend));
     obj.insert("latency_ms".into(),      serde_json::json!(meta.latency_ms));
+    // #774: token accounting for this completion — prompt, cached, generated
+    // and reasoning tokens, reasoning length, finish reason. Always present,
+    // with explicit nulls for whatever the backend did not report, so
+    // `payload->'llm_usage'->>'completion_tokens'` is queryable on every row.
+    obj.insert(
+        "llm_usage".into(),
+        serde_json::to_value(&meta.usage)
+            .expect("CompletionStats serialisation cannot fail (integers, a string, no maps)"),
+    );
     obj.insert("retry_count".into(),     serde_json::json!(meta.retry_count));
     obj.insert("plan_step_count".into(), serde_json::json!(plan.steps.len()));
     obj.insert("decision_kind".into(),   serde_json::json!(decision_kind));

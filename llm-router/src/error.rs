@@ -116,6 +116,32 @@ pub enum RouterError {
     BodyTooLarge { cap: usize },
 }
 
+/// Is a transport failure with these two `reqwest` flags the **request
+/// budget** running out — i.e. the backend was reached and was too slow?
+///
+/// Pure. A *connect* timeout sets **both** flags (`reqwest::Error::is_timeout`
+/// walks the source chain for `io::ErrorKind::TimedOut`, which a stalled
+/// connect puts there) and means the opposite: the backend was not reached
+/// at all, so nothing about its speed is known and nothing that makes a
+/// request cheaper can help. Same split the guard tier's
+/// `error_kind::classify_transport` makes, for the same reason.
+pub fn is_request_timeout_flags(is_timeout: bool, is_connect: bool) -> bool {
+    is_timeout && !is_connect
+}
+
+impl RouterError {
+    /// `true` only for [`RouterError::Transport`] where the request budget
+    /// (`KASTELLAN_LLM_TIMEOUT_MS`) ran out on a reached backend — see
+    /// [`is_request_timeout_flags`]. Callers use it to decide whether a
+    /// cheaper retry could succeed (#774).
+    pub fn is_request_timeout(&self) -> bool {
+        match self {
+            RouterError::Transport(e) => is_request_timeout_flags(e.is_timeout(), e.is_connect()),
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +157,21 @@ mod tests {
         assert_eq!(transport_kind_tag(false, false), "");
         // timeout wins if both somehow set (it's the more actionable signal).
         assert_eq!(transport_kind_tag(true, true), " [request timed out]");
+    }
+
+    #[test]
+    fn request_timeout_excludes_the_connect_timeout() {
+        assert!(is_request_timeout_flags(true, false));
+        assert!(!is_request_timeout_flags(true, true), "a connect timeout never reached the model");
+        assert!(!is_request_timeout_flags(false, true));
+        assert!(!is_request_timeout_flags(false, false));
+    }
+
+    #[test]
+    fn non_transport_errors_are_never_request_timeouts() {
+        assert!(!RouterError::Config("x".into()).is_request_timeout());
+        assert!(!RouterError::HttpStatus { status: 504, body: "gateway timeout".into() }
+            .is_request_timeout());
     }
 
     #[test]

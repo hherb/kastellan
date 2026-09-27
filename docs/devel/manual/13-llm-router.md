@@ -62,7 +62,22 @@ The router is configured from environment variables (see `config.rs`):
 |----------|---------|---------|
 | `KASTELLAN_LLM_LOCAL_URL` | `http://127.0.0.1:8000/v1` — vLLM/SGLang on Linux, oMLX on macOS | OpenAI-compatible base URL |
 | `KASTELLAN_LLM_LOCAL_MODEL` | `local-default` (a placeholder every real deployment overrides) | Model name to pass in the request body |
+| `KASTELLAN_LLM_TIMEOUT_MS` | `180000` | Whole-request budget; bounds **generation**, not just connect |
+| `KASTELLAN_LLM_DISABLE_THINKING` | `1` (on) | Ask a reasoning model not to think (`0` = let it think) |
+| `KASTELLAN_LLM_THINKING_SWITCH` | `chat_template_kwargs` | How that request is written: `chat_template_kwargs` (vLLM, SGLang, llama.cpp) or `reasoning_effort` (**Ollama**) |
 | Frontier vars (Phase 5) | — | Endpoint + secret-store key; gated by `PolicyGate` |
+
+⚠️ **On Ollama, `KASTELLAN_LLM_DISABLE_THINKING` does nothing unless
+`KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort`** — Ollama silently ignores
+`chat_template_kwargs` (#773). The router cannot send both: vLLM 0.15 rejects
+`reasoning_effort: "none"` with a 400. A backend that thinks despite being
+asked not to is logged once at WARN, with the setting to change. The guard
+endpoint always uses `chat_template_kwargs`, whatever this says — it names
+the planner's backend.
+
+Every `agent / plan.formulate` audit row carries `llm_usage` (prompt, cached,
+completion and reasoning tokens, reasoning length, finish reason; `null` =
+not reported) — the first place to look when planning gets slow (#774).
 
 Only `rustls-tls` and `json` features of `reqwest` are enabled
 (workspace-level decision, see top-level `Cargo.toml`). `openssl-sys` is

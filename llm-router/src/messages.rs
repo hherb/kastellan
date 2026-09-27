@@ -29,6 +29,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::thinking::ThinkingPolicy;
+
 /// Role of the speaker in a chat-completion message.
 ///
 /// Closed enum on purpose — see module docstring.
@@ -51,17 +53,50 @@ pub enum ChatRole {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+
+    /// The model's reasoning, when a backend returns it beside `content`
+    /// (Ollama and current vLLM spell it `reasoning`). Read only to
+    /// *measure* thinking — its length feeds the plan audit row and the
+    /// thinking-leak check (#773, #774); the text itself is never logged.
+    ///
+    /// **Deserialise-only** (`skip_serializing`): a message read from a
+    /// backend and handed back in a later request must not replay the
+    /// model's private reasoning to it, and an audit serialisation of a
+    /// response must not carry it either.
+    #[serde(default, skip_serializing)]
+    pub reasoning: Option<String>,
+
+    /// The older spelling of [`ChatMessage::reasoning`] (vLLM before the
+    /// rename, DeepSeek-style servers). A **separate field, not a serde
+    /// `alias`**: some builds send both keys, and an alias turns a
+    /// duplicate into a hard decode error — every planning call failing
+    /// over a field we only count. Read through
+    /// [`ChatMessage::reasoning_text`].
+    #[serde(default, skip_serializing)]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
+    fn with_role(role: ChatRole, content: impl Into<String>) -> Self {
+        Self { role, content: content.into(), reasoning: None, reasoning_content: None }
+    }
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::System, content: content.into() }
+        Self::with_role(ChatRole::System, content)
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::User, content: content.into() }
+        Self::with_role(ChatRole::User, content)
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::Assistant, content: content.into() }
+        Self::with_role(ChatRole::Assistant, content)
+    }
+
+    /// The reasoning text under whichever key the backend used, `None`
+    /// when absent or empty. `reasoning` wins when both are present.
+    pub fn reasoning_text(&self) -> Option<&str> {
+        [self.reasoning.as_deref(), self.reasoning_content.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|t| !t.is_empty())
     }
 }
 
@@ -85,13 +120,30 @@ pub struct ChatRequest {
     /// Extra keyword arguments forwarded to the backend's chat
     /// *template* (not to sampling). This is the de-facto OpenAI-compat
     /// extension both Ollama and vLLM honour; it is the only portable
-    /// way to reach a reasoning model's `enable_thinking` switch.
+    /// way to reach a vLLM/SGLang/llama.cpp reasoning model's
+    /// `enable_thinking` switch. **Ollama ignores it** — see
+    /// [`crate::thinking`] (#773).
     ///
     /// Left `None` the field is not serialised at all, so a backend
-    /// that has never heard of it sees a byte-identical payload. Set it
-    /// with [`ChatRequest::without_thinking`] rather than by hand.
+    /// that has never heard of it sees a byte-identical payload. Normally
+    /// set by the router from its configured dialect, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<serde_json::Value>,
+
+    /// OpenAI's reasoning-effort knob. `"none"` is how Ollama's
+    /// OpenAI-compat endpoint is told not to think. Left `None` it is not
+    /// serialised — and it must stay unset on vLLM 0.15, which 400s on
+    /// `"none"`. Normally set by the router from its configured dialect
+    /// ([`crate::thinking::ThinkingSwitch`]), not by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+
+    /// The caller's say over thinking for this one request. **Never on the
+    /// wire** (`serde(skip)`): it is an instruction to the router, which
+    /// writes it in whichever dialect the backend understands. See
+    /// [`ChatRequest::with_thinking`].
+    #[serde(skip)]
+    pub thinking: ThinkingPolicy,
 
     /// Ask the backend to return per-token log-probabilities.
     ///
@@ -121,9 +173,17 @@ impl ChatRequest {
             max_tokens: None,
             temperature: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
+            thinking: ThinkingPolicy::RouterDefault,
             logprobs: None,
             top_logprobs: None,
         }
+    }
+
+    /// Override the router's thinking default for this request.
+    pub fn with_thinking(mut self, policy: ThinkingPolicy) -> Self {
+        self.thinking = policy;
+        self
     }
 
     /// Ask for `top_n` token alternatives at each output position.
@@ -159,9 +219,11 @@ impl ChatRequest {
     /// that plan decoding reports `expected value at line 1 column 1`)
     /// trace back to it.
     ///
-    /// A backend that does not implement the switch ignores the key,
-    /// which is why this is safe to set unconditionally on the local
-    /// leg.
+    /// This is the [`crate::thinking::ThinkingSwitch::ChatTemplateKwargs`]
+    /// dialect. A backend that does not implement it ignores the key
+    /// *silently* — Ollama does, which is how the DGX thought on every
+    /// planning call while configured not to (#773). The router picks the
+    /// dialect from config; see [`crate::thinking`].
     pub fn without_thinking(mut self) -> Self {
         self.chat_template_kwargs =
             Some(serde_json::json!({ "enable_thinking": false }));
@@ -284,6 +346,19 @@ pub struct Usage {
     /// `kastellan_core::cassandra::guard_model::timeout::probe_sample`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// OpenAI's breakdown of `completion_tokens`. Carries the reasoning
+    /// count on backends that report one; Ollama does not (it returns the
+    /// reasoning text instead — see [`ChatMessage::reasoning`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+/// How many of `completion_tokens` were spent reasoning, when the backend
+/// says. Absence means "not reported", never "zero" (#774).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionTokensDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
 }
 
 /// Decoded `200 OK` response from a chat-completion call.
@@ -298,296 +373,15 @@ pub struct ChatResponse {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Identifies the serving stack on some backends — Ollama stamps
+    /// `fp_ollama`, which lets a thinking-leak warning name the fix
+    /// ([`crate::thinking::leak_warning`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
     pub choices: Vec<ChatChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn chat_role_serializes_as_lowercase() {
-        // Wire-shape pin: any change here rotates the contract with
-        // every OpenAI-compatible backend on the planet.
-        assert_eq!(serde_json::to_string(&ChatRole::System).unwrap(), "\"system\"");
-        assert_eq!(serde_json::to_string(&ChatRole::User).unwrap(), "\"user\"");
-        assert_eq!(serde_json::to_string(&ChatRole::Assistant).unwrap(), "\"assistant\"");
-        assert_eq!(serde_json::to_string(&ChatRole::Tool).unwrap(), "\"tool\"");
-    }
-
-    #[test]
-    fn chat_role_rejects_unknown_string() {
-        // Closed enum: deserialising "developer" must fail rather than
-        // silently fall back. If we ever add Developer as a role this
-        // test will fail at the right moment.
-        let err = serde_json::from_str::<ChatRole>("\"developer\"").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("unknown variant"), "expected 'unknown variant' in {msg:?}");
-    }
-
-    #[test]
-    fn chat_message_constructors_set_the_right_role() {
-        assert_eq!(ChatMessage::system("hi").role, ChatRole::System);
-        assert_eq!(ChatMessage::user("hi").role, ChatRole::User);
-        assert_eq!(ChatMessage::assistant("hi").role, ChatRole::Assistant);
-    }
-
-    #[test]
-    fn chat_request_omits_none_fields_on_the_wire() {
-        // Some local backends (older llama.cpp builds especially) reject
-        // requests that include explicit nulls. The
-        // `skip_serializing_if = Option::is_none` pin guards against a
-        // refactor that drops it.
-        let req = ChatRequest::new("local-model", vec![ChatMessage::user("hi")]);
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(!s.contains("max_tokens"), "max_tokens leaked: {s}");
-        assert!(!s.contains("temperature"), "temperature leaked: {s}");
-        assert!(s.contains("\"model\":\"local-model\""), "model missing in {s}");
-    }
-
-    #[test]
-    fn chat_request_includes_optional_fields_when_set() {
-        let req = ChatRequest {
-            model: "m".into(),
-            messages: vec![ChatMessage::user("hi")],
-            max_tokens: Some(42),
-            temperature: Some(0.7),
-            chat_template_kwargs: None,
-            logprobs: None,
-            top_logprobs: None,
-        };
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(s.contains("\"max_tokens\":42"), "max_tokens missing: {s}");
-        assert!(s.contains("\"temperature\":0.7"), "temperature missing: {s}");
-    }
-
-    /// An untouched request must stay byte-identical on the wire — a
-    /// backend that has never heard of `chat_template_kwargs` must not
-    /// start seeing it just because the field exists in the struct.
-    #[test]
-    fn chat_template_kwargs_is_absent_unless_asked_for() {
-        let req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(
-            !s.contains("chat_template_kwargs"),
-            "chat_template_kwargs leaked into an untouched request: {s}"
-        );
-    }
-
-    /// The exact wire shape both Ollama and vLLM look for. Pinned
-    /// because a typo here fails silently: the backend ignores the
-    /// unknown key and the model thinks anyway.
-    #[test]
-    fn without_thinking_emits_the_enable_thinking_false_kwarg() {
-        let req =
-            ChatRequest::new("m", vec![ChatMessage::user("hi")]).without_thinking();
-        let v: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
-        assert_eq!(
-            v["chat_template_kwargs"]["enable_thinking"],
-            serde_json::Value::Bool(false),
-            "unexpected wire shape: {v}"
-        );
-    }
-
-    /// `without_thinking` must not disturb anything else the caller set.
-    #[test]
-    fn without_thinking_preserves_the_other_fields() {
-        let req = ChatRequest {
-            model: "m".into(),
-            messages: vec![ChatMessage::user("hi")],
-            max_tokens: Some(8192),
-            temperature: Some(0.2),
-            chat_template_kwargs: None,
-            logprobs: None,
-            top_logprobs: None,
-        }
-        .without_thinking();
-        assert_eq!(req.model, "m");
-        assert_eq!(req.max_tokens, Some(8192));
-        assert_eq!(req.temperature, Some(0.2));
-        assert_eq!(req.messages.len(), 1);
-    }
-
-    /// The prefix-cache block decodes when present, and its absence
-    /// stays absent rather than defaulting to zero.
-    ///
-    /// The distinction is load-bearing: the guard probe must be able to
-    /// tell "this backend reports no cache" from "nothing was cached",
-    /// because only the second is a number it may divide by. Verbatim
-    /// shape from the DGX guard server, 2026-08-23.
-    #[test]
-    fn usage_decodes_prompt_tokens_details_and_tolerates_its_absence() {
-        let with: Usage = serde_json::from_value(json!({
-            "prompt_tokens": 810,
-            "completion_tokens": 1,
-            "total_tokens": 811,
-            "prompt_tokens_details": {"cached_tokens": 809}
-        }))
-        .unwrap();
-        assert_eq!(with.prompt_tokens, Some(810));
-        assert_eq!(
-            with.prompt_tokens_details.and_then(|d| d.cached_tokens),
-            Some(809)
-        );
-
-        // A backend that reports `usage` but no cache block at all.
-        let without: Usage = serde_json::from_value(json!({
-            "prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14
-        }))
-        .unwrap();
-        assert!(
-            without.prompt_tokens_details.is_none(),
-            "a missing block must stay None, not become Some(cached_tokens: 0)"
-        );
-
-        // Present but empty — llama.cpp omits `cached_tokens` on a
-        // fully-cold request in some builds.
-        let empty: Usage =
-            serde_json::from_value(json!({"prompt_tokens": 810, "prompt_tokens_details": {}}))
-                .unwrap();
-        assert_eq!(
-            empty.prompt_tokens_details.and_then(|d| d.cached_tokens),
-            None
-        );
-    }
-
-    #[test]
-    fn chat_response_decodes_canonical_openai_envelope() {
-        // Hand-crafted to match what a vLLM 0.5+ server returns; the
-        // `system_fingerprint` field is absent on purpose to prove
-        // `serde(default)` fields tolerate missing keys.
-        let raw = json!({
-            "id": "chatcmpl-abc",
-            "object": "chat.completion",
-            "created": 1_700_000_000_u64,
-            "model": "Qwen/Qwen2.5-7B-Instruct",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "hello back"},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
-        });
-        let resp: ChatResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(resp.id.as_deref(), Some("chatcmpl-abc"));
-        assert_eq!(resp.model.as_deref(), Some("Qwen/Qwen2.5-7B-Instruct"));
-        assert_eq!(resp.choices.len(), 1);
-        assert_eq!(resp.choices[0].message.role, ChatRole::Assistant);
-        assert_eq!(resp.choices[0].message.content, "hello back");
-        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
-        let usage = resp.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, Some(11));
-        assert_eq!(usage.total_tokens, Some(14));
-    }
-
-    /// The planner path must stay byte-identical to what it sends today:
-    /// neither logprobs field may appear on a request nobody asked to
-    /// score. Same guarantee `chat_template_kwargs` carries, and the same
-    /// reason — a backend that has never heard of the field must not start
-    /// seeing it merely because the struct grew.
-    #[test]
-    fn logprobs_fields_are_absent_unless_asked_for() {
-        let req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(!s.contains("logprobs"), "logprobs leaked: {s}");
-        assert!(!s.contains("top_logprobs"), "top_logprobs leaked: {s}");
-    }
-
-    /// The exact pair OpenAI-compatible backends look for. `logprobs` is a
-    /// bool and `top_logprobs` a count, and sending only the count is a 4xx
-    /// on vLLM — so the builder sets both or neither.
-    #[test]
-    fn with_logprobs_emits_the_openai_wire_shape() {
-        let req =
-            ChatRequest::new("m", vec![ChatMessage::user("hi")]).with_logprobs(20);
-        let v: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
-        assert_eq!(v["logprobs"], serde_json::Value::Bool(true), "shape: {v}");
-        assert_eq!(v["top_logprobs"], serde_json::json!(20), "shape: {v}");
-    }
-
-    /// `with_logprobs` must not disturb anything else the caller set —
-    /// notably `chat_template_kwargs`, which the local leg stamps on
-    /// unconditionally.
-    #[test]
-    fn with_logprobs_preserves_the_other_fields() {
-        let req = ChatRequest::new("m", vec![ChatMessage::user("hi")])
-            .without_thinking()
-            .with_logprobs(5);
-        assert_eq!(req.model, "m");
-        assert_eq!(req.messages.len(), 1);
-        assert!(req.chat_template_kwargs.is_some());
-        assert_eq!(req.top_logprobs, Some(5));
-    }
-
-    /// Decoded from a real response measured against DGX Ollama 0.22.0 on
-    /// 2026-08-16 (`/v1/chat/completions`, `top_logprobs: 5`) rather than
-    /// reconstructed by hand — a fixture written from what we believe the
-    /// shape to be pins our belief, not the wire ([[#566's lesson]]).
-    #[test]
-    fn chat_response_decodes_the_logprobs_envelope() {
-        let raw = json!({
-            "id": "chatcmpl-800",
-            "model": "gemma4:26b-a4b-it-q8_0-ctx64k",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": ""},
-                "finish_reason": "length",
-                "logprobs": {"content": [{
-                    "token": "yes",
-                    "logprob": -0.000000004074,
-                    "bytes": [121, 101, 115],
-                    "top_logprobs": [
-                        {"token": "yes", "logprob": -0.000000004074, "bytes": [121, 101, 115]},
-                        {"token": "no",  "logprob": -20.2255,        "bytes": [110, 111]}
-                    ]
-                }]}
-            }],
-            "usage": {"prompt_tokens": 28, "completion_tokens": 1, "total_tokens": 29}
-        });
-        let resp: ChatResponse = serde_json::from_value(raw).unwrap();
-        let lp = resp.choices[0].logprobs.as_ref().expect("logprobs decoded");
-        assert_eq!(lp.content.len(), 1);
-        assert_eq!(lp.content[0].token, "yes");
-        assert_eq!(lp.content[0].top_logprobs.len(), 2);
-        assert_eq!(lp.content[0].top_logprobs[1].token, "no");
-        assert_eq!(
-            lp.content[0].top_logprobs[0].bytes.as_deref(),
-            Some([121u8, 101, 115].as_slice())
-        );
-    }
-
-    /// Every backend that returns no logprobs — which is every call the
-    /// planner makes — must keep decoding exactly as before.
-    #[test]
-    fn chat_response_without_logprobs_decodes_with_none() {
-        let raw = json!({
-            "model": "m",
-            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
-        });
-        let resp: ChatResponse = serde_json::from_value(raw).unwrap();
-        assert!(resp.choices[0].logprobs.is_none());
-    }
-
-    #[test]
-    fn chat_response_decodes_minimal_ollama_envelope() {
-        // Ollama's OpenAI-compat front door omits `usage` entirely when
-        // the underlying GGUF runtime didn't surface it. This test pins
-        // that the decoder accepts the absence rather than failing.
-        let raw = json!({
-            "model": "llama3.2:3b",
-            "choices": [{
-                "message": {"role": "assistant", "content": "ok"}
-            }]
-        });
-        let resp: ChatResponse = serde_json::from_value(raw).unwrap();
-        assert!(resp.id.is_none());
-        assert!(resp.usage.is_none());
-        assert!(resp.choices[0].finish_reason.is_none());
-        assert_eq!(resp.choices[0].index, 0);
-    }
-}
+mod tests;

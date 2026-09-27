@@ -97,6 +97,8 @@ mod tests {
             max_tokens: Some(8192),
             temperature: Some(0.9),
             chat_template_kwargs: None,
+            reasoning_effort: None,
+            thinking: Default::default(),
             // Populated rather than left None: this test's stated pin is
             // "no matter what the request looks like", so a request
             // carrying every optional field — including the classifier

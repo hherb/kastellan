@@ -46,6 +46,7 @@ use super::inner_loop_audit::{
 
 mod floor;
 mod invoke_expand;
+mod llm_failure;
 // `pub(crate)` so `scheduler::conversation` can reuse the same pruning,
 // clamping and screen-text extraction for the conversation block (#701).
 // A second copy of that logic is exactly the drift #669 warns about.
@@ -161,8 +162,9 @@ impl StepOutcome {
 /// build the spec §7 `task.finalize` summary row without re-querying.
 ///
 /// `plan_count` is the final value of `TaskContext::plan_count` (one
-/// increment per formulator call) and is the natural value for the
-/// finalize payload's `total_llm_calls` field. `dispatch_count` is
+/// increment per formulator call that produced a plan);
+/// `failed_llm_calls` counts the calls that produced none (#774), so the
+/// finalize payload's `total_llm_calls` is their sum. `dispatch_count` is
 /// incremented once per `StepDispatcher::dispatch_step` call —
 /// regardless of whether the call returned `Ok` or `Err` — so the
 /// audit row reflects how often the host actually tried to dispatch
@@ -172,6 +174,9 @@ pub struct InnerLoopResult {
     pub outcome: Outcome,
     pub plan_count: u32,
     pub dispatch_count: u32,
+    /// Formulator calls in this run that produced no plan — a timed-out
+    /// attempt the loop recovered from, or the final failure (#774).
+    pub failed_llm_calls: u32,
     /// `l1_insight` from the terminal plan, captured only when the
     /// inner loop reaches `Outcome::Completed`. The lane runner reads
     /// this in `drain_lane` and writes one `actor='scheduler'
@@ -381,6 +386,12 @@ pub async fn run_to_terminal(
     // spec §7 `task.finalize` summary row.
     let mut dispatch_count: u32 = 0;
 
+    // Formulator calls that produced NO plan (#774): a timed-out attempt the
+    // loop recovered from, or the final failure. `plan_count` counts only
+    // the calls that produced a plan, so `task.finalize`'s `total_llm_calls`
+    // is `plan_count + failed_llm_calls`.
+    let mut failed_llm_calls: u32 = 0;
+
     // Set true once any iteration expands an `invoke_skill` directive.
     // ANDed into the terminal `l3_skill` capture so an invoke-driven task
     // never re-crystallises the skill it just ran (forecloses a
@@ -399,6 +410,7 @@ pub async fn run_to_terminal(
                 outcome: $outcome,
                 plan_count: ctx.plan_count,
                 dispatch_count,
+                failed_llm_calls,
                 terminal_l1_insight: $insight,
                 terminal_l3_skill: $skill,
                 terminal_python_skill: $pyskill,
@@ -433,6 +445,10 @@ pub async fn run_to_terminal(
     // never loop back into it (belt-and-suspenders — a synth turn always
     // returns a terminal outcome anyway).
     let mut synth_attempted = false;
+    // Set true when a planning call timed out after something was gathered
+    // (#774): the next iteration spends the forced-synthesis turn instead of
+    // the task failing with everything it gathered thrown away.
+    let mut force_synth = false;
 
     loop {
         // Cancellation poll — top of loop.
@@ -452,7 +468,7 @@ pub async fn run_to_terminal(
         // there is nothing to synthesize, so the cap fails hard as before —
         // which is why the existing cap tests are unaffected.
         let over_cap = ctx.plan_count >= ctx.max_plans;
-        let synth_turn = over_cap && gathered && !synth_attempted;
+        let synth_turn = (over_cap || force_synth) && gathered && !synth_attempted;
         if over_cap && !synth_turn {
             return finish!(Outcome::Failed(format!(
                 "plan_iteration_cap_exceeded ({}>={})", ctx.plan_count, ctx.max_plans
@@ -464,18 +480,21 @@ pub async fn run_to_terminal(
 
         // 1. Formulate plan (forced-synthesis variant on the synth turn).
         //
-        // No loop-level retry: replanning IS the retry shape (the agent
-        // sees the prior failure on the next iteration, bounded by
-        // `max_plans`). A transient HTTP/transport error that escapes
-        // the formulator's own retry is therefore terminal here.
-        let formulation = if synth_turn {
-            formulator.formulate_synthesis(&ctx).await
-        } else {
-            formulator.formulate_plan(&ctx).await
-        };
-        let (mut plan, meta) = match formulation {
-            Ok(x) => x,
-            Err(e) => return finish!(Outcome::Failed(format!("llm: {e}"))),
+        // No general loop-level retry: replanning IS the retry shape (the
+        // agent sees the prior failure on the next iteration, bounded by
+        // `max_plans`). The one exception is a REQUEST TIMEOUT (#774), the
+        // failure a cheaper request can beat — `llm_failure::formulate_turn`
+        // owns that recovery, and the counting/audit of every failed call.
+        let turn = llm_failure::TurnState { synth_turn, gathered, synth_attempted };
+        let (mut plan, meta) = match llm_failure::formulate_turn(
+            pool, formulator.as_ref(), &ctx, turn, &mut failed_llm_calls,
+        ).await {
+            llm_failure::Turn::Planned(planned) => *planned,
+            llm_failure::Turn::ForceSynthesis => {
+                force_synth = true;
+                continue;
+            }
+            llm_failure::Turn::Failed(detail) => return finish!(Outcome::Failed(detail)),
         };
 
         ctx.plan_count += 1;
@@ -797,6 +816,13 @@ pub async fn run_to_terminal(
         // non-terminal plan, do NOT execute more tool steps — fail at the
         // cap rather than spending another gather round.
         if synth_turn {
+            // A synthesis turn that a TIMEOUT forced (#774) never reached the
+            // cap, so it must not say it did — operators count cap rows.
+            if !over_cap {
+                return finish!(Outcome::Failed(llm_failure::forced_synthesis_no_answer_detail(
+                    &llm_failure::GatheredWork::from_plans(&ctx.plans),
+                )));
+            }
             // Report the cap the same way as the primary cap message above
             // (`max_plans>=max_plans`). `ctx.plan_count` is now `max_plans + 1`
             // — the synthesis turn spent one extra formulation — so printing it
@@ -876,3 +902,5 @@ pub async fn run_to_terminal(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timeout_tests;

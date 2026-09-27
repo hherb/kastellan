@@ -152,6 +152,7 @@ fn test_meta() -> FormulationMeta {
         graph_seed_entity_ids: Vec::new(),
         graph_seed_count: 0,
         graph_seed_source: kastellan_core::entity_extraction::SeedSource::None,
+        usage: Default::default(),
     }
 }
 

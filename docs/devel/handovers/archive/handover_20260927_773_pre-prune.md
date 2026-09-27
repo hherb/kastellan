@@ -4,13 +4,13 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260927_773_pre-prune.md`](archive/handover_20260927_773_pre-prune.md),
+> [`archive/handover_20260927_673_pre-prune.md`](archive/handover_20260927_673_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-27, latest (#773 + #774: the thinking switch works on Ollama; a
-slow planning call no longer discards the task) ·
-**Recent PRs, newest first:** [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Last updated:** 2026-09-27, later (#673 + #674: an upstream credential refusal is
+`UPSTREAM_AUTH_FAILED`, and the operator hears about it; filed #769) ·
+**Recent PRs, newest first:** [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -26,9 +26,7 @@ Post-deploy on the DGX: full sweep **187/187 suites, 4729 passed / 0 failed / 79
 force-routed live round trip green with the real key and, with a **bogus key**, failing as
 `-32004` "localmail rejected kastellan's credential (HTTP 401) … retrying will not help" through the
 real sandboxed worker + MITM proxy. Rootfs images last rebuilt
-2026-09-08. ⚠️ **The DGX does NOT yet run #776**; its `kastellan.env.local` already carries
-`KASTELLAN_LLM_DISABLE_THINKING=0` + `KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort` (inert on
-#770; backup `…bak-20260927-thinking`) and `KASTELLAN_LLM_TIMEOUT_MS=600000`.
+2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -66,43 +64,36 @@ real sandboxed worker + MITM proxy. Rootfs images last rebuilt
 
 ## Current state
 
-### This session (2026-09-27, latest): #773 + #774 — thinking, and slow planning calls
+### This session (2026-09-27, latest): #673 + #674 — a refused credential says so
 
-- **`KASTELLAN_LLM_THINKING_SWITCH`** (`llm-router/src/thinking.rs`, pure): `chat_template_kwargs`
-  (default — byte-identical for vLLM/SGLang/llama.cpp) or `reasoning_effort` (sends `"none"`;
-  **the only one Ollama honours**). ⚠️ **Never send both:** vLLM **0.15.1** (the DGX's
-  `nvcr.io/nvidia/vllm:26.02` image) types `reasoning_effort` as `low|medium|high` → 400 on every
-  call; 0.17 accepts `"none"` (both read from the images' source). llama.cpp accepts either
-  (measured). `for_guard` **pins** kwargs — the setting names the planner's backend.
-- **Leak detector:** suppression requested + reasoning returned (`message.reasoning` /
-  `reasoning_content` — two fields, **not** a serde alias, since some vLLMs send both) or
-  `reasoning_tokens > 0` → one WARN per process naming the fix. `ChatRequest.thinking`
-  (`ThinkingPolicy`, `serde(skip)`) lets one call override the config.
-- **`llm_usage` on every `plan.formulate` row** (`CompletionStats`: prompt/cached/completion/
-  reasoning tokens, reasoning chars, finish reason; `null` = not reported). Ollama reports **no**
-  reasoning-token count — read `reasoning_chars`.
-- **Timeouts** (`inner_loop/llm_failure.rs`, pure; `RouterError::is_request_timeout` excludes a
-  *connect* timeout): after something was gathered, a timed-out planning call **spends the
-  forced-synthesis turn** instead of failing; a timed-out synthesis **retries once with thinking
-  suppressed** (only when config lets it think — else the retry is the same request); a final
-  timeout tells the user in words what was gathered, raw error last (`like '%timed out%'` still
-  matches). The loop calls one `formulate_turn` → `Turn::{Planned, ForceSynthesis, Failed}`.
-  PG loop test uses **real** reqwest timeouts; mutation-checked (decision, retry wiring, row guard).
-- **Every failed planning call is counted and audited** (review fixes): `InnerLoopResult.failed_llm_calls`,
-  so `task.finalize.total_llm_calls = plan_count + failed`; one best-effort
-  `agent/plan.formulate_failed` row per failed call (`synth_turn`, `thinking_suppressed_retry`,
-  `request_timeout`, clamped `error`); the retry's `plan.formulate` row has `retry_count: 1`. A
-  timeout-forced synthesis that asks for tools says so — **not** `plan_iteration_cap_exceeded`.
-- ⚠️ **Not decided, deliberately:** thinking on vs off for plan quality — that is the live
-  re-measure. #774 item 4 (prompt budgets) only if `llm_usage` shows prompt size matters.
-
-### Previous (2026-09-27): #673 + #674 — a refused credential says so
-
-`codes::UPSTREAM_AUTH_FAILED = -32004` + pure `upstream_auth_refusal` (401/403) in `mail` and
-`email-in`; the dispatcher logs `operator action needed: …`; the email channel's `OutageLog`
-repeats the refusal every 15 min. ⚠️ Only `ClientError::Rpc` keeps its type through
-`client_error_to_anyhow`. **#769 filed, not fixed** (respawn on a live worker's refusal — check
-Matrix recovery first). Full prose in the `673` archive snapshot.
+- **New protocol code `codes::UPSTREAM_AUTH_FAILED = -32004`** (`-32003` is taken privately by
+  gliner-relex and browser-driver) and a pure `kastellan_protocol::upstream_auth_refusal(service,
+  status)`: it owns *which* statuses count (401, 403) and the wording (401 "invalid, expired or
+  revoked", 403 "lacks a grant, or a proxy in front refused" — localmail itself never 403s; both
+  "not a kastellan policy refusal; retrying will not help", both ≤
+  `STEP_ERR_DETAIL_MAX`). `mail` and `email-in` were the **only** workers aliasing an upstream
+  status onto `POLICY_DENIED` (surveyed); both now call it, every other status unchanged.
+  ✅ Live DGX localmail answers a bad bearer `401 invalid-token` — the case the 401 text names.
+- **The operator hears it.** `rpc_code_name` names the code; the step dispatcher logs one ERROR
+  `operator action needed: …` per refused call (`upstream_auth_failure_detail`, pure; the
+  worker-written detail is `neutralise_controls`'d + clamped — review fix). The email channel's
+  polled driver says "refused its credential" instead of "worker died or restarting" — possible
+  because `ClientTransport::call` now keeps an `RpcError`'s **type** (`client_error_to_anyhow`,
+  pure; a test crosses the real driver thread). Its latch is `OutageLog` (pure, clock passed in):
+  the refusal is tracked **apart** from up/down, so an outage that began as a restart still reaches
+  ERROR, and it **repeats every 15 min** (`CREDENTIAL_REFUSAL_REPEAT`) because #769's per-cycle
+  `[worker-death]` lines buried a once-per-outage ERROR within minutes (review finding).
+  ⚠️ **Only `Rpc` is preserved**: a preserved `ClientError::Io` prints its source twice under
+  `{e:#}` — mutation-proved.
+- ⚠️ **#769, filed, deliberately not fixed:** the persistent driver still **respawns on a live
+  worker's RPC refusal**, so an expired email-channel credential still also emits death reports and
+  the respawn-rate alarm. Matrix may rely on that respawn (a failed send = re-login + fresh sync);
+  changing it needs its own look.
+- Docs: `docs/workers/mail.md` and the generated email-env help say **`localmail add-api-key`, not a
+  login token** (30-day expiry). #674's boot-time credential probe was **not** done (operator's
+  scope call: code + log signal only).
+- ✅ **`mail-live` gate green as evidence on the DGX** (on `main` @ #766: 1 test, `[E2E]` 1, 0
+  SKIP/WARN/panic) — the first DGX run.
 
 ### Previous (2026-09-26/27): the mail worker — #760, #698, #763, #765 — what still binds
 
@@ -138,21 +129,60 @@ What still binds:
   `LC_ALL=C`. One NUL made GNU grep print nothing and exit 0 (the Mac hid it)
   [[gnu-grep-binary-file-prints-nothing-exit-0]]. Deferred hardening: #759.
 
-### Previous (2026-09-20/23): the #725 → #750 worker-report arc and #748
+### Previous (2026-09-22/23): #748 and #750
 
-Full prose in the `748`/`755` archive snapshots. What still binds:
+Full prose in [`archive/handover_20260923_755_pre-prune.md`](archive/handover_20260923_755_pre-prune.md)
+and [`archive/handover_20260923_748_pre-prune.md`](archive/handover_20260923_748_pre-prune.md).
+What still binds:
 
-- **Every profiled test binary must reach the panic hook, checked at RUN time** — call
-  `panic_hook::install_once()` first; a knob installs it through **two** doors (`raw()`,
-  `action_reporting_to`). `MAX_PANIC` measured 0 on all five profiles; blind before the first knob
-  read (#757). ⚠️ **`grep -c` counts lines** [[grep-c-counts-lines-not-matches]].
-- ⚠️ **`warn_and_fall_back!` must stay a MACRO** (the delivery check expands at the emitter's
-  callsite, `message` field included). **`eprintln!` is load-bearing** [[libtest-capture-only-print-macros]].
-- ⚠️ **No marker may begin with `[SKIP]`/`[WARN]`/`[E2E]`** (`[worker-failed]`, `[worker-death]`,
-  `[worker-down]`, `[panic]`, `[panic-hook]` — disjoint, tested). `shutdown()`'s join is the only
-  proof a report was emitted; `WorkerRetirementCause::from_client_error` is THE census.
-- ⚠️ **Give a mutating reviewer its own worktree, and bracket every sweep with a source sha**
-  [[never-edit-tree-during-a-sweep]].
+- **Every profiled test binary must reach the panic hook, checked at RUN time.** ⚠️ A hermetic
+  suite in a profile must call `panic_hook::install_once()` first in every parent test. A knob has
+  **two** doors that install it (`raw()`, `action_reporting_to`). `MAX_PANIC` measured 0 on all five
+  profiles; blind before the first knob read (#757).
+- ⚠️ **`grep -c` counts lines** — the `microvm` profile refused every run from #720 to #748
+  [[grep-c-counts-lines-not-matches]]. `KASTELLAN_PG_BIN_DIR` for `pg`/`gliner` on this Mac.
+- ⚠️ **Renderers match an exhaustive `TailState`**, deliberately not `#[non_exhaustive]`.
+  `stderr_is_writable()` takes no fd, deliberately.
+- ⚠️ **Give a mutating reviewer its own worktree, and bracket every sweep with a sha of the
+  sources** — two reviewers in one worktree fabricated a "flake" [[never-edit-tree-during-a-sweep]].
+
+### Previous (2026-09-20/22): the #725 → #745 worker-report arc
+
+PRs #731, #735, #743, #745. What still binds:
+
+- ⚠️ **The delivery check must expand at the EMITTER's callsite — `warn_and_fall_back!` is a MACRO
+  and must stay one**, and every field the `warn!` carries must be named in the check, **`message`
+  included** (forgetting it reopened #734 inside its own fix).
+- ⚠️ **`eprintln!` is load-bearing, not style** [[libtest-capture-only-print-macros]], and a
+  *captured* one returns on the child's **stdout** — read a child's two streams separately.
+- ⚠️ **No marker may begin with `[SKIP]`/`[WARN]`/`[E2E]`** — hence `[worker-failed]`,
+  `[worker-death]`, `[worker-down]`, `[panic]` and now `[panic-hook]` (disjoint both ways, tested).
+- ⚠️ **`shutdown()` joins the driver thread, and that join is the only proof the report was
+  emitted.** `WorkerRetirementCause::from_client_error` is THE census; `ToolHostError::Io` is
+  pre-spawn, pinned by a `compile_fail` doctest. `PanicHookInfo` cannot be named (MSRV 1.78), and
+  the hook is installed from `action_reporting_to`, **not `action`**.
+
+### Previous (2026-09-17/19): #699/#700, #719, #720, #717, #709, #702
+
+Full text in [`archive/handover_20260921_730_pre-prune.md`](archive/handover_20260921_730_pre-prune.md).
+
+- **#699 + #700** (PR #728) — each `plans_so_far` step carries a screened `"call"`; the **oldest
+  calls' `parameters`** drop first under budget. ⚠️ **Hardening that rewrites screened text must ADD
+  readings** [[screen-hardening-must-add-readings]]. ⚠️ **Not yet measured live** — needs a
+  multi-search mail question in a **fresh DM room** (a same-room one inherits prior calls since #709).
+- **#719** (PR #726) — workers start in `/` (Seatbelt `getcwd()` EPERM); host-mode gliner opts into
+  `ephemeral_scratch`. ⚠️ **A sandbox that restricts but does not relocate leaks the caller's
+  context into the jail.** Delete `__pycache__` after mutating a `.py` [[mutation-testing-leaves-stale-pyc]].
+- **#720** — **Every gate needs a REQUIRE knob *and* a positive control that fails when zero tests
+  ran.** One `RequireKnob` vocabulary; a tier is one `const`. ⚠️ **No `sandbox`/`container`
+  profile yet — both would be red on every host** (#718: 92 hand-rolled `[SKIP]`s; #722).
+- **#717** — ⚠️ **the ROADMAP is the accurate source; GitHub issues are the stale mirror.**
+- **#709 (#701)** — a channel task writes `tasks.turn_record` = `{calls, data_class}`; the next task
+  in the same conversation reads up to 3, screened, and inherits their floor — from every turn
+  **loaded**, not those the screen kept. ⚠️ **A security property can be documented, tested, and
+  absent** (`inherit_floor` read the wrong field). Email is still stateless.
+- **#702 (#677)** — `result_view` is the planner's pruned, labelled JSON view of a step.
+  ⚠️ **Keys never reach the guard model** (#703).
 
 ### Merged arcs — only what still binds
 
@@ -222,18 +252,26 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **Deploy #776 to the DGX, then the live re-measure** (operator DMs, a **fresh room**).
-   `scripts/upgrade_from_git.sh`; the overlay is already set (thinking ON, `reasoning_effort`
-   dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
-   out on the synthesis turn), then read each plan's cost in one query:
-   `select action, payload->'llm_usage', payload->>'latency_ms', payload->>'error' from audit_log
-   where action in ('plan.formulate','plan.formulate_failed') and payload->>'task_id'='<id>' order by id`. Then #728's multi-search question, a filter-only one (#698), a
-   long PDF read across pages (#760), and a revoked mail key once (the planner's reaction to
-   `UPSTREAM_AUTH_FAILED`). **The thinking decision (#773) is made from these rows:** repeat the
-   set with `KASTELLAN_LLM_DISABLE_THINKING=1` (now real on Ollama) and compare answer quality
-   against latency — the #773 probe's non-thinking answer was *wrong*.
-   Then #769 (persistent respawn on an RPC refusal — check Matrix recovery first), #771,
-   #767/#768, and #538 (the mail worker's second, hand-rolled localmail mock).
+1. **Mail worker — a live re-measure.** #760/#763/#765/#673/#674 are done and the `mail-live` gate
+   is green on both hosts. **A live planner re-measure is owed** (operator DMs, a **fresh room**):
+   #728's multi-search question, a filter-only one (#698), a long PDF read across pages (#760) —
+   and, now cheap, point the DGX mail token file at a revoked key once to watch the planner report
+   `UPSTREAM_AUTH_FAILED` instead of re-planning. The DGX runs #770 (redeployed 2026-09-27), and the
+   worker-level mapping is already proven live there with a bogus key; what is left is the
+   **planner's** reaction, which needs an operator DM.
+   ⚠️ **A many-email mail task times out on the DGX** (tasks 193 + 194, 2026-09-26/27: the
+   forced-synthesis call hit the 180 s LLM timeout after 5 good plans; 13 such failures since
+   July). Root cause measured: **`KASTELLAN_LLM_DISABLE_THINKING` is a no-op on Ollama**, which
+   ignores the vLLM-style `chat_template_kwargs` switch, so gemma4 thinks freely on every plan
+   call; prefill is ~1,760 tok/s, decode ~42 tok/s, so the time is hidden reasoning, not prompt
+   size — [#773](https://github.com/hherb/kastellan/issues/773). A synthesis-turn timeout
+   discards the whole task and no plan row records token usage —
+   [#774](https://github.com/hherb/kastellan/issues/774). **Mitigation live:** the DGX's
+   `kastellan.env.local` has `KASTELLAN_LLM_TIMEOUT_MS=600000` (was 180000; backup
+   `kastellan.env.local.bak-20260927-timeout180`). Re-ask the Qantas question as the first
+   measurement of the re-measure.
+   Then #769 (persistent respawn on an RPC refusal — check Matrix recovery first), #767/#768, and
+   #538 (the mail worker's second, hand-rolled localmail mock).
 
 2. **#702 follow-ups: #703, #704, #705.** ⚠️ **The guard model never sees object keys** (#703) — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
@@ -277,6 +315,10 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
   — per-test-cluster contention (`the database system is starting up`) under a full sweep. Blast
   radius, not teardown; restore the shared suffix with a `.suffix()` setter, **not** by reverting
   #641 [[issue-as-filed-can-carry-a-regression]].
+- **Refused-credential follow-ups — [#769](https://github.com/hherb/kastellan/issues/769) +
+  [#771](https://github.com/hherb/kastellan/issues/771)** (#673/#674 shipped in #770): a live
+  worker's refusal still respawns it and logs a false death (#769); the upstream's own 401 reason
+  (bad header vs bad token) is dropped before the operator sees it (#771).
 - **Web workers — [#706](https://github.com/hherb/kastellan/issues/706) before any release** (no rate
   limiting, backoff, conditional requests or `robots.txt`); #707 blocked upstream — ⚠️ **do not adopt
   Obscura before its V8 bump lands**; our jail would be its only layer.
@@ -300,7 +342,7 @@ than asserting it** — #730's split checked every moved region was **byte-ident
 control** proving the checker can fail. Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
 1558+ (#639), `core/src/workers/gliner_relex/tests.rs`, `db/src/asks.rs`,
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
-`core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
+`llm-router/src/config.rs`, `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `core/src/worker_lifecycle/persistent.rs`, `core/src/scheduler/inner_loop.rs`,
 `core/src/channel/bus.rs`, `workers/matrix/src/sdk_live.rs`, `llm-router/src/messages.rs`,
@@ -312,9 +354,7 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 #673/#674 grew three already-over files a little without splitting: `tool_dispatch.rs` 710→722,
 `worker_lifecycle/persistent.rs` 590→662 (pure fn + its tests), `polled_driver/tests.rs` 670→733.
 `channel/polled_driver.rs` would have crossed 500, so its failure logging went to a new
-`polled_driver/outage.rs` (433 + 111). #773/#774 split tests out **first-class** instead:
-`llm-router/src/config.rs` 924→385 and `messages.rs` 593→385, `scheduler/agent.rs` 542→429 — but
-grew `inner_loop.rs` 878→923 (already over; its new logic went to `inner_loop/llm_failure.rs`).
+`polled_driver/outage.rs` (433 + 111).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
 (seam in `confine.rs`); python-exec Phase 4 curated wheels; web-research polish; an ANN index on
@@ -347,8 +387,8 @@ grew `inner_loop.rs` 878→923 (already over; its new logic went to `inner_loop/
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#773 + #774 — **the gate that stands**) | branch tip `0671ea70` | **4642 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, after `cargo build --workspace`. **Delta reconciled per suite: +53 over the row below** = this branch **+47** (llm-router lib +29, new `thinking_switch_e2e` +6 and +1 suite, core lib +12 — per-file test-count diff against `origin/main`) + **6 already on `main`** since that row's sweep (core +5, email-in +1: #770's last round). **DGX** (native Linux, same tip): core `scheduler::` 369, llm-router 116 + wire 6, **0 `[SKIP]`** — the PG timeout test ran there | **both hosts** exit 0, cold (fresh `CARGO_TARGET_DIR`), **27** `Checking kastellan` lines, zero warnings. The DGX's cold runs caught `large_enum_variant` **twice** during the session (a test stub, then `Turn`), both fixed before this row | **23** Mac |
-| **Mac** (#673 + #674 — superseded) | branch tip | **4589 / 0 / 47**, **187** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**. +17 over #763's 4572: #766's review fix-up +4, protocol +5, mail +2, email-in +1, core +5 | exit 0, cold, **27** `Checking kastellan` lines | **23** Mac |
+| **Mac** (#673 + #674 — **the gate that stands**) | branch tip | **4589 / 0 / 47**, **187** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. Same recipe. **Delta reconciles EXACTLY: +17 over the row below** = #766's review fix-up +4 (never swept) + this change +13: protocol +5 (`upstream_auth`), mail +2, email-in +1, core +5 (`tool_dispatch` +2, `persistent` +2, `polled_driver` +1). Plus `mail-live` green as evidence **on the DGX** (on `main`) | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-673`, fresh), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
+| **Mac** (#763 + #765 — superseded) | branch tip | **4572 / 0 / 47**, **187** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, after `cargo build --workspace`. **Delta reconciles EXACTLY against the row below (4560 + its 2 flakes = 4562 run): +10** — mail worker +2 (199→201: attach +1, handler +1), tests-common +8 (`live_localmail`); **+1 suite** (`mail_live_shape_e2e`, its one test `#[ignore]`d, moved from `mail_daemon_e2e` — ignored unchanged). Plus `mail-live` gate green on the Mac | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-763`), **27** `Checking kastellan` lines, zero warnings | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -429,11 +469,6 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#776](https://github.com/hherb/kastellan/pull/776)** (#773, #774) — `KASTELLAN_LLM_THINKING_SWITCH`
-  (`reasoning_effort` for Ollama) + a once-per-process thinking-leak WARN; `llm_usage` on every
-  `plan.formulate` row; a request timeout after gathering spends the synthesis turn, a timed-out
-  synthesis retries once without thinking, a final timeout is worded for the user.
-- **[#775](https://github.com/hherb/kastellan/pull/775)** — handover only: the DGX timeout raise and the #773 diagnosis.
 - **[#770](https://github.com/hherb/kastellan/pull/770)** (#673, #674) — `codes::UPSTREAM_AUTH_FAILED` + pure
   `upstream_auth_refusal` replace `POLICY_DENIED` for localmail 401/403 in `mail` and `email-in`;
   the dispatcher and the email channel's polled driver log an operator ERROR; docs say API key, not
@@ -449,8 +484,25 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
 - **[#761](https://github.com/hherb/kastellan/pull/761)** (#698, #561) — `mail.search` takes a filter-only search. Filed #760.
 - **[#758](https://github.com/hherb/kastellan/pull/758)** (#755) — the gate refuses a counted marker stranded mid-line; the scan reads
   bytes (`grep -a`, `LC_ALL=C`). Filed #759.
-- **#748, #750, #745, #743, #740, #735, #731, #728, #726, #720, #727, #717, #709, #708, #702, #694,
-  #692, #688, #685** and earlier — see git history and the [`archive/`](archive/) snapshots.
+- **#748** — a `worker-report` gate profile; the gate refuses any test binary that never reached
+  the panic hook (checked at run time); a measured `[panic]` cap (`MAX_PANIC`, measured 0 on all five profiles); a knob read installs the hook through **two** doors, not one; the `microvm` profile runs for the first time since #720.
+  Filed #755.
+- **[#750](https://github.com/hherb/kastellan/pull/750)** — a read-error drain stops earning the
+  "suspect a kill" diagnosis, the **third** renderer of the same tail is fixed, and the panic hook
+  can no longer SIGABRT on a broken stderr (#747, #746, #749). The order-dependent
+  `is_known_silent()`/`is_complete()` pair is replaced by an exhaustive `TailState`. Closes the
+  #725 → #750 arc bar #748.
+- **[#743](https://github.com/hherb/kastellan/pull/743)** — every retired worker reports, and every
+  worker that stays down says so (#737, #738, #739). One census behind both "retire it" and "say
+  so"; `[worker-early-exit]` → **`[worker-failed]`** plus a new **`[worker-down]`**; a panicked
+  driver is reported instead of swallowed; `ToolHostError::Io` reclassified pre-spawn and its
+  blanket `#[from]` removed. Filed #742.
+- **[#745](https://github.com/hherb/kastellan/pull/745)** — the worker report reaches a reader whose
+  `RUST_LOG` would have dropped it, cannot `SIGABRT` on a broken pipe, and stops calling a
+  timed-out drain "the worker wrote NOTHING"; plus a panic hook that cannot forge a gate line
+  (#734, #733, #732, #742). Closes the #725 → #745 arc.
+- **#740, #735, #731, #728, #726, #720, #727, #717, #709, #708, #702, #694, #692, #688, #685** and
+  earlier — see git history and the [`archive/`](archive/) snapshots.
 
 ---
 
