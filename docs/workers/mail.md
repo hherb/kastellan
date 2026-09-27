@@ -242,8 +242,10 @@ because it asks localmail to filter by nothing.
   generic endpoint guard — use a literal `127.0.0.1` for loopback.
 - **Auth failures** (401/403 from localmail) surface as
   `UPSTREAM_AUTH_FAILED` — never as `POLICY_DENIED`, which is the core's own
-  policy verdict (#673). A 401 says the credential may have expired or been
-  revoked; a 403 says it lacks a grant. The planner is told this is not a
-  kastellan refusal and that retrying will not help, and the daemon logs an
-  ERROR line (`operator action needed: …`) for every refused call, so renew
-  the key or fix its grant.
+  policy verdict (#673). A 401 says the credential is invalid, expired or
+  revoked (on a fresh install, suspect the token file first); a 403 says a
+  grant is missing *or a proxy in front refused* — localmail's own API never
+  answers 403, it reports an ACL miss as 404. The planner is told this is not
+  a kastellan refusal and that retrying will not help, and the daemon logs an
+  ERROR line (`operator action needed: …`, worker text neutralised) for every
+  refused call, so renew the key or fix its grant.

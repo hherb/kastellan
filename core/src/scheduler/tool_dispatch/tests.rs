@@ -54,7 +54,24 @@ fn an_upstream_auth_rpc_error_is_named_and_flagged_for_the_operator() {
         }
         other => panic!("expected Err, got {other:?}"),
     }
-    assert_eq!(upstream_auth_failure_detail(&out), Some(message.as_str()));
+    // An honest refusal reaches the operator's line unchanged.
+    assert_eq!(upstream_auth_failure_detail(&out), Some(message));
+}
+
+/// The detail is worker-written and a compromised worker is in scope: it must
+/// not be able to forge log lines inside the operator's ERROR, nor flood it.
+#[test]
+fn a_hostile_upstream_auth_detail_is_neutralised_and_clamped_for_the_log() {
+    let forged = StepOutcome::Err {
+        code: "UPSTREAM_AUTH_FAILED".into(),
+        detail: "x\nERROR forged line\u{2028}\u{1b}[31m\u{202e}".into(),
+    };
+    let shown = upstream_auth_failure_detail(&forged).unwrap();
+    assert_eq!(shown, "x ERROR forged line  [31m ");
+
+    let huge = StepOutcome::Err { code: "UPSTREAM_AUTH_FAILED".into(), detail: "é".repeat(10_000) };
+    let shown = upstream_auth_failure_detail(&huge).unwrap();
+    assert_eq!(shown.chars().count(), kastellan_protocol::STEP_ERR_DETAIL_MAX);
 }
 
 #[test]

@@ -97,11 +97,10 @@ impl ClientTransport {
 ///
 /// Everything else stays flattened to its Display, exactly as before.
 /// `ClientError::Io` carries a `source`, and keeping it would print the io
-/// text twice wherever this error is rendered with `{e:#}` (the channel boot
-/// supervisor does).
+/// text twice wherever this error is rendered with `{e:#}`.
 ///
-/// ⚠️ This does **not** change what the driver does with the error: every
-/// call error still triggers a respawn, a live worker's refusal included
+/// ⚠️ This does **not** change what the `PersistentWorker` driver thread does
+/// with the error: every call error still triggers a respawn, a live worker's refusal included
 /// (#769 — deliberately separate, since Matrix may rely on it to recover).
 fn client_error_to_anyhow(e: ClientError) -> anyhow::Error {
     match e {
@@ -518,6 +517,30 @@ mod tests {
         };
         assert_eq!(v["gen"], 1);
         assert!(spawns.load(Ordering::SeqCst) >= 2);
+        h.shutdown();
+    }
+
+    /// #674: the polled driver reads a credential refusal by downcasting the
+    /// error `PersistentHandle::call` returns. `client_error_to_anyhow` keeping
+    /// the type is not enough on its own — the driver thread and the reply
+    /// channel sit in between, and re-flattening there (`anyhow!("{e}")`, the
+    /// pre-#674 shape) would leave every unit test green while the ERROR
+    /// branch stopped firing. This crosses them. (A `.context(..)` would not
+    /// break it: anyhow's `downcast_ref` sees through context.)
+    #[test]
+    fn a_workers_rpc_refusal_reaches_the_handle_caller_still_typed() {
+        struct Refusing;
+        impl PersistentTransport for Refusing {
+            fn call(&mut self, _m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+                let rpc = kastellan_protocol::upstream_auth_refusal("localmail", 401).unwrap();
+                Err(client_error_to_anyhow(ClientError::Rpc(rpc)))
+            }
+        }
+        let factory: PersistentFactory = Box::new(|| Ok(Box::new(Refusing)));
+        let h = PersistentWorker::spawn_with_backoff("test", factory, fast_backoff()).unwrap();
+        let e = h.call("email.poll", serde_json::json!({})).unwrap_err();
+        let rpc = e.downcast_ref::<kastellan_protocol::RpcError>().expect("typed through the driver thread");
+        assert_eq!(rpc.code, kastellan_protocol::codes::UPSTREAM_AUTH_FAILED);
         h.shutdown();
     }
 

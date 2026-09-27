@@ -26,8 +26,12 @@ use crate::{codes, RpcError};
 /// operator actions:
 ///
 /// * **401** — the credential itself was not accepted. On a schedule, that is
-///   an **expiry** (the failure that actually happened), so the message says so.
-/// * **403** — the credential was accepted but lacks a grant for this request.
+///   an **expiry** (the failure that actually happened), but on a fresh
+///   install it is as likely a wrong token file, so the message names all
+///   three: invalid, expired or revoked.
+/// * **403** — a grant is missing, **or something in front of the service
+///   refused**. localmail's own `/v1` API never answers 403 (an ACL miss is a
+///   404), so for localmail a 403 points at a proxy; the message names both.
 ///
 /// Both messages say "not a kastellan policy refusal" and "retrying will not
 /// help", which is what stops the planner re-planning around the failure.
@@ -35,12 +39,14 @@ use crate::{codes, RpcError};
 pub fn upstream_auth_refusal(service: &str, status: u16) -> Option<RpcError> {
     let message = match status {
         401 => format!(
-            "{service} rejected kastellan's credential (HTTP 401): it may have expired or been \
-             revoked. Not a kastellan policy refusal; the operator must renew it."
+            "{service} rejected kastellan's credential (HTTP 401): it is invalid, expired or \
+             revoked. Not a kastellan policy refusal; retrying will not help. The operator \
+             must renew it."
         ),
         403 => format!(
-            "{service} refused kastellan's credential (HTTP 403): it lacks a grant for this. \
-             Not a kastellan policy refusal; the operator must fix its access."
+            "{service} refused kastellan (HTTP 403): the credential lacks a grant, or a proxy in \
+             front refused. Not a kastellan policy refusal; retrying will not help. The \
+             operator must fix it."
         ),
         _ => return None,
     };
@@ -58,7 +64,9 @@ mod tests {
         assert!(e.message.starts_with("localmail "), "names the service: {}", e.message);
         assert!(e.message.contains("HTTP 401"), "{}", e.message);
         assert!(e.message.contains("expired"), "names the likely cause: {}", e.message);
+        assert!(e.message.contains("invalid"), "a wrong token file is not an expiry: {}", e.message);
         assert!(e.message.contains("Not a kastellan policy refusal"), "{}", e.message);
+        assert!(e.message.contains("retrying will not help"), "{}", e.message);
     }
 
     #[test]
@@ -67,7 +75,10 @@ mod tests {
         assert_eq!(e.code, codes::UPSTREAM_AUTH_FAILED);
         assert!(e.message.contains("HTTP 403"), "{}", e.message);
         assert!(e.message.contains("grant"), "{}", e.message);
+        assert!(e.message.contains("proxy"), "localmail never 403s itself: {}", e.message);
+        assert!(!e.message.contains("expired"), "a 403 is not an expiry: {}", e.message);
         assert!(e.message.contains("Not a kastellan policy refusal"), "{}", e.message);
+        assert!(e.message.contains("retrying will not help"), "{}", e.message);
     }
 
     #[test]

@@ -706,6 +706,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
         // #674: an upstream credential refusal needs the OPERATOR, and until
         // now only the planner heard about it. Log it once per refused call,
         // at ERROR, saying what to do — the audit row alone was not noticed.
+        // The detail is worker-written; the helper neutralises and clamps it.
         if let Some(detail) = upstream_auth_failure_detail(&outcome) {
             tracing::error!(
                 tool = %step.tool, method = %method, detail = %detail,

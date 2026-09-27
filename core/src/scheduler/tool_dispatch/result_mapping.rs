@@ -42,7 +42,8 @@ pub fn rpc_code_name(code: i32) -> &'static str {
 }
 
 /// The worker's detail when `outcome` is an upstream credential refusal
-/// ([`codes::UPSTREAM_AUTH_FAILED`]), else `None`. Pure.
+/// ([`codes::UPSTREAM_AUTH_FAILED`]), made safe for the daemon log; else
+/// `None`. Pure.
 ///
 /// Why the dispatcher asks (#674): an expired credential is an **operator**
 /// problem that no plan can fix, yet the only party told about it is the
@@ -51,12 +52,22 @@ pub fn rpc_code_name(code: i32) -> &'static str {
 /// daemon log per refused call; the tool's own audit row already carries the
 /// worker's message and the numeric code.
 ///
+/// The detail is **worker-written**, and a compromised worker is in scope: it
+/// could send this code with newlines that forge log lines inside the one
+/// line an operator is told to act on. So it goes through
+/// [`crate::untrusted_text::neutralise_controls`] — as every other
+/// worker-to-log path does — and is clamped to the planner's own budget,
+/// [`kastellan_protocol::STEP_ERR_DETAIL_MAX`] chars, which every honest
+/// refusal fits.
+///
 /// Compared through [`rpc_code_name`], not a second string literal, so the
 /// mnemonic has one spelling.
-pub fn upstream_auth_failure_detail(outcome: &StepOutcome) -> Option<&str> {
+pub fn upstream_auth_failure_detail(outcome: &StepOutcome) -> Option<String> {
     match outcome {
         StepOutcome::Err { code, detail } if code == rpc_code_name(codes::UPSTREAM_AUTH_FAILED) => {
-            Some(detail)
+            let clamped: String =
+                detail.chars().take(kastellan_protocol::STEP_ERR_DETAIL_MAX).collect();
+            Some(crate::untrusted_text::neutralise_controls(&clamped))
         }
         _ => None,
     }

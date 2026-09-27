@@ -240,7 +240,9 @@ fn email_err_to_rpc(e: EmailError) -> RpcError {
         // A 401/403 is localmail refusing the channel's credential, not
         // kastellan refusing anything: `UPSTREAM_AUTH_FAILED`, never the core's
         // own `POLICY_DENIED` (#673). The core's polled driver recognises this
-        // code and says "credential refused" rather than "worker died" (#674).
+        // code and its own line says "credential refused" rather than "worker
+        // died" (#674) — though the respawn that follows still reports a death
+        // of its own (#769).
         EmailError::Upstream { status, body } => {
             kastellan_protocol::upstream_auth_refusal("localmail", status).unwrap_or_else(|| {
                 RpcError::new(codes::OPERATION_FAILED, format!("localmail {status}: {body}"))
@@ -300,13 +302,13 @@ fn describe_email_error(e: &EmailError) -> String {
 ///   * `401 Unauthorized` and `403 Forbidden` — retryable after an **operator
 ///     action**, and therefore NOT permanent by this function's own test
 ///     ("will retrying the exact same request never succeed?"). An expired or
-///     rotated localmail bearer token, or a withdrawn `api-user` grant, makes
+///     rotated localmail bearer token, or a withdrawn API-key grant, makes
 ///     the identical request succeed again the moment the operator fixes it;
 ///     acking the message away first would destroy mail over a recoverable
 ///     credential problem, and destruction is the one direction this
 ///     classification must never guess wrong in. Note `email_err_to_rpc`
-///     already treats these two as their own class ("check token / api-user
-///     grant") — i.e. as configuration, not as a fact about the message —
+///     already treats these two as their own class (`UPSTREAM_AUTH_FAILED`,
+///     #673) — i.e. as configuration, not as a fact about the message —
 ///     so calling them permanent here was internally inconsistent too
 ///     (review finding). A wholly-revoked token normally fails the earlier
 ///     `changes` call and never reaches this branch; this covers the narrower

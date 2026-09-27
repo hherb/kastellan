@@ -648,3 +648,42 @@ fn a_401_or_403_maps_to_upstream_auth_failed_never_policy_denied() {
     assert_eq!(e.code, codes::OPERATION_FAILED, "only the credential statuses moved");
     assert_eq!(e.message, "localmail 500: boom");
 }
+
+/// Answers every authenticated GET with one fixed status — `/v1/changes`
+/// included — as a localmail refusing the channel's credential would.
+struct RefusingFake(u16);
+impl HttpGet for RefusingFake {
+    fn get(&self, _u: &Url) -> Result<RawResponse, String> {
+        unreachable!("client uses get_authed")
+    }
+    fn transport_kind(&self) -> &'static str {
+        "fake"
+    }
+    fn get_authed(&self, _u: &Url, _bearer: &str, _max: usize) -> Result<RawResponse, String> {
+        Ok(RawResponse {
+            status: self.0,
+            location: None,
+            content_type: "application/problem+json".into(),
+            body: br#"{"detail":"token is invalid, expired, or revoked"}"#.to_vec(),
+        })
+    }
+}
+
+/// The incident path end to end within the worker (#673): the credential is
+/// refused on `/v1/changes`, so `email.poll` itself fails — and it must fail
+/// as `UPSTREAM_AUTH_FAILED`, the code the core's polled driver turns into an
+/// operator ERROR. (A refusal on one message's detail fetch is a different
+/// path: deliberately transient, see `is_permanent`.)
+#[test]
+fn a_poll_refused_by_localmail_fails_as_upstream_auth_failed() {
+    for status in [401u16, 403] {
+        let mut h = crate::handler::EmailInHandler::with_client(
+            client_with(Box::new(RefusingFake(status))),
+            "sub".to_string(),
+            "agent@example.org".to_string(),
+        );
+        let e = h.call("email.poll", serde_json::json!({"timeout_ms": 10})).unwrap_err();
+        assert_eq!(e.code, codes::UPSTREAM_AUTH_FAILED, "status {status}: {}", e.message);
+        assert!(e.message.contains(&format!("HTTP {status}")), "{}", e.message);
+    }
+}

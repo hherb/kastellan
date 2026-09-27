@@ -63,17 +63,23 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
 
 - **New protocol code `codes::UPSTREAM_AUTH_FAILED = -32004`** (`-32003` is taken privately by
   gliner-relex and browser-driver) and a pure `kastellan_protocol::upstream_auth_refusal(service,
-  status)`: it owns *which* statuses count (401, 403) and the wording (401 "may have expired or been
-  revoked", 403 "lacks a grant", both "not a kastellan policy refusal", both ≤
+  status)`: it owns *which* statuses count (401, 403) and the wording (401 "invalid, expired or
+  revoked", 403 "lacks a grant, or a proxy in front refused" — localmail itself never 403s; both
+  "not a kastellan policy refusal; retrying will not help", both ≤
   `STEP_ERR_DETAIL_MAX`). `mail` and `email-in` were the **only** workers aliasing an upstream
   status onto `POLICY_DENIED` (surveyed); both now call it, every other status unchanged.
   ✅ Live DGX localmail answers a bad bearer `401 invalid-token` — the case the 401 text names.
 - **The operator hears it.** `rpc_code_name` names the code; the step dispatcher logs one ERROR
-  `operator action needed: …` per refused call (`upstream_auth_failure_detail`, pure). The email
-  channel's polled driver says "refused its credential" instead of "worker died or restarting",
-  once per outage — possible because `ClientTransport::call` now keeps an `RpcError`'s **type**
-  (`client_error_to_anyhow`, pure). ⚠️ **Only `Rpc` is preserved**: a preserved `ClientError::Io`
-  prints its source twice under `{e:#}` (the boot supervisor renders that way) — mutation-proved.
+  `operator action needed: …` per refused call (`upstream_auth_failure_detail`, pure; the
+  worker-written detail is `neutralise_controls`'d + clamped — review fix). The email channel's
+  polled driver says "refused its credential" instead of "worker died or restarting" — possible
+  because `ClientTransport::call` now keeps an `RpcError`'s **type** (`client_error_to_anyhow`,
+  pure; a test crosses the real driver thread). Its latch is `OutageLog` (pure, clock passed in):
+  the refusal is tracked **apart** from up/down, so an outage that began as a restart still reaches
+  ERROR, and it **repeats every 15 min** (`CREDENTIAL_REFUSAL_REPEAT`) because #769's per-cycle
+  `[worker-death]` lines buried a once-per-outage ERROR within minutes (review finding).
+  ⚠️ **Only `Rpc` is preserved**: a preserved `ClientError::Io` prints its source twice under
+  `{e:#}` — mutation-proved.
 - ⚠️ **#769, filed, deliberately not fixed:** the persistent driver still **respawns on a live
   worker's RPC refusal**, so an expired email-channel credential still also emits death reports and
   the respawn-rate alarm. Matrix may rely on that respawn (a failed send = re-login + fresh sync);
@@ -291,8 +297,10 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
   — per-test-cluster contention (`the database system is starting up`) under a full sweep. Blast
   radius, not teardown; restore the shared suffix with a `.suffix()` setter, **not** by reverting
   #641 [[issue-as-filed-can-carry-a-regression]].
-- **Mail credential expiry — [#673](https://github.com/hherb/kastellan/issues/673) + [#674](https://github.com/hherb/kastellan/issues/674):**
-  an upstream 401/403 reads as `POLICY_DENIED`, and nothing notices the expiry.
+- **Refused-credential follow-ups — [#769](https://github.com/hherb/kastellan/issues/769) +
+  [#771](https://github.com/hherb/kastellan/issues/771)** (#673/#674 shipped in #770): a live
+  worker's refusal still respawns it and logs a false death (#769); the upstream's own 401 reason
+  (bad header vs bad token) is dropped before the operator sees it (#771).
 - **Web workers — [#706](https://github.com/hherb/kastellan/issues/706) before any release** (no rate
   limiting, backoff, conditional requests or `robots.txt`); #707 blocked upstream — ⚠️ **do not adopt
   Obscura before its V8 bump lands**; our jail would be its only layer.
@@ -325,8 +333,10 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `worker_lifecycle/persistent.rs`); #750 split `worker_stderr/mod.rs` **first** instead. #748
 pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it also grew
 `scripts/run-e2e-gate.sh` to 561 (shell, not split) and `require.rs` 647→661 (already over).
-#673/#674 grew three already-over files a little without splitting: `tool_dispatch.rs` 710→721,
-`worker_lifecycle/persistent.rs` 590→639 (pure fn + its tests), `polled_driver/tests.rs` 670→688.
+#673/#674 grew three already-over files a little without splitting: `tool_dispatch.rs` 710→722,
+`worker_lifecycle/persistent.rs` 590→662 (pure fn + its tests), `polled_driver/tests.rs` 670→733.
+`channel/polled_driver.rs` would have crossed 500, so its failure logging went to a new
+`polled_driver/outage.rs` (433 + 111).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
 (seam in `confine.rs`); python-exec Phase 4 curated wheels; web-research polish; an ANN index on
