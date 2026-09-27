@@ -4,7 +4,7 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260927_673_pre-prune.md`](archive/handover_20260927_673_pre-prune.md),
+> [`archive/handover_20260926_698_pre-prune.md`](archive/handover_20260926_698_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
@@ -20,7 +20,7 @@
 is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/) snapshots;
 **`gh issue list --state open` is the live answer** and the only one worth trusting. ·
 **The DGX runs `main` as of #709**, redeployed 2026-09-17. **A redeploy is owed for #743 + #745 +
-#750 + #770** (diagnostics and error codes; #748 is test-harness only and needs none). Rootfs images last rebuilt
+#750** (diagnostics only; #748 is test-harness only and needs none). Rootfs images last rebuilt
 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
@@ -84,25 +84,44 @@ is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/
 - ✅ **`mail-live` gate green as evidence on the DGX** (on `main` @ #766: 1 test, `[E2E]` 1, 0
   SKIP/WARN/panic) — the first DGX run.
 
-### Previous (2026-09-26/27): the mail worker — #760, #698, #763, #765 — what still binds
+### Previous (2026-09-27): #763 + #765 — the mail gate and param order
 
-Full prose in [`archive/handover_20260927_673_pre-prune.md`](archive/handover_20260927_673_pre-prune.md).
+- **#763, the live shape gate is evidence now** — own suite `core/tests/mail_live_shape_e2e.rs`,
+  knob `KASTELLAN_MAIL_LIVE_REQUIRE_E2E` (tier `live-localmail`), a **`mail-live` profile** (floor
+  1, `MAX_SKIP` 0, `MAX_PANIC` 0, `--ignored`); `scripts/mail/live-shape-gate.sh` finds the
+  credentials and runs the profile. Green on both hosts.
+- **#763, no hand copies.** `API_MAJOR`/`MIN_API_MINOR`/`HIT_FIELDS`/`SNIPPET_CHARS` live in
+  `workers/mail/src/localmail_contract.rs`, which the live gate and `mock_localmail`'s tests
+  `include!`. ⚠️ **It is compiled three times: `pub const`s only, no `use`, no `//!`.** The live
+  gate does not allow dead code, so an unchecked wire constant is a `-D warnings` error (verified).
+- **#765** — `handler/request.rs` (pure) parses every call into a typed `Request` **before** the
+  gate, which takes `&Request` (order in the signature); `attach::choose` validates a planner sha
+  *and* shape-checks one beside a `message_id`. `handler.rs` 555→415.
+- Review residue: #767 (route spellings into the contract), #768 (small type hardening).
+- ⚠️ **A new `*_or_skip` helper must be classified** in `microvm/guard.rs` (`BANNED_HELPERS` or
+  `REQUIRE_AWARE`) or the roster test refuses it. It caught `credentials_or_skip`.
 
-- **Version gate:** search, both attachment tools and header reads refuse below localmail API
-  **1.3** — **no fallback** (operator's call). Params are parsed into a typed `Request` (pure
-  `handler/request.rs`) **before** the gate, which takes `&Request` (#765).
-- **Wire facts live in `workers/mail/src/localmail_contract.rs`**, `include!`d by the live gate and
-  `mock_localmail`. ⚠️ **Compiled three times: `pub const`s only, no `use`, no `//!`.**
-- **Slice E:** `fields` + `snippet_chars: 120` on every search. ⚠️ **A 50-hit page is still ~18 KB,
-  over the 16 KiB step view.** **Headers:** `?headers=list`, checked fail-closed, never reshaped.
-- **Slice D:** attachments fetched **by position** and **hashed against the listed sha**. Paged text:
-  `next_offset` **copied, never computed**; inconsistent paging is a fault. ⚠️ 16 KiB view
-  guaranteed only for Latin text.
-- **#698:** a blank query defaults to `sort: date`. ⚠️ `sort::is_textless` cannot see an
-  operator-only query.
-- **Live gate:** `bash scripts/mail/live-shape-gate.sh` → the `mail-live` profile (knob
-  `KASTELLAN_MAIL_LIVE_REQUIRE_E2E`). ⚠️ **A new `*_or_skip` helper must be classified** in
-  `microvm/guard.rs` (`BANNED_HELPERS` or `REQUIRE_AWARE`) or the roster test refuses it.
+### Previous (2026-09-26): #760 (PRs #762, #764) and #698 (PR #761) — what still binds
+
+Full prose in git history (PR bodies) and the ROADMAP.
+
+- **Version gate:** `mail.search`, both attachment tools and now header reads refuse below API
+  **1.3**, naming the upgrade — **no fallback** (operator's call; an old server answers wrong, not
+  loudly). A pass is cached per worker; a refusal is asked again. `Request::needs_current_api` is an
+  exhaustive match on the *parsed* request, and the gate takes that `&Request` — params first (#765).
+- **Slice E:** every search sends `fields` = `localmail_contract::HIT_FIELDS` + `snippet_chars: 120`.
+  ⚠️ **A 50-hit page is still ~18 KB, over the 16 KiB step view.**
+- **Headers (#764):** `?headers=list`, checked fail-closed — never reshaped.
+- **Slice D:** `get_message` writes `index` into each attachment; a message-resolved attachment
+  is fetched **by position** and its bytes **hashed against the listed sha** (`Picked::verify_bytes`).
+- **Paged text:** 8,000-char pages; `next_offset` is **copied, never computed** (code points); a
+  body without paging fields, or inconsistent paging, is a **fault**. ⚠️ Guarantees the 16 KiB
+  view only for Latin text.
+- **#698:** `query` optional; a blank query with no `sort`/cursor defaults to `date` (localmail
+  400s a stated `rank` there). ⚠️ `sort::is_textless` cannot see an operator-only query.
+- Live gate: `scripts/mail/live-shape-gate.sh` (reads `kastellan.env.local`; runs with nothing
+  exported). Its attachment leg falls back to a `has_attachment` search and **fails** if it finds
+  none. Now a gate profile (`mail-live`, #763).
 
 ### Previous (2026-09-23, later): #755 — a marker stranded mid-line is refused
 
@@ -451,11 +470,20 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
   passes the per-occurrence list on after a fail-closed shape check; the `{name, values}` reshaping
   is gone; the headers path joins the version gate.
 
-- **[#762](https://github.com/hherb/kastellan/pull/762)** (#760) — the mail worker adopts localmail slices D and E (version gate,
-  compact hits, attachments by `index`, 8,000-char paged text). Filed #763.
-- **[#761](https://github.com/hherb/kastellan/pull/761)** (#698, #561) — `mail.search` takes a filter-only search. Filed #760.
-- **[#758](https://github.com/hherb/kastellan/pull/758)** (#755) — the gate refuses a counted marker stranded mid-line; the scan reads
-  bytes (`grep -a`, `LC_ALL=C`). Filed #759.
+- **[#762](https://github.com/hherb/kastellan/pull/762)** (#760) — the mail worker adopts localmail slices D and E: a `/v1/version` gate (≥ 1.3, no
+  fallback), `fields`/`snippet_chars` on every search, `index` on attachments (written by
+  `get_message`, taken by both attachment tools, fetched by position), and 8,000-char paged text
+  with localmail's `next_offset`. Three movement-only splits first. `headers=list` left on #760.
+  Review fix-up: position-fetched bytes hashed against the listing, paging consistency enforced,
+  exhaustive gate enum, live gate un-vacuoused. Filed #763.
+- **[#761](https://github.com/hherb/kastellan/pull/761)** (#698, #561) — `mail.search` takes a filter-only search: `query` optional, a
+  blank query defaults to `sort: "date"` (localmail 400s a stated `rank` there, measured). #561
+  measured fixed upstream. `handler.rs` tests split out first. Filed #760.
+- **[#758](https://github.com/hherb/kastellan/pull/758)** (#755) — the gate refuses a counted marker stranded mid-line after libtest's `test <name> ... `
+  (both gaps); emitter one-write tests; `microvm::require_action_to` no longer skips a non-UTF-8
+  knob silently. The issue's "unframed emitters" premise was wrong. Review round: the scan reads
+  bytes (`grep -a`, `LC_ALL=C`) and decides on grep's exit status — a NUL had blinded it on GNU
+  grep. Follow-ups filed as #759.
 - **#748** — a `worker-report` gate profile; the gate refuses any test binary that never reached
   the panic hook (checked at run time); a measured `[panic]` cap (`MAX_PANIC`, measured 0 on all five profiles); a knob read installs the hook through **two** doors, not one; the `microvm` profile runs for the first time since #720.
   Filed #755.
