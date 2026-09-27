@@ -8,9 +8,9 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-27, latest (#776 deployed to the DGX; the operator is running the live
-re-measure) ·
-**Recent PRs, newest first:** [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Last updated:** 2026-09-27, latest (#767 + #768, the mail-worker review residue; the operator is
+still running the #773 live re-measure) ·
+**Recent PRs, newest first:** #PRNUM (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -69,35 +69,37 @@ real sandboxed worker + MITM proxy. Rootfs images last rebuilt
 
 ## Current state
 
-### This session (2026-09-27, latest): #773 + #774 — thinking, and slow planning calls
+### This session (2026-09-27, latest): #767 + #768 — the #766 review residue
 
-- **`KASTELLAN_LLM_THINKING_SWITCH`** (`llm-router/src/thinking.rs`, pure): `chat_template_kwargs`
-  (default — byte-identical for vLLM/SGLang/llama.cpp) or `reasoning_effort` (sends `"none"`;
-  **the only one Ollama honours**). ⚠️ **Never send both:** vLLM **0.15.1** (the DGX's
-  `nvcr.io/nvidia/vllm:26.02` image) types `reasoning_effort` as `low|medium|high` → 400 on every
-  call; 0.17 accepts `"none"` (both read from the images' source). llama.cpp accepts either
-  (measured). `for_guard` **pins** kwargs — the setting names the planner's backend.
-- **Leak detector:** suppression requested + reasoning returned (`message.reasoning` /
-  `reasoning_content` — two fields, **not** a serde alias, since some vLLMs send both) or
-  `reasoning_tokens > 0` → one WARN per process naming the fix. `ChatRequest.thinking`
-  (`ThinkingPolicy`, `serde(skip)`) lets one call override the config.
-- **`llm_usage` on every `plan.formulate` row** (`CompletionStats`: prompt/cached/completion/
-  reasoning tokens, reasoning chars, finish reason; `null` = not reported). Ollama reports **no**
-  reasoning-token count — read `reasoning_chars`.
-- **Timeouts** (`inner_loop/llm_failure.rs`, pure; `RouterError::is_request_timeout` excludes a
-  *connect* timeout): after something was gathered, a timed-out planning call **spends the
-  forced-synthesis turn** instead of failing; a timed-out synthesis **retries once with thinking
-  suppressed** (only when config lets it think — else the retry is the same request); a final
-  timeout tells the user in words what was gathered, raw error last (`like '%timed out%'` still
-  matches). The loop calls one `formulate_turn` → `Turn::{Planned, ForceSynthesis, Failed}`.
-  PG loop test uses **real** reqwest timeouts; mutation-checked (decision, retry wiring, row guard).
-- **Every failed planning call is counted and audited** (review fixes): `InnerLoopResult.failed_llm_calls`,
-  so `task.finalize.total_llm_calls = plan_count + failed`; one best-effort
-  `agent/plan.formulate_failed` row per failed call (`synth_turn`, `thinking_suppressed_retry`,
-  `request_timeout`, clamped `error`); the retry's `plan.formulate` row has `retry_count: 1`. A
-  timeout-forced synthesis that asks for tools says so — **not** `plan_iteration_cap_exceeded`.
-- ⚠️ **Not decided, deliberately:** thinking on vs off for plan quality — that is the live
-  re-measure. #774 item 4 (prompt budgets) only if `llm_usage` shows prompt size matters.
+- **`localmail_contract.rs` now holds pure `pub fn`s too** (`attachment_by_index_path`,
+  `attachment_by_sha_path`, `text_page_path`): `attach::Picked` builds every path from them and the
+  live gate `include!`s the same file — no route spelling is hand-copied anywhere (#767). Still no
+  `use` (spell `std::fmt::Display` out) and no inner `//!`; every item must be used by the gate.
+- **The live gate pages from offset 2, not 0** — at 0 a respelled `offset` read as the default and
+  passed. It now also reads the hash text route **paged** and hashes the hash route's **bytes**.
+  Live-proven: a contract respelling `offset=`/`limit=` fails the gate with the precise assertion.
+- **One case rule for a planner hash (#768):** lowercased at parse time in both forms. The bare form
+  (`Picked::from_planner_sha`) now **accepts** uppercase; beside a `message_id` it is a `ShaPrefix`
+  (1..=64 hex, lowercased, never interpolated). `is_sha256` stays strict and runs *after* lowercasing.
+- `Search.filters: Option<NormalizedFilters>` (private map, one constructor); `sort: ""` → `None`;
+  `Selector::is_planner_typed()`; `live_localmail::Credentials` fields private; `credentials_or_skip`
+  reads the env through a tested seam; `gate_script_tests/callers.rs` refuses a script that runs the
+  gate with a profile the table lacks. `Picked` moved to `attach/picked.rs` (movement-only commit).
+
+### Previous (2026-09-27): #773 + #774 — thinking, and slow planning calls — what still binds
+
+Full prose in git history (#776) and the `773` archive snapshot.
+
+- **`KASTELLAN_LLM_THINKING_SWITCH`** (`llm-router/src/thinking.rs`): `chat_template_kwargs`
+  (default) or `reasoning_effort` (**the only one Ollama honours**). ⚠️ **Never send both:** vLLM
+  **0.15.1** (the DGX's `vllm:26.02`) 400s on `reasoning_effort: "none"`. `for_guard` **pins** kwargs.
+- **`llm_usage` on every `plan.formulate` row** — Ollama reports **no** reasoning-token count; read
+  `reasoning_chars`. Every failed planning call is counted and audited
+  (`agent/plan.formulate_failed`).
+- **Timeouts** (`inner_loop/llm_failure.rs`): after gathering, a timed-out plan spends the synthesis
+  turn; a timed-out synthesis retries once with thinking suppressed; a final timeout is worded for
+  the user (`like '%timed out%'` still matches).
+- ⚠️ **Not decided, deliberately:** thinking on vs off — that is the live re-measure.
 
 ### Previous (2026-09-27): #673 + #674 — a refused credential says so
 
@@ -234,8 +236,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `UPSTREAM_AUTH_FAILED`). **The thinking decision (#773) is made from these rows:** repeat the
    set with `KASTELLAN_LLM_DISABLE_THINKING=1` (now real on Ollama) and compare answer quality
    against latency — the #773 probe's non-thinking answer was *wrong*.
-   Then #769 (persistent respawn on an RPC refusal — check Matrix recovery first), #771,
-   #767/#768, and #538 (the mail worker's second, hand-rolled localmail mock).
+   Then #769 (persistent respawn on an RPC refusal — check Matrix recovery first), #771, and #538
+   (the mail worker's second, hand-rolled localmail mock). **Owed: a DGX run of the `mail-live`
+   profile** (`bash scripts/mail/live-shape-gate.sh`) — only the Mac has run it since #766.
 
 2. **#702 follow-ups: #703, #704, #705.** ⚠️ **The guard model never sees object keys** (#703) — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
@@ -317,6 +320,10 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 `polled_driver/outage.rs` (433 + 111). #773/#774 split tests out **first-class** instead:
 `llm-router/src/config.rs` 924→385 and `messages.rs` 593→385, `scheduler/agent.rs` 542→429 — but
 grew `inner_loop.rs` 878→923 (already over; its new logic went to `inner_loop/llm_failure.rs`).
+#767/#768 split `workers/mail/src/attach.rs` **first** (717→559, `Picked` → `attach/picked.rs`)
+and put its new tests in `attach/tests/hash_and_route.rs` (`attach/tests.rs` 719→727); it grew
+`core/tests/mail_live_shape_e2e.rs` 508→529 (one test fn — split it before the next leg) and
+`gate_script_tests.rs` 518→519 (its new check went to `gate_script_tests/callers.rs`).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
 (seam in `confine.rs`); python-exec Phase 4 curated wheels; web-research polish; an ANN index on
@@ -349,8 +356,8 @@ grew `inner_loop.rs` 878→923 (already over; its new logic went to `inner_loop/
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#773 + #774 — **the gate that stands**) | branch tip `0671ea70` | **4642 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, after `cargo build --workspace`. **Delta reconciled per suite: +53 over the row below** = this branch **+47** (llm-router lib +29, new `thinking_switch_e2e` +6 and +1 suite, core lib +12 — per-file test-count diff against `origin/main`) + **6 already on `main`** since that row's sweep (core +5, email-in +1: #770's last round). **DGX** (native Linux, same tip): core `scheduler::` 369, llm-router 116 + wire 6, **0 `[SKIP]`** — the PG timeout test ran there | **both hosts** exit 0, cold (fresh `CARGO_TARGET_DIR`), **27** `Checking kastellan` lines, zero warnings. The DGX's cold runs caught `large_enum_variant` **twice** during the session (a test stub, then `Turn`), both fixed before this row | **23** Mac |
-| **Mac** (#673 + #674 — superseded) | branch tip | **4589 / 0 / 47**, **187** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**. +17 over #763's 4572: #766's review fix-up +4, protocol +5, mail +2, email-in +1, core +5 | exit 0, cold, **27** `Checking kastellan` lines | **23** Mac |
+| **Mac** (#767 + #768 — **the gate that stands**) | branch tip `378b7433` | **4653 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha + clean tree identical before and after. Same flags as below. **Delta +11, reconciled per suite:** mail bin 205→211 (+6), tests-common lib 447→452 (+5). `mail-live` gate green as evidence on the tip (and on `378b7433`); mail rustdoc 0 warnings | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-767`), **27** `Checking kastellan` lines | **23** Mac |
+| **Mac** (#773 + #774 — superseded) | branch tip `0671ea70` | **4642 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, after `cargo build --workspace`. **Delta reconciled per suite: +53 over the row below** = this branch **+47** (llm-router lib +29, new `thinking_switch_e2e` +6 and +1 suite, core lib +12 — per-file test-count diff against `origin/main`) + **6 already on `main`** since that row's sweep (core +5, email-in +1: #770's last round). **DGX** (native Linux, same tip): core `scheduler::` 369, llm-router 116 + wire 6, **0 `[SKIP]`** — the PG timeout test ran there | **both hosts** exit 0, cold (fresh `CARGO_TARGET_DIR`), **27** `Checking kastellan` lines, zero warnings. The DGX's cold runs caught `large_enum_variant` **twice** during the session (a test stub, then `Turn`), both fixed before this row | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -431,6 +438,9 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#PRNUM** (#767, #768) — route spellings as pure fns in `localmail_contract.rs`, used by the
+  worker and the live gate (which now pages from offset 2 and checks the hash routes too); one
+  lowercase rule for a planner hash (`ShaPrefix`); `NormalizedFilters`; private `Credentials`.
 - **[#776](https://github.com/hherb/kastellan/pull/776)** (#773, #774) — `KASTELLAN_LLM_THINKING_SWITCH`
   (`reasoning_effort` for Ollama) + a once-per-process thinking-leak WARN; `llm_usage` on every
   `plan.formulate` row; a request timeout after gathering spends the synthesis turn, a timed-out
