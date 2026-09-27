@@ -174,7 +174,7 @@ fn leak_is_detected_from_legacy_reasoning_content() {
 #[test]
 fn warning_names_the_exact_fix_for_ollama_on_the_kwargs_dialect() {
     let leak = ThinkingLeak { reasoning_chars: 1289, reasoning_tokens: None, backend_is_ollama: true };
-    let w = leak_warning(&leak, ThinkingSwitch::ChatTemplateKwargs);
+    let w = leak_warning(&leak, ThinkingSwitch::ChatTemplateKwargs, true);
     assert!(w.contains("1289 reasoning chars"), "{w}");
     assert!(w.contains("KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort"), "{w}");
 }
@@ -188,10 +188,20 @@ fn warning_on_a_dialect_that_should_have_worked_points_at_both_settings() {
         (false, ThinkingSwitch::ChatTemplateKwargs),
     ] {
         let leak = ThinkingLeak { reasoning_chars: 10, reasoning_tokens: Some(7), backend_is_ollama: ollama };
-        let w = leak_warning(&leak, switch);
+        let w = leak_warning(&leak, switch, true);
         assert!(w.contains(switch.as_str()), "{w}");
         assert!(w.contains("KASTELLAN_LLM_DISABLE_THINKING=0"), "{w}");
         assert!(w.contains("7 reasoning tokens"), "{w}");
         assert!(!w.contains("=reasoning_effort"), "must not claim an exact fix: {w}");
     }
+}
+
+/// When a caller's per-request suppress (the #774 synthesis retry) leaked,
+/// the config already lets the model think — "set it to 0" is no lever.
+#[test]
+fn warning_for_a_per_request_suppress_does_not_suggest_the_config_it_already_has() {
+    let leak = ThinkingLeak { reasoning_chars: 10, reasoning_tokens: None, backend_is_ollama: false };
+    let w = leak_warning(&leak, ThinkingSwitch::ChatTemplateKwargs, false);
+    assert!(w.contains(THINKING_SWITCH_ENV), "{w}");
+    assert!(!w.contains("KASTELLAN_LLM_DISABLE_THINKING"), "{w}");
 }

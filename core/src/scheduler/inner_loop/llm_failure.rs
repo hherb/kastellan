@@ -127,5 +127,81 @@ pub(super) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) ->
     )
 }
 
+/// The task's failure detail when a synthesis turn that a **timeout**
+/// forced (not the plan cap) still returned tool steps instead of an answer.
+/// Pure.
+///
+/// Distinct from the cap's `plan_iteration_cap_exceeded` wording on
+/// purpose: the cap was never reached, and operators count cap-exceeded
+/// rows (#774 review).
+pub(super) fn forced_synthesis_no_answer_detail(work: &GatheredWork) -> String {
+    format!(
+        "A planning call ran out of time, so the task asked the language model to answer from \
+         the {} tool result{} already gathered — and it asked for more tools instead of \
+         answering. No answer was produced. Asking for less at once usually fits; the operator \
+         can also raise KASTELLAN_LLM_TIMEOUT_MS. [llm: forced synthesis after a timeout did not \
+         produce a final answer]",
+        work.succeeded,
+        if work.succeeded == 1 { "" } else { "s" },
+    )
+}
+
+/// Audit action for a formulator call that produced no plan.
+pub(super) const ACTION_FORMULATE_FAILED: &str = "plan.formulate_failed";
+
+/// Longest router-error text an `agent/plan.formulate_failed` row carries.
+/// The error can embed a backend's response body (already capped at 1 KiB
+/// by the router); the row needs the kind of failure, not the body.
+const FAILED_ROW_ERROR_CHARS: usize = 512;
+
+/// Payload for one `agent/plan.formulate_failed` row. Pure.
+///
+/// A timed-out call writes no `plan.formulate` row (there is no plan), so
+/// without this the minutes it cost are visible only in the daemon log —
+/// and #774's point is that "why was this task slow?" is a query.
+/// `plan_count` is the count *before* the call (a failed call adds no
+/// plan); `thinking_suppressed_retry` marks the synthesis retry.
+pub(super) fn formulate_failed_payload(
+    task_id: i64,
+    plan_count: u32,
+    synth_turn: bool,
+    thinking_suppressed_retry: bool,
+    request_timeout: bool,
+    error: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "task_id": task_id,
+        "plan_count": plan_count,
+        "synth_turn": synth_turn,
+        "thinking_suppressed_retry": thinking_suppressed_retry,
+        "request_timeout": request_timeout,
+        "error": error.chars().take(FAILED_ROW_ERROR_CHARS).collect::<String>(),
+    })
+}
+
+/// Write the `agent/plan.formulate_failed` row for one failed formulator
+/// call. **Best-effort**: a lost forensic row must not fail a task the
+/// loop may still rescue — logged at ERROR instead, like the sink-block rows.
+pub(super) async fn record_failed_formulation(
+    pool: &sqlx::PgPool,
+    task_id: i64,
+    plan_count: u32,
+    synth_turn: bool,
+    thinking_suppressed_retry: bool,
+    error: &crate::scheduler::agent::AgentError,
+) {
+    let payload = formulate_failed_payload(
+        task_id,
+        plan_count,
+        synth_turn,
+        thinking_suppressed_retry,
+        error.is_request_timeout(),
+        &error.to_string(),
+    );
+    if let Err(e) = kastellan_db::audit::insert(pool, "agent", ACTION_FORMULATE_FAILED, payload).await {
+        tracing::error!(task_id, error = %e, "plan.formulate_failed audit insert failed");
+    }
+}
+
 #[cfg(test)]
 mod tests;

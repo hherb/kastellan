@@ -167,14 +167,29 @@ async fn claim_ctx(pool: &sqlx::PgPool) -> TaskContext {
     }
 }
 
-async fn run(pool: &sqlx::PgPool, f: Arc<TimeoutScript>) -> InnerLoopResult {
+async fn run(pool: &sqlx::PgPool, f: Arc<TimeoutScript>) -> (i64, InnerLoopResult) {
     let review = Arc::new(crate::cassandra::review::ChainReviewStage::new(vec![Arc::new(
         crate::cassandra::review::NoopReviewStage,
     )]));
     let ctx = claim_ctx(pool).await;
-    super::run_to_terminal(pool, f, review, Arc::new(OkDispatcher), ctx, None)
+    let task_id = ctx.task_id;
+    let r = super::run_to_terminal(pool, f, review, Arc::new(OkDispatcher), ctx, None)
         .await
-        .unwrap()
+        .unwrap();
+    (task_id, r)
+}
+
+/// `agent/<action>` rows for one task, as their payloads, oldest first.
+async fn agent_rows(pool: &sqlx::PgPool, task_id: i64, action: &str) -> Vec<serde_json::Value> {
+    sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT payload FROM audit_log WHERE actor = 'agent' AND action = $1 \
+         AND (payload->>'task_id')::bigint = $2 ORDER BY id",
+    )
+    .bind(action)
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .expect("audit query")
 }
 
 fn failed_detail(r: &InnerLoopResult) -> &str {
@@ -226,53 +241,88 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
         ],
         None,
     );
-    let r = run(&pool, f.clone()).await;
+    let (task_id, r) = run(&pool, f.clone()).await;
     assert_eq!(completed_body(&r), "Five bookings: …");
     assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 1, "the answer came from the synthesis door");
-    assert_eq!(r.plan_count, 2, "the timed-out call produced no plan and is not counted");
+    assert_eq!(r.plan_count, 2, "the timed-out call produced no plan");
+    assert_eq!(r.failed_llm_calls, 1, "…but it is a model call, counted separately");
     assert_eq!(r.dispatch_count, 1);
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["request_timeout"], true);
+    assert_eq!(failed[0]["synth_turn"], false);
 
     // ── 2. The synthesis turn itself times out → one retry, which answers.
     let f = TimeoutScript::new(
         vec![Next::Plan(Box::new(one_step_plan())), Next::Timeout, Next::Timeout],
         Some(Next::Plan(Box::new(terminal_plan("from the retry")))),
     );
-    let r = run(&pool, f.clone()).await;
+    let (task_id, r) = run(&pool, f.clone()).await;
     assert_eq!(completed_body(&r), "from the retry");
     assert_eq!(f.retry_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(r.failed_llm_calls, 2, "the planning timeout and the synthesis timeout");
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert_eq!(failed[1]["synth_turn"], true);
+    assert_eq!(failed[1]["thinking_suppressed_retry"], false, "the FIRST synthesis attempt timed out");
+    let plans = agent_rows(&pool, task_id, "plan.formulate").await;
+    assert_eq!(plans.last().unwrap()["retry_count"], 1, "the retry's row says it was one");
+    assert_eq!(plans[0]["retry_count"], 0);
 
     // ── 3. Synthesis times out and no cheaper attempt exists → a worded failure.
     let f = TimeoutScript::new(
         vec![Next::Plan(Box::new(one_step_plan())), Next::Timeout, Next::Timeout],
         None,
     );
-    let r = run(&pool, f.clone()).await;
+    let (task_id, r) = run(&pool, f.clone()).await;
     let d = failed_detail(&r);
     assert!(d.starts_with("The language model ran out of time before it could write an answer"), "{d}");
     assert!(d.contains("1 tool call (1 succeeded): read ×1."), "{d}");
     assert!(d.contains("[llm: router: HTTP transport error") && d.contains("timed out"), "{d}");
     assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 1, "never a second synthesis turn");
+    assert_eq!(r.failed_llm_calls, 2);
+    assert_eq!(agent_rows(&pool, task_id, "plan.formulate_failed").await.len(), 2, "one row per failed call, never two");
 
     // ── 4. The retry times out too → the same worded failure, after exactly one retry.
     let f = TimeoutScript::new(
         vec![Next::Plan(Box::new(one_step_plan())), Next::Timeout, Next::Timeout],
         Some(Next::Timeout),
     );
-    let r = run(&pool, f.clone()).await;
+    let (task_id, r) = run(&pool, f.clone()).await;
     assert!(failed_detail(&r).starts_with("The language model ran out of time"), "{}", failed_detail(&r));
     assert_eq!(f.retry_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(r.failed_llm_calls, 3, "planning timeout, synthesis timeout, retry timeout");
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 3, "{failed:?}");
+    assert_eq!(failed[2]["thinking_suppressed_retry"], true);
 
     // ── 5. A timeout before anything was gathered → worded failure, no synthesis.
     let f = TimeoutScript::new(vec![Next::Timeout], Some(Next::Plan(Box::new(terminal_plan("unused")))));
-    let r = run(&pool, f.clone()).await;
+    let (_, r) = run(&pool, f.clone()).await;
     let d = failed_detail(&r);
     assert!(d.contains("no tool was called"), "{d}");
     assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 0);
     assert_eq!(f.retry_calls.load(Ordering::SeqCst), 0, "the retry is for synthesis turns only");
+    assert_eq!(r.failed_llm_calls, 1);
 
     // ── 6. A NON-timeout failure after a gather is unchanged: `llm: …`, no synthesis.
     let f = TimeoutScript::new(vec![Next::Plan(Box::new(one_step_plan())), Next::Decode], None);
-    let r = run(&pool, f.clone()).await;
+    let (task_id, r) = run(&pool, f.clone()).await;
     assert!(failed_detail(&r).starts_with("llm: plan decode failed"), "{}", failed_detail(&r));
     assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(r.failed_llm_calls, 1, "a final non-timeout failure is a model call too");
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed[0]["request_timeout"], false);
+
+    // ── 7. A timeout-forced synthesis that asks for more tools must not claim
+    //       the plan cap, which was never reached (#774 review).
+    let f = TimeoutScript::new(
+        vec![Next::Plan(Box::new(one_step_plan())), Next::Timeout, Next::Plan(Box::new(one_step_plan()))],
+        None,
+    );
+    let (_, r) = run(&pool, f.clone()).await;
+    let d = failed_detail(&r);
+    assert!(d.starts_with("A planning call ran out of time"), "{d}");
+    assert!(!d.contains("plan_iteration_cap_exceeded"), "{d}");
+    assert_eq!(r.dispatch_count, 1, "the synthesis turn's steps must not run");
 }

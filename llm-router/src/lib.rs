@@ -440,7 +440,7 @@ impl Router {
                 reasoning_tokens = ?leak.reasoning_tokens,
                 thinking_switch = self.config.thinking_switch.as_str(),
                 "{}",
-                thinking::leak_warning(&leak, self.config.thinking_switch)
+                thinking::leak_warning(&leak, self.config.thinking_switch, self.config.disable_thinking)
             );
         }
     }

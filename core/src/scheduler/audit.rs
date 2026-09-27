@@ -294,9 +294,9 @@ pub fn action_task_terminal(state: &str) -> String {
 
 /// Aggregate counters carried in the `task.finalize` payload.
 ///
-/// `total_llm_calls` is just `plan_count` today (one formulator call
-/// per plan iteration), but the field is named per-spec so a future
-/// formulator that retries internally can populate it distinctly.
+/// `total_llm_calls` is `plan_count` plus the formulator calls that
+/// produced no plan (`InnerLoopResult::failed_llm_calls`, #774): a timed-out
+/// planning call the loop recovered from still cost the model its time.
 /// `total_dispatch_calls` is incremented by the inner loop on every
 /// `StepDispatcher::dispatch_step` call.
 ///

@@ -68,7 +68,7 @@ pub(super) async fn write_finalize_row(
         // a silent `as i32` truncation would be a subtle bug if a
         // future change ever lifted the cap.
         plan_count: i32::try_from(result.plan_count).unwrap_or(i32::MAX),
-        total_llm_calls: result.plan_count,
+        total_llm_calls: total_llm_calls(result),
         total_dispatch_calls: result.dispatch_count,
         total_duration_ms: compute_duration_ms(claimed.started_at, finished_at),
         started_at: claimed.started_at,
@@ -83,6 +83,13 @@ pub(super) async fn write_finalize_row(
             "audit insert for scheduler task.finalize row failed (best-effort)"
         );
     }
+}
+
+/// Every model call the run made, not just those that produced a plan
+/// (#774): a timed-out attempt the loop recovered from still cost up to
+/// `KASTELLAN_LLM_TIMEOUT_MS`. Pure.
+fn total_llm_calls(result: &InnerLoopResult) -> u32 {
+    result.plan_count.saturating_add(result.failed_llm_calls)
 }
 
 /// Best-effort agent-raised L1 promotion writer. Called by
@@ -310,5 +317,22 @@ mod tests {
             super::write_l1_promoted_row(pool, extractor, embedder, task_id, insight)
         }
         let _ = _signature_pin;
+    }
+
+    #[test]
+    fn total_llm_calls_counts_the_calls_that_produced_no_plan() {
+        let mut r = crate::scheduler::inner_loop::InnerLoopResult {
+            outcome: crate::scheduler::inner_loop::Outcome::Completed(serde_json::json!({})),
+            plan_count: 2,
+            dispatch_count: 1,
+            failed_llm_calls: 2,
+            terminal_l1_insight: None,
+            terminal_l3_skill: None,
+            terminal_python_skill: None,
+            turn_record: None,
+        };
+        assert_eq!(super::total_llm_calls(&r), 4);
+        r.failed_llm_calls = u32::MAX;
+        assert_eq!(super::total_llm_calls(&r), u32::MAX, "saturates, never wraps");
     }
 }

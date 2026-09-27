@@ -201,7 +201,11 @@ pub fn detect_thinking_leak(suppressed: bool, response: &ChatResponse) -> Option
 ///
 /// Names the setting to change. When the backend is recognisably Ollama
 /// and the dialect is the one Ollama ignores, it names the exact value.
-pub fn leak_warning(leak: &ThinkingLeak, switch: ThinkingSwitch) -> String {
+/// `config_disables_thinking` says whether the suppression came from
+/// `KASTELLAN_LLM_DISABLE_THINKING`: only then is "set it to 0" a lever —
+/// when a caller's per-request [`ThinkingPolicy::Suppress`] asked (the #774
+/// synthesis retry), the config is already 0.
+pub fn leak_warning(leak: &ThinkingLeak, switch: ThinkingSwitch, config_disables_thinking: bool) -> String {
     let tokens = leak
         .reasoning_tokens
         .map(|t| format!(", {t} reasoning tokens"))
@@ -212,9 +216,13 @@ pub fn leak_warning(leak: &ThinkingLeak, switch: ThinkingSwitch) -> String {
              {THINKING_SWITCH_ENV}=reasoning_effort"
         )
     } else {
+        let deliberate = if config_disables_thinking {
+            ", or set KASTELLAN_LLM_DISABLE_THINKING=0 to make the thinking deliberate"
+        } else {
+            ""
+        };
         format!(
-            "this backend does not honour the `{}` dialect; check {THINKING_SWITCH_ENV}, or set \
-             KASTELLAN_LLM_DISABLE_THINKING=0 to make the thinking deliberate",
+            "this backend does not honour the `{}` dialect; check {THINKING_SWITCH_ENV}{deliberate}",
             switch.as_str()
         )
     };

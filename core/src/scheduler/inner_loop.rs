@@ -162,8 +162,9 @@ impl StepOutcome {
 /// build the spec §7 `task.finalize` summary row without re-querying.
 ///
 /// `plan_count` is the final value of `TaskContext::plan_count` (one
-/// increment per formulator call) and is the natural value for the
-/// finalize payload's `total_llm_calls` field. `dispatch_count` is
+/// increment per formulator call that produced a plan);
+/// `failed_llm_calls` counts the calls that produced none (#774), so the
+/// finalize payload's `total_llm_calls` is their sum. `dispatch_count` is
 /// incremented once per `StepDispatcher::dispatch_step` call —
 /// regardless of whether the call returned `Ok` or `Err` — so the
 /// audit row reflects how often the host actually tried to dispatch
@@ -173,6 +174,9 @@ pub struct InnerLoopResult {
     pub outcome: Outcome,
     pub plan_count: u32,
     pub dispatch_count: u32,
+    /// Formulator calls in this run that produced no plan — a timed-out
+    /// attempt the loop recovered from, or the final failure (#774).
+    pub failed_llm_calls: u32,
     /// `l1_insight` from the terminal plan, captured only when the
     /// inner loop reaches `Outcome::Completed`. The lane runner reads
     /// this in `drain_lane` and writes one `actor='scheduler'
@@ -382,6 +386,12 @@ pub async fn run_to_terminal(
     // spec §7 `task.finalize` summary row.
     let mut dispatch_count: u32 = 0;
 
+    // Formulator calls that produced NO plan (#774): a timed-out attempt the
+    // loop recovered from, or the final failure. `plan_count` counts only
+    // the calls that produced a plan, so `task.finalize`'s `total_llm_calls`
+    // is `plan_count + failed_llm_calls`.
+    let mut failed_llm_calls: u32 = 0;
+
     // Set true once any iteration expands an `invoke_skill` directive.
     // ANDed into the terminal `l3_skill` capture so an invoke-driven task
     // never re-crystallises the skill it just ran (forecloses a
@@ -400,6 +410,7 @@ pub async fn run_to_terminal(
                 outcome: $outcome,
                 plan_count: ctx.plan_count,
                 dispatch_count,
+                failed_llm_calls,
                 terminal_l1_insight: $insight,
                 terminal_l3_skill: $skill,
                 terminal_python_skill: $pyskill,
@@ -473,27 +484,58 @@ pub async fn run_to_terminal(
         // agent sees the prior failure on the next iteration, bounded by
         // `max_plans`). The one exception is a REQUEST TIMEOUT (#774), the
         // failure a cheaper request can beat — see `llm_failure`.
-        let mut formulation = if synth_turn {
+        let first = if synth_turn {
             formulator.formulate_synthesis(&ctx).await
         } else {
             formulator.formulate_plan(&ctx).await
         };
         // A synthesis turn that ran out of time gets one more attempt with
-        // thinking suppressed, when the formulator has such an attempt.
-        if synth_turn && matches!(&formulation, Err(e) if e.is_request_timeout()) {
-            tracing::warn!(
-                task_id = ctx.task_id,
-                plan_count = ctx.plan_count,
-                "forced-synthesis call timed out; retrying once with thinking suppressed \
-                 (if thinking is not already off)"
-            );
-            if let Some(retry) = formulator.formulate_synthesis_without_thinking(&ctx).await {
-                formulation = retry;
+        // thinking suppressed, when the formulator has such an attempt. Every
+        // failed call is counted and gets an audit row exactly once:
+        // `failure_recorded` stops the row below from repeating one already
+        // written here.
+        let mut retried = false;
+        let mut failure_recorded = false;
+        let formulation = match first {
+            Err(e) if synth_turn && e.is_request_timeout() => {
+                failed_llm_calls = failed_llm_calls.saturating_add(1);
+                llm_failure::record_failed_formulation(
+                    pool, ctx.task_id, ctx.plan_count, true, false, &e,
+                ).await;
+                match formulator.formulate_synthesis_without_thinking(&ctx).await {
+                    Some(retry) => {
+                        tracing::warn!(
+                            task_id = ctx.task_id,
+                            plan_count = ctx.plan_count,
+                            retry_ok = retry.is_ok(),
+                            "forced-synthesis call timed out; retried once with thinking suppressed"
+                        );
+                        retried = true;
+                        retry
+                    }
+                    None => {
+                        tracing::warn!(
+                            task_id = ctx.task_id,
+                            plan_count = ctx.plan_count,
+                            "forced-synthesis call timed out; no cheaper retry exists \
+                             (thinking is already suppressed by config)"
+                        );
+                        failure_recorded = true;
+                        Err(e)
+                    }
+                }
             }
-        }
-        let (mut plan, meta) = match formulation {
+            other => other,
+        };
+        let (mut plan, mut meta) = match formulation {
             Ok(x) => x,
             Err(e) => {
+                if !failure_recorded {
+                    failed_llm_calls = failed_llm_calls.saturating_add(1);
+                    llm_failure::record_failed_formulation(
+                        pool, ctx.task_id, ctx.plan_count, synth_turn, retried, &e,
+                    ).await;
+                }
                 let timed_out = e.is_request_timeout();
                 if llm_failure::should_force_synthesis(timed_out, gathered, synth_attempted) {
                     tracing::warn!(
@@ -517,6 +559,11 @@ pub async fn run_to_terminal(
                 return finish!(Outcome::Failed(detail));
             }
         };
+        // The retry's `plan.formulate` row says it was one: the existing
+        // `retry_count` column, which the formulator itself leaves at 0.
+        if retried {
+            meta.retry_count = meta.retry_count.saturating_add(1);
+        }
 
         ctx.plan_count += 1;
         // Best-effort mirror — the in-memory `ctx.plan_count` is the
@@ -837,6 +884,13 @@ pub async fn run_to_terminal(
         // non-terminal plan, do NOT execute more tool steps — fail at the
         // cap rather than spending another gather round.
         if synth_turn {
+            // A synthesis turn that a TIMEOUT forced (#774) never reached the
+            // cap, so it must not say it did — operators count cap rows.
+            if !over_cap {
+                return finish!(Outcome::Failed(llm_failure::forced_synthesis_no_answer_detail(
+                    &llm_failure::GatheredWork::from_plans(&ctx.plans),
+                )));
+            }
             // Report the cap the same way as the primary cap message above
             // (`max_plans>=max_plans`). `ctx.plan_count` is now `max_plans + 1`
             // — the synthesis turn spent one extra formulation — so printing it

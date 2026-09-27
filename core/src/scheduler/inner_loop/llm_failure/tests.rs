@@ -121,3 +121,30 @@ fn the_message_before_any_call_says_nothing_ran() {
     assert!(d.contains("no tool was called"), "{d}");
     assert!(d.ends_with("[llm: e]"), "{d}");
 }
+
+// ── forced_synthesis_no_answer_detail / formulate_failed_payload ─────────
+
+#[test]
+fn a_timeout_forced_synthesis_without_an_answer_does_not_claim_the_cap() {
+    let plans = vec![record(&["mail.search", "mail.search"], vec![ok(), ok()])];
+    let d = forced_synthesis_no_answer_detail(&GatheredWork::from_plans(&plans));
+    assert!(d.starts_with("A planning call ran out of time"), "{d}");
+    assert!(d.contains("the 2 tool results already gathered"), "{d}");
+    assert!(!d.contains("plan_iteration_cap_exceeded"), "the cap was never reached: {d}");
+    let one = vec![record(&["mail.search"], vec![ok()])];
+    assert!(forced_synthesis_no_answer_detail(&GatheredWork::from_plans(&one))
+        .contains("the 1 tool result already"));
+}
+
+#[test]
+fn the_failed_call_row_carries_its_facts_and_a_clamped_error() {
+    let long = "x".repeat(FAILED_ROW_ERROR_CHARS + 100);
+    let v = formulate_failed_payload(7, 3, true, true, true, &long);
+    assert_eq!(v["task_id"], 7);
+    assert_eq!(v["plan_count"], 3);
+    assert_eq!(v["synth_turn"], true);
+    assert_eq!(v["thinking_suppressed_retry"], true);
+    assert_eq!(v["request_timeout"], true);
+    assert_eq!(v["error"].as_str().unwrap().chars().count(), FAILED_ROW_ERROR_CHARS);
+    assert_eq!(v.as_object().unwrap().len(), 6, "{v}");
+}

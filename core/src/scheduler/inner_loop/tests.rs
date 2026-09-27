@@ -515,6 +515,7 @@ fn inner_loop_result_terminal_l1_insight_default_is_none() {
         outcome: Outcome::Failed("test".into()),
         plan_count: 0,
         dispatch_count: 0,
+        failed_llm_calls: 0,
         terminal_l1_insight: None,
         terminal_l3_skill: None,
         terminal_python_skill: None,
