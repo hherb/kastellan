@@ -46,7 +46,7 @@
 //!    object keeps its alphabetically first keys, so `ordering_note` outlives
 //!    `results` and `sort_applied`. It is not first — `next_cursor` sorts
 //!    before it — so a view narrowed to one key keeps only the cursor.
-//!    [`ordering_key_sorts_before_results`] pins the part this module controls.
+//!    The test `ordering_key_sorts_before_results` pins the part this module controls.
 //!    `core`'s `an_ordering_note_reaches_the_planner_wherever_its_key_sorts`
 //!    shows the note reaching the planner at the production budget, where no
 //!    object is narrowed; nothing tests the narrowed case end to end.

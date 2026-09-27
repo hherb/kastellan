@@ -48,7 +48,7 @@ impl Picked {
 
     /// A hash the **planner** typed, with no message to vouch for it.
     ///
-    /// The only public constructor, reached in production through [`choose`]
+    /// The only public constructor, reached in production through [`super::choose`]
     /// so that a malformed hash is refused while the params are read (#765).
     /// It is fallible so the traversal guard on the `{sha256}` URL segment is
     /// structural rather than a rule each call site has to remember. There is
