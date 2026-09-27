@@ -8,8 +8,8 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-27, latest (#767 + #768, the mail-worker review residue; the operator is
-still running the #773 live re-measure) ·
+**Last updated:** 2026-09-28, latest (#778's second review round, on top of #767 + #768; the
+operator is still running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
@@ -85,6 +85,17 @@ real sandboxed worker + MITM proxy. Rootfs images last rebuilt
   `Selector::is_planner_typed()`; `live_localmail::Credentials` fields private; `credentials_or_skip`
   reads the env through a tested seam; `gate_script_tests/callers.rs` refuses a script that runs the
   gate with a profile the table lacks. `Picked` moved to `attach/picked.rs` (movement-only commit).
+- **Second review round (2026-09-28, five agents, `9ee5d1ee`):** the live gate no longer pages
+  the *first* stored attachment — an archive whose first one is an image failed it with localmail
+  unchanged. It collects up to 10 and takes the first whose paged `/text` answers 200 with
+  `total` past the window, probed with **the very request it then asserts** (live: green; a
+  contract respelling of `limit=`/`offset=` still fails it). `callers.rs`'s refusal is now a pure
+  `undefined()` with a test of its own (before, it only ever saw valid names), and the parser reads
+  single quotes, a quoted profile, `\` continuations and `.github/workflows/*.yml`.
+  `Picked::is_planner_typed` replaces the `Selector` one (asked after resolution);
+  `find_by_sha(&ShaPrefix)`; `Picked::resolved` is `assert!`, not `debug_assert!`; a
+  whitespace-only `sort` is no sort. **Filed:** #779 (sha+filename is fail-open where
+  index+filename refuses — a policy call; duplicate blobs), #780 (type the contract fns).
 
 ### Previous (2026-09-27): #773 + #774 — thinking, and slow planning calls — what still binds
 
@@ -322,7 +333,8 @@ pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it 
 grew `inner_loop.rs` 878→923 (already over; its new logic went to `inner_loop/llm_failure.rs`).
 #767/#768 split `workers/mail/src/attach.rs` **first** (717→559, `Picked` → `attach/picked.rs`)
 and put its new tests in `attach/tests/hash_and_route.rs` (`attach/tests.rs` 719→727); it grew
-`core/tests/mail_live_shape_e2e.rs` 508→529 (one test fn — split it before the next leg) and
+`core/tests/mail_live_shape_e2e.rs` 508→529→**559** after the second review (one test fn — **split
+it before the next leg**; the attachment half is the natural cut) and
 `gate_script_tests.rs` 518→519 (its new check went to `gate_script_tests/callers.rs`).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
@@ -356,7 +368,8 @@ and put its new tests in `attach/tests/hash_and_route.rs` (`attach/tests.rs` 719
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#767 + #768 — **the gate that stands**) | branch tip `378b7433` | **4653 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha + clean tree identical before and after. Same flags as below. **Delta +11, reconciled per suite:** mail bin 205→211 (+6), tests-common lib 447→452 (+5). `mail-live` gate green as evidence on the tip (and on `378b7433`); mail rustdoc 0 warnings | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-767`), **27** `Checking kastellan` lines | **23** Mac |
+| **Mac** (#778 second review — **the gate that stands**) | `9ee5d1ee` | **4657 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), HEAD + tree status identical before and after. Same flags as below. **Delta +4, reconciled per suite:** mail bin 211→213 (+2), tests-common lib 452→454 (+2). `mail-live` gate green as evidence on the tip, plus two live mutants (`limit=`, `offset=` respelled in the contract) each failing it; mail rustdoc 0 warnings | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-778fix2`, re-run after a first run overlapped a mutant), **27** `Checking kastellan` lines | **23** Mac |
+| **Mac** (#767 + #768 — superseded) | branch tip `378b7433` | **4653 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha + clean tree identical before and after. Same flags as below. **Delta +11, reconciled per suite:** mail bin 205→211 (+6), tests-common lib 447→452 (+5). `mail-live` gate green as evidence on the tip (and on `378b7433`); mail rustdoc 0 warnings | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-767`), **27** `Checking kastellan` lines | **23** Mac |
 | **Mac** (#773 + #774 — superseded) | branch tip `0671ea70` | **4642 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha identical before and after. `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, after `cargo build --workspace`. **Delta reconciled per suite: +53 over the row below** = this branch **+47** (llm-router lib +29, new `thinking_switch_e2e` +6 and +1 suite, core lib +12 — per-file test-count diff against `origin/main`) + **6 already on `main`** since that row's sweep (core +5, email-in +1: #770's last round). **DGX** (native Linux, same tip): core `scheduler::` 369, llm-router 116 + wire 6, **0 `[SKIP]`** — the PG timeout test ran there | **both hosts** exit 0, cold (fresh `CARGO_TARGET_DIR`), **27** `Checking kastellan` lines, zero warnings. The DGX's cold runs caught `large_enum_variant` **twice** during the session (a test stub, then `Turn`), both fixed before this row | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
@@ -441,6 +454,8 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
 - **[#778](https://github.com/hherb/kastellan/pull/778)** (#767, #768) — route spellings as pure fns in `localmail_contract.rs`, used by the
   worker and the live gate (which now pages from offset 2 and checks the hash routes too); one
   lowercase rule for a planner hash (`ShaPrefix`); `NormalizedFilters`; private `Credentials`.
+  Second review round: the gate picks an attachment with text, the profile refusal has a test.
+  Filed #779, #780.
 - **[#776](https://github.com/hherb/kastellan/pull/776)** (#773, #774) — `KASTELLAN_LLM_THINKING_SWITCH`
   (`reasoning_effort` for Ollama) + a once-per-process thinking-leak WARN; `llm_usage` on every
   `plan.formulate` row; a request timeout after gathering spends the synthesis turn, a timed-out
