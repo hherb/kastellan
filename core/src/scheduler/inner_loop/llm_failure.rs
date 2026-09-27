@@ -183,8 +183,9 @@ pub(super) fn formulate_failed_payload(
 
 /// What one planning turn produced.
 pub(super) enum Turn {
-    /// A plan to act on.
-    Planned(Plan, FormulationMeta),
+    /// A plan to act on. Boxed: a `Plan` + `FormulationMeta` is far larger
+    /// than the other variants (`clippy::large_enum_variant`).
+    Planned(Box<(Plan, FormulationMeta)>),
     /// The call timed out after tools had gathered results: spend the
     /// forced-synthesis turn next instead of failing ([`should_force_synthesis`]).
     ForceSynthesis,
@@ -296,7 +297,7 @@ pub(super) async fn formulate_turn(
     if retried {
         meta.retry_count = meta.retry_count.saturating_add(1);
     }
-    Turn::Planned(plan, meta)
+    Turn::Planned(Box::new((plan, meta)))
 }
 
 /// Write the `agent/plan.formulate_failed` row for one failed formulator

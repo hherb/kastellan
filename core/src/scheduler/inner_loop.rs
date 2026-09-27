@@ -489,7 +489,7 @@ pub async fn run_to_terminal(
         let (mut plan, meta) = match llm_failure::formulate_turn(
             pool, formulator.as_ref(), &ctx, turn, &mut failed_llm_calls,
         ).await {
-            llm_failure::Turn::Planned(plan, meta) => (plan, meta),
+            llm_failure::Turn::Planned(planned) => *planned,
             llm_failure::Turn::ForceSynthesis => {
                 force_synth = true;
                 continue;
