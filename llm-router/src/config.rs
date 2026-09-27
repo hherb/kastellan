@@ -31,6 +31,13 @@
 //! | `KASTELLAN_LLM_GUARD_MODEL` | Default model on the guard backend | unset |
 //! | `KASTELLAN_LLM_TIMEOUT_MS` | Request timeout, milliseconds | 180_000 |
 //! | `KASTELLAN_LLM_DISABLE_THINKING` | Suppress the local model's thinking block | `1` (on) |
+//! | `KASTELLAN_LLM_THINKING_SWITCH` | How to say "don't think": `chat_template_kwargs` (vLLM, SGLang, llama.cpp) or `reasoning_effort` (**Ollama**) | `chat_template_kwargs` |
+//!
+//! ⚠️ **On Ollama, `KASTELLAN_LLM_DISABLE_THINKING` does nothing unless
+//! `KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort`** — Ollama silently
+//! ignores the default dialect (#773). Why the router cannot just send both
+//! is in [`crate::thinking`]; a backend that thinks anyway is reported once
+//! at WARN with the fix.
 //!
 //! `KASTELLAN_LLM_DISABLE_THINKING` accepts `1`/`true`/`yes`/`on` and
 //! `0`/`false`/`no`/`off` (trimmed, case-insensitive) and **rejects any
@@ -63,6 +70,7 @@
 use std::time::Duration;
 
 use crate::error::RouterError;
+use crate::thinking::{ThinkingSwitch, THINKING_SWITCH_ENV};
 
 pub const DEFAULT_LOCAL_MODEL: &str = "local-default";
 pub const DEFAULT_EMBEDDING_MODEL: &str = "embedding-default";
@@ -181,7 +189,15 @@ pub struct RouterConfig {
     /// Set `KASTELLAN_LLM_DISABLE_THINKING=0` to let the model think —
     /// appropriate when the local model is not a reasoning model, or
     /// when reasoning quality matters more than latency.
+    ///
+    /// ⚠️ **Only as good as [`RouterConfig::thinking_switch`]**: a backend
+    /// that does not speak the configured dialect thinks anyway (#773).
     pub disable_thinking: bool,
+    /// The wire dialect used to suppress thinking, from
+    /// `KASTELLAN_LLM_THINKING_SWITCH` — see [`crate::thinking`]. Used both
+    /// for `disable_thinking` and for a caller's per-request
+    /// [`crate::thinking::ThinkingPolicy::Suppress`].
+    pub thinking_switch: ThinkingSwitch,
 }
 
 impl Default for RouterConfig {
@@ -200,6 +216,7 @@ impl Default for RouterConfig {
             guard_timeout_ms: None,
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
             disable_thinking: true,
+            thinking_switch: ThinkingSwitch::ChatTemplateKwargs,
         }
     }
 }
@@ -274,6 +291,9 @@ impl RouterConfig {
                 }
             };
         }
+        if let Some(v) = read_env(THINKING_SWITCH_ENV)? {
+            cfg.thinking_switch = ThinkingSwitch::parse(&v)?;
+        }
         Ok(cfg)
     }
 
@@ -329,6 +349,14 @@ impl RouterConfig {
                 local_url: url.clone(),
                 local_model: model.clone(),
                 timeout,
+                // Pinned, NOT inherited. `KASTELLAN_LLM_THINKING_SWITCH`
+                // describes the PLANNER's backend (Ollama on the DGX); the
+                // guard is a llama.cpp server whose classifier prompt was
+                // measured byte-identical under this dialect (see
+                // `ChatRequest::with_logprobs`). Inheriting `reasoning_effort`
+                // would change what the calibrated tau was fitted against,
+                // on the strength of a setting about a different server.
+                thinking_switch: ThinkingSwitch::ChatTemplateKwargs,
                 ..self.clone()
             })),
         }
@@ -412,6 +440,7 @@ mod tests {
             ("KASTELLAN_LLM_GUARD_MODEL", None),
             ("KASTELLAN_LLM_TIMEOUT_MS", None),
             ("KASTELLAN_LLM_DISABLE_THINKING", None),
+            (THINKING_SWITCH_ENV, None),
         ])
     }
 
@@ -839,5 +868,57 @@ mod tests {
         let cfg = RouterConfig::from_env().expect("valid");
         assert!(cfg.guard_url.is_none());
         assert!(cfg.guard_model.is_none());
+    }
+
+    // ── KASTELLAN_LLM_THINKING_SWITCH (#773) ─────────────────────────────
+
+    #[test]
+    fn thinking_switch_defaults_to_the_kwargs_dialect() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _scope = clear_all();
+        let cfg = RouterConfig::from_env().expect("valid");
+        assert_eq!(cfg.thinking_switch, ThinkingSwitch::ChatTemplateKwargs);
+        assert_eq!(RouterConfig::default().thinking_switch, ThinkingSwitch::ChatTemplateKwargs);
+    }
+
+    #[test]
+    fn thinking_switch_reads_reasoning_effort_and_rejects_a_typo() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _clear = clear_all();
+        {
+            let _scope = EnvScope::new(&[(THINKING_SWITCH_ENV, Some("reasoning_effort"))]);
+            let cfg = RouterConfig::from_env().expect("valid");
+            assert_eq!(cfg.thinking_switch, ThinkingSwitch::ReasoningEffort);
+        }
+        {
+            let _scope = EnvScope::new(&[(THINKING_SWITCH_ENV, Some("ollama"))]);
+            let err = RouterConfig::from_env().expect_err("a typo must not pick a dialect");
+            assert!(err.to_string().contains(THINKING_SWITCH_ENV), "{err}");
+        }
+        {
+            // Empty = absent, like every var in the table.
+            let _scope = EnvScope::new(&[(THINKING_SWITCH_ENV, Some(""))]);
+            let cfg = RouterConfig::from_env().expect("valid");
+            assert_eq!(cfg.thinking_switch, ThinkingSwitch::ChatTemplateKwargs);
+        }
+    }
+
+    /// The planner's dialect setting must not reach the guard: it names the
+    /// planner's backend, and the guard's classifier prompt was measured
+    /// under the kwargs dialect only.
+    #[test]
+    fn for_guard_pins_the_kwargs_dialect_instead_of_inheriting_it() {
+        let cfg = RouterConfig {
+            guard_url: Some("http://127.0.0.1:8081/v1".to_string()),
+            guard_model: Some("shieldstral".to_string()),
+            thinking_switch: ThinkingSwitch::ReasoningEffort,
+            ..Default::default()
+        };
+        let guard = cfg
+            .for_guard(Duration::from_secs(15))
+            .expect("no misconfiguration")
+            .expect("configured");
+        assert_eq!(guard.thinking_switch, ThinkingSwitch::ChatTemplateKwargs);
+        assert_eq!(cfg.thinking_switch, ThinkingSwitch::ReasoningEffort, "parent untouched");
     }
 }

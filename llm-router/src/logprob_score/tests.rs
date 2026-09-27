@@ -160,6 +160,7 @@ fn response_with(alts: Vec<TopLogProb>) -> ChatResponse {
     ChatResponse {
         id: None,
         model: None,
+        system_fingerprint: None,
         usage: None,
         choices: vec![ChatChoice {
             index: 0,
@@ -191,6 +192,7 @@ fn first_position_alternatives_is_none_without_a_logprobs_block() {
     let resp = ChatResponse {
         id: None,
         model: None,
+        system_fingerprint: None,
         usage: None,
         choices: vec![ChatChoice {
             index: 0,
@@ -212,6 +214,6 @@ fn first_position_alternatives_is_none_for_an_empty_top_logprobs() {
 
 #[test]
 fn first_position_alternatives_is_none_when_there_are_no_choices() {
-    let resp = ChatResponse { id: None, model: None, usage: None, choices: vec![] };
+    let resp = ChatResponse { id: None, model: None, system_fingerprint: None, usage: None, choices: vec![] };
     assert!(first_position_alternatives(&resp).is_none());
 }

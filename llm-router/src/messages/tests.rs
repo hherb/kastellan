@@ -54,6 +54,8 @@ fn chat_request_includes_optional_fields_when_set() {
         max_tokens: Some(42),
         temperature: Some(0.7),
         chat_template_kwargs: None,
+        reasoning_effort: None,
+        thinking: Default::default(),
         logprobs: None,
         top_logprobs: None,
     };
@@ -100,6 +102,8 @@ fn without_thinking_preserves_the_other_fields() {
         max_tokens: Some(8192),
         temperature: Some(0.2),
         chat_template_kwargs: None,
+        reasoning_effort: None,
+        thinking: Default::default(),
         logprobs: None,
         top_logprobs: None,
     }
@@ -287,4 +291,84 @@ fn chat_response_decodes_minimal_ollama_envelope() {
     assert!(resp.usage.is_none());
     assert!(resp.choices[0].finish_reason.is_none());
     assert_eq!(resp.choices[0].index, 0);
+}
+
+// ── #773 / #774: reasoning, reasoning_effort, usage details ───────────────
+
+/// Both spellings of the reasoning field decode, and a body carrying BOTH
+/// must still decode — a serde `alias` would make it a duplicate-field
+/// error and fail every planning call on such a backend.
+#[test]
+fn reasoning_decodes_under_either_key_and_under_both() {
+    for (body, want) in [
+        (json!({"role": "assistant", "content": "x", "reasoning": "r1"}), "r1"),
+        (json!({"role": "assistant", "content": "x", "reasoning_content": "r2"}), "r2"),
+        (
+            json!({"role": "assistant", "content": "x", "reasoning": "r1", "reasoning_content": "r2"}),
+            "r1",
+        ),
+        // An empty `reasoning` must not hide a populated legacy field.
+        (json!({"role": "assistant", "content": "x", "reasoning": "", "reasoning_content": "r2"}), "r2"),
+    ] {
+        let m: ChatMessage = serde_json::from_value(body.clone()).expect("decodes");
+        assert_eq!(m.reasoning_text(), Some(want), "for {body}");
+    }
+    let plain: ChatMessage =
+        serde_json::from_value(json!({"role": "assistant", "content": "x"})).unwrap();
+    assert_eq!(plain.reasoning_text(), None);
+}
+
+/// Reasoning is read, never written: a decoded message handed back in a
+/// request must not replay the model's private reasoning to it.
+#[test]
+fn reasoning_is_never_serialised() {
+    let mut m = ChatMessage::assistant("x");
+    m.reasoning = Some("private".into());
+    m.reasoning_content = Some("private".into());
+    let s = serde_json::to_string(&m).unwrap();
+    assert!(!s.contains("private") && !s.contains("reasoning"), "{s}");
+}
+
+#[test]
+fn reasoning_effort_is_absent_unless_set_and_thinking_policy_never_serialises() {
+    use crate::thinking::ThinkingPolicy;
+    let req = ChatRequest::new("m", vec![ChatMessage::user("hi")])
+        .with_thinking(ThinkingPolicy::Suppress);
+    assert_eq!(req.thinking, ThinkingPolicy::Suppress);
+    let s = serde_json::to_string(&req).unwrap();
+    assert!(!s.contains("reasoning_effort"), "{s}");
+    assert!(!s.contains("thinking"), "the policy is for the router, not the wire: {s}");
+
+    let mut req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+    req.reasoning_effort = Some("none".into());
+    let v = serde_json::to_value(&req).unwrap();
+    assert_eq!(v["reasoning_effort"], "none");
+}
+
+/// Ollama's real shape (captured on the DGX 2026-09-27) and an
+/// OpenAI-style one with a reasoning-token count both decode.
+#[test]
+fn response_decodes_fingerprint_reasoning_and_reasoning_tokens() {
+    let ollama = json!({
+        "id": "chatcmpl-928", "object": "chat.completion", "created": 1790484544,
+        "model": "gemma4:26b-a4b-it-q8_0-ctx64k", "system_fingerprint": "fp_ollama",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "391",
+            "reasoning": "17*23 = 391"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 31, "completion_tokens": 283, "total_tokens": 314}
+    });
+    let r: ChatResponse = serde_json::from_value(ollama).unwrap();
+    assert_eq!(r.system_fingerprint.as_deref(), Some("fp_ollama"));
+    assert_eq!(r.choices[0].message.reasoning_text(), Some("17*23 = 391"));
+    assert_eq!(r.usage.as_ref().unwrap().completion_tokens_details, None);
+
+    let openai = json!({
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 50,
+            "completion_tokens_details": {"reasoning_tokens": 42}}
+    });
+    let r: ChatResponse = serde_json::from_value(openai).unwrap();
+    assert_eq!(
+        r.usage.unwrap().completion_tokens_details.unwrap().reasoning_tokens,
+        Some(42)
+    );
 }

@@ -46,6 +46,7 @@ use super::inner_loop_audit::{
 
 mod floor;
 mod invoke_expand;
+mod llm_failure;
 // `pub(crate)` so `scheduler::conversation` can reuse the same pruning,
 // clamping and screen-text extraction for the conversation block (#701).
 // A second copy of that logic is exactly the drift #669 warns about.
@@ -433,6 +434,10 @@ pub async fn run_to_terminal(
     // never loop back into it (belt-and-suspenders — a synth turn always
     // returns a terminal outcome anyway).
     let mut synth_attempted = false;
+    // Set true when a planning call timed out after something was gathered
+    // (#774): the next iteration spends the forced-synthesis turn instead of
+    // the task failing with everything it gathered thrown away.
+    let mut force_synth = false;
 
     loop {
         // Cancellation poll — top of loop.
@@ -452,7 +457,7 @@ pub async fn run_to_terminal(
         // there is nothing to synthesize, so the cap fails hard as before —
         // which is why the existing cap tests are unaffected.
         let over_cap = ctx.plan_count >= ctx.max_plans;
-        let synth_turn = over_cap && gathered && !synth_attempted;
+        let synth_turn = (over_cap || force_synth) && gathered && !synth_attempted;
         if over_cap && !synth_turn {
             return finish!(Outcome::Failed(format!(
                 "plan_iteration_cap_exceeded ({}>={})", ctx.plan_count, ctx.max_plans
@@ -464,18 +469,53 @@ pub async fn run_to_terminal(
 
         // 1. Formulate plan (forced-synthesis variant on the synth turn).
         //
-        // No loop-level retry: replanning IS the retry shape (the agent
-        // sees the prior failure on the next iteration, bounded by
-        // `max_plans`). A transient HTTP/transport error that escapes
-        // the formulator's own retry is therefore terminal here.
-        let formulation = if synth_turn {
+        // No general loop-level retry: replanning IS the retry shape (the
+        // agent sees the prior failure on the next iteration, bounded by
+        // `max_plans`). The one exception is a REQUEST TIMEOUT (#774), the
+        // failure a cheaper request can beat — see `llm_failure`.
+        let mut formulation = if synth_turn {
             formulator.formulate_synthesis(&ctx).await
         } else {
             formulator.formulate_plan(&ctx).await
         };
+        // A synthesis turn that ran out of time gets one more attempt with
+        // thinking suppressed, when the formulator has such an attempt.
+        if synth_turn && matches!(&formulation, Err(e) if e.is_request_timeout()) {
+            tracing::warn!(
+                task_id = ctx.task_id,
+                plan_count = ctx.plan_count,
+                "forced-synthesis call timed out; retrying once with thinking suppressed \
+                 (if thinking is not already off)"
+            );
+            if let Some(retry) = formulator.formulate_synthesis_without_thinking(&ctx).await {
+                formulation = retry;
+            }
+        }
         let (mut plan, meta) = match formulation {
             Ok(x) => x,
-            Err(e) => return finish!(Outcome::Failed(format!("llm: {e}"))),
+            Err(e) => {
+                let timed_out = e.is_request_timeout();
+                if llm_failure::should_force_synthesis(timed_out, gathered, synth_attempted) {
+                    tracing::warn!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        error = %e,
+                        "planning call timed out after tools had gathered results; \
+                         spending the forced-synthesis turn now instead of failing the task"
+                    );
+                    force_synth = true;
+                    continue;
+                }
+                let detail = if timed_out {
+                    llm_failure::timeout_failure_detail(
+                        &llm_failure::GatheredWork::from_plans(&ctx.plans),
+                        &e.to_string(),
+                    )
+                } else {
+                    format!("llm: {e}")
+                };
+                return finish!(Outcome::Failed(detail));
+            }
         };
 
         ctx.plan_count += 1;
@@ -876,3 +916,5 @@ pub async fn run_to_terminal(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timeout_tests;

@@ -50,24 +50,29 @@
 //!   consumer (Phase 1 memory recall) lands.
 
 pub mod backend;
+pub mod completion_stats;
 pub mod config;
 pub mod embeddings;
 pub mod error;
 pub mod logprob_score;
 pub mod messages;
 pub mod policy;
+pub mod thinking;
 
-use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub use backend::Backend;
+pub use completion_stats::CompletionStats;
 pub use config::RouterConfig;
 pub use embeddings::{EmbeddingData, EmbeddingRequest, EmbeddingResponse};
 pub use error::RouterError;
 pub use messages::{
-    ChatChoice, ChatMessage, ChatRequest, ChatResponse, ChatRole, PromptTokensDetails, Usage,
+    ChatChoice, ChatMessage, ChatRequest, ChatResponse, ChatRole, CompletionTokensDetails,
+    PromptTokensDetails, Usage,
 };
 pub use policy::{DefaultLocalPolicy, PolicyGate};
+pub use thinking::{ThinkingPolicy, ThinkingSwitch};
 
 use error::{truncate_for_error, ERROR_BODY_CAP};
 
@@ -146,6 +151,10 @@ pub struct Router {
     config: RouterConfig,
     http: reqwest::Client,
     policy: Arc<dyn PolicyGate>,
+    /// Set once the thinking-leak warning has been logged (#773). Shared
+    /// by clones: a leak is a fact about the configuration, so one line
+    /// per process says it; one per planning call would bury everything.
+    thinking_leak_reported: Arc<AtomicBool>,
 }
 
 impl Router {
@@ -192,6 +201,7 @@ impl Router {
             config,
             http,
             policy,
+            thinking_leak_reported: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -385,16 +395,13 @@ impl Router {
 
         // Thinking suppression is a property of the *local leg*, not of
         // any one caller, so it is applied here rather than at each call
-        // site — every local completion gets it or none does. An
-        // explicit `chat_template_kwargs` from the caller always wins;
-        // the config only fills a gap it left.
-        let request = if self.config.disable_thinking
-            && request.chat_template_kwargs.is_none()
-        {
-            Cow::Owned(request.clone().without_thinking())
-        } else {
-            Cow::Borrowed(request)
-        };
+        // site — every local completion gets it or none does, unless the
+        // caller's `ThinkingPolicy` says otherwise. It is written in the
+        // configured dialect (#773); an explicit value for that dialect's
+        // key from the caller always wins.
+        let suppress = request.thinking.suppresses(self.config.disable_thinking);
+        let request =
+            thinking::apply_thinking_switch(request, suppress, self.config.thinking_switch);
 
         let resp = self.http.post(&url).json(request.as_ref()).send().await?;
         let status = resp.status();
@@ -414,7 +421,28 @@ impl Router {
                 body: truncate_for_error(&body, ERROR_BODY_CAP),
             }
         })?;
+        self.report_thinking_leak_once(suppress, &decoded);
         Ok(decoded)
+    }
+
+    /// Log, once per process, that the backend thought although asked not
+    /// to — the "config switch that silently does nothing" of #773. The
+    /// decision and the wording are pure ([`thinking::detect_thinking_leak`],
+    /// [`thinking::leak_warning`]); this only owns the once-latch.
+    fn report_thinking_leak_once(&self, suppressed: bool, response: &ChatResponse) {
+        let Some(leak) = thinking::detect_thinking_leak(suppressed, response) else {
+            return;
+        };
+        if !self.thinking_leak_reported.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "kastellan::llm_router",
+                reasoning_chars = leak.reasoning_chars,
+                reasoning_tokens = ?leak.reasoning_tokens,
+                thinking_switch = self.config.thinking_switch.as_str(),
+                "{}",
+                thinking::leak_warning(&leak, self.config.thinking_switch)
+            );
+        }
     }
 }
 

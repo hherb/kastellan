@@ -29,6 +29,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::thinking::ThinkingPolicy;
+
 /// Role of the speaker in a chat-completion message.
 ///
 /// Closed enum on purpose — see module docstring.
@@ -51,17 +53,50 @@ pub enum ChatRole {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+
+    /// The model's reasoning, when a backend returns it beside `content`
+    /// (Ollama and current vLLM spell it `reasoning`). Read only to
+    /// *measure* thinking — its length feeds the plan audit row and the
+    /// thinking-leak check (#773, #774); the text itself is never logged.
+    ///
+    /// **Deserialise-only** (`skip_serializing`): a message read from a
+    /// backend and handed back in a later request must not replay the
+    /// model's private reasoning to it, and an audit serialisation of a
+    /// response must not carry it either.
+    #[serde(default, skip_serializing)]
+    pub reasoning: Option<String>,
+
+    /// The older spelling of [`ChatMessage::reasoning`] (vLLM before the
+    /// rename, DeepSeek-style servers). A **separate field, not a serde
+    /// `alias`**: some builds send both keys, and an alias turns a
+    /// duplicate into a hard decode error — every planning call failing
+    /// over a field we only count. Read through
+    /// [`ChatMessage::reasoning_text`].
+    #[serde(default, skip_serializing)]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
+    fn with_role(role: ChatRole, content: impl Into<String>) -> Self {
+        Self { role, content: content.into(), reasoning: None, reasoning_content: None }
+    }
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::System, content: content.into() }
+        Self::with_role(ChatRole::System, content)
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::User, content: content.into() }
+        Self::with_role(ChatRole::User, content)
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::Assistant, content: content.into() }
+        Self::with_role(ChatRole::Assistant, content)
+    }
+
+    /// The reasoning text under whichever key the backend used, `None`
+    /// when absent or empty. `reasoning` wins when both are present.
+    pub fn reasoning_text(&self) -> Option<&str> {
+        [self.reasoning.as_deref(), self.reasoning_content.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|t| !t.is_empty())
     }
 }
 
@@ -85,13 +120,30 @@ pub struct ChatRequest {
     /// Extra keyword arguments forwarded to the backend's chat
     /// *template* (not to sampling). This is the de-facto OpenAI-compat
     /// extension both Ollama and vLLM honour; it is the only portable
-    /// way to reach a reasoning model's `enable_thinking` switch.
+    /// way to reach a vLLM/SGLang/llama.cpp reasoning model's
+    /// `enable_thinking` switch. **Ollama ignores it** — see
+    /// [`crate::thinking`] (#773).
     ///
     /// Left `None` the field is not serialised at all, so a backend
-    /// that has never heard of it sees a byte-identical payload. Set it
-    /// with [`ChatRequest::without_thinking`] rather than by hand.
+    /// that has never heard of it sees a byte-identical payload. Normally
+    /// set by the router from its configured dialect, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<serde_json::Value>,
+
+    /// OpenAI's reasoning-effort knob. `"none"` is how Ollama's
+    /// OpenAI-compat endpoint is told not to think. Left `None` it is not
+    /// serialised — and it must stay unset on vLLM 0.15, which 400s on
+    /// `"none"`. Normally set by the router from its configured dialect
+    /// ([`crate::thinking::ThinkingSwitch`]), not by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+
+    /// The caller's say over thinking for this one request. **Never on the
+    /// wire** (`serde(skip)`): it is an instruction to the router, which
+    /// writes it in whichever dialect the backend understands. See
+    /// [`ChatRequest::with_thinking`].
+    #[serde(skip)]
+    pub thinking: ThinkingPolicy,
 
     /// Ask the backend to return per-token log-probabilities.
     ///
@@ -121,9 +173,17 @@ impl ChatRequest {
             max_tokens: None,
             temperature: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
+            thinking: ThinkingPolicy::RouterDefault,
             logprobs: None,
             top_logprobs: None,
         }
+    }
+
+    /// Override the router's thinking default for this request.
+    pub fn with_thinking(mut self, policy: ThinkingPolicy) -> Self {
+        self.thinking = policy;
+        self
     }
 
     /// Ask for `top_n` token alternatives at each output position.
@@ -159,9 +219,11 @@ impl ChatRequest {
     /// that plan decoding reports `expected value at line 1 column 1`)
     /// trace back to it.
     ///
-    /// A backend that does not implement the switch ignores the key,
-    /// which is why this is safe to set unconditionally on the local
-    /// leg.
+    /// This is the [`crate::thinking::ThinkingSwitch::ChatTemplateKwargs`]
+    /// dialect. A backend that does not implement it ignores the key
+    /// *silently* — Ollama does, which is how the DGX thought on every
+    /// planning call while configured not to (#773). The router picks the
+    /// dialect from config; see [`crate::thinking`].
     pub fn without_thinking(mut self) -> Self {
         self.chat_template_kwargs =
             Some(serde_json::json!({ "enable_thinking": false }));
@@ -284,6 +346,19 @@ pub struct Usage {
     /// `kastellan_core::cassandra::guard_model::timeout::probe_sample`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// OpenAI's breakdown of `completion_tokens`. Carries the reasoning
+    /// count on backends that report one; Ollama does not (it returns the
+    /// reasoning text instead — see [`ChatMessage::reasoning`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+/// How many of `completion_tokens` were spent reasoning, when the backend
+/// says. Absence means "not reported", never "zero" (#774).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionTokensDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
 }
 
 /// Decoded `200 OK` response from a chat-completion call.
@@ -298,6 +373,11 @@ pub struct ChatResponse {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Identifies the serving stack on some backends — Ollama stamps
+    /// `fp_ollama`, which lets a thinking-leak warning name the fix
+    /// ([`crate::thinking::leak_warning`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
     pub choices: Vec<ChatChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,

@@ -60,6 +60,7 @@ fn router_pointing_at_with_thinking_disabled(
         // waiting for the production 30 s default.
         timeout: Duration::from_secs(2),
         disable_thinking,
+        thinking_switch: Default::default(),
     };
     Router::new(cfg).expect("build router")
 }
@@ -330,6 +331,7 @@ async fn router_send_routes_to_pick_backend_choice() {
         guard_timeout_ms: None,
         timeout: Duration::from_secs(2),
         disable_thinking: true,
+        thinking_switch: Default::default(),
     };
     let router = Router::with_policy(cfg, Arc::new(AlwaysFrontier)).unwrap();
 
