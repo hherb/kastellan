@@ -140,8 +140,8 @@ fn row_to_memory(r: &sqlx::postgres::PgRow) -> Result<Memory, DbError> {
 /// The trust filter runs **in SQL**, so the result set — and the work
 /// this does — is bounded by the number of *matching* rows, not the
 /// whole layer. This matters for [`MemoryLayer::Skill`]: the L3
-/// crystallisation writer appends a `trust:"untrusted"` row on every
-/// completed multi-step task, so that layer grows with task history,
+/// crystallisation writers can append a `trust:"untrusted"` row after
+/// any completed tool-using task, so that layer grows with task history,
 /// yet only the handful of operator-approved/pinned rows ever surface to
 /// the planner. The `WHERE layer = $1 AND metadata->>'trust' = ANY($2)`
 /// push-down keeps prompt assembly off that growth curve — the caller no

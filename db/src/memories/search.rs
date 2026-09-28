@@ -1,7 +1,8 @@
-//! Read-path helpers for the `memories` table — the three per-lane
-//! recall searches (semantic / lexical / graph) and the order-preserving
-//! hydration of ranked id-lists. The layer-load queries moved to the
-//! sibling `layer_load` module (2026-09-29).
+//! Read-path helpers for the `memories` table — three of the four
+//! recall lanes (semantic / lexical / graph; the fourth,
+//! entity-similarity, is `crate::entity_embedding`) and the
+//! order-preserving hydration of ranked id-lists. The layer-load
+//! queries moved to the sibling `layer_load` module (2026-09-29).
 //!
 //! Split out of the parent [`crate::memories`] module (2026-05-30) to
 //! keep each file under the 500-LOC cap. Every public function here is
