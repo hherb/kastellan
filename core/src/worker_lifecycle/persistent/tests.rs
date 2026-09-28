@@ -66,6 +66,22 @@ impl PersistentTransport for FakeTransport {
     }
 }
 
+/// Retry `h.call(method)` until it succeeds — the worker is being respawned
+/// underneath — but FAIL rather than hang if it never does: a keep/retire
+/// mistake leaves a dead worker kept, which errors forever.
+fn call_until_up(h: &PersistentHandle, method: &str) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match h.call(method, serde_json::json!({})) {
+            Ok(v) => return v,
+            Err(e) => {
+                assert!(Instant::now() < deadline, "the worker never came back: {e:#}");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
 fn fast_backoff() -> RestartBackoff {
     RestartBackoff { base: Duration::from_millis(1), factor_num: 1, factor_den: 1, cap: Duration::from_millis(1) }
 }
@@ -102,12 +118,7 @@ fn respawns_on_death_and_serves_again() {
     // supervisor respawned → gen 1 serves.
     // Calls sent while the driver is still in the respawn loop are
     // rejected with "is restarting"; retry until the worker is up.
-    let v = loop {
-        match h.call("c", serde_json::json!({})) {
-            Ok(v) => break v,
-            Err(_) => thread::sleep(Duration::from_millis(5)),
-        }
-    };
+    let v = call_until_up(&h, "c");
     assert_eq!(v["gen"], 1);
     assert!(spawns.load(Ordering::SeqCst) >= 2);
     h.shutdown();
@@ -118,8 +129,10 @@ fn respawns_on_death_and_serves_again() {
 /// the type is not enough on its own — the driver thread and the reply
 /// channel sit in between, and re-flattening there (`anyhow!("{e}")`, the
 /// pre-#674 shape) would leave every unit test green while the ERROR
-/// branch stopped firing. This crosses them. (A `.context(..)` would not
-/// break it: anyhow's `downcast_ref` sees through context.)
+/// branch stopped firing — and, since #769, while every refusal read as a
+/// death to the driver, losing its refusal pacing. This crosses them. (A
+/// `.context(..)` would not break it: anyhow's `downcast_ref` sees through
+/// context.)
 #[test]
 fn a_workers_rpc_refusal_reaches_the_handle_caller_still_typed() {
     struct Refusing;
@@ -187,32 +200,169 @@ fn a_refusing_worker_is_kept_not_respawned() {
     h.shutdown();
 }
 
-/// The driver's rule and the idle-timeout lifecycle's census
-/// (`WorkerRetirementCause::from_client_error`) must agree on every
-/// `ClientError` variant, as it reaches the driver — i.e. after
-/// `client_error_to_anyhow`. Before #769 they disagreed on exactly one: the
-/// census called `Rpc` alive, the driver respawned on it. A new variant
-/// breaks the census's exhaustive match first; this makes the driver follow.
+/// One sample of every `ClientError` variant. The `match` is the point: it
+/// has no `_` arm, so a variant added to `kastellan-protocol` stops this file
+/// compiling until it is listed here too — a hand-written list alone would
+/// silently leave it out of the census test below.
+fn every_client_error() -> Vec<ClientError> {
+    let samples = vec![
+        ClientError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe gone")),
+        ClientError::Decode(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+        ClientError::EarlyExit,
+        ClientError::ResponseTooLarge { cap: 1 },
+        ClientError::IdMismatch { expected: serde_json::json!(1), got: serde_json::json!(2) },
+        ClientError::Rpc(kastellan_protocol::RpcError::new(kastellan_protocol::codes::OPERATION_FAILED, "no")),
+    ];
+    let mut seen = [false; 6];
+    for e in &samples {
+        let i = match e {
+            ClientError::Io(_) => 0,
+            ClientError::Decode(_) => 1,
+            ClientError::EarlyExit => 2,
+            ClientError::ResponseTooLarge { .. } => 3,
+            ClientError::IdMismatch { .. } => 4,
+            ClientError::Rpc(_) => 5,
+        };
+        seen[i] = true;
+    }
+    assert!(seen.iter().all(|s| *s), "every variant has a sample: {seen:?}");
+    samples
+}
+
+/// The supervisor's classifier and the idle-timeout lifecycle's census
+/// (`WorkerRetirementCause::from_client_error`) must agree on which
+/// `ClientError`s mean the worker is gone, as each reaches the classifier —
+/// i.e. after `client_error_to_anyhow`. Before #769 they disagreed on exactly
+/// one: the census called `Rpc` alive, the driver respawned on it.
 #[test]
 fn the_driver_retires_exactly_what_the_census_calls_fatal() {
     use crate::worker_lifecycle::idle_timeout::WorkerRetirementCause;
-    let every_variant = || -> Vec<ClientError> {
-        vec![
-            ClientError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe gone")),
-            ClientError::Decode(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
-            ClientError::EarlyExit,
-            ClientError::ResponseTooLarge { cap: 1 },
-            ClientError::IdMismatch { expected: serde_json::json!(1), got: serde_json::json!(2) },
-            ClientError::Rpc(kastellan_protocol::RpcError::new(kastellan_protocol::codes::OPERATION_FAILED, "no")),
-        ]
-    };
-    let census: Vec<bool> = every_variant().iter().map(|v| WorkerRetirementCause::from_client_error(v).is_some()).collect();
-    let driver: Vec<bool> = every_variant()
+    let census: Vec<bool> =
+        every_client_error().iter().map(|v| WorkerRetirementCause::from_client_error(v).is_some()).collect();
+    let driver: Vec<bool> = every_client_error()
         .into_iter()
-        .map(|v| call_error_retires_worker(&client_error_to_anyhow(v)))
+        .map(|v| classify_call_error(&client_error_to_anyhow(v)) == CallFailure::Gone)
         .collect();
     assert_eq!(driver, census);
     assert_eq!(census.iter().filter(|fatal| !**fatal).count(), 1, "exactly one survivable variant: Rpc");
+}
+
+#[test]
+fn only_a_typed_credential_refusal_is_classified_as_one() {
+    let credential = kastellan_protocol::upstream_auth_refusal("localmail", 401).unwrap();
+    let flattened = anyhow::anyhow!("{credential}");
+    let credential = client_error_to_anyhow(ClientError::Rpc(credential));
+    assert_eq!(classify_call_error(&credential), CallFailure::CredentialRefused);
+    let other = kastellan_protocol::RpcError::new(kastellan_protocol::codes::OPERATION_FAILED, "no");
+    assert_eq!(classify_call_error(&client_error_to_anyhow(ClientError::Rpc(other))), CallFailure::Refused);
+    assert_eq!(classify_call_error(&flattened), CallFailure::Gone, "a flattened refusal reads as a death");
+    let wrapped = credential.context("while polling");
+    assert_eq!(classify_call_error(&wrapped), CallFailure::CredentialRefused, "context does not hide it");
+}
+
+// ----- a credential refusal replaces the worker; a dead sidecar retires it (#769 review) -----
+
+/// A live worker that refuses `"login"` with `UPSTREAM_AUTH_FAILED` and
+/// answers everything else, optionally with a dead sidecar. Counts the death
+/// reports it is asked for.
+struct Credentialed { gen: usize, sidecar_dead: bool, death_reports: Arc<AtomicUsize> }
+impl PersistentTransport for Credentialed {
+    fn call(&mut self, m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        match m {
+            "login" => Err(client_error_to_anyhow(ClientError::Rpc(
+                kastellan_protocol::upstream_auth_refusal("localmail", 401).unwrap(),
+            ))),
+            "no" => Err(client_error_to_anyhow(ClientError::Rpc(kastellan_protocol::RpcError::new(
+                kastellan_protocol::codes::OPERATION_FAILED,
+                "transport: connect proxy uds: refused",
+            )))),
+            _ => Ok(serde_json::json!({ "gen": self.gen })),
+        }
+    }
+    fn death_report(&mut self) -> Option<String> {
+        self.death_reports.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+    fn sidecar_exited(&mut self) -> Option<String> {
+        self.sidecar_dead.then(|| "egress sidecar exited (exit status: 1)".to_string())
+    }
+}
+
+/// Spawn a supervisor over [`Credentialed`] workers. `factory_ok(n)` says
+/// whether the n-th spawn (0-based) succeeds; `sidecar_dead(n)` whether that
+/// worker's sidecar is dead. Returns the handle, the spawn count and the
+/// death-report count.
+fn spawn_credentialed(
+    factory_ok: fn(usize) -> bool,
+    sidecar_dead: fn(usize) -> bool,
+) -> (PersistentHandle, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let death_reports = Arc::new(AtomicUsize::new(0));
+    let (s, d) = (spawns.clone(), death_reports.clone());
+    let factory: PersistentFactory = Box::new(move || {
+        let n = s.fetch_add(1, Ordering::SeqCst);
+        anyhow::ensure!(factory_ok(n), "spawn {n} refused by the test");
+        Ok(Box::new(Credentialed { gen: n, sidecar_dead: sidecar_dead(n), death_reports: d.clone() }))
+    });
+    let h = PersistentWorker::spawn_with_backoff("test", factory, fast_backoff()).unwrap();
+    (h, spawns, death_reports)
+}
+
+/// A worker reads its credential once, at spawn. Before #769 every credential
+/// refusal respawned it, so a renewed token was picked up; keeping the worker
+/// would keep the stale token until the daemon restarts. So a credential
+/// refusal still gets a fresh worker — but quietly: the caller sees the typed
+/// refusal (the driver's ERROR and backoff depend on it), and there is no
+/// death report, no "is restarting" window and no alarm.
+#[test]
+fn a_credential_refusal_replaces_the_worker_quietly() {
+    let (h, spawns, death_reports) = spawn_credentialed(|_| true, |_| false);
+    for n in 1..=ALARM_THRESHOLD + 2 {
+        let e = h.call("login", serde_json::json!({})).unwrap_err();
+        let rpc = e.downcast_ref::<kastellan_protocol::RpcError>().expect("still typed for the driver");
+        assert_eq!(rpc.code, kastellan_protocol::codes::UPSTREAM_AUTH_FAILED);
+        // No retry loop: the replacement is in place before the next call.
+        let v = h.call("yes", serde_json::json!({})).expect("the fresh worker serves at once");
+        assert_eq!(v["gen"], n, "a fresh worker after each credential refusal");
+    }
+    assert_eq!(spawns.load(Ordering::SeqCst), ALARM_THRESHOLD + 3, "the first worker and one per refusal");
+    assert_eq!(death_reports.load(Ordering::SeqCst), 0, "a credential refusal is not a death");
+    h.shutdown();
+}
+
+/// If no fresh worker can be started, the running one — alive, merely
+/// refused — is kept rather than torn down into a respawn loop.
+#[test]
+fn a_credential_refusal_keeps_the_worker_when_no_fresh_one_starts() {
+    let (h, spawns, death_reports) = spawn_credentialed(|n| n == 0, |_| false);
+    h.call("login", serde_json::json!({})).unwrap_err();
+    let v = h.call("yes", serde_json::json!({})).expect("the running worker is kept");
+    assert_eq!(v["gen"], 0);
+    assert_eq!(spawns.load(Ordering::SeqCst), 2, "one replacement was attempted");
+    assert_eq!(death_reports.load(Ordering::SeqCst), 0);
+    h.shutdown();
+}
+
+/// A worker whose egress sidecar died is alive, but every upstream request it
+/// makes fails and it says so — a refusal, which on its own would keep the
+/// pair cut off for good. The supervisor asks the transport, and a dead
+/// sidecar retires the worker with it: the caller reads a death (the refusal
+/// flattened), and the respawned pair serves.
+#[test]
+fn a_refusal_from_behind_a_dead_sidecar_retires_the_worker() {
+    // Workers 0 and 1 sit behind a dead sidecar; worker 2's is healthy.
+    let (h, spawns, _) = spawn_credentialed(|_| true, |n| n < 2);
+    // Any refusal — a credential one too, which would otherwise be a quiet
+    // replacement rather than a death.
+    for (i, method) in ["no", "login"].into_iter().enumerate() {
+        let e = h.call(method, serde_json::json!({})).unwrap_err();
+        assert!(e.downcast_ref::<kastellan_protocol::RpcError>().is_none(), "reads as a death, not a refusal: {e}");
+        assert!(format!("{e}").contains("egress sidecar exited"), "{e}");
+        let v = call_until_up(&h, "yes");
+        assert_eq!(v["gen"], i + 1, "the pair was respawned");
+    }
+    assert_eq!(spawns.load(Ordering::SeqCst), 3);
+    h.shutdown();
 }
 
 #[test]
@@ -296,12 +446,7 @@ fn respawn_drops_the_dead_transport() {
     let _ = h.call("a", serde_json::json!({}));
     let _ = h.call("b", serde_json::json!({}));
     // Drive a successful post-respawn call so we know the swap happened.
-    loop {
-        match h.call("c", serde_json::json!({})) {
-            Ok(_) => break,
-            Err(_) => thread::sleep(Duration::from_millis(5)),
-        }
-    }
+    call_until_up(&h, "c");
     // The dead transport's detached drop should have run.
     let mut seen = 0;
     for _ in 0..100 {

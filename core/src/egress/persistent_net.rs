@@ -99,13 +99,13 @@ pub struct NetTransportSpawn<'a> {
 
 /// A long-lived net worker + its egress sidecar (posture per `NetTransportSpawn::mitm`),
 /// driven by `PersistentWorker`. `Drop` reaps BOTH children: `inner` (the
-/// worker/VMM child, via `ClientTransport::drop`) then `_egress` (the sidecar
+/// worker/VMM child, via `ClientTransport::drop`) then `egress` (the sidecar
 /// child + scratch, via `EgressSidecar::drop`). Field declaration order fixes
 /// drop order.
 pub struct NetClientTransport {
     inner: ClientTransport,
     // Dropped after `inner`. Owns the sidecar + per-worker scratch dir.
-    _egress: EgressSidecar,
+    egress: EgressSidecar,
 }
 
 impl PersistentTransport for NetClientTransport {
@@ -118,6 +118,9 @@ impl PersistentTransport for NetClientTransport {
     }
     fn death_report(&mut self) -> Option<String> {
         self.inner.death_report()
+    }
+    fn sidecar_exited(&mut self) -> Option<String> {
+        self.egress.exited()
     }
 }
 
@@ -191,7 +194,7 @@ pub fn spawn_net_transport(
     let egress = EgressSidecar::from_parts(sidecar, ingest, Some(scratch.to_path_buf()));
     Ok(NetClientTransport {
         inner,
-        _egress: egress,
+        egress,
     })
 }
 

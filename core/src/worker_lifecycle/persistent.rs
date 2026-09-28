@@ -1,8 +1,9 @@
 //! Backend-agnostic supervisor for a LONG-LIVED worker: a persistent OS thread
 //! owns the worker, forwards serialized RPC calls to it, and respawns it on
 //! death (capped-exponential backoff + sliding-window rate alarm) — but not on a
-//! live worker's refusal, which is answered and the worker kept (#769, see
-//! `call_error_retires_worker`). PDEATHSIG-safe
+//! live worker's refusal, which is answered and the worker kept (#769; see
+//! [`call_failure`] for the one classifier and what the respawn used to do).
+//! PDEATHSIG-safe
 //! (the spawning thread outlives the worker — required under the slice-5a
 //! bwrap-confined launcher). A generalization of the Matrix channel's
 //! historical self-spawning supervised-driver pattern, with no
@@ -22,6 +23,9 @@ use kastellan_sandbox::{SandboxBackend, SandboxPolicy};
 
 use crate::channel::respawn_alarm::RespawnRateAlarm;
 use crate::worker_lifecycle::RestartBackoff;
+
+mod call_failure;
+pub(crate) use call_failure::{classify_call_error, CallFailure};
 
 // ── ClientTransport ──────────────────────────────────────────────────────────
 
@@ -91,56 +95,21 @@ impl ClientTransport {
 /// How a [`ClientTransport`] call error becomes the `anyhow::Error` every
 /// [`PersistentHandle::call`] caller sees. Pure.
 ///
-/// A structured refusal keeps its type (#674): a caller can
-/// `downcast_ref::<RpcError>()` and read the code. The polled channel driver
-/// uses that to tell "the upstream refused the worker's credential" from "the
-/// worker died". Its Display is the text the flattening below would have given
-/// (`ClientError::Rpc` is `#[error(transparent)]`), so no log line changes.
+/// A structured refusal keeps its type (#674), and that type is what
+/// [`classify_call_error`] reads — in the supervisor, to keep a refusing worker
+/// rather than respawn it, and in the polled channel driver, to pace and report
+/// a refusal rather than wait out a death (#769). Its Display is the text the
+/// flattening below would have given (`ClientError::Rpc` is
+/// `#[error(transparent)]`), so no log line changes.
 ///
 /// Everything else stays flattened to its Display, exactly as before.
 /// `ClientError::Io` carries a `source`, and keeping it would print the io
 /// text twice wherever this error is rendered with `{e:#}`.
-///
-/// The typed refusal is also what the `PersistentWorker` driver thread reads to
-/// decide whether to respawn — see [`call_error_retires_worker`] (#769).
 fn client_error_to_anyhow(e: ClientError) -> anyhow::Error {
     match e {
         ClientError::Rpc(rpc) => anyhow::Error::from(rpc),
         other => anyhow::anyhow!("{other}"),
     }
-}
-
-/// Does this call error mean the worker is gone — retire it and respawn — or
-/// did a live worker answer with a refusal, so it should be kept? Pure.
-///
-/// A structured [`kastellan_protocol::RpcError`] is the one answer a worker can
-/// only give by being alive and listening: it read the request and said no.
-/// Every other error (a closed pipe, an early exit, undecodable bytes, a
-/// desynced stream) means the conversation with this process is over.
-///
-/// **Why a refusal no longer respawns (#769).** Before, every error did. For
-/// the email channel with an expired credential that meant, on every poll, a
-/// `[worker-death]` report for a worker that had not died, a respawn, and
-/// within minutes the respawn-rate alarm — a crash loop, as far as the log
-/// could tell. And the respawn could not help: the fresh worker restores the
-/// same session and store, and the upstream refuses it again.
-///
-/// **What the respawn used to do that still matters, and where it went:**
-/// - *Pacing the retry.* The respawn's ~1 s delay was the only thing slowing
-///   a caller that retries a refused call. The polled channel driver now backs
-///   off on refusals itself (`channel::polled_driver::refusal`).
-/// - *Recovering a wedged Matrix session.* Not this path's job: the Matrix
-///   worker's own sync loop exits the process after sustained sync failures
-///   (`workers/matrix/src/sync_retry.rs`, #348), and that exit IS a death here.
-///   A refused *send* with healthy sync is a room-level answer (unknown room,
-///   forbidden, rate-limited), which a restored session cannot change.
-///
-/// This must agree with the idle-timeout lifecycle's census,
-/// [`crate::worker_lifecycle::idle_timeout::WorkerRetirementCause::from_client_error`],
-/// on every [`ClientError`] as it reaches this driver (after
-/// [`client_error_to_anyhow`]); a test pins that over every variant.
-fn call_error_retires_worker(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<kastellan_protocol::RpcError>().is_none()
 }
 
 impl PersistentTransport for ClientTransport {
@@ -178,11 +147,18 @@ impl Drop for ClientTransport {
     }
 }
 
-// ── PersistentWorker + PersistentHandle (unchanged below) ───────────────────
+// ── PersistentWorker + PersistentHandle ─────────────────────────────────────
 
 pub trait PersistentTransport: Send {
     fn call(&mut self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value>;
     fn death_report(&mut self) -> Option<String> { None }
+    /// `Some(what happened)` when the egress sidecar this worker is bundled
+    /// with has exited. Asked only after the worker *refused* a call (#769): a
+    /// worker whose sidecar died is alive but can only refuse — every upstream
+    /// request fails, and it says so — so a supervisor that keeps refusing
+    /// workers must ask, or the pair stays cut off for good. `None` for a
+    /// transport with no sidecar.
+    fn sidecar_exited(&mut self) -> Option<String> { None }
 }
 
 pub type PersistentFactory =
@@ -234,19 +210,46 @@ impl PersistentWorker {
                 Err(e) => { let _ = init_tx.send(Err(e)); return; }
             };
             let mut alarm = RespawnRateAlarm::new(ALARM_WINDOW, ALARM_THRESHOLD);
-            // Serve jobs; respawn when the worker is gone.
+            // Serve jobs. A failed call is `classify_call_error`'s to read
+            // (#769): keep a worker that refused, replace one whose credential
+            // was refused, respawn one that is gone.
             while let Ok(job) = req_rx.recv() {
-                match transport.call(&job.method, job.params) {
-                    Ok(v) => { let _ = job.reply.send(Ok(v)); }
-                    // A live worker refused the call (#769): hand the refusal
-                    // to the caller and keep the worker. No death report, no
-                    // respawn, no alarm tick.
-                    Err(e) if !call_error_retires_worker(&e) => { let _ = job.reply.send(Err(e)); }
-                    Err(e) => {
+                let e = match transport.call(&job.method, job.params) {
+                    Ok(v) => { let _ = job.reply.send(Ok(v)); continue; }
+                    Err(e) => e,
+                };
+                let failure = classify_call_error(&e);
+                let sidecar = match failure {
+                    CallFailure::Gone => None,
+                    CallFailure::Refused | CallFailure::CredentialRefused => transport.sidecar_exited(),
+                };
+                match (failure, sidecar) {
+                    // A live worker refused the call: hand the refusal to the
+                    // caller and keep the worker. No death report, no respawn,
+                    // no alarm tick.
+                    (CallFailure::Refused, None) => { let _ = job.reply.send(Err(e)); }
+                    (CallFailure::CredentialRefused, None) => {
+                        let _ = job.reply.send(Err(e));
+                        replace_for_credential(&mut transport, &mut factory, &label);
+                    }
+                    // Gone — or it refused because its sidecar died, which only
+                    // a respawn of the pair fixes.
+                    (_, sidecar) => {
                         // MINOR 1 fix: reply to the in-flight caller FIRST so a
                         // panicking death_report cannot prevent the reply.
-                        let _ = job.reply.send(Err(e));
-                        if let Some(r) = transport.death_report() {
+                        let report = match sidecar {
+                            Some(why) => {
+                                // Flattened, so the caller reads a death, not
+                                // an answer it should back off from.
+                                let _ = job.reply.send(Err(anyhow::anyhow!("{why}; the worker it served is retired with it ({e})")));
+                                Some(why)
+                            }
+                            None => {
+                                let _ = job.reply.send(Err(e));
+                                transport.death_report()
+                            }
+                        };
+                        if let Some(r) = report {
                             // NOT a bare `tracing::warn!` (#730). This driver
                             // runs the Matrix and email channel workers, and
                             // 8 of the 9 `core/tests` suites that drive a
@@ -357,6 +360,32 @@ impl PersistentWorker {
         init_rx.recv()
             .map_err(|_| anyhow::anyhow!("persistent driver exited before initial spawn"))??;
         Ok(PersistentHandle { req_tx: Some(req_tx), driver: Some(driver), label: handle_label })
+    }
+}
+
+/// Replace a live worker whose upstream refused its credential
+/// ([`CallFailure::CredentialRefused`]), so the fresh one reads the credential
+/// afresh. Quiet: the worker did not die, so no death report and no alarm
+/// tick; the caller's own backoff (the polled driver's refusal backoff) paces
+/// how often this happens. When no fresh worker can be started the running one
+/// is kept, and the next credential refusal tries again.
+fn replace_for_credential(
+    transport: &mut Box<dyn PersistentTransport>,
+    factory: &mut PersistentFactory,
+    label: &str,
+) {
+    match factory() {
+        Ok(fresh) => {
+            // Reaped off this thread, as on the respawn path.
+            let old = std::mem::replace(transport, fresh);
+            thread::spawn(move || drop(old));
+            tracing::debug!(%label, "credential refused: replaced the worker so it reads its credential afresh");
+        }
+        Err(e) => tracing::warn!(
+            %label, error = %format!("{e:#}"),
+            "credential refused, and no fresh worker could be started to read a renewed one; \
+             keeping the running worker"
+        ),
     }
 }
 

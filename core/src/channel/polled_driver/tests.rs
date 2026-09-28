@@ -1,6 +1,6 @@
 //! Unit tests for the channel-generic polled-worker driver, against a scripted
 //! in-process fake — no worker process, no supervisor, no sandbox.
-use super::outage::is_upstream_auth_refusal;
+use super::refusal::is_upstream_auth_refusal;
 use super::*;
 use kastellan_protocol::{codes, RpcError};
 use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
@@ -687,8 +687,8 @@ fn audit_ack_only_is_not_called_when_the_same_batchs_events_fail_to_decode() {
 }
 
 /// #674: only a structured `UPSTREAM_AUTH_FAILED` refusal reads as "the
-/// credential was refused"; a death, a respawn in progress or any other
-/// worker refusal keeps the old "worker died or restarting" wording.
+/// credential was refused"; a death, a respawn in progress, a flattened
+/// refusal and any other `RpcError` code do not.
 #[test]
 fn only_an_upstream_auth_refusal_is_reported_as_a_credential_problem() {
     let refused = anyhow::Error::from(kastellan_protocol::upstream_auth_refusal("localmail", 401).unwrap());

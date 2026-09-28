@@ -8,8 +8,8 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-28, latest (#769 — a live worker's refusal keeps the worker, PR #781;
-the operator is still running the #773 live re-measure) ·
+**Last updated:** 2026-09-28, latest (#769 — a live worker's refusal keeps the worker, PR #781,
+with its review round; the operator is still running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
@@ -69,21 +69,30 @@ real sandboxed worker + MITM proxy. Rootfs images last rebuilt
 
 ## Current state
 
-### This session (2026-09-28, latest): #769 — a refusal is not a death (PR #781)
+### This session (2026-09-28, latest): #769 — a refusal is not a death (PR #781 + review)
 
-- **`PersistentWorker` keeps a worker that answered with a typed `RpcError`** — pure
-  `call_error_retires_worker`, pinned to the census (`WorkerRetirementCause::from_client_error`)
-  over every `ClientError` variant. No `[worker-death]`, no respawn, no alarm tick on a refusal.
-- **The polled driver paces refusals itself** (`polled_driver/refusal.rs`, pure `RefusalRun`): per
-  method (send, poll), `PolledWorkerSpec::refusal_backoff` (prod `REFUSAL_BACKOFF` 1 s → 60 s); logged
-  first and every 15 min (ERROR + operator action for `UPSTREAM_AUTH_FAILED`), once more on
-  acceptance. ⚠️ **The respawn's ~1 s delay was the only pacing before** — a new `WorkerCalls`
-  consumer that retries must pace refusals too, or it hammers the upstream every 200 ms.
-- **A refused send no longer freezes inbound** — the reply keeps its place (order kept), polling
-  continues; a death still skips the poll. `OutageLog` is only the down latch now.
-- **Matrix: no recycle rule (operator's call).** Wedge recovery is the worker's own sync give-up
-  (`workers/matrix/src/sync_retry.rs`), which *is* a death. ⚠️ **Workspace MSRV is 1.78** — cold
-  clippy refused `Option::is_none_or` (1.82); the sweep compiles it fine.
+- **One classifier, `worker_lifecycle/persistent/call_failure.rs`** (`classify_call_error` →
+  `Gone` / `Refused` / `CredentialRefused`), read by the supervisor **and** the polled driver;
+  pinned to the census over every `ClientError` variant (a `match` witness breaks the build on a
+  new one). Its module doc lists **each job the old respawn did and where it went** — the review
+  found three of four were lost, all on the email channel:
+  - **Refused** → the worker is kept (no death report, respawn or alarm tick).
+  - **CredentialRefused** → replaced **quietly**, so a renewed token is read. ⚠️ A worker reads its
+    credential once, at spawn, and bwrap binds the token file **by inode** — an in-worker re-read
+    would miss a rotation by rename.
+  - **A refusal from behind a dead egress sidecar** → a death (`PersistentTransport::sidecar_exited`,
+    `try_wait`), flattened so the driver reads "down". email-in reports every failed localmail
+    request as a typed `OPERATION_FAILED "transport: …"`, so it can only ever *refuse*.
+- **The polled driver paces refusals per method — send, poll and ack** (`polled_driver/refusal.rs`,
+  pure `RefusalRun`; `REFUSAL_BACKOFF` 1 s → 60 s, checked at spawn); logged first, every 15 min, and
+  at once on a new code. ⚠️ **A refused ack holds the next poll**: a poll with events does not wait,
+  so an unpaced refused ack re-delivered the same email as fast as localmail answered.
+- `kastellan-protocol`: `"result": null` is `Ok(Null)` (serde reads it as `None`); a response with
+  neither member is `Decode`, not a client-built `RpcError` that read as a live refusal.
+- A refused send keeps its place and polling continues — ⚠️ **every conversation's replies queue
+  behind it** (#782). Refusal lines carry no stderr marker (#783). Matrix: no recycle rule
+  (operator's call); its sync give-up (`sdk_live.rs`, policy `sync_retry.rs`) is a death.
+  ⚠️ **Workspace MSRV is 1.78** (`Option::is_none_or` is 1.82).
 
 ### Previous (2026-09-27/28): #767 + #768 — the #766 review residue (PR #778)
 
@@ -242,7 +251,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `UPSTREAM_AUTH_FAILED`). **The thinking decision (#773) is made from these rows:** repeat the
    set with `KASTELLAN_LLM_DISABLE_THINKING=1` (now real on Ollama) and compare answer quality
    against latency — the #773 probe's non-thinking answer was *wrong*.
-   Then #771 (its ack path is shorter since #781 — no respawn before the next poll's ERROR) and #538
+   Then #771 (carry localmail's own 401 reason to the operator — the channel's line is now in
+   `polled_driver/refusal.rs`), #782, #783 and #538
    (the mail worker's second, hand-rolled localmail mock). **Owed: a DGX run of the `mail-live`
    profile** (`bash scripts/mail/live-shape-gate.sh`) — only the Mac has run it since #766.
 
@@ -332,8 +342,8 @@ and put its new tests in `attach/tests/hash_and_route.rs` (`attach/tests.rs` 719
 it before the next leg**; the attachment half is the natural cut) and
 `gate_script_tests.rs` 518→519 (its new check went to `gate_script_tests/callers.rs`).
 #769 split `worker_lifecycle/persistent.rs` **first** (662→407 + tests 254, movement proven by
-`cmp` with a negative control); `polled_driver.rs` 433→497 (at the cap — split before growing it)
-and moved its refusal tests to `polled_driver/tests/refusal.rs` (`tests.rs` 735→722).
+`cmp` with a negative control); its review put the classifier in `persistent/call_failure.rs`
+(`persistent.rs` 474) and the ack calls in `polled_driver/ack.rs` (`polled_driver.rs` 497→469).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
 (seam in `confine.rs`); python-exec Phase 4 curated wheels; web-research polish; an ANN index on
@@ -366,9 +376,9 @@ and moved its refusal tests to `polled_driver/tests/refusal.rs` (`tests.rs` 735�
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#769, PR #781 — **the gate that stands**) | branch tip `f8461f66` | **4666 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after. Same flags as below. **Delta +9, predicted exactly:** core lib only — persistent +2, polled driver −3 old `OutageLog` + 1 latch + 9 refusal. Mutants: 6 of 7 caught, the survivor near-equivalent (in the PR). After the MSRV fix (one line), core lib 2263 re-passed | exit 0 after the `is_none_or` fix; cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-769`, **27** distinct `Checking kastellan` across the two runs | **23** Mac |
+| **Mac** (#769 review round, PR #781 — **the gate that stands**) | the review-fix commit on PR #781 | **4684 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set (a first sweep without it showed 362 `[SKIP]`s at the *same* 4684 — not evidence). **Delta +18, predicted exactly:** protocol lib +3, core lib +15 (polled driver +10, persistent +4, egress spawn +1). Mutants: 12 of 12 caught | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-781`, **27** distinct `Checking kastellan` | **23** Mac |
+| **Mac** (#769, PR #781 first commit — superseded) | `f8461f66` | **4666 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after. Same flags as below. **Delta +9, predicted exactly:** core lib only — persistent +2, polled driver −3 old `OutageLog` + 1 latch + 9 refusal. Mutants: 6 of 7 caught, the survivor near-equivalent (in the PR). After the MSRV fix (one line), core lib 2263 re-passed | exit 0 after the `is_none_or` fix; cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-769`, **27** distinct `Checking kastellan` across the two runs | **23** Mac |
 | **Mac** (#778 second review — superseded) | `9ee5d1ee` | **4657 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), HEAD + tree status identical before and after. Same flags as below. **Delta +4, reconciled per suite:** mail bin 211→213 (+2), tests-common lib 452→454 (+2). `mail-live` gate green as evidence on the tip, plus two live mutants (`limit=`, `offset=` respelled in the contract) each failing it; mail rustdoc 0 warnings | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-778fix2`, re-run after a first run overlapped a mutant), **27** `Checking kastellan` lines | **23** Mac |
-| **Mac** (#767 + #768 — superseded) | branch tip `378b7433` | **4653 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), source sha + clean tree identical before and after. Same flags as below. **Delta +11, reconciled per suite:** mail bin 205→211 (+6), tests-common lib 447→452 (+5). `mail-live` gate green as evidence on the tip (and on `378b7433`); mail rustdoc 0 warnings | exit 0, cold (`CARGO_TARGET_DIR=$HOME/.cargo-clippy-767`), **27** `Checking kastellan` lines | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -450,8 +460,9 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
 - **[#781](https://github.com/hherb/kastellan/pull/781)** (#769) — a live worker's `RpcError` keeps the worker (no death
-  report, respawn or alarm); the polled driver backs off per method on refusals and keeps polling
-  behind a refused send; Matrix gets no recycle rule.
+  report, respawn or alarm); a credential refusal replaces it quietly, a dead sidecar retires it;
+  the polled driver backs off per method (send, poll, ack) and keeps polling behind a refused send.
+  Filed #782, #783.
 - **[#778](https://github.com/hherb/kastellan/pull/778)** (#767, #768) — route spellings as pure fns in `localmail_contract.rs`, used by the
   worker and the live gate (which now pages from offset 2 and checks the hash routes too); one
   lowercase rule for a planner hash (`ShaPrefix`); `NormalizedFilters`; private `Credentials`.
@@ -468,16 +479,7 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
   login token. Filed #769.
 - **[#766](https://github.com/hherb/kastellan/pull/766)** (#763, #765) — live shape gate: own suite, knob, `mail-live` profile,
   shared `localmail_contract.rs`; mail params parsed (pure `handler/request.rs`) before the gate.
-- **[#764](https://github.com/hherb/kastellan/pull/764)** (#760, last piece) — `mail.get_message` asks localmail for `?headers=list` and
-  passes the per-occurrence list on after a fail-closed shape check; the `{name, values}` reshaping
-  is gone; the headers path joins the version gate.
-
-- **[#762](https://github.com/hherb/kastellan/pull/762)** (#760) — the mail worker adopts localmail slices D and E (version gate,
-  compact hits, attachments by `index`, 8,000-char paged text). Filed #763.
-- **[#761](https://github.com/hherb/kastellan/pull/761)** (#698, #561) — `mail.search` takes a filter-only search. Filed #760.
-- **[#758](https://github.com/hherb/kastellan/pull/758)** (#755) — the gate refuses a counted marker stranded mid-line; the scan reads
-  bytes (`grep -a`, `LC_ALL=C`). Filed #759.
-- **#748, #750, #745, #743, #740, #735, #731, #728, #726, #720, #727, #717, #709, #708, #702, #694,
+- **#764, #762, #761, #758, #748, #750, #745, #743, #740, #735, #731, #728, #726, #720, #727, #717, #709, #708, #702, #694,
   #692, #688, #685** and earlier — see git history and the [`archive/`](archive/) snapshots.
 
 ---

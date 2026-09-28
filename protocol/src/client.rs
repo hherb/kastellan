@@ -3,7 +3,7 @@
 use std::io::{self, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout};
 
-use crate::{codes, read_capped_record, Record, Request, Response, RpcError, MAX_RECORD_BYTES};
+use crate::{read_capped_record, Record, Request, Response, RpcError, MAX_RECORD_BYTES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -87,24 +87,7 @@ impl Client {
                 })
             }
         };
-        // serde_json tolerates the trailing `\n` (surrounding whitespace is skipped).
-        let resp: Response = serde_json::from_slice(&buf)?;
-        if resp.id != id {
-            return Err(ClientError::IdMismatch {
-                expected: id,
-                got: resp.id,
-            });
-        }
-        if let Some(err) = resp.error {
-            return Err(ClientError::Rpc(err));
-        }
-        resp.result
-            .ok_or_else(|| {
-                ClientError::Rpc(RpcError::new(
-                    codes::INTERNAL_ERROR,
-                    "response had neither result nor error",
-                ))
-            })
+        response_to_result(&buf, id)
     }
 
     /// Close stdin (signals EOF to the worker) and wait for it to exit.
@@ -160,6 +143,75 @@ impl Drop for Client {
         // so the reaping `wait` cannot block, then collect it.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Pure: one response record, answering the request `id`, as the call's
+/// result.
+///
+/// ⚠️ **serde reads `"result": null` as `None`**, so an `Option` alone cannot
+/// tell a worker that answered `null` — a valid JSON-RPC result — from one that
+/// sent neither member. The first is `Ok(Null)`. The second is not a JSON-RPC
+/// response at all, so it is a [`ClientError::Decode`]: until #769's review it
+/// was an `RpcError` built here, which a caller cannot tell from a refusal the
+/// worker sent, and a supervisor that keeps a refusing worker kept this one too.
+fn response_to_result(buf: &[u8], id: serde_json::Value) -> Result<serde_json::Value, ClientError> {
+    // serde_json tolerates the trailing `\n` (surrounding whitespace is skipped).
+    let resp: Response = serde_json::from_slice(buf)?;
+    if resp.id != id {
+        return Err(ClientError::IdMismatch {
+            expected: id,
+            got: resp.id,
+        });
+    }
+    if let Some(err) = resp.error {
+        return Err(ClientError::Rpc(err));
+    }
+    match resp.result {
+        Some(v) => Ok(v),
+        // Only on this rare path is the record parsed a second time.
+        None if has_result_member(buf) => Ok(serde_json::Value::Null),
+        None => Err(ClientError::Decode(serde::de::Error::custom(
+            "response had neither result nor error",
+        ))),
+    }
+}
+
+fn has_result_member(buf: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(buf)
+        .is_ok_and(|m| m.contains_key("result"))
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn answer(record: serde_json::Value) -> Result<serde_json::Value, ClientError> {
+        response_to_result(record.to_string().as_bytes(), json!(7))
+    }
+
+    #[test]
+    fn a_null_result_is_an_answer() {
+        let got = answer(json!({"jsonrpc": "2.0", "id": 7, "result": null}));
+        assert_eq!(got.unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_response_with_neither_member_is_undecodable_not_a_refusal() {
+        let err = answer(json!({"jsonrpc": "2.0", "id": 7})).unwrap_err();
+        assert!(matches!(err, ClientError::Decode(_)), "{err:?}");
+        assert!(err.to_string().contains("neither result nor error"), "{err}");
+    }
+
+    #[test]
+    fn a_result_and_an_error_still_map_as_before() {
+        assert_eq!(answer(json!({"jsonrpc": "2.0", "id": 7, "result": {"ok": 1}})).unwrap(), json!({"ok": 1}));
+        let err = answer(json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32000, "message": "no"}}))
+            .unwrap_err();
+        assert!(matches!(err, ClientError::Rpc(ref rpc) if rpc.code == -32000), "{err:?}");
+        let err = answer(json!({"jsonrpc": "2.0", "id": 8, "result": 1})).unwrap_err();
+        assert!(matches!(err, ClientError::IdMismatch { .. }), "{err:?}");
     }
 }
 

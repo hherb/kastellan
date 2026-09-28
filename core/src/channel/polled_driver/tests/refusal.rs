@@ -5,8 +5,13 @@
 //! half runs the real `run` loop against the scripted fake in `super`, with a
 //! millisecond-scale backoff so it stays fast.
 use super::*;
-use crate::channel::polled_driver::refusal::{is_refusal, RefusalRun, Refused, REFUSAL_REPEAT};
+use crate::channel::polled_driver::refusal::{
+    check_refusal_backoff, is_refusal, refusal_line, RefusalLine, RefusalRun, Refused, REFUSAL_REPEAT,
+};
 use crate::worker_lifecycle::RestartBackoff;
+
+/// The code the fake's refusals carry.
+const OP: i32 = codes::OPERATION_FAILED;
 
 /// 100 ms, doubling, capped at 1 s — the shape of the production default
 /// (1 s → 60 s) at a scale a unit test can wait for.
@@ -41,7 +46,7 @@ fn a_run_backs_off_exponentially_up_to_the_cap() {
     let mut run = RefusalRun::default();
     let t = Instant::now();
     assert!(run.ready(t), "nothing refused yet");
-    let delays: Vec<Duration> = (0..6).map(|_| run.on_refusal(t, &FAST).delay).collect();
+    let delays: Vec<Duration> = (0..6).map(|_| run.on_refusal(t, &FAST, OP).delay).collect();
     let ms: Vec<u128> = delays.iter().map(Duration::as_millis).collect();
     assert_eq!(ms, [100, 200, 400, 800, 1000, 1000]);
 }
@@ -50,7 +55,7 @@ fn a_run_backs_off_exponentially_up_to_the_cap() {
 fn a_refused_method_is_not_ready_until_its_delay_has_passed() {
     let mut run = RefusalRun::default();
     let t = Instant::now();
-    let Refused { delay, .. } = run.on_refusal(t, &FAST);
+    let Refused { delay, .. } = run.on_refusal(t, &FAST, OP);
     assert!(!run.ready(t));
     assert!(!run.ready(t + delay - Duration::from_millis(1)), "one ms early");
     assert!(run.ready(t + delay), "exactly on time");
@@ -60,12 +65,12 @@ fn a_refused_method_is_not_ready_until_its_delay_has_passed() {
 fn a_run_is_reported_first_then_every_repeat_interval_not_per_refusal() {
     let mut run = RefusalRun::default();
     let t0 = Instant::now();
-    assert!(run.on_refusal(t0, &FAST).report, "the first refusal is reported");
+    assert!(run.on_refusal(t0, &FAST, OP).report, "the first refusal is reported");
     let almost = t0 + REFUSAL_REPEAT - Duration::from_secs(1);
-    assert!(!run.on_refusal(almost, &FAST).report, "not yet due");
+    assert!(!run.on_refusal(almost, &FAST, OP).report, "not yet due");
     let due = t0 + REFUSAL_REPEAT;
-    assert!(run.on_refusal(due, &FAST).report, "due again");
-    assert!(!run.on_refusal(due, &FAST).report, "and re-armed from then");
+    assert!(run.on_refusal(due, &FAST, OP).report, "due again");
+    assert!(!run.on_refusal(due, &FAST, OP).report, "and re-armed from then");
 }
 
 #[test]
@@ -73,12 +78,83 @@ fn acceptance_ends_the_run_and_resets_it() {
     let mut run = RefusalRun::default();
     let t = Instant::now();
     assert_eq!(run.on_accepted(), 0, "no run to end");
-    run.on_refusal(t, &FAST);
-    run.on_refusal(t, &FAST);
+    let _ = run.on_refusal(t, &FAST, OP);
+    let _ = run.on_refusal(t, &FAST, OP);
     assert_eq!(run.on_accepted(), 2, "says how many refusals it ended");
     assert!(run.ready(t), "callable at once");
-    let next = run.on_refusal(t, &FAST);
+    let next = run.on_refusal(t, &FAST, OP);
     assert_eq!(next, Refused { delay: FAST.base, report: true }, "a new run starts from scratch");
+}
+
+/// The #770 review's case, which a time-only cadence brought back: a run that
+/// starts as a transient refusal (a localmail restart's 503) and turns into a
+/// credential refusal must get its operator-action ERROR at once, not up to
+/// 15 min later behind the WARN it started with.
+#[test]
+fn a_refusal_with_a_new_code_is_reported_at_once() {
+    let mut run = RefusalRun::default();
+    let t0 = Instant::now();
+    let auth = codes::UPSTREAM_AUTH_FAILED;
+    assert!(run.on_refusal(t0, &FAST, OP).report);
+    assert!(!run.on_refusal(t0 + Duration::from_secs(1), &FAST, OP).report, "same code, not due");
+    assert!(run.on_refusal(t0 + Duration::from_secs(2), &FAST, auth).report, "the code changed");
+    assert!(!run.on_refusal(t0 + Duration::from_secs(3), &FAST, auth).report, "and the cadence resumes");
+}
+
+/// A refusal that ends an outage is logged even when the cadence says no:
+/// the "back up" line just said the driver resumed.
+#[test]
+fn a_rearmed_run_reports_its_next_refusal() {
+    let mut run = RefusalRun::default();
+    let t0 = Instant::now();
+    assert!(run.on_refusal(t0, &FAST, OP).report);
+    run.rearm_report();
+    assert!(run.on_refusal(t0 + Duration::from_secs(1), &FAST, OP).report);
+}
+
+/// The #674 line choice, pure: the ERROR (and its operator action) only for a
+/// typed credential refusal, and nothing at all when the cadence says no.
+#[test]
+fn only_a_due_credential_refusal_gets_the_error_line() {
+    let credential = anyhow::Error::from(kastellan_protocol::upstream_auth_refusal("localmail", 401).unwrap());
+    let other = anyhow::Error::from(RpcError::new(OP, "send failed: nope"));
+    let due = Refused { delay: FAST.base, report: true };
+    let not_due = Refused { delay: FAST.base, report: false };
+    assert_eq!(refusal_line(&credential, &due), RefusalLine::CredentialError);
+    assert_eq!(refusal_line(&other, &due), RefusalLine::Warn);
+    assert_eq!(refusal_line(&credential, &not_due), RefusalLine::Silent);
+    assert_eq!(refusal_line(&other, &not_due), RefusalLine::Silent);
+}
+
+/// Both refusal lines say "Repeated every 15 min".
+#[test]
+fn the_repeat_interval_is_the_one_the_log_lines_name() {
+    assert_eq!(REFUSAL_REPEAT, Duration::from_secs(15 * 60));
+}
+
+#[test]
+fn a_backoff_that_would_not_pace_anything_is_rejected() {
+    check_refusal_backoff(&REFUSAL_BACKOFF).expect("production");
+    check_refusal_backoff(&FAST).expect("the tests' own");
+    let zero_factor = RestartBackoff { factor_num: 0, factor_den: 0, ..FAST };
+    check_refusal_backoff(&zero_factor).expect("read as a factor of 1: a constant delay still paces");
+    for bad in [
+        RestartBackoff { base: Duration::ZERO, ..FAST },
+        RestartBackoff { factor_num: 1, factor_den: 2, ..FAST },
+        RestartBackoff { cap: Duration::from_millis(50), ..FAST },
+        RestartBackoff { cap: Duration::from_secs(2 * 60 * 60), ..FAST },
+    ] {
+        assert!(check_refusal_backoff(&bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn spawn_refuses_a_backoff_that_would_not_pace_anything() {
+    let (st, calls) = fake();
+    let bad = spec(RestartBackoff { base: Duration::ZERO, ..FAST });
+    let res = PolledWorkerDriver::spawn(bad, calls, test_parse, test_encode, None, None, None, ChannelId("t".into()));
+    assert!(res.is_err(), "a zero base would retry a refused call every loop");
+    assert_eq!(st.init_calls.load(Ordering::SeqCst), 0, "refused before calling the worker");
 }
 
 // ----- the driver loop -----
@@ -160,8 +236,9 @@ fn a_refused_send_is_retried_after_its_backoff_and_order_is_kept() {
 
 /// The pacing job the supervisor's respawn used to do by accident: a
 /// refused poll is retried on the backoff, not every 200 ms `RETRY_SLICE`.
-/// For the email channel with an expired key that is the difference between
-/// five requests a second at localmail and one a minute.
+/// Before #769 the respawn's delay held it to about one a second; with
+/// neither, the email channel with an expired key would ask localmail five
+/// times a second. With the backoff it settles at one a minute.
 #[test]
 fn a_refused_poll_backs_off_instead_of_retrying_every_slice() {
     let (st, calls) = fake();
@@ -177,8 +254,8 @@ fn a_refused_poll_backs_off_instead_of_retrying_every_slice() {
 
 /// Once a refused poll is accepted, polling is back to its own pace: no
 /// backoff left over, and no extra slice after a completed poll. (That the
-/// *next* run starts again from the base delay is pinned by the pure
-/// `acceptance_ends_the_run_and_resets_it`.)
+/// *next* run starts again from the base delay is pinned by
+/// `a_new_poll_refusal_run_starts_from_the_base_delay`.)
 #[test]
 fn polling_resumes_at_full_pace_once_the_refusal_ends() {
     let (st, calls) = fake();
@@ -194,4 +271,103 @@ fn polling_resumes_at_full_pace_once_the_refusal_ends() {
     std::thread::sleep(Duration::from_millis(300));
     // The fake's poll timeout is 5 ms: unthrottled, 300 ms is dozens of polls.
     assert!(calls_to(&st, "t.poll") - before >= 5, "polling is back to its own pace");
+}
+
+/// 300 ms, doubling, capped at 10 s: slow enough that the first delays are
+/// easy to tell apart at test scale.
+const SLOW: RestartBackoff = RestartBackoff { base: Duration::from_millis(300), cap: Duration::from_secs(10), ..FAST };
+
+fn refusals_left(st: &FakeState) -> usize {
+    st.refuse.lock().unwrap().as_ref().map_or(0, |(_, n)| *n)
+}
+
+/// The driver must END a refusal run when the method is accepted, or the next
+/// run starts at the old run's accumulated delay — and its first refusal goes
+/// unlogged for up to 15 min. The pure reset is pinned above; this pins that
+/// the driver calls it.
+#[test]
+fn a_new_poll_refusal_run_starts_from_the_base_delay() {
+    let (st, calls) = fake();
+    *st.refuse.lock().unwrap() = Some(("t.poll".into(), 2));
+    let _driver = spawn_with(spec(SLOW), calls);
+    // 300 + 600 ms of backoff, then accepted.
+    let first_run_over = calls_to(&st, "t.poll");
+    wait_until(|| refusals_left(&st) == 0 && calls_to(&st, "t.poll") > first_run_over + 2);
+    *st.refuse.lock().unwrap() = Some(("t.poll".into(), 1));
+    wait_until(|| refusals_left(&st) == 0);
+    let refused_at = calls_to(&st, "t.poll");
+    std::thread::sleep(Duration::from_millis(800));
+    // A fresh run waits 300 ms. Carried over, the third refusal waits 1.2 s.
+    let since = calls_to(&st, "t.poll") - refused_at;
+    assert!(since >= 5, "polling resumed after the base delay: {since} polls in 800 ms");
+}
+
+/// The same for send.
+#[test]
+fn a_new_send_refusal_run_starts_from_the_base_delay() {
+    let (st, calls) = fake();
+    *st.refuse.lock().unwrap() = Some(("t.send".into(), 2));
+    let driver = spawn_with(spec(SLOW), calls);
+    driver.outbound_tx.send(outgoing("first")).unwrap();
+    wait_until(|| st.sends.lock().unwrap().len() == 1);
+    *st.refuse.lock().unwrap() = Some(("t.send".into(), 1));
+    let queued = Instant::now();
+    driver.outbound_tx.send(outgoing("second")).unwrap();
+    wait_until(|| st.sends.lock().unwrap().len() == 2);
+    // A fresh run waits 300 ms. Carried over, the third refusal waits 1.2 s.
+    let took = queued.elapsed();
+    assert!(took < Duration::from_millis(1_000), "retried after the base delay: {took:?}");
+}
+
+/// The other direction of independence: a refused poll must not hold the
+/// replies. (A Matrix sync refused while sends still work.)
+#[test]
+fn a_refused_poll_does_not_stall_sends() {
+    let (st, calls) = fake();
+    *st.refuse.lock().unwrap() = Some(("t.poll".into(), usize::MAX));
+    let long = RestartBackoff { base: Duration::from_secs(2), cap: Duration::from_secs(10), ..FAST };
+    let driver = spawn_with(spec(long), calls);
+    wait_until(|| calls_to(&st, "t.poll") >= 1);
+    let queued = Instant::now();
+    driver.outbound_tx.send(outgoing("while polls are refused")).unwrap();
+    wait_until(|| st.sends.lock().unwrap().len() == 1);
+    let took = queued.elapsed();
+    assert!(took < Duration::from_secs(1), "sent within a slice, not after the poll's 2 s: {took:?}");
+}
+
+/// A refused ack left the cursor where it was, so the next poll returns the
+/// same messages — and a poll that returns events does not wait. Before #769
+/// the respawn a refusal caused paced that loop; without pacing the agent
+/// would receive the same email as fast as localmail answers. So a refused
+/// ack holds the next poll on its backoff, and stops acking its batch (the
+/// rest would be refused the same way).
+#[test]
+fn a_refused_ack_holds_the_next_poll_and_stops_the_batch() {
+    let (st, calls) = fake();
+    *st.refuse.lock().unwrap() = Some(("email.ack".into(), usize::MAX));
+    for _ in 0..50 {
+        st.polls.lock().unwrap().push_back(json!({"events": [
+            {"peer": "me@example.org", "conversation": "<a>", "body": "same mail", "ack_token": "1"},
+            {"peer": "me@example.org", "conversation": "<b>", "body": "next mail", "ack_token": "2"}
+        ]}));
+    }
+    let spec = PolledWorkerSpec { refusal_backoff: SLOW, ..spec_with_ack() };
+    let _driver = PolledWorkerDriver::spawn(
+        spec,
+        calls,
+        test_parse,
+        test_encode,
+        Some(encode_test_ack),
+        None,
+        None,
+        ChannelId("email".into()),
+    )
+    .unwrap();
+    // Polls due at about 0, 0.4 and 1.0 s (300 then 600 ms of ack backoff,
+    // on 200 ms slices), then not before 2.2 s. Unpaced: all 50 at once.
+    std::thread::sleep(Duration::from_millis(1_300));
+    let polls = calls_to(&st, "email.poll");
+    let acks = calls_to(&st, "email.ack");
+    assert!((1..=3).contains(&polls), "{polls} polls in 1.3 s");
+    assert_eq!(acks, polls, "one refused ack per batch, not one per event");
 }
