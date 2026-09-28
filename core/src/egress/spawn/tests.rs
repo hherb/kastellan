@@ -434,6 +434,40 @@ fn dropping_a_bare_sidecar_handle_kills_the_child() {
     assert!(!pid_is_alive(pid), "dropping the handle must kill and reap the sidecar (pid {pid})");
 }
 
+/// #769: the persistent supervisor keeps a worker that refuses, so it asks
+/// the sidecar whether it has died (a live worker behind a dead sidecar can
+/// only refuse). `exit_status` must say so once the child exits, and not
+/// before — a `None` for a dead one would keep the pair cut off for good.
+#[test]
+fn exit_status_reports_a_dead_sidecar_and_not_a_live_one() {
+    use std::process::{Command, Stdio};
+
+    let spawn = |script: &str| {
+        let child = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+        SidecarHandle { child, uds_path: std::path::PathBuf::from("/nonexistent/kastellan-test.sock") }
+    };
+    let mut live = spawn("sleep 300");
+    assert!(live.exit_status().is_none(), "a running sidecar has not exited");
+
+    let mut dead = spawn("exit 3");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(s) = dead.exit_status() {
+            break s;
+        }
+        assert!(std::time::Instant::now() < deadline, "the exited child was never reported");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(3));
+    assert_eq!(dead.exit_status(), Some(status), "asking again keeps answering");
+}
+
 /// `kill -0 <pid>` succeeds only for a live, signalable process. Shelling out
 /// rather than calling `libc::kill` keeps this crate free of a `libc`
 /// dependency it does not otherwise need; the flag and its meaning are

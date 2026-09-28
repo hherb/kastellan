@@ -29,7 +29,8 @@
 //! exactly-once without a receipt protocol on the bus side too.
 //!
 //! A failed ack call is itself non-fatal: it's logged and the loop continues,
-//! leaving the cursor unadvanced (same redelivery outcome as a crash). The one
+//! leaving the cursor unadvanced (same redelivery outcome as a crash; a
+//! *refused* ack also holds the next poll — see `run`). The one
 //! residual gap is structural and shared with Matrix's existing behaviour: if
 //! the bus *accepts* the send but a downstream consumer later fails to fully
 //! process it, the message is still acked (Matrix already drops in the
@@ -73,9 +74,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc as tok_mpsc;
 
 use crate::worker_lifecycle::persistent::PersistentHandle;
+use crate::worker_lifecycle::RestartBackoff;
 
+mod ack;
+use ack::{ack, ack_skipped};
 mod outage;
-use outage::{is_upstream_auth_refusal, report_call_failure, OutageLog};
+use outage::{report_down, OutageLog};
+mod refusal;
+use refusal::{accepted, check_refusal_backoff, is_refusal, refused, RefusalRun};
 
 use super::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId};
 
@@ -84,10 +90,30 @@ use super::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvi
 /// reaches it (the driver `blocking_send`s past it — backpressure, not drop).
 const INBOUND_BUFFER: usize = 256;
 
-/// How long the driver sleeps between retries while the worker is down (the
-/// supervisor is respawning it underneath). Short so recovery latency is low;
-/// the shutdown check runs every slice so a dead channel's thread exits fast.
+/// How long the driver sleeps between iterations that completed no poll: the
+/// worker is down (the supervisor is respawning it underneath), or a refused
+/// poll or ack is waiting out its backoff — so it is also the resolution at
+/// which such a backoff is honoured. Short so recovery latency is low; the
+/// shutdown check runs every slice so a dead channel's thread exits fast.
 const RETRY_SLICE: Duration = Duration::from_millis(200);
+
+/// How a channel paces retries of a call its worker **refused** (#769): 1 s,
+/// doubling, capped at 60 s. The channels' specs use it; see
+/// [`PolledWorkerSpec::refusal_backoff`].
+///
+/// Why these numbers: the base matches the ~1 s the supervisor's respawn used
+/// to add before each retry, so a transient refused poll (a network blip
+/// through the egress tunnel) is retried about as soon as before. (A refused
+/// *send* is retried at the first flush after its delay, and a flush follows
+/// each long-poll, so it can wait up to one poll window longer.) The cap bounds
+/// a lasting refusal — an expired credential, a room the bot was removed from —
+/// to one request a minute against an upstream that keeps saying no.
+pub const REFUSAL_BACKOFF: RestartBackoff = RestartBackoff {
+    base: Duration::from_secs(1),
+    factor_num: 2,
+    factor_den: 1,
+    cap: Duration::from_secs(60),
+};
 
 /// What a channel-shaped worker looks like to the driver: three JSON-RPC
 /// methods plus the worker-side long-poll wait.
@@ -110,6 +136,10 @@ pub struct PolledWorkerSpec {
     /// Worker-side long-poll wait. Outbound latency is bounded by this (the
     /// single JSON-RPC pipe serializes poll and send).
     pub poll_timeout_ms: u64,
+    /// How long to wait before calling a method again after the worker
+    /// refused it, per consecutive refusal of that method (#769). Production
+    /// specs use [`REFUSAL_BACKOFF`].
+    pub refusal_backoff: RestartBackoff,
 }
 
 /// One inbound event as the channel layer sees it, before the driver stamps
@@ -207,6 +237,7 @@ impl PolledWorkerDriver {
         audit_ack_only: Option<AckOnlyAudit>,
         cid: ChannelId,
     ) -> anyhow::Result<(Self, serde_json::Value)> {
+        check_refusal_backoff(&spec.refusal_backoff)?;
         let identity = calls
             .call(spec.init_method, serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("{}: {e}", spec.init_method))?;
@@ -237,8 +268,21 @@ impl PolledWorkerDriver {
 ///    messages STAY in `pending`, so a death mid-send loses nothing;
 /// 3. long-poll for inbound events, forward them to the bus, then — for a
 ///    spec with `ack_method` set — ack the ones that carried an `ack_token`;
-/// 4. on any call error, sleep one short slice (shutdown-responsive) and
-///    retry — the supervisor is respawning the worker underneath.
+/// 4. unless a poll just completed (its long-poll paces the loop), sleep one
+///    short slice (shutdown-responsive) and go round again.
+///
+/// A failed call is one of two things (#769), told apart by
+/// [`refusal::is_refusal`]:
+/// - **the worker is down** — the supervisor is respawning it. Stop, skip the
+///   poll, retry after one slice; [`OutageLog`] logs the outage once.
+/// - **the worker refused the call** — it is alive and was kept. That method
+///   waits out its own backoff ([`RefusalRun`], `spec.refusal_backoff`) while
+///   the others keep going: a refused reply stays at the front of `pending`, in
+///   order, while polling continues, so inbound never freezes behind one reply
+///   the upstream will not take. (All replies wait behind it, whatever their
+///   conversation — #782.) A refused **ack** stops acking the batch and holds
+///   the next poll too: the cursor did not move, so polling would only hand the
+///   same messages to the bus again, as fast as the upstream answers.
 #[allow(clippy::too_many_arguments)] // mirrors spawn's own descriptor args + the two channel endpoints
 fn run(
     calls: Box<dyn WorkerCalls>,
@@ -254,9 +298,13 @@ fn run(
 ) {
     let mut pending: VecDeque<OutgoingMessage> = VecDeque::new();
     // Latches the down/up transitions so they log once per outage instead of
-    // once per retry slice — except a credential refusal, which has its own
-    // cadence (see `OutageLog`).
+    // once per retry slice (see `OutageLog`).
     let mut outage = OutageLog::default();
+    // Each method's run of refusals from a live worker (#769) — separate,
+    // because a homeserver can refuse a send while every poll succeeds.
+    let mut send_refusals = RefusalRun::default();
+    let mut poll_refusals = RefusalRun::default();
+    let mut ack_refusals = RefusalRun::default();
     loop {
         // 1) Pull newly-queued replies into the local buffer (non-blocking).
         loop {
@@ -271,31 +319,44 @@ fn run(
         }
 
         // 2) Flush buffered replies (front-first); stop at the first error.
-        let mut errored = false;
-        while let Some(out) = pending.front() {
-            match calls.call(spec.send_method, encode_send(out)) {
-                Ok(_) => {
-                    if outage.on_success() {
-                        tracing::info!(label = spec.label, "worker back up; polled driver resumed");
+        //    Not at all while the front reply's refusal backoff runs: later
+        //    replies wait behind it, so replies keep their order (#782).
+        let mut down = false;
+        if send_refusals.ready(Instant::now()) {
+            while let Some(out) = pending.front() {
+                match calls.call(spec.send_method, encode_send(out)) {
+                    Ok(_) => {
+                        accepted(&mut send_refusals, &mut outage, spec.label, spec.send_method);
+                        pending.pop_front();
                     }
-                    pending.pop_front();
-                }
-                Err(e) => {
-                    let line = outage.on_failure(is_upstream_auth_refusal(&e), Instant::now());
-                    report_call_failure(spec.label, &e, "send failed; retrying after respawn", line);
-                    errored = true;
-                    break;
+                    Err(e) if is_refusal(&e) => {
+                        refused(&mut send_refusals, &mut outage, &spec, spec.send_method, &e);
+                        break;
+                    }
+                    Err(e) => {
+                        if outage.on_down() {
+                            report_down(spec.label, &e, "send failed; retrying after respawn");
+                        }
+                        down = true;
+                        break;
+                    }
                 }
             }
         }
 
-        // 3) Long-poll for inbound events → push to the bus.
-        if !errored {
+        // 3) Long-poll for inbound events → push to the bus. Skipped while the
+        //    worker is down, or while a refused poll or ack waits out its
+        //    backoff.
+        let mut polled = false;
+        let now = Instant::now();
+        if !down && poll_refusals.ready(now) && ack_refusals.ready(now) {
             match calls.call(spec.poll_method, serde_json::json!({ "timeout_ms": spec.poll_timeout_ms })) {
                 Ok(v) => {
-                    if outage.on_success() {
-                        tracing::info!(label = spec.label, "worker back up; polled driver resumed");
-                    }
+                    polled = true;
+                    accepted(&mut poll_refusals, &mut outage, spec.label, spec.poll_method);
+                    // Cleared by an ack refusal: the rest of the batch would be
+                    // refused the same way.
+                    let mut acking = true;
                     // Extracted BEFORE `parse_poll` consumes `v` by value —
                     // both extractors see the identical raw poll result.
                     let ack_only_ids = parse_ack_only.map(|f| f(&v)).unwrap_or_default();
@@ -332,11 +393,12 @@ fn run(
                                 // non-fatal — it just leaves the worker's
                                 // cursor unadvanced, so the message is
                                 // redelivered. At-least-once, by design.
-                                if let (Some(method), Some(enc), Some(tok)) =
-                                    (spec.ack_method, encode_ack, ack_token.as_deref())
+                                if let (true, Some(method), Some(enc), Some(tok)) =
+                                    (acking, spec.ack_method, encode_ack, ack_token.as_deref())
                                 {
-                                    if let Err(e) = calls.call(method, enc(tok)) {
-                                        tracing::warn!(label = spec.label, error = %e, "ack failed; event will be redelivered");
+                                    match ack(&*calls, &spec, method, enc(tok), &mut outage, &mut ack_refusals) {
+                                        Ok(keep) => acking = keep,
+                                        Err(e) => tracing::warn!(label = spec.label, error = %e, "ack failed; event will be redelivered"),
                                     }
                                 }
                             }
@@ -360,40 +422,8 @@ fn run(
                             // `parse_ack_only` (Matrix) means `ack_only_ids`
                             // is always empty, so this loop never runs for
                             // Matrix — byte-identical.
-                            if let (Some(method), Some(enc)) = (spec.ack_method, encode_ack) {
-                                for (id, reason) in ack_only_ids {
-                                    tracing::warn!(
-                                        label = spec.label,
-                                        message_id = %id,
-                                        reason = %reason,
-                                        "discarding a message that never became an event; acking it \
-                                         so the worker's cursor advances"
-                                    );
-                                    // Best-effort audit trail: never FAILS the
-                                    // ack itself — a real hook only logs on its
-                                    // own insert error (see AckOnlyAudit's docs
-                                    // — `None` when the caller has no durable
-                                    // sink to write to). It CAN block this
-                                    // thread for the duration of the write: a
-                                    // production hook (e.g. the daemon's)
-                                    // typically `Handle::block_on`s an async DB
-                                    // insert, same as `pg_decision_sink`. That
-                                    // is fine here — this is a dedicated
-                                    // background thread (`thread::spawn` in
-                                    // `PolledWorkerDriver::spawn`), never a
-                                    // tokio worker thread.
-                                    if let Some(audit) = &audit_ack_only {
-                                        audit(&id, &reason);
-                                    }
-                                    if let Err(e) = calls.call(method, enc(&id)) {
-                                        tracing::warn!(
-                                            label = spec.label,
-                                            error = %e,
-                                            message_id = %id,
-                                            "ack of skipped id failed; will retry next poll"
-                                        );
-                                    }
-                                }
+                            if let (true, Some(enc)) = (acking, encode_ack) {
+                                ack_skipped(&*calls, &spec, enc, ack_only_ids, audit_ack_only.as_ref(), &mut outage, &mut ack_refusals);
                             }
                         }
                         Err(e) => {
@@ -409,17 +439,23 @@ fn run(
                         }
                     }
                 }
+                Err(e) if is_refusal(&e) => {
+                    refused(&mut poll_refusals, &mut outage, &spec, spec.poll_method, &e);
+                }
                 Err(e) => {
-                    let line = outage.on_failure(is_upstream_auth_refusal(&e), Instant::now());
-                    report_call_failure(spec.label, &e, "poll failed (worker died or restarting)", line);
-                    errored = true;
+                    if outage.on_down() {
+                        report_down(spec.label, &e, "poll failed (worker died or restarting)");
+                    }
                 }
             }
         }
 
-        // 4) Worker down: the supervisor owns respawn/backoff/alarm; just wait
-        //    a short, shutdown-responsive slice and retry.
-        if errored {
+        // 4) No poll completed — the worker is down (the supervisor owns
+        //    respawn/backoff/alarm), or the poll was refused or is held by a
+        //    poll or ack refusal backoff: wait a short, shutdown-responsive
+        //    slice and go round again. A completed poll needs no wait; its
+        //    long-poll already paced this iteration.
+        if !polled {
             if inbound_tx.is_closed() {
                 tracing::info!(label = spec.label, "inbound receiver closed during retry; polled driver exiting");
                 return;

@@ -105,6 +105,13 @@ impl Drop for EgressSidecar {
 }
 
 impl EgressSidecar {
+    /// `Some(what happened)` when the sidecar process has exited — for the
+    /// persistent supervisor, which otherwise would keep a live worker that can
+    /// no longer reach anything (#769, `PersistentTransport::sidecar_exited`).
+    pub(crate) fn exited(&mut self) -> Option<String> {
+        self.sidecar.exit_status().map(|status| format!("egress sidecar exited ({status})"))
+    }
+
     /// Build a bundle from already-spawned parts. Used by
     /// [`super::persistent_net::spawn_net_transport`], which spawns the sidecar +
     /// worker itself (it needs the raw `Client`, not a `SupervisedWorker`) and

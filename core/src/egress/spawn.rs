@@ -92,6 +92,14 @@ impl SidecarHandle {
         let _ = std::fs::remove_file(&self.uds_path);
     }
 
+    /// The sidecar's exit status if it has exited, else `None` (also when the
+    /// status cannot be read). One non-blocking `try_wait`; a later
+    /// [`terminate`](Self::terminate) still reaps cleanly, since `Child` caches
+    /// the status it collected.
+    pub fn exit_status(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
     /// Borrow the child's stdout for the caller's decision-ingest loop.
     pub fn stdout(&mut self) -> Option<std::process::ChildStdout> {
         self.child.stdout.take()

@@ -12,7 +12,7 @@
 
 use kastellan_matrix_wire::PollResult;
 
-use crate::channel::polled_driver::{PolledEvent, PolledWorkerSpec};
+use crate::channel::polled_driver::{PolledEvent, PolledWorkerSpec, REFUSAL_BACKOFF};
 use crate::channel::OutgoingMessage;
 
 /// How long the driver waits in one `matrix.poll` before looping to check the
@@ -29,6 +29,7 @@ pub const MATRIX_POLLED_SPEC: PolledWorkerSpec = PolledWorkerSpec {
     // Matrix has no server-side polling cursor to advance — no ack RPC.
     ack_method: None,
     poll_timeout_ms: POLL_MS,
+    refusal_backoff: REFUSAL_BACKOFF,
 };
 
 /// Decode a `matrix.poll` result (wire [`PollResult`]) into driver events.
