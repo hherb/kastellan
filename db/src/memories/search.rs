@@ -20,7 +20,9 @@ use sqlx::Row;
 
 use crate::DbError;
 
-use super::{check_embedding_dim, limit_as_i64, vector_literal, Memory, MemoryLayer};
+use super::{
+    check_embedding_dim, limit_as_i64, recallable_layer_codes, vector_literal, Memory, MemoryLayer,
+};
 
 /// Semantic recall: nearest-neighbour search over `memories.embedding`
 /// using pgvector's cosine-distance operator (`<=>`).
@@ -31,6 +33,10 @@ use super::{check_embedding_dim, limit_as_i64, vector_literal, Memory, MemoryLay
 /// get an empty result without round-tripping.
 ///
 /// `query_embedding.len()` must equal [`EMBEDDING_DIM`](super::EMBEDDING_DIM).
+///
+/// **Layer gate (#785):** only layers for which
+/// [`MemoryLayer::is_recallable`] holds are searched, so L0 (meta-rules)
+/// and L3 (skills) rows never come back from this lane.
 pub async fn semantic_search<'e, E>(
     executor: E,
     query_embedding: &[f32],
@@ -49,11 +55,13 @@ where
         "SELECT id \
          FROM memories \
          WHERE embedding IS NOT NULL \
+           AND layer = ANY($3) \
          ORDER BY embedding <=> $1::vector \
          LIMIT $2",
     )
     .bind(lit)
     .bind(limit_as_i64(k))
+    .bind(recallable_layer_codes())
     .fetch_all(executor)
     .await
     .map_err(|e| DbError::Query(format!("semantic_search: {e}")))?;
@@ -80,6 +88,10 @@ where
 /// `ts_rank` first). Documents with no overlapping lexemes don't appear
 /// in the result set — they are excluded by the `tsv @@ query`
 /// filter, not just ranked low.
+///
+/// **Layer gate (#785):** only layers for which
+/// [`MemoryLayer::is_recallable`] holds are searched, so L0 (meta-rules)
+/// and L3 (skills) rows never come back from this lane.
 pub async fn lexical_search<'e, E>(
     executor: E,
     query_text: &str,
@@ -100,11 +112,13 @@ where
         "SELECT m.id \
          FROM memories m, plainto_tsquery('simple', $1) AS query \
          WHERE m.tsv @@ query \
+           AND m.layer = ANY($3) \
          ORDER BY ts_rank(m.tsv, query) DESC, m.id ASC \
          LIMIT $2",
     )
     .bind(query_text)
     .bind(limit_as_i64(k))
+    .bind(recallable_layer_codes())
     .fetch_all(executor)
     .await
     .map_err(|e| DbError::Query(format!("lexical_search: {e}")))?;
@@ -202,6 +216,10 @@ where
 /// equivalent to `COUNT(DISTINCT entity_id)` regardless of input
 /// duplication. The caller's expansion logic should dedup via
 /// `HashSet` anyway, but this helper does not enforce it.
+///
+/// **Layer gate (#785):** only layers for which
+/// [`MemoryLayer::is_recallable`] holds are searched, so L0 (meta-rules)
+/// and L3 (skills) rows never come back from this lane.
 pub async fn graph_search<'e, E>(
     executor: E,
     entity_ids: &[i64],
@@ -222,8 +240,10 @@ where
         "SELECT me.memory_id \
          FROM memory_entities me \
          JOIN entities e ON me.entity_id = e.id \
+         JOIN memories m ON m.id = me.memory_id \
          WHERE me.entity_id = ANY($1::bigint[]) \
            AND ($3 OR e.quarantine = FALSE) \
+           AND m.layer = ANY($4) \
          GROUP BY me.memory_id \
          ORDER BY COUNT(*) DESC, me.memory_id ASC \
          LIMIT $2",
@@ -231,6 +251,7 @@ where
     .bind(entity_ids)
     .bind(limit_as_i64(k))
     .bind(include_quarantined)
+    .bind(recallable_layer_codes())
     .fetch_all(executor)
     .await
     .map_err(|e| DbError::Query(format!("graph_search: {e}")))?;

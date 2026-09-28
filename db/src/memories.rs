@@ -61,10 +61,12 @@ use crate::DbError;
 // `check_embedding_dim` / `limit_as_i64` guards, `vector_literal`, and
 // the `Memory` / `MemoryLayer` types) via `super::`.
 mod layer_load;
+mod recall_layers;
 mod search;
 mod write;
 
 pub use layer_load::{load_active_l0, load_layer, load_layer_by_trust, load_unembedded_at_layer};
+pub use recall_layers::{recallable_layer_codes, retain_recallable};
 pub use search::{fetch_by_ids, graph_search, lexical_search, semantic_search};
 pub use write::{
     delete_memory_at_layer, insert_memory, insert_memory_at_layer, insert_memory_light,

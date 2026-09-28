@@ -11,7 +11,7 @@
 
 use sqlx::Row;
 
-use crate::memories::{check_embedding_dim, limit_as_i64, vector_literal};
+use crate::memories::{check_embedding_dim, limit_as_i64, recallable_layer_codes, vector_literal};
 use crate::DbError;
 
 /// Scan every entity whose `embedding IS NULL`, returning `(id, kind, name)`
@@ -105,6 +105,10 @@ where
 /// `EMBEDDING_DIM` (hard `DbError`, not a degrade case). An empty result
 /// (no embedded/approved entities yet) is normal — the lane simply
 /// contributes nothing to fusion.
+///
+/// **Layer gate (#785):** only memories at a recallable layer are returned
+/// ([`crate::memories::MemoryLayer::is_recallable`]) — L0 and L3 rows
+/// never come back from this lane, however close their entity is.
 pub async fn entity_similarity_search<'e, E>(
     executor: E,
     query_embedding: &[f32],
@@ -132,6 +136,8 @@ where
              LIMIT $2 \
          ) top_e \
          JOIN memory_entities me ON me.entity_id = top_e.id \
+         JOIN memories m ON m.id = me.memory_id \
+         WHERE m.layer = ANY($5) \
          GROUP BY me.memory_id \
          ORDER BY MIN(top_e.dist) ASC, me.memory_id ASC \
          LIMIT $3",
@@ -140,6 +146,7 @@ where
     .bind(entity_fanout)
     .bind(limit_as_i64(k))
     .bind(include_quarantined)
+    .bind(recallable_layer_codes())
     .fetch_all(executor)
     .await
     .map_err(|e| DbError::Query(format!("entity_similarity_search: {e}")))?;

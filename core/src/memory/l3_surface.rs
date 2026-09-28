@@ -18,6 +18,11 @@
 //! absent (the fail-safe
 //! [`crate::memory::l3_approval::SkillTrust::from_metadata_str`]
 //! downgrades it to `Untrusted`) — never reaches the planner.
+//!
+//! This block is the **only** door. The recall lanes that fill
+//! `<recalled>` exclude L3 rows entirely, whatever their trust
+//! (`MemoryLayer::is_recallable`, #785) — before that fix an untrusted
+//! skill whose words matched the query reached the planner that way.
 
 use crate::cassandra::types::{L3Param, L3SkillCandidate, PythonSkillCandidate};
 use crate::memory::l3_approval::SkillTrust;

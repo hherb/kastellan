@@ -19,7 +19,7 @@ A personal agentic system, security-first, vendor-neutral, AGPL-licensed.
 Rust workspace with 27 crates (full tree in the root `README.md` Layout
 section). The load-bearing ones:
 
-- `core` (`kastellan-core`): bin + lib. Agent loop + scheduler, three-lane memory, CASSANDRA oversight, audit log, the `tool_host` dispatcher chokepoint, channel bus (Matrix + gated email inbound), egress integration, secrets vault, installer; ships the `kastellan` daemon + `kastellan-cli`.
+- `core` (`kastellan-core`): bin + lib. Agent loop + scheduler, layered memory (L0–L4) with four-lane recall, CASSANDRA oversight, audit log, the `tool_host` dispatcher chokepoint, channel bus (Matrix + gated email inbound), egress integration, secrets vault, installer; ships the `kastellan` daemon + `kastellan-cli`.
 - `sandbox` (`kastellan-sandbox`): cross-platform sandbox abstraction. `SandboxPolicy` + `SandboxBackend` trait. Backends: Linux bwrap (+`systemd-run --scope` cgroup), macOS Seatbelt, opt-in Apple `container` micro-VM (macOS), opt-in Firecracker micro-VM (Linux; sha256-pinned guest kernel verified at every VM boot).
 - `supervisor` (`kastellan-supervisor`): systemd --user / launchd unit generation + drivers; brings up the real `kastellan.target`.
 - `protocol` (`kastellan-protocol`): JSON-RPC 2.0 server/client over stdio (MCP-stdio compatible). Sole IPC mechanism between core and workers.

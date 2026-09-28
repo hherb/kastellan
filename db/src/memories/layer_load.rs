@@ -69,7 +69,7 @@ where
 /// Load the `(id, body)` of every row at `layer` whose `embedding IS NULL`
 /// — the scan behind the `kastellan-cli memory l1 reembed` backfill.
 ///
-/// These rows are invisible to the semantic recall lane ([`semantic_search`]
+/// These rows are invisible to the semantic recall lane ([`super::semantic_search`]
 /// filters `WHERE embedding IS NOT NULL`): pre-#324 rows and operator-added
 /// rows (`memory l1 add` stores no embedding). The backfill re-embeds each
 /// body and writes the vector back via [`super::set_embedding`].

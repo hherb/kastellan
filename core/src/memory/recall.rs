@@ -21,9 +21,20 @@
 //! lane's ordered list, or "absent" (contributes 0) when the document
 //! doesn't appear. Items absent from *every* lane do not appear in
 //! the output.
+//!
+//! ## Which layers recall may return (#785)
+//!
+//! Only L1, L2 and L4. L0 (meta-rules) and L3 (skills) each reach the
+//! prompt through their own gated block — `<l0_meta_rules>` (newest
+//! version of each rule) and `<skills>` (operator-approved only) — and
+//! recall must not be a second door around those gates. The rule is
+//! `kastellan_db::memories::MemoryLayer::is_recallable`; every lane's SQL
+//! applies it, and [`recall`] re-checks it after hydration.
 
 use kastellan_db::graph::Graph;
-use kastellan_db::memories::{fetch_by_ids, lexical_search, semantic_search, Memory, EMBEDDING_DIM};
+use kastellan_db::memories::{
+    fetch_by_ids, lexical_search, retain_recallable, semantic_search, Memory, EMBEDDING_DIM,
+};
 use kastellan_db::DbError;
 use sqlx::PgPool;
 
@@ -422,7 +433,11 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
     let fused = reciprocal_rank_fusion(&lane_refs, RRF_K_CONSTANT);
     let top: Vec<i64> = fused.into_iter().take(params.k).map(|(id, _)| id).collect();
 
-    fetch_by_ids(pool, &top).await
+    // Layer gate (#785), second half: each lane's SQL already excludes
+    // L0 and L3, so today this drops nothing. It is here so a future lane
+    // that forgets the SQL filter still cannot put an untrusted skill or a
+    // superseded meta-rule into `<recalled>`.
+    Ok(retain_recallable(fetch_by_ids(pool, &top).await?))
 }
 
 /// Reciprocal Rank Fusion over `lists` of ranked ids.
