@@ -4,7 +4,7 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260929_785_pre-prune.md`](archive/handover_20260929_785_pre-prune.md),
+> [`archive/handover_20260927_773_pre-prune.md`](archive/handover_20260927_773_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
@@ -334,14 +334,29 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
 `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
+`core/src/worker_lifecycle/persistent.rs`, `core/src/scheduler/inner_loop.rs`,
 `core/src/channel/bus.rs`, `workers/matrix/src/sdk_live.rs`, `llm-router/src/messages.rs`,
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`.
-Also over: `core/src/memory/l3_surface.rs` 539, `core/src/scheduler/inner_loop.rs` 923,
-`tool_dispatch.rs` 722, `polled_driver/tests.rs` 733, `attach/tests.rs` 727, `require.rs` 661,
-`scripts/run-e2e-gate.sh` 561 (shell). ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
-its next leg** (the attachment half is the natural cut). Recent splits done **first** (the pattern to
-keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memories/search.rs`.
-Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
+⚠️ **#743 and #745 both grew files already over cap without splitting them** (`tool_host.rs`,
+`worker_lifecycle/persistent.rs`); #750 split `worker_stderr/mod.rs` **first** instead. #748
+pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it also grew
+`scripts/run-e2e-gate.sh` to 561 (shell, not split) and `require.rs` 647→661 (already over).
+#673/#674 grew three already-over files a little without splitting: `tool_dispatch.rs` 710→722,
+`worker_lifecycle/persistent.rs` 590→662 (pure fn + its tests), `polled_driver/tests.rs` 670→733.
+`channel/polled_driver.rs` would have crossed 500, so its failure logging went to a new
+`polled_driver/outage.rs` (433 + 111). #773/#774 split tests out **first-class** instead:
+`llm-router/src/config.rs` 924→385 and `messages.rs` 593→385, `scheduler/agent.rs` 542→429 — but
+grew `inner_loop.rs` 878→923 (already over; its new logic went to `inner_loop/llm_failure.rs`).
+#767/#768 split `workers/mail/src/attach.rs` **first** (717→559, `Picked` → `attach/picked.rs`)
+and put its new tests in `attach/tests/hash_and_route.rs` (`attach/tests.rs` 719→727); it grew
+`core/tests/mail_live_shape_e2e.rs` 508→529→**559** after the second review (one test fn — **split
+it before the next leg**; the attachment half is the natural cut) and
+`gate_script_tests.rs` 518→519 (its new check went to `gate_script_tests/callers.rs`).
+#769 split `worker_lifecycle/persistent.rs` **first** (662→407 + tests 254, movement proven by
+`cmp` with a negative control); its review put the classifier in `persistent/call_failure.rs`
+(`persistent.rs` 474) and the ack calls in `polled_driver/ack.rs` (`polled_driver.rs` 497→469).
+#785 split `db/src/memories/search.rs` **first** (508→244 + `layer_load.rs` 280); it grew
+`core/src/memory/l3_surface.rs` 534→539 (doc only, already over) and `recall.rs` 471→486.
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
 (seam in `confine.rs`); python-exec Phase 4 curated wheels; web-research polish; an ANN index on
@@ -462,8 +477,16 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
   report, respawn or alarm); a credential refusal replaces it quietly, a dead sidecar retires it;
   the polled driver backs off per method (send, poll, ack) and keeps polling behind a refused send.
   Filed #782, #783.
-- **[#778](https://github.com/hherb/kastellan/pull/778)** (#767, #768) — route spellings from `localmail_contract.rs`; one hash-case rule. Filed #779, #780.
-- **[#776](https://github.com/hherb/kastellan/pull/776)** (#773, #774) — `KASTELLAN_LLM_THINKING_SWITCH`; `llm_usage` per plan; timeouts spend the synthesis turn. **[#775](https://github.com/hherb/kastellan/pull/775)** — handover only.
+- **[#778](https://github.com/hherb/kastellan/pull/778)** (#767, #768) — route spellings as pure fns in `localmail_contract.rs`, used by the
+  worker and the live gate (which now pages from offset 2 and checks the hash routes too); one
+  lowercase rule for a planner hash (`ShaPrefix`); `NormalizedFilters`; private `Credentials`.
+  Second review round: the gate picks an attachment with text, the profile refusal has a test.
+  Filed #779, #780.
+- **[#776](https://github.com/hherb/kastellan/pull/776)** (#773, #774) — `KASTELLAN_LLM_THINKING_SWITCH`
+  (`reasoning_effort` for Ollama) + a once-per-process thinking-leak WARN; `llm_usage` on every
+  `plan.formulate` row; a request timeout after gathering spends the synthesis turn, a timed-out
+  synthesis retries once without thinking, a final timeout is worded for the user.
+- **[#775](https://github.com/hherb/kastellan/pull/775)** — handover only: the DGX timeout raise and the #773 diagnosis.
 - **[#770](https://github.com/hherb/kastellan/pull/770)** (#673, #674) — `codes::UPSTREAM_AUTH_FAILED` + pure
   `upstream_auth_refusal` replace `POLICY_DENIED` for localmail 401/403 in `mail` and `email-in`;
   the dispatcher and the email channel's polled driver log an operator ERROR; docs say API key, not
