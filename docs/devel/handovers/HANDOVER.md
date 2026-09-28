@@ -94,6 +94,16 @@ real sandboxed worker + MITM proxy. Rootfs images last rebuilt
   (operator's call); its sync give-up (`sdk_live.rs`, policy `sync_retry.rs`) is a death.
   ⚠️ **Workspace MSRV is 1.78** (`Option::is_none_or` is 1.82).
 
+### Also 2026-09-28: cognee / cognee-rs survey (docs only)
+
+[`docs/devel/notes/2026-09-28-cognee-survey.md`](../notes/2026-09-28-cognee-survey.md). **Verdict: not a
+dependency** (a second memory system with its own stores, LLM egress, auth and default-on telemetry;
+raw Cypher execution on by default). **Borrow:** relation provenance + supersession, and a
+recall-eval harness (both now ROADMAP Phase 1, *proposed*). ⚠️ **Found in our own tree:** the
+semantic/lexical recall lanes have no `layer`/trust filter, so an `untrusted` L3 skill reaches the
+planner through `<recalled>`, contrary to `l3_surface.rs:17-20` (not yet filed). `CLAUDE.md`'s
+"three-lane memory" is stale; there are four lanes.
+
 ### Previous (2026-09-27/28): #767 + #768 — the #766 review residue (PR #778)
 
 Route spellings are pure `pub fn`s in `localmail_contract.rs`, used by the worker **and** the live
