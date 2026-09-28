@@ -241,8 +241,7 @@ fn email_err_to_rpc(e: EmailError) -> RpcError {
         // kastellan refusing anything: `UPSTREAM_AUTH_FAILED`, never the core's
         // own `POLICY_DENIED` (#673). The core's polled driver recognises this
         // code and its own line says "credential refused" rather than "worker
-        // died" (#674) — though the respawn that follows still reports a death
-        // of its own (#769).
+        // died" (#674); the worker is kept, not respawned (#769).
         EmailError::Upstream { status, body } => {
             kastellan_protocol::upstream_auth_refusal("localmail", status).unwrap_or_else(|| {
                 RpcError::new(codes::OPERATION_FAILED, format!("localmail {status}: {body}"))

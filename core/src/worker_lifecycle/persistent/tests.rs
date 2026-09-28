@@ -137,6 +137,84 @@ fn a_workers_rpc_refusal_reaches_the_handle_caller_still_typed() {
     h.shutdown();
 }
 
+// ----- a refusal keeps the worker (#769) -----
+
+/// A worker that refuses every `"no"` call with a structured `RpcError` and
+/// answers everything else — alive throughout. Counts how often the driver
+/// asked it for a death report, which it must never do for a refusal.
+struct RefusesSome { gen: usize, death_reports: Arc<AtomicUsize> }
+impl PersistentTransport for RefusesSome {
+    fn call(&mut self, m: &str, _p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        if m == "no" {
+            let rpc = kastellan_protocol::RpcError::new(kastellan_protocol::codes::OPERATION_FAILED, "send failed: nope");
+            return Err(client_error_to_anyhow(ClientError::Rpc(rpc)));
+        }
+        Ok(serde_json::json!({ "gen": self.gen }))
+    }
+    fn death_report(&mut self) -> Option<String> {
+        self.death_reports.fetch_add(1, Ordering::SeqCst);
+        Some("should never be asked for".into())
+    }
+}
+
+/// #769: a structured refusal comes from a worker that is alive and still
+/// listening. Before the fix every refusal was treated as a death: a
+/// `[worker-death]` report, a respawn, and — five refusals in five minutes —
+/// a respawn-rate alarm. An expired email-channel credential read as a crash
+/// loop. The refusal must reach the caller, and the SAME worker must serve
+/// the next call.
+#[test]
+fn a_refusing_worker_is_kept_not_respawned() {
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let death_reports = Arc::new(AtomicUsize::new(0));
+    let (s, d) = (spawns.clone(), death_reports.clone());
+    let factory: PersistentFactory = Box::new(move || {
+        let gen = s.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(RefusesSome { gen, death_reports: d.clone() }))
+    });
+    let h = PersistentWorker::spawn_with_backoff("test", factory, fast_backoff()).unwrap();
+    // More refusals than ALARM_THRESHOLD: the old code would have respawned
+    // on each one and raised the alarm.
+    for _ in 0..ALARM_THRESHOLD + 2 {
+        let e = h.call("no", serde_json::json!({})).unwrap_err();
+        assert!(e.downcast_ref::<kastellan_protocol::RpcError>().is_some(), "the caller still sees the refusal: {e}");
+    }
+    // No retry loop: a respawn in progress would answer "is restarting".
+    let v = h.call("yes", serde_json::json!({})).expect("the kept worker serves the next call at once");
+    assert_eq!(v["gen"], 0, "still the first worker");
+    assert_eq!(spawns.load(Ordering::SeqCst), 1, "a refusal must not respawn");
+    assert_eq!(death_reports.load(Ordering::SeqCst), 0, "a refusal is not a death");
+    h.shutdown();
+}
+
+/// The driver's rule and the idle-timeout lifecycle's census
+/// (`WorkerRetirementCause::from_client_error`) must agree on every
+/// `ClientError` variant, as it reaches the driver — i.e. after
+/// `client_error_to_anyhow`. Before #769 they disagreed on exactly one: the
+/// census called `Rpc` alive, the driver respawned on it. A new variant
+/// breaks the census's exhaustive match first; this makes the driver follow.
+#[test]
+fn the_driver_retires_exactly_what_the_census_calls_fatal() {
+    use crate::worker_lifecycle::idle_timeout::WorkerRetirementCause;
+    let every_variant = || -> Vec<ClientError> {
+        vec![
+            ClientError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe gone")),
+            ClientError::Decode(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+            ClientError::EarlyExit,
+            ClientError::ResponseTooLarge { cap: 1 },
+            ClientError::IdMismatch { expected: serde_json::json!(1), got: serde_json::json!(2) },
+            ClientError::Rpc(kastellan_protocol::RpcError::new(kastellan_protocol::codes::OPERATION_FAILED, "no")),
+        ]
+    };
+    let census: Vec<bool> = every_variant().iter().map(|v| WorkerRetirementCause::from_client_error(v).is_some()).collect();
+    let driver: Vec<bool> = every_variant()
+        .into_iter()
+        .map(|v| call_error_retires_worker(&client_error_to_anyhow(v)))
+        .collect();
+    assert_eq!(driver, census);
+    assert_eq!(census.iter().filter(|fatal| !**fatal).count(), 1, "exactly one survivable variant: Rpc");
+}
+
 #[test]
 fn call_after_shutdown_errors() {
     let factory: PersistentFactory = Box::new(|| Ok(Box::new(FakeTransport { calls: 0, die_after: 1000, gen: 0 })));

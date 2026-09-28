@@ -1,6 +1,6 @@
 //! Unit tests for the channel-generic polled-worker driver, against a scripted
 //! in-process fake — no worker process, no supervisor, no sandbox.
-use super::outage::{FailureLine, CREDENTIAL_REFUSAL_REPEAT};
+use super::outage::is_upstream_auth_refusal;
 use super::*;
 use kastellan_protocol::{codes, RpcError};
 use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 /// While `down` is set every call fails (simulating the supervisor's respawn
 /// window, where `PersistentHandle::call` returns `Err`); `fail_method`, if
 /// set, fails only that one exact method (used to exercise the ack-specific
-/// failure path without taking the whole worker down).
+/// failure path without taking the whole worker down). `refuse`, if set,
+/// makes method `m` answer its next `n` calls with a structured `RpcError` —
+/// a *refusal* from a live worker, which the driver treats differently from
+/// every other failure (#769).
 struct FakeState {
     down: AtomicBool,
     polls: Mutex<VecDeque<Value>>,
@@ -33,6 +36,8 @@ struct FakeState {
     /// canned response, independent of `down`. `None` means no per-method
     /// failure is injected.
     fail_method: Mutex<Option<String>>,
+    /// `Some((m, n))`: the next `n` calls to method `m` are refused.
+    refuse: Mutex<Option<(String, usize)>>,
 }
 struct FakeCalls(Arc<FakeState>);
 impl WorkerCalls for FakeCalls {
@@ -41,6 +46,12 @@ impl WorkerCalls for FakeCalls {
             anyhow::bail!("persistent worker is restarting");
         }
         self.0.log.lock().unwrap().push((method.to_string(), params.clone()));
+        if let Some((m, left)) = self.0.refuse.lock().unwrap().as_mut() {
+            if m == method && *left > 0 {
+                *left -= 1;
+                return Err(RpcError::new(codes::OPERATION_FAILED, "fake: refused").into());
+            }
+        }
         if self.0.fail_method.lock().unwrap().as_deref() == Some(method) {
             anyhow::bail!("fake: forced failure for {method}");
         }
@@ -76,6 +87,7 @@ fn fake() -> (Arc<FakeState>, Box<dyn WorkerCalls>) {
         init_calls: AtomicUsize::new(0),
         log: Mutex::new(Vec::new()),
         fail_method: Mutex::new(None),
+        refuse: Mutex::new(None),
     });
     (st.clone(), Box::new(FakeCalls(st)))
 }
@@ -107,6 +119,7 @@ const TEST_SPEC: PolledWorkerSpec = PolledWorkerSpec {
     send_method: "t.send",
     ack_method: None,
     poll_timeout_ms: 5,
+    refusal_backoff: REFUSAL_BACKOFF,
 };
 
 fn spawn_test_driver(
@@ -126,6 +139,7 @@ fn spec_with_ack() -> PolledWorkerSpec {
         send_method: "email.send",
         ack_method: Some("email.ack"),
         poll_timeout_ms: 50,
+        refusal_backoff: REFUSAL_BACKOFF,
     }
 }
 
@@ -140,6 +154,7 @@ fn spec_without_ack() -> PolledWorkerSpec {
         send_method: "matrix.send",
         ack_method: None,
         poll_timeout_ms: 50,
+        refusal_backoff: REFUSAL_BACKOFF,
     }
 }
 
@@ -689,47 +704,19 @@ fn only_an_upstream_auth_refusal_is_reported_as_a_credential_problem() {
     }
 }
 
-// ----- OutageLog (#674, #770 review) -----
+// ----- OutageLog: the worker-down latch (#674, #769) -----
 
-/// The plain case: the first failure of an outage warns, the rest are silent,
-/// and a success ends the outage (and says so exactly once).
+/// The first failure of an outage warns, the rest are silent, and an answer
+/// ends the outage (and says so exactly once).
 #[test]
-fn an_ordinary_outage_warns_once_and_reports_recovery_once() {
+fn an_outage_warns_once_and_reports_recovery_once() {
     let mut log = OutageLog::default();
-    let t = Instant::now();
-    assert!(!log.on_success(), "no outage to end yet");
-    assert_eq!(log.on_failure(false, t), FailureLine::Warn);
-    assert_eq!(log.on_failure(false, t), FailureLine::Silent);
-    assert!(log.on_success(), "the outage ends");
-    assert!(!log.on_success(), "and only once");
-    assert_eq!(log.on_failure(false, t), FailureLine::Warn, "a new outage warns again");
+    assert!(!log.on_answer(), "no outage to end yet");
+    assert!(log.on_down(), "the first failure of an outage is reported");
+    assert!(!log.on_down(), "the rest are not");
+    assert!(log.on_answer(), "the outage ends");
+    assert!(!log.on_answer(), "and only once");
+    assert!(log.on_down(), "a new outage warns again");
 }
 
-/// The review's scenario: an outage that begins as a restart and comes back
-/// as a 401 must still reach ERROR — the single up/down latch hid it.
-#[test]
-fn a_credential_refusal_is_reported_even_when_the_outage_began_otherwise() {
-    let mut log = OutageLog::default();
-    let t = Instant::now();
-    assert_eq!(log.on_failure(false, t), FailureLine::Warn);
-    assert_eq!(log.on_failure(true, t), FailureLine::CredentialError);
-}
-
-/// Every refusal respawns the worker (#769), so a lasting refusal alternates
-/// with "restarting" failures: neither may re-log each cycle, but the ERROR
-/// comes back after `CREDENTIAL_REFUSAL_REPEAT` so it is not buried.
-#[test]
-fn a_lasting_credential_refusal_repeats_on_its_interval_and_not_per_cycle() {
-    let mut log = OutageLog::default();
-    let t0 = Instant::now();
-    assert_eq!(log.on_failure(true, t0), FailureLine::CredentialError);
-    let almost = t0 + CREDENTIAL_REFUSAL_REPEAT - Duration::from_secs(1);
-    assert_eq!(log.on_failure(false, almost), FailureLine::Silent, "the respawn's restarting error");
-    assert_eq!(log.on_failure(true, almost), FailureLine::Silent, "not yet due");
-    let due = t0 + CREDENTIAL_REFUSAL_REPEAT;
-    assert_eq!(log.on_failure(true, due), FailureLine::CredentialError, "due again");
-    assert_eq!(log.on_failure(true, due), FailureLine::Silent, "and re-armed from then");
-    // A success resets the cadence: the next refusal is a new outage.
-    assert!(log.on_success());
-    assert_eq!(log.on_failure(true, due), FailureLine::CredentialError);
-}
+mod refusal;

@@ -1,6 +1,8 @@
 //! Backend-agnostic supervisor for a LONG-LIVED worker: a persistent OS thread
 //! owns the worker, forwards serialized RPC calls to it, and respawns it on
-//! death (capped-exponential backoff + sliding-window rate alarm). PDEATHSIG-safe
+//! death (capped-exponential backoff + sliding-window rate alarm) — but not on a
+//! live worker's refusal, which is answered and the worker kept (#769, see
+//! `call_error_retires_worker`). PDEATHSIG-safe
 //! (the spawning thread outlives the worker — required under the slice-5a
 //! bwrap-confined launcher). A generalization of the Matrix channel's
 //! historical self-spawning supervised-driver pattern, with no
@@ -99,14 +101,46 @@ impl ClientTransport {
 /// `ClientError::Io` carries a `source`, and keeping it would print the io
 /// text twice wherever this error is rendered with `{e:#}`.
 ///
-/// ⚠️ This does **not** change what the `PersistentWorker` driver thread does
-/// with the error: every call error still triggers a respawn, a live worker's refusal included
-/// (#769 — deliberately separate, since Matrix may rely on it to recover).
+/// The typed refusal is also what the `PersistentWorker` driver thread reads to
+/// decide whether to respawn — see [`call_error_retires_worker`] (#769).
 fn client_error_to_anyhow(e: ClientError) -> anyhow::Error {
     match e {
         ClientError::Rpc(rpc) => anyhow::Error::from(rpc),
         other => anyhow::anyhow!("{other}"),
     }
+}
+
+/// Does this call error mean the worker is gone — retire it and respawn — or
+/// did a live worker answer with a refusal, so it should be kept? Pure.
+///
+/// A structured [`kastellan_protocol::RpcError`] is the one answer a worker can
+/// only give by being alive and listening: it read the request and said no.
+/// Every other error (a closed pipe, an early exit, undecodable bytes, a
+/// desynced stream) means the conversation with this process is over.
+///
+/// **Why a refusal no longer respawns (#769).** Before, every error did. For
+/// the email channel with an expired credential that meant, on every poll, a
+/// `[worker-death]` report for a worker that had not died, a respawn, and
+/// within minutes the respawn-rate alarm — a crash loop, as far as the log
+/// could tell. And the respawn could not help: the fresh worker restores the
+/// same session and store, and the upstream refuses it again.
+///
+/// **What the respawn used to do that still matters, and where it went:**
+/// - *Pacing the retry.* The respawn's ~1 s delay was the only thing slowing
+///   a caller that retries a refused call. The polled channel driver now backs
+///   off on refusals itself (`channel::polled_driver::refusal`).
+/// - *Recovering a wedged Matrix session.* Not this path's job: the Matrix
+///   worker's own sync loop exits the process after sustained sync failures
+///   (`workers/matrix/src/sync_retry.rs`, #348), and that exit IS a death here.
+///   A refused *send* with healthy sync is a room-level answer (unknown room,
+///   forbidden, rate-limited), which a restored session cannot change.
+///
+/// This must agree with the idle-timeout lifecycle's census,
+/// [`crate::worker_lifecycle::idle_timeout::WorkerRetirementCause::from_client_error`],
+/// on every [`ClientError`] as it reaches this driver (after
+/// [`client_error_to_anyhow`]); a test pins that over every variant.
+fn call_error_retires_worker(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<kastellan_protocol::RpcError>().is_none()
 }
 
 impl PersistentTransport for ClientTransport {
@@ -200,10 +234,14 @@ impl PersistentWorker {
                 Err(e) => { let _ = init_tx.send(Err(e)); return; }
             };
             let mut alarm = RespawnRateAlarm::new(ALARM_WINDOW, ALARM_THRESHOLD);
-            // Serve jobs; respawn on transport error.
+            // Serve jobs; respawn when the worker is gone.
             while let Ok(job) = req_rx.recv() {
                 match transport.call(&job.method, job.params) {
                     Ok(v) => { let _ = job.reply.send(Ok(v)); }
+                    // A live worker refused the call (#769): hand the refusal
+                    // to the caller and keep the worker. No death report, no
+                    // respawn, no alarm tick.
+                    Err(e) if !call_error_retires_worker(&e) => { let _ = job.reply.send(Err(e)); }
                     Err(e) => {
                         // MINOR 1 fix: reply to the in-flight caller FIRST so a
                         // panicking death_report cannot prevent the reply.
