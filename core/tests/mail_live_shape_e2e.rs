@@ -49,9 +49,10 @@ mod contract {
 #[test]
 #[ignore = "needs a live localmail — run scripts/mail/live-shape-gate.sh"]
 fn mock_localmail_shapes_match_real_localmail() {
-    let Some(live_localmail::Credentials { endpoint, token }) = live_localmail::credentials_or_skip() else {
+    let Some(credentials) = live_localmail::credentials_or_skip() else {
         return;
     };
+    let (endpoint, token) = (credentials.endpoint(), credentials.token());
 
     // `curl -k` a path; return (status code, lowercased response headers,
     // parsed-JSON-or-none).
@@ -257,9 +258,11 @@ fn mock_localmail_shapes_match_real_localmail() {
     let attachment_rows = with_attachments["results"].as_array().cloned().unwrap_or_else(|| {
         panic!("filter-only /v1/search must key hits under `results`: {with_attachments}")
     });
-    let mut sha: Option<String> = None;
-    // The same attachment by position: (message id, index), for slice D's route.
-    let mut at: Option<(String, usize)> = None;
+    // Stored attachments, in the order found: (message id, position, sha256) —
+    // the position for slice D's route. More than one, because the paging leg
+    // below needs one with enough text, and the first found may be an image.
+    const CANDIDATES: usize = 10;
+    let mut stored: Vec<(String, usize, String)> = Vec::new();
     // Checked once, on the first detail actually fetched (see below).
     let mut detail_shape_checked = false;
     // Checked once, alongside the detail shape.
@@ -413,17 +416,12 @@ fn mock_localmail_shapes_match_real_localmail() {
             );
         }
 
-        if let Some((i, s)) = msg
-            .get("attachments")
-            .and_then(|a| a.as_array())
-            .and_then(|atts| {
-                atts.iter()
-                    .enumerate()
-                    .find_map(|(i, a)| a.get("sha256").and_then(|s| s.as_str()).map(|s| (i, s)))
-            })
-        {
-            sha = Some(s.to_string());
-            at = Some((id.clone(), i));
+        for (i, a) in msg["attachments"].as_array().into_iter().flatten().enumerate() {
+            if let Some(s) = a.get("sha256").and_then(|s| s.as_str()) {
+                stored.push((id.clone(), i, s.to_string()));
+            }
+        }
+        if stored.len() >= CANDIDATES {
             break;
         }
     }
@@ -454,55 +452,108 @@ fn mock_localmail_shapes_match_real_localmail() {
     // as the two asserts above. This used to print a `[NOTE]` and return, which
     // no marker count sees, so an archive without a stored attachment passed
     // the whole attachment half (and #760's slice D leg) having checked nothing.
-    let sha = sha.expect(
+    assert!(
+        !stored.is_empty(),
         "no message among the listed rows carries a stored attachment, so the attachment \
          text and slice D index-route checks verified nothing — point the gate at an archive \
-         (or token) that can see one",
-    );
-    let (status, head, text) = curl("GET", &format!("/v1/attachments/{sha}/text"), None);
-    assert_eq!(status, 200, "attachment text must answer 200, headers:\n{head}");
-    assert!(
-        head.contains("application/json"),
-        "attachment text must be application/json (the #487 contract), headers:\n{head}"
-    );
-    assert!(
-        text.and_then(|v| v.get("text").map(|t| t.is_string())).unwrap_or(false),
-        "attachment text must be a JSON {{\"text\": …}} envelope"
+         (or token) that can see one"
     );
 
-    // #760 (slice D): the same attachment by position, paged. The worker
-    // copies `next_offset` rather than computing it, and treats a body missing
-    // any paging field as a fault — so all four must be on the wire.
-    let (id, i) = at.expect("set beside sha");
-    let page = ok_json(
-        "/v1/messages/{id}/attachments/{index}/text",
-        curl("GET", &format!("/v1/messages/{id}/attachments/{i}/text?offset=0&limit=5"), None),
-    );
-    assert!(page["text"].is_string(), "#760: paged text must carry `text`: {page}");
-    assert_eq!(page["offset"], 0, "#760: {page}");
-    let total = page["total"].as_u64().unwrap_or_else(|| panic!("#760: `total` must be a count: {page}"));
-    let want_next = if total > 5 { serde_json::json!(5) } else { serde_json::Value::Null };
-    assert_eq!(page["next_offset"], want_next, "#760: next_offset for a 5-char window: {page}");
-    let (status, head, _) = curl("GET", &format!("/v1/messages/{id}/attachments/{i}"), None);
-    assert_eq!(status, 200, "#760: the index bytes route must answer 200, headers:\n{head}");
+    // The text routes, in the paged form the worker sends. The worker copies
+    // `next_offset` rather than computing it, and treats a body missing any
+    // paging field as a fault — so all four must be on the wire, on BOTH
+    // routes (#760 slice D). The hash route is the one a planner-typed
+    // `sha256` reads; until #767 this gate fetched it unpaged, a request the
+    // worker never makes.
+    //
+    // The window starts at 2, not 0: a paging parameter the service did not
+    // recognise would be dropped and read as its default, and the default
+    // offset IS 0 — so at 0 a respelled `offset` passed this check. At 2 a
+    // dropped `offset` fails the echo, and a dropped `limit` the `next_offset`.
+    const AT: u64 = 2;
+    const WINDOW: u32 = 5;
+    let end = AT + u64::from(WINDOW);
+    // Every route below is spelled by `contract` — the functions the worker's
+    // `attach::Picked` builds its paths with — never written out here (#767).
+    // A hand copy is how #500 passed every test: the gate checked its own
+    // spelling of a query the worker no longer sent.
+    //
+    // Which attachment: the first whose text runs past the window, since a
+    // text that ends inside it has `next_offset: null` whether or not `limit`
+    // was honoured. Taking simply the first stored one failed the gate on any
+    // archive whose first attachment is an image — a refusal with nothing
+    // wrong, which is how a gate gets switched off. The probe is the very
+    // request asserted below, so it cannot route around a shape change: a
+    // respelled route or `total` fails every probe, and fails here.
+    let mut probed = Vec::new();
+    let (id, i, sha) = stored
+        .iter()
+        .find(|(_, _, sha)| {
+            let (status, _, page) =
+                curl("GET", &contract::text_page_path(&contract::attachment_by_sha_path(sha), AT, WINDOW), None);
+            let total = page.as_ref().and_then(|p| p["total"].as_u64());
+            probed.push(format!("{}…: {status}, total {total:?}", sha.chars().take(12).collect::<String>()));
+            status == 200 && total.is_some_and(|t| t > end)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no stored attachment served a paged /text with more than {end} chars, so a \
+                 dropped `limit` could not be told apart from an honoured one. Either the text \
+                 route changed shape (look at the statuses) or every candidate is short — point \
+                 the gate at an archive with a longer one. Probed: {probed:?}"
+            )
+        });
+    let by_sha = contract::attachment_by_sha_path(sha);
+    let by_index = contract::attachment_by_index_path(id, *i);
+    for blob in [&by_sha, &by_index] {
+        let (status, head, page) = curl("GET", &contract::text_page_path(blob, AT, WINDOW), None);
+        assert_eq!(status, 200, "{blob}/text must answer 200, headers:\n{head}");
+        assert!(
+            head.contains("application/json"),
+            "{blob}/text must be application/json (the #487 contract), headers:\n{head}"
+        );
+        let page = page.unwrap_or_else(|| panic!("{blob}/text: expected a JSON body"));
+        assert!(page["text"].is_string(), "{blob}/text must be a {{\"text\": …}} envelope: {page}");
+        assert_eq!(page["offset"], AT, "#760: {blob}/text must echo the offset: {page}");
+        let total = page["total"].as_u64().unwrap_or_else(|| panic!("#760: `total` must be a count: {page}"));
+        // Re-asserted: the probe read the hash route only, and this loop also
+        // reads the index route.
+        assert!(total > end, "{blob}/text holds only {total} chars, past the probe's {end}: {page}");
+        assert_eq!(page["next_offset"], end, "#760: next_offset for a {WINDOW}-char window at {AT}: {page}");
+    }
 
-    // #760: the worker checks bytes fetched by position against the sha256 the
-    // listing gave (`attach::Picked::verify_bytes`), on the premise that
-    // localmail stores a blob under the hash of exactly the bytes this route
-    // serves. Proven here against the real service — a hermetic fixture can
-    // only agree with whoever wrote it. Raw bytes, so not through `curl` above
-    // (which reads the body as lossy UTF-8).
+    // The bytes routes. localmail stores a blob under the sha256 of exactly
+    // the bytes it serves (`attachments.py`); the worker relies on that twice.
+    // By position, `attach::Picked::verify_bytes` checks the bytes against the
+    // listed sha256 and refuses a mismatch. By hash, it does not re-check at
+    // all, on the premise that localmail already matched them. Both are proven
+    // here against the real service, since a hermetic fixture can only agree
+    // with whoever wrote it.
+    for blob in [&by_index, &by_sha] {
+        assert_eq!(
+            raw_sha256(endpoint, token, blob),
+            *sha,
+            "#760: {blob} must serve bytes hashing to the sha256 get_message listed, or \
+             verify_bytes refuses every message-resolved get_attachment (index route) and a \
+             planner-typed hash saves unverified bytes (hash route)"
+        );
+    }
+}
+
+/// The sha256 of the raw bytes localmail serves at `path`, hex. Not through
+/// the test's `curl` closure, which reads the body as lossy UTF-8.
+fn raw_sha256(endpoint: &str, token: &str, path: &str) -> String {
+    use sha2::{Digest, Sha256};
     let raw = Command::new("curl")
-        .args(["-skf", "-H", &format!("Authorization: Bearer {token}")])
-        .arg(format!("{endpoint}/v1/messages/{id}/attachments/{i}"))
+        .args(["-sSkf", "-H", &format!("Authorization: Bearer {token}")])
+        .arg(format!("{endpoint}{path}"))
         .output()
         .expect("curl");
-    assert!(raw.status.success(), "#760: raw fetch of the index bytes route failed");
-    use sha2::{Digest, Sha256};
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&raw.stdout)),
-        sha,
-        "#760: the index route's bytes must hash to the sha256 get_message listed at that \
-         position, or verify_bytes refuses every message-resolved get_attachment"
+    assert!(
+        raw.status.success(),
+        "raw fetch of {path} failed ({}): {}",
+        raw.status,
+        String::from_utf8_lossy(&raw.stderr).trim()
     );
+    format!("{:x}", Sha256::digest(&raw.stdout))
 }

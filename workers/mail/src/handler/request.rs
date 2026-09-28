@@ -49,13 +49,17 @@ impl Tool {
     }
 }
 
-/// `mail.search`'s params, validated. `filters` is already normalised (the
-/// top-level `account_ids`/`folder_ids` folded in and typed).
+/// `mail.search`'s params, validated.
 #[derive(Debug)]
 pub(super) struct Search {
     /// `""` for a filter-only search (#698): absent and `null` both mean "no text".
     pub query: String,
-    pub filters: Option<serde_json::Value>,
+    /// The top-level `account_ids`/`folder_ids` folded in and typed — by
+    /// construction, since only `search_params::normalize_filters` makes one.
+    pub filters: Option<search_params::NormalizedFilters>,
+    /// `None` when absent, `null`, `""` or only whitespace (#768) — "no sort",
+    /// which `sort::plan_sort` then decides. Any other value is trimmed and
+    /// passed through for localmail to validate (see `crate::sort`).
     pub sort: Option<String>,
     pub limit: Option<u32>,
     pub cursor: Option<String>,
@@ -232,7 +236,7 @@ fn parse_search(params: serde_json::Value) -> Result<Search, RpcError> {
     Ok(Search {
         query: p.query.unwrap_or_default(),
         filters,
-        sort: p.sort,
+        sort: p.sort.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()),
         limit: p.limit,
         cursor: p.cursor,
     })

@@ -7,11 +7,13 @@
 // values this worker actually sends rather than a hand-copied list (this crate
 // is bin-only, so neither can import it). Two consequences:
 //
-// * Keep it to `pub const` items of plain types — no `use`, no inner `//!`
-//   docs (an `include!`d file may not carry inner attributes), nothing that
-//   needs this crate's other modules.
-// * Every constant here must be USED by the live gate. The gate does not
-//   silence dead code (the mock's tests do, deliberately), so a constant it
+// * Keep it to `pub const` items of plain types and pure `pub fn`s over plain
+//   types — no `use` (spell `std::fmt::Display` out), no inner `//!` docs (an
+//   `include!`d file may not carry inner attributes), nothing that needs this
+//   crate's other modules. A route is a function rather than const fragments
+//   (#767) so its separators and parameter order have one source too.
+// * Every item here must be USED by the live gate. The gate does not
+//   silence dead code (the mock's tests do, deliberately), so an item it
 //   ignores is a `dead_code` warning there, which CI's
 //   `cargo clippy … -D warnings` refuses — a wire fact added here without the
 //   live gate referencing it does not pass CI. (`cargo build`/`test` only
@@ -60,3 +62,35 @@ pub const SNIPPET_CHARS: u32 = 120;
 /// `full_headers=true`, which localmail silently drops, and every test agreed
 /// with it because each was written from the same reading.
 pub const HEADER_LIST_QUERY: &str = "headers=list";
+
+/// localmail's route for the original bytes of one attachment, **by its
+/// position** in a message's `attachments` array (slice D, `api_minor` 2).
+/// The worker fetches every message-resolved attachment this way
+/// (`attach::Picked::blob_path`): the route re-checks the message's ACL and
+/// serves that entry's own filename. `/text` under it is the extracted text.
+///
+/// ⚠️ Validates nothing: the worker calls it only from `Picked`, whose
+/// constructors vet every segment. Don't hand it a planner string.
+pub fn attachment_by_index_path(message_id: impl std::fmt::Display, index: usize) -> String {
+    format!("/v1/messages/{message_id}/attachments/{index}")
+}
+
+/// localmail's route for the original bytes of a stored blob, **by its
+/// sha256** — used only for a hash the planner typed, which names no message.
+/// `/text` under it is the extracted text.
+///
+/// ⚠️ Validates nothing — the sha is interpolated into the path as given. The
+/// worker calls it only from `Picked`, whose sha is vetted by `is_sha256`.
+pub fn attachment_by_sha_path(sha256: &str) -> String {
+    format!("/v1/attachments/{sha256}")
+}
+
+/// One page of an attachment's extracted text: `limit` characters from
+/// character `offset`, under either route above (`blob_path` is what one of
+/// them returned). Both text routes page the same way. The parameter NAMES are
+/// the #500 lesson again: a renamed one is dropped silently by the service,
+/// which then serves its default window, and every test written from our own
+/// reading would still agree.
+pub fn text_page_path(blob_path: &str, offset: u64, limit: u32) -> String {
+    format!("{blob_path}/text?offset={offset}&limit={limit}")
+}

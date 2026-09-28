@@ -177,7 +177,8 @@ fn invalid_params_are_refused_before_the_version_gate() {
         ("mail.get_attachment", serde_json::json!({})),
         ("mail.get_attachment", serde_json::json!({"index": 0})),
         ("mail.get_attachment", serde_json::json!({"filename": "a.pdf"})),
-        ("mail.get_attachment", serde_json::json!({"sha256": "A".repeat(64)})),
+        // Not hex. (Uppercase hex is no longer invalid: #768 lowercases it.)
+        ("mail.get_attachment", serde_json::json!({"sha256": "g".repeat(64)})),
         ("mail.get_attachment", serde_json::json!({"message_id": 5, "sha256": ""})),
         // list_accounts takes no params: a filter it would ignore is refused.
         ("mail.list_accounts", serde_json::json!({"account_ids": [3]})),
@@ -215,4 +216,17 @@ fn a_refusal_is_asked_again_and_a_pass_is_remembered() {
     assert!(h.call("mail.search", q.clone()).is_err(), "1.2 refused");
     h.call("mail.search", q.clone()).expect("upgraded to 1.3");
     h.call("mail.search", q).expect("remembered; the fake panics on a third ask");
+}
+
+/// #768 end to end: an uppercase `sha256` is accepted by the bare form and
+/// fetched by its lowercase spelling — the only one the traversal guard
+/// vouches for. Pinned at the handler, not just at `attach::choose`, so a
+/// pre-check added in `request` cannot quietly refuse it again.
+#[test]
+fn an_uppercase_planner_hash_is_fetched_lowercased() {
+    let mut h = MailHandler::with_client(client_with(Box::new(attachments::TextFake)));
+    let sha = "ab".repeat(32);
+    let out = h.call("mail.get_attachment_text", serde_json::json!({"sha256": sha.to_uppercase()})).unwrap();
+    assert!(out["text"].as_str().unwrap().starts_with(&format!("/v1/attachments/{sha}/text?")), "{out}");
+    assert_eq!(out["sha256"], sha, "{out}");
 }

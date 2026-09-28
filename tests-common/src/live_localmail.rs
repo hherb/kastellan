@@ -43,12 +43,29 @@ pub const TOKEN_ENV: &str = "KASTELLAN_MAIL_TOKEN";
 
 /// Where the live localmail is, and how to authenticate to it.
 ///
+/// The fields are private (#768), so the only way to hold one is through
+/// [`credentials_from`]'s trim and non-blank checks. With `pub` fields a
+/// struct literal skipped them, and [`decide`] would have announced `[E2E]`
+/// for a blank endpoint.
+///
 /// `Debug` is written by hand so the token cannot reach a panic message or a
 /// log through a `{:?}`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials {
-    pub endpoint: String,
-    pub token: String,
+    endpoint: String,
+    token: String,
+}
+
+impl Credentials {
+    /// The base URL, trimmed and non-blank, e.g. `https://10.0.0.3:8443`.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// The bearer token, trimmed and non-blank. Never log it.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
 }
 
 impl std::fmt::Debug for Credentials {
@@ -91,10 +108,21 @@ pub fn credentials_from(endpoint: Option<String>, token: Option<String>) -> Resu
 ///
 /// When [`KNOB`] is set and a credential is missing, naming it.
 pub fn credentials_or_skip() -> Option<Credentials> {
-    let action = KNOB.action();
+    credentials_from_env(KNOB.action(), |name| std::env::var(name), &mut std::io::stderr())
+}
+
+/// [`credentials_or_skip`] with the environment and the marker sink as
+/// parameters, so a test can check which variables it reads and that `action`
+/// reaches [`decide`] unchanged — without mutating the process environment,
+/// which every other test in the binary shares (#768).
+fn credentials_from_env(
+    action: UnmetAction,
+    env: impl Fn(&str) -> Result<String, std::env::VarError>,
+    out: &mut dyn Write,
+) -> Option<Credentials> {
     // A set-but-not-UTF-8 value is named as such: `.ok()` would report it as
     // unset, and send the operator to set a variable that is already set.
-    let read = |name: &str| match std::env::var(name) {
+    let read = |name: &str| match env(name) {
         Ok(v) => Ok(Some(v)),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!("no live localmail: {name} is set but is not UTF-8")),
@@ -103,7 +131,7 @@ pub fn credentials_or_skip() -> Option<Credentials> {
         (Ok(endpoint), Ok(token)) => credentials_from(endpoint, token),
         (Err(why), _) | (_, Err(why)) => Err(why),
     };
-    decide(action, found, &mut std::io::stderr())
+    decide(action, found, out)
 }
 
 /// [`credentials_or_skip`] after the environment is read, writing its marker
