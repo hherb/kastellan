@@ -11,7 +11,7 @@
 **Last updated:** 2026-09-29, latest (#782 + #783 — replies queue per conversation, a refused one is
 given up and audited, and refusal lines carry `[worker-refusal]`, PR #787; the operator is still
 running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#786](https://github.com/hherb/kastellan/pull/786) (#785), [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+**Recent PRs, newest first:** [#787](https://github.com/hherb/kastellan/pull/787) (#782, #783), [#786](https://github.com/hherb/kastellan/pull/786) (#785), [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
 [#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
@@ -20,7 +20,7 @@ running the #773 live re-measure) ·
 **The #725 → #748 worker-report arc is closed**, #748 being its last piece. Its review residue
 is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/) snapshots;
 **`gh issue list --state open` is the live answer** and the only one worth trusting. ·
-**The DGX runs PR #787's branch** (`fix/782-per-conversation-reply-queues` @ `69424849`, i.e. `main` @ #786 + #787), deployed 2026-09-29 (evening) with a copy of `scripts/upgrade_from_git.sh` whose `git switch main` named the branch — 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at attempt 1. ⚠️ **Its checkout is on that branch, not `main`**: `upgrade_from_git.sh` switches back to `main` by itself, so after #787 merges a plain run is right. Before that: #776's deploy, 2026-09-27 (evening) via `scripts/upgrade_from_git.sh`
+**The DGX runs PR #787's branch** (`fix/782-per-conversation-reply-queues` @ `69424849`, i.e. `main` @ #786 + #787), deployed 2026-09-29 (evening) with a copy of `scripts/upgrade_from_git.sh` whose `git switch main` named the branch — 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at attempt 1. ⚠️ **Its checkout is on that branch, not `main`**: #787 has since merged (same tree), and `upgrade_from_git.sh` switches back to `main` by itself, so the next plain run is right. Before that: #776's deploy, 2026-09-27 (evening) via `scripts/upgrade_from_git.sh`
 (15 binaries; generated env **and** `.local` overlay byte-identical to the pre-deploy backups
 `~/kastellan.env*.bak-pre776`; Matrix channel up; `NRestarts=0`). The live process's environ has
 `KASTELLAN_LLM_DISABLE_THINKING=0`, `KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort`,
@@ -481,6 +481,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **[#787](https://github.com/hherb/kastellan/pull/787)** (#782, #783) — replies queue per conversation; a refused one is given up and audited; `[worker-refusal]` marker. Filed #788, #789, #790.
 - **[#786](https://github.com/hherb/kastellan/pull/786)** (#785) — the four recall lanes stop returning L0 and L3 rows.
 - **[#784](https://github.com/hherb/kastellan/pull/784)** — docs only: the cognee / cognee-rs survey; its own-tree finding filed as #785.
 - **[#781](https://github.com/hherb/kastellan/pull/781)** (#769) — a live worker's `RpcError` keeps the worker; the polled driver backs off per method. Filed #782, #783.
