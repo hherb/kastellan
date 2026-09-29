@@ -20,7 +20,7 @@ running the #773 live re-measure) ·
 **The #725 → #748 worker-report arc is closed**, #748 being its last piece. Its review residue
 is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/) snapshots;
 **`gh issue list --state open` is the live answer** and the only one worth trusting. ·
-**The DGX runs `main` as of #776**, redeployed 2026-09-27 (evening) via `scripts/upgrade_from_git.sh`
+**The DGX runs PR #787's branch** (`fix/782-per-conversation-reply-queues` @ `69424849`, i.e. `main` @ #786 + #787), deployed 2026-09-29 (evening) with a copy of `scripts/upgrade_from_git.sh` whose `git switch main` named the branch — 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at attempt 1. ⚠️ **Its checkout is on that branch, not `main`**: `upgrade_from_git.sh` switches back to `main` by itself, so after #787 merges a plain run is right. Before that: #776's deploy, 2026-09-27 (evening) via `scripts/upgrade_from_git.sh`
 (15 binaries; generated env **and** `.local` overlay byte-identical to the pre-deploy backups
 `~/kastellan.env*.bak-pre776`; Matrix channel up; `NRestarts=0`). The live process's environ has
 `KASTELLAN_LLM_DISABLE_THINKING=0`, `KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort`,
