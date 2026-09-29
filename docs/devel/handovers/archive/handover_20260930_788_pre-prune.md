@@ -4,23 +4,35 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260930_788_pre-prune.md`](archive/handover_20260930_788_pre-prune.md),
+> [`archive/handover_20260929_785_pre-prune.md`](archive/handover_20260929_785_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-30 (#788 + #789 + #790 — the review residue of #787, PR #791; the
-operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#791](https://github.com/hherb/kastellan/pull/791) (#788, #789, #790), [#787](https://github.com/hherb/kastellan/pull/787) (#782, #783), [#786](https://github.com/hherb/kastellan/pull/786) (#785), [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765).
-Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
-answer** and the only one worth trusting. ·
-**The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
-#787 since the merge): 15 binaries, generated env **and** `.local` byte-identical to
-`~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at
-attempt 1. `scripts/upgrade_from_git.sh` switches its checkout back to `main` by itself, so the next
-plain run is right. ⚠️ **This PR's changes are not deployed.** The live process runs thinking **ON**
-(`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`, `TIMEOUT_MS=600000`). The
-last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN]`, 4 `[SKIP]`
-(gliner opt-in). Rootfs images last rebuilt 2026-09-08.
+**Last updated:** 2026-09-29, latest (#782 + #783 — replies queue per conversation, a refused one is
+given up and audited, and refusal lines carry `[worker-refusal]`, PR #787; the operator is still
+running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#787](https://github.com/hherb/kastellan/pull/787) (#782, #783), [#786](https://github.com/hherb/kastellan/pull/786) (#785), [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
+[#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
+[#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
+[#740](https://github.com/hherb/kastellan/pull/740) (#736), [#735](https://github.com/hherb/kastellan/pull/735) (#730),
+[#731](https://github.com/hherb/kastellan/pull/731) (#725), [#728](https://github.com/hherb/kastellan/pull/728) (#699, #700),
+[#726](https://github.com/hherb/kastellan/pull/726) (#719), [#720](https://github.com/hherb/kastellan/pull/720) (the REQUIRE-knob contract).
+**The #725 → #748 worker-report arc is closed**, #748 being its last piece. Its review residue
+is filed as #751–#754 and #757. Older filings are in the [`archive/`](archive/) snapshots;
+**`gh issue list --state open` is the live answer** and the only one worth trusting. ·
+**The DGX runs PR #787's branch** (`fix/782-per-conversation-reply-queues` @ `69424849`, i.e. `main` @ #786 + #787), deployed 2026-09-29 (evening) with a copy of `scripts/upgrade_from_git.sh` whose `git switch main` named the branch — 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at attempt 1. ⚠️ **Its checkout is on that branch, not `main`**: #787 has since merged (same tree), and `upgrade_from_git.sh` switches back to `main` by itself, so the next plain run is right. Before that: #776's deploy, 2026-09-27 (evening) via `scripts/upgrade_from_git.sh`
+(15 binaries; generated env **and** `.local` overlay byte-identical to the pre-deploy backups
+`~/kastellan.env*.bak-pre776`; Matrix channel up; `NRestarts=0`). The live process's environ has
+`KASTELLAN_LLM_DISABLE_THINKING=0`, `KASTELLAN_LLM_THINKING_SWITCH=reasoning_effort`,
+`KASTELLAN_LLM_TIMEOUT_MS=600000`, and the boot line reads `"disable_thinking":false,
+"thinking_switch":"reasoning_effort"` — so planning **thinks** (deliberately) and the #774 synthesis
+retry can drop it. No sweep was re-run for #776 on the DGX beyond its PR gate (core `scheduler::`
+369, llm-router 116 + 6, cold clippy, 0 `[SKIP]`). The #770 deploy's post-deploy full sweep: **187/187 suites, 4729 passed / 0 failed / 79 ignored**, 0
+`[WARN]`, 4 `[SKIP]` (all the opt-in GLiNER tier); `mail-live` gate green as evidence; the
+force-routed live round trip green with the real key and, with a **bogus key**, failing as
+`-32004` "localmail rejected kastellan's credential (HTTP 401) … retrying will not help" through the
+real sandboxed worker + MITM proxy. Rootfs images last rebuilt
+2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -58,51 +70,49 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-09-30): #788 + #789 + #790 — the review residue of #787 (PR #791)
+### This session (2026-09-29, later): #782 + #783 — a stuck room holds only itself, and refusals are marked
 
-- **#788 — a refusal that ENDS says so on the marked stream.** `accepted()` emits "the worker
-  accepted `<method>` [for conversation `<c>`] again after N refusals; that refusal has ended"
-  (pure `format_accepted_report`) through `emit_worker_refusal_report` at the new
-  **`RefusalSeverity::Info`**, whose `warn_and_fall_back!` arm is `level = INFO`, checked at
-  INFO. ⚠️ **An INFO line falls back under an operator's `RUST_LOG=warn` too, on purpose**: it
-  closes a refusal that was shown, and it is one line per run. ⚠️ **The two outage lines
-  (`note_answer`, `report_down`) stay unmarked, deliberately** (doc in `outage.rs`): the
-  supervisor's `[worker-death]`, plus a `[worker-down]` for every failed respawn, already tell that
-  story on the marked stream.
-- **#789 — no audit sink blocks the driver thread.** One helper, `core/src/main/audit_sink.rs`
-  `spawn_audit_insert`, used by both daemon sinks (Matrix `reply_undelivered`, email
-  `skipped_ack_only`). ⚠️ **Tested with no Postgres**: `audit_sink::test_support::stalled_pool` is
-  a `TcpListener` that accepts and never answers, plus a positive control that a *waited-for*
-  insert takes the acquire timeout. ⚠️ Build that pool **inside** a runtime
-  (`rt.block_on(async { stalled_pool() })`): a lazy pool spawns its maintenance task as it is made.
-- **#790 — the reply audit hook cannot see the body.** `ReplyUndeliveredAudit` takes
-  `channel::UndeliveredReply<'_>` (channel, peer, conversation, reason; `payload()`), which has no
-  body field. Driver tests tell audited replies apart by **peer** (`tests/replies.rs` `reply()`
-  sets the peer to the body).
-- **Splits, movement only (own commit, byte-identical, fn set checked, negative control):**
-  `channel/mod.rs` 508 → 394 (+ `channel/undelivered.rs`), `polled_driver.rs` 517 → 467
-  (+ `polled_driver/audit.rs`). Paths unchanged via re-exports.
-- Mutants 4/4 killed (helper blocks; email sink back to `block_on`; the INFO arm checked at WARN;
-  the recovery line bypassing the emitter).
-
-### Previous (2026-09-29): #782 + #783 — a stuck room holds only itself (PR #787)
-
-Full prose in the `788` archive snapshot. What still binds:
-
-- **Replies queue per conversation** (`polled_driver/replies.rs`, pure `ReplyQueues`, clock passed
-  in). A reply is **given up** at `REPLY_GIVE_UP`: ≥ 1 h of its conversation refusing **with the
-  channel otherwise answering**, **and** ≥ 3 refusals (`min_refusals ≥ 2` enforced at spawn); then
-  audited `channel.reply_undelivered` (`gave_up` / `queue_full` / `driver_exit`; the bus writes
-  `send_failed`). Each queue is capped at 256. A driver that exits audits what it drops.
-- ⚠️ **A channel-wide failure holds every conversation, charges none, and RESTARTS every give-up
-  clock** (refused credential, `UPSTREAM_UNAVAILABLE`, dead worker, failed poll). Cost: a channel
-  failing more often than hourly never gives up a dead room (still capped, named every 15 min).
-- ⚠️ **The Matrix worker's 401 is `UPSTREAM_UNAVAILABLE` (-32005), NOT `UPSTREAM_AUTH_FAILED`**:
-  the latter makes the supervisor start a fresh worker while the old one runs — two matrix-sdk
-  clients on one crypto store. A 403 is a room's answer in Matrix.
-- ⚠️ **Don't test a driver line through a scoped `tracing` subscriber** (callsite interest is
-  process-wide; flaked 6 in 30). Read `worker_stderr::emitted_refusal_lines_for(label)`, one
-  channel label per test.
+- **Replies queue per conversation** (`core/src/channel/polled_driver/replies.rs`, pure `ReplyQueues`
+  + `ConversationQueue::on_front_refused`, clock passed in): order holds *within* a conversation; a
+  refused reply holds only its own room. **Given up** at `REPLY_GIVE_UP` — **≥ 1 h** of that
+  conversation refusing **with the channel otherwise answering**, **and ≥ 3** refusals of that
+  reply (`min_refusals ≥ 2` is enforced at spawn: a reply always gets a retry of its own) — then
+  logged with its conversation and audited `channel.reply_undelivered` with a fixed `reason`
+  (`gave_up` / `queue_full` / `driver_exit`; the bus writes `send_failed`) through
+  `DriverAudit.reply_undelivered`. The daemon's Matrix sink (`main/matrix_boot.rs`) **spawns** the
+  insert — never `block_on` on the driver thread. Each queue is capped at 256.
+- ⚠️ **A channel-wide failure holds every conversation, charges none, and RESTARTS every
+  conversation's give-up clock** (review round, the critical finding): a refused credential, an
+  `UPSTREAM_UNAVAILABLE` answer, a dead worker, a failed poll. Without it a homeserver down
+  overnight gave up every room's replies. Cost: a channel failing more often than hourly never
+  gives up a dead room (still capped, still named every 15 min).
+- ⚠️ **The Matrix worker now says whose problem a failed send is** (`workers/matrix/src/sdk.rs`,
+  pure `classify_send_failure`): 403 / unknown room / bad id stay `OPERATION_FAILED` (the room's);
+  **no response, 5xx, 429 and 401 are the new `codes::UPSTREAM_UNAVAILABLE` (-32005)** →
+  `CallFailure::Unavailable`. ⚠️ **The 401 is deliberately NOT `UPSTREAM_AUTH_FAILED`**: the
+  supervisor answers that by starting a fresh worker *while the old one runs* — two matrix-sdk
+  clients on one crypto store. A 403 is a room's answer in Matrix, never a credential one.
+  **Needs a DGX redeploy of the Matrix worker (and `matrix.ext4` if VM mode) to take effect.**
+- **A driver that exits drops what is queued, and says so** (`discard_on_exit`): one
+  `[worker-refusal]` line per conversation + a `driver_exit` row per reply. Drop lines now say
+  "NOT recorded" when the channel has no sink (email, the CLI probe). `DriverAudit` has no
+  `Default` — `DriverAudit::none()` names the choice. The probe prints **QUEUED**, not SENT.
+- **`[worker-refusal]`** (#783, `worker_stderr/report/refusal.rs`, 4th entry in
+  `STDERR_FALLBACK_MARKERS`): every refusal line goes through `emit_worker_refusal_report`;
+  `warn_and_fall_back!` gained a `level = ERROR` arm. ⚠️ The lines' `method`/`error`/`retry_in_ms`
+  **fields are gone** — folded into the text; only `label` stays a field. Pinned end to end by the
+  new re-exec suite `worker_refusal_stderr_fallback_e2e` (marker, defanging, and each severity at
+  its own level under an ERROR-only subscriber).
+- ⚠️ **Don't test a driver line through a scoped `tracing` subscriber.** `tracing` caches callsite
+  interest process-wide; #787's first try flaked **6 in 30** even after `rebuild_interest_cache()`.
+  Test builds record every line the refusal emitter is handed (`EMITTED`, read with
+  `worker_stderr::emitted_refusal_lines_for(label)`) — give each test its own channel label.
+- Splits first, movement-only (commit 1): `delivery.rs` → `delivery/tests.rs` + `delivery/tests/fd.rs`;
+  `polled_driver/tests.rs` → `tests/ack.rs`; the review round split the reply tests into
+  `tests/replies.rs` (pure) + `tests/replies_driver.rs`. Filed from the review, not fixed:
+  [#788](https://github.com/hherb/kastellan/issues/788) (recovery lines carry no marker),
+  [#789](https://github.com/hherb/kastellan/issues/789) (the email skipped-id sink still
+  `block_on`s), [#790](https://github.com/hherb/kastellan/issues/790) (the audit hook sees the body).
 
 ### Previous (2026-09-29): #785 — `<recalled>` is not a door around the L0/L3 gates (PR #786)
 
@@ -110,6 +120,21 @@ Pure `MemoryLayer::is_recallable` (exhaustive; **L1, L2, L4 yes, L0 and L3 no**)
 four lanes' SQL **before each `LIMIT`** (and the entity lane's fan-out), re-checked after hydration
 (`error!` + `debug_assert!`). ⚠️ **L1 stays recallable on purpose** (older insights past the 32-row /
 4 KiB block cap). Pinned by `memory_recall_layer_gate_e2e` (in the `pg` profile).
+
+### Previous (2026-09-28): #769 — a refusal is not a death (PR #781); cognee survey (PR #784)
+
+One classifier, `worker_lifecycle/persistent/call_failure.rs` (`Gone` / `Refused` /
+`CredentialRefused`), read by the supervisor **and** the polled driver. ⚠️ A worker reads its
+credential **once, at spawn**, so a credential refusal replaces it quietly. ⚠️ **A refused ack holds
+the next poll** (unpaced, it re-delivered the same email in a loop). ⚠️ **Workspace MSRV is 1.78**.
+The cognee survey ([notes](../notes/2026-09-28-cognee-survey.md)) is **not a dependency**; borrow
+relation provenance + supersession and a recall-eval harness (ROADMAP Phase 1, *proposed*).
+
+### Previous (2026-09-27/28): #767 + #768 (PR #778)
+
+Route spellings are pure `pub fn`s in `localmail_contract.rs` (⚠️ `include!`d three times: no `use`,
+no `//!`). The live gate pages from offset **2** [[probe-value-equal-to-default-hides-dropped-param]].
+Filed #779 (a policy call), #780.
 
 ### Previous (2026-09-27): #773 + #774 — thinking, and slow planning calls — what still binds
 
@@ -151,29 +176,37 @@ Full prose in [`archive/handover_20260927_673_pre-prune.md`](archive/handover_20
   `KASTELLAN_MAIL_LIVE_REQUIRE_E2E`). ⚠️ **A new `*_or_skip` helper must be classified** in
   `microvm/guard.rs` (`BANNED_HELPERS` or `REQUIRE_AWARE`) or the roster test refuses it.
 
-### Previous (2026-09-20/23): the worker-report arc (#725 → #750, #748) and #755
+### Previous (2026-09-23, later): #755 — a marker stranded mid-line is refused
 
-Full prose in the `748`/`755`/`698` archive snapshots. What still binds:
+Full prose in [`archive/handover_20260926_698_pre-prune.md`](archive/handover_20260926_698_pre-prune.md).
+What still binds:
+
+- **The fix is structural:** `run-e2e-gate.sh` refuses a counted marker as the first `[` on a
+  `test <name> ... ` line — ⚠️ libtest leaves **two** gaps (before the result word, and between it
+  and its `\n`). Counts stay anchored. Tests in `gate_script_tests/mid_line.rs`.
+- ⚠️ **#718's unframed `[SKIP]`s outside every profile would be refused** the day a profile selects
+  them — frame them when you do.
+- ⚠️ **The scan reads bytes:** `grep -a`, verdict from the **exit status**, assertions under
+  `LC_ALL=C`. One NUL made GNU grep print nothing and exit 0 (the Mac hid it)
+  [[gnu-grep-binary-file-prints-nothing-exit-0]]. Deferred hardening: #759.
+
+### Previous (2026-09-20/23): the #725 → #750 worker-report arc and #748
+
+Full prose in the `748`/`755` archive snapshots. What still binds:
 
 - **Every profiled test binary must reach the panic hook, checked at RUN time** — call
-  `panic_hook::install_once()` first. `MAX_PANIC` is blind before the first knob read (#757).
-- ⚠️ **`warn_and_fall_back!` must stay a MACRO** (the check expands at the emitter's callsite, every
-  field incl. `message` named, **at the event's own level** — #788 added the INFO arm).
-  **`eprintln!` is load-bearing** [[libtest-capture-only-print-macros]]. **No marker may begin with
-  `[SKIP]`/`[WARN]`/`[E2E]`**; `WorkerRetirementCause::from_client_error` is THE census.
-- **#755:** `run-e2e-gate.sh` refuses a counted marker stranded mid-line (libtest leaves **two**
-  gaps). ⚠️ #718's unframed `[SKIP]`s would be refused the day a profile selects them. ⚠️ **The
-  scan reads bytes** — `grep -a`, exit status, `LC_ALL=C` [[gnu-grep-binary-file-prints-nothing-exit-0]].
-  ⚠️ **`grep -c` counts lines** [[grep-c-counts-lines-not-matches]].
+  `panic_hook::install_once()` first; a knob installs it through **two** doors (`raw()`,
+  `action_reporting_to`). `MAX_PANIC` measured 0 on all five profiles; blind before the first knob
+  read (#757). ⚠️ **`grep -c` counts lines** [[grep-c-counts-lines-not-matches]].
+- ⚠️ **`warn_and_fall_back!` must stay a MACRO** (the delivery check expands at the emitter's
+  callsite, `message` field included). **`eprintln!` is load-bearing** [[libtest-capture-only-print-macros]].
+- ⚠️ **No marker may begin with `[SKIP]`/`[WARN]`/`[E2E]`** (`[worker-failed]`, `[worker-death]`,
+  `[worker-down]`, `[panic]`, `[panic-hook]` — disjoint, tested). `shutdown()`'s join is the only
+  proof a report was emitted; `WorkerRetirementCause::from_client_error` is THE census.
+- ⚠️ **Give a mutating reviewer its own worktree, and bracket every sweep with a source sha**
+  [[never-edit-tree-during-a-sweep]].
 
 ### Merged arcs — only what still binds
-
-**#769 (PR #781) — a refusal is not a death.** One classifier, `persistent/call_failure.rs`
-(`Gone` / `Refused` / `CredentialRefused` / `Unavailable`), read by the supervisor **and** the polled
-driver. ⚠️ A worker reads its credential **once, at spawn**. ⚠️ **A refused ack holds the next poll.**
-⚠️ **Workspace MSRV is 1.78.** The cognee survey (#784, [notes](../notes/2026-09-28-cognee-survey.md))
-is **not a dependency**. **#767/#768:** route spellings are pure `pub fn`s in `localmail_contract.rs`;
-the live gate pages from offset **2** [[probe-value-equal-to-default-hides-dropped-param]].
 
 **#694 (#617).** `truncate_payload` derives `req_summary = {head, sha256, len}` centrally, over the
 **whole** request. ⚠️ **No sink double can test it** [[audit-sink-doubles-hide-storage-transforms]].
@@ -324,15 +357,13 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `core/src/channel/bus.rs`, `workers/matrix/src/sdk_live.rs`, `llm-router/src/messages.rs`,
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
-`core/src/channel/email/mod.rs` 542, `worker_stderr/report/tool_worker.rs` 710.
+`core/src/channel/email/mod.rs` 542 (+7 in #782, a doc block), `worker_stderr/report/tool_worker.rs` 710.
 Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
 `tool_dispatch.rs` 722, `attach/tests.rs` 727, `require.rs` 661,
 `scripts/run-e2e-gate.sh` 561 (shell). ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
 its next leg** (the attachment half is the natural cut). Recent splits done **first** (the pattern to
 keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memories/search.rs`,
-#782 `report/delivery.rs` and `polled_driver/tests.rs`, #788 `channel/mod.rs` (→ `undelivered.rs`) and
-`polled_driver.rs` (→ `polled_driver/audit.rs`). ⚠️ `polled_driver/replies.rs` is at **489** — split it before
-it grows.
+#782 `report/delivery.rs` (→ `delivery/tests{,/fd}.rs`) and `polled_driver/tests.rs` (→ `tests/ack.rs`).
 Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
@@ -366,8 +397,10 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#788 + #789 + #790 — **the gate that stands**) | the split commit on PR #791 (`91299630`) | **4741 / 0 / 50**, **190** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against the row below: #787's review round +18 / +2 ign / +1 suite (predicted there, never measured until now) and this PR +10 / +1 ign — core lib 2311 → 2317 (+6: recovery line 4, INFO arm 1, the view 1), `kastellan` bin 17 → 20 (+3: helper + one per sink), `worker_refusal_stderr_fallback_e2e` 2 → 3 (+1 ign). Mutants 4/4 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-788`, **27** `Checking kastellan` (303 compile/check lines from `proc-macro2`) | **23** Mac |
-| **Mac** (#782 + #783 — superseded) | the feature commit on PR #787 | **4713 / 0 / 47**, **189** suites. The sweep measured **4714**, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +22, predicted exactly**, all core lib: `polled_driver::tests::replies` +16, `report::refusal` +3, `delivery` +2, `channel::tests` +1. Then clippy refused one constant-valued test; it became a `const` assert in `replies.rs` (−1: core lib re-run 2300 → 2299, bins 16/96 unchanged). Mutants 10/11 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-782` (fresh dir: **27** `Checking kastellan`, then core re-checked after the fixes) | **23** Mac |
+| **Mac** (#787 review round — **targeted, NOT a full sweep**) | the review-fix commit on PR #787 | Affected suites only, `TEST_EXIT=0`, `--no-fail-fast -- --test-threads=4`: core lib **2311 / 0 / 1** (+12: reply tests 15 → 25, `persistent` +1, `channel` +1), `kastellan` bin 17 (+1, `matrix_boot` row), `kastellan-cli` 96, `email_channel_e2e` 8, `matrix_channel_e2e` 2, `persistent_worker_death_stderr_fallback_e2e` 4 + 4 ign, **new** `worker_refusal_stderr_fallback_e2e` 2 + 2 ign, protocol 20, matrix worker 20 (+3). Predicted full-sweep delta **+18 passed, +2 ignored, +1 suite** — not measured: `syspolicyd` was saturated all session ([[mac-fresh-large-binaries-hang-in-dyld]]), one warm build took 27 min. Reply tests **30/30** (the scoped-subscriber version: 6/30 failed). Mutants 2/2 on the clock restarts | exit 0 **warm** (20 `Checking kastellan`, not a cold 27), plus `-p kastellan-worker-matrix --features live-matrix --all-targets` exit 0 | not measured |
+| **Mac** (#782 + #783 — **the last FULL sweep; the gate that stands**) | the feature commit on PR #787 | **4713 / 0 / 47**, **189** suites. The sweep measured **4714**, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +22, predicted exactly**, all core lib: `polled_driver::tests::replies` +16, `report::refusal` +3, `delivery` +2, `channel::tests` +1. Then clippy refused one constant-valued test; it became a `const` assert in `replies.rs` (−1: core lib re-run 2300 → 2299, bins 16/96 unchanged). Mutants 10/11 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-782` (fresh dir: **27** `Checking kastellan`, then core re-checked after the fixes) | **23** Mac |
+| **Mac** (#785 review round — superseded) | the review-fix commit on PR #786 | **4692 / 0 / 47**, **189** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container + 4 gliner, unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +2, predicted exactly:** db lib `recall_layers` 5→7. `pg` gate profile green as evidence (4 binaries, 39 `[E2E]`, 0 `[SKIP]`). Mutants 11/12 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-786`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#785 — superseded) | `8d836f56` | **4690 / 0 / 47**, **189** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container + 4 gliner, unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +6 / +1 suite, predicted exactly:** db lib 206→211 (+5, `recall_layers`), new suite `memory_recall_layer_gate_e2e` (+1). ⚠️ A first sweep **without `--nocapture`** showed 12 `[SKIP]` at the same 4690 — libtest swallows a passing test's stderr; not comparable. Mutants 7/7 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-785`, **27** `Checking kastellan` | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
