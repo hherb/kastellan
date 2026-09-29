@@ -342,6 +342,38 @@ impl UndeliveredReason {
     }
 }
 
+/// What the writer of an [`actions::REPLY_UNDELIVERED`] row is told about a
+/// reply a polled driver dropped: whose it was, where it was going, and why —
+/// **never what it said** (#790).
+///
+/// The row must carry channel, peer and reason only (a reply is conversation
+/// content). Until #790 the driver's audit hook was handed the whole
+/// [`OutgoingMessage`], so that rule was kept by a doc comment and by the one
+/// sink happening to call [`reply_undelivered_payload`]. This view has no body
+/// field, so no sink can write one.
+///
+/// `conversation` is not in the row. It is here so a sink whose insert fails
+/// can name the conversation in its own log line, matching the driver's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UndeliveredReply<'a> {
+    pub channel: &'a ChannelId,
+    pub peer: &'a PeerId,
+    pub conversation: &'a ConversationId,
+    pub reason: UndeliveredReason,
+}
+
+impl<'a> UndeliveredReply<'a> {
+    /// Pure: the view of `out`, dropped for `reason`. The body stays behind.
+    pub fn of(out: &'a OutgoingMessage, reason: UndeliveredReason) -> Self {
+        Self { channel: &out.channel, peer: &out.peer, conversation: &out.conversation, reason }
+    }
+
+    /// Pure: this reply's row payload ([`reply_undelivered_payload`]).
+    pub fn payload(&self) -> serde_json::Value {
+        reply_undelivered_payload(self.channel, self.peer, self.reason)
+    }
+}
+
 /// Pure: the payload of an [`actions::REPLY_UNDELIVERED`] row — the channel,
 /// the peer and the [`UndeliveredReason`], nothing else. Never the body (a
 /// reply is conversation content) and never the error (transport text, not a
@@ -365,6 +397,26 @@ mod tests {
             super::UndeliveredReason::GaveUp,
         );
         assert_eq!(v, serde_json::json!({ "channel": "matrix", "peer": "@me:srv", "reason": "gave_up" }));
+    }
+
+    /// #790: the audit hook's view of a dropped reply cannot carry its body.
+    /// Debug renders every field the view has, so a body field added later
+    /// fails here.
+    #[test]
+    fn the_undelivered_view_leaves_the_body_behind() {
+        let out = super::OutgoingMessage {
+            channel: super::ChannelId("matrix".into()),
+            peer: super::PeerId("@me:srv".into()),
+            conversation: super::ConversationId("!room:srv".into()),
+            body: "SECRET-BODY".into(),
+        };
+        let view = super::UndeliveredReply::of(&out, super::UndeliveredReason::GaveUp);
+        assert!(format!("{view:?}").contains("!room:srv"), "POSITIVE CONTROL: Debug renders the fields");
+        assert!(!format!("{view:?}").contains("SECRET-BODY"), "{view:?}");
+        assert_eq!(
+            view.payload(),
+            serde_json::json!({ "channel": "matrix", "peer": "@me:srv", "reason": "gave_up" })
+        );
     }
 
     /// The `reason` labels are a durable operator interface, like the ask

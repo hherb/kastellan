@@ -57,12 +57,11 @@ pub(super) fn ack_skipped(
         );
         // Best-effort audit trail: never FAILS the ack itself — a real hook
         // only logs on its own insert error (see AckOnlyAudit's docs — `None`
-        // when the caller has no durable sink to write to). It CAN block this
-        // thread for the duration of the write: a production hook (e.g. the
-        // daemon's) typically `Handle::block_on`s an async DB insert, same as
-        // `pg_decision_sink`. That is fine here — this is the driver's
-        // dedicated background thread (`thread::spawn` in
-        // `PolledWorkerDriver::spawn`), never a tokio worker thread.
+        // when the caller has no durable sink to write to). It must NOT block:
+        // this thread is the one every conversation, the poll and the ack wait
+        // on, so a hook that waited for its insert stalled the whole channel
+        // for a pool-acquire timeout per skipped id (#789). The daemon's hook
+        // spawns its insert and returns.
         if let Some(audit) = audit {
             audit(&id, &reason);
         }

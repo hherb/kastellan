@@ -44,7 +44,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::channel::{ConversationId, OutgoingMessage, UndeliveredReason};
+use crate::channel::{ConversationId, OutgoingMessage, UndeliveredReason, UndeliveredReply};
 use crate::worker_lifecycle::persistent::{classify_call_error, CallFailure};
 use crate::worker_lifecycle::RestartBackoff;
 use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
@@ -337,14 +337,15 @@ pub(super) fn format_exit_report(conversation: &str, n: usize, sink: bool) -> St
     )
 }
 
-/// Hand a dropped reply to the audit hook, if there is one.
+/// Hand a dropped reply to the audit hook, if there is one — as an
+/// [`UndeliveredReply`], which leaves the body behind (#790).
 fn record_undelivered(
     audit: Option<&ReplyUndeliveredAudit>,
     out: &OutgoingMessage,
     reason: UndeliveredReason,
 ) {
     if let Some(audit) = audit {
-        audit(out, reason);
+        audit(UndeliveredReply::of(out, reason));
     }
 }
 

@@ -29,6 +29,11 @@ pub const WORKER_REFUSAL_STDERR_MARKER: &str = "[worker-refusal]";
 /// How loud a refusal report is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefusalSeverity {
+    /// A refusal ENDED: the worker accepted the call again (#788). The
+    /// closing line of a run whose refusals were reported, so a reader can
+    /// tell a room that is still stuck from one that recovered. Not a warning,
+    /// so an alert keyed on WARN does not fire on a recovery.
+    Info,
     /// A refusal the driver retries with backoff, or a reply it gave up on.
     Warn,
     /// The upstream refused the channel's credential: an operator action.
@@ -100,10 +105,18 @@ pub fn emit_worker_refusal_report(label: &str, report: &str, severity: RefusalSe
     ));
     #[cfg(test)]
     EMITTED.lock().unwrap_or_else(|p| p.into_inner()).push((line.clone(), severity));
-    // Two invocations, not one with a level argument: `tracing` needs the
-    // level at compile time. Both expand the delivery check here, in this
-    // module, which is what `warn_and_fall_back!` requires.
+    // One invocation per level, not one with a level argument: `tracing`
+    // needs the level at compile time. Each expands the delivery check here,
+    // in this module, which is what `warn_and_fall_back!` requires.
+    //
+    // ⚠️ An INFO line falls back to stderr whenever INFO would not be
+    // recorded — under an operator's `RUST_LOG=warn` too — on purpose: it
+    // closes a refusal that WAS reported, and a story with no ending is the
+    // #788 defect. It is one line per refusal run, so it cannot flood.
     match severity {
+        RefusalSeverity::Info => {
+            warn_and_fall_back!(WORKER_REFUSAL_STDERR_MARKER, &line, label = &label, level = INFO)
+        }
         RefusalSeverity::Warn => {
             warn_and_fall_back!(WORKER_REFUSAL_STDERR_MARKER, &line, label = &label)
         }

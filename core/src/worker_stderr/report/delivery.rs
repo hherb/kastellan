@@ -326,6 +326,23 @@ macro_rules! warn_and_fall_back {
             false
         }
     }};
+    // One `label` field at INFO: the refusal report's recovery line (#788),
+    // which says a refusal ended. Same shape, and the same reason the level
+    // is spelled out, as the ERROR arm above: an `info!` checked at WARN
+    // would answer "recorded" under a WARN-only filter that drops it, and
+    // the line would reach nobody.
+    ($marker:expr, $line:expr, label = $label:expr, level = INFO $(,)?) => {{
+        let line: &str = $line;
+        let label: &str = $label;
+        ::tracing::info!(%label, "{line}");
+        if !::tracing::event_enabled!(::tracing::Level::INFO, label, message) {
+            $crate::worker_stderr::report::delivery::write_fallback_line(
+                &$crate::worker_stderr::report::shared::format_stderr_fallback($marker, line),
+            )
+        } else {
+            false
+        }
+    }};
     // One `label` field: both persistent-worker reports and the refusal
     // report's WARN line. The field is named in the check as well as in the
     // `warn!`, which is the whole point of having this arm rather than falling

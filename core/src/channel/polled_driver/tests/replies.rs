@@ -20,10 +20,15 @@ pub(super) const FAST: RestartBackoff = RestartBackoff {
     cap: Duration::from_secs(1),
 };
 
+/// A reply to `conversation` saying `body`.
+///
+/// The peer is the body too. The audit hook is never shown a reply's body
+/// (#790), so a test that must tell two audited replies apart — often two in
+/// one conversation — reads the peer instead.
 pub(super) fn reply(conversation: &str, body: &str) -> OutgoingMessage {
     OutgoingMessage {
         channel: ChannelId("t".into()),
-        peer: PeerId("@me:srv".into()),
+        peer: PeerId(body.into()),
         conversation: ConversationId(conversation.into()),
         body: body.into(),
     }
@@ -237,7 +242,7 @@ fn a_dead_worker_restarts_the_clock_between_two_refusals() {
     let audited: Arc<Mutex<Vec<String>>> = Arc::default();
     let sink = audited.clone();
     let audit: crate::channel::polled_driver::ReplyUndeliveredAudit =
-        Box::new(move |out, _| sink.lock().unwrap().push(out.body.clone()));
+        Box::new(move |r| sink.lock().unwrap().push(r.peer.0.clone()));
     let mut qs = queues(&[("!a", "a1")]);
     let mut outage = OutageLog::default();
     let mut flush_once = |qs: &mut ReplyQueues| flush(qs, &*calls, &spec, test_encode, &mut outage, Some(&audit));

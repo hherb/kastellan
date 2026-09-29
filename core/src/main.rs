@@ -6,6 +6,8 @@ use tracing::{info, warn};
 // sibling files under `main/` to keep this binary entrypoint under the 500-LOC
 // cap (Item 9b). `#[path]` is required because `main.rs` is a crate root — a
 // bare `mod bootstrap;` would resolve to `src/bootstrap.rs`, not `src/main/`.
+#[path = "main/audit_sink.rs"]
+mod audit_sink;
 #[path = "main/bootstrap.rs"]
 mod bootstrap;
 #[path = "main/email_boot.rs"]

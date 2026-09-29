@@ -91,7 +91,7 @@ use replies::{
 
 use super::{
     ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId,
-    UndeliveredReason,
+    UndeliveredReply,
 };
 
 /// Bounded depth of the inbound buffer between the driver thread and the bus.
@@ -197,27 +197,31 @@ pub type ParseAckOnly = fn(&serde_json::Value) -> Vec<(String, String)>;
 
 /// Best-effort side channel for a caller to record "this id was discarded
 /// without ever becoming a bus event" somewhere durable (e.g. an
-/// `audit_log` row) — called once per skipped id actually acked, as
+/// `audit_log` row) — called once per skipped id, just before its ack, as
 /// `audit(message_id, reason)`. The driver itself stays DB-free by design
 /// (see the module docs); this is a boxed closure rather than a bare `fn`
 /// pointer specifically so a caller CAN capture state (a `PgPool` +
-/// `tokio::runtime::Handle`, following the exact pattern
-/// `crate::egress::net_worker::pg_decision_sink` already uses to drive an
-/// async DB insert from a synchronous background thread). `None` means no
-/// audit call is ever made — the default, and Matrix's case (it never
-/// supplies a `parse_ack_only` either, so this is moot for it).
+/// `tokio::runtime::Handle`). `None` means no audit call is ever made — the
+/// default, and Matrix's case (it never supplies a `parse_ack_only` either,
+/// so this is moot for it).
+///
+/// It is called on the driver's own thread, so it must not block on I/O —
+/// the same rule as [`ReplyUndeliveredAudit`]. The daemon's hook spawns its
+/// insert rather than `block_on`ing it (#789).
 pub type AckOnlyAudit = Box<dyn Fn(&str, &str) + Send + 'static>;
 
 /// Best-effort side channel for a caller to record "this reply was never
 /// delivered" durably — the `channel.reply_undelivered` row (#782). Called
-/// once per reply the driver drops, with why ([`UndeliveredReason`]): given
+/// once per reply the driver drops, with why
+/// ([`UndeliveredReason`](crate::channel::UndeliveredReason)): given
 /// up after its refusals, past a full conversation queue, or still queued
-/// when the driver exits. Same shape and reasons as [`AckOnlyAudit`]; the
-/// sink must write channel + peer + reason only, never the body
-/// (see `crate::channel::reply_undelivered_payload`). It is called on the
-/// driver's own thread, so it must not block on I/O: a stalled audit insert
-/// would stall every conversation and the poll with it.
-pub type ReplyUndeliveredAudit = Box<dyn Fn(&OutgoingMessage, UndeliveredReason) + Send + 'static>;
+/// when the driver exits. Same shape and reasons as [`AckOnlyAudit`].
+///
+/// It is handed an [`UndeliveredReply`], not the reply: the row carries
+/// channel + peer + reason only, and the view has no body to leak (#790).
+/// It is called on the driver's own thread, so it must not block on I/O: a
+/// stalled audit insert would stall every conversation and the poll with it.
+pub type ReplyUndeliveredAudit = Box<dyn Fn(UndeliveredReply<'_>) + Send + 'static>;
 
 /// The driver's optional audit hooks.
 ///

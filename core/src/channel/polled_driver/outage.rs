@@ -5,6 +5,18 @@
 //! pacing and its own lines in [`super::refusal`]. Split out of [`super`] to
 //! keep it under the 500-LOC soft cap. Everything here is pure except
 //! [`note_answer`] and [`report_down`], which only emit a line.
+//!
+//! ## Why these lines carry no stderr marker (#788)
+//!
+//! The refusal lines, and the line that says a refusal ended, go through the
+//! marked `[worker-refusal]` emitter so a binary with no `tracing` subscriber
+//! still sees them. These two stay on `tracing` alone, deliberately. An
+//! outage is the **supervisor's** story, and it already tells it on the
+//! marked stream: `[worker-death]` when the worker dies, and a `[worker-down]`
+//! line for every respawn attempt that fails (#738). So on that stream a death
+//! followed by no `[worker-down]` means no respawn attempt has failed. Marking
+//! the driver's "down" line would print every death twice; marking "back up"
+//! would add an ending the marked stream already implies.
 
 /// The driver's worker-down latch: says "down" once per outage and "back up"
 /// once when it ends. Pure. Refusals are not tracked here; see

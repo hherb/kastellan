@@ -18,7 +18,9 @@
 //! Everything here is pure except [`refused`], [`accepted`] and
 //! [`report_refusal`], which only emit the lines the pure parts chose. The
 //! refusal lines go out through the marked `[worker-refusal]` emitter (#783),
-//! so they reach a binary with no `tracing` subscriber too.
+//! so they reach a binary with no `tracing` subscriber too — and so does the
+//! line that says a refusal ended (#788), so a reader of that stream can tell
+//! a conversation that is still stuck from one that recovered.
 
 use std::time::{Duration, Instant};
 
@@ -222,7 +224,8 @@ pub(super) fn refused(
 }
 
 /// A call of `method` was accepted: the worker is up, and a refusal run of
-/// that method (for `conversation`, when it is a send) ends — said once.
+/// that method (for `conversation`, when it is a send) ends — said once, on
+/// the marked emitter at INFO (#788), like the refusals it closes.
 pub(super) fn accepted(
     run: &mut RefusalRun,
     outage: &mut OutageLog,
@@ -231,11 +234,33 @@ pub(super) fn accepted(
     conversation: Option<&str>,
 ) {
     note_answer(outage, label);
-    let refusals = run.on_accepted();
-    if refusals > 0 {
-        let conversation = conversation.map(crate::untrusted_text::neutralise_controls);
-        tracing::info!(label, method, refusals, conversation, "the worker accepted the call again");
+    if let Some(report) = format_accepted_report(method, conversation, run.on_accepted()) {
+        emit_worker_refusal_report(label, &report, RefusalSeverity::Info);
     }
+}
+
+/// Pure: the line that closes a refusal run of `refusals` refusals, before
+/// [`emit_worker_refusal_report`] folds the channel label in. `None` when no
+/// run ended (`refusals == 0`): an ordinary accepted call says nothing.
+///
+/// Names the method and the conversation the same way the refusal lines do,
+/// so a reader can pair the two.
+pub(super) fn format_accepted_report(
+    method: &str,
+    conversation: Option<&str>,
+    refusals: u32,
+) -> Option<String> {
+    if refusals == 0 {
+        return None;
+    }
+    let what = match conversation {
+        Some(c) => format!("{method} for conversation {c}"),
+        None => method.to_string(),
+    };
+    let plural = if refusals == 1 { "" } else { "s" };
+    Some(format!(
+        "the worker accepted {what} again after {refusals} refusal{plural}; that refusal has ended"
+    ))
 }
 
 /// Pure: the text of a refusal line, before [`emit_worker_refusal_report`]

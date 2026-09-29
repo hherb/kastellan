@@ -27,6 +27,10 @@ mod pretend_emitter {
         super::super::warn_and_fall_back!("[worker-failed]", line, label = label, level = ERROR)
     }
 
+    pub fn emit_info_with_label(line: &str, label: &str) -> bool {
+        super::super::warn_and_fall_back!("[worker-failed]", line, label = label, level = INFO)
+    }
+
     /// This module's own path, so a test can build a directive naming it
     /// without hardcoding a string that silently rots if the module moves.
     pub fn target() -> &'static str {
@@ -169,6 +173,10 @@ fn a_field_scoped_off_directive_does_not_fool_the_labelled_check() {
             "labelled ERROR",
             Box::new(|| pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix")),
         ),
+        (
+            "labelled INFO",
+            Box::new(|| pretend_emitter::emit_info_with_label(PROBE_LINE, "matrix")),
+        ),
     ] {
         let (fell_back, recorded) = under(&directive, fired);
         assert!(
@@ -206,6 +214,24 @@ fn the_error_arm_checks_at_its_own_level() {
 }
 
 #[test]
+fn the_info_arm_checks_at_its_own_level() {
+    // #788's recovery line. The mirror image of the ERROR case: an `info!`
+    // checked at WARN answers "recorded" under a WARN-only directive that
+    // drops it, so the line reaches nobody. That directive is the test.
+    let directive = format!("{}=warn", pretend_emitter::target());
+    let (fell_back, recorded) =
+        under(&directive, || pretend_emitter::emit_info_with_label(PROBE_LINE, "matrix"));
+    assert!(!recorded, "POSITIVE CONTROL: `{directive}` must drop an INFO event");
+    assert!(fell_back, "a dropped INFO report must fall back, not be checked at WARN");
+    // And the recorded direction: no second copy on stderr.
+    let directive = format!("{}=info", pretend_emitter::target());
+    let (fell_back, recorded) =
+        under(&directive, || pretend_emitter::emit_info_with_label(PROBE_LINE, "matrix"));
+    assert!(recorded, "POSITIVE CONTROL: `{directive}` must record an INFO event");
+    assert!(!fell_back, "a recorded INFO report must not also take the stderr fallback");
+}
+
+#[test]
 fn a_message_scoped_off_directive_fools_neither_arm() {
     // The hole #745's own review found in #745's fix, and the reason this
     // test covers BOTH arms where the `label` one covers only the second.
@@ -216,7 +242,10 @@ fn a_message_scoped_off_directive_fools_neither_arm() {
     // while `EnvFilter` dropped the event — both channels silent, which is
     // #734 verbatim, one field further along than the version the macro's
     // doc already tabulated.
-    let directive = format!("warn,{}[{{message}}]=off", pretend_emitter::target());
+    // The base is `info`, not `warn`, so the INFO arm's event is enabled by
+    // everything but the `message` predicate — otherwise it would fall back
+    // for its level alone and the row would test nothing.
+    let directive = format!("info,{}[{{message}}]=off", pretend_emitter::target());
     for (arm, fired) in [
         ("bare", Box::new(|| pretend_emitter::emit(PROBE_LINE)) as Box<dyn Fn() -> bool>),
         (
@@ -275,8 +304,8 @@ fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>
             Box::new(|| crate::worker_stderr::emit_persistent_down_report("matrix", PROBE_LINE)),
         ),
         // The ERROR severity: the credential line, the one that names an
-        // operator action. The WARN severity is driven by
-        // `both_refusal_severities_check_delivery_at_their_own_callsite`,
+        // operator action. The WARN and INFO severities are driven by
+        // `every_refusal_severity_checks_delivery_at_its_own_callsite`,
         // because this array holds one row per marker.
         (
             "emit_worker_refusal_report",
@@ -293,15 +322,15 @@ fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>
 }
 
 #[test]
-fn both_refusal_severities_check_delivery_at_their_own_callsite() {
+fn every_refusal_severity_checks_delivery_at_its_own_callsite() {
     use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
     const REFUSAL: &str = "kastellan_core::worker_stderr::report::refusal";
-    for severity in [RefusalSeverity::Warn, RefusalSeverity::Error] {
+    for severity in [RefusalSeverity::Info, RefusalSeverity::Warn, RefusalSeverity::Error] {
         let emit = || emit_worker_refusal_report("matrix", PROBE_LINE, severity);
-        let (fell_back, recorded) = under(&format!("warn,{REFUSAL}=off"), emit);
+        let (fell_back, recorded) = under(&format!("info,{REFUSAL}=off"), emit);
         assert!(!recorded, "POSITIVE CONTROL for {severity:?}: the directive must drop it");
         assert!(fell_back, "{severity:?}: a dropped refusal report must fall back to stderr");
-        let (fell_back, recorded) = under(&format!("{REFUSAL}=warn"), emit);
+        let (fell_back, recorded) = under(&format!("{REFUSAL}=info"), emit);
         assert!(recorded, "POSITIVE CONTROL for {severity:?}: the directive must record it");
         assert!(!fell_back, "{severity:?}: a recorded refusal report must not also fall back");
     }

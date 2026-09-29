@@ -114,12 +114,15 @@ fn cap_reason(reason: &str) -> String {
 /// Payload carries the message id and the reason ONLY — never a body, never
 /// headers — and `reason` is capped via [`cap_reason`] before it is written
 /// (see that function's docs for why this sink applies its own bound rather
-/// than trusting the worker's). Shape otherwise mirrors
-/// `crate::egress::net_worker::pg_decision_sink` exactly: capture a cloned
-/// `PgPool` + `tokio::runtime::Handle`, then `block_on` the async insert from
-/// inside a closure that itself is called synchronously from
-/// `polled_driver::run`'s background thread (not a tokio task), so
-/// `Handle::block_on` — rather than `.await` — is the only way in.
+/// than trusting the worker's).
+///
+/// The driver calls it from its own std thread, which every conversation, the
+/// poll and the ack wait on, so the insert is **spawned**
+/// ([`crate::audit_sink::spawn_audit_insert`], whose doc gives the cost), not
+/// `block_on`'d (#789): a slow or unreachable Postgres stalled the email
+/// channel for a pool-acquire timeout per skipped id. A failed insert is
+/// logged with the message id, so it can be matched to the driver's own line
+/// for the skip.
 fn email_skipped_audit_sink(pool: PgPool, handle: tokio::runtime::Handle) -> AckOnlyAudit {
     Box::new(move |message_id: &str, reason: &str| {
         let payload = serde_json::json!({
@@ -127,15 +130,22 @@ fn email_skipped_audit_sink(pool: PgPool, handle: tokio::runtime::Handle) -> Ack
             "message_id": message_id,
             "reason": cap_reason(reason),
         });
-        let res = handle.block_on(kastellan_db::audit::insert(
+        let message_id = kastellan_core::untrusted_text::neutralise_controls(message_id);
+        crate::audit_sink::spawn_audit_insert(
+            &handle,
             &pool,
             "channel",
             kastellan_core::channel::actions::SKIPPED_ACK_ONLY,
             payload,
-        ));
-        if let Err(e) = res {
-            error!(error = %e, message_id, "email: skipped-id audit insert failed (non-fatal)");
-        }
+            move |e| {
+                error!(
+                    error = %e,
+                    %message_id,
+                    "email: skipped-id audit insert failed (non-fatal); the driver's line for \
+                     the skip stands, but it has no audit row"
+                );
+            },
+        );
     })
 }
 
@@ -354,6 +364,18 @@ mod tests {
             }
             other => panic!("expected Fatal, got {other:?}"),
         }
+    }
+
+    /// #789: the skipped-id sink returns at once against a Postgres that never
+    /// answers. It used to `block_on` its insert on the driver's thread, which
+    /// every conversation, poll and ack wait on.
+    #[test]
+    fn the_skipped_id_sink_does_not_hold_the_driver_thread() {
+        use crate::audit_sink::test_support::{assert_returns_at_once, stalled_pool};
+        let rt = tokio::runtime::Runtime::new().expect("a runtime");
+        let (pool, _listener) = rt.block_on(async { stalled_pool() });
+        let sink = email_skipped_audit_sink(pool, rt.handle().clone());
+        assert_returns_at_once("the email skipped-id sink", || sink("<id@host>", "unattributable"));
     }
 
     /// A worker spawn failure is RETRYABLE — it is the observed #514 trigger

@@ -8,10 +8,12 @@
 use super::replies::{reply, FAST};
 use super::*;
 use crate::channel::polled_driver::replies::MAX_QUEUED_PER_CONVERSATION;
-use crate::channel::UndeliveredReason;
+use crate::channel::{UndeliveredReason, UndeliveredReply};
 use crate::worker_stderr::{emitted_refusal_lines_for, RefusalSeverity};
 
-/// Every audited reply's body and reason, in order.
+/// Every audited reply's identity and reason, in order. The identity is the
+/// peer, which `replies::reply` sets to the body: the hook never sees a body
+/// (#790).
 type Audited = Arc<Mutex<Vec<(String, UndeliveredReason)>>>;
 
 fn bodies(audited: &Audited) -> Vec<String> {
@@ -22,8 +24,8 @@ fn spawn_audited(spec: PolledWorkerSpec, calls: Box<dyn WorkerCalls>) -> (Polled
     let audited: Audited = Arc::default();
     let sink = audited.clone();
     let audit = DriverAudit {
-        reply_undelivered: Some(Box::new(move |out: &OutgoingMessage, reason| {
-            sink.lock().unwrap().push((out.body.clone(), reason));
+        reply_undelivered: Some(Box::new(move |r: UndeliveredReply<'_>| {
+            sink.lock().unwrap().push((r.peer.0.clone(), r.reason));
         })),
         ..DriverAudit::none()
     };
