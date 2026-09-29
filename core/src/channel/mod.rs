@@ -32,8 +32,10 @@ pub mod polled_driver;
 pub mod pump_liveness;
 pub mod respawn_alarm;
 pub mod route;
+mod undelivered;
 
 pub use bus::ChannelBus;
+pub use undelivered::{reply_undelivered_payload, UndeliveredReason, UndeliveredReply};
 
 use serde::{Deserialize, Serialize};
 
@@ -310,124 +312,8 @@ pub mod actions {
     pub const ASK_REASON_MALFORMED: &str = "malformed";
 }
 
-/// Why a reply was not delivered: the `reason` of an
-/// [`actions::REPLY_UNDELIVERED`] row. A fixed label, never transport text, so
-/// observation SQL can group on it. Each calls for a different operator
-/// action, which is why the row carries it (#782 review).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UndeliveredReason {
-    /// The bus's `Channel::send` failed (the email channel until slice 2).
-    SendFailed,
-    /// A polled driver gave up on a reply its worker kept refusing: look at
-    /// the conversation (a room the bot was removed from).
-    GaveUp,
-    /// A polled driver dropped a reply past a full conversation queue: the
-    /// conversation is stuck, and more replies kept coming.
-    QueueFull,
-    /// A polled driver exited with the reply still queued: the channel was
-    /// restarted or shut down while the reply waited.
-    DriverExit,
-}
-
-impl UndeliveredReason {
-    /// The label stored in the row. A committed operator-facing interface,
-    /// pinned literally by a test.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SendFailed => "send_failed",
-            Self::GaveUp => "gave_up",
-            Self::QueueFull => "queue_full",
-            Self::DriverExit => "driver_exit",
-        }
-    }
-}
-
-/// What the writer of an [`actions::REPLY_UNDELIVERED`] row is told about a
-/// reply a polled driver dropped: whose it was, where it was going, and why —
-/// **never what it said** (#790).
-///
-/// The row must carry channel, peer and reason only (a reply is conversation
-/// content). Until #790 the driver's audit hook was handed the whole
-/// [`OutgoingMessage`], so that rule was kept by a doc comment and by the one
-/// sink happening to call [`reply_undelivered_payload`]. This view has no body
-/// field, so no sink can write one.
-///
-/// `conversation` is not in the row. It is here so a sink whose insert fails
-/// can name the conversation in its own log line, matching the driver's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UndeliveredReply<'a> {
-    pub channel: &'a ChannelId,
-    pub peer: &'a PeerId,
-    pub conversation: &'a ConversationId,
-    pub reason: UndeliveredReason,
-}
-
-impl<'a> UndeliveredReply<'a> {
-    /// Pure: the view of `out`, dropped for `reason`. The body stays behind.
-    pub fn of(out: &'a OutgoingMessage, reason: UndeliveredReason) -> Self {
-        Self { channel: &out.channel, peer: &out.peer, conversation: &out.conversation, reason }
-    }
-
-    /// Pure: this reply's row payload ([`reply_undelivered_payload`]).
-    pub fn payload(&self) -> serde_json::Value {
-        reply_undelivered_payload(self.channel, self.peer, self.reason)
-    }
-}
-
-/// Pure: the payload of an [`actions::REPLY_UNDELIVERED`] row — the channel,
-/// the peer and the [`UndeliveredReason`], nothing else. Never the body (a
-/// reply is conversation content) and never the error (transport text, not a
-/// fixed label). The one definition for every writer of that row; see the
-/// action's doc.
-pub fn reply_undelivered_payload(
-    channel: &ChannelId,
-    peer: &PeerId,
-    reason: UndeliveredReason,
-) -> serde_json::Value {
-    serde_json::json!({ "channel": channel.0, "peer": peer.0, "reason": reason.as_str() })
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_reply_undelivered_payload_carries_channel_peer_and_reason_only() {
-        let v = super::reply_undelivered_payload(
-            &super::ChannelId("matrix".into()),
-            &super::PeerId("@me:srv".into()),
-            super::UndeliveredReason::GaveUp,
-        );
-        assert_eq!(v, serde_json::json!({ "channel": "matrix", "peer": "@me:srv", "reason": "gave_up" }));
-    }
-
-    /// #790: the audit hook's view of a dropped reply cannot carry its body.
-    /// Debug renders every field the view has, so a body field added later
-    /// fails here.
-    #[test]
-    fn the_undelivered_view_leaves_the_body_behind() {
-        let out = super::OutgoingMessage {
-            channel: super::ChannelId("matrix".into()),
-            peer: super::PeerId("@me:srv".into()),
-            conversation: super::ConversationId("!room:srv".into()),
-            body: "SECRET-BODY".into(),
-        };
-        let view = super::UndeliveredReply::of(&out, super::UndeliveredReason::GaveUp);
-        assert!(format!("{view:?}").contains("!room:srv"), "POSITIVE CONTROL: Debug renders the fields");
-        assert!(!format!("{view:?}").contains("SECRET-BODY"), "{view:?}");
-        assert_eq!(
-            view.payload(),
-            serde_json::json!({ "channel": "matrix", "peer": "@me:srv", "reason": "gave_up" })
-        );
-    }
-
-    /// The `reason` labels are a durable operator interface, like the ask
-    /// reasons below: pinned literally, so a renamed label fails here.
-    #[test]
-    fn the_undelivered_reasons_are_pinned_literally() {
-        use super::UndeliveredReason::*;
-        let labels: Vec<_> = [SendFailed, GaveUp, QueueFull, DriverExit].map(|r| r.as_str()).into();
-        assert_eq!(labels, ["send_failed", "gave_up", "queue_full", "driver_exit"]);
-    }
-
     use super::*;
 
     /// The four `reason` values are a durable operator interface: observation
