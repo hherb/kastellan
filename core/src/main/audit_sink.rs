@@ -83,12 +83,16 @@ pub(crate) mod test_support {
 
     /// Assert that `call` returns well inside [`ACQUIRE_TIMEOUT`] — that it
     /// did not wait for an insert against the stalled pool.
+    ///
+    /// The bound is two thirds of the timeout, not a few milliseconds: a call
+    /// that waits takes the WHOLE timeout, so the widest margin that still
+    /// tells the two apart is the one least likely to flake on a loaded host.
     pub(crate) fn assert_returns_at_once(what: &str, call: impl FnOnce()) {
         let t = Instant::now();
         call();
         let took = t.elapsed();
         assert!(
-            took < ACQUIRE_TIMEOUT / 3,
+            took < ACQUIRE_TIMEOUT * 2 / 3,
             "{what} must return at once, not wait for its insert (#789): took {took:?}"
         );
     }
