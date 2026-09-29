@@ -160,7 +160,16 @@ pub mod actions {
     pub const REPLIED: &str = "channel.replied";
     /// A message was routed to its channel but the transport refused to
     /// deliver it. Carries the channel + peer only, never the reply body and
-    /// never the error string (which is transport text, not a fixed label).
+    /// never the error string (which is transport text, not a fixed label) —
+    /// built by [`super::reply_undelivered_payload`].
+    ///
+    /// **Two writers.** The bus's per-channel pump, when `Channel::send`
+    /// fails. And, since #782, a polled channel's driver
+    /// (`polled_driver::replies`), whose `send` only queues: it writes the row
+    /// when it **gives up** on a reply its worker kept refusing, or drops one
+    /// past a full conversation queue. Until #782 a polled channel never wrote
+    /// this row, so its `channel.replied` read as delivered even when the
+    /// reply was stuck for ever.
     ///
     /// Usually the compensating row for a [`REPLIED`] that did not land —
     /// but **not always, and an anti-join on that pairing will report false
@@ -297,8 +306,25 @@ pub mod actions {
     pub const ASK_REASON_MALFORMED: &str = "malformed";
 }
 
+/// Pure: the payload of an [`actions::REPLY_UNDELIVERED`] row — the channel
+/// and the peer, nothing else. Never the body (a reply is conversation
+/// content) and never the error (transport text, not a fixed label). The one
+/// definition for both of that row's writers; see the action's doc.
+pub fn reply_undelivered_payload(channel: &ChannelId, peer: &PeerId) -> serde_json::Value {
+    serde_json::json!({ "channel": channel.0, "peer": peer.0 })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reply_undelivered_payload_carries_channel_and_peer_only() {
+        let v = super::reply_undelivered_payload(
+            &super::ChannelId("matrix".into()),
+            &super::PeerId("@me:srv".into()),
+        );
+        assert_eq!(v, serde_json::json!({ "channel": "matrix", "peer": "@me:srv" }));
+    }
+
     use super::*;
 
     /// The four `reason` values are a durable operator interface: observation

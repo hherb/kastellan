@@ -19,7 +19,7 @@ use kastellan_core::channel::bus::{ChannelBus, ChannelEvents, CompletedTasks};
 use kastellan_core::channel::matrix::{
     encode_matrix_send, parse_matrix_poll, MatrixChannel, MATRIX_POLLED_SPEC,
 };
-use kastellan_core::channel::polled_driver::PolledWorkerDriver;
+use kastellan_core::channel::polled_driver::{DriverAudit, PolledWorkerDriver};
 use kastellan_core::channel::{ChannelId, PeerId};
 use kastellan_core::worker_lifecycle::persistent::{
     ClientTransport, PersistentFactory, PersistentTransport, PersistentWorker,
@@ -111,7 +111,7 @@ fn spawn_matrix_channel(sent_file: &Path, peer: &str) -> Option<MatrixChannel> {
         encode_matrix_send,
         None, // Matrix has no ack cursor — MATRIX_POLLED_SPEC.ack_method is None too.
         None, // No skipped-id extraction either: parse_matrix_poll never drops anything.
-        None, // ...and so no ack-only audit hook either.
+        DriverAudit::default(), // No audit hooks: this suite has no database.
         ChannelId("matrix".into()),
     )
     .expect("polled driver spawn");

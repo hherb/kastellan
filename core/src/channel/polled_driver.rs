@@ -1,7 +1,9 @@
 //! Channel-generic driver for a long-lived, pull-only worker supervised by
 //! [`PersistentWorker`]: owns the autonomous long-poll loop, surfaces the
 //! worker's login identity at startup, and retains queued outbound messages
-//! across a worker respawn (no dropped replies). The supervisor underneath
+//! across a worker respawn (no dropped replies). Replies are queued per
+//! conversation, and one the upstream keeps refusing is given up and audited
+//! (#782) — the delivery contract is in `replies.rs`. The supervisor underneath
 //! owns spawn/respawn/backoff/alarm; this driver only *calls* the worker and
 //! retries through the supervisor's `"is restarting"` window.
 //!
@@ -66,7 +68,6 @@
 //! can never be wound back — the messages are gone for good, not merely
 //! delayed.
 
-use std::collections::VecDeque;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -82,6 +83,9 @@ mod outage;
 use outage::{report_down, OutageLog};
 mod refusal;
 use refusal::{accepted, check_refusal_backoff, is_refusal, refused, RefusalRun};
+mod replies;
+pub use replies::{ReplyGiveUp, REPLY_GIVE_UP};
+use replies::{check_reply_give_up, enqueue, flush, ReplyQueues, MAX_QUEUED_PER_CONVERSATION};
 
 use super::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId};
 
@@ -137,9 +141,12 @@ pub struct PolledWorkerSpec {
     /// single JSON-RPC pipe serializes poll and send).
     pub poll_timeout_ms: u64,
     /// How long to wait before calling a method again after the worker
-    /// refused it, per consecutive refusal of that method (#769). Production
-    /// specs use [`REFUSAL_BACKOFF`].
+    /// refused it, per consecutive refusal of that method (#769) — for a send,
+    /// per conversation (#782). Production specs use [`REFUSAL_BACKOFF`].
     pub refusal_backoff: RestartBackoff,
+    /// When to give up on a reply the worker keeps refusing (#782).
+    /// Production specs use [`REPLY_GIVE_UP`].
+    pub reply_give_up: ReplyGiveUp,
 }
 
 /// One inbound event as the channel layer sees it, before the driver stamps
@@ -196,6 +203,24 @@ pub type ParseAckOnly = fn(&serde_json::Value) -> Vec<(String, String)>;
 /// supplies a `parse_ack_only` either, so this is moot for it).
 pub type AckOnlyAudit = Box<dyn Fn(&str, &str) + Send + 'static>;
 
+/// Best-effort side channel for a caller to record "this reply was never
+/// delivered" durably — the `channel.reply_undelivered` row (#782). Called
+/// once per reply the driver drops: given up after its refusals, or past a
+/// full conversation queue. Same shape and reasons as [`AckOnlyAudit`]; the
+/// sink must write channel + peer only, never the body
+/// (see `crate::channel::reply_undelivered_payload`).
+pub type ReplyUndeliveredAudit = Box<dyn Fn(&OutgoingMessage) + Send + 'static>;
+
+/// The driver's optional audit hooks. `DriverAudit::default()` is "none":
+/// the driver still logs every event these would record.
+#[derive(Default)]
+pub struct DriverAudit {
+    /// See [`AckOnlyAudit`]. Only the email channel supplies one.
+    pub ack_only: Option<AckOnlyAudit>,
+    /// See [`ReplyUndeliveredAudit`].
+    pub reply_undelivered: Option<ReplyUndeliveredAudit>,
+}
+
 /// Seam over "something that can call the worker" so the driver is unit-tested
 /// without a supervisor or a process. Production is [`PersistentHandle`].
 pub trait WorkerCalls: Send + 'static {
@@ -234,10 +259,11 @@ impl PolledWorkerDriver {
         encode_send: EncodeSend,
         encode_ack: Option<EncodeAck>,
         parse_ack_only: Option<ParseAckOnly>,
-        audit_ack_only: Option<AckOnlyAudit>,
+        audit: DriverAudit,
         cid: ChannelId,
     ) -> anyhow::Result<(Self, serde_json::Value)> {
         check_refusal_backoff(&spec.refusal_backoff)?;
+        check_reply_give_up(&spec.reply_give_up)?;
         let identity = calls
             .call(spec.init_method, serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("{}: {e}", spec.init_method))?;
@@ -251,7 +277,7 @@ impl PolledWorkerDriver {
                 encode_send,
                 encode_ack,
                 parse_ack_only,
-                audit_ack_only,
+                audit,
                 inbound_tx,
                 outbound_rx,
                 cid,
@@ -263,9 +289,11 @@ impl PolledWorkerDriver {
 
 /// The driver loop. Direct port of the Matrix channel's historical `drive()`
 /// semantics minus its respawn state machine (the supervisor owns that now):
-/// 1. drain queued outbound messages into `pending` (non-blocking);
-/// 2. flush `pending` front-first, stopping at the first error — unacked
-///    messages STAY in `pending`, so a death mid-send loses nothing;
+/// 1. drain queued outbound messages into their conversation's queue
+///    (non-blocking; see [`replies`]);
+/// 2. flush each conversation front-first, stopping that conversation at its
+///    first refusal and everything at the first death — unsent messages STAY
+///    queued, so a death mid-send loses nothing;
 /// 3. long-poll for inbound events, forward them to the bus, then — for a
 ///    spec with `ack_method` set — ack the ones that carried an `ack_token`;
 /// 4. unless a poll just completed (its long-poll paces the loop), sleep one
@@ -277,10 +305,10 @@ impl PolledWorkerDriver {
 ///   poll, retry after one slice; [`OutageLog`] logs the outage once.
 /// - **the worker refused the call** — it is alive and was kept. That method
 ///   waits out its own backoff ([`RefusalRun`], `spec.refusal_backoff`) while
-///   the others keep going: a refused reply stays at the front of `pending`, in
-///   order, while polling continues, so inbound never freezes behind one reply
-///   the upstream will not take. (All replies wait behind it, whatever their
-///   conversation — #782.) A refused **ack** stops acking the batch and holds
+///   the others keep going: a refused reply stays at the front of its
+///   conversation's queue, in order, while polling and every other
+///   conversation continue, until it is accepted or given up (#782). A refused
+///   **ack** stops acking the batch and holds
 ///   the next poll too: the cursor did not move, so polling would only hand the
 ///   same messages to the bus again, as fast as the upstream answers.
 #[allow(clippy::too_many_arguments)] // mirrors spawn's own descriptor args + the two channel endpoints
@@ -291,25 +319,26 @@ fn run(
     encode_send: EncodeSend,
     encode_ack: Option<EncodeAck>,
     parse_ack_only: Option<ParseAckOnly>,
-    audit_ack_only: Option<AckOnlyAudit>,
+    audit: DriverAudit,
     inbound_tx: tok_mpsc::Sender<IncomingMessage>,
     outbound_rx: std_mpsc::Receiver<OutgoingMessage>,
     cid: ChannelId,
 ) {
-    let mut pending: VecDeque<OutgoingMessage> = VecDeque::new();
+    let DriverAudit { ack_only: audit_ack_only, reply_undelivered } = audit;
+    let mut replies = ReplyQueues::new(MAX_QUEUED_PER_CONVERSATION);
     // Latches the down/up transitions so they log once per outage instead of
     // once per retry slice (see `OutageLog`).
     let mut outage = OutageLog::default();
     // Each method's run of refusals from a live worker (#769) — separate,
-    // because a homeserver can refuse a send while every poll succeeds.
-    let mut send_refusals = RefusalRun::default();
+    // because a homeserver can refuse a send while every poll succeeds. Sends
+    // keep theirs per conversation, inside `replies` (#782).
     let mut poll_refusals = RefusalRun::default();
     let mut ack_refusals = RefusalRun::default();
     loop {
         // 1) Pull newly-queued replies into the local buffer (non-blocking).
         loop {
             match outbound_rx.try_recv() {
-                Ok(out) => pending.push_back(out),
+                Ok(out) => enqueue(&mut replies, out, spec.label, reply_undelivered.as_ref()),
                 Err(std_mpsc::TryRecvError::Empty) => break,
                 Err(std_mpsc::TryRecvError::Disconnected) => {
                     tracing::info!(label = spec.label, "outbound sender dropped; polled driver exiting");
@@ -318,31 +347,15 @@ fn run(
             }
         }
 
-        // 2) Flush buffered replies (front-first); stop at the first error.
-        //    Not at all while the front reply's refusal backoff runs: later
-        //    replies wait behind it, so replies keep their order (#782).
-        let mut down = false;
-        if send_refusals.ready(Instant::now()) {
-            while let Some(out) = pending.front() {
-                match calls.call(spec.send_method, encode_send(out)) {
-                    Ok(_) => {
-                        accepted(&mut send_refusals, &mut outage, spec.label, spec.send_method);
-                        pending.pop_front();
-                    }
-                    Err(e) if is_refusal(&e) => {
-                        refused(&mut send_refusals, &mut outage, &spec, spec.send_method, &e);
-                        break;
-                    }
-                    Err(e) => {
-                        if outage.on_down() {
-                            report_down(spec.label, &e, "send failed; retrying after respawn");
-                        }
-                        down = true;
-                        break;
-                    }
-                }
-            }
-        }
+        // 2) Flush buffered replies, each conversation front-first (#782).
+        let down = flush(
+            &mut replies,
+            &*calls,
+            &spec,
+            encode_send,
+            &mut outage,
+            reply_undelivered.as_ref(),
+        );
 
         // 3) Long-poll for inbound events → push to the bus. Skipped while the
         //    worker is down, or while a refused poll or ack waits out its
@@ -353,7 +366,7 @@ fn run(
             match calls.call(spec.poll_method, serde_json::json!({ "timeout_ms": spec.poll_timeout_ms })) {
                 Ok(v) => {
                     polled = true;
-                    accepted(&mut poll_refusals, &mut outage, spec.label, spec.poll_method);
+                    accepted(&mut poll_refusals, &mut outage, spec.label, spec.poll_method, None);
                     // Cleared by an ack refusal: the rest of the batch would be
                     // refused the same way.
                     let mut acking = true;
@@ -440,7 +453,7 @@ fn run(
                     }
                 }
                 Err(e) if is_refusal(&e) => {
-                    refused(&mut poll_refusals, &mut outage, &spec, spec.poll_method, &e);
+                    refused(&mut poll_refusals, &mut outage, &spec, spec.poll_method, None, &e);
                 }
                 Err(e) => {
                     if outage.on_down() {

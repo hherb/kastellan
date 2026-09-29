@@ -6,7 +6,7 @@ use super::super::shared::STDERR_FALLBACK_MARKERS;
 
 mod fd;
 
-/// A stand-in emitter living in its **own module**, exactly as the three
+/// A stand-in emitter living in its **own module**, exactly as the four
 /// real ones do.
 ///
 /// The point of the nesting: this module's path differs from
@@ -21,6 +21,10 @@ mod pretend_emitter {
 
     pub fn emit_with_label(line: &str, label: &str) -> bool {
         super::super::warn_and_fall_back!("[worker-failed]", line, label = label)
+    }
+
+    pub fn emit_error_with_label(line: &str, label: &str) -> bool {
+        super::super::warn_and_fall_back!("[worker-failed]", line, label = label, level = ERROR)
     }
 
     /// This module's own path, so a test can build a directive naming it
@@ -153,20 +157,52 @@ fn a_field_scoped_off_directive_does_not_fool_the_labelled_check() {
     // different set of directives than bare ones, so a BARE check is
     // fail-OPEN here — it reports `true` for an event this directive drops.
     let directive = format!("warn,{}[{{label}}]=off", pretend_emitter::target());
+    // Both labelled arms: the ERROR one (#783) repeats the rule at its own
+    // level, so it can get it wrong on its own.
+    for (arm, fired) in [
+        (
+            "labelled WARN",
+            Box::new(|| pretend_emitter::emit_with_label(PROBE_LINE, "matrix"))
+                as Box<dyn Fn() -> bool>,
+        ),
+        (
+            "labelled ERROR",
+            Box::new(|| pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix")),
+        ),
+    ] {
+        let (fell_back, recorded) = under(&directive, fired);
+        assert!(
+            !recorded,
+            "POSITIVE CONTROL for the {arm} arm: a field-scoped `off` must drop the \
+             labelled event, or this test is not exercising the disagreement it exists \
+             for. Directive: {directive}"
+        );
+        assert!(
+            fell_back,
+            "the {arm} arm's check must declare the same `label` field its event does. A \
+             bare `event_enabled!` answers `true` under `{directive}` while the event is \
+             dropped — silence, which is the failure mode this module exists to remove."
+        );
+    }
+}
+
+#[test]
+fn the_error_arm_checks_at_its_own_level() {
+    // An `error!` checked at WARN answers for the wrong directive set: under
+    // `<target>=warn` both levels are on, so only a directive that keeps
+    // ERROR and drops WARN tells them apart — and in that one the ERROR
+    // report IS recorded, so it must not also fall back.
+    let directive = format!("{}=error", pretend_emitter::target());
     let (fell_back, recorded) =
-        under(&directive, || pretend_emitter::emit_with_label(PROBE_LINE, "matrix"));
-    assert!(
-        !recorded,
-        "POSITIVE CONTROL: a field-scoped `off` must drop the labelled warn, or this test \
-         is not exercising the disagreement it exists for. Directive: {directive}"
-    );
-    assert!(
-        fell_back,
-        "the labelled arm's check must declare the same `label` field its `warn!` does. A \
-         bare `event_enabled!(Level::WARN)` answers `true` under `{directive}` while the \
-         event is dropped — silence, which is the failure mode this module exists to \
-         remove."
-    );
+        under(&directive, || pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix"));
+    assert!(recorded, "POSITIVE CONTROL: `{directive}` must record an ERROR event");
+    assert!(!fell_back, "a recorded ERROR report must not also take the stderr fallback");
+    // And the other way: a WARN-level check would say "delivered" here.
+    let directive = format!("{}=off", pretend_emitter::target());
+    let (fell_back, recorded) =
+        under(&directive, || pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix"));
+    assert!(!recorded, "POSITIVE CONTROL: `{directive}` must drop it");
+    assert!(fell_back, "a dropped ERROR report must fall back");
 }
 
 #[test]
@@ -186,6 +222,10 @@ fn a_message_scoped_off_directive_fools_neither_arm() {
         (
             "labelled",
             Box::new(|| pretend_emitter::emit_with_label(PROBE_LINE, "matrix")),
+        ),
+        (
+            "labelled ERROR",
+            Box::new(|| pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix")),
         ),
     ] {
         let (fell_back, recorded) = under(&directive, fired);
@@ -208,7 +248,7 @@ fn a_message_scoped_off_directive_fools_neither_arm() {
 /// Every emitter that actually ships, with the module its `warn!` is
 /// written in.
 ///
-/// ⚠️ **A new emitter must join this array.** Nothing forces it — a fourth
+/// ⚠️ **A new emitter must join this array.** Nothing forces it — a fifth
 /// `emit_*` that called a plain function instead of `warn_and_fall_back!`
 /// would be silently un-guarded, which is the whole failure this array
 /// exists to prevent. [`every_shipping_emitter_is_covered`] is the only
@@ -217,6 +257,7 @@ fn a_message_scoped_off_directive_fools_neither_arm() {
 fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>)> {
     const TOOL_WORKER: &str = "kastellan_core::worker_stderr::report::tool_worker";
     const PERSISTENT: &str = "kastellan_core::worker_stderr::report::persistent";
+    const REFUSAL: &str = "kastellan_core::worker_stderr::report::refusal";
     vec![
         (
             "emit_worker_failure_report",
@@ -233,14 +274,44 @@ fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>
             PERSISTENT,
             Box::new(|| crate::worker_stderr::emit_persistent_down_report("matrix", PROBE_LINE)),
         ),
+        // The ERROR severity: the credential line, the one that names an
+        // operator action. The WARN severity is driven by
+        // `both_refusal_severities_check_delivery_at_their_own_callsite`,
+        // because this array holds one row per marker.
+        (
+            "emit_worker_refusal_report",
+            REFUSAL,
+            Box::new(|| {
+                crate::worker_stderr::emit_worker_refusal_report(
+                    "matrix",
+                    PROBE_LINE,
+                    crate::worker_stderr::RefusalSeverity::Error,
+                )
+            }),
+        ),
     ]
+}
+
+#[test]
+fn both_refusal_severities_check_delivery_at_their_own_callsite() {
+    use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
+    const REFUSAL: &str = "kastellan_core::worker_stderr::report::refusal";
+    for severity in [RefusalSeverity::Warn, RefusalSeverity::Error] {
+        let emit = || emit_worker_refusal_report("matrix", PROBE_LINE, severity);
+        let (fell_back, recorded) = under(&format!("warn,{REFUSAL}=off"), emit);
+        assert!(!recorded, "POSITIVE CONTROL for {severity:?}: the directive must drop it");
+        assert!(fell_back, "{severity:?}: a dropped refusal report must fall back to stderr");
+        let (fell_back, recorded) = under(&format!("{REFUSAL}=warn"), emit);
+        assert!(recorded, "POSITIVE CONTROL for {severity:?}: the directive must record it");
+        assert!(!fell_back, "{severity:?}: a recorded refusal report must not also fall back");
+    }
 }
 
 #[test]
 fn every_shipping_emitter_checks_delivery_at_its_own_callsite() {
     // The blind spot this closes: every other test in this file drives
     // `pretend_emitter`, which proves the MACRO works and nothing about the
-    // three functions that actually ship. A refactor replacing the macro in
+    // four functions that actually ship. A refactor replacing the macro in
     // `persistent.rs` with a helper call would pass all of them.
     for (name, target, emit) in shipping_emitters() {
         // Enable everything EXCEPT this emitter's own module. A check at
@@ -271,7 +342,7 @@ fn every_shipping_emitter_is_covered() {
     assert_eq!(
         shipping_emitters().len(),
         STDERR_FALLBACK_MARKERS.len(),
-        "there is exactly one shipping emitter per fallback marker; if a fourth marker was \
+        "there is exactly one shipping emitter per fallback marker; if a fifth marker was \
          added, its emitter must join `shipping_emitters` or it is unguarded"
     );
     // ⚠️ **Counts alone are not the census.** A count check is satisfied by
@@ -314,6 +385,7 @@ fn marker_of(emitter: &str) -> &'static str {
         "emit_worker_failure_report" => crate::worker_stderr::WORKER_FAILED_STDERR_MARKER,
         "emit_persistent_death_report" => crate::worker_stderr::WORKER_DEATH_STDERR_MARKER,
         "emit_persistent_down_report" => crate::worker_stderr::WORKER_DOWN_STDERR_MARKER,
+        "emit_worker_refusal_report" => crate::worker_stderr::WORKER_REFUSAL_STDERR_MARKER,
         other => panic!(
             "a new shipping emitter `{other}` must name the marker it writes here, or \
              `every_shipping_emitter_is_covered` cannot tell whether it is guarded"

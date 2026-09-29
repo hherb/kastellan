@@ -1,4 +1,4 @@
-//! The half all three events share: the marker census and the one line
+//! The half all four events share: the marker census and the one line
 //! renderer.
 //!
 //! Kept in its own module so the neutralisation exists in exactly one place.
@@ -12,6 +12,7 @@
 //! had dropped; the measured table is on that macro.
 
 use super::persistent::{WORKER_DEATH_STDERR_MARKER, WORKER_DOWN_STDERR_MARKER};
+use super::refusal::WORKER_REFUSAL_STDERR_MARKER;
 use super::tool_worker::WORKER_FAILED_STDERR_MARKER;
 
 /// Every marker this module can put at the start of a fallback line.
@@ -21,18 +22,19 @@ use super::tool_worker::WORKER_FAILED_STDERR_MARKER;
 /// rather than over one name that a second marker could quietly fail to join.
 ///
 /// ⚠️ **A new marker must be added here as well as declared.** Nothing forces
-/// it: a **fourth** `pub const` that never joins this array is a line in a gate
+/// it: a **fifth** `pub const` that never joins this array is a line in a gate
 /// log that no test ever looked at. The tests below are the only enforcement, and
 /// they can only check what the array holds.
-pub const STDERR_FALLBACK_MARKERS: [&str; 3] = [
+pub const STDERR_FALLBACK_MARKERS: [&str; 4] = [
     WORKER_FAILED_STDERR_MARKER,
     WORKER_DEATH_STDERR_MARKER,
     WORKER_DOWN_STDERR_MARKER,
+    WORKER_REFUSAL_STDERR_MARKER,
 ];
 
 /// Pure: the exact bytes a marked stderr-fallback line carries.
 ///
-/// **The one renderer for all three markers.** Parameterising the marker rather than
+/// **The one renderer for every marker.** Parameterising the marker rather than
 /// writing a second `format!` is the point: the neutralisation below then exists
 /// in exactly one place, and a future third marker inherits it by construction
 /// instead of by whoever adds it remembering.
@@ -93,10 +95,11 @@ mod tests {
 
     #[test]
     fn the_stderr_fallback_markers_are_distinct() {
-        // The three events point at three different places to look: a single
+        // The four events point at four different places to look: a single
         // call's jail (`[worker-failed]`), a long-lived worker that stopped and
-        // is being respawned (`[worker-death]`), and one the supervisor is NOT
-        // getting back (`[worker-down]`). One marker for any two of them would
+        // is being respawned (`[worker-death]`), one the supervisor is NOT
+        // getting back (`[worker-down]`), and a live one whose upstream said
+        // no (`[worker-refusal]`, #783). One marker for any two of them would
         // make a gate log unable to say which happened — the reason #730 gave
         // the death its own rather than reusing the tool-worker marker, and
         // #738 the same again.

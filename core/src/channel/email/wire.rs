@@ -52,7 +52,7 @@
 use std::sync::OnceLock;
 
 use crate::channel::email::gate::{extract_token, trusted_dmarc_pass};
-use crate::channel::polled_driver::{PolledEvent, PolledWorkerSpec, REFUSAL_BACKOFF};
+use crate::channel::polled_driver::{PolledEvent, PolledWorkerSpec, REFUSAL_BACKOFF, REPLY_GIVE_UP};
 use crate::channel::PeerEvidence;
 
 /// Long-poll window for one `email.poll` call. Longer than Matrix's 2s: email
@@ -78,6 +78,7 @@ pub const EMAIL_POLLED_SPEC: PolledWorkerSpec = PolledWorkerSpec {
     ack_method: Some("email.ack"),
     poll_timeout_ms: POLL_MS,
     refusal_backoff: REFUSAL_BACKOFF,
+    reply_give_up: REPLY_GIVE_UP,
 };
 
 /// Configured authserv-id of our own MX. Set once at channel construction:

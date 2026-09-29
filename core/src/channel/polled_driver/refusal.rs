@@ -15,7 +15,9 @@
 //! [`super::PolledWorkerSpec::refusal_backoff`]).
 //!
 //! Everything here is pure except [`refused`], [`accepted`] and
-//! [`report_refusal`], which only emit the lines the pure parts chose.
+//! [`report_refusal`], which only emit the lines the pure parts chose. The
+//! refusal lines go out through the marked `[worker-refusal]` emitter (#783),
+//! so they reach a binary with no `tracing` subscriber too.
 
 use std::time::{Duration, Instant};
 
@@ -23,6 +25,7 @@ use kastellan_protocol::RpcError;
 
 use crate::worker_lifecycle::persistent::{classify_call_error, CallFailure};
 use crate::worker_lifecycle::RestartBackoff;
+use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
 
 use super::outage::{note_answer, OutageLog};
 use super::PolledWorkerSpec;
@@ -101,6 +104,9 @@ pub(super) struct RefusalRun {
     reported_at: Option<Instant>,
     /// The code of the refusal last logged.
     reported_code: Option<i32>,
+    /// When this run's first refusal happened. `None` outside a run. Read by
+    /// the reply give-up bound (#782, `super::replies`).
+    since: Option<Instant>,
 }
 
 impl RefusalRun {
@@ -122,6 +128,7 @@ impl RefusalRun {
     /// gets its operator-action line without waiting out the repeat.
     pub(super) fn on_refusal(&mut self, now: Instant, backoff: &RestartBackoff, code: i32) -> Refused {
         self.consecutive = self.consecutive.saturating_add(1);
+        self.since.get_or_insert(now);
         let delay = backoff.next_delay(self.consecutive - 1);
         // `check_refusal_backoff` bounds `delay`, so the add cannot overflow in
         // practice; if it ever did, the longest allowed wait is the safe side.
@@ -133,6 +140,11 @@ impl RefusalRun {
             self.reported_code = Some(code);
         }
         Refused { delay, report }
+    }
+
+    /// When this run's first refusal happened; `None` when there is no run.
+    pub(super) fn since(&self) -> Option<Instant> {
+        self.since
     }
 
     /// Log the next refusal whatever the cadence says. For a refusal that ends
@@ -173,59 +185,102 @@ pub(super) fn refusal_line(e: &anyhow::Error, r: &Refused) -> RefusalLine {
     }
 }
 
+/// The code of a refusal, for [`RefusalRun::on_refusal`]. `0` when the error
+/// is not a typed `RpcError` (the classifier would not call it a refusal).
+pub(super) fn refusal_code(e: &anyhow::Error) -> i32 {
+    e.downcast_ref::<RpcError>().map_or(0, |rpc| rpc.code)
+}
+
 /// A call of `method` was refused: the worker is up (log "back up" if that
 /// ends an outage), the method waits out its backoff, and the refusal is
-/// logged if due.
+/// logged if due. `conversation` names the conversation whose reply was
+/// refused, for a send (#782); `None` for poll, ack, and a send refused for
+/// the whole channel.
 pub(super) fn refused(
     run: &mut RefusalRun,
     outage: &mut OutageLog,
     spec: &PolledWorkerSpec,
     method: &str,
+    conversation: Option<&str>,
     e: &anyhow::Error,
 ) {
     if note_answer(outage, spec.label) {
         run.rearm_report();
     }
-    let code = e.downcast_ref::<RpcError>().map_or(0, |rpc| rpc.code);
-    let r = run.on_refusal(Instant::now(), &spec.refusal_backoff, code);
-    report_refusal(spec.label, method, e, &r);
+    let r = run.on_refusal(Instant::now(), &spec.refusal_backoff, refusal_code(e));
+    report_refusal(spec.label, method, conversation, e, &r);
 }
 
 /// A call of `method` was accepted: the worker is up, and a refusal run of
-/// that method ends — said once.
-pub(super) fn accepted(run: &mut RefusalRun, outage: &mut OutageLog, label: &str, method: &str) {
+/// that method (for `conversation`, when it is a send) ends — said once.
+pub(super) fn accepted(
+    run: &mut RefusalRun,
+    outage: &mut OutageLog,
+    label: &str,
+    method: &str,
+    conversation: Option<&str>,
+) {
     note_answer(outage, label);
     let refusals = run.on_accepted();
     if refusals > 0 {
-        tracing::info!(label, method, refusals, "the worker accepted the call again");
+        let conversation = conversation.map(crate::untrusted_text::neutralise_controls);
+        tracing::info!(label, method, refusals, conversation, "the worker accepted the call again");
     }
 }
 
-/// Emit the line [`refusal_line`] chose, if any.
+/// Pure: the text of a refusal line, before [`emit_worker_refusal_report`]
+/// folds the channel label in. `None` for [`RefusalLine::Silent`].
 ///
-/// The error text is worker-written (and a compromised worker is in scope), so
-/// it goes through [`crate::untrusted_text::neutralise_controls`] like every
-/// other worker-to-log path.
-fn report_refusal(label: &str, method: &str, e: &anyhow::Error, r: &Refused) {
-    let line = refusal_line(e, r);
-    if line == RefusalLine::Silent {
-        return;
-    }
-    let error = crate::untrusted_text::neutralise_controls(&e.to_string());
-    let retry_in_ms = r.delay.as_millis() as u64;
-    if line == RefusalLine::CredentialError {
-        tracing::error!(
-            label, method, error = %error, retry_in_ms,
+/// Everything a reader needs is in the text, not in `tracing` fields, because
+/// the stderr fallback (#783) carries no fields.
+pub(super) fn format_refusal_report(
+    line: &RefusalLine,
+    method: &str,
+    conversation: Option<&str>,
+    error: &str,
+    retry_in: std::time::Duration,
+) -> Option<String> {
+    let retry_in_ms = retry_in.as_millis();
+    let what = match conversation {
+        Some(c) => format!("{method} for conversation {c}"),
+        None => method.to_string(),
+    };
+    match line {
+        RefusalLine::Silent => None,
+        RefusalLine::CredentialError => Some(format!(
             "operator action needed: the channel's upstream refused its credential \
              (invalid, expired, revoked, or missing a grant); nothing arrives until it is \
              renewed. The worker is restarted at each retry, so it reads a renewed credential \
-             by the next one. Repeated every 15 min while it lasts"
-        );
-    } else {
-        tracing::warn!(
-            label, method, error = %error, retry_in_ms,
-            "the worker refused the call (it is alive and was kept); retrying with backoff. \
+             by the next one. {what} was refused: {error}; retrying in {retry_in_ms} ms. \
              Repeated every 15 min while it lasts"
-        );
+        )),
+        RefusalLine::Warn => Some(format!(
+            "the worker refused {what} (it is alive and was kept): {error}; retrying in \
+             {retry_in_ms} ms with backoff. Repeated every 15 min while it lasts"
+        )),
     }
+}
+
+/// Emit the line [`refusal_line`] chose, if any, through the marked
+/// `[worker-refusal]` emitter (#783), which neutralises the worker-written
+/// error text and the conversation id.
+pub(super) fn report_refusal(
+    label: &str,
+    method: &str,
+    conversation: Option<&str>,
+    e: &anyhow::Error,
+    r: &Refused,
+) {
+    let line = refusal_line(e, r);
+    let Some(report) =
+        format_refusal_report(&line, method, conversation, &e.to_string(), r.delay)
+    else {
+        return;
+    };
+    let severity = if line == RefusalLine::CredentialError {
+        RefusalSeverity::Error
+    } else {
+        RefusalSeverity::Warn
+    };
+    emit_worker_refusal_report(label, &report, severity);
 }

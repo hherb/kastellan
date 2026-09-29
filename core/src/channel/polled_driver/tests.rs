@@ -38,6 +38,12 @@ struct FakeState {
     fail_method: Mutex<Option<String>>,
     /// `Some((m, n))`: the next `n` calls to method `m` are refused.
     refuse: Mutex<Option<(String, usize)>>,
+    /// The `RpcError` code `refuse` answers with (default `OPERATION_FAILED`;
+    /// `UPSTREAM_AUTH_FAILED` makes it a credential refusal).
+    refuse_code: std::sync::atomic::AtomicI32,
+    /// `Some(c)`: every `*.send` whose params' `conversation` is `c` is
+    /// refused with `OPERATION_FAILED` (#782's stuck room).
+    refuse_conversation: Mutex<Option<String>>,
 }
 struct FakeCalls(Arc<FakeState>);
 impl WorkerCalls for FakeCalls {
@@ -49,7 +55,14 @@ impl WorkerCalls for FakeCalls {
         if let Some((m, left)) = self.0.refuse.lock().unwrap().as_mut() {
             if m == method && *left > 0 {
                 *left -= 1;
-                return Err(RpcError::new(codes::OPERATION_FAILED, "fake: refused").into());
+                let code = self.0.refuse_code.load(Ordering::SeqCst);
+                return Err(RpcError::new(code, "fake: refused").into());
+            }
+        }
+        if method.ends_with(".send") {
+            let stuck = self.0.refuse_conversation.lock().unwrap().clone();
+            if stuck.is_some() && params["conversation"].as_str() == stuck.as_deref() {
+                return Err(RpcError::new(codes::OPERATION_FAILED, "fake: room refused").into());
             }
         }
         if self.0.fail_method.lock().unwrap().as_deref() == Some(method) {
@@ -88,6 +101,8 @@ fn fake() -> (Arc<FakeState>, Box<dyn WorkerCalls>) {
         log: Mutex::new(Vec::new()),
         fail_method: Mutex::new(None),
         refuse: Mutex::new(None),
+        refuse_code: std::sync::atomic::AtomicI32::new(codes::OPERATION_FAILED),
+        refuse_conversation: Mutex::new(None),
     });
     (st.clone(), Box::new(FakeCalls(st)))
 }
@@ -120,12 +135,13 @@ const TEST_SPEC: PolledWorkerSpec = PolledWorkerSpec {
     ack_method: None,
     poll_timeout_ms: 5,
     refusal_backoff: REFUSAL_BACKOFF,
+    reply_give_up: REPLY_GIVE_UP,
 };
 
 fn spawn_test_driver(
     calls: Box<dyn WorkerCalls>,
 ) -> (PolledWorkerDriver, Value) {
-    PolledWorkerDriver::spawn(TEST_SPEC, calls, test_parse, test_encode, None, None, None, ChannelId("t".into()))
+    PolledWorkerDriver::spawn(TEST_SPEC, calls, test_parse, test_encode, None, None, DriverAudit::default(), ChannelId("t".into()))
         .expect("driver spawn")
 }
 
@@ -140,6 +156,7 @@ fn spec_with_ack() -> PolledWorkerSpec {
         ack_method: Some("email.ack"),
         poll_timeout_ms: 50,
         refusal_backoff: REFUSAL_BACKOFF,
+        reply_give_up: REPLY_GIVE_UP,
     }
 }
 
@@ -155,6 +172,7 @@ fn spec_without_ack() -> PolledWorkerSpec {
         ack_method: None,
         poll_timeout_ms: 50,
         refusal_backoff: REFUSAL_BACKOFF,
+        reply_give_up: REPLY_GIVE_UP,
     }
 }
 
@@ -210,7 +228,7 @@ fn init_failure_fails_spawn() {
         test_encode,
         None,
         None,
-        None,
+        DriverAudit::default(),
         ChannelId("t".into()),
     );
     assert!(res.is_err(), "init error must fail the spawn (login proof)");
@@ -345,3 +363,4 @@ fn an_outage_warns_once_and_reports_recovery_once() {
 
 mod ack;
 mod refusal;
+mod replies;

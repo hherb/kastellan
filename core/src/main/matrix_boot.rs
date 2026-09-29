@@ -60,6 +60,38 @@ fn classify_homeserver(homeserver_url: &str, forced: bool) -> Option<BootOutcome
         .map(|detail| BootOutcome::Fatal(anyhow::anyhow!("{detail}")))
 }
 
+/// Build the [`ReplyUndeliveredAudit`] closure the Matrix channel's polled
+/// driver calls for every reply it drops (#782): given up after its worker
+/// kept refusing it, or past a full conversation queue. Writes the
+/// `channel.reply_undelivered` row the bus's `channel.replied` promises for a
+/// reply that did not land — channel + peer only
+/// ([`reply_undelivered_payload`]), never the body.
+///
+/// Same shape as `email_boot::email_skipped_audit_sink`: the driver calls it
+/// from its own std thread, not a tokio task, so `Handle::block_on` is the way
+/// into the async insert. A failed insert is logged and otherwise ignored —
+/// the driver has already logged the reply it dropped.
+///
+/// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit
+/// [`reply_undelivered_payload`]: kastellan_core::channel::reply_undelivered_payload
+fn reply_undelivered_audit_sink(
+    pool: PgPool,
+    handle: tokio::runtime::Handle,
+) -> kastellan_core::channel::polled_driver::ReplyUndeliveredAudit {
+    Box::new(move |out: &kastellan_core::channel::OutgoingMessage| {
+        let payload = kastellan_core::channel::reply_undelivered_payload(&out.channel, &out.peer);
+        let res = handle.block_on(kastellan_db::audit::insert(
+            &pool,
+            "channel",
+            kastellan_core::channel::actions::REPLY_UNDELIVERED,
+            payload,
+        ));
+        if let Err(e) = res {
+            tracing::error!(error = %e, "matrix: reply-undelivered audit insert failed (non-fatal)");
+        }
+    })
+}
+
 /// One Matrix bring-up attempt: open the LISTEN/NOTIFY connection, spawn the
 /// sandboxed live worker (which restores its persisted session — the one-time
 /// initial login is done separately with `kastellan-cli matrix probe`), then
@@ -166,12 +198,15 @@ async fn attempt(
     // yields a Retry instead of holding the attempt open. On timeout the
     // blocking task is left to drain against the SDK's own HTTP timeouts (a
     // blocking task cannot be force-cancelled).
+    let audit_undelivered =
+        Some(reply_undelivered_audit_sink(pool.clone(), tokio::runtime::Handle::current()));
     let spawn = tokio::task::spawn_blocking(move || {
         kastellan_core::channel::matrix::spawn_matrix_worker(
             backend,
             kastellan_core::channel::ChannelId("matrix".to_string()),
             &spawn_cfg,
             egress,
+            audit_undelivered,
         )
     });
     let worker = match tokio::time::timeout(MATRIX_LOGIN_TIMEOUT, spawn).await {

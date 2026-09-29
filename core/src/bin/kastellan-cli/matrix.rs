@@ -214,7 +214,7 @@ async fn probe(args: &[String], kp: kastellan_db::secrets::OsKeyringProvider) ->
     // egress sidecar) so a sidecar/DNS problem can be distinguished from an
     // SDK/login problem. The daemon path is the force-routed one.
     let SpawnedMatrixWorker { mut channel, identity } =
-        match spawn_matrix_worker(backend, ChannelId("matrix".to_string()), &cfg, None) {
+        match spawn_matrix_worker(backend, ChannelId("matrix".to_string()), &cfg, None, None) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("matrix probe: spawn/login failed: {e:#}");

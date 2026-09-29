@@ -1,8 +1,8 @@
 //! Whether a report actually **reaches** someone, and whether writing it can
 //! kill the process.
 //!
-//! Two questions that the three emitters in `report`'s sibling modules
-//! (`tool_worker`, `persistent`) all have to answer the same way — none of them
+//! Two questions that the four emitters in `report`'s sibling modules
+//! (`tool_worker`, `persistent`, `refusal`) all have to answer the same way — none of them
 //! lives here, which is the entire point: see [`warn_and_fall_back`] for why
 //! the check must expand at *their* callsites and not in this module. They used
 //! to be answered by one line —
@@ -308,9 +308,28 @@ macro_rules! warn_and_fall_back {
             false
         }
     }};
-    // One `label` field: both persistent-worker reports. The field is named in
-    // the check as well as in the `warn!`, which is the whole point of having a
-    // second arm rather than falling through to the first.
+    // One `label` field at an ERROR level: the refusal report's credential
+    // line (#783), which names an operator action. Same shape as the WARN arm below.
+    // The level is spelled out rather than passed in, because `tracing` bakes
+    // the level into a static callsite, and because the check must name the
+    // SAME level as the event: an `error!` checked at WARN would answer for a
+    // different directive set.
+    ($marker:expr, $line:expr, label = $label:expr, level = ERROR $(,)?) => {{
+        let line: &str = $line;
+        let label: &str = $label;
+        ::tracing::error!(%label, "{line}");
+        if !::tracing::event_enabled!(::tracing::Level::ERROR, label, message) {
+            $crate::worker_stderr::report::delivery::write_fallback_line(
+                &$crate::worker_stderr::report::shared::format_stderr_fallback($marker, line),
+            )
+        } else {
+            false
+        }
+    }};
+    // One `label` field: both persistent-worker reports and the refusal
+    // report's WARN line. The field is named in the check as well as in the
+    // `warn!`, which is the whole point of having this arm rather than falling
+    // through to the first.
     ($marker:expr, $line:expr, label = $label:expr $(,)?) => {{
         let line: &str = $line;
         let label: &str = $label;
