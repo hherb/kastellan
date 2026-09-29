@@ -18,6 +18,11 @@
 //! absent (the fail-safe
 //! [`crate::memory::l3_approval::SkillTrust::from_metadata_str`]
 //! downgrades it to `Untrusted`) — never reaches the planner.
+//!
+//! This block is the **only** prompt door for skill descriptions: recall
+//! excludes L3 whatever its trust (`MemoryLayer::is_recallable`, #785;
+//! before it, an untrusted skill matching the query got in that way).
+//! Invoking a skill is a separate, pinned-only path.
 
 use crate::cassandra::types::{L3Param, L3SkillCandidate, PythonSkillCandidate};
 use crate::memory::l3_approval::SkillTrust;

@@ -388,6 +388,8 @@ own caveats before trusting their numbers:
    is a trust gate that one path honours and another does not.
    **Worth an issue:** either filter `layer`/trust in the lane SQL, or correct the
    module doc and say why `<recalled>` may see unapproved skills.
+   *(Filed and fixed as #785: every lane now filters `layer` in SQL — L1/L2/L4
+   only — and `recall()` re-checks after hydration.)*
 
 2. **`CLAUDE.md` describes "three-lane memory"; the code has four lanes**
    (semantic, lexical, graph, entity-similarity) plus the L0–L4 layers. The

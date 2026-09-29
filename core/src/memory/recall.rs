@@ -1,10 +1,13 @@
 //! Multi-lane recall over the `memories` table.
 //!
 //! This module owns the retrieval surface: it runs the configured
-//! lanes (semantic via pgvector, lexical via `tsvector`+`ts_rank`),
-//! fuses their ranked id-lists via Reciprocal Rank Fusion, then
-//! hydrates the top-`k` rows. The lanes themselves live in
-//! `kastellan_db::memories`; this module composes them.
+//! lanes (semantic via pgvector, lexical via `tsvector`+`ts_rank`,
+//! graph over seed entities + 1-hop neighbours, entity-similarity over
+//! `entities.embedding`), fuses their ranked id-lists via Reciprocal
+//! Rank Fusion, then hydrates the top-`k` rows. The lanes themselves
+//! live in `kastellan_db::memories` (semantic, lexical, graph) and
+//! `kastellan_db::entity_embedding` (entity-similarity); this module
+//! composes them.
 //!
 //! ## Why RRF and not weighted-sum / softmax-fusion
 //!
@@ -13,7 +16,7 @@
 //! on rank positions instead of raw scores (so semantic cosine and
 //! lexical `ts_rank` don't need calibration to be combined), and is
 //! what every contemporary hybrid-search reference (Elasticsearch,
-//! Vespa, pgvector docs) recommends for two-lane fusion. The formula:
+//! Vespa, pgvector docs) recommends for multi-lane fusion. The formula:
 //!
 //!   score(d) = Σ_lanes 1 / (k + rank_lane(d))
 //!
@@ -21,9 +24,20 @@
 //! lane's ordered list, or "absent" (contributes 0) when the document
 //! doesn't appear. Items absent from *every* lane do not appear in
 //! the output.
+//!
+//! ## Which layers recall may return (#785)
+//!
+//! Only L1, L2 and L4. L0 (meta-rules) and L3 (skills) each reach the
+//! prompt through their own gated block — `<l0_meta_rules>` (newest
+//! version of each rule) and `<skills>` (operator-approved only) — and
+//! recall must not be a second door around those gates. The rule is
+//! `kastellan_db::memories::MemoryLayer::is_recallable`; every lane's SQL
+//! applies it, and [`recall`] re-checks it after hydration.
 
 use kastellan_db::graph::Graph;
-use kastellan_db::memories::{fetch_by_ids, lexical_search, semantic_search, Memory, EMBEDDING_DIM};
+use kastellan_db::memories::{
+    fetch_by_ids, lexical_search, retain_recallable, semantic_search, Memory, EMBEDDING_DIM,
+};
 use kastellan_db::DbError;
 use sqlx::PgPool;
 
@@ -185,7 +199,7 @@ impl<'a> RecallParams<'a> {
         }
     }
 
-    /// Seed-bearing constructor: all three lanes ([`RecallModes::ALL`]),
+    /// Seed-bearing constructor: all four lanes ([`RecallModes::ALL`]),
     /// default budget, seeds wired in for the graph lane. Use when the
     /// caller has already resolved entity ids (e.g. from an
     /// entity-extraction step or a [`kastellan_db::graph::Graph::get_entity`]
@@ -258,8 +272,9 @@ pub const ENTITY_SIMILARITY_FANOUT: i64 = 64;
 /// immediate [`DbError::Query`] (dim mismatch is a hard contract, not
 /// a degrade case). The fusion + hydration is best-effort: a
 /// hydration of `n` ids may return fewer than `n` rows when one was
-/// deleted concurrently — the caller observes a shorter list, not an
-/// error.
+/// deleted concurrently, or when the post-hydration layer gate withheld
+/// a row a lane should never have returned (logged at `error!`; #785) —
+/// the caller observes a shorter list, not an error.
 pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memory>, DbError> {
     if params.k == 0 {
         return Ok(Vec::new());
@@ -422,7 +437,12 @@ pub async fn recall(pool: &PgPool, params: &RecallParams<'_>) -> Result<Vec<Memo
     let fused = reciprocal_rank_fusion(&lane_refs, RRF_K_CONSTANT);
     let top: Vec<i64> = fused.into_iter().take(params.k).map(|(id, _)| id).collect();
 
-    fetch_by_ids(pool, &top).await
+    // Layer gate (#785), second half: each lane's SQL already excludes
+    // L0 and L3, so today this drops nothing. It is here so a future lane
+    // that forgets the SQL filter still cannot put an untrusted skill or a
+    // superseded meta-rule into `<recalled>` — and it logs (and, in debug
+    // builds, panics on) any row it withholds, so that lane is found.
+    Ok(retain_recallable(fetch_by_ids(pool, &top).await?))
 }
 
 /// Reciprocal Rank Fusion over `lists` of ranked ids.

@@ -25,11 +25,13 @@ Nothing else.
 6. **Memory-write injection** — a process (or compromised worker) with `INSERT`
    on `memories` plants attacker-controlled text. The recall lane
    (`core::recall_assembly`, wired into `RouterAgent::formulate_plan` from
-   2026-05-17) surfaces matching rows verbatim inside the assembled system
-   prompt's `<recalled>` block. Phase 1 trusts the model's tokeniser on the
-   same basis as L0/L1; if `memories` writes ever become reachable from a
-   less-trusted code path (e.g. a tool worker), the recall lane must
-   sanitise (or partition by trust label) before rendering.
+   2026-05-17) surfaces matching rows inside the assembled system prompt's
+   `<recalled>` block. Recalled bodies are escaped and injection-screened
+   before rendering (2026-07-02 audit, #392), and recall is partitioned by
+   layer: it returns only L1/L2/L4 rows, never L0 meta-rules or L3 skills,
+   which reach the prompt only through their own gated blocks (#785). If `memories`
+   writes ever become reachable from a less-trusted code path (e.g. a tool
+   worker), recall must also partition by a per-row trust label.
 
 ## Out of scope
 

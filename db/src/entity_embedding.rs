@@ -2,7 +2,7 @@
 //! entity-embedding **backfill** scan + guarded updater, and the
 //! entity-similarity recall lane (issue: entity-embedding recall lane).
 //!
-//! Co-located here (rather than in the over-cap `entities.rs` /
+//! Co-located here (rather than in `entities.rs` /
 //! `memories/search.rs`) so all three entity-embedding SQL helpers share
 //! one focused, testable module. Every helper reuses the same dimension
 //! chokepoint (`check_embedding_dim`) and `vector(256)` literal encoder
@@ -11,7 +11,7 @@
 
 use sqlx::Row;
 
-use crate::memories::{check_embedding_dim, limit_as_i64, vector_literal};
+use crate::memories::{check_embedding_dim, limit_as_i64, recallable_layer_codes, vector_literal};
 use crate::DbError;
 
 /// Scan every entity whose `embedding IS NULL`, returning `(id, kind, name)`
@@ -105,6 +105,14 @@ where
 /// `EMBEDDING_DIM` (hard `DbError`, not a degrade case). An empty result
 /// (no embedded/approved entities yet) is normal — the lane simply
 /// contributes nothing to fusion.
+///
+/// **Layer gate (#785):** only memories at a recallable layer are returned
+/// ([`crate::memories::MemoryLayer::is_recallable`]) — L0 and L3 rows
+/// never come back from this lane, however close their entity is. The
+/// gate applies to stage 1 too: an entity counts toward `entity_fanout`
+/// only if it links at least one recallable memory, so entities linked
+/// only to L0 rows (L0 seeding entity-links them) cannot fill the fan-out
+/// and starve the lane.
 pub async fn entity_similarity_search<'e, E>(
     executor: E,
     query_embedding: &[f32],
@@ -124,14 +132,21 @@ where
     let rows = sqlx::query(
         "SELECT me.memory_id \
          FROM ( \
-             SELECT id, embedding <=> $1::vector AS dist \
-             FROM entities \
-             WHERE embedding IS NOT NULL \
-               AND ($4 OR quarantine = FALSE) \
+             SELECT e.id, e.embedding <=> $1::vector AS dist \
+             FROM entities e \
+             WHERE e.embedding IS NOT NULL \
+               AND ($4 OR e.quarantine = FALSE) \
+               AND EXISTS ( \
+                   SELECT 1 FROM memory_entities le \
+                   JOIN memories lm ON lm.id = le.memory_id \
+                   WHERE le.entity_id = e.id AND lm.layer = ANY($5) \
+               ) \
              ORDER BY dist \
              LIMIT $2 \
          ) top_e \
          JOIN memory_entities me ON me.entity_id = top_e.id \
+         JOIN memories m ON m.id = me.memory_id \
+         WHERE m.layer = ANY($5) \
          GROUP BY me.memory_id \
          ORDER BY MIN(top_e.dist) ASC, me.memory_id ASC \
          LIMIT $3",
@@ -140,6 +155,7 @@ where
     .bind(entity_fanout)
     .bind(limit_as_i64(k))
     .bind(include_quarantined)
+    .bind(recallable_layer_codes())
     .fetch_all(executor)
     .await
     .map_err(|e| DbError::Query(format!("entity_similarity_search: {e}")))?;

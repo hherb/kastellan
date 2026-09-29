@@ -39,9 +39,10 @@
 //!   writer-side helper [`link_memory_to_entities`] and the read-side
 //!   helper [`graph_search`] live in this module. The 1-hop outbound
 //!   expansion (via the `db::graph::Graph` chokepoint) happens in
-//!   `core::memory::recall`. Future entity-similarity over
-//!   `entities.embedding` (still NULL today) is a separate Phase-1
-//!   follow-up.
+//!   `core::memory::recall`. The fourth lane, entity-similarity over
+//!   `entities.embedding`, lives in [`crate::entity_embedding`].
+//! * **Layer gate (#785).** No lane returns an L0 or L3 row; the rule
+//!   is [`MemoryLayer::is_recallable`], in the `recall_layers` submodule.
 //! * **Embedding worker.** `insert_memory` accepts an `Option<&[f32]>`
 //!   and stores NULL when absent. `embed_query` shipped via Option O
 //!   in `core::memory::embed`; the production caller routes the body
@@ -53,20 +54,24 @@ use std::fmt::Write as _;
 
 use crate::DbError;
 
-// The read and write query helpers live in sibling modules to keep each
-// file under the 500-LOC cap (split 2026-05-30). They are re-exported
-// here so every external call site keeps its `db::memories::<name>`
-// path unchanged — the split is invisible to callers. Both siblings
-// reach the shared vocabulary in this parent (the consts, the
-// `check_embedding_dim` / `limit_as_i64` guards, `vector_literal`, and
-// the `Memory` / `MemoryLayer` types) via `super::`.
+// The helpers live in submodules to keep each file under the 500-LOC
+// cap: `search` (the three memory-table recall lanes + hydration),
+// `layer_load` (the per-layer loaders behind the prompt's dedicated
+// blocks), `write`, and `recall_layers` (the pure #785 layer gate).
+// They are re-exported here so every external call site keeps its
+// `db::memories::<name>` path unchanged. Each reaches the shared
+// vocabulary in this parent (the consts, the `check_embedding_dim` /
+// `limit_as_i64` guards, `vector_literal`, and the `Memory` /
+// `MemoryLayer` types) via `super::`.
+mod layer_load;
+mod recall_layers;
 mod search;
 mod write;
 
-pub use search::{
-    fetch_by_ids, graph_search, lexical_search, load_active_l0, load_layer, load_layer_by_trust,
-    load_unembedded_at_layer, semantic_search,
-};
+pub use layer_load::{load_active_l0, load_layer, load_layer_by_trust, load_unembedded_at_layer};
+pub(crate) use recall_layers::recallable_layer_codes;
+pub use recall_layers::retain_recallable;
+pub use search::{fetch_by_ids, graph_search, lexical_search, semantic_search};
 pub use write::{
     delete_memory_at_layer, insert_memory, insert_memory_at_layer, insert_memory_light,
     link_memory_to_entities, seed_meta_memory, set_embedding, set_skill_trust,
@@ -174,6 +179,10 @@ pub(crate) fn limit_as_i64(k: usize) -> i64 {
 /// value is ever read back, so [`MemoryLayer::from_db`] only needs to
 /// defend against a corrupted-row case; production code paths never
 /// trip it.
+///
+/// Whether rows at a layer may be returned by the recall lanes (and so
+/// reach `<recalled>`) is [`MemoryLayer::is_recallable`] — decide it
+/// there when adding a layer (#785).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i16)]
 pub enum MemoryLayer {
@@ -184,16 +193,17 @@ pub enum MemoryLayer {
     /// [`seed_meta_memory`], deliberately named so a `grep` over the
     /// tree surfaces every L0 write site.
     Meta = 0,
-    /// L1 — insight index. Small routing pointers loaded
-    /// unconditionally into every system prompt by
-    /// `core::memory::layers::load_l1`. The whole point of the layer
-    /// is "fits in the prompt regardless of similarity score."
+    /// L1 — insight index. Small routing pointers; the newest rows (up
+    /// to the `core::memory::layers` 32-row / 4 KiB cap) are loaded into
+    /// every system prompt regardless of similarity score. Older ones
+    /// stay reachable through recall.
     Index = 1,
     /// L2 — stable accumulated facts. Default for [`insert_memory`]
     /// and the layer every pre-migration row backfills to.
     Stable = 2,
-    /// L3 — skills / SOPs (parameterised procedures). Reserved; no
-    /// writer in the slice that introduced this enum.
+    /// L3 — skills / SOPs (parameterised procedures). Written by the
+    /// agent's crystallisation paths (`core::memory::l3_crystallise`,
+    /// `l3py_crystallise`) as `untrusted`; surfaced only once approved.
     Skill = 3,
     /// L4 — session digests. Reserved; no writer in the slice that
     /// introduced this enum.

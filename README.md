@@ -182,12 +182,13 @@ What works today:
 - **CASSANDRA oversight.** Constitutional and deterministic (data-classification)
   policy stages with an offline replay/iteration harness; a worker-output
   prompt-injection guard that redacts and audits blocked content.
-- **Memory.** Three-lane recall (pgvector semantic + `tsvector` lexical + graph)
-  fused with Reciprocal Rank Fusion; layered prompt assembly (L0 meta-rules, L1
-  always-in-context index, L3 approved skills); entity/relation extraction with a
+- **Memory.** Four-lane recall (pgvector semantic + `tsvector` lexical + graph +
+  entity-similarity) over L1/L2/L4, fused with Reciprocal Rank Fusion; layered
+  prompt assembly (L0 meta-rules, L1 always-in-context index, L3 approved
+  skills — each through its own gated block, never through recall); entity/relation extraction with a
   quarantine-review CLI; a large-tool-result handoff cache.
 - **L3 skill arc.** Crystallise a successful trajectory → operator approve/pin →
-  recall-surface → re-invoke, with trust tiers and live re-validation at dispatch.
+  surface in `<skills>` → re-invoke, with trust tiers and live re-validation at dispatch.
 - **Workers.** `shell-exec` (argv-allowlisted execve), `web-fetch` (HTTPS-only,
   host-allowlisted, redirect/size-capped readable-text extraction), `web-search`
   (SearxNG-backed query worker), `web-research` (composite search → fetch →

@@ -4,12 +4,12 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20260929_785_pre-prune.md`](archive/handover_20260929_785_pre-prune.md),
+> [`archive/handover_20260927_773_pre-prune.md`](archive/handover_20260927_773_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-09-29, latest (#785 — the recall lanes stop returning L0 and L3 rows, PR #786,
-plus its five-reviewer review round; the operator is still running the #773 live re-measure) ·
+**Last updated:** 2026-09-29, latest (#785 — the recall lanes stop returning L0 and L3 rows; the
+operator is still running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#775](https://github.com/hherb/kastellan/pull/775) (handover), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765), [#764](https://github.com/hherb/kastellan/pull/764) (#760), [#762](https://github.com/hherb/kastellan/pull/762) (#760), [#761](https://github.com/hherb/kastellan/pull/761) (#698, #561), [#758](https://github.com/hherb/kastellan/pull/758) (#755), [#756](https://github.com/hherb/kastellan/pull/756) (#748), [#750](https://github.com/hherb/kastellan/pull/750) (#746, #747, #749),
 [#745](https://github.com/hherb/kastellan/pull/745) (#734, #733, #732, #742),
 [#743](https://github.com/hherb/kastellan/pull/743) (#737, #738, #739),
@@ -78,18 +78,13 @@ real sandboxed worker + MITM proxy. Rootfs images last rebuilt
   ⚠️ **L1 stays recallable on purpose:** `<l1_insights>` holds only the newest 32 rows / 4 KiB, and
   `promote_l1` + the #325 backfill embed L1 *so that* older insights stay reachable by recall.
 - **Enforced in all four lanes' SQL** (`layer = ANY(recallable_layer_codes())` — semantic, lexical,
-  graph, entity-similarity) **before each `LIMIT`**, so a growing L3 cannot take lane slots; the
-  entity lane also gates its **entity fan-out** (`EXISTS` a recallable link — review round: an entity
-  linking only L0 rows could fill all 64 slots). **Re-checked after hydration** in `recall()`
-  (`retain_recallable`), which now **reports** a withheld row: `error!` per row + `debug_assert!`
-  (⚠️ so a *debug* daemon panics on a leak; release logs and withholds — `panic = "abort"`). Deleting
-  the `recall()` call still survives every test (no lane leaks); a leaking lane now trips the panic.
-- **Pinned by `core/tests/memory_recall_layer_gate_e2e.rs`** (PG, now in the `pg` gate profile):
-  three recallable rows and three decoys (L0, untrusted + pinned L3) that **outrank** them in every
-  lane, asserted as fixture preconditions — so `k = 3` proves the filter runs before `LIMIT`, and
-  fan-out 1 pins the entity fix. **11/12 mutants caught** (each lane's predicate, lexical filter moved
-  after `LIMIT`, graph filter folded into the quarantine `OR`, the `EXISTS`, `Skill`/`Index`
-  flipped, the `debug_assert!`, the split); the survivor is deleting the `recall()` call, above.
+  graph, entity-similarity), so a growing L3 cannot take lane slots, **and re-checked after
+  hydration** in `recall()` (`retain_recallable`). ⚠️ That second check is **unreachable by any test
+  today** — no lane can return an L0/L3 row — so deleting it survives; it exists for a future lane.
+- **Pinned by `core/tests/memory_recall_layer_gate_e2e.rs`** (PG): one row per layer, all sharing a
+  word, an embedding and an entity, so every lane wants all six; each lane and fused `recall()` must
+  return exactly {L1, L2, L4}. Red before the fix; **7/7 mutants caught** (each lane's predicate, and
+  `Skill`/`Meta` flipped recallable, `Index` flipped not).
 - `db/src/memories/search.rs` (508) split **first**, movement-only: the layer loaders went to
   `memories/layer_load.rs` (proven by `cmp` + fn-name multiset + a negative control).
 
@@ -339,14 +334,29 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
 `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
+`core/src/worker_lifecycle/persistent.rs`, `core/src/scheduler/inner_loop.rs`,
 `core/src/channel/bus.rs`, `workers/matrix/src/sdk_live.rs`, `llm-router/src/messages.rs`,
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`.
-Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
-`tool_dispatch.rs` 722, `polled_driver/tests.rs` 733, `attach/tests.rs` 727, `require.rs` 661,
-`scripts/run-e2e-gate.sh` 561 (shell). ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
-its next leg** (the attachment half is the natural cut). Recent splits done **first** (the pattern to
-keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memories/search.rs`.
-Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
+⚠️ **#743 and #745 both grew files already over cap without splitting them** (`tool_host.rs`,
+`worker_lifecycle/persistent.rs`); #750 split `worker_stderr/mod.rs` **first** instead. #748
+pushed `panic_hook.rs` over (432→584) and split its tests out (357 + 229); it also grew
+`scripts/run-e2e-gate.sh` to 561 (shell, not split) and `require.rs` 647→661 (already over).
+#673/#674 grew three already-over files a little without splitting: `tool_dispatch.rs` 710→722,
+`worker_lifecycle/persistent.rs` 590→662 (pure fn + its tests), `polled_driver/tests.rs` 670→733.
+`channel/polled_driver.rs` would have crossed 500, so its failure logging went to a new
+`polled_driver/outage.rs` (433 + 111). #773/#774 split tests out **first-class** instead:
+`llm-router/src/config.rs` 924→385 and `messages.rs` 593→385, `scheduler/agent.rs` 542→429 — but
+grew `inner_loop.rs` 878→923 (already over; its new logic went to `inner_loop/llm_failure.rs`).
+#767/#768 split `workers/mail/src/attach.rs` **first** (717→559, `Picked` → `attach/picked.rs`)
+and put its new tests in `attach/tests/hash_and_route.rs` (`attach/tests.rs` 719→727); it grew
+`core/tests/mail_live_shape_e2e.rs` 508→529→**559** after the second review (one test fn — **split
+it before the next leg**; the attachment half is the natural cut) and
+`gate_script_tests.rs` 518→519 (its new check went to `gate_script_tests/callers.rs`).
+#769 split `worker_lifecycle/persistent.rs` **first** (662→407 + tests 254, movement proven by
+`cmp` with a negative control); its review put the classifier in `persistent/call_failure.rs`
+(`persistent.rs` 474) and the ack calls in `polled_driver/ack.rs` (`polled_driver.rs` 497→469).
+#785 split `db/src/memories/search.rs` **first** (508→244 + `layer_load.rs` 280); it grew
+`core/src/memory/l3_surface.rs` 534→539 (doc only, already over) and `recall.rs` 471→486.
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
 (seam in `confine.rs`); python-exec Phase 4 curated wheels; web-research polish; an ANN index on
@@ -379,9 +389,9 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#785 review round — **the gate that stands**) | the review-fix commit on PR #786 | **4692 / 0 / 47**, **189** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container + 4 gliner, unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +2, predicted exactly:** db lib `recall_layers` 5→7. `pg` gate profile green as evidence (4 binaries, 39 `[E2E]`, 0 `[SKIP]`). Mutants 11/12 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-786`, **27** `Checking kastellan` | **23** Mac |
-| **Mac** (#785 — superseded) | `8d836f56` | **4690 / 0 / 47**, **189** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container + 4 gliner, unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +6 / +1 suite, predicted exactly:** db lib 206→211 (+5, `recall_layers`), new suite `memory_recall_layer_gate_e2e` (+1). ⚠️ A first sweep **without `--nocapture`** showed 12 `[SKIP]` at the same 4690 — libtest swallows a passing test's stderr; not comparable. Mutants 7/7 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-785`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#785 — **the gate that stands**) | branch tip | **4690 / 0 / 47**, **189** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container + 4 gliner, unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +6 / +1 suite, predicted exactly:** db lib 206→211 (+5, `recall_layers`), new suite `memory_recall_layer_gate_e2e` (+1). ⚠️ A first sweep **without `--nocapture`** showed 12 `[SKIP]` at the same 4690 — libtest swallows a passing test's stderr; not comparable. Mutants 7/7 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-785`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#769 review round, PR #781 — superseded) | the review-fix commit on PR #781 | **4684 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set (a first sweep without it showed 362 `[SKIP]`s at the *same* 4684 — not evidence). **Delta +18, predicted exactly:** protocol lib +3, core lib +15 (polled driver +10, persistent +4, egress spawn +1). Mutants: 12 of 12 caught | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-781`, **27** distinct `Checking kastellan` | **23** Mac |
+| **Mac** (#769, PR #781 first commit — superseded) | `f8461f66` | **4666 / 0 / 47**, **188** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after. Same flags as below. **Delta +9, predicted exactly:** core lib only — persistent +2, polled driver −3 old `OutageLog` + 1 latch + 9 refusal. Mutants: 6 of 7 caught, the survivor near-equivalent (in the PR). After the MSRV fix (one line), core lib 2263 re-passed | exit 0 after the `is_none_or` fix; cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-769`, **27** distinct `Checking kastellan` across the two runs | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -467,8 +477,16 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
   report, respawn or alarm); a credential refusal replaces it quietly, a dead sidecar retires it;
   the polled driver backs off per method (send, poll, ack) and keeps polling behind a refused send.
   Filed #782, #783.
-- **[#778](https://github.com/hherb/kastellan/pull/778)** (#767, #768) — route spellings from `localmail_contract.rs`; one hash-case rule. Filed #779, #780.
-- **[#776](https://github.com/hherb/kastellan/pull/776)** (#773, #774) — `KASTELLAN_LLM_THINKING_SWITCH`; `llm_usage` per plan; timeouts spend the synthesis turn. **[#775](https://github.com/hherb/kastellan/pull/775)** — handover only.
+- **[#778](https://github.com/hherb/kastellan/pull/778)** (#767, #768) — route spellings as pure fns in `localmail_contract.rs`, used by the
+  worker and the live gate (which now pages from offset 2 and checks the hash routes too); one
+  lowercase rule for a planner hash (`ShaPrefix`); `NormalizedFilters`; private `Credentials`.
+  Second review round: the gate picks an attachment with text, the profile refusal has a test.
+  Filed #779, #780.
+- **[#776](https://github.com/hherb/kastellan/pull/776)** (#773, #774) — `KASTELLAN_LLM_THINKING_SWITCH`
+  (`reasoning_effort` for Ollama) + a once-per-process thinking-leak WARN; `llm_usage` on every
+  `plan.formulate` row; a request timeout after gathering spends the synthesis turn, a timed-out
+  synthesis retries once without thinking, a final timeout is worded for the user.
+- **[#775](https://github.com/hherb/kastellan/pull/775)** — handover only: the DGX timeout raise and the #773 diagnosis.
 - **[#770](https://github.com/hherb/kastellan/pull/770)** (#673, #674) — `codes::UPSTREAM_AUTH_FAILED` + pure
   `upstream_auth_refusal` replace `POLICY_DENIED` for localmail 401/403 in `mail` and `email-in`;
   the dispatcher and the email channel's polled driver log an operator ERROR; docs say API key, not

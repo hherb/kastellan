@@ -48,7 +48,9 @@ Confirmed data flow, all in shipped code:
   table (`L1Source::AgentRaised`). This is untrusted LLM output (adversary #1).
 - The recall lanes in `db/src/memories/search.rs` select
   `FROM memories WHERE embedding IS NOT NULL` with **no layer or trust filter**,
-  so an agent-raised L1 row is recallable on any later task.
+  so an agent-raised L1 row is recallable on any later task. *(Later: #785 added
+  a layer filter — recall now returns only L1/L2/L4 — but L1 stays recallable by
+  design, so this finding's L1 path is unchanged by it.)*
 - `core/src/prompt_assembly/assemble.rs` renders each recalled body **verbatim**
   (`out.push_str("- "); out.push_str(body)`) into the planner **system prompt**,
   with no injection screen and no delimiter escaping.
