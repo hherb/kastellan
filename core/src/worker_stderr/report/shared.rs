@@ -36,7 +36,7 @@ pub const STDERR_FALLBACK_MARKERS: [&str; 4] = [
 ///
 /// **The one renderer for every marker.** Parameterising the marker rather than
 /// writing a second `format!` is the point: the neutralisation below then exists
-/// in exactly one place, and a future third marker inherits it by construction
+/// in exactly one place, and a future marker inherits it by construction
 /// instead of by whoever adds it remembering.
 ///
 /// ⚠️ **Neutralises here, not only in the callers.** The one-line property —

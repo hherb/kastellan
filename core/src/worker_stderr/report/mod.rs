@@ -66,6 +66,8 @@ pub use refusal::{
     emit_worker_refusal_report, format_worker_refusal_line,
     format_worker_refusal_stderr_fallback, RefusalSeverity, WORKER_REFUSAL_STDERR_MARKER,
 };
+#[cfg(test)]
+pub(crate) use refusal::emitted_for as emitted_refusal_lines_for;
 pub use shared::STDERR_FALLBACK_MARKERS;
 pub use tool_worker::{
     emit_worker_failure_report, format_worker_failure_report,

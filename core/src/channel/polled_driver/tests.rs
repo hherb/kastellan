@@ -141,11 +141,11 @@ const TEST_SPEC: PolledWorkerSpec = PolledWorkerSpec {
 fn spawn_test_driver(
     calls: Box<dyn WorkerCalls>,
 ) -> (PolledWorkerDriver, Value) {
-    PolledWorkerDriver::spawn(TEST_SPEC, calls, test_parse, test_encode, None, None, DriverAudit::default(), ChannelId("t".into()))
+    PolledWorkerDriver::spawn(TEST_SPEC, calls, test_parse, test_encode, None, None, DriverAudit::none(), ChannelId("t".into()))
         .expect("driver spawn")
 }
 
-/// Spec for the ack-bearing tests below: an email-fallback-shaped channel
+/// Spec for the ack-bearing tests (`tests/ack.rs`): an email-fallback-shaped channel
 /// whose worker keeps a server-side polling cursor that must be advanced.
 fn spec_with_ack() -> PolledWorkerSpec {
     PolledWorkerSpec {
@@ -228,7 +228,7 @@ fn init_failure_fails_spawn() {
         test_encode,
         None,
         None,
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("t".into()),
     );
     assert!(res.is_err(), "init error must fail the spawn (login proof)");
@@ -364,3 +364,4 @@ fn an_outage_warns_once_and_reports_recovery_once() {
 mod ack;
 mod refusal;
 mod replies;
+mod replies_driver;

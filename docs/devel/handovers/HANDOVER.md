@@ -73,31 +73,46 @@ real sandboxed worker + MITM proxy. Rootfs images last rebuilt
 ### This session (2026-09-29, later): #782 + #783 — a stuck room holds only itself, and refusals are marked
 
 - **Replies queue per conversation** (`core/src/channel/polled_driver/replies.rs`, pure `ReplyQueues`
-  + `give_up_due`): order holds *within* a conversation; a refused reply holds only its own room.
-  **Given up** at `REPLY_GIVE_UP` — **≥ 1 h** of that conversation refusing **and ≥ 3** refusals of
-  that reply (the count keeps a slept laptop from dropping on two tries) — then logged with its
-  conversation and audited `channel.reply_undelivered` through `DriverAudit.reply_undelivered`
-  (the daemon's Matrix sink is in `main/matrix_boot.rs`; payload from the one
-  `channel::reply_undelivered_payload`, also used by the bus). ⚠️ **A credential refusal is
-  channel-wide:** it holds every conversation and **never** counts toward a give-up. Each queue is
-  capped at 256; the reply past it is dropped + audited at once. ⚠️ **The give-up does not reset
-  the conversation's backoff**, so a second reply in a dead room goes after ~3 more refusals at the
-  60 s cap, not another hour. ⚠️ Email passes `reply_undelivered: None` — `EmailChannel::send`
-  refuses every reply itself until slice 2; **wire a sink when slice 2 routes replies through
-  `email.send`.**
+  + `ConversationQueue::on_front_refused`, clock passed in): order holds *within* a conversation; a
+  refused reply holds only its own room. **Given up** at `REPLY_GIVE_UP` — **≥ 1 h** of that
+  conversation refusing **with the channel otherwise answering**, **and ≥ 3** refusals of that
+  reply (`min_refusals ≥ 2` is enforced at spawn: a reply always gets a retry of its own) — then
+  logged with its conversation and audited `channel.reply_undelivered` with a fixed `reason`
+  (`gave_up` / `queue_full` / `driver_exit`; the bus writes `send_failed`) through
+  `DriverAudit.reply_undelivered`. The daemon's Matrix sink (`main/matrix_boot.rs`) **spawns** the
+  insert — never `block_on` on the driver thread. Each queue is capped at 256.
+- ⚠️ **A channel-wide failure holds every conversation, charges none, and RESTARTS every
+  conversation's give-up clock** (review round, the critical finding): a refused credential, an
+  `UPSTREAM_UNAVAILABLE` answer, a dead worker, a failed poll. Without it a homeserver down
+  overnight gave up every room's replies. Cost: a channel failing more often than hourly never
+  gives up a dead room (still capped, still named every 15 min).
+- ⚠️ **The Matrix worker now says whose problem a failed send is** (`workers/matrix/src/sdk.rs`,
+  pure `classify_send_failure`): 403 / unknown room / bad id stay `OPERATION_FAILED` (the room's);
+  **no response, 5xx, 429 and 401 are the new `codes::UPSTREAM_UNAVAILABLE` (-32005)** →
+  `CallFailure::Unavailable`. ⚠️ **The 401 is deliberately NOT `UPSTREAM_AUTH_FAILED`**: the
+  supervisor answers that by starting a fresh worker *while the old one runs* — two matrix-sdk
+  clients on one crypto store. A 403 is a room's answer in Matrix, never a credential one.
+  **Needs a DGX redeploy of the Matrix worker (and `matrix.ext4` if VM mode) to take effect.**
+- **A driver that exits drops what is queued, and says so** (`discard_on_exit`): one
+  `[worker-refusal]` line per conversation + a `driver_exit` row per reply. Drop lines now say
+  "NOT recorded" when the channel has no sink (email, the CLI probe). `DriverAudit` has no
+  `Default` — `DriverAudit::none()` names the choice. The probe prints **QUEUED**, not SENT.
 - **`[worker-refusal]`** (#783, `worker_stderr/report/refusal.rs`, 4th entry in
-  `STDERR_FALLBACK_MARKERS`): every refusal line (WARN, the credential ERROR, the give-up and
-  overflow lines) goes through `emit_worker_refusal_report`, so it reaches a subscriber-less binary.
-  `warn_and_fall_back!` gained a `level = ERROR` arm (the check must name the event's own level).
-  ⚠️ The lines' `method`/`error`/`retry_in_ms` **fields are gone** — folded into the text, since the
-  fallback carries no fields; only `label` stays a field.
-- ⚠️ **`tracing` caches callsite interest process-wide:** a scoped-subscriber test of a callsite
-  that other tests' threads hit with no subscriber flaked 1 in 5. Prime the callsite, then
-  `tracing::callsite::rebuild_interest_cache()` inside the scope (20/20 after).
+  `STDERR_FALLBACK_MARKERS`): every refusal line goes through `emit_worker_refusal_report`;
+  `warn_and_fall_back!` gained a `level = ERROR` arm. ⚠️ The lines' `method`/`error`/`retry_in_ms`
+  **fields are gone** — folded into the text; only `label` stays a field. Pinned end to end by the
+  new re-exec suite `worker_refusal_stderr_fallback_e2e` (marker, defanging, and each severity at
+  its own level under an ERROR-only subscriber).
+- ⚠️ **Don't test a driver line through a scoped `tracing` subscriber.** `tracing` caches callsite
+  interest process-wide; #787's first try flaked **6 in 30** even after `rebuild_interest_cache()`.
+  Test builds record every line the refusal emitter is handed (`EMITTED`, read with
+  `worker_stderr::emitted_refusal_lines_for(label)`) — give each test its own channel label.
 - Splits first, movement-only (commit 1): `delivery.rs` → `delivery/tests.rs` + `delivery/tests/fd.rs`;
-  `polled_driver/tests.rs` → `tests/ack.rs`. Mutants **10/11**; the survivor (stuck conversation
-  ends the whole flush) only delays other rooms by one loop iteration, because the stuck room's own
-  backoff skips it next time — near-equivalent at test scale. Mac gate only; nothing is cfg-gated.
+  `polled_driver/tests.rs` → `tests/ack.rs`; the review round split the reply tests into
+  `tests/replies.rs` (pure) + `tests/replies_driver.rs`. Filed from the review, not fixed:
+  [#788](https://github.com/hherb/kastellan/issues/788) (recovery lines carry no marker),
+  [#789](https://github.com/hherb/kastellan/issues/789) (the email skipped-id sink still
+  `block_on`s), [#790](https://github.com/hherb/kastellan/issues/790) (the audit hook sees the body).
 
 ### Previous (2026-09-29): #785 — `<recalled>` is not a door around the L0/L3 gates (PR #786)
 
@@ -344,7 +359,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
 `core/src/channel/email/mod.rs` 542 (+7 in #782, a doc block), `worker_stderr/report/tool_worker.rs` 710.
 Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
-`tool_dispatch.rs` 722, `polled_driver/tests.rs` 733, `attach/tests.rs` 727, `require.rs` 661,
+`tool_dispatch.rs` 722, `attach/tests.rs` 727, `require.rs` 661,
 `scripts/run-e2e-gate.sh` 561 (shell). ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
 its next leg** (the attachment half is the natural cut). Recent splits done **first** (the pattern to
 keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memories/search.rs`,
@@ -382,7 +397,8 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#782 + #783 — **the gate that stands**) | the feature commit on PR #787 | **4713 / 0 / 47**, **189** suites. The sweep measured **4714**, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +22, predicted exactly**, all core lib: `polled_driver::tests::replies` +16, `report::refusal` +3, `delivery` +2, `channel::tests` +1. Then clippy refused one constant-valued test; it became a `const` assert in `replies.rs` (−1: core lib re-run 2300 → 2299, bins 16/96 unchanged). Mutants 10/11 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-782` (fresh dir: **27** `Checking kastellan`, then core re-checked after the fixes) | **23** Mac |
+| **Mac** (#787 review round — **targeted, NOT a full sweep**) | the review-fix commit on PR #787 | Affected suites only, `TEST_EXIT=0`, `--no-fail-fast -- --test-threads=4`: core lib **2311 / 0 / 1** (+12: reply tests 15 → 25, `persistent` +1, `channel` +1), `kastellan` bin 17 (+1, `matrix_boot` row), `kastellan-cli` 96, `email_channel_e2e` 8, `matrix_channel_e2e` 2, `persistent_worker_death_stderr_fallback_e2e` 4 + 4 ign, **new** `worker_refusal_stderr_fallback_e2e` 2 + 2 ign, protocol 20, matrix worker 20 (+3). Predicted full-sweep delta **+18 passed, +2 ignored, +1 suite** — not measured: `syspolicyd` was saturated all session ([[mac-fresh-large-binaries-hang-in-dyld]]), one warm build took 27 min. Reply tests **30/30** (the scoped-subscriber version: 6/30 failed). Mutants 2/2 on the clock restarts | exit 0 **warm** (20 `Checking kastellan`, not a cold 27), plus `-p kastellan-worker-matrix --features live-matrix --all-targets` exit 0 | not measured |
+| **Mac** (#782 + #783 — **the last FULL sweep; the gate that stands**) | the feature commit on PR #787 | **4713 / 0 / 47**, **189** suites. The sweep measured **4714**, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +22, predicted exactly**, all core lib: `polled_driver::tests::replies` +16, `report::refusal` +3, `delivery` +2, `channel::tests` +1. Then clippy refused one constant-valued test; it became a `const` assert in `replies.rs` (−1: core lib re-run 2300 → 2299, bins 16/96 unchanged). Mutants 10/11 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-782` (fresh dir: **27** `Checking kastellan`, then core re-checked after the fixes) | **23** Mac |
 | **Mac** (#785 review round — superseded) | the review-fix commit on PR #786 | **4692 / 0 / 47**, **189** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container + 4 gliner, unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +2, predicted exactly:** db lib `recall_layers` 5→7. `pg` gate profile green as evidence (4 binaries, 39 `[E2E]`, 0 `[SKIP]`). Mutants 11/12 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-786`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#785 — superseded) | `8d836f56` | **4690 / 0 / 47**, **189** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (19 container + 4 gliner, unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +6 / +1 suite, predicted exactly:** db lib 206→211 (+5, `recall_layers`), new suite `memory_recall_layer_gate_e2e` (+1). ⚠️ A first sweep **without `--nocapture`** showed 12 `[SKIP]` at the same 4690 — libtest swallows a passing test's stderr; not comparable. Mutants 7/7 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-785`, **27** `Checking kastellan` | **23** Mac |
 

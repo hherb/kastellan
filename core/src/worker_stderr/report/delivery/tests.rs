@@ -197,7 +197,7 @@ fn the_error_arm_checks_at_its_own_level() {
         under(&directive, || pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix"));
     assert!(recorded, "POSITIVE CONTROL: `{directive}` must record an ERROR event");
     assert!(!fell_back, "a recorded ERROR report must not also take the stderr fallback");
-    // And the other way: a WARN-level check would say "delivered" here.
+    // And a plain round trip: with the target off, the report falls back.
     let directive = format!("{}=off", pretend_emitter::target());
     let (fell_back, recorded) =
         under(&directive, || pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix"));

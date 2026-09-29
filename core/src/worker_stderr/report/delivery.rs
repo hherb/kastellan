@@ -100,7 +100,7 @@ use std::os::fd::RawFd;
 /// `cargo test … 2>/dev/null` — suppressed **every** worker report on macOS,
 /// which is the one direction this module's own doc forbids. Linux does not
 /// share the quirk, so this is the third bit's version of the `POLLERR` /
-/// `POLLHUP` split below: one host cannot prove it. `fcntl(F_GETFD)` answers
+/// `POLLHUP` split above: one host cannot prove it. `fcntl(F_GETFD)` answers
 /// "is this open" authoritatively and portably, so `POLLNVAL` is now believed
 /// only when `fcntl` agrees. Pinned by
 /// [`a_character_device_is_writable`] and
@@ -225,7 +225,7 @@ pub(super) fn write_fallback_line(line: &str) -> bool {
 ///
 /// Evaluates to `true` when the stderr fallback line was written — i.e. when
 /// `tracing` was **not** going to record the event. Production call sites
-/// discard it with a `;`. It exists because the tests below have to observe
+/// discard it with a `;`. It exists because the tests in `delivery/tests.rs` have to observe
 /// which branch was taken, and they cannot do that by reading output: libtest
 /// captures a passing test's `eprintln!` and gives it back to no one.
 ///

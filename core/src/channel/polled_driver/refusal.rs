@@ -11,8 +11,9 @@
 //! those jobs lands here: the respawn's delay was the only pacing of a retry.
 //! Without it the driver would retry a refused poll every [`super::RETRY_SLICE`]
 //! (200 ms) — five requests a second at an upstream that is saying no. So each
-//! method's run of consecutive refusals backs off exponentially (the channel's
-//! [`super::PolledWorkerSpec::refusal_backoff`]).
+//! run of consecutive refusals ([`RefusalRun`]: poll, ack, each conversation's
+//! sends, and the channel-wide send hold) backs off exponentially (the
+//! channel's [`super::PolledWorkerSpec::refusal_backoff`]).
 //!
 //! Everything here is pure except [`refused`], [`accepted`] and
 //! [`report_refusal`], which only emit the lines the pure parts chose. The
@@ -51,6 +52,7 @@ pub(super) fn is_refusal(e: &anyhow::Error) -> bool {
 
 /// True when the refusal is the worker's **upstream refusing its credential**
 /// — the one refusal whose log line names an operator action. Pure.
+#[cfg(test)]
 pub(super) fn is_upstream_auth_refusal(e: &anyhow::Error) -> bool {
     classify_call_error(e) == CallFailure::CredentialRefused
 }
@@ -88,12 +90,13 @@ pub(super) struct Refused {
     pub(super) report: bool,
 }
 
-/// One method's run of consecutive refusals: when it may be called again, and
-/// when the run was last reported. Pure — the clock is passed in.
+/// One run of consecutive refusals: when the call may be made again, and when
+/// the run was last reported. Pure — the clock is passed in.
 ///
-/// The driver keeps one per method (send, poll, ack), because they are refused
-/// independently: a Matrix homeserver can reject a send while sync, and so
-/// every poll, is healthy.
+/// The driver keeps one for poll and one for ack; sends keep one per
+/// conversation plus one channel-wide hold (`super::replies`, #782). They are
+/// refused independently: a Matrix homeserver can reject a send to one room
+/// while sync, and so every poll, is healthy.
 #[derive(Debug, Default)]
 pub(super) struct RefusalRun {
     /// Refusals since this method was last accepted.
@@ -147,6 +150,13 @@ impl RefusalRun {
         self.since
     }
 
+    /// Forget when the run began, keeping its backoff and log cadence: the
+    /// next refusal starts the clock again. For a channel-wide failure, which
+    /// says nothing about this run's target (#782, `super::replies`).
+    pub(super) fn restart_clock(&mut self) {
+        self.since = None;
+    }
+
     /// Log the next refusal whatever the cadence says. For a refusal that ends
     /// an outage: the "back up" line just said the driver resumed, and a
     /// silent refusal would leave that the last word.
@@ -177,11 +187,11 @@ pub(super) enum RefusalLine {
 /// Pure: the line [`report_refusal`] emits for this refusal.
 pub(super) fn refusal_line(e: &anyhow::Error, r: &Refused) -> RefusalLine {
     if !r.report {
-        RefusalLine::Silent
-    } else if is_upstream_auth_refusal(e) {
-        RefusalLine::CredentialError
-    } else {
-        RefusalLine::Warn
+        return RefusalLine::Silent;
+    }
+    match classify_call_error(e) {
+        CallFailure::CredentialRefused => RefusalLine::CredentialError,
+        CallFailure::Refused | CallFailure::Unavailable | CallFailure::Gone => RefusalLine::Warn,
     }
 }
 
@@ -261,7 +271,24 @@ pub(super) fn format_refusal_report(
     }
 }
 
-/// Emit the line [`refusal_line`] chose, if any, through the marked
+/// Pure: the text and severity of the line [`refusal_line`] chose, or `None`
+/// when it chose none.
+pub(super) fn refusal_report(
+    method: &str,
+    conversation: Option<&str>,
+    e: &anyhow::Error,
+    r: &Refused,
+) -> Option<(String, RefusalSeverity)> {
+    let line = refusal_line(e, r);
+    let report = format_refusal_report(&line, method, conversation, &e.to_string(), r.delay)?;
+    let severity = match line {
+        RefusalLine::CredentialError => RefusalSeverity::Error,
+        RefusalLine::Warn | RefusalLine::Silent => RefusalSeverity::Warn,
+    };
+    Some((report, severity))
+}
+
+/// Emit the line [`refusal_report`] chose, if any, through the marked
 /// `[worker-refusal]` emitter (#783), which neutralises the worker-written
 /// error text and the conversation id.
 pub(super) fn report_refusal(
@@ -271,16 +298,7 @@ pub(super) fn report_refusal(
     e: &anyhow::Error,
     r: &Refused,
 ) {
-    let line = refusal_line(e, r);
-    let Some(report) =
-        format_refusal_report(&line, method, conversation, &e.to_string(), r.delay)
-    else {
-        return;
-    };
-    let severity = if line == RefusalLine::CredentialError {
-        RefusalSeverity::Error
-    } else {
-        RefusalSeverity::Warn
-    };
-    emit_worker_refusal_report(label, &report, severity);
+    if let Some((report, severity)) = refusal_report(method, conversation, e, r) {
+        emit_worker_refusal_report(label, &report, severity);
+    }
 }

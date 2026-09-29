@@ -258,7 +258,7 @@ async fn spawn_email_channel(events: Vec<Value>, skipped: Vec<Value>) -> Handle 
         wire::encode_email_send,
         Some(wire::encode_email_ack),
         Some(wire::parse_email_skipped),
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .expect("polled driver spawn");

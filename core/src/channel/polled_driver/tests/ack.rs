@@ -16,7 +16,7 @@ fn ack_is_called_after_the_event_reaches_the_bus() {
         test_encode,
         Some(encode_test_ack),
         None,
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .unwrap();
@@ -48,7 +48,7 @@ fn no_ack_method_means_no_ack_call() {
         test_encode,
         None,
         None,
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("matrix".into()),
     )
     .unwrap();
@@ -77,7 +77,7 @@ fn an_event_without_an_ack_token_is_not_acked() {
         test_encode,
         Some(encode_test_ack),
         None,
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .unwrap();
@@ -106,7 +106,7 @@ fn ack_failure_is_non_fatal_and_the_driver_keeps_polling() {
         test_encode,
         Some(encode_test_ack),
         None,
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .unwrap();
@@ -172,7 +172,7 @@ fn skipped_ids_are_acked_even_though_they_never_become_events() {
         test_encode,
         Some(encode_test_ack),
         Some(test_parse_ack_only),
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .unwrap();
@@ -208,7 +208,7 @@ fn skipped_ids_alongside_real_events_are_both_acked() {
         test_encode,
         Some(encode_test_ack),
         Some(test_parse_ack_only),
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .unwrap();
@@ -245,7 +245,7 @@ fn no_ack_method_means_skipped_ids_are_never_acked_either() {
         test_encode,
         None,
         Some(test_parse_ack_only),
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("matrix".into()),
     )
     .unwrap();
@@ -285,7 +285,7 @@ fn a_skipped_id_is_not_acked_when_the_same_batchs_events_fail_to_decode() {
         test_encode,
         Some(encode_test_ack),
         Some(test_parse_ack_only),
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .unwrap();
@@ -323,7 +323,7 @@ fn audit_ack_only_is_called_with_id_and_reason_for_every_acked_skipped_id() {
         test_encode,
         Some(encode_test_ack),
         Some(test_parse_ack_only),
-        DriverAudit { ack_only: Some(audit), ..DriverAudit::default() },
+        DriverAudit { ack_only: Some(audit), ..DriverAudit::none() },
         ChannelId("email".into()),
     )
     .unwrap();
@@ -364,7 +364,7 @@ fn audit_ack_only_is_not_called_when_the_same_batchs_events_fail_to_decode() {
         test_encode,
         Some(encode_test_ack),
         Some(test_parse_ack_only),
-        DriverAudit { ack_only: Some(audit), ..DriverAudit::default() },
+        DriverAudit { ack_only: Some(audit), ..DriverAudit::none() },
         ChannelId("email".into()),
     )
     .unwrap();

@@ -700,7 +700,7 @@ impl ChannelBus {
                                 events
                                     .audit(
                                         actions::REPLY_UNDELIVERED,
-                                        super::reply_undelivered_payload(&id, &peer),
+                                        super::reply_undelivered_payload(&id, &peer, super::UndeliveredReason::SendFailed),
                                     )
                                     .await;
                             }

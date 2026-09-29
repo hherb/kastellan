@@ -235,7 +235,15 @@ async fn probe(args: &[String], kp: kastellan_db::secrets::OsKeyringProvider) ->
             eprintln!("matrix probe: send failed: {e:#}");
             return ExitCode::from(1);
         }
-        println!("SENT to {room}: {:?}", a.body);
+        // Queued, not sent: the polled driver sends it on its own thread, after
+        // the current long-poll returns. Claiming "SENT" here reported success
+        // for a room the bot had been removed from (#782 review).
+        println!(
+            "QUEUED for {room}: {:?} — the worker sends it asynchronously, and a refusal is \
+             logged as a [worker-refusal] line. Pass --listen <secs> to keep the probe up while \
+             it goes out; exiting first discards it.",
+            a.body
+        );
     }
 
     if let Some(secs) = a.listen_secs {

@@ -221,13 +221,15 @@ impl PersistentWorker {
                 let failure = classify_call_error(&e);
                 let sidecar = match failure {
                     CallFailure::Gone => None,
-                    CallFailure::Refused | CallFailure::CredentialRefused => transport.sidecar_exited(),
+                    CallFailure::Refused | CallFailure::CredentialRefused | CallFailure::Unavailable => {
+                        transport.sidecar_exited()
+                    }
                 };
                 match (failure, sidecar) {
                     // A live worker refused the call: hand the refusal to the
                     // caller and keep the worker. No death report, no respawn,
                     // no alarm tick.
-                    (CallFailure::Refused, None) => { let _ = job.reply.send(Err(e)); }
+                    (CallFailure::Refused | CallFailure::Unavailable, None) => { let _ = job.reply.send(Err(e)); }
                     (CallFailure::CredentialRefused, None) => {
                         let _ = job.reply.send(Err(e));
                         replace_for_credential(&mut transport, &mut factory, &label);

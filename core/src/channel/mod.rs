@@ -150,26 +150,30 @@ pub mod actions {
     /// `send` happens afterwards, in the per-channel pump, and can still fail
     /// (in slice 1 `EmailChannel::send` fails *unconditionally*, since there is
     /// no outbound worker yet). A failure emits [`REPLY_UNDELIVERED`] for the
-    /// same reply, so a `channel.replied` with no matching
-    /// `channel.reply_undelivered` is a delivered reply. The name is kept
+    /// same reply. So a `channel.replied` with no matching
+    /// `channel.reply_undelivered` is a delivered reply — or, for a polled
+    /// channel (Matrix), one still queued in its driver, which writes the row
+    /// when it gives the reply up, drops it or exits with it (#782). The name is kept
     /// because these strings are a committed operator-facing interface (see
     /// `auth::UnauthenticReason::as_str`); the doc is what was wrong, and it
     /// claimed delivery.
     ///
     /// **The converse does not hold** — see [`REPLY_UNDELIVERED`].
     pub const REPLIED: &str = "channel.replied";
-    /// A message was routed to its channel but the transport refused to
-    /// deliver it. Carries the channel + peer only, never the reply body and
-    /// never the error string (which is transport text, not a fixed label) —
-    /// built by [`super::reply_undelivered_payload`].
+    /// A message was routed to its channel but was not delivered. Carries the
+    /// channel, the peer and a fixed [`super::UndeliveredReason`] label only —
+    /// never the reply body and never the error string (which is transport
+    /// text, not a fixed label) — built by [`super::reply_undelivered_payload`].
     ///
     /// **Two writers.** The bus's per-channel pump, when `Channel::send`
-    /// fails. And, since #782, a polled channel's driver
+    /// fails (`send_failed`). And, since #782, a polled channel's driver
     /// (`polled_driver::replies`), whose `send` only queues: it writes the row
-    /// when it **gives up** on a reply its worker kept refusing, or drops one
-    /// past a full conversation queue. Until #782 a polled channel never wrote
-    /// this row, so its `channel.replied` read as delivered even when the
-    /// reply was stuck for ever.
+    /// when it **gives up** on a reply its worker kept refusing (`gave_up`),
+    /// drops one past a full conversation queue (`queue_full`), or exits with
+    /// replies still queued (`driver_exit`) — when the channel supplies an
+    /// audit sink, which the daemon's Matrix channel does. Until #782 a polled
+    /// channel never wrote this row, so its `channel.replied` read as
+    /// delivered even when the reply was stuck for ever.
     ///
     /// Usually the compensating row for a [`REPLIED`] that did not land —
     /// but **not always, and an anti-join on that pairing will report false
@@ -306,23 +310,70 @@ pub mod actions {
     pub const ASK_REASON_MALFORMED: &str = "malformed";
 }
 
-/// Pure: the payload of an [`actions::REPLY_UNDELIVERED`] row — the channel
-/// and the peer, nothing else. Never the body (a reply is conversation
-/// content) and never the error (transport text, not a fixed label). The one
-/// definition for both of that row's writers; see the action's doc.
-pub fn reply_undelivered_payload(channel: &ChannelId, peer: &PeerId) -> serde_json::Value {
-    serde_json::json!({ "channel": channel.0, "peer": peer.0 })
+/// Why a reply was not delivered: the `reason` of an
+/// [`actions::REPLY_UNDELIVERED`] row. A fixed label, never transport text, so
+/// observation SQL can group on it. Each calls for a different operator
+/// action, which is why the row carries it (#782 review).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UndeliveredReason {
+    /// The bus's `Channel::send` failed (the email channel until slice 2).
+    SendFailed,
+    /// A polled driver gave up on a reply its worker kept refusing: look at
+    /// the conversation (a room the bot was removed from).
+    GaveUp,
+    /// A polled driver dropped a reply past a full conversation queue: the
+    /// conversation is stuck, and more replies kept coming.
+    QueueFull,
+    /// A polled driver exited with the reply still queued: the channel was
+    /// restarted or shut down while the reply waited.
+    DriverExit,
+}
+
+impl UndeliveredReason {
+    /// The label stored in the row. A committed operator-facing interface,
+    /// pinned literally by a test.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SendFailed => "send_failed",
+            Self::GaveUp => "gave_up",
+            Self::QueueFull => "queue_full",
+            Self::DriverExit => "driver_exit",
+        }
+    }
+}
+
+/// Pure: the payload of an [`actions::REPLY_UNDELIVERED`] row — the channel,
+/// the peer and the [`UndeliveredReason`], nothing else. Never the body (a
+/// reply is conversation content) and never the error (transport text, not a
+/// fixed label). The one definition for every writer of that row; see the
+/// action's doc.
+pub fn reply_undelivered_payload(
+    channel: &ChannelId,
+    peer: &PeerId,
+    reason: UndeliveredReason,
+) -> serde_json::Value {
+    serde_json::json!({ "channel": channel.0, "peer": peer.0, "reason": reason.as_str() })
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_reply_undelivered_payload_carries_channel_and_peer_only() {
+    fn a_reply_undelivered_payload_carries_channel_peer_and_reason_only() {
         let v = super::reply_undelivered_payload(
             &super::ChannelId("matrix".into()),
             &super::PeerId("@me:srv".into()),
+            super::UndeliveredReason::GaveUp,
         );
-        assert_eq!(v, serde_json::json!({ "channel": "matrix", "peer": "@me:srv" }));
+        assert_eq!(v, serde_json::json!({ "channel": "matrix", "peer": "@me:srv", "reason": "gave_up" }));
+    }
+
+    /// The `reason` labels are a durable operator interface, like the ask
+    /// reasons below: pinned literally, so a renamed label fails here.
+    #[test]
+    fn the_undelivered_reasons_are_pinned_literally() {
+        use super::UndeliveredReason::*;
+        let labels: Vec<_> = [SendFailed, GaveUp, QueueFull, DriverExit].map(|r| r.as_str()).into();
+        assert_eq!(labels, ["send_failed", "gave_up", "queue_full", "driver_exit"]);
     }
 
     use super::*;

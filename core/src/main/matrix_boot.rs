@@ -60,35 +60,57 @@ fn classify_homeserver(homeserver_url: &str, forced: bool) -> Option<BootOutcome
         .map(|detail| BootOutcome::Fatal(anyhow::anyhow!("{detail}")))
 }
 
+/// Pure: the `(actor, action, payload)` of the row
+/// [`reply_undelivered_audit_sink`] writes for `out`. The actor is the bus's
+/// own (`PgChannelEvents::audit`), so both writers' rows read alike.
+fn reply_undelivered_row(
+    out: &kastellan_core::channel::OutgoingMessage,
+    reason: kastellan_core::channel::UndeliveredReason,
+) -> (&'static str, &'static str, serde_json::Value) {
+    (
+        "channel",
+        kastellan_core::channel::actions::REPLY_UNDELIVERED,
+        kastellan_core::channel::reply_undelivered_payload(&out.channel, &out.peer, reason),
+    )
+}
+
 /// Build the [`ReplyUndeliveredAudit`] closure the Matrix channel's polled
 /// driver calls for every reply it drops (#782): given up after its worker
-/// kept refusing it, or past a full conversation queue. Writes the
-/// `channel.reply_undelivered` row the bus's `channel.replied` promises for a
-/// reply that did not land — channel + peer only
-/// ([`reply_undelivered_payload`]), never the body.
+/// kept refusing it, past a full conversation queue, or still queued when the
+/// driver exits. Writes the `channel.reply_undelivered` row the bus's
+/// `channel.replied` promises for a reply that did not land — channel, peer
+/// and reason only ([`reply_undelivered_row`]), never the body.
 ///
-/// Same shape as `email_boot::email_skipped_audit_sink`: the driver calls it
-/// from its own std thread, not a tokio task, so `Handle::block_on` is the way
-/// into the async insert. A failed insert is logged and otherwise ignored —
-/// the driver has already logged the reply it dropped.
+/// The driver calls it from its own std thread, and every conversation and
+/// the poll wait on that thread, so the insert is **spawned** onto the
+/// runtime, not `block_on`'d: a slow or unreachable Postgres must not stall
+/// the channel for a pool-acquire timeout per dropped reply. The cost is that
+/// a row being written as the daemon shuts down can be lost with the runtime;
+/// the driver's own `[worker-refusal]` line for the drop stands either way.
+/// A failed insert is logged with the conversation and reason, so it can be
+/// matched to that line.
 ///
 /// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit
-/// [`reply_undelivered_payload`]: kastellan_core::channel::reply_undelivered_payload
 fn reply_undelivered_audit_sink(
     pool: PgPool,
     handle: tokio::runtime::Handle,
 ) -> kastellan_core::channel::polled_driver::ReplyUndeliveredAudit {
-    Box::new(move |out: &kastellan_core::channel::OutgoingMessage| {
-        let payload = kastellan_core::channel::reply_undelivered_payload(&out.channel, &out.peer);
-        let res = handle.block_on(kastellan_db::audit::insert(
-            &pool,
-            "channel",
-            kastellan_core::channel::actions::REPLY_UNDELIVERED,
-            payload,
-        ));
-        if let Err(e) = res {
-            tracing::error!(error = %e, "matrix: reply-undelivered audit insert failed (non-fatal)");
-        }
+    Box::new(move |out, reason| {
+        let (actor, action, payload) = reply_undelivered_row(out, reason);
+        let conversation =
+            kastellan_core::untrusted_text::neutralise_controls(&out.conversation.0);
+        let pool = pool.clone();
+        handle.spawn(async move {
+            if let Err(e) = kastellan_db::audit::insert(&pool, actor, action, payload).await {
+                tracing::error!(
+                    error = %e,
+                    %conversation,
+                    reason = reason.as_str(),
+                    "matrix: reply-undelivered audit insert failed (non-fatal); the dropped \
+                     reply's [worker-refusal] line stands, but it has no audit row"
+                );
+            }
+        });
     })
 }
 
@@ -301,5 +323,30 @@ mod tests {
     #[test]
     fn a_routable_homeserver_is_not_refused() {
         assert!(classify_homeserver("https://matrix.kastellan.dev", true).is_none());
+    }
+
+    /// The row the Matrix driver's sink writes: the bus's actor, the
+    /// reply-undelivered action, and a payload that names the reason but
+    /// never carries the reply body (#782). A recording sink in the driver
+    /// tests sees only what the driver passed; this pins what is stored.
+    #[test]
+    fn the_reply_undelivered_row_is_the_bus_s_shape_without_the_body() {
+        use kastellan_core::channel::{
+            ChannelId, ConversationId, OutgoingMessage, PeerId, UndeliveredReason,
+        };
+        let out = OutgoingMessage {
+            channel: ChannelId("matrix".into()),
+            peer: PeerId("@me:srv".into()),
+            conversation: ConversationId("!room:srv".into()),
+            body: "SECRET-BODY".into(),
+        };
+        let (actor, action, payload) = reply_undelivered_row(&out, UndeliveredReason::QueueFull);
+        assert_eq!(actor, "channel");
+        assert_eq!(action, "channel.reply_undelivered");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "channel": "matrix", "peer": "@me:srv", "reason": "queue_full" })
+        );
+        assert!(!payload.to_string().contains("SECRET-BODY"));
     }
 }

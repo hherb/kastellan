@@ -152,7 +152,7 @@ fn a_backoff_that_would_not_pace_anything_is_rejected() {
 fn spawn_refuses_a_backoff_that_would_not_pace_anything() {
     let (st, calls) = fake();
     let bad = spec(RestartBackoff { base: Duration::ZERO, ..FAST });
-    let res = PolledWorkerDriver::spawn(bad, calls, test_parse, test_encode, None, None, DriverAudit::default(), ChannelId("t".into()));
+    let res = PolledWorkerDriver::spawn(bad, calls, test_parse, test_encode, None, None, DriverAudit::none(), ChannelId("t".into()));
     assert!(res.is_err(), "a zero base would retry a refused call every loop");
     assert_eq!(st.init_calls.load(Ordering::SeqCst), 0, "refused before calling the worker");
 }
@@ -164,7 +164,7 @@ fn spec(refusal_backoff: RestartBackoff) -> PolledWorkerSpec {
 }
 
 fn spawn_with(spec: PolledWorkerSpec, calls: Box<dyn WorkerCalls>) -> PolledWorkerDriver {
-    PolledWorkerDriver::spawn(spec, calls, test_parse, test_encode, None, None, DriverAudit::default(), ChannelId("t".into()))
+    PolledWorkerDriver::spawn(spec, calls, test_parse, test_encode, None, None, DriverAudit::none(), ChannelId("t".into()))
         .expect("driver spawn")
         .0
 }
@@ -359,7 +359,7 @@ fn a_refused_ack_holds_the_next_poll_and_stops_the_batch() {
         test_encode,
         Some(encode_test_ack),
         None,
-        DriverAudit::default(),
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .unwrap();

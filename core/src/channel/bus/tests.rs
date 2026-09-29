@@ -309,6 +309,7 @@ async fn a_refused_reply_audits_reply_undelivered_alongside_replied() {
         if let (true, Some((_, payload))) = (replied, undelivered) {
             assert_eq!(payload["channel"], "email");
             assert_eq!(payload["peer"], "me@example.org");
+            assert_eq!(payload["reason"], "send_failed");
             let rendered = payload.to_string();
             assert!(!rendered.contains("714"), "must never persist the reply body: {rendered}");
             break;

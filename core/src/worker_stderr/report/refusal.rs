@@ -53,6 +53,35 @@ pub fn format_worker_refusal_stderr_fallback(line: &str) -> String {
     format_stderr_fallback(WORKER_REFUSAL_STDERR_MARKER, line)
 }
 
+/// Test builds only: every line [`emit_worker_refusal_report`] was handed, as
+/// rendered (label folded in, neutralised), with its severity.
+///
+/// ⚠️ **Why this exists instead of a scoped `tracing` subscriber.** A scoped
+/// subscriber only sees an event when `tracing`'s *process-wide* callsite
+/// interest cache agrees, and the driver tests hit this callsite from their
+/// own threads with no subscriber. The #783 test that relied on it failed 6
+/// runs in 30 even after `rebuild_interest_cache()`. Tests read this instead,
+/// filtered to their own channel label — every test uses a distinct one, so
+/// tests running in parallel cannot see each other's lines. Whether the line
+/// then reaches `tracing` or the marked stderr fallback is the business of
+/// `delivery`'s tests and the re-exec e2e, not of the driver's.
+#[cfg(test)]
+pub(crate) static EMITTED: std::sync::Mutex<Vec<(String, RefusalSeverity)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test builds only: the lines [`EMITTED`] holds for channel `label`.
+#[cfg(test)]
+pub(crate) fn emitted_for(label: &str) -> Vec<(String, RefusalSeverity)> {
+    let prefix = format_worker_refusal_line(label, "");
+    EMITTED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter(|(line, _)| line.starts_with(&prefix))
+        .cloned()
+        .collect()
+}
+
 /// Report a refusal from a live channel worker on whichever channel will carry
 /// it: `tracing` (at `severity`) when it will record the event, the marked
 /// stderr line when not.
@@ -69,6 +98,8 @@ pub fn emit_worker_refusal_report(label: &str, report: &str, severity: RefusalSe
     let line = crate::untrusted_text::neutralise_controls(&format_worker_refusal_line(
         &label, report,
     ));
+    #[cfg(test)]
+    EMITTED.lock().unwrap_or_else(|p| p.into_inner()).push((line.clone(), severity));
     // Two invocations, not one with a level argument: `tracing` needs the
     // level at compile time. Both expand the delivery check here, in this
     // module, which is what `warn_and_fall_back!` requires.

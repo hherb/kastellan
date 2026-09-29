@@ -1,7 +1,7 @@
 //! Channel-generic driver for a long-lived, pull-only worker supervised by
 //! [`PersistentWorker`]: owns the autonomous long-poll loop, surfaces the
 //! worker's login identity at startup, and retains queued outbound messages
-//! across a worker respawn (no dropped replies). Replies are queued per
+//! across a worker respawn (a respawn drops no reply). Replies are queued per
 //! conversation, and one the upstream keeps refusing is given up and audited
 //! (#782) — the delivery contract is in `replies.rs`. The supervisor underneath
 //! owns spawn/respawn/backoff/alarm; this driver only *calls* the worker and
@@ -85,9 +85,14 @@ mod refusal;
 use refusal::{accepted, check_refusal_backoff, is_refusal, refused, RefusalRun};
 mod replies;
 pub use replies::{ReplyGiveUp, REPLY_GIVE_UP};
-use replies::{check_reply_give_up, enqueue, flush, ReplyQueues, MAX_QUEUED_PER_CONVERSATION};
+use replies::{
+    check_reply_give_up, discard_on_exit, enqueue, flush, ReplyQueues, MAX_QUEUED_PER_CONVERSATION,
+};
 
-use super::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId};
+use super::{
+    ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId,
+    UndeliveredReason,
+};
 
 /// Bounded depth of the inbound buffer between the driver thread and the bus.
 /// Matches the Matrix channel's historical value; a single-user channel never
@@ -205,20 +210,34 @@ pub type AckOnlyAudit = Box<dyn Fn(&str, &str) + Send + 'static>;
 
 /// Best-effort side channel for a caller to record "this reply was never
 /// delivered" durably — the `channel.reply_undelivered` row (#782). Called
-/// once per reply the driver drops: given up after its refusals, or past a
-/// full conversation queue. Same shape and reasons as [`AckOnlyAudit`]; the
-/// sink must write channel + peer only, never the body
-/// (see `crate::channel::reply_undelivered_payload`).
-pub type ReplyUndeliveredAudit = Box<dyn Fn(&OutgoingMessage) + Send + 'static>;
+/// once per reply the driver drops, with why ([`UndeliveredReason`]): given
+/// up after its refusals, past a full conversation queue, or still queued
+/// when the driver exits. Same shape and reasons as [`AckOnlyAudit`]; the
+/// sink must write channel + peer + reason only, never the body
+/// (see `crate::channel::reply_undelivered_payload`). It is called on the
+/// driver's own thread, so it must not block on I/O: a stalled audit insert
+/// would stall every conversation and the poll with it.
+pub type ReplyUndeliveredAudit = Box<dyn Fn(&OutgoingMessage, UndeliveredReason) + Send + 'static>;
 
-/// The driver's optional audit hooks. `DriverAudit::default()` is "none":
-/// the driver still logs every event these would record.
-#[derive(Default)]
+/// The driver's optional audit hooks.
+///
+/// No `Default`, on purpose: "no audit sink" means the driver's drops are
+/// logged but leave **no** durable row, so a caller says so by name
+/// ([`DriverAudit::none`]) rather than by `..Default::default()`.
 pub struct DriverAudit {
     /// See [`AckOnlyAudit`]. Only the email channel supplies one.
     pub ack_only: Option<AckOnlyAudit>,
     /// See [`ReplyUndeliveredAudit`].
     pub reply_undelivered: Option<ReplyUndeliveredAudit>,
+}
+
+impl DriverAudit {
+    /// No audit hooks: every drop and skip is still logged (on the
+    /// `[worker-refusal]` emitter for a dropped reply, whose line then says it
+    /// was **not** recorded), but nothing is written durably.
+    pub fn none() -> Self {
+        Self { ack_only: None, reply_undelivered: None }
+    }
 }
 
 /// Seam over "something that can call the worker" so the driver is unit-tested
@@ -292,12 +311,17 @@ impl PolledWorkerDriver {
 /// 1. drain queued outbound messages into their conversation's queue
 ///    (non-blocking; see [`replies`]);
 /// 2. flush each conversation front-first, stopping that conversation at its
-///    first refusal and everything at the first death — unsent messages STAY
-///    queued, so a death mid-send loses nothing;
+///    first refusal and everything at the first death or channel-wide refusal
+///    (a refused credential, an unavailable upstream: #782) — unsent messages
+///    STAY queued, so a death mid-send loses nothing;
 /// 3. long-poll for inbound events, forward them to the bus, then — for a
 ///    spec with `ack_method` set — ack the ones that carried an `ack_token`;
 /// 4. unless a poll just completed (its long-poll paces the loop), sleep one
 ///    short slice (shutdown-responsive) and go round again.
+///
+/// The driver exits when either channel endpoint is dropped (the channel
+/// restarting or shutting down). Replies still queued then are dropped, with a
+/// line per conversation and an audit call per reply (`replies::discard_on_exit`).
 ///
 /// A failed call is one of two things (#769), told apart by
 /// [`refusal::is_refusal`]:
@@ -342,6 +366,7 @@ fn run(
                 Err(std_mpsc::TryRecvError::Empty) => break,
                 Err(std_mpsc::TryRecvError::Disconnected) => {
                     tracing::info!(label = spec.label, "outbound sender dropped; polled driver exiting");
+                    discard_on_exit(&mut replies, [], spec.label, reply_undelivered.as_ref());
                     return;
                 }
             }
@@ -388,6 +413,7 @@ fn run(
                                 };
                                 if inbound_tx.blocking_send(msg).is_err() {
                                     tracing::info!(label = spec.label, "inbound receiver closed; polled driver exiting");
+                                    discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
                                     return;
                                 }
 
@@ -452,13 +478,17 @@ fn run(
                         }
                     }
                 }
+                // A failed poll is a failure of the whole channel: no
+                // conversation's give-up clock runs through it (#782).
                 Err(e) if is_refusal(&e) => {
                     refused(&mut poll_refusals, &mut outage, &spec, spec.poll_method, None, &e);
+                    replies.restart_give_up_clocks();
                 }
                 Err(e) => {
                     if outage.on_down() {
                         report_down(spec.label, &e, "poll failed (worker died or restarting)");
                     }
+                    replies.restart_give_up_clocks();
                 }
             }
         }
@@ -471,6 +501,7 @@ fn run(
         if !polled {
             if inbound_tx.is_closed() {
                 tracing::info!(label = spec.label, "inbound receiver closed during retry; polled driver exiting");
+                discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
                 return;
             }
             thread::sleep(RETRY_SLICE);

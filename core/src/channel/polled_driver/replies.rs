@@ -15,42 +15,59 @@
 //! - **A reply the upstream keeps refusing is given up** once [`ReplyGiveUp`]
 //!   is met: that reply refused at least `min_refusals` times, **and** its
 //!   conversation refusing for at least `after`. The reply is dropped, logged
-//!   with its conversation, and handed to the caller's audit hook, which
-//!   writes `channel.reply_undelivered`. That is the row the bus's
-//!   `channel.replied` promises for a reply that did not land.
-//! - **A refused credential holds every conversation and never counts toward
-//!   a give-up.** It is the channel's problem, not the reply's: every send
-//!   would be refused the same way, and dropping replies because a token
-//!   expired overnight would lose all of them.
+//!   with its conversation, and handed to the caller's audit hook when there
+//!   is one (the daemon's Matrix channel has one), which writes
+//!   `channel.reply_undelivered`. That is the row the bus's `channel.replied`
+//!   promises for a reply that did not land.
+//! - **A failure of the whole channel holds every conversation and charges
+//!   none of them.** A refused credential (`UPSTREAM_AUTH_FAILED`), an
+//!   unreachable upstream (`UPSTREAM_UNAVAILABLE`), a dead worker, a failed
+//!   poll: every send would fail the same way, so none of it is evidence
+//!   against a conversation. It adds nothing to any reply's refusal count,
+//!   and it **restarts** every conversation's give-up clock, so an outage —
+//!   a homeserver down overnight, a token revoked — can never age a reply
+//!   out. A conversation is given up only after `after` of refusals *with the
+//!   channel otherwise answering*. The cost: a channel that fails more often
+//!   than `after` never gives up on a dead room; its queue is still capped,
+//!   and its refusal line still names it every 15 min.
 //! - **Each conversation's queue is capped** at [`MAX_QUEUED_PER_CONVERSATION`].
 //!   A reply past the cap is dropped and audited at once, so a stuck
 //!   conversation cannot grow the queue without bound.
+//! - **A driver that exits drops what is queued**, and says so: one line per
+//!   conversation, and an audit call per reply ([`discard_on_exit`]).
 //!
-//! [`ReplyQueues`] and the decision fns are pure; [`enqueue`] and [`flush`]
-//! call the worker and emit the lines the pure parts chose.
+//! [`ReplyQueues`], [`ConversationQueue`]'s transitions and the decision fns
+//! are pure (the clock is passed in); [`enqueue`], [`flush`] and
+//! [`discard_on_exit`] call the worker or the audit hook and emit the lines
+//! the pure parts chose.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::channel::{ConversationId, OutgoingMessage};
+use crate::channel::{ConversationId, OutgoingMessage, UndeliveredReason};
+use crate::worker_lifecycle::persistent::{classify_call_error, CallFailure};
+use crate::worker_lifecycle::RestartBackoff;
 use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
 
 use super::outage::{note_answer, report_down, OutageLog};
-use super::refusal::{
-    accepted, is_refusal, is_upstream_auth_refusal, refusal_code, refused, RefusalRun,
-};
+use super::refusal::{accepted, refusal_code, refused, report_refusal, RefusalRun, Refused};
 use super::{EncodeSend, PolledWorkerSpec, ReplyUndeliveredAudit, WorkerCalls};
 
 /// When the driver gives up on a reply its worker keeps refusing (#782).
 ///
-/// Both halves must hold. The time half is the real bound. The count half
-/// keeps a suspended host (a laptop lid closed for a night) from giving up on
-/// a reply that was only tried once before the sleep and once after it.
+/// Both halves must hold. The time half is the real bound: it is measured
+/// from the start of the conversation's current refusal run, which a
+/// channel-wide failure restarts (see the module docs). The count half gives
+/// every reply attempts of its own: without it, a reply queued behind one
+/// just given up in a conversation refusing for an hour would be dropped at
+/// its very first refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplyGiveUp {
     /// How long the reply's conversation must have been refusing.
     pub after: Duration,
-    /// How many times this reply must have been refused. At least 1.
+    /// How many times this reply must have been refused, the refusal that
+    /// decides included. At least 2 ([`check_reply_give_up`]): a reply is
+    /// never dropped at its first refusal.
     pub min_refusals: u32,
 }
 
@@ -60,9 +77,11 @@ pub struct ReplyGiveUp {
 /// Why an hour: it outlasts every transient refusal seen so far (a homeserver
 /// restart, an egress blip), so a reply is only given up when retrying has
 /// stopped being plausible. At the 60 s refusal-backoff cap that is about 60
-/// attempts. A second reply in the same stuck conversation inherits the
-/// conversation's hour, so it is given up after three more refusals (about
-/// three minutes), not after another hour.
+/// attempts. A reply **already queued** behind a given-up one inherits the
+/// conversation's hour, so it goes after its own three refusals (about three
+/// minutes at the cap), not after another hour. A reply that arrives after the
+/// conversation's queue emptied starts a fresh run: [`ReplyQueues`] forgets an
+/// empty conversation, refusal state and all.
 pub const REPLY_GIVE_UP: ReplyGiveUp =
     ReplyGiveUp { after: Duration::from_secs(60 * 60), min_refusals: 3 };
 
@@ -71,14 +90,23 @@ pub const REPLY_GIVE_UP: ReplyGiveUp =
 /// reply is refused; it exists so the queue has a bound at all.
 pub(super) const MAX_QUEUED_PER_CONVERSATION: usize = 256;
 
-// A cap of 0 or 1 would drop every reply queued behind a refused one. Outside
-// `#[cfg(test)]` on purpose, so a release build refuses such a value too.
+// A cap of 0 drops every reply; a small one drops the replies a person types
+// while one reply is briefly refused (a homeserver restart takes minutes).
+// 64 is a floor well above that, not a tuned value. Outside `#[cfg(test)]` on
+// purpose, so a release build refuses such a value too.
 const _: () = assert!(MAX_QUEUED_PER_CONVERSATION >= 64);
 
-/// Pure: reject a give-up bound that would drop a reply at its first refusal.
-/// Checked once, by [`super::PolledWorkerDriver::spawn`].
+/// Pure: reject a give-up bound that would drop a reply at its first refusal
+/// (`min_refusals` below 2 — the count includes the deciding refusal, so 0
+/// and 1 both mean "no retry of its own"). Checked once, by
+/// [`super::PolledWorkerDriver::spawn`].
 pub(super) fn check_reply_give_up(g: &ReplyGiveUp) -> anyhow::Result<()> {
-    anyhow::ensure!(g.min_refusals >= 1, "reply give-up: min_refusals must be at least 1");
+    anyhow::ensure!(
+        g.min_refusals >= 2,
+        "reply give-up: min_refusals must be at least 2, so a reply is never dropped at its \
+         first refusal (got {})",
+        g.min_refusals
+    );
     Ok(())
 }
 
@@ -96,26 +124,97 @@ pub(super) fn give_up_due(
     refusals >= g.min_refusals && now.saturating_duration_since(refusing_since) >= g.after
 }
 
+/// What a refusal of a conversation's front reply comes to.
+#[derive(Debug)]
+pub(super) enum OnRefused {
+    /// Keep it; retry after the backoff. Carries whether to log it.
+    Retry(Refused),
+    /// Past the bound: the reply left the queue and is handed back.
+    GaveUp {
+        reply: OutgoingMessage,
+        /// Its refusals, the deciding one included.
+        refusals: u32,
+        /// How long the conversation had been refusing.
+        refusing_for: Duration,
+    },
+}
+
 /// One conversation's queued replies, oldest first, and its refusal state.
 #[derive(Debug)]
 pub(super) struct ConversationQueue {
     conversation: ConversationId,
     replies: VecDeque<OutgoingMessage>,
-    /// Pacing and log cadence for this conversation's sends. Ends only when a
-    /// send is accepted, so a give-up does not reset the backoff: the next
-    /// reply in a stuck conversation waits at the cap, not from 1 s.
+    /// Pacing, log cadence and give-up clock for this conversation's sends.
+    /// Ends when a send is accepted; its clock alone restarts on a
+    /// channel-wide failure. A give-up does not end it, so a reply already
+    /// queued behind the given-up one waits at the backoff cap, not from 1 s.
+    /// It goes when the queue empties ([`ReplyQueues`] forgets the
+    /// conversation).
     run: RefusalRun,
     /// Refusals of the reply at the front. Reset when it leaves the queue.
     front_refusals: u32,
 }
 
-/// Every conversation's queue, in the order each conversation first queued a
-/// reply, plus the channel-wide credential hold. Pure.
+impl ConversationQueue {
+    fn new(out: OutgoingMessage) -> Self {
+        Self {
+            conversation: out.conversation.clone(),
+            replies: VecDeque::from([out]),
+            run: RefusalRun::default(),
+            front_refusals: 0,
+        }
+    }
+
+    /// The reply to send next.
+    pub(super) fn front(&self) -> Option<&OutgoingMessage> {
+        self.replies.front()
+    }
+
+    /// Pure: the front reply was accepted. It leaves the queue and its count
+    /// goes with it; the caller ends the run ([`accepted`], which logs).
+    fn on_front_accepted(&mut self) {
+        self.replies.pop_front();
+        self.front_refusals = 0;
+    }
+
+    /// Pure: the front reply was refused with `code` at `now`. Counts the
+    /// refusal against the reply and the conversation's run, then keeps it
+    /// ([`OnRefused::Retry`]) or, past `give_up`, drops it
+    /// ([`OnRefused::GaveUp`]). The run is not reset by a give-up: see
+    /// the `run` field's doc. A queue with no front reply has nothing to
+    /// give up, and only paces.
+    pub(super) fn on_front_refused(
+        &mut self,
+        now: Instant,
+        give_up: &ReplyGiveUp,
+        backoff: &RestartBackoff,
+        code: i32,
+    ) -> OnRefused {
+        let r = self.run.on_refusal(now, backoff, code);
+        self.front_refusals = self.front_refusals.saturating_add(1);
+        let since = self.run.since().unwrap_or(now);
+        if !give_up_due(self.front_refusals, since, now, give_up) {
+            return OnRefused::Retry(r);
+        }
+        let Some(reply) = self.replies.pop_front() else {
+            return OnRefused::Retry(r);
+        };
+        OnRefused::GaveUp {
+            reply,
+            refusals: std::mem::take(&mut self.front_refusals),
+            refusing_for: now.saturating_duration_since(since),
+        }
+    }
+}
+
+/// Every conversation's queue, in the order each conversation's current queue
+/// began, plus the channel-wide send hold. Pure.
 #[derive(Debug)]
 pub(super) struct ReplyQueues {
     queues: Vec<ConversationQueue>,
-    /// A refused **credential** (#674) holds every conversation; see the
-    /// module docs. Paced and logged like any other refusal run.
+    /// A channel-wide send failure — a refused credential (#674), an
+    /// unavailable upstream — holds every conversation; see the module docs.
+    /// Paced and logged like any other refusal run.
     hold: RefusalRun,
     cap: usize,
 }
@@ -136,15 +235,28 @@ impl ReplyQueues {
                 Ok(())
             }
             None => {
-                self.queues.push(ConversationQueue {
-                    conversation: out.conversation.clone(),
-                    replies: VecDeque::from([out]),
-                    run: RefusalRun::default(),
-                    front_refusals: 0,
-                });
+                self.queues.push(ConversationQueue::new(out));
                 Ok(())
             }
         }
+    }
+
+    /// A failure of the whole channel: restart every conversation's give-up
+    /// clock. Backoffs and counts are kept; only the time half of
+    /// [`ReplyGiveUp`] starts again at the next refusal. See the module docs.
+    pub(super) fn restart_give_up_clocks(&mut self) {
+        for q in &mut self.queues {
+            q.run.restart_clock();
+        }
+    }
+
+    /// Take every queued reply, grouped by conversation (in queue order,
+    /// oldest first), leaving the queues empty. For a driver that exits.
+    pub(super) fn drain(&mut self) -> Vec<(ConversationId, Vec<OutgoingMessage>)> {
+        std::mem::take(&mut self.queues)
+            .into_iter()
+            .map(|q| (q.conversation, q.replies.into()))
+            .collect()
     }
 
     /// How many replies are queued, over every conversation.
@@ -153,10 +265,16 @@ impl ReplyQueues {
         self.queues.iter().map(|q| q.replies.len()).sum()
     }
 
-    /// How many conversations have a queued reply.
+    /// How many conversations have a queue.
     #[cfg(test)]
     pub(super) fn conversations(&self) -> usize {
         self.queues.len()
+    }
+
+    /// The queue of `conversation`, if it has one.
+    #[cfg(test)]
+    pub(super) fn queue_mut(&mut self, conversation: &str) -> Option<&mut ConversationQueue> {
+        self.queues.iter_mut().find(|q| q.conversation.0 == conversation)
     }
 
     /// Forget the conversations whose queue is empty. Their refusal state goes
@@ -166,29 +284,68 @@ impl ReplyQueues {
     }
 }
 
+/// Pure: how a drop line ends, from whether the channel has an audit sink.
+/// The sink is asynchronous and logs its own failure, so the line says the
+/// row is being written, not that it was.
+fn audit_clause(sink: bool) -> &'static str {
+    if sink {
+        "recording it as channel.reply_undelivered"
+    } else {
+        "NOT recorded as channel.reply_undelivered: this channel has no audit sink"
+    }
+}
+
 /// Pure: the line for a reply given up after `refusals` refusals over
-/// `refusing_for`.
+/// `refusing_for`. `sink`: whether the channel records it.
 pub(super) fn format_gave_up_report(
     method: &str,
     conversation: &str,
     refusals: u32,
     refusing_for: Duration,
     error: &str,
+    sink: bool,
 ) -> String {
     format!(
         "gave up on a reply to conversation {conversation} after {refusals} refusals of \
-         {method} (the conversation has been refusing for {} s); recorded as \
-         channel.reply_undelivered. Last refusal: {error}",
-        refusing_for.as_secs()
+         {method} (the conversation has been refusing for {} s); {}. Last refusal: {error}",
+        refusing_for.as_secs(),
+        audit_clause(sink)
     )
 }
 
 /// Pure: the line for a reply dropped because its conversation's queue is full.
-pub(super) fn format_overflow_report(conversation: &str, cap: usize) -> String {
+pub(super) fn format_overflow_report(conversation: &str, cap: usize, sink: bool) -> String {
     format!(
         "dropped a new reply to conversation {conversation}: {cap} replies are already queued \
-         behind a refused one; recorded as channel.reply_undelivered"
+         behind a refused one; {}",
+        audit_clause(sink)
     )
+}
+
+/// Pure: the line for `n` replies to `conversation` dropped by a driver that
+/// is exiting.
+pub(super) fn format_exit_report(conversation: &str, n: usize, sink: bool) -> String {
+    let each = if sink {
+        "recording each as channel.reply_undelivered"
+    } else {
+        "NOT recorded as channel.reply_undelivered: this channel has no audit sink"
+    };
+    format!(
+        "discarded {n} queued repl{} to conversation {conversation}: the driver is exiting (the \
+         channel was restarted or shut down); {each}",
+        if n == 1 { "y" } else { "ies" }
+    )
+}
+
+/// Hand a dropped reply to the audit hook, if there is one.
+fn record_undelivered(
+    audit: Option<&ReplyUndeliveredAudit>,
+    out: &OutgoingMessage,
+    reason: UndeliveredReason,
+) {
+    if let Some(audit) = audit {
+        audit(out, reason);
+    }
 }
 
 /// Queue `out`, or — when its conversation is full — drop it, say so, and
@@ -200,19 +357,43 @@ pub(super) fn enqueue(
     audit: Option<&ReplyUndeliveredAudit>,
 ) {
     if let Err(dropped) = queues.push(out) {
-        let report = format_overflow_report(&dropped.conversation.0, queues.cap);
+        let report = format_overflow_report(&dropped.conversation.0, queues.cap, audit.is_some());
         emit_worker_refusal_report(label, &report, RefusalSeverity::Warn);
-        if let Some(audit) = audit {
-            audit(&dropped);
+        record_undelivered(audit, &dropped, UndeliveredReason::QueueFull);
+    }
+}
+
+/// The driver is exiting: every reply still queued, and every reply in `late`
+/// (still in the outbound channel), will never be sent. Say so, one line per
+/// conversation, and audit each reply.
+pub(super) fn discard_on_exit(
+    queues: &mut ReplyQueues,
+    late: impl IntoIterator<Item = OutgoingMessage>,
+    label: &str,
+    audit: Option<&ReplyUndeliveredAudit>,
+) {
+    let mut groups = queues.drain();
+    for out in late {
+        match groups.iter_mut().find(|(c, _)| *c == out.conversation) {
+            Some((_, replies)) => replies.push(out),
+            None => groups.push((out.conversation.clone(), vec![out])),
+        }
+    }
+    for (conversation, replies) in groups {
+        let report = format_exit_report(&conversation.0, replies.len(), audit.is_some());
+        emit_worker_refusal_report(label, &report, RefusalSeverity::Warn);
+        for out in &replies {
+            record_undelivered(audit, out, UndeliveredReason::DriverExit);
         }
     }
 }
 
 /// Send what can be sent: each conversation front-first, stopping that
-/// conversation at its first refusal. Returns `true` when the worker is
-/// **down** (the caller skips the poll).
+/// conversation at its first refusal and every conversation at a
+/// channel-wide failure. Returns `true` when the worker is **down** (the
+/// caller skips the poll).
 ///
-/// Skipped entirely while a credential refusal's backoff runs, and a
+/// Skipped entirely while the channel-wide hold's backoff runs, and a
 /// conversation is skipped while its own backoff runs.
 pub(super) fn flush(
     queues: &mut ReplyQueues,
@@ -224,31 +405,35 @@ pub(super) fn flush(
 ) -> bool {
     let method = spec.send_method;
     let mut down = false;
+    let mut channel_wide = false;
     if queues.hold.ready(Instant::now()) {
         'conversations: for q in queues.queues.iter_mut() {
             if !q.run.ready(Instant::now()) {
                 continue;
             }
-            while let Some(out) = q.replies.front() {
-                let conversation = q.conversation.0.as_str();
-                match calls.call(method, encode_send(out)) {
+            while let Some(out) = q.front() {
+                let e = match calls.call(method, encode_send(out)) {
                     Ok(_) => {
                         accepted(&mut queues.hold, outage, spec.label, method, None);
-                        accepted(&mut q.run, outage, spec.label, method, Some(conversation));
-                        q.replies.pop_front();
-                        q.front_refusals = 0;
+                        accepted(&mut q.run, outage, spec.label, method, Some(&q.conversation.0));
+                        q.on_front_accepted();
+                        continue;
                     }
-                    Err(e) if is_upstream_auth_refusal(&e) => {
-                        // The whole channel's problem: hold every conversation,
-                        // and count nothing against this reply.
-                        refused(&mut queues.hold, outage, spec, method, None, &e);
-                        break 'conversations;
-                    }
-                    Err(e) if is_refusal(&e) => {
+                    Err(e) => e,
+                };
+                match classify_call_error(&e) {
+                    CallFailure::Refused => {
                         on_reply_refused(q, outage, spec, &e, audit);
                         break;
                     }
-                    Err(e) => {
+                    CallFailure::CredentialRefused | CallFailure::Unavailable => {
+                        // The whole channel's problem: hold every
+                        // conversation, and charge none of them.
+                        refused(&mut queues.hold, outage, spec, method, None, &e);
+                        channel_wide = true;
+                        break 'conversations;
+                    }
+                    CallFailure::Gone => {
                         if outage.on_down() {
                             report_down(spec.label, &e, "send failed; retrying after respawn");
                         }
@@ -258,6 +443,9 @@ pub(super) fn flush(
                 }
             }
         }
+    }
+    if down || channel_wide {
+        queues.restart_give_up_clocks();
     }
     queues.prune();
     down
@@ -273,30 +461,28 @@ fn on_reply_refused(
     e: &anyhow::Error,
     audit: Option<&ReplyUndeliveredAudit>,
 ) {
-    let now = Instant::now();
-    q.front_refusals = q.front_refusals.saturating_add(1);
-    let since = q.run.since().unwrap_or(now);
-    if !give_up_due(q.front_refusals, since, now, &spec.reply_give_up) {
-        refused(&mut q.run, outage, spec, spec.send_method, Some(&q.conversation.0), e);
-        return;
+    if note_answer(outage, spec.label) {
+        q.run.rearm_report();
     }
-    // Still a refusal: the worker is up, and the next reply in this
-    // conversation waits out the (unreset) backoff. The give-up line below
-    // replaces the refusal line, which would say "retrying" about a reply that
-    // is not retried.
-    note_answer(outage, spec.label);
-    let _ = q.run.on_refusal(now, &spec.refusal_backoff, refusal_code(e));
-    let refusals = std::mem::take(&mut q.front_refusals);
-    let Some(dropped) = q.replies.pop_front() else { return };
-    let report = format_gave_up_report(
-        spec.send_method,
-        &q.conversation.0,
-        refusals,
-        now.saturating_duration_since(since),
-        &e.to_string(),
-    );
-    emit_worker_refusal_report(spec.label, &report, RefusalSeverity::Warn);
-    if let Some(audit) = audit {
-        audit(&dropped);
+    let outcome =
+        q.on_front_refused(Instant::now(), &spec.reply_give_up, &spec.refusal_backoff, refusal_code(e));
+    match outcome {
+        OnRefused::Retry(r) => {
+            report_refusal(spec.label, spec.send_method, Some(&q.conversation.0), e, &r);
+        }
+        OnRefused::GaveUp { reply, refusals, refusing_for } => {
+            // Replaces the refusal line, which would say "retrying" about a
+            // reply that is not retried.
+            let report = format_gave_up_report(
+                spec.send_method,
+                &q.conversation.0,
+                refusals,
+                refusing_for,
+                &e.to_string(),
+                audit.is_some(),
+            );
+            emit_worker_refusal_report(spec.label, &report, RefusalSeverity::Warn);
+            record_undelivered(audit, &reply, UndeliveredReason::GaveUp);
+        }
     }
 }
