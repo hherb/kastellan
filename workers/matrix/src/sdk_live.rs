@@ -53,7 +53,7 @@ use matrix_sdk::{Client, Room, RoomMemberships, RoomState};
 use kastellan_matrix_wire::{push_bounded_fair, Event, FairPush, InitResult};
 
 use crate::bridge::ProxyBridge;
-use crate::sdk::MatrixSdk;
+use crate::sdk::{MatrixSdk, SendError, SendEvidence};
 use crate::sync_retry;
 
 /// Bounded depth of the inbound buffer the sync task fills and `poll` drains. A
@@ -313,23 +313,41 @@ impl MatrixSdk for LiveSdk {
         })
     }
 
-    fn send(&mut self, conversation: &str, body: &str) -> anyhow::Result<()> {
+    fn send(&mut self, conversation: &str, body: &str) -> Result<(), SendError> {
         let body = body.to_string();
         let conversation = conversation.to_string();
         // Clone the client (cheap — it's `Arc`-backed) so the future doesn't
         // borrow `self` across the runtime's `block_on`.
         let client = self.client.as_ref().expect("live client present").clone();
         self.runtime.block_on(async move {
-            let room_id = RoomId::parse(&conversation)
-                .with_context(|| format!("invalid room id {conversation:?}"))?;
-            let room = client
-                .get_room(&room_id)
-                .with_context(|| format!("unknown room {conversation}"))?;
-            room.send(RoomMessageEventContent::text_plain(body))
-                .await
-                .context("send room message")?;
+            let room_id = RoomId::parse(&conversation).map_err(|e| {
+                SendError::new(SendEvidence::Local, format!("invalid room id {conversation:?}: {e}"))
+            })?;
+            let room = client.get_room(&room_id).ok_or_else(|| {
+                SendError::new(SendEvidence::Local, format!("unknown room {conversation}"))
+            })?;
+            room.send(RoomMessageEventContent::text_plain(body)).await.map_err(|e| {
+                SendError::new(send_evidence(&e), format!("send room message: {e}"))
+            })?;
             Ok(())
         })
+    }
+}
+
+/// What a failed `room.send` got back (#782): no HTTP response at all, or the
+/// homeserver's status. Everything else — a crypto or local-store failure, a
+/// response that was not a Matrix error — is [`SendEvidence::Local`], which
+/// charges the room; those are rare, and a room is still given up only after
+/// an hour of them with the channel otherwise answering.
+fn send_evidence(e: &matrix_sdk::Error) -> SendEvidence {
+    match e {
+        matrix_sdk::Error::Timeout => SendEvidence::NoResponse,
+        matrix_sdk::Error::Http(h) if matches!(**h, matrix_sdk::HttpError::Reqwest(_)) => {
+            SendEvidence::NoResponse
+        }
+        _ => e
+            .as_client_api_error()
+            .map_or(SendEvidence::Local, |api| SendEvidence::Status(api.status_code.as_u16())),
     }
 }
 

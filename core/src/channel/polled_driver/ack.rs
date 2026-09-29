@@ -21,11 +21,11 @@ pub(super) fn ack(
 ) -> Result<bool, String> {
     match calls.call(method, params) {
         Ok(_) => {
-            accepted(run, outage, spec.label, method);
+            accepted(run, outage, spec.label, method, None);
             Ok(true)
         }
         Err(e) if is_refusal(&e) => {
-            refused(run, outage, spec, method, &e);
+            refused(run, outage, spec, method, None, &e);
             Ok(false)
         }
         Err(e) => Err(crate::untrusted_text::neutralise_controls(&e.to_string())),

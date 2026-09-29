@@ -34,7 +34,7 @@ use tokio::sync::mpsc as tok_mpsc;
 
 use kastellan_sandbox::SandboxBackend;
 
-use crate::channel::polled_driver::{AckOnlyAudit, PolledWorkerDriver};
+use crate::channel::polled_driver::{AckOnlyAudit, DriverAudit, PolledWorkerDriver};
 use crate::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
 use crate::egress::spawn::Mitm;
 use crate::worker_lifecycle::force_route::ForceRoutingConfig;
@@ -310,10 +310,17 @@ pub fn spawn_email_worker(
         wire::encode_email_send,
         Some(wire::encode_email_ack),
         Some(wire::parse_email_skipped),
-        // A skipped id is always LOGGED (driver `tracing::warn!`, id + reason,
-        // never body) regardless of this hook — `audit_ack_only` only
-        // controls whether it ALSO becomes a durable `audit_log` row.
-        audit_ack_only,
+        DriverAudit {
+            // A skipped id is always LOGGED (driver `tracing::warn!`, id +
+            // reason, never body) regardless of this hook — `audit_ack_only`
+            // only controls whether it ALSO becomes a durable `audit_log` row.
+            ack_only: audit_ack_only,
+            // No reply ever reaches this driver's send: `EmailChannel::send`
+            // refuses every reply itself (outbound is slice 2), and the bus
+            // audits that refusal. Wire a sink here when slice 2 routes
+            // replies through `email.send`.
+            reply_undelivered: None,
+        },
         id.clone(),
     )?;
     Ok(SpawnedEmailWorker { channel: EmailChannel::from_driver(id, driver), identity })

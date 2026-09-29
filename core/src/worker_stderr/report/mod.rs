@@ -23,7 +23,7 @@
 //! installed that records nothing from these targets — and the report then
 //! needs the stderr line exactly as a test binary does.
 //!
-//! There are three such events, and they get **distinct markers** so a grep
+//! There are four such events, and they get **distinct markers** so a grep
 //! can tell them apart:
 //!
 //! | Event | Marker | Emitter |
@@ -31,8 +31,9 @@
 //! | a tool worker fails a call and is retired | [`WORKER_FAILED_STDERR_MARKER`] | [`emit_worker_failure_report`] |
 //! | a persistent worker dies mid-service | [`WORKER_DEATH_STDERR_MARKER`] | [`emit_persistent_death_report`] |
 //! | a persistent worker is NOT coming back | [`WORKER_DOWN_STDERR_MARKER`] | [`emit_persistent_down_report`] |
+//! | a live channel worker refused a call (#783) | [`WORKER_REFUSAL_STDERR_MARKER`] | [`emit_worker_refusal_report`] |
 //!
-//! ⚠️ **The shared half is shared on purpose.** All three emitters render
+//! ⚠️ **The shared half is shared on purpose.** All four emitters render
 //! through the same private `format_stderr_fallback` and emit through the same
 //! `warn_and_fall_back!`, so neither the neutralisation nor the delivery check
 //! exists in two copies that can drift. That drift is the shape CLAUDE.md's
@@ -49,6 +50,7 @@
 
 mod delivery;
 mod persistent;
+mod refusal;
 pub(crate) mod shared;
 mod tool_worker;
 
@@ -60,6 +62,12 @@ pub use persistent::{
 };
 #[doc(hidden)]
 pub use delivery::stderr_is_writable;
+pub use refusal::{
+    emit_worker_refusal_report, format_worker_refusal_line,
+    format_worker_refusal_stderr_fallback, RefusalSeverity, WORKER_REFUSAL_STDERR_MARKER,
+};
+#[cfg(test)]
+pub(crate) use refusal::emitted_for as emitted_refusal_lines_for;
 pub use shared::STDERR_FALLBACK_MARKERS;
 pub use tool_worker::{
     emit_worker_failure_report, format_worker_failure_report,

@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use kastellan_core::channel::auth::{AuthDecision, PeerAuthorizer, UnauthenticReason};
 use kastellan_core::channel::bus::{ChannelBus, ChannelEvents, CompletedTasks};
 use kastellan_core::channel::email::{wire, EmailChannel};
-use kastellan_core::channel::polled_driver::PolledWorkerDriver;
+use kastellan_core::channel::polled_driver::{DriverAudit, PolledWorkerDriver};
 use kastellan_core::channel::{actions, ChannelId, PeerEvidence};
 use kastellan_core::worker_lifecycle::persistent::{
     ClientTransport, PersistentFactory, PersistentTransport, PersistentWorker,
@@ -258,7 +258,7 @@ async fn spawn_email_channel(events: Vec<Value>, skipped: Vec<Value>) -> Handle 
         wire::encode_email_send,
         Some(wire::encode_email_ack),
         Some(wire::parse_email_skipped),
-        None,
+        DriverAudit::none(),
         ChannelId("email".into()),
     )
     .expect("polled driver spawn");

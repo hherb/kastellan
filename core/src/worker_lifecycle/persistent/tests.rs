@@ -260,6 +260,16 @@ fn only_a_typed_credential_refusal_is_classified_as_one() {
     assert_eq!(classify_call_error(&wrapped), CallFailure::CredentialRefused, "context does not hide it");
 }
 
+/// #782: an unreachable upstream is its own class, so the polled driver can
+/// hold every conversation on it instead of charging one room's give-up.
+#[test]
+fn an_unavailable_upstream_is_classified_as_one_and_keeps_the_worker() {
+    let down = kastellan_protocol::RpcError::new(kastellan_protocol::codes::UPSTREAM_UNAVAILABLE, "503");
+    let down = client_error_to_anyhow(ClientError::Rpc(down));
+    assert_eq!(classify_call_error(&down), CallFailure::Unavailable);
+    assert_eq!(classify_call_error(&down.context("while sending")), CallFailure::Unavailable);
+}
+
 // ----- a credential refusal replaces the worker; a dead sidecar retires it (#769 review) -----
 
 /// A live worker that refuses `"login"` with `UPSTREAM_AUTH_FAILED` and

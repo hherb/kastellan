@@ -700,9 +700,7 @@ impl ChannelBus {
                                 events
                                     .audit(
                                         actions::REPLY_UNDELIVERED,
-                                        serde_json::json!({
-                                            "channel": id.0, "peer": peer.0,
-                                        }),
+                                        super::reply_undelivered_payload(&id, &peer, super::UndeliveredReason::SendFailed),
                                     )
                                     .await;
                             }

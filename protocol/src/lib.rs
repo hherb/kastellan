@@ -150,6 +150,16 @@ pub mod codes {
     /// privately (gliner-relex `INFERENCE_FAILED`, browser-driver
     /// `RENDER_FAILED`).
     pub const UPSTREAM_AUTH_FAILED: i32 = -32004;
+    /// The worker's own upstream failed for the **whole service**, not for
+    /// this request's target (a room, a mailbox): no HTTP response at all, a
+    /// timeout, a 5xx, a 429 — or a refused credential that restarting the
+    /// worker cannot fix (the Matrix worker's session lives in a store a
+    /// second process must not open, so it cannot take
+    /// [`UPSTREAM_AUTH_FAILED`]'s quiet replacement). A caller that queues per
+    /// target must not charge it to one (#782): every target would be refused
+    /// the same way. The worker is kept; the message says whether the operator
+    /// must act.
+    pub const UPSTREAM_UNAVAILABLE: i32 = -32005;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

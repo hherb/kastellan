@@ -29,8 +29,12 @@
 //!   worker's sync task exits the process after sustained sync failures
 //!   (`workers/matrix/src/sdk_live.rs`, policy in `sync_retry.rs`, #348), and
 //!   that exit IS a death here. A refused *send* with healthy sync is a
-//!   room-level answer (unknown room, forbidden, rate-limited), which a
-//!   restored session cannot change.
+//!   room-level answer (unknown room, forbidden), which a restored session
+//!   cannot change. The worker tells the channel-wide answers apart (#782):
+//!   no response, a 5xx, a 429 **and a 401** are [`CallFailure::Unavailable`]
+//!   — the 401 deliberately not [`CallFailure::CredentialRefused`], whose
+//!   replacement would run two clients on one Matrix store (see the worker's
+//!   `handler::send_error`).
 
 use kastellan_protocol::{codes, RpcError};
 
@@ -50,6 +54,14 @@ pub(crate) enum CallFailure {
     /// the supervisor also replaces the worker — quietly, with no death report
     /// and no alarm tick — so that a renewed credential is read.
     CredentialRefused,
+    /// A live worker's upstream failed for the whole service
+    /// ([`codes::UPSTREAM_UNAVAILABLE`]: no response, a timeout, a 5xx, a
+    /// 429, or a refused credential a restart cannot fix). Answered like
+    /// [`Self::Refused`] — the worker is kept, never replaced — but it is
+    /// about the **channel**, not the call's target, so the polled driver
+    /// holds every conversation on it instead of charging one conversation's
+    /// give-up (#782).
+    Unavailable,
 }
 
 /// Pure: classify a call error as it reaches a [`super::PersistentHandle::call`]
@@ -70,6 +82,7 @@ pub(crate) fn classify_call_error(e: &anyhow::Error) -> CallFailure {
     match e.downcast_ref::<RpcError>() {
         None => CallFailure::Gone,
         Some(rpc) if rpc.code == codes::UPSTREAM_AUTH_FAILED => CallFailure::CredentialRefused,
+        Some(rpc) if rpc.code == codes::UPSTREAM_UNAVAILABLE => CallFailure::Unavailable,
         Some(_) => CallFailure::Refused,
     }
 }
