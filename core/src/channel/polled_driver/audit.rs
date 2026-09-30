@@ -3,7 +3,7 @@
 //! DB-free. Split out of [`super`] to keep it under the 500-LOC soft cap;
 //! re-exported there, so every path is unchanged.
 
-use crate::channel::UndeliveredReply;
+use crate::channel::{OutgoingMessage, UndeliveredReason, UndeliveredReply};
 
 /// Best-effort side channel for a caller to record "this id was discarded
 /// without ever becoming a bus event" somewhere durable (e.g. an
@@ -53,5 +53,17 @@ impl DriverAudit {
     /// was **not** recorded), but nothing is written durably.
     pub fn none() -> Self {
         Self { ack_only: None, reply_undelivered: None }
+    }
+}
+
+/// Hand a dropped reply to the audit hook, if there is one — as an
+/// [`UndeliveredReply`], which leaves the body behind (#790).
+pub(super) fn record_undelivered(
+    audit: Option<&ReplyUndeliveredAudit>,
+    out: &OutgoingMessage,
+    reason: UndeliveredReason,
+) {
+    if let Some(audit) = audit {
+        audit(UndeliveredReply::of(out, reason));
     }
 }

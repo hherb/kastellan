@@ -44,12 +44,13 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::channel::{ConversationId, OutgoingMessage, UndeliveredReason, UndeliveredReply};
+use crate::channel::{ConversationId, OutgoingMessage, UndeliveredReason};
 use crate::worker_lifecycle::persistent::{classify_call_error, CallFailure};
 use crate::worker_lifecycle::RestartBackoff;
 use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
 
 use super::outage::{note_answer, report_down, OutageLog};
+use super::audit::record_undelivered;
 use super::refusal::{accepted, refusal_code, refused, report_refusal, RefusalRun, Refused};
 use super::{EncodeSend, PolledWorkerSpec, ReplyUndeliveredAudit, WorkerCalls};
 
@@ -335,18 +336,6 @@ pub(super) fn format_exit_report(conversation: &str, n: usize, sink: bool) -> St
          channel was restarted or shut down); {each}",
         if n == 1 { "y" } else { "ies" }
     )
-}
-
-/// Hand a dropped reply to the audit hook, if there is one — as an
-/// [`UndeliveredReply`], which leaves the body behind (#790).
-fn record_undelivered(
-    audit: Option<&ReplyUndeliveredAudit>,
-    out: &OutgoingMessage,
-    reason: UndeliveredReason,
-) {
-    if let Some(audit) = audit {
-        audit(UndeliveredReply::of(out, reason));
-    }
 }
 
 /// Queue `out`, or — when its conversation is full — drop it, say so, and
