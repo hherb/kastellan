@@ -63,9 +63,11 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - **#788 — a refusal that ENDS says so on the marked stream.** `accepted()` emits "the worker
   accepted `<method>` [for conversation `<c>`] again after N refusals; that refusal has ended"
   (pure `format_accepted_report`) through `emit_worker_refusal_report` at the new
-  **`RefusalSeverity::Info`**, whose `warn_and_fall_back!` arm is `level = INFO`, checked at
-  INFO. ⚠️ **An INFO line falls back under an operator's `RUST_LOG=warn` too, on purpose**: it
-  closes a refusal that was shown, and it is one line per run. ⚠️ **The two outage lines
+  **`RefusalSeverity::Recovered`** (named for its event, not its level, so no per-event INFO line
+  borrows it), whose `warn_and_fall_back!` arm is `level = INFO`, checked at INFO. ⚠️ **It falls
+  back under an operator's `RUST_LOG=warn` too, on purpose**: it closes a refusal that was shown,
+  and it is one line per run. Under `RUST_LOG=warn` the refusal and its ending travel apart
+  (`tracing` vs stderr). ⚠️ **The two outage lines
   (`note_answer`, `report_down`) stay unmarked, deliberately** (doc in `outage.rs`): the
   supervisor's `[worker-death]`, plus a `[worker-down]` for every failed respawn, already tell that
   story on the marked stream.
@@ -75,6 +77,14 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   a `TcpListener` that accepts and never answers, plus a positive control that a *waited-for*
   insert takes the acquire timeout. ⚠️ Build that pool **inside** a runtime
   (`rt.block_on(async { stalled_pool() })`): a lazy pool spawns its maintenance task as it is made.
+  ⚠️ **Spawned is bounded, not free** (review round): `block_on` ran one insert at a time, and a
+  compromised email-in worker can return any number of skipped ids, so unbounded spawning could
+  starve the shared 16-connection pool that tool-dispatch and scheduler rows go through. The helper
+  holds these inserts to **4 connections, 1024 queued**; past that a row is **shed** and the sink's
+  `on_failure` says so (`audit_sink::Unwritten::Shed`). Each sink test also asserts the insert was
+  *attempted* (`assert_insert_attempted`: the stalled listener saw a connection) — a sink that
+  wrote nothing passed the fast-return test alone. Rows lost at shutdown or before a crash are
+  still silent: **#792**. A hook that blocks is still caught only by tests: **#793**.
 - **#790 — the reply audit hook cannot see the body.** `ReplyUndeliveredAudit` takes
   `channel::UndeliveredReply<'_>` (channel, peer, conversation, reason; `payload()`), which has no
   body field. Driver tests tell audited replies apart by **peer** (`tests/replies.rs` `reply()`
@@ -83,7 +93,12 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   `channel/mod.rs` 508 → 394 (+ `channel/undelivered.rs`), `polled_driver.rs` 517 → 467
   (+ `polled_driver/audit.rs`). Paths unchanged via re-exports.
 - Mutants 4/4 killed (helper blocks; email sink back to `block_on`; the INFO arm checked at WARN;
-  the recovery line bypassing the emitter).
+  the recovery line bypassing the emitter). **Review round, 8/8 more:** three INFO-arm field lists
+  (the INFO rows of the field- and message-scoped delivery tests had landed in each other's test,
+  so a bare INFO check survived — ⚠️ a row under a `warn` base tests nothing for INFO), both sinks
+  writing nothing, the connection and queue bounds removed, `Recovered` routed to the WARN arm
+  (now a unit test pins every severity × level, not only the e2e). The email row is a pure
+  `email_skipped_row`, pinned like Matrix's.
 
 ### Previous (2026-09-29): #782 + #783 — a stuck room holds only itself (PR #787)
 
@@ -270,6 +285,11 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#721](https://github.com/hherb/kastellan/issues/721), [#723](https://github.com/hherb/kastellan/issues/723),
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
+
+5. **The polled-driver audit residue of PR #791: [#792](https://github.com/hherb/kastellan/issues/792)**
+   (audit rows lost at shutdown or before a crash leave no trace — join the drivers and drain a
+   pending counter before `pool.close()`) **and [#793](https://github.com/hherb/kastellan/issues/793)**
+   (time the hook calls to catch a sink that blocks; a named view for `AckOnlyAudit`).
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
