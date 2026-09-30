@@ -1,4 +1,4 @@
-//! The half all four events share: the marker census and the one line
+//! The half all five events share: the marker census and the one line
 //! renderer.
 //!
 //! Kept in its own module so the neutralisation exists in exactly one place.
@@ -11,6 +11,7 @@
 //! target. A version of it written here answered `true` for events `EnvFilter`
 //! had dropped; the measured table is on that macro.
 
+use super::audit_lost::AUDIT_LOST_STDERR_MARKER;
 use super::persistent::{WORKER_DEATH_STDERR_MARKER, WORKER_DOWN_STDERR_MARKER};
 use super::refusal::WORKER_REFUSAL_STDERR_MARKER;
 use super::tool_worker::WORKER_FAILED_STDERR_MARKER;
@@ -22,14 +23,15 @@ use super::tool_worker::WORKER_FAILED_STDERR_MARKER;
 /// rather than over one name that a second marker could quietly fail to join.
 ///
 /// ⚠️ **A new marker must be added here as well as declared.** Nothing forces
-/// it: a **fifth** `pub const` that never joins this array is a line in a gate
+/// it: a **sixth** `pub const` that never joins this array is a line in a gate
 /// log that no test ever looked at. The tests below are the only enforcement, and
 /// they can only check what the array holds.
-pub const STDERR_FALLBACK_MARKERS: [&str; 4] = [
+pub const STDERR_FALLBACK_MARKERS: [&str; 5] = [
     WORKER_FAILED_STDERR_MARKER,
     WORKER_DEATH_STDERR_MARKER,
     WORKER_DOWN_STDERR_MARKER,
     WORKER_REFUSAL_STDERR_MARKER,
+    AUDIT_LOST_STDERR_MARKER,
 ];
 
 /// Pure: the exact bytes a marked stderr-fallback line carries.
@@ -82,20 +84,28 @@ mod tests {
             // `starts_with` in this file, and `stdout.contains("")` in the e2es is
             // true of any output at all. Every other assertion on a marker reads
             // the const, so this is the only place their VALUES are pinned.
+            //
+            // `[<family>-<event>]`, both halves non-empty: `[worker-…]` for the
+            // four worker events, `[audit-lost]` for #792's, which is not one.
+            let token = marker.strip_prefix('[').and_then(|m| m.strip_suffix(']'));
+            let halves = token.and_then(|t| t.split_once('-'));
             assert!(
-                marker.starts_with("[worker-")
-                    && marker.ends_with(']')
-                    && marker.len() > "[worker-]".len(),
-                "each marker must be a non-trivial bracketed `[worker-…]` token; an empty or \
-                 single-character marker passes every other check in this file vacuously, \
-                 including `contains` in the e2es. Got: {marker:?}"
+                halves.is_some_and(|(family, event)| {
+                    !family.is_empty()
+                        && !event.is_empty()
+                        && family.bytes().all(|b| b.is_ascii_lowercase())
+                }),
+                "each marker must be a non-trivial bracketed `[<family>-<event>]` token (a \
+                 lower-case family, a non-empty event); an empty or single-character marker \
+                 passes every other check in this file vacuously, including `contains` in the \
+                 e2es. Got: {marker:?}"
             );
         }
     }
 
     #[test]
     fn the_stderr_fallback_markers_are_distinct() {
-        // The four events point at four different places to look: a single
+        // The five events point at five different places to look: a single
         // call's jail (`[worker-failed]`), a long-lived worker that stopped and
         // is being respawned (`[worker-death]`), one the supervisor is NOT
         // getting back (`[worker-down]`), and a live one whose upstream said
@@ -104,7 +114,7 @@ mod tests {
         // the death its own rather than reusing the tool-worker marker, and
         // #738 the same again.
         //
-        // Reads the ARRAY, not the consts, so a fourth marker that duplicated an
+        // Reads the ARRAY, not the consts, so a new marker that duplicated an
         // existing one is caught here too.
         let mut seen = STDERR_FALLBACK_MARKERS.to_vec();
         seen.sort_unstable();

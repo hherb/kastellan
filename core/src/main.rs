@@ -815,8 +815,16 @@ async fn main() -> Result<()> {
 
     // Stop the scheduler before the audit-mirror so any final audit
     // rows it writes during graceful drain land in the mirror's
-    // catch-up SELECT.
-    scheduler.shutdown().await;
+    // catch-up SELECT. Beside it, and for the same reason before the mirror
+    // and the pool, drain the channel drivers' audit rows (#792): the
+    // stopped channels' drivers exit on their own thread, a Matrix driver
+    // auditing its still-queued replies as it goes, and each row is spawned
+    // rather than awaited. Bounded (`audit_sink::DRAIN_BOUND`); what is still
+    // pending then is reported on the `[audit-lost]` marker, and a row tried
+    // after it is refused and reported rather than silently dropped with the
+    // runtime.
+    let (drained, ()) = tokio::join!(audit_sink::drain(), scheduler.shutdown());
+    audit_sink::report_drained(drained);
 
     // Graceful shutdown: stop the mirror task first so any in-flight
     // catch-up SELECT completes its fsync, then close the pool.

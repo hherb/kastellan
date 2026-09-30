@@ -6,7 +6,7 @@ use super::super::shared::STDERR_FALLBACK_MARKERS;
 
 mod fd;
 
-/// A stand-in emitter living in its **own module**, exactly as the four
+/// A stand-in emitter living in its **own module**, exactly as the five
 /// real ones do.
 ///
 /// The point of the nesting: this module's path differs from
@@ -286,7 +286,7 @@ fn a_message_scoped_off_directive_fools_neither_arm() {
 /// Every emitter that actually ships, with the module its `warn!` is
 /// written in.
 ///
-/// ⚠️ **A new emitter must join this array.** Nothing forces it — a fifth
+/// ⚠️ **A new emitter must join this array.** Nothing forces it — a sixth
 /// `emit_*` that called a plain function instead of `warn_and_fall_back!`
 /// would be silently un-guarded, which is the whole failure this array
 /// exists to prevent. [`every_shipping_emitter_is_covered`] is the only
@@ -296,6 +296,7 @@ fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>
     const TOOL_WORKER: &str = "kastellan_core::worker_stderr::report::tool_worker";
     const PERSISTENT: &str = "kastellan_core::worker_stderr::report::persistent";
     const REFUSAL: &str = "kastellan_core::worker_stderr::report::refusal";
+    const AUDIT_LOST: &str = "kastellan_core::worker_stderr::report::audit_lost";
     vec![
         (
             "emit_worker_failure_report",
@@ -326,6 +327,12 @@ fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>
                     crate::worker_stderr::RefusalSeverity::Error,
                 )
             }),
+        ),
+        // #792: not a worker event, but a marked line all the same.
+        (
+            "emit_audit_lost_report",
+            AUDIT_LOST,
+            Box::new(|| crate::worker_stderr::emit_audit_lost_report("shutdown", PROBE_LINE)),
         ),
     ]
 }
@@ -362,7 +369,7 @@ fn every_refusal_severity_checks_delivery_at_its_own_callsite() {
 fn every_shipping_emitter_checks_delivery_at_its_own_callsite() {
     // The blind spot this closes: every other test in this file drives
     // `pretend_emitter`, which proves the MACRO works and nothing about the
-    // four functions that actually ship. A refactor replacing the macro in
+    // five functions that actually ship. A refactor replacing the macro in
     // `persistent.rs` with a helper call would pass all of them.
     for (name, target, emit) in shipping_emitters() {
         // Enable everything EXCEPT this emitter's own module. A check at
@@ -393,7 +400,7 @@ fn every_shipping_emitter_is_covered() {
     assert_eq!(
         shipping_emitters().len(),
         STDERR_FALLBACK_MARKERS.len(),
-        "there is exactly one shipping emitter per fallback marker; if a fifth marker was \
+        "there is exactly one shipping emitter per fallback marker; if a new marker was \
          added, its emitter must join `shipping_emitters` or it is unguarded"
     );
     // ⚠️ **Counts alone are not the census.** A count check is satisfied by
@@ -437,6 +444,7 @@ fn marker_of(emitter: &str) -> &'static str {
         "emit_persistent_death_report" => crate::worker_stderr::WORKER_DEATH_STDERR_MARKER,
         "emit_persistent_down_report" => crate::worker_stderr::WORKER_DOWN_STDERR_MARKER,
         "emit_worker_refusal_report" => crate::worker_stderr::WORKER_REFUSAL_STDERR_MARKER,
+        "emit_audit_lost_report" => crate::worker_stderr::AUDIT_LOST_STDERR_MARKER,
         other => panic!(
             "a new shipping emitter `{other}` must name the marker it writes here, or \
              `every_shipping_emitter_is_covered` cannot tell whether it is guarded"

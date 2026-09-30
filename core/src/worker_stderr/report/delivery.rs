@@ -1,7 +1,7 @@
 //! Whether a report actually **reaches** someone, and whether writing it can
 //! kill the process.
 //!
-//! Two questions that the four emitters in `report`'s sibling modules
+//! Two questions that the five emitters in `report`'s sibling modules
 //! (`tool_worker`, `persistent`, `refusal`) all have to answer the same way — none of them
 //! lives here, which is the entire point: see [`warn_and_fall_back`] for why
 //! the check must expand at *their* callsites and not in this module. They used

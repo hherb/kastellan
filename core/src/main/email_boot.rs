@@ -68,7 +68,7 @@
 use std::sync::Arc;
 
 use sqlx::PgPool;
-use tracing::{error, info};
+use tracing::info;
 
 use kastellan_core::channel::boot_supervisor::pg_sink::pg_boot_audit_sink;
 use kastellan_core::channel::boot_supervisor::{
@@ -124,6 +124,16 @@ fn email_skipped_row(
     )
 }
 
+/// Pure: the `[audit-lost]` report for a `channel.skipped_ack_only` row the
+/// email sink could not write, naming the message id (neutralised by the
+/// emitter) so it can be matched to the driver's own line for the skip.
+fn format_skipped_row_lost(message_id: &str, why: &dyn std::fmt::Display) -> String {
+    format!(
+        "channel.skipped_ack_only row for message {message_id} not written: {why}. The \
+         driver's line for the skip stands, but the id was acked, so it is not redelivered"
+    )
+}
+
 /// Build the [`AckOnlyAudit`] closure the email driver invokes for each
 /// message id it is about to ack without that id ever becoming a bus event
 /// (localmail's `skipped` list — an unattributable `From`, an unfetchable
@@ -135,22 +145,20 @@ fn email_skipped_row(
 /// The row is [`email_skipped_row`]'s.
 ///
 /// The driver calls it from its own std thread, which every conversation, the
-/// poll and the ack wait on, so the insert is **spawned**
-/// ([`crate::audit_sink::spawn_audit_insert`], whose doc gives the cost), not
+/// poll and the ack wait on, so the insert is **spawned** through `writer`
+/// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost), not
 /// `block_on`'d (#789): a slow or unreachable Postgres stalled the email
 /// channel for a pool-acquire timeout per skipped id. A row that was not
-/// written is logged with the message id (control characters neutralised), so
-/// it can be matched to the driver's own line for the skip.
-fn email_skipped_audit_sink(pool: PgPool, handle: tokio::runtime::Handle) -> AckOnlyAudit {
+/// written is reported on the `[audit-lost]` marker
+/// ([`format_skipped_row_lost`]).
+fn email_skipped_audit_sink(writer: crate::audit_sink::SinkWriter) -> AckOnlyAudit {
     Box::new(move |message_id: &str, reason: &str| {
         let (actor, action, payload) = email_skipped_row(message_id, reason);
-        let message_id = kastellan_core::untrusted_text::neutralise_controls(message_id);
-        crate::audit_sink::spawn_audit_insert(&handle, &pool, actor, action, payload, move |e| {
-            error!(
-                error = %e,
-                %message_id,
-                "email: skipped-id audit row not written (non-fatal); the driver's line for \
-                 the skip stands, but it has no audit row"
+        let message_id = message_id.to_string();
+        writer.spawn(actor, action, payload, move |why| {
+            kastellan_core::worker_stderr::emit_audit_lost_report(
+                "email",
+                &format_skipped_row_lost(&message_id, &why),
             );
         });
     })
@@ -264,8 +272,10 @@ async fn attempt(
         }
     };
 
-    let audit_ack_only =
-        Some(email_skipped_audit_sink(pool.clone(), tokio::runtime::Handle::current()));
+    let audit_ack_only = Some(email_skipped_audit_sink(crate::audit_sink::SinkWriter::new(
+        pool.clone(),
+        tokio::runtime::Handle::current(),
+    )));
 
     let spawned = match kastellan_core::channel::email::spawn_email_worker(
         backend,
@@ -383,9 +393,32 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().expect("a runtime");
         let (pool, listener) = rt.block_on(async { stalled_pool() });
-        let sink = email_skipped_audit_sink(pool, rt.handle().clone());
+        static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(8, 8);
+        let sink = email_skipped_audit_sink(crate::audit_sink::SinkWriter::with_ledger(
+            &LEDGER,
+            pool,
+            rt.handle().clone(),
+        ));
         assert_returns_at_once("the email skipped-id sink", || sink("<id@host>", "unattributable"));
         assert_insert_attempted("the email skipped-id sink", &listener);
+        // #792: the sink holds its lease until the driver drops it, so the
+        // shutdown drain waits for the driver that owns it.
+        assert_eq!(LEDGER.snapshot().sinks_live, 1, "the email skipped-id sink holds a lease");
+        drop(sink);
+        assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives it back when dropped");
+    }
+
+    /// #792: a skipped-id row that was not written names the message and why,
+    /// and says the id will not come back.
+    #[test]
+    fn a_lost_skipped_row_names_its_message_and_cause() {
+        let line = format_skipped_row_lost("<id@host>", &"shed: too many");
+        assert_eq!(
+            line,
+            "channel.skipped_ack_only row for message <id@host> not written: shed: too many. \
+             The driver's line for the skip stands, but the id was acked, so it is not \
+             redelivered"
+        );
     }
 
     /// The row the email sink writes: the bus's actor, the skipped-ack-only
