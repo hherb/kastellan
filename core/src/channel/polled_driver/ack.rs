@@ -62,7 +62,7 @@ pub(super) fn ack_skipped(
              so the worker's cursor advances"
         );
         // Best-effort audit trail: never FAILS the ack itself — a real hook
-        // only logs on its own insert error (see AckOnlyAudit's docs — `None`
+        // reports its own insert error (the daemon's, on `[audit-lost]`) (see AckOnlyAudit's docs — `None`
         // when the caller has no durable sink to write to). It must NOT block:
         // this thread is the one every conversation, the poll and the ack wait
         // on, so a hook that waited for its insert stalled the whole channel

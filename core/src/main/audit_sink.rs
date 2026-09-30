@@ -19,7 +19,8 @@
 //!   has no length cap, so unbounded, one poll could start thousands of
 //!   inserts and time out tool-dispatch and scheduler rows waiting behind
 //!   them. At most [`MAX_CONNECTIONS`] of these inserts use the pool at once
-//!   and at most [`MAX_QUEUED`] wait; past that a row is **shed**, and the
+//!   and at most [`MAX_QUEUED`] are in flight in all, running or waiting; past
+//!   that a row is **shed**, and the
 //!   sink's `on_failure` says so, like any other row that was not written.
 //! - **After the fact.** The row is written after the hook returns, so an
 //!   email id is acked before its row exists: a crash in between loses the
@@ -54,9 +55,10 @@ use tokio::sync::Semaphore;
 /// the rest to every other writer.
 const MAX_CONNECTIONS: usize = 4;
 
-/// How many may wait for one of those. Far above any honest burst (a Matrix
-/// queue's overflow, one email poll's skipped ids), and a bound on what a
-/// flood or a wedged Postgres can pile up.
+/// How many may be in flight in all, running or waiting for one of those
+/// connections (the permit is held for a row's whole life). Far above any
+/// honest burst (a Matrix queue's overflow, one email poll's skipped ids), and
+/// a bound on what a flood or a wedged Postgres can pile up.
 const MAX_QUEUED: usize = 1024;
 
 /// How long [`drain`] waits at shutdown for the channel drivers to exit and
@@ -83,10 +85,12 @@ const DRAIN_POLL: Duration = Duration::from_millis(20);
 
 /// The bounds on these inserts, and what is in flight under them.
 ///
-/// `pending` is its own counter, not the queue semaphore's free permits,
-/// because closing needs `SeqCst` on both sides: a row spawned while
-/// [`drain`] closes the ledger must either see `closed` or be counted by it —
-/// never neither, which would be a row lost with no line.
+/// The invariant: a row spawned while [`drain`] closes the ledger must either
+/// see `closed` or be counted by drain's final snapshot — never neither, which
+/// would be a row lost with no line. `spawn` counts (`pending`) before it reads
+/// `closed`, and `drain` stores `closed` before it counts, all `SeqCst`. That is
+/// why `pending` is its own counter (a shed row needs counting too) and not the
+/// queue semaphore's free permits.
 pub(crate) struct Ledger {
     queued: Semaphore,
     connections: Semaphore,
@@ -111,11 +115,17 @@ impl Ledger {
     }
 
     /// What is still in flight.
+    ///
+    /// `live_sinks` is read BEFORE `pending`, and the order matters: a driver
+    /// spawns its last rows (`pending += 1`) and only then drops its writer
+    /// (`live_sinks -= 1`). Reading `pending` first could see 0 before those
+    /// rows and `live_sinks` 0 after the drop, calling a driver that just
+    /// queued rows "settled". Reading the writers first means a drop seen here
+    /// puts every row that driver spawned before this `pending` load.
     pub(crate) fn snapshot(&self) -> Drained {
-        Drained {
-            rows_pending: self.pending.load(Ordering::SeqCst),
-            sinks_live: self.live_sinks.load(Ordering::SeqCst),
-        }
+        let sinks_live = self.live_sinks.load(Ordering::SeqCst);
+        let rows_pending = self.pending.load(Ordering::SeqCst);
+        Drained { rows_pending, sinks_live }
     }
 }
 

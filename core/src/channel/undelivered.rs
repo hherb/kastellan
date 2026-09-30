@@ -109,7 +109,8 @@ pub fn reply_undelivered_payload(
     })
 }
 
-/// Pure: an event time as a row stores it — RFC 3339, UTC as given. `null`
+/// Pure: an event time as a row stores it — RFC 3339, in the value's own offset (the
+/// drivers pass UTC). `null`
 /// for a time RFC 3339 cannot spell (a year outside 0–9999), which no clock
 /// this daemon reads will produce, rather than a panic in an audit path.
 pub(crate) fn observed_at_json(t: time::OffsetDateTime) -> serde_json::Value {

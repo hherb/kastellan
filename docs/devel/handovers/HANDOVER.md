@@ -95,6 +95,15 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   survived the first pass and got their tests). ⚠️ **Not guarded:** the *call* to the emitter in
   `report_drained` and in each sink's `on_failure` (a bin test cannot read the lib's test-only
   records). **Still unreported by design:** a row lost to a crash.
+- **PR #795 review round (`/review-pr`, five agents).** Fixed in the PR: `Ledger::snapshot` now
+  reads `live_sinks` **before** `pending` (the other order let a driver that had just queued rows
+  and dropped its writer look settled, so drain skipped its wait); the closed-bus exit no longer
+  says "redelivered" for a spec with no `ack_method` (Matrix) and WARNs instead; the email
+  lost-row line no longer claims the id *was* acked (the hook runs before the ack); stale docs
+  (`spawn_audit_insert`, `MAX_QUEUED`, the `Ledger` invariant). **Filed as follow-ups:** #796 (a
+  stuck live Matrix driver past the drain bound is INFO only; orphaned lease), #797 (a cancelled
+  or panicked insert never calls `on_failure`), #798 (per-row reports on the driver thread,
+  uncapped ids), #799 (test gaps, incl. the `on_failure` wiring), #800 (type/API tidy-ups).
 
 ### Previous (2026-09-30): #788 + #789 + #790 — the review residue of #787 (PR #791)
 

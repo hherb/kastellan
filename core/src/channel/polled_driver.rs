@@ -353,11 +353,21 @@ fn run(
                     // would ack those ids and write their audit rows into a
                     // daemon that is shutting down, losing both (#792).
                     if inbound_tx.is_closed() {
-                        tracing::info!(
-                            label = spec.label,
-                            "inbound receiver closed during a poll; polled driver exiting \
-                             without acking the batch (it is redelivered)"
-                        );
+                        if spec.ack_method.is_some() {
+                            tracing::info!(
+                                label = spec.label,
+                                "inbound receiver closed during a poll; polled driver exiting \
+                                 without acking the batch (it is redelivered)"
+                            );
+                        } else {
+                            // No ack method: the worker has already moved its
+                            // cursor past this batch, so nothing redelivers it.
+                            tracing::warn!(
+                                label = spec.label,
+                                "inbound receiver closed during a poll; polled driver exiting, \
+                                 and this channel does not redeliver the batch — it is dropped"
+                            );
+                        }
                         discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
                         return;
                     }

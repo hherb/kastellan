@@ -99,7 +99,8 @@ fn email_skipped_row(
 fn format_skipped_row_lost(message_id: &str, why: &dyn std::fmt::Display) -> String {
     format!(
         "channel.skipped_ack_only row for message {message_id} not written: {why}. The \
-         driver's line for the skip stands, but the id was acked, so it is not redelivered"
+         driver's line for the skip stands; the id's ack was about to be sent, and unless \
+         that ack then failed it is not redelivered"
     )
 }
 
@@ -392,8 +393,8 @@ mod tests {
         assert_eq!(
             line,
             "channel.skipped_ack_only row for message <id@host> not written: shed: too many. \
-             The driver's line for the skip stands, but the id was acked, so it is not \
-             redelivered"
+             The driver's line for the skip stands; the id's ack was about to be sent, and \
+             unless that ack then failed it is not redelivered"
         );
     }
 

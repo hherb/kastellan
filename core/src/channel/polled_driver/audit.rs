@@ -106,7 +106,7 @@ pub(super) fn slow_hook_reports_for(label: &str) -> Vec<String> {
 /// Make one hook call, timed; report it if it held the thread too long.
 ///
 /// On `tracing` at WARN, not a marked emitter: a slow hook is a defect in the
-/// caller's sink, found in development, and nothing is lost by it.
+/// caller's sink; the WARN names the hook that held the thread.
 fn timed(label: &str, hook: &str, call: impl FnOnce()) {
     let started = Instant::now();
     call();
