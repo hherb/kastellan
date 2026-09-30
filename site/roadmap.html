@@ -35,7 +35,7 @@
     <!-- 1. Page head -->
     <div class="page-head wrap">
       <h1>Where Kastellan stands</h1>
-      <p class="subtitle">Curated by hand, updated as milestones ship. Last updated: <time datetime="2026-07">July 2026</time>.</p>
+      <p class="subtitle">Curated by hand, updated as milestones ship. Last updated: <time datetime="2026-09">September 2026</time>.</p>
     </div>
 
     <!-- 2. Stat cards -->
@@ -44,13 +44,13 @@
         <div class="card">
           <div class="stat">
             <span>v0.2.0</span>
-            <span>published on crates.io</span>
+            <span>latest release</span>
           </div>
         </div>
         <div class="card">
           <div class="stat">
-            <span>~2,900</span>
-            <span>tests green on Linux + macOS</span>
+            <span>~4,700</span>
+            <span>tests green (full sweep: 187 suites, 0 failures)</span>
           </div>
         </div>
         <div class="card">
@@ -76,19 +76,19 @@
         <li class="timeline-item">
           <span class="dot-done"></span>
           <h3 class="timeline-title">Phase 1 — Memory &amp; the agent loop <span class="badge-done">SHIPPED</span></h3>
-          <p class="timeline-text">Three-lane memory recall (semantic, lexical, graph), the task scheduler, CASSANDRA plan review, a prompt-injection guard on worker output, encrypted secrets, and an operator-approved skill system.</p>
+          <p class="timeline-text">Four-lane memory recall (semantic, lexical, graph, entity-similarity) fused by rank — with layer gates so operator rules and approved skills reach the prompt only through their own blocks, never through recall. The task scheduler, CASSANDRA plan review, a prompt-injection guard on worker output, encrypted secrets, an operator-approved skill system, and a one-command supervised installer (<code>kastellan-cli install</code>: Postgres + the agent under <code>systemd --user</code> or launchd, no root).</p>
         </li>
 
         <li class="timeline-item">
           <span class="dot-done"></span>
           <h3 class="timeline-title">Phase 3 — Web egress <span class="badge-done">SHIPPED</span></h3>
-          <p class="timeline-text">Web search, web fetch, one-call web research, and a read-only mail-archive tool shipped behind host allowlists. The egress proxy — the single chokepoint all worker traffic is forced through — <strong>force-routes every networked worker by default</strong> (private netns, no direct route), terminates and inspects worker TLS, scans the cleartext for the worker&#8217;s own secrets, and pins server certificates; an operator-configured extra CA can admit exactly one private TLS origin. Optional micro-VM isolation (Firecracker on Linux, Apple <code>container</code> on macOS) wraps networked workers end to end. Remaining: wiring the proxy to the first frontier-egress worker.</p>
+          <p class="timeline-text">Web search, web fetch, one-call web research, and a read-only mail-archive tool shipped behind host allowlists. The egress proxy — the single chokepoint all worker traffic is forced through — <strong>force-routes every networked worker by default</strong> (private netns, no direct route), terminates and inspects worker TLS, scans the cleartext for the worker&#8217;s own secrets, and pins server certificates; an operator-configured extra CA can admit exactly one private TLS origin. Optional micro-VM isolation (Firecracker on Linux, Apple <code>container</code> on macOS) wraps networked workers end to end, including the browser worker. Remaining: wiring the proxy to the first frontier-egress worker, and making good-netizen behaviour (rate limits, backoff, <code>robots.txt</code>) a structural property of the web workers rather than operator policy.</p>
         </li>
 
         <li class="timeline-item">
           <span class="dot-wip"></span>
           <h3 class="timeline-title">Phase 2 — Channels <span class="badge-wip">IN PROGRESS</span></h3>
-          <p class="timeline-text">Matrix — self-hosted, single-user, federation off, end-to-end encrypted — is <strong>live end to end</strong>: the sandboxed Matrix client, peer pairing, and the message bus have all shipped. The email failover&#8217;s inbound half shipped too, off by default and gated hard (a DMARC verdict from your own mail server <em>plus</em> a per-pairing token in the body). Remaining: outbound email replies (SMTP) — until then email is receive-only. <span aria-hidden="true">←</span> currently being built</p>
+          <p class="timeline-text">Matrix — self-hosted, single-user, federation off, end-to-end encrypted — is <strong>live end to end</strong>: the sandboxed Matrix client, peer pairing, the message bus, and supervised channel bring-up have all shipped. Follow-up messages now carry the recent conversation, so a short question after an answer is understood in context, and a stuck room holds up only itself — undeliverable replies queue per conversation and are audited if given up. The <strong>operator ask channel</strong> is live too: when CASSANDRA says a human must decide, the question is posted to your Matrix room and the task waits for a closed-set answer — a bounded deadline fails closed. The email failover&#8217;s inbound half shipped as well, off by default and gated hard (a DMARC verdict from your own mail server <em>plus</em> a per-pairing token in the body). Remaining: outbound email replies (SMTP) — until then email is receive-only, and replies to it are audited as undelivered. <span aria-hidden="true">←</span> next up</p>
         </li>
 
         <li class="timeline-item">
@@ -98,9 +98,9 @@
         </li>
 
         <li class="timeline-item">
-          <span class="dot-plan"></span>
-          <h3 class="timeline-title">Phase 5 — Frontier escalation &amp; hardening <span class="badge-plan">PLANNED</span></h3>
-          <p class="timeline-text">A policy gate deciding when a frontier LLM may be consulted (TLS pinning for that egress path is already built), and a 7-day adversarial soak test.</p>
+          <span class="dot-wip"></span>
+          <h3 class="timeline-title">Phase 5 — Oversight, frontier escalation &amp; hardening <span class="badge-wip">IN PROGRESS</span></h3>
+          <p class="timeline-text">A model-based CASSANDRA guard tier is running in production as <strong>advisory defence-in-depth, not a gate</strong>: measured at 65% recall at zero false positives, with narrative-framed attacks the known miss — so nothing downstream is allowed to relax on it. Still to come: a policy gate deciding when a frontier LLM may be consulted (TLS pinning for that egress path is already built), a measured oversight corpus for the review lattice, and a 7-day adversarial soak test.</p>
         </li>
 
       </ul>

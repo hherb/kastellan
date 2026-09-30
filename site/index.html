@@ -45,8 +45,9 @@
           <a class="btn-ghost" href="security.html">How it’s secured →</a>
           <a class="btn-ghost" href="https://github.com/hherb/kastellan/blob/main/docs/user/manual/index.md">Read the manual →</a>
         </div>
-        <pre class="chip" role="region" tabindex="0" aria-label="Install command: cargo install kastellan-core">$ cargo install kastellan-core
-<span class="chip-comment"># v0.2.0 on crates.io</span></pre>
+        <pre class="chip" role="region" tabindex="0" aria-label="Install commands: build the release tree, then run the one-command installer">$ bash scripts/build-release.sh
+$ ./target/release/kastellan-cli install
+<span class="chip-comment"># supervised, per-user, no root — systemd --user / launchd</span></pre>
       </div>
       <div>
         <img src="assets/logo.png" alt="The Kastellan robot mascot holding mail, calendar, chat, and code icons" width="280" height="280" fetchpriority="high" decoding="async">
@@ -76,7 +77,7 @@
           </div>
           <div class="band-card">
             <h3 class="band-card-title">CASSANDRA oversight</h3>
-            <p>Every plan the agent forms is reviewed before any tool runs — against five constitutional constraints that no user, admin, or configuration change can override.</p>
+            <p>Every plan the agent forms is reviewed before any tool runs — against five constitutional constraints that no user, admin, or configuration change can override. When a plan needs a human decision, the agent asks you in your Matrix room and waits; it never quietly turns the question into a yes.</p>
           </div>
         </div>
         <a class="band-link" href="security.html">Read the full security architecture →</a>
@@ -89,11 +90,19 @@
       <div class="grid-3">
         <article class="card">
           <h3 class="card-title"><span aria-hidden="true">💬</span> Talks to you <span class="badge-done">today</span></h3>
-          <p class="card-text">Matrix — self-hosted, single-user, end-to-end encrypted — live today. Inbound email works behind a strict authentication gate; email replies land next.</p>
+          <p class="card-text">Matrix — self-hosted, single-user, end-to-end encrypted — live today, with follow-up questions that remember the conversation so far. Inbound email works behind a strict authentication gate; email replies land next.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">🙋</span> Asks before it acts <span class="badge-done">today</span></h3>
+          <p class="card-text">When oversight says a human must decide, the question reaches you in Matrix. Your answer is a closed choice — approve, deny, or an option — never free text fed back into a plan — and an unanswered ask fails closed.</p>
         </article>
         <article class="card">
           <h3 class="card-title"><span aria-hidden="true">🌐</span> Works the web <span class="badge-done">today</span></h3>
-          <p class="card-text">Web search, page fetch, and one-call research — host-allowlisted; read-only sandboxed browser rendering is opt-in.</p>
+          <p class="card-text">Web search, page fetch, and one-call research — host-allowlisted and forced through an inspecting egress proxy; read-only sandboxed browser rendering is opt-in.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">✉️</span> Reads your mail <span class="badge-done">today</span></h3>
+          <p class="card-text">Six read-only tools over your local mail archive — search, read, and attachments delivered to a durable per-task folder. Read-only by construction: it cannot send.</p>
         </article>
         <article class="card">
           <h3 class="card-title"><span aria-hidden="true">🐍</span> Runs code <span class="badge-done">today</span></h3>
@@ -101,7 +110,7 @@
         </article>
         <article class="card">
           <h3 class="card-title"><span aria-hidden="true">🧠</span> Remembers <span class="badge-done">today</span></h3>
-          <p class="card-text">Postgres memory with semantic, lexical, and graph recall.</p>
+          <p class="card-text">Postgres memory with four-lane recall — semantic, lexical, graph, and entity-similarity — fused by rank. Rules and skills reach the prompt only through their own gated blocks, never through recall.</p>
         </article>
         <article class="card">
           <h3 class="card-title"><span aria-hidden="true">📈</span> Learns skills <span class="badge-done">today</span></h3>
@@ -110,6 +119,10 @@
         <article class="card">
           <h3 class="card-title"><span aria-hidden="true">📜</span> Accountable <span class="badge-done">today</span></h3>
           <p class="card-text">An append-only audit log of every action, enforced by the database itself.</p>
+        </article>
+        <article class="card">
+          <h3 class="card-title"><span aria-hidden="true">📦</span> Installs in one command <span class="badge-done">today</span></h3>
+          <p class="card-text"><code>kastellan-cli install</code> brings up Postgres and the agent under <code>systemd --user</code> or launchd — no root — and re-running it is a clean upgrade.</p>
         </article>
       </div>
     </section>
@@ -123,10 +136,10 @@
       <div class="stats">
         <div class="stat">
           <span>v0.2.0</span>
-          <span>on crates.io</span>
+          <span>latest release</span>
         </div>
         <div class="stat">
-          <span>~2,900</span>
+          <span>~4,700</span>
           <span>tests green</span>
         </div>
         <div class="stat">
@@ -134,8 +147,8 @@
           <span>workspace crates</span>
         </div>
         <div class="stat">
-          <span>2</span>
-          <span>OS sandboxes, first-class</span>
+          <span>4</span>
+          <span>sandbox backends — bwrap, Seatbelt, Firecracker, Apple container</span>
         </div>
       </div>
       <p>
@@ -143,6 +156,8 @@
         <span class="dot-done"></span> Phase 1 — Memory &amp; agent loop (done) &nbsp;·&nbsp;
         <span class="dot-done"></span> Egress proxy (force-routed by default) &nbsp;·&nbsp;
         <span class="dot-done"></span> python-exec &amp; approved skills &nbsp;·&nbsp;
+        <span class="dot-done"></span> Operator ask channel &nbsp;·&nbsp;
+        <span class="dot-done"></span> One-command supervised install &nbsp;·&nbsp;
         <span class="dot-wip"></span> Channels — Matrix live · email inbound gated, replies next &nbsp;·&nbsp;
         <span class="dot-plan"></span> Frontier gate (planned)
       </p>
