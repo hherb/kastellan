@@ -80,9 +80,9 @@ fn reply_undelivered_row(
 /// the poll wait on, so the insert is **spawned**
 /// ([`crate::audit_sink::spawn_audit_insert`], whose doc gives the cost): a
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
-/// timeout per dropped reply. A failed insert is logged with the conversation
-/// and reason, so it can be matched to the driver's `[worker-refusal]` line
-/// for the drop.
+/// timeout per dropped reply. A row that was not written is logged with the
+/// conversation (control characters neutralised) and reason, so it can be
+/// matched to the driver's `[worker-refusal]` line for the drop.
 ///
 /// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit
 fn reply_undelivered_audit_sink(
@@ -99,7 +99,7 @@ fn reply_undelivered_audit_sink(
                 error = %e,
                 %conversation,
                 reason = reason.as_str(),
-                "matrix: reply-undelivered audit insert failed (non-fatal); the dropped \
+                "matrix: reply-undelivered audit row not written (non-fatal); the dropped \
                  reply's [worker-refusal] line stands, but it has no audit row"
             );
         });
@@ -321,12 +321,14 @@ mod tests {
     /// Postgres that never answers — it is called on the driver's thread.
     #[test]
     fn the_reply_undelivered_sink_does_not_hold_the_driver_thread() {
-        use crate::audit_sink::test_support::{assert_returns_at_once, stalled_pool};
+        use crate::audit_sink::test_support::{
+            assert_insert_attempted, assert_returns_at_once, stalled_pool,
+        };
         use kastellan_core::channel::{
             ChannelId, ConversationId, OutgoingMessage, PeerId, UndeliveredReason, UndeliveredReply,
         };
         let rt = tokio::runtime::Runtime::new().expect("a runtime");
-        let (pool, _listener) = rt.block_on(async { stalled_pool() });
+        let (pool, listener) = rt.block_on(async { stalled_pool() });
         let sink = reply_undelivered_audit_sink(pool, rt.handle().clone());
         let out = OutgoingMessage {
             channel: ChannelId("matrix".into()),
@@ -337,6 +339,7 @@ mod tests {
         assert_returns_at_once("the Matrix reply-undelivered sink", || {
             sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp))
         });
+        assert_insert_attempted("the Matrix reply-undelivered sink", &listener);
     }
 
     /// The row the Matrix driver's sink writes: the bus's actor, the

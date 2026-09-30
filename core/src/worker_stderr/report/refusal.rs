@@ -31,9 +31,19 @@ pub const WORKER_REFUSAL_STDERR_MARKER: &str = "[worker-refusal]";
 pub enum RefusalSeverity {
     /// A refusal ENDED: the worker accepted the call again (#788). The
     /// closing line of a run whose refusals were reported, so a reader can
-    /// tell a room that is still stuck from one that recovered. Not a warning,
-    /// so an alert keyed on WARN does not fire on a recovery.
-    Info,
+    /// tell a room that is still stuck from one that recovered.
+    ///
+    /// Recorded at INFO, so an alert keyed on the WARN level does not fire on
+    /// it. But its stderr fallback carries no level, so one keyed on the
+    /// `[worker-refusal]` marker does: match "again after" to tell a recovery
+    /// from a refusal.
+    ///
+    /// ⚠️ **For the line that closes a reported run, and nothing else.** It
+    /// falls back to stderr whenever INFO would not be recorded — under an
+    /// operator's `RUST_LOG=warn` too — which is right only for a line that
+    /// ends a story already told. A per-event INFO line on this severity would
+    /// bypass the operator's filter every time.
+    Recovered,
     /// A refusal the driver retries with backoff, or a reply it gave up on.
     Warn,
     /// The upstream refused the channel's credential: an operator action.
@@ -109,12 +119,14 @@ pub fn emit_worker_refusal_report(label: &str, report: &str, severity: RefusalSe
     // needs the level at compile time. Each expands the delivery check here,
     // in this module, which is what `warn_and_fall_back!` requires.
     //
-    // ⚠️ An INFO line falls back to stderr whenever INFO would not be
+    // ⚠️ A `Recovered` line falls back to stderr whenever INFO would not be
     // recorded — under an operator's `RUST_LOG=warn` too — on purpose: it
     // closes a refusal that WAS reported, and a story with no ending is the
-    // #788 defect. It is one line per refusal run, so it cannot flood.
+    // #788 defect. A run's first refusal is always reported, so these never
+    // outnumber the refusal lines they close. Under `RUST_LOG=warn` the two
+    // travel apart, though: the refusal on `tracing`, its ending on stderr.
     match severity {
-        RefusalSeverity::Info => {
+        RefusalSeverity::Recovered => {
             warn_and_fall_back!(WORKER_REFUSAL_STDERR_MARKER, &line, label = &label, level = INFO)
         }
         RefusalSeverity::Warn => {

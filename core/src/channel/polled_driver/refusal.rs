@@ -224,8 +224,9 @@ pub(super) fn refused(
 }
 
 /// A call of `method` was accepted: the worker is up, and a refusal run of
-/// that method (for `conversation`, when it is a send) ends — said once, on
-/// the marked emitter at INFO (#788), like the refusals it closes.
+/// that method (for `conversation`, when it is a send) ends — said once, at
+/// INFO, on the same marked `[worker-refusal]` emitter as the refusals it
+/// closes (#788).
 pub(super) fn accepted(
     run: &mut RefusalRun,
     outage: &mut OutageLog,
@@ -235,7 +236,7 @@ pub(super) fn accepted(
 ) {
     note_answer(outage, label);
     if let Some(report) = format_accepted_report(method, conversation, run.on_accepted()) {
-        emit_worker_refusal_report(label, &report, RefusalSeverity::Info);
+        emit_worker_refusal_report(label, &report, RefusalSeverity::Recovered);
     }
 }
 

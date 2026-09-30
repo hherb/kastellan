@@ -7,9 +7,11 @@ use crate::channel::UndeliveredReply;
 
 /// Best-effort side channel for a caller to record "this id was discarded
 /// without ever becoming a bus event" somewhere durable (e.g. an
-/// `audit_log` row) — called once per skipped id, just before its ack, as
-/// `audit(message_id, reason)`. The driver itself stays DB-free by design
-/// (see the module docs); this is a boxed closure rather than a bare `fn`
+/// `audit_log` row) — called just before a skipped id's ack, as
+/// `audit(message_id, reason)`, once per poll that reaches the id: an id whose
+/// ack failed is redelivered and audited again. The driver itself stays
+/// DB-free by design (memory and database access are the core's, never a
+/// channel driver's); this is a boxed closure rather than a bare `fn`
 /// pointer specifically so a caller CAN capture state (a `PgPool` +
 /// `tokio::runtime::Handle`). `None` means no audit call is ever made — the
 /// default, and Matrix's case (it never supplies a `parse_ack_only` either,
@@ -25,7 +27,7 @@ pub type AckOnlyAudit = Box<dyn Fn(&str, &str) + Send + 'static>;
 /// once per reply the driver drops, with why
 /// ([`UndeliveredReason`](crate::channel::UndeliveredReason)): given
 /// up after its refusals, past a full conversation queue, or still queued
-/// when the driver exits. Same shape and reasons as [`AckOnlyAudit`].
+/// when the driver exits. Optional and best-effort, like [`AckOnlyAudit`].
 ///
 /// It is handed an [`UndeliveredReply`], not the reply: the row carries
 /// channel + peer + reason only, and the view has no body to leak (#790).

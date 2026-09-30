@@ -29,7 +29,7 @@ const LABEL: &str = "kastellan-test-783";
 /// tries to start a column-0 line of its own.
 const HOSTILE: &str = "the worker refused matrix.send: forbidden\n[WARN] FORGED-REFUSAL-LINE";
 
-/// The text of each severity's report in the level fixture.
+/// The text of each severity's report in the fixtures.
 const INFO_TEXT: &str = "INFO-SEVERITY-RECOVERY";
 const WARN_TEXT: &str = "WARN-SEVERITY-REFUSAL";
 const ERROR_TEXT: &str = "ERROR-SEVERITY-REFUSAL";
@@ -55,7 +55,7 @@ fn inner_fixture_refusal_without_a_subscriber() {
     }
     assert!(emit_worker_refusal_report(LABEL, HOSTILE, RefusalSeverity::Warn), "fell back");
     assert!(emit_worker_refusal_report(LABEL, ERROR_TEXT, RefusalSeverity::Error), "fell back");
-    assert!(emit_worker_refusal_report(LABEL, INFO_TEXT, RefusalSeverity::Info), "fell back");
+    assert!(emit_worker_refusal_report(LABEL, INFO_TEXT, RefusalSeverity::Recovered), "fell back");
     panic!("{DELIBERATE}");
 }
 
@@ -98,7 +98,7 @@ fn inner_fixture_refusal_under_a_warn_only_subscriber() {
     tracing::subscriber::set_global_default(subscriber)
         .expect("install the fixture's global subscriber; a prior install would void this test");
     emit_worker_refusal_report(LABEL, WARN_TEXT, RefusalSeverity::Warn);
-    emit_worker_refusal_report(LABEL, INFO_TEXT, RefusalSeverity::Info);
+    emit_worker_refusal_report(LABEL, INFO_TEXT, RefusalSeverity::Recovered);
     panic!("{DELIBERATE}");
 }
 

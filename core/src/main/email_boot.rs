@@ -104,48 +104,55 @@ fn cap_reason(reason: &str) -> String {
     kastellan_core::channel::audit_text::cap_chars(reason, AUDIT_REASON_CAP_CHARS)
 }
 
-/// Build the [`AckOnlyAudit`] closure `spawn_email_worker` invokes for every
-/// message id it acks without that id ever becoming a bus event (localmail's
-/// `skipped` list — an unattributable `From`, an unfetchable detail fetch,
-/// etc.). Those ids are messages the agent silently never saw, so they must
-/// stay traceable in `audit_log` even though the polled driver that acks
-/// them is DB-free by design.
+/// Pure: the `(actor, action, payload)` of the row
+/// [`email_skipped_audit_sink`] writes for one skipped id. The message id and
+/// the reason ONLY — never a body, never headers — and `reason` capped via
+/// [`cap_reason`] (see that function's docs for why this sink applies its own
+/// bound rather than trusting the worker's).
+fn email_skipped_row(
+    message_id: &str,
+    reason: &str,
+) -> (&'static str, &'static str, serde_json::Value) {
+    (
+        "channel",
+        kastellan_core::channel::actions::SKIPPED_ACK_ONLY,
+        serde_json::json!({
+            "channel": "email",
+            "message_id": message_id,
+            "reason": cap_reason(reason),
+        }),
+    )
+}
+
+/// Build the [`AckOnlyAudit`] closure the email driver invokes for each
+/// message id it is about to ack without that id ever becoming a bus event
+/// (localmail's `skipped` list — an unattributable `From`, an unfetchable
+/// detail fetch, etc.) — once per poll that reaches the id, so an id whose ack
+/// failed is redelivered and audited again. Those ids are messages the agent
+/// silently never saw, so they must stay traceable in `audit_log` even though
+/// the polled driver that acks them is DB-free by design.
 ///
-/// Payload carries the message id and the reason ONLY — never a body, never
-/// headers — and `reason` is capped via [`cap_reason`] before it is written
-/// (see that function's docs for why this sink applies its own bound rather
-/// than trusting the worker's).
+/// The row is [`email_skipped_row`]'s.
 ///
 /// The driver calls it from its own std thread, which every conversation, the
 /// poll and the ack wait on, so the insert is **spawned**
 /// ([`crate::audit_sink::spawn_audit_insert`], whose doc gives the cost), not
 /// `block_on`'d (#789): a slow or unreachable Postgres stalled the email
-/// channel for a pool-acquire timeout per skipped id. A failed insert is
-/// logged with the message id, so it can be matched to the driver's own line
-/// for the skip.
+/// channel for a pool-acquire timeout per skipped id. A row that was not
+/// written is logged with the message id (control characters neutralised), so
+/// it can be matched to the driver's own line for the skip.
 fn email_skipped_audit_sink(pool: PgPool, handle: tokio::runtime::Handle) -> AckOnlyAudit {
     Box::new(move |message_id: &str, reason: &str| {
-        let payload = serde_json::json!({
-            "channel": "email",
-            "message_id": message_id,
-            "reason": cap_reason(reason),
-        });
+        let (actor, action, payload) = email_skipped_row(message_id, reason);
         let message_id = kastellan_core::untrusted_text::neutralise_controls(message_id);
-        crate::audit_sink::spawn_audit_insert(
-            &handle,
-            &pool,
-            "channel",
-            kastellan_core::channel::actions::SKIPPED_ACK_ONLY,
-            payload,
-            move |e| {
-                error!(
-                    error = %e,
-                    %message_id,
-                    "email: skipped-id audit insert failed (non-fatal); the driver's line for \
-                     the skip stands, but it has no audit row"
-                );
-            },
-        );
+        crate::audit_sink::spawn_audit_insert(&handle, &pool, actor, action, payload, move |e| {
+            error!(
+                error = %e,
+                %message_id,
+                "email: skipped-id audit row not written (non-fatal); the driver's line for \
+                 the skip stands, but it has no audit row"
+            );
+        });
     })
 }
 
@@ -371,11 +378,36 @@ mod tests {
     /// every conversation, poll and ack wait on.
     #[test]
     fn the_skipped_id_sink_does_not_hold_the_driver_thread() {
-        use crate::audit_sink::test_support::{assert_returns_at_once, stalled_pool};
+        use crate::audit_sink::test_support::{
+            assert_insert_attempted, assert_returns_at_once, stalled_pool,
+        };
         let rt = tokio::runtime::Runtime::new().expect("a runtime");
-        let (pool, _listener) = rt.block_on(async { stalled_pool() });
+        let (pool, listener) = rt.block_on(async { stalled_pool() });
         let sink = email_skipped_audit_sink(pool, rt.handle().clone());
         assert_returns_at_once("the email skipped-id sink", || sink("<id@host>", "unattributable"));
+        assert_insert_attempted("the email skipped-id sink", &listener);
+    }
+
+    /// The row the email sink writes: the bus's actor, the skipped-ack-only
+    /// action, and the message id and reason ONLY — with the reason capped.
+    /// The sink's fast return proves nothing about what it stores; this does.
+    #[test]
+    fn the_skipped_id_row_is_the_message_id_and_a_capped_reason() {
+        let (actor, action, payload) = email_skipped_row("<id@host>", "no usable From address");
+        assert_eq!(actor, "channel");
+        assert_eq!(action, "channel.skipped_ack_only");
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "channel": "email",
+                "message_id": "<id@host>",
+                "reason": "no usable From address",
+            })
+        );
+        let long = "r".repeat(AUDIT_REASON_CAP_CHARS + 10);
+        let (_, _, payload) = email_skipped_row("<id@host>", &long);
+        assert_eq!(payload["reason"], serde_json::json!(cap_reason(&long)));
+        assert_ne!(payload["reason"], serde_json::json!(long), "POSITIVE CONTROL: the cap must bite");
     }
 
     /// A worker spawn failure is RETRYABLE — it is the observed #514 trigger

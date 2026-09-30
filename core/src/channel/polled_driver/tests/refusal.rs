@@ -414,7 +414,7 @@ fn the_end_of_a_poll_refusal_run_is_reported_once_at_info() {
     let ended: Vec<_> = lines.iter().filter(|(l, _)| l.contains("again after")).collect();
     assert_eq!(ended.len(), 1, "one recovery line per run: {lines:?}");
     assert!(ended[0].0.contains("accepted t.poll again after 2 refusals"), "{ended:?}");
-    assert_eq!(ended[0].1, RefusalSeverity::Info);
+    assert_eq!(ended[0].1, RefusalSeverity::Recovered);
     assert!(
         lines.iter().any(|(l, s)| l.contains("refused t.poll") && *s == RefusalSeverity::Warn),
         "POSITIVE CONTROL: the refusals it closes were reported too: {lines:?}"
@@ -437,7 +437,7 @@ fn the_end_of_a_send_refusal_run_names_its_conversation() {
     assert!(
         lines.iter().any(|(l, s)| {
             l.contains("accepted t.send for conversation !room:srv again after 1 refusal;")
-                && *s == RefusalSeverity::Info
+                && *s == RefusalSeverity::Recovered
         }),
         "{lines:?}"
     );

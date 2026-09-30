@@ -16,7 +16,7 @@ use crate::worker_stderr::{emitted_refusal_lines_for, RefusalSeverity};
 /// (#790).
 type Audited = Arc<Mutex<Vec<(String, UndeliveredReason)>>>;
 
-fn bodies(audited: &Audited) -> Vec<String> {
+fn audited_peers(audited: &Audited) -> Vec<String> {
     audited.lock().unwrap().iter().map(|(b, _)| b.clone()).collect()
 }
 
@@ -201,7 +201,7 @@ fn the_same_bound_gives_up_an_ordinary_refusal() {
     driver.outbound_tx.send(reply("!a", "a1")).unwrap();
     driver.outbound_tx.send(reply("!b", "b1")).unwrap();
     wait_until(|| sent_bodies(&st) == ["b1"] && !audited.lock().unwrap().is_empty());
-    assert_eq!(bodies(&audited), ["a1"]);
+    assert_eq!(audited_peers(&audited), ["a1"]);
 }
 
 /// A failing POLL is a channel-wide failure too: while every poll fails, a
@@ -223,7 +223,7 @@ fn a_failing_poll_keeps_a_refusing_conversation_from_being_given_up() {
     assert!(send_attempts(&st).len() >= 3, "the reply kept being refused: {:?}", send_attempts(&st));
     assert!(audited.lock().unwrap().is_empty(), "every failed poll restarted the clock");
     *st.fail_method.lock().unwrap() = None;
-    wait_until(|| bodies(&audited) == ["a1"]);
+    wait_until(|| audited_peers(&audited) == ["a1"]);
 }
 
 /// A stuck conversation cannot grow the queue without bound: the reply past

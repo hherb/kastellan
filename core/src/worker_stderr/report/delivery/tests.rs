@@ -160,9 +160,13 @@ fn a_field_scoped_off_directive_does_not_fool_the_labelled_check() {
     // `event_enabled!`: `EnvFilter` matches field-carrying events with a
     // different set of directives than bare ones, so a BARE check is
     // fail-OPEN here — it reports `true` for an event this directive drops.
-    let directive = format!("warn,{}[{{label}}]=off", pretend_emitter::target());
-    // Both labelled arms: the ERROR one (#783) repeats the rule at its own
-    // level, so it can get it wrong on its own.
+    //
+    // The base is `info`, not `warn`: under a `warn` base the INFO arm's event
+    // is dropped for its LEVEL, so its row would fall back whatever its check
+    // declared, and test nothing.
+    let directive = format!("info,{}[{{label}}]=off", pretend_emitter::target());
+    // Every labelled arm: the ERROR one (#783) and the INFO one (#788) each
+    // repeat the rule at their own level, so each can get it wrong on its own.
     for (arm, fired) in [
         (
             "labelled WARN",
@@ -234,7 +238,8 @@ fn the_info_arm_checks_at_its_own_level() {
 #[test]
 fn a_message_scoped_off_directive_fools_neither_arm() {
     // The hole #745's own review found in #745's fix, and the reason this
-    // test covers BOTH arms where the `label` one covers only the second.
+    // test covers EVERY arm, the bare one included, where the `label` test
+    // covers only the labelled ones.
     //
     // A `warn!("{line}")` carries an implicit `message` field. The checks
     // originally declared `label` (second arm) or nothing (first arm), so
@@ -255,6 +260,10 @@ fn a_message_scoped_off_directive_fools_neither_arm() {
         (
             "labelled ERROR",
             Box::new(|| pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix")),
+        ),
+        (
+            "labelled INFO",
+            Box::new(|| pretend_emitter::emit_info_with_label(PROBE_LINE, "matrix")),
         ),
     ] {
         let (fell_back, recorded) = under(&directive, fired);
@@ -325,14 +334,27 @@ fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>
 fn every_refusal_severity_checks_delivery_at_its_own_callsite() {
     use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
     const REFUSAL: &str = "kastellan_core::worker_stderr::report::refusal";
-    for severity in [RefusalSeverity::Info, RefusalSeverity::Warn, RefusalSeverity::Error] {
+    // Each severity with the least verbose level that still records it.
+    const LEVELS: [&str; 3] = ["info", "warn", "error"];
+    for (severity, own) in [
+        (RefusalSeverity::Recovered, 0),
+        (RefusalSeverity::Warn, 1),
+        (RefusalSeverity::Error, 2),
+    ] {
         let emit = || emit_worker_refusal_report("matrix", PROBE_LINE, severity);
         let (fell_back, recorded) = under(&format!("info,{REFUSAL}=off"), emit);
         assert!(!recorded, "POSITIVE CONTROL for {severity:?}: the directive must drop it");
         assert!(fell_back, "{severity:?}: a dropped refusal report must fall back to stderr");
-        let (fell_back, recorded) = under(&format!("{REFUSAL}=info"), emit);
-        assert!(recorded, "POSITIVE CONTROL for {severity:?}: the directive must record it");
-        assert!(!fell_back, "{severity:?}: a recorded refusal report must not also fall back");
+        // And each at its OWN level: recorded exactly when the directive's
+        // level admits it, and falling back exactly when not. A severity
+        // routed to another level's arm gets one of these wrong.
+        for (i, level) in LEVELS.iter().enumerate() {
+            let directive = format!("{REFUSAL}={level}");
+            let (fell_back, recorded) = under(&directive, emit);
+            let admitted = own >= i;
+            assert_eq!(recorded, admitted, "{severity:?} under `{directive}`: recorded?");
+            assert_eq!(fell_back, !admitted, "{severity:?} under `{directive}`: fell back?");
+        }
     }
 }
 
