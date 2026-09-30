@@ -1,5 +1,6 @@
 //! #783, end to end: a refusal report reaches a failing test's output with the
-//! `[worker-refusal]` marker, and each severity is checked at its own level.
+//! `[worker-refusal]` marker, and each severity is checked at its own level —
+//! including #788's INFO, the line that says a refusal ended.
 //!
 //! The unit tests prove the pieces (the renderer marks the line; the driver
 //! hands its lines to `emit_worker_refusal_report`), but not that the emitter
@@ -28,7 +29,8 @@ const LABEL: &str = "kastellan-test-783";
 /// tries to start a column-0 line of its own.
 const HOSTILE: &str = "the worker refused matrix.send: forbidden\n[WARN] FORGED-REFUSAL-LINE";
 
-/// The text of each severity's report in the level fixture.
+/// The text of each severity's report in the fixtures.
+const INFO_TEXT: &str = "INFO-SEVERITY-RECOVERY";
 const WARN_TEXT: &str = "WARN-SEVERITY-REFUSAL";
 const ERROR_TEXT: &str = "ERROR-SEVERITY-REFUSAL";
 
@@ -44,7 +46,7 @@ fn is_the_child() -> bool {
 }
 
 /// Inner fixture: no subscriber, so the marked stderr line is the only channel,
-/// for both severities.
+/// for every severity.
 #[test]
 #[ignore = "inner fixture: fails on purpose; run by its parent test in a child process"]
 fn inner_fixture_refusal_without_a_subscriber() {
@@ -53,6 +55,7 @@ fn inner_fixture_refusal_without_a_subscriber() {
     }
     assert!(emit_worker_refusal_report(LABEL, HOSTILE, RefusalSeverity::Warn), "fell back");
     assert!(emit_worker_refusal_report(LABEL, ERROR_TEXT, RefusalSeverity::Error), "fell back");
+    assert!(emit_worker_refusal_report(LABEL, INFO_TEXT, RefusalSeverity::Recovered), "fell back");
     panic!("{DELIBERATE}");
 }
 
@@ -74,6 +77,28 @@ fn inner_fixture_refusal_under_an_error_only_subscriber() {
         .expect("install the fixture's global subscriber; a prior install would void this test");
     emit_worker_refusal_report(LABEL, ERROR_TEXT, RefusalSeverity::Error);
     emit_worker_refusal_report(LABEL, WARN_TEXT, RefusalSeverity::Warn);
+    panic!("{DELIBERATE}");
+}
+
+/// Inner fixture: a subscriber that records WARN and above. The WARN report
+/// must go to it; the INFO report is not recorded, so it must fall back. An
+/// INFO line checked at WARN would be called "recorded" here and reach nobody
+/// (#788).
+#[test]
+#[ignore = "inner fixture: fails on purpose; run by its parent test in a child process"]
+fn inner_fixture_refusal_under_a_warn_only_subscriber() {
+    if !is_the_child() {
+        return;
+    }
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("install the fixture's global subscriber; a prior install would void this test");
+    emit_worker_refusal_report(LABEL, WARN_TEXT, RefusalSeverity::Warn);
+    emit_worker_refusal_report(LABEL, INFO_TEXT, RefusalSeverity::Recovered);
     panic!("{DELIBERATE}");
 }
 
@@ -130,7 +155,7 @@ fn a_refusal_with_no_subscriber_is_a_marked_line_in_the_failing_tests_output() {
     let marked = run.marked();
     assert_eq!(
         marked.len(),
-        2,
+        3,
         "one `{WORKER_REFUSAL_STDERR_MARKER}` line per report, in the CAPTURED output.\n{both}"
     );
     for line in &marked {
@@ -140,6 +165,7 @@ fn a_refusal_with_no_subscriber_is_a_marked_line_in_the_failing_tests_output() {
         );
     }
     assert!(marked[1].contains(ERROR_TEXT), "the ERROR report falls back too.\n{both}");
+    assert!(marked[2].contains(INFO_TEXT), "and so does the INFO one.\n{both}");
     assert!(
         run.stdout.contains("FORGED-REFUSAL-LINE"),
         "POSITIVE CONTROL: the hostile text reached the output.\n{both}"
@@ -170,4 +196,26 @@ fn each_refusal_severity_is_delivered_at_its_own_level() {
          a `{WORKER_REFUSAL_STDERR_MARKER}` line.\n{both}"
     );
     assert!(!run.stderr.contains(WARN_TEXT), "and not reach the subscriber.\n{both}");
+}
+
+#[test]
+fn an_info_report_under_a_warn_only_subscriber_falls_back() {
+    kastellan_tests_common::panic_hook::install_once();
+    let run = run_inner_fixture("inner_fixture_refusal_under_a_warn_only_subscriber");
+    let both = run.both();
+    assert!(
+        run.stderr.contains(WARN_TEXT),
+        "POSITIVE CONTROL: the WARN report must reach the WARN-only subscriber.\n{both}"
+    );
+    assert!(
+        !run.marked().iter().any(|l| l.contains(WARN_TEXT)),
+        "the WARN report was recorded, so it must NOT also fall back.\n{both}"
+    );
+    assert!(
+        run.marked().iter().any(|l| l.contains(INFO_TEXT)),
+        "the INFO report is not recorded by a WARN-only subscriber, so it must fall back to \
+         a `{WORKER_REFUSAL_STDERR_MARKER}` line — a check made at WARN would say \
+         'recorded' and drop it.\n{both}"
+    );
+    assert!(!run.stderr.contains(INFO_TEXT), "and not reach the subscriber.\n{both}");
 }

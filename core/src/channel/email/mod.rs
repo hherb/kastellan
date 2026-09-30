@@ -179,9 +179,10 @@ fn email_backoff() -> RestartBackoff {
 /// probe` diagnostic), `Some` to record every acked-but-never-an-event id
 /// (localmail's `skipped` list) as an `audit_log` row via
 /// [`crate::channel::polled_driver::AckOnlyAudit`] — see that type's docs for
-/// why it is a boxed closure rather than a `PgPool` parameter (this module
-/// stays DB-free; the daemon wiring supplies the closure, following
-/// `crate::egress::net_worker::pg_decision_sink`'s pattern).
+/// why it is a boxed closure rather than a `PgPool` parameter, and why it must
+/// not block (this module stays DB-free; the daemon wiring supplies the
+/// closure, which spawns its insert — `audit_sink::spawn_audit_insert` in the
+/// daemon binary — rather than `block_on`ing it, #789).
 ///
 /// [`SandboxPolicy`]: kastellan_sandbox::SandboxPolicy
 pub fn spawn_email_worker(

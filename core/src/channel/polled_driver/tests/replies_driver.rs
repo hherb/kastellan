@@ -8,13 +8,15 @@
 use super::replies::{reply, FAST};
 use super::*;
 use crate::channel::polled_driver::replies::MAX_QUEUED_PER_CONVERSATION;
-use crate::channel::UndeliveredReason;
+use crate::channel::{UndeliveredReason, UndeliveredReply};
 use crate::worker_stderr::{emitted_refusal_lines_for, RefusalSeverity};
 
-/// Every audited reply's body and reason, in order.
+/// Every audited reply's identity and reason, in order. The identity is the
+/// peer, which `replies::reply` sets to the body: the hook never sees a body
+/// (#790).
 type Audited = Arc<Mutex<Vec<(String, UndeliveredReason)>>>;
 
-fn bodies(audited: &Audited) -> Vec<String> {
+fn audited_peers(audited: &Audited) -> Vec<String> {
     audited.lock().unwrap().iter().map(|(b, _)| b.clone()).collect()
 }
 
@@ -22,8 +24,8 @@ fn spawn_audited(spec: PolledWorkerSpec, calls: Box<dyn WorkerCalls>) -> (Polled
     let audited: Audited = Arc::default();
     let sink = audited.clone();
     let audit = DriverAudit {
-        reply_undelivered: Some(Box::new(move |out: &OutgoingMessage, reason| {
-            sink.lock().unwrap().push((out.body.clone(), reason));
+        reply_undelivered: Some(Box::new(move |r: UndeliveredReply<'_>| {
+            sink.lock().unwrap().push((r.peer.0.clone(), r.reason));
         })),
         ..DriverAudit::none()
     };
@@ -199,7 +201,7 @@ fn the_same_bound_gives_up_an_ordinary_refusal() {
     driver.outbound_tx.send(reply("!a", "a1")).unwrap();
     driver.outbound_tx.send(reply("!b", "b1")).unwrap();
     wait_until(|| sent_bodies(&st) == ["b1"] && !audited.lock().unwrap().is_empty());
-    assert_eq!(bodies(&audited), ["a1"]);
+    assert_eq!(audited_peers(&audited), ["a1"]);
 }
 
 /// A failing POLL is a channel-wide failure too: while every poll fails, a
@@ -221,7 +223,7 @@ fn a_failing_poll_keeps_a_refusing_conversation_from_being_given_up() {
     assert!(send_attempts(&st).len() >= 3, "the reply kept being refused: {:?}", send_attempts(&st));
     assert!(audited.lock().unwrap().is_empty(), "every failed poll restarted the clock");
     *st.fail_method.lock().unwrap() = None;
-    wait_until(|| bodies(&audited) == ["a1"]);
+    wait_until(|| audited_peers(&audited) == ["a1"]);
 }
 
 /// A stuck conversation cannot grow the queue without bound: the reply past

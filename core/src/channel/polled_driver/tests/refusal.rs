@@ -6,9 +6,11 @@
 //! millisecond-scale backoff so it stays fast.
 use super::*;
 use crate::channel::polled_driver::refusal::{
-    check_refusal_backoff, is_refusal, refusal_line, RefusalLine, RefusalRun, Refused, REFUSAL_REPEAT,
+    check_refusal_backoff, format_accepted_report, is_refusal, refusal_line, RefusalLine, RefusalRun,
+    Refused, REFUSAL_REPEAT,
 };
 use crate::worker_lifecycle::RestartBackoff;
+use crate::worker_stderr::{emitted_refusal_lines_for, RefusalSeverity};
 
 /// The code the fake's refusals carry.
 const OP: i32 = codes::OPERATION_FAILED;
@@ -370,4 +372,74 @@ fn a_refused_ack_holds_the_next_poll_and_stops_the_batch() {
     let acks = calls_to(&st, "email.ack");
     assert!((1..=3).contains(&polls), "{polls} polls in 1.3 s");
     assert_eq!(acks, polls, "one refused ack per batch, not one per event");
+}
+
+// ----- #788: the line that says a refusal ended -----
+
+#[test]
+fn the_recovery_line_names_what_was_refused_and_how_often() {
+    assert_eq!(
+        format_accepted_report("matrix.send", Some("!room:srv"), 3).as_deref(),
+        Some(
+            "the worker accepted matrix.send for conversation !room:srv again after 3 refusals; \
+             that refusal has ended"
+        )
+    );
+    let one = format_accepted_report("email.poll", None, 1).expect("a run of one ended");
+    assert!(one.contains("accepted email.poll again after 1 refusal;"), "{one}");
+}
+
+#[test]
+fn an_accepted_call_that_ends_no_run_says_nothing() {
+    assert_eq!(format_accepted_report("email.poll", None, 0), None);
+}
+
+/// Through the real loop: the end of a poll refusal run is said once, at
+/// INFO, on the marked emitter — so a reader of the `[worker-refusal]` lines
+/// sees the refusal close, not only open (#788).
+#[test]
+fn the_end_of_a_poll_refusal_run_is_reported_once_at_info() {
+    let (st, calls) = fake();
+    *st.refuse.lock().unwrap() = Some(("t.poll".into(), 2));
+    let spec = PolledWorkerSpec { label: "t-poll-recovered", ..spec(FAST) };
+    let mut driver = spawn_with(spec, calls);
+    st.polls.lock().unwrap().push_back(json!({"events": [
+        {"peer": "@me:srv", "conversation": "!room:srv", "body": "after the refusals"}
+    ]}));
+    recv_within(&mut driver, Duration::from_secs(5));
+    let ended = |(l, _): &(String, RefusalSeverity)| l.contains("again after");
+    wait_until(|| emitted_refusal_lines_for("t-poll-recovered").iter().any(ended));
+    std::thread::sleep(Duration::from_millis(100)); // catch a second recovery line
+    let lines = emitted_refusal_lines_for("t-poll-recovered");
+    let ended: Vec<_> = lines.iter().filter(|(l, _)| l.contains("again after")).collect();
+    assert_eq!(ended.len(), 1, "one recovery line per run: {lines:?}");
+    assert!(ended[0].0.contains("accepted t.poll again after 2 refusals"), "{ended:?}");
+    assert_eq!(ended[0].1, RefusalSeverity::Recovered);
+    assert!(
+        lines.iter().any(|(l, s)| l.contains("refused t.poll") && *s == RefusalSeverity::Warn),
+        "POSITIVE CONTROL: the refusals it closes were reported too: {lines:?}"
+    );
+}
+
+/// A send run's recovery line names the conversation, as its refusal lines do.
+#[test]
+fn the_end_of_a_send_refusal_run_names_its_conversation() {
+    let (st, calls) = fake();
+    *st.refuse.lock().unwrap() = Some(("t.send".into(), 1));
+    let spec = PolledWorkerSpec { label: "t-send-recovered", ..spec(FAST) };
+    let driver = spawn_with(spec, calls);
+    driver.outbound_tx.send(outgoing("refused once")).unwrap();
+    // On the line, not on the send: the fake records the send before the
+    // driver hears it was accepted.
+    let ended = |(l, _): &(String, RefusalSeverity)| l.contains("again after");
+    wait_until(|| emitted_refusal_lines_for("t-send-recovered").iter().any(ended));
+    let lines = emitted_refusal_lines_for("t-send-recovered");
+    assert!(
+        lines.iter().any(|(l, s)| {
+            l.contains("accepted t.send for conversation !room:srv again after 1 refusal;")
+                && *s == RefusalSeverity::Recovered
+        }),
+        "{lines:?}"
+    );
+    assert_eq!(st.sends.lock().unwrap().len(), 1, "POSITIVE CONTROL: the reply went through");
 }
