@@ -26,7 +26,9 @@ PRs that touch the repo get free preview URLs.
 Content is curated by hand (see
 `docs/superpowers/specs/2026-06-11-kastellan-dev-website-design.md`).
 When a milestone ships, update `roadmap.html` (timeline + "Last updated"
-stamp) and, if the numbers moved, the landing-page status snapshot.
+stamp) and, if the numbers moved, the landing-page status snapshot (test count
+from the latest full sweep in `docs/devel/handovers/HANDOVER.md`, crate count
+from the root `README.md`). Last full refresh: 2026-09-30.
 
 ## Manual site (docs.kastellan.dev) — operator setup (one-time)
 

@@ -66,7 +66,7 @@
       <pre class="chip" role="region" tabindex="0" aria-label="Build commands"><code>git clone https://github.com/hherb/kastellan
 cd kastellan &amp;&amp; cargo build --workspace
 cargo test --workspace</code></pre>
-      <p>Ubuntu 24.04+ needs one extra step — an AppArmor profile so bubblewrap can create user namespaces (<code>sudo scripts/linux/install-bwrap-apparmor-profile.sh</code>). macOS works out of the box.</p>
+      <p>Ubuntu 24.04+ needs one extra step — an AppArmor profile so bubblewrap can create user namespaces (<code>sudo scripts/linux/install-bwrap-apparmor-profile.sh</code>). macOS works out of the box. Without that profile, sandbox tests print <code>[SKIP]</code> and still report green — so run <code>scripts/run-e2e-gate.sh --list</code> to see the gated tiers that demand their fixtures. Release builds go through one script, <code>bash scripts/build-release.sh</code>, so every consumer sees the same bytes.</p>
     </section>
 
     <!-- 4. House rules -->
@@ -76,6 +76,7 @@ cargo test --workspace</code></pre>
         <li>AGPL-3.0, and AGPL-compatible dependencies only — license hygiene is part of the security boundary.</li>
         <li>Linux and macOS are both first-class: no platform-specific feature lands without a counterpart of equivalent guarantee.</li>
         <li>Every worker is sandboxed before it runs. There is no unsandboxed escape hatch, and reviewers refuse PRs that try to add one.</li>
+        <li>A green run is not evidence until you know what ran: skipped tests count as passes, so gated suites ship with a REQUIRE knob and a positive control that fails when zero tests ran.</li>
         <li>The repo&#8217;s handover convention (docs/devel/handovers/) means any contributor — or any AI session — can pick up exactly where the last one left off.</li>
       </ul>
     </section>
