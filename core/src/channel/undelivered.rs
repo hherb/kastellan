@@ -43,7 +43,7 @@ impl UndeliveredReason {
 /// reply a polled driver dropped: whose it was, where it was going, and why —
 /// **never what it said** (#790).
 ///
-/// The row must carry channel, peer and reason only (a reply is conversation
+/// The row must carry channel, peer, reason and when only (a reply is conversation
 /// content). Until #790 the driver's audit hook was handed the whole
 /// [`OutgoingMessage`], so that rule was kept by a doc comment and by the one
 /// sink happening to call [`reply_undelivered_payload`]. This view has no body
