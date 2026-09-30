@@ -365,6 +365,21 @@ fn every_refusal_severity_checks_delivery_at_its_own_callsite() {
     }
 }
 
+/// #792: a lost audit row is reported at ERROR — recorded under a filter
+/// that admits only errors, and falling back under one that admits nothing
+/// from its module. The census rows above filter at WARN, which admits ERROR
+/// and WARN alike, so they cannot tell the two arms apart.
+#[test]
+fn the_audit_lost_report_is_recorded_at_error() {
+    const AUDIT_LOST: &str = "kastellan_core::worker_stderr::report::audit_lost";
+    let emit = || crate::worker_stderr::emit_audit_lost_report("shutdown", PROBE_LINE);
+    let (fell_back, recorded) = under(&format!("{AUDIT_LOST}=error"), emit);
+    assert!(recorded, "a lost audit row must be recorded by an errors-only filter");
+    assert!(!fell_back, "and then not also written to stderr");
+    let (fell_back, recorded) = under(&format!("info,{AUDIT_LOST}=off"), emit);
+    assert!(!recorded && fell_back, "POSITIVE CONTROL: dropped, it falls back");
+}
+
 #[test]
 fn every_shipping_emitter_checks_delivery_at_its_own_callsite() {
     // The blind spot this closes: every other test in this file drives

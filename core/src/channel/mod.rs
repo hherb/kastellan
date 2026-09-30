@@ -32,9 +32,11 @@ pub mod polled_driver;
 pub mod pump_liveness;
 pub mod respawn_alarm;
 pub mod route;
+mod skipped;
 mod undelivered;
 
 pub use bus::ChannelBus;
+pub use skipped::{SkippedId, SKIPPED_REASON_CAP_CHARS};
 pub use undelivered::{reply_undelivered_payload, UndeliveredReason, UndeliveredReply};
 
 use serde::{Deserialize, Serialize};
@@ -163,8 +165,8 @@ pub mod actions {
     /// **The converse does not hold** — see [`REPLY_UNDELIVERED`].
     pub const REPLIED: &str = "channel.replied";
     /// A message was routed to its channel but was not delivered. Carries the
-    /// channel, the peer and a fixed [`super::UndeliveredReason`] label only —
-    /// never the reply body and never the error string (which is transport
+    /// channel, the peer, a fixed [`super::UndeliveredReason`] label and the
+    /// event's time (`observed_at`, #792) only — never the reply body and never the error string (which is transport
     /// text, not a fixed label) — built by [`super::reply_undelivered_payload`].
     ///
     /// **Two writers.** The bus's per-channel pump, when `Channel::send`
@@ -195,7 +197,8 @@ pub mod actions {
     /// unfetchable detail fetch). These are messages the agent silently
     /// never saw, so they must stay traceable even though the driver that
     /// acks them (`polled_driver::run`) is DB-free by design. See
-    /// [`super::polled_driver::AckOnlyAudit`].
+    /// [`super::polled_driver::AckOnlyAudit`]; the payload is
+    /// [`super::SkippedId::payload`]'s.
     pub const SKIPPED_ACK_ONLY: &str = "channel.skipped_ack_only";
     /// A channel bus came up. Payload carries the channel and how many
     /// bring-up attempts it took, so "did it have to retry?" is answerable

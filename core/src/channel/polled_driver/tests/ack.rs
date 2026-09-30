@@ -313,8 +313,8 @@ fn audit_ack_only_is_called_with_id_and_reason_for_every_acked_skipped_id() {
     }));
     let audited: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let audited_cl = audited.clone();
-    let audit: AckOnlyAudit = Box::new(move |id, reason| {
-        audited_cl.lock().unwrap().push((id.to_string(), reason.to_string()));
+    let audit: AckOnlyAudit = Box::new(move |skipped: crate::channel::SkippedId<'_>| {
+        audited_cl.lock().unwrap().push((skipped.message_id.to_string(), skipped.reason.to_string()));
     });
     let (_driver, _identity) = PolledWorkerDriver::spawn(
         spec_with_ack(),
@@ -354,8 +354,8 @@ fn audit_ack_only_is_not_called_when_the_same_batchs_events_fail_to_decode() {
     }));
     let audited: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let audited_cl = audited.clone();
-    let audit: AckOnlyAudit = Box::new(move |id, reason| {
-        audited_cl.lock().unwrap().push((id.to_string(), reason.to_string()));
+    let audit: AckOnlyAudit = Box::new(move |skipped: crate::channel::SkippedId<'_>| {
+        audited_cl.lock().unwrap().push((skipped.message_id.to_string(), skipped.reason.to_string()));
     });
     let (mut driver, _identity) = PolledWorkerDriver::spawn(
         spec_with_ack(),
@@ -416,7 +416,9 @@ fn skipped_ids_are_neither_acked_nor_audited_once_the_bus_has_gone() {
     let calls = PollOutlivesTheBus { bus_gone: bus_gone.clone(), polls: AtomicUsize::new(0), log: log.clone() };
     let audited: Arc<Mutex<Vec<String>>> = Arc::default();
     let audited_cl = audited.clone();
-    let audit: AckOnlyAudit = Box::new(move |id, _| audited_cl.lock().unwrap().push(id.to_string()));
+    let audit: AckOnlyAudit = Box::new(move |skipped: crate::channel::SkippedId<'_>| {
+        audited_cl.lock().unwrap().push(skipped.message_id.to_string())
+    });
     let (driver, _identity) = PolledWorkerDriver::spawn(
         spec_with_ack(),
         Box::new(calls),

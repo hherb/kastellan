@@ -433,7 +433,7 @@ fn run(
                             // is always empty, so this loop never runs for
                             // Matrix — byte-identical.
                             if let (true, Some(enc)) = (acking, encode_ack) {
-                                ack_skipped(&*calls, &spec, enc, ack_only_ids, audit_ack_only.as_ref(), &mut outage, &mut ack_refusals);
+                                ack_skipped(&*calls, &spec, enc, ack_only_ids, audit_ack_only.as_ref(), &cid, &mut outage, &mut ack_refusals);
                             }
                         }
                         Err(e) => {

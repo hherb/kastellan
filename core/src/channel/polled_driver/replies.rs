@@ -349,7 +349,7 @@ pub(super) fn enqueue(
     if let Err(dropped) = queues.push(out) {
         let report = format_overflow_report(&dropped.conversation.0, queues.cap, audit.is_some());
         emit_worker_refusal_report(label, &report, RefusalSeverity::Warn);
-        record_undelivered(audit, &dropped, UndeliveredReason::QueueFull);
+        record_undelivered(audit, label, &dropped, UndeliveredReason::QueueFull);
     }
 }
 
@@ -373,7 +373,7 @@ pub(super) fn discard_on_exit(
         let report = format_exit_report(&conversation.0, replies.len(), audit.is_some());
         emit_worker_refusal_report(label, &report, RefusalSeverity::Warn);
         for out in &replies {
-            record_undelivered(audit, out, UndeliveredReason::DriverExit);
+            record_undelivered(audit, label, out, UndeliveredReason::DriverExit);
         }
     }
 }
@@ -472,7 +472,7 @@ fn on_reply_refused(
                 audit.is_some(),
             );
             emit_worker_refusal_report(spec.label, &report, RefusalSeverity::Warn);
-            record_undelivered(audit, &reply, UndeliveredReason::GaveUp);
+            record_undelivered(audit, spec.label, &reply, UndeliveredReason::GaveUp);
         }
     }
 }

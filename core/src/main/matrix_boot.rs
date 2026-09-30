@@ -352,7 +352,7 @@ mod tests {
             body: "b".into(),
         };
         assert_returns_at_once("the Matrix reply-undelivered sink", || {
-            sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp))
+            sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp, time::OffsetDateTime::now_utc()))
         });
         assert_insert_attempted("the Matrix reply-undelivered sink", &listener);
         // #792: the sink holds its lease until the driver drops it, so the
@@ -389,13 +389,19 @@ mod tests {
             conversation: ConversationId("!room:srv".into()),
             body: "SECRET-BODY".into(),
         };
-        let reply = UndeliveredReply::of(&out, UndeliveredReason::QueueFull);
+        let at = time::macros::datetime!(2026-09-30 12:34:56 UTC);
+        let reply = UndeliveredReply::of(&out, UndeliveredReason::QueueFull, at);
         let (actor, action, payload) = reply_undelivered_row(&reply);
         assert_eq!(actor, "channel");
         assert_eq!(action, "channel.reply_undelivered");
         assert_eq!(
             payload,
-            serde_json::json!({ "channel": "matrix", "peer": "@me:srv", "reason": "queue_full" })
+            serde_json::json!({
+                "channel": "matrix",
+                "peer": "@me:srv",
+                "reason": "queue_full",
+                "observed_at": "2026-09-30T12:34:56Z",
+            })
         );
         assert!(!payload.to_string().contains("SECRET-BODY"));
     }
