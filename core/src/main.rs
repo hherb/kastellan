@@ -821,10 +821,10 @@ async fn main() -> Result<()> {
     // auditing its still-queued replies as it goes, and each row is spawned
     // rather than awaited. Bounded (`audit_sink::DRAIN_BOUND`); what is still
     // pending then is reported on the `[audit-lost]` marker, and a row tried
-    // after it is refused and reported rather than silently dropped with the
-    // runtime.
+    // after it is refused (and reported, thinned past a flood) rather than
+    // silently dropped with the runtime.
     let (drained, ()) = tokio::join!(audit_sink::drain(), scheduler.shutdown());
-    audit_sink::report_drained(drained);
+    audit_sink::report_drained(&drained, audit_sink::emit_report);
 
     // Graceful shutdown: stop the mirror task first so any in-flight
     // catch-up SELECT completes its fsync, then close the pool.

@@ -57,6 +57,9 @@ pub(crate) fn format_stderr_fallback(marker: &str, report: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The families a fallback marker may belong to. Adding one is deliberate.
+    const MARKER_FAMILIES: [&str; 2] = ["worker", "audit"];
+
     #[test]
     fn every_stderr_fallback_marker_is_distinctive_and_not_a_gate_evidence_marker() {
         // `scripts/run-e2e-gate.sh` asserts ZERO `[WARN]` lines in a profile run,
@@ -85,18 +88,19 @@ mod tests {
             // true of any output at all. Every other assertion on a marker reads
             // the const, so this is the only place their VALUES are pinned.
             //
-            // `[<family>-<event>]`, both halves non-empty: `[worker-…]` for the
-            // four worker events, `[audit-lost]` for #792's, which is not one.
+            // `[<family>-<event>]`, both halves non-empty, the family one of
+            // `MARKER_FAMILIES`: `[worker-…]` for the four worker events,
+            // `[audit-lost]` for #792's, which is not one. A closed list, not
+            // "any lower-case word" (#800): a new family is a decision to record
+            // here, not a typo like `[abc-x]` that passes unnoticed.
             let token = marker.strip_prefix('[').and_then(|m| m.strip_suffix(']'));
             let halves = token.and_then(|t| t.split_once('-'));
             assert!(
                 halves.is_some_and(|(family, event)| {
-                    !family.is_empty()
-                        && !event.is_empty()
-                        && family.bytes().all(|b| b.is_ascii_lowercase())
+                    MARKER_FAMILIES.contains(&family) && !event.is_empty()
                 }),
                 "each marker must be a non-trivial bracketed `[<family>-<event>]` token (a \
-                 lower-case family, a non-empty event); an empty or single-character marker \
+                 family from MARKER_FAMILIES, a non-empty event); an empty or single-character marker \
                  passes every other check in this file vacuously, including `contains` in the \
                  e2es. Got: {marker:?}"
             );

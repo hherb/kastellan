@@ -70,6 +70,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tracing::info;
 
+use kastellan_core::worker_stderr::AuditLostWriter;
 use kastellan_core::channel::boot_supervisor::pg_sink::pg_boot_audit_sink;
 use kastellan_core::channel::boot_supervisor::{
     BootOutcome, ChannelSupervisor, ReportingPolicy, StartedChannel,
@@ -94,9 +95,10 @@ fn email_skipped_row(
 }
 
 /// Pure: the `[audit-lost]` report for a `channel.skipped_ack_only` row the
-/// email sink could not write, naming the message id (neutralised by the
-/// emitter) so it can be matched to the driver's own line for the skip.
+/// email sink could not write, naming the message id (capped by `quoted_id`, neutralised
+/// by `format_audit_lost_line`) so it can be matched to the driver's own line for the skip.
 fn format_skipped_row_lost(message_id: &str, why: &dyn std::fmt::Display) -> String {
+    let message_id = crate::audit_sink::quoted_id(message_id);
     format!(
         "channel.skipped_ack_only row for message {message_id} not written: {why}. The \
          driver's line for the skip stands; the id's ack was about to be sent, and unless \
@@ -121,15 +123,19 @@ fn format_skipped_row_lost(message_id: &str, why: &dyn std::fmt::Display) -> Str
 /// channel for a pool-acquire timeout per skipped id. A row that was not
 /// written is reported on the `[audit-lost]` marker
 /// ([`format_skipped_row_lost`]).
-fn email_skipped_audit_sink(writer: crate::audit_sink::SinkWriter) -> AckOnlyAudit {
+///
+/// `report` is how a lost row is said: [`crate::audit_sink::emit_report`] in
+/// the daemon, a recorder in a test (#799).
+fn email_skipped_audit_sink(
+    writer: crate::audit_sink::SinkWriter,
+    report: crate::audit_sink::Reporter,
+) -> AckOnlyAudit {
     Box::new(move |skipped| {
         let (actor, action, payload) = email_skipped_row(&skipped);
         let message_id = skipped.message_id.to_string();
-        writer.spawn(actor, action, payload, move |why| {
-            kastellan_core::worker_stderr::emit_audit_lost_report(
-                "email",
-                &format_skipped_row_lost(&message_id, &why),
-            );
+        let label = format!("email skipped message {}", crate::audit_sink::quoted_id(&message_id));
+        writer.spawn(actor, action, payload, label, move |why| {
+            report(AuditLostWriter::Email, &format_skipped_row_lost(&message_id, &why));
         });
     })
 }
@@ -242,10 +248,14 @@ async fn attempt(
         }
     };
 
-    let audit_ack_only = Some(email_skipped_audit_sink(crate::audit_sink::SinkWriter::new(
-        pool.clone(),
-        tokio::runtime::Handle::current(),
-    )));
+    let audit_ack_only = Some(email_skipped_audit_sink(
+        crate::audit_sink::SinkWriter::new(
+            pool.clone(),
+            tokio::runtime::Handle::current(),
+            crate::audit_sink::SinkKind::SkippedIds,
+        ),
+        crate::audit_sink::emit_report,
+    ));
 
     let spawned = match kastellan_core::channel::email::spawn_email_worker(
         backend,
@@ -363,12 +373,16 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().expect("a runtime");
         let (pool, listener) = rt.block_on(async { stalled_pool() });
-        static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(8, 8);
-        let sink = email_skipped_audit_sink(crate::audit_sink::SinkWriter::with_ledger(
-            &LEDGER,
-            pool,
-            rt.handle().clone(),
-        ));
+        static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 8, connections: 8 });
+        let sink = email_skipped_audit_sink(
+            crate::audit_sink::SinkWriter::with_ledger(
+                &LEDGER,
+                pool,
+                rt.handle().clone(),
+                crate::audit_sink::SinkKind::SkippedIds,
+            ),
+            |_, _| {},
+        );
         let channel = ChannelId("email".into());
         let skipped = kastellan_core::channel::SkippedId {
             channel: &channel,
@@ -383,6 +397,53 @@ mod tests {
         assert_eq!(LEDGER.snapshot().sinks_live, 1, "the email skipped-id sink holds a lease");
         drop(sink);
         assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives it back when dropped");
+    }
+
+    /// The recorder for [`the_email_sink_reports_a_row_it_could_not_write`]:
+    /// a `fn`, like the production reporter, so one static holds it.
+    static EMAIL_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// #799: the sink's failure closure reaches the reporter, as the EMAIL
+    /// writer, and names the message. A ledger with no queue room sheds every
+    /// row, so `on_failure` runs at once, on this thread. Swapping the closure
+    /// for `|_| {}` — which nothing else here noticed — fails this.
+    #[test]
+    fn the_email_sink_reports_a_row_it_could_not_write() {
+        let rt = tokio::runtime::Runtime::new().expect("a runtime");
+        let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+        static LEDGER: crate::audit_sink::Ledger =
+            crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 0, connections: 1 });
+        let sink = email_skipped_audit_sink(
+            crate::audit_sink::SinkWriter::with_ledger(
+                &LEDGER,
+                pool,
+                rt.handle().clone(),
+                crate::audit_sink::SinkKind::SkippedIds,
+            ),
+            |w, line| EMAIL_SAID.lock().unwrap().push((w, line.to_string())),
+        );
+        let channel = ChannelId("email".into());
+        sink(kastellan_core::channel::SkippedId {
+            channel: &channel,
+            message_id: "<shed-me@host>",
+            reason: "unattributable",
+            observed_at: time::OffsetDateTime::now_utc(),
+        });
+        let said = EMAIL_SAID.lock().unwrap();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].0, AuditLostWriter::Email);
+        assert!(said[0].1.contains("<shed-me@host>") && said[0].1.contains("shed:"), "{said:?}");
+    }
+
+    /// #798: a worker-supplied id is bounded where it is quoted, and the row's
+    /// label for the shutdown line is too.
+    #[test]
+    fn a_hostile_message_id_is_capped_in_the_lost_row_line() {
+        let long = "x".repeat(10_000);
+        let line = format_skipped_row_lost(&long, &"shed");
+        assert!(line.len() < 1_000, "{} bytes", line.len());
+        assert!(line.contains("...(truncated)"), "POSITIVE CONTROL: the cap bit");
     }
 
     /// #792: a skipped-id row that was not written names the message and why,

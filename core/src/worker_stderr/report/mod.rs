@@ -58,7 +58,7 @@ mod tool_worker;
 
 pub use audit_lost::{
     emit_audit_lost_report, format_audit_lost_line, format_audit_lost_stderr_fallback,
-    AUDIT_LOST_STDERR_MARKER,
+    AuditLostWriter, AUDIT_LOST_STDERR_MARKER,
 };
 pub use persistent::{
     emit_persistent_death_report, emit_persistent_down_report, format_death_report,
