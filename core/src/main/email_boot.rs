@@ -95,8 +95,8 @@ fn email_skipped_row(
 }
 
 /// Pure: the `[audit-lost]` report for a `channel.skipped_ack_only` row the
-/// email sink could not write, naming the message id (neutralised by the
-/// emitter) so it can be matched to the driver's own line for the skip.
+/// email sink could not write, naming the message id (capped by `quoted_id`, neutralised
+/// by `format_audit_lost_line`) so it can be matched to the driver's own line for the skip.
 fn format_skipped_row_lost(message_id: &str, why: &dyn std::fmt::Display) -> String {
     let message_id = crate::audit_sink::quoted_id(message_id);
     format!(

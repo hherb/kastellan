@@ -71,8 +71,8 @@ fn reply_undelivered_row(
 }
 
 /// Pure: the `[audit-lost]` report for a `channel.reply_undelivered` row the
-/// Matrix sink could not write, naming the conversation (neutralised by the
-/// emitter) and reason so it can be matched to the driver's `[worker-refusal]`
+/// Matrix sink could not write, naming the conversation (capped by `quoted_id`, neutralised
+/// by `format_audit_lost_line`) and reason so it can be matched to the driver's `[worker-refusal]`
 /// line for the drop.
 fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::Display) -> String {
     let conversation = crate::audit_sink::quoted_id(conversation);

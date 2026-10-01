@@ -89,7 +89,7 @@ pub fn format_audit_lost_stderr_fallback(line: &str) -> String {
 /// Returns whether the stderr fallback line was written; see
 /// [`super::emit_worker_failure_report`] for why that value exists. The
 /// daemon's reporters ignore it: nothing more can be done for a row that the
-/// report itself could not reach anyone about (#798).
+/// report itself could not reach anyone about (#792).
 pub fn emit_audit_lost_report(writer: AuditLostWriter, report: &str) -> bool {
     let line = format_audit_lost_line(writer, report);
     warn_and_fall_back!(AUDIT_LOST_STDERR_MARKER, &line, label = writer.as_str(), level = ERROR)

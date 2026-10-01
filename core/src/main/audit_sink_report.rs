@@ -25,7 +25,7 @@ pub(crate) fn counted(n: usize, noun: &str, one: &str, many: &str) -> String {
     format!("{n} {noun}{} {}", if n == 1 { "" } else { "s" }, if n == 1 { one } else { many })
 }
 
-/// Pure: the `[audit-lost]` line for rows still pending when [`drain`] gave
+/// Pure: the `[audit-lost]` line for rows still pending when [`super::drain`] gave
 /// up, or `None` when there were none. Names the first few (#797), so the line
 /// can be matched to the driver's own line for the event.
 pub(crate) fn format_pending_at_shutdown(d: &Drained, bound: Duration) -> Option<String> {
@@ -51,21 +51,24 @@ pub(crate) fn format_pending_at_shutdown(d: &Drained, bound: Duration) -> Option
 }
 
 /// Pure: the `[audit-lost]` line for Matrix drivers still running when
-/// [`drain`] gave up, or `None` when there were none (#796). A stuck one never
-/// audits the replies still queued behind it, so this one is a loss.
+/// [`super::drain`] gave up, or `None` when there were none (#796). A stuck one never
+/// audits the replies still queued behind it, so this one is a possible loss
+/// (it is also what a Matrix bring-up abandoned mid-login looks like, which
+/// queued none).
 pub(crate) fn format_stuck_replies_at_shutdown(d: &Drained, bound: Duration) -> Option<String> {
     (d.replies_live > 0).then(|| {
         format!(
-            "{} not exited after {} s at shutdown; the replies still queued behind a stuck \
-             one are not audited as `channel.reply_undelivered`, and an audit row one writes \
-             from now on is refused",
+            "{} not exited (or finished starting) after {} s at shutdown; the replies still queued behind a stuck \
+             one may not be audited as `channel.reply_undelivered` (a driver whose bring-up \
+             was abandoned never queued any), and an audit row one writes from now on is \
+             refused and reported",
             counted(d.replies_live, "channel driver", "had", "had"),
             bound.as_secs(),
         )
     })
 }
 
-/// Pure: the INFO line for the other drivers still running when [`drain`] gave
+/// Pure: the INFO line for the other drivers still running when [`super::drain`] gave
 /// up, or `None` when there were none. Not a loss by itself — see
 /// [`DRAIN_BOUND`] — and a row one of them does try is reported as it happens.
 pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<String> {
@@ -73,7 +76,7 @@ pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<St
     (others > 0).then(|| {
         format!(
             "{} not exited after {} s at shutdown; an audit row one writes from now on is \
-             refused and reported on the [audit-lost] marker",
+             refused, and reported on the [audit-lost] marker unless thinned out",
             counted(others, "channel driver", "had", "had"),
             bound.as_secs(),
         )
@@ -81,7 +84,7 @@ pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<St
 }
 
 /// Pure: the `[audit-lost]` line for refused rows that got no report of their
-/// own ([`should_report`]), or `None` when there were none (#798).
+/// own ([`super::should_report`]), or `None` when there were none (#798).
 pub(crate) fn format_unreported_at_shutdown(d: &Drained) -> Option<String> {
     (d.unreported > 0).then(|| {
         format!(
@@ -99,15 +102,15 @@ pub(crate) fn format_unreported_at_shutdown(d: &Drained) -> Option<String> {
 pub(crate) type Reporter = fn(AuditLostWriter, &str);
 
 /// The daemon's [`Reporter`]: [`emit_audit_lost_report`]. Its "was the stderr
-/// line written" answer is dropped, because there is nobody left to tell
-/// (#798).
+/// line written" answer is dropped, because there is nobody left to tell:
+/// tracing is the primary channel and the stderr write the fallback.
 ///
 /// [`emit_audit_lost_report`]: kastellan_core::worker_stderr::emit_audit_lost_report
 pub(crate) fn emit_report(writer: AuditLostWriter, line: &str) {
     kastellan_core::worker_stderr::emit_audit_lost_report(writer, line);
 }
 
-/// Say what [`drain`] left behind: lost rows, stuck Matrix drivers and thinned
+/// Say what [`super::drain`] left behind: lost rows, stuck Matrix drivers and thinned
 /// reports on the `[audit-lost]` marker through `report`; other drivers still
 /// running at INFO.
 pub(crate) fn report_drained(d: &Drained, report: Reporter) {

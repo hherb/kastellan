@@ -215,17 +215,24 @@ fn drain_waits_for_the_last_writer_and_no_longer() {
 fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
     static LEDGER: Ledger = Ledger::new(bounds(8, 8));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
-    let stuck = writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}).expect("not shed");
+    let stuck = writer
+        .spawn("a", "b", serde_json::json!({}), "STUCK-ROW".into(), |_| {})
+        .expect("not shed");
+    let _matrix = SinkWriter::with_ledger(&LEDGER, writer.pool.clone(), rt.handle().clone(), SinkKind::Replies);
 
     let bound = ACQUIRE_TIMEOUT / 3;
     let t = Instant::now();
     let d = rt.block_on(drain_ledger(&LEDGER, bound));
     assert!(t.elapsed() >= bound, "it waited its bound: {:?}", t.elapsed());
     assert_eq!(
-        (d.rows_pending, d.sinks_live),
-        (1, 1),
-        "the stalled row and its writer"
+        (d.rows_pending, d.sinks_live, d.replies_live),
+        (1, 2, 1),
+        "the stalled row, its writer, and a Matrix one"
     );
+    // `drain` returns the FINAL snapshot: the names and the thinned count
+    // reach `report_drained` (a `snapshot()` there would leave them empty).
+    assert_eq!(d.named, vec!["STUCK-ROW".to_string()]);
+    assert_eq!(d.unreported, 0);
 
     let (told, on_failure) = recorder();
     assert!(writer.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure).is_none());
@@ -277,7 +284,7 @@ fn the_shutdown_lines_count_rows_and_drivers_and_are_silent_at_zero() {
     assert_eq!(
         format_live_at_shutdown(&one, bound).unwrap(),
         "1 channel driver had not exited after 3 s at shutdown; an audit row one writes from \
-         now on is refused and reported on the [audit-lost] marker"
+         now on is refused, and reported on the [audit-lost] marker unless thinned out"
     );
     let many = Drained { rows_pending: 2, sinks_live: 2, ..Drained::default() };
     assert!(format_pending_at_shutdown(&many, bound).unwrap().starts_with("2 channel audit rows were"));
@@ -308,7 +315,7 @@ fn a_stuck_matrix_driver_is_a_loss_and_a_stuck_email_driver_is_not() {
     let bound = Duration::from_secs(3);
     let matrix = Drained { sinks_live: 1, replies_live: 1, ..Drained::default() };
     let line = format_stuck_replies_at_shutdown(&matrix, bound).unwrap();
-    assert!(line.contains("not audited as `channel.reply_undelivered`"), "{line}");
+    assert!(line.contains("may not be audited as `channel.reply_undelivered`"), "{line}");
     assert_eq!(format_live_at_shutdown(&matrix, bound), None, "not also an INFO line");
 
     let email = Drained { sinks_live: 1, replies_live: 0, ..Drained::default() };
@@ -333,6 +340,30 @@ fn the_ledger_counts_live_replies_sinks_apart_from_the_rest() {
     assert_eq!(LEDGER.snapshot(), Drained::default());
 }
 
+/// #798: the closed form agrees with the predicate it summarises.
+#[test]
+fn the_unreported_count_matches_the_predicate() {
+    for n in (0..200).chain([1023, 1024, 1025, 4096, 1 << 20]) {
+        let reported = (0..n).filter(|&i| should_report(i)).count();
+        assert_eq!(unreported_of(n), n - reported, "n = {n}");
+    }
+}
+
+static CLEAN_SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn record_clean(_: AuditLostWriter, line: &str) {
+    CLEAN_SAID.lock().unwrap().push(line.to_string());
+}
+
+/// `report_drained` says nothing at ERROR for a clean drain, nor for an email
+/// driver still in its long-poll (INFO only) — #796.
+#[test]
+fn a_clean_drain_and_a_stuck_email_driver_report_no_loss() {
+    report_drained(&Drained::default(), record_clean);
+    report_drained(&Drained { sinks_live: 1, replies_live: 0, ..Drained::default() }, record_clean);
+    assert_eq!(*CLEAN_SAID.lock().unwrap(), Vec::<String>::new());
+}
+
 /// `report_drained` sends each loss to the reporter under the shutdown writer,
 /// and nothing for a clean drain.
 #[test]
@@ -346,7 +377,11 @@ fn report_drained_reports_each_loss_through_the_reporter() {
         unreported: 4,
     };
     report_drained(&d, record);
-    for needle in ["REPORT-DRAINED-ROW", "channel driver had not exited", "without a line of its own"] {
+    for needle in [
+        "REPORT-DRAINED-ROW",
+        "channel driver had not exited (or finished starting)",
+        "without a line of its own",
+    ] {
         let said = said_containing(needle);
         assert_eq!(said.len(), 1, "{needle}: {said:?}");
         assert_eq!(said[0].0, AuditLostWriter::Shutdown);
@@ -368,8 +403,9 @@ fn refused_rows_are_reported_one_by_one_then_thinned() {
         writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| *told.lock().unwrap() += 1);
     }
     let reported = *told.lock().unwrap();
-    assert_eq!(reported, 17, "16 each, then n = 16 only (n = 17..19 thinned out)");
-    assert_eq!(LEDGER.final_snapshot().unreported, 20 - reported);
+    assert_eq!(reported, 17, "n = 0..15 each, n = 16 (a power of two); n = 17..19 thinned out");
+    assert_eq!(LEDGER.final_snapshot().unreported, 3);
+    assert!(LEDGER.final_snapshot().named.is_empty(), "a refused row leaves no label behind");
 }
 
 /// #797: the final snapshot names pending rows — a cancelled task cannot —

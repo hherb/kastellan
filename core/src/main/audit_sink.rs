@@ -21,7 +21,8 @@
 //!   them. At most [`MAX_CONNECTIONS`] of these inserts use the pool at once
 //!   and at most [`MAX_QUEUED`] are in flight in all, running or waiting; past
 //!   that a row is **shed**, and the
-//!   sink's `on_failure` says so, like any other row that was not written.
+//!   sink's `on_failure` says so (thinned past a flood, [`should_report`]), like
+//!   any other row that was not written.
 //! - **After the fact.** The row is written after the hook returns, so an
 //!   email id is acked before its row exists: a crash in between loses the
 //!   row, and the id is not redelivered. Rows can also land out of order
@@ -33,9 +34,9 @@
 //!   every spawned row to finish, then **closes** the ledger. What is still
 //!   pending then is reported on the `[audit-lost]` marker
 //!   ([`report_drained`]), and a row a late driver tries to write after that
-//!   is refused and reported by its sink ([`Unwritten::AfterShutdown`]),
-//!   rather than spawned onto a runtime that is going away — where tokio
-//!   drops it without a word.
+//!   is refused ([`Unwritten::AfterShutdown`]) and, thinned past a flood
+//!   ([`should_report`]), reported by its sink — rather than spawned onto a
+//!   runtime that is going away, where tokio drops it without a word.
 //!
 //! The shutdown line names the first few pending rows (#797: a cancelled task
 //! never runs its `on_failure`), counts a Matrix driver still stuck as a loss
@@ -43,7 +44,9 @@
 //! a flood of refused rows ([`should_report`], #798) — all in `audit_sink_report.rs`.
 //!
 //! What still goes unreported: a row lost to a crash (SIGKILL, OOM, a panic
-//! under `panic = "abort"`), because nothing runs after one.
+//! under `panic = "abort"`), because nothing runs after one; and a row refused
+//! after the shutdown line was written and past the thinning, which is counted
+//! nowhere (the line is written once).
 //!
 //! One writer for both channels (Matrix's `channel.reply_undelivered`, email's
 //! `channel.skipped_ack_only`). Before #789 each sink hand-rolled its own
@@ -119,6 +122,20 @@ fn should_report(n: usize) -> bool {
     n < REPORT_EACH_UP_TO || n.is_power_of_two()
 }
 
+/// Pure: how many of the first `refused` rows [`should_report`] leaves out —
+/// closed form, so a shutdown after a huge flood does not loop over it.
+fn unreported_of(refused: usize) -> usize {
+    // Reported: indices 0..REPORT_EACH_UP_TO, then each power of two from
+    // REPORT_EACH_UP_TO (itself one) up to the last index, `refused - 1`.
+    let each = refused.min(REPORT_EACH_UP_TO);
+    let powers = if refused > REPORT_EACH_UP_TO {
+        (refused - 1).ilog2() as usize - REPORT_EACH_UP_TO.ilog2() as usize + 1
+    } else {
+        0
+    };
+    refused - each - powers
+}
+
 /// The bounds on these inserts, and what is in flight under them.
 ///
 /// The invariant: a row spawned while [`drain`] closes the ledger must either
@@ -139,12 +156,16 @@ pub(crate) struct Ledger {
     live_replies: AtomicUsize,
     /// Set by [`drain`]: no row starts after it.
     closed: AtomicBool,
-    /// Rows refused on the caller's thread so far (shed, or after the close),
-    /// for [`should_report`].
-    refused: AtomicUsize,
+    /// Rows shed on the caller's thread so far, for [`should_report`]. Counted
+    /// apart from [`Self::late`]: a flood shed over the daemon's life must not
+    /// silence the rows refused at shutdown.
+    shed: AtomicUsize,
+    /// Rows refused after the close so far, for [`should_report`].
+    late: AtomicUsize,
     /// Who the pending rows are, for the shutdown line (#797). Only for
     /// naming: the count that gates `drain` is `pending`.
     labels: Mutex<Vec<(u64, String)>>,
+    /// Pairs a label with its [`PendingRow`].
     next_row: AtomicU64,
 }
 
@@ -157,7 +178,8 @@ impl Ledger {
             live_sinks: AtomicUsize::new(0),
             live_replies: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
-            refused: AtomicUsize::new(0),
+            shed: AtomicUsize::new(0),
+            late: AtomicUsize::new(0),
             labels: Mutex::new(Vec::new()),
             next_row: AtomicU64::new(0),
         }
@@ -186,9 +208,9 @@ impl Ledger {
             let labels = self.labels.lock().unwrap_or_else(|p| p.into_inner());
             labels.iter().take(NAMED_AT_SHUTDOWN).map(|(_, l)| l.clone()).collect()
         };
-        let refused = self.refused.load(Ordering::SeqCst);
-        let reported = (0..refused).filter(|&n| should_report(n)).count();
-        Drained { named, unreported: refused - reported, ..counts }
+        let unreported = unreported_of(self.shed.load(Ordering::SeqCst))
+            + unreported_of(self.late.load(Ordering::SeqCst));
+        Drained { named, unreported, ..counts }
     }
 }
 
@@ -253,8 +275,10 @@ pub(crate) enum SinkKind {
 /// ⚠️ A writer made for a bring-up attempt that is then abandoned (Matrix's
 /// login timeout leaves its `spawn_blocking` running) keeps its lease until
 /// that task ends, so a shutdown can wait the full bound for a driver that
-/// never started. The line then says a driver "had not exited": true of the
-/// lease, and harmless, because that task writes no rows either.
+/// never started. Being [`SinkKind::Replies`], the lease is then reported on
+/// `[audit-lost]` as a driver that "had not exited (or finished starting)": no
+/// replies were ever queued behind it, so the loss it hints at did not happen,
+/// and the line's wording says only that it may have.
 pub(crate) struct SinkWriter {
     ledger: &'static Ledger,
     handle: tokio::runtime::Handle,
@@ -311,17 +335,16 @@ impl SinkWriter {
         on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let ledger = self.ledger;
-        // Counted BEFORE `closed` is read: see `Ledger`'s doc.
-        ledger.pending.fetch_add(1, Ordering::SeqCst);
+        // Counts the row (see `Ledger`'s doc for why before `closed` is read).
         let row = PendingRow::new(ledger, label);
         if ledger.closed.load(Ordering::SeqCst) {
             drop(row);
-            refuse(ledger, Unwritten::AfterShutdown, on_failure);
+            refuse(&ledger.late, Unwritten::AfterShutdown, on_failure);
             return None;
         }
         let Ok(queued) = ledger.queued.try_acquire() else {
             drop(row);
-            refuse(ledger, Unwritten::Shed, on_failure);
+            refuse(&ledger.shed, Unwritten::Shed, on_failure);
             return None;
         };
         let pool = self.pool.clone();
@@ -341,8 +364,8 @@ impl SinkWriter {
 /// Tell `on_failure` of a row refused on the caller's thread — unless the
 /// flood has passed [`should_report`]'s thinning, in which case it is only
 /// counted.
-fn refuse(ledger: &Ledger, why: Unwritten<'_>, on_failure: impl FnOnce(Unwritten<'_>)) {
-    if should_report(ledger.refused.fetch_add(1, Ordering::SeqCst)) {
+fn refuse(counter: &AtomicUsize, why: Unwritten<'_>, on_failure: impl FnOnce(Unwritten<'_>)) {
+    if should_report(counter.fetch_add(1, Ordering::SeqCst)) {
         on_failure(why);
     }
 }
@@ -357,15 +380,15 @@ impl Drop for SinkWriter {
 }
 
 /// One row counted in [`Ledger::pending`], and named in its label list, until
-/// dropped.
+/// dropped. Counted BEFORE `closed` is read: see [`Ledger`]'s doc.
 struct PendingRow {
     ledger: &'static Ledger,
     id: u64,
 }
 
 impl PendingRow {
-    /// The caller has already counted the row in `pending`.
     fn new(ledger: &'static Ledger, label: String) -> Self {
+        ledger.pending.fetch_add(1, Ordering::SeqCst);
         let id = ledger.next_row.fetch_add(1, Ordering::SeqCst);
         ledger.labels.lock().unwrap_or_else(|p| p.into_inner()).push((id, label));
         Self { ledger, id }

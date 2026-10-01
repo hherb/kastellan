@@ -79,6 +79,13 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   plurals. ⚠️ Not done: the two undelivered-payload paths in `channel/undelivered.rs`.
 - Movement: formatters → `audit_sink_report.rs`. Mutants 4/4 (drain `settled`, `should_report`, the
   email `on_failure` call, the `live_sinks` read).
+- **PR #801 review fixes** (5-agent review): `shed` and `late` refusals are counted apart (an old shed
+  flood no longer silences shutdown refusals); `unreported_of` is a closed form (was a `0..refused`
+  loop); `PendingRow::new` now owns the `pending` increment; the stuck-Matrix line says "may not be
+  audited" / "or finished starting" (an abandoned login lease reports as one — wording fixed, lease
+  not); stale "reported"/"harmless" comments corrected. Tests: `drain` returns the *final* snapshot,
+  a clean drain reports nothing, the closed form equals the predicate. Rest filed as
+  [#802](https://github.com/hherb/kastellan/issues/802). Re-run: 37 bin tests green, core clippy clean.
 
 ### Previous (2026-09-30): #792 + #793 — the audit residue of #791 (PR #795) — what still binds
 
@@ -280,8 +287,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **The polled-driver audit residue of PR #801 — the "Not done" items above**, filed on #796–#800
-   (the issues stay open for them). **First DGX deploy of #791 + #795 + #801:** watch one restart for
+5. **The polled-driver audit residue of PR #801 — the "Not done" items above** and the review
+   deferrals, filed on #796–#800 and [#802](https://github.com/hherb/kastellan/issues/802). **First DGX deploy of #791 + #795 + #801:** watch one restart for
    the `[audit-lost]` / INFO drain lines, and query an `observed_at` on the next `channel.*` row.
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
