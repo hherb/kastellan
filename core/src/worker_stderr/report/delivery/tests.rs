@@ -332,7 +332,7 @@ fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>
         (
             "emit_audit_lost_report",
             AUDIT_LOST,
-            Box::new(|| crate::worker_stderr::emit_audit_lost_report("shutdown", PROBE_LINE)),
+            Box::new(|| crate::worker_stderr::emit_audit_lost_report(crate::worker_stderr::AuditLostWriter::Shutdown, PROBE_LINE)),
         ),
     ]
 }
@@ -372,7 +372,7 @@ fn every_refusal_severity_checks_delivery_at_its_own_callsite() {
 #[test]
 fn the_audit_lost_report_is_recorded_at_error() {
     const AUDIT_LOST: &str = "kastellan_core::worker_stderr::report::audit_lost";
-    let emit = || crate::worker_stderr::emit_audit_lost_report("shutdown", PROBE_LINE);
+    let emit = || crate::worker_stderr::emit_audit_lost_report(crate::worker_stderr::AuditLostWriter::Shutdown, PROBE_LINE);
     let (fell_back, recorded) = under(&format!("{AUDIT_LOST}=error"), emit);
     assert!(recorded, "a lost audit row must be recorded by an errors-only filter");
     assert!(!fell_back, "and then not also written to stderr");

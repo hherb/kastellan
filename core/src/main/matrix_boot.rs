@@ -28,6 +28,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tracing::info;
 
+use kastellan_core::worker_stderr::AuditLostWriter;
 use kastellan_core::channel::boot_supervisor::pg_sink::pg_boot_audit_sink;
 use kastellan_core::channel::boot_supervisor::{
     BootOutcome, ChannelSupervisor, ReportingPolicy, StartedChannel,
@@ -74,6 +75,7 @@ fn reply_undelivered_row(
 /// emitter) and reason so it can be matched to the driver's `[worker-refusal]`
 /// line for the drop.
 fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::Display) -> String {
+    let conversation = crate::audit_sink::quoted_id(conversation);
     format!(
         "channel.reply_undelivered row for a reply to conversation {conversation} \
          ({reason}) not written: {why}. The dropped reply's [worker-refusal] line stands"
@@ -98,16 +100,25 @@ fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::D
 /// ([`format_reply_row_lost`]).
 ///
 /// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit
+///
+/// `report` is how a lost row is said: [`crate::audit_sink::emit_report`] in
+/// the daemon, a recorder in a test (#799).
 fn reply_undelivered_audit_sink(
     writer: crate::audit_sink::SinkWriter,
+    report: crate::audit_sink::Reporter,
 ) -> kastellan_core::channel::polled_driver::ReplyUndeliveredAudit {
     Box::new(move |reply| {
         let (actor, action, payload) = reply_undelivered_row(&reply);
         let reason = reply.reason;
         let conversation = reply.conversation.0.clone();
-        writer.spawn(actor, action, payload, move |why| {
-            kastellan_core::worker_stderr::emit_audit_lost_report(
-                "matrix",
+        let label = format!(
+            "matrix reply to conversation {} ({})",
+            crate::audit_sink::quoted_id(&conversation),
+            reason.as_str()
+        );
+        writer.spawn(actor, action, payload, label, move |why| {
+            report(
+                AuditLostWriter::Matrix,
                 &format_reply_row_lost(&conversation, reason.as_str(), &why),
             );
         });
@@ -220,10 +231,14 @@ async fn attempt(
     // yields a Retry instead of holding the attempt open. On timeout the
     // blocking task is left to drain against the SDK's own HTTP timeouts (a
     // blocking task cannot be force-cancelled).
-    let audit_undelivered = Some(reply_undelivered_audit_sink(crate::audit_sink::SinkWriter::new(
-        pool.clone(),
-        tokio::runtime::Handle::current(),
-    )));
+    let audit_undelivered = Some(reply_undelivered_audit_sink(
+        crate::audit_sink::SinkWriter::new(
+            pool.clone(),
+            tokio::runtime::Handle::current(),
+            crate::audit_sink::SinkKind::Replies,
+        ),
+        crate::audit_sink::emit_report,
+    ));
     let spawn = tokio::task::spawn_blocking(move || {
         kastellan_core::channel::matrix::spawn_matrix_worker(
             backend,
@@ -339,12 +354,16 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().expect("a runtime");
         let (pool, listener) = rt.block_on(async { stalled_pool() });
-        static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(8, 8);
-        let sink = reply_undelivered_audit_sink(crate::audit_sink::SinkWriter::with_ledger(
-            &LEDGER,
-            pool,
-            rt.handle().clone(),
-        ));
+        static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 8, connections: 8 });
+        let sink = reply_undelivered_audit_sink(
+            crate::audit_sink::SinkWriter::with_ledger(
+                &LEDGER,
+                pool,
+                rt.handle().clone(),
+                crate::audit_sink::SinkKind::Replies,
+            ),
+            |_, _| {},
+        );
         let out = OutgoingMessage {
             channel: ChannelId("matrix".into()),
             peer: PeerId("@me:srv".into()),
@@ -360,6 +379,53 @@ mod tests {
         assert_eq!(LEDGER.snapshot().sinks_live, 1, "the Matrix reply-undelivered sink holds a lease");
         drop(sink);
         assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives it back when dropped");
+    }
+
+    static MATRIX_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// #799: the Matrix sink's failure closure reaches the reporter, as the
+    /// MATRIX writer, naming the conversation and the reason.
+    #[test]
+    fn the_matrix_sink_reports_a_row_it_could_not_write() {
+        use kastellan_core::channel::{
+            ChannelId, ConversationId, OutgoingMessage, PeerId, UndeliveredReason, UndeliveredReply,
+        };
+        let rt = tokio::runtime::Runtime::new().expect("a runtime");
+        let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+        static LEDGER: crate::audit_sink::Ledger =
+            crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 0, connections: 1 });
+        let sink = reply_undelivered_audit_sink(
+            crate::audit_sink::SinkWriter::with_ledger(
+                &LEDGER,
+                pool,
+                rt.handle().clone(),
+                crate::audit_sink::SinkKind::Replies,
+            ),
+            |w, line| MATRIX_SAID.lock().unwrap().push((w, line.to_string())),
+        );
+        let out = OutgoingMessage {
+            channel: ChannelId("matrix".into()),
+            peer: PeerId("@me:srv".into()),
+            conversation: ConversationId("!shed-me:srv".into()),
+            body: "b".into(),
+        };
+        sink(UndeliveredReply::of(&out, UndeliveredReason::QueueFull, time::OffsetDateTime::now_utc()));
+        let said = MATRIX_SAID.lock().unwrap();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].0, AuditLostWriter::Matrix);
+        assert!(
+            said[0].1.contains("!shed-me:srv") && said[0].1.contains("queue_full"),
+            "{said:?}"
+        );
+    }
+
+    /// #798: a conversation id is bounded where it is quoted.
+    #[test]
+    fn a_hostile_conversation_id_is_capped_in_the_lost_row_line() {
+        let long = "!".repeat(10_000);
+        let line = format_reply_row_lost(&long, "gave_up", &"shed");
+        assert!(line.len() < 1_000, "{} bytes", line.len());
     }
 
     /// #792: a reply row that was not written says which reply's drop it

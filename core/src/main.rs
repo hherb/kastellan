@@ -824,7 +824,7 @@ async fn main() -> Result<()> {
     // after it is refused and reported rather than silently dropped with the
     // runtime.
     let (drained, ()) = tokio::join!(audit_sink::drain(), scheduler.shutdown());
-    audit_sink::report_drained(drained);
+    audit_sink::report_drained(&drained, audit_sink::emit_report);
 
     // Graceful shutdown: stop the mirror task first so any in-flight
     // catch-up SELECT completes its fsync, then close the pool.

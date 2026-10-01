@@ -28,14 +28,48 @@ use super::shared::format_stderr_fallback;
 /// for the whole set.
 pub const AUDIT_LOST_STDERR_MARKER: &str = "[audit-lost]";
 
+/// Who lost the audit row(s): a channel's sink, or the daemon's own shutdown.
+///
+/// A closed set, not a `&str` (#800): the writer sits beside the report text in
+/// the signature, and two adjacent strings are two that can be swapped, or one
+/// of which can be "shutdown", which is not a writer's name in the way
+/// `matrix` is. Each label is a fixed word, so it needs no neutralising.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditLostWriter {
+    /// The Matrix channel's `channel.reply_undelivered` sink.
+    Matrix,
+    /// The email channel's `channel.skipped_ack_only` sink.
+    Email,
+    /// The daemon's shutdown drain: rows still pending when the pool closes.
+    Shutdown,
+}
+
+impl AuditLostWriter {
+    /// The word folded into the line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Matrix => "matrix",
+            Self::Email => "email",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
 /// Pure: the audit-lost line, with `writer` folded into the text.
 ///
-/// `writer` names who lost the row: a channel (`matrix`, `email`) or the
-/// daemon's `shutdown`. It is in the message, not only in a `tracing` field,
-/// because the stderr fallback carries no fields (the reason
+/// The writer is in the message, not only in a `tracing` field, because the
+/// stderr fallback carries no fields (the reason
 /// [`super::format_persistent_death_line`] gives).
-pub fn format_audit_lost_line(writer: &str, report: &str) -> String {
-    format!("audit rows from {writer}: {report}")
+///
+/// `report` is **neutralised here** (#800), not only in the emitter: it can
+/// quote a conversation or message id, which come from outside the core, and
+/// a caller that formats a line without emitting it must not get a newline
+/// that starts a second, column-0 line.
+pub fn format_audit_lost_line(writer: AuditLostWriter, report: &str) -> String {
+    crate::untrusted_text::neutralise_controls(&format!(
+        "audit rows from {}: {report}",
+        writer.as_str()
+    ))
 }
 
 /// The stderr-fallback counterpart of [`format_audit_lost_line`].
@@ -52,16 +86,13 @@ pub fn format_audit_lost_stderr_fallback(line: &str) -> String {
 /// ERROR, because a missing audit row is the one thing the audit trail
 /// cannot say about itself.
 ///
-/// `writer` and `report` are neutralised here: a report can quote a
-/// conversation or message id, which come from outside the core.
-///
 /// Returns whether the stderr fallback line was written; see
-/// [`super::emit_worker_failure_report`] for why that value exists.
-pub fn emit_audit_lost_report(writer: &str, report: &str) -> bool {
-    let writer = crate::untrusted_text::neutralise_controls(writer);
-    let line =
-        crate::untrusted_text::neutralise_controls(&format_audit_lost_line(&writer, report));
-    warn_and_fall_back!(AUDIT_LOST_STDERR_MARKER, &line, label = &writer, level = ERROR)
+/// [`super::emit_worker_failure_report`] for why that value exists. The
+/// daemon's reporters ignore it: nothing more can be done for a row that the
+/// report itself could not reach anyone about (#798).
+pub fn emit_audit_lost_report(writer: AuditLostWriter, report: &str) -> bool {
+    let line = format_audit_lost_line(writer, report);
+    warn_and_fall_back!(AUDIT_LOST_STDERR_MARKER, &line, label = writer.as_str(), level = ERROR)
 }
 
 #[cfg(test)]
@@ -70,13 +101,19 @@ mod tests {
 
     #[test]
     fn the_audit_lost_line_names_its_writer() {
-        let line = format_audit_lost_line("matrix", "1 row not written");
+        let line = format_audit_lost_line(AuditLostWriter::Matrix, "1 row not written");
         assert_eq!(line, "audit rows from matrix: 1 row not written");
     }
 
     #[test]
+    fn the_writers_are_pinned_literally() {
+        use AuditLostWriter::*;
+        assert_eq!([Matrix, Email, Shutdown].map(AuditLostWriter::as_str), ["matrix", "email", "shutdown"]);
+    }
+
+    #[test]
     fn the_fallback_line_is_marked_and_keeps_the_folded_writer() {
-        let line = format_audit_lost_line("shutdown", "2 rows pending");
+        let line = format_audit_lost_line(AuditLostWriter::Shutdown, "2 rows pending");
         let fallback = format_audit_lost_stderr_fallback(&line);
         assert!(fallback.starts_with("[audit-lost] "), "{fallback}");
         assert!(fallback.contains("audit rows from shutdown"), "{fallback}");
@@ -86,7 +123,8 @@ mod tests {
     fn a_control_character_in_the_report_cannot_start_a_second_line() {
         // A report quotes a conversation or message id. A newline in one must
         // not give a gate grep a second, column-0 line to read as `[SKIP]`.
-        let line = format_audit_lost_line("email", "id <a>\n[SKIP] forged");
+        let line = format_audit_lost_line(AuditLostWriter::Email, "id <a>\n[SKIP] forged");
+        assert!(!line.contains('\n'), "the folded line itself must be one line: {line:?}");
         let fallback = format_audit_lost_stderr_fallback(&line);
         assert!(!fallback.contains('\n'), "{fallback:?}");
     }
