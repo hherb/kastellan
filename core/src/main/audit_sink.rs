@@ -1,6 +1,6 @@
 //! Writing an audit row from a polled channel driver's thread **without
-//! stalling the driver** (#789), and without letting a flood of them starve
-//! every other writer's audit rows.
+//! stalling the driver** (#789), without letting a flood of them starve every
+//! other writer's audit rows, and **saying so when one is lost** (#792).
 //!
 //! The polled channel driver (`kastellan_core::channel::polled_driver`) is
 //! DB-free by design. It calls its audit hooks synchronously, on its own std
@@ -11,8 +11,7 @@
 //! every event in a batch.
 //!
 //! So the daemon's hooks **spawn** the insert onto the runtime and return at
-//! once, through [`spawn_audit_insert`]. What that costs, stated where it is
-//! paid:
+//! once, through a [`SinkWriter`]. What that costs, stated where it is paid:
 //!
 //! - **Bounded, not free.** `block_on` ran one insert at a time; spawned
 //!   inserts run side by side, on the pool the whole daemon writes its audit
@@ -20,20 +19,33 @@
 //!   has no length cap, so unbounded, one poll could start thousands of
 //!   inserts and time out tool-dispatch and scheduler rows waiting behind
 //!   them. At most [`MAX_CONNECTIONS`] of these inserts use the pool at once
-//!   and at most [`MAX_QUEUED`] wait; past that a row is **shed**, and the
+//!   and at most [`MAX_QUEUED`] are in flight in all, running or waiting; past
+//!   that a row is **shed**, and the
 //!   sink's `on_failure` says so, like any other row that was not written.
 //! - **After the fact.** The row is written after the hook returns, so an
 //!   email id is acked before its row exists: a crash in between loses the
 //!   row, and the id is not redelivered. Rows can also land out of order
-//!   relative to the events, and `audit_log.ts` is the insert's time.
-//! - **At shutdown.** A row still waiting or being written as the daemon
-//!   shuts down can be lost with the runtime, and a cancelled insert runs no
-//!   `on_failure`. The driver's own line for the event stands either way;
-//!   #792 is for reporting these losses rather than only stating them.
+//!   relative to the events; each row's payload carries its event's own time
+//!   (`observed_at`), because `audit_log.ts` is the insert's.
+//! - **At shutdown (#792).** Before the pool closes, `main` calls [`drain`]:
+//!   it waits, bounded by [`DRAIN_BOUND`], for every driver holding a sink to
+//!   exit (a Matrix driver audits its still-queued replies as it goes) and for
+//!   every spawned row to finish, then **closes** the ledger. What is still
+//!   pending then is reported on the `[audit-lost]` marker
+//!   ([`report_drained`]), and a row a late driver tries to write after that
+//!   is refused and reported by its sink ([`Unwritten::AfterShutdown`]),
+//!   rather than spawned onto a runtime that is going away — where tokio
+//!   drops it without a word.
 //!
-//! One helper for both channels (Matrix's `channel.reply_undelivered`, email's
+//! What still goes unreported: a row lost to a crash (SIGKILL, OOM, a panic
+//! under `panic = "abort"`), because nothing runs after one.
+//!
+//! One writer for both channels (Matrix's `channel.reply_undelivered`, email's
 //! `channel.skipped_ack_only`). Before #789 each sink hand-rolled its own
 //! insert, and the two had already drifted: one spawned, one blocked.
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
@@ -43,26 +55,83 @@ use tokio::sync::Semaphore;
 /// the rest to every other writer.
 const MAX_CONNECTIONS: usize = 4;
 
-/// How many may wait for one of those. Far above any honest burst (a Matrix
-/// queue's overflow, one email poll's skipped ids), and a bound on what a
-/// flood or a wedged Postgres can pile up.
+/// How many may be in flight in all, running or waiting for one of those
+/// connections (the permit is held for a row's whole life). Far above any
+/// honest burst (a Matrix queue's overflow, one email poll's skipped ids), and
+/// a bound on what a flood or a wedged Postgres can pile up.
 const MAX_QUEUED: usize = 1024;
 
-/// The two bounds, as one value so a test can use its own.
-pub(crate) struct Limits {
+/// How long [`drain`] waits at shutdown for the channel drivers to exit and
+/// their rows to land.
+///
+/// Long enough for a Matrix driver to notice its channel is gone (it long-polls
+/// for [`kastellan_core::channel::matrix::POLL_MS`] at a time, asserted below)
+/// and write its `driver_exit` rows. Short enough to leave most of the service
+/// manager's stop budget — 10 s from SIGTERM to SIGKILL on both hosts
+/// (`TimeoutStopSec` / `ExitTimeOut`, `kastellan-supervisor`) — to the
+/// scheduler shutdown it runs beside. An email driver long-polls for 15 s, so
+/// it is often still running when this expires; that costs nothing, because
+/// it audits nothing once its bus is gone (`polled_driver`'s skipped-id acks
+/// stop there), and [`report_drained`] says so at INFO, not as a loss.
+pub(crate) const DRAIN_BOUND: Duration = Duration::from_secs(3);
+
+const _: () = assert!(
+    DRAIN_BOUND.as_millis() > kastellan_core::channel::matrix::POLL_MS as u128,
+    "the drain must outlast one Matrix long-poll, or every shutdown reports its driver"
+);
+
+/// How often [`drain`] looks again.
+const DRAIN_POLL: Duration = Duration::from_millis(20);
+
+/// The bounds on these inserts, and what is in flight under them.
+///
+/// The invariant: a row spawned while [`drain`] closes the ledger must either
+/// see `closed` or be counted by drain's final snapshot — never neither, which
+/// would be a row lost with no line. `spawn` counts (`pending`) before it reads
+/// `closed`, and `drain` stores `closed` before it counts, all `SeqCst`. That is
+/// why `pending` is its own counter (a shed row needs counting too) and not the
+/// queue semaphore's free permits.
+pub(crate) struct Ledger {
     queued: Semaphore,
     connections: Semaphore,
+    /// Rows spawned and not yet finished (written, failed, or cancelled).
+    pending: AtomicUsize,
+    /// [`SinkWriter`]s alive: each is owned by one driver's audit hook, so
+    /// this is the number of drivers that may still write a row.
+    live_sinks: AtomicUsize,
+    /// Set by [`drain`]: no row starts after it.
+    closed: AtomicBool,
 }
 
-impl Limits {
+impl Ledger {
     pub(crate) const fn new(queued: usize, connections: usize) -> Self {
-        Self { queued: Semaphore::const_new(queued), connections: Semaphore::const_new(connections) }
+        Self {
+            queued: Semaphore::const_new(queued),
+            connections: Semaphore::const_new(connections),
+            pending: AtomicUsize::new(0),
+            live_sinks: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    /// What is still in flight.
+    ///
+    /// `live_sinks` is read BEFORE `pending`, and the order matters: a driver
+    /// spawns its last rows (`pending += 1`) and only then drops its writer
+    /// (`live_sinks -= 1`). Reading `pending` first could see 0 before those
+    /// rows and `live_sinks` 0 after the drop, calling a driver that just
+    /// queued rows "settled". Reading the writers first means a drop seen here
+    /// puts every row that driver spawned before this `pending` load.
+    pub(crate) fn snapshot(&self) -> Drained {
+        let sinks_live = self.live_sinks.load(Ordering::SeqCst);
+        let rows_pending = self.pending.load(Ordering::SeqCst);
+        Drained { rows_pending, sinks_live }
     }
 }
 
 /// The daemon's. Every sink shares it, so the bound is on the load these
 /// inserts put on the pool, not on each channel's share of it.
-static LIMITS: Limits = Limits::new(MAX_QUEUED, MAX_CONNECTIONS);
+static LEDGER: Ledger = Ledger::new(MAX_QUEUED, MAX_CONNECTIONS);
 
 /// Why a row was not written, as `on_failure` is told.
 #[derive(Debug)]
@@ -71,6 +140,9 @@ pub(crate) enum Unwritten<'a> {
     Insert(&'a kastellan_db::DbError),
     /// Never tried: the queue was full.
     Shed,
+    /// Never tried: the daemon had already drained its audit writes and was
+    /// shutting down (#792).
+    AfterShutdown,
 }
 
 impl std::fmt::Display for Unwritten<'_> {
@@ -81,268 +153,190 @@ impl std::fmt::Display for Unwritten<'_> {
                 "shed: too many audit inserts already waiting for the pool (a flood of \
                  audited events, or a wedged Postgres)",
             ),
+            Self::AfterShutdown => f.write_str(
+                "not tried: the daemon was shutting down and had already drained its audit \
+                 writes",
+            ),
         }
     }
 }
 
-/// Insert one audit row on `handle`'s runtime, without waiting for it.
+/// One sink's way to write rows, and its **lease** on the ledger: while a
+/// `SinkWriter` is alive, [`drain`] counts its driver as one that may still
+/// write a row.
 ///
-/// Returns at once — call it from a thread that must not block (the polled
-/// driver's). `on_failure` is told of a row that was not written, with why: on
-/// the runtime if the insert fails, or right here, on the caller's thread, if
-/// the row is shed (see the module docs). It should log with enough to match
-/// the row to the caller's own line for the event (a conversation, a message
-/// id), and must not block either.
-///
-/// The returned handle is for tests, which await it to see the outcome; `None`
-/// when the row was shed. In production it is dropped, which detaches the
-/// task: it still runs.
-pub(crate) fn spawn_audit_insert(
-    handle: &tokio::runtime::Handle,
-    pool: &PgPool,
-    actor: &'static str,
-    action: &'static str,
-    payload: serde_json::Value,
-    on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
-) -> Option<tokio::task::JoinHandle<()>> {
-    spawn_limited(&LIMITS, handle, pool, actor, action, payload, on_failure)
+/// A sink's hook closure owns its writer, and the driver owns the hook, so the
+/// lease ends exactly when the driver drops its hooks — as its thread returns,
+/// after any `driver_exit` rows are spawned. No driver has to remember to
+/// report its exit.
+pub(crate) struct SinkWriter {
+    ledger: &'static Ledger,
+    handle: tokio::runtime::Handle,
+    pool: PgPool,
 }
 
-/// [`spawn_audit_insert`] against `limits`.
-fn spawn_limited(
-    limits: &'static Limits,
-    handle: &tokio::runtime::Handle,
-    pool: &PgPool,
-    actor: &'static str,
-    action: &'static str,
-    payload: serde_json::Value,
-    on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let Ok(queued) = limits.queued.try_acquire() else {
-        on_failure(Unwritten::Shed);
-        return None;
-    };
-    let pool = pool.clone();
-    Some(handle.spawn(async move {
-        let _queued = queued;
-        // `Err` only for a closed semaphore, and these are never closed.
-        let _connection = limits.connections.acquire().await.ok();
-        if let Err(e) = kastellan_db::audit::insert(&pool, actor, action, payload).await {
-            on_failure(Unwritten::Insert(&e));
+impl SinkWriter {
+    /// A writer on the daemon's ledger, spawning onto `handle`.
+    pub(crate) fn new(pool: PgPool, handle: tokio::runtime::Handle) -> Self {
+        Self::with_ledger(&LEDGER, pool, handle)
+    }
+
+    /// A writer on `ledger`: tests use their own, so their counts are theirs.
+    pub(crate) fn with_ledger(
+        ledger: &'static Ledger,
+        pool: PgPool,
+        handle: tokio::runtime::Handle,
+    ) -> Self {
+        ledger.live_sinks.fetch_add(1, Ordering::SeqCst);
+        Self { ledger, handle, pool }
+    }
+
+    /// Insert one audit row on the runtime, without waiting for it.
+    ///
+    /// Returns at once — call it from a thread that must not block (the polled
+    /// driver's). `on_failure` is told of a row that was not written, with
+    /// why: on the runtime if the insert fails, or right here, on the caller's
+    /// thread, if the row is shed or the daemon is shutting down (see the
+    /// module docs). It should report the row on the `[audit-lost]` marker
+    /// with enough to match it to the caller's own line for the event (a
+    /// conversation, a message id), and must not block either.
+    ///
+    /// The returned handle is for tests, which await it to see the outcome;
+    /// `None` when the row was never tried. In production it is dropped, which
+    /// detaches the task: it still runs.
+    pub(crate) fn spawn(
+        &self,
+        actor: &'static str,
+        action: &'static str,
+        payload: serde_json::Value,
+        on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let ledger = self.ledger;
+        // Counted BEFORE `closed` is read: see `Ledger`'s doc.
+        ledger.pending.fetch_add(1, Ordering::SeqCst);
+        let row = PendingRow(ledger);
+        if ledger.closed.load(Ordering::SeqCst) {
+            drop(row);
+            on_failure(Unwritten::AfterShutdown);
+            return None;
         }
-    }))
+        let Ok(queued) = ledger.queued.try_acquire() else {
+            drop(row);
+            on_failure(Unwritten::Shed);
+            return None;
+        };
+        let pool = self.pool.clone();
+        Some(self.handle.spawn(async move {
+            // Dropped when the task ends however it ends, cancelled included.
+            let _row = row;
+            let _queued = queued;
+            // `Err` only for a closed semaphore, and these are never closed.
+            let _connection = ledger.connections.acquire().await.ok();
+            if let Err(e) = kastellan_db::audit::insert(&pool, actor, action, payload).await {
+                on_failure(Unwritten::Insert(&e));
+            }
+        }))
+    }
+}
+
+impl Drop for SinkWriter {
+    fn drop(&mut self) {
+        self.ledger.live_sinks.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// One row counted in [`Ledger::pending`] until dropped.
+struct PendingRow(&'static Ledger);
+
+impl Drop for PendingRow {
+    fn drop(&mut self) {
+        self.0.pending.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// What [`drain`] left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Drained {
+    /// Rows spawned and still unwritten.
+    pub(crate) rows_pending: usize,
+    /// Drivers still holding a sink.
+    pub(crate) sinks_live: usize,
+}
+
+impl Drained {
+    fn settled(self) -> bool {
+        self.rows_pending == 0 && self.sinks_live == 0
+    }
+}
+
+/// Shutdown: wait up to [`DRAIN_BOUND`] for the daemon's channel drivers to
+/// exit and their rows to land, then close the ledger, so a row a late driver
+/// tries after this is refused and reported ([`Unwritten::AfterShutdown`]).
+/// Call it after the channels are stopped and before the pool closes; hand the
+/// result to [`report_drained`].
+pub(crate) async fn drain() -> Drained {
+    drain_ledger(&LEDGER, DRAIN_BOUND).await
+}
+
+/// [`drain`] on `ledger`, bounded by `bound`.
+async fn drain_ledger(ledger: &'static Ledger, bound: Duration) -> Drained {
+    let deadline = tokio::time::Instant::now() + bound;
+    while !ledger.snapshot().settled() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(DRAIN_POLL).await;
+    }
+    // Close first, then count: see `Ledger`'s doc.
+    ledger.closed.store(true, Ordering::SeqCst);
+    ledger.snapshot()
+}
+
+/// Pure: the `[audit-lost]` line for rows still pending when [`drain`] gave
+/// up, or `None` when there were none.
+pub(crate) fn format_pending_at_shutdown(d: Drained, bound: Duration) -> Option<String> {
+    (d.rows_pending > 0).then(|| {
+        format!(
+            "{} channel audit row{} still unwritten after waiting {} s at shutdown; the \
+             database pool closes next, so {} lost unless already mid-write",
+            d.rows_pending,
+            if d.rows_pending == 1 { " was" } else { "s were" },
+            bound.as_secs(),
+            if d.rows_pending == 1 { "it is" } else { "they are" },
+        )
+    })
+}
+
+/// Pure: the INFO line for drivers still running when [`drain`] gave up, or
+/// `None` when there were none. Not a loss by itself — see [`DRAIN_BOUND`] —
+/// and a row one of them does try is reported as it happens.
+pub(crate) fn format_live_at_shutdown(d: Drained, bound: Duration) -> Option<String> {
+    (d.sinks_live > 0).then(|| {
+        format!(
+            "{} channel driver{} had not exited after {} s at shutdown; an audit row one \
+             writes from now on is refused and reported on the [audit-lost] marker",
+            d.sinks_live,
+            if d.sinks_live == 1 { "" } else { "s" },
+            bound.as_secs(),
+        )
+    })
+}
+
+/// Say what [`drain`] left behind: rows still pending on the `[audit-lost]`
+/// marker, drivers still running at INFO.
+pub(crate) fn report_drained(d: Drained) {
+    if let Some(line) = format_pending_at_shutdown(d, DRAIN_BOUND) {
+        kastellan_core::worker_stderr::emit_audit_lost_report("shutdown", &line);
+    }
+    if let Some(line) = format_live_at_shutdown(d, DRAIN_BOUND) {
+        tracing::info!("{line}");
+    }
 }
 
 /// Test builds only: a Postgres that never answers, for proving a sink does
 /// not wait for its insert — and that it did try one. Shared by this module's
 /// tests and each sink's own.
 #[cfg(test)]
-pub(crate) mod test_support {
-    use sqlx::PgPool;
-    use std::net::TcpListener;
-    use std::time::{Duration, Instant};
-
-    /// How long the stalled pool waits for a connection before giving up.
-    /// Long enough that a blocking call is unmistakable, short enough to keep
-    /// the test quick.
-    pub(crate) const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(1500);
-
-    /// A pool whose every connection attempt **hangs**: a TCP listener that
-    /// completes the handshake (the kernel does that, from the backlog) and
-    /// then never answers Postgres's startup message. That is a slow or wedged
-    /// Postgres, with no Postgres. The listener is returned so it outlives the
-    /// test's calls, and so [`assert_insert_attempted`] can ask it.
-    ///
-    /// Build it inside `rt` (`rt.block_on(async { stalled_pool() })`): a lazy
-    /// pool spawns its maintenance task as it is made, and panics with no
-    /// runtime to spawn it on.
-    pub(crate) fn stalled_pool() -> (PgPool, TcpListener) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
-        listener.set_nonblocking(true).expect("a non-blocking listener");
-        let port = listener.local_addr().expect("local addr").port();
-        let options = sqlx::postgres::PgConnectOptions::new()
-            .host("127.0.0.1")
-            .port(port)
-            .username("nobody")
-            .database("nothing");
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(ACQUIRE_TIMEOUT)
-            .connect_lazy_with(options);
-        (pool, listener)
-    }
-
-    /// Assert that `call` returns well inside [`ACQUIRE_TIMEOUT`] — that it
-    /// did not wait for an insert against the stalled pool.
-    ///
-    /// The bound is two thirds of the timeout, not a few milliseconds: a call
-    /// that waits takes the WHOLE timeout, so two thirds separates the two with
-    /// room to spare on a loaded host.
-    pub(crate) fn assert_returns_at_once(what: &str, call: impl FnOnce()) {
-        let t = Instant::now();
-        call();
-        let took = t.elapsed();
-        assert!(
-            took < ACQUIRE_TIMEOUT * 2 / 3,
-            "{what} must return at once, not wait for its insert (#789): took {took:?}"
-        );
-    }
-
-    /// Whether anything connected to `listener` within `within`.
-    pub(crate) fn connected_within(listener: &TcpListener, within: Duration) -> bool {
-        let deadline = Instant::now() + within;
-        loop {
-            match listener.accept() {
-                Ok(_) => return true,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => panic!("accept on the stalled pool's listener: {e}"),
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Assert that an insert was actually attempted against the stalled pool:
-    /// a sink that returns at once by writing nothing passes
-    /// [`assert_returns_at_once`] too. Its positive control — the pool opens
-    /// no connection unasked — is this module's
-    /// `a_stalled_pool_connects_only_for_an_insert`.
-    pub(crate) fn assert_insert_attempted(what: &str, listener: &TcpListener) {
-        assert!(
-            connected_within(listener, ACQUIRE_TIMEOUT),
-            "{what} must actually try its insert: nothing connected to the pool"
-        );
-    }
-}
+#[path = "audit_sink_test_support.rs"]
+pub(crate) mod test_support;
 
 #[cfg(test)]
-mod tests {
-    use super::test_support::{
-        assert_insert_attempted, assert_returns_at_once, connected_within, stalled_pool,
-        ACQUIRE_TIMEOUT,
-    };
-    use super::*;
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
-
-    type OnFailure = Box<dyn FnOnce(Unwritten<'_>) + Send>;
-
-    /// Records what `on_failure` was told.
-    fn recorder() -> (Arc<Mutex<Option<String>>>, impl FnOnce(Unwritten<'_>) + Send + 'static) {
-        let told: Arc<Mutex<Option<String>>> = Arc::default();
-        let seen = told.clone();
-        (told, move |u: Unwritten<'_>| *seen.lock().unwrap() = Some(u.to_string()))
-    }
-
-    /// #789: the insert does not hold the caller. The positive control first:
-    /// the same insert, **waited for** from the same kind of thread (as the
-    /// email sink did with `block_on`), takes the whole acquire timeout — so
-    /// the fixture really stalls, and the fast return below is the helper's
-    /// doing. Then the helper's failure callback does run, once the pool
-    /// gives up.
-    #[test]
-    fn the_insert_does_not_hold_the_calling_thread() {
-        let rt = tokio::runtime::Runtime::new().expect("a runtime");
-        // Made inside the runtime, but this thread stays outside it — like the
-        // driver thread that calls the real sinks.
-        let (pool, _listener) = rt.block_on(async { stalled_pool() });
-
-        let t = Instant::now();
-        let blocked = rt.block_on(kastellan_db::audit::insert(&pool, "a", "b", serde_json::json!({})));
-        assert!(blocked.is_err(), "POSITIVE CONTROL: the stalled pool must fail the insert");
-        assert!(
-            t.elapsed() >= ACQUIRE_TIMEOUT,
-            "POSITIVE CONTROL: waiting for the insert must take the acquire timeout, or this \
-             fixture does not stall and the assertion below proves nothing: {:?}",
-            t.elapsed()
-        );
-
-        let (told, on_failure) = recorder();
-        let mut task = None;
-        assert_returns_at_once("spawn_audit_insert", || {
-            task = spawn_audit_insert(rt.handle(), &pool, "a", "b", serde_json::json!({}), on_failure);
-        });
-        rt.block_on(task.expect("not shed")).expect("the insert task ran to completion");
-        assert!(told.lock().unwrap().is_some(), "a failed insert reaches `on_failure`");
-    }
-
-    /// The positive control for [`assert_insert_attempted`]: the stalled pool
-    /// opens no connection of its own accord, so a connection means an insert
-    /// was tried.
-    #[test]
-    fn a_stalled_pool_connects_only_for_an_insert() {
-        let rt = tokio::runtime::Runtime::new().expect("a runtime");
-        let (pool, listener) = rt.block_on(async { stalled_pool() });
-        assert!(
-            !connected_within(&listener, Duration::from_millis(300)),
-            "POSITIVE CONTROL: the lazy pool must not connect before it is used"
-        );
-        let task = spawn_audit_insert(rt.handle(), &pool, "a", "b", serde_json::json!({}), |_| {});
-        assert_insert_attempted("spawn_audit_insert", &listener);
-        rt.block_on(task.expect("not shed")).expect("the insert task ran to completion");
-    }
-
-    /// Past the queue bound a row is shed — at once, on the caller's thread,
-    /// and said so through `on_failure` — and the slot comes back once the
-    /// queued insert gives up.
-    #[test]
-    fn past_the_queue_bound_a_row_is_shed_and_said_so() {
-        static ONE_SLOT: Limits = Limits::new(1, 1);
-        let rt = tokio::runtime::Runtime::new().expect("a runtime");
-        let (pool, _listener) = rt.block_on(async { stalled_pool() });
-        let spawn = |on_failure: OnFailure| {
-            spawn_limited(&ONE_SLOT, rt.handle(), &pool, "a", "b", serde_json::json!({}), on_failure)
-        };
-
-        let queued = spawn(Box::new(|_: Unwritten<'_>| {}))
-            .expect("POSITIVE CONTROL: the first row fits the queue");
-        let (told, on_failure) = recorder();
-        assert_returns_at_once("a shed row", || {
-            assert!(spawn(Box::new(on_failure)).is_none(), "the second row must be shed");
-        });
-        let told = told.lock().unwrap().clone();
-        assert!(
-            told.as_deref().is_some_and(|t| t.starts_with("shed:")),
-            "a shed row must reach `on_failure` at once, as shed: {told:?}"
-        );
-
-        rt.block_on(queued).expect("the queued insert ran to completion");
-        let again = spawn(Box::new(|_: Unwritten<'_>| {})).expect("the slot comes back");
-        rt.block_on(again).expect("the insert task ran to completion");
-    }
-
-    /// At most `connections` inserts use the pool at once, the rest wait: two
-    /// stalled inserts through one connection take two acquire timeouts, one
-    /// after the other. The control: through two, they take one.
-    #[test]
-    fn inserts_share_a_bounded_number_of_connections() {
-        static ONE_CONNECTION: Limits = Limits::new(2, 1);
-        static TWO_CONNECTIONS: Limits = Limits::new(2, 2);
-        let rt = tokio::runtime::Runtime::new().expect("a runtime");
-        let (pool, _listener) = rt.block_on(async { stalled_pool() });
-        let both = |limits: &'static Limits| {
-            let t = Instant::now();
-            let tasks: Vec<_> = (0..2)
-                .map(|_| {
-                    spawn_limited(limits, rt.handle(), &pool, "a", "b", serde_json::json!({}), |_| {})
-                        .expect("not shed")
-                })
-                .collect();
-            for task in tasks {
-                rt.block_on(task).expect("the insert task ran to completion");
-            }
-            t.elapsed()
-        };
-        let parallel = both(&TWO_CONNECTIONS);
-        assert!(
-            parallel < ACQUIRE_TIMEOUT * 2,
-            "POSITIVE CONTROL: two inserts through two connections wait side by side: {parallel:?}"
-        );
-        let serial = both(&ONE_CONNECTION);
-        assert!(
-            serial >= ACQUIRE_TIMEOUT * 2,
-            "two inserts through one connection must wait one after the other: {serial:?}"
-        );
-    }
-}
+#[path = "audit_sink_tests.rs"]
+mod tests;

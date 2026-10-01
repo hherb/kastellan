@@ -23,7 +23,7 @@
 //! installed that records nothing from these targets — and the report then
 //! needs the stderr line exactly as a test binary does.
 //!
-//! There are four such events, and they get **distinct markers** so a grep
+//! There are five such events, and they get **distinct markers** so a grep
 //! can tell them apart:
 //!
 //! | Event | Marker | Emitter |
@@ -32,8 +32,9 @@
 //! | a persistent worker dies mid-service | [`WORKER_DEATH_STDERR_MARKER`] | [`emit_persistent_death_report`] |
 //! | a persistent worker is NOT coming back | [`WORKER_DOWN_STDERR_MARKER`] | [`emit_persistent_down_report`] |
 //! | a live channel worker refused a call (#783) | [`WORKER_REFUSAL_STDERR_MARKER`] | [`emit_worker_refusal_report`] |
+//! | an audit row was not written (#792) — not a worker event; see `audit_lost` | [`AUDIT_LOST_STDERR_MARKER`] | [`emit_audit_lost_report`] |
 //!
-//! ⚠️ **The shared half is shared on purpose.** All four emitters render
+//! ⚠️ **The shared half is shared on purpose.** All five emitters render
 //! through the same private `format_stderr_fallback` and emit through the same
 //! `warn_and_fall_back!`, so neither the neutralisation nor the delivery check
 //! exists in two copies that can drift. That drift is the shape CLAUDE.md's
@@ -48,12 +49,17 @@
 //! function answers for the wrong target and reports "delivered" for an event
 //! `EnvFilter` dropped. Measured table in that macro's doc.
 
+mod audit_lost;
 mod delivery;
 mod persistent;
 mod refusal;
 pub(crate) mod shared;
 mod tool_worker;
 
+pub use audit_lost::{
+    emit_audit_lost_report, format_audit_lost_line, format_audit_lost_stderr_fallback,
+    AUDIT_LOST_STDERR_MARKER,
+};
 pub use persistent::{
     emit_persistent_death_report, emit_persistent_down_report, format_death_report,
     format_persistent_death_line, format_persistent_death_stderr_fallback,

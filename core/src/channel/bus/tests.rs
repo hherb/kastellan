@@ -310,6 +310,7 @@ async fn a_refused_reply_audits_reply_undelivered_alongside_replied() {
             assert_eq!(payload["channel"], "email");
             assert_eq!(payload["peer"], "me@example.org");
             assert_eq!(payload["reason"], "send_failed");
+            assert!(payload["observed_at"].is_string(), "every writer stamps the event: {payload}");
             let rendered = payload.to_string();
             assert!(!rendered.contains("714"), "must never persist the reply body: {rendered}");
             break;

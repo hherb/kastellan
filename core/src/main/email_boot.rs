@@ -68,7 +68,7 @@
 use std::sync::Arc;
 
 use sqlx::PgPool;
-use tracing::{error, info};
+use tracing::info;
 
 use kastellan_core::channel::boot_supervisor::pg_sink::pg_boot_audit_sink;
 use kastellan_core::channel::boot_supervisor::{
@@ -80,47 +80,27 @@ use kastellan_core::worker_lifecycle::force_route::ForceRoutingConfig;
 use kastellan_core::worker_lifecycle::RestartBackoff;
 use kastellan_sandbox::{SandboxBackend, SandboxBackends};
 
-/// Cap on `reason`'s length before it becomes a durable `audit_log` payload
-/// value. `reason` originates from the worker's `skipped[].reason`
-/// (`workers/email-in/src/handler.rs::describe_email_error`), which already
-/// truncates an upstream (localmail) HTTP error body to 200 chars — but
-/// `polled_driver::run`, which hands it to this sink, is DB-free by design
-/// and applies no cap of its own. Defence in depth: this sink must not trust
-/// a future worker change (or a compromised worker) to keep bounding it
-/// before it lands permanently in `audit_log`. Comfortably above the
-/// worker's own 200-char cap so today's values pass through untouched.
+/// Pure: the `(actor, action, payload)` of the row
+/// [`email_skipped_audit_sink`] writes for one skipped id: the bus's actor, and
+/// [`SkippedId::payload`] — the message id, the capped reason and when, never
+/// a body or headers. The payload has one definition, in the lib beside the
+/// view, as the reply row's does (#793).
 ///
-/// Aliased to the supervisor's cap rather than a second `256` typed here: both
-/// bound an unbounded, externally-originated string on its way into the same
-/// column, so one number and one set of edge cases is the honest arrangement.
-const AUDIT_REASON_CAP_CHARS: usize =
-    kastellan_core::channel::boot_supervisor::AUDIT_CAUSE_CAP_CHARS;
-
-/// Truncate `reason` to [`AUDIT_REASON_CAP_CHARS`] on a `char` boundary
-/// (never mid-UTF-8-codepoint — `reason` may echo arbitrary upstream text).
-/// A no-op for anything at or under the cap, which covers every value the
-/// worker emits today.
-fn cap_reason(reason: &str) -> String {
-    kastellan_core::channel::audit_text::cap_chars(reason, AUDIT_REASON_CAP_CHARS)
+/// [`SkippedId::payload`]: kastellan_core::channel::SkippedId::payload
+fn email_skipped_row(
+    skipped: &kastellan_core::channel::SkippedId<'_>,
+) -> (&'static str, &'static str, serde_json::Value) {
+    ("channel", kastellan_core::channel::actions::SKIPPED_ACK_ONLY, skipped.payload())
 }
 
-/// Pure: the `(actor, action, payload)` of the row
-/// [`email_skipped_audit_sink`] writes for one skipped id. The message id and
-/// the reason ONLY — never a body, never headers — and `reason` capped via
-/// [`cap_reason`] (see that function's docs for why this sink applies its own
-/// bound rather than trusting the worker's).
-fn email_skipped_row(
-    message_id: &str,
-    reason: &str,
-) -> (&'static str, &'static str, serde_json::Value) {
-    (
-        "channel",
-        kastellan_core::channel::actions::SKIPPED_ACK_ONLY,
-        serde_json::json!({
-            "channel": "email",
-            "message_id": message_id,
-            "reason": cap_reason(reason),
-        }),
+/// Pure: the `[audit-lost]` report for a `channel.skipped_ack_only` row the
+/// email sink could not write, naming the message id (neutralised by the
+/// emitter) so it can be matched to the driver's own line for the skip.
+fn format_skipped_row_lost(message_id: &str, why: &dyn std::fmt::Display) -> String {
+    format!(
+        "channel.skipped_ack_only row for message {message_id} not written: {why}. The \
+         driver's line for the skip stands; the id's ack was about to be sent, and unless \
+         that ack then failed it is not redelivered"
     )
 }
 
@@ -135,22 +115,20 @@ fn email_skipped_row(
 /// The row is [`email_skipped_row`]'s.
 ///
 /// The driver calls it from its own std thread, which every conversation, the
-/// poll and the ack wait on, so the insert is **spawned**
-/// ([`crate::audit_sink::spawn_audit_insert`], whose doc gives the cost), not
+/// poll and the ack wait on, so the insert is **spawned** through `writer`
+/// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost), not
 /// `block_on`'d (#789): a slow or unreachable Postgres stalled the email
 /// channel for a pool-acquire timeout per skipped id. A row that was not
-/// written is logged with the message id (control characters neutralised), so
-/// it can be matched to the driver's own line for the skip.
-fn email_skipped_audit_sink(pool: PgPool, handle: tokio::runtime::Handle) -> AckOnlyAudit {
-    Box::new(move |message_id: &str, reason: &str| {
-        let (actor, action, payload) = email_skipped_row(message_id, reason);
-        let message_id = kastellan_core::untrusted_text::neutralise_controls(message_id);
-        crate::audit_sink::spawn_audit_insert(&handle, &pool, actor, action, payload, move |e| {
-            error!(
-                error = %e,
-                %message_id,
-                "email: skipped-id audit row not written (non-fatal); the driver's line for \
-                 the skip stands, but it has no audit row"
+/// written is reported on the `[audit-lost]` marker
+/// ([`format_skipped_row_lost`]).
+fn email_skipped_audit_sink(writer: crate::audit_sink::SinkWriter) -> AckOnlyAudit {
+    Box::new(move |skipped| {
+        let (actor, action, payload) = email_skipped_row(&skipped);
+        let message_id = skipped.message_id.to_string();
+        writer.spawn(actor, action, payload, move |why| {
+            kastellan_core::worker_stderr::emit_audit_lost_report(
+                "email",
+                &format_skipped_row_lost(&message_id, &why),
             );
         });
     })
@@ -264,8 +242,10 @@ async fn attempt(
         }
     };
 
-    let audit_ack_only =
-        Some(email_skipped_audit_sink(pool.clone(), tokio::runtime::Handle::current()));
+    let audit_ack_only = Some(email_skipped_audit_sink(crate::audit_sink::SinkWriter::new(
+        pool.clone(),
+        tokio::runtime::Handle::current(),
+    )));
 
     let spawned = match kastellan_core::channel::email::spawn_email_worker(
         backend,
@@ -383,36 +363,61 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().expect("a runtime");
         let (pool, listener) = rt.block_on(async { stalled_pool() });
-        let sink = email_skipped_audit_sink(pool, rt.handle().clone());
-        assert_returns_at_once("the email skipped-id sink", || sink("<id@host>", "unattributable"));
+        static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(8, 8);
+        let sink = email_skipped_audit_sink(crate::audit_sink::SinkWriter::with_ledger(
+            &LEDGER,
+            pool,
+            rt.handle().clone(),
+        ));
+        let channel = ChannelId("email".into());
+        let skipped = kastellan_core::channel::SkippedId {
+            channel: &channel,
+            message_id: "<id@host>",
+            reason: "unattributable",
+            observed_at: time::OffsetDateTime::now_utc(),
+        };
+        assert_returns_at_once("the email skipped-id sink", || sink(skipped));
         assert_insert_attempted("the email skipped-id sink", &listener);
+        // #792: the sink holds its lease until the driver drops it, so the
+        // shutdown drain waits for the driver that owns it.
+        assert_eq!(LEDGER.snapshot().sinks_live, 1, "the email skipped-id sink holds a lease");
+        drop(sink);
+        assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives it back when dropped");
+    }
+
+    /// #792: a skipped-id row that was not written names the message and why,
+    /// and says the id will not come back.
+    #[test]
+    fn a_lost_skipped_row_names_its_message_and_cause() {
+        let line = format_skipped_row_lost("<id@host>", &"shed: too many");
+        assert_eq!(
+            line,
+            "channel.skipped_ack_only row for message <id@host> not written: shed: too many. \
+             The driver's line for the skip stands; the id's ack was about to be sent, and \
+             unless that ack then failed it is not redelivered"
+        );
     }
 
     /// The row the email sink writes: the bus's actor, the skipped-ack-only
-    /// action, and the message id and reason ONLY — with the reason capped.
-    /// The sink's fast return proves nothing about what it stores; this does.
+    /// action, and the view's payload (pinned field by field, cap included,
+    /// beside `SkippedId` in the lib). The sink's fast return proves nothing
+    /// about what it stores; this does.
     #[test]
-    fn the_skipped_id_row_is_the_message_id_and_a_capped_reason() {
-        let (actor, action, payload) = email_skipped_row("<id@host>", "no usable From address");
+    fn the_skipped_id_row_is_the_bus_s_actor_and_the_view_s_payload() {
+        let channel = ChannelId("email".into());
+        let skipped = kastellan_core::channel::SkippedId {
+            channel: &channel,
+            message_id: "<id@host>",
+            reason: "no usable From address",
+            observed_at: time::macros::datetime!(2026-09-30 12:34:56 UTC),
+        };
+        let (actor, action, payload) = email_skipped_row(&skipped);
         assert_eq!(actor, "channel");
         assert_eq!(action, "channel.skipped_ack_only");
-        assert_eq!(
-            payload,
-            serde_json::json!({
-                "channel": "email",
-                "message_id": "<id@host>",
-                "reason": "no usable From address",
-            })
-        );
-        let long = "r".repeat(AUDIT_REASON_CAP_CHARS + 10);
-        let (_, _, payload) = email_skipped_row("<id@host>", &long);
-        assert_eq!(payload["reason"], serde_json::json!(cap_reason(&long)));
-        assert_ne!(payload["reason"], serde_json::json!(long), "POSITIVE CONTROL: the cap must bite");
+        assert_eq!(payload, skipped.payload());
+        assert_eq!(payload["message_id"], "<id@host>", "POSITIVE CONTROL: the view's own payload");
     }
 
-    /// A worker spawn failure is RETRYABLE — it is the observed #514 trigger
-    /// (`systemd-run --scope` refusing to create the sandbox cgroup while the
-    /// user manager restarts), which the next attempt absorbs.
     #[test]
     fn a_worker_spawn_failure_is_retryable() {
         let err = anyhow::anyhow!("egress-proxy sidecar exited before becoming ready");

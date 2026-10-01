@@ -69,38 +69,46 @@ fn reply_undelivered_row(
     ("channel", kastellan_core::channel::actions::REPLY_UNDELIVERED, reply.payload())
 }
 
+/// Pure: the `[audit-lost]` report for a `channel.reply_undelivered` row the
+/// Matrix sink could not write, naming the conversation (neutralised by the
+/// emitter) and reason so it can be matched to the driver's `[worker-refusal]`
+/// line for the drop.
+fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::Display) -> String {
+    format!(
+        "channel.reply_undelivered row for a reply to conversation {conversation} \
+         ({reason}) not written: {why}. The dropped reply's [worker-refusal] line stands"
+    )
+}
+
 /// Build the [`ReplyUndeliveredAudit`] closure the Matrix channel's polled
 /// driver calls for every reply it drops (#782): given up after its worker
 /// kept refusing it, past a full conversation queue, or still queued when the
 /// driver exits. Writes the `channel.reply_undelivered` row the bus's
-/// `channel.replied` promises for a reply that did not land — channel, peer
-/// and reason only ([`reply_undelivered_row`]), never the body.
+/// `channel.replied` promises for a reply that did not land — channel, peer,
+/// reason and the drop's time only ([`reply_undelivered_row`]), never the
+/// body.
 ///
 /// The driver calls it from its own std thread, which every conversation and
-/// the poll wait on, so the insert is **spawned**
-/// ([`crate::audit_sink::spawn_audit_insert`], whose doc gives the cost): a
+/// the poll wait on, so the insert is **spawned** through `writer`
+/// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost): a
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
-/// timeout per dropped reply. A row that was not written is logged with the
-/// conversation (control characters neutralised) and reason, so it can be
-/// matched to the driver's `[worker-refusal]` line for the drop.
+/// timeout per dropped reply. The closure owns `writer`, so the driver holds
+/// its lease until it exits, and the daemon's shutdown drain waits for it. A
+/// row that was not written is reported on the `[audit-lost]` marker
+/// ([`format_reply_row_lost`]).
 ///
 /// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit
 fn reply_undelivered_audit_sink(
-    pool: PgPool,
-    handle: tokio::runtime::Handle,
+    writer: crate::audit_sink::SinkWriter,
 ) -> kastellan_core::channel::polled_driver::ReplyUndeliveredAudit {
     Box::new(move |reply| {
         let (actor, action, payload) = reply_undelivered_row(&reply);
         let reason = reply.reason;
-        let conversation =
-            kastellan_core::untrusted_text::neutralise_controls(&reply.conversation.0);
-        crate::audit_sink::spawn_audit_insert(&handle, &pool, actor, action, payload, move |e| {
-            tracing::error!(
-                error = %e,
-                %conversation,
-                reason = reason.as_str(),
-                "matrix: reply-undelivered audit row not written (non-fatal); the dropped \
-                 reply's [worker-refusal] line stands, but it has no audit row"
+        let conversation = reply.conversation.0.clone();
+        writer.spawn(actor, action, payload, move |why| {
+            kastellan_core::worker_stderr::emit_audit_lost_report(
+                "matrix",
+                &format_reply_row_lost(&conversation, reason.as_str(), &why),
             );
         });
     })
@@ -212,8 +220,10 @@ async fn attempt(
     // yields a Retry instead of holding the attempt open. On timeout the
     // blocking task is left to drain against the SDK's own HTTP timeouts (a
     // blocking task cannot be force-cancelled).
-    let audit_undelivered =
-        Some(reply_undelivered_audit_sink(pool.clone(), tokio::runtime::Handle::current()));
+    let audit_undelivered = Some(reply_undelivered_audit_sink(crate::audit_sink::SinkWriter::new(
+        pool.clone(),
+        tokio::runtime::Handle::current(),
+    )));
     let spawn = tokio::task::spawn_blocking(move || {
         kastellan_core::channel::matrix::spawn_matrix_worker(
             backend,
@@ -329,7 +339,12 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().expect("a runtime");
         let (pool, listener) = rt.block_on(async { stalled_pool() });
-        let sink = reply_undelivered_audit_sink(pool, rt.handle().clone());
+        static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(8, 8);
+        let sink = reply_undelivered_audit_sink(crate::audit_sink::SinkWriter::with_ledger(
+            &LEDGER,
+            pool,
+            rt.handle().clone(),
+        ));
         let out = OutgoingMessage {
             channel: ChannelId("matrix".into()),
             peer: PeerId("@me:srv".into()),
@@ -337,9 +352,26 @@ mod tests {
             body: "b".into(),
         };
         assert_returns_at_once("the Matrix reply-undelivered sink", || {
-            sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp))
+            sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp, time::OffsetDateTime::now_utc()))
         });
         assert_insert_attempted("the Matrix reply-undelivered sink", &listener);
+        // #792: the sink holds its lease until the driver drops it, so the
+        // shutdown drain waits for the driver that owns it.
+        assert_eq!(LEDGER.snapshot().sinks_live, 1, "the Matrix reply-undelivered sink holds a lease");
+        drop(sink);
+        assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives it back when dropped");
+    }
+
+    /// #792: a reply row that was not written says which reply's drop it
+    /// belonged to, and why it was not written.
+    #[test]
+    fn a_lost_reply_row_names_its_conversation_reason_and_cause() {
+        let line = format_reply_row_lost("!room:srv", "gave_up", &"shed: too many");
+        assert_eq!(
+            line,
+            "channel.reply_undelivered row for a reply to conversation !room:srv (gave_up) not \
+             written: shed: too many. The dropped reply's [worker-refusal] line stands"
+        );
     }
 
     /// The row the Matrix driver's sink writes: the bus's actor, the
@@ -357,13 +389,19 @@ mod tests {
             conversation: ConversationId("!room:srv".into()),
             body: "SECRET-BODY".into(),
         };
-        let reply = UndeliveredReply::of(&out, UndeliveredReason::QueueFull);
+        let at = time::macros::datetime!(2026-09-30 12:34:56 UTC);
+        let reply = UndeliveredReply::of(&out, UndeliveredReason::QueueFull, at);
         let (actor, action, payload) = reply_undelivered_row(&reply);
         assert_eq!(actor, "channel");
         assert_eq!(action, "channel.reply_undelivered");
         assert_eq!(
             payload,
-            serde_json::json!({ "channel": "matrix", "peer": "@me:srv", "reason": "queue_full" })
+            serde_json::json!({
+                "channel": "matrix",
+                "peer": "@me:srv",
+                "reason": "queue_full",
+                "observed_at": "2026-09-30T12:34:56Z",
+            })
         );
         assert!(!payload.to_string().contains("SECRET-BODY"));
     }

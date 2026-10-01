@@ -4,7 +4,9 @@
 
 use super::outage::OutageLog;
 use super::refusal::{accepted, is_refusal, refused, RefusalRun};
+use super::audit::record_skipped;
 use super::{AckOnlyAudit, EncodeAck, PolledWorkerSpec, WorkerCalls};
+use crate::channel::{ChannelId, SkippedId};
 
 /// Ack one id. `Ok(true)` when accepted; `Ok(false)` when refused — already
 /// logged, and the ack's backoff set, so the caller stops acking this batch;
@@ -37,12 +39,16 @@ pub(super) fn ack(
 /// the same batch's events reached the bus, which the caller guarantees by
 /// calling this from `parse_poll`'s `Ok` arm; and like the event acks, it stops
 /// at the first refusal. A spec without `ack_method` acks nothing.
+///
+/// `channel` is the bus's id for the channel, which the audit row names.
+#[allow(clippy::too_many_arguments)] // the ack's own inputs, plus the audit hook and the id it names
 pub(super) fn ack_skipped(
     calls: &dyn WorkerCalls,
     spec: &PolledWorkerSpec,
     enc: EncodeAck,
     ids: Vec<(String, String)>,
     audit: Option<&AckOnlyAudit>,
+    channel: &ChannelId,
     outage: &mut OutageLog,
     run: &mut RefusalRun,
 ) {
@@ -56,15 +62,20 @@ pub(super) fn ack_skipped(
              so the worker's cursor advances"
         );
         // Best-effort audit trail: never FAILS the ack itself — a real hook
-        // only logs on its own insert error (see AckOnlyAudit's docs — `None`
+        // reports its own insert error (the daemon's, on `[audit-lost]`) (see AckOnlyAudit's docs — `None`
         // when the caller has no durable sink to write to). It must NOT block:
         // this thread is the one every conversation, the poll and the ack wait
         // on, so a hook that waited for its insert stalled the whole channel
         // for a pool-acquire timeout per skipped id (#789). The daemon's hook
-        // spawns its insert and returns.
-        if let Some(audit) = audit {
-            audit(&id, &reason);
-        }
+        // spawns its insert and returns; the call is timed, and one that
+        // held the thread anyway is reported (#793).
+        let skipped = SkippedId {
+            channel,
+            message_id: &id,
+            reason: &reason,
+            observed_at: time::OffsetDateTime::now_utc(),
+        };
+        record_skipped(audit, spec.label, skipped);
         match ack(calls, spec, method, enc(&id), outage, run) {
             Ok(true) => {}
             Ok(false) => return,

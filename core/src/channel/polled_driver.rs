@@ -344,6 +344,33 @@ fn run(
         if !down && poll_refusals.ready(now) && ack_refusals.ready(now) {
             match calls.call(spec.poll_method, serde_json::json!({ "timeout_ms": spec.poll_timeout_ms })) {
                 Ok(v) => {
+                    // The bus went away while the poll was out (the channel
+                    // was stopped mid long-poll). Nothing in this batch can
+                    // reach it, so ack none of it: an unacked batch is
+                    // redelivered on the next start. Checked HERE, not only at
+                    // an event's `blocking_send`, because a batch of skipped
+                    // ids alone has no event to notice the closed bus — and
+                    // would ack those ids and write their audit rows into a
+                    // daemon that is shutting down, losing both (#792).
+                    if inbound_tx.is_closed() {
+                        if spec.ack_method.is_some() {
+                            tracing::info!(
+                                label = spec.label,
+                                "inbound receiver closed during a poll; polled driver exiting \
+                                 without acking the batch (it is redelivered)"
+                            );
+                        } else {
+                            // No ack method: the worker has already moved its
+                            // cursor past this batch, so nothing redelivers it.
+                            tracing::warn!(
+                                label = spec.label,
+                                "inbound receiver closed during a poll; polled driver exiting, \
+                                 and this channel does not redeliver the batch — it is dropped"
+                            );
+                        }
+                        discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
+                        return;
+                    }
                     polled = true;
                     accepted(&mut poll_refusals, &mut outage, spec.label, spec.poll_method, None);
                     // Cleared by an ack refusal: the rest of the batch would be
@@ -416,7 +443,7 @@ fn run(
                             // is always empty, so this loop never runs for
                             // Matrix — byte-identical.
                             if let (true, Some(enc)) = (acking, encode_ack) {
-                                ack_skipped(&*calls, &spec, enc, ack_only_ids, audit_ack_only.as_ref(), &mut outage, &mut ack_refusals);
+                                ack_skipped(&*calls, &spec, enc, ack_only_ids, audit_ack_only.as_ref(), &cid, &mut outage, &mut ack_refusals);
                             }
                         }
                         Err(e) => {

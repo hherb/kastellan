@@ -4,20 +4,20 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261001_792_pre-prune.md`](archive/handover_20261001_792_pre-prune.md),
+> [`archive/handover_20260930_788_pre-prune.md`](archive/handover_20260930_788_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-01 (#792 + #793 — the audit residue of #791, PR #795; the operator is
-still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793), [#791](https://github.com/hherb/kastellan/pull/791) (#788, #789, #790), [#787](https://github.com/hherb/kastellan/pull/787) (#782, #783), [#786](https://github.com/hherb/kastellan/pull/786) (#785), [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774).
+**Last updated:** 2026-09-30 (#788 + #789 + #790 — the review residue of #787, PR #791; the
+operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#791](https://github.com/hherb/kastellan/pull/791) (#788, #789, #790), [#787](https://github.com/hherb/kastellan/pull/787) (#782, #783), [#786](https://github.com/hherb/kastellan/pull/786) (#785), [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774), [#770](https://github.com/hherb/kastellan/pull/770) (#673, #674), [#766](https://github.com/hherb/kastellan/pull/766) (#763, #765).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
 #787 since the merge): 15 binaries, generated env **and** `.local` byte-identical to
 `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at
 attempt 1. `scripts/upgrade_from_git.sh` switches its checkout back to `main` by itself, so the next
-plain run is right. ⚠️ **Neither #791's nor #795's changes are deployed.** The live process runs thinking **ON**
+plain run is right. ⚠️ **This PR's changes are not deployed.** The live process runs thinking **ON**
 (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`, `TIMEOUT_MS=600000`). The
 last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN]`, 4 `[SKIP]`
 (gliner opt-in). Rootfs images last rebuilt 2026-09-08.
@@ -58,80 +58,73 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-09-30): #792 + #793 — the audit residue of #791 (PR #795)
+### This session (2026-09-30): #788 + #789 + #790 — the review residue of #787 (PR #791)
 
-- **#792 — a lost channel audit row says so, on a new `[audit-lost]` marker.**
-  `core/src/main/audit_sink.rs`: a `Ledger` counts rows in flight and live
-  **`SinkWriter`s**. A sink's hook owns its writer and the driver owns the hook, so the lease
-  ends exactly when the driver thread returns (after its `driver_exit` rows are spawned).
-  `main` runs `audit_sink::drain()` **beside `scheduler.shutdown()`**, before the mirror and
-  `pool.close()`: it waits up to `DRAIN_BOUND` = **3 s** (one Matrix long-poll + margin,
-  const-asserted against `POLL_MS`; the stop budget is 10 s on both hosts), then **closes** the
-  ledger. Rows still pending → one `[audit-lost]` line; drivers still running → INFO only (the
-  email driver's 15 s long-poll usually is, and costs nothing — see the next point). A row tried
-  after the close is refused (`Unwritten::AfterShutdown`) and reported, instead of being spawned
-  onto a runtime tokio drops silently. Both sinks' `on_failure` now report through
-  `emit_audit_lost_report` (ERROR). ⚠️ **`pending` is its own `SeqCst` counter, not the queue
-  semaphore's free permits**: a row spawned while the drain closes must see `closed` or be
-  counted — never neither.
-- ⚠️ **Found on the way (#792): a poll answered after the bus went away acked its skipped ids.**
-  A batch of skipped ids alone has no event whose `blocking_send` notices the closed bus, so the
-  email driver acked those ids (never redelivered) and wrote their rows into a daemon shutting
-  down; with only the inbound side closed it also never exited. The driver now checks
-  `inbound_tx.is_closed()` first thing after every successful poll.
-- **`[audit-lost]` is the fifth stderr marker and the first non-worker one.** The census rule
-  widened from `[worker-…]` to any `[<family>-<event>]` token (lower-case family). It lives in
-  `worker_stderr/report/audit_lost.rs` because the macro, renderer and census are there.
-- **#793 — the driver times every audit hook call** (`polled_driver/audit.rs`
-  `record_skipped` / `record_undelivered`) and reports one past `HOOK_BUDGET` (100 ms) at WARN;
-  tests read a per-label record (`slow_hook_reports_for`), not a scoped subscriber.
-  `AckOnlyAudit` takes **`channel::SkippedId<'_>`** (channel, message_id, reason, observed_at);
-  the row's payload is `SkippedId::payload` in the lib (the reason cap moved with it).
-- **Both rows carry `observed_at`** (the event's time, stamped by the driver; `audit_log.ts` is
-  the insert's since #789). The bus's `send_failed` writer stamps it too — one shape per action.
-- Movement-only commit first (`audit_sink` tests → `audit_sink_tests.rs` +
-  `audit_sink_test_support.rs`; `record_undelivered` → `polled_driver/audit.rs`), proved
-  byte-identical with a negative control. **Mutants 15/15** (the reply stamp and the ERROR level
-  survived the first pass and got their tests). ⚠️ **Not guarded:** the *call* to the emitter in
-  `report_drained` and in each sink's `on_failure` (a bin test cannot read the lib's test-only
-  records). **Still unreported by design:** a row lost to a crash.
-- **PR #795 review round (`/review-pr`, five agents).** Fixed in the PR: `Ledger::snapshot` now
-  reads `live_sinks` **before** `pending` (the other order let a driver that had just queued rows
-  and dropped its writer look settled, so drain skipped its wait); the closed-bus exit no longer
-  says "redelivered" for a spec with no `ack_method` (Matrix) and WARNs instead; the email
-  lost-row line no longer claims the id *was* acked (the hook runs before the ack); stale docs
-  (`spawn_audit_insert`, `MAX_QUEUED`, the `Ledger` invariant). **Filed as follow-ups:** #796 (a
-  stuck live Matrix driver past the drain bound is INFO only; orphaned lease), #797 (a cancelled
-  or panicked insert never calls `on_failure`), #798 (per-row reports on the driver thread,
-  uncapped ids), #799 (test gaps, incl. the `on_failure` wiring), #800 (type/API tidy-ups).
+- **#788 — a refusal that ENDS says so on the marked stream.** `accepted()` emits "the worker
+  accepted `<method>` [for conversation `<c>`] again after N refusals; that refusal has ended"
+  (pure `format_accepted_report`) through `emit_worker_refusal_report` at the new
+  **`RefusalSeverity::Recovered`** (named for its event, not its level, so no per-event INFO line
+  borrows it), whose `warn_and_fall_back!` arm is `level = INFO`, checked at INFO. ⚠️ **It falls
+  back under an operator's `RUST_LOG=warn` too, on purpose**: it closes a refusal that was shown,
+  and it is one line per run. Under `RUST_LOG=warn` the refusal and its ending travel apart
+  (`tracing` vs stderr). ⚠️ **The two outage lines
+  (`note_answer`, `report_down`) stay unmarked, deliberately** (doc in `outage.rs`): the
+  supervisor's `[worker-death]`, plus a `[worker-down]` for every failed respawn, already tell that
+  story on the marked stream.
+- **#789 — no audit sink blocks the driver thread.** One helper, `core/src/main/audit_sink.rs`
+  `spawn_audit_insert`, used by both daemon sinks (Matrix `reply_undelivered`, email
+  `skipped_ack_only`). ⚠️ **Tested with no Postgres**: `audit_sink::test_support::stalled_pool` is
+  a `TcpListener` that accepts and never answers, plus a positive control that a *waited-for*
+  insert takes the acquire timeout. ⚠️ Build that pool **inside** a runtime
+  (`rt.block_on(async { stalled_pool() })`): a lazy pool spawns its maintenance task as it is made.
+  ⚠️ **Spawned is bounded, not free** (review round): `block_on` ran one insert at a time, and a
+  compromised email-in worker can return any number of skipped ids, so unbounded spawning could
+  starve the shared 16-connection pool that tool-dispatch and scheduler rows go through. The helper
+  holds these inserts to **4 connections, 1024 queued**; past that a row is **shed** and the sink's
+  `on_failure` says so (`audit_sink::Unwritten::Shed`). Each sink test also asserts the insert was
+  *attempted* (`assert_insert_attempted`: the stalled listener saw a connection) — a sink that
+  wrote nothing passed the fast-return test alone. Rows lost at shutdown or before a crash are
+  still silent: **#792**. A hook that blocks is still caught only by tests: **#793**.
+- **#790 — the reply audit hook cannot see the body.** `ReplyUndeliveredAudit` takes
+  `channel::UndeliveredReply<'_>` (channel, peer, conversation, reason; `payload()`), which has no
+  body field. Driver tests tell audited replies apart by **peer** (`tests/replies.rs` `reply()`
+  sets the peer to the body).
+- **Splits, movement only (own commit, byte-identical, fn set checked, negative control):**
+  `channel/mod.rs` 508 → 394 (+ `channel/undelivered.rs`), `polled_driver.rs` 517 → 467
+  (+ `polled_driver/audit.rs`). Paths unchanged via re-exports.
+- Mutants 4/4 killed (helper blocks; email sink back to `block_on`; the INFO arm checked at WARN;
+  the recovery line bypassing the emitter). **Review round, 8/8 more:** three INFO-arm field lists
+  (the INFO rows of the field- and message-scoped delivery tests had landed in each other's test,
+  so a bare INFO check survived — ⚠️ a row under a `warn` base tests nothing for INFO), both sinks
+  writing nothing, the connection and queue bounds removed, `Recovered` routed to the WARN arm
+  (now a unit test pins every severity × level, not only the e2e). The email row is a pure
+  `email_skipped_row`, pinned like Matrix's.
 
-### Previous (2026-09-30): #788 + #789 + #790 — the review residue of #787 (PR #791)
+### Previous (2026-09-29): #782 + #783 — a stuck room holds only itself (PR #787)
 
-Full prose in the `792` archive snapshot. What still binds:
+Full prose in the `788` archive snapshot. What still binds:
 
-- **A refusal that ends says so** on `[worker-refusal]` at `RefusalSeverity::Recovered` (INFO arm
-  of `warn_and_fall_back!`); ⚠️ it falls back under `RUST_LOG=warn` too, on purpose. The outage
-  lines (`note_answer`, `report_down`) stay unmarked — the supervisor's markers cover them.
-- **No audit sink blocks the driver thread**; spawned inserts are bounded (**4 connections, 1024
-  queued**, then shed and reported). Test fixture: `audit_sink::test_support::stalled_pool` —
-  ⚠️ build it **inside** a runtime [[stalled-postgres-test-fixture]]; assert the insert was
-  *attempted*, not only that the call returned.
-- **`ReplyUndeliveredAudit` takes a body-less `UndeliveredReply` view**; driver tests tell
-  audited replies apart by **peer**. ⚠️ A test row under a `warn` base tests nothing for INFO.
-- ⚠️ **#791's `Closes #N` keywords did not fire** (the three issues were linked but left open
-  after the merge; closed by hand 2026-09-30). Check the issues after every merge.
+- **Replies queue per conversation** (`polled_driver/replies.rs`, pure `ReplyQueues`, clock passed
+  in). A reply is **given up** at `REPLY_GIVE_UP`: ≥ 1 h of its conversation refusing **with the
+  channel otherwise answering**, **and** ≥ 3 refusals (`min_refusals ≥ 2` enforced at spawn); then
+  audited `channel.reply_undelivered` (`gave_up` / `queue_full` / `driver_exit`; the bus writes
+  `send_failed`). Each queue is capped at 256. A driver that exits audits what it drops.
+- ⚠️ **A channel-wide failure holds every conversation, charges none, and RESTARTS every give-up
+  clock** (refused credential, `UPSTREAM_UNAVAILABLE`, dead worker, failed poll). Cost: a channel
+  failing more often than hourly never gives up a dead room (still capped, named every 15 min).
+- ⚠️ **The Matrix worker's 401 is `UPSTREAM_UNAVAILABLE` (-32005), NOT `UPSTREAM_AUTH_FAILED`**:
+  the latter makes the supervisor start a fresh worker while the old one runs — two matrix-sdk
+  clients on one crypto store. A 403 is a room's answer in Matrix.
+- ⚠️ **Don't test a driver line through a scoped `tracing` subscriber** (callsite interest is
+  process-wide; flaked 6 in 30). Read `worker_stderr::emitted_refusal_lines_for(label)`, one
+  channel label per test.
 
-### Previous (2026-09-29): #782 + #783 (PR #787) and #785 (PR #786) — what still binds
+### Previous (2026-09-29): #785 — `<recalled>` is not a door around the L0/L3 gates (PR #786)
 
-- **Replies queue per conversation** (pure `ReplyQueues`); a reply is **given up** after ≥ 1 h of
-  its conversation refusing with the channel otherwise answering **and** ≥ 3 refusals, then audited
-  `channel.reply_undelivered`; each queue is capped at 256. ⚠️ **A channel-wide failure holds every
-  conversation and RESTARTS every give-up clock.** ⚠️ **The Matrix worker's 401 is
-  `UPSTREAM_UNAVAILABLE`, NOT `UPSTREAM_AUTH_FAILED`** (the latter would run two matrix-sdk clients
-  on one store). ⚠️ **Never test a driver line through a scoped `tracing` subscriber** — read the
-  emitter's per-label test record [[tracing-scoped-subscriber-interest-cache-flake]].
-- **#785:** pure `MemoryLayer::is_recallable` (**L1, L2, L4 yes; L0, L3 no**) in all four recall
-  lanes' SQL before each `LIMIT`. ⚠️ **L1 stays recallable on purpose.**
+Pure `MemoryLayer::is_recallable` (exhaustive; **L1, L2, L4 yes, L0 and L3 no**), enforced in all
+four lanes' SQL **before each `LIMIT`** (and the entity lane's fan-out), re-checked after hydration
+(`error!` + `debug_assert!`). ⚠️ **L1 stays recallable on purpose** (older insights past the 32-row /
+4 KiB block cap). Pinned by `memory_recall_layer_gate_e2e` (in the `pg` profile).
 
 ### Previous (2026-09-27): #773 + #774 — thinking, and slow planning calls — what still binds
 
@@ -147,6 +140,11 @@ Full prose in git history (#776) and the `773` archive snapshot.
   turn; a timed-out synthesis retries once with thinking suppressed; a final timeout is worded for
   the user (`like '%timed out%'` still matches).
 - ⚠️ **Not decided, deliberately:** thinking on vs off — that is the live re-measure.
+
+### Previous (2026-09-27): #673 + #674 — a refused credential says so
+
+`codes::UPSTREAM_AUTH_FAILED = -32004` (401/403) in `mail` and `email-in`. ⚠️ Only
+`ClientError::Rpc` keeps its type through `client_error_to_anyhow`.
 
 ### Previous (2026-09-26/27): the mail worker — #760, #698, #763, #765 — what still binds
 
@@ -184,9 +182,6 @@ Full prose in the `748`/`755`/`698` archive snapshots. What still binds:
   ⚠️ **`grep -c` counts lines** [[grep-c-counts-lines-not-matches]].
 
 ### Merged arcs — only what still binds
-
-**#673/#674 (PR #770):** `UPSTREAM_AUTH_FAILED = -32004` for localmail 401/403; ⚠️ only
-`ClientError::Rpc` keeps its type through `client_error_to_anyhow`.
 
 **#769 (PR #781) — a refusal is not a death.** One classifier, `persistent/call_failure.rs`
 (`Gone` / `Refused` / `CredentialRefused` / `Unavailable`), read by the supervisor **and** the polled
@@ -231,9 +226,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 > **never** by `touch`ing sources (falsifies the #687 image gate, #691). Sweep first, lint after.
 
 > ⚠️ **A private `CARGO_TARGET_DIR` breaks daemon e2es** [[custom-cargo-target-dir-breaks-daemon-e2e]];
-> **rust-analyzer's `cargo check` holds `target/debug/.cargo-lock`** — ~10 min per save (all ~190
-> test targets). Iterate lib/bin unit tests in a private `CARGO_TARGET_DIR=$HOME/.cargo-target-<topic>`
-> (never for daemon e2es or the gate sweep), or kill the IDE's cargo child (recurred 2026-09-30).
+> **rust-analyzer's `cargo check` holds `target/debug/.cargo-lock`** (a blocked build prints `Blocking
+> waiting for file lock` — kill the IDE's cargo child, recurred 2026-09-19).
 
 > ⚠️ **Do NOT edit the tree while a sweep compiles in it — and give every reviewer its own worktree**
 > [[never-edit-tree-during-a-sweep]] [[worktree-cwd-lands-on-main]]. **A fresh worktree has no worker
@@ -292,11 +286,10 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **The polled-driver audit residue of PR #795 — nothing filed.** Unguarded by a test: the
-   *call* to `emit_audit_lost_report` in `audit_sink::report_drained` and in each sink's
-   `on_failure` (a bin test cannot read the lib's test-only records). Unreported by design: a row
-   lost to a crash. **First DGX deploy of #791 + #795:** watch one restart for the `[audit-lost]`
-   / INFO drain lines, and query an `observed_at` on the next `channel.*` row.
+5. **The polled-driver audit residue of PR #791: [#792](https://github.com/hherb/kastellan/issues/792)**
+   (audit rows lost at shutdown or before a crash leave no trace — join the drivers and drain a
+   pending counter before `pool.close()`) **and [#793](https://github.com/hherb/kastellan/issues/793)**
+   (time the hook calls to catch a sink that blocks; a named view for `AckOnlyAudit`).
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
@@ -358,9 +351,8 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its next leg** (the attachment half is the natural cut). Recent splits done **first** (the pattern to
 keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memories/search.rs`,
 #782 `report/delivery.rs` and `polled_driver/tests.rs`, #788 `channel/mod.rs` (→ `undelivered.rs`) and
-`polled_driver.rs` (→ `polled_driver/audit.rs`), #792 `main/audit_sink.rs` (→ `audit_sink_tests.rs`,
-`audit_sink_test_support.rs`). ⚠️ **Near the cap:** `polled_driver.rs` **484**, `worker_stderr/report/delivery/tests.rs`
-**484**, `polled_driver/replies.rs` **478** — split before the next change grows them.
+`polled_driver.rs` (→ `polled_driver/audit.rs`). ⚠️ `polled_driver/replies.rs` is at **489** — split it before
+it grows.
 Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
@@ -394,8 +386,8 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#792 + #793 — **the gate that stands**) | the doc-fix commit on PR #795 (`c9cffe77`) | **4766 / 0 / 50**, **190** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against the row below: #791's review round +4 (`kastellan` bin 20 → 24, measured here first) and this PR +21 (core lib +13: `audit_lost` 3, `skipped` 2, `undelivered` 1, driver `tests/audit` 5, `tests/ack` 1, delivery 1; bin 24 → 32). Mutants 15/15 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-792`, **27** `Checking kastellan` | **23** Mac |
-| **Mac** (#788 + #789 + #790 — superseded) | the split commit on PR #791 (`91299630`) | **4741 / 0 / 50**, **190** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**. Mutants 4/4 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-788`, **27** | **23** Mac |
+| **Mac** (#788 + #789 + #790 — **the gate that stands**) | the split commit on PR #791 (`91299630`) | **4741 / 0 / 50**, **190** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against the row below: #787's review round +18 / +2 ign / +1 suite (predicted there, never measured until now) and this PR +10 / +1 ign — core lib 2311 → 2317 (+6: recovery line 4, INFO arm 1, the view 1), `kastellan` bin 17 → 20 (+3: helper + one per sink), `worker_refusal_stderr_fallback_e2e` 2 → 3 (+1 ign). Mutants 4/4 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-788`, **27** `Checking kastellan` (303 compile/check lines from `proc-macro2`) | **23** Mac |
+| **Mac** (#782 + #783 — superseded) | the feature commit on PR #787 | **4713 / 0 / 47**, **189** suites. The sweep measured **4714**, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Delta +22, predicted exactly**, all core lib: `polled_driver::tests::replies` +16, `report::refusal` +3, `delivery` +2, `channel::tests` +1. Then clippy refused one constant-valued test; it became a `const` assert in `replies.rs` (−1: core lib re-run 2300 → 2299, bins 16/96 unchanged). Mutants 10/11 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-782` (fresh dir: **27** `Checking kastellan`, then core re-checked after the fixes) | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -476,7 +468,6 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#791](https://github.com/hherb/kastellan/pull/791)** (#788, #789, #790) — recovery lines marked, audit sinks spawn (bounded), a body-less reply view. Filed #792, #793.
 - **[#787](https://github.com/hherb/kastellan/pull/787)** (#782, #783) — replies queue per conversation; a refused one is given up and audited; `[worker-refusal]` marker. Filed #788, #789, #790.
 - **[#786](https://github.com/hherb/kastellan/pull/786)** (#785) — the four recall lanes stop returning L0 and L3 rows.
 - **[#784](https://github.com/hherb/kastellan/pull/784)** — docs only: the cognee / cognee-rs survey; its own-tree finding filed as #785.

@@ -181,7 +181,7 @@ fn email_backoff() -> RestartBackoff {
 /// [`crate::channel::polled_driver::AckOnlyAudit`] — see that type's docs for
 /// why it is a boxed closure rather than a `PgPool` parameter, and why it must
 /// not block (this module stays DB-free; the daemon wiring supplies the
-/// closure, which spawns its insert — `audit_sink::spawn_audit_insert` in the
+/// closure, which spawns its insert — `audit_sink::SinkWriter::spawn` in the
 /// daemon binary — rather than `block_on`ing it, #789).
 ///
 /// [`SandboxPolicy`]: kastellan_sandbox::SandboxPolicy

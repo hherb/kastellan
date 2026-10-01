@@ -313,8 +313,8 @@ fn audit_ack_only_is_called_with_id_and_reason_for_every_acked_skipped_id() {
     }));
     let audited: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let audited_cl = audited.clone();
-    let audit: AckOnlyAudit = Box::new(move |id, reason| {
-        audited_cl.lock().unwrap().push((id.to_string(), reason.to_string()));
+    let audit: AckOnlyAudit = Box::new(move |skipped: crate::channel::SkippedId<'_>| {
+        audited_cl.lock().unwrap().push((skipped.message_id.to_string(), skipped.reason.to_string()));
     });
     let (_driver, _identity) = PolledWorkerDriver::spawn(
         spec_with_ack(),
@@ -354,8 +354,8 @@ fn audit_ack_only_is_not_called_when_the_same_batchs_events_fail_to_decode() {
     }));
     let audited: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let audited_cl = audited.clone();
-    let audit: AckOnlyAudit = Box::new(move |id, reason| {
-        audited_cl.lock().unwrap().push((id.to_string(), reason.to_string()));
+    let audit: AckOnlyAudit = Box::new(move |skipped: crate::channel::SkippedId<'_>| {
+        audited_cl.lock().unwrap().push((skipped.message_id.to_string(), skipped.reason.to_string()));
     });
     let (mut driver, _identity) = PolledWorkerDriver::spawn(
         spec_with_ack(),
@@ -377,4 +377,71 @@ fn audit_ack_only_is_not_called_when_the_same_batchs_events_fail_to_decode() {
         !audited.lock().unwrap().iter().any(|(id, _)| id == "77"),
         "audit must not fire for a skipped id whose batch's events failed to decode"
     );
+}
+
+/// A worker whose first poll is still out when the bus goes away — the
+/// daemon's shutdown mid long-poll — and then answers it with skipped ids
+/// only. Every later poll is an empty batch; every call is logged.
+struct PollOutlivesTheBus {
+    bus_gone: Arc<AtomicBool>,
+    polls: AtomicUsize,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl WorkerCalls for PollOutlivesTheBus {
+    fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.log.lock().unwrap().push(format!("{method} {params}"));
+        if method.ends_with(".poll") && self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+            wait_until(|| self.bus_gone.load(Ordering::SeqCst));
+            return Ok(json!({
+                "events": [],
+                "skipped": [{"message_id": "10", "reason": "no usable From address"}]
+            }));
+        }
+        Ok(json!({"events": []}))
+    }
+}
+
+/// #792: a poll that brought only skipped ids after the bus went away acks
+/// none of them and audits none of them, and the driver exits. Acked then,
+/// an id's audit row would be written into a shutting-down daemon (and lost
+/// with it) while the id itself is never redelivered; not acked, the next
+/// start redelivers it. The outbound endpoint is kept alive, so it is the
+/// closed INBOUND side the driver must notice — the check a batch with no
+/// event never reached (only an event's `blocking_send` could see it).
+#[test]
+fn skipped_ids_are_neither_acked_nor_audited_once_the_bus_has_gone() {
+    let bus_gone = Arc::new(AtomicBool::new(false));
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let calls = PollOutlivesTheBus { bus_gone: bus_gone.clone(), polls: AtomicUsize::new(0), log: log.clone() };
+    let audited: Arc<Mutex<Vec<String>>> = Arc::default();
+    let audited_cl = audited.clone();
+    let audit: AckOnlyAudit = Box::new(move |skipped: crate::channel::SkippedId<'_>| {
+        audited_cl.lock().unwrap().push(skipped.message_id.to_string())
+    });
+    let (driver, _identity) = PolledWorkerDriver::spawn(
+        spec_with_ack(),
+        Box::new(calls),
+        test_parse,
+        test_encode,
+        Some(encode_test_ack),
+        Some(test_parse_ack_only),
+        DriverAudit { ack_only: Some(audit), ..DriverAudit::none() },
+        ChannelId("email".into()),
+    )
+    .unwrap();
+    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
+
+    wait_until(|| log.lock().unwrap().iter().any(|c| c.starts_with("email.poll")));
+    drop(inbound_rx);
+    bus_gone.store(true, Ordering::SeqCst);
+
+    wait_until(|| join.is_finished());
+    assert!(
+        !log.lock().unwrap().iter().any(|c| c.starts_with("email.ack")),
+        "no skipped id may be acked once the bus has gone: {:?}",
+        log.lock().unwrap()
+    );
+    assert!(audited.lock().unwrap().is_empty(), "nor audited: {:?}", audited.lock().unwrap());
+    drop(outbound_tx);
 }
