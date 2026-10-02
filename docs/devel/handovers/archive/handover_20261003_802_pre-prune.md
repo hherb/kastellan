@@ -4,20 +4,20 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261003_802_pre-prune.md`](archive/handover_20261003_802_pre-prune.md),
+> [`archive/handover_20261001_796_pre-prune.md`](archive/handover_20261001_796_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-03 (#796–#800 + #802 — the audit-sink close-out, PR #806; the operator
-is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793), [#791](https://github.com/hherb/kastellan/pull/791) (#788, #789, #790), [#787](https://github.com/hherb/kastellan/pull/787) (#782, #783), [#786](https://github.com/hherb/kastellan/pull/786) (#785), [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774).
+**Last updated:** 2026-10-01 (#796–#800 — the review residue of #795, PR #801; the operator is
+still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793), [#791](https://github.com/hherb/kastellan/pull/791) (#788, #789, #790), [#787](https://github.com/hherb/kastellan/pull/787) (#782, #783), [#786](https://github.com/hherb/kastellan/pull/786) (#785), [#784](https://github.com/hherb/kastellan/pull/784) (cognee survey), [#781](https://github.com/hherb/kastellan/pull/781) (#769), [#778](https://github.com/hherb/kastellan/pull/778) (#767, #768), [#776](https://github.com/hherb/kastellan/pull/776) (#773, #774).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
 #787 since the merge): 15 binaries, generated env **and** `.local` byte-identical to
 `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at
 attempt 1. `scripts/upgrade_from_git.sh` switches its checkout back to `main` by itself, so the next
-plain run is right. ⚠️ **None of #791, #795, #801 or #806 is deployed.** The live process runs thinking **ON**
+plain run is right. ⚠️ **Neither #791's, #795's nor #801's changes are deployed.** The live process runs thinking **ON**
 (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`, `TIMEOUT_MS=600000`). The
 last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN]`, 4 `[SKIP]`
 (gliner opt-in). Rootfs images last rebuilt 2026-09-08.
@@ -58,41 +58,47 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-03): the audit-sink close-out — #796–#800, #802 (PR #806)
+### This session (2026-10-01): #796–#800 — the review residue of #795 (PR #801)
 
-Closes the #792 → #802 residue chain. `core/src/main/audit_sink*.rs` is now six files:
-ledger + `spawn` (`audit_sink.rs`), lease (`_lease.rs`), pure thinning (`_thinning.rs`), report
-lines (`_report.rs`), and their tests. What binds:
+- **#796:** `SinkWriter::new(.., SinkKind)`: a Matrix (`Replies`) driver still live after the drain is a
+  **loss** (its queued replies go unaudited) → `[audit-lost]`; an email (`SkippedIds`) one stays INFO.
+  ⚠️ Not done: the orphaned lease from an abandoned Matrix login attempt (documented on `SinkWriter`).
+- **#797:** `spawn(.., label, on_failure)`; the ledger keeps `(id, label)` per pending row and the
+  shutdown line names the first 5. ⚠️ Not done: `spawn` still returns `Option<JoinHandle>`.
+- **#798:** `should_report(n)`: the first 16 refused rows report one by one, then only powers of two;
+  `Drained::unreported` counts the rest and the shutdown line says so. Ids quoted in lines/labels are
+  capped (`quoted_id`, 128 chars). ⚠️ Not done: `SkippedId::message_id` is still stored uncapped in
+  the row payload (capping would corrupt identity); `emit_*` return value ignored; `observed_at_json` null.
+- **#799:** sinks take an injected `Reporter` (`fn(AuditLostWriter, &str)`) so a bin test sees the
+  `on_failure` wiring; drain-on-pending-row-alone test; concurrent close-vs-spawn test (⚠️ the
+  invariant is `accepted <= pending <= accepted + threads`, a row caught mid-refusal is over-counted —
+  my first assertion was `==` and flaked under the sweep). ⚠️ Not done: snapshot-order stress, child
+  `[audit-lost]` stderr e2e, wall-clock flake margins.
+- **#800:** `AuditLostWriter` enum replaces the stringly writer; `format_audit_lost_line` neutralises
+  itself; census families are a closed list (`worker`, `audit`); `Ledger::new(Bounds{..})`; `counted()`
+  plurals. ⚠️ Not done: the two undelivered-payload paths in `channel/undelivered.rs`.
+- Movement: formatters → `audit_sink_report.rs`. Mutants 4/4 (drain `settled`, `should_report`, the
+  email `on_failure` call, the `live_sinks` read).
+- **PR #801 review fixes** (5-agent review): `shed` and `late` refusals are counted apart (an old shed
+  flood no longer silences shutdown refusals); `unreported_of` is a closed form (was a `0..refused`
+  loop); `PendingRow::new` now owns the `pending` increment; the stuck-Matrix line says "may not be
+  audited" / "or finished starting" (an abandoned login lease reports as one — wording fixed, lease
+  not); stale "reported"/"harmless" comments corrected. Tests: `drain` returns the *final* snapshot,
+  a clean drain reports nothing, the closed form equals the predicate. Rest filed as
+  [#802](https://github.com/hherb/kastellan/issues/802). Re-run: 37 bin tests green, core clippy clean.
 
-- **A lease is *starting* until its driver is up** (`SinkWriter::starting_with_ledger` → `Starting`).
-  Matrix's `attempt` builds it through `reply_sink`; `login_outcome` calls `started()` **only** for a
-  login that came up. A starting lease is not waited for by `drain` and is said at INFO, not
-  `[audit-lost]`. Email's lease is live at once (`skipped_sink`; its bring-up is synchronous).
-  `SinkKind::{AuditsOnExit, SilentOnExit}`. ⚠️ **`Ledger::snapshot` reads `starting`, then the
-  live counts, then `pending`** — both orders are load-bearing; `snapshot_around` is the test seam.
-- **Close-vs-spawn handshake** has deterministic seams: `close_and_count` (drain: close, then count)
-  and `SinkWriter::spawn_around` (spawn: count, then read `closed`). ⚠️ A contention stress test
-  could not kill a reversed read order — mutate against the seams, not the stress.
-- **Thinning is per burst** (pure `Thinning`, 60 s quiet gap, clock injected); `shed` and `late`
-  apart. Rows thinned **after** the shutdown report: `unreported_since` → one last line in `main`.
-  ⚠️ Still a gap: rows refused between that line and exit, which can last while the runtime drop
-  waits on an abandoned login's blocking task (#805).
-- `spawn` → `Result<JoinHandle, Unwritten<'static>>`. Ids in lines/labels are **quoted** (`{:?}`)
-  and capped. `UndeliveredReply::payload` is the reply row's **only** definition (the bus builds
-  the view). `observed_at_json` warns when it stores null. ⚠️ `SkippedId::message_id` is **not**
-  capped on purpose — the audit layer's 4 KiB cap stores an oversized payload as sha256 + len.
-- ⚠️ **Test fixture lesson:** the stalled pool fails an insert after 1.5 s, so a test that needs a
-  row to *stay pending* must use a ledger with **`connections: 0`** (and never await the row).
-- New `core/tests/audit_lost_stderr_fallback_e2e.rs` (re-exec, hostile id, ERROR level) — not in
-  any gate profile, like its `worker_refusal` sibling. Mutants 10/10.
+### Previous (2026-09-30): #792 + #793 — the audit residue of #791 (PR #795) — what still binds
 
-### Previous (2026-09-30/10-01): #792 + #793 (PR #795), #796–#800 (PR #801) — what still binds
+Full prose in the `796` archive snapshot.
 
-Full prose in the `796` and `802` archive snapshots. `drain()` runs beside `scheduler.shutdown()`,
-waits `DRAIN_BOUND` = **3 s**, then **closes** the ledger; `[audit-lost]` is the fifth stderr
-marker (`worker_stderr/report/audit_lost.rs`, typed `AuditLostWriter`); a poll answered after the
-bus went away acks nothing; the driver times every audit hook (`HOOK_BUDGET` 100 ms); both rows
-carry `observed_at`. ⚠️ **Still unreported by design:** a row lost to a crash.
+- `main/audit_sink.rs`: a `Ledger` counts rows in flight and live `SinkWriter`s (the lease ends when the
+  driver drops its hook). `drain()` runs beside `scheduler.shutdown()`, waits `DRAIN_BOUND` = **3 s**,
+  then **closes** the ledger; a row tried after is refused (`Unwritten::AfterShutdown`). ⚠️ `pending` is its
+  own `SeqCst` counter; `snapshot` reads `live_sinks` **before** `pending`.
+- `[audit-lost]` is the fifth stderr marker and the first non-worker one (`worker_stderr/report/audit_lost.rs`).
+- A poll answered after the bus went away no longer acks its skipped ids. The driver times every audit
+  hook (`HOOK_BUDGET` 100 ms); `AckOnlyAudit` takes `SkippedId`; both rows carry `observed_at`.
+- ⚠️ **Still unreported by design:** a row lost to a crash.
 
 ### Previous (2026-09-30): #788 + #789 + #790 — the review residue of #787 (PR #791)
 
@@ -107,12 +113,14 @@ Full prose in the `792` archive snapshot. What still binds:
   *attempted*, not only that the call returned.
 - **`ReplyUndeliveredAudit` takes a body-less `UndeliveredReply` view**; driver tests tell
   audited replies apart by **peer**. ⚠️ A test row under a `warn` base tests nothing for INFO.
-- ⚠️ **#791's `Closes #N` keywords did not fire** — check the issues after every merge (#806 too).
+- ⚠️ **#791's `Closes #N` keywords did not fire** (the three issues were linked but left open
+  after the merge; closed by hand 2026-09-30). Check the issues after every merge.
 
 ### Previous (2026-09-29): #782 + #783 (PR #787) and #785 (PR #786) — what still binds
 
-- **Replies queue per conversation** (pure `ReplyQueues`); given up after ≥ 1 h refusing **and**
-  ≥ 3 refusals, then audited `channel.reply_undelivered`; each queue is capped at 256. ⚠️ **A channel-wide failure holds every
+- **Replies queue per conversation** (pure `ReplyQueues`); a reply is **given up** after ≥ 1 h of
+  its conversation refusing with the channel otherwise answering **and** ≥ 3 refusals, then audited
+  `channel.reply_undelivered`; each queue is capped at 256. ⚠️ **A channel-wide failure holds every
   conversation and RESTARTS every give-up clock.** ⚠️ **The Matrix worker's 401 is
   `UPSTREAM_UNAVAILABLE`, NOT `UPSTREAM_AUTH_FAILED`** (the latter would run two matrix-sdk clients
   on one store). ⚠️ **Never test a driver line through a scoped `tracing` subscriber** — read the
@@ -279,11 +287,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **First DGX deploy of #791 + #795 + #801 + #806:** watch one restart for the `[audit-lost]` /
-   INFO drain lines (a Matrix login still in progress at shutdown should now be INFO "not finished
-   starting", not a loss), and query an `observed_at` on the next `channel.*` row. Then
-   [#805](https://github.com/hherb/kastellan/issues/805) (`main`'s last-line wiring has no seam;
-   the runtime drop can outlive the last line) — low.
+5. **The polled-driver audit residue of PR #801 — the "Not done" items above** and the review
+   deferrals, filed on #796–#800 and [#802](https://github.com/hherb/kastellan/issues/802). **First DGX deploy of #791 + #795 + #801:** watch one restart for
+   the `[audit-lost]` / INFO drain lines, and query an `observed_at` on the next `channel.*` row.
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
@@ -346,7 +352,7 @@ its next leg** (the attachment half is the natural cut). Recent splits done **fi
 keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memories/search.rs`,
 #782 `report/delivery.rs` and `polled_driver/tests.rs`, #788 `channel/mod.rs` (→ `undelivered.rs`) and
 `polled_driver.rs` (→ `polled_driver/audit.rs`), #792 `main/audit_sink.rs` (→ `audit_sink_tests.rs`,
-`audit_sink_test_support.rs`), #806 `email_boot.rs`/`matrix_boot.rs` (→ `*_tests.rs`, proved byte-identical). ⚠️ **Near the cap:** `polled_driver.rs` **484**, `worker_stderr/report/delivery/tests.rs`
+`audit_sink_test_support.rs`). ⚠️ **Near the cap:** `polled_driver.rs` **484**, `worker_stderr/report/delivery/tests.rs`
 **484**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
 
@@ -381,9 +387,9 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#796–#800 + #802 — **the gate that stands**) | PR #806 (`54e882b0`) | **4808 / 0 / 52**, **191** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against `main` ≈ 4782 (the row below + #801's review round's 2 bin tests, recorded after it): bin 47 → 66 (+19), core lib +5, new `audit_lost_stderr_fallback_e2e` +2 / +2 ignored (its inner fixtures). Mutants 10/10 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-802`, **27** | **23** Mac |
-| **Mac** (#796–#800 — superseded) | PR #801 | **4780 / 0 / 50** after the one flaky assertion was fixed: the sweep read **4779 / 1 / 50**, **190** suites, `[WARN]` **0**, `[SKIP]` **23**; the failure was my new stress test's `==` (see above), re-run 5× green + the whole bin suite (45) after the fix, not a second full sweep. **Predicted exactly** against the row below: bin 32 → 45 (+13), core lib +1 (`audit_lost`). Mutants 4/4 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-796` | **23** Mac |
+| **Mac** (#796–#800 — **the gate that stands**) | PR #801 | **4780 / 0 / 50** after the one flaky assertion was fixed: the sweep read **4779 / 1 / 50**, **190** suites, `[WARN]` **0**, `[SKIP]` **23**; the failure was my new stress test's `==` (see above), re-run 5× green + the whole bin suite (45) after the fix, not a second full sweep. **Predicted exactly** against the row below: bin 32 → 45 (+13), core lib +1 (`audit_lost`). Mutants 4/4 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-796` | **23** Mac |
 | **Mac** (#792 + #793 — superseded) | the doc-fix commit on PR #795 (`c9cffe77`) | **4766 / 0 / 50**, **190** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against the row below: #791's review round +4 (`kastellan` bin 20 → 24, measured here first) and this PR +21 (core lib +13: `audit_lost` 3, `skipped` 2, `undelivered` 1, driver `tests/audit` 5, `tests/ack` 1, delivery 1; bin 24 → 32). Mutants 15/15 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-792`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#788 + #789 + #790 — superseded) | the split commit on PR #791 (`91299630`) | **4741 / 0 / 50**, **190** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**. Mutants 4/4 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-788`, **27** | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -464,7 +470,6 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#804](https://github.com/hherb/kastellan/pull/804)** — `Cargo.lock` only: async-trait 0.1.92 + thiserror 2.0.21, for clippy 1.99's `double_must_use` / `redundant_field_names` on macro output. **[#803](https://github.com/hherb/kastellan/pull/803)** — docs only: the TencentDB Agent Memory survey (`docs/devel/notes/2026-10-01-tencentdb-agent-memory-survey.md`).
 - **[#801](https://github.com/hherb/kastellan/pull/801)** (#796–#800) — shutdown names pending rows; a stuck Matrix driver is a loss; refused-row reports thinned; typed `AuditLostWriter`.
 - **[#795](https://github.com/hherb/kastellan/pull/795)** (#792, #793) — `[audit-lost]` marker and shutdown drain.
 - **[#791](https://github.com/hherb/kastellan/pull/791)** (#788, #789, #790) — recovery lines marked, audit sinks spawn (bounded), a body-less reply view. Filed #792, #793.
