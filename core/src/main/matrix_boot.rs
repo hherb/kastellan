@@ -100,7 +100,8 @@ fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::D
 /// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost): a
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
 /// timeout per dropped reply. The closure owns `writer`, so the driver holds
-/// its lease until it exits, and the daemon's shutdown drain waits for it. A
+/// its lease until it exits, and — once the lease has started (see
+/// [`login_outcome`]) — the daemon's shutdown drain waits for it. A
 /// row that was not written is reported on the `[audit-lost]` marker
 /// ([`format_reply_row_lost`]).
 ///
@@ -130,6 +131,55 @@ fn reply_undelivered_audit_sink(
             );
         });
     })
+}
+
+/// The Matrix sink as `attempt` builds it, on `ledger`: the reply-undelivered
+/// hook, and its lease's [`Starting`] token — a lease that counts only once
+/// [`login_outcome`] says the worker is up (#802). A function, so a test can
+/// see the lease `attempt` takes.
+///
+/// [`Starting`]: crate::audit_sink::Starting
+fn reply_sink(
+    ledger: &'static crate::audit_sink::Ledger,
+    pool: PgPool,
+    handle: tokio::runtime::Handle,
+    report: crate::audit_sink::Reporter,
+) -> (
+    kastellan_core::channel::polled_driver::ReplyUndeliveredAudit,
+    crate::audit_sink::Starting,
+) {
+    let (writer, starting) =
+        crate::audit_sink::SinkWriter::starting_with_ledger(ledger, pool, handle, SINK_KIND);
+    (reply_undelivered_audit_sink(writer, report), starting)
+}
+
+/// Classify the login's outcome — the worker, or the [`BootOutcome::Retry`]
+/// for a failed, panicked or timed-out login — and **start the sink's lease
+/// only when the worker is up** (#802). A lease started any earlier would make
+/// a login abandoned at its timeout a driver the shutdown waits for and calls
+/// a possible loss. Counting from here misses no reply: none can be queued
+/// before `attempt` builds the bus.
+fn login_outcome<T>(
+    outcome: Result<
+        Result<anyhow::Result<T>, tokio::task::JoinError>,
+        tokio::time::error::Elapsed,
+    >,
+    sink_started: crate::audit_sink::Starting,
+) -> Result<T, BootOutcome> {
+    match outcome {
+        Ok(Ok(Ok(worker))) => {
+            sink_started.started();
+            Ok(worker)
+        }
+        Ok(Ok(Err(e))) => Err(BootOutcome::Retry(e.context("matrix worker spawn/login failed"))),
+        Ok(Err(join_err)) => Err(BootOutcome::Retry(anyhow::anyhow!(
+            "matrix worker spawn task panicked: {join_err}"
+        ))),
+        Err(_elapsed) => Err(BootOutcome::Retry(anyhow::anyhow!(
+            "matrix worker login timed out ({}s)",
+            MATRIX_LOGIN_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 /// One Matrix bring-up attempt: open the LISTEN/NOTIFY connection, spawn the
@@ -243,14 +293,14 @@ async fn attempt(
     // the timeout keeps its blocking task, and the writer in it, running —
     // and a driver that never came up has no replies to audit, so the
     // shutdown drain must neither wait for it nor call it a loss. It counts
-    // from `sink_started.started()` below, once the worker is up.
-    let (writer, sink_started) = crate::audit_sink::SinkWriter::starting(
+    // once `login_outcome` sees the worker up.
+    let (audit_undelivered, sink_started) = reply_sink(
+        crate::audit_sink::daemon_ledger(),
         pool.clone(),
         tokio::runtime::Handle::current(),
-        SINK_KIND,
+        crate::audit_sink::emit_report,
     );
-    let audit_undelivered =
-        Some(reply_undelivered_audit_sink(writer, crate::audit_sink::emit_report));
+    let audit_undelivered = Some(audit_undelivered);
     let spawn = tokio::task::spawn_blocking(move || {
         kastellan_core::channel::matrix::spawn_matrix_worker(
             backend,
@@ -260,24 +310,11 @@ async fn attempt(
             audit_undelivered,
         )
     });
-    let worker = match tokio::time::timeout(MATRIX_LOGIN_TIMEOUT, spawn).await {
-        Ok(Ok(Ok(worker))) => worker,
-        Ok(Ok(Err(e))) => return BootOutcome::Retry(e.context("matrix worker spawn/login failed")),
-        Ok(Err(join_err)) => {
-            return BootOutcome::Retry(anyhow::anyhow!(
-                "matrix worker spawn task panicked: {join_err}"
-            ))
-        }
-        Err(_elapsed) => {
-            return BootOutcome::Retry(anyhow::anyhow!(
-                "matrix worker login timed out ({}s)",
-                MATRIX_LOGIN_TIMEOUT.as_secs()
-            ))
-        }
-    };
-    // The driver is up. No reply can be queued before the bus below exists,
-    // so counting from here misses none.
-    sink_started.started();
+    let worker =
+        match login_outcome(tokio::time::timeout(MATRIX_LOGIN_TIMEOUT, spawn).await, sink_started) {
+            Ok(worker) => worker,
+            Err(outcome) => return outcome,
+        };
 
     info!(identity = %worker.identity, "matrix worker logged in; starting channel bus");
     let authorizer = Arc::new(kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()));

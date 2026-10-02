@@ -220,7 +220,9 @@ fn drain_waits_for_the_last_writer_and_no_longer() {
 /// than spawned onto a runtime that is going away.
 #[test]
 fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
-    static LEDGER: Ledger = Ledger::new(bounds(8, 8));
+    // No connection is ever free, so the stalled row stays pending however
+    // slow the host is (it would otherwise fail after the pool's timeout).
+    static LEDGER: Ledger = Ledger::new(bounds(8, 0));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
     let stuck = writer
         .spawn("a", "b", serde_json::json!({}), "STUCK-ROW".into(), |_| {})
@@ -252,7 +254,7 @@ fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
         "a row after the drain must be refused and said so: {told:?}"
     );
     assert_eq!(LEDGER.snapshot().rows_pending, 1, "a refused row is not left counted");
-    rt.block_on(stuck).expect("the stalled insert ran to completion");
+    drop(stuck); // it waits for a connection forever; it ends with the runtime
 }
 
 /// #798: a flood of rows refused through a sink reports its first few, then
@@ -301,7 +303,8 @@ fn the_final_snapshot_names_pending_rows_up_to_a_few() {
 /// other test.)
 #[test]
 fn drain_waits_for_a_pending_row_with_no_live_sink() {
-    static LEDGER: Ledger = Ledger::new(bounds(8, 8));
+    // No connection is ever free: the row stays pending (see above).
+    static LEDGER: Ledger = Ledger::new(bounds(8, 0));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
     let stuck = writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}).expect("not shed");
     drop(writer);
@@ -312,7 +315,7 @@ fn drain_waits_for_a_pending_row_with_no_live_sink() {
     let d = rt.block_on(drain_ledger(&LEDGER, bound));
     assert!(t.elapsed() >= bound, "it must wait on the row alone: {:?}", t.elapsed());
     assert_eq!(d.in_flight.rows_pending, 1);
-    rt.block_on(stuck).expect("the stalled insert ran to completion");
+    drop(stuck);
 }
 
 /// #799: the close-versus-spawn handshake under real contention. Every spawn
@@ -321,7 +324,9 @@ fn drain_waits_for_a_pending_row_with_no_live_sink() {
 /// finishes (and none can leave the count) during the test.
 #[test]
 fn a_row_spawned_while_the_drain_closes_is_refused_or_counted() {
-    static LEDGER: Ledger = Ledger::new(bounds(100_000, 4));
+    // No connection is ever free, so no accepted row can finish and leave the
+    // count before the snapshot, however long the threads take.
+    static LEDGER: Ledger = Ledger::new(bounds(100_000, 0));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
     let writer = Arc::new(writer);
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -362,17 +367,23 @@ fn a_row_spawned_while_the_drain_closes_is_refused_or_counted() {
 /// it, for the daemon's last line.
 #[test]
 fn rows_thinned_after_the_drain_are_counted_for_the_last_line() {
-    static LEDGER: Ledger = Ledger::new(bounds(8, 8));
+    // No queue room: every row before the drain is shed.
+    static LEDGER: Ledger = Ledger::new(bounds(0, 1));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
+    let refuse_20 = || {
+        let told = Arc::new(AtomicUsize::new(0));
+        for _ in 0..20 {
+            let told = told.clone();
+            let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| {
+                told.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        told.load(Ordering::SeqCst)
+    };
+    assert_eq!(refuse_20(), 17, "POSITIVE CONTROL: 20 shed, 0..16 and 16 reported");
     let d = rt.block_on(drain_ledger(&LEDGER, Duration::ZERO));
-    assert_eq!(unreported_on_since(&LEDGER, &d), 0, "nothing refused yet");
-    let told = Arc::new(AtomicUsize::new(0));
-    for _ in 0..20 {
-        let told = told.clone();
-        let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| {
-            told.fetch_add(1, Ordering::SeqCst);
-        });
-    }
-    assert_eq!(told.load(Ordering::SeqCst), 17, "POSITIVE CONTROL: 0..16 and 16 were reported");
-    assert_eq!(unreported_on_since(&LEDGER, &d), 3);
+    assert_eq!(d.unreported, 3, "the shed rows are the drain line's");
+    assert_eq!(unreported_on_since(&LEDGER, &d), 0, "so none is counted twice");
+    assert_eq!(refuse_20(), 17, "20 refused after the drain, a burst of their own");
+    assert_eq!(unreported_on_since(&LEDGER, &d), 3, "only the late ones");
 }

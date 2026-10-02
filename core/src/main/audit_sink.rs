@@ -29,8 +29,9 @@
 //!   relative to the events; each row's payload carries its event's own time
 //!   (`observed_at`), because `audit_log.ts` is the insert's.
 //! - **At shutdown (#792).** Before the pool closes, `main` calls [`drain`]:
-//!   it waits, bounded by [`DRAIN_BOUND`], for every driver holding a sink to
-//!   exit (a Matrix driver audits its still-queued replies as it goes) and for
+//!   it waits, bounded by [`DRAIN_BOUND`], for every driver holding a
+//!   started sink to exit (one whose bring-up never finished is not waited
+//!   for: `audit_sink_lease.rs`) (a Matrix driver audits its still-queued replies as it goes) and for
 //!   every spawned row to finish, then **closes** the ledger. What is still
 //!   pending then is reported on the `[audit-lost]` marker
 //!   ([`report_drained`]), and a row a late driver tries to write after that
@@ -48,8 +49,16 @@
 //! line just before the daemon exits (#802).
 //!
 //! What still goes unreported: a row lost to a crash (SIGKILL, OOM, a panic
-//! under `panic = "abort"`), because nothing runs after one; and a row refused
-//! in the instant between that last line and the process's exit.
+//! under `panic = "abort"`), because nothing runs after one; and a row
+//! refused, past the thinning, between that last line and the process's exit.
+//! That gap is usually an instant, but not always: dropping the runtime waits
+//! for its blocking tasks, so a Matrix login abandoned at its timeout can hold
+//! the process open until the SDK's own timeouts end it, or the service
+//! manager's SIGKILL.
+//!
+//! What may be said twice: a row caught by the final snapshot in the middle
+//! of being refused is counted as pending there and then refused (and
+//! reported, unless thinned) — over-counting, which is the safe direction.
 //!
 //! One writer for both channels (Matrix's `channel.reply_undelivered`, email's
 //! `channel.skipped_ack_only`). Before #789 each sink hand-rolled its own
@@ -170,6 +179,12 @@ impl Ledger {
     /// rows and `live_sinks` 0 after the drop, calling a driver that just
     /// queued rows "settled". Reading the writers first means a drop seen here
     /// puts every row that driver spawned before this `pending` load.
+    ///
+    /// `starting` is read before the live counts for the same reason against
+    /// a lease being promoted (#802), which counts itself live before it
+    /// stops counting as starting: a promotion this read misses is one the
+    /// live reads after it can only see, so a driver is counted once or twice
+    /// (the safe direction), never not at all.
     pub(crate) fn snapshot(&self) -> InFlight {
         self.snapshot_around(|| {})
     }
@@ -178,9 +193,9 @@ impl Ledger {
     /// before `pending` is: the seam a test uses to put a driver's last row
     /// and its exit exactly inside the window the read order guards (#799).
     fn snapshot_around(&self, between: impl FnOnce()) -> InFlight {
+        let starting = self.starting.load(Ordering::SeqCst);
         let sinks_live = self.live_sinks.load(Ordering::SeqCst);
         let auditing_live = self.live_auditing.load(Ordering::SeqCst);
-        let starting = self.starting.load(Ordering::SeqCst);
         between();
         let rows_pending = self.pending.load(Ordering::SeqCst);
         InFlight { rows_pending, sinks_live, auditing_live, starting }
@@ -208,6 +223,11 @@ impl Ledger {
 /// inserts put on the pool, not on each channel's share of it.
 static LEDGER: Ledger =
     Ledger::new(Bounds { queued: MAX_QUEUED, connections: MAX_CONNECTIONS });
+
+/// The daemon's ledger, for a sink's constructor (`SinkWriter::with_ledger`).
+pub(crate) fn daemon_ledger() -> &'static Ledger {
+    &LEDGER
+}
 
 /// Why a row was not written, as `on_failure` is told.
 #[derive(Clone, Copy, Debug)]
@@ -275,9 +295,25 @@ impl SinkWriter {
         label: String,
         on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
     ) -> Result<tokio::task::JoinHandle<()>, Unwritten<'static>> {
+        self.spawn_around(actor, action, payload, label, on_failure, || {})
+    }
+
+    /// [`Self::spawn`], running `between` after the row is counted and before
+    /// `closed` is read: the seam a test uses to close the ledger exactly
+    /// inside the window the handshake guards (#802).
+    fn spawn_around(
+        &self,
+        actor: &'static str,
+        action: &'static str,
+        payload: serde_json::Value,
+        label: String,
+        on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
+        between: impl FnOnce(),
+    ) -> Result<tokio::task::JoinHandle<()>, Unwritten<'static>> {
         let ledger = self.ledger;
         // Counts the row (see `Ledger`'s doc for why before `closed` is read).
         let row = PendingRow::new(ledger, label);
+        between();
         if ledger.closed.load(Ordering::SeqCst) {
             drop(row);
             return Err(refuse(&ledger.late, Unwritten::AfterShutdown, on_failure));
@@ -394,8 +430,15 @@ async fn drain_ledger(ledger: &'static Ledger, bound: Duration) -> Drained {
     while !ledger.snapshot().settled() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(DRAIN_POLL).await;
     }
-    // Close first, then count: see `Ledger`'s doc.
+    close_and_count(ledger, || {})
+}
+
+/// The end of [`drain_ledger`]: close first, then count (see `Ledger`'s doc),
+/// running `between` in the window between the two — the seam a test uses to
+/// spawn or count a row exactly there (#802).
+fn close_and_count(ledger: &'static Ledger, between: impl FnOnce()) -> Drained {
     ledger.closed.store(true, Ordering::SeqCst);
+    between();
     ledger.final_snapshot()
 }
 
@@ -413,7 +456,7 @@ fn unreported_on_since(ledger: &'static Ledger, drained: &Drained) -> usize {
 
 #[path = "audit_sink_lease.rs"]
 mod lease;
-pub(crate) use lease::SinkKind;
+pub(crate) use lease::{SinkKind, Starting};
 
 #[path = "audit_sink_thinning.rs"]
 mod thinning;

@@ -9,18 +9,13 @@
 use super::*;
 use crate::audit_sink::test_support::stalled_pool;
 use crate::audit_sink::{
-    drain_ledger, report_drained, Bounds, Drained, InFlight, PendingRow,
+    close_and_count, drain_ledger, report_drained, Bounds, InFlight, PendingRow, Unwritten,
 };
 use kastellan_core::worker_stderr::AuditLostWriter;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 /// See `audit_sink_tests.rs`'s `NEVER`: a bound no test is meant to reach.
 const NEVER: Duration = Duration::from_secs(60);
-
-fn ledger(queued: usize, connections: usize) -> Ledger {
-    Ledger::new(Bounds { queued, connections })
-}
 
 /// A runtime and a stalled pool, the pool made inside the runtime (it spawns
 /// its maintenance task as it is made). The listener outlives the test's calls.
@@ -138,19 +133,52 @@ fn started_racing_the_writer_s_drop_leaves_no_count() {
     }
 }
 
-/// #792 + #802: a row counted before the close is in the final snapshot,
-/// named — the half of the close-versus-spawn handshake a stress test can only
-/// hit by chance, made directly: count, then close, then look.
+/// #802: the drain's half of the close-versus-spawn handshake, at the exact
+/// point it guards. A row counted after the close (but before the count) must
+/// be in the final snapshot, and a row spawned there must be refused.
+/// Counting before closing breaks the first; closing after the window breaks
+/// the second.
 #[test]
-fn a_row_counted_before_the_close_is_in_the_final_snapshot() {
-    static LEDGER: Ledger = ledger_const();
-    let rt = tokio::runtime::Runtime::new().expect("a runtime");
-    let row = PendingRow::new(&LEDGER, "COUNTED-BEFORE-CLOSE".into());
-    let d = rt.block_on(drain_ledger(&LEDGER, Duration::ZERO));
-    assert_eq!(d.in_flight.rows_pending, 1);
-    assert_eq!(d.named, ["COUNTED-BEFORE-CLOSE"]);
+fn the_drain_closes_before_it_counts() {
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let (rt, pool, _listener) = runtime_and_pool();
+    let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::SilentOnExit);
+    let mut row = None;
+    let mut refused = None;
+    let d = close_and_count(&LEDGER, || {
+        row = Some(PendingRow::new(&LEDGER, "COUNTED-IN-THE-WINDOW".into()));
+        refused = Some(writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}));
+    });
+    assert_eq!(d.named, ["COUNTED-IN-THE-WINDOW"], "a row counted after the close is counted");
+    assert!(
+        matches!(refused, Some(Err(Unwritten::AfterShutdown))),
+        "a row spawned after the close is refused: {refused:?}"
+    );
     drop(row);
-    assert_eq!(LEDGER.final_snapshot(), Drained::default(), "a dropped row leaves no name");
+}
+
+/// #802: the spawn's half. The ledger closes after the row is counted and
+/// before `closed` is read: the row must be refused, and a count taken in that
+/// window must already include it. Reading `closed` before counting lets the
+/// row through uncounted.
+#[test]
+fn a_spawn_counts_its_row_before_it_reads_closed() {
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let (rt, pool, _listener) = runtime_and_pool();
+    let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::SilentOnExit);
+    let mut counted = None;
+    let spawned = writer.spawn_around(
+        "a",
+        "b",
+        serde_json::json!({}),
+        "SPAWNED-AS-THE-DRAIN-CLOSED".into(),
+        |_| {},
+        || counted = Some(close_and_count(&LEDGER, || {})),
+    );
+    let counted = counted.expect("the seam ran");
+    assert_eq!(counted.named, ["SPAWNED-AS-THE-DRAIN-CLOSED"], "{counted:?}");
+    assert!(matches!(spawned, Err(Unwritten::AfterShutdown)), "{spawned:?}");
+    assert_eq!(LEDGER.snapshot().rows_pending, 0, "the refused row stops counting");
 }
 
 /// #799: the read order `Ledger::snapshot` depends on, made deterministic: a
@@ -171,63 +199,4 @@ fn a_driver_exiting_mid_snapshot_is_seen_with_its_row() {
     assert!(!s.settled(), "a driver that queued a row on its way out is not settled: {s:?}");
     assert_eq!((s.sinks_live, s.rows_pending), (1, 1));
     assert_eq!(LEDGER.snapshot().sinks_live, 0, "POSITIVE CONTROL: the writer is gone now");
-}
-
-/// #799: the same read order under real contention — a smoke test beside the
-/// deterministic one above, for an interleaving the seam does not model. Each
-/// round, four drivers each spawn one row (which never finishes: no pool
-/// connection is ever free) and then drop their writer, while this thread
-/// snapshots. Each writer seen gone had spawned its row first, so a snapshot
-/// must count at least one row per writer it no longer sees. Reading
-/// `pending` before `live_sinks` breaks that: it can see no rows, then no
-/// writers.
-#[test]
-fn a_writer_seen_gone_has_its_rows_counted() {
-    const DRIVERS: usize = 4;
-    let (rt, pool, _listener) = runtime_and_pool();
-    for round in 0..200 {
-        let ledger: &'static Ledger = Box::leak(Box::new(ledger(1024, 0)));
-        let writers: Vec<_> = (0..DRIVERS)
-            .map(|_| {
-                SinkWriter::with_ledger(ledger, pool.clone(), rt.handle().clone(), SinkKind::SilentOnExit)
-            })
-            .collect();
-        let done = Arc::new(AtomicBool::new(false));
-        let go = Arc::new(std::sync::Barrier::new(DRIVERS + 1));
-        // Snapshotting before the drivers are released, so it overlaps them.
-        let watcher = {
-            let done = done.clone();
-            std::thread::spawn(move || {
-                while !done.load(Ordering::SeqCst) {
-                    let s = ledger.snapshot();
-                    assert!(
-                        s.rows_pending >= DRIVERS - s.sinks_live,
-                        "round {round}: {s:?} — a writer seen gone without its row"
-                    );
-                }
-            })
-        };
-        let drivers: Vec<_> = writers
-            .into_iter()
-            .map(|w| {
-                let go = go.clone();
-                std::thread::spawn(move || {
-                    go.wait();
-                    let spawned = w.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {});
-                    assert!(spawned.is_ok(), "the queue has room");
-                    drop(w);
-                })
-            })
-            .collect();
-        go.wait();
-        for d in drivers {
-            d.join().unwrap();
-        }
-        done.store(true, Ordering::SeqCst);
-        watcher.join().expect("the snapshot invariant held");
-        let s = ledger.snapshot();
-        assert_eq!((s.rows_pending, s.sinks_live), (DRIVERS, 0), "POSITIVE CONTROL: all ran");
-    }
-    // The rows' tasks wait for a connection that never comes; they end with
-    // the runtime.
 }

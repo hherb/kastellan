@@ -169,8 +169,8 @@ fn the_starting_and_residual_lines_say_what_they_count() {
     assert_eq!(
         format_starting_at_shutdown(&starting).unwrap(),
         "2 channel drivers had not finished starting at shutdown (an abandoned bring-up); none \
-         had queued anything to audit, and an audit row one writes from now on is refused and \
-         reported"
+         had queued anything to audit, and an audit row one writes from now on is refused, and \
+         reported unless thinned out"
     );
     assert_eq!(format_stuck_replies_at_shutdown(&starting, Duration::from_secs(3)), None);
     assert_eq!(

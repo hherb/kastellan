@@ -69,7 +69,7 @@ pub(crate) fn format_stuck_replies_at_shutdown(d: &Drained, bound: Duration) -> 
         format!(
             "{} not exited after {} s at shutdown; the replies still queued behind it may not \
              be audited as `channel.reply_undelivered`, and an audit row it writes from now \
-             on is refused and reported",
+             on is refused, and reported unless thinned out",
             counted(stuck, "channel driver", "had", "had"),
             bound.as_secs(),
         )
@@ -85,7 +85,8 @@ pub(crate) fn format_starting_at_shutdown(d: &Drained) -> Option<String> {
     (starting > 0).then(|| {
         format!(
             "{} not finished starting at shutdown (an abandoned bring-up); none had queued \
-             anything to audit, and an audit row one writes from now on is refused and reported",
+             anything to audit, and an audit row one writes from now on is refused, and \
+             reported unless thinned out",
             counted(starting, "channel driver", "had", "had"),
         )
     })

@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use sqlx::PgPool;
 
-use super::{Ledger, SinkWriter, LEDGER};
+use super::{Ledger, SinkWriter};
 
 /// What a sink's driver does with rows at the end of its life — which decides
 /// whether a driver [`super::drain`] finds still running is a loss (#796).
@@ -104,9 +104,13 @@ impl Lease {
 }
 
 /// Count a live lease of `kind` in or out. In: `live_sinks` LAST, so a
-/// snapshot that sees it sees the kind's count too. Out: `live_sinks` last as
-/// well — the driver has spawned its final rows before this, and
-/// `Ledger::snapshot` reads `live_sinks` first (see there).
+/// snapshot that sees it sees the kind's count too (the converse does not
+/// hold: one read can see the kind counted and `live_sinks` not yet, so
+/// `auditing_live` can exceed `sinks_live` there; the formatters saturate). Out:
+/// `live_sinks` last as well — the driver has spawned its final rows before
+/// this, and `Ledger::snapshot` reads the writers before `pending` (see there).
+/// A promotion calls this BEFORE it uncounts `starting`, which the snapshot
+/// reads first.
 fn count_live(ledger: &'static Ledger, kind: SinkKind, inc: bool) {
     let step = |n: &std::sync::atomic::AtomicUsize| {
         if inc {
@@ -136,24 +140,9 @@ impl Starting {
 }
 
 impl SinkWriter {
-    /// A writer on the daemon's ledger, spawning onto `handle`, whose lease
-    /// counts at once: for a driver built in the same call.
-    pub(crate) fn new(pool: PgPool, handle: tokio::runtime::Handle, kind: SinkKind) -> Self {
-        Self::with_ledger(&LEDGER, pool, handle, kind)
-    }
-
-    /// A writer on the daemon's ledger whose lease counts only once
-    /// [`Starting::started`] is called: for a driver whose bring-up can be
-    /// abandoned with the writer still held (Matrix's login).
-    pub(crate) fn starting(
-        pool: PgPool,
-        handle: tokio::runtime::Handle,
-        kind: SinkKind,
-    ) -> (Self, Starting) {
-        Self::starting_with_ledger(&LEDGER, pool, handle, kind)
-    }
-
-    /// [`Self::new`] on `ledger`: tests use their own, so their counts are theirs.
+    /// A writer on `ledger`, spawning onto `handle`, whose lease counts at
+    /// once: for a driver built in the same call (email's). The daemon passes
+    /// [`super::daemon_ledger`]; tests pass their own, so their counts are theirs.
     pub(crate) fn with_ledger(
         ledger: &'static Ledger,
         pool: PgPool,
@@ -164,7 +153,9 @@ impl SinkWriter {
         Self { ledger, handle, pool, lease }
     }
 
-    /// [`Self::starting`] on `ledger`.
+    /// A writer on `ledger` whose lease counts only once [`Starting::started`]
+    /// is called: for a driver whose bring-up can be abandoned with the writer
+    /// still held (Matrix's login).
     pub(crate) fn starting_with_ledger(
         ledger: &'static Ledger,
         pool: PgPool,

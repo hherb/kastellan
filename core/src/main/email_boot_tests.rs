@@ -57,10 +57,10 @@ fn the_skipped_id_sink_does_not_hold_the_driver_thread() {
         observed_at: time::OffsetDateTime::now_utc(),
     };
     assert_returns_at_once("the email skipped-id sink", || sink(skipped));
-    assert_insert_attempted("the email skipped-id sink", &listener);
-    // #802: the row's label for the shutdown line — the insert is still
-    // waiting on the stalled pool, so the row is pending and named.
+    // #802: the row's label for the shutdown line, read at once — the row is
+    // pending until the stalled pool gives up on it.
     assert_eq!(LEDGER.final_snapshot().named, [r#"email skipped message "<id@host>""#]);
+    assert_insert_attempted("the email skipped-id sink", &listener);
     // #792: the sink holds its lease until the driver drops it, so the
     // shutdown drain waits for the driver that owns it.
     assert_eq!(LEDGER.snapshot().sinks_live, 1, "the email skipped-id sink holds a lease");
@@ -148,11 +148,19 @@ fn the_skipped_id_row_is_the_bus_s_actor_and_the_view_s_payload() {
     assert_eq!(payload["message_id"], "<id@host>", "POSITIVE CONTROL: the view's own payload");
 }
 
-/// #802: the email driver audits nothing once its bus is gone, so one still
-/// in its long-poll at shutdown is no loss. Pinned, like Matrix's.
+/// #802: the sink `attempt` builds holds a live lease at once, of a driver
+/// that audits nothing on exit — so one still in its long-poll at shutdown is
+/// waited for, then said at INFO, not as a loss.
 #[test]
-fn the_email_sink_is_one_that_is_silent_on_exit() {
-    assert_eq!(SINK_KIND, crate::audit_sink::SinkKind::SilentOnExit);
+fn attempt_s_sink_is_live_at_once_and_silent_on_exit() {
+    use crate::audit_sink::{Bounds, InFlight, Ledger};
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let rt = tokio::runtime::Runtime::new().expect("a runtime");
+    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+    let sink = skipped_sink(&LEDGER, pool, rt.handle().clone(), |_, _| {});
+    assert_eq!(LEDGER.snapshot(), InFlight { sinks_live: 1, ..InFlight::default() });
+    drop(sink);
+    assert_eq!(LEDGER.snapshot(), InFlight::default());
 }
 
 #[test]

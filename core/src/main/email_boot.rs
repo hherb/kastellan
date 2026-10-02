@@ -147,6 +147,20 @@ fn email_skipped_audit_sink(
     })
 }
 
+/// The email sink as `attempt` builds it, on `ledger`. Its lease is live at
+/// once, not *starting*: the driver is built in the same synchronous call, so
+/// the lease cannot outlive an abandoned bring-up. A function, so a test can
+/// see the lease `attempt` takes (#802).
+fn skipped_sink(
+    ledger: &'static crate::audit_sink::Ledger,
+    pool: PgPool,
+    handle: tokio::runtime::Handle,
+    report: crate::audit_sink::Reporter,
+) -> AckOnlyAudit {
+    let writer = crate::audit_sink::SinkWriter::with_ledger(ledger, pool, handle, SINK_KIND);
+    email_skipped_audit_sink(writer, report)
+}
+
 /// Pure: a configuration error can never be fixed without an operator edit
 /// **plus a restart**, because the process environment is immutable for this
 /// daemon's lifetime. Fatal, therefore — and the message the supervisor prints
@@ -255,10 +269,10 @@ async fn attempt(
         }
     };
 
-    let audit_ack_only = Some(email_skipped_audit_sink(
-        // `new`, not `starting`: the driver is built in the same synchronous
-        // call, so the lease cannot outlive an abandoned bring-up.
-        crate::audit_sink::SinkWriter::new(pool.clone(), tokio::runtime::Handle::current(), SINK_KIND),
+    let audit_ack_only = Some(skipped_sink(
+        crate::audit_sink::daemon_ledger(),
+        pool.clone(),
+        tokio::runtime::Handle::current(),
         crate::audit_sink::emit_report,
     ));
 

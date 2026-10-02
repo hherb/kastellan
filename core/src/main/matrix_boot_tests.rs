@@ -60,13 +60,13 @@ fn the_reply_undelivered_sink_does_not_hold_the_driver_thread() {
     assert_returns_at_once("the Matrix reply-undelivered sink", || {
         sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp, time::OffsetDateTime::now_utc()))
     });
-    assert_insert_attempted("the Matrix reply-undelivered sink", &listener);
-    // #802: the row's label for the shutdown line — the insert is still
-    // waiting on the stalled pool, so the row is pending and named.
+    // #802: the row's label for the shutdown line, read at once — the row is
+    // pending until the stalled pool gives up on it.
     assert_eq!(
         LEDGER.final_snapshot().named,
         [r#"matrix reply to conversation "!room:srv" (gave_up)"#]
     );
+    assert_insert_attempted("the Matrix reply-undelivered sink", &listener);
     // #792: the sink holds its lease until the driver drops it, so the
     // shutdown drain waits for the driver that owns it.
     assert_eq!(LEDGER.snapshot().sinks_live, 1, "the Matrix reply-undelivered sink holds a lease");
@@ -133,12 +133,66 @@ fn a_lost_reply_row_names_its_conversation_reason_and_cause() {
     );
 }
 
-/// #802: the Matrix driver audits its queued replies on exit, so one stuck at
-/// shutdown is a possible loss. Pinned, because `attempt` is not testable
-/// without a homeserver and the kind decides how a stuck driver is reported.
+/// #802: the sink `attempt` builds takes a *starting* lease — not waited for,
+/// no loss — that becomes a live lease of a driver that audits on exit once
+/// started.
 #[test]
-fn the_matrix_sink_is_one_that_audits_on_exit() {
-    assert_eq!(SINK_KIND, crate::audit_sink::SinkKind::AuditsOnExit);
+fn attempt_s_sink_starts_as_starting_and_audits_on_exit_once_started() {
+    use crate::audit_sink::{Bounds, InFlight, Ledger};
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let rt = tokio::runtime::Runtime::new().expect("a runtime");
+    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+    let (sink, starting) = reply_sink(&LEDGER, pool, rt.handle().clone(), |_, _| {});
+    assert_eq!(LEDGER.snapshot(), InFlight { starting: 1, ..InFlight::default() });
+    starting.started();
+    assert_eq!(
+        LEDGER.snapshot(),
+        InFlight { sinks_live: 1, auditing_live: 1, ..InFlight::default() }
+    );
+    drop(sink);
+    assert_eq!(LEDGER.snapshot(), InFlight::default());
+}
+
+/// #802: only a login that came up starts the sink's lease. A failed, a
+/// cancelled or panicked, and a timed-out login leave it *starting* — the
+/// timed-out one being the abandoned bring-up whose lease made every shutdown
+/// wait and report a loss.
+#[test]
+fn only_a_login_that_came_up_starts_the_sink_s_lease() {
+    use crate::audit_sink::{Bounds, InFlight, Ledger};
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let rt = tokio::runtime::Runtime::new().expect("a runtime");
+    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+    let mut sinks = Vec::new();
+    let mut sink = || {
+        let (s, starting) = reply_sink(&LEDGER, pool.clone(), rt.handle().clone(), |_, _| {});
+        sinks.push(s);
+        starting
+    };
+
+    let failed = login_outcome::<u8>(Ok(Ok(Err(anyhow::anyhow!("login refused")))), sink());
+    assert!(matches!(failed, Err(BootOutcome::Retry(_))));
+    let cancelled = {
+        let task = rt.spawn(std::future::pending::<anyhow::Result<u8>>());
+        task.abort();
+        rt.block_on(task).expect_err("aborted")
+    };
+    assert!(matches!(login_outcome::<u8>(Ok(Err(cancelled)), sink()), Err(BootOutcome::Retry(_))));
+    let elapsed = rt
+        .block_on(async {
+            tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>()).await
+        })
+        .expect_err("timed out");
+    assert!(matches!(login_outcome::<u8>(Err(elapsed), sink()), Err(BootOutcome::Retry(_))));
+    assert_eq!(LEDGER.snapshot(), InFlight { starting: 3, ..InFlight::default() }, "none started");
+
+    assert!(matches!(login_outcome(Ok(Ok(Ok(7u8))), sink()), Ok(7)));
+    assert_eq!(
+        LEDGER.snapshot(),
+        InFlight { starting: 3, sinks_live: 1, auditing_live: 1, ..InFlight::default() },
+        "the one that came up did"
+    );
+    drop(sinks);
 }
 
 /// The row the Matrix driver's sink writes: the bus's actor, the
