@@ -833,6 +833,14 @@ async fn main() -> Result<()> {
     }
     pool.close().await;
 
+    // The last word on audit rows (#802): a driver still running past the
+    // drain can try rows after the lines above, and past the first few they
+    // are thinned to a count. Say that count now — nothing is said after it.
+    audit_sink::report_unreported_since(
+        audit_sink::unreported_since(&drained),
+        audit_sink::emit_report,
+    );
+
     info!("kastellan core shutting down");
     Ok(())
 }

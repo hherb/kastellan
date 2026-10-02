@@ -94,6 +94,11 @@ fn email_skipped_row(
     ("channel", kastellan_core::channel::actions::SKIPPED_ACK_ONLY, skipped.payload())
 }
 
+/// What the email driver does with its rows at exit: nothing, once its bus is
+/// gone, so one still in its long-poll at shutdown is no loss. A `const` so a
+/// test pins it (#802).
+const SINK_KIND: crate::audit_sink::SinkKind = crate::audit_sink::SinkKind::SilentOnExit;
+
 /// Pure: the `[audit-lost]` report for a `channel.skipped_ack_only` row the
 /// email sink could not write, naming the message id (capped by `quoted_id`, neutralised
 /// by `format_audit_lost_line`) so it can be matched to the driver's own line for the skip.
@@ -134,7 +139,9 @@ fn email_skipped_audit_sink(
         let (actor, action, payload) = email_skipped_row(&skipped);
         let message_id = skipped.message_id.to_string();
         let label = format!("email skipped message {}", crate::audit_sink::quoted_id(&message_id));
-        writer.spawn(actor, action, payload, label, move |why| {
+        // A refused row is reported through the closure, so its `Err` is not
+        // needed here.
+        let _ = writer.spawn(actor, action, payload, label, move |why| {
             report(AuditLostWriter::Email, &format_skipped_row_lost(&message_id, &why));
         });
     })
@@ -249,11 +256,9 @@ async fn attempt(
     };
 
     let audit_ack_only = Some(email_skipped_audit_sink(
-        crate::audit_sink::SinkWriter::new(
-            pool.clone(),
-            tokio::runtime::Handle::current(),
-            crate::audit_sink::SinkKind::SkippedIds,
-        ),
+        // `new`, not `starting`: the driver is built in the same synchronous
+        // call, so the lease cannot outlive an abandoned bring-up.
+        crate::audit_sink::SinkWriter::new(pool.clone(), tokio::runtime::Handle::current(), SINK_KIND),
         crate::audit_sink::emit_report,
     ));
 

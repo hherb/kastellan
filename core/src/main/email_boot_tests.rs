@@ -45,7 +45,7 @@ fn the_skipped_id_sink_does_not_hold_the_driver_thread() {
             &LEDGER,
             pool,
             rt.handle().clone(),
-            crate::audit_sink::SinkKind::SkippedIds,
+            crate::audit_sink::SinkKind::SilentOnExit,
         ),
         |_, _| {},
     );
@@ -58,6 +58,9 @@ fn the_skipped_id_sink_does_not_hold_the_driver_thread() {
     };
     assert_returns_at_once("the email skipped-id sink", || sink(skipped));
     assert_insert_attempted("the email skipped-id sink", &listener);
+    // #802: the row's label for the shutdown line — the insert is still
+    // waiting on the stalled pool, so the row is pending and named.
+    assert_eq!(LEDGER.final_snapshot().named, [r#"email skipped message "<id@host>""#]);
     // #792: the sink holds its lease until the driver drops it, so the
     // shutdown drain waits for the driver that owns it.
     assert_eq!(LEDGER.snapshot().sinks_live, 1, "the email skipped-id sink holds a lease");
@@ -85,7 +88,7 @@ fn the_email_sink_reports_a_row_it_could_not_write() {
             &LEDGER,
             pool,
             rt.handle().clone(),
-            crate::audit_sink::SinkKind::SkippedIds,
+            crate::audit_sink::SinkKind::SilentOnExit,
         ),
         |w, line| EMAIL_SAID.lock().unwrap().push((w, line.to_string())),
     );
@@ -119,7 +122,7 @@ fn a_lost_skipped_row_names_its_message_and_cause() {
     let line = format_skipped_row_lost("<id@host>", &"shed: too many");
     assert_eq!(
         line,
-        "channel.skipped_ack_only row for message <id@host> not written: shed: too many. \
+        "channel.skipped_ack_only row for message \"<id@host>\" not written: shed: too many. \
          The driver's line for the skip stands; the id's ack was about to be sent, and \
          unless that ack then failed it is not redelivered"
     );
@@ -143,6 +146,13 @@ fn the_skipped_id_row_is_the_bus_s_actor_and_the_view_s_payload() {
     assert_eq!(action, "channel.skipped_ack_only");
     assert_eq!(payload, skipped.payload());
     assert_eq!(payload["message_id"], "<id@host>", "POSITIVE CONTROL: the view's own payload");
+}
+
+/// #802: the email driver audits nothing once its bus is gone, so one still
+/// in its long-poll at shutdown is no loss. Pinned, like Matrix's.
+#[test]
+fn the_email_sink_is_one_that_is_silent_on_exit() {
+    assert_eq!(SINK_KIND, crate::audit_sink::SinkKind::SilentOnExit);
 }
 
 #[test]

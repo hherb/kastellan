@@ -61,6 +61,11 @@ fn classify_homeserver(homeserver_url: &str, forced: bool) -> Option<BootOutcome
         .map(|detail| BootOutcome::Fatal(anyhow::anyhow!("{detail}")))
 }
 
+/// What the Matrix driver does with its rows at exit: it audits every reply
+/// still queued (`driver_exit`), so one stuck at shutdown is a possible loss.
+/// A `const` so a test pins it (#802).
+const SINK_KIND: crate::audit_sink::SinkKind = crate::audit_sink::SinkKind::AuditsOnExit;
+
 /// Pure: the `(actor, action, payload)` of the row
 /// [`reply_undelivered_audit_sink`] writes for `reply`. The actor is the bus's
 /// own (`PgChannelEvents::audit`), so both writers' rows read alike.
@@ -116,7 +121,9 @@ fn reply_undelivered_audit_sink(
             crate::audit_sink::quoted_id(&conversation),
             reason.as_str()
         );
-        writer.spawn(actor, action, payload, label, move |why| {
+        // A refused row is reported through the closure, so its `Err` is not
+        // needed here.
+        let _ = writer.spawn(actor, action, payload, label, move |why| {
             report(
                 AuditLostWriter::Matrix,
                 &format_reply_row_lost(&conversation, reason.as_str(), &why),
@@ -231,14 +238,19 @@ async fn attempt(
     // yields a Retry instead of holding the attempt open. On timeout the
     // blocking task is left to drain against the SDK's own HTTP timeouts (a
     // blocking task cannot be force-cancelled).
-    let audit_undelivered = Some(reply_undelivered_audit_sink(
-        crate::audit_sink::SinkWriter::new(
-            pool.clone(),
-            tokio::runtime::Handle::current(),
-            crate::audit_sink::SinkKind::Replies,
-        ),
-        crate::audit_sink::emit_report,
-    ));
+    //
+    // The audit sink's lease starts as *starting* (#802): a login abandoned at
+    // the timeout keeps its blocking task, and the writer in it, running —
+    // and a driver that never came up has no replies to audit, so the
+    // shutdown drain must neither wait for it nor call it a loss. It counts
+    // from `sink_started.started()` below, once the worker is up.
+    let (writer, sink_started) = crate::audit_sink::SinkWriter::starting(
+        pool.clone(),
+        tokio::runtime::Handle::current(),
+        SINK_KIND,
+    );
+    let audit_undelivered =
+        Some(reply_undelivered_audit_sink(writer, crate::audit_sink::emit_report));
     let spawn = tokio::task::spawn_blocking(move || {
         kastellan_core::channel::matrix::spawn_matrix_worker(
             backend,
@@ -263,6 +275,9 @@ async fn attempt(
             ))
         }
     };
+    // The driver is up. No reply can be queued before the bus below exists,
+    // so counting from here misses none.
+    sink_started.started();
 
     info!(identity = %worker.identity, "matrix worker logged in; starting channel bus");
     let authorizer = Arc::new(kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()));

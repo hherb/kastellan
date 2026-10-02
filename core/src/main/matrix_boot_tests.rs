@@ -47,7 +47,7 @@ fn the_reply_undelivered_sink_does_not_hold_the_driver_thread() {
             &LEDGER,
             pool,
             rt.handle().clone(),
-            crate::audit_sink::SinkKind::Replies,
+            crate::audit_sink::SinkKind::AuditsOnExit,
         ),
         |_, _| {},
     );
@@ -61,6 +61,12 @@ fn the_reply_undelivered_sink_does_not_hold_the_driver_thread() {
         sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp, time::OffsetDateTime::now_utc()))
     });
     assert_insert_attempted("the Matrix reply-undelivered sink", &listener);
+    // #802: the row's label for the shutdown line — the insert is still
+    // waiting on the stalled pool, so the row is pending and named.
+    assert_eq!(
+        LEDGER.final_snapshot().named,
+        [r#"matrix reply to conversation "!room:srv" (gave_up)"#]
+    );
     // #792: the sink holds its lease until the driver drops it, so the
     // shutdown drain waits for the driver that owns it.
     assert_eq!(LEDGER.snapshot().sinks_live, 1, "the Matrix reply-undelivered sink holds a lease");
@@ -87,7 +93,7 @@ fn the_matrix_sink_reports_a_row_it_could_not_write() {
             &LEDGER,
             pool,
             rt.handle().clone(),
-            crate::audit_sink::SinkKind::Replies,
+            crate::audit_sink::SinkKind::AuditsOnExit,
         ),
         |w, line| MATRIX_SAID.lock().unwrap().push((w, line.to_string())),
     );
@@ -122,9 +128,17 @@ fn a_lost_reply_row_names_its_conversation_reason_and_cause() {
     let line = format_reply_row_lost("!room:srv", "gave_up", &"shed: too many");
     assert_eq!(
         line,
-        "channel.reply_undelivered row for a reply to conversation !room:srv (gave_up) not \
+        "channel.reply_undelivered row for a reply to conversation \"!room:srv\" (gave_up) not \
          written: shed: too many. The dropped reply's [worker-refusal] line stands"
     );
+}
+
+/// #802: the Matrix driver audits its queued replies on exit, so one stuck at
+/// shutdown is a possible loss. Pinned, because `attempt` is not testable
+/// without a homeserver and the kind decides how a stuck driver is reported.
+#[test]
+fn the_matrix_sink_is_one_that_audits_on_exit() {
+    assert_eq!(SINK_KIND, crate::audit_sink::SinkKind::AuditsOnExit);
 }
 
 /// The row the Matrix driver's sink writes: the bus's actor, the

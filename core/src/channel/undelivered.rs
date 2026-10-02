@@ -46,11 +46,13 @@ impl UndeliveredReason {
 /// The row must carry channel, peer, reason and when only (a reply is conversation
 /// content). Until #790 the driver's audit hook was handed the whole
 /// [`OutgoingMessage`], so that rule was kept by a doc comment and by the one
-/// sink happening to call [`reply_undelivered_payload`]. This view has no body
-/// field, so no sink can write one.
+/// sink happening to call the payload function. This view has no body field,
+/// so no sink can write one — and since #800 it is also what the bus's own
+/// writer builds, so [`Self::payload`] is the row's only definition.
 ///
-/// `conversation` is not in the row. It is here so a sink whose insert fails
-/// can name the conversation in its own log line, matching the driver's.
+/// `conversation` is not in the row, on purpose (the row's shape predates it
+/// and observation SQL reads it as is). It is here so a sink whose insert
+/// fails can name the conversation in its own log line, matching the driver's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UndeliveredReply<'a> {
     pub channel: &'a ChannelId,
@@ -79,43 +81,43 @@ impl<'a> UndeliveredReply<'a> {
         }
     }
 
-    /// Pure: this reply's row payload ([`reply_undelivered_payload`]).
+    /// Pure: the payload of an [`actions::REPLY_UNDELIVERED`] row — the
+    /// channel, the peer, the [`UndeliveredReason`] and when it happened,
+    /// nothing else. Never the body (a reply is conversation content) and
+    /// never the error (transport text, not a fixed label). The one definition
+    /// for every writer of that row (#800); see the action's doc.
+    ///
+    /// `observed_at` is the event's time, because a polled driver's row is
+    /// written after the fact (#789) and `audit_log.ts` is then the insert's.
+    /// The bus's own writer awaits its insert, so for it the two agree; it
+    /// carries the field anyway, so every row of the action has one shape.
     pub fn payload(&self) -> serde_json::Value {
-        reply_undelivered_payload(self.channel, self.peer, self.reason, self.observed_at)
+        serde_json::json!({
+            "channel": self.channel.0,
+            "peer": self.peer.0,
+            "reason": self.reason.as_str(),
+            "observed_at": observed_at_json(self.observed_at),
+        })
     }
 }
 
-/// Pure: the payload of an [`actions::REPLY_UNDELIVERED`] row — the channel,
-/// the peer, the [`UndeliveredReason`] and when it happened, nothing else.
-/// Never the body (a reply is conversation content) and never the error
-/// (transport text, not a fixed label). The one definition for every writer of
-/// that row; see the action's doc.
-///
-/// `observed_at` is the event's time, because a polled driver's row is written
-/// after the fact (#789) and `audit_log.ts` is then the insert's. The bus's own
-/// writer awaits its insert, so for it the two agree; it carries the field
-/// anyway, so every row of the action has one shape.
-pub fn reply_undelivered_payload(
-    channel: &ChannelId,
-    peer: &PeerId,
-    reason: UndeliveredReason,
-    observed_at: time::OffsetDateTime,
-) -> serde_json::Value {
-    serde_json::json!({
-        "channel": channel.0,
-        "peer": peer.0,
-        "reason": reason.as_str(),
-        "observed_at": observed_at_json(observed_at),
-    })
-}
-
-/// Pure: an event time as a row stores it — RFC 3339, in the value's own offset (the
-/// drivers pass UTC). `null`
-/// for a time RFC 3339 cannot spell (a year outside 0–9999), which no clock
-/// this daemon reads will produce, rather than a panic in an audit path.
+/// An event time as a row stores it — RFC 3339, in the value's own offset (the
+/// drivers pass UTC). `null` for a time RFC 3339 cannot spell (a year outside
+/// 0–9999), which no clock this daemon reads will produce, rather than a panic
+/// in an audit path — and said at WARN, with the time as Unix seconds, so a
+/// `null` in the trail is never silent (#798).
 pub(crate) fn observed_at_json(t: time::OffsetDateTime) -> serde_json::Value {
-    t.format(&time::format_description::well_known::Rfc3339)
-        .map_or(serde_json::Value::Null, serde_json::Value::String)
+    match t.format(&time::format_description::well_known::Rfc3339) {
+        Ok(s) => serde_json::Value::String(s),
+        Err(e) => {
+            tracing::warn!(
+                unix_seconds = t.unix_timestamp(),
+                error = %e,
+                "an audit row's observed_at is outside RFC 3339's range; stored as null"
+            );
+            serde_json::Value::Null
+        }
+    }
 }
 
 #[cfg(test)]
@@ -126,12 +128,15 @@ mod tests {
 
     #[test]
     fn a_reply_undelivered_payload_carries_channel_peer_reason_and_when_only() {
-        let v = super::reply_undelivered_payload(
-            &super::ChannelId("matrix".into()),
-            &super::PeerId("@me:srv".into()),
-            super::UndeliveredReason::GaveUp,
-            at(),
-        );
+        let v = super::UndeliveredReply {
+            channel: &super::ChannelId("matrix".into()),
+            peer: &super::PeerId("@me:srv".into()),
+            conversation: &super::ConversationId("!not-in-the-row:srv".into()),
+            reason: super::UndeliveredReason::GaveUp,
+            observed_at: at(),
+        }
+        .payload();
+        assert!(!v.to_string().contains("not-in-the-row"), "the conversation stays out: {v}");
         assert_eq!(
             v,
             serde_json::json!({

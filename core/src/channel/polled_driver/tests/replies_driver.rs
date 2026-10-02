@@ -273,3 +273,61 @@ fn an_exiting_driver_accounts_for_every_reply_it_drops() {
     let lines = lines_with("t-exit", "discarded 2 queued replies to conversation !a");
     assert_eq!(lines.len(), 1, "{:?}", emitted_refusal_lines_for("t-exit"));
 }
+
+/// The scripted fake, except that a poll made once a send has been refused
+/// waits for the bus to go away: the daemon stopping the channel mid
+/// long-poll, with a reply queued behind a refusal. `polling` says the poll
+/// is out.
+struct PollOutlivesTheBus {
+    inner: Box<dyn WorkerCalls>,
+    st: Arc<FakeState>,
+    polling: Arc<AtomicBool>,
+    bus_gone: Arc<AtomicBool>,
+}
+
+impl WorkerCalls for PollOutlivesTheBus {
+    fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let refused_once = !send_attempts(&self.st).is_empty();
+        if method == "t.poll" && refused_once && !self.bus_gone.load(Ordering::SeqCst) {
+            self.polling.store(true, Ordering::SeqCst);
+            wait_until(|| self.bus_gone.load(Ordering::SeqCst));
+        }
+        self.inner.call(method, params)
+    }
+}
+
+/// #799: the bus going away while a poll is out is an exit like any other:
+/// the reply still queued behind its refusal, and the one that arrived in the
+/// outbound channel while the poll was out, are each audited as `DriverExit`.
+/// (`an_exiting_driver_accounts_for_every_reply_it_drops` covers the exit on a
+/// dropped outbound sender; this is the inbound-closed one, after a poll.)
+#[test]
+fn replies_held_when_the_bus_closes_mid_poll_are_audited_as_driver_exit() {
+    let (st, inner) = fake();
+    *st.refuse_conversation.lock().unwrap() = Some("!a".into());
+    let polling = Arc::new(AtomicBool::new(false));
+    let bus_gone = Arc::new(AtomicBool::new(false));
+    let calls = PollOutlivesTheBus {
+        inner,
+        st: st.clone(),
+        polling: polling.clone(),
+        bus_gone: bus_gone.clone(),
+    };
+    let spec = PolledWorkerSpec { label: "t-bus-gone", refusal_backoff: FAST, ..TEST_SPEC };
+    let (driver, audited) = spawn_audited(spec, Box::new(calls));
+    driver.outbound_tx.send(reply("!a", "a1")).unwrap();
+    wait_until(|| polling.load(Ordering::SeqCst));
+    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
+    // Lands in the outbound channel: the driver is inside the poll.
+    outbound_tx.send(reply("!a", "a2")).unwrap();
+    drop(inbound_rx);
+    bus_gone.store(true, Ordering::SeqCst);
+    join.join().expect("the driver exits cleanly");
+    assert_eq!(
+        *audited.lock().unwrap(),
+        [("a1".into(), UndeliveredReason::DriverExit), ("a2".into(), UndeliveredReason::DriverExit)],
+        "the queued reply and the late one"
+    );
+    assert!(sent_bodies(&st).is_empty(), "POSITIVE CONTROL: neither was delivered");
+    drop(outbound_tx);
+}

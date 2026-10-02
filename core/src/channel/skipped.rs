@@ -49,6 +49,14 @@ impl SkippedId<'_> {
     /// Pure: this id's row payload — the channel, the message id, the reason
     /// capped at [`SKIPPED_REASON_CAP_CHARS`] on a `char` boundary, and when.
     /// Never a body, never headers.
+    ///
+    /// The message id is **not** capped here, unlike the reason (#798): it is
+    /// the row's identity, and a prefix two ids could share would make the row
+    /// name a message it is not. What bounds it is the audit layer's own
+    /// payload cap, which every insert applies (`kastellan_db::audit::
+    /// truncate_payload`): a payload over its budget is stored as a SHA-256
+    /// and a length of the whole, so an oversized id still leaves a row that
+    /// says a skip happened, with a digest that identifies it exactly.
     pub fn payload(&self) -> serde_json::Value {
         serde_json::json!({
             "channel": self.channel.0,
@@ -98,5 +106,22 @@ mod tests {
         let payload = id.payload();
         assert_eq!(payload["reason"], serde_json::json!(cap_chars(&long, SKIPPED_REASON_CAP_CHARS)));
         assert_ne!(payload["reason"], serde_json::json!(long), "POSITIVE CONTROL: the cap must bite");
+    }
+
+    /// #798: the message id is left whole here, and bounded where the row is
+    /// stored: the audit layer's payload cap turns an oversized payload into a
+    /// digest of the whole, within budget.
+    #[test]
+    fn an_oversized_message_id_is_bounded_by_the_audit_payload_cap() {
+        use kastellan_db::audit::{truncate_payload, PAYLOAD_MAX_BYTES};
+        let channel = ChannelId("email".into());
+        let long = "m".repeat(PAYLOAD_MAX_BYTES * 4);
+        let id = SkippedId { channel: &channel, message_id: &long, reason: "r", observed_at: at() };
+        let payload = id.payload();
+        assert_eq!(payload["message_id"], serde_json::json!(long), "POSITIVE CONTROL: not capped here");
+        let stored = truncate_payload(payload);
+        assert!(serde_json::to_vec(&stored).unwrap().len() <= PAYLOAD_MAX_BYTES, "{stored}");
+        assert_eq!(stored["_truncated"], true, "{stored}");
+        assert!(stored["sha256"].as_str().is_some_and(|h| h.len() == 64), "{stored}");
     }
 }

@@ -37,7 +37,7 @@ mod undelivered;
 
 pub use bus::ChannelBus;
 pub use skipped::{SkippedId, SKIPPED_REASON_CAP_CHARS};
-pub use undelivered::{reply_undelivered_payload, UndeliveredReason, UndeliveredReply};
+pub use undelivered::{UndeliveredReason, UndeliveredReply};
 
 use serde::{Deserialize, Serialize};
 
@@ -167,7 +167,7 @@ pub mod actions {
     /// A message was routed to its channel but was not delivered. Carries the
     /// channel, the peer, a fixed [`super::UndeliveredReason`] label and the
     /// event's time (`observed_at`, #792) only — never the reply body and never the error string (which is transport
-    /// text, not a fixed label) — built by [`super::reply_undelivered_payload`].
+    /// text, not a fixed label) — built by [`super::UndeliveredReply::payload`], its one definition (#800).
     ///
     /// **Two writers.** The bus's per-channel pump, when `Channel::send`
     /// fails (`send_failed`). And, since #782, a polled channel's driver
