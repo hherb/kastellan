@@ -5,6 +5,7 @@
 //! below is re-exported from [`super`], so `kastellan_db::audit::…` paths are
 //! unchanged.
 
+use super::nul_escape::{self, NUL_ESCAPED_KEY};
 use super::req_summary::{self, HEAD_MAX_BYTES, REQ_KEY, REQ_SUMMARY_KEY};
 
 /// Maximum size in bytes of a serialised `audit_log.payload` JSONB
@@ -58,6 +59,13 @@ pub const PAYLOAD_MAX_BYTES: usize = 4096;
 /// it happens. Small, irrecoverable and historically lost beats large and
 /// self-announcing.
 ///
+/// **[`NUL_ESCAPED_KEY`] comes last (issue #816).** It meets all three
+/// criteria — a single integer, the record of the NUL escape, and
+/// irrecoverable once `␀` has replaced the NULs (a worker can send a
+/// literal `␀`). It is the smallest member, so last costs it nothing in
+/// practice; and if it were ever starved, [`DROPPED_PRESERVED_KEY`] would
+/// still name it.
+///
 /// Contention is not reachable in production today — a real envelope peaks
 /// near 1.4 KiB against a 4032-byte working budget — so the order is a
 /// standing decision for the member after next rather than a live
@@ -68,7 +76,7 @@ pub const PAYLOAD_MAX_BYTES: usize = 4096;
 /// mutation, because the behavioural half was previously vacuous — its
 /// fixture could not fit in either slot, so it passed with the array
 /// reversed while claiming to assert the order.
-pub const PRESERVED_KEYS: &[&str] = &[GUARD_KEY, REQ_SUMMARY_KEY];
+pub const PRESERVED_KEYS: &[&str] = &[GUARD_KEY, REQ_SUMMARY_KEY, NUL_ESCAPED_KEY];
 
 /// The payload key under which `core::tool_host::post_process` records the
 /// guard tier's per-dispatch verdict — and the first member of
@@ -287,7 +295,13 @@ pub fn is_truncation_envelope(payload: &serde_json::Value) -> bool {
 
 /// Returns the JSONB payload to *actually store* for a given input.
 ///
-/// If the input serialises to ≤ [`PAYLOAD_MAX_BYTES`], the input is
+/// **First, every NUL is escaped** ([`nul_escape::escape_payload`], issue
+/// #816): Postgres would refuse the row otherwise. Everything below — the
+/// size test, the fingerprint, the request summary — sees that escaped
+/// form, because it is the form that gets stored. A payload with no NUL is
+/// untouched by the step.
+///
+/// If the escaped payload serialises to ≤ [`PAYLOAD_MAX_BYTES`], it is
 /// returned unchanged. Otherwise it is replaced with:
 ///
 /// ```json
@@ -295,9 +309,10 @@ pub fn is_truncation_envelope(payload: &serde_json::Value) -> bool {
 /// ```
 ///
 /// where `len` is the original serialised byte length and `sha256` is
-/// the lowercase-hex SHA-256 digest of the same bytes — **of the input,
-/// not of the envelope**, so two rows for the same body still compare
-/// equal whatever else they carry.
+/// the lowercase-hex SHA-256 digest of the same bytes — **of the (escaped)
+/// input, not of the envelope**, so two rows for the same body still compare
+/// equal whatever else they carry. A body with NULs and the same body with
+/// literal `␀`s differ in their [`NUL_ESCAPED_KEY`], so they do not collide.
 ///
 /// Any [`PRESERVED_KEYS`] present in the input are then copied onto the
 /// envelope **verbatim, whatever their value** — including a `null` or a
@@ -310,11 +325,12 @@ pub fn is_truncation_envelope(payload: &serde_json::Value) -> bool {
 /// copy does not have: one oversized key cannot take a bounded sibling
 /// down with it, and anything refused can still be *named*, under
 /// [`DROPPED_PRESERVED_KEY`]. Nothing in this workspace can produce an
-/// oversized preserved key. There are **two** producers, both bounded:
-/// `core::tool_host::post_process` via `GuardReport::audit_value`, which
-/// emits a fixed handful of small scalars, and **this function itself**,
-/// via `req_summary::summarize_req`, which is bounded by
-/// [`HEAD_MAX_BYTES`] plus a digest and a length. But the signature permits
+/// oversized preserved key. One is written by a caller and two by **this
+/// function itself**, all bounded: `guard` by `core::tool_host::post_process`
+/// via `GuardReport::audit_value` (a fixed handful of small scalars),
+/// `req_summary` by `req_summary::summarize_req` ([`HEAD_MAX_BYTES`] plus a
+/// digest and a length), and [`NUL_ESCAPED_KEY`] by
+/// [`nul_escape::escape_payload`] (one integer). But the signature permits
 /// an oversized one, and [`preserve_onto`] is tested against multi-key
 /// lists that exercise it.
 ///
@@ -325,7 +341,11 @@ pub fn is_truncation_envelope(payload: &serde_json::Value) -> bool {
 ///
 /// Pure: deterministic, no I/O, no global state. Same input → same
 /// output, every call.
-pub fn truncate_payload(mut payload: serde_json::Value) -> serde_json::Value {
+pub fn truncate_payload(payload: serde_json::Value) -> serde_json::Value {
+    // Escape before measuring: the stored form is what the cap, the
+    // fingerprint and the request summary must all describe (issue #816).
+    let mut payload = nul_escape::escape_payload(payload);
+
     // `to_vec` is infallible for `serde_json::Value` (the value is
     // already valid JSON in memory). The serialised form is what
     // Postgres will see — so that's the form we measure.
@@ -399,13 +419,13 @@ pub fn truncate_payload(mut payload: serde_json::Value) -> serde_json::Value {
 ///
 /// Split out of [`truncate_payload`] so `keys` can be a **parameter**.
 ///
-/// At two members every branch here is *structurally* live — a running
-/// envelope differs from a fixed one, a starved sibling is expressible,
-/// and [`DROPPED_PRESERVED_KEY`] can name two keys. What keeps the
-/// starvation arm from occurring in production is **sizing, not
+/// With more than one member every branch here is *structurally* live — a
+/// running envelope differs from a fixed one, a starved sibling is
+/// expressible, and [`DROPPED_PRESERVED_KEY`] can name several keys. What
+/// keeps the starvation arm from occurring in production is **sizing, not
 /// cardinality**: a real envelope peaks near 1.4 KiB (fingerprint ~110 B,
-/// guard ~110 B, summary ~1.1 KiB worst case) against a 4032-byte working
-/// budget, and the compile-time block above pins
+/// guard ~110 B, summary ~1.1 KiB worst case, NUL count ~20 B) against a
+/// 4032-byte working budget, and the compile-time block above pins
 /// [`HEAD_MAX_BYTES`] so a later bump cannot quietly change that.
 ///
 /// This paragraph used to say the multi-key half was unreachable, which

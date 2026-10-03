@@ -46,8 +46,13 @@ use kastellan_db::DbError;
 /// that one key: a double implements [`insert_stored`](Self::insert_stored)
 /// and therefore receives the stored payload whether or not its author
 /// thought about truncation. `PgAuditSink` re-applies it via
-/// `db::audit::insert`, which is harmless — `truncate_payload` is
-/// idempotent, an envelope being already under the cap.
+/// `db::audit::insert`, which is harmless only because `truncate_payload`
+/// is idempotent: an envelope is already under the cap, and the NUL escape
+/// leaves an already-escaped payload — its `_nul_escaped` count included —
+/// alone (issue #816; pinned by `db::audit::nul_escape`'s
+/// `truncate_payload_is_idempotent_with_nuls_in_play`, and on a live
+/// cluster by `db/tests/audit_nul_e2e.rs`). A storage step that is not
+/// idempotent cannot be added here without changing this seam.
 #[async_trait]
 pub trait AuditSink: Send + Sync {
     /// Insert one row whose payload has **already** been through

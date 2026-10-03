@@ -66,6 +66,16 @@
 //! [`DROPPED_PRESERVED_KEY`] rather than vanishing, because an
 //! unrecorded loss is the shape of the defect above.
 //!
+//! ## NUL is escaped before anything else (issue #816)
+//!
+//! Postgres refuses U+0000 in `jsonb` and `text`, so one NUL in a
+//! worker-written string used to fail the whole row — and a hostile channel
+//! peer could erase its own audit trail by putting one in its id.
+//! [`truncate_payload`] therefore runs [`nul_escape::escape_payload`] first:
+//! each NUL becomes [`NUL_ESCAPE`] (`␀`) and the payload records how many
+//! under [`NUL_ESCAPED_KEY`], which rides through truncation as a
+//! [`PRESERVED_KEYS`] member. [`insert`] escapes `actor` and `action` too.
+//!
 //! Pure: returns a new `serde_json::Value`, performs no I/O. Tested
 //! with deterministic-fingerprint regression pins.
 
@@ -73,9 +83,11 @@ use sqlx::Row;
 
 use crate::DbError;
 
+pub mod nul_escape;
 pub mod req_summary;
 mod truncate;
 
+pub use nul_escape::{NUL_ESCAPE, NUL_ESCAPED_KEY};
 pub use req_summary::{HEAD_MAX_BYTES, REQ_KEY, REQ_SUMMARY_KEY};
 pub use truncate::{
     is_truncation_envelope, truncate_payload, DROPPED_PRESERVED_KEY, DROP_MARKER_RESERVE, GUARD_KEY,
@@ -111,8 +123,14 @@ pub struct AuditRow {
 /// Insert one row into `audit_log` and return its `id`.
 ///
 /// `payload` flows through [`truncate_payload`] so the caller does not
-/// have to enforce the cap themselves. The insert is a single round-trip
-/// (`INSERT … RETURNING id`) — there is no separate SELECT.
+/// have to enforce the cap — or escape NUL — themselves. `actor` and
+/// `action` are `text` columns, which refuse NUL just as `jsonb` does, so
+/// they are escaped too ([`nul_escape::escape_str`]). Both are spelled by
+/// code today, so this is a backstop; with no payload of their own to
+/// carry a count, the `␀` glyph is their record.
+///
+/// The insert is a single round-trip (`INSERT … RETURNING id`) — there is
+/// no separate SELECT.
 ///
 /// `executor` is generic so this works against both a `&PgPool`
 /// (production: dispatcher write site) and a `&mut PgConnection`
@@ -133,12 +151,14 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let payload = truncate_payload(payload);
+    let (actor, _) = nul_escape::escape_str(actor);
+    let (action, _) = nul_escape::escape_str(action);
     let row = sqlx::query(
         "INSERT INTO audit_log (actor, action, payload) \
          VALUES ($1, $2, $3) RETURNING id",
     )
-    .bind(actor)
-    .bind(action)
+    .bind(&actor)
+    .bind(&action)
     .bind(payload)
     .fetch_one(executor)
     .await

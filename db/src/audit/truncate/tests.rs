@@ -383,7 +383,8 @@ fn every_envelope_fits_the_budget() {
 
 // ── The multi-key half of `preserve_onto`. ────────────────────────
 //
-// `PRESERVED_KEYS` has TWO members since issue #617, so every property
+// `PRESERVED_KEYS` has had several members since issue #617 (three since
+// #816), so every property
 // below is structurally reachable through `truncate_payload` — what
 // keeps the starvation arm from occurring in production is now sizing,
 // not cardinality (a real envelope peaks near 1.4 KiB against a
@@ -545,10 +546,11 @@ fn wire_key_literals_are_pinned() {
     assert_eq!(DROPPED_PRESERVED_KEY, "_dropped_preserved");
     assert_eq!(GUARD_KEY, "guard");
     assert_eq!(REQ_SUMMARY_KEY, "req_summary");
+    assert_eq!(NUL_ESCAPED_KEY, "_nul_escaped");
     // Order is priority order, and `the_guard_record_is_admitted_before_the_
     // req_summary` proves what that costs the loser. Pinned here so a
     // re-ordering is a deliberate edit rather than a silent one.
-    assert_eq!(PRESERVED_KEYS, ["guard", "req_summary"].as_slice());
+    assert_eq!(PRESERVED_KEYS, ["guard", "req_summary", "_nul_escaped"].as_slice());
 }
 
 /// `str_eq` is the sole enforcer of the compile-time shadow guard.
