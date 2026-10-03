@@ -14,7 +14,9 @@
 //! under a flood, failed against a wedged Postgres, or still pending when the
 //! daemon shuts down. Each of those says so on this marker, so a grep or an
 //! alert keyed on `[audit-lost]` sees every row the audit trail is missing,
-//! whatever the operator's `RUST_LOG`.
+//! whatever the operator's `RUST_LOG`. So, since #808, does a failed insert
+//! of the channel bus's own rows, which it awaits (`channel::pg_events` — its
+//! module doc says what that writer still misses).
 
 use super::delivery::warn_and_fall_back;
 use super::shared::format_stderr_fallback;
@@ -28,7 +30,8 @@ use super::shared::format_stderr_fallback;
 /// for the whole set.
 pub const AUDIT_LOST_STDERR_MARKER: &str = "[audit-lost]";
 
-/// Who lost the audit row(s): a channel's sink, or the daemon's own shutdown.
+/// Who lost the audit row(s): a channel's sink, the channel bus, or the
+/// daemon's own shutdown.
 ///
 /// A closed set, not a `&str` (#800): the writer sits beside the report text in
 /// the signature, and two adjacent strings are two that can be swapped, or one
@@ -40,7 +43,14 @@ pub enum AuditLostWriter {
     Matrix,
     /// The email channel's `channel.skipped_ack_only` sink.
     Email,
-    /// The daemon's shutdown drain: rows still pending when the pool closes.
+    /// The channel bus's own writer (`channel::pg_events`, #808): the rows
+    /// the bus writes itself — `channel.received`, a
+    /// `channel.reply_undelivered` for a failed `send`, the other `channel.*`
+    /// rows, and `ask.resolved`. This writer serves every channel, so the line
+    /// names the row's channel and peer, and its ids, when the payload has them.
+    Bus,
+    /// The daemon's shutdown drain, for what is no one channel's: rows still
+    /// pending when the pool closes, and stuck drivers that audit on exit.
     Shutdown,
 }
 
@@ -50,6 +60,7 @@ impl AuditLostWriter {
         match self {
             Self::Matrix => "matrix",
             Self::Email => "email",
+            Self::Bus => "bus",
             Self::Shutdown => "shutdown",
         }
     }
@@ -108,7 +119,10 @@ mod tests {
     #[test]
     fn the_writers_are_pinned_literally() {
         use AuditLostWriter::*;
-        assert_eq!([Matrix, Email, Shutdown].map(AuditLostWriter::as_str), ["matrix", "email", "shutdown"]);
+        assert_eq!(
+            [Matrix, Email, Bus, Shutdown].map(AuditLostWriter::as_str),
+            ["matrix", "email", "bus", "shutdown"]
+        );
     }
 
     #[test]

@@ -28,7 +28,6 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tracing::info;
 
-use kastellan_core::worker_stderr::AuditLostWriter;
 use kastellan_core::channel::boot_supervisor::pg_sink::pg_boot_audit_sink;
 use kastellan_core::channel::boot_supervisor::{
     BootOutcome, ChannelSupervisor, ReportingPolicy, StartedChannel,
@@ -61,10 +60,11 @@ fn classify_homeserver(homeserver_url: &str, forced: bool) -> Option<BootOutcome
         .map(|detail| BootOutcome::Fatal(anyhow::anyhow!("{detail}")))
 }
 
-/// What the Matrix driver does with its rows at exit: it audits every reply
-/// still queued (`driver_exit`), so one stuck at shutdown is a possible loss.
-/// A `const` so a test pins it (#802).
-const SINK_KIND: crate::audit_sink::SinkKind = crate::audit_sink::SinkKind::AuditsOnExit;
+/// The Matrix sink's channel (#807): its refused rows are thinned and counted
+/// as Matrix's, its `[audit-lost]` lines name `matrix`, and its `SinkKind`
+/// follows — the driver audits every reply still queued as it exits
+/// (`driver_exit`), so one stuck at shutdown is a possible loss (#802).
+const SINK_CHANNEL: crate::audit_sink::SinkChannel = crate::audit_sink::SinkChannel::Matrix;
 
 /// Pure: the `(actor, action, payload)` of the row
 /// [`reply_undelivered_audit_sink`] writes for `reply`. The actor is the bus's
@@ -122,13 +122,12 @@ fn reply_undelivered_audit_sink(
             &conversation,
             Some(reason.as_str()),
         );
+        // Under the channel the row is counted under: the writer's own.
+        let who = writer.channel().writer();
         // A refused row is reported through the closure, so its `Err` is not
         // needed here.
         let _ = writer.spawn(actor, action, payload, label, move |why| {
-            report(
-                AuditLostWriter::Matrix,
-                &format_reply_row_lost(&conversation, reason.as_str(), &why),
-            );
+            report(who, &format_reply_row_lost(&conversation, reason.as_str(), &why));
         });
     })
 }
@@ -149,7 +148,7 @@ fn reply_sink(
     crate::audit_sink::Starting,
 ) {
     let (writer, starting) =
-        crate::audit_sink::SinkWriter::starting_with_ledger(ledger, pool, handle, SINK_KIND);
+        crate::audit_sink::SinkWriter::starting_with_ledger(ledger, pool, handle, SINK_CHANNEL);
     (reply_undelivered_audit_sink(writer, report), starting)
 }
 

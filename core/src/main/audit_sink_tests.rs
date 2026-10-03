@@ -43,7 +43,7 @@ pub(super) fn stalled_writer(
     // Made inside the runtime, but the test thread stays outside it — like the
     // driver thread that calls the real sinks.
     let (pool, listener) = rt.block_on(async { stalled_pool() });
-    let writer = SinkWriter::with_ledger(ledger, pool, rt.handle().clone(), SinkKind::SilentOnExit);
+    let writer = SinkWriter::with_ledger(ledger, pool, rt.handle().clone(), SinkChannel::Email);
     (rt, writer, listener)
 }
 
@@ -109,7 +109,7 @@ fn past_the_queue_bound_a_row_is_shed_and_said_so() {
         .expect("POSITIVE CONTROL: the first row fits the queue");
     let (told, on_failure) = recorder();
     assert_returns_at_once("a shed row", || {
-        assert!(matches!(spawn(Box::new(on_failure)), Err(Unwritten::Shed)), "the second row must be shed");
+        assert!(matches!(spawn(Box::new(on_failure)), Err(Unwritten::Shed(_))), "the second row must be shed");
     });
     let told = told.lock().unwrap().clone();
     assert!(
@@ -133,7 +133,7 @@ fn inserts_share_a_bounded_number_of_connections() {
     let rt = tokio::runtime::Runtime::new().expect("a runtime");
     let (pool, _listener) = rt.block_on(async { stalled_pool() });
     let both = |ledger: &'static Ledger| {
-        let writer = SinkWriter::with_ledger(ledger, pool.clone(), rt.handle().clone(), SinkKind::SilentOnExit);
+        let writer = SinkWriter::with_ledger(ledger, pool.clone(), rt.handle().clone(), SinkChannel::Email);
         let t = Instant::now();
         let tasks: Vec<_> = (0..2)
             .map(|_| writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}).expect("not shed"))
@@ -227,7 +227,7 @@ fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
     let stuck = writer
         .spawn("a", "b", serde_json::json!({}), "STUCK-ROW".into(), |_| {})
         .expect("not shed");
-    let _matrix = SinkWriter::with_ledger(&LEDGER, writer.pool.clone(), rt.handle().clone(), SinkKind::AuditsOnExit);
+    let _matrix = SinkWriter::with_ledger(&LEDGER, writer.pool.clone(), rt.handle().clone(), SinkChannel::Matrix);
 
     let bound = ACQUIRE_TIMEOUT / 3;
     let t = Instant::now();
@@ -241,12 +241,12 @@ fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
     // `drain` returns the FINAL snapshot: the names and the thinned count
     // reach `report_drained` (a `snapshot()` there would leave them empty).
     assert_eq!(d.named, vec!["STUCK-ROW".to_string()]);
-    assert_eq!(d.unreported, 0);
+    assert_eq!(d.unreported, Unreported::default());
 
     let (told, on_failure) = recorder();
     assert!(matches!(
         writer.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure),
-        Err(Unwritten::AfterShutdown)
+        Err(Unwritten::AfterShutdown(_))
     ));
     let told = told.lock().unwrap().clone();
     assert!(
@@ -259,20 +259,88 @@ fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
 
 /// #798: a flood of rows refused through a sink reports its first few, then
 /// thins out — the ledger wired to `audit_sink_thinning.rs`, whose own tests
-/// pin the predicate.
+/// pin the predicate. #807: each line it lets through says where the row
+/// stands in its burst, so the flood's size is in the lines themselves.
 #[test]
 fn a_flood_of_shed_rows_is_reported_one_by_one_then_thinned() {
     static LEDGER: Ledger = Ledger::new(bounds(0, 1));
     let (_rt, writer, _listener) = stalled_writer(&LEDGER);
-    let told = Arc::new(Mutex::new(0usize));
-    for _ in 0..20 {
+    let told: Arc<Mutex<Vec<String>>> = Arc::default();
+    for _ in 0..33 {
         let told = told.clone();
-        let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| *told.lock().unwrap() += 1);
+        let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |why| {
+            told.lock().unwrap().push(why.to_string());
+        });
     }
-    let reported = *told.lock().unwrap();
-    assert_eq!(reported, 17, "n = 0..15 each, n = 16 (a power of two); n = 17..19 thinned out");
-    assert_eq!(LEDGER.final_snapshot().unreported, 3);
+    let told = told.lock().unwrap().clone();
+    assert_eq!(told.len(), 18, "n = 0..15 each, then n = 16 and 32 (powers of two); the rest thinned out");
+    assert!(told[16].ends_with("; refused row 17 of this burst"), "{:?}", told[16]);
+    assert!(
+        told[17].ends_with("; refused row 33 of this burst (15 before it had no line of their own)"),
+        "{:?}",
+        told[17]
+    );
+    assert_eq!(LEDGER.final_snapshot().unreported.email, UnsaidCounts { shed: 15, late: 0 });
+    assert_eq!(LEDGER.final_snapshot().unreported.matrix, UnsaidCounts::default(), "email's flood is email's");
     assert!(LEDGER.final_snapshot().named.is_empty(), "a refused row leaves no label behind");
+}
+
+/// #807: the ledger thins each channel on its own. A Matrix row shed in the
+/// middle of an email flood still gets a line of its own, naming its place —
+/// before #807 it was row 101 of one shared burst, and said nothing. The
+/// Matrix writer is built as production builds it: starting, then started.
+#[test]
+fn an_email_flood_does_not_thin_a_matrix_rows_line() {
+    static LEDGER: Ledger = Ledger::new(bounds(0, 1));
+    let (rt, email, _listener) = stalled_writer(&LEDGER);
+    let (matrix, starting) =
+        SinkWriter::starting_with_ledger(&LEDGER, email.pool.clone(), rt.handle().clone(), SinkChannel::Matrix);
+    starting.started();
+    assert_eq!(matrix.channel(), SinkChannel::Matrix);
+    let flood = Arc::new(AtomicUsize::new(0));
+    for _ in 0..100 {
+        let flood = flood.clone();
+        let _ = email.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| {
+            flood.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+    assert!(flood.load(Ordering::SeqCst) < 100, "POSITIVE CONTROL: the email flood is thinned");
+    let (told, on_failure) = recorder();
+    let _ = matrix.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure);
+    let told = told.lock().unwrap().clone();
+    assert!(
+        told.as_deref().is_some_and(|t| t.ends_with("; refused row 1 of this burst")),
+        "the Matrix row is its own burst's first, and reported: {told:?}"
+    );
+}
+
+/// #807: after the drain, too, each channel's late rows are thinned on their
+/// own — a driver still flooding email past shutdown does not silence a
+/// Matrix row refused then.
+#[test]
+fn an_email_flood_after_the_drain_does_not_thin_a_matrix_rows_line() {
+    static LEDGER: Ledger = Ledger::new(bounds(8, 1));
+    let (rt, email, _listener) = stalled_writer(&LEDGER);
+    let matrix = SinkWriter::with_ledger(&LEDGER, email.pool.clone(), rt.handle().clone(), SinkChannel::Matrix);
+    let _ = rt.block_on(drain_ledger(&LEDGER, Duration::ZERO));
+    let flood = Arc::new(AtomicUsize::new(0));
+    for _ in 0..100 {
+        let flood = flood.clone();
+        let refused = email.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| {
+            flood.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(matches!(refused, Err(Unwritten::AfterShutdown(_))), "POSITIVE CONTROL: refused as late");
+    }
+    assert!(flood.load(Ordering::SeqCst) < 100, "POSITIVE CONTROL: the email flood is thinned");
+    let (told, on_failure) = recorder();
+    let _ = matrix.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure);
+    let told = told.lock().unwrap().clone();
+    assert!(
+        told.as_deref().is_some_and(|t| t.ends_with("; refused row 1 of this burst")),
+        "the late Matrix row is its own burst's first, and reported: {told:?}"
+    );
+    assert_eq!(LEDGER.unreported().matrix, UnsaidCounts::default());
+    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late: thinning::unreported_of(100) });
 }
 
 /// #797: the final snapshot names pending rows — a cancelled task cannot —
@@ -382,10 +450,12 @@ fn rows_thinned_after_the_drain_are_counted_for_the_last_line() {
     };
     assert_eq!(refuse_20(), 17, "POSITIVE CONTROL: 20 shed, 0..16 and 16 reported");
     let d = rt.block_on(drain_ledger(&LEDGER, Duration::ZERO));
-    assert_eq!(d.unreported, 3, "the shed rows are the drain line's");
-    assert_eq!(unreported_on_since(&LEDGER, &d), 0, "so none is counted twice");
+    assert_eq!(d.unreported.total(), 3, "the shed rows are the drain line's");
+    assert_eq!(unreported_on_since(&LEDGER, &d), Unreported::default(), "so none is counted twice");
     assert_eq!(refuse_20(), 17, "20 refused after the drain, a burst of their own");
-    assert_eq!(unreported_on_since(&LEDGER, &d), 3, "only the late ones");
+    let since = unreported_on_since(&LEDGER, &d);
+    assert_eq!(since.email, UnsaidCounts { shed: 0, late: 3 }, "only the late ones, and email's");
+    assert_eq!(since.matrix, UnsaidCounts::default());
 }
 
 /// What the last lines said, for the test below.

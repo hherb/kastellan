@@ -2,6 +2,7 @@
 //! soft cap; `#[path]`-included there, so `super::` is `email_boot`.
 
 use super::*;
+use kastellan_core::worker_stderr::AuditLostWriter;
 
 /// A PARTIAL config must be FATAL: the process environment is fixed for
 /// this daemon's lifetime, so no number of retries can complete it. The
@@ -45,7 +46,7 @@ fn the_skipped_id_sink_does_not_hold_the_driver_thread() {
             &LEDGER,
             pool,
             rt.handle().clone(),
-            crate::audit_sink::SinkKind::SilentOnExit,
+            crate::audit_sink::SinkChannel::Email,
         ),
         |_, _| {},
     );
@@ -85,7 +86,7 @@ fn the_email_sink_reports_a_row_it_could_not_write() {
             &LEDGER,
             pool,
             rt.handle().clone(),
-            crate::audit_sink::SinkKind::SilentOnExit,
+            crate::audit_sink::SinkChannel::Email,
         ),
         |w, line| EMAIL_SAID.lock().unwrap().push((w, line.to_string())),
     );

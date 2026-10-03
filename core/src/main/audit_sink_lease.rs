@@ -1,6 +1,7 @@
 //! A sink's **lease** on the ledger (#792), and when it starts to count
 //! (#802). Split out of `audit_sink.rs` to keep it under the 500-LOC soft cap;
-//! `#[path]`-included there, and its items re-exported by name.
+//! `#[path]`-included there; [`SinkChannel`] and [`Starting`] are re-exported
+//! by name.
 //!
 //! While a [`SinkWriter`] is alive, [`super::drain`] counts its driver as one
 //! that may still write a row. A sink's hook closure owns its writer, and the
@@ -22,6 +23,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use kastellan_core::worker_stderr::AuditLostWriter;
 use sqlx::PgPool;
 
 use super::{Ledger, SinkWriter};
@@ -41,6 +43,38 @@ pub(crate) enum SinkKind {
     /// ids' acks stop there, so a driver still in its 15 s long-poll costs
     /// nothing. INFO.
     SilentOnExit,
+}
+
+/// Which channel a sink writes for (#807): what its refused rows are thinned
+/// and counted under, apart from the other channel's, and the writer its
+/// `[audit-lost]` lines name. Each channel's [`SinkKind`] follows from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SinkChannel {
+    /// `channel.reply_undelivered`, from the Matrix driver.
+    Matrix,
+    /// `channel.skipped_ack_only`, from the email driver.
+    Email,
+}
+
+impl SinkChannel {
+    /// Both, in the order the shutdown lines are said.
+    pub(crate) const ALL: [Self; 2] = [Self::Matrix, Self::Email];
+
+    /// What this channel's driver does with rows at the end of its life.
+    pub(crate) const fn kind(self) -> SinkKind {
+        match self {
+            Self::Matrix => SinkKind::AuditsOnExit,
+            Self::Email => SinkKind::SilentOnExit,
+        }
+    }
+
+    /// The writer this channel's `[audit-lost]` lines name.
+    pub(crate) const fn writer(self) -> AuditLostWriter {
+        match self {
+            Self::Matrix => AuditLostWriter::Matrix,
+            Self::Email => AuditLostWriter::Email,
+        }
+    }
 }
 
 /// Where a lease stands. One lock for the state and its counters' moves, so a
@@ -157,33 +191,34 @@ impl Starting {
 }
 
 impl SinkWriter {
-    /// A writer on `ledger`, spawning onto `handle`, whose lease counts at
-    /// once: for a driver whose bring-up is never abandoned with the writer
-    /// still held (email's: the writer is handed straight to the driver, with
-    /// no timeout between). The daemon passes [`super::daemon_ledger`]; tests
-    /// pass their own, so their counts are theirs.
+    /// A writer for `channel` on `ledger`, spawning onto `handle`, whose
+    /// lease counts at once: for a driver whose bring-up is never abandoned
+    /// with the writer still held (email's: the writer is handed straight to
+    /// the driver, with no timeout between). The daemon passes
+    /// [`super::daemon_ledger`]; tests pass their own, so their counts are
+    /// theirs.
     pub(crate) fn with_ledger(
         ledger: &'static Ledger,
         pool: PgPool,
         handle: tokio::runtime::Handle,
-        kind: SinkKind,
+        channel: SinkChannel,
     ) -> Self {
-        let lease = Lease::live(ledger, kind);
-        Self { ledger, handle, pool, lease }
+        let lease = Lease::live(ledger, channel.kind());
+        Self { ledger, handle, pool, channel, lease }
     }
 
-    /// A writer on `ledger` whose lease counts only once [`Starting::started`]
+    /// A writer for `channel` on `ledger` whose lease counts only once [`Starting::started`]
     /// is called: for a driver whose bring-up can be abandoned with the writer
     /// still held (Matrix's login).
     pub(crate) fn starting_with_ledger(
         ledger: &'static Ledger,
         pool: PgPool,
         handle: tokio::runtime::Handle,
-        kind: SinkKind,
+        channel: SinkChannel,
     ) -> (Self, Starting) {
-        let lease = Lease::starting(ledger, kind);
+        let lease = Lease::starting(ledger, channel.kind());
         let starting = Starting(lease.clone());
-        (Self { ledger, handle, pool, lease }, starting)
+        (Self { ledger, handle, pool, channel, lease }, starting)
     }
 }
 

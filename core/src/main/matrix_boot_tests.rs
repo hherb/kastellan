@@ -2,6 +2,7 @@
 //! soft cap; `#[path]`-included there, so `super::` is `matrix_boot`.
 
 use super::*;
+use kastellan_core::worker_stderr::AuditLostWriter;
 
 /// The classification #514's fix depends on: a `localhost`-NAME homeserver
 /// under force-routing can NEVER succeed (the proxy resolves the name to
@@ -47,7 +48,7 @@ fn the_reply_undelivered_sink_does_not_hold_the_driver_thread() {
             &LEDGER,
             pool,
             rt.handle().clone(),
-            crate::audit_sink::SinkKind::AuditsOnExit,
+            crate::audit_sink::SinkChannel::Matrix,
         ),
         |_, _| {},
     );
@@ -87,7 +88,7 @@ fn the_matrix_sink_reports_a_row_it_could_not_write() {
             &LEDGER,
             pool,
             rt.handle().clone(),
-            crate::audit_sink::SinkKind::AuditsOnExit,
+            crate::audit_sink::SinkChannel::Matrix,
         ),
         |w, line| MATRIX_SAID.lock().unwrap().push((w, line.to_string())),
     );

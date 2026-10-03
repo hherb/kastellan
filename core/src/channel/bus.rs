@@ -27,7 +27,9 @@ pub const PAIRED_ACK_BODY: &str = "\u{2713} Paired \u{2014} you can now message 
 pub trait ChannelEvents: Send + Sync {
     /// Enqueue a channel task; returns its id.
     async fn enqueue(&self, lane: Lane, payload: Value) -> anyhow::Result<i64>;
-    /// Best-effort audit row (never fatal; log on error).
+    /// Best-effort audit row: never fatal. The production impl,
+    /// `PgChannelEvents`, reports a failed insert on the `[audit-lost]`
+    /// marker (#808).
     async fn audit(&self, action: &str, payload: Value);
 }
 
@@ -148,26 +150,9 @@ pub struct AskWiring {
     pub resolver: Arc<dyn AskResolver>,
 }
 
-/// Real DB-backed `ChannelEvents` over the runtime pool.
-pub struct PgChannelEvents {
-    pool: sqlx::PgPool,
-}
-impl PgChannelEvents {
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
-    }
-}
-#[async_trait::async_trait]
-impl ChannelEvents for PgChannelEvents {
-    async fn enqueue(&self, lane: Lane, payload: Value) -> anyhow::Result<i64> {
-        Ok(tasks::insert_pending(&self.pool, lane, payload).await?)
-    }
-    async fn audit(&self, action: &str, payload: Value) {
-        if let Err(e) = kastellan_db::audit::insert(&self.pool, "channel", action, payload).await {
-            warn!(action, error = %e, "channel audit insert failed (non-fatal)");
-        }
-    }
-}
+/// Real DB-backed `ChannelEvents`; its own module since #808, which made a
+/// failed audit insert an `[audit-lost]` report.
+pub use super::pg_events::PgChannelEvents;
 
 /// Real `CompletedTasks` over a `PgListener` on `tasks_completed` + `tasks::get`.
 /// Construct via [`PgCompletedTasks::connect`].
