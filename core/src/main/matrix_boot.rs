@@ -117,10 +117,10 @@ fn reply_undelivered_audit_sink(
         let (actor, action, payload) = reply_undelivered_row(&reply);
         let reason = reply.reason;
         let conversation = reply.conversation.0.clone();
-        let label = format!(
-            "matrix reply to conversation {} ({})",
-            crate::audit_sink::quoted_id(&conversation),
-            reason.as_str()
+        let label = crate::audit_sink::RowLabel::new(
+            "matrix reply to conversation",
+            &conversation,
+            Some(reason.as_str()),
         );
         // A refused row is reported through the closure, so its `Err` is not
         // needed here.
@@ -154,7 +154,7 @@ fn reply_sink(
 }
 
 /// Classify the login's outcome — the worker, or the [`BootOutcome::Retry`]
-/// for a failed, panicked or timed-out login — and **start the sink's lease
+/// for a failed, panicked or cancelled, or timed-out login — and **start the sink's lease
 /// only when the worker is up** (#802). A lease started any earlier would make
 /// a login abandoned at its timeout a driver the shutdown waits for and calls
 /// a possible loss. Counting from here misses no reply: none can be queued

@@ -78,8 +78,8 @@ fn the_pending_line_names_the_rows_it_knows_and_counts_the_rest() {
     );
 }
 
-/// #796: a Matrix driver still running is a loss, said as one; an email driver
-/// still running is not, and stays at INFO.
+/// #796: a driver that audits on exit (Matrix's) still running is a possible
+/// loss, said as one; one silent on exit (email's) is not, and stays at INFO.
 #[test]
 fn a_stuck_matrix_driver_is_a_loss_and_a_stuck_email_driver_is_not() {
     let bound = Duration::from_secs(3);
@@ -103,7 +103,8 @@ fn record_clean(_: AuditLostWriter, line: &str) {
 }
 
 /// `report_drained` says nothing at ERROR for a clean drain, nor for an email
-/// driver still in its long-poll (INFO only) — #796.
+/// driver still in its long-poll (INFO only) — #796 — nor for an abandoned
+/// bring-up (#802); and no residual line is said for zero rows.
 #[test]
 fn a_clean_drain_and_a_stuck_email_driver_report_no_loss() {
     report_drained(&Drained::default(), record_clean);
@@ -137,21 +138,49 @@ fn report_drained_reports_each_loss_through_the_reporter() {
     }
 }
 
+/// Whether `inner` (a quoted string's inside) holds a `"` that no backslash
+/// escapes. Walks escapes as pairs, so `\\"` — an escaped backslash, then a
+/// bare quote — is caught, which a "preceded by `\`" check misses.
+fn has_bare_quote(inner: &str) -> bool {
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '"' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// #802: an id is quoted, so one that contains the shutdown line's `"; "`
-/// separator — or a `"` to end its own quotes early — cannot read as a second
-/// named row.
+/// separator — or a `"` to end its own quotes early, with or without a `\`
+/// before it — cannot read as a second named row.
 #[test]
 fn a_quoted_id_cannot_forge_a_second_named_row() {
     assert_eq!(quoted_id("<a@h>"), r#""<a@h>""#);
-    let hostile = r#"x"; matrix reply to conversation "!forged" (gave_up"#;
-    let quoted = quoted_id(hostile);
-    assert!(quoted.starts_with('"') && quoted.ends_with('"'), "{quoted}");
-    let inner = &quoted[1..quoted.len() - 1];
-    let bare_quote = inner
-        .char_indices()
-        .any(|(i, c)| c == '"' && !inner[..i].ends_with('\\'));
-    assert!(!bare_quote, "every `\"` inside is escaped, so the entry cannot end early: {quoted}");
+    assert!(has_bare_quote(r#"x\\"; y"#), "POSITIVE CONTROL: the check sees `\\\\\"`");
+    for hostile in [
+        r#"x"; matrix reply to conversation "!forged" (gave_up"#,
+        r#"x\"; matrix reply to conversation "!forged" (gave_up"#,
+    ] {
+        let quoted = quoted_id(hostile);
+        assert!(quoted.starts_with('"') && quoted.ends_with('"'), "{quoted}");
+        let inner = &quoted[1..quoted.len() - 1];
+        assert!(!has_bare_quote(inner), "the entry cannot end early: {quoted}");
+    }
     assert!(quoted_id("a\nb").contains("\\n"), "a control character is escaped too");
+}
+
+/// #802: a row label quotes its id, and its own words stay as they are.
+#[test]
+fn a_row_label_quotes_its_id() {
+    let label = RowLabel::new("matrix reply to conversation", "!r\"; x", Some("gave_up"));
+    assert_eq!(label.into_string(), r#"matrix reply to conversation "!r\"; x" (gave_up)"#);
+    let label = RowLabel::new("email skipped message", "<id@h>", None);
+    assert_eq!(label.into_string(), r#"email skipped message "<id@h>""#);
 }
 
 /// #798: the cap still bites inside the quotes.

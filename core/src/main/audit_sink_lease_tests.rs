@@ -51,9 +51,9 @@ fn record_clean(_: AuditLostWriter, line: &str) {
 
 /// #802: a lease whose driver never finished starting — a Matrix login
 /// abandoned at its timeout, the blocking task still holding the writer — is
-/// counted apart, not waited for, and not reported as a loss. Before, every
-/// shutdown waited the full bound for it and then called it a stuck driver
-/// whose queued replies might go unaudited.
+/// counted apart, not waited for, and not reported as a loss. Before, a
+/// shutdown after such a login waited the full bound for it and then called it
+/// a stuck driver whose queued replies might go unaudited.
 #[test]
 fn a_lease_that_never_started_is_not_waited_for_or_called_a_loss() {
     static LEDGER: Ledger = ledger_const();
@@ -94,6 +94,57 @@ fn a_started_lease_counts_until_its_writer_goes() {
     assert_eq!(LEDGER.snapshot(), InFlight::default());
 }
 
+/// #802: a promotion keeps the lease's kind. A started lease of a driver
+/// silent on exit (email's) is live but not auditing, so stuck it is INFO, not
+/// a loss — every other starting lease here audits on exit, which a promotion
+/// that ignored the kind would pass.
+#[test]
+fn a_started_silent_lease_is_live_but_not_auditing() {
+    static LEDGER: Ledger = ledger_const();
+    let (rt, pool, _listener) = runtime_and_pool();
+    let (writer, starting) =
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::SilentOnExit);
+    starting.started();
+    assert_eq!(LEDGER.snapshot(), InFlight { sinks_live: 1, ..InFlight::default() });
+    drop(writer);
+    assert_eq!(LEDGER.snapshot(), InFlight::default());
+}
+
+/// #802: a promotion counts the lease live BEFORE it stops counting it as
+/// starting, so a snapshot taken between the two sees it — twice, the safe
+/// direction. The other order shows a just-started driver counted nowhere,
+/// which the drain calls settled.
+#[test]
+fn a_promotion_counts_live_before_it_stops_counting_as_starting() {
+    static LEDGER: Ledger = ledger_const();
+    let (rt, pool, _listener) = runtime_and_pool();
+    let (writer, starting) =
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::AuditsOnExit);
+    let mut mid = None;
+    starting.0.promote_around(|| mid = Some(LEDGER.snapshot()));
+    let mid = mid.expect("the seam ran");
+    assert_eq!(mid, InFlight { starting: 1, sinks_live: 1, auditing_live: 1, ..InFlight::default() });
+    assert!(!mid.settled());
+    drop(writer);
+}
+
+/// #802: `snapshot` reads `starting` before the live counts. A lease promoted
+/// exactly between them is seen — as starting by the first read, live by the
+/// second. Reading the live counts first sees it in neither: a just-started
+/// driver, called settled.
+#[test]
+fn a_lease_promoted_mid_snapshot_is_counted() {
+    static LEDGER: Ledger = ledger_const();
+    let (rt, pool, _listener) = runtime_and_pool();
+    let (writer, starting) =
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::AuditsOnExit);
+    let s = LEDGER.snapshot_around(|| starting.started(), || {});
+    assert_eq!((s.starting, s.sinks_live), (1, 1), "seen twice, never not at all: {s:?}");
+    assert!(!s.settled());
+    assert_eq!(LEDGER.snapshot().starting, 0, "POSITIVE CONTROL: it was promoted");
+    drop(writer);
+}
+
 /// #802: `started()` after the writer is gone counts nothing — the driver
 /// failed and dropped its hooks before the caller could say it was up.
 #[test]
@@ -108,7 +159,9 @@ fn started_after_the_writer_is_gone_counts_nothing() {
 }
 
 /// #802: `started()` racing the writer's drop, from two threads, never leaves
-/// a driver counted and never counts one twice — whichever wins.
+/// a driver counted and never counts one twice — whichever wins. This states
+/// the contract; it would rarely catch the lease's lock going (the window is
+/// a few instructions), which the lock's one-line design guards instead.
 #[test]
 fn started_racing_the_writer_s_drop_leaves_no_count() {
     static LEDGER: Ledger = ledger_const();
@@ -191,7 +244,7 @@ fn a_driver_exiting_mid_snapshot_is_seen_with_its_row() {
     static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
     let (rt, pool, _listener) = runtime_and_pool();
     let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::SilentOnExit);
-    let s = LEDGER.snapshot_around(|| {
+    let s = LEDGER.snapshot_around(|| {}, || {
         let spawned = writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {});
         assert!(spawned.is_ok(), "the queue has room");
         drop(writer);

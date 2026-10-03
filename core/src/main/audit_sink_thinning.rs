@@ -2,8 +2,9 @@
 //! burst (#802). Pure: the clock is passed in. Split out of `audit_sink.rs` to
 //! keep it under the 500-LOC soft cap; `#[path]`-included there.
 //!
-//! A shed or refused row is reported by its sink **on the driver thread** (one
-//! tracing ERROR and a stderr write, either of which can block), and a flood —
+//! A shed or refused row is reported by its sink **on the driver thread** (a
+//! tracing ERROR, or the marked stderr line when nothing records it — either
+//! can block), and a flood —
 //! email's `skipped` list has no length cap — would have the driver do that
 //! for every id. So within one burst the first [`REPORT_EACH_UP_TO`] are
 //! reported, then only the 2^k-th: the reports stay logarithmic in the flood.
@@ -18,6 +19,11 @@ use std::time::{Duration, Instant};
 /// How many refused rows of one burst are reported one by one before
 /// [`should_report`] thins them out.
 pub(super) const REPORT_EACH_UP_TO: usize = 16;
+
+// `unreported_of`'s closed form counts REPORT_EACH_UP_TO as the first power of
+// two it reports; any other value miscounts (or, at 0, panics) — and a
+// `#[cfg(test)]` check is no guard in a release build.
+const _: () = assert!(REPORT_EACH_UP_TO.is_power_of_two(), "unreported_of assumes a power of two");
 
 /// How long with no refused row ends a burst, so the next one is reported
 /// afresh. A sustained flood never pauses this long, so it stays thinned; a
@@ -64,14 +70,16 @@ impl Thinning {
 
     /// Count one refused row at `now`, and say whether it gets a report of
     /// its own. A clock that steps backwards reads as no gap, never as a new
-    /// burst.
+    /// burst, and does not move the burst's last row back either, so the gap
+    /// after it is not stretched. (Production passes `Instant::now()`, read
+    /// under the lock, so this is defence, not a case it meets.)
     pub(super) fn refuse(&mut self, now: Instant) -> bool {
         let quiet = self.last.is_some_and(|last| now.saturating_duration_since(last) >= BURST_QUIET_GAP);
         if quiet {
             self.unreported_before += unreported_of(self.in_burst);
             self.in_burst = 0;
         }
-        self.last = Some(now);
+        self.last = Some(self.last.map_or(now, |last| last.max(now)));
         let n = self.in_burst;
         self.in_burst += 1;
         should_report(n)
@@ -148,5 +156,7 @@ mod tests {
         let mut t = Thinning::new();
         refuse_n(&mut t, 17, t0);
         assert!(!t.refuse(t0 - BURST_QUIET_GAP), "row 17 of one burst");
+        let just_short = t0 + BURST_QUIET_GAP - Duration::from_millis(1);
+        assert!(!t.refuse(just_short), "the step back did not stretch the gap after t0");
     }
 }

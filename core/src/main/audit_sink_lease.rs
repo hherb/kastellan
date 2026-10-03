@@ -8,13 +8,14 @@
 //! hooks — as its thread returns, after any `driver_exit` rows are spawned. No
 //! driver has to remember to report its exit.
 //!
-//! **A lease can start before its driver does** ([`SinkWriter::starting`]).
-//! Matrix builds its writer before a login that can time out, and a timed-out
-//! login's blocking task cannot be cancelled: it keeps the writer, and with it
-//! the lease, until the SDK's own timeouts end it. Counted from the start,
-//! that lease made every shutdown wait the full drain bound for a driver that
-//! never ran, then report it on `[audit-lost]` as one whose queued replies
-//! might go unaudited — when none was ever queued (#796, #802). So such a
+//! **A lease can start before its driver does**
+//! ([`SinkWriter::starting_with_ledger`]). Matrix builds its writer before a
+//! login that can time out, and a timed-out login's blocking task cannot be
+//! cancelled: it keeps the writer, and with it the lease, until the SDK's own
+//! timeouts end it. Counted from the start, that lease made a shutdown after
+//! an abandoned login wait the full drain bound for a driver that never came
+//! up, then report it on `[audit-lost]` as one whose queued replies might go
+//! unaudited — when none was ever queued (#796, #802). So such a
 //! lease counts only as *starting* (said at INFO, not waited for) until
 //! [`Starting::started`] says the driver is up.
 
@@ -64,15 +65,16 @@ pub(super) struct Lease {
 }
 
 impl Lease {
-    fn new(ledger: &'static Ledger, kind: SinkKind, state: LeaseState) -> Arc<Self> {
-        match state {
-            LeaseState::Starting => {
-                ledger.starting.fetch_add(1, Ordering::SeqCst);
-            }
-            LeaseState::Live => count_live(ledger, kind, true),
-            LeaseState::Ended => {}
-        }
-        Arc::new(Self { ledger, kind, state: Mutex::new(state) })
+    /// A lease that counts as *starting* until promoted.
+    fn starting(ledger: &'static Ledger, kind: SinkKind) -> Arc<Self> {
+        ledger.starting.fetch_add(1, Ordering::SeqCst);
+        Arc::new(Self { ledger, kind, state: Mutex::new(LeaseState::Starting) })
+    }
+
+    /// A lease that counts as live at once.
+    fn live(ledger: &'static Ledger, kind: SinkKind) -> Arc<Self> {
+        count_live(ledger, kind, true);
+        Arc::new(Self { ledger, kind, state: Mutex::new(LeaseState::Live) })
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, LeaseState> {
@@ -81,16 +83,25 @@ impl Lease {
 
     /// `Starting` → `Live`; anything else stays as it is.
     fn promote(&self) {
+        self.promote_around(|| {});
+    }
+
+    /// [`Self::promote`], running `between` once the lease counts as live and
+    /// before it stops counting as starting: the seam a test uses to take a
+    /// snapshot exactly inside the window that order guards (#802).
+    fn promote_around(&self, between: impl FnOnce()) {
         let mut state = self.state();
         if *state == LeaseState::Starting {
             count_live(self.ledger, self.kind, true);
+            between();
             self.ledger.starting.fetch_sub(1, Ordering::SeqCst);
             *state = LeaseState::Live;
         }
     }
 
-    /// The writer is gone: stop counting it, wherever it was counted.
-    pub(super) fn end(&self) {
+    /// The writer is gone: stop counting it, wherever it was counted. Only
+    /// the writer's `Drop` calls it, so a writer cannot outlive its lease.
+    fn end(&self) {
         let mut state = self.state();
         match *state {
             LeaseState::Starting => {
@@ -109,6 +120,8 @@ impl Lease {
 /// `auditing_live` can exceed `sinks_live` there; the formatters saturate). Out:
 /// `live_sinks` last as well — the driver has spawned its final rows before
 /// this, and `Ledger::snapshot` reads the writers before `pending` (see there).
+/// So one read can also see a Matrix driver mid-exit as live but not
+/// auditing, and say it at INFO; its rows are already spawned and counted.
 /// A promotion calls this BEFORE it uncounts `starting`, which the snapshot
 /// reads first.
 fn count_live(ledger: &'static Ledger, kind: SinkKind, inc: bool) {
@@ -128,6 +141,10 @@ fn count_live(ledger: &'static Ledger, kind: SinkKind, inc: bool) {
 /// A lease that is still starting. [`Starting::started`] once the driver can
 /// hold rows it will audit; dropped instead (the bring-up failed or was
 /// abandoned), the lease stays *starting* until its writer goes.
+///
+/// Forgetting `started()` on a bring-up that DID succeed fails toward
+/// under-reporting: that driver is neither waited for nor a loss, only an
+/// INFO line. `login_outcome`'s test pins each of its arms for that reason.
 #[must_use = "a starting lease is never waited for or reported as a loss until `started()`"]
 pub(crate) struct Starting(Arc<Lease>);
 
@@ -141,15 +158,17 @@ impl Starting {
 
 impl SinkWriter {
     /// A writer on `ledger`, spawning onto `handle`, whose lease counts at
-    /// once: for a driver built in the same call (email's). The daemon passes
-    /// [`super::daemon_ledger`]; tests pass their own, so their counts are theirs.
+    /// once: for a driver whose bring-up is never abandoned with the writer
+    /// still held (email's: the writer is handed straight to the driver, with
+    /// no timeout between). The daemon passes [`super::daemon_ledger`]; tests
+    /// pass their own, so their counts are theirs.
     pub(crate) fn with_ledger(
         ledger: &'static Ledger,
         pool: PgPool,
         handle: tokio::runtime::Handle,
         kind: SinkKind,
     ) -> Self {
-        let lease = Lease::new(ledger, kind, LeaseState::Live);
+        let lease = Lease::live(ledger, kind);
         Self { ledger, handle, pool, lease }
     }
 
@@ -162,7 +181,7 @@ impl SinkWriter {
         handle: tokio::runtime::Handle,
         kind: SinkKind,
     ) -> (Self, Starting) {
-        let lease = Lease::new(ledger, kind, LeaseState::Starting);
+        let lease = Lease::starting(ledger, kind);
         let starting = Starting(lease.clone());
         (Self { ledger, handle, pool, lease }, starting)
     }

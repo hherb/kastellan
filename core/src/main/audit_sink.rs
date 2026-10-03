@@ -30,35 +30,36 @@
 //!   (`observed_at`), because `audit_log.ts` is the insert's.
 //! - **At shutdown (#792).** Before the pool closes, `main` calls [`drain`]:
 //!   it waits, bounded by [`DRAIN_BOUND`], for every driver holding a
-//!   started sink to exit (one whose bring-up never finished is not waited
-//!   for: `audit_sink_lease.rs`) (a Matrix driver audits its still-queued replies as it goes) and for
-//!   every spawned row to finish, then **closes** the ledger. What is still
-//!   pending then is reported on the `[audit-lost]` marker
-//!   ([`report_drained`]), and a row a late driver tries to write after that
-//!   is refused ([`Unwritten::AfterShutdown`]) and, thinned past a flood,
-//!   reported by its sink — rather than spawned onto a runtime that is going
-//!   away, where tokio drops it without a word.
+//!   started sink to exit (a Matrix driver audits its still-queued replies as
+//!   it goes; one whose bring-up never finished is not waited for, see
+//!   `audit_sink_lease.rs`) and for every spawned row to finish, then
+//!   **closes** the ledger. What is still pending then is reported on the
+//!   `[audit-lost]` marker ([`report_drained`]), and a row a late driver
+//!   tries to write after that is refused ([`Unwritten::AfterShutdown`]) and,
+//!   thinned past a flood, reported by its sink — rather than spawned onto a
+//!   runtime that is going away, where tokio drops it without a word.
 //!
 //! The shutdown line names the first few pending rows (#797: a cancelled task
 //! never runs its `on_failure`), counts a stuck driver that audits on exit as
 //! a possible loss (#796: its queued replies go unaudited) but not one that
 //! never finished starting (#802, `audit_sink_lease.rs`), and counts the
 //! refused rows whose reports were thinned out (#798, `audit_sink_thinning.rs`)
-//! — the lines are in `audit_sink_report.rs`. Rows refused after that line,
-//! past the thinning, are counted again by [`unreported_since`] for one last
-//! line just before the daemon exits (#802).
+//! — the lines are in `audit_sink_report.rs`. Rows refused after the drain's
+//! snapshot, past the thinning, are counted afresh for the daemon's last
+//! lines ([`close_then_report_unreported`], #802): said once before the pool
+//! closes, because that close has no bound, and once more after it.
 //!
 //! What still goes unreported: a row lost to a crash (SIGKILL, OOM, a panic
-//! under `panic = "abort"`), because nothing runs after one; and a row
-//! refused, past the thinning, between that last line and the process's exit.
-//! That gap is usually an instant, but not always: dropping the runtime waits
-//! for its blocking tasks, so a Matrix login abandoned at its timeout can hold
-//! the process open until the SDK's own timeouts end it, or the service
-//! manager's SIGKILL.
+//! under `panic = "abort"`), because nothing runs after one; a row refused,
+//! past the thinning, during a pool close the service manager's SIGKILL ends;
+//! and one refused between the last line and the process's exit. That last
+//! gap is usually an instant, but not always: dropping the runtime waits for
+//! its blocking tasks, so a Matrix login abandoned at its timeout can hold the
+//! process open until the SDK's own timeouts end it, or the SIGKILL (#805).
 //!
 //! What may be said twice: a row caught by the final snapshot in the middle
-//! of being refused is counted as pending there and then refused (and
-//! reported, unless thinned) — over-counting, which is the safe direction.
+//! of being refused is counted as pending there and then refused — reported,
+//! or counted in the last lines — over-counting, which is the safe direction.
 //!
 //! One writer for both channels (Matrix's `channel.reply_undelivered`, email's
 //! `channel.skipped_ack_only`). Before #789 each sink hand-rolled its own
@@ -82,6 +83,11 @@ const MAX_CONNECTIONS: usize = 4;
 /// honest burst (a Matrix queue's overflow, one email poll's skipped ids), and
 /// a bound on what a flood or a wedged Postgres can pile up.
 const MAX_QUEUED: usize = 1024;
+
+const _: () = assert!(
+    MAX_CONNECTIONS > 0 && MAX_QUEUED >= MAX_CONNECTIONS,
+    "no connection would wedge every row until the drain called it lost"
+);
 
 /// How long [`drain`] waits at shutdown for the channel drivers to exit and
 /// their rows to land.
@@ -186,17 +192,19 @@ impl Ledger {
     /// live reads after it can only see, so a driver is counted once or twice
     /// (the safe direction), never not at all.
     pub(crate) fn snapshot(&self) -> InFlight {
-        self.snapshot_around(|| {})
+        self.snapshot_around(|| {}, || {})
     }
 
-    /// [`Self::snapshot`], running `between` after the writers are counted and
-    /// before `pending` is: the seam a test uses to put a driver's last row
-    /// and its exit exactly inside the window the read order guards (#799).
-    fn snapshot_around(&self, between: impl FnOnce()) -> InFlight {
+    /// [`Self::snapshot`], running `after_starting` once `starting` is read
+    /// and `after_live` once the writers are: the seams a test uses to promote
+    /// a lease (#802), or put a driver's last row and its exit (#799), exactly
+    /// inside the window each read order guards.
+    fn snapshot_around(&self, after_starting: impl FnOnce(), after_live: impl FnOnce()) -> InFlight {
         let starting = self.starting.load(Ordering::SeqCst);
+        after_starting();
         let sinks_live = self.live_sinks.load(Ordering::SeqCst);
         let auditing_live = self.live_auditing.load(Ordering::SeqCst);
-        between();
+        after_live();
         let rows_pending = self.pending.load(Ordering::SeqCst);
         InFlight { rows_pending, sinks_live, auditing_live, starting }
     }
@@ -209,13 +217,20 @@ impl Ledger {
 
     /// [`Self::snapshot`], plus who the pending rows are and how many refused
     /// rows went unreported. Taken once, at the end of [`drain`].
-    pub(crate) fn final_snapshot(&self) -> Drained {
+    fn final_snapshot(&self) -> Drained {
         let in_flight = self.snapshot();
         let named = {
             let labels = self.labels.lock().unwrap_or_else(|p| p.into_inner());
             labels.values().take(NAMED_AT_SHUTDOWN).cloned().collect()
         };
         Drained { in_flight, named, unreported: self.unreported() }
+    }
+
+    /// Test builds only: the labels [`drain`] would name now, for a sink's
+    /// tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn named_pending(&self) -> Vec<String> {
+        self.final_snapshot().named
     }
 }
 
@@ -229,36 +244,9 @@ pub(crate) fn daemon_ledger() -> &'static Ledger {
     &LEDGER
 }
 
-/// Why a row was not written, as `on_failure` is told.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Unwritten<'a> {
-    /// The insert ran and failed.
-    Insert(&'a kastellan_db::DbError),
-    /// Never tried: the queue was full.
-    Shed,
-    /// Never tried: the daemon had already drained its audit writes and was
-    /// shutting down (#792).
-    AfterShutdown,
-}
-
-impl std::fmt::Display for Unwritten<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Insert(e) => e.fmt(f),
-            Self::Shed => f.write_str(
-                "shed: too many audit inserts already waiting for the pool (a flood of \
-                 audited events, or a wedged Postgres)",
-            ),
-            Self::AfterShutdown => f.write_str(
-                "not tried: the daemon was shutting down and had already drained its audit \
-                 writes",
-            ),
-        }
-    }
-}
-
 /// One sink's way to write rows, and its lease on the ledger — see
 /// `audit_sink_lease.rs`, which also has its constructors and its `Drop`.
+/// Never `Clone`: a clone's drop would end a lease the other still holds.
 pub(crate) struct SinkWriter {
     ledger: &'static Ledger,
     handle: tokio::runtime::Handle,
@@ -280,8 +268,8 @@ impl SinkWriter {
     /// through; the shutdown lines count the rest.
     ///
     /// `label` names the row for that shutdown line (#797), which cannot ask
-    /// `on_failure` — a task cancelled with the runtime never runs it. Keep it
-    /// short and free of the row's content: a channel and a [`quoted_id`].
+    /// `on_failure` — a task cancelled with the runtime never runs it. A
+    /// [`RowLabel`], so a worker-supplied id in it is always quoted (#802).
     ///
     /// `Ok` is the spawned insert's handle, for tests, which await it to see
     /// the outcome; in production it is dropped, which detaches the task: it
@@ -292,7 +280,7 @@ impl SinkWriter {
         actor: &'static str,
         action: &'static str,
         payload: serde_json::Value,
-        label: String,
+        label: RowLabel,
         on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
     ) -> Result<tokio::task::JoinHandle<()>, Unwritten<'static>> {
         self.spawn_around(actor, action, payload, label, on_failure, || {})
@@ -306,7 +294,7 @@ impl SinkWriter {
         actor: &'static str,
         action: &'static str,
         payload: serde_json::Value,
-        label: String,
+        label: RowLabel,
         on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
         between: impl FnOnce(),
     ) -> Result<tokio::task::JoinHandle<()>, Unwritten<'static>> {
@@ -314,13 +302,17 @@ impl SinkWriter {
         // Counts the row (see `Ledger`'s doc for why before `closed` is read).
         let row = PendingRow::new(ledger, label);
         between();
+        // A refused row is counted as refused BEFORE it stops counting as
+        // pending, so a snapshot between the two sees it twice, never neither.
         if ledger.closed.load(Ordering::SeqCst) {
+            let why = refuse(&ledger.late, Unwritten::AfterShutdown, on_failure);
             drop(row);
-            return Err(refuse(&ledger.late, Unwritten::AfterShutdown, on_failure));
+            return Err(why);
         }
         let Ok(queued) = ledger.queued.try_acquire() else {
+            let why = refuse(&ledger.shed, Unwritten::Shed, on_failure);
             drop(row);
-            return Err(refuse(&ledger.shed, Unwritten::Shed, on_failure));
+            return Err(why);
         };
         let pool = self.pool.clone();
         Ok(self.handle.spawn(async move {
@@ -365,10 +357,10 @@ struct PendingRow {
 }
 
 impl PendingRow {
-    fn new(ledger: &'static Ledger, label: String) -> Self {
+    fn new(ledger: &'static Ledger, label: RowLabel) -> Self {
         ledger.pending.fetch_add(1, Ordering::SeqCst);
         let id = ledger.next_row.fetch_add(1, Ordering::SeqCst);
-        ledger.labels.lock().unwrap_or_else(|p| p.into_inner()).insert(id, label);
+        ledger.labels.lock().unwrap_or_else(|p| p.into_inner()).insert(id, label.into_string());
         Self { ledger, id }
     }
 }
@@ -398,28 +390,32 @@ pub(crate) struct InFlight {
 
 impl InFlight {
     /// Nothing left to wait for. A starting lease is not: its driver never
-    /// ran, so it has no row to write.
+    /// came up — no bus was built, so no reply was queued and it has no row
+    /// to write.
     fn settled(&self) -> bool {
         self.rows_pending == 0 && self.sinks_live == 0
     }
 }
 
 /// What [`drain`] left behind: the last [`InFlight`], who the pending rows
-/// are, and how many refused rows went unreported.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// are, and how many refused rows went unreported. Its fields are this
+/// module's, and outside tests only [`drain`] makes one, so the baseline
+/// [`close_then_report_unreported`] counts from is always the drain's own.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(Clone, Default))]
 pub(crate) struct Drained {
-    pub(crate) in_flight: InFlight,
+    in_flight: InFlight,
     /// Labels of the oldest pending rows, at most [`NAMED_AT_SHUTDOWN`].
-    pub(crate) named: Vec<String>,
+    named: Vec<String>,
     /// Refused rows that never got a report of their own, so far.
-    pub(crate) unreported: usize,
+    unreported: usize,
 }
 
 /// Shutdown: wait up to [`DRAIN_BOUND`] for the daemon's channel drivers to
 /// exit and their rows to land, then close the ledger, so a row a late driver
 /// tries after this is refused and reported ([`Unwritten::AfterShutdown`]).
 /// Call it after the channels are stopped and before the pool closes; hand the
-/// result to [`report_drained`], and later to [`unreported_since`].
+/// result to [`report_drained`], and then to [`close_then_report_unreported`].
 pub(crate) async fn drain() -> Drained {
     drain_ledger(&LEDGER, DRAIN_BOUND).await
 }
@@ -442,14 +438,8 @@ fn close_and_count(ledger: &'static Ledger, between: impl FnOnce()) -> Drained {
     ledger.final_snapshot()
 }
 
-/// The refused rows thinned out since `drained` was reported — late rows a
-/// still-running driver tried after the shutdown line (#802). For the last
-/// line before the daemon exits ([`report_unreported_since`]).
-pub(crate) fn unreported_since(drained: &Drained) -> usize {
-    unreported_on_since(&LEDGER, drained)
-}
-
-/// [`unreported_since`] on `ledger`.
+/// The refused rows thinned out since `drained` was taken — late rows a
+/// still-running driver tried after the drain's snapshot (#802).
 fn unreported_on_since(ledger: &'static Ledger, drained: &Drained) -> usize {
     ledger.unreported().saturating_sub(drained.unreported)
 }
@@ -464,7 +454,10 @@ use thinning::Thinning;
 
 #[path = "audit_sink_report.rs"]
 mod report;
-pub(crate) use report::{emit_report, quoted_id, report_drained, report_unreported_since, Reporter};
+pub(crate) use report::{
+    close_then_report_unreported, emit_report, quoted_id, report_drained, Reporter, RowLabel,
+    Unwritten,
+};
 
 /// Test builds only: a Postgres that never answers, for proving a sink does
 /// not wait for its insert — and that it did try one. Shared by this module's

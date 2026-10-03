@@ -50,8 +50,8 @@ impl UndeliveredReason {
 /// so no sink can write one — and since #800 it is also what the bus's own
 /// writer builds, so [`Self::payload`] is the row's only definition.
 ///
-/// `conversation` is not in the row, on purpose (the row's shape predates it
-/// and observation SQL reads it as is). It is here so a sink whose insert
+/// `conversation` is not in the row, on purpose (the row's shape predates it,
+/// and operators' queries read it as is). It is here so a sink whose insert
 /// fails can name the conversation in its own log line, matching the driver's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UndeliveredReply<'a> {

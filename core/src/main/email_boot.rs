@@ -138,7 +138,7 @@ fn email_skipped_audit_sink(
     Box::new(move |skipped| {
         let (actor, action, payload) = email_skipped_row(&skipped);
         let message_id = skipped.message_id.to_string();
-        let label = format!("email skipped message {}", crate::audit_sink::quoted_id(&message_id));
+        let label = crate::audit_sink::RowLabel::new("email skipped message", &message_id, None);
         // A refused row is reported through the closure, so its `Err` is not
         // needed here.
         let _ = writer.spawn(actor, action, payload, label, move |why| {
@@ -148,8 +148,9 @@ fn email_skipped_audit_sink(
 }
 
 /// The email sink as `attempt` builds it, on `ledger`. Its lease is live at
-/// once, not *starting*: the driver is built in the same synchronous call, so
-/// the lease cannot outlive an abandoned bring-up. A function, so a test can
+/// once, not *starting*: `attempt` hands the writer straight to
+/// `spawn_email_worker`, synchronously and with no timeout between, so a
+/// failed bring-up drops it rather than abandoning it. A function, so a test can
 /// see the lease `attempt` takes (#802).
 fn skipped_sink(
     ledger: &'static crate::audit_sink::Ledger,

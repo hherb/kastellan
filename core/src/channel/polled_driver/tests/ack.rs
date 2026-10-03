@@ -454,6 +454,8 @@ fn skipped_ids_are_neither_acked_nor_audited_once_the_bus_has_gone() {
 fn the_same_worker_s_skipped_ids_are_acked_and_audited_while_the_bus_is_up() {
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
     let calls = PollOutlivesTheBus {
+        // Only releases the fake's first poll at once; the driver's bus stays
+        // up until `drop(driver)` below.
         bus_gone: Arc::new(AtomicBool::new(true)),
         polls: AtomicUsize::new(0),
         log: log.clone(),

@@ -60,12 +60,6 @@ fn the_reply_undelivered_sink_does_not_hold_the_driver_thread() {
     assert_returns_at_once("the Matrix reply-undelivered sink", || {
         sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp, time::OffsetDateTime::now_utc()))
     });
-    // #802: the row's label for the shutdown line, read at once — the row is
-    // pending until the stalled pool gives up on it.
-    assert_eq!(
-        LEDGER.final_snapshot().named,
-        [r#"matrix reply to conversation "!room:srv" (gave_up)"#]
-    );
     assert_insert_attempted("the Matrix reply-undelivered sink", &listener);
     // #792: the sink holds its lease until the driver drops it, so the
     // shutdown drain waits for the driver that owns it.
@@ -153,10 +147,36 @@ fn attempt_s_sink_starts_as_starting_and_audits_on_exit_once_started() {
     assert_eq!(LEDGER.snapshot(), InFlight::default());
 }
 
+/// #802: the row `attempt`'s sink spawns is named for the shutdown line by
+/// its conversation, quoted, and its reason. No connection is ever free, so
+/// the row stays pending — and named — for as long as the test reads it.
+#[test]
+fn attempt_s_sink_names_its_pending_row() {
+    use crate::audit_sink::{Bounds, Ledger};
+    use kastellan_core::channel::{
+        ChannelId, ConversationId, OutgoingMessage, PeerId, UndeliveredReason, UndeliveredReply,
+    };
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let rt = tokio::runtime::Runtime::new().expect("a runtime");
+    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+    let (sink, _starting) = reply_sink(&LEDGER, pool, rt.handle().clone(), |_, _| {});
+    let out = OutgoingMessage {
+        channel: ChannelId("matrix".into()),
+        peer: PeerId("@me:srv".into()),
+        conversation: ConversationId("!room:srv".into()),
+        body: "b".into(),
+    };
+    sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp, time::OffsetDateTime::now_utc()));
+    assert_eq!(
+        LEDGER.named_pending(),
+        [r#"matrix reply to conversation "!room:srv" (gave_up)"#]
+    );
+}
+
 /// #802: only a login that came up starts the sink's lease. A failed, a
 /// cancelled or panicked, and a timed-out login leave it *starting* — the
-/// timed-out one being the abandoned bring-up whose lease made every shutdown
-/// wait and report a loss.
+/// timed-out one being the abandoned bring-up whose lease made a shutdown
+/// after it wait and report a loss.
 #[test]
 fn only_a_login_that_came_up_starts_the_sink_s_lease() {
     use crate::audit_sink::{Bounds, InFlight, Ledger};

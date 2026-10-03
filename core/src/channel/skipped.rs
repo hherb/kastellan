@@ -54,9 +54,12 @@ impl SkippedId<'_> {
     /// the row's identity, and a prefix two ids could share would make the row
     /// name a message it is not. What bounds it is the audit layer's own
     /// payload cap, which every insert applies (`kastellan_db::audit::
-    /// truncate_payload`): a payload over its budget is stored as a SHA-256
-    /// and a length of the whole, so an oversized id still leaves a row that
-    /// says a skip happened, with a digest that identifies it exactly.
+    /// truncate_payload`): a payload over its budget is stored as
+    /// `{_truncated, sha256, len}` of the WHOLE payload. So an oversized id
+    /// still leaves a row whose action says a skip happened, but channel,
+    /// reason and time go with the id, and the digest only confirms a payload
+    /// rebuilt byte for byte — it cannot name the id. The driver's own line
+    /// for the skip is what names it.
     pub fn payload(&self) -> serde_json::Value {
         serde_json::json!({
             "channel": self.channel.0,

@@ -64,27 +64,31 @@ Closes the #792 → #802 residue chain. `core/src/main/audit_sink*.rs` is now si
 ledger + `spawn` (`audit_sink.rs`), lease (`_lease.rs`), pure thinning (`_thinning.rs`), report
 lines (`_report.rs`), and their tests. What binds:
 
-- **A lease is *starting* until its driver is up** (`SinkWriter::starting_with_ledger` → `Starting`).
-  Matrix's `attempt` builds it through `reply_sink`; `login_outcome` calls `started()` **only** for a
-  login that came up. A starting lease is not waited for by `drain` and is said at INFO, not
-  `[audit-lost]`. Email's lease is live at once (`skipped_sink`; its bring-up is synchronous).
+- **A lease is *starting* until its driver is up** (`SinkWriter::starting_with_ledger` → `Starting`);
+  `login_outcome` calls `started()` **only** for a login that came up. Not waited for by `drain`;
+  said at INFO. Email's lease is live at once (`skipped_sink`; its bring-up is synchronous).
   `SinkKind::{AuditsOnExit, SilentOnExit}`. ⚠️ **`Ledger::snapshot` reads `starting`, then the
-  live counts, then `pending`** — both orders are load-bearing; `snapshot_around` is the test seam.
+  live counts, then `pending`**, and `promote` counts live before uncounting `starting` — all
+  load-bearing; seams `snapshot_around` (two closures) and `Lease::promote_around`.
 - **Close-vs-spawn handshake** has deterministic seams: `close_and_count` (drain: close, then count)
   and `SinkWriter::spawn_around` (spawn: count, then read `closed`). ⚠️ A contention stress test
   could not kill a reversed read order — mutate against the seams, not the stress.
 - **Thinning is per burst** (pure `Thinning`, 60 s quiet gap, clock injected); `shed` and `late`
-  apart. Rows thinned **after** the shutdown report: `unreported_since` → one last line in `main`.
-  ⚠️ Still a gap: rows refused between that line and exit, which can last while the runtime drop
-  waits on an abandoned login's blocking task (#805).
-- `spawn` → `Result<JoinHandle, Unwritten<'static>>`. Ids in lines/labels are **quoted** (`{:?}`)
-  and capped. `UndeliveredReply::payload` is the reply row's **only** definition (the bus builds
-  the view). `observed_at_json` warns when it stores null. ⚠️ `SkippedId::message_id` is **not**
-  capped on purpose — the audit layer's 4 KiB cap stores an oversized payload as sha256 + len.
-- ⚠️ **Test fixture lesson:** the stalled pool fails an insert after 1.5 s, so a test that needs a
-  row to *stay pending* must use a ledger with **`connections: 0`** (and never await the row).
+  apart. Rows thinned **after** the drain: `close_then_report_unreported` in `main` says them
+  **before** the mirror + pool close (sqlx's `Pool::close` has no bound) and again after. It takes
+  `Drained` by value; `Drained`'s fields are private, `Default` test-only. ⚠️ Gap: rows refused
+  after the last line, while the runtime drop waits on an abandoned login (#805).
+- `spawn` → `Result<JoinHandle, Unwritten<'static>>`, label a `RowLabel` (always `quoted_id`'d).
+  `UndeliveredReply::payload` is the reply row's **only** definition (the bus builds the view; the
+  lib's `pub fn reply_undelivered_payload` is gone — a 0.x API break for the next release notes).
+  `observed_at_json` warns when it stores null. ⚠️ `SkippedId::message_id` is **not**
+  capped on purpose — the audit layer's 4 KiB cap stores an oversized payload as sha256 + len of the
+  WHOLE payload, which loses channel/reason/time too ([#809](https://github.com/hherb/kastellan/issues/809)).
+- ⚠️ **Fixture lesson:** the stalled pool fails an insert after 1.5 s; a row that must *stay
+  pending* needs a **`connections: 0`** ledger (both boot tests' label checks now do).
 - New `core/tests/audit_lost_stderr_fallback_e2e.rs` (re-exec, hostile id, ERROR level) — not in
-  any gate profile, like its `worker_refusal` sibling. Mutants 10/10.
+  any gate profile, like its `worker_refusal` sibling. Mutants 10/10 + 7/7 (review round). Filed:
+  #807 (flood counts said only at a clean stop), #808 (bus insert failure off `[audit-lost]`), #809–#811.
 
 ### Previous (2026-09-30/10-01): #792 + #793 (PR #795), #796–#800 (PR #801) — what still binds
 
@@ -282,8 +286,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 5. **First DGX deploy of #791 + #795 + #801 + #806:** watch one restart for the `[audit-lost]` /
    INFO drain lines (a Matrix login still in progress at shutdown should now be INFO "not finished
    starting", not a loss), and query an `observed_at` on the next `channel.*` row. Then
-   [#805](https://github.com/hherb/kastellan/issues/805) (`main`'s last-line wiring has no seam;
-   the runtime drop can outlive the last line) — low.
+   [#805](https://github.com/hherb/kastellan/issues/805) (the runtime drop can outlive the last
+   line) and #807–#811 above — #807 and #808 first.
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
@@ -381,7 +385,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#796–#800 + #802 — **the gate that stands**) | PR #806 (`54e882b0`) | **4808 / 0 / 52**, **191** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against `main` ≈ 4782 (the row below + #801's review round's 2 bin tests, recorded after it): bin 47 → 66 (+19), core lib +5, new `audit_lost_stderr_fallback_e2e` +2 / +2 ignored (its inner fixtures). Mutants 10/10 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-802`, **27** | **23** Mac |
+| **Mac** (#796–#800 + #802 — **the gate that stands**) | PR #806 (`54e882b0`) | **4808 / 0 / 52**, **191** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against `main` ≈ 4782 (the row below + #801's review round's 2 bin tests, recorded after it): bin 47 → 66 (+19), core lib +5, new `audit_lost_stderr_fallback_e2e` +2 / +2 ignored (its inner fixtures). Mutants 10/10. **Review round (not a full sweep):** bin 66 → **73**, core lib 2336 / 1 ignored and the e2e unchanged — expect **4815** next sweep; mutants 7/7 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-802`, **27** | **23** Mac |
 | **Mac** (#796–#800 — superseded) | PR #801 | **4780 / 0 / 50** after the one flaky assertion was fixed: the sweep read **4779 / 1 / 50**, **190** suites, `[WARN]` **0**, `[SKIP]` **23**; the failure was my new stress test's `==` (see above), re-run 5× green + the whole bin suite (45) after the fix, not a second full sweep. **Predicted exactly** against the row below: bin 32 → 45 (+13), core lib +1 (`audit_lost`). Mutants 4/4 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-796` | **23** Mac |
 | **Mac** (#792 + #793 — superseded) | the doc-fix commit on PR #795 (`c9cffe77`) | **4766 / 0 / 50**, **190** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23** (unchanged), tree hash identical before and after; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against the row below: #791's review round +4 (`kastellan` bin 20 → 24, measured here first) and this PR +21 (core lib +13: `audit_lost` 3, `skipped` 2, `undelivered` 1, driver `tests/audit` 5, `tests/ack` 1, delivery 1; bin 24 → 32). Mutants 15/15 | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-792`, **27** `Checking kastellan` | **23** Mac |
 

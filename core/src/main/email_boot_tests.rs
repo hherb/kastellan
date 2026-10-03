@@ -57,9 +57,6 @@ fn the_skipped_id_sink_does_not_hold_the_driver_thread() {
         observed_at: time::OffsetDateTime::now_utc(),
     };
     assert_returns_at_once("the email skipped-id sink", || sink(skipped));
-    // #802: the row's label for the shutdown line, read at once — the row is
-    // pending until the stalled pool gives up on it.
-    assert_eq!(LEDGER.final_snapshot().named, [r#"email skipped message "<id@host>""#]);
     assert_insert_attempted("the email skipped-id sink", &listener);
     // #792: the sink holds its lease until the driver drops it, so the
     // shutdown drain waits for the driver that owns it.
@@ -161,6 +158,26 @@ fn attempt_s_sink_is_live_at_once_and_silent_on_exit() {
     assert_eq!(LEDGER.snapshot(), InFlight { sinks_live: 1, ..InFlight::default() });
     drop(sink);
     assert_eq!(LEDGER.snapshot(), InFlight::default());
+}
+
+/// #802: the row `attempt`'s sink spawns is named for the shutdown line by
+/// its message id, quoted. No connection is ever free, so the row stays
+/// pending — and named — for as long as the test reads it.
+#[test]
+fn attempt_s_sink_names_its_pending_row() {
+    use crate::audit_sink::{Bounds, Ledger};
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let rt = tokio::runtime::Runtime::new().expect("a runtime");
+    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+    let sink = skipped_sink(&LEDGER, pool, rt.handle().clone(), |_, _| {});
+    let channel = ChannelId("email".into());
+    sink(kastellan_core::channel::SkippedId {
+        channel: &channel,
+        message_id: "<id@host>",
+        reason: "unattributable",
+        observed_at: time::OffsetDateTime::now_utc(),
+    });
+    assert_eq!(LEDGER.named_pending(), [r#"email skipped message "<id@host>""#]);
 }
 
 #[test]

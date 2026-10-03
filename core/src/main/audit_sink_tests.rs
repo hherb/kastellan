@@ -284,14 +284,14 @@ fn the_final_snapshot_names_pending_rows_up_to_a_few() {
     let tasks: Vec<_> = (0..7)
         .map(|i| {
             writer
-                .spawn("a", "b", serde_json::json!({}), format!("row-{i}"), |_| {})
+                .spawn("a", "b", serde_json::json!({}), format!("row-{i}").as_str().into(), |_| {})
                 .expect("not shed")
         })
         .collect();
     let d = LEDGER.final_snapshot();
     assert_eq!(d.in_flight.rows_pending, 7);
     assert_eq!(d.named.len(), NAMED_AT_SHUTDOWN, "only a few are named");
-    assert!(d.named.iter().all(|n| n.starts_with("row-")), "{:?}", d.named);
+    assert_eq!(d.named, ["row-0", "row-1", "row-2", "row-3", "row-4"], "the oldest, in order");
     for t in tasks {
         rt.block_on(t).expect("the insert task ran to completion");
     }
@@ -320,8 +320,8 @@ fn drain_waits_for_a_pending_row_with_no_live_sink() {
 
 /// #799: the close-versus-spawn handshake under real contention. Every spawn
 /// that was NOT refused must be counted by the final snapshot — a row counted
-/// by neither would be lost with no line. The pool is stalled, so no row
-/// finishes (and none can leave the count) during the test.
+/// by neither would be lost with no line. No connection is ever free, so no
+/// row finishes (and none can leave the count) during the test.
 #[test]
 fn a_row_spawned_while_the_drain_closes_is_refused_or_counted() {
     // No connection is ever free, so no accepted row can finish and leave the
@@ -386,4 +386,46 @@ fn rows_thinned_after_the_drain_are_counted_for_the_last_line() {
     assert_eq!(unreported_on_since(&LEDGER, &d), 0, "so none is counted twice");
     assert_eq!(refuse_20(), 17, "20 refused after the drain, a burst of their own");
     assert_eq!(unreported_on_since(&LEDGER, &d), 3, "only the late ones");
+}
+
+/// What the last lines said, for the test below.
+static LAST_SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn record_last(_: kastellan_core::worker_stderr::AuditLostWriter, line: &str) {
+    LAST_SAID.lock().unwrap().push(line.to_string());
+}
+
+/// #806 review: the last word is said BEFORE the close as well as after it.
+/// A close that never returns — sqlx's `Pool::close` waiting on an insert
+/// stuck in a wedged Postgres — cannot swallow the rows thinned since the
+/// drain; rows thinned while the close runs get a line of their own, and none
+/// is counted in both.
+#[test]
+fn the_last_line_is_said_before_a_close_that_may_never_return() {
+    static NEVER_CLOSES: Ledger = Ledger::new(bounds(0, 1));
+    static CLOSES: Ledger = Ledger::new(bounds(0, 1));
+    let refuse_20 = |writer: &SinkWriter| {
+        for _ in 0..20 {
+            let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {});
+        }
+    };
+
+    let (rt, writer, _listener) = stalled_writer(&NEVER_CLOSES);
+    let d = rt.block_on(drain_ledger(&NEVER_CLOSES, Duration::ZERO));
+    refuse_20(&writer);
+    let close = report::close_on_then_report(&NEVER_CLOSES, &d, std::future::pending(), record_last);
+    let hung = rt.block_on(async { tokio::time::timeout(Duration::from_millis(50), close).await });
+    assert!(hung.is_err(), "POSITIVE CONTROL: the close never returned");
+    let said = |needle: &str| LAST_SAID.lock().unwrap().iter().filter(|l| l.contains(needle)).count();
+    assert_eq!(said("3 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
+
+    let (rt, writer, _listener) = stalled_writer(&CLOSES);
+    let d = rt.block_on(drain_ledger(&CLOSES, Duration::ZERO));
+    for _ in 0..5 {
+        refuse_20(&writer); // 100 late rows, 0..16 and 16, 32, 64 reported: 81 thinned
+    }
+    let close = async { refuse_20(&writer) }; // 20 more, 0 reported: 101 thinned
+    rt.block_on(report::close_on_then_report(&CLOSES, &d, close, record_last));
+    assert_eq!(said("81 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
+    assert_eq!(said("20 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
 }
