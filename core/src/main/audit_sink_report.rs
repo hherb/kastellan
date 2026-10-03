@@ -10,8 +10,8 @@ use std::time::Duration;
 use kastellan_core::worker_stderr::AuditLostWriter;
 
 use super::{
-    unreported_on_since, BurstTally, Drained, Ledger, SinkChannel, UnsaidCounts, DRAIN_BOUND,
-    LEDGER,
+    unreported_on_since, BurstTally, Drained, Ledger, SinkChannel, UnsaidCounts, Unreported,
+    DRAIN_BOUND, LEDGER,
 };
 
 /// Why a row was not written, as `on_failure` is told.
@@ -160,8 +160,9 @@ pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<St
 
 /// Pure: the `[audit-lost]` line for one channel's refused rows that got no
 /// report of their own (`audit_sink_thinning.rs`), or `None` when there were
-/// none (#798). Shed and late are said apart (#807): rows shed in last week's
-/// flood are not this shutdown's.
+/// none (#798). Said at shutdown, but not all refused then: shed and late are
+/// said apart (#807), because rows shed in last week's flood are not this
+/// shutdown's.
 pub(crate) fn format_unreported_at_shutdown(counts: UnsaidCounts) -> Option<String> {
     let total = counts.total();
     (total > 0).then(|| {
@@ -176,8 +177,7 @@ pub(crate) fn format_unreported_at_shutdown(counts: UnsaidCounts) -> Option<Stri
             kinds.push(format!("{} tried after shutdown began", counts.late));
         }
         format!(
-            "at shutdown, {} refused without a line of {}, to keep a flood from stalling its \
-             driver: {}",
+            "{} refused without a line of {}, to keep a flood from stalling its driver: {}",
             counted(total, "channel audit row", "was", "were"),
             if total == 1 { "its own" } else { "their own" },
             kinds.join("; "),
@@ -185,9 +185,10 @@ pub(crate) fn format_unreported_at_shutdown(counts: UnsaidCounts) -> Option<Stri
     })
 }
 
-/// Pure: a last `[audit-lost]` line, for `n` refused rows thinned out since
-/// the drain's snapshot (or since the line before it), or `None` when there
-/// were none (#802).
+/// Pure: a last `[audit-lost]` line, for `n` of one channel's refused rows
+/// thinned out since the drain's snapshot (or since the line before it), or
+/// `None` when there were none (#802). Said under that channel's writer
+/// ([`report_unreported_since`]).
 pub(crate) fn format_unreported_since(n: usize) -> Option<String> {
     (n > 0).then(|| {
         format!(
@@ -237,10 +238,14 @@ pub(crate) fn report_drained(d: &Drained, report: Reporter) {
     }
 }
 
-/// Say `unreported` thinned-out rows on the `[audit-lost]` marker, if any.
-fn report_unreported_since(unreported: usize, report: Reporter) {
-    if let Some(line) = format_unreported_since(unreported) {
-        report(AuditLostWriter::Shutdown, &line);
+/// Say `unreported` thinned-out rows on the `[audit-lost]` marker, if any:
+/// one line per channel, under its own writer (#807), as [`report_drained`]
+/// says the drain's.
+fn report_unreported_since(unreported: Unreported, report: Reporter) {
+    for channel in SinkChannel::ALL {
+        if let Some(line) = format_unreported_since(unreported.of(channel).total()) {
+            report(channel.writer(), &line);
+        }
     }
 }
 
@@ -273,7 +278,7 @@ pub(super) async fn close_on_then_report(
     let before = unreported_on_since(ledger, drained);
     report_unreported_since(before, report);
     close.await;
-    report_unreported_since(unreported_on_since(ledger, drained).saturating_sub(before), report);
+    report_unreported_since(unreported_on_since(ledger, drained).since(before), report);
 }
 
 #[cfg(test)]

@@ -27,8 +27,9 @@ pub const PAIRED_ACK_BODY: &str = "\u{2713} Paired \u{2014} you can now message 
 pub trait ChannelEvents: Send + Sync {
     /// Enqueue a channel task; returns its id.
     async fn enqueue(&self, lane: Lane, payload: Value) -> anyhow::Result<i64>;
-    /// Best-effort audit row: never fatal, and a row not written is reported
-    /// on the `[audit-lost]` marker (`PgChannelEvents`, #808).
+    /// Best-effort audit row: never fatal. The production impl,
+    /// `PgChannelEvents`, reports a failed insert on the `[audit-lost]`
+    /// marker (#808).
     async fn audit(&self, action: &str, payload: Value);
 }
 

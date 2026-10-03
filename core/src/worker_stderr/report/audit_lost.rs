@@ -14,7 +14,9 @@
 //! under a flood, failed against a wedged Postgres, or still pending when the
 //! daemon shuts down. Each of those says so on this marker, so a grep or an
 //! alert keyed on `[audit-lost]` sees every row the audit trail is missing,
-//! whatever the operator's `RUST_LOG`.
+//! whatever the operator's `RUST_LOG`. So, since #808, does a failed insert
+//! of the channel bus's own rows, which it awaits (`channel::pg_events` — its
+//! module doc says what that writer still misses).
 
 use super::delivery::warn_and_fall_back;
 use super::shared::format_stderr_fallback;
@@ -41,12 +43,14 @@ pub enum AuditLostWriter {
     Matrix,
     /// The email channel's `channel.skipped_ack_only` sink.
     Email,
-    /// The channel bus's own writer (`channel::pg_events`, #808): every
-    /// `channel.*` row the bus writes itself — `channel.received`, a
-    /// `channel.reply_undelivered` for a failed `send`, and the rest. The
-    /// line names the channel, since this writer serves all of them.
+    /// The channel bus's own writer (`channel::pg_events`, #808): the rows
+    /// the bus writes itself — `channel.received`, a
+    /// `channel.reply_undelivered` for a failed `send`, the other `channel.*`
+    /// rows, and `ask.resolved`. This writer serves every channel, so the line
+    /// names the row's channel and peer, and its ids, when the payload has them.
     Bus,
-    /// The daemon's shutdown drain: rows still pending when the pool closes.
+    /// The daemon's shutdown drain, for what is no one channel's: rows still
+    /// pending when the pool closes, and stuck drivers that audit on exit.
     Shutdown,
 }
 

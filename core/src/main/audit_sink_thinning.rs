@@ -1,6 +1,9 @@
 //! Which refused audit rows get a report of their own (#798), counted per
-//! burst (#802). Pure: the clock is passed in. Split out of `audit_sink.rs` to
-//! keep it under the 500-LOC soft cap; `#[path]`-included there.
+//! burst (#802), per channel (#807). [`Thinning`] and the predicates are pure
+//! — the clock is passed in; [`Refusals`] holds one behind a lock per channel
+//! and kind, and [`refuse`] reads the clock and reports. Split out of
+//! `audit_sink.rs` to keep it under the 500-LOC soft cap; `#[path]`-included
+//! there.
 //!
 //! A shed or refused row is reported by its sink **on the driver thread** (a
 //! tracing ERROR, or the marked stderr line when nothing records it — either
@@ -17,10 +20,16 @@
 //! **Each reported line carries its burst's count** (#807, [`BurstTally`]):
 //! which row of the burst it is, and how many before it went unsaid. Before
 //! #807 the 2^k-th lines were identical, and a flood's size was said only by
-//! a graceful shutdown — an OOM, a SIGKILL or a crash lost it, and a weeks-long
-//! daemon's alert saw ~18 anonymous lines for 10 000 rows. Now the last line
-//! said is within a factor of two of the burst's size, and the first row of
-//! the next burst says how the one before it ended.
+//! a graceful shutdown — an OOM, a SIGKILL or a crash lost it, and an alert
+//! saw 26 lines for 10 000 rows, alike but for their ids, none saying how big
+//! the flood was. Now the last line said is within a factor of two of the
+//! burst's size, and the first row of the next burst says how the one before
+//! it ended.
+//!
+//! What that leaves unsaid until then: the rows after a burst's last 2^k-th
+//! line. They are said by the next burst's first line on the same channel and
+//! kind, or by a graceful shutdown — and by neither if the daemon crashes
+//! first, or no row of that channel and kind is ever refused again (#817).
 //!
 //! **Each channel thins on its own** ([`Refusals`], #807). One shared count
 //! let a compromised email worker — its `skipped` list has no cap — hold a
@@ -72,25 +81,25 @@ pub(super) fn unreported_of(refused: usize) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BurstTally {
     /// This row is the `nth` refused in its burst, counting from 1.
-    pub(crate) nth: usize,
+    pub(super) nth: usize,
     /// How many of the burst's rows before this one got no line of their own.
-    pub(crate) unsaid_before: usize,
+    pub(super) unsaid_before: usize,
     /// The burst this row's quiet gap ended, if that burst left rows unsaid:
     /// said once, here — the first row of a burst is always reported.
-    pub(crate) ended: Option<EndedBurst>,
+    pub(super) ended: Option<EndedBurst>,
 }
 
 /// A burst that ended with rows left unsaid (#807).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EndedBurst {
     /// Rows refused in it.
-    pub(crate) rows: usize,
+    pub(super) rows: usize,
     /// Of those, the ones with no line of their own.
-    pub(crate) unsaid: usize,
+    pub(super) unsaid: usize,
 }
 
 impl std::fmt::Display for BurstTally {
-    /// `refused row 1024 of this burst (1007 before it had no line of their
+    /// `refused row 1025 of this burst (1002 before it had no line of their
     /// own)`, then, on a new burst's first row, how the last one ended.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "refused row {} of this burst", self.nth)?;
@@ -206,7 +215,7 @@ impl Refusals {
         }
     }
 
-    /// `channel`'s rows shed on the caller's thread.
+    /// `channel`'s rows shed: the queue was full.
     pub(super) fn shed(&self, channel: SinkChannel) -> &Mutex<Thinning> {
         &self.of(channel).shed
     }
@@ -227,41 +236,57 @@ impl Refusals {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct UnsaidCounts {
     /// Shed: too many inserts already waiting for the pool.
-    pub(crate) shed: usize,
+    pub(super) shed: usize,
     /// Tried after the shutdown drain closed the ledger.
-    pub(crate) late: usize,
+    pub(super) late: usize,
 }
 
 impl UnsaidCounts {
-    pub(crate) fn total(self) -> usize {
+    pub(super) fn total(self) -> usize {
         self.shed + self.late
+    }
+
+    /// The rows counted since `base` was taken. Each count only grows, so the
+    /// saturation hides nothing.
+    fn since(self, base: Self) -> Self {
+        Self { shed: self.shed.saturating_sub(base.shed), late: self.late.saturating_sub(base.late) }
     }
 }
 
 /// Every channel's [`UnsaidCounts`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Unreported {
-    pub(crate) matrix: UnsaidCounts,
-    pub(crate) email: UnsaidCounts,
+    pub(super) matrix: UnsaidCounts,
+    pub(super) email: UnsaidCounts,
 }
 
 impl Unreported {
-    pub(crate) fn of(self, channel: SinkChannel) -> UnsaidCounts {
+    pub(super) fn of(self, channel: SinkChannel) -> UnsaidCounts {
         match channel {
             SinkChannel::Matrix => self.matrix,
             SinkChannel::Email => self.email,
         }
     }
 
-    /// Every channel's, both kinds.
-    pub(crate) fn total(self) -> usize {
+    /// Test builds only: every channel's, both kinds. The daemon says each
+    /// channel's apart and never sums them (#807).
+    #[cfg(test)]
+    pub(super) fn total(self) -> usize {
         self.matrix.total() + self.email.total()
+    }
+
+    /// The rows counted since `base` was taken, per channel and kind — so a
+    /// residual line can still say whose they were (#807).
+    pub(super) fn since(self, base: Self) -> Self {
+        Self { matrix: self.matrix.since(base.matrix), email: self.email.since(base.email) }
     }
 }
 
-/// Tell `on_failure` of a row refused on the caller's thread — unless the
-/// burst has passed the thinning, in which case it is only counted — and hand
-/// the [`Unwritten`] (`why`, given the row's tally) back for the caller's `Err`.
+/// Tell `on_failure` of a refused row — unless the burst has passed the
+/// thinning, in which case it is only counted — and hand the [`Unwritten`]
+/// (`why`, given the row's tally) back for the caller's `Err`. Called on the
+/// caller's thread for a shed or late row, and from the spawned task on its
+/// (unreachable) closed-semaphore path.
 pub(super) fn refuse(
     thinning: &Mutex<Thinning>,
     why: fn(BurstTally) -> Unwritten<'static>,

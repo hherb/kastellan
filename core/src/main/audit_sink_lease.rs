@@ -1,6 +1,7 @@
 //! A sink's **lease** on the ledger (#792), and when it starts to count
 //! (#802). Split out of `audit_sink.rs` to keep it under the 500-LOC soft cap;
-//! `#[path]`-included there, and its items re-exported by name.
+//! `#[path]`-included there; [`SinkChannel`] and [`Starting`] are re-exported
+//! by name.
 //!
 //! While a [`SinkWriter`] is alive, [`super::drain`] counts its driver as one
 //! that may still write a row. A sink's hook closure owns its writer, and the

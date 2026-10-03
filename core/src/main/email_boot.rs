@@ -139,10 +139,12 @@ fn email_skipped_audit_sink(
         let (actor, action, payload) = email_skipped_row(&skipped);
         let message_id = skipped.message_id.to_string();
         let label = crate::audit_sink::RowLabel::new("email skipped message", &message_id, None);
+        // Under the channel the row is counted under: the writer's own.
+        let who = writer.channel().writer();
         // A refused row is reported through the closure, so its `Err` is not
         // needed here.
         let _ = writer.spawn(actor, action, payload, label, move |why| {
-            report(SINK_CHANNEL.writer(), &format_skipped_row_lost(&message_id, &why));
+            report(who, &format_skipped_row_lost(&message_id, &why));
         });
     })
 }

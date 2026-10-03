@@ -110,28 +110,41 @@ fn a_clean_drain_and_a_stuck_email_driver_report_no_loss() {
     report_drained(&Drained::default(), record_clean);
     report_drained(&drained(0, 1, 0), record_clean);
     report_drained(&Drained { in_flight: InFlight { starting: 1, ..InFlight::default() }, ..Drained::default() }, record_clean);
-    report_unreported_since(0, record_clean);
+    report_unreported_since(Unreported::default(), record_clean);
     assert_eq!(*CLEAN_SAID.lock().unwrap(), Vec::<String>::new());
 }
 
-/// `report_drained` sends each loss to the reporter under the shutdown writer,
-/// and nothing for a clean drain.
+/// `report_drained` sends each loss to the reporter — what is no one
+/// channel's under the shutdown writer, each channel's thinned rows under its
+/// own — and nothing for a clean drain.
 #[test]
 fn report_drained_reports_each_loss_through_the_reporter() {
     report_drained(&Drained::default(), record);
     let d = Drained {
         named: vec!["REPORT-DRAINED-ROW".into()],
-        unreported: Unreported { email: UnsaidCounts { shed: 4, late: 0 }, ..Unreported::default() },
+        unreported: Unreported {
+            matrix: UnsaidCounts { shed: 2, late: 0 },
+            email: UnsaidCounts { shed: 4, late: 0 },
+        },
         ..drained(1, 1, 1)
     };
     report_drained(&d, record);
-    report_unreported_since(3, record);
+    report_unreported_since(
+        Unreported {
+            matrix: UnsaidCounts { shed: 0, late: 3 },
+            email: UnsaidCounts { shed: 0, late: 6 },
+        },
+        record,
+    );
     for (needle, writer) in [
         ("REPORT-DRAINED-ROW", AuditLostWriter::Shutdown),
         ("1 channel driver had not exited after", AuditLostWriter::Shutdown),
-        // #807: a channel's thinned rows are said under its own writer.
+        // #807: a channel's thinned rows are said under its own writer —
+        // the drain's, and the residual after it.
+        ("2 channel audit rows were refused", AuditLostWriter::Matrix),
         ("4 channel audit rows were refused", AuditLostWriter::Email),
-        ("3 more channel audit rows were refused after the shutdown report", AuditLostWriter::Shutdown),
+        ("3 more channel audit rows were refused after the shutdown report", AuditLostWriter::Matrix),
+        ("6 more channel audit rows were refused after the shutdown report", AuditLostWriter::Email),
     ] {
         let said = said_containing(needle);
         assert_eq!(said.len(), 1, "{needle}: {said:?}");
@@ -216,14 +229,20 @@ fn the_starting_and_residual_lines_say_what_they_count() {
 fn the_unreported_line_says_shed_and_late_apart() {
     assert_eq!(
         format_unreported_at_shutdown(UnsaidCounts { shed: 3, late: 2 }).unwrap(),
-        "at shutdown, 5 channel audit rows were refused without a line of their own, to keep a \
-         flood from stalling its driver: 3 shed over the daemon's life (too many inserts already \
-         waiting for the pool); 2 tried after shutdown began"
+        "5 channel audit rows were refused without a line of their own, to keep a flood from \
+         stalling its driver: 3 shed over the daemon's life (too many inserts already waiting for \
+         the pool); 2 tried after shutdown began"
     );
     assert_eq!(
         format_unreported_at_shutdown(UnsaidCounts { shed: 0, late: 1 }).unwrap(),
-        "at shutdown, 1 channel audit row was refused without a line of its own, to keep a flood \
-         from stalling its driver: 1 tried after shutdown began"
+        "1 channel audit row was refused without a line of its own, to keep a flood from stalling \
+         its driver: 1 tried after shutdown began"
+    );
+    assert_eq!(
+        format_unreported_at_shutdown(UnsaidCounts { shed: 3, late: 0 }).unwrap(),
+        "3 channel audit rows were refused without a line of their own, to keep a flood from \
+         stalling its driver: 3 shed over the daemon's life (too many inserts already waiting for \
+         the pool)"
     );
 }
 

@@ -25,6 +25,24 @@ fn runtime_and_pool() -> (tokio::runtime::Runtime, PgPool, std::net::TcpListener
     (rt, pool, listener)
 }
 
+/// `SinkChannel::ALL` is hand-kept, and the shutdown lines say only the
+/// channels in it: a variant left out would be a channel whose thinned rows
+/// are never said. The `match` has no wildcard, so a new variant fails to
+/// compile here until it has an arm — the prompt to list it in this loop,
+/// where the assert checks `ALL` has it too. A tripwire, not a proof: Rust
+/// cannot enumerate an enum's variants without a derive crate.
+#[test]
+fn every_channel_is_in_all() {
+    for channel in [SinkChannel::Matrix, SinkChannel::Email] {
+        match channel {
+            SinkChannel::Matrix | SinkChannel::Email => {
+                assert!(SinkChannel::ALL.contains(&channel), "{channel:?} missing from ALL")
+            }
+        }
+    }
+    assert_eq!(SinkChannel::ALL.len(), 2, "and nothing listed twice");
+}
+
 #[test]
 fn the_ledger_counts_live_auditing_sinks_apart_from_the_rest() {
     static LEDGER: Ledger = ledger_const();

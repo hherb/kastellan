@@ -122,13 +122,12 @@ fn reply_undelivered_audit_sink(
             &conversation,
             Some(reason.as_str()),
         );
+        // Under the channel the row is counted under: the writer's own.
+        let who = writer.channel().writer();
         // A refused row is reported through the closure, so its `Err` is not
         // needed here.
         let _ = writer.spawn(actor, action, payload, label, move |why| {
-            report(
-                SINK_CHANNEL.writer(),
-                &format_reply_row_lost(&conversation, reason.as_str(), &why),
-            );
+            report(who, &format_reply_row_lost(&conversation, reason.as_str(), &why));
         });
     })
 }

@@ -50,9 +50,11 @@
 //! closes, because that close has no bound, and once more after it.
 //!
 //! What still goes unreported: a row lost to a crash (SIGKILL, OOM, a panic
-//! under `panic = "abort"`), because nothing runs after one; a row refused,
-//! past the thinning, during a pool close the service manager's SIGKILL ends;
-//! and one refused between the last line and the process's exit. That last
+//! under `panic = "abort"`), because nothing runs after one — and with it the
+//! count of a burst's rows after its last 2^k-th line, which only the next
+//! burst's first line or a graceful shutdown says (`audit_sink_thinning.rs`,
+//! #817); a row refused, past the thinning, during a pool close the service
+//! manager's SIGKILL ends; and one refused between the last line and the process's exit. That last
 //! gap is usually an instant, but not always: dropping the runtime waits for
 //! its blocking tasks, so a Matrix login abandoned at its timeout can hold the
 //! process open until the SDK's own timeouts end it, or the SIGKILL (#805).
@@ -100,8 +102,8 @@ const _: () = assert!(
 /// scheduler shutdown it runs beside. An email driver long-polls for 15 s, so
 /// it is often still running when this expires; that costs nothing, because
 /// it audits nothing once its bus is gone (`polled_driver`'s skipped-id acks
-/// stop there: [`SinkKind::SilentOnExit`]), and [`report_drained`] says so at
-/// INFO, not as a loss.
+/// stop there: [`SinkKind::SilentOnExit`](lease::SinkKind::SilentOnExit)), and
+/// [`report_drained`] says so at INFO, not as a loss.
 pub(crate) const DRAIN_BOUND: Duration = Duration::from_secs(3);
 
 const _: () = assert!(
@@ -141,15 +143,15 @@ pub(crate) struct Ledger {
     /// Leases that count ([`SinkWriter`]s whose driver is up): the drivers
     /// that may still write a row, and that [`drain`] waits for.
     live_sinks: AtomicUsize,
-    /// How many of `live_sinks` are [`SinkKind::AuditsOnExit`].
+    /// How many of `live_sinks` are [`SinkKind::AuditsOnExit`](lease::SinkKind::AuditsOnExit).
     live_auditing: AtomicUsize,
     /// Leases whose driver has not finished starting (`audit_sink_lease.rs`):
     /// not waited for, and not a loss.
     starting: AtomicUsize,
     /// Set by [`drain`]: no row starts after it.
     closed: AtomicBool,
-    /// Rows refused on the caller's thread — shed, or tried after the close —
-    /// thinned and counted per channel and per kind (#798, #807).
+    /// Rows refused — shed, or tried after the close — thinned and counted
+    /// per channel and per kind (#798, #807).
     refusals: Refusals,
     /// Who the pending rows are, oldest first, for the shutdown line (#797).
     /// Only for naming: the count that gates `drain` is `pending`.
@@ -253,6 +255,12 @@ pub(crate) struct SinkWriter {
 }
 
 impl SinkWriter {
+    /// Whose rows these are: what a sink's lines name, so the writer a sink
+    /// reports under is the one it is counted under (#807).
+    pub(crate) fn channel(&self) -> SinkChannel {
+        self.channel
+    }
+
     /// Insert one audit row on the runtime, without waiting for it.
     ///
     /// Returns at once — call it from a thread that must not block (the polled
@@ -262,8 +270,9 @@ impl SinkWriter {
     /// module docs). It should report the row on the `[audit-lost]` marker
     /// with enough to match it to the caller's own line for the event (a
     /// conversation, a message id), and must not block either. On the caller's
-    /// thread it is called only for the rows `audit_sink_thinning.rs` lets
-    /// through; the shutdown lines count the rest.
+    /// thread — and on the runtime, for a row refused there — it is called
+    /// only for the rows `audit_sink_thinning.rs` lets through; the shutdown
+    /// lines count the rest.
     ///
     /// `label` names the row for that shutdown line (#797), which cannot ask
     /// `on_failure` — a task cancelled with the runtime never runs it. A
@@ -363,8 +372,8 @@ pub(crate) struct InFlight {
     pub(crate) rows_pending: usize,
     /// Drivers up and still holding a sink.
     pub(crate) sinks_live: usize,
-    /// Of those, the [`SinkKind::AuditsOnExit`] ones: their queued replies go
-    /// unaudited while they stay stuck.
+    /// Of those, the [`SinkKind::AuditsOnExit`](lease::SinkKind::AuditsOnExit) ones: their
+    /// queued replies go unaudited while they stay stuck.
     pub(crate) auditing_live: usize,
     /// Drivers holding a sink that never finished starting: not counted in
     /// `sinks_live`, not waited for, not a loss.
@@ -423,9 +432,10 @@ fn close_and_count(ledger: &'static Ledger, between: impl FnOnce()) -> Drained {
 }
 
 /// The refused rows thinned out since `drained` was taken — late rows a
-/// still-running driver tried after the drain's snapshot (#802).
-fn unreported_on_since(ledger: &'static Ledger, drained: &Drained) -> usize {
-    ledger.unreported().total().saturating_sub(drained.unreported.total())
+/// still-running driver tried after the drain's snapshot (#802) — per channel
+/// and kind, so the last lines still say whose they were (#807).
+fn unreported_on_since(ledger: &'static Ledger, drained: &Drained) -> Unreported {
+    ledger.unreported().since(drained.unreported)
 }
 
 #[path = "audit_sink_lease.rs"]

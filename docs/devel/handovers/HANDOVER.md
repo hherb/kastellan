@@ -68,14 +68,28 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   `BurstTally` (`refused row N of this burst (M before it had no line of their own)`), and a new
   burst's first line says how the last one ended — the last line said is within 2× of a flood's
   size, so a crash no longer loses it whole. ⚠️ **Residual by design:** the tail of a burst after
-  its last 2^k line is said only by the next burst's first line or a graceful shutdown. At shutdown
-  shed and late are said apart, **under the channel's own writer** (not `shutdown`); the
-  after-drain "since" lines still sum both channels under `shutdown`.
+  its last 2^k line is said only by the next burst's first line or a graceful shutdown
+  ([#817](https://github.com/hherb/kastellan/issues/817)). At shutdown shed and late are said
+  apart, **under the channel's own writer** (not `shutdown`) — and since the review round so are
+  the after-drain "since" lines (`Unreported::since`, per channel and kind). A sink reports under
+  `writer.channel().writer()`, so the channel it is counted under and the one its lines name come
+  from one value.
 - **#808 — the bus's own losses are on the marker.** `PgChannelEvents` moved to
-  `channel/pg_events.rs` (re-exported from `bus`); a failed insert of **any** bus `channel.*` row is
-  `emit_audit_lost_report(AuditLostWriter::Bus, …)` naming the action, `channel` and `peer` (only
-  those two payload fields are read). `quoted_id` now lives in the lib (`channel::audit_text`); the
-  bin re-exports it. Test seam: a `fn` reporter, pool pointed at a refused port.
+  `channel/pg_events.rs` (re-exported from `bus`); a failed insert of **any** bus row (`channel.*`
+  and `ask.resolved`) is `emit_audit_lost_report(AuditLostWriter::Bus, …)` naming the action and
+  whichever of `channel`, `peer`, `task_id`, `ask_id`, `reason` the payload has (`describe_row`;
+  nothing else is read). `quoted_id` now lives in the lib (`channel::audit_text`); the bin
+  re-exports it. Test seam: `PgChannelEvents::with_reporter` (test-only), driven **through**
+  `ChannelEvents::audit`, pool pointed at a refused port. ⚠️ **Not caught:** an insert still awaited
+  when `ChannelBus::shutdown` aborts the pump ([#813](https://github.com/hherb/kastellan/issues/813)).
+- **Review round** (pr-review-toolkit, 5 agents): 6 surviving mutants at the constructor and
+  trait-impl seams — the bus fix revertible to `let _ =`, the tally constant past row 1, Matrix's
+  `starting_with_ledger` channel, the Matrix shutdown writer, the late path's channel — each now
+  killed by a test; doc fixes (the `BurstTally` example is row **1025 / 1002**, not 1024 / 1007;
+  broken `SinkKind` intra-doc links). Filed [#813](https://github.com/hherb/kastellan/issues/813)–[#817](https://github.com/hherb/kastellan/issues/817)
+  (bus-stop cancellation; `boot_supervisor/pg_sink.rs` still WARN-only; two bus drops with no row;
+  a NUL in a peer id fails the jsonb insert — unverified; a burst's tail); the `refuse` pairing is
+  a comment on #811.
 - Mutants 5/5. ⚠️ **The first sweep stalled two hours at `Compiling kastellan-core`** with
   `syspolicyd` at 20–50 % CPU and was killed by the 2 h background cap; a probe binary then ran and
   the rerun was clean. Check progress after a few minutes rather than waiting blind.
@@ -379,7 +393,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#807 + #808 — **the gate that stands**) | PR #812 (`199ead78`; only docs changed after it) | **4826 / 0 / 52**, **191** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #806's review-round 4815: bin 73 → **79** (+6: thinning 3, report 2, ledger 1), core lib +5 (`pg_events` 4, `audit_text` 1). Mutants 5/5 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-807`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#807 + #808 — **the gate that stands**) | PR #812 (`199ead78`; only docs changed after it) | **4826 / 0 / 52**, **191** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #806's review-round 4815: bin 73 → **79** (+6: thinning 3, report 2, ledger 1), core lib +5 (`pg_events` 4, `audit_text` 1). Mutants 5/5. **Review round (not a full sweep):** bin 79 → **81**, core lib `channel` 390 → **392** — expect **4830** next sweep; the review's 6 survivors + 4 new mutants, **10/10** killed; `cargo clippy -p kastellan-core --all-targets` clean (warm, not the cold 27) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-807`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#796–#800 + #802 — superseded) | PR #806 (`54e882b0`) | **4808 / 0 / 52**, **191** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against `main` ≈ 4782 (the row below + #801's review round's 2 bin tests, recorded after it): bin 47 → 66 (+19), core lib +5, new `audit_lost_stderr_fallback_e2e` +2 / +2 ignored (its inner fixtures). Mutants 10/10. **Review round (not a full sweep):** bin 66 → **73**, core lib 2336 / 1 ignored and the e2e unchanged — expect **4815** next sweep; mutants 7/7 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-802`, **27** | **23** Mac |
 | **Mac** (#796–#800 — superseded) | PR #801 | **4780 / 0 / 50** after the one flaky assertion was fixed: the sweep read **4779 / 1 / 50**, **190** suites, `[WARN]` **0**, `[SKIP]` **23**; the failure was my new stress test's `==` (see above), re-run 5× green + the whole bin suite (45) after the fix, not a second full sweep. **Predicted exactly** against the row below: bin 32 → 45 (+13), core lib +1 (`audit_lost`). Mutants 4/4 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-796` | **23** Mac |
 
