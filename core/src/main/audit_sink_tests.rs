@@ -9,17 +9,23 @@ use super::test_support::{
     ACQUIRE_TIMEOUT,
 };
 use super::*;
-use kastellan_core::worker_stderr::AuditLostWriter;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// `Bounds` in one line, for the statics below.
-const fn bounds(queued: usize, connections: usize) -> Bounds {
+pub(super) const fn bounds(queued: usize, connections: usize) -> Bounds {
     Bounds { queued, connections }
 }
 
+
 type OnFailure = Box<dyn FnOnce(Unwritten<'_>) + Send>;
+
+/// A drain bound no test is meant to reach. A test that expects `drain` to
+/// return early asserts it took under half of this: a wrong wait takes all of
+/// it, and half a minute is room for any loaded host (#799 — the old
+/// thresholds were 1 s and 5 s).
+const NEVER: Duration = Duration::from_secs(60);
 
 /// Records what `on_failure` was told.
 fn recorder() -> (Arc<Mutex<Option<String>>>, impl FnOnce(Unwritten<'_>) + Send + 'static) {
@@ -30,14 +36,14 @@ fn recorder() -> (Arc<Mutex<Option<String>>>, impl FnOnce(Unwritten<'_>) + Send 
 
 /// A runtime and a writer on `ledger` against the stalled pool; the listener
 /// is returned so it outlives the test's calls.
-fn stalled_writer(
+pub(super) fn stalled_writer(
     ledger: &'static Ledger,
 ) -> (tokio::runtime::Runtime, SinkWriter, std::net::TcpListener) {
     let rt = tokio::runtime::Runtime::new().expect("a runtime");
     // Made inside the runtime, but the test thread stays outside it — like the
     // driver thread that calls the real sinks.
     let (pool, listener) = rt.block_on(async { stalled_pool() });
-    let writer = SinkWriter::with_ledger(ledger, pool, rt.handle().clone(), SinkKind::SkippedIds);
+    let writer = SinkWriter::with_ledger(ledger, pool, rt.handle().clone(), SinkKind::SilentOnExit);
     (rt, writer, listener)
 }
 
@@ -66,9 +72,10 @@ fn the_insert_does_not_hold_the_calling_thread() {
     let (told, on_failure) = recorder();
     let mut task = None;
     assert_returns_at_once("SinkWriter::spawn", || {
-        task = writer.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure);
+        task = Some(writer.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure));
     });
-    rt.block_on(task.expect("not shed")).expect("the insert task ran to completion");
+    let task = task.expect("spawn was called").expect("not shed");
+    rt.block_on(task).expect("the insert task ran to completion");
     assert!(told.lock().unwrap().is_some(), "a failed insert reaches `on_failure`");
 }
 
@@ -102,7 +109,7 @@ fn past_the_queue_bound_a_row_is_shed_and_said_so() {
         .expect("POSITIVE CONTROL: the first row fits the queue");
     let (told, on_failure) = recorder();
     assert_returns_at_once("a shed row", || {
-        assert!(spawn(Box::new(on_failure)).is_none(), "the second row must be shed");
+        assert!(matches!(spawn(Box::new(on_failure)), Err(Unwritten::Shed)), "the second row must be shed");
     });
     let told = told.lock().unwrap().clone();
     assert!(
@@ -126,7 +133,7 @@ fn inserts_share_a_bounded_number_of_connections() {
     let rt = tokio::runtime::Runtime::new().expect("a runtime");
     let (pool, _listener) = rt.block_on(async { stalled_pool() });
     let both = |ledger: &'static Ledger| {
-        let writer = SinkWriter::with_ledger(ledger, pool.clone(), rt.handle().clone(), SinkKind::SkippedIds);
+        let writer = SinkWriter::with_ledger(ledger, pool.clone(), rt.handle().clone(), SinkKind::SilentOnExit);
         let t = Instant::now();
         let tasks: Vec<_> = (0..2)
             .map(|_| writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}).expect("not shed"))
@@ -154,7 +161,7 @@ fn inserts_share_a_bounded_number_of_connections() {
 fn a_row_counts_until_its_task_ends_and_a_writer_while_it_lives() {
     static LEDGER: Ledger = Ledger::new(bounds(8, 8));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
-    assert_eq!(LEDGER.snapshot(), Drained { rows_pending: 0, sinks_live: 1, ..Drained::default() });
+    assert_eq!(LEDGER.snapshot(), InFlight { sinks_live: 1, ..InFlight::default() });
 
     let task = writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}).expect("not shed");
     assert_eq!(LEDGER.snapshot().rows_pending, 1, "a spawned row is pending");
@@ -162,7 +169,7 @@ fn a_row_counts_until_its_task_ends_and_a_writer_while_it_lives() {
     assert_eq!(LEDGER.snapshot().rows_pending, 0, "a finished row is not");
 
     drop(writer);
-    assert_eq!(LEDGER.snapshot(), Drained::default());
+    assert_eq!(LEDGER.snapshot(), InFlight::default());
 }
 
 /// #792: a row whose task is cancelled — the runtime dropped under it, as at
@@ -184,9 +191,9 @@ fn a_settled_ledger_drains_at_once() {
     static LEDGER: Ledger = Ledger::new(bounds(8, 8));
     let rt = tokio::runtime::Runtime::new().expect("a runtime");
     let t = Instant::now();
-    let d = rt.block_on(drain_ledger(&LEDGER, Duration::from_secs(10)));
+    let d = rt.block_on(drain_ledger(&LEDGER, NEVER));
     assert_eq!(d, Drained::default());
-    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    assert!(t.elapsed() < NEVER / 2, "{:?}", t.elapsed());
 }
 
 /// #792: `drain` waits for the last driver to let go of its sink — a Matrix
@@ -200,12 +207,12 @@ fn drain_waits_for_the_last_writer_and_no_longer() {
         drop(writer);
     });
     let t = Instant::now();
-    let d = rt.block_on(drain_ledger(&LEDGER, Duration::from_secs(10)));
+    let d = rt.block_on(drain_ledger(&LEDGER, NEVER));
     let took = t.elapsed();
     driver.join().unwrap();
     assert_eq!(d, Drained::default());
     assert!(took >= Duration::from_millis(300), "it must wait for the writer: {took:?}");
-    assert!(took < Duration::from_secs(5), "and return once it is gone: {took:?}");
+    assert!(took < NEVER / 2, "and return once it is gone: {took:?}");
 }
 
 /// #792: past its bound, `drain` returns what is still in flight, and closes
@@ -213,19 +220,21 @@ fn drain_waits_for_the_last_writer_and_no_longer() {
 /// than spawned onto a runtime that is going away.
 #[test]
 fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
-    static LEDGER: Ledger = Ledger::new(bounds(8, 8));
+    // No connection is ever free, so the stalled row stays pending however
+    // slow the host is (it would otherwise fail after the pool's timeout).
+    static LEDGER: Ledger = Ledger::new(bounds(8, 0));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
     let stuck = writer
         .spawn("a", "b", serde_json::json!({}), "STUCK-ROW".into(), |_| {})
         .expect("not shed");
-    let _matrix = SinkWriter::with_ledger(&LEDGER, writer.pool.clone(), rt.handle().clone(), SinkKind::Replies);
+    let _matrix = SinkWriter::with_ledger(&LEDGER, writer.pool.clone(), rt.handle().clone(), SinkKind::AuditsOnExit);
 
     let bound = ACQUIRE_TIMEOUT / 3;
     let t = Instant::now();
     let d = rt.block_on(drain_ledger(&LEDGER, bound));
     assert!(t.elapsed() >= bound, "it waited its bound: {:?}", t.elapsed());
     assert_eq!(
-        (d.rows_pending, d.sinks_live, d.replies_live),
+        (d.in_flight.rows_pending, d.in_flight.sinks_live, d.in_flight.auditing_live),
         (1, 2, 1),
         "the stalled row, its writer, and a Matrix one"
     );
@@ -235,172 +244,30 @@ fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
     assert_eq!(d.unreported, 0);
 
     let (told, on_failure) = recorder();
-    assert!(writer.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure).is_none());
+    assert!(matches!(
+        writer.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure),
+        Err(Unwritten::AfterShutdown)
+    ));
     let told = told.lock().unwrap().clone();
     assert!(
         told.as_deref().is_some_and(|t| t.starts_with("not tried: the daemon was shutting down")),
         "a row after the drain must be refused and said so: {told:?}"
     );
     assert_eq!(LEDGER.snapshot().rows_pending, 1, "a refused row is not left counted");
-    rt.block_on(stuck).expect("the stalled insert ran to completion");
+    drop(stuck); // it waits for a connection forever; it ends with the runtime
 }
 
-// --- #792 / #796 / #797 / #798: what the shutdown says -------------------
-
-/// A [`Reporter`] that records, for the tests that read what `report_drained`
-/// says. One static, shared: each test asserts on lines only it can produce.
-static SAID: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
-
-fn record(writer: AuditLostWriter, line: &str) {
-    SAID.lock().unwrap().push((writer, line.to_string()));
-}
-
-fn said_containing(needle: &str) -> Vec<(AuditLostWriter, String)> {
-    SAID.lock().unwrap().iter().filter(|(_, l)| l.contains(needle)).cloned().collect()
-}
-
+/// #798: a flood of rows refused through a sink reports its first few, then
+/// thins out — the ledger wired to `audit_sink_thinning.rs`, whose own tests
+/// pin the predicate.
 #[test]
-fn the_counting_words_agree_with_their_number() {
-    assert_eq!(counted(1, "row", "was", "were"), "1 row was");
-    assert_eq!(counted(2, "row", "was", "were"), "2 rows were");
-    assert_eq!(counted(0, "row", "was", "were"), "0 rows were");
-}
-
-#[test]
-fn the_shutdown_lines_count_rows_and_drivers_and_are_silent_at_zero() {
-    let bound = Duration::from_secs(3);
-    let none = Drained::default();
-    assert_eq!(format_pending_at_shutdown(&none, bound), None);
-    assert_eq!(format_stuck_replies_at_shutdown(&none, bound), None);
-    assert_eq!(format_live_at_shutdown(&none, bound), None);
-    assert_eq!(format_unreported_at_shutdown(&none), None);
-
-    let one = Drained { rows_pending: 1, sinks_live: 1, ..Drained::default() };
-    assert_eq!(
-        format_pending_at_shutdown(&one, bound).unwrap(),
-        "1 channel audit row was still unwritten after waiting 3 s at shutdown; the database \
-         pool closes next, so it is lost unless already mid-write"
-    );
-    assert_eq!(
-        format_live_at_shutdown(&one, bound).unwrap(),
-        "1 channel driver had not exited after 3 s at shutdown; an audit row one writes from \
-         now on is refused, and reported on the [audit-lost] marker unless thinned out"
-    );
-    let many = Drained { rows_pending: 2, sinks_live: 2, ..Drained::default() };
-    assert!(format_pending_at_shutdown(&many, bound).unwrap().starts_with("2 channel audit rows were"));
-    assert!(format_pending_at_shutdown(&many, bound).unwrap().contains("so they are lost"));
-    assert!(format_live_at_shutdown(&many, bound).unwrap().starts_with("2 channel drivers had"));
-}
-
-/// #797: the line names the rows it can, and counts the ones it cannot.
-#[test]
-fn the_pending_line_names_the_rows_it_knows_and_counts_the_rest() {
-    let bound = Duration::from_secs(3);
-    let d = Drained {
-        rows_pending: 7,
-        named: vec!["email skipped message <a@h>".into(), "matrix reply to !r (gave_up)".into()],
-        ..Drained::default()
-    };
-    let line = format_pending_at_shutdown(&d, bound).unwrap();
-    assert!(
-        line.contains("(email skipped message <a@h>; matrix reply to !r (gave_up); and 5 more)"),
-        "{line}"
-    );
-}
-
-/// #796: a Matrix driver still running is a loss, said as one; an email driver
-/// still running is not, and stays at INFO.
-#[test]
-fn a_stuck_matrix_driver_is_a_loss_and_a_stuck_email_driver_is_not() {
-    let bound = Duration::from_secs(3);
-    let matrix = Drained { sinks_live: 1, replies_live: 1, ..Drained::default() };
-    let line = format_stuck_replies_at_shutdown(&matrix, bound).unwrap();
-    assert!(line.contains("may not be audited as `channel.reply_undelivered`"), "{line}");
-    assert_eq!(format_live_at_shutdown(&matrix, bound), None, "not also an INFO line");
-
-    let email = Drained { sinks_live: 1, replies_live: 0, ..Drained::default() };
-    assert_eq!(format_stuck_replies_at_shutdown(&email, bound), None);
-    assert!(format_live_at_shutdown(&email, bound).is_some());
-
-    let both = Drained { sinks_live: 3, replies_live: 1, ..Drained::default() };
-    assert!(format_live_at_shutdown(&both, bound).unwrap().starts_with("2 channel drivers had"));
-}
-
-#[test]
-fn the_ledger_counts_live_replies_sinks_apart_from_the_rest() {
-    static LEDGER: Ledger = Ledger::new(bounds(8, 8));
-    let rt = tokio::runtime::Runtime::new().expect("a runtime");
-    let (pool, _listener) = rt.block_on(async { stalled_pool() });
-    let mk = |kind| SinkWriter::with_ledger(&LEDGER, pool.clone(), rt.handle().clone(), kind);
-    let (m, e) = (mk(SinkKind::Replies), mk(SinkKind::SkippedIds));
-    assert_eq!((LEDGER.snapshot().sinks_live, LEDGER.snapshot().replies_live), (2, 1));
-    drop(m);
-    assert_eq!((LEDGER.snapshot().sinks_live, LEDGER.snapshot().replies_live), (1, 0));
-    drop(e);
-    assert_eq!(LEDGER.snapshot(), Drained::default());
-}
-
-/// #798: the closed form agrees with the predicate it summarises.
-#[test]
-fn the_unreported_count_matches_the_predicate() {
-    for n in (0..200).chain([1023, 1024, 1025, 4096, 1 << 20]) {
-        let reported = (0..n).filter(|&i| should_report(i)).count();
-        assert_eq!(unreported_of(n), n - reported, "n = {n}");
-    }
-}
-
-static CLEAN_SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-fn record_clean(_: AuditLostWriter, line: &str) {
-    CLEAN_SAID.lock().unwrap().push(line.to_string());
-}
-
-/// `report_drained` says nothing at ERROR for a clean drain, nor for an email
-/// driver still in its long-poll (INFO only) — #796.
-#[test]
-fn a_clean_drain_and_a_stuck_email_driver_report_no_loss() {
-    report_drained(&Drained::default(), record_clean);
-    report_drained(&Drained { sinks_live: 1, replies_live: 0, ..Drained::default() }, record_clean);
-    assert_eq!(*CLEAN_SAID.lock().unwrap(), Vec::<String>::new());
-}
-
-/// `report_drained` sends each loss to the reporter under the shutdown writer,
-/// and nothing for a clean drain.
-#[test]
-fn report_drained_reports_each_loss_through_the_reporter() {
-    report_drained(&Drained::default(), record);
-    let d = Drained {
-        rows_pending: 1,
-        sinks_live: 1,
-        replies_live: 1,
-        named: vec!["REPORT-DRAINED-ROW".into()],
-        unreported: 4,
-    };
-    report_drained(&d, record);
-    for needle in [
-        "REPORT-DRAINED-ROW",
-        "channel driver had not exited (or finished starting)",
-        "without a line of its own",
-    ] {
-        let said = said_containing(needle);
-        assert_eq!(said.len(), 1, "{needle}: {said:?}");
-        assert_eq!(said[0].0, AuditLostWriter::Shutdown);
-    }
-}
-
-/// #798: a flood of refused rows reports its first few, then thins out.
-#[test]
-fn refused_rows_are_reported_one_by_one_then_thinned() {
-    assert!((0..REPORT_EACH_UP_TO).all(should_report), "the first rows are each reported");
-    assert!(should_report(16) && should_report(32) && should_report(1024), "then powers of two");
-    assert!(!should_report(17) && !should_report(33) && !should_report(1000));
-    // The census's own count agrees with the predicate.
+fn a_flood_of_shed_rows_is_reported_one_by_one_then_thinned() {
     static LEDGER: Ledger = Ledger::new(bounds(0, 1));
     let (_rt, writer, _listener) = stalled_writer(&LEDGER);
     let told = Arc::new(Mutex::new(0usize));
     for _ in 0..20 {
         let told = told.clone();
-        writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| *told.lock().unwrap() += 1);
+        let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| *told.lock().unwrap() += 1);
     }
     let reported = *told.lock().unwrap();
     assert_eq!(reported, 17, "n = 0..15 each, n = 16 (a power of two); n = 17..19 thinned out");
@@ -417,14 +284,14 @@ fn the_final_snapshot_names_pending_rows_up_to_a_few() {
     let tasks: Vec<_> = (0..7)
         .map(|i| {
             writer
-                .spawn("a", "b", serde_json::json!({}), format!("row-{i}"), |_| {})
+                .spawn("a", "b", serde_json::json!({}), format!("row-{i}").as_str().into(), |_| {})
                 .expect("not shed")
         })
         .collect();
     let d = LEDGER.final_snapshot();
-    assert_eq!(d.rows_pending, 7);
+    assert_eq!(d.in_flight.rows_pending, 7);
     assert_eq!(d.named.len(), NAMED_AT_SHUTDOWN, "only a few are named");
-    assert!(d.named.iter().all(|n| n.starts_with("row-")), "{:?}", d.named);
+    assert_eq!(d.named, ["row-0", "row-1", "row-2", "row-3", "row-4"], "the oldest, in order");
     for t in tasks {
         rt.block_on(t).expect("the insert task ran to completion");
     }
@@ -436,7 +303,8 @@ fn the_final_snapshot_names_pending_rows_up_to_a_few() {
 /// other test.)
 #[test]
 fn drain_waits_for_a_pending_row_with_no_live_sink() {
-    static LEDGER: Ledger = Ledger::new(bounds(8, 8));
+    // No connection is ever free: the row stays pending (see above).
+    static LEDGER: Ledger = Ledger::new(bounds(8, 0));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
     let stuck = writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}).expect("not shed");
     drop(writer);
@@ -446,17 +314,19 @@ fn drain_waits_for_a_pending_row_with_no_live_sink() {
     let t = Instant::now();
     let d = rt.block_on(drain_ledger(&LEDGER, bound));
     assert!(t.elapsed() >= bound, "it must wait on the row alone: {:?}", t.elapsed());
-    assert_eq!(d.rows_pending, 1);
-    rt.block_on(stuck).expect("the stalled insert ran to completion");
+    assert_eq!(d.in_flight.rows_pending, 1);
+    drop(stuck);
 }
 
 /// #799: the close-versus-spawn handshake under real contention. Every spawn
 /// that was NOT refused must be counted by the final snapshot — a row counted
-/// by neither would be lost with no line. The pool is stalled, so no row
-/// finishes (and none can leave the count) during the test.
+/// by neither would be lost with no line. No connection is ever free, so no
+/// row finishes (and none can leave the count) during the test.
 #[test]
 fn a_row_spawned_while_the_drain_closes_is_refused_or_counted() {
-    static LEDGER: Ledger = Ledger::new(bounds(100_000, 4));
+    // No connection is ever free, so no accepted row can finish and leave the
+    // count before the snapshot, however long the threads take.
+    static LEDGER: Ledger = Ledger::new(bounds(100_000, 0));
     let (rt, writer, _listener) = stalled_writer(&LEDGER);
     let writer = Arc::new(writer);
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -465,13 +335,18 @@ fn a_row_spawned_while_the_drain_closes_is_refused_or_counted() {
             let (writer, accepted) = (writer.clone(), accepted.clone());
             std::thread::spawn(move || loop {
                 match writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}) {
-                    Some(_) => accepted.fetch_add(1, Ordering::SeqCst),
-                    None => return,
+                    Ok(_) => accepted.fetch_add(1, Ordering::SeqCst),
+                    Err(_) => return,
                 };
             })
         })
         .collect();
-    std::thread::sleep(Duration::from_millis(20));
+    // Close only once rows are being spawned — waited for, not slept for, so
+    // a slow host cannot void the positive control below (#802).
+    let deadline = Instant::now() + NEVER;
+    while accepted.load(Ordering::SeqCst) < 100 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
     let d = rt.block_on(drain_ledger(&LEDGER, Duration::ZERO));
     for t in threads {
         t.join().unwrap();
@@ -482,6 +357,75 @@ fn a_row_spawned_while_the_drain_closes_is_refused_or_counted() {
     // caught mid-refusal by the snapshot, so up to one extra per thread is
     // counted — over-counting is the safe direction; under-counting is the bug.
     let accepted = accepted.load(Ordering::SeqCst);
-    assert!(d.rows_pending >= accepted, "every accepted row is counted: {d:?} vs {accepted}");
-    assert!(d.rows_pending <= accepted + 4, "only rows caught mid-refusal are extra: {d:?} vs {accepted}");
+    let pending = d.in_flight.rows_pending;
+    assert!(pending >= accepted, "every accepted row is counted: {d:?} vs {accepted}");
+    assert!(pending <= accepted + 4, "only rows caught mid-refusal are extra: {d:?} vs {accepted}");
+}
+
+/// #802: rows refused after the drain, past the thinning, were counted
+/// nowhere — the shutdown line was already written. They are counted since
+/// it, for the daemon's last line.
+#[test]
+fn rows_thinned_after_the_drain_are_counted_for_the_last_line() {
+    // No queue room: every row before the drain is shed.
+    static LEDGER: Ledger = Ledger::new(bounds(0, 1));
+    let (rt, writer, _listener) = stalled_writer(&LEDGER);
+    let refuse_20 = || {
+        let told = Arc::new(AtomicUsize::new(0));
+        for _ in 0..20 {
+            let told = told.clone();
+            let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |_| {
+                told.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        told.load(Ordering::SeqCst)
+    };
+    assert_eq!(refuse_20(), 17, "POSITIVE CONTROL: 20 shed, 0..16 and 16 reported");
+    let d = rt.block_on(drain_ledger(&LEDGER, Duration::ZERO));
+    assert_eq!(d.unreported, 3, "the shed rows are the drain line's");
+    assert_eq!(unreported_on_since(&LEDGER, &d), 0, "so none is counted twice");
+    assert_eq!(refuse_20(), 17, "20 refused after the drain, a burst of their own");
+    assert_eq!(unreported_on_since(&LEDGER, &d), 3, "only the late ones");
+}
+
+/// What the last lines said, for the test below.
+static LAST_SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn record_last(_: kastellan_core::worker_stderr::AuditLostWriter, line: &str) {
+    LAST_SAID.lock().unwrap().push(line.to_string());
+}
+
+/// #806 review: the last word is said BEFORE the close as well as after it.
+/// A close that never returns — sqlx's `Pool::close` waiting on an insert
+/// stuck in a wedged Postgres — cannot swallow the rows thinned since the
+/// drain; rows thinned while the close runs get a line of their own, and none
+/// is counted in both.
+#[test]
+fn the_last_line_is_said_before_a_close_that_may_never_return() {
+    static NEVER_CLOSES: Ledger = Ledger::new(bounds(0, 1));
+    static CLOSES: Ledger = Ledger::new(bounds(0, 1));
+    let refuse_20 = |writer: &SinkWriter| {
+        for _ in 0..20 {
+            let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {});
+        }
+    };
+
+    let (rt, writer, _listener) = stalled_writer(&NEVER_CLOSES);
+    let d = rt.block_on(drain_ledger(&NEVER_CLOSES, Duration::ZERO));
+    refuse_20(&writer);
+    let close = report::close_on_then_report(&NEVER_CLOSES, &d, std::future::pending(), record_last);
+    let hung = rt.block_on(async { tokio::time::timeout(Duration::from_millis(50), close).await });
+    assert!(hung.is_err(), "POSITIVE CONTROL: the close never returned");
+    let said = |needle: &str| LAST_SAID.lock().unwrap().iter().filter(|l| l.contains(needle)).count();
+    assert_eq!(said("3 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
+
+    let (rt, writer, _listener) = stalled_writer(&CLOSES);
+    let d = rt.block_on(drain_ledger(&CLOSES, Duration::ZERO));
+    for _ in 0..5 {
+        refuse_20(&writer); // 100 late rows, 0..16 and 16, 32, 64 reported: 81 thinned
+    }
+    let close = async { refuse_20(&writer) }; // 20 more, 0 reported: 101 thinned
+    rt.block_on(report::close_on_then_report(&CLOSES, &d, close, record_last));
+    assert_eq!(said("81 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
+    assert_eq!(said("20 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
 }

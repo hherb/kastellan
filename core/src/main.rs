@@ -827,11 +827,23 @@ async fn main() -> Result<()> {
     audit_sink::report_drained(&drained, audit_sink::emit_report);
 
     // Graceful shutdown: stop the mirror task first so any in-flight
-    // catch-up SELECT completes its fsync, then close the pool.
-    if let Some(handle) = mirror {
-        handle.shutdown().await;
-    }
-    pool.close().await;
+    // catch-up SELECT completes its fsync, then close the pool. Around that
+    // close, the last word on audit rows (#802): a driver still running past
+    // the drain can try rows after the lines above, and past the first few
+    // they are thinned to a count. That count is said before the close (which
+    // has no bound) and again for the rows thinned during it; no audit line
+    // follows.
+    audit_sink::close_then_report_unreported(
+        drained,
+        async move {
+            if let Some(handle) = mirror {
+                handle.shutdown().await;
+            }
+            pool.close().await;
+        },
+        audit_sink::emit_report,
+    )
+    .await;
 
     info!("kastellan core shutting down");
     Ok(())

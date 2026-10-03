@@ -445,3 +445,39 @@ fn skipped_ids_are_neither_acked_nor_audited_once_the_bus_has_gone() {
     assert!(audited.lock().unwrap().is_empty(), "nor audited: {:?}", audited.lock().unwrap());
     drop(outbound_tx);
 }
+
+/// #799: the positive control for the test above, in the same file. The same
+/// worker, with the bus still up when its poll answers, acks and audits the
+/// skipped id — so the test above sees the closed bus, not a worker or a hook
+/// that never acks or audits anything.
+#[test]
+fn the_same_worker_s_skipped_ids_are_acked_and_audited_while_the_bus_is_up() {
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let calls = PollOutlivesTheBus {
+        // Only releases the fake's first poll at once; the driver's bus stays
+        // up until `drop(driver)` below.
+        bus_gone: Arc::new(AtomicBool::new(true)),
+        polls: AtomicUsize::new(0),
+        log: log.clone(),
+    };
+    let audited: Arc<Mutex<Vec<String>>> = Arc::default();
+    let audited_cl = audited.clone();
+    let audit: AckOnlyAudit = Box::new(move |skipped: crate::channel::SkippedId<'_>| {
+        audited_cl.lock().unwrap().push(skipped.message_id.to_string())
+    });
+    let (driver, _identity) = PolledWorkerDriver::spawn(
+        spec_with_ack(),
+        Box::new(calls),
+        test_parse,
+        test_encode,
+        Some(encode_test_ack),
+        Some(test_parse_ack_only),
+        DriverAudit { ack_only: Some(audit), ..DriverAudit::none() },
+        ChannelId("email".into()),
+    )
+    .unwrap();
+    wait_until(|| log.lock().unwrap().iter().any(|c| c.starts_with("email.ack")));
+    wait_until(|| !audited.lock().unwrap().is_empty());
+    assert_eq!(*audited.lock().unwrap(), ["10"]);
+    drop(driver);
+}

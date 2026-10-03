@@ -61,6 +61,11 @@ fn classify_homeserver(homeserver_url: &str, forced: bool) -> Option<BootOutcome
         .map(|detail| BootOutcome::Fatal(anyhow::anyhow!("{detail}")))
 }
 
+/// What the Matrix driver does with its rows at exit: it audits every reply
+/// still queued (`driver_exit`), so one stuck at shutdown is a possible loss.
+/// A `const` so a test pins it (#802).
+const SINK_KIND: crate::audit_sink::SinkKind = crate::audit_sink::SinkKind::AuditsOnExit;
+
 /// Pure: the `(actor, action, payload)` of the row
 /// [`reply_undelivered_audit_sink`] writes for `reply`. The actor is the bus's
 /// own (`PgChannelEvents::audit`), so both writers' rows read alike.
@@ -95,7 +100,8 @@ fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::D
 /// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost): a
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
 /// timeout per dropped reply. The closure owns `writer`, so the driver holds
-/// its lease until it exits, and the daemon's shutdown drain waits for it. A
+/// its lease until it exits, and — once the lease has started (see
+/// [`login_outcome`]) — the daemon's shutdown drain waits for it. A
 /// row that was not written is reported on the `[audit-lost]` marker
 /// ([`format_reply_row_lost`]).
 ///
@@ -111,18 +117,69 @@ fn reply_undelivered_audit_sink(
         let (actor, action, payload) = reply_undelivered_row(&reply);
         let reason = reply.reason;
         let conversation = reply.conversation.0.clone();
-        let label = format!(
-            "matrix reply to conversation {} ({})",
-            crate::audit_sink::quoted_id(&conversation),
-            reason.as_str()
+        let label = crate::audit_sink::RowLabel::new(
+            "matrix reply to conversation",
+            &conversation,
+            Some(reason.as_str()),
         );
-        writer.spawn(actor, action, payload, label, move |why| {
+        // A refused row is reported through the closure, so its `Err` is not
+        // needed here.
+        let _ = writer.spawn(actor, action, payload, label, move |why| {
             report(
                 AuditLostWriter::Matrix,
                 &format_reply_row_lost(&conversation, reason.as_str(), &why),
             );
         });
     })
+}
+
+/// The Matrix sink as `attempt` builds it, on `ledger`: the reply-undelivered
+/// hook, and its lease's [`Starting`] token — a lease that counts only once
+/// [`login_outcome`] says the worker is up (#802). A function, so a test can
+/// see the lease `attempt` takes.
+///
+/// [`Starting`]: crate::audit_sink::Starting
+fn reply_sink(
+    ledger: &'static crate::audit_sink::Ledger,
+    pool: PgPool,
+    handle: tokio::runtime::Handle,
+    report: crate::audit_sink::Reporter,
+) -> (
+    kastellan_core::channel::polled_driver::ReplyUndeliveredAudit,
+    crate::audit_sink::Starting,
+) {
+    let (writer, starting) =
+        crate::audit_sink::SinkWriter::starting_with_ledger(ledger, pool, handle, SINK_KIND);
+    (reply_undelivered_audit_sink(writer, report), starting)
+}
+
+/// Classify the login's outcome — the worker, or the [`BootOutcome::Retry`]
+/// for a failed, panicked or cancelled, or timed-out login — and **start the sink's lease
+/// only when the worker is up** (#802). A lease started any earlier would make
+/// a login abandoned at its timeout a driver the shutdown waits for and calls
+/// a possible loss. Counting from here misses no reply: none can be queued
+/// before `attempt` builds the bus.
+fn login_outcome<T>(
+    outcome: Result<
+        Result<anyhow::Result<T>, tokio::task::JoinError>,
+        tokio::time::error::Elapsed,
+    >,
+    sink_started: crate::audit_sink::Starting,
+) -> Result<T, BootOutcome> {
+    match outcome {
+        Ok(Ok(Ok(worker))) => {
+            sink_started.started();
+            Ok(worker)
+        }
+        Ok(Ok(Err(e))) => Err(BootOutcome::Retry(e.context("matrix worker spawn/login failed"))),
+        Ok(Err(join_err)) => Err(BootOutcome::Retry(anyhow::anyhow!(
+            "matrix worker spawn task panicked: {join_err}"
+        ))),
+        Err(_elapsed) => Err(BootOutcome::Retry(anyhow::anyhow!(
+            "matrix worker login timed out ({}s)",
+            MATRIX_LOGIN_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 /// One Matrix bring-up attempt: open the LISTEN/NOTIFY connection, spawn the
@@ -231,14 +288,19 @@ async fn attempt(
     // yields a Retry instead of holding the attempt open. On timeout the
     // blocking task is left to drain against the SDK's own HTTP timeouts (a
     // blocking task cannot be force-cancelled).
-    let audit_undelivered = Some(reply_undelivered_audit_sink(
-        crate::audit_sink::SinkWriter::new(
-            pool.clone(),
-            tokio::runtime::Handle::current(),
-            crate::audit_sink::SinkKind::Replies,
-        ),
+    //
+    // The audit sink's lease starts as *starting* (#802): a login abandoned at
+    // the timeout keeps its blocking task, and the writer in it, running —
+    // and a driver that never came up has no replies to audit, so the
+    // shutdown drain must neither wait for it nor call it a loss. It counts
+    // once `login_outcome` sees the worker up.
+    let (audit_undelivered, sink_started) = reply_sink(
+        crate::audit_sink::daemon_ledger(),
+        pool.clone(),
+        tokio::runtime::Handle::current(),
         crate::audit_sink::emit_report,
-    ));
+    );
+    let audit_undelivered = Some(audit_undelivered);
     let spawn = tokio::task::spawn_blocking(move || {
         kastellan_core::channel::matrix::spawn_matrix_worker(
             backend,
@@ -248,21 +310,11 @@ async fn attempt(
             audit_undelivered,
         )
     });
-    let worker = match tokio::time::timeout(MATRIX_LOGIN_TIMEOUT, spawn).await {
-        Ok(Ok(Ok(worker))) => worker,
-        Ok(Ok(Err(e))) => return BootOutcome::Retry(e.context("matrix worker spawn/login failed")),
-        Ok(Err(join_err)) => {
-            return BootOutcome::Retry(anyhow::anyhow!(
-                "matrix worker spawn task panicked: {join_err}"
-            ))
-        }
-        Err(_elapsed) => {
-            return BootOutcome::Retry(anyhow::anyhow!(
-                "matrix worker login timed out ({}s)",
-                MATRIX_LOGIN_TIMEOUT.as_secs()
-            ))
-        }
-    };
+    let worker =
+        match login_outcome(tokio::time::timeout(MATRIX_LOGIN_TIMEOUT, spawn).await, sink_started) {
+            Ok(worker) => worker,
+            Err(outcome) => return outcome,
+        };
 
     info!(identity = %worker.identity, "matrix worker logged in; starting channel bus");
     let authorizer = Arc::new(kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()));
@@ -313,162 +365,5 @@ pub(crate) fn supervise_matrix_channel(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The classification #514's fix depends on: a `localhost`-NAME homeserver
-    /// under force-routing can NEVER succeed (the proxy resolves the name to
-    /// loopback and range-denies every CONNECT), so it must be FATAL. Were it
-    /// merely retryable, the new supervisor would spin on it forever —
-    /// precisely the respawn loop #459's check exists to prevent.
-    #[test]
-    fn a_force_routed_localhost_homeserver_is_fatal_not_retryable() {
-        let outcome = classify_homeserver("http://localhost:8008", true);
-        assert!(matches!(outcome, Some(BootOutcome::Fatal(_))), "{outcome:?}");
-    }
-
-    /// The same URL without force-routing is reachable — the worker resolves
-    /// localhost itself (dev conduit) — so nothing is refused up front.
-    #[test]
-    fn a_localhost_homeserver_without_force_routing_is_not_refused() {
-        assert!(classify_homeserver("http://localhost:8008", false).is_none());
-    }
-
-    /// A routable homeserver is never refused up front: an unreachable one is
-    /// a *transient* condition and belongs to the retry loop, not to this
-    /// static check.
-    #[test]
-    fn a_routable_homeserver_is_not_refused() {
-        assert!(classify_homeserver("https://matrix.kastellan.dev", true).is_none());
-    }
-
-    /// #789's twin: the reply-undelivered sink returns at once against a
-    /// Postgres that never answers — it is called on the driver's thread.
-    #[test]
-    fn the_reply_undelivered_sink_does_not_hold_the_driver_thread() {
-        use crate::audit_sink::test_support::{
-            assert_insert_attempted, assert_returns_at_once, stalled_pool,
-        };
-        use kastellan_core::channel::{
-            ChannelId, ConversationId, OutgoingMessage, PeerId, UndeliveredReason, UndeliveredReply,
-        };
-        let rt = tokio::runtime::Runtime::new().expect("a runtime");
-        let (pool, listener) = rt.block_on(async { stalled_pool() });
-        static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 8, connections: 8 });
-        let sink = reply_undelivered_audit_sink(
-            crate::audit_sink::SinkWriter::with_ledger(
-                &LEDGER,
-                pool,
-                rt.handle().clone(),
-                crate::audit_sink::SinkKind::Replies,
-            ),
-            |_, _| {},
-        );
-        let out = OutgoingMessage {
-            channel: ChannelId("matrix".into()),
-            peer: PeerId("@me:srv".into()),
-            conversation: ConversationId("!room:srv".into()),
-            body: "b".into(),
-        };
-        assert_returns_at_once("the Matrix reply-undelivered sink", || {
-            sink(UndeliveredReply::of(&out, UndeliveredReason::GaveUp, time::OffsetDateTime::now_utc()))
-        });
-        assert_insert_attempted("the Matrix reply-undelivered sink", &listener);
-        // #792: the sink holds its lease until the driver drops it, so the
-        // shutdown drain waits for the driver that owns it.
-        assert_eq!(LEDGER.snapshot().sinks_live, 1, "the Matrix reply-undelivered sink holds a lease");
-        drop(sink);
-        assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives it back when dropped");
-    }
-
-    static MATRIX_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>> =
-        std::sync::Mutex::new(Vec::new());
-
-    /// #799: the Matrix sink's failure closure reaches the reporter, as the
-    /// MATRIX writer, naming the conversation and the reason.
-    #[test]
-    fn the_matrix_sink_reports_a_row_it_could_not_write() {
-        use kastellan_core::channel::{
-            ChannelId, ConversationId, OutgoingMessage, PeerId, UndeliveredReason, UndeliveredReply,
-        };
-        let rt = tokio::runtime::Runtime::new().expect("a runtime");
-        let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
-        static LEDGER: crate::audit_sink::Ledger =
-            crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 0, connections: 1 });
-        let sink = reply_undelivered_audit_sink(
-            crate::audit_sink::SinkWriter::with_ledger(
-                &LEDGER,
-                pool,
-                rt.handle().clone(),
-                crate::audit_sink::SinkKind::Replies,
-            ),
-            |w, line| MATRIX_SAID.lock().unwrap().push((w, line.to_string())),
-        );
-        let out = OutgoingMessage {
-            channel: ChannelId("matrix".into()),
-            peer: PeerId("@me:srv".into()),
-            conversation: ConversationId("!shed-me:srv".into()),
-            body: "b".into(),
-        };
-        sink(UndeliveredReply::of(&out, UndeliveredReason::QueueFull, time::OffsetDateTime::now_utc()));
-        let said = MATRIX_SAID.lock().unwrap();
-        assert_eq!(said.len(), 1, "{said:?}");
-        assert_eq!(said[0].0, AuditLostWriter::Matrix);
-        assert!(
-            said[0].1.contains("!shed-me:srv") && said[0].1.contains("queue_full"),
-            "{said:?}"
-        );
-    }
-
-    /// #798: a conversation id is bounded where it is quoted.
-    #[test]
-    fn a_hostile_conversation_id_is_capped_in_the_lost_row_line() {
-        let long = "!".repeat(10_000);
-        let line = format_reply_row_lost(&long, "gave_up", &"shed");
-        assert!(line.len() < 1_000, "{} bytes", line.len());
-    }
-
-    /// #792: a reply row that was not written says which reply's drop it
-    /// belonged to, and why it was not written.
-    #[test]
-    fn a_lost_reply_row_names_its_conversation_reason_and_cause() {
-        let line = format_reply_row_lost("!room:srv", "gave_up", &"shed: too many");
-        assert_eq!(
-            line,
-            "channel.reply_undelivered row for a reply to conversation !room:srv (gave_up) not \
-             written: shed: too many. The dropped reply's [worker-refusal] line stands"
-        );
-    }
-
-    /// The row the Matrix driver's sink writes: the bus's actor, the
-    /// reply-undelivered action, and a payload that names the reason but
-    /// never carries the reply body (#782). A recording sink in the driver
-    /// tests sees only what the driver passed; this pins what is stored.
-    #[test]
-    fn the_reply_undelivered_row_is_the_bus_s_shape_without_the_body() {
-        use kastellan_core::channel::{
-            ChannelId, ConversationId, OutgoingMessage, PeerId, UndeliveredReason, UndeliveredReply,
-        };
-        let out = OutgoingMessage {
-            channel: ChannelId("matrix".into()),
-            peer: PeerId("@me:srv".into()),
-            conversation: ConversationId("!room:srv".into()),
-            body: "SECRET-BODY".into(),
-        };
-        let at = time::macros::datetime!(2026-09-30 12:34:56 UTC);
-        let reply = UndeliveredReply::of(&out, UndeliveredReason::QueueFull, at);
-        let (actor, action, payload) = reply_undelivered_row(&reply);
-        assert_eq!(actor, "channel");
-        assert_eq!(action, "channel.reply_undelivered");
-        assert_eq!(
-            payload,
-            serde_json::json!({
-                "channel": "matrix",
-                "peer": "@me:srv",
-                "reason": "queue_full",
-                "observed_at": "2026-09-30T12:34:56Z",
-            })
-        );
-        assert!(!payload.to_string().contains("SECRET-BODY"));
-    }
-}
+#[path = "matrix_boot_tests.rs"]
+mod tests;

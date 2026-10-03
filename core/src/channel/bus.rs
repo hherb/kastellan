@@ -694,15 +694,20 @@ impl ChannelBus {
                             // task — correlating it needs the outbound
                             // message to carry its `ask_id`, tracked
                             // separately.
-                            let peer = out.peer.clone();
+                            let (peer, conversation) = (out.peer.clone(), out.conversation.clone());
                             if let Err(e) = ch.send(out).await {
                                 warn!(channel = %id.0, error = %e, "channel send failed");
-                                events
-                                    .audit(
-                                        actions::REPLY_UNDELIVERED,
-                                        super::reply_undelivered_payload(&id, &peer, super::UndeliveredReason::SendFailed, time::OffsetDateTime::now_utc()),
-                                    )
-                                    .await;
+                                // The same view a polled driver's sink is
+                                // handed, so the row has one definition
+                                // (`UndeliveredReply::payload`, #800).
+                                let reply = super::UndeliveredReply {
+                                    channel: &id,
+                                    peer: &peer,
+                                    conversation: &conversation,
+                                    reason: super::UndeliveredReason::SendFailed,
+                                    observed_at: time::OffsetDateTime::now_utc(),
+                                };
+                                events.audit(actions::REPLY_UNDELIVERED, reply.payload()).await;
                             }
                         }
                     }
