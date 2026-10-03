@@ -28,6 +28,7 @@ pub mod ingest;
 pub mod matrix;
 pub mod outbox;
 pub mod pairing;
+mod pg_events;
 pub mod polled_driver;
 pub mod pump_liveness;
 pub mod respawn_alarm;

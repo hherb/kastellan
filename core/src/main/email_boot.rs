@@ -70,7 +70,6 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tracing::info;
 
-use kastellan_core::worker_stderr::AuditLostWriter;
 use kastellan_core::channel::boot_supervisor::pg_sink::pg_boot_audit_sink;
 use kastellan_core::channel::boot_supervisor::{
     BootOutcome, ChannelSupervisor, ReportingPolicy, StartedChannel,
@@ -94,10 +93,11 @@ fn email_skipped_row(
     ("channel", kastellan_core::channel::actions::SKIPPED_ACK_ONLY, skipped.payload())
 }
 
-/// What the email driver does with its rows at exit: nothing, once its bus is
-/// gone, so one still in its long-poll at shutdown is no loss. A `const` so a
-/// test pins it (#802).
-const SINK_KIND: crate::audit_sink::SinkKind = crate::audit_sink::SinkKind::SilentOnExit;
+/// The email sink's channel (#807): its refused rows are thinned and counted
+/// as email's, its `[audit-lost]` lines name `email`, and its `SinkKind`
+/// follows — the driver audits nothing once its bus is gone, so one still in
+/// its long-poll at shutdown is no loss (#802).
+const SINK_CHANNEL: crate::audit_sink::SinkChannel = crate::audit_sink::SinkChannel::Email;
 
 /// Pure: the `[audit-lost]` report for a `channel.skipped_ack_only` row the
 /// email sink could not write, naming the message id (capped by `quoted_id`, neutralised
@@ -142,7 +142,7 @@ fn email_skipped_audit_sink(
         // A refused row is reported through the closure, so its `Err` is not
         // needed here.
         let _ = writer.spawn(actor, action, payload, label, move |why| {
-            report(AuditLostWriter::Email, &format_skipped_row_lost(&message_id, &why));
+            report(SINK_CHANNEL.writer(), &format_skipped_row_lost(&message_id, &why));
         });
     })
 }
@@ -158,7 +158,7 @@ fn skipped_sink(
     handle: tokio::runtime::Handle,
     report: crate::audit_sink::Reporter,
 ) -> AckOnlyAudit {
-    let writer = crate::audit_sink::SinkWriter::with_ledger(ledger, pool, handle, SINK_KIND);
+    let writer = crate::audit_sink::SinkWriter::with_ledger(ledger, pool, handle, SINK_CHANNEL);
     email_skipped_audit_sink(writer, report)
 }
 

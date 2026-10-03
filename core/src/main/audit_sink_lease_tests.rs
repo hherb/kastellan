@@ -30,7 +30,7 @@ fn the_ledger_counts_live_auditing_sinks_apart_from_the_rest() {
     static LEDGER: Ledger = ledger_const();
     let (rt, pool, _listener) = runtime_and_pool();
     let mk = |kind| SinkWriter::with_ledger(&LEDGER, pool.clone(), rt.handle().clone(), kind);
-    let (m, e) = (mk(SinkKind::AuditsOnExit), mk(SinkKind::SilentOnExit));
+    let (m, e) = (mk(SinkChannel::Matrix), mk(SinkChannel::Email));
     assert_eq!((LEDGER.snapshot().sinks_live, LEDGER.snapshot().auditing_live), (2, 1));
     drop(m);
     assert_eq!((LEDGER.snapshot().sinks_live, LEDGER.snapshot().auditing_live), (1, 0));
@@ -59,7 +59,7 @@ fn a_lease_that_never_started_is_not_waited_for_or_called_a_loss() {
     static LEDGER: Ledger = ledger_const();
     let (rt, pool, _listener) = runtime_and_pool();
     let (writer, starting) =
-        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::AuditsOnExit);
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Matrix);
     drop(starting); // the bring-up was abandoned: `started()` is never called
     assert_eq!(LEDGER.snapshot(), InFlight { starting: 1, ..InFlight::default() });
 
@@ -84,7 +84,7 @@ fn a_started_lease_counts_until_its_writer_goes() {
     static LEDGER: Ledger = ledger_const();
     let (rt, pool, _listener) = runtime_and_pool();
     let (writer, starting) =
-        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::AuditsOnExit);
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Matrix);
     starting.started();
     assert_eq!(
         LEDGER.snapshot(),
@@ -103,7 +103,7 @@ fn a_started_silent_lease_is_live_but_not_auditing() {
     static LEDGER: Ledger = ledger_const();
     let (rt, pool, _listener) = runtime_and_pool();
     let (writer, starting) =
-        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::SilentOnExit);
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Email);
     starting.started();
     assert_eq!(LEDGER.snapshot(), InFlight { sinks_live: 1, ..InFlight::default() });
     drop(writer);
@@ -119,7 +119,7 @@ fn a_promotion_counts_live_before_it_stops_counting_as_starting() {
     static LEDGER: Ledger = ledger_const();
     let (rt, pool, _listener) = runtime_and_pool();
     let (writer, starting) =
-        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::AuditsOnExit);
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Matrix);
     let mut mid = None;
     starting.0.promote_around(|| mid = Some(LEDGER.snapshot()));
     let mid = mid.expect("the seam ran");
@@ -137,7 +137,7 @@ fn a_lease_promoted_mid_snapshot_is_counted() {
     static LEDGER: Ledger = ledger_const();
     let (rt, pool, _listener) = runtime_and_pool();
     let (writer, starting) =
-        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::AuditsOnExit);
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Matrix);
     let s = LEDGER.snapshot_around(|| starting.started(), || {});
     assert_eq!((s.starting, s.sinks_live), (1, 1), "seen twice, never not at all: {s:?}");
     assert!(!s.settled());
@@ -152,7 +152,7 @@ fn started_after_the_writer_is_gone_counts_nothing() {
     static LEDGER: Ledger = ledger_const();
     let (rt, pool, _listener) = runtime_and_pool();
     let (writer, starting) =
-        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::AuditsOnExit);
+        SinkWriter::starting_with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Matrix);
     drop(writer);
     starting.started();
     assert_eq!(LEDGER.snapshot(), InFlight::default());
@@ -171,7 +171,7 @@ fn started_racing_the_writer_s_drop_leaves_no_count() {
             &LEDGER,
             pool.clone(),
             rt.handle().clone(),
-            SinkKind::AuditsOnExit,
+            SinkChannel::Matrix,
         );
         let go = Arc::new(std::sync::Barrier::new(2));
         let go2 = go.clone();
@@ -195,7 +195,7 @@ fn started_racing_the_writer_s_drop_leaves_no_count() {
 fn the_drain_closes_before_it_counts() {
     static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
     let (rt, pool, _listener) = runtime_and_pool();
-    let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::SilentOnExit);
+    let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Email);
     let mut row = None;
     let mut refused = None;
     let d = close_and_count(&LEDGER, || {
@@ -204,7 +204,7 @@ fn the_drain_closes_before_it_counts() {
     });
     assert_eq!(d.named, ["COUNTED-IN-THE-WINDOW"], "a row counted after the close is counted");
     assert!(
-        matches!(refused, Some(Err(Unwritten::AfterShutdown))),
+        matches!(refused, Some(Err(Unwritten::AfterShutdown(_)))),
         "a row spawned after the close is refused: {refused:?}"
     );
     drop(row);
@@ -218,7 +218,7 @@ fn the_drain_closes_before_it_counts() {
 fn a_spawn_counts_its_row_before_it_reads_closed() {
     static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
     let (rt, pool, _listener) = runtime_and_pool();
-    let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::SilentOnExit);
+    let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Email);
     let mut counted = None;
     let spawned = writer.spawn_around(
         "a",
@@ -230,7 +230,7 @@ fn a_spawn_counts_its_row_before_it_reads_closed() {
     );
     let counted = counted.expect("the seam ran");
     assert_eq!(counted.named, ["SPAWNED-AS-THE-DRAIN-CLOSED"], "{counted:?}");
-    assert!(matches!(spawned, Err(Unwritten::AfterShutdown)), "{spawned:?}");
+    assert!(matches!(spawned, Err(Unwritten::AfterShutdown(_))), "{spawned:?}");
     assert_eq!(LEDGER.snapshot().rows_pending, 0, "the refused row stops counting");
 }
 
@@ -243,7 +243,7 @@ fn a_spawn_counts_its_row_before_it_reads_closed() {
 fn a_driver_exiting_mid_snapshot_is_seen_with_its_row() {
     static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
     let (rt, pool, _listener) = runtime_and_pool();
-    let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkKind::SilentOnExit);
+    let writer = SinkWriter::with_ledger(&LEDGER, pool, rt.handle().clone(), SinkChannel::Email);
     let s = LEDGER.snapshot_around(|| {}, || {
         let spawned = writer.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {});
         assert!(spawned.is_ok(), "the queue has room");

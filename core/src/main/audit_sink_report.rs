@@ -9,54 +9,47 @@ use std::time::Duration;
 
 use kastellan_core::worker_stderr::AuditLostWriter;
 
-use super::{unreported_on_since, Drained, Ledger, DRAIN_BOUND, LEDGER};
+use super::{
+    unreported_on_since, BurstTally, Drained, Ledger, SinkChannel, UnsaidCounts, DRAIN_BOUND,
+    LEDGER,
+};
 
 /// Why a row was not written, as `on_failure` is told.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Unwritten<'a> {
     /// The insert ran and failed.
     Insert(&'a kastellan_db::DbError),
-    /// Never tried: the queue was full.
-    Shed,
+    /// Never tried: the queue was full. With where the row stands in its
+    /// channel's burst of shed rows (#807), so a thinned flood's lines still
+    /// say how big it is.
+    Shed(BurstTally),
     /// Never tried: the daemon had already drained its audit writes and was
-    /// shutting down (#792).
-    AfterShutdown,
+    /// shutting down (#792). With its place in the channel's burst of late
+    /// rows (#807).
+    AfterShutdown(BurstTally),
 }
 
 impl std::fmt::Display for Unwritten<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Insert(e) => e.fmt(f),
-            Self::Shed => f.write_str(
+            Self::Shed(tally) => write!(
+                f,
                 "shed: too many audit inserts already waiting for the pool (a flood of \
-                 audited events, or a wedged Postgres)",
+                 audited events, or a wedged Postgres); {tally}"
             ),
-            Self::AfterShutdown => f.write_str(
+            Self::AfterShutdown(tally) => write!(
+                f,
                 "not tried: the daemon was shutting down and had already drained its audit \
-                 writes",
+                 writes; {tally}"
             ),
         }
     }
 }
 
-/// How long an id quoted in an `[audit-lost]` line or a row label may be,
-/// before quoting: escaping can lengthen it (a control character becomes
-/// `\u{1b}`).
-/// Worker-supplied ids are uncapped (email's `skipped` list), and a line is
-/// written on the driver's thread (#798).
-const QUOTED_ID_CAP_CHARS: usize = 128;
-
-/// Pure: `id`, shortened and **quoted** for a report line or a row label:
-/// in double quotes, with any `"`, `\` or control character inside escaped
-/// (Rust's `{:?}` of a string).
-///
-/// Quoted because the ids are worker-supplied and the shutdown line joins row
-/// labels with `"; "` (#802): an unquoted id `x; matrix reply to …` would read
-/// as two rows. Inside quotes whose own `"` cannot appear unescaped, an id
-/// cannot end its entry early.
-pub(crate) fn quoted_id(id: &str) -> String {
-    format!("{:?}", kastellan_core::channel::audit_text::cap_chars(id, QUOTED_ID_CAP_CHARS))
-}
+/// `id`, shortened and quoted for a report line or a row label — the lib's,
+/// since #808, so the bus's own lost-row line quotes ids the same way.
+pub(crate) use kastellan_core::channel::audit_text::quoted_id;
 
 /// A pending row's name for the shutdown line (#797): what the row is, and
 /// the worker-supplied id it is about, **always** [`quoted_id`]'d — so no sink
@@ -165,14 +158,29 @@ pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<St
     })
 }
 
-/// Pure: the `[audit-lost]` line for refused rows that got no report of their
-/// own (`audit_sink_thinning.rs`), or `None` when there were none (#798).
-pub(crate) fn format_unreported_at_shutdown(d: &Drained) -> Option<String> {
-    (d.unreported > 0).then(|| {
+/// Pure: the `[audit-lost]` line for one channel's refused rows that got no
+/// report of their own (`audit_sink_thinning.rs`), or `None` when there were
+/// none (#798). Shed and late are said apart (#807): rows shed in last week's
+/// flood are not this shutdown's.
+pub(crate) fn format_unreported_at_shutdown(counts: UnsaidCounts) -> Option<String> {
+    let total = counts.total();
+    (total > 0).then(|| {
+        let mut kinds = Vec::new();
+        if counts.shed > 0 {
+            kinds.push(format!(
+                "{} shed over the daemon's life (too many inserts already waiting for the pool)",
+                counts.shed
+            ));
+        }
+        if counts.late > 0 {
+            kinds.push(format!("{} tried after shutdown began", counts.late));
+        }
         format!(
-            "{} refused (shed, or tried after shutdown began) without a line of its own, \
-             to keep a flood from stalling its driver",
-            counted(d.unreported, "channel audit row", "was", "were"),
+            "at shutdown, {} refused without a line of {}, to keep a flood from stalling its \
+             driver: {}",
+            counted(total, "channel audit row", "was", "were"),
+            if total == 1 { "its own" } else { "their own" },
+            kinds.join("; "),
         )
     })
 }
@@ -206,16 +214,22 @@ pub(crate) fn emit_report(writer: AuditLostWriter, line: &str) {
 }
 
 /// Say what [`super::drain`] left behind: lost rows, stuck drivers that audit on
-/// exit and thinned reports on the `[audit-lost]` marker through `report`;
+/// exit and thinned reports (under each channel's own writer) on the
+/// `[audit-lost]` marker through `report`;
 /// other drivers still running, and bring-ups that never finished, at INFO.
 pub(crate) fn report_drained(d: &Drained, report: Reporter) {
     let lost = [
         format_pending_at_shutdown(d, DRAIN_BOUND),
         format_stuck_replies_at_shutdown(d, DRAIN_BOUND),
-        format_unreported_at_shutdown(d),
     ];
     for line in lost.into_iter().flatten() {
         report(AuditLostWriter::Shutdown, &line);
+    }
+    // Under each channel's own writer (#807): whose rows they were.
+    for channel in SinkChannel::ALL {
+        if let Some(line) = format_unreported_at_shutdown(d.unreported.of(channel)) {
+            report(channel.writer(), &line);
+        }
     }
     let info = [format_live_at_shutdown(d, DRAIN_BOUND), format_starting_at_shutdown(d)];
     for line in info.into_iter().flatten() {

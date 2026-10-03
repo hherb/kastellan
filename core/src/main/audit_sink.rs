@@ -68,7 +68,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
@@ -148,11 +148,9 @@ pub(crate) struct Ledger {
     starting: AtomicUsize,
     /// Set by [`drain`]: no row starts after it.
     closed: AtomicBool,
-    /// Rows shed on the caller's thread. Counted apart from [`Self::late`]:
-    /// a flood shed earlier must not silence the rows refused at shutdown.
-    shed: Mutex<Thinning>,
-    /// Rows refused after the close.
-    late: Mutex<Thinning>,
+    /// Rows refused on the caller's thread — shed, or tried after the close —
+    /// thinned and counted per channel and per kind (#798, #807).
+    refusals: Refusals,
     /// Who the pending rows are, oldest first, for the shutdown line (#797).
     /// Only for naming: the count that gates `drain` is `pending`.
     labels: Mutex<BTreeMap<u64, String>>,
@@ -170,8 +168,7 @@ impl Ledger {
             live_auditing: AtomicUsize::new(0),
             starting: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
-            shed: Mutex::new(Thinning::new()),
-            late: Mutex::new(Thinning::new()),
+            refusals: Refusals::new(),
             labels: Mutex::new(BTreeMap::new()),
             next_row: AtomicU64::new(0),
         }
@@ -209,10 +206,9 @@ impl Ledger {
         InFlight { rows_pending, sinks_live, auditing_live, starting }
     }
 
-    /// Refused rows that got no report of their own, shed and late together.
-    fn unreported(&self) -> usize {
-        let count = |t: &Mutex<Thinning>| t.lock().unwrap_or_else(|p| p.into_inner()).unreported();
-        count(&self.shed) + count(&self.late)
+    /// Refused rows that got no report of their own, per channel and kind.
+    fn unreported(&self) -> Unreported {
+        self.refusals.unreported()
     }
 
     /// [`Self::snapshot`], plus who the pending rows are and how many refused
@@ -251,6 +247,8 @@ pub(crate) struct SinkWriter {
     ledger: &'static Ledger,
     handle: tokio::runtime::Handle,
     pool: PgPool,
+    /// Whose refused rows these are (#807).
+    channel: SinkChannel,
     lease: Arc<lease::Lease>,
 }
 
@@ -298,19 +296,19 @@ impl SinkWriter {
         on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
         between: impl FnOnce(),
     ) -> Result<tokio::task::JoinHandle<()>, Unwritten<'static>> {
-        let ledger = self.ledger;
+        let (ledger, channel) = (self.ledger, self.channel);
         // Counts the row (see `Ledger`'s doc for why before `closed` is read).
         let row = PendingRow::new(ledger, label);
         between();
         // A refused row is counted as refused BEFORE it stops counting as
         // pending, so a snapshot between the two sees it twice, never neither.
         if ledger.closed.load(Ordering::SeqCst) {
-            let why = refuse(&ledger.late, Unwritten::AfterShutdown, on_failure);
+            let why = refuse(ledger.refusals.late(channel), Unwritten::AfterShutdown, on_failure);
             drop(row);
             return Err(why);
         }
         let Ok(queued) = ledger.queued.try_acquire() else {
-            let why = refuse(&ledger.shed, Unwritten::Shed, on_failure);
+            let why = refuse(ledger.refusals.shed(channel), Unwritten::Shed, on_failure);
             drop(row);
             return Err(why);
         };
@@ -321,9 +319,10 @@ impl SinkWriter {
             let _queued = queued;
             // Only a closed semaphore errs, and this one is never closed. Were
             // it closed, no insert could start any more — which is what
-            // `AfterShutdown` says — so the row is reported, not dropped (#802).
+            // `AfterShutdown` says — so the row is refused like a late one:
+            // counted, and reported unless thinned out (#802, #807).
             let Ok(_connection) = ledger.connections.acquire().await else {
-                on_failure(Unwritten::AfterShutdown);
+                refuse(ledger.refusals.late(channel), Unwritten::AfterShutdown, on_failure);
                 return;
             };
             if let Err(e) = kastellan_db::audit::insert(&pool, actor, action, payload).await {
@@ -331,22 +330,6 @@ impl SinkWriter {
             }
         }))
     }
-}
-
-/// Tell `on_failure` of a row refused on the caller's thread — unless the
-/// burst has passed the thinning, in which case it is only counted — and hand
-/// `why` back for the caller's `Err`.
-fn refuse(
-    thinning: &Mutex<Thinning>,
-    why: Unwritten<'static>,
-    on_failure: impl FnOnce(Unwritten<'_>),
-) -> Unwritten<'static> {
-    // The lock is released before `on_failure` runs: a report can block.
-    let report = thinning.lock().unwrap_or_else(|p| p.into_inner()).refuse(Instant::now());
-    if report {
-        on_failure(why);
-    }
-    why
 }
 
 /// One row counted in [`Ledger::pending`], and named in its label list, until
@@ -407,8 +390,9 @@ pub(crate) struct Drained {
     in_flight: InFlight,
     /// Labels of the oldest pending rows, at most [`NAMED_AT_SHUTDOWN`].
     named: Vec<String>,
-    /// Refused rows that never got a report of their own, so far.
-    unreported: usize,
+    /// Refused rows that never got a report of their own, so far, per
+    /// channel and kind (#807).
+    unreported: Unreported,
 }
 
 /// Shutdown: wait up to [`DRAIN_BOUND`] for the daemon's channel drivers to
@@ -441,16 +425,17 @@ fn close_and_count(ledger: &'static Ledger, between: impl FnOnce()) -> Drained {
 /// The refused rows thinned out since `drained` was taken — late rows a
 /// still-running driver tried after the drain's snapshot (#802).
 fn unreported_on_since(ledger: &'static Ledger, drained: &Drained) -> usize {
-    ledger.unreported().saturating_sub(drained.unreported)
+    ledger.unreported().total().saturating_sub(drained.unreported.total())
 }
 
 #[path = "audit_sink_lease.rs"]
 mod lease;
-pub(crate) use lease::{SinkKind, Starting};
+pub(crate) use lease::{SinkChannel, Starting};
 
 #[path = "audit_sink_thinning.rs"]
 mod thinning;
-use thinning::Thinning;
+use thinning::{refuse, Refusals};
+pub(crate) use thinning::{BurstTally, UnsaidCounts, Unreported};
 
 #[path = "audit_sink_report.rs"]
 mod report;
