@@ -37,6 +37,7 @@ pub mod entity_kinds;
 pub mod entity_name;
 pub mod graph;
 pub mod memories;
+pub mod nul;
 pub mod pairings;
 pub mod pool;
 pub mod probe;
