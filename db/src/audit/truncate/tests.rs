@@ -1,10 +1,7 @@
-//! Unit tests for the [`super`] audit module.
+//! Unit tests for [`super`], the payload cap. Their NUL-escape counterparts
+//! live in `audit/nul_escape/tests.rs`.
 //!
-//! Lifted verbatim out of `audit.rs` in a movement-only commit (the repo
-//! convention is to split *before* the change that grows a file, so the
-//! `#[test]` name set is verifiable either side of the move). Nothing here
-//! was rewritten: the assertions, the fixtures and the doc comments are the
-//! ones that were in `audit.rs`, and the test-name set is unchanged at 25.
+//! Originally part of `audit.rs`'s tests; moved here with `truncate.rs`.
 
 use super::*;
 
@@ -383,9 +380,10 @@ fn every_envelope_fits_the_budget() {
 
 // ── The multi-key half of `preserve_onto`. ────────────────────────
 //
-// `PRESERVED_KEYS` has TWO members since issue #617, so every property
-// below is structurally reachable through `truncate_payload` — what
-// keeps the starvation arm from occurring in production is now sizing,
+// `PRESERVED_KEYS` has had two members since issue #617 and three since
+// #816, so every property below is structurally reachable through
+// `truncate_payload` — what keeps the starvation arm from occurring in
+// production is now sizing,
 // not cardinality (a real envelope peaks near 1.4 KiB against a
 // 4032-byte budget). They are the properties its doc comment claims,
 // and the mutation that breaks them -- measuring each candidate against
@@ -545,10 +543,11 @@ fn wire_key_literals_are_pinned() {
     assert_eq!(DROPPED_PRESERVED_KEY, "_dropped_preserved");
     assert_eq!(GUARD_KEY, "guard");
     assert_eq!(REQ_SUMMARY_KEY, "req_summary");
+    assert_eq!(NUL_ESCAPED_KEY, "_nul_escaped");
     // Order is priority order, and `the_guard_record_is_admitted_before_the_
     // req_summary` proves what that costs the loser. Pinned here so a
     // re-ordering is a deliberate edit rather than a silent one.
-    assert_eq!(PRESERVED_KEYS, ["guard", "req_summary"].as_slice());
+    assert_eq!(PRESERVED_KEYS, ["guard", "req_summary", "_nul_escaped"].as_slice());
 }
 
 /// `str_eq` is the sole enforcer of the compile-time shadow guard.
