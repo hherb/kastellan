@@ -190,6 +190,9 @@ impl CompletedTasks for PgCompletedTasks {
 }
 
 /// Handle one inbound message. Order is security-load-bearing:
+///   0. **NUL boundary** (`super::inbound_nul`, #818): a NUL in the channel,
+///      peer or conversation id refuses the message with a
+///      `channel.rejected_malformed` row; a NUL in the body is escaped to `␀`.
 ///   1. **authorize** (`(channel, peer, evidence)`), yielding three distinct
 ///      outcomes:
 ///      - `RejectedUnauthentic(reason)` — the transport-supplied evidence
@@ -266,6 +269,9 @@ pub async fn handle_inbound(
     events: &dyn ChannelEvents,
     msg: &IncomingMessage,
 ) -> Option<OutgoingMessage> {
+    // Step 0 (#818): a NUL in an id refuses the message with an audit row; a
+    // NUL in the body is escaped. Postgres can store neither.
+    let msg = &*super::inbound_nul::admit(events, msg).await?;
     match authorizer.authorize(&msg.channel, &msg.peer, msg.evidence.as_ref()).await {
         AuthDecision::Recognised => {}
         AuthDecision::RejectedUnauthentic(reason) => {

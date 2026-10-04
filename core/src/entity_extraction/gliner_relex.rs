@@ -141,6 +141,30 @@ pub fn merge_chunks(chunk_responses: Vec<(usize, ExtractResponse)>) -> ExtractRe
     ExtractResponse { entities, triples }
 }
 
+/// Drop every entity and triple carrying a NUL (U+0000) in a field that
+/// reaches the graph; return how many were dropped (#818).
+///
+/// An entity's text becomes `entities.name_norm`, half of its
+/// `(kind, name_norm)` identity key, and a triple is resolved by its
+/// endpoints' text — so these are **identities**, which
+/// `kastellan_db::nul` refuses rather than escapes. Postgres cannot store a
+/// NUL anyway, and one poisoned span failed the **whole** batch upsert: a
+/// NUL error is SQLSTATE class 22, which the per-row fallback (class 23
+/// only) does not catch. The input text is read back from Postgres, so it
+/// holds no NUL; a span carrying one was invented by the worker, and is
+/// dropped on its own so the rest of the turn's entities still land.
+///
+/// Pure; no I/O.
+pub fn discard_nul_bearing(resp: &mut ExtractResponse) -> usize {
+    let has_nul = |fields: &[&str]| fields.iter().any(|f| f.contains('\0'));
+    let before = resp.entities.len() + resp.triples.len();
+    resp.entities.retain(|e| !has_nul(&[&e.text, &e.label]));
+    resp.triples.retain(|t| {
+        !has_nul(&[&t.head.text, &t.head.r#type, &t.tail.text, &t.tail.r#type, &t.relation])
+    });
+    before - (resp.entities.len() + resp.triples.len())
+}
+
 use sqlx::PgPool;
 
 /// Result of the upsert pass.
@@ -337,7 +361,18 @@ impl EntityExtractor for GlinerRelexExtractor {
                 max_entities: None,
             };
             match self.client.extract(req).await {
-                Ok(resp) => chunk_responses.push((chunk.byte_offset, resp)),
+                Ok(mut resp) => {
+                    let dropped = discard_nul_bearing(&mut resp);
+                    if dropped > 0 {
+                        tracing::warn!(
+                            target: "kastellan::entity_extraction",
+                            dropped,
+                            chunk_offset = chunk.byte_offset,
+                            "dropped worker spans carrying a NUL (#818)",
+                        );
+                    }
+                    chunk_responses.push((chunk.byte_offset, resp))
+                }
                 Err(e) => {
                     tracing::warn!(
                         target: "kastellan::entity_extraction",
