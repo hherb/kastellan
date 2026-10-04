@@ -1,9 +1,9 @@
 //! The payload cap: [`truncate_payload`] and the keys that survive it.
 //!
 //! Split out of `audit.rs` in a movement-only commit (the module doc there
-//! still holds the policy prose, under "Truncation policy"). Every item
-//! below is re-exported from [`super`], so `kastellan_db::audit::…` paths are
-//! unchanged.
+//! still holds the policy prose, under "Truncation policy"). Every public
+//! item below is re-exported from [`super`], so `kastellan_db::audit::…`
+//! paths are unchanged.
 
 use super::nul_escape::{self, NUL_ESCAPED_KEY};
 use super::req_summary::{self, HEAD_MAX_BYTES, REQ_KEY, REQ_SUMMARY_KEY};
@@ -69,13 +69,14 @@ pub const PAYLOAD_MAX_BYTES: usize = 4096;
 /// Contention is not reachable in production today — a real envelope peaks
 /// near 1.4 KiB against a 4032-byte working budget — so the order is a
 /// standing decision for the member after next rather than a live
-/// tie-break. A re-ordering is caught **twice**: by
-/// `wire_key_literals_are_pinned`, which pins the array itself, and
+/// tie-break. A re-ordering of the first two members is caught **twice**:
+/// by `wire_key_literals_are_pinned`, which pins the array itself, and
 /// behaviourally by `the_guard_record_is_admitted_before_the_req_summary`,
 /// whose fixture makes each key fit alone but not both. Verified by
 /// mutation, because the behavioural half was previously vacuous — its
 /// fixture could not fit in either slot, so it passed with the array
-/// reversed while claiming to assert the order.
+/// reversed while claiming to assert the order. [`NUL_ESCAPED_KEY`]'s
+/// position is pinned by `wire_key_literals_are_pinned` alone.
 pub const PRESERVED_KEYS: &[&str] = &[GUARD_KEY, REQ_SUMMARY_KEY, NUL_ESCAPED_KEY];
 
 /// The payload key under which `core::tool_host::post_process` records the
@@ -116,6 +117,10 @@ pub const DROPPED_PRESERVED_KEY: &str = "_dropped_preserved";
 /// Public because [`truncate_payload`]'s one hard postcondition is stated
 /// in terms of it: a caller reasoning about what will survive the cap
 /// cannot do so without this number.
+///
+/// ⚠️ Headroom is thin: with three [`PRESERVED_KEYS`] the worst case is 61
+/// of these 64 bytes, so a fourth member will need this raised. The
+/// compile-time assertion refuses the build if it is not.
 pub const DROP_MARKER_RESERVE: usize = 64;
 
 /// The envelope's fingerprint keys. Private — [`is_truncation_envelope`] is
@@ -308,13 +313,15 @@ pub fn is_truncation_envelope(payload: &serde_json::Value) -> bool {
 /// { "_truncated": true, "sha256": "<64 hex>", "len": <bytes> }
 /// ```
 ///
-/// where `len` is the original serialised byte length and `sha256` is
-/// the lowercase-hex SHA-256 digest of the same bytes — **of the (escaped)
-/// input, not of the envelope**, so two rows for the same body still compare
-/// equal whatever else they carry. A body with NULs and the same body with
-/// literal `␀`s differ in their [`NUL_ESCAPED_KEY`], so they do not collide.
+/// where `len` is the serialised byte length of the escaped input and
+/// `sha256` is the lowercase-hex SHA-256 digest of the same bytes — **of the
+/// escaped input, not of the envelope**, so two rows for the same body still
+/// compare equal whatever else they carry. Both describe the stored form,
+/// not the bytes the worker sent. An object body with NULs and the same body
+/// with literal `␀`s differ in their [`NUL_ESCAPED_KEY`], so they do not
+/// collide; a bare string or array has no key to differ in, and does.
 ///
-/// Any [`PRESERVED_KEYS`] present in the input are then copied onto the
+/// Any [`PRESERVED_KEYS`] present in the escaped payload are then copied onto the
 /// envelope **verbatim, whatever their value** — including a `null` or a
 /// scalar, since this function judges keys and not shapes — because a
 /// bounded decision record is not what the cap is defending against and is
@@ -367,7 +374,7 @@ pub fn truncate_payload(payload: serde_json::Value) -> serde_json::Value {
     // ── Derive the bounded request summary (issue #617). ──
     //
     // Strictly after the fingerprint above, which is computed over `bytes`
-    // — the serialisation of the payload as it arrived. Inserting the
+    // — the serialisation of the escaped payload, the stored form. Inserting the
     // summary first would fold it into the digest and two rows for one
     // request body would stop comparing equal, which is the one thing the
     // fingerprint exists to do. `the_req_summary_does_not_change_the_

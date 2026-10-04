@@ -1,8 +1,8 @@
 //! PG-gated e2e for issue #816: an audit row whose payload carries a NUL
 //! must still land.
 //!
-//! Postgres refuses U+0000 anywhere in `text` and in `jsonb` (`unsupported
-//! Unicode escape sequence`). A compromised channel worker is in scope
+//! Postgres refuses U+0000 anywhere in `jsonb` (`unsupported Unicode escape
+//! sequence`) and in `text` (an invalid byte sequence). A compromised channel worker is in scope
 //! (`docs/threat-model.md`), and it controls strings that end up in audit
 //! payloads — a peer id, a message id, a tool result. Before #816 a single
 //! NUL in one of them failed the whole insert, so a hostile peer could erase
@@ -15,7 +15,8 @@
 //! while proving nothing about the escape.
 //!
 //! Skip-as-pass without a supervisor/PG (root CI container, a Mac without
-//! `KASTELLAN_PG_BIN_DIR`); live wherever a cluster can be brought up.
+//! `KASTELLAN_PG_BIN_DIR`); live wherever a cluster can be brought up, and
+//! demanded by the `pg` profile of `scripts/run-e2e-gate.sh`.
 
 use kastellan_db::audit::{self, NUL_ESCAPE, NUL_ESCAPED_KEY, PAYLOAD_MAX_BYTES};
 use kastellan_tests_common::{
@@ -138,10 +139,11 @@ fn audit_rows_carrying_nul_land_with_the_escape_counted() {
         // payload slot of their own, so their glyph is their record.
         assert!(row.payload.get(NUL_ESCAPED_KEY).is_none(), "{}", row.payload);
 
-        // ── Over the cap: the request summary's head keeps its NUL out. ──
-        // `req_summary` copies a head of `req` onto the truncation envelope,
-        // so a NUL early in an oversized request reaches the stored row by
-        // that route too. The count rides through truncation.
+        // ── Over the cap: the count rides through truncation. ──
+        // The body is replaced by a fingerprint envelope; the count is a
+        // preserved key, so the row still says it was rewritten. The
+        // request summary's head is cut from the escaped request, so it
+        // shows `␀` like the rest of the row.
         let big = serde_json::json!({
             "req": {"argv": ["echo", "x\u{0}y"]},
             "result": "z".repeat(PAYLOAD_MAX_BYTES),
@@ -152,6 +154,10 @@ fn audit_rows_carrying_nul_land_with_the_escape_counted() {
         let row = audit::fetch_by_id(&pool, id).await.expect("read back");
         assert!(audit::is_truncation_envelope(&row.payload), "{}", row.payload);
         assert_eq!(row.payload[NUL_ESCAPED_KEY], serde_json::json!(1), "{}", row.payload);
+        let head = row.payload[audit::REQ_SUMMARY_KEY]["head"]
+            .as_str()
+            .expect("a req_summary head was stored");
+        assert!(head.contains(&format!("x{esc}y")), "{head}");
 
         pool.close().await;
     });

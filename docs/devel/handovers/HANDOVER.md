@@ -77,7 +77,17 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - Mutants 8/8 (one harness "SURVIVED" was spurious — re-run by hand, killed). Filed
   [#818](https://github.com/hherb/kastellan/issues/818): the same NUL rule bites `tasks`,
   `memories`, `entities`, `pairings` — ⚠️ for identity columns (`pairings.peer`) escaping is an
-  identity decision; refuse at the boundary instead.
+  identity decision; refuse at the boundary instead. (Review added `tasks::finalize` — a failed
+  `turn_record` UPDATE silently drops the channel reply — `asks`, and a UTF8-cluster caveat there.)
+- **Review round (same PR):** `audit::stored_form(actor, action, payload)` is now the ONE storage
+  transform; `AuditSink::insert` calls it, so a double sees escaped `actor`/`action` too (the #614
+  class, one column over — pinned by a core seam test). `insert` logs a `warn!` on any escaped row
+  (keyed on the stored marker, so once per row despite the double pass). `audit_nul_e2e` is now in
+  the **`pg` gate profile** (ran: 21 tests, 0 `[SKIP]`). `nul_free` was a substring false positive
+  — now a walk; and the `req_summary` head was never a NUL route (it is cut from the
+  *serialisation*). New tests: escape-pushes-over-cap, count survives the most crowded envelope,
+  object-vs-bare fingerprint (bare strings collide — documented). Mutants 3/3. Stale "original
+  bytes" fingerprint/`len` docs corrected.
 
 ### Previous (2026-10-03): #807 + #808 (PR #812) — what still binds
 
@@ -389,7 +399,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#816 — **the gate that stands**) | PR #819 | **4846 / 0 / 52**, **192** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #812's expected 4830: db lib 213 → **228** (+15, `nul_escape`), new suite `audit_nul_e2e` +1 (ran, not skipped). Mutants 8/8 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-816`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#816 — **the gate that stands**) | PR #819 | **4846 / 0 / 52**, **192** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #812's expected 4830: db lib 213 → **228** (+15, `nul_escape`), new suite `audit_nul_e2e` +1 (ran, not skipped). Mutants 8/8. **Review round (not a full sweep):** db lib 228 → **234** (+6), core lib +1 (`audit_sink` seam) — expect **4853** next sweep; `pg` profile passed as evidence (21 tests, 41 `[E2E]`); clippy db+core warm | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-816`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#807 + #808 — superseded) | PR #812 (`199ead78`; only docs changed after it) | **4826 / 0 / 52**, **191** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #806's review-round 4815: bin 73 → **79** (+6: thinning 3, report 2, ledger 1), core lib +5 (`pg_events` 4, `audit_text` 1). Mutants 5/5. **Review round (not a full sweep):** bin 79 → **81**, core lib `channel` 390 → **392** — expect **4830** next sweep; the review's 6 survivors + 4 new mutants, **10/10** killed; `cargo clippy -p kastellan-core --all-targets` clean (warm, not the cold 27) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-807`, **27** `Checking kastellan` | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.

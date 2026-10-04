@@ -43,8 +43,8 @@
 //!
 //! [`truncate_payload`] enforces a 4 KiB cap (after JSON serialisation):
 //! oversize payloads are replaced with a small envelope carrying a
-//! SHA-256 fingerprint of the original bytes plus the original byte
-//! length. The fingerprint lets two truncated rows be compared for
+//! SHA-256 fingerprint of the stored (NUL-escaped, see below) bytes plus
+//! their byte length. The fingerprint lets two truncated rows be compared for
 //! equality without storing the bytes themselves; the length tells an
 //! operator how much was elided.
 //!
@@ -66,6 +66,10 @@
 //! [`DROPPED_PRESERVED_KEY`] rather than vanishing, because an
 //! unrecorded loss is the shape of the defect above.
 //!
+//! [`truncate_payload`] is pure: it returns a new `serde_json::Value` and
+//! performs no I/O. Its tests — deterministic-fingerprint regression pins
+//! among them — live in `audit/truncate/tests.rs`.
+//!
 //! ## NUL is escaped before anything else (issue #816)
 //!
 //! Postgres refuses U+0000 in `jsonb` and `text`, so one NUL in a
@@ -74,10 +78,16 @@
 //! [`truncate_payload`] therefore runs [`nul_escape::escape_payload`] first:
 //! each NUL becomes [`NUL_ESCAPE`] (`␀`) and the payload records how many
 //! under [`NUL_ESCAPED_KEY`], which rides through truncation as a
-//! [`PRESERVED_KEYS`] member. [`insert`] escapes `actor` and `action` too.
+//! [`PRESERVED_KEYS`] member. [`insert`] escapes `actor` and `action` too;
+//! [`stored_form`] is that whole storage transform as one pure function.
 //!
-//! Pure: returns a new `serde_json::Value`, performs no I/O. Tested
-//! with deterministic-fingerprint regression pins.
+//! This closes the hazard for rows that reach `audit_log` only. A NUL still
+//! fails other inserts that carry worker-written text — an inbound channel
+//! message's `tasks` row among them, which then leaves no audit row at all —
+//! tracked by [#815](https://github.com/hherb/kastellan/issues/815) and
+//! [#818](https://github.com/hherb/kastellan/issues/818).
+
+use std::borrow::Cow;
 
 use sqlx::Row;
 
@@ -120,14 +130,65 @@ pub struct AuditRow {
     pub payload: serde_json::Value,
 }
 
+/// What [`insert`] writes for one `(actor, action, payload)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredForm<'a> {
+    /// `actor`, NUL-escaped. Borrowed when it held no NUL.
+    pub actor: Cow<'a, str>,
+    /// `action`, NUL-escaped. Borrowed when it held no NUL.
+    pub action: Cow<'a, str>,
+    /// `payload` after [`truncate_payload`].
+    pub payload: serde_json::Value,
+}
+
+impl StoredForm<'_> {
+    /// Whether the escape rewrote `actor` or `action`. Those columns have no
+    /// payload slot for a count, so this is the only place it is known.
+    pub fn columns_escaped(&self) -> bool {
+        matches!(self.actor, Cow::Owned(_)) || matches!(self.action, Cow::Owned(_))
+    }
+}
+
+/// Every storage transform [`insert`] applies, as one pure function.
+///
+/// `payload` goes through [`truncate_payload`] (which escapes NUL first).
+/// `actor` and `action` are `text` columns, which refuse NUL just as
+/// `jsonb` does, so they are escaped too ([`nul_escape::escape_str`]).
+/// Both are spelled by code today, so that is a backstop; with no payload
+/// of their own to carry a count, the `␀` glyph is their record.
+///
+/// Public so a test double can observe exactly what Postgres stores:
+/// `core::tool_host::audit_sink::AuditSink::insert` calls it rather than
+/// [`truncate_payload`] alone, so a storage step added here reaches every
+/// double without a second edit (PR #614's class of defect).
+///
+/// **Idempotent**, and production depends on it: the tool path applies it
+/// twice (once in the seam, once in [`insert`]). An escaped string holds no
+/// NUL, and [`truncate_payload`] is idempotent.
+pub fn stored_form<'a>(
+    actor: &'a str,
+    action: &'a str,
+    payload: serde_json::Value,
+) -> StoredForm<'a> {
+    StoredForm {
+        actor: nul_escape::escape_str(actor).0,
+        action: nul_escape::escape_str(action).0,
+        payload: truncate_payload(payload),
+    }
+}
+
 /// Insert one row into `audit_log` and return its `id`.
 ///
-/// `payload` flows through [`truncate_payload`] so the caller does not
-/// have to enforce the cap — or escape NUL — themselves. `actor` and
-/// `action` are `text` columns, which refuse NUL just as `jsonb` does, so
-/// they are escaped too ([`nul_escape::escape_str`]). Both are spelled by
-/// code today, so this is a backstop; with no payload of their own to
-/// carry a count, the `␀` glyph is their record.
+/// The row is [`stored_form`]`(actor, action, payload)`, so the caller does
+/// not have to enforce the cap — or escape NUL — themselves.
+///
+/// A row that carries escaped NULs is also logged at `warn`: a NUL from a
+/// worker or peer is a sign of hostile or broken input, and without the log
+/// an operator would learn of it only by querying for [`NUL_ESCAPED_KEY`].
+/// The trigger is the stored marker, which survives the tool path's second
+/// pass, so each such row logs once. A NUL in `actor`/`action` on that path
+/// is NOT logged — the seam's first pass already escaped it — but there
+/// both columns are spelled by code, so none can arrive.
 ///
 /// The insert is a single round-trip (`INSERT … RETURNING id`) — there is
 /// no separate SELECT.
@@ -150,16 +211,24 @@ pub async fn insert<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let payload = truncate_payload(payload);
-    let (actor, _) = nul_escape::escape_str(actor);
-    let (action, _) = nul_escape::escape_str(action);
+    let stored = stored_form(actor, action, payload);
+    let payload_nuls = stored.payload.get(NUL_ESCAPED_KEY);
+    if payload_nuls.is_some() || stored.columns_escaped() {
+        tracing::warn!(
+            actor = %stored.actor,
+            action = %stored.action,
+            payload_nuls = payload_nuls.and_then(serde_json::Value::as_u64).unwrap_or(0),
+            columns_escaped = stored.columns_escaped(),
+            "audit row carried NUL; escaped to U+2400 before storing (#816)"
+        );
+    }
     let row = sqlx::query(
         "INSERT INTO audit_log (actor, action, payload) \
          VALUES ($1, $2, $3) RETURNING id",
     )
-    .bind(&actor)
-    .bind(&action)
-    .bind(payload)
+    .bind(stored.actor.as_ref())
+    .bind(stored.action.as_ref())
+    .bind(stored.payload)
     .fetch_one(executor)
     .await
     .map_err(|e| DbError::Query(format!("audit_log insert: {e}")))?;

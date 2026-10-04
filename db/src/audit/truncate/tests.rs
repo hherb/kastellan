@@ -1,10 +1,7 @@
-//! Unit tests for the [`super`] audit module.
+//! Unit tests for [`super`], the payload cap. Their NUL-escape counterparts
+//! live in `audit/nul_escape/tests.rs`.
 //!
-//! Lifted verbatim out of `audit.rs` in a movement-only commit (the repo
-//! convention is to split *before* the change that grows a file, so the
-//! `#[test]` name set is verifiable either side of the move). Nothing here
-//! was rewritten: the assertions, the fixtures and the doc comments are the
-//! ones that were in `audit.rs`, and the test-name set is unchanged at 25.
+//! Originally part of `audit.rs`'s tests; moved here with `truncate.rs`.
 
 use super::*;
 
@@ -383,10 +380,10 @@ fn every_envelope_fits_the_budget() {
 
 // ── The multi-key half of `preserve_onto`. ────────────────────────
 //
-// `PRESERVED_KEYS` has had several members since issue #617 (three since
-// #816), so every property
-// below is structurally reachable through `truncate_payload` — what
-// keeps the starvation arm from occurring in production is now sizing,
+// `PRESERVED_KEYS` has had two members since issue #617 and three since
+// #816, so every property below is structurally reachable through
+// `truncate_payload` — what keeps the starvation arm from occurring in
+// production is now sizing,
 // not cardinality (a real envelope peaks near 1.4 KiB against a
 // 4032-byte budget). They are the properties its doc comment claims,
 // and the mutation that breaks them -- measuring each candidate against

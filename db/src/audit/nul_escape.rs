@@ -2,10 +2,10 @@
 //!
 //! ## Why this exists
 //!
-//! Postgres refuses U+0000 anywhere in a `text` column and anywhere in a
-//! `jsonb` value — string or object key — with `unsupported Unicode escape
-//! sequence`. The audit insert is one statement, so a single NUL anywhere in
-//! a row fails the **whole row**.
+//! Postgres refuses U+0000 anywhere in a `jsonb` value — string or object
+//! key — with `unsupported Unicode escape sequence`, and anywhere in a `text`
+//! column as an invalid byte sequence. The audit insert is one statement, so
+//! a single NUL anywhere in a row fails the **whole row**.
 //!
 //! Audit payloads carry worker-written strings: a channel peer id, a skipped
 //! message id, a tool's entire result. A compromised worker is in scope
@@ -24,8 +24,13 @@
 //!
 //! Because a hostile worker can also send a literal `␀`, the glyph alone
 //! cannot say which characters were rewritten. So a payload object also
-//! gets [`NUL_ESCAPED_KEY`], the number of NULs replaced. A row without that
-//! key had none; a row with it was rewritten, and says by how much.
+//! gets [`NUL_ESCAPED_KEY`], the number of NULs replaced. An **object**
+//! payload with that key was rewritten and says by how much; one without it
+//! (and with no `_dropped_preserved` naming it) had no NUL in its payload.
+//! Three things say so only through the glyph: `actor` and `action`, which
+//! have no payload slot; a non-object payload, which has nowhere to put a
+//! key; and which of several colliding keys was renamed (see
+//! `escape_object`).
 //!
 //! [`escape_payload`] is the step [`super::truncate_payload`] runs **first**,
 //! so the cap, the fingerprint and the request summary all see the stored
@@ -40,10 +45,10 @@ use serde_json::{Map, Value};
 
 /// What every NUL in an audit row is replaced with: U+2400 SYMBOL FOR NULL.
 ///
-/// Not a space (the log-side choice in `core::untrusted_text`): a terminal
-/// needs the control *gone*, but an audit row needs to keep saying a NUL was
-/// there. Not U+FFFD either, which already means "an undecodable byte" —
-/// a different fact.
+/// Not a space (the display-side choice in `core::untrusted_text`, for logs
+/// and planner-bound text): a reader needs the control *gone*, but an audit
+/// row needs to keep saying a NUL was there. Not U+FFFD either, which
+/// already means "an undecodable byte" — a different fact.
 pub const NUL_ESCAPE: char = '\u{2400}';
 
 /// Payload key holding how many NULs [`escape_payload`] replaced.
@@ -57,9 +62,14 @@ pub const NUL_ESCAPE: char = '\u{2400}';
 /// **idempotent**, and production depends on it: the tool path applies
 /// [`super::truncate_payload`] twice (`core::tool_host::audit_sink`), and a
 /// second pass that stripped the key would store `␀` with nothing left to
-/// say it had been a NUL. Leaving a marker alone gives a worker nothing:
-/// top-level payload keys are spelled by core's payload builders, and worker
-/// data sits beneath them.
+/// say it had been a NUL.
+///
+/// ⚠️ **Leaving a marker alone is safe only because core spells every
+/// top-level payload key** — each `audit::insert` site builds its payload
+/// with worker data nested beneath its own keys. A site that stored a
+/// worker-returned object *as* the payload would let that worker forge this
+/// key on a NUL-free row. Nothing enforces the convention; keep it when
+/// adding a write site.
 pub const NUL_ESCAPED_KEY: &str = "_nul_escaped";
 
 /// `s` with every NUL replaced by [`NUL_ESCAPE`], and how many there were.
@@ -132,6 +142,10 @@ fn escape_value(v: &mut Value) -> u64 {
 /// [`NUL_ESCAPE`] appended until it is unique. Nothing is overwritten. The
 /// appended glyphs replace no NUL, so they are not counted: the count is
 /// always the number of NULs the worker sent.
+///
+/// What is **not** recoverable is which key was renamed: `{"k\0": A,
+/// "k␀": B}` and `{"k␀\0": A, "k␀": B}` are stored alike. That is ambiguity
+/// in evidence, not loss of it — both values and the true count survive.
 fn escape_object(map: &mut Map<String, Value>) -> u64 {
     let mut count: u64 = map.values_mut().map(escape_value).sum();
 
