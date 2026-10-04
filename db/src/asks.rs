@@ -327,7 +327,13 @@ const ASK_COLUMNS: &str = "id, task_id, kind, body, options, plan_digest, state,
 /// otherwise; see `core::cassandra::plan_digest` for what the value means.
 ///
 /// `resume_state` is the caller's opaque record of the run being suspended
-/// (#564 slice 1b, D11) — stored verbatim, never interpreted here. Pass
+/// (#564 slice 1b, D11) — stored verbatim except for NUL, never interpreted
+/// here.
+///
+/// `body` and `resume_state` are **records**, so a NUL in either is escaped
+/// to `␀` rather than failing the INSERT (#818). `resume_state` holds raw
+/// tool results, so before #818 one NUL from any tool in the run made the
+/// escalation impossible and failed the task. Pass
 /// `None` when there is no run state to carry; the resume then restores an
 /// empty history, which is what every ask raised before migration 0024
 /// does.
@@ -346,6 +352,16 @@ pub async fn raise(
     deadline_at: OffsetDateTime,
     resume_state: Option<&serde_json::Value>,
 ) -> Result<RaisedAsk, DbError> {
+    let (body, n_body) = crate::nul::escape_str(body);
+    let (resume_state, n_resume) = crate::nul::escape_opt_json(resume_state.cloned());
+    if n_body + n_resume > 0 {
+        tracing::warn!(
+            task_id,
+            nuls_escaped = n_body + n_resume,
+            "asks raise: NUL escaped to U+2400 in body/resume_state (#818)"
+        );
+    }
+
     let nonce = generate_nonce();
     let nonce_hash = sha256_hex(&nonce);
 
@@ -380,12 +396,12 @@ pub async fn raise(
     )
     .bind(task_id)
     .bind(kind)
-    .bind(body)
+    .bind(body.as_ref())
     .bind(options)
     .bind(plan_digest)
     .bind(&nonce_hash)
     .bind(deadline_at)
-    .bind(resume_state)
+    .bind(resume_state.as_ref())
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| DbError::Query(format!("asks raise insert: {e}")))?;

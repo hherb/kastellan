@@ -22,10 +22,17 @@ pub struct Pairing {
 }
 
 /// True iff `(channel, peer)` has an active (non-revoked) pairing.
+///
+/// A key holding a NUL answers `false` without a query: no stored row can
+/// hold one (see [`refuse_nul_key`]), so "not paired" is the truth, and
+/// Postgres would otherwise fail the lookup itself (#818).
 pub async fn is_paired<'e, E>(executor: E, channel: &str, peer: &str) -> Result<bool, DbError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    if refuse_nul_key(channel, peer).is_err() {
+        return Ok(false);
+    }
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM pairings \
          WHERE channel = $1 AND peer = $2 AND revoked_at IS NULL)",
@@ -40,6 +47,7 @@ where
 
 /// Bind `(channel, peer)` if not already active. Idempotent via the partial
 /// unique index (`pairings_active_uniq`). Returns `true` iff a new row was added.
+/// A NUL in either key is refused ([`refuse_nul_key`]).
 pub async fn insert_pairing<'e, E>(
     executor: E,
     channel: &str,
@@ -49,6 +57,7 @@ pub async fn insert_pairing<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    refuse_nul_key(channel, peer)?;
     let r = sqlx::query(
         "INSERT INTO pairings (channel, peer, method) VALUES ($1, $2, $3) \
          ON CONFLICT (channel, peer) WHERE revoked_at IS NULL DO NOTHING",
@@ -69,6 +78,7 @@ pub async fn revoke_pairing<'e, E>(executor: E, channel: &str, peer: &str) -> Re
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    refuse_nul_key(channel, peer)?;
     let r = sqlx::query(
         "UPDATE pairings SET revoked_at = now() \
          WHERE channel = $1 AND peer = $2 AND revoked_at IS NULL",
@@ -127,6 +137,7 @@ pub async fn insert_pairing_with_token<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
+    refuse_nul_key(channel, peer)?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO pairings (channel, peer, method, token_sha256)
          VALUES ($1, $2, $3, $4) RETURNING id",
@@ -146,6 +157,9 @@ where
 /// * `None` — no active pairing (revoked rows included). Not authorized.
 /// * `Some(None)` — paired, no token required (Matrix).
 /// * `Some(Some(hash))` — paired, and the sender must present this token.
+///
+/// A key holding a NUL answers `None` without a query, as [`is_paired`]
+/// does: no stored row can hold one.
 pub async fn token_hash_for<'e, E>(
     executor: E,
     channel: &str,
@@ -154,6 +168,9 @@ pub async fn token_hash_for<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
+    if refuse_nul_key(channel, peer).is_err() {
+        return Ok(None);
+    }
     let row: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT token_sha256 FROM pairings
           WHERE channel = $1 AND peer = $2 AND revoked_at IS NULL",
@@ -163,6 +180,17 @@ where
     .fetch_optional(executor)
     .await?;
     Ok(row.map(|(h,)| h))
+}
+
+/// Refuse a NUL in a pairing's `(channel, peer)` key, before any SQL (#818).
+///
+/// Refused, never escaped: these are identities, and a peer `a\0` stored as
+/// `a␀` would then match a different, real peer `a␀` ([`crate::nul`]). Every
+/// writer calls this, which is what lets the two lookups above answer "not
+/// paired" for a NUL key without asking Postgres.
+fn refuse_nul_key(channel: &str, peer: &str) -> Result<(), DbError> {
+    crate::nul::refuse_nul_in_text("pairings.channel", channel)?;
+    crate::nul::refuse_nul_in_text("pairings.peer", peer)
 }
 
 fn dec(col: &'static str) -> impl Fn(sqlx::Error) -> DbError {
@@ -181,6 +209,9 @@ pub async fn insert_code<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    if let Some(label) = label {
+        crate::nul::refuse_nul_in_text("pairing_codes.label", label)?;
+    }
     let expires_at = OffsetDateTime::now_utc() + Duration::minutes(ttl_minutes);
     let row = sqlx::query(
         "INSERT INTO pairing_codes (code_sha256, label, expires_at) \
@@ -224,6 +255,8 @@ pub async fn claim_code<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    // `consumed_by` is `"{channel}/{peer}"`, an identity like the key.
+    crate::nul::refuse_nul_in_text("pairing_codes.consumed_by", consumed_by)?;
     let r = sqlx::query(
         "UPDATE pairing_codes SET consumed_at = now(), consumed_by = $2 \
          WHERE code_sha256 = $1 AND consumed_at IS NULL AND expires_at > now()",

@@ -148,6 +148,18 @@ pub enum DbError {
     #[error("storage policy violation: {0}")]
     PolicyViolation(String),
 
+    /// A value bound for `column` holds a NUL (U+0000), which Postgres
+    /// cannot store in `text` or `jsonb`, and `column` is one the code
+    /// refuses rather than escapes (an identity, or long-lived knowledge —
+    /// see [`nul`]). Raised before any SQL runs. Carries the column only,
+    /// never the value, which may be a hostile peer's id. Retrying never
+    /// helps: the input itself is malformed.
+    #[error("refusing to store a NUL (U+0000) in {column}")]
+    NulRefused {
+        /// The `table.column` (or `table.column` + key) refused.
+        column: &'static str,
+    },
+
     /// Catchall for other errors not fitting other variants.
     #[error("{0}")]
     Other(String),
@@ -165,6 +177,20 @@ impl From<sqlx::Error> for DbError {
     }
 }
 
+/// The cluster encoding for `initdb`: `"UTF8"` for any spelling Postgres
+/// reads as UTF8 (`UTF8`, `UTF-8`, any case) or a blank, refused otherwise
+/// — see [`InitDbOptions::encoding`] for why. Pure.
+fn require_utf8(encoding: &str) -> Result<&'static str, DbError> {
+    let e = encoding.trim();
+    if e.is_empty() || e.eq_ignore_ascii_case("UTF8") || e.eq_ignore_ascii_case("UTF-8") {
+        return Ok("UTF8");
+    }
+    Err(DbError::PolicyViolation(format!(
+        "cluster encoding {e:?} is not supported: kastellan requires UTF8 \
+         (the NUL escape writes U+2400, which only a UTF8 cluster can store)"
+    )))
+}
+
 /// Inputs to [`build_initdb_argv`]. Caller resolves all paths.
 ///
 /// The struct exists so we can grow new options (e.g. `--locale`,
@@ -179,7 +205,12 @@ pub struct InitDbOptions {
     /// Username (Postgres role) that owns the cluster. Almost always
     /// the OS username running `initdb`. Defaults to "kastellan" if empty.
     pub username: String,
-    /// Cluster encoding. Default: "UTF8".
+    /// Cluster encoding. Default: "UTF8" — and **it must be UTF8**:
+    /// [`build_initdb_argv`] refuses anything else. The NUL escape
+    /// ([`nul`], #816/#818) writes U+2400, which a LATIN1 or SQL_ASCII
+    /// cluster cannot encode, so such a cluster would fail exactly the rows
+    /// the escape exists to save. Kept as a field so the choice is visible
+    /// at the call site, not because another value is supported.
     pub encoding: String,
     /// When `true`, request `--data-checksums`. Cheap CRC of every page;
     /// catches silent disk corruption. Recommended on; flipping later
@@ -209,7 +240,8 @@ impl Default for InitDbOptions {
 /// Flags baked in (with reasons):
 /// - `--pgdata <dir>`: where the cluster lives.
 /// - `--username <name>`: superuser role for the new cluster.
-/// - `--encoding=UTF8`: the only sane default for a modern Postgres.
+/// - `--encoding=UTF8`: required, not just the default — see
+///   [`InitDbOptions::encoding`].
 /// - `--auth-local=peer`: local UDS connections must come from the same
 ///   OS uid as the role they're connecting as. Combined with the
 ///   listen-on-UDS-only config below, this is the only auth path that
@@ -221,7 +253,10 @@ impl Default for InitDbOptions {
 /// - `--data-checksums` (when enabled): page-level CRC.
 ///
 /// Pure: no I/O, deterministic — same input, same argv every call.
-pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Vec<String> {
+///
+/// Errors with [`DbError::PolicyViolation`] when `opts.encoding` is not
+/// UTF8 (see [`InitDbOptions::encoding`]).
+pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Result<Vec<String>, DbError> {
     let mut argv: Vec<String> = Vec::with_capacity(8);
     argv.push(initdb_bin.to_string_lossy().into_owned());
 
@@ -235,12 +270,7 @@ pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Vec<String>
     };
     argv.push(format!("--username={}", username));
 
-    let encoding = if opts.encoding.trim().is_empty() {
-        "UTF8"
-    } else {
-        opts.encoding.as_str()
-    };
-    argv.push(format!("--encoding={}", encoding));
+    argv.push(format!("--encoding={}", require_utf8(&opts.encoding)?));
 
     argv.push("--auth-local=peer".into());
     argv.push("--auth-host=reject".into());
@@ -249,7 +279,7 @@ pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Vec<String>
         argv.push("--data-checksums".into());
     }
 
-    argv
+    Ok(argv)
 }
 
 /// Inputs to [`build_postgresql_auto_conf`].

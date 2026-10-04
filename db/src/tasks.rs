@@ -88,11 +88,19 @@ pub struct Task {
 /// Insert a fresh `pending` task row. The `tasks_inserted` trigger
 /// will fire `pg_notify('tasks_inserted', NEW.id::text)` for any
 /// listeners (the lane runner of the matching lane).
+///
+/// A payload holding a NUL anywhere is **refused** with
+/// [`DbError::NulRefused`] (#818): a channel task's payload carries the
+/// peer and conversation ids the reply is routed by, so rewriting a NUL
+/// would be an identity decision ([`crate::nul`]). The channel bus refuses
+/// such ids at its own boundary first, with an audit row, and escapes a NUL
+/// in the message body — so this is the backstop, not the policy.
 pub async fn insert_pending(
     pool: &PgPool,
     lane: Lane,
     payload: serde_json::Value,
 ) -> Result<i64, DbError> {
+    crate::nul::refuse_nul_in_json("tasks.payload", &payload)?;
     let row = sqlx::query(
         "INSERT INTO tasks (state, lane, payload) \
          VALUES ('pending', $1, $2) \
@@ -204,6 +212,12 @@ fn decode_task_row(row: &PgRow) -> Result<Task, DbError> {
 /// read — see [`turns`]. `None` for every other task kind, which leaves the
 /// column NULL. Written here, in the same UPDATE that makes the task terminal,
 /// so a record can never describe a task that did not finish.
+///
+/// `result` and `turn_record` are **records**, so a NUL in either is
+/// escaped to `␀` rather than failing the UPDATE (#818). Both carry
+/// planner-written text that can quote a hostile worker or peer, and a
+/// failed UPDATE here left the task `running` until the next startup sweep
+/// — no completed NOTIFY, so the channel reply was silently never sent.
 pub async fn finalize(
     pool: &PgPool,
     task_id: i64,
@@ -211,6 +225,15 @@ pub async fn finalize(
     result: Option<serde_json::Value>,
     turn_record: Option<serde_json::Value>,
 ) -> Result<(), DbError> {
+    let (result, n_result) = crate::nul::escape_opt_json(result);
+    let (turn_record, n_turn) = crate::nul::escape_opt_json(turn_record);
+    if n_result + n_turn > 0 {
+        tracing::warn!(
+            task_id,
+            nuls_escaped = n_result + n_turn,
+            "tasks finalize: NUL escaped to U+2400 in result/turn_record (#818)"
+        );
+    }
     sqlx::query(
         "UPDATE tasks \
          SET state = $2, \
