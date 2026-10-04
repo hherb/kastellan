@@ -30,7 +30,7 @@
 //! Three things say so only through the glyph: `actor` and `action`, which
 //! have no payload slot; a non-object payload, which has nowhere to put a
 //! key; and which of several colliding keys was renamed (see
-//! `escape_object`).
+//! `escape_object` in [`crate::nul`]).
 //!
 //! [`escape_payload`] is the step [`super::truncate_payload`] runs **first**,
 //! so the cap, the fingerprint and the request summary all see the stored

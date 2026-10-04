@@ -243,3 +243,23 @@ fn discard_nul_bearing_leaves_a_clean_response_alone() {
     assert_eq!(discard_nul_bearing(&mut resp), 0);
     assert_eq!(resp, clean);
 }
+
+/// The chokepoint wrapper borrows a clean response (no copy on the common
+/// path) and hands back a cleaned copy plus the count otherwise.
+#[test]
+fn without_nul_bearing_borrows_when_clean_and_cleans_otherwise() {
+    let clean = ExtractResponse { entities: vec![ent("Alice", "person", 0, 1)], triples: vec![] };
+    let (out, n) = without_nul_bearing(&clean);
+    assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(n, 0);
+
+    let dirty = ExtractResponse {
+        entities: vec![ent("Alice", "person", 0, 1), ent("B\0", "person", 0, 1)],
+        triples: vec![tri("Alice", "B\0", "knows")],
+    };
+    let (out, n) = without_nul_bearing(&dirty);
+    assert!(matches!(out, std::borrow::Cow::Owned(_)));
+    assert_eq!(n, 2);
+    assert_eq!(out.entities, vec![ent("Alice", "person", 0, 1)]);
+    assert!(out.triples.is_empty());
+}

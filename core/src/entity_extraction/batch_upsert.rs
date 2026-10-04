@@ -323,6 +323,14 @@ pub async fn upsert_entities_and_relations(
     merged: &ExtractResponse,
     embedder: &dyn Embedder,
 ) -> Result<crate::entity_extraction::gliner_relex::UpsertOutcome, EntityExtractionError> {
+    // #818: a span carrying a NUL cannot be stored and would fail the WHOLE
+    // batch (class 22, not the class 23 the fallback catches) — drop it here,
+    // at the chokepoint every caller passes.
+    let (merged, dropped) = crate::entity_extraction::gliner_relex::without_nul_bearing(merged);
+    if dropped > 0 {
+        tracing::warn!(target: "kastellan::entity_extraction", dropped, "dropped spans carrying a NUL (#818)");
+    }
+    let merged = &*merged;
     // Phase 1: entity upsert with fallback.
     // dedup_entity_inputs returns the deduped vec PLUS a Vec<String> of
     // name_norms parallel to merged.entities — re-used by the post-upsert

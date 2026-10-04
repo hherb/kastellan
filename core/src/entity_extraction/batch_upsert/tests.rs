@@ -230,3 +230,44 @@ fn select_new_entities_empty_input_returns_empty() {
     let map: HashMap<(String, String), (i64, bool)> = HashMap::new();
     assert!(select_new_entities(&deduped, &map).is_empty());
 }
+
+/// #818: the write chokepoint drops NUL-bearing spans **before any SQL**, so
+/// every caller is covered — not just the GLiNER extractor.
+///
+/// Every span here carries a NUL, so once they are dropped there is nothing
+/// to write and the function returns without touching the pool. The pool is
+/// lazy and points at a dead port with a short acquire timeout, so a
+/// regression that let the spans reach SQL fails here as a connection error
+/// rather than passing — no cluster needed.
+#[tokio::test]
+async fn upsert_drops_nul_bearing_spans_before_any_sql() {
+    use crate::workers::gliner_relex::{Triple, TripleEntity};
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(500))
+        .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/none")
+        .expect("lazy pool construction does not connect");
+    let endpoint = |text: &str| TripleEntity {
+        text: text.into(),
+        r#type: "person".into(),
+        start: 0,
+        end: 1,
+        entity_idx: 0,
+    };
+    let merged = ExtractResponse {
+        entities: vec![make_entity("Bo\0b", "person")],
+        triples: vec![Triple {
+            head: endpoint("Bo\0b"),
+            tail: endpoint("Carol"),
+            relation: "knows".into(),
+            score: 0.9,
+        }],
+    };
+
+    let outcome = upsert_entities_and_relations(&pool, &merged, &crate::memory::NoOpEmbedder::new())
+        .await
+        .expect("nothing is left to write, so no SQL may run");
+    assert!(outcome.entity_ids.is_empty());
+    assert_eq!(outcome.n_entities_upserted_new, 0);
+    assert_eq!(outcome.n_relations_inserted, 0);
+}

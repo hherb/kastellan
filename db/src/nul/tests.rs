@@ -82,6 +82,7 @@ fn escape_json_leaves_a_clean_value_alone() {
 #[tokio::test]
 async fn identity_writers_refuse_before_any_sql() {
     use crate::memories::{insert_memory, insert_memory_at_layer, MemoryLayer};
+    use crate::graph::Graph;
     use crate::{pairings, tasks};
 
     let pool = sqlx::postgres::PgPool::connect_lazy("postgres://invalid:invalid@127.0.0.1:1/none")
@@ -117,6 +118,13 @@ async fn identity_writers_refuse_before_any_sql() {
         pairings::insert_code(&pool, "hash", Some("label\0"), 10).await.map(drop),
         "pairing_codes.label",
     );
+
+    let graph = crate::graph::PgGraph::new(&pool);
+    refused(graph.upsert_entity("person", "Bo\0b", &json!({})).await.map(drop), "entities.name");
+    refused(graph.upsert_entity("per\0", "Bob", &json!({})).await.map(drop), "entities.kind");
+    refused(graph.upsert_entity("person", "Bob", &json!({"k\0": 1})).await.map(drop), "entities.attrs");
+    refused(graph.upsert_relation(1, 2, "kn\0ows", &json!({})).await.map(drop), "relations.kind");
+    refused(graph.upsert_relation(1, 2, "knows", &json!(["\0"])).await.map(drop), "relations.attrs");
 
     assert!(!pairings::is_paired(&pool, "matrix", "a\0").await.expect("answered without SQL"));
     assert_eq!(

@@ -425,6 +425,12 @@ impl<'a> Graph for PgGraph<'a> {
         // canonical `normalize_entity_name` helper so this writer
         // matches the v2 extractor's `upsert_entities_and_relations`
         // exactly (same input → same dedup key).
+        //
+        // A NUL is refused, not escaped (#818): `name` becomes the
+        // `(kind, name_norm)` identity key ([`crate::nul`]).
+        crate::nul::refuse_nul_in_text("entities.kind", kind)?;
+        crate::nul::refuse_nul_in_text("entities.name", name)?;
+        crate::nul::refuse_nul_in_json("entities.attrs", attrs)?;
         let name_norm = crate::normalize_entity_name(name);
         let row = sqlx::query(
             r#"
@@ -454,6 +460,9 @@ impl<'a> Graph for PgGraph<'a> {
         kind: &str,
         attrs: &serde_json::Value,
     ) -> Result<i64, DbError> {
+        // Refused, as for entities (#818).
+        crate::nul::refuse_nul_in_text("relations.kind", kind)?;
+        crate::nul::refuse_nul_in_json("relations.attrs", attrs)?;
         let row = sqlx::query(
             r#"
             INSERT INTO relations (src_id, dst_id, kind, attrs)

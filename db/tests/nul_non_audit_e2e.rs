@@ -180,6 +180,8 @@ fn nul_in_non_audit_writes_is_escaped_in_records_and_refused_in_identities() {
             .fetch_one(&pool)
             .await
             .expect("count");
+        // Belt and braces: the typed refusals above already prove the check
+        // runs before SQL; this only pins that no row slipped in regardless.
         assert_eq!(n, 0, "a refused memory leaves no row");
 
         // ── Identity: pairings refuse a NUL peer; a lookup answers "no". ──
@@ -207,6 +209,25 @@ fn nul_in_non_audit_writes_is_escaped_in_records_and_refused_in_identities() {
             "no stored peer can hold a NUL, so the truthful answer is 'not paired'"
         );
         assert!(!pairings::is_paired(&pool, "matrix", "@m\u{0}:x").await.expect("is_paired"));
+
+        // ── The escape needs a UTF8 database; boot refuses any other. ──
+        // `CREATE DATABASE … ENCODING` is the one way to get a non-UTF8
+        // database now that `build_initdb_argv` refuses a non-UTF8 cluster.
+        sqlx::query(
+            "CREATE DATABASE kastellan_ascii ENCODING 'SQL_ASCII' \
+             LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0",
+        )
+        .execute(&admin)
+        .await
+        .expect("create a SQL_ASCII database");
+        let mut ascii = cluster.conn_spec.clone();
+        ascii.database = "kastellan_ascii".into();
+        match kastellan_db::probe::run(&ascii, "core", "startup", json!({})).await {
+            Err(DbError::PolicyViolation(msg)) => {
+                assert!(msg.contains("SQL_ASCII") && msg.contains("UTF8"), "{msg}")
+            }
+            other => panic!("boot must refuse a non-UTF8 database, got {other:?}"),
+        }
 
         pool.close().await;
         admin.close().await;

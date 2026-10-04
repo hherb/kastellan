@@ -154,15 +154,41 @@ pub fn merge_chunks(chunk_responses: Vec<(usize, ExtractResponse)>) -> ExtractRe
 /// holds no NUL; a span carrying one was invented by the worker, and is
 /// dropped on its own so the rest of the turn's entities still land.
 ///
+/// Applied at the write chokepoint,
+/// [`crate::entity_extraction::batch_upsert::upsert_entities_and_relations`]
+/// (via [`without_nul_bearing`]), so every caller is covered, not just this
+/// extractor.
+///
 /// Pure; no I/O.
 pub fn discard_nul_bearing(resp: &mut ExtractResponse) -> usize {
-    let has_nul = |fields: &[&str]| fields.iter().any(|f| f.contains('\0'));
     let before = resp.entities.len() + resp.triples.len();
-    resp.entities.retain(|e| !has_nul(&[&e.text, &e.label]));
-    resp.triples.retain(|t| {
-        !has_nul(&[&t.head.text, &t.head.r#type, &t.tail.text, &t.tail.r#type, &t.relation])
-    });
+    resp.entities.retain(|e| !entity_has_nul(e));
+    resp.triples.retain(|t| !triple_has_nul(t));
     before - (resp.entities.len() + resp.triples.len())
+}
+
+/// [`discard_nul_bearing`] without a copy in the common case: the response
+/// itself when nothing carries a NUL, else a cleaned copy. Returns how many
+/// entities and triples were dropped. Pure; no I/O.
+pub fn without_nul_bearing(resp: &ExtractResponse) -> (std::borrow::Cow<'_, ExtractResponse>, usize) {
+    if !resp.entities.iter().any(entity_has_nul) && !resp.triples.iter().any(triple_has_nul) {
+        return (std::borrow::Cow::Borrowed(resp), 0);
+    }
+    let mut cleaned = resp.clone();
+    let dropped = discard_nul_bearing(&mut cleaned);
+    (std::borrow::Cow::Owned(cleaned), dropped)
+}
+
+/// Does any field of `e` that reaches the graph hold a NUL?
+fn entity_has_nul(e: &Entity) -> bool {
+    [&e.text, &e.label].iter().any(|f| f.contains('\0'))
+}
+
+/// Does any field of `t` that reaches the graph hold a NUL?
+fn triple_has_nul(t: &Triple) -> bool {
+    [&t.head.text, &t.head.r#type, &t.tail.text, &t.tail.r#type, &t.relation]
+        .iter()
+        .any(|f| f.contains('\0'))
 }
 
 use sqlx::PgPool;
@@ -170,7 +196,8 @@ use sqlx::PgPool;
 /// Result of the upsert pass.
 pub struct UpsertOutcome {
     /// IDs of every entity in the merged response, in original order
-    /// (whether newly inserted or pre-existing). This is what the
+    /// (whether newly inserted or pre-existing) — except one carrying a NUL,
+    /// which is dropped before the write (#818, `discard_nul_bearing`). This is what the
     /// extractor returns to recall as the graph-lane seeds.
     pub entity_ids: Vec<i64>,
     /// Number of entity rows the upsert created (not counting
@@ -361,18 +388,7 @@ impl EntityExtractor for GlinerRelexExtractor {
                 max_entities: None,
             };
             match self.client.extract(req).await {
-                Ok(mut resp) => {
-                    let dropped = discard_nul_bearing(&mut resp);
-                    if dropped > 0 {
-                        tracing::warn!(
-                            target: "kastellan::entity_extraction",
-                            dropped,
-                            chunk_offset = chunk.byte_offset,
-                            "dropped worker spans carrying a NUL (#818)",
-                        );
-                    }
-                    chunk_responses.push((chunk.byte_offset, resp))
-                }
+                Ok(resp) => chunk_responses.push((chunk.byte_offset, resp)),
                 Err(e) => {
                     tracing::warn!(
                         target: "kastellan::entity_extraction",

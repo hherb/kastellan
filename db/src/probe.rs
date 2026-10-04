@@ -61,6 +61,17 @@ pub async fn run(
         .await
         .map_err(|e| DbError::Connect(e.to_string()))?;
 
+    // The database must be UTF8 (#818): the NUL escape writes U+2400, which
+    // no other server encoding can store, so a LATIN1/SQL_ASCII database
+    // would fail exactly the rows the escape exists to save. `initdb` is
+    // already refused one (`build_initdb_argv`); this catches a cluster or
+    // database made some other way, at boot, before anything is written.
+    let encoding: String = sqlx::query_scalar("SHOW server_encoding")
+        .fetch_one(&mut conn)
+        .await
+        .map_err(|e| DbError::Query(format!("SHOW server_encoding: {e}")))?;
+    crate::require_utf8(&encoding)?;
+
     crate::MIGRATOR
         .run(&mut conn)
         .await

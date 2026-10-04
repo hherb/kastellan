@@ -82,7 +82,12 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Errors surfaced by the db helpers, CLI, and runtime probe.
+///
+/// `#[non_exhaustive]` since #818 added [`DbError::NulRefused`]: a
+/// downstream `match` must keep a wildcard arm, so the next variant is not
+/// another breaking change.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DbError {
     /// A path argument that must be absolute was relative.
     #[error("path must be absolute: {0}")]
@@ -180,13 +185,13 @@ impl From<sqlx::Error> for DbError {
 /// The cluster encoding for `initdb`: `"UTF8"` for any spelling Postgres
 /// reads as UTF8 (`UTF8`, `UTF-8`, any case) or a blank, refused otherwise
 /// — see [`InitDbOptions::encoding`] for why. Pure.
-fn require_utf8(encoding: &str) -> Result<&'static str, DbError> {
+pub(crate) fn require_utf8(encoding: &str) -> Result<&'static str, DbError> {
     let e = encoding.trim();
     if e.is_empty() || e.eq_ignore_ascii_case("UTF8") || e.eq_ignore_ascii_case("UTF-8") {
         return Ok("UTF8");
     }
     Err(DbError::PolicyViolation(format!(
-        "cluster encoding {e:?} is not supported: kastellan requires UTF8 \
+        "encoding {e:?} is not supported: kastellan requires a UTF8 cluster and database \
          (the NUL escape writes U+2400, which only a UTF8 cluster can store)"
     )))
 }

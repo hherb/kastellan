@@ -353,7 +353,12 @@ pub async fn raise(
     resume_state: Option<&serde_json::Value>,
 ) -> Result<RaisedAsk, DbError> {
     let (body, n_body) = crate::nul::escape_str(body);
-    let (resume_state, n_resume) = crate::nul::escape_opt_json(resume_state.cloned());
+    // Copied only when it holds a NUL: a run's history can be large.
+    let (escaped_resume, n_resume) = match resume_state {
+        Some(v) if crate::nul::json_contains_nul(v) => crate::nul::escape_opt_json(Some(v.clone())),
+        _ => (None, 0),
+    };
+    let resume_state = escaped_resume.as_ref().or(resume_state);
     if n_body + n_resume > 0 {
         tracing::warn!(
             task_id,
@@ -401,7 +406,7 @@ pub async fn raise(
     .bind(plan_digest)
     .bind(&nonce_hash)
     .bind(deadline_at)
-    .bind(resume_state.as_ref())
+    .bind(resume_state)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| DbError::Query(format!("asks raise insert: {e}")))?;

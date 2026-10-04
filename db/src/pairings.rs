@@ -24,7 +24,7 @@ pub struct Pairing {
 /// True iff `(channel, peer)` has an active (non-revoked) pairing.
 ///
 /// A key holding a NUL answers `false` without a query: no stored row can
-/// hold one (see [`refuse_nul_key`]), so "not paired" is the truth, and
+/// hold one (see `refuse_nul_key`), so "not paired" is the truth, and
 /// Postgres would otherwise fail the lookup itself (#818).
 pub async fn is_paired<'e, E>(executor: E, channel: &str, peer: &str) -> Result<bool, DbError>
 where
@@ -47,7 +47,7 @@ where
 
 /// Bind `(channel, peer)` if not already active. Idempotent via the partial
 /// unique index (`pairings_active_uniq`). Returns `true` iff a new row was added.
-/// A NUL in either key is refused ([`refuse_nul_key`]).
+/// A NUL in either key is refused (`refuse_nul_key`).
 pub async fn insert_pairing<'e, E>(
     executor: E,
     channel: &str,

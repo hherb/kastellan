@@ -33,6 +33,18 @@
 //! Identity is checked first, so a message with NULs in both is refused —
 //! escaping the body never launders an id.
 //!
+//! Two consequences of escaping the body, both deliberate:
+//!
+//! * `channel.injection_blocked`'s `sha256` is computed over the **escaped**
+//!   body, so for a NUL-bearing message it will not match a hash of the
+//!   transport's raw bytes.
+//! * a body the task insert used to refuse now reaches the queue. One such
+//!   shape is a verb glued to a live token by a NUL (`/approve\0TOKEN`): it
+//!   was "contained" only by the insert failing, and is now enqueued with
+//!   the token in it — the containment arm's accepted open risk (no
+//!   whitespace-separated verb, no gate), not a new class. A peer could
+//!   already send the same text with a literal `␀`.
+//!
 //! ⚠️ Running before authorization means an **unpaired** peer can produce a
 //! `rejected_malformed` row, exactly as it can produce a `rejected_unpaired`
 //! one today: one row per message, no more. The body escape writes no row and

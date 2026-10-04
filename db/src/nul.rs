@@ -28,6 +28,16 @@
 //!   silently rewritten value would be a different instruction, not a
 //!   faithful record.
 //!
+//! **Some escaped records are replayed too** — a `turn_record` feeds the
+//! next turn of the conversation (#701), and `resume_state` restores a
+//! suspended run's plan history. They are escaped anyway because refusing
+//! them strands a live task (no reply; no escalation), whereas a memory
+//! write that is refused costs only that one memory. Escaping cannot widen
+//! anything: a replayed `x␀y` id simply fails to match, and an escaped plan
+//! that is copied verbatim gets a different plan digest, so an approval
+//! bound to the original is not honoured and the run asks again — the safe
+//! direction.
+//!
 //! [`crate::audit::nul_escape`] layers the audit row's count marker on top
 //! of the escape. The non-audit records add no marker: their columns are
 //! read back by code that expects their own shape, so the write site logs
