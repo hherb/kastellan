@@ -328,15 +328,15 @@ const ASK_COLUMNS: &str = "id, task_id, kind, body, options, plan_digest, state,
 ///
 /// `resume_state` is the caller's opaque record of the run being suspended
 /// (#564 slice 1b, D11) — stored verbatim except for NUL, never interpreted
-/// here.
+/// here. Pass `None` when there is no run state to carry; the resume then
+/// restores an empty history, which is what every ask raised before
+/// migration 0024 does.
 ///
 /// `body` and `resume_state` are **records**, so a NUL in either is escaped
-/// to `␀` rather than failing the INSERT (#818). `resume_state` holds raw
-/// tool results, so before #818 one NUL from any tool in the run made the
-/// escalation impossible and failed the task. Pass
-/// `None` when there is no run state to carry; the resume then restores an
-/// empty history, which is what every ask raised before migration 0024
-/// does.
+/// to `␀` rather than failing the INSERT (#818). `resume_state` holds the
+/// run's plans and step outcomes, tool results among them, so before #818
+/// one NUL from any tool in the run made the escalation impossible and
+/// failed the task.
 // One argument per column this INSERT writes. A params struct would move
 // the same fields behind a name without making any call site clearer, and
 // would put a second place to keep in sync with the table. Same posture as

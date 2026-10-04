@@ -201,9 +201,10 @@ fn tri(head: &str, tail: &str, relation: &str) -> Triple {
     }
 }
 
-/// An entity name is the `(kind, name_norm)` identity key, so a NUL in any
-/// field that reaches it — text, label, a triple's head/tail or relation —
-/// drops that entity or triple, and only that one. Before #818 one such span
+/// An entity name is the `(kind, name_norm)` identity key and a triple is
+/// resolved by its endpoints, so a NUL in any field that reaches the graph —
+/// text, label, a triple's head/tail or relation — drops that entity or
+/// triple, and only that one; each kind is counted separately. Before #818 one such span
 /// failed the whole batch upsert (a NUL is SQLSTATE class 22, not the class
 /// 23 the per-row fallback catches), so every entity of the turn was lost.
 #[test]
@@ -217,7 +218,7 @@ fn discard_nul_bearing_drops_only_the_poisoned_spans() {
             tri("Alice", "Carol", "kn\0ows"),
         ],
     };
-    assert_eq!(discard_nul_bearing(&mut resp), 5);
+    assert_eq!(discard_nul_bearing(&mut resp), NulDropped { entities: 2, triples: 3 });
     assert_eq!(resp.entities, vec![ent("Alice", "person", 0, 1)]);
     assert_eq!(resp.triples, vec![tri("Alice", "Carol", "knows")]);
 }
@@ -228,7 +229,7 @@ fn discard_nul_bearing_checks_the_triple_endpoint_type() {
     let mut t = tri("Alice", "Carol", "knows");
     t.tail.r#type = "per\0son".into();
     let mut resp = ExtractResponse { entities: vec![], triples: vec![t] };
-    assert_eq!(discard_nul_bearing(&mut resp), 1);
+    assert_eq!(discard_nul_bearing(&mut resp), NulDropped { entities: 0, triples: 1 });
     assert!(resp.triples.is_empty());
 }
 
@@ -240,7 +241,8 @@ fn discard_nul_bearing_leaves_a_clean_response_alone() {
         triples: vec![tri("Alice", "Carol", "knows")],
     };
     let mut resp = clean.clone();
-    assert_eq!(discard_nul_bearing(&mut resp), 0);
+    assert_eq!(discard_nul_bearing(&mut resp), NulDropped::default());
+    assert!(!NulDropped::default().any());
     assert_eq!(resp, clean);
 }
 
@@ -251,7 +253,7 @@ fn without_nul_bearing_borrows_when_clean_and_cleans_otherwise() {
     let clean = ExtractResponse { entities: vec![ent("Alice", "person", 0, 1)], triples: vec![] };
     let (out, n) = without_nul_bearing(&clean);
     assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
-    assert_eq!(n, 0);
+    assert_eq!(n, NulDropped::default());
 
     let dirty = ExtractResponse {
         entities: vec![ent("Alice", "person", 0, 1), ent("B\0", "person", 0, 1)],
@@ -259,7 +261,8 @@ fn without_nul_bearing_borrows_when_clean_and_cleans_otherwise() {
     };
     let (out, n) = without_nul_bearing(&dirty);
     assert!(matches!(out, std::borrow::Cow::Owned(_)));
-    assert_eq!(n, 2);
+    assert_eq!(n, NulDropped { entities: 1, triples: 1 });
+    assert!(n.any());
     assert_eq!(out.entities, vec![ent("Alice", "person", 0, 1)]);
     assert!(out.triples.is_empty());
 }

@@ -23,9 +23,9 @@ pub struct Pairing {
 
 /// True iff `(channel, peer)` has an active (non-revoked) pairing.
 ///
-/// A key holding a NUL answers `false` without a query: no stored row can
-/// hold one (see `refuse_nul_key`), so "not paired" is the truth, and
-/// Postgres would otherwise fail the lookup itself (#818).
+/// A key holding a NUL answers `false` without a query: Postgres cannot
+/// store a NUL in `text`, so no row can match, and sending it would fail
+/// the lookup itself (#818).
 pub async fn is_paired<'e, E>(executor: E, channel: &str, peer: &str) -> Result<bool, DbError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -159,7 +159,7 @@ where
 /// * `Some(Some(hash))` — paired, and the sender must present this token.
 ///
 /// A key holding a NUL answers `None` without a query, as [`is_paired`]
-/// does: no stored row can hold one.
+/// does: Postgres cannot store one, so no row can match.
 pub async fn token_hash_for<'e, E>(
     executor: E,
     channel: &str,
@@ -186,8 +186,8 @@ where
 ///
 /// Refused, never escaped: these are identities, and a peer `a\0` stored as
 /// `a␀` would then match a different, real peer `a␀` ([`crate::nul`]). Every
-/// writer calls this, which is what lets the two lookups above answer "not
-/// paired" for a NUL key without asking Postgres.
+/// writer calls this so a NUL key fails as a typed `NulRefused` naming the
+/// column, rather than as an opaque Postgres encoding error.
 fn refuse_nul_key(channel: &str, peer: &str) -> Result<(), DbError> {
     crate::nul::refuse_nul_in_text("pairings.channel", channel)?;
     crate::nul::refuse_nul_in_text("pairings.peer", peer)
@@ -209,6 +209,8 @@ pub async fn insert_code<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    // Operator text, so a record by the rule — but an operator typing a NUL
+    // into a label is a mistake to report, not a value worth rewriting.
     if let Some(label) = label {
         crate::nul::refuse_nul_in_text("pairing_codes.label", label)?;
     }
@@ -255,7 +257,9 @@ pub async fn claim_code<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    // `consumed_by` is `"{channel}/{peer}"`, an identity like the key.
+    // Refused rather than escaped: `consumed_by` is `"{channel}/{peer}"`,
+    // and the `insert_pairing` that follows in the same transaction refuses
+    // that peer anyway — failing here keeps the code unconsumed.
     crate::nul::refuse_nul_in_text("pairing_codes.consumed_by", consumed_by)?;
     let r = sqlx::query(
         "UPDATE pairing_codes SET consumed_at = now(), consumed_by = $2 \

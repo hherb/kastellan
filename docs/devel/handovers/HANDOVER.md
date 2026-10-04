@@ -9,8 +9,8 @@
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-04 (#818 — a NUL in worker/peer text is escaped in records and refused
-in identities across the non-audit writes, PR #820; the operator is still running the #773 live
-re-measure) ·
+in identities across the non-audit writes, PR #820, after a second, five-reviewer round; follow-ups
+#821–#823 filed; the operator is still running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793), [#791](https://github.com/hherb/kastellan/pull/791) (#788, #789, #790), [#787](https://github.com/hherb/kastellan/pull/787) (#782, #783).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
@@ -73,20 +73,28 @@ Postgres refuses U+0000 in `text`/`jsonb`; one NUL fails the whole statement.
   `token_hash_for` answer "not paired" for a NUL key without a query.
 - **Channel bus step 0** (`core/src/channel/inbound_nul.rs`, before authorize): a NUL in the
   channel/peer/conversation id → `channel.rejected_malformed` (`field`, `reason: "nul"`), no ack;
-  a NUL in the body → escaped, message kept. Identity is checked first.
+  a NUL in the body → escaped, kept, **counted** (`nul_escaped_body` on `channel.received` /
+  `injection_blocked` — a typed `␀` makes the glyph alone no record). Identity first; `screen`
+  destructures `IncomingMessage` exhaustively, so a new field must be classified to compile.
 - **Entities:** `upsert_entities_and_relations` drops NUL-bearing spans at the chokepoint
   (`without_nul_bearing`) — one used to fail the whole batch (class 22, not the class-23 fallback).
-- **UTF8 is now enforced**: `build_initdb_argv` → `Result`, refuses non-UTF8; `probe::run` (boot)
-  refuses a non-UTF8 database (`SHOW server_encoding`). ⚠️ **`kastellan-db`'s next crates.io
-  release must be 0.3.0** — `NulRefused` + the fallible `build_initdb_argv` are breaking;
-  `DbError` is now `#[non_exhaustive]` so the next variant is not.
+  Counted (`NulDropped`) on `UpsertOutcome` and the `extract_entities` row (**10 keys** now) — a NUL
+  span was invented by the worker, which is evidence.
+- **UTF8 is enforced**: `initdb` always gets `--encoding=UTF8` (`InitDbOptions.encoding` is gone);
+  `probe::run` refuses a non-UTF8 database **strictly** (blank/alias refused) and before migrations
+  (pinned live), naming the remedy. ⚠️ **`kastellan-db`'s next release must be 0.3.0** (`NulRefused`,
+  the removed field); `DbError` is now `#[non_exhaustive]`; most `nul` helpers are `pub(crate)`.
 - Movement-only first commit (`audit/nul_escape.rs` → `db/src/nul.rs`, proved byte-identical with a
-  negative control). Mutants 8 + 8 + 3 (review round), all killed. `nul_non_audit_e2e` is in the
-  **`pg` profile** (22 tests, 0 `[SKIP]`).
+  negative control). Mutants 8 + 8 + 3 (review round 1) + 3 (round 2), all killed. `nul_non_audit_e2e`
+  is in the **`pg` profile** (22 tests, 0 `[SKIP]`).
+- **Review round 2** (five reviewers) found no bug, but gaps in the audit trail and wrong *reasons*:
+  SQL_ASCII **can** store U+2400 (it validates nothing — hence refused); the pairing lookups skip
+  Postgres because it cannot store a NUL, not because writers check.
 - ⚠️ **A zsh `echo "$out" | grep` verdict reported 4 false SURVIVED mutants** (it eats `\0` in panic
   text) — use `printf '%s'` [[bash-tool-runs-zsh-path-clobber]].
 - Still open nearby: **#815** — the bus's `enqueue` `Err` arm is `warn!`-only (unreachable for NUL
-  now, not for a DB outage).
+  now, not for a DB outage). **#821** `finalize`/`raise` counts reach only a `warn!`; **#822**
+  type-level follow-ups; **#823** a `pg`-profile suite running zero tests clears the aggregate floors.
 
 ### Previous (2026-10-03): #816 (PR #819) and #807/#808 (PR #812) — what still binds
 
@@ -391,8 +399,8 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#818 — **the gate that stands**) | PR #820 | **4872 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #816's expected 4853: db lib 234 → **240** (+6 `nul` + 1 initdb-UTF8 − 1 duplicate `nul_free` test), new suite `nul_non_audit_e2e` +1, core lib +12 (`inbound_nul` 7, `gliner_relex` 4, `batch_upsert` 1). `pg` profile passed as evidence (22 tests, 43 `[E2E]`, 0 `[SKIP]`); `gliner` profile + opt-in `entity_extraction_e2e` 16 / `memory_entity_link_e2e` 6 with `KASTELLAN_GLINER_RELEX_ENABLE=1`. Mutants 8 + 8 + 3 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-818`, **27** `Checking kastellan` (rustc **1.98** — CI is 1.99) | **23** Mac |
-| **Mac** (#816 — superseded) | PR #819 | **4846 / 0 / 52**, **192** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #812's expected 4830: db lib 213 → **228** (+15, `nul_escape`), new suite `audit_nul_e2e` +1 (ran, not skipped). Mutants 8/8. **Review round (not a full sweep):** db lib 228 → **234** (+6), core lib +1 (`audit_sink` seam) — expect **4853** next sweep; `pg` profile passed as evidence (21 tests, 41 `[E2E]`); clippy db+core warm | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-816`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#818 review round 2 — **the gate that stands**) | PR #820 | **4877 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against round 1's 4872: db lib 240 → **241** (initdb-UTF8 test replaced by an always-UTF8 test + a strict `require_utf8` test), core lib **+3** (`inbound_nul` 4 bus tests replace 2; `pg_events` +1), `entity_extraction_e2e` **+1** (mixed NUL batch). `pg` profile passed as evidence (22 tests, 43 `[E2E]`, 0 `[SKIP]`); `entity_extraction_e2e` upsert tier 14/14 live, the new test under `KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1`. Mutants 3/3 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-818`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
+| **Mac** (#818 round 1 — superseded) | PR #820 | **4872 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #816's expected 4853: db lib 234 → **240** (+6 `nul` + 1 initdb-UTF8 − 1 duplicate `nul_free` test), new suite `nul_non_audit_e2e` +1, core lib +12 (`inbound_nul` 7, `gliner_relex` 4, `batch_upsert` 1). `pg` profile passed as evidence (22 tests, 43 `[E2E]`, 0 `[SKIP]`); `gliner` profile + opt-in `entity_extraction_e2e` 16 / `memory_entity_link_e2e` 6 with `KASTELLAN_GLINER_RELEX_ENABLE=1`. Mutants 8 + 8 + 3 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-818`, **27** `Checking kastellan` (rustc **1.98** — CI is 1.99) | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 

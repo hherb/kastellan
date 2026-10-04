@@ -83,9 +83,9 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Errors surfaced by the db helpers, CLI, and runtime probe.
 ///
-/// `#[non_exhaustive]` since #818 added [`DbError::NulRefused`]: a
-/// downstream `match` must keep a wildcard arm, so the next variant is not
-/// another breaking change.
+/// `#[non_exhaustive]` (added with [`DbError::NulRefused`], #818) so a
+/// downstream `match` keeps a wildcard arm and the next new variant is not
+/// a breaking change.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DbError {
@@ -161,7 +161,7 @@ pub enum DbError {
     /// helps: the input itself is malformed.
     #[error("refusing to store a NUL (U+0000) in {column}")]
     NulRefused {
-        /// The `table.column` (or `table.column` + key) refused.
+        /// The `table.column` the value was bound for.
         column: &'static str,
     },
 
@@ -182,17 +182,25 @@ impl From<sqlx::Error> for DbError {
     }
 }
 
-/// The cluster encoding for `initdb`: `"UTF8"` for any spelling Postgres
-/// reads as UTF8 (`UTF8`, `UTF-8`, any case) or a blank, refused otherwise
-/// — see [`InitDbOptions::encoding`] for why. Pure.
-pub(crate) fn require_utf8(encoding: &str) -> Result<&'static str, DbError> {
-    let e = encoding.trim();
-    if e.is_empty() || e.eq_ignore_ascii_case("UTF8") || e.eq_ignore_ascii_case("UTF-8") {
-        return Ok("UTF8");
+/// Refuse a database whose `server_encoding` is not UTF8 (#818). Pure.
+///
+/// kastellan needs UTF8: the NUL escape ([`nul`]) writes U+2400, which
+/// LATIN1 and the other single-byte encodings cannot represent, and
+/// SQL_ASCII would accept the bytes but validates nothing at all. `initdb`
+/// always gets `--encoding=UTF8` ([`build_initdb_argv`]); this catches a
+/// cluster or database made some other way.
+///
+/// **Strict**: `SHOW server_encoding` reports Postgres's canonical name, so
+/// only `UTF8` (any case) passes — a blank or an alias such as `UNICODE`
+/// is refused, failing closed rather than guessing.
+pub(crate) fn require_utf8(server_encoding: &str) -> Result<(), DbError> {
+    if server_encoding.eq_ignore_ascii_case("UTF8") {
+        return Ok(());
     }
     Err(DbError::PolicyViolation(format!(
-        "encoding {e:?} is not supported: kastellan requires a UTF8 cluster and database \
-         (the NUL escape writes U+2400, which only a UTF8 cluster can store)"
+        "database encoding {server_encoding:?} is not supported: kastellan requires a UTF8 \
+         database (#818). To recover, dump it (pg_dump), recreate it with ENCODING 'UTF8', \
+         and restore it"
     )))
 }
 
@@ -210,13 +218,6 @@ pub struct InitDbOptions {
     /// Username (Postgres role) that owns the cluster. Almost always
     /// the OS username running `initdb`. Defaults to "kastellan" if empty.
     pub username: String,
-    /// Cluster encoding. Default: "UTF8" — and **it must be UTF8**:
-    /// [`build_initdb_argv`] refuses anything else. The NUL escape
-    /// ([`nul`], #816/#818) writes U+2400, which a LATIN1 or SQL_ASCII
-    /// cluster cannot encode, so such a cluster would fail exactly the rows
-    /// the escape exists to save. Kept as a field so the choice is visible
-    /// at the call site, not because another value is supported.
-    pub encoding: String,
     /// When `true`, request `--data-checksums`. Cheap CRC of every page;
     /// catches silent disk corruption. Recommended on; flipping later
     /// requires a `pg_checksums` rebuild so set it correctly the first
@@ -229,7 +230,6 @@ impl Default for InitDbOptions {
         Self {
             data_dir: PathBuf::new(),
             username: "kastellan".into(),
-            encoding: "UTF8".into(),
             data_checksums: true,
         }
     }
@@ -245,8 +245,9 @@ impl Default for InitDbOptions {
 /// Flags baked in (with reasons):
 /// - `--pgdata <dir>`: where the cluster lives.
 /// - `--username <name>`: superuser role for the new cluster.
-/// - `--encoding=UTF8`: required, not just the default — see
-///   [`InitDbOptions::encoding`].
+/// - `--encoding=UTF8`: always, not configurable — kastellan requires a
+///   UTF8 cluster (#818; see [`require_utf8`], which refuses any other
+///   database at boot).
 /// - `--auth-local=peer`: local UDS connections must come from the same
 ///   OS uid as the role they're connecting as. Combined with the
 ///   listen-on-UDS-only config below, this is the only auth path that
@@ -258,10 +259,7 @@ impl Default for InitDbOptions {
 /// - `--data-checksums` (when enabled): page-level CRC.
 ///
 /// Pure: no I/O, deterministic — same input, same argv every call.
-///
-/// Errors with [`DbError::PolicyViolation`] when `opts.encoding` is not
-/// UTF8 (see [`InitDbOptions::encoding`]).
-pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Result<Vec<String>, DbError> {
+pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Vec<String> {
     let mut argv: Vec<String> = Vec::with_capacity(8);
     argv.push(initdb_bin.to_string_lossy().into_owned());
 
@@ -275,7 +273,7 @@ pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Result<Vec<
     };
     argv.push(format!("--username={}", username));
 
-    argv.push(format!("--encoding={}", require_utf8(&opts.encoding)?));
+    argv.push("--encoding=UTF8".into());
 
     argv.push("--auth-local=peer".into());
     argv.push("--auth-host=reject".into());
@@ -284,7 +282,7 @@ pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Result<Vec<
         argv.push("--data-checksums".into());
     }
 
-    Ok(argv)
+    argv
 }
 
 /// Inputs to [`build_postgresql_auto_conf`].

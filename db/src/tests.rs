@@ -34,7 +34,7 @@ fn opts(dir: &str) -> InitDbOptions {
 /// `Command::new(&argv[0]).args(&argv[1..])` is the call shape.
 #[test]
 fn build_initdb_argv_starts_with_binary_path() {
-    let argv = build_initdb_argv(Path::new("/usr/bin/initdb"), &opts("/tmp/data")).expect("UTF8 default");
+    let argv = build_initdb_argv(Path::new("/usr/bin/initdb"), &opts("/tmp/data"));
     assert_eq!(argv[0], "/usr/bin/initdb");
 }
 
@@ -42,7 +42,7 @@ fn build_initdb_argv_starts_with_binary_path() {
 /// initdb defaults to `$PGDATA` env which we never set.
 #[test]
 fn build_initdb_argv_includes_pgdata_flag_with_data_dir() {
-    let argv = build_initdb_argv(Path::new("/u/initdb"), &opts("/srv/pgdata")).expect("UTF8 default");
+    let argv = build_initdb_argv(Path::new("/u/initdb"), &opts("/srv/pgdata"));
     let pgdata_idx = argv.iter().position(|a| a == "--pgdata").unwrap();
     assert_eq!(argv[pgdata_idx + 1], "/srv/pgdata");
 }
@@ -54,7 +54,7 @@ fn build_initdb_argv_includes_pgdata_flag_with_data_dir() {
 /// authenticate even by accident.
 #[test]
 fn build_initdb_argv_pins_secure_auth_defaults() {
-    let argv = build_initdb_argv(Path::new("/u/initdb"), &opts("/d")).expect("UTF8 default");
+    let argv = build_initdb_argv(Path::new("/u/initdb"), &opts("/d"));
     assert!(
         argv.iter().any(|a| a == "--auth-local=peer"),
         "argv must include --auth-local=peer, got {argv:?}"
@@ -65,27 +65,28 @@ fn build_initdb_argv_pins_secure_auth_defaults() {
     );
 }
 
-/// The cluster must be UTF8 (#818): the NUL escape writes U+2400, which a
-/// LATIN1/SQL_ASCII cluster cannot encode, so a non-UTF8 cluster would fail
-/// exactly the rows the escape exists to save. Spellings Postgres treats as
-/// UTF8 are accepted (and a blank falls back to it); anything else is
-/// refused before `initdb` runs, naming the value.
+/// The cluster is always UTF8 (#818) — not an option a caller can turn off.
 #[test]
-fn build_initdb_argv_requires_a_utf8_cluster() {
-    for ok in ["UTF8", "utf8", "UTF-8", "Utf-8", "  "] {
-        let mut o = opts("/d");
-        o.encoding = ok.into();
-        let argv = build_initdb_argv(Path::new("/u/initdb"), &o)
-            .unwrap_or_else(|e| panic!("{ok:?} must be accepted: {e}"));
-        assert!(argv.iter().any(|a| a == "--encoding=UTF8"), "{ok:?} -> {argv:?}");
+fn build_initdb_argv_always_requests_utf8() {
+    let argv = build_initdb_argv(Path::new("/u/initdb"), &opts("/d"));
+    assert!(argv.iter().any(|a| a == "--encoding=UTF8"), "{argv:?}");
+}
+
+/// Boot refuses a non-UTF8 database (#818), strictly: `SHOW
+/// server_encoding` reports Postgres's canonical `UTF8`, so a blank or an
+/// alias is refused rather than guessed at — this check must fail closed.
+/// The refusal names the encoding and says how to recover.
+#[test]
+fn require_utf8_accepts_only_the_canonical_name() {
+    for ok in ["UTF8", "utf8"] {
+        require_utf8(ok).unwrap_or_else(|e| panic!("{ok:?} must be accepted: {e}"));
     }
-    for bad in ["LATIN1", "SQL_ASCII", "UTF16", "UTF8x"] {
-        let mut o = opts("/d");
-        o.encoding = bad.into();
-        match build_initdb_argv(Path::new("/u/initdb"), &o) {
-            Err(DbError::PolicyViolation(msg)) => {
-                assert!(msg.contains(bad) && msg.contains("UTF8"), "{msg}")
-            }
+    for bad in ["", "  ", "LATIN1", "SQL_ASCII", "UNICODE", "UTF-8", "UTF16", "UTF8x"] {
+        match require_utf8(bad) {
+            Err(DbError::PolicyViolation(msg)) => assert!(
+                msg.contains(&format!("{bad:?}")) && msg.contains("UTF8") && msg.contains("pg_dump"),
+                "{msg}"
+            ),
             other => panic!("{bad:?} must be refused, got {other:?}"),
         }
     }
@@ -95,13 +96,13 @@ fn build_initdb_argv_requires_a_utf8_cluster() {
 fn build_initdb_argv_omits_data_checksums_when_disabled() {
     let mut o = opts("/d");
     o.data_checksums = false;
-    let argv = build_initdb_argv(Path::new("/u/initdb"), &o).expect("UTF8 default");
+    let argv = build_initdb_argv(Path::new("/u/initdb"), &o);
     assert!(!argv.iter().any(|a| a == "--data-checksums"));
 }
 
 #[test]
 fn build_initdb_argv_includes_data_checksums_when_enabled() {
-    let argv = build_initdb_argv(Path::new("/u/initdb"), &opts("/d")).expect("UTF8 default");
+    let argv = build_initdb_argv(Path::new("/u/initdb"), &opts("/d"));
     assert!(argv.iter().any(|a| a == "--data-checksums"));
 }
 
@@ -109,7 +110,7 @@ fn build_initdb_argv_includes_data_checksums_when_enabled() {
 fn build_initdb_argv_falls_back_to_kastellan_when_username_blank() {
     let mut o = opts("/d");
     o.username = "   ".into();
-    let argv = build_initdb_argv(Path::new("/u/initdb"), &o).expect("UTF8 default");
+    let argv = build_initdb_argv(Path::new("/u/initdb"), &o);
     assert!(
         argv.iter().any(|a| a == "--username=kastellan"),
         "blank username should fall back to kastellan, got {argv:?}"
@@ -120,7 +121,7 @@ fn build_initdb_argv_falls_back_to_kastellan_when_username_blank() {
 fn build_initdb_argv_uses_supplied_username() {
     let mut o = opts("/d");
     o.username = "alice".into();
-    let argv = build_initdb_argv(Path::new("/u/initdb"), &o).expect("UTF8 default");
+    let argv = build_initdb_argv(Path::new("/u/initdb"), &o);
     assert!(argv.iter().any(|a| a == "--username=alice"));
 }
 

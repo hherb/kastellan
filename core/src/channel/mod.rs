@@ -149,7 +149,9 @@ pub mod actions {
     /// which Postgres cannot store (#818). Carries the channel, the peer, a
     /// fixed `field` label and a fixed `reason` label
     /// (`super::inbound_nul::REASON_NUL`), never the body. A NUL in the
-    /// *body* is escaped instead and writes no row of its own.
+    /// *body* is escaped instead, writes no row of its own, and is counted on
+    /// the message's received / injection-blocked row
+    /// (`super::inbound_nul::NUL_ESCAPED_BODY_KEY`).
     pub const REJECTED_MALFORMED: &str = "channel.rejected_malformed";
     /// An unpaired peer presented a valid pairing code and was bound (slice #3).
     pub const PAIRED: &str = "channel.paired";

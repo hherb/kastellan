@@ -17,8 +17,11 @@
 //!
 //! ## What it does
 //!
-//! Every NUL becomes [`NUL_ESCAPE`] (U+2400 `␀`, SYMBOL FOR NULL — the
-//! Unicode glyph that exists to *depict* a NUL). Replaced, never deleted:
+//! The escape itself is [`crate::nul`]'s; this module adds the audit-only
+//! count marker.
+//!
+//! Every NUL becomes [`crate::nul::NUL_ESCAPE`] (U+2400 `␀`, SYMBOL FOR
+//! NULL — the Unicode glyph that exists to *depict* a NUL). Replaced, never deleted:
 //! deleting would join the characters on either side into a string the
 //! worker never sent, and an audit row is evidence.
 //!
@@ -42,7 +45,6 @@
 use serde_json::Value;
 
 use crate::nul::escape_value;
-pub use crate::nul::{escape_str, NUL_ESCAPE};
 
 /// Payload key holding how many NULs [`escape_payload`] replaced.
 ///
@@ -65,9 +67,8 @@ pub use crate::nul::{escape_str, NUL_ESCAPE};
 /// adding a write site.
 pub const NUL_ESCAPED_KEY: &str = "_nul_escaped";
 
-
 /// The payload with every NUL — in any string, at any depth, in any object
-/// key — replaced by [`NUL_ESCAPE`], and [`NUL_ESCAPED_KEY`] set to how many
+/// key — replaced by [`crate::nul::NUL_ESCAPE`], and [`NUL_ESCAPED_KEY`] set to how many
 /// were replaced.
 ///
 /// A payload with no NUL comes back **unchanged** — including a

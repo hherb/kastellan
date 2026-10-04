@@ -63,8 +63,8 @@ fn escape_json_replaces_and_counts_without_a_marker() {
     assert!(out.get(crate::audit::NUL_ESCAPED_KEY).is_none(), "{out}");
 }
 
-/// A clean value comes back unchanged with a zero count, so every row
-/// written before #818 is stored exactly as it was.
+/// A clean value comes back unchanged with a zero count, so a clean row is
+/// stored exactly as it was before #818.
 #[test]
 fn escape_json_leaves_a_clean_value_alone() {
     let v = json!({"state": "completed", "n": 3, "list": ["a", {"b": null}]});
@@ -85,7 +85,10 @@ async fn identity_writers_refuse_before_any_sql() {
     use crate::graph::Graph;
     use crate::{pairings, tasks};
 
-    let pool = sqlx::postgres::PgPool::connect_lazy("postgres://invalid:invalid@127.0.0.1:1/none")
+    // A short acquire timeout so a regression fails in half a second, not 30.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(500))
+        .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/none")
         .expect("lazy pool construction does not connect");
     let refused = |r: Result<(), DbError>, column: &str| match r {
         Err(DbError::NulRefused { column: c }) => assert_eq!(c, column),

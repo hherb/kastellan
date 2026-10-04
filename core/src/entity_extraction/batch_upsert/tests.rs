@@ -270,4 +270,9 @@ async fn upsert_drops_nul_bearing_spans_before_any_sql() {
     assert!(outcome.entity_ids.is_empty());
     assert_eq!(outcome.n_entities_upserted_new, 0);
     assert_eq!(outcome.n_relations_inserted, 0);
+    assert_eq!(
+        outcome.dropped_nul,
+        crate::entity_extraction::gliner_relex::NulDropped { entities: 1, triples: 1 },
+        "the drop is reported, so the audit row can carry it"
+    );
 }

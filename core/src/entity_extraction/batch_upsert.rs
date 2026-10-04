@@ -326,9 +326,14 @@ pub async fn upsert_entities_and_relations(
     // #818: a span carrying a NUL cannot be stored and would fail the WHOLE
     // batch (class 22, not the class 23 the fallback catches) — drop it here,
     // at the chokepoint every caller passes.
-    let (merged, dropped) = crate::entity_extraction::gliner_relex::without_nul_bearing(merged);
-    if dropped > 0 {
-        tracing::warn!(target: "kastellan::entity_extraction", dropped, "dropped spans carrying a NUL (#818)");
+    let (merged, dropped_nul) = crate::entity_extraction::gliner_relex::without_nul_bearing(merged);
+    if dropped_nul.any() {
+        tracing::warn!(
+            target: "kastellan::entity_extraction",
+            entities = dropped_nul.entities,
+            triples = dropped_nul.triples,
+            "dropped spans carrying a NUL (#818)",
+        );
     }
     let merged = &*merged;
     // Phase 1: entity upsert with fallback.
@@ -379,6 +384,12 @@ pub async fn upsert_entities_and_relations(
 
     // Phase 2: relation upsert with fallback.
     let resolved = build_resolved_triples(merged, &upsert_map);
+    let unresolved = merged.triples.len() - resolved.len();
+    if unresolved > 0 {
+        // Pre-#818 behaviour, but a dropped NUL-labelled entity can now
+        // orphan a clean triple that names it, so say how many.
+        tracing::debug!(target: "kastellan::entity_extraction", unresolved, "triples skipped: endpoint not upserted");
+    }
     let n_relations_inserted = match try_batch_upsert_relations(pool, &resolved).await {
         Ok(n) => n,
         Err(e) if is_constraint_violation(&e) => {
@@ -395,6 +406,7 @@ pub async fn upsert_entities_and_relations(
         entity_ids,
         n_entities_upserted_new: n_new,
         n_relations_inserted,
+        dropped_nul,
     })
 }
 

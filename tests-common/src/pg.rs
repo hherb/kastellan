@@ -241,8 +241,7 @@ pub fn bring_up_pg_cluster_with_timeout(
             username: user.clone(),
             ..InitDbOptions::default()
         },
-    )
-    .expect("the default encoding is UTF8");
+    );
     let out = Command::new(&argv[0])
         .args(&argv[1..])
         .env_clear()

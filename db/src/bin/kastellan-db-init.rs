@@ -142,7 +142,7 @@ fn run(argv: Vec<OsString>) -> Result<(), DbError> {
             username: args.username.unwrap_or_else(|| "kastellan".into()),
             ..InitDbOptions::default()
         };
-        let argv = build_initdb_argv(&initdb_bin, &opts)?;
+        let argv = build_initdb_argv(&initdb_bin, &opts);
         eprintln!("kastellan-db-init: running {}", argv.join(" "));
         let status = Command::new(&argv[0])
             .args(&argv[1..])

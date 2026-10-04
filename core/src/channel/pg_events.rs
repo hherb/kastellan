@@ -90,8 +90,12 @@ async fn audit_or_report(pool: &sqlx::PgPool, action: &str, payload: Value, repo
 }
 
 /// The string fields a lost-row line names, in order: who the row is about,
-/// then why it was written (a fixed label, e.g. `send_failed`).
-const STRING_FIELDS: [&str; 3] = ["channel", "peer", "reason"];
+/// then why it was written — fixed labels, e.g. `reason: "send_failed"`, or
+/// `field: "conversation"` on a `channel.rejected_malformed` row (#818).
+const STRING_FIELDS: [&str; 4] = ["channel", "peer", "field", "reason"];
+
+/// The [`STRING_FIELDS`] that say *why*, named after the ids.
+const WHY_FIELDS: [&str; 2] = ["field", "reason"];
 
 /// The integer fields it names: the core's own ids, to match the loss to the
 /// `tasks` table or an ask (`ask.resolved` has no channel or peer).
@@ -109,8 +113,8 @@ fn describe_row(payload: &Value) -> String {
     let ids = ID_FIELDS
         .iter()
         .filter_map(|&key| payload.get(key).and_then(Value::as_i64).map(|v| (key, v.to_string())));
-    // Who first, then the ids, then why: `reason` is the last string field.
-    let (who, why): (Vec<_>, Vec<_>) = strings.partition(|(key, _)| *key != "reason");
+    // Who first, then the ids, then why.
+    let (who, why): (Vec<_>, Vec<_>) = strings.partition(|(key, _)| !WHY_FIELDS.contains(key));
     let parts: Vec<String> =
         who.into_iter().chain(ids).chain(why).map(|(key, value)| format!("{key} {value}")).collect();
     if parts.is_empty() {
@@ -156,6 +160,19 @@ mod tests {
         assert_eq!(describe_row(&serde_json::json!({"channel": "email"})), r#" for channel "email""#);
         assert_eq!(describe_row(&serde_json::json!({"peer": 7, "task_id": "7"})), "");
         assert_eq!(describe_row(&serde_json::json!("not an object")), "");
+    }
+
+    /// A malformed-id refusal (#818) names which id was malformed, after the
+    /// parties — the field is a fixed label, so it is a "why", not a "who".
+    #[test]
+    fn a_malformed_row_names_its_field() {
+        let payload = serde_json::json!({
+            "channel": "matrix", "peer": "@a\u{0}:srv", "field": "peer", "reason": "nul",
+        });
+        assert_eq!(
+            describe_row(&payload),
+            r#" for channel "matrix", peer "@a\0:srv", field "peer", reason "nul""#
+        );
     }
 
     /// `ask.resolved` has no channel or peer: its line still names the ask.

@@ -419,10 +419,18 @@ async fn extractor_extract_writes_summary_audit_row() {
 
     // Narrow audit-shape pin: don't spin up the real worker. Call
     // `build_extract_entities_payload` + `kastellan_db::audit::insert`
-    // directly with the same 8-key shape `GlinerRelexExtractor::extract`
+    // directly with the same 10-key shape `GlinerRelexExtractor::extract`
     // emits in production.
     let payload = kastellan_core::scheduler::audit::build_extract_entities_payload(
-        234, 1, 5, 2, 5, 2, "multi-v1.0", 142,
+        234,
+        1,
+        5,
+        2,
+        kastellan_core::entity_extraction::gliner_relex::NulDropped::default(),
+        5,
+        2,
+        "multi-v1.0",
+        142,
     );
     kastellan_db::audit::insert(
         &pool,
@@ -884,6 +892,60 @@ async fn upsert_batch_relations_inserts_dedups_and_skips_unknown_entities() {
     assert_eq!(src, out1.entity_ids[0]);
     assert_eq!(dst, out1.entity_ids[1]);
     assert_eq!(kind, "treats");
+
+    pool.close().await;
+}
+
+/// #818: a NUL-bearing span in a mixed batch is dropped on its own — the
+/// clean entities and the triple between them still land, and the drop is
+/// reported. Before #818 the NUL failed the whole batch (SQLSTATE class 22,
+/// not the class 23 the per-row fallback catches), losing every entity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upsert_batch_drops_only_the_nul_bearing_spans() {
+    let Some((_cluster, pool)) = bring_up_pg("batch-nul-mixed").await else {
+        return;
+    };
+
+    let endpoint = |text: &str, ty: &str, idx| TripleEntity {
+        text: text.into(), r#type: ty.into(), start: 0, end: 1, entity_idx: idx,
+    };
+    let merged = ExtractResponse {
+        entities: vec![
+            Entity { text: "Dr Smith".into(), label: "person".into(),  start: 0, end: 8, score: 0.99 },
+            Entity { text: "Mal\u{0}lory".into(), label: "person".into(), start: 0, end: 7, score: 0.99 },
+            Entity { text: "asthma".into(),   label: "disease".into(), start: 0, end: 6, score: 0.99 },
+        ],
+        triples: vec![
+            Triple {
+                head: endpoint("Dr Smith", "person", 0),
+                tail: endpoint("asthma", "disease", 2),
+                relation: "treats".into(),
+                score: 0.92,
+            },
+            Triple {
+                head: endpoint("Mal\u{0}lory", "person", 1),
+                tail: endpoint("asthma", "disease", 2),
+                relation: "treats".into(),
+                score: 0.9,
+            },
+        ],
+    };
+    let out = upsert_entities_and_relations(&pool, &merged, &kastellan_core::memory::NoOpEmbedder::new())
+        .await
+        .expect("one poisoned span must not fail the batch");
+    assert_eq!(out.entity_ids.len(), 2, "the two clean entities land");
+    assert_eq!(out.n_entities_upserted_new, 2);
+    assert_eq!(out.n_relations_inserted, 1, "the clean triple lands");
+    assert_eq!(
+        out.dropped_nul,
+        kastellan_core::entity_extraction::gliner_relex::NulDropped { entities: 1, triples: 1 }
+    );
+    let mut names: Vec<String> = sqlx::query_scalar("SELECT name FROM entities")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    names.sort();
+    assert_eq!(names, vec!["Dr Smith".to_string(), "asthma".to_string()]);
 
     pool.close().await;
 }

@@ -1,4 +1,4 @@
-//! NUL handling for every Postgres write (issues #816, #818).
+//! The NUL rule for Postgres writes (issues #816, #818).
 //!
 //! Postgres refuses U+0000 anywhere in a `jsonb` value — string or object
 //! key — with `unsupported Unicode escape sequence`, and anywhere in a `text`
@@ -16,13 +16,14 @@
 //!   Losing a record is worse than rewriting one character of it, and for
 //!   these columns losing the row also strands what depends on it (a task
 //!   that never leaves `running`, an escalation that cannot be raised).
-//!   Use [`escape_json`] / [`escape_str`].
-//! * **An identity** — a column that is *matched* (`pairings.peer`, a task
-//!   payload's `peer`/`conversation`, `entities.name_norm`) — is **refused**.
-//!   Escaping would be an identity decision: a peer `a\0` stored as `a␀`
-//!   would then match a different, real peer `a␀`. Use [`refuse_nul_in_text`]
-//!   / [`refuse_nul_in_json`], which fail with [`DbError::NulRefused`] before
-//!   any SQL runs, naming the column and never the value.
+//!   Use `escape_json` / [`escape_str`].
+//! * **An identity** — a column that is *matched* (`pairings.peer`,
+//!   `tasks.payload`, which carries the peer and conversation ids, an
+//!   entity's `(kind, name_norm)` key) — is **refused**. Escaping would be
+//!   an identity decision: a peer `a\0` stored as `a␀` would then match a
+//!   different, real peer `a␀`. Use `refuse_nul_in_text` /
+//!   `refuse_nul_in_json`, called before the bind: they fail with
+//!   [`DbError::NulRefused`], naming the column and never the value.
 //! * **Long-lived knowledge** — a `memories` row — is refused too: it is
 //!   recalled and replayed later (a crystallised skill's parameters), so a
 //!   silently rewritten value would be a different instruction, not a
@@ -32,19 +33,22 @@
 //! next turn of the conversation (#701), and `resume_state` restores a
 //! suspended run's plan history. They are escaped anyway because refusing
 //! them strands a live task (no reply; no escalation), whereas a memory
-//! write that is refused costs only that one memory. Escaping cannot widen
-//! anything: a replayed `x␀y` id simply fails to match, and an escaped plan
-//! that is copied verbatim gets a different plan digest, so an approval
-//! bound to the original is not honoured and the run asks again — the safe
-//! direction.
+//! write that is refused costs only that one memory. Escaping does not
+//! widen what a replayed record can reach: an id in it can only resolve to
+//! something the peer could already name by typing a literal `␀`, and an
+//! escaped plan that is copied verbatim gets a different plan digest, so an
+//! approval bound to the original is not honoured and the run asks again —
+//! the safe direction.
 //!
 //! [`crate::audit::nul_escape`] layers the audit row's count marker on top
 //! of the escape. The non-audit records add no marker: their columns are
-//! read back by code that expects their own shape, so the write site logs
-//! the count instead.
+//! read back by code that expects their own shape, so the count is
+//! reported beside the row instead — `tasks::finalize` and `asks::raise`
+//! `warn!` it with the task id, and the channel bus puts it on the message's
+//! audit row (`core::channel::inbound_nul`).
 //!
-//! ⚠️ The escape glyph is U+2400, which needs a UTF8 cluster — see
-//! [`crate::InitDbOptions::encoding`].
+//! ⚠️ The escape glyph is U+2400, which needs a UTF8 database; boot refuses
+//! any other (`probe::run`).
 //!
 //! Pure: no I/O, no global state.
 
@@ -88,7 +92,7 @@ fn count_nuls(s: &str) -> u64 {
 }
 
 /// Escape `v` in place; return how many NULs were replaced.
-pub fn escape_value(v: &mut Value) -> u64 {
+pub(crate) fn escape_value(v: &mut Value) -> u64 {
     match v {
         Value::String(s) => {
             let (escaped, count) = escape_str(s);
@@ -139,14 +143,14 @@ fn escape_object(map: &mut Map<String, Value>) -> u64 {
 
 /// `v` with every NUL escaped (see [`escape_value`]), and how many there
 /// were. For a **record** column; adds no marker key (see the module doc).
-pub fn escape_json(mut v: Value) -> (Value, u64) {
+pub(crate) fn escape_json(mut v: Value) -> (Value, u64) {
     let count = escape_value(&mut v);
     (v, count)
 }
 
 /// [`escape_json`] over an optional column value; `None` stays `None` with
 /// a zero count.
-pub fn escape_opt_json(v: Option<Value>) -> (Option<Value>, u64) {
+pub(crate) fn escape_opt_json(v: Option<Value>) -> (Option<Value>, u64) {
     match v {
         Some(v) => {
             let (v, n) = escape_json(v);
@@ -170,11 +174,12 @@ pub fn json_contains_nul(v: &Value) -> bool {
     }
 }
 
-/// Refuse a NUL in an **identity** `text` column, before any SQL runs.
+/// Refuse a NUL in an **identity** `text` column. Call it before binding,
+/// so the refusal comes before any SQL.
 ///
-/// `column` is the `table.column` the value was bound for; the error names
+/// `column` is the `table.column` the value is bound for; the error names
 /// it and deliberately not the value, which may be a hostile peer's id.
-pub fn refuse_nul_in_text(column: &'static str, s: &str) -> Result<(), DbError> {
+pub(crate) fn refuse_nul_in_text(column: &'static str, s: &str) -> Result<(), DbError> {
     if s.contains('\0') {
         return Err(DbError::NulRefused { column });
     }
@@ -183,7 +188,7 @@ pub fn refuse_nul_in_text(column: &'static str, s: &str) -> Result<(), DbError> 
 
 /// [`refuse_nul_in_text`] for a `jsonb` column: any NUL in any string or
 /// key refuses the whole value.
-pub fn refuse_nul_in_json(column: &'static str, v: &Value) -> Result<(), DbError> {
+pub(crate) fn refuse_nul_in_json(column: &'static str, v: &Value) -> Result<(), DbError> {
     if json_contains_nul(v) {
         return Err(DbError::NulRefused { column });
     }

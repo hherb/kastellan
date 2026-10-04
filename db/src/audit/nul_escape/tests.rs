@@ -5,6 +5,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::nul::{escape_str, NUL_ESCAPE};
 use crate::audit::{
     is_truncation_envelope, stored_form, truncate_payload, DROPPED_PRESERVED_KEY, GUARD_KEY,
     PAYLOAD_MAX_BYTES, PRESERVED_KEYS, REQ_KEY, REQ_SUMMARY_KEY,

@@ -212,7 +212,7 @@ fn nul_in_non_audit_writes_is_escaped_in_records_and_refused_in_identities() {
 
         // ── The escape needs a UTF8 database; boot refuses any other. ──
         // `CREATE DATABASE … ENCODING` is the one way to get a non-UTF8
-        // database now that `build_initdb_argv` refuses a non-UTF8 cluster.
+        // database now that `build_initdb_argv` always asks for UTF8.
         sqlx::query(
             "CREATE DATABASE kastellan_ascii ENCODING 'SQL_ASCII' \
              LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0",
@@ -228,6 +228,18 @@ fn nul_in_non_audit_writes_is_escaped_in_records_and_refused_in_identities() {
             }
             other => panic!("boot must refuse a non-UTF8 database, got {other:?}"),
         }
+        // …and refuse it before migrating: nothing may have been written.
+        let ascii_admin = kastellan_db::pool::connect_admin_pool(&ascii)
+            .await
+            .expect("admin pool on the SQL_ASCII database");
+        let untouched: bool = sqlx::query_scalar(
+            "SELECT to_regclass('_sqlx_migrations') IS NULL AND to_regclass('audit_log') IS NULL",
+        )
+        .fetch_one(&ascii_admin)
+        .await
+        .expect("catalog lookup");
+        assert!(untouched, "the encoding check must run before migrations");
+        ascii_admin.close().await;
 
         pool.close().await;
         admin.close().await;

@@ -427,7 +427,10 @@ impl<'a> Graph for PgGraph<'a> {
         // exactly (same input → same dedup key).
         //
         // A NUL is refused, not escaped (#818): `name` becomes the
-        // `(kind, name_norm)` identity key ([`crate::nul`]).
+        // `(kind, name_norm)` identity key ([`crate::nul`]). `attrs` is
+        // refused with the row too: an entity is long-lived knowledge, like
+        // a memory, so a silently rewritten attribute would be a different
+        // fact, not a faithful record of one.
         crate::nul::refuse_nul_in_text("entities.kind", kind)?;
         crate::nul::refuse_nul_in_text("entities.name", name)?;
         crate::nul::refuse_nul_in_json("entities.attrs", attrs)?;
@@ -460,7 +463,8 @@ impl<'a> Graph for PgGraph<'a> {
         kind: &str,
         attrs: &serde_json::Value,
     ) -> Result<i64, DbError> {
-        // Refused, as for entities (#818).
+        // Refused, as for entities (#818): `kind` is the relation's
+        // identity, and `attrs` long-lived knowledge.
         crate::nul::refuse_nul_in_text("relations.kind", kind)?;
         crate::nul::refuse_nul_in_json("relations.attrs", attrs)?;
         let row = sqlx::query(
