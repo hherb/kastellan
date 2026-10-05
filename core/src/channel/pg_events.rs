@@ -1,7 +1,9 @@
 //! The channel bus's real DB seam, [`PgChannelEvents`]: enqueue a channel
 //! task, write one of the bus's audit rows (`channel.*`, and `ask.resolved`)
 //! — and **say so on the `[audit-lost]` marker when that row is not written**
-//! (#808).
+//! (#808). Since #814 the channel boot supervisor's sink writes its
+//! `channel.started`/`boot_failed`/`died` rows through the same
+//! [`audit_or_report`], under its own `[audit-lost]` writer.
 //!
 //! Split out of `bus.rs` (over the 500-LOC soft cap) when its failure report
 //! grew a seam of its own; `bus` re-exports it, so the path
