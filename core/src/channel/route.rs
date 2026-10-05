@@ -17,7 +17,8 @@ use super::OutgoingMessage;
 
 /// Build the reply for a finalized channel task. Returns `None` (with no error)
 /// when `payload.kind != "channel"` (an `ask`/`l3_run` completion the bus must
-/// ignore) or routing metadata is missing/malformed (the caller logs a warn).
+/// ignore) or routing metadata is missing/malformed (the caller, which can
+/// tell the two apart by `kind`, warns for the second).
 pub fn reply_for_completed_task(payload: &Value, result: Option<&Value>) -> Option<OutgoingMessage> {
     // The same four keys the ask-delivery path reads, through the same
     // function (spec D10) — so where an ask is asked and where its task's

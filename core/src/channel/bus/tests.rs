@@ -5,19 +5,27 @@
 //! a real cluster, plus the real `DbPeerAuthorizer`.
 
 use super::*;
-use crate::channel::auth::{StaticPairings, UnauthenticReason};
+use crate::channel::auth::{AuthDecision, StaticPairings, UnauthenticReason};
 use crate::channel::outbox::ChannelOutbox;
 use crate::channel::{ChannelId, ConversationId, IncomingMessage, PeerEvidence, PeerId};
 use std::sync::Mutex;
+
+/// #815: the messages and replies the bus drops, and the rows they leave.
+mod dropped;
 
 #[derive(Default)]
 struct FakeEvents {
     enqueued: Mutex<Vec<(Lane, Value)>>,
     audited: Mutex<Vec<(String, Value)>>,
+    /// When set, `enqueue` fails with this text instead of recording.
+    enqueue_fails_with: Option<&'static str>,
 }
 #[async_trait::async_trait]
 impl ChannelEvents for FakeEvents {
     async fn enqueue(&self, lane: Lane, payload: Value) -> anyhow::Result<i64> {
+        if let Some(why) = self.enqueue_fails_with {
+            anyhow::bail!(why);
+        }
         self.enqueued.lock().unwrap().push((lane, payload));
         Ok(1)
     }
@@ -152,7 +160,11 @@ async fn inbound_paired_clean_enqueues_and_audits_received() {
     let ack = handle_inbound(&auth, None, None, &ev, &msg("@me:srv", "summarise my mail")).await;
     assert!(ack.is_none());
     assert_eq!(ev.enqueued.lock().unwrap().len(), 1);
-    assert_eq!(ev.audited.lock().unwrap()[0].0, actions::RECEIVED);
+    // Exactly one row: an `enqueue_failed` (#815) written beside it would
+    // claim a drop that did not happen.
+    let audited = ev.audited.lock().unwrap().clone();
+    assert_eq!(audited.len(), 1, "{audited:?}");
+    assert_eq!(audited[0].0, actions::RECEIVED);
 }
 
 #[tokio::test]
@@ -243,7 +255,11 @@ async fn outbound_routes_completed_channel_task_to_its_channel() {
     assert_eq!(out.body, "done");
     let delivered = rx.recv().await.unwrap();
     assert_eq!(delivered.peer, PeerId("@me:srv".into()));
-    assert_eq!(ev.audited.lock().unwrap()[0].0, actions::REPLIED);
+    // Exactly one row: a `reply_undelivered` (#815) beside it would claim a
+    // drop that did not happen.
+    let audited = ev.audited.lock().unwrap().clone();
+    assert_eq!(audited.len(), 1, "{audited:?}");
+    assert_eq!(audited[0].0, actions::REPLIED);
 }
 
 /// A channel whose `send` always fails — the exact shape `EmailChannel` has in

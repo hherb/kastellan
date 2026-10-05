@@ -15,6 +15,19 @@ use super::{ChannelId, ConversationId, OutgoingMessage, PeerId};
 pub enum UndeliveredReason {
     /// The bus's `Channel::send` failed (the email channel until slice 2).
     SendFailed,
+    /// The bus could not even queue the reply for its channel: that channel's
+    /// pump had already ended, so nothing drains its queue (#815).
+    ///
+    /// A narrow window, not "every reply while the channel is down": a pump
+    /// that ends rings the bus's death bell, and the channel supervisor then
+    /// stops the whole bus, aborting the outbound pump that writes this row.
+    /// So it covers only a reply routed between the pump ending and that
+    /// stop — and its insert races the abort its own cause triggers (#813).
+    /// A reply that completes while the bus is down leaves no row at all
+    /// (#825). Not to be confused with the `OutboxError` label of the same
+    /// spelling, which an `ask.delivery_failed` row carries when a raised ask
+    /// meets a closed queue (`scheduler::asks::delivery`).
+    QueueClosed,
     /// A polled driver gave up on a reply its worker kept refusing: look at
     /// the conversation (a room the bot was removed from).
     GaveUp,
@@ -32,6 +45,7 @@ impl UndeliveredReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SendFailed => "send_failed",
+            Self::QueueClosed => "queue_closed",
             Self::GaveUp => "gave_up",
             Self::QueueFull => "queue_full",
             Self::DriverExit => "driver_exit",
@@ -40,8 +54,8 @@ impl UndeliveredReason {
 }
 
 /// What the writer of an [`actions::REPLY_UNDELIVERED`] row is told about a
-/// reply a polled driver dropped: whose it was, where it was going, and why —
-/// **never what it said** (#790).
+/// reply that was dropped — by a polled driver, or by the bus itself — whose
+/// it was, where it was going, and why — **never what it said** (#790).
 ///
 /// The row must carry channel, peer, reason and when only (a reply is conversation
 /// content). Until #790 the driver's audit hook was handed the whole
@@ -59,7 +73,7 @@ pub struct UndeliveredReply<'a> {
     pub peer: &'a PeerId,
     pub conversation: &'a ConversationId,
     pub reason: UndeliveredReason,
-    /// When the driver dropped it. The row is written after the fact (#789),
+    /// When it was dropped. The row is written after the fact (#789),
     /// so `audit_log.ts` is the insert's time, not this.
     pub observed_at: time::OffsetDateTime,
 }
@@ -186,7 +200,8 @@ mod tests {
     #[test]
     fn the_undelivered_reasons_are_pinned_literally() {
         use super::UndeliveredReason::*;
-        let labels: Vec<_> = [SendFailed, GaveUp, QueueFull, DriverExit].map(|r| r.as_str()).into();
-        assert_eq!(labels, ["send_failed", "gave_up", "queue_full", "driver_exit"]);
+        let labels: Vec<_> =
+            [SendFailed, QueueClosed, GaveUp, QueueFull, DriverExit].map(|r| r.as_str()).into();
+        assert_eq!(labels, ["send_failed", "queue_closed", "gave_up", "queue_full", "driver_exit"]);
     }
 }

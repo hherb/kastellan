@@ -1,7 +1,9 @@
 //! The channel bus's real DB seam, [`PgChannelEvents`]: enqueue a channel
 //! task, write one of the bus's audit rows (`channel.*`, and `ask.resolved`)
 //! — and **say so on the `[audit-lost]` marker when that row is not written**
-//! (#808).
+//! (#808). Since #814 the channel boot supervisor's sink writes its
+//! `channel.started`/`boot_failed`/`died` rows through the same
+//! [`audit_or_report`], under its own `[audit-lost]` writer.
 //!
 //! Split out of `bus.rs` (over the 500-LOC soft cap) when its failure report
 //! grew a seam of its own; `bus` re-exports it, so the path
@@ -27,7 +29,8 @@ use super::audit_text::quoted_id;
 use super::bus::ChannelEvents;
 use crate::worker_stderr::{emit_audit_lost_report, AuditLostWriter};
 
-/// The `actor` every bus audit row is written under.
+/// The `actor` every row [`audit_or_report`] writes is under: the bus's, and
+/// since #814 the boot supervisor's.
 const ACTOR: &str = "channel";
 
 /// Real DB-backed `ChannelEvents` over the runtime pool.
@@ -60,7 +63,7 @@ impl ChannelEvents for PgChannelEvents {
     /// fails is reported on `[audit-lost]` (#808). One still awaited when the
     /// bus stops is not: see the module doc.
     async fn audit(&self, action: &str, payload: Value) {
-        audit_or_report(&self.pool, action, payload, self.report).await;
+        audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report).await;
     }
 }
 
@@ -68,24 +71,37 @@ impl ChannelEvents for PgChannelEvents {
 /// test. A `fn` pointer, because the emitter's own record is a `tracing`
 /// event, which a test can read only through a scoped subscriber — and those
 /// flake on the interest cache.
-type Reporter = fn(AuditLostWriter, &str);
+pub(crate) type Reporter = fn(AuditLostWriter, &str);
 
 /// The production [`Reporter`]. Whether the stderr fallback was written is
 /// dropped: nothing more can be done for a row the report itself could not
 /// reach anyone about (the daemon's sinks drop it for the same reason).
-fn emit_report(writer: AuditLostWriter, line: &str) {
+pub(crate) fn emit_report(writer: AuditLostWriter, line: &str) {
     emit_audit_lost_report(writer, line);
 }
 
-/// Insert one bus audit row; report it through `report` if the insert fails.
+/// Insert one `channel`-actor audit row; report it through `report`, as
+/// `writer`'s, if the insert fails.
+///
+/// Two writers share it: the bus ([`AuditLostWriter::Bus`]) and, since #814,
+/// the channel boot supervisor's sink
+/// ([`AuditLostWriter::ChannelSupervisor`]) — one shape of lost-row line for
+/// every `channel.*` row.
 ///
 /// What the row is about is read **before** the insert, which consumes the
 /// payload. Only the fields [`describe_row`] names are read, so nothing else
-/// in the payload — a message body, a token — can reach the line.
-async fn audit_or_report(pool: &sqlx::PgPool, action: &str, payload: Value, report: Reporter) {
+/// in the payload — a message body, a token, a bring-up `cause` — can reach
+/// the line.
+pub(crate) async fn audit_or_report(
+    pool: &sqlx::PgPool,
+    writer: AuditLostWriter,
+    action: &str,
+    payload: Value,
+    report: Reporter,
+) {
     let about = describe_row(&payload);
     if let Err(e) = kastellan_db::audit::insert(pool, ACTOR, action, payload).await {
-        report(AuditLostWriter::Bus, &format_bus_row_lost(action, &about, &e));
+        report(writer, &format_row_lost(action, &about, &e));
     }
 }
 
@@ -101,11 +117,11 @@ const WHY_FIELDS: [&str; 2] = ["field", "reason"];
 /// `tasks` table or an ask (`ask.resolved` has no channel or peer).
 const ID_FIELDS: [&str; 2] = ["task_id", "ask_id"];
 
-/// Pure: what a bus row is about, for its lost-row line — ` for channel "x",
-/// peer "y", task_id 7, reason "z"`, each part left out when the payload has
-/// no such field of that type, and empty when it has none. Each string is
-/// [`quoted_id`]'d: a peer comes from outside the core. The ids are integers,
-/// so they need no quoting.
+/// Pure: what a `channel.*` (or `ask.resolved`) row is about, for its
+/// lost-row line — ` for channel "x", peer "y", task_id 7, reason "z"`,
+/// each part left out when the payload has no such field of that type, and
+/// empty when it has none. Each string is [`quoted_id`]'d: a peer comes from
+/// outside the core. The ids are integers, so they need no quoting.
 fn describe_row(payload: &Value) -> String {
     let strings = STRING_FIELDS
         .iter()
@@ -124,10 +140,35 @@ fn describe_row(payload: &Value) -> String {
     }
 }
 
-/// Pure: the `[audit-lost]` report for a bus row that was not written —
-/// the action, what it was about ([`describe_row`]), and why.
-fn format_bus_row_lost(action: &str, about: &str, why: &dyn std::fmt::Display) -> String {
+/// Pure: the `[audit-lost]` report for a `channel.*` row that was not written
+/// — the action, what it was about ([`describe_row`]), and why.
+fn format_row_lost(action: &str, about: &str, why: &dyn std::fmt::Display) -> String {
     format!("{action} row{about} not written: {why}")
+}
+
+/// Test fixtures shared with the boot supervisor's sink, which reports through
+/// [`audit_or_report`] too.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::time::Duration;
+
+    /// A lazy pool aimed at a port nothing listens on, so every insert fails.
+    /// sqlx retries a refused connect until its acquire timeout, kept short
+    /// here (1 s).
+    pub(crate) fn refused_pool() -> sqlx::PgPool {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        }; // dropped: the port now refuses
+        let options = sqlx::postgres::PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(port)
+            .username("nobody")
+            .database("nothing");
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy_with(options)
+    }
 }
 
 #[cfg(test)]
@@ -136,7 +177,6 @@ mod tests {
     use crate::channel::undelivered::{UndeliveredReason, UndeliveredReply};
     use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
     use std::sync::Mutex;
-    use std::time::Duration;
 
     #[test]
     fn the_line_names_what_the_row_is_about_and_nothing_else() {
@@ -147,7 +187,7 @@ mod tests {
             "reason": "send_failed",
             "body": "NEVER-IN-A-LINE",
         });
-        let line = format_bus_row_lost("channel.reply_undelivered", &describe_row(&payload), &"boom");
+        let line = format_row_lost("channel.reply_undelivered", &describe_row(&payload), &"boom");
         assert_eq!(
             line,
             r#"channel.reply_undelivered row for channel "matrix", peer "@a:srv", task_id 7, reason "send_failed" not written: boom"#
@@ -173,6 +213,17 @@ mod tests {
             describe_row(&payload),
             r#" for channel "matrix", peer "@a\0:srv", field "peer", reason "nul""#
         );
+    }
+
+    /// #815: a `channel.enqueue_failed` row is usually lost to the same outage
+    /// that failed the enqueue, so its line is the drop's only trace — it
+    /// must name who sent the message.
+    #[test]
+    fn an_enqueue_failed_row_names_its_channel_and_peer() {
+        let payload = serde_json::json!({
+            "channel": "matrix", "peer": "@a:srv", "conversation": "!r:srv",
+        });
+        assert_eq!(describe_row(&payload), r#" for channel "matrix", peer "@a:srv""#);
     }
 
     /// `ask.resolved` has no channel or peer: its line still names the ask.
@@ -220,24 +271,10 @@ mod tests {
     /// #808: a failed insert reaches the reporter, as the bus's, naming the
     /// row — through the `ChannelEvents::audit` the bus calls, so a revert of
     /// that method to swallowing the error fails here. The pool points at a
-    /// port nothing listens on; sqlx retries a refused connect until its
-    /// acquire timeout, kept short here.
+    /// port nothing listens on ([`test_support::refused_pool`]).
     #[tokio::test]
     async fn a_failed_insert_is_reported_on_the_marker() {
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            listener.local_addr().expect("addr").port()
-        }; // dropped: the port now refuses
-        let options = sqlx::postgres::PgConnectOptions::new()
-            .host("127.0.0.1")
-            .port(port)
-            .username("nobody")
-            .database("nothing");
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_secs(1))
-            .connect_lazy_with(options);
-
-        let events = PgChannelEvents::with_reporter(pool, record);
+        let events = PgChannelEvents::with_reporter(test_support::refused_pool(), record);
         let payload = serde_json::json!({"channel": "matrix", "peer": "@lost:srv"});
         ChannelEvents::audit(&events, "channel.reply_undelivered", payload).await;
 

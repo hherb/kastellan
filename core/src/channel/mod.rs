@@ -23,6 +23,7 @@ pub mod audit_text;
 pub mod auth;
 pub mod boot_supervisor;
 pub mod bus;
+mod bus_inbound;
 pub mod email;
 pub mod inbound_nul;
 pub mod ingest;
@@ -142,6 +143,21 @@ pub trait Channel: Send + Sync {
 pub mod actions {
     /// A message arrived from a recognised peer and was screened.
     pub const RECEIVED: &str = "channel.received";
+    /// A recognised peer's message passed screening but could not be
+    /// enqueued (#815), so the agent never saw it. Written **instead of**
+    /// [`RECEIVED`], which would claim a task id there is none of. Carries
+    /// the channel, the peer and the conversation only: never the body, and
+    /// never the error (driver text, not a fixed label; it goes to the
+    /// daemon log). No `nul_escaped_body` count either: the escaped body is
+    /// never stored on this path.
+    ///
+    /// Not the row a *full* Postgres outage leaves: authorization reads the
+    /// pairing table first, fails closed, and the message is recorded as
+    /// [`REJECTED_UNPAIRED`] (#827). This one is for a lookup that succeeded
+    /// and an insert that then failed. If this row's own insert fails too,
+    /// the bus's writer says so (#808), naming the channel and peer — except
+    /// for an insert still awaited when the bus is stopped (#813).
+    pub const ENQUEUE_FAILED: &str = "channel.enqueue_failed";
     /// A message from an unrecognised/unpaired peer was dropped (fail-closed).
     pub const REJECTED_UNPAIRED: &str = "channel.rejected_unpaired";
     /// A message was refused before authorization because an identity field
@@ -175,13 +191,20 @@ pub mod actions {
     ///
     /// **The converse does not hold** — see [`REPLY_UNDELIVERED`].
     pub const REPLIED: &str = "channel.replied";
-    /// A message was routed to its channel but was not delivered. Carries the
-    /// channel, the peer, a fixed [`super::UndeliveredReason`] label and the
-    /// event's time (`observed_at`, #792) only — never the reply body and never the error string (which is transport
-    /// text, not a fixed label) — built by [`super::UndeliveredReply::payload`], its one definition (#800).
+    /// A message for a channel was not delivered: a reply, an ask, or an
+    /// inbound ack — routed to its channel's queue or, for `queue_closed`,
+    /// not even that. Carries the channel, the peer, a fixed
+    /// [`super::UndeliveredReason`] label and the event's time
+    /// (`observed_at`, #792) only — never the reply body and never the error
+    /// string (which is transport text, not a fixed label) — built by
+    /// [`super::UndeliveredReply::payload`], its one definition (#800).
     ///
-    /// **Two writers.** The bus's per-channel pump, when `Channel::send`
-    /// fails (`send_failed`). And, since #782, a polled channel's driver
+    /// **Two writers.** The bus: its per-channel pump, when `Channel::send`
+    /// fails (`send_failed`) — for a reply, an ask, or (since #824) the ack
+    /// `handle_inbound` sends back — and, since #815, `handle_completed`, when
+    /// the channel's queue is closed because its pump has ended
+    /// (`queue_closed`; that reply has **no** [`REPLIED`] row, since it was
+    /// never routed). And, since #782, a polled channel's driver
     /// (`polled_driver::replies`), whose `send` only queues: it writes the row
     /// when it **gives up** on a reply its worker kept refusing (`gave_up`),
     /// drops one past a full conversation queue (`queue_full`), or exits with
@@ -198,7 +221,9 @@ pub mod actions {
     /// behind it rather than `channel.replied`. Because the payload is
     /// channel + peer only, such a row names neither the ask nor the task
     /// and is correlatable only by timestamp; carrying `ask_id` into the
-    /// pump is tracked as its own issue.
+    /// pump is tracked as its own issue. Two more orphan sources: an inbound
+    /// ack the transport refused (it answers a message, not a task), and a
+    /// `queue_closed` row, which by definition has no `channel.replied`.
     pub const REPLY_UNDELIVERED: &str = "channel.reply_undelivered";
     /// A message failed transport authenticity (DMARC and/or token) — dropped
     /// before authorization, so it never reaches the pairing carve-out.
