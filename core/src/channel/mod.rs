@@ -24,6 +24,7 @@ pub mod auth;
 pub mod boot_supervisor;
 pub mod bus;
 pub mod email;
+pub mod inbound_nul;
 pub mod ingest;
 pub mod matrix;
 pub mod outbox;
@@ -143,6 +144,15 @@ pub mod actions {
     pub const RECEIVED: &str = "channel.received";
     /// A message from an unrecognised/unpaired peer was dropped (fail-closed).
     pub const REJECTED_UNPAIRED: &str = "channel.rejected_unpaired";
+    /// A message was refused before authorization because an identity field
+    /// (channel, peer or conversation id) is malformed — today, holds a NUL,
+    /// which Postgres cannot store (#818). Carries the channel, the peer, a
+    /// fixed `field` label and a fixed `reason` label
+    /// (`super::inbound_nul::REASON_NUL`), never the body. A NUL in the
+    /// *body* is escaped instead, writes no row of its own, and is counted on
+    /// the message's received / injection-blocked row
+    /// (`super::inbound_nul::NUL_ESCAPED_BODY_KEY`).
+    pub const REJECTED_MALFORMED: &str = "channel.rejected_malformed";
     /// An unpaired peer presented a valid pairing code and was bound (slice #3).
     pub const PAIRED: &str = "channel.paired";
     /// A recognised peer's message was blocked by the injection guard.

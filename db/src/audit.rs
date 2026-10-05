@@ -97,7 +97,8 @@ pub mod nul_escape;
 pub mod req_summary;
 mod truncate;
 
-pub use nul_escape::{NUL_ESCAPE, NUL_ESCAPED_KEY};
+pub use crate::nul::NUL_ESCAPE;
+pub use nul_escape::NUL_ESCAPED_KEY;
 pub use req_summary::{HEAD_MAX_BYTES, REQ_KEY, REQ_SUMMARY_KEY};
 pub use truncate::{
     is_truncation_envelope, truncate_payload, DROPPED_PRESERVED_KEY, DROP_MARKER_RESERVE, GUARD_KEY,
@@ -153,7 +154,7 @@ impl StoredForm<'_> {
 ///
 /// `payload` goes through [`truncate_payload`] (which escapes NUL first).
 /// `actor` and `action` are `text` columns, which refuse NUL just as
-/// `jsonb` does, so they are escaped too ([`nul_escape::escape_str`]).
+/// `jsonb` does, so they are escaped too ([`crate::nul::escape_str`]).
 /// Both are spelled by code today, so that is a backstop; with no payload
 /// of their own to carry a count, the `␀` glyph is their record.
 ///
@@ -171,8 +172,8 @@ pub fn stored_form<'a>(
     payload: serde_json::Value,
 ) -> StoredForm<'a> {
     StoredForm {
-        actor: nul_escape::escape_str(actor).0,
-        action: nul_escape::escape_str(action).0,
+        actor: crate::nul::escape_str(actor).0,
+        action: crate::nul::escape_str(action).0,
         payload: truncate_payload(payload),
     }
 }

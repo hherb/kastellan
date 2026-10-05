@@ -14,7 +14,7 @@
 //!      row (`emit_extract_entities_audit`).
 //!   7. Return `EntitySeeds`.
 
-use crate::workers::gliner_relex::{Entity, ExtractResponse, ExtractRequest, Triple};
+use crate::workers::gliner_relex::{Entity, ExtractResponse, ExtractRequest, Triple, TripleEntity};
 
 /// Maximum chunk size in bytes — sized below the worker's 8192-byte
 /// cap with headroom for label-list overhead in the JSON envelope.
@@ -141,19 +141,100 @@ pub fn merge_chunks(chunk_responses: Vec<(usize, ExtractResponse)>) -> ExtractRe
     ExtractResponse { entities, triples }
 }
 
+/// How many entities and triples [`without_nul_bearing`] dropped (#818).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NulDropped {
+    pub entities: usize,
+    pub triples: usize,
+}
+
+impl NulDropped {
+    /// True when anything was dropped.
+    pub fn any(self) -> bool {
+        self.entities + self.triples > 0
+    }
+}
+
+/// Drop every entity and triple carrying a NUL (U+0000) in a field that
+/// reaches the graph; return how many were dropped (#818).
+///
+/// An entity's text becomes `entities.name_norm`, half of its
+/// `(kind, name_norm)` identity key, and a triple is resolved by its
+/// endpoints' text — so these are **identities**, which
+/// `kastellan_db::nul` refuses rather than escapes. Postgres cannot store a
+/// NUL anyway, and one poisoned span failed the **whole** batch upsert: a
+/// NUL error is SQLSTATE class 22, which the per-row fallback (class 23
+/// only) does not catch. Every input text has already been stored in
+/// Postgres (a task instruction or a memory body), so it holds no NUL; a
+/// span carrying one was invented by the worker — evidence worth keeping,
+/// so the counts reach the `extract_entities` audit row — and is dropped on
+/// its own so the rest of the response's entities still land.
+///
+/// Applied at the write chokepoint,
+/// [`crate::entity_extraction::batch_upsert::upsert_entities_and_relations`]
+/// (via [`without_nul_bearing`]), so every caller is covered, not just this
+/// extractor.
+///
+/// Pure; no I/O.
+fn discard_nul_bearing(resp: &mut ExtractResponse) -> NulDropped {
+    let (entities, triples) = (resp.entities.len(), resp.triples.len());
+    resp.entities.retain(|e| !entity_has_nul(e));
+    resp.triples.retain(|t| !triple_has_nul(t));
+    NulDropped {
+        entities: entities - resp.entities.len(),
+        triples: triples - resp.triples.len(),
+    }
+}
+
+/// [`discard_nul_bearing`] without a copy in the common case: the response
+/// itself when nothing carries a NUL, else a cleaned copy. Returns how many
+/// entities and triples were dropped. Pure; no I/O.
+pub fn without_nul_bearing(resp: &ExtractResponse) -> (std::borrow::Cow<'_, ExtractResponse>, NulDropped) {
+    if !resp.entities.iter().any(entity_has_nul) && !resp.triples.iter().any(triple_has_nul) {
+        return (std::borrow::Cow::Borrowed(resp), NulDropped::default());
+    }
+    let mut cleaned = resp.clone();
+    let dropped = discard_nul_bearing(&mut cleaned);
+    (std::borrow::Cow::Owned(cleaned), dropped)
+}
+
+/// Does any field of `e` that reaches the graph hold a NUL?
+///
+/// Every field is named (here and in [`triple_has_nul`]), so a string field
+/// added to the wire structs does not compile until someone decides whether
+/// it reaches the graph.
+fn entity_has_nul(e: &Entity) -> bool {
+    let Entity { text, label, start: _, end: _, score: _ } = e;
+    [text, label].iter().any(|f| f.contains('\0'))
+}
+
+/// Does any field of `t` that reaches the graph hold a NUL?
+fn triple_has_nul(t: &Triple) -> bool {
+    let Triple { head, tail, relation, score: _ } = t;
+    let endpoint_has_nul = |e: &TripleEntity| {
+        let TripleEntity { text, r#type, start: _, end: _, entity_idx: _ } = e;
+        [text, r#type].iter().any(|f| f.contains('\0'))
+    };
+    endpoint_has_nul(head) || endpoint_has_nul(tail) || relation.contains('\0')
+}
+
 use sqlx::PgPool;
 
 /// Result of the upsert pass.
 pub struct UpsertOutcome {
     /// IDs of every entity in the merged response, in original order
-    /// (whether newly inserted or pre-existing). This is what the
-    /// extractor returns to recall as the graph-lane seeds.
+    /// (whether newly inserted or pre-existing) — except those carrying a
+    /// NUL, which the chokepoint drops before the write (#818,
+    /// [`crate::entity_extraction::batch_upsert::upsert_entities_and_relations`]).
+    /// This is what the extractor returns to recall as the graph-lane seeds.
     pub entity_ids: Vec<i64>,
     /// Number of entity rows the upsert created (not counting
     /// ON CONFLICT hits).
     pub n_entities_upserted_new: u32,
     /// Number of relation rows the upsert created.
     pub n_relations_inserted: u32,
+    /// What the chokepoint dropped for carrying a NUL (#818).
+    pub dropped_nul: NulDropped,
 }
 
 // Integration test coverage in core/tests/entity_extraction_e2e.rs:
@@ -366,6 +447,7 @@ impl EntityExtractor for GlinerRelexExtractor {
             n_chunks,
             merged.entities.len(),
             merged.triples.len(),
+            outcome.dropped_nul,
             outcome.n_entities_upserted_new,
             outcome.n_relations_inserted,
             "multi-v1.0",

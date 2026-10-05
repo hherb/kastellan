@@ -5,6 +5,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::nul::{escape_str, NUL_ESCAPE};
 use crate::audit::{
     is_truncation_envelope, stored_form, truncate_payload, DROPPED_PRESERVED_KEY, GUARD_KEY,
     PAYLOAD_MAX_BYTES, PRESERVED_KEYS, REQ_KEY, REQ_SUMMARY_KEY,
@@ -13,28 +14,10 @@ use crate::audit::{
 /// `␀`, spelled once so a fixture cannot drift from the constant.
 const E: char = NUL_ESCAPE;
 
-/// True when no string or key anywhere in `v` holds a NUL.
-///
-/// A walk, not a substring search of the serialisation: a string holding
-/// the six characters `\u0000` serialises as `\\u0000`, which contains
-/// `\u0000`, so a search would report a NUL that is not there.
+/// True when no string or key anywhere in `v` holds a NUL — the shared
+/// detector, whose own cases are pinned in `crate::nul::tests`.
 fn nul_free(v: &Value) -> bool {
-    match v {
-        Value::String(s) => !s.contains('\0'),
-        Value::Array(items) => items.iter().all(nul_free),
-        Value::Object(map) => map.iter().all(|(k, v)| !k.contains('\0') && nul_free(v)),
-        Value::Null | Value::Bool(_) | Value::Number(_) => true,
-    }
-}
-
-/// The helper itself: it must see a NUL in a key and deep in a value, and
-/// must NOT see one in the literal text `\u0000`.
-#[test]
-fn nul_free_finds_real_nuls_only() {
-    assert!(!nul_free(&json!({"k\0": 1})));
-    assert!(!nul_free(&json!({"a": [{"b": "x\0"}]})));
-    assert!(nul_free(&json!({"a": "\\u0000"})));
-    assert!(nul_free(&json!({"a": format!("x{E}")})));
+    !crate::nul::json_contains_nul(v)
 }
 
 /// [`escape_str`] with its result owned, so fixtures compare plain strings.

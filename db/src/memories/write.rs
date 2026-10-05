@@ -40,6 +40,7 @@ pub async fn insert_memory<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    refuse_nul(body, metadata)?;
     if let Some(v) = embedding {
         check_embedding_dim("insert", v)?;
     }
@@ -345,6 +346,7 @@ async fn insert_row_at_layer_unchecked<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    refuse_nul(body, metadata)?;
     if let Some(v) = embedding {
         check_embedding_dim("insert", v)?;
     }
@@ -379,6 +381,18 @@ where
     .map_err(|e| DbError::Query(format!("insert memory at layer {layer:?}: {e}")))?;
     row.try_get::<i64, _>(0)
         .map_err(|e| DbError::Query(format!("decode memory.id: {e}")))
+}
+
+/// Refuse a NUL in a memory's `body` or `metadata` before any SQL (#818).
+///
+/// Refused, not escaped: a memory is long-lived knowledge that is recalled
+/// and replayed — an L3 skill's template parameters become a later tool
+/// call — so a silently rewritten value would be a different instruction,
+/// not a faithful record (see [`crate::nul`]). Postgres would refuse the
+/// row anyway; this makes the refusal typed and names the column.
+fn refuse_nul(body: &str, metadata: &serde_json::Value) -> Result<(), DbError> {
+    crate::nul::refuse_nul_in_text("memories.body", body)?;
+    crate::nul::refuse_nul_in_json("memories.metadata", metadata)
 }
 
 #[cfg(test)]

@@ -190,6 +190,10 @@ impl CompletedTasks for PgCompletedTasks {
 }
 
 /// Handle one inbound message. Order is security-load-bearing:
+///   0. **NUL boundary** (`super::inbound_nul`, #818): a NUL in the channel,
+///      peer or conversation id refuses the message with a
+///      `channel.rejected_malformed` row; a NUL in the body is escaped to `␀`
+///      and counted on the message's received / injection-blocked row.
 ///   1. **authorize** (`(channel, peer, evidence)`), yielding three distinct
 ///      outcomes:
 ///      - `RejectedUnauthentic(reason)` — the transport-supplied evidence
@@ -266,6 +270,9 @@ pub async fn handle_inbound(
     events: &dyn ChannelEvents,
     msg: &IncomingMessage,
 ) -> Option<OutgoingMessage> {
+    // Step 0: see the ordering doc above.
+    let admitted = super::inbound_nul::admit(events, msg).await?;
+    let msg = &*admitted.msg;
     match authorizer.authorize(&msg.channel, &msg.peer, msg.evidence.as_ref()).await {
         AuthDecision::Recognised => {}
         AuthDecision::RejectedUnauthentic(reason) => {
@@ -420,10 +427,10 @@ pub async fn handle_inbound(
                 events
                     .audit(
                         actions::RECEIVED,
-                        serde_json::json!({
+                        admitted.mark(serde_json::json!({
                             "task_id": id, "channel": msg.channel.0,
                             "peer": msg.peer.0, "conversation": msg.conversation.0,
-                        }),
+                        })),
                     )
                     .await;
             }
@@ -433,10 +440,10 @@ pub async fn handle_inbound(
             events
                 .audit(
                     actions::INJECTION_BLOCKED,
-                    serde_json::json!({
+                    admitted.mark(serde_json::json!({
                         "channel": msg.channel.0, "peer": msg.peer.0,
                         "sha256": sha256, "reason_codes": reason_codes, "score": score,
-                    }),
+                    })),
                 )
                 .await;
         }

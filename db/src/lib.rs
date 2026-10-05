@@ -37,6 +37,7 @@ pub mod entity_kinds;
 pub mod entity_name;
 pub mod graph;
 pub mod memories;
+pub mod nul;
 pub mod pairings;
 pub mod pool;
 pub mod probe;
@@ -81,7 +82,12 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Errors surfaced by the db helpers, CLI, and runtime probe.
+///
+/// `#[non_exhaustive]` (added with [`DbError::NulRefused`], #818) so a
+/// downstream `match` keeps a wildcard arm and the next new variant is not
+/// a breaking change.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DbError {
     /// A path argument that must be absolute was relative.
     #[error("path must be absolute: {0}")]
@@ -147,6 +153,18 @@ pub enum DbError {
     #[error("storage policy violation: {0}")]
     PolicyViolation(String),
 
+    /// A value bound for `column` holds a NUL (U+0000), which Postgres
+    /// cannot store in `text` or `jsonb`, and `column` is one the code
+    /// refuses rather than escapes (an identity, or long-lived knowledge —
+    /// see [`nul`]). Raised before any SQL runs. Carries the column only,
+    /// never the value, which may be a hostile peer's id. Retrying never
+    /// helps: the input itself is malformed.
+    #[error("refusing to store a NUL (U+0000) in {column}")]
+    NulRefused {
+        /// The `table.column` the value was bound for.
+        column: &'static str,
+    },
+
     /// Catchall for other errors not fitting other variants.
     #[error("{0}")]
     Other(String),
@@ -164,6 +182,28 @@ impl From<sqlx::Error> for DbError {
     }
 }
 
+/// Refuse a database whose `server_encoding` is not UTF8 (#818). Pure.
+///
+/// kastellan needs UTF8: the NUL escape ([`nul`]) writes U+2400, which
+/// LATIN1 and the other single-byte encodings cannot represent, and
+/// SQL_ASCII would accept the bytes but validates nothing at all. `initdb`
+/// always gets `--encoding=UTF8` ([`build_initdb_argv`]); this catches a
+/// cluster or database made some other way.
+///
+/// **Strict**: `SHOW server_encoding` reports Postgres's canonical name, so
+/// only `UTF8` (any case) passes — a blank or an alias such as `UNICODE`
+/// is refused, failing closed rather than guessing.
+pub(crate) fn require_utf8(server_encoding: &str) -> Result<(), DbError> {
+    if server_encoding.eq_ignore_ascii_case("UTF8") {
+        return Ok(());
+    }
+    Err(DbError::PolicyViolation(format!(
+        "database encoding {server_encoding:?} is not supported: kastellan requires a UTF8 \
+         database (#818). To recover, dump it (pg_dump), recreate it with ENCODING 'UTF8', \
+         and restore it"
+    )))
+}
+
 /// Inputs to [`build_initdb_argv`]. Caller resolves all paths.
 ///
 /// The struct exists so we can grow new options (e.g. `--locale`,
@@ -178,8 +218,6 @@ pub struct InitDbOptions {
     /// Username (Postgres role) that owns the cluster. Almost always
     /// the OS username running `initdb`. Defaults to "kastellan" if empty.
     pub username: String,
-    /// Cluster encoding. Default: "UTF8".
-    pub encoding: String,
     /// When `true`, request `--data-checksums`. Cheap CRC of every page;
     /// catches silent disk corruption. Recommended on; flipping later
     /// requires a `pg_checksums` rebuild so set it correctly the first
@@ -192,7 +230,6 @@ impl Default for InitDbOptions {
         Self {
             data_dir: PathBuf::new(),
             username: "kastellan".into(),
-            encoding: "UTF8".into(),
             data_checksums: true,
         }
     }
@@ -208,7 +245,9 @@ impl Default for InitDbOptions {
 /// Flags baked in (with reasons):
 /// - `--pgdata <dir>`: where the cluster lives.
 /// - `--username <name>`: superuser role for the new cluster.
-/// - `--encoding=UTF8`: the only sane default for a modern Postgres.
+/// - `--encoding=UTF8`: always, not configurable — kastellan requires a
+///   UTF8 cluster (#818; see [`require_utf8`], which refuses any other
+///   database at boot).
 /// - `--auth-local=peer`: local UDS connections must come from the same
 ///   OS uid as the role they're connecting as. Combined with the
 ///   listen-on-UDS-only config below, this is the only auth path that
@@ -234,12 +273,7 @@ pub fn build_initdb_argv(initdb_bin: &Path, opts: &InitDbOptions) -> Vec<String>
     };
     argv.push(format!("--username={}", username));
 
-    let encoding = if opts.encoding.trim().is_empty() {
-        "UTF8"
-    } else {
-        opts.encoding.as_str()
-    };
-    argv.push(format!("--encoding={}", encoding));
+    argv.push("--encoding=UTF8".into());
 
     argv.push("--auth-local=peer".into());
     argv.push("--auth-host=reject".into());

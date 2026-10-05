@@ -188,3 +188,81 @@ fn strip_undefined_label_drops_all_undefined_occurrences() {
     let out = strip_undefined_label(input);
     assert_eq!(out, vec!["treats".to_string()]);
 }
+
+// ── #818: NUL-bearing spans are discarded before the upsert ──
+
+/// A triple between two `person` endpoints, built from the shared `tent`.
+fn tri(head: &str, tail: &str, relation: &str) -> Triple {
+    Triple {
+        head: tent(head, "person", 0),
+        tail: tent(tail, "person", 1),
+        relation: relation.into(),
+        score: 0.9,
+    }
+}
+
+/// An entity name is the `(kind, name_norm)` identity key and a triple is
+/// resolved by its endpoints, so a NUL in any field that reaches the graph —
+/// text, label, a triple's head/tail or relation — drops that entity or
+/// triple, and only that one; each kind is counted separately. Before #818 one such span
+/// failed the whole batch upsert (a NUL is SQLSTATE class 22, not the class
+/// 23 the per-row fallback catches), so every entity of the turn was lost.
+#[test]
+fn discard_nul_bearing_drops_only_the_poisoned_spans() {
+    let mut resp = ExtractResponse {
+        entities: vec![ent("Alice", "person", 0, 1), ent("Bo\0b", "person", 0, 1), ent("Carol", "per\0son", 0, 1)],
+        triples: vec![
+            tri("Alice", "Carol", "knows"),
+            tri("Ali\0ce", "Carol", "knows"),
+            tri("Alice", "Ca\0rol", "knows"),
+            tri("Alice", "Carol", "kn\0ows"),
+        ],
+    };
+    assert_eq!(discard_nul_bearing(&mut resp), NulDropped { entities: 2, triples: 3 });
+    assert_eq!(resp.entities, vec![ent("Alice", "person", 0, 1)]);
+    assert_eq!(resp.triples, vec![tri("Alice", "Carol", "knows")]);
+}
+
+/// A NUL in a triple endpoint's `type` drops the triple too.
+#[test]
+fn discard_nul_bearing_checks_the_triple_endpoint_type() {
+    let mut t = tri("Alice", "Carol", "knows");
+    t.tail.r#type = "per\0son".into();
+    let mut resp = ExtractResponse { entities: vec![], triples: vec![t] };
+    assert_eq!(discard_nul_bearing(&mut resp), NulDropped { entities: 0, triples: 1 });
+    assert!(resp.triples.is_empty());
+}
+
+/// A clean response is left exactly as it was.
+#[test]
+fn discard_nul_bearing_leaves_a_clean_response_alone() {
+    let clean = ExtractResponse {
+        entities: vec![ent("Alice", "person", 0, 1)],
+        triples: vec![tri("Alice", "Carol", "knows")],
+    };
+    let mut resp = clean.clone();
+    assert_eq!(discard_nul_bearing(&mut resp), NulDropped::default());
+    assert!(!NulDropped::default().any());
+    assert_eq!(resp, clean);
+}
+
+/// The chokepoint wrapper borrows a clean response (no copy on the common
+/// path) and hands back a cleaned copy plus the count otherwise.
+#[test]
+fn without_nul_bearing_borrows_when_clean_and_cleans_otherwise() {
+    let clean = ExtractResponse { entities: vec![ent("Alice", "person", 0, 1)], triples: vec![] };
+    let (out, n) = without_nul_bearing(&clean);
+    assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(n, NulDropped::default());
+
+    let dirty = ExtractResponse {
+        entities: vec![ent("Alice", "person", 0, 1), ent("B\0", "person", 0, 1)],
+        triples: vec![tri("Alice", "B\0", "knows")],
+    };
+    let (out, n) = without_nul_bearing(&dirty);
+    assert!(matches!(out, std::borrow::Cow::Owned(_)));
+    assert_eq!(n, NulDropped { entities: 1, triples: 1 });
+    assert!(n.any());
+    assert_eq!(out.entities, vec![ent("Alice", "person", 0, 1)]);
+    assert!(out.triples.is_empty());
+}

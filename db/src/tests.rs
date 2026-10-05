@@ -65,6 +65,33 @@ fn build_initdb_argv_pins_secure_auth_defaults() {
     );
 }
 
+/// The cluster is always UTF8 (#818) — not an option a caller can turn off.
+#[test]
+fn build_initdb_argv_always_requests_utf8() {
+    let argv = build_initdb_argv(Path::new("/u/initdb"), &opts("/d"));
+    assert!(argv.iter().any(|a| a == "--encoding=UTF8"), "{argv:?}");
+}
+
+/// Boot refuses a non-UTF8 database (#818), strictly: `SHOW
+/// server_encoding` reports Postgres's canonical `UTF8`, so a blank or an
+/// alias is refused rather than guessed at — this check must fail closed.
+/// The refusal names the encoding and says how to recover.
+#[test]
+fn require_utf8_accepts_only_the_canonical_name() {
+    for ok in ["UTF8", "utf8"] {
+        require_utf8(ok).unwrap_or_else(|e| panic!("{ok:?} must be accepted: {e}"));
+    }
+    for bad in ["", "  ", "LATIN1", "SQL_ASCII", "UNICODE", "UTF-8", "UTF16", "UTF8x"] {
+        match require_utf8(bad) {
+            Err(DbError::PolicyViolation(msg)) => assert!(
+                msg.contains(&format!("{bad:?}")) && msg.contains("UTF8") && msg.contains("pg_dump"),
+                "{msg}"
+            ),
+            other => panic!("{bad:?} must be refused, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn build_initdb_argv_omits_data_checksums_when_disabled() {
     let mut o = opts("/d");

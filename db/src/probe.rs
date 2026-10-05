@@ -13,7 +13,8 @@
 //!
 //!   1. Connect to the maintenance DB (`postgres`) using peer auth.
 //!   2. Check `pg_database` for the application DB. CREATE if absent.
-//!   3. Disconnect from `postgres`; connect to the application DB.
+//!   3. Disconnect from `postgres`; connect to the application DB, and
+//!      refuse it unless its `server_encoding` is UTF8 (#818).
 //!   4. Run [`crate::MIGRATOR`] (the embedded `migrations/0001_init.sql`,
 //!      `0002_runtime_role.sql`, and any future siblings) as the OS user
 //!      / cluster superuser — required for `CREATE EXTENSION`,
@@ -60,6 +61,15 @@ pub async fn run(
     let mut conn = sqlx::postgres::PgConnection::connect_with(&app_opts)
         .await
         .map_err(|e| DbError::Connect(e.to_string()))?;
+
+    // The database must be UTF8 (#818; see `require_utf8` for why).
+    // `build_initdb_argv` always asks for UTF8; this catches a cluster or
+    // database made some other way, before migrations or any row is written.
+    let encoding: String = sqlx::query_scalar("SHOW server_encoding")
+        .fetch_one(&mut conn)
+        .await
+        .map_err(|e| DbError::Query(format!("SHOW server_encoding: {e}")))?;
+    crate::require_utf8(&encoding)?;
 
     crate::MIGRATOR
         .run(&mut conn)
