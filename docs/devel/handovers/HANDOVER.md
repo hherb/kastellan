@@ -73,6 +73,19 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   insert on `[audit-lost]` under the new **`AuditLostWriter::ChannelSupervisor`**
   (`channel_supervisor`) — action + channel, **never `cause`** — via `pg_events::audit_or_report`,
   which now takes its writer. `row_for` is a pure, pinned fn.
+- **Review round (4 parallel reviewers, no code defects):** a refused **inbound ack** ("✓ Approved",
+  usage hint, pairing) now writes `channel.reply_undelivered` (`send_failed`) through the new
+  `bus::send_or_record`, shared with the reply arm — `EmailChannel::send` refuses every ack, so none
+  was ever in `audit_log`. A `kind:"channel"` task with no routing metadata now WARNs (it was
+  silent). Docs that over-claimed were narrowed: `queue_closed` is a **narrow** window (the
+  supervisor stops the bus at once), "never silent" now names #813, and a *full* outage is recorded
+  as `rejected_unpaired`, not `enqueue_failed`. Tests: `channel.enqueue_failed` pinned literally,
+  `len == 1` on the two success paths, a red-checked ack test. Core lib **2365 / 0 / 1**, clippy clean.
+- **Filed from the review:** #825 (replies lost while the bus is down / on a failed load — wants a
+  catch-up sweep), #826 (polled driver drops an inbound batch at WARN/INFO), #827 (a failed pairing
+  lookup is audited `rejected_unpaired`), #828 (the `[audit-lost]` text is only on the stderr
+  fallback — on the tracing path grep `audit rows from`). #813 got a comment: `queue_closed` is its
+  worst case.
 - ⚠️ **`git push` over SSH fails in this environment (agent has no identities)**; push with
   `git -c credential.helper='!gh auth git-credential' push https://github.com/hherb/kastellan.git <branch>`.
 
@@ -281,7 +294,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    (a decision), #237's absent macOS CI leg.
 
 5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824:** watch one restart for the `[audit-lost]` /
-   INFO drain lines (a Matrix login still in progress at shutdown should now be INFO "not finished
+   INFO drain lines (⚠️ at the default `RUST_LOG` the tracing line reads `audit rows from <writer>:`
+   and carries **no** `[audit-lost]` text — #828; a Matrix login still in progress at shutdown should now be INFO "not finished
    starting", not a loss), and query an `observed_at` on the next `channel.*` row. Then
    [#805](https://github.com/hherb/kastellan/issues/805) (the runtime drop can outlive the last
    line) and #809–#811. A deploy of #812 is the first time a thinned line's
@@ -289,7 +303,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    adds a **boot-time `server_encoding` check** — the DGX cluster was made by `kastellan-db-init`
    (UTF8), but confirm the daemon comes up. Natural next security item: **#813** (a bus audit insert
    still awaited at shutdown is dropped with no `[audit-lost]` line — the last bus-writer gap; #814
-   and #815 shipped in #824).
+   and #815 shipped in #824), then the channel drops #824's review found: #825, #826, #827, #828.
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with

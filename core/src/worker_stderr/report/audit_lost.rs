@@ -47,7 +47,7 @@ pub enum AuditLostWriter {
     /// The channel bus's own writer (`channel::pg_events`, #808): the rows
     /// the bus writes itself — `channel.received`, `channel.enqueue_failed`,
     /// a `channel.reply_undelivered` for a failed `send` or a closed queue,
-    /// the other `channel.*` rows, and `ask.resolved`. This writer serves
+    /// the bus's other `channel.*` rows, and `ask.resolved`. This writer serves
     /// every channel, so the line names the row's channel and peer, and its
     /// ids, when the payload has them.
     Bus,

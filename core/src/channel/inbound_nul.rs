@@ -31,9 +31,10 @@
 //!   body is the peer's words, a record; keeping the message with one glyph
 //!   rewritten beats dropping it. How many NULs were rewritten rides on the
 //!   message's own audit row ([`NUL_ESCAPED_BODY_KEY`], on
-//!   `channel.received` and `channel.injection_blocked`): a peer can also
-//!   type a literal `␀`, so the glyph alone cannot say which ones were NULs
-//!   — the same reason #816 gave the audit log its `_nul_escaped` count.
+//!   `channel.received` and `channel.injection_blocked` — not on
+//!   `channel.enqueue_failed`, whose message was never stored): a peer can
+//!   also type a literal `␀`, so the glyph alone cannot say which ones were
+//!   NULs — the same reason #816 gave the audit log its `_nul_escaped` count.
 //!
 //! Identity is checked first, so a message with NULs in both is refused —
 //! escaping the body never launders an id.

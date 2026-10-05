@@ -143,7 +143,7 @@ impl AskResolver for PgAskResolver {
 /// containment still applies: without a resolver the exact question cannot
 /// be asked, so D7's no-wiring fallback refuses every body the broad
 /// predicate matches, audited `unscannable`. That is deliberately NOT the
-/// pre-#564-slice-2 behaviour; see `containment_refusal`.
+/// pre-#564-slice-2 behaviour; see `bus_inbound::containment_refusal`.
 pub struct AskWiring {
     pub outbox: Arc<super::outbox::ChannelOutbox>,
     pub resolver: Arc<dyn AskResolver>,
@@ -153,8 +153,8 @@ pub struct AskWiring {
 /// failed audit insert an `[audit-lost]` report.
 pub use super::pg_events::PgChannelEvents;
 
-/// The inbound path; its own module since #815 grew it (over the 500-LOC soft
-/// cap).
+/// The inbound path; its own module since #824 (`bus.rs` was already over the
+/// 500-LOC soft cap, and #815 was about to grow it).
 pub use super::bus_inbound::handle_inbound;
 
 /// Real `CompletedTasks` over a `PgListener` on `tasks_completed` + `tasks::get`.
@@ -192,6 +192,37 @@ impl CompletedTasks for PgCompletedTasks {
     }
 }
 
+/// `ch.send(out)` — and when the transport refuses it, a WARN and a
+/// `channel.reply_undelivered` row (`send_failed`), so the audit trail does
+/// not assert a delivery that never happened. Every message a per-channel pump
+/// hands its transport goes through here: a reply, a raised ask, an inbound
+/// ack. `what` is the WARN's message, so the log still says which.
+///
+/// The row is the same view a polled driver's sink is handed, so it has one
+/// definition (`UndeliveredReply::payload`, #800); the error stays in the log,
+/// since it is transport text, not a fixed label, and the body is never
+/// persisted.
+async fn send_or_record(
+    ch: &dyn Channel,
+    events: &dyn ChannelEvents,
+    id: &ChannelId,
+    out: OutgoingMessage,
+    what: &'static str,
+) {
+    let (peer, conversation) = (out.peer.clone(), out.conversation.clone());
+    if let Err(e) = ch.send(out).await {
+        warn!(channel = %id.0, error = %e, "{what}");
+        let reply = super::UndeliveredReply {
+            channel: id,
+            peer: &peer,
+            conversation: &conversation,
+            reason: super::UndeliveredReason::SendFailed,
+            observed_at: time::OffsetDateTime::now_utc(),
+        };
+        events.audit(actions::REPLY_UNDELIVERED, reply.payload()).await;
+    }
+}
+
 /// Handle one completed-task id on the outbound side: load it, route it (pure),
 /// and `send` via the matching channel. `senders` maps `ChannelId` → an outbound
 /// `send` handle. Returns the `OutgoingMessage` actually sent (for tests).
@@ -209,7 +240,17 @@ pub async fn handle_completed(
             return None;
         }
     };
-    let out = reply_for_completed_task(&payload, result.as_ref())?;
+    let Some(out) = reply_for_completed_task(&payload, result.as_ref()) else {
+        // `None` is the normal answer for a completion that is not a channel
+        // task (an `ask`/`l3_run`). A channel task with no routing metadata
+        // is a reply nobody can deliver, and before #824 it went without a
+        // word. A WARN, not a row: there is no channel or peer to put in one,
+        // and both buses see every NOTIFY (#497), so expect one line per bus.
+        if payload.get("kind").and_then(Value::as_str) == Some("channel") {
+            warn!(task_id = id, "channel task has no routing metadata; reply dropped");
+        }
+        return None;
+    };
     let Some(tx) = senders.get(&out.channel) else {
         // NOT a warning: the daemon runs one `ChannelBus` per channel family
         // (`main.rs` spawns a Matrix bus and an email bus), and every bus's
@@ -327,10 +368,11 @@ impl ChannelBus {
                                     // operator whose approval landed but
                                     // whose confirmation never arrived
                                     // should not be reading a log line that
-                                    // says "pairing".
-                                    if let Err(e) = ch.send(ack).await {
-                                        warn!(channel = %id.0, error = %e, "inbound ack send failed");
-                                    }
+                                    // says "pairing" — nor finding no row at
+                                    // all: until #824 a refused ack was a
+                                    // WARN only, and `EmailChannel::send`
+                                    // refuses every one.
+                                    send_or_record(&*ch, &*events, &id, ack, "inbound ack send failed").await;
                                 }
                             }
                             None => { info!(channel = %id.0, "inbound closed"); break; }
@@ -355,32 +397,16 @@ impl ChannelBus {
                             //
                             // The actual transport attempt is HERE either
                             // way, so a failure must leave its own durable
-                            // trace, or the audit trail asserts a delivery
-                            // that never happened. `EmailChannel::send` still
-                            // always fails, so without this pair every email
-                            // answer looked delivered. Payload is channel +
-                            // peer only: the error is transport text, not a
-                            // fixed label, and the body must never be
-                            // persisted. That also means an ask failure
-                            // recorded here names neither the ask nor the
-                            // task — correlating it needs the outbound
-                            // message to carry its `ask_id`, tracked
-                            // separately.
-                            let (peer, conversation) = (out.peer.clone(), out.conversation.clone());
-                            if let Err(e) = ch.send(out).await {
-                                warn!(channel = %id.0, error = %e, "channel send failed");
-                                // The same view a polled driver's sink is
-                                // handed, so the row has one definition
-                                // (`UndeliveredReply::payload`, #800).
-                                let reply = super::UndeliveredReply {
-                                    channel: &id,
-                                    peer: &peer,
-                                    conversation: &conversation,
-                                    reason: super::UndeliveredReason::SendFailed,
-                                    observed_at: time::OffsetDateTime::now_utc(),
-                                };
-                                events.audit(actions::REPLY_UNDELIVERED, reply.payload()).await;
-                            }
+                            // trace (`send_or_record`), or the audit trail
+                            // asserts a delivery that never happened.
+                            // `EmailChannel::send` still always fails, so
+                            // without it every email answer looked
+                            // delivered. The row is channel + peer only, so
+                            // an ask failure recorded here names neither the
+                            // ask nor the task — correlating it needs the
+                            // outbound message to carry its `ask_id`,
+                            // tracked separately.
+                            send_or_record(&*ch, &*events, &id, out, "channel send failed").await;
                         }
                     }
                 }

@@ -29,7 +29,8 @@ use super::audit_text::quoted_id;
 use super::bus::ChannelEvents;
 use crate::worker_stderr::{emit_audit_lost_report, AuditLostWriter};
 
-/// The `actor` every bus audit row is written under.
+/// The `actor` every row [`audit_or_report`] writes is under: the bus's, and
+/// since #814 the boot supervisor's.
 const ACTOR: &str = "channel";
 
 /// Real DB-backed `ChannelEvents` over the runtime pool.
@@ -116,11 +117,11 @@ const WHY_FIELDS: [&str; 2] = ["field", "reason"];
 /// `tasks` table or an ask (`ask.resolved` has no channel or peer).
 const ID_FIELDS: [&str; 2] = ["task_id", "ask_id"];
 
-/// Pure: what a bus row is about, for its lost-row line — ` for channel "x",
-/// peer "y", task_id 7, reason "z"`, each part left out when the payload has
-/// no such field of that type, and empty when it has none. Each string is
-/// [`quoted_id`]'d: a peer comes from outside the core. The ids are integers,
-/// so they need no quoting.
+/// Pure: what a `channel.*` (or `ask.resolved`) row is about, for its
+/// lost-row line — ` for channel "x", peer "y", task_id 7, reason "z"`,
+/// each part left out when the payload has no such field of that type, and
+/// empty when it has none. Each string is [`quoted_id`]'d: a peer comes from
+/// outside the core. The ids are integers, so they need no quoting.
 fn describe_row(payload: &Value) -> String {
     let strings = STRING_FIELDS
         .iter()

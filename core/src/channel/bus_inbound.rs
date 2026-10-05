@@ -77,9 +77,9 @@ use super::{actions, IncomingMessage, OutgoingMessage};
 ///      *mentions* a verb, such as `should I /approve the PR?` — **does**
 ///      fall through to step 3 and is enqueued. That is #582's fix: the old
 ///      guess refused it, and on email the refusal could not even be sent,
-///      so the message vanished. The first two arms share one ack so the
-///      All three refusal arms send the *same* ack, so the peer cannot tell
-///      them apart; only the audit `reason` differs.
+///      so the message vanished. All three refusal arms send the *same*
+///      ack, so the peer cannot tell them apart; only the audit `reason`
+///      differs.
 ///
 ///      **This containment arm runs whether or not `asks` is wired.** The
 ///      wiring decides whether an answer can be *resolved*; it must not
@@ -220,9 +220,11 @@ pub async fn handle_inbound(
         }
     }
 
-    // Arms 2 and 3 (#582, spec D4). Containment first, so a live token in
-    // a malformed command audits the security-relevant cause; both arms
-    // return the same ack, so the peer cannot tell them apart.
+    // The three refusal arms (#582, spec D4): containment — a live token,
+    // or a body that could not be answered — first, so a live token in a
+    // malformed command audits the security-relevant cause; then the usage
+    // hint for a malformed command. All three return the same ack, so the
+    // peer cannot tell them apart.
     //
     // Deliberately OUTSIDE the `if let Some(wiring)` above: containment is
     // a property of the inbound path, not of this bus's configuration. See
@@ -266,8 +268,9 @@ pub async fn handle_inbound(
                 // The error is logged only: it is driver text, not a fixed
                 // label, and the row below is operator-queried. The row is
                 // what makes the drop visible under any `RUST_LOG` (#815) —
-                // and if it cannot be written either (the usual case: the
-                // same outage), the writer says so on `[audit-lost]`.
+                // and if it cannot be written either, the writer says so on
+                // `[audit-lost]` (#808), unless the bus is stopped while the
+                // insert is still awaited (#813).
                 warn!(error = %e, "channel enqueue failed; message dropped");
                 events
                     .audit(
