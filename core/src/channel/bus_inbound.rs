@@ -262,7 +262,24 @@ pub async fn handle_inbound(
                     )
                     .await;
             }
-            Err(e) => warn!(error = %e, "channel enqueue failed; message dropped"),
+            Err(e) => {
+                // The error is logged only: it is driver text, not a fixed
+                // label, and the row below is operator-queried. The row is
+                // what makes the drop visible under any `RUST_LOG` (#815) —
+                // and if it cannot be written either (the usual case: the
+                // same outage), the writer says so on `[audit-lost]`.
+                warn!(error = %e, "channel enqueue failed; message dropped");
+                events
+                    .audit(
+                        actions::ENQUEUE_FAILED,
+                        serde_json::json!({
+                            "channel": msg.channel.0,
+                            "peer": msg.peer.0,
+                            "conversation": msg.conversation.0,
+                        }),
+                    )
+                    .await;
+            }
         },
         InboundDecision::InjectionBlocked { sha256, reason_codes, score } => {
             events

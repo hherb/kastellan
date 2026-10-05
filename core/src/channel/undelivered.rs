@@ -15,6 +15,11 @@ use super::{ChannelId, ConversationId, OutgoingMessage, PeerId};
 pub enum UndeliveredReason {
     /// The bus's `Channel::send` failed (the email channel until slice 2).
     SendFailed,
+    /// The bus could not even queue the reply for its channel: that channel's
+    /// pump had already ended, so nothing drains its queue (#815). The channel
+    /// supervisor restarts a bus whose pump ends; replies completed in between
+    /// land here.
+    QueueClosed,
     /// A polled driver gave up on a reply its worker kept refusing: look at
     /// the conversation (a room the bot was removed from).
     GaveUp,
@@ -32,6 +37,7 @@ impl UndeliveredReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SendFailed => "send_failed",
+            Self::QueueClosed => "queue_closed",
             Self::GaveUp => "gave_up",
             Self::QueueFull => "queue_full",
             Self::DriverExit => "driver_exit",
@@ -186,7 +192,8 @@ mod tests {
     #[test]
     fn the_undelivered_reasons_are_pinned_literally() {
         use super::UndeliveredReason::*;
-        let labels: Vec<_> = [SendFailed, GaveUp, QueueFull, DriverExit].map(|r| r.as_str()).into();
-        assert_eq!(labels, ["send_failed", "gave_up", "queue_full", "driver_exit"]);
+        let labels: Vec<_> =
+            [SendFailed, QueueClosed, GaveUp, QueueFull, DriverExit].map(|r| r.as_str()).into();
+        assert_eq!(labels, ["send_failed", "queue_closed", "gave_up", "queue_full", "driver_exit"]);
     }
 }

@@ -224,8 +224,19 @@ pub async fn handle_completed(
         debug!(channel = %out.channel.0, "reply is for a channel this bus does not serve; ignoring");
         return None;
     };
-    if let Err(e) = tx.send(out.clone()).await {
-        warn!(error = %e, "outbound send queue closed; reply dropped");
+    if let Err(mpsc::error::SendError(dropped)) = tx.send(out.clone()).await {
+        // The queue's only receiver is this channel's pump, so a closed queue
+        // means the pump has ended. Before #815 this was a WARN and nothing
+        // else: no row, so `channel.replied`/`channel.reply_undelivered` no
+        // longer accounted for every reply. No `channel.replied` either — the
+        // reply was never routed.
+        warn!(channel = %dropped.channel.0, "outbound send queue closed; reply dropped");
+        let reply = super::UndeliveredReply::of(
+            &dropped,
+            super::UndeliveredReason::QueueClosed,
+            time::OffsetDateTime::now_utc(),
+        );
+        events.audit(actions::REPLY_UNDELIVERED, reply.payload()).await;
         return None;
     }
     events

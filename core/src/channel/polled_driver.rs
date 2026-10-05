@@ -36,7 +36,8 @@
 //! residual gap is structural and shared with Matrix's existing behaviour: if
 //! the bus *accepts* the send but a downstream consumer later fails to fully
 //! process it, the message is still acked (Matrix already drops in the
-//! equivalent case, logging "channel enqueue failed; message dropped") — this
+//! equivalent case, logging "channel enqueue failed; message dropped" and,
+//! since #815, writing a `channel.enqueue_failed` row) — this
 //! driver does not invent a receipt protocol to close that gap for one
 //! channel.
 //!

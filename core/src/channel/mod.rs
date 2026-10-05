@@ -143,6 +143,16 @@ pub trait Channel: Send + Sync {
 pub mod actions {
     /// A message arrived from a recognised peer and was screened.
     pub const RECEIVED: &str = "channel.received";
+    /// A recognised peer's message passed screening but could not be
+    /// enqueued (#815) — typically Postgres is unreachable — so the agent
+    /// never saw it. Written **instead of** [`RECEIVED`], which would claim a
+    /// task id there is none of. Carries the channel, the peer and the
+    /// conversation only: never the body, and never the error (driver text,
+    /// not a fixed label; it goes to the daemon log). The insert that would
+    /// write this row usually fails for the same reason the enqueue did; the
+    /// bus's writer then says so on `[audit-lost]` (#808), naming the
+    /// channel and peer, so the drop is never silent either way.
+    pub const ENQUEUE_FAILED: &str = "channel.enqueue_failed";
     /// A message from an unrecognised/unpaired peer was dropped (fail-closed).
     pub const REJECTED_UNPAIRED: &str = "channel.rejected_unpaired";
     /// A message was refused before authorization because an identity field
@@ -181,8 +191,11 @@ pub mod actions {
     /// event's time (`observed_at`, #792) only — never the reply body and never the error string (which is transport
     /// text, not a fixed label) — built by [`super::UndeliveredReply::payload`], its one definition (#800).
     ///
-    /// **Two writers.** The bus's per-channel pump, when `Channel::send`
-    /// fails (`send_failed`). And, since #782, a polled channel's driver
+    /// **Two writers.** The bus: its per-channel pump, when `Channel::send`
+    /// fails (`send_failed`), and — since #815 — `handle_completed`, when
+    /// the channel's queue is closed because its pump has ended
+    /// (`queue_closed`; that reply has **no** [`REPLIED`] row, since it was
+    /// never routed). And, since #782, a polled channel's driver
     /// (`polled_driver::replies`), whose `send` only queues: it writes the row
     /// when it **gives up** on a reply its worker kept refusing (`gave_up`),
     /// drops one past a full conversation queue (`queue_full`), or exits with

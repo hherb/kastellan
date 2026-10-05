@@ -16,7 +16,8 @@
 //! alert keyed on `[audit-lost]` sees every row the audit trail is missing,
 //! whatever the operator's `RUST_LOG`. So, since #808, does a failed insert
 //! of the channel bus's own rows, which it awaits (`channel::pg_events` — its
-//! module doc says what that writer still misses).
+//! module doc says what that writer still misses), and, since #814, of the
+//! channel boot supervisor's `channel.started`/`boot_failed`/`died` rows.
 
 use super::delivery::warn_and_fall_back;
 use super::shared::format_stderr_fallback;
@@ -30,8 +31,8 @@ use super::shared::format_stderr_fallback;
 /// for the whole set.
 pub const AUDIT_LOST_STDERR_MARKER: &str = "[audit-lost]";
 
-/// Who lost the audit row(s): a channel's sink, the channel bus, or the
-/// daemon's own shutdown.
+/// Who lost the audit row(s): a channel's sink, the channel bus, the channel
+/// boot supervisor, or the daemon's own shutdown.
 ///
 /// A closed set, not a `&str` (#800): the writer sits beside the report text in
 /// the signature, and two adjacent strings are two that can be swapped, or one
@@ -44,11 +45,15 @@ pub enum AuditLostWriter {
     /// The email channel's `channel.skipped_ack_only` sink.
     Email,
     /// The channel bus's own writer (`channel::pg_events`, #808): the rows
-    /// the bus writes itself — `channel.received`, a
-    /// `channel.reply_undelivered` for a failed `send`, the other `channel.*`
-    /// rows, and `ask.resolved`. This writer serves every channel, so the line
+    /// the bus writes itself — `channel.received`, `channel.enqueue_failed`,
+    /// a `channel.reply_undelivered` for a failed `send` or a closed queue,
+    /// the other `channel.*` rows, and `ask.resolved`. This writer serves every channel, so the line
     /// names the row's channel and peer, and its ids, when the payload has them.
     Bus,
+    /// The channel boot supervisor's sink (`channel::boot_supervisor::pg_sink`,
+    /// #814): `channel.started`, `channel.boot_failed` and `channel.died`. The
+    /// line names the action and the channel — never the bring-up `cause`.
+    ChannelSupervisor,
     /// The daemon's shutdown drain, for what is no one channel's: rows still
     /// pending when the pool closes, and stuck drivers that audit on exit.
     Shutdown,
@@ -61,6 +66,7 @@ impl AuditLostWriter {
             Self::Matrix => "matrix",
             Self::Email => "email",
             Self::Bus => "bus",
+            Self::ChannelSupervisor => "channel_supervisor",
             Self::Shutdown => "shutdown",
         }
     }
@@ -120,8 +126,8 @@ mod tests {
     fn the_writers_are_pinned_literally() {
         use AuditLostWriter::*;
         assert_eq!(
-            [Matrix, Email, Bus, Shutdown].map(AuditLostWriter::as_str),
-            ["matrix", "email", "bus", "shutdown"]
+            [Matrix, Email, Bus, ChannelSupervisor, Shutdown].map(AuditLostWriter::as_str),
+            ["matrix", "email", "bus", "channel_supervisor", "shutdown"]
         );
     }
 

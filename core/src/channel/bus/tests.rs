@@ -10,14 +10,22 @@ use crate::channel::outbox::ChannelOutbox;
 use crate::channel::{ChannelId, ConversationId, IncomingMessage, PeerEvidence, PeerId};
 use std::sync::Mutex;
 
+/// #815: the messages and replies the bus drops, and the rows they leave.
+mod dropped;
+
 #[derive(Default)]
 struct FakeEvents {
     enqueued: Mutex<Vec<(Lane, Value)>>,
     audited: Mutex<Vec<(String, Value)>>,
+    /// When set, `enqueue` fails with this text instead of recording.
+    enqueue_fails_with: Option<&'static str>,
 }
 #[async_trait::async_trait]
 impl ChannelEvents for FakeEvents {
     async fn enqueue(&self, lane: Lane, payload: Value) -> anyhow::Result<i64> {
+        if let Some(why) = self.enqueue_fails_with {
+            anyhow::bail!(why);
+        }
         self.enqueued.lock().unwrap().push((lane, payload));
         Ok(1)
     }
