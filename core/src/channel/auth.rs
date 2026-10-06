@@ -28,6 +28,19 @@ pub enum AuthDecision {
     ///
     /// [`Rejected`]: AuthDecision::Rejected
     RejectedUnauthentic(UnauthenticReason),
+    /// The pairing lookup itself failed (a database error), so whether the
+    /// peer is paired is **unknown** (#827). Fail-closed like [`Rejected`] —
+    /// dropped, never enqueued, no ack — and, unlike it, the bus skips the
+    /// pairing carve-out: that is for a peer known to be unpaired, and this
+    /// one may be the operator's own paired account.
+    ///
+    /// Its own outcome so the audit row says what happened. Before #827 a
+    /// Postgres outage audited every paired peer's message as
+    /// `channel.rejected_unpaired`, a false claim about the pairing table in
+    /// the one record an operator reads after the outage.
+    ///
+    /// [`Rejected`]: AuthDecision::Rejected
+    Unverifiable,
 }
 
 /// Why an evidence-bearing message was refused. Every variant is a **non-secret
@@ -129,8 +142,9 @@ impl PeerAuthorizer for StaticPairings {
 }
 
 /// Production authorizer: an active (non-revoked) row in the `pairings` table for
-/// `(channel, peer)` means recognised. A DB error fails **closed** (`Rejected`,
-/// logged) — an authorization lookup that can't be confirmed must not admit.
+/// `(channel, peer)` means recognised. A DB error fails **closed**
+/// (`Unverifiable`, logged — #827) — an authorization lookup that can't be
+/// confirmed must not admit.
 pub struct DbPeerAuthorizer {
     pool: sqlx::PgPool,
 }
@@ -203,10 +217,14 @@ impl PeerAuthorizer for DbPeerAuthorizer {
                     AuthDecision::RejectedUnauthentic(UnauthenticReason::TokenMismatch)
                 }
             }
+            // The lookup failed: we cannot say whether the peer is paired.
+            // Fail closed, as `Unverifiable` rather than `Rejected` (#827) —
+            // see that variant. The error text goes to the log only; the
+            // audit row carries channel + peer.
             Err(e) => {
                 tracing::warn!(error = %e, channel = %channel.0,
                     "pairing lookup failed; failing closed");
-                AuthDecision::Rejected
+                AuthDecision::Unverifiable
             }
         }
     }
@@ -248,6 +266,28 @@ mod tests {
         let a = StaticPairings::from_peers([PeerId("@me:srv".into())]);
         assert_eq!(a.authorize(&ch(), &PeerId("@me:srv.evil".into()), None).await, AuthDecision::Rejected);
         assert_eq!(a.authorize(&ch(), &PeerId("evil@me:srv".into()), None).await, AuthDecision::Rejected);
+    }
+
+    /// #827: a lookup that FAILS (here, a dead port standing in for a Postgres
+    /// outage) is `Unverifiable` — still a refusal, but not the claim that the
+    /// peer is unpaired, which `Rejected` makes. For both transport shapes:
+    /// the `Err` arm must not be reached through an evidence branch.
+    #[tokio::test]
+    async fn a_failed_pairing_lookup_is_unverifiable_not_rejected() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/none")
+            .expect("lazy pool construction does not connect");
+        let a = DbPeerAuthorizer::new(pool);
+        let ev = PeerEvidence { dmarc_pass: true, presented_token: Some("t".into()) };
+        assert_eq!(
+            a.authorize(&ch(), &PeerId("@me:srv".into()), None).await,
+            AuthDecision::Unverifiable
+        );
+        assert_eq!(
+            a.authorize(&ch(), &PeerId("me@example.org".into()), Some(&ev)).await,
+            AuthDecision::Unverifiable
+        );
     }
 
     #[tokio::test]

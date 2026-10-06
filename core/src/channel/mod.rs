@@ -153,13 +153,26 @@ pub mod actions {
     ///
     /// Not the row a *full* Postgres outage leaves: authorization reads the
     /// pairing table first, fails closed, and the message is recorded as
-    /// [`REJECTED_UNPAIRED`] (#827). This one is for a lookup that succeeded
-    /// and an insert that then failed. If this row's own insert fails too,
+    /// [`REJECTED_UNVERIFIABLE`] (#827). This one is for a lookup that
+    /// succeeded and an insert that then failed. If this row's own insert fails too,
     /// the bus's writer says so (#808), naming the channel and peer — also
     /// for an insert still awaited when the bus is stopped (#813).
     pub const ENQUEUE_FAILED: &str = "channel.enqueue_failed";
     /// A message from an unrecognised/unpaired peer was dropped (fail-closed).
+    /// Written only when the pairing lookup **answered** "no active pairing";
+    /// a lookup that failed writes [`REJECTED_UNVERIFIABLE`] instead (#827).
     pub const REJECTED_UNPAIRED: &str = "channel.rejected_unpaired";
+    /// A message was dropped (fail-closed) because its peer's pairing lookup
+    /// **failed** — a database error — so whether the peer is paired is
+    /// unknown (#827). Carries the channel and the peer only: never the body,
+    /// the evidence, or the error (driver text; it goes to the daemon log).
+    /// No pairing carve-out ran and no ack was sent.
+    ///
+    /// Until #827 this was recorded as [`REJECTED_UNPAIRED`], so after an
+    /// outage the operator's own paired account read as unpaired. If this
+    /// row's own insert fails too — likely, in the outage that caused it —
+    /// the bus's writer says so on `[audit-lost]` (#808).
+    pub const REJECTED_UNVERIFIABLE: &str = "channel.rejected_unverifiable";
     /// A message was refused before authorization because an identity field
     /// (channel, peer or conversation id) is malformed — today, holds a NUL,
     /// which Postgres cannot store (#818). Carries the channel, the peer, a
