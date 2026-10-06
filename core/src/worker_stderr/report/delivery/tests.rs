@@ -6,6 +6,9 @@ use super::super::shared::STDERR_FALLBACK_MARKERS;
 
 mod fd;
 
+/// The `[audit-lost]` report's own delivery tests (#792, #828).
+mod audit_lost;
+
 /// A stand-in emitter living in its **own module**, exactly as the five
 /// real ones do.
 ///
@@ -47,6 +50,13 @@ mod pretend_emitter {
 /// `event_enabled!` itself would be checking the implementation against
 /// itself.
 fn under(directive: &str, f: impl FnOnce() -> bool) -> (bool, bool) {
+    let (fell_back, recorded) = under_text(directive, f);
+    (fell_back, recorded.contains(PROBE_LINE))
+}
+
+/// [`under`], handing back everything the subscriber recorded rather than
+/// whether it holds [`PROBE_LINE`] — for a test about the recorded *text*.
+fn under_text(directive: &str, f: impl FnOnce() -> bool) -> (bool, String) {
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -78,7 +88,7 @@ fn under(directive: &str, f: impl FnOnce() -> bool) -> (bool, bool) {
     // every later test in the process.
     let fell_back = tracing::subscriber::with_default(subscriber, f);
     let recorded = String::from_utf8_lossy(&sink.0.lock().expect("sink mutex")).into_owned();
-    (fell_back, recorded.contains(PROBE_LINE))
+    (fell_back, recorded)
 }
 
 /// The text each macro invocation carries, distinctive enough that finding
@@ -363,21 +373,6 @@ fn every_refusal_severity_checks_delivery_at_its_own_callsite() {
             assert_eq!(fell_back, !admitted, "{severity:?} under `{directive}`: fell back?");
         }
     }
-}
-
-/// #792: a lost audit row is reported at ERROR — recorded under a filter
-/// that admits only errors, and falling back under one that admits nothing
-/// from its module. The census rows above filter at WARN, which admits ERROR
-/// and WARN alike, so they cannot tell the two arms apart.
-#[test]
-fn the_audit_lost_report_is_recorded_at_error() {
-    const AUDIT_LOST: &str = "kastellan_core::worker_stderr::report::audit_lost";
-    let emit = || crate::worker_stderr::emit_audit_lost_report(crate::worker_stderr::AuditLostWriter::Shutdown, PROBE_LINE);
-    let (fell_back, recorded) = under(&format!("{AUDIT_LOST}=error"), emit);
-    assert!(recorded, "a lost audit row must be recorded by an errors-only filter");
-    assert!(!fell_back, "and then not also written to stderr");
-    let (fell_back, recorded) = under(&format!("info,{AUDIT_LOST}=off"), emit);
-    assert!(!recorded && fell_back, "POSITIVE CONTROL: dropped, it falls back");
 }
 
 #[test]

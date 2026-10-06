@@ -104,13 +104,18 @@ pub fn format_audit_lost_stderr_fallback(line: &str) -> String {
 /// ERROR, because a missing audit row is the one thing the audit trail
 /// cannot say about itself.
 ///
+/// **Both paths carry the `[audit-lost]` marker** (#828, the macro's
+/// `marked` arm): the traced message is the same bytes as the fallback line.
+/// Before #828 the marker was in the fallback only, so at the default
+/// `RUST_LOG` — where `tracing` records ERROR — a grep for it saw nothing.
+///
 /// Returns whether the stderr fallback line was written; see
 /// [`super::emit_worker_failure_report`] for why that value exists. The
 /// daemon's reporters ignore it: nothing more can be done for a row that the
 /// report itself could not reach anyone about (#792).
 pub fn emit_audit_lost_report(writer: AuditLostWriter, report: &str) -> bool {
     let line = format_audit_lost_line(writer, report);
-    warn_and_fall_back!(AUDIT_LOST_STDERR_MARKER, &line, label = writer.as_str(), level = ERROR)
+    warn_and_fall_back!(AUDIT_LOST_STDERR_MARKER, &line, label = writer.as_str(), level = ERROR, marked)
 }
 
 #[cfg(test)]

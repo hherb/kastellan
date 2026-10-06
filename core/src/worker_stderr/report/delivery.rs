@@ -326,6 +326,25 @@ macro_rules! warn_and_fall_back {
             false
         }
     }};
+    // The ERROR arm above, with the MARKER in the traced message as well
+    // (#828): the `[audit-lost]` report. An operator's alert keys on that
+    // marker, and with the plain arm it was in the stderr fallback only, so on
+    // a daemon whose `tracing` records ERROR — the default — a grep for it
+    // matched nothing however many rows were lost. Here both paths carry the
+    // same bytes (`format_stderr_fallback` once), so one alert rule sees every
+    // report whatever the operator's `RUST_LOG`. The worker markers keep the
+    // plain arms: their tracing lines are keyed by `label`, and no alert reads
+    // them by marker.
+    ($marker:expr, $line:expr, label = $label:expr, level = ERROR, marked $(,)?) => {{
+        let marked = $crate::worker_stderr::report::shared::format_stderr_fallback($marker, $line);
+        let label: &str = $label;
+        ::tracing::error!(%label, "{marked}");
+        if !::tracing::event_enabled!(::tracing::Level::ERROR, label, message) {
+            $crate::worker_stderr::report::delivery::write_fallback_line(&marked)
+        } else {
+            false
+        }
+    }};
     // One `label` field at INFO: the refusal report's recovery line (#788),
     // which says a refusal ended. Same shape, and the same reason the level
     // is spelled out, as the ERROR arm above: an `info!` checked at WARN

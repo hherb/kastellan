@@ -28,7 +28,8 @@ pub trait ChannelEvents: Send + Sync {
     async fn enqueue(&self, lane: Lane, payload: Value) -> anyhow::Result<i64>;
     /// Best-effort audit row: never fatal. The production impl,
     /// `PgChannelEvents`, reports a failed insert on the `[audit-lost]`
-    /// marker (#808).
+    /// marker (#808) — and one whose future is dropped mid-insert, as
+    /// `shutdown`'s abort does to a pump parked here (#813).
     async fn audit(&self, action: &str, payload: Value);
 }
 

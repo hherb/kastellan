@@ -155,7 +155,7 @@ pub mod actions {
     /// pairing table first, fails closed, and the message is recorded as
     /// [`REJECTED_UNPAIRED`] (#827). This one is for a lookup that succeeded
     /// and an insert that then failed. If this row's own insert fails too,
-    /// the bus's writer says so (#808), naming the channel and peer — except
+    /// the bus's writer says so (#808), naming the channel and peer — also
     /// for an insert still awaited when the bus is stopped (#813).
     pub const ENQUEUE_FAILED: &str = "channel.enqueue_failed";
     /// A message from an unrecognised/unpaired peer was dropped (fail-closed).
