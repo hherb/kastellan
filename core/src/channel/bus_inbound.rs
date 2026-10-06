@@ -269,8 +269,8 @@ pub async fn handle_inbound(
                 // label, and the row below is operator-queried. The row is
                 // what makes the drop visible under any `RUST_LOG` (#815) —
                 // and if it cannot be written either, the writer says so on
-                // `[audit-lost]` (#808), unless the bus is stopped while the
-                // insert is still awaited (#813).
+                // `[audit-lost]` (#808) — also when the bus is stopped while
+                // the insert is still awaited (#813).
                 warn!(error = %e, "channel enqueue failed; message dropped");
                 events
                     .audit(

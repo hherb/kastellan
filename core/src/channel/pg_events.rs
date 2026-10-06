@@ -13,13 +13,20 @@
 //! fallback, no marker. Under `RUST_LOG=error` the loss was invisible — and
 //! an alert keyed on `[audit-lost]` is promised every row the audit trail is
 //! missing, whatever the operator's `RUST_LOG`
-//! (`worker_stderr/report/audit_lost.rs`). The daemon's own sinks for the
-//! same action (`channel.reply_undelivered`, from a polled driver) already
-//! kept that promise; this writer is the bus's half.
+//! (`worker_stderr/report/audit_lost.rs`; at the default `RUST_LOG` only since
+//! #828, before which the traced line carried no marker). The daemon's own
+//! sinks for the same action (`channel.reply_undelivered`, from a polled
+//! driver) already reported their failed inserts; this writer is the bus's
+//! half.
 //!
-//! What it does not catch: an insert still awaited when the bus is stopped.
-//! `ChannelBus::shutdown` aborts its pumps, the awaited future is dropped, and
-//! no `Err` arm runs — so that row, written or not, gets no line (#813).
+//! Since #813 that includes an insert still awaited when the bus is stopped:
+//! `ChannelBus::shutdown` aborts its pumps, the awaited future is dropped and
+//! no `Err` arm runs, so a drop guard says it instead — as a row that *may*
+//! not have been written. What is still unsaid: a row lost to a crash, and a
+//! stop that lands on any *other* await of a pump — an inbound message's
+//! `enqueue` or pairing lookup, a reply still in a channel's queue (#832).
+//! Separately, these lines are not thinned: one per lost row, where the
+//! daemon's sinks thin their shed and after-shutdown refusals (#829).
 
 use serde_json::Value;
 
@@ -48,7 +55,7 @@ impl PgChannelEvents {
     /// Test builds only: lost rows said to `report`, so a test can read them
     /// through the trait method production calls.
     #[cfg(test)]
-    fn with_reporter(pool: sqlx::PgPool, report: Reporter) -> Self {
+    pub(crate) fn with_reporter(pool: sqlx::PgPool, report: Reporter) -> Self {
         Self { pool, report }
     }
 }
@@ -60,8 +67,8 @@ impl ChannelEvents for PgChannelEvents {
     }
 
     /// Best-effort, as the trait says — never fatal — and a row whose insert
-    /// fails is reported on `[audit-lost]` (#808). One still awaited when the
-    /// bus stops is not: see the module doc.
+    /// fails is reported on `[audit-lost]` (#808), as is one still awaited
+    /// when the bus stops (#813).
     async fn audit(&self, action: &str, payload: Value) {
         audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report).await;
     }
@@ -81,7 +88,7 @@ pub(crate) fn emit_report(writer: AuditLostWriter, line: &str) {
 }
 
 /// Insert one `channel`-actor audit row; report it through `report`, as
-/// `writer`'s, if the insert fails.
+/// `writer`'s, if the insert fails or is abandoned mid-await.
 ///
 /// Two writers share it: the bus ([`AuditLostWriter::Bus`]) and, since #814,
 /// the channel boot supervisor's sink
@@ -92,6 +99,16 @@ pub(crate) fn emit_report(writer: AuditLostWriter, line: &str) {
 /// payload. Only the fields [`describe_row`] names are read, so nothing else
 /// in the payload — a message body, a token, a bring-up `cause` — can reach
 /// the line.
+///
+/// **A row whose insert never returns is reported too** (#813). When the bus
+/// stops, it aborts its pumps, and a pump parked on this `await` has its
+/// future dropped: no `Err` ever arrives. Under a wedged Postgres an insert
+/// takes up to the pool's acquire timeout (10 s), or longer on a connection
+/// already acquired, since no statement timeout bounds it — so a pump with a
+/// row to write is likely parked here when the bus stops. The
+/// [`PendingInsert`] guard says so from its `Drop`, which runs on
+/// cancellation (a dropped future is not an unwind, so `panic = "abort"` does
+/// not void it).
 pub(crate) async fn audit_or_report(
     pool: &sqlx::PgPool,
     writer: AuditLostWriter,
@@ -100,9 +117,75 @@ pub(crate) async fn audit_or_report(
     report: Reporter,
 ) {
     let about = describe_row(&payload);
-    if let Err(e) = kastellan_db::audit::insert(pool, ACTOR, action, payload).await {
-        report(writer, &format_row_lost(action, &about, &e));
+    let insert = kastellan_db::audit::insert(pool, ACTOR, action, payload);
+    settle_or_report(insert, writer, action, &about, report).await;
+}
+
+/// Await `insert` under a [`PendingInsert`] guard: the one place a row's
+/// outcome is said. Generic over the insert so a test can drive every
+/// outcome — `Ok`, `Err`, abandoned, panicked — without a Postgres; creating
+/// the insert future above runs none of it, so nothing is awaited unguarded.
+async fn settle_or_report<E: std::fmt::Display>(
+    insert: impl std::future::Future<Output = Result<i64, E>>,
+    writer: AuditLostWriter,
+    action: &str,
+    about: &str,
+    report: Reporter,
+) {
+    // No `.await` may come before this line: a stop landing there would
+    // abandon the row with nothing said.
+    let pending = PendingInsert::new(writer, action, about, report);
+    pending.settle(insert.await);
+}
+
+/// A drop guard held across one audit insert. Every way the insert can end
+/// says exactly one thing, or nothing: [`PendingInsert::settle`] reports an
+/// `Err` and stays quiet on `Ok`; dropped unsettled — the future awaiting
+/// the insert was dropped (an aborted task, a runtime shutting down) — it
+/// reports the row as abandoned (#813).
+struct PendingInsert<'a> {
+    writer: AuditLostWriter,
+    action: &'a str,
+    about: &'a str,
+    report: Reporter,
+    /// Set by [`PendingInsert::settle`]; a guard dropped with it unset says
+    /// the row was abandoned.
+    settled: bool,
+}
+
+impl<'a> PendingInsert<'a> {
+    /// Arm the guard. Construct it directly before awaiting the insert.
+    fn new(writer: AuditLostWriter, action: &'a str, about: &'a str, report: Reporter) -> Self {
+        Self { writer, action, about, report, settled: false }
     }
+
+    /// The insert returned: disarm, and report it if it failed.
+    fn settle<E: std::fmt::Display>(mut self, result: Result<i64, E>) {
+        self.settled = true;
+        if let Err(e) = result {
+            (self.report)(self.writer, &format_row_lost(self.action, self.about, &e));
+        }
+    }
+}
+
+impl Drop for PendingInsert<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            // Only an unwinding build gets here mid-panic (release is
+            // `panic = "abort"`), but there a panic is not a stop.
+            let cause = if std::thread::panicking() { Abandoned::Panicked } else { Abandoned::Stopped };
+            (self.report)(self.writer, &format_row_abandoned(self.action, self.about, cause));
+        }
+    }
+}
+
+/// Why an insert never returned, for [`format_row_abandoned`].
+#[derive(Clone, Copy)]
+enum Abandoned {
+    /// Its future was dropped: the task was aborted, or the runtime shut down.
+    Stopped,
+    /// It panicked (unwinding builds only).
+    Panicked,
 }
 
 /// The string fields a lost-row line names, in order: who the row is about,
@@ -146,8 +229,20 @@ fn format_row_lost(action: &str, about: &str, why: &dyn std::fmt::Display) -> St
     format!("{action} row{about} not written: {why}")
 }
 
-/// Test fixtures shared with the boot supervisor's sink, which reports through
-/// [`audit_or_report`] too.
+/// Pure: the `[audit-lost]` report for a row whose insert was abandoned
+/// mid-await (#813). "*May* not have been written", unlike
+/// [`format_row_lost`]: the statement may have reached Postgres before the
+/// task was stopped, so the row may be there — only a query can say.
+fn format_row_abandoned(action: &str, about: &str, cause: Abandoned) -> String {
+    let cause = match cause {
+        Abandoned::Stopped => "its task was stopped before the insert returned",
+        Abandoned::Panicked => "the insert panicked",
+    };
+    format!("{action} row{about} may not have been written: {cause}")
+}
+
+/// Test fixtures for [`audit_or_report`]'s two writers: this module's tests,
+/// the bus's (`bus/tests/dropped.rs`), and the boot supervisor's sink.
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::time::Duration;
@@ -169,121 +264,58 @@ pub(crate) mod test_support {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy_with(options)
     }
+
+    /// A lazy pool whose every insert **hangs** until its 30 s acquire
+    /// timeout, long after any test's stop: a listener that takes the TCP
+    /// handshake and never answers Postgres's startup message — a wedged
+    /// Postgres, with no Postgres. The insert is still awaited when the test
+    /// stops its task, which is the case #813 is about.
+    ///
+    /// The listener is returned so it outlives the test's calls, and so
+    /// [`connected`] can tell the test the insert has started. (The daemon
+    /// binary's `audit_sink::test_support` has a variant of this fixture —
+    /// a shorter timeout, a synchronous wait — since a binary's test items
+    /// are not visible to the library's.)
+    ///
+    /// Build it inside a runtime: a lazy pool spawns its maintenance task as
+    /// it is made.
+    pub(crate) fn stalled_pool() -> (sqlx::PgPool, std::net::TcpListener) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("non-blocking listener");
+        let port = listener.local_addr().expect("addr").port();
+        let options = sqlx::postgres::PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(port)
+            .username("nobody")
+            .database("nothing");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(30))
+            .connect_lazy_with(options);
+        (pool, listener)
+    }
+
+    /// Wait (up to 5 s) until something connects to `listener`: the insert
+    /// against [`stalled_pool`] is under way. Async, and sleeping between
+    /// polls, so the task making the connection can run on the same runtime.
+    ///
+    /// Returns the accepted stream, which the caller must **hold** until the
+    /// stop it is testing: dropped, it would close the connection, and the
+    /// insert would see an EOF — an error that could return before the stop
+    /// — rather than a Postgres that never answers.
+    #[must_use = "dropping the stream closes the connection the insert is waiting on"]
+    pub(crate) async fn connected(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("accept on the stalled pool's listener: {e}"),
+            }
+            assert!(std::time::Instant::now() < deadline, "the insert never connected");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::channel::undelivered::{UndeliveredReason, UndeliveredReply};
-    use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
-    use std::sync::Mutex;
-
-    #[test]
-    fn the_line_names_what_the_row_is_about_and_nothing_else() {
-        let payload = serde_json::json!({
-            "channel": "matrix",
-            "peer": "@a:srv",
-            "task_id": 7,
-            "reason": "send_failed",
-            "body": "NEVER-IN-A-LINE",
-        });
-        let line = format_row_lost("channel.reply_undelivered", &describe_row(&payload), &"boom");
-        assert_eq!(
-            line,
-            r#"channel.reply_undelivered row for channel "matrix", peer "@a:srv", task_id 7, reason "send_failed" not written: boom"#
-        );
-        assert!(!line.contains("NEVER-IN-A-LINE"), "only the named fields are read: {line}");
-    }
-
-    #[test]
-    fn a_missing_or_mistyped_field_is_left_out() {
-        assert_eq!(describe_row(&serde_json::json!({"channel": "email"})), r#" for channel "email""#);
-        assert_eq!(describe_row(&serde_json::json!({"peer": 7, "task_id": "7"})), "");
-        assert_eq!(describe_row(&serde_json::json!("not an object")), "");
-    }
-
-    /// A malformed-id refusal (#818) names which id was malformed, after the
-    /// parties — the field is a fixed label, so it is a "why", not a "who".
-    #[test]
-    fn a_malformed_row_names_its_field() {
-        let payload = serde_json::json!({
-            "channel": "matrix", "peer": "@a\u{0}:srv", "field": "peer", "reason": "nul",
-        });
-        assert_eq!(
-            describe_row(&payload),
-            r#" for channel "matrix", peer "@a\0:srv", field "peer", reason "nul""#
-        );
-    }
-
-    /// #815: a `channel.enqueue_failed` row is usually lost to the same outage
-    /// that failed the enqueue, so its line is the drop's only trace — it
-    /// must name who sent the message.
-    #[test]
-    fn an_enqueue_failed_row_names_its_channel_and_peer() {
-        let payload = serde_json::json!({
-            "channel": "matrix", "peer": "@a:srv", "conversation": "!r:srv",
-        });
-        assert_eq!(describe_row(&payload), r#" for channel "matrix", peer "@a:srv""#);
-    }
-
-    /// `ask.resolved` has no channel or peer: its line still names the ask.
-    #[test]
-    fn a_row_with_no_parties_is_named_by_its_ids() {
-        let payload = serde_json::json!({
-            "ask_id": 3, "task_id": 9, "choice": "approve", "resolved_by": "@op:srv", "via": "channel",
-        });
-        assert_eq!(describe_row(&payload), " for task_id 9, ask_id 3");
-    }
-
-    /// The real producer's payload, not a hand-built one: a renamed key in
-    /// [`UndeliveredReply::payload`] would leave the line naming nobody.
-    #[test]
-    fn the_line_names_a_real_undelivered_reply() {
-        let out = OutgoingMessage {
-            channel: ChannelId("matrix".into()),
-            peer: PeerId("@a:srv".into()),
-            conversation: ConversationId("!r:srv".into()),
-            body: "NEVER-IN-A-LINE".into(),
-        };
-        let reply = UndeliveredReply::of(&out, UndeliveredReason::SendFailed, time::OffsetDateTime::UNIX_EPOCH);
-        assert_eq!(
-            describe_row(&reply.payload()),
-            r#" for channel "matrix", peer "@a:srv", reason "send_failed""#
-        );
-    }
-
-    /// A peer is outside input: quoted, so a newline or a forged second entry
-    /// stays inside its own quotes.
-    #[test]
-    fn a_hostile_peer_is_quoted() {
-        let about = describe_row(&serde_json::json!({"peer": "x\", peer \"forged\n[SKIP]"}));
-        assert_eq!(about, r#" for peer "x\", peer \"forged\n[SKIP]""#);
-        assert!(!about.contains('\n'));
-    }
-
-    /// What the recorder below was told.
-    static SAID: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
-
-    fn record(writer: AuditLostWriter, line: &str) {
-        SAID.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
-    }
-
-    /// #808: a failed insert reaches the reporter, as the bus's, naming the
-    /// row — through the `ChannelEvents::audit` the bus calls, so a revert of
-    /// that method to swallowing the error fails here. The pool points at a
-    /// port nothing listens on ([`test_support::refused_pool`]).
-    #[tokio::test]
-    async fn a_failed_insert_is_reported_on_the_marker() {
-        let events = PgChannelEvents::with_reporter(test_support::refused_pool(), record);
-        let payload = serde_json::json!({"channel": "matrix", "peer": "@lost:srv"});
-        ChannelEvents::audit(&events, "channel.reply_undelivered", payload).await;
-
-        let said = SAID.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        assert_eq!(said.len(), 1, "{said:?}");
-        assert_eq!(said[0].0, AuditLostWriter::Bus);
-        assert!(
-            said[0].1.starts_with(r#"channel.reply_undelivered row for channel "matrix", peer "@lost:srv" not written: "#),
-            "{said:?}"
-        );
-    }
-}
+mod tests;

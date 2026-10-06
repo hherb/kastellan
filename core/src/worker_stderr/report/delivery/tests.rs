@@ -6,6 +6,9 @@ use super::super::shared::STDERR_FALLBACK_MARKERS;
 
 mod fd;
 
+/// The `[audit-lost]` report's own delivery tests (#792, #828).
+mod audit_lost;
+
 /// A stand-in emitter living in its **own module**, exactly as the five
 /// real ones do.
 ///
@@ -25,6 +28,11 @@ mod pretend_emitter {
 
     pub fn emit_error_with_label(line: &str, label: &str) -> bool {
         super::super::warn_and_fall_back!("[worker-failed]", line, label = label, level = ERROR)
+    }
+
+    /// The `marked` ERROR arm (#828): the `[audit-lost]` report's.
+    pub fn emit_error_marked(line: &str, label: &str) -> bool {
+        super::super::warn_and_fall_back!("[audit-lost]", line, label = label, level = ERROR, marked)
     }
 
     pub fn emit_info_with_label(line: &str, label: &str) -> bool {
@@ -47,26 +55,37 @@ mod pretend_emitter {
 /// `event_enabled!` itself would be checking the implementation against
 /// itself.
 fn under(directive: &str, f: impl FnOnce() -> bool) -> (bool, bool) {
-    use std::sync::{Arc, Mutex};
+    let (fell_back, recorded) = under_text(directive, f);
+    (fell_back, recorded.contains(PROBE_LINE))
+}
 
-    #[derive(Clone, Default)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Sink {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("sink mutex").extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+/// Where a test's subscriber writes: a shared buffer, read back as text.
+#[derive(Clone, Default)]
+struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl Sink {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("sink mutex")).into_owned()
     }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
-        type Writer = Sink;
-        fn make_writer(&'a self) -> Sink {
-            self.clone()
-        }
+}
+impl std::io::Write for Sink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("sink mutex").extend_from_slice(b);
+        Ok(b.len())
     }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+    type Writer = Sink;
+    fn make_writer(&'a self) -> Sink {
+        self.clone()
+    }
+}
 
+/// [`under`], handing back everything the subscriber recorded rather than
+/// whether it holds [`PROBE_LINE`] — for a test about the recorded *text*.
+fn under_text(directive: &str, f: impl FnOnce() -> bool) -> (bool, String) {
     let sink = Sink::default();
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(directive))
@@ -77,8 +96,7 @@ fn under(directive: &str, f: impl FnOnce() -> bool) -> (bool, bool) {
     // everything else in this binary, and a global install would leak into
     // every later test in the process.
     let fell_back = tracing::subscriber::with_default(subscriber, f);
-    let recorded = String::from_utf8_lossy(&sink.0.lock().expect("sink mutex")).into_owned();
-    (fell_back, recorded.contains(PROBE_LINE))
+    (fell_back, sink.text())
 }
 
 /// The text each macro invocation carries, distinctive enough that finding
@@ -165,8 +183,8 @@ fn a_field_scoped_off_directive_does_not_fool_the_labelled_check() {
     // is dropped for its LEVEL, so its row would fall back whatever its check
     // declared, and test nothing.
     let directive = format!("info,{}[{{label}}]=off", pretend_emitter::target());
-    // Every labelled arm: the ERROR one (#783) and the INFO one (#788) each
-    // repeat the rule at their own level, so each can get it wrong on its own.
+    // Every labelled arm: the ERROR one (#783), its marked twin (#828) and the
+    // INFO one (#788) each repeat the rule, so each can get it wrong on its own.
     for (arm, fired) in [
         (
             "labelled WARN",
@@ -176,6 +194,10 @@ fn a_field_scoped_off_directive_does_not_fool_the_labelled_check() {
         (
             "labelled ERROR",
             Box::new(|| pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix")),
+        ),
+        (
+            "marked ERROR",
+            Box::new(|| pretend_emitter::emit_error_marked(PROBE_LINE, "matrix")),
         ),
         (
             "labelled INFO",
@@ -199,22 +221,26 @@ fn a_field_scoped_off_directive_does_not_fool_the_labelled_check() {
 }
 
 #[test]
-fn the_error_arm_checks_at_its_own_level() {
+fn the_error_arms_check_at_their_own_level() {
     // An `error!` checked at WARN answers for the wrong directive set: under
     // `<target>=warn` both levels are on, so only a directive that keeps
     // ERROR and drops WARN tells them apart — and in that one the ERROR
-    // report IS recorded, so it must not also fall back.
-    let directive = format!("{}=error", pretend_emitter::target());
-    let (fell_back, recorded) =
-        under(&directive, || pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix"));
-    assert!(recorded, "POSITIVE CONTROL: `{directive}` must record an ERROR event");
-    assert!(!fell_back, "a recorded ERROR report must not also take the stderr fallback");
-    // And a plain round trip: with the target off, the report falls back.
-    let directive = format!("{}=off", pretend_emitter::target());
-    let (fell_back, recorded) =
-        under(&directive, || pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix"));
-    assert!(!recorded, "POSITIVE CONTROL: `{directive}` must drop it");
-    assert!(fell_back, "a dropped ERROR report must fall back");
+    // report IS recorded, so it must not also fall back. Both ERROR arms,
+    // the plain one and its marked twin (#828).
+    for (arm, fired) in [
+        ("plain", pretend_emitter::emit_error_with_label as fn(&str, &str) -> bool),
+        ("marked", pretend_emitter::emit_error_marked),
+    ] {
+        let directive = format!("{}=error", pretend_emitter::target());
+        let (fell_back, recorded) = under(&directive, || fired(PROBE_LINE, "matrix"));
+        assert!(recorded, "POSITIVE CONTROL ({arm}): `{directive}` must record an ERROR event");
+        assert!(!fell_back, "a recorded {arm} ERROR report must not also take the stderr fallback");
+        // And a plain round trip: with the target off, the report falls back.
+        let directive = format!("{}=off", pretend_emitter::target());
+        let (fell_back, recorded) = under(&directive, || fired(PROBE_LINE, "matrix"));
+        assert!(!recorded, "POSITIVE CONTROL ({arm}): `{directive}` must drop it");
+        assert!(fell_back, "a dropped {arm} ERROR report must fall back");
+    }
 }
 
 #[test]
@@ -260,6 +286,10 @@ fn a_message_scoped_off_directive_fools_neither_arm() {
         (
             "labelled ERROR",
             Box::new(|| pretend_emitter::emit_error_with_label(PROBE_LINE, "matrix")),
+        ),
+        (
+            "marked ERROR",
+            Box::new(|| pretend_emitter::emit_error_marked(PROBE_LINE, "matrix")),
         ),
         (
             "labelled INFO",
@@ -363,21 +393,6 @@ fn every_refusal_severity_checks_delivery_at_its_own_callsite() {
             assert_eq!(fell_back, !admitted, "{severity:?} under `{directive}`: fell back?");
         }
     }
-}
-
-/// #792: a lost audit row is reported at ERROR — recorded under a filter
-/// that admits only errors, and falling back under one that admits nothing
-/// from its module. The census rows above filter at WARN, which admits ERROR
-/// and WARN alike, so they cannot tell the two arms apart.
-#[test]
-fn the_audit_lost_report_is_recorded_at_error() {
-    const AUDIT_LOST: &str = "kastellan_core::worker_stderr::report::audit_lost";
-    let emit = || crate::worker_stderr::emit_audit_lost_report(crate::worker_stderr::AuditLostWriter::Shutdown, PROBE_LINE);
-    let (fell_back, recorded) = under(&format!("{AUDIT_LOST}=error"), emit);
-    assert!(recorded, "a lost audit row must be recorded by an errors-only filter");
-    assert!(!fell_back, "and then not also written to stderr");
-    let (fell_back, recorded) = under(&format!("info,{AUDIT_LOST}=off"), emit);
-    assert!(!recorded && fell_back, "POSITIVE CONTROL: dropped, it falls back");
 }
 
 #[test]

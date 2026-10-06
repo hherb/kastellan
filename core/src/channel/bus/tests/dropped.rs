@@ -4,8 +4,9 @@
 //! `RUST_LOG=error`, and absent from `audit_log`, so the channel rows no
 //! longer accounted for every message in and every reply out. Each drop now
 //! writes a row; if that row's own insert fails, the bus's writer already says
-//! so on `[audit-lost]` (#808). The one exception is an insert still awaited
-//! when the bus is stopped (#813), which these in-process fakes cannot show.
+//! so on `[audit-lost]` (#808) — and, since #813, so does an insert still
+//! awaited when the bus is stopped, shown here against the real writer over a
+//! stalled pool, since the in-process fakes have no insert to abandon.
 
 use super::*;
 
@@ -120,4 +121,96 @@ async fn a_refused_ack_audits_reply_undelivered() {
     let rendered = payload.to_string();
     assert!(!rendered.contains(PAIRED_ACK_BODY), "never the ack's body: {rendered}");
     bus.shutdown().await;
+}
+
+/// Yields one completed task once `release` fires, then parks: the
+/// completion arrives exactly when the test says, not before the per-channel
+/// pump has ended.
+struct GatedCompleted {
+    release: Option<tokio::sync::oneshot::Receiver<()>>,
+    row: (Value, Option<Value>),
+}
+#[async_trait::async_trait]
+impl CompletedTasks for GatedCompleted {
+    async fn next_completed(&mut self) -> Option<i64> {
+        match self.release.take() {
+            Some(release) => {
+                let _ = release.await;
+                Some(7)
+            }
+            None => std::future::pending().await,
+        }
+    }
+    async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
+        Ok(Some(self.row.clone()))
+    }
+}
+
+/// What [`record_lost`] was told: the real bus writer's lost-row reports, as
+/// they reach the `[audit-lost]` emitter (before it folds in the writer and
+/// the marker).
+static LOST: Mutex<Vec<(crate::worker_stderr::AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_lost(writer: crate::worker_stderr::AuditLostWriter, line: &str) {
+    LOST.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// #813, through the sequence `UndeliveredReason::QueueClosed`'s doc names
+/// (`channel/undelivered.rs`): a per-channel pump ends and rings the death
+/// bell; a completion for that channel then finds its queue closed, so the
+/// outbound pump awaits a `queue_closed` row; and the channel supervisor,
+/// reacting to the bell, stops the bus — aborting the pump that is awaiting
+/// that very insert. Against a wedged Postgres the abort wins, and before
+/// #813 the row's absence was said nowhere — only the bus's own WARN that
+/// the reply was dropped.
+///
+/// The real writer (`PgChannelEvents`) over a stalled pool, not a fake: the
+/// guard under test lives in its insert.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queue_closed_row_abandoned_by_the_stop_is_reported() {
+    let (pool, listener) = crate::channel::pg_events::test_support::stalled_pool();
+    let events = Arc::new(crate::channel::pg_events::PgChannelEvents::with_reporter(pool, record_lost));
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let completed = GatedCompleted {
+        release: Some(gate),
+        row: (
+            serde_json::json!({"kind":"channel","channel":"matrix","peer":"@me:srv","conversation":"!room:srv"}),
+            Some(serde_json::json!({"kind":"completed","message": SECRET_BODY})),
+        ),
+    };
+    let (inbound_tx, inbound_rx) = mpsc::channel::<IncomingMessage>(1);
+    let channel = RefusingChannel { id: ChannelId("matrix".into()), inbound_rx };
+    let bus = ChannelBus::spawn(
+        vec![Box::new(channel)],
+        Arc::new(StaticPairings::new()),
+        None,
+        events,
+        Box::new(completed),
+        None,
+    );
+
+    // The per-channel pump ends: its inbound closes, and the bell rings.
+    drop(inbound_tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), bus.death_signal())
+        .await
+        .expect("a pump whose inbound closed rings the bell");
+
+    // A completion for that channel now: its queue is closed, so the outbound
+    // pump writes `queue_closed` — and the stalled pool holds the insert.
+    release.send(()).unwrap();
+    let _held = crate::channel::pg_events::test_support::connected(&listener).await;
+
+    // The supervisor's reaction to the bell.
+    bus.shutdown().await;
+
+    let lost = LOST.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0].0, crate::worker_stderr::AuditLostWriter::Bus);
+    assert!(
+        lost[0].1.starts_with(
+            r#"channel.reply_undelivered row for channel "matrix", peer "@me:srv", reason "queue_closed" may not have been written"#
+        ),
+        "{lost:?}"
+    );
+    assert!(!lost[0].1.contains(SECRET_BODY), "never the body: {lost:?}");
 }
