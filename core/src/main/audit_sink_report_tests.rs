@@ -197,6 +197,13 @@ fn a_row_label_quotes_its_id() {
     assert_eq!(label.into_string(), r#"email skipped message "<id@h>""#);
 }
 
+/// #826: a row about a number of things is named by the count.
+#[test]
+fn a_counted_row_label_names_its_count() {
+    let label = RowLabel::with_count("matrix inbound messages dropped", 3);
+    assert_eq!(label.into_string(), "matrix inbound messages dropped (3)");
+}
+
 /// #798: the cap still bites inside the quotes.
 #[test]
 fn a_quoted_id_is_capped() {

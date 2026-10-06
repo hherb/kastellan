@@ -249,6 +249,18 @@ pub mod actions {
     /// [`super::polled_driver::AckOnlyAudit`]; the payload is
     /// [`super::SkippedId::payload`]'s.
     pub const SKIPPED_ACK_ONLY: &str = "channel.skipped_ack_only";
+    /// A polled channel that does not redeliver (Matrix) dropped inbound
+    /// messages because the bus had closed — a restart or shutdown that
+    /// landed while a poll was out or mid-batch — after its worker had
+    /// already moved past them (#826). Carries the channel, the count
+    /// (`dropped`) and the event's time (`observed_at`) only: never a peer,
+    /// an id or a body, all peer-supplied. Written by the channel's driver
+    /// audit hook; the payload is
+    /// [`super::polled_driver::InboundDropped::payload`]'s.
+    ///
+    /// Not every bus-stop loss: messages the driver DID hand over, still
+    /// buffered unread in the bus when it stopped, are #832's.
+    pub const INBOUND_DROPPED: &str = "channel.inbound_dropped";
     /// A channel bus came up. Payload carries the channel and how many
     /// bring-up attempts it took, so "did it have to retry?" is answerable
     /// after the fact — `attempts: 1` is the healthy shape (#514).

@@ -321,6 +321,9 @@ pub fn spawn_email_worker(
             // audits that refusal. Wire a sink here when slice 2 routes
             // replies through `email.send`.
             reply_undelivered: None,
+            // An ack channel: a batch the bus never took is not acked, so the
+            // worker redelivers it, and the driver never calls this hook (#826).
+            inbound_dropped: None,
         },
         id.clone(),
     )?;

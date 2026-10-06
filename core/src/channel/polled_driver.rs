@@ -84,7 +84,10 @@ use ack::{ack, ack_skipped};
 mod outage;
 use outage::{report_down, OutageLog};
 mod audit;
-pub use audit::{AckOnlyAudit, DriverAudit, ReplyUndeliveredAudit};
+pub use audit::{AckOnlyAudit, DriverAudit, InboundDroppedAudit, ReplyUndeliveredAudit};
+mod inbound_drop;
+pub use inbound_drop::InboundDropped;
+use inbound_drop::{on_bus_closed_during_poll, on_bus_closed_mid_batch};
 mod refusal;
 use refusal::{accepted, check_refusal_backoff, is_refusal, refused, RefusalRun};
 mod replies;
@@ -197,6 +200,9 @@ impl PolledWorkerDriver {
 /// The driver exits when either channel endpoint is dropped (the channel
 /// restarting or shutting down). Replies still queued then are dropped, with a
 /// line per conversation and an audit call per reply (`replies::discard_on_exit`).
+/// Inbound messages the closed bus never took are redelivered on an ack
+/// channel, and counted, said and audited on one without (#826,
+/// `inbound_drop`).
 ///
 /// A failed call is one of two things (#769), told apart by
 /// [`refusal::is_refusal`]:
@@ -223,7 +229,7 @@ fn run(
     outbound_rx: std_mpsc::Receiver<OutgoingMessage>,
     cid: ChannelId,
 ) {
-    let DriverAudit { ack_only: audit_ack_only, reply_undelivered } = audit;
+    let DriverAudit { ack_only: audit_ack_only, reply_undelivered, inbound_dropped } = audit;
     let mut replies = ReplyQueues::new(MAX_QUEUED_PER_CONVERSATION);
     // Latches the down/up transitions so they log once per outage instead of
     // once per retry slice (see `OutageLog`).
@@ -274,21 +280,9 @@ fn run(
                     // would ack those ids and write their audit rows into a
                     // daemon that is shutting down, losing both (#792).
                     if inbound_tx.is_closed() {
-                        if spec.ack_method.is_some() {
-                            tracing::info!(
-                                label = spec.label,
-                                "inbound receiver closed during a poll; polled driver exiting \
-                                 without acking the batch (it is redelivered)"
-                            );
-                        } else {
-                            // No ack method: the worker has already moved its
-                            // cursor past this batch, so nothing redelivers it.
-                            tracing::warn!(
-                                label = spec.label,
-                                "inbound receiver closed during a poll; polled driver exiting, \
-                                 and this channel does not redeliver the batch — it is dropped"
-                            );
-                        }
+                        // Redelivered on an ack channel; counted, said and
+                        // audited on one that does not redeliver (#826).
+                        on_bus_closed_during_poll(&spec, &cid, parse_poll, v, inbound_dropped.as_ref());
                         discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
                         return;
                     }
@@ -302,7 +296,8 @@ fn run(
                     let ack_only_ids = parse_ack_only.map(|f| f(&v)).unwrap_or_default();
                     match parse_poll(v) {
                         Ok(events) => {
-                            for ev in events {
+                            let mut events = events.into_iter();
+                            while let Some(ev) = events.next() {
                                 // Captured before `ev`'s other fields move into
                                 // `msg` below — a partial move, not a clone.
                                 let ack_token = ev.ack_token;
@@ -314,7 +309,10 @@ fn run(
                                     evidence: ev.evidence,
                                 };
                                 if inbound_tx.blocking_send(msg).is_err() {
-                                    tracing::info!(label = spec.label, "inbound receiver closed; polled driver exiting");
+                                    // This message and the rest of the batch
+                                    // never reached the bus (#826).
+                                    let unsent = 1 + events.len();
+                                    on_bus_closed_mid_batch(&spec, &cid, unsent, inbound_dropped.as_ref());
                                     discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
                                     return;
                                 }

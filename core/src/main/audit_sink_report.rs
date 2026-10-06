@@ -65,6 +65,13 @@ impl RowLabel {
         Self(format!("{what} {}{detail}", quoted_id(id)))
     }
 
+    /// `what (n)`, for a row about a number of things rather than one id:
+    /// e.g. `matrix inbound messages dropped (3)` (#826). Nothing in it is
+    /// worker-supplied, so there is nothing to quote.
+    pub(crate) fn with_count(what: &'static str, n: usize) -> Self {
+        Self(format!("{what} ({n})"))
+    }
+
     pub(super) fn into_string(self) -> String {
         self.0
     }

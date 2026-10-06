@@ -1,16 +1,17 @@
 //! The polled driver's optional audit hooks: the caller's way to record a
-//! skipped id or a dropped reply durably, while the driver itself stays
-//! DB-free. Split out of [`super`] to keep it under the 500-LOC soft cap;
-//! re-exported there, so every path is unchanged.
+//! skipped id, a dropped reply or a dropped inbound batch durably, while the
+//! driver itself stays DB-free. Split out of [`super`] to keep it under the
+//! 500-LOC soft cap; re-exported there, so every path is unchanged.
 //!
-//! Both hooks run on the driver's only thread, which every conversation, the
+//! Every hook runs on the driver's only thread, which every conversation, the
 //! poll and the ack wait on, so **a hook must not block** (#789). A type cannot
 //! say that, so the driver times every hook call it makes ([`record_skipped`],
-//! [`record_undelivered`]) and says so when one holds the thread past
+//! [`record_undelivered`], [`record_inbound_dropped`]) and says so when one holds the thread past
 //! [`HOOK_BUDGET`] (#793): what cannot be enforced is at least detected.
 
 use std::time::{Duration, Instant};
 
+use super::inbound_drop::InboundDropped;
 use crate::channel::{OutgoingMessage, SkippedId, UndeliveredReason, UndeliveredReply};
 
 /// Best-effort side channel for a caller to record "this id was discarded
@@ -44,6 +45,18 @@ pub type AckOnlyAudit = Box<dyn Fn(SkippedId<'_>) + Send + 'static>;
 /// stalled audit insert would stall every conversation and the poll with it.
 pub type ReplyUndeliveredAudit = Box<dyn Fn(UndeliveredReply<'_>) + Send + 'static>;
 
+/// Best-effort side channel for a caller to record "the bus closed while this
+/// channel's worker had already passed these inbound messages, and nothing
+/// redelivers them" durably — the `channel.inbound_dropped` row (#826). Called
+/// at most once per exit, and only for a channel with no ack method (Matrix):
+/// an ack channel's unacked batch is redelivered on the next start, so it is
+/// not a loss.
+///
+/// It is handed an [`InboundDropped`]: the channel, how many, and when — never
+/// a peer, an id or a body, all of which are peer-supplied. Called on the
+/// driver's own thread, so it must not block on I/O, like the hooks above.
+pub type InboundDroppedAudit = Box<dyn Fn(InboundDropped<'_>) + Send + 'static>;
+
 /// The driver's optional audit hooks.
 ///
 /// No `Default`, on purpose: "no audit sink" means the driver's drops are
@@ -54,6 +67,9 @@ pub struct DriverAudit {
     pub ack_only: Option<AckOnlyAudit>,
     /// See [`ReplyUndeliveredAudit`].
     pub reply_undelivered: Option<ReplyUndeliveredAudit>,
+    /// See [`InboundDroppedAudit`]. Only a channel with no ack method needs
+    /// one; the driver never calls it for an ack channel.
+    pub inbound_dropped: Option<InboundDroppedAudit>,
 }
 
 impl DriverAudit {
@@ -61,7 +77,7 @@ impl DriverAudit {
     /// `[worker-refusal]` emitter for a dropped reply, whose line then says it
     /// was **not** recorded), but nothing is written durably.
     pub fn none() -> Self {
-        Self { ack_only: None, reply_undelivered: None }
+        Self { ack_only: None, reply_undelivered: None, inbound_dropped: None }
     }
 }
 
@@ -139,5 +155,17 @@ pub(super) fn record_undelivered(
     if let Some(audit) = audit {
         let reply = UndeliveredReply::of(out, reason, time::OffsetDateTime::now_utc());
         timed(label, "reply-undelivered", || audit(reply));
+    }
+}
+
+/// Hand a dropped inbound batch to the audit hook, if there is one, timed
+/// (#793, #826).
+pub(super) fn record_inbound_dropped(
+    audit: Option<&InboundDroppedAudit>,
+    label: &str,
+    dropped: InboundDropped<'_>,
+) {
+    if let Some(audit) = audit {
+        timed(label, "inbound-dropped", || audit(dropped));
     }
 }

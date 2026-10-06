@@ -42,7 +42,9 @@ use tokio::sync::mpsc as tok_mpsc;
 
 use kastellan_sandbox::SandboxBackend;
 
-use crate::channel::polled_driver::{DriverAudit, PolledWorkerDriver, ReplyUndeliveredAudit};
+#[allow(unused_imports)] // referenced by the doc comments' intra-doc links
+use crate::channel::polled_driver::{InboundDroppedAudit, ReplyUndeliveredAudit};
+use crate::channel::polled_driver::{DriverAudit, PolledWorkerDriver};
 use crate::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
 use crate::egress::spawn::Mitm;
 use crate::worker_lifecycle::force_route::ForceRoutingConfig;
@@ -161,10 +163,13 @@ fn matrix_backoff() -> RestartBackoff {
 /// directly on `Net::Allowlist` (the legacy path — used by the `kastellan-cli
 /// matrix probe` diagnostic).
 ///
-/// `audit_undelivered` records a reply the driver gave up on as a
-/// `channel.reply_undelivered` row (#782) — see [`ReplyUndeliveredAudit`].
-/// `None` when the caller has no database (the probe); the driver still logs
-/// every such reply.
+/// `audit` is the driver's audit hooks: `reply_undelivered` records a reply
+/// the driver dropped as a `channel.reply_undelivered` row (#782) — see
+/// [`ReplyUndeliveredAudit`] — and `inbound_dropped` an inbound batch the bus
+/// closed on as `channel.inbound_dropped` (#826) — see [`InboundDroppedAudit`].
+/// Matrix has no ack cursor, so `ack_only` is never called.
+/// [`DriverAudit::none`] when the caller has no database (the probe); the
+/// driver still logs every drop.
 ///
 /// [`SandboxPolicy`]: kastellan_sandbox::SandboxPolicy
 pub fn spawn_matrix_worker(
@@ -172,7 +177,7 @@ pub fn spawn_matrix_worker(
     id: ChannelId,
     cfg: &MatrixSpawnConfig,
     egress: Option<MatrixEgress>,
-    audit_undelivered: Option<ReplyUndeliveredAudit>,
+    audit: DriverAudit,
 ) -> anyhow::Result<SpawnedMatrixWorker> {
     let (host, port) = host_port_from_url(&cfg.homeserver_url)?;
 
@@ -358,8 +363,8 @@ pub fn spawn_matrix_worker(
         encode_matrix_send,
         None, // Matrix has no ack cursor — MATRIX_POLLED_SPEC.ack_method is None too.
         None, // No skipped-id extraction either: parse_matrix_poll never drops anything.
-        // ...and so no ack-only audit hook either.
-        DriverAudit { ack_only: None, reply_undelivered: audit_undelivered },
+        // ...so `audit.ack_only` is never called.
+        audit,
         id.clone(),
     )?;
     Ok(SpawnedMatrixWorker { channel: MatrixChannel::from_driver(id, driver), identity })
