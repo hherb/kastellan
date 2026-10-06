@@ -4,7 +4,7 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261006_813_pre-prune.md`](archive/handover_20261006_813_pre-prune.md),
+> [`archive/handover_20261005_815_pre-prune.md`](archive/handover_20261005_815_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
@@ -106,14 +106,23 @@ spans are dropped at the upsert chokepoint. UTF8 enforced at `initdb` and strict
 
 ### Previous (2026-09-30 → 10-03): the audit sink — #788–#802 (PRs #791, #795, #801, #806) — what still binds
 
-`core/src/main/audit_sink*.rs`: ledger + `spawn`, lease, pure thinning, report lines, tests. Full prose
-in the `792`/`796`/`802`/`813` archive snapshots. ⚠️ **`Ledger::snapshot` reads `starting`, then the
-live counts, then `pending`**, and `promote` counts live before uncounting `starting` — load-bearing;
-mutate against the seams (`snapshot_around`, `Lease::promote_around`, `close_and_count`,
-`SinkWriter::spawn_around`), not a stress test. `drain()` waits `DRAIN_BOUND` = **3 s**, then closes
-the ledger; inserts are bounded (**4 connections, 1024 queued**); hooks timed (`HOOK_BUDGET` 100 ms).
-⚠️ `SkippedId::message_id` is not capped on purpose (#809). ⚠️ A row that must *stay pending* in a
-test needs a **`connections: 0`** ledger; the `stalled_pool` fixture is built **inside** a runtime
+`core/src/main/audit_sink*.rs`: ledger + `spawn`, lease, pure thinning, report lines, and tests.
+A lease is *starting* until its driver is up (`starting_with_ledger` → `Starting::started()` only
+for a login that came up). ⚠️ **`Ledger::snapshot` reads `starting`, then the live counts, then
+`pending`**, and `promote` counts live before uncounting `starting` — all load-bearing; seams
+`snapshot_around`, `Lease::promote_around`, `close_and_count`, `SinkWriter::spawn_around` — mutate
+against the seams, not a stress test. Thinning is per burst (60 s quiet gap); rows thinned after
+the drain are said by `close_then_report_unreported` before **and** after the (unbounded) pool
+close. `UndeliveredReply::payload` is the reply row's only definition. ⚠️ `SkippedId::message_id`
+is not capped on purpose (#809). ⚠️ A row that must *stay pending* in a test needs a
+**`connections: 0`** ledger (the stalled pool fails an insert after 1.5 s).
+Full prose in the `792`, `796` and `802` archive snapshots. `drain()` runs beside
+`scheduler.shutdown()`, waits `DRAIN_BOUND` = **3 s**, then **closes** the ledger; `[audit-lost]` is
+the fifth stderr marker (typed `AuditLostWriter`); the driver times every audit hook (`HOOK_BUDGET`
+100 ms); both rows carry `observed_at`. A refusal that ends says so on `[worker-refusal]` at INFO
+(⚠️ falls back under `RUST_LOG=warn` too, on purpose). No audit sink blocks the driver thread;
+spawned inserts are bounded (**4 connections, 1024 queued**) — test fixture
+`audit_sink::test_support::stalled_pool`, ⚠️ built **inside** a runtime
 [[stalled-postgres-test-fixture]]. ⚠️ A test row under a `warn` base tests nothing for INFO.
 ⚠️ **#791's `Closes #N` keywords did not fire** — check the issues after every merge.
 ⚠️ **Still unreported by design:** a row lost to a crash.
