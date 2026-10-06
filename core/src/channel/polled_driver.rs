@@ -75,6 +75,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc as tok_mpsc;
 
+#[allow(unused_imports)] // referenced by the doc comments' intra-doc links
 use crate::worker_lifecycle::persistent::PersistentHandle;
 use crate::worker_lifecycle::RestartBackoff;
 
@@ -88,11 +89,15 @@ mod refusal;
 use refusal::{accepted, check_refusal_backoff, is_refusal, refused, RefusalRun};
 mod replies;
 pub use replies::{ReplyGiveUp, REPLY_GIVE_UP};
+mod spec;
+pub use spec::{
+    EncodeAck, EncodeSend, ParseAckOnly, ParsePoll, PolledEvent, PolledWorkerSpec, WorkerCalls,
+};
 use replies::{
     check_reply_give_up, discard_on_exit, enqueue, flush, ReplyQueues, MAX_QUEUED_PER_CONVERSATION,
 };
 
-use super::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId};
+use super::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerId};
 
 /// Bounded depth of the inbound buffer between the driver thread and the bus.
 /// Matches the Matrix channel's historical value; a single-user channel never
@@ -123,91 +128,6 @@ pub const REFUSAL_BACKOFF: RestartBackoff = RestartBackoff {
     factor_den: 1,
     cap: Duration::from_secs(60),
 };
-
-/// What a channel-shaped worker looks like to the driver: three JSON-RPC
-/// methods plus the worker-side long-poll wait.
-#[derive(Clone, Copy, Debug)]
-pub struct PolledWorkerSpec {
-    /// Log label (also a good supervisor label), e.g. `"matrix"`.
-    pub label: &'static str,
-    /// Identity/login-proof method, called once at spawn (e.g. `matrix.init`).
-    pub init_method: &'static str,
-    /// Long-poll method; params are `{"timeout_ms": <poll_timeout_ms>}`.
-    pub poll_method: &'static str,
-    /// Outbound-delivery method; params come from the `EncodeSend` fn.
-    pub send_method: &'static str,
-    /// Optional cursor-advance method, called once per inbound event right
-    /// after the driver hands that event to the bus (see `run`, step 3).
-    /// `None` for a worker with no server-side polling cursor to advance —
-    /// Matrix sets this to `None`, so it never gets the extra RPC and its
-    /// control flow is byte-identical to before this field existed.
-    pub ack_method: Option<&'static str>,
-    /// Worker-side long-poll wait. Outbound latency is bounded by this (the
-    /// single JSON-RPC pipe serializes poll and send).
-    pub poll_timeout_ms: u64,
-    /// How long to wait before calling a method again after the worker
-    /// refused it, per consecutive refusal of that method (#769) — for a send,
-    /// per conversation (#782). Production specs use [`REFUSAL_BACKOFF`].
-    pub refusal_backoff: RestartBackoff,
-    /// When to give up on a reply the worker keeps refusing (#782).
-    /// Production specs use [`REPLY_GIVE_UP`].
-    pub reply_give_up: ReplyGiveUp,
-}
-
-/// One inbound event as the channel layer sees it, before the driver stamps
-/// its [`ChannelId`] on. Produced by a [`ParsePoll`] fn from the poll result.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolledEvent {
-    pub peer: String,
-    pub conversation: String,
-    pub body: String,
-    /// Transport-supplied authenticity evidence, carried straight through to
-    /// the [`IncomingMessage`] the driver builds. `None` for transports that
-    /// authenticate their own peers (Matrix — see `matrix::wire::parse_matrix_poll`).
-    pub evidence: Option<PeerEvidence>,
-    /// A per-message acknowledgement token some polled transports need echoed
-    /// back on their next send (e.g. an email fallback worker's delivery ack).
-    /// Unused by Matrix.
-    pub ack_token: Option<String>,
-}
-
-/// Decode one poll RESULT into events. A decode error marks the batch as a
-/// worker bug (logged + skipped), NOT a worker death.
-pub type ParsePoll = fn(serde_json::Value) -> anyhow::Result<Vec<PolledEvent>>;
-
-/// Encode one outbound message into the send method's params.
-pub type EncodeSend = fn(&OutgoingMessage) -> serde_json::Value;
-
-/// Encode one event's [`PolledEvent::ack_token`] into the ack method's params
-/// (e.g. `{"cursor": tok}`). Only called when both `PolledWorkerSpec::ack_method`
-/// and the event's own `ack_token` are present — see `run`.
-pub type EncodeAck = fn(&str) -> serde_json::Value;
-
-/// Extract `(id, reason)` pairs to acknowledge that never became a
-/// [`PolledEvent`] at all — see the module docs' "Acking ids that never
-/// become an event". Run against the raw poll [`serde_json::Value`], in
-/// addition to (and before) `parse_poll` consumes it. Extraction itself is
-/// unconditional, but `run` only actually *acks* the resulting ids when the
-/// same batch's `parse_poll` call also succeeded — see `run` and the module
-/// docs' monotonic-cursor note. Only ever invoked when
-/// `PolledWorkerSpec::ack_method` and an `EncodeAck` are both present too.
-/// `reason` is a short, static-ish diagnostic (never message content) — it is
-/// only ever used for a log line and, when supplied, an [`AckOnlyAudit`] call.
-pub type ParseAckOnly = fn(&serde_json::Value) -> Vec<(String, String)>;
-
-/// Seam over "something that can call the worker" so the driver is unit-tested
-/// without a supervisor or a process. Production is [`PersistentHandle`].
-pub trait WorkerCalls: Send + 'static {
-    fn call(&self, method: &str, params: serde_json::Value)
-        -> anyhow::Result<serde_json::Value>;
-}
-
-impl WorkerCalls for PersistentHandle {
-    fn call(&self, method: &str, params: serde_json::Value)
-        -> anyhow::Result<serde_json::Value> {
-        PersistentHandle::call(self, method, params)
-    }
-}
 
 /// A running polled-worker driver: the endpoints a channel wraps. Dropping
 /// both endpoints stops the driver thread, which drops its [`WorkerCalls`] —
