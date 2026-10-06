@@ -105,9 +105,16 @@ pub fn format_audit_lost_stderr_fallback(line: &str) -> String {
 /// cannot say about itself.
 ///
 /// **Both paths carry the `[audit-lost]` marker** (#828, the macro's
-/// `marked` arm): the traced message is the same bytes as the fallback line.
-/// Before #828 the marker was in the fallback only, so at the default
-/// `RUST_LOG` — where `tracing` records ERROR — a grep for it saw nothing.
+/// `marked` arm): the traced message is the fallback line's text. Before
+/// #828 the marker was in the fallback only, so at the default `RUST_LOG` —
+/// where `tracing` records ERROR — a grep for it saw nothing.
+///
+/// ⚠️ **Column 0 on the fallback only.** The daemon's subscriber is
+/// `.json()`, so the traced report is `{…"fields":{"message":"[audit-lost] …"}}`
+/// — the marker opens the message, not the line, and quotes in it are
+/// JSON-escaped. An alert that must see every report matches the marker
+/// unanchored, or reads `fields.message`; an anchored `^\[audit-lost\]`
+/// sees the fallback alone.
 ///
 /// Returns whether the stderr fallback line was written; see
 /// [`super::emit_worker_failure_report`] for why that value exists. The

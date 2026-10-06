@@ -331,10 +331,12 @@ macro_rules! warn_and_fall_back {
     // marker, and with the plain arm it was in the stderr fallback only, so on
     // a daemon whose `tracing` records ERROR — the default — a grep for it
     // matched nothing however many rows were lost. Here both paths carry the
-    // same bytes (`format_stderr_fallback` once), so one alert rule sees every
-    // report whatever the operator's `RUST_LOG`. The worker markers keep the
-    // plain arms: their tracing lines are keyed by `label`, and no alert reads
-    // them by marker.
+    // same message text (`format_stderr_fallback` once). The daemon's
+    // subscriber is `.json()`, so on the traced path the marker opens the
+    // `fields.message` string rather than the line: an alert that sees every
+    // report is unanchored or JSON-aware, never `^\[audit-lost\]`. The worker
+    // markers still use the plain arms, so their traced lines carry no marker
+    // — the same gap, for alerts keyed on `^\[worker-` (#831).
     ($marker:expr, $line:expr, label = $label:expr, level = ERROR, marked $(,)?) => {{
         let marked = $crate::worker_stderr::report::shared::format_stderr_fallback($marker, $line);
         let label: &str = $label;
@@ -347,7 +349,7 @@ macro_rules! warn_and_fall_back {
     }};
     // One `label` field at INFO: the refusal report's recovery line (#788),
     // which says a refusal ended. Same shape, and the same reason the level
-    // is spelled out, as the ERROR arm above: an `info!` checked at WARN
+    // is spelled out, as the plain ERROR arm above: an `info!` checked at WARN
     // would answer "recorded" under a WARN-only filter that drops it, and
     // the line would reach nobody.
     ($marker:expr, $line:expr, label = $label:expr, level = INFO $(,)?) => {{

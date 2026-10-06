@@ -23,7 +23,9 @@ pub enum UndeliveredReason {
     /// stops the whole bus, aborting the outbound pump that writes this row.
     /// So it covers only a reply routed between the pump ending and that
     /// stop — and its insert races the abort its own cause triggers: when
-    /// the abort wins, the bus's writer says so on `[audit-lost]` (#813).
+    /// the abort lands on that insert, the bus's writer says so on
+    /// `[audit-lost]` (#813); when it lands earlier, on the completion's
+    /// `load`, nothing is said (#825, #832).
     /// A reply that completes while the bus is down leaves no row at all
     /// (#825). Not to be confused with the `OutboxError` label of the same
     /// spelling, which an `ask.delivery_failed` row carries when a raised ask

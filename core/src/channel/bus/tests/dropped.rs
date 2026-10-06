@@ -146,19 +146,23 @@ impl CompletedTasks for GatedCompleted {
     }
 }
 
-/// What [`record_lost`] was told: the real bus writer's `[audit-lost]` lines.
+/// What [`record_lost`] was told: the real bus writer's lost-row reports, as
+/// they reach the `[audit-lost]` emitter (before it folds in the writer and
+/// the marker).
 static LOST: Mutex<Vec<(crate::worker_stderr::AuditLostWriter, String)>> = Mutex::new(Vec::new());
 
 fn record_lost(writer: crate::worker_stderr::AuditLostWriter, line: &str) {
     LOST.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
 }
 
-/// #813, through the sequence its #824 comment names: a per-channel pump
-/// ends and rings the death bell; a completion for that channel then finds
-/// its queue closed, so the outbound pump awaits a `queue_closed` row; and
-/// the channel supervisor, reacting to the bell, stops the bus — aborting
-/// the pump that is awaiting that very insert. Against a wedged Postgres the
-/// abort wins, and before #813 the row left no trace at all.
+/// #813, through the sequence `UndeliveredReason::QueueClosed`'s doc names
+/// (`channel/undelivered.rs`): a per-channel pump ends and rings the death
+/// bell; a completion for that channel then finds its queue closed, so the
+/// outbound pump awaits a `queue_closed` row; and the channel supervisor,
+/// reacting to the bell, stops the bus — aborting the pump that is awaiting
+/// that very insert. Against a wedged Postgres the abort wins, and before
+/// #813 the row's absence was said nowhere — only the bus's own WARN that
+/// the reply was dropped.
 ///
 /// The real writer (`PgChannelEvents`) over a stalled pool, not a fake: the
 /// guard under test lives in its insert.
