@@ -50,7 +50,8 @@ pub(crate) enum SinkKind {
 /// `[audit-lost]` lines name. Each channel's [`SinkKind`] follows from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SinkChannel {
-    /// `channel.reply_undelivered`, from the Matrix driver.
+    /// `channel.reply_undelivered` and `channel.inbound_dropped` (#826), from
+    /// the Matrix driver.
     Matrix,
     /// `channel.skipped_ack_only`, from the email driver.
     Email,

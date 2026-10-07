@@ -157,6 +157,34 @@ fn a_batch_cut_off_mid_send_counts_only_what_was_never_handed_over() {
     assert!(lines[0].0.contains("dropped 2 inbound messages"), "{lines:?}");
 }
 
+/// The mid-batch twin of the ack-channel test above: an email-shaped channel
+/// cut off mid-send does not ack what the bus never took, so it is
+/// redelivered — no drop line (it would falsely say "does not redeliver") and
+/// no hook call. The buffered messages WERE acked, which is the bus's stop
+/// (#832), not this path.
+#[test]
+fn an_ack_channel_cut_off_mid_send_is_redelivered_so_not_reported() {
+    let (st, calls) = fake();
+    st.polls.lock().unwrap().push_back(events(INBOUND_BUFFER + 2, true));
+    let spec = PolledWorkerSpec { label: "email-drop-mid", ..spec_with_ack() };
+    let dropped: Dropped = Arc::default();
+    let audit = DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() };
+    let (driver, _identity) = PolledWorkerDriver::spawn(
+        spec, calls, test_parse, test_encode, Some(encode_test_ack), None, audit,
+        ChannelId("email-drop-mid".into()),
+    )
+    .expect("driver spawn");
+    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
+    wait_until(|| inbound_rx.len() == INBOUND_BUFFER);
+    drop(inbound_rx);
+    join.join().expect("the driver exits cleanly");
+    drop(outbound_tx);
+    let acks = st.log.lock().unwrap().iter().filter(|(m, _)| m.ends_with(".ack")).count();
+    assert_eq!(acks, INBOUND_BUFFER, "POSITIVE CONTROL: only what the bus took was acked");
+    assert!(dropped.lock().unwrap().is_empty(), "{:?}", dropped.lock().unwrap());
+    assert!(emitted_refusal_lines_for("email-drop-mid").is_empty());
+}
+
 /// Pure: the line names the count, agrees in number, and says whether the
 /// channel records it — a channel with no sink must not claim a row.
 #[test]
