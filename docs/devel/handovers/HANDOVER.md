@@ -12,7 +12,7 @@
 `channel.rejected_unverifiable`, and a Matrix batch the closed bus never took is counted and
 audited as `channel.inbound_dropped`, PR #834; the operator is still running the #773 live
 re-measure) ·
-**Recent PRs, newest first:** [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), 
+**Recent PRs, newest first:** [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
@@ -62,7 +62,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ### This session (2026-10-07): #827 + #826 — two inbound drops get truthful rows (PR #834)
 
-- **#827:** `AuthDecision::Unverifiable` — `DbPeerAuthorizer`'s failed lookup. Fail-closed (no
+- **#827:** `AuthDecision::RejectedUnverifiable` — `DbPeerAuthorizer`'s failed lookup. Fail-closed (no
   enqueue, no ack) and **no pairing carve-out**; audited **`channel.rejected_unverifiable`**
   (channel + peer). `rejected_unpaired` now means only "the lookup answered: not paired".
 - **#826:** the polled driver counts inbound messages a **closed bus** never took (whole batch
@@ -71,9 +71,22 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   `DriverAudit::inbound_dropped` hook → **`channel.inbound_dropped`** (channel, `dropped`,
   `observed_at` — never peer/id/body). An ack channel's batch is redelivered, so not reported; an
   empty batch reports nothing. Both Matrix hooks share **one** `SinkWriter` via `Arc` (one lease);
-  `spawn_matrix_worker` now takes a `DriverAudit`. `polled_driver.rs` split first
-  (→ `polled_driver/spec.rs`, movement only, byte-identical with a negative control).
-- ⚠️ **Still unsaid:** messages handed to the bus but unread in its buffer at stop (#832).
+  `spawn_matrix_worker` now takes a **`MatrixDriverAudit`** (reply + inbound hooks only — there is
+  no `ack_only` field to pass a hook Matrix would never call). `InboundDropped::dropped` is a
+  `NonZeroUsize`. `polled_driver.rs` split first (→ `polled_driver/spec.rs`; the items moved
+  verbatim with a negative control, and the review round repointed their docs at `super`).
+- ⚠️ **`ack_method: None` now also means "does not redeliver"** — a channel whose upstream
+  redelivers without an ack must not leave it `None`, or it writes false `inbound_dropped` rows.
+- **Review round (`/fixall`):** comment fixes from the move; a decode failure on a channel that does
+  not redeliver now says "dropped … count unknown" (`inbound_drop::on_undecodable_batch`); new tests —
+  the no-sink drop line, a second mid-batch count, `observed_at` bounds, and the PG e2e
+  `a_failed_pairing_lookup_is_stored_as_rejected_unverifiable_against_real_postgres` (live code,
+  checked still claimable). Operator docs (`threat-model.md`, the Matrix runbook) name both rows.
+- ⚠️ **Still unsaid — a quiet `audit_log` is not proof of no loss:** messages unread in the bus at
+  stop (#832), queued inside the Matrix worker at driver exit (#835), an undecodable batch (#836).
+  Filed from the review: #837 (thinning per channel, not action), #838 (a failed pairing-code
+  redemption reads as `rejected_unpaired`), #839 (a persistent lookup failure never reaches ERROR),
+  #840 (sink closures' wiring to `SinkWriter::spawn` untested).
 
 ### Previous (2026-10-06): #813 + #828 (PR #830) — what still binds
 
@@ -357,7 +370,7 @@ keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memo
 #824 `channel/bus.rs` (→ `bus_inbound.rs`), #782 `report/delivery.rs` and `polled_driver/tests.rs`, #818 `audit/nul_escape.rs` → `db/src/nul.rs`, #816 `db/src/audit.rs` (→ `audit/truncate.rs`; ⚠️
 `audit/truncate/tests.rs` is still 833), #788 `channel/mod.rs` (→ `undelivered.rs`) and
 `polled_driver.rs` (→ `polled_driver/audit.rs`), #792 `main/audit_sink.rs` (→ `audit_sink_tests.rs`,
-`audit_sink_test_support.rs`), #806 `email_boot.rs`/`matrix_boot.rs` (→ `*_tests.rs`, proved byte-identical). ⚠️ **Near the cap:** `worker_stderr/report/delivery/tests.rs` **484**, `polled_driver/replies.rs`
+`audit_sink_test_support.rs`), #806 `email_boot.rs`/`matrix_boot.rs` (→ `*_tests.rs`, proved byte-identical). ⚠️ **Near the cap:** `worker_stderr/report/delivery/tests.rs` **499** (one under), `polled_driver/replies.rs`
 **478** — split before the next change grows them. #826 split `polled_driver.rs` (→ `spec.rs`).
 Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
 
@@ -392,7 +405,8 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#827/#826 — **the gate that stands**) | PR #834 (3rd commit, `b8e1cab9`) | **4902 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #830's 4888: core lib **+9** (`auth` 1, `bus/tests/unverifiable` 2, `polled_driver/tests/inbound_drop` 6), daemon bin **+5** (`matrix_boot` 4, `audit_sink::report` 1). The review commit adds **1** core lib test (ack-channel mid-batch), run in isolation — expect **4903** next sweep. Red first; 6 mutants all killed | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-826`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
+| **Mac** (#827/#826 `/fixall` review round — **the gate that stands**) | PR #834 (review-round commit) | **4906 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, log `~/.local/state/kastellan/gate-logs/sweep-834-fixall.log`. **Predicted exactly**: 4903 (the 3rd commit's 4902 + the review commit's 1) + core lib **2** (no-sink drop line, longer mid-batch tail) + `channel_bus_pg_e2e` **1** (`rejected_unverifiable` against real PG, also run alone under `KASTELLAN_PG_REQUIRE_E2E=1`: `[E2E]` lines, 0 `[SKIP]`). Mutants killed: `audit.is_some()`→`true`, `unsent = 2`, `Err`→`Rejected` (PG) | exit 0, **incremental** (default target dir — only the 3 crates touched re-checked; no cold run this round) | **23** Mac |
+| **Mac** (#827/#826 — superseded) | PR #834 (3rd commit, `b8e1cab9`) | **4902 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #830's 4888: core lib **+9** (`auth` 1, `bus/tests/unverifiable` 2, `polled_driver/tests/inbound_drop` 6), daemon bin **+5** (`matrix_boot` 4, `audit_sink::report` 1). The review commit adds **1** core lib test (ack-channel mid-batch), run in isolation — expect **4903** next sweep. Red first; 6 mutants all killed | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-826`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
 | **Mac** (#813/#828 review round — superseded) | PR #830 (2nd commit) | **4888 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly**: core lib 2368 → **2370** (`pg_events` every-outcome test, `.json()` marker test; the ERROR-arm level test was widened, not added). New assertions mutation-checked: marked arm minus `message`/`label`, guard armed on `Ok`, panic reported as a stop — all 4 killed | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-830`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.

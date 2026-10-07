@@ -318,6 +318,89 @@ async fn db_peer_authorizer_covers_all_evidence_arms_against_a_real_pairing_tabl
     runtime.close().await;
 }
 
+/// #827 end to end: a pairing lookup that FAILS is stored as
+/// `channel.rejected_unverifiable` — the literal operators query — with
+/// channel + peer only, and is not stored as `channel.rejected_unpaired`,
+/// the false claim an outage used to leave.
+///
+/// The bus's own unit test (`bus/tests/unverifiable.rs`) uses `FakeEvents`;
+/// this is the leg through the real `PgChannelEvents` insert and the real
+/// `DbPairingService`. The authorizer alone sits on a dead port — the shape
+/// of a pairing read that fails while the audit insert still lands. The body
+/// is a LIVE pairing code, so a carve-out that ran would consume it and bind
+/// the peer: the code must still be claimable afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_pairing_lookup_is_stored_as_rejected_unverifiable_against_real_postgres() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else {
+        return; // skip-as-pass
+    };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "unv-d",
+        "unv-l",
+        &format!("kastellan-supervisor-test-pg-unv-{suffix}"),
+    );
+    let pool = probe_and_pool(&cluster.conn_spec).await;
+    let admin = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec)
+        .await
+        .expect("admin pool");
+    const LIVE_CODE: &str = "E2E-CODE-827";
+    kastellan_db::pairings::insert_code(&admin, &sha256_hex(LIVE_CODE.as_bytes()), Some("e2e"), 10)
+        .await
+        .expect("mint a live pairing code");
+
+    let dead = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(500))
+        .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/none")
+        .expect("lazy pool construction does not connect");
+    let authorizer = DbPeerAuthorizer::new(dead);
+    let pairing = kastellan_core::channel::pairing::DbPairingService::new(pool.clone());
+    let events = PgChannelEvents::new(pool.clone());
+    let msg = IncomingMessage {
+        channel: ChannelId("matrix".into()),
+        peer: PeerId("@me:srv".into()),
+        conversation: ConversationId("!room:srv".into()),
+        body: LIVE_CODE.into(),
+        evidence: None,
+    };
+
+    let ack = handle_inbound(&authorizer, Some(&pairing), None, &events, &msg).await;
+
+    assert!(ack.is_none(), "fail-closed: no ack, not even a pairing one");
+    let rows: Vec<_> = kastellan_db::audit::fetch_since(&pool, 0, 200)
+        .await
+        .expect("audit fetch")
+        .into_iter()
+        .filter(|r| r.actor == "channel")
+        .collect();
+    assert_eq!(rows.len(), 1, "exactly one channel row: {:?}", rows.iter().map(|r| &r.action).collect::<Vec<_>>());
+    assert_eq!(rows[0].action, "channel.rejected_unverifiable", "the literal, as stored");
+    assert_eq!(
+        rows[0].payload,
+        serde_json::json!({"channel": "matrix", "peer": "@me:srv"}),
+        "channel + peer only: no body, no DB error"
+    );
+    assert!(
+        kastellan_db::pairings::any_active_code(&pool).await.expect("code check"),
+        "the carve-out must not have run: the live code is still claimable"
+    );
+    assert!(
+        !kastellan_db::pairings::is_paired(&pool, "matrix", "@me:srv").await.expect("pairing check"),
+        "and the peer was not bound"
+    );
+    let pending = tasks::list(&pool, Some(Lane::Fast), Some("pending"), 10)
+        .await
+        .expect("list pending");
+    assert!(pending.is_empty(), "never enqueued: {pending:?}");
+
+    admin.close().await;
+    pool.close().await;
+}
+
 /// `PgAskResolver` — the ONLY production glue between an inbound
 /// `/approve` and the database — driven through `handle_inbound` against a
 /// real cluster.

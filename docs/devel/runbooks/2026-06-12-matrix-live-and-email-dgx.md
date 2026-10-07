@@ -96,6 +96,10 @@ accepts **both**: a custom root CA **and** a CONNECT-over-UDS proxy.
   (`channel.rejected_unpaired`, no reply); `kastellan-cli pair issue` → send the
   code from a new account → `channel.paired` + ack; a catalogued injection →
   `channel.injection_blocked`.
+- After an outage or restart, two more rows matter: `channel.rejected_unverifiable`
+  (the pairing lookup **failed** — a database error, not an unpaired peer; #827) and
+  `channel.inbound_dropped` (Matrix messages lost because the bus closed while the
+  driver held them, with a count; #826).
 - Update HANDOVER + ROADMAP ("Matrix inbound"/"Matrix outbound" → `[x]`), flip the
   `live-matrix` build on in the deployment, and record the A1 spike outcome.
 

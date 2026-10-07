@@ -16,8 +16,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use kastellan_core::channel::matrix::{spawn_matrix_worker, MatrixSpawnConfig, SpawnedMatrixWorker};
-use kastellan_core::channel::polled_driver::DriverAudit;
+use kastellan_core::channel::matrix::{
+    spawn_matrix_worker, MatrixDriverAudit, MatrixSpawnConfig, SpawnedMatrixWorker,
+};
 use kastellan_core::channel::{Channel, ChannelId, ConversationId, OutgoingMessage, PeerId};
 
 use crate::common::{resolve_connect_spec, with_runtime};
@@ -215,7 +216,7 @@ async fn probe(args: &[String], kp: kastellan_db::secrets::OsKeyringProvider) ->
     // egress sidecar) so a sidecar/DNS problem can be distinguished from an
     // SDK/login problem. The daemon path is the force-routed one.
     // No database here, so no audit hooks: the driver still logs every drop.
-    let audit = DriverAudit::none();
+    let audit = MatrixDriverAudit::none();
     let SpawnedMatrixWorker { mut channel, identity } =
         match spawn_matrix_worker(backend, ChannelId("matrix".to_string()), &cfg, None, audit) {
         Ok(w) => w,

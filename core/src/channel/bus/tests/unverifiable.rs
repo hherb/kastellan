@@ -20,7 +20,7 @@ impl PeerAuthorizer for UnverifiableAuthorizer {
         _p: &PeerId,
         _evidence: Option<&PeerEvidence>,
     ) -> AuthDecision {
-        AuthDecision::Unverifiable
+        AuthDecision::RejectedUnverifiable
     }
 }
 

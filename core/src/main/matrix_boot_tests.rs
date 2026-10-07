@@ -270,11 +270,11 @@ fn attempt_s_inbound_dropped_hook_shares_the_lease_and_names_its_row() {
         InFlight { sinks_live: 1, auditing_live: 1, ..InFlight::default() },
         "two hooks, one lease"
     );
-    assert!(audit.ack_only.is_none(), "Matrix has no skipped ids");
     let hook = audit.inbound_dropped.as_ref().expect("the inbound-dropped hook");
     let channel = ChannelId("matrix".into());
     crate::audit_sink::test_support::assert_returns_at_once("the Matrix inbound-dropped sink", || {
-        hook(InboundDropped { channel: &channel, dropped: 3, observed_at: time::OffsetDateTime::now_utc() })
+        let dropped = std::num::NonZeroUsize::new(3).unwrap();
+        hook(InboundDropped { channel: &channel, dropped, observed_at: time::OffsetDateTime::now_utc() })
     });
     assert_eq!(LEDGER.named_pending(), ["matrix inbound messages dropped (3)"]);
     drop(audit);
@@ -304,7 +304,8 @@ fn the_matrix_sink_reports_an_inbound_dropped_row_it_could_not_write() {
         |w, line| MATRIX_INBOUND_SAID.lock().unwrap().push((w, line.to_string())),
     );
     let channel = ChannelId("matrix".into());
-    sink(InboundDropped { channel: &channel, dropped: 5, observed_at: time::OffsetDateTime::now_utc() });
+    let dropped = std::num::NonZeroUsize::new(5).unwrap();
+    sink(InboundDropped { channel: &channel, dropped, observed_at: time::OffsetDateTime::now_utc() });
     let said = MATRIX_INBOUND_SAID.lock().unwrap();
     assert_eq!(said.len(), 1, "{said:?}");
     assert_eq!(said[0].0, AuditLostWriter::Matrix);
@@ -318,7 +319,7 @@ fn the_matrix_sink_reports_an_inbound_dropped_row_it_could_not_write() {
 #[test]
 fn a_lost_inbound_dropped_row_names_its_count_and_cause() {
     assert_eq!(
-        format_inbound_row_lost(1, &"shed: too many"),
+        format_inbound_row_lost(std::num::NonZeroUsize::MIN, &"shed: too many"),
         "channel.inbound_dropped row for 1 dropped inbound message not written: shed: too \
          many. The drop's [worker-refusal] line stands"
     );
@@ -326,15 +327,17 @@ fn a_lost_inbound_dropped_row_names_its_count_and_cause() {
 
 /// #826: the row the Matrix sink writes — the bus's actor, the action
 /// spelled literally, channel + count + when. A recording hook in the driver
-/// tests sees only what the driver passed; this pins what is stored.
+/// tests sees only what the driver passed; this pins what the sink hands to
+/// the insert (whose `stored_form` changes nothing in this payload).
 #[test]
 fn the_inbound_dropped_row_is_the_bus_s_actor_and_channel_count_and_when() {
     use kastellan_core::channel::polled_driver::InboundDropped;
     use kastellan_core::channel::ChannelId;
     let channel = ChannelId("matrix".into());
     let at = time::macros::datetime!(2026-10-07 12:34:56 UTC);
+    let dropped = std::num::NonZeroUsize::new(2).unwrap();
     let (actor, action, payload) =
-        inbound_dropped_row(&InboundDropped { channel: &channel, dropped: 2, observed_at: at });
+        inbound_dropped_row(&InboundDropped { channel: &channel, dropped, observed_at: at });
     assert_eq!(actor, "channel");
     assert_eq!(action, "channel.inbound_dropped");
     assert_eq!(

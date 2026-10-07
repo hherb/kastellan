@@ -44,7 +44,11 @@ pub enum RefusalSeverity {
     /// ends a story already told. A per-event INFO line on this severity would
     /// bypass the operator's filter every time.
     Recovered,
-    /// A refusal the driver retries with backoff, or a reply it gave up on.
+    /// A refusal the driver retries with backoff, a reply it gave up on, or
+    /// an inbound batch a closed bus never took (#826). The last two are
+    /// losses, not refusals, but they ride this emitter for its stderr
+    /// fallback and stay WARN: each is also a durable row where the channel
+    /// has an audit sink, and the line says so when it has none.
     Warn,
     /// The upstream refused the channel's credential: an operator action.
     Error,

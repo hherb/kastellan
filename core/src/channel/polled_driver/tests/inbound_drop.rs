@@ -8,8 +8,13 @@
 use super::*;
 use crate::worker_stderr::{emitted_refusal_lines_for, RefusalSeverity};
 
-/// What the hook was handed, per call: `(channel, dropped)`.
-type Dropped = Arc<Mutex<Vec<(String, usize)>>>;
+/// What the hook was handed, per call: `(channel, dropped, observed_at)`.
+type Dropped = Arc<Mutex<Vec<(String, usize, time::OffsetDateTime)>>>;
+
+/// The `(channel, dropped)` of each hook call, without the time.
+fn counts(dropped: &[(String, usize, time::OffsetDateTime)]) -> Vec<(String, usize)> {
+    dropped.iter().map(|(c, n, _)| (c.clone(), *n)).collect()
+}
 
 /// A worker whose FIRST poll is held until the test closes the bus, then
 /// answers with `batch`; every later poll is empty. So the batch is in the
@@ -52,17 +57,21 @@ fn events(n: usize, with_ack_token: bool) -> Value {
 
 fn hook(dropped: &Dropped) -> InboundDroppedAudit {
     let sink = dropped.clone();
-    Box::new(move |d: InboundDropped<'_>| sink.lock().unwrap().push((d.channel.0.clone(), d.dropped)))
+    Box::new(move |d: InboundDropped<'_>| {
+        sink.lock().unwrap().push((d.channel.0.clone(), d.dropped.get(), d.observed_at))
+    })
 }
 
 /// Spawn a driver over [`BatchOutlivesTheBus`] answering with `batch`, close
 /// the bus while its first poll is out, release the poll, and wait for the
-/// driver to exit. Returns what the hook was handed and the worker's calls.
+/// driver to exit. Returns what the hook was handed (with no hook when `sink`
+/// is false: the driver gets [`DriverAudit::none`]) and the worker's calls.
 fn run_until_the_bus_closes_mid_poll(
     spec: PolledWorkerSpec,
     batch: Value,
     encode_ack: Option<EncodeAck>,
-) -> (Vec<(String, usize)>, Vec<String>) {
+    sink: bool,
+) -> (Vec<(String, usize, time::OffsetDateTime)>, Vec<String>) {
     let polling = Arc::new(AtomicBool::new(false));
     let bus_gone = Arc::new(AtomicBool::new(false));
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -74,7 +83,11 @@ fn run_until_the_bus_closes_mid_poll(
         log: log.clone(),
     };
     let dropped: Dropped = Arc::default();
-    let audit = DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() };
+    let audit = if sink {
+        DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() }
+    } else {
+        DriverAudit::none()
+    };
     let (driver, _identity) = PolledWorkerDriver::spawn(
         spec, Box::new(calls), test_parse, test_encode, encode_ack, None, audit,
         ChannelId(spec.label.into()),
@@ -93,12 +106,16 @@ fn run_until_the_bus_closes_mid_poll(
 
 /// The headline: on Matrix's shape (no ack method), a batch the worker had
 /// already passed when the bus closed is counted, said once at WARN, and
-/// handed to the hook — channel and count only.
+/// handed to the hook — channel, count, and the time of the drop.
 #[test]
 fn a_batch_that_outlives_the_bus_is_counted_said_and_audited_when_nothing_redelivers_it() {
     let spec = PolledWorkerSpec { label: "t-drop-batch", ..spec_without_ack() };
-    let (dropped, _log) = run_until_the_bus_closes_mid_poll(spec, events(3, false), None);
-    assert_eq!(dropped, [("t-drop-batch".to_string(), 3)]);
+    let before = time::OffsetDateTime::now_utc();
+    let (dropped, _log) = run_until_the_bus_closes_mid_poll(spec, events(3, false), None, true);
+    let after = time::OffsetDateTime::now_utc();
+    assert_eq!(counts(&dropped), [("t-drop-batch".to_string(), 3)]);
+    let at = dropped[0].2;
+    assert!(before <= at && at <= after, "observed_at is the drop's time: {before} <= {at} <= {after}");
     let lines = emitted_refusal_lines_for("t-drop-batch");
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].0.contains("dropped 3 inbound messages"), "{lines:?}");
@@ -112,10 +129,26 @@ fn a_batch_that_outlives_the_bus_is_counted_said_and_audited_when_nothing_redeli
 #[test]
 fn an_empty_poll_that_outlives_the_bus_reports_nothing() {
     let spec = PolledWorkerSpec { label: "t-drop-empty", ..spec_without_ack() };
-    let (dropped, log) = run_until_the_bus_closes_mid_poll(spec, events(0, false), None);
+    let (dropped, log) = run_until_the_bus_closes_mid_poll(spec, events(0, false), None, true);
     assert!(log.iter().any(|m| m.ends_with(".poll")), "POSITIVE CONTROL: the poll ran: {log:?}");
     assert!(dropped.is_empty(), "{dropped:?}");
     assert!(emitted_refusal_lines_for("t-drop-empty").is_empty());
+}
+
+/// A channel with no audit sink (the `matrix probe`) still says the drop —
+/// and says it was NOT recorded, rather than claiming a row nobody wrote.
+#[test]
+fn a_drop_on_a_channel_with_no_sink_is_said_and_not_claimed_as_recorded() {
+    let spec = PolledWorkerSpec { label: "t-drop-nosink", ..spec_without_ack() };
+    let (dropped, _log) = run_until_the_bus_closes_mid_poll(spec, events(2, false), None, false);
+    assert!(dropped.is_empty(), "no hook to hand it to: {dropped:?}");
+    let lines = emitted_refusal_lines_for("t-drop-nosink");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].0.contains("dropped 2 inbound messages"), "{lines:?}");
+    assert!(
+        lines[0].0.contains("NOT recorded as channel.inbound_dropped"),
+        "a channel with no sink must not claim a row: {lines:?}"
+    );
 }
 
 /// An ack channel's batch is not acked, so it is redelivered on the next
@@ -124,10 +157,40 @@ fn an_empty_poll_that_outlives_the_bus_reports_nothing() {
 fn an_ack_channel_s_batch_is_redelivered_so_not_reported() {
     let spec = PolledWorkerSpec { label: "email-drop", ..spec_with_ack() };
     let (dropped, log) =
-        run_until_the_bus_closes_mid_poll(spec, events(2, true), Some(encode_test_ack));
+        run_until_the_bus_closes_mid_poll(spec, events(2, true), Some(encode_test_ack), true);
     assert!(!log.iter().any(|m| m.ends_with(".ack")), "nothing acked: {log:?}");
     assert!(dropped.is_empty(), "{dropped:?}");
     assert!(emitted_refusal_lines_for("email-drop").is_empty());
+}
+
+/// Spawn a driver whose one poll answers `INBOUND_BUFFER + extra` events,
+/// let it fill the inbound buffer, then drop the receiver while it is blocked
+/// on the next send. Returns what the hook was handed and how many acks the
+/// worker saw (an ack channel when `ack`).
+fn run_cut_off_mid_send(
+    label: &'static str,
+    extra: usize,
+    ack: bool,
+) -> (Vec<(String, usize)>, usize) {
+    let (st, calls) = fake();
+    st.polls.lock().unwrap().push_back(events(INBOUND_BUFFER + extra, ack));
+    let base = if ack { spec_with_ack() } else { spec_without_ack() };
+    let spec = PolledWorkerSpec { label, ..base };
+    let encode_ack: Option<EncodeAck> = if ack { Some(encode_test_ack) } else { None };
+    let dropped: Dropped = Arc::default();
+    let audit = DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() };
+    let (driver, _identity) = PolledWorkerDriver::spawn(
+        spec, calls, test_parse, test_encode, encode_ack, None, audit, ChannelId(label.into()),
+    )
+    .expect("driver spawn");
+    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
+    wait_until(|| inbound_rx.len() == INBOUND_BUFFER);
+    drop(inbound_rx);
+    join.join().expect("the driver exits cleanly");
+    drop(outbound_tx);
+    let acks = st.log.lock().unwrap().iter().filter(|(m, _)| m.ends_with(".ack")).count();
+    let dropped = counts(&dropped.lock().unwrap());
+    (dropped, acks)
 }
 
 /// The bus closes MID-batch: the driver has handed over what fits in the
@@ -137,24 +200,19 @@ fn an_ack_channel_s_batch_is_redelivered_so_not_reported() {
 /// stop, #832.)
 #[test]
 fn a_batch_cut_off_mid_send_counts_only_what_was_never_handed_over() {
-    let (st, calls) = fake();
-    st.polls.lock().unwrap().push_back(events(INBOUND_BUFFER + 2, false));
-    let spec = PolledWorkerSpec { label: "t-drop-mid", ..spec_without_ack() };
-    let dropped: Dropped = Arc::default();
-    let audit = DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() };
-    let (driver, _identity) = PolledWorkerDriver::spawn(
-        spec, calls, test_parse, test_encode, None, None, audit, ChannelId("t-drop-mid".into()),
-    )
-    .expect("driver spawn");
-    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
-    wait_until(|| inbound_rx.len() == INBOUND_BUFFER);
-    drop(inbound_rx);
-    join.join().expect("the driver exits cleanly");
-    drop(outbound_tx);
-    assert_eq!(*dropped.lock().unwrap(), [("t-drop-mid".to_string(), 2)]);
+    let (dropped, _acks) = run_cut_off_mid_send("t-drop-mid", 2, false);
+    assert_eq!(dropped, [("t-drop-mid".to_string(), 2)]);
     let lines = emitted_refusal_lines_for("t-drop-mid");
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].0.contains("dropped 2 inbound messages"), "{lines:?}");
+}
+
+/// The same cut with a longer tail: the count is the failed send plus the
+/// whole rest of the batch, not a constant.
+#[test]
+fn a_longer_tail_cut_off_mid_send_is_counted_whole() {
+    let (dropped, _acks) = run_cut_off_mid_send("t-drop-mid-4", 4, false);
+    assert_eq!(dropped, [("t-drop-mid-4".to_string(), 4)]);
 }
 
 /// The mid-batch twin of the ack-channel test above: an email-shaped channel
@@ -164,24 +222,9 @@ fn a_batch_cut_off_mid_send_counts_only_what_was_never_handed_over() {
 /// (#832), not this path.
 #[test]
 fn an_ack_channel_cut_off_mid_send_is_redelivered_so_not_reported() {
-    let (st, calls) = fake();
-    st.polls.lock().unwrap().push_back(events(INBOUND_BUFFER + 2, true));
-    let spec = PolledWorkerSpec { label: "email-drop-mid", ..spec_with_ack() };
-    let dropped: Dropped = Arc::default();
-    let audit = DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() };
-    let (driver, _identity) = PolledWorkerDriver::spawn(
-        spec, calls, test_parse, test_encode, Some(encode_test_ack), None, audit,
-        ChannelId("email-drop-mid".into()),
-    )
-    .expect("driver spawn");
-    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
-    wait_until(|| inbound_rx.len() == INBOUND_BUFFER);
-    drop(inbound_rx);
-    join.join().expect("the driver exits cleanly");
-    drop(outbound_tx);
-    let acks = st.log.lock().unwrap().iter().filter(|(m, _)| m.ends_with(".ack")).count();
+    let (dropped, acks) = run_cut_off_mid_send("email-drop-mid", 2, true);
     assert_eq!(acks, INBOUND_BUFFER, "POSITIVE CONTROL: only what the bus took was acked");
-    assert!(dropped.lock().unwrap().is_empty(), "{:?}", dropped.lock().unwrap());
+    assert!(dropped.is_empty(), "{dropped:?}");
     assert!(emitted_refusal_lines_for("email-drop-mid").is_empty());
 }
 
@@ -189,7 +232,10 @@ fn an_ack_channel_cut_off_mid_send_is_redelivered_so_not_reported() {
 /// channel records it — a channel with no sink must not claim a row.
 #[test]
 fn the_drop_line_counts_and_says_whether_it_is_recorded() {
-    use super::super::inbound_drop::format_inbound_drop_report as line;
+    use super::super::inbound_drop::format_inbound_drop_report;
+    let line = |n: usize, sink: bool| {
+        format_inbound_drop_report(std::num::NonZeroUsize::new(n).unwrap(), sink)
+    };
     assert_eq!(
         line(1, true),
         "dropped 1 inbound message: the bus closed (the channel was restarted or shut down) \
@@ -213,7 +259,7 @@ fn the_drop_line_counts_and_says_whether_it_is_recorded() {
 fn the_inbound_dropped_row_is_channel_count_and_when_only() {
     let v = InboundDropped {
         channel: &ChannelId("matrix".into()),
-        dropped: 3,
+        dropped: std::num::NonZeroUsize::new(3).unwrap(),
         observed_at: time::macros::datetime!(2026-10-07 12:34:56 UTC),
     }
     .payload();

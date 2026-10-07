@@ -23,6 +23,7 @@
 //! `MatrixEgress` wiring, and the 60-second login timeout that bounds a single
 //! attempt.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use sqlx::PgPool;
@@ -63,7 +64,8 @@ fn classify_homeserver(homeserver_url: &str, forced: bool) -> Option<BootOutcome
 /// The Matrix sink's channel (#807): its refused rows are thinned and counted
 /// as Matrix's, its `[audit-lost]` lines name `matrix`, and its `SinkKind`
 /// follows — the driver audits every reply still queued as it exits
-/// (`driver_exit`), so one stuck at shutdown is a possible loss (#802).
+/// (`driver_exit`), and an inbound batch the closed bus never took (#826), so
+/// a row stuck at shutdown is a possible loss (#802).
 const SINK_CHANNEL: crate::audit_sink::SinkChannel = crate::audit_sink::SinkChannel::Matrix;
 
 /// Pure: the `(actor, action, payload)` of the row
@@ -99,12 +101,12 @@ fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::D
 /// the poll wait on, so the insert is **spawned** through `writer`
 /// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost): a
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
-/// timeout per dropped reply. The closure shares `writer` with the driver's
-/// other hook ([`inbound_dropped_audit_sink`]), so the driver holds its lease
-/// until it exits, and — once the lease has started (see
-/// [`login_outcome`]) — the daemon's shutdown drain waits for it. A
-/// row that was not written is reported on the `[audit-lost]` marker
-/// ([`format_reply_row_lost`]).
+/// timeout per dropped reply. The closure holds an `Arc` of `writer` (shared
+/// with [`inbound_dropped_audit_sink`]'s when [`driver_sinks`] builds both, so
+/// one lease), and the driver owns the closure, so the driver holds that lease
+/// until it exits, and — once the lease has started (see [`login_outcome`]) —
+/// the daemon's shutdown drain waits for it. A row that was not written is
+/// reported on the `[audit-lost]` marker ([`format_reply_row_lost`]).
 ///
 /// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit
 ///
@@ -145,11 +147,12 @@ fn inbound_dropped_row(
 /// Pure: the `[audit-lost]` report for a `channel.inbound_dropped` row the
 /// Matrix sink could not write, naming the count so it can be matched to the
 /// driver's `[worker-refusal]` line for the drop.
-fn format_inbound_row_lost(dropped: usize, why: &dyn std::fmt::Display) -> String {
+fn format_inbound_row_lost(dropped: NonZeroUsize, why: &dyn std::fmt::Display) -> String {
     format!(
-        "channel.inbound_dropped row for {dropped} dropped inbound message{} not written: \
-         {why}. The drop's [worker-refusal] line stands",
-        if dropped == 1 { "" } else { "s" }
+        "{} row for {dropped} dropped inbound message{} not written: {why}. The drop's \
+         [worker-refusal] line stands",
+        kastellan_core::channel::actions::INBOUND_DROPPED,
+        if dropped.get() == 1 { "" } else { "s" }
     )
 }
 
@@ -169,7 +172,8 @@ fn inbound_dropped_audit_sink(
     Box::new(move |dropped| {
         let (actor, action, payload) = inbound_dropped_row(&dropped);
         let n = dropped.dropped;
-        let label = crate::audit_sink::RowLabel::with_count("matrix inbound messages dropped", n);
+        let label =
+            crate::audit_sink::RowLabel::with_count("matrix inbound messages dropped", n.get());
         let who = writer.channel().writer();
         // A refused row is reported through the closure, so its `Err` is not
         // needed here.
@@ -191,13 +195,11 @@ fn driver_sinks(
     pool: PgPool,
     handle: tokio::runtime::Handle,
     report: crate::audit_sink::Reporter,
-) -> (kastellan_core::channel::polled_driver::DriverAudit, crate::audit_sink::Starting) {
+) -> (kastellan_core::channel::matrix::MatrixDriverAudit, crate::audit_sink::Starting) {
     let (writer, starting) =
         crate::audit_sink::SinkWriter::starting_with_ledger(ledger, pool, handle, SINK_CHANNEL);
     let writer = Arc::new(writer);
-    let audit = kastellan_core::channel::polled_driver::DriverAudit {
-        // Matrix has no ack cursor, so no skipped ids.
-        ack_only: None,
+    let audit = kastellan_core::channel::matrix::MatrixDriverAudit {
         reply_undelivered: Some(reply_undelivered_audit_sink(Arc::clone(&writer), report)),
         inbound_dropped: Some(inbound_dropped_audit_sink(writer, report)),
     };

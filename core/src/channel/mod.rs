@@ -152,11 +152,12 @@ pub mod actions {
     /// never stored on this path.
     ///
     /// Not the row a *full* Postgres outage leaves: authorization reads the
-    /// pairing table first, fails closed, and the message is recorded as
-    /// [`REJECTED_UNVERIFIABLE`] (#827). This one is for a lookup that
-    /// succeeded and an insert that then failed. If this row's own insert fails too,
-    /// the bus's writer says so (#808), naming the channel and peer — also
-    /// for an insert still awaited when the bus is stopped (#813).
+    /// pairing table first, fails closed, and the message is audited as
+    /// [`REJECTED_UNVERIFIABLE`] (#827) — whose own insert, in that outage,
+    /// likely lands on `[audit-lost]`. This one is for a lookup that
+    /// succeeded and an insert that then failed. If this row's own insert
+    /// fails too, the bus's writer says so (#808), naming the channel and
+    /// peer — also for an insert still awaited when the bus is stopped (#813).
     pub const ENQUEUE_FAILED: &str = "channel.enqueue_failed";
     /// A message from an unrecognised/unpaired peer was dropped (fail-closed).
     /// Written only when the pairing lookup **answered** "no active pairing";
@@ -165,8 +166,8 @@ pub mod actions {
     /// A message was dropped (fail-closed) because its peer's pairing lookup
     /// **failed** — a database error — so whether the peer is paired is
     /// unknown (#827). Carries the channel and the peer only: never the body,
-    /// the evidence, or the error (driver text; it goes to the daemon log).
-    /// No pairing carve-out ran and no ack was sent.
+    /// the evidence, or the error (sqlx/Postgres text; it goes to the daemon
+    /// log). No pairing carve-out ran and no ack was sent.
     ///
     /// Until #827 this was recorded as [`REJECTED_UNPAIRED`], so after an
     /// outage the operator's own paired account read as unpaired. If this
@@ -258,8 +259,11 @@ pub mod actions {
     /// audit hook; the payload is
     /// [`super::polled_driver::InboundDropped::payload`]'s.
     ///
-    /// Not every bus-stop loss: messages the driver DID hand over, still
-    /// buffered unread in the bus when it stopped, are #832's.
+    /// Not every inbound loss, so a quiet `audit_log` is not proof of none:
+    /// messages the driver DID hand over, still buffered unread in the bus
+    /// when it stopped, are #832's; messages the worker had received but not
+    /// yet returned from a poll when the driver exited are #835's; a batch
+    /// that did not decode has no count to give (#836).
     pub const INBOUND_DROPPED: &str = "channel.inbound_dropped";
     /// A channel bus came up. Payload carries the channel and how many
     /// bring-up attempts it took, so "did it have to retry?" is answerable

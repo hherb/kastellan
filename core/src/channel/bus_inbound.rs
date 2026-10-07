@@ -24,13 +24,13 @@ use super::{actions, IncomingMessage, OutgoingMessage};
 ///      and counted on the message's received / injection-blocked row.
 ///   1. **authorize** (`(channel, peer, evidence)`), yielding four distinct
 ///      outcomes:
-///      - `Unverifiable` — the pairing lookup itself failed (#827), so it is
-///        unknown whether the peer is paired. Dropped + audited as
+///      - `RejectedUnverifiable` — the pairing lookup itself failed (#827), so
+///        it is unknown whether the peer is paired. Dropped + audited as
 ///        `channel.rejected_unverifiable`, without the pairing carve-out;
 ///      - `RejectedUnauthentic(reason)` — the transport-supplied evidence
 ///        didn't check out (bad DMARC / missing-or-wrong token / a pairing
 ///        row with no token at all). Dropped + audited immediately, carrying
-///        `reason`'s stable label so the four denial arms are tellable apart
+///        `reason`'s stable label so the five denial arms are tellable apart
 ///        in `audit_log`, and BEFORE and
 ///        WITHOUT the pairing carve-out: that carve-out compares unpaired
 ///        input against a live single-use code, and a transport that cannot
@@ -130,12 +130,12 @@ pub async fn handle_inbound(
                 .await;
             return None;
         }
-        AuthDecision::Unverifiable => {
+        AuthDecision::RejectedUnverifiable => {
             // The pairing lookup failed (#827): fail closed, and BEFORE the
             // carve-out, which is for a peer known to be unpaired — this may
             // be the operator's own paired account. Channel + peer only:
-            // never the body, never the evidence, never the DB error (driver
-            // text; it went to the log in `DbPeerAuthorizer`).
+            // never the body, never the evidence, never the DB error
+            // (sqlx/Postgres text; it went to the log in `DbPeerAuthorizer`).
             events
                 .audit(
                     actions::REJECTED_UNVERIFIABLE,

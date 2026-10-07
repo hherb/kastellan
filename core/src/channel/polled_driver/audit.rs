@@ -6,8 +6,9 @@
 //! Every hook runs on the driver's only thread, which every conversation, the
 //! poll and the ack wait on, so **a hook must not block** (#789). A type cannot
 //! say that, so the driver times every hook call it makes ([`record_skipped`],
-//! [`record_undelivered`], [`record_inbound_dropped`]) and says so when one holds the thread past
-//! [`HOOK_BUDGET`] (#793): what cannot be enforced is at least detected.
+//! [`record_undelivered`], [`record_inbound_dropped`]) and says so when one
+//! holds the thread past [`HOOK_BUDGET`] (#793): what cannot be enforced is at
+//! least detected.
 
 use std::time::{Duration, Instant};
 
@@ -74,8 +75,9 @@ pub struct DriverAudit {
 
 impl DriverAudit {
     /// No audit hooks: every drop and skip is still logged (on the
-    /// `[worker-refusal]` emitter for a dropped reply, whose line then says it
-    /// was **not** recorded), but nothing is written durably.
+    /// `[worker-refusal]` emitter for a dropped reply or a dropped inbound
+    /// batch, whose line then says it was **not** recorded), but nothing is
+    /// written durably.
     pub fn none() -> Self {
         Self { ack_only: None, reply_undelivered: None, inbound_dropped: None }
     }

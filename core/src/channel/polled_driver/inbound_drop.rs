@@ -21,10 +21,25 @@
 //!
 //! An empty batch — the usual result of a long-poll that timed out — drops
 //! nothing and says nothing.
+//!
+//! ## What this does not count
+//!
+//! Only a batch the driver itself holds is counted. Three losses lie outside
+//! it, so a quiet `audit_log` after a restart is not proof that nothing was
+//! lost:
+//!
+//! - messages the bus took but had not read when it stopped (#832);
+//! - messages the worker had received but not yet returned from a poll when
+//!   the driver exited — the live Matrix worker queues them in memory, and
+//!   they die with it (#835);
+//! - a batch that did not decode: dropped on a channel that does not
+//!   redeliver, with a WARN but no count, because there is none to give
+//!   ([`on_undecodable_batch`], #836).
+
+use std::num::NonZeroUsize;
 
 use super::audit::{record_inbound_dropped, InboundDroppedAudit};
 use super::{ParsePoll, PolledWorkerSpec};
-#[allow(unused_imports)] // referenced by the doc comments' intra-doc links
 use crate::channel::actions;
 use crate::channel::undelivered::observed_at_json;
 use crate::channel::ChannelId;
@@ -35,9 +50,9 @@ use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InboundDropped<'a> {
     pub channel: &'a ChannelId,
-    /// How many messages the bus never saw. Never 0: an empty batch is not
-    /// reported.
-    pub dropped: usize,
+    /// How many messages the bus never saw. Never 0 — an empty batch is not
+    /// reported — and the type says so.
+    pub dropped: NonZeroUsize,
     /// When they were dropped. The row is written after the fact (#789), so
     /// `audit_log.ts` is the insert's time, not this.
     pub observed_at: time::OffsetDateTime,
@@ -57,17 +72,19 @@ impl InboundDropped<'_> {
 
 /// Pure: the line for `n` inbound messages dropped by a channel that does not
 /// redeliver. `sink` says whether the channel records them as a row.
-pub(super) fn format_inbound_drop_report(n: usize, sink: bool) -> String {
+pub(super) fn format_inbound_drop_report(n: NonZeroUsize, sink: bool) -> String {
+    let action = actions::INBOUND_DROPPED;
     let recorded = if sink {
-        "recording it as channel.inbound_dropped"
+        format!("recording it as {action}")
     } else {
-        "NOT recorded as channel.inbound_dropped: this channel has no audit sink"
+        format!("NOT recorded as {action}: this channel has no audit sink")
     };
+    let one = n.get() == 1;
     format!(
         "dropped {n} inbound message{}: the bus closed (the channel was restarted or shut down) \
          after the worker had passed {}, and this channel does not redeliver; {recorded}",
-        if n == 1 { "" } else { "s" },
-        if n == 1 { "it" } else { "them" },
+        if one { "" } else { "s" },
+        if one { "it" } else { "them" },
     )
 }
 
@@ -79,16 +96,41 @@ fn report_inbound_dropped(
     n: usize,
     audit: Option<&InboundDroppedAudit>,
 ) {
-    if n == 0 {
+    let Some(n) = NonZeroUsize::new(n) else {
         return;
-    }
-    // WARN, like the driver's other drop lines (`replies::discard_on_exit`):
-    // the emitter falls back to stderr when `tracing` would not record it.
+    };
+    // WARN on the `[worker-refusal]` emitter, like the driver's dropped-reply
+    // line (`replies::discard_on_exit`), not ERROR: the loss is recorded as a
+    // durable row where there is a sink, and the line says so when there is
+    // not. The emitter falls back to stderr when `tracing` would not record
+    // it.
     let report = format_inbound_drop_report(n, audit.is_some());
     emit_worker_refusal_report(label, &report, RefusalSeverity::Warn);
     let dropped =
         InboundDropped { channel: cid, dropped: n, observed_at: time::OffsetDateTime::now_utc() };
     record_inbound_dropped(audit, label, dropped);
+}
+
+/// A poll result that did not decode: a worker bug, not a death, so the
+/// driver logs it and keeps going — whether the bus is up or has just closed.
+/// What happened to the batch depends on the channel: an ack channel did not
+/// ack it, so it is redelivered; one that does not redeliver has lost it, and
+/// cannot say how many messages it held (#836).
+pub(super) fn on_undecodable_batch(spec: &PolledWorkerSpec, e: &anyhow::Error) {
+    if spec.ack_method.is_some() {
+        tracing::warn!(
+            label = spec.label,
+            error = %e,
+            "poll result decode failed; batch skipped (not acked, so the worker redelivers it)"
+        );
+    } else {
+        tracing::warn!(
+            label = spec.label,
+            error = %e,
+            "poll result decode failed; batch dropped: this channel does not redeliver, and how \
+             many messages it held is unknown"
+        );
+    }
 }
 
 /// The bus closed while a poll was out: the whole batch `v` never reached it.
@@ -112,10 +154,8 @@ pub(super) fn on_bus_closed_during_poll(
     // Decoded only to count it: nothing in it is used.
     match parse_poll(v) {
         Ok(events) => report_inbound_dropped(spec.label, cid, events.len(), audit),
-        // A batch that does not decode is skipped while the bus is up too.
-        Err(e) => {
-            tracing::warn!(label = spec.label, error = %e, "poll result decode failed; batch skipped")
-        }
+        // Said exactly as while the bus is up: no count to report.
+        Err(e) => on_undecodable_batch(spec, &e),
     }
 }
 

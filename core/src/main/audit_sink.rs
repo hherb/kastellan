@@ -64,8 +64,9 @@
 //! or counted in the last lines — over-counting, which is the safe direction.
 //!
 //! One writer for both channels (Matrix's `channel.reply_undelivered` and
-//! `channel.inbound_dropped`, email's `channel.skipped_ack_only`). Before #789 each sink hand-rolled its own
-//! insert, and the two had already drifted: one spawned, one blocked.
+//! `channel.inbound_dropped`, email's `channel.skipped_ack_only`). Before #789
+//! each sink hand-rolled its own insert, and the two had already drifted: one
+//! spawned, one blocked.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

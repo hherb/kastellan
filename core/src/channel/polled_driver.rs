@@ -18,8 +18,15 @@
 //! cursor server-side: the mail service only stops re-sending a message once
 //! the worker explicitly acks it. Matrix has no such cursor, so ack support is
 //! *optional* — a [`PolledWorkerSpec`] with `ack_method: None` (Matrix's spec)
-//! makes the driver skip the ack step entirely, with no extra RPC and no
-//! change to control flow versus before this existed.
+//! makes the driver skip the ack step entirely, with no extra RPC.
+//!
+//! ⚠️ **`ack_method` also says whether the channel redelivers.** With one, a
+//! batch the driver could not hand to a closed bus stays unacked and comes
+//! back on the next start; without one, the driver treats it as **lost** —
+//! counted, said, and handed to [`InboundDroppedAudit`] (#826, see
+//! `inbound_drop.rs`). A channel whose upstream redelivers without an ack must
+//! not leave `ack_method` `None` without revisiting that, or it writes false
+//! `channel.inbound_dropped` rows.
 //!
 //! Why the ack fires *after* the event is handed to the bus, not before: if
 //! the worker died between receiving the poll result and the driver forwarding
@@ -87,7 +94,7 @@ mod audit;
 pub use audit::{AckOnlyAudit, DriverAudit, InboundDroppedAudit, ReplyUndeliveredAudit};
 mod inbound_drop;
 pub use inbound_drop::InboundDropped;
-use inbound_drop::{on_bus_closed_during_poll, on_bus_closed_mid_batch};
+use inbound_drop::{on_bus_closed_during_poll, on_bus_closed_mid_batch, on_undecodable_batch};
 mod refusal;
 use refusal::{accepted, check_refusal_backoff, is_refusal, refused, RefusalRun};
 mod replies;
@@ -367,14 +374,14 @@ fn run(
                         }
                         Err(e) => {
                             // A malformed poll result is a worker bug, not a
-                            // death — log + skip the batch, keep polling. The
+                            // death — log the batch, keep polling. The
                             // skipped ids from THIS batch are deliberately NOT
                             // acked here (see the comment above the ack-only
                             // loop): they share the worker's one monotonic
                             // cursor with the events that just failed to
                             // decode, and acking them would silently drag
                             // that cursor past messages nobody ever saw.
-                            tracing::warn!(label = spec.label, error = %e, "poll result decode failed; batch skipped");
+                            on_undecodable_batch(&spec, &e);
                         }
                     }
                 }
