@@ -569,8 +569,16 @@ pub async fn mark_failed_running(pool: &PgPool, task_id: i64) -> Result<bool, Db
     Ok(r.rows_affected() == 1)
 }
 
+/// The `detail` of the error result [`sweep_crashed`] stores on a task it
+/// marks `crashed`, so the reply its peer gets can say the task was
+/// interrupted (`core::channel::route::reply_body` matches on it). Until #825
+/// no reply was ever sent for one — the sweep runs at boot, before any
+/// channel is listening — so a NULL result was never seen.
+pub const CRASHED_DETAIL: &str = "crashed";
+
 /// Startup sweep. Marks every task whose lease has elapsed but is
-/// still `running` as `crashed`. Idempotent; safe to re-run.
+/// still `running` as `crashed`, with an error result naming
+/// [`CRASHED_DETAIL`]. Idempotent; safe to re-run.
 ///
 /// Returns the recovered rows (`RETURNING *`) so the caller can emit
 /// one `scheduler/task.crashed` audit row per task. The post-UPDATE
@@ -583,12 +591,14 @@ pub async fn sweep_crashed(pool: &PgPool) -> Result<Vec<Task>, DbError> {
     let rows = sqlx::query(
         "UPDATE tasks \
          SET state = 'crashed', \
+             result = $1, \
              finished_at = now(), \
              updated_at = now() \
          WHERE state = 'running' AND lease_expires_at < now() \
          RETURNING id, state, lane, created_at, updated_at, started_at, \
                    finished_at, lease_expires_at, plan_count, payload, result",
     )
+    .bind(serde_json::json!({"kind": "error", "detail": CRASHED_DETAIL}))
     .fetch_all(pool)
     .await
     .map_err(|e| DbError::Query(format!("tasks sweep_crashed: {e}")))?;

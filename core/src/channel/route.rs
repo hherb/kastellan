@@ -54,6 +54,18 @@ pub fn reply_body(result: Option<&Value>) -> String {
              answered in time, so I stopped."
                 .to_string()
         }
+        // The daemon restarted while this task ran, and the boot crash
+        // sweep marked it `crashed` (#825 now delivers that reply, which
+        // used to be lost). "Sorry — that failed: crashed" would read like
+        // the request itself broke something; it was interrupted.
+        Some("error")
+            if result.get("detail").and_then(Value::as_str)
+                == Some(kastellan_db::tasks::CRASHED_DETAIL) =>
+        {
+            "Sorry — I was restarted while working on that, so it never finished. \
+             Please ask again."
+                .to_string()
+        }
         Some("error") => format!(
             "Sorry — that failed: {}",
             result.get("detail").and_then(Value::as_str).unwrap_or("unknown error")
@@ -222,6 +234,19 @@ mod tests {
     /// crosses into its terminal set — so the only question is what it says.
     /// "Sorry — that failed: ask_timeout" is true and useless; the user's
     /// question stalled because nobody answered a question about it.
+    /// A task the daemon's restart swept to `crashed` (#825 delivers its
+    /// reply now, where before it was lost): the peer is told it was
+    /// interrupted and should ask again — not "Task finished, but produced no
+    /// result.", which it did not, nor the raw detail string.
+    #[test]
+    fn a_crashed_task_reads_as_interrupted_not_finished() {
+        let body = reply_body(Some(&json!({"kind": "error", "detail": "crashed"})));
+        assert!(body.contains("restarted"), "{body}");
+        assert!(body.contains("ask again"), "{body}");
+        assert!(!body.contains("crashed"), "the raw detail string is not user-facing: {body}");
+        assert!(!body.contains("finished, but"), "{body}");
+    }
+
     #[test]
     fn an_ask_timeout_reads_as_an_unanswered_question_not_a_crash() {
         let body = reply_body(Some(&json!({"kind": "error", "detail": "ask_timeout"})));

@@ -209,3 +209,56 @@ fn the_claim_has_one_winner_and_only_for_finished_tasks() {
         pool.close().await;
     });
 }
+
+/// A task the boot crash sweep marks `crashed` carries an error result, so
+/// the reply the catch-up now delivers for it (#825) can say it was
+/// interrupted instead of "Task finished, but produced no result."
+#[test]
+fn a_crashed_task_carries_an_error_result() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "rc-xd",
+        "rc-xl",
+        &format!("kastellan-supervisor-test-pg-rcx-{suffix}"),
+    );
+    runtime().block_on(async {
+        kastellan_db::probe::run(
+            &cluster.conn_spec,
+            "core",
+            "startup",
+            serde_json::json!({"version": "test", "purpose": "reply-claim-crash-e2e"}),
+        )
+        .await
+        .expect("probe");
+        let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+        let id = kastellan_db::tasks::insert_pending(
+            &pool,
+            kastellan_db::tasks::Lane::Fast,
+            channel_payload(),
+        )
+        .await
+        .expect("pending");
+        // A lease already expired: the worker that claimed it is gone.
+        let running = kastellan_db::tasks::claim_one(&pool, kastellan_db::tasks::Lane::Fast, -1)
+            .await
+            .expect("claim")
+            .expect("the pending task");
+        assert_eq!(running.id, id);
+
+        let swept = kastellan_db::tasks::sweep_crashed(&pool).await.expect("sweep");
+
+        assert_eq!(swept.len(), 1);
+        // The literal, not a const: the reply wording keys off this value.
+        let expected = serde_json::json!({"kind": "error", "detail": "crashed"});
+        assert_eq!(swept[0].result.as_ref(), Some(&expected), "RETURNING carries it");
+        let stored = kastellan_db::tasks::get(&pool, id).await.expect("get").expect("row");
+        assert_eq!(stored.state, "crashed");
+        assert_eq!(stored.result, Some(expected));
+        pool.close().await;
+    });
+}
