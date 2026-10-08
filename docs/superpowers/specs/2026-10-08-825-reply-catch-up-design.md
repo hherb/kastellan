@@ -78,7 +78,7 @@ The grants need no change: `kastellan_runtime` already has `UPDATE` on `tasks`.
 
 ⚠️ **The terminal-state list now exists in four places:** the `notify_task_completed` trigger
 (0012), this backfill, this index predicate, and Rust. The Rust side gets **one** const,
-`REPLIED_STATES`, which moves from `db/src/tasks/turns.rs` to `pub(crate)` so the sweep shares
+`REPLIED_STATES`, which moves from `db/src/tasks/turns.rs` to a `pub` const in `reply_claim.rs` (`pub` because the db e2e iterates it) so the sweep shares
 the copy that `conversation_turns` reads. A PG test pins the index predicate against that const
 (see Testing). Pinning the trigger itself remains #712.
 
@@ -134,7 +134,7 @@ both the NOTIFY loop and the sweep. Its steps, in order:
    fails (the narrow race where the queue closes between step 4 and here), write the existing
    `channel.reply_undelivered` row with reason `queue_closed`. Otherwise write `channel.replied`.
 
-**The sweep** (`catch_up::sweep`) walks the backlog in pages of `SWEEP_PAGE` = 100 by
+**The sweep** (`bus_outbound::sweep`, beside `handle_completed`, so `catch_up.rs` stays pure) walks the backlog in pages of `SWEEP_PAGE` = 100 by
 ascending id, calling `handle_completed(…, Via::CatchUp)` for each id. The cursor advances
 past every id, including skipped ones (tasks this bus doesn't serve, load failures), so a stuck
 set can't starve the rest. A DB error WARNs and ends **this** sweep only. The pump keeps
