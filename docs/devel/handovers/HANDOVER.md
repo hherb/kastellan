@@ -9,16 +9,16 @@
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-09 (#825 — a finished channel task's reply is no longer lost when the
-bus missed its NOTIFY: a claim column + a catch-up sweep, PR pending number; the operator is still
+bus missed its NOTIFY: a claim column + a catch-up sweep, PR [#842](https://github.com/hherb/kastellan/pull/842); the operator is still
 running the #773 live re-measure) ·
-**Recent PRs, newest first:** (#825's, pending), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Recent PRs, newest first:** [#842](https://github.com/hherb/kastellan/pull/842) (#825), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
 #787 since the merge): 15 binaries, generated env **and** `.local` byte-identical to
 `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at
 attempt 1. `scripts/upgrade_from_git.sh` switches its checkout back to `main` by itself, so the next
-plain run is right. ⚠️ **None of #791, #795, #801, #806, #812, #819, #820, #824, #830, #834 or #825's PR is deployed.** The live process runs thinking **ON**
+plain run is right. ⚠️ **None of #791, #795, #801, #806, #812, #819, #820, #824, #830, #834 or #842 is deployed.** The live process runs thinking **ON**
 (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`, `TIMEOUT_MS=600000`). The
 last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN]`, 4 `[SKIP]`
 (gliner opt-in). Rootfs images last rebuilt 2026-09-08.
@@ -59,7 +59,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-08/09): #825 — the reply catch-up (PR pending number)
+### This session (2026-10-08/09): #825 — the reply catch-up (PR [#842](https://github.com/hherb/kastellan/pull/842))
 
 - **Migration 0027** adds `tasks.reply_settled_at` + `reply_disposition` (`routed` / `unroutable` /
   `backfilled`), backfills every finished channel task as `backfilled` (history is never re-sent),
@@ -279,7 +279,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824 + #830 + #834 + #825's PR:** watch one restart for the `[audit-lost]` /
+5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824 + #830 + #834 + #842:** watch one restart for the `[audit-lost]` /
    INFO drain lines (since #830 the traced line carries `[audit-lost]` too; a Matrix login still in
    progress at shutdown should be INFO "not finished starting", not a loss; a bus stopped under a
    wedged Postgres now says `may not have been written`), and query an `observed_at` on the next `channel.*` row. Then
@@ -394,7 +394,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#825 after the review fix pass — **the gate that stands**) | #825 PR (`213f0eb7` + docs) | **4934** tests / **195** suites as predicted (#834's 4906 + db `reply_claim_e2e` **3** as a new suite + core lib **24**: `catch_up` 7, claim 8 + abort-on-full-queue 1, sweep 7, `route` 1, the 2 retargeted `dropped` tests net 0 + core `reply_catch_up_pg_e2e` **1**, new suite) — **4931 passed + 3 failed** on `the database system is starting up` at probe connect (#548/#676: `channel_bus_pg_e2e` ask-resolver, `l3_surface_e2e`, `mail_e2e`), each **green in isolation** under `KASTELLAN_PG_REQUIRE_E2E=1`; `[WARN]` **0**, `[SKIP]` **23**; log `~/.local/state/kastellan/gate-logs/sweep-825-final.log`. The pre-review sweep was **4931 / 0 / 52**, 195 suites, `TEST_EXIT=0`. Mutants killed: claim `IS NULL` and terminal guards, `>`→`>=`, the 1-min floor, closed-queue check, lost-claim send, unroutable row on loss, no start sweep, stuck cursor, dead tick; negative controls on the index/backfill pins and the two-bus e2e | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-825`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#825 after the review fix pass — **the gate that stands**) | PR #842 (`213f0eb7` + docs) | **4934** tests / **195** suites as predicted (#834's 4906 + db `reply_claim_e2e` **3** as a new suite + core lib **24**: `catch_up` 7, claim 8 + abort-on-full-queue 1, sweep 7, `route` 1, the 2 retargeted `dropped` tests net 0 + core `reply_catch_up_pg_e2e` **1**, new suite) — **4931 passed + 3 failed** on `the database system is starting up` at probe connect (#548/#676: `channel_bus_pg_e2e` ask-resolver, `l3_surface_e2e`, `mail_e2e`), each **green in isolation** under `KASTELLAN_PG_REQUIRE_E2E=1`; `[WARN]` **0**, `[SKIP]` **23**; log `~/.local/state/kastellan/gate-logs/sweep-825-final.log`. The pre-review sweep was **4931 / 0 / 52**, 195 suites, `TEST_EXIT=0`. Mutants killed: claim `IS NULL` and terminal guards, `>`→`>=`, the 1-min floor, closed-queue check, lost-claim send, unroutable row on loss, no start sweep, stuck cursor, dead tick; negative controls on the index/backfill pins and the two-bus e2e | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-825`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#827/#826 `/fixall` — superseded) | PR #834 | **4906 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` 0, `[SKIP]` 23 | exit 0, incremental | 23 Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
