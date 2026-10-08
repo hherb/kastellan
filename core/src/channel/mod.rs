@@ -23,6 +23,7 @@ pub mod audit_text;
 pub mod auth;
 pub mod boot_supervisor;
 pub mod bus;
+pub mod catch_up;
 mod bus_inbound;
 mod bus_outbound;
 pub mod email;
