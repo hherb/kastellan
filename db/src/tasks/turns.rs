@@ -32,7 +32,8 @@
 //!
 //! # Why this state list
 //!
-//! [`REPLIED_STATES`] is exactly the set `notify_task_completed` fires on
+//! [`REPLIED_STATES`](super::reply_claim::REPLIED_STATES) — shared with the
+//! reply claim since #825 — is exactly the set `notify_task_completed` fires on
 //! (migration `0005`, widened with `refused` by `0012`), which is the set the
 //! outbound pump replies to. So every row this can return is a turn the peer
 //! actually received a reply for — which is what makes the rendered `answer`
@@ -49,6 +50,8 @@ use sqlx::Row;
 use time::OffsetDateTime;
 
 use crate::DbError;
+
+use super::reply_claim::REPLIED_STATES;
 
 /// One earlier turn of a conversation, exactly as stored.
 ///
@@ -72,12 +75,6 @@ pub struct ConversationTurnRow {
     pub result: Option<serde_json::Value>,
     pub turn_record: Option<serde_json::Value>,
 }
-
-/// The terminal states a channel peer was replied to for. See the module docs:
-/// this mirrors `notify_task_completed`.
-const REPLIED_STATES: [&str; 7] = [
-    "completed", "failed", "cancelled", "blocked", "timed_out", "crashed", "refused",
-];
 
 /// Which conversation to read, and how much of it.
 ///

@@ -14,6 +14,7 @@ use time::Duration;
 use crate::DbError;
 
 pub mod turns;
+pub mod reply_claim;
 
 /// The two concurrency lanes. `fast` is the default; `long` is opt-in
 /// via the producer (CLI flag, channel adapter default, etc.).
