@@ -64,6 +64,25 @@ async fn insert_at_0026(pool: &sqlx::PgPool, state: &str, payload: serde_json::V
     .expect("seed at 0026")
 }
 
+/// The state literals in a partial-index predicate as Postgres renders it —
+/// `… (state = ANY (ARRAY['completed'::text, …]))` — sorted.
+fn index_states(predicate: &str) -> Vec<String> {
+    let start = predicate.find("state = ANY (ARRAY[").expect("a state list") + "state = ANY (ARRAY[".len();
+    let list = &predicate[start..start + predicate[start..].find(']').expect("closing bracket")];
+    let mut states: Vec<String> = list
+        .split(',')
+        .map(|item| item.trim().trim_end_matches("::text").trim_matches('\'').to_string())
+        .collect();
+    states.sort();
+    states
+}
+
+fn sorted(states: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = states.iter().map(|s| (*s).to_string()).collect();
+    v.sort();
+    v
+}
+
 /// D4: history is settled at deploy, honestly labelled, and nothing else is.
 #[test]
 fn the_backfill_settles_only_finished_channel_tasks() {
@@ -83,15 +102,20 @@ fn the_backfill_settles_only_finished_channel_tasks() {
         let admin = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec).await.expect("admin");
         kastellan_db::MIGRATOR.run_to(BEFORE_0027, &admin).await.expect("migrate to 0026");
 
-        let done = insert_at_0026(&admin, "completed", channel_payload()).await;
-        let crashed = insert_at_0026(&admin, "crashed", channel_payload()).await;
+        // One finished channel task per terminal state: pins 0027's backfill
+        // list against the const, state by state.
+        let mut finished = Vec::new();
+        for state in REPLIED_STATES {
+            finished.push((state, insert_at_0026(&admin, state, channel_payload()).await));
+        }
         let running = insert_at_0026(&admin, "running", channel_payload()).await;
         let not_channel = insert_at_0026(&admin, "completed", serde_json::json!({"kind": "ask"})).await;
 
         kastellan_db::MIGRATOR.run(&admin).await.expect("migrate 0027+");
 
-        assert_eq!(disposition(&admin, done).await.as_deref(), Some("backfilled"));
-        assert_eq!(disposition(&admin, crashed).await.as_deref(), Some("backfilled"));
+        for (state, id) in finished {
+            assert_eq!(disposition(&admin, id).await.as_deref(), Some("backfilled"), "{state}");
+        }
         assert_eq!(disposition(&admin, running).await, None, "an unfinished task is not history");
         assert_eq!(disposition(&admin, not_channel).await, None, "not a channel task");
         let backlog = unsettled_channel_replies(&admin, 0, 100).await.expect("backlog");
@@ -140,6 +164,18 @@ fn the_claim_has_one_winner_and_only_for_finished_tasks() {
         .await
         .expect("pending");
         assert_eq!(unsettled_channel_replies(&pool, 0, 100).await.unwrap(), by_state);
+
+        // The partial index itself holds exactly these states. The query above
+        // carries its own WHERE, so it would pass with no index at all; this
+        // reads the predicate Postgres stored.
+        let predicate: String = sqlx::query_scalar(
+            "SELECT pg_get_expr(indpred, indrelid) FROM pg_index \
+              WHERE indexrelid = 'tasks_unsettled_channel_replies'::regclass",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("the partial index exists");
+        assert_eq!(index_states(&predicate), sorted(&REPLIED_STATES), "{predicate}");
 
         // Paging: `after_id` is exclusive, `limit` is honoured.
         let page = unsettled_channel_replies(&pool, by_state[1], 2).await.unwrap();
