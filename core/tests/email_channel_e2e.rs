@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use kastellan_core::channel::auth::{AuthDecision, PeerAuthorizer, UnauthenticReason};
-use kastellan_core::channel::bus::{ChannelBus, ChannelEvents, CompletedTasks};
+use kastellan_core::channel::bus::{
+    ChannelBus, ChannelEvents, ClaimedReply, CompletedTasks, ReplyDisposition,
+};
 use kastellan_core::channel::email::{wire, EmailChannel};
 use kastellan_core::channel::polled_driver::{DriverAudit, PolledWorkerDriver};
 use kastellan_core::channel::{actions, ChannelId, PeerEvidence};
@@ -107,6 +109,16 @@ impl CompletedTasks for NeverCompleted {
     }
     async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
         Ok(None)
+    }
+    /// Claims always succeed: this fake predates the reply claim (#825),
+    /// whose own semantics are tested against `bus/tests/catch_up.rs`'s
+    /// `Backlog` and real Postgres.
+    async fn claim(&self, _id: i64, _d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+        let now = time::OffsetDateTime::now_utc();
+        Ok(Some(ClaimedReply { created_at: now, finished_at: Some(now) }))
+    }
+    async fn unsettled(&self, _after_id: i64, _limit: i64) -> anyhow::Result<Vec<i64>> {
+        Ok(Vec::new())
     }
 }
 

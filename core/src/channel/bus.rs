@@ -32,13 +32,25 @@ pub trait ChannelEvents: Send + Sync {
     async fn audit(&self, action: &str, payload: Value);
 }
 
-/// Outbound source seam: a stream of completed task ids + a reader for the row.
+/// The reply claim's types, re-exported so `CompletedTasks` implementors in
+/// other crates' tests need no direct `kastellan-db` path.
+pub use kastellan_db::tasks::reply_claim::{ClaimedReply, ReplyDisposition};
+
+/// Outbound source seam: a stream of completed task ids, a reader for the
+/// row, and — since #825 — the reply claim and the backlog it settles.
 #[async_trait::async_trait]
 pub trait CompletedTasks: Send + Sync {
     /// Next completed task id, or `None` when the stream ends.
     async fn next_completed(&mut self) -> Option<i64>;
     /// Fetch `(payload, result)` for a task id, or `None` if absent.
     async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>>;
+    /// Settle `id`'s reply as `d`. `Ok(None)`: already settled, or not
+    /// finished — either way, not this caller's to route. See
+    /// `kastellan_db::tasks::reply_claim::claim_reply`.
+    async fn claim(&self, id: i64, d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>>;
+    /// Up to `limit` unsettled finished channel task ids above `after_id`,
+    /// ascending.
+    async fn unsettled(&self, after_id: i64, limit: i64) -> anyhow::Result<Vec<i64>>;
 }
 
 /// Pairing carve-out seam: consulted **only** for authorizer-rejected peers, and
@@ -292,7 +304,7 @@ impl ChannelBus {
         handles.push(tokio::spawn(async move {
             let _life = life;
             while let Some(id) = completed.next_completed().await {
-                handle_completed(&*completed, &*events_out, &senders, id).await;
+                handle_completed(&*completed, &*events_out, &senders, id, super::catch_up::Via::Notify).await;
             }
             info!("outbound pump stopped");
         }));

@@ -9,7 +9,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use kastellan_core::channel::auth::StaticPairings;
-use kastellan_core::channel::bus::{ChannelBus, ChannelEvents, CompletedTasks};
+use kastellan_core::channel::bus::{
+    ChannelBus, ChannelEvents, ClaimedReply, CompletedTasks, ReplyDisposition,
+};
 use kastellan_core::channel::{
     Channel, ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerId,
 };
@@ -77,6 +79,16 @@ impl CompletedTasks for FakeCompleted {
     async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
         let payload = self.enqueued.lock().unwrap().first().cloned();
         Ok(payload.map(|p| (p, Some(json!({"kind": "completed", "message": "You have 2 meetings."})))))
+    }
+    /// Claims always succeed: this fake predates the reply claim (#825),
+    /// whose own semantics are tested against `bus/tests/catch_up.rs`'s
+    /// `Backlog` and real Postgres.
+    async fn claim(&self, _id: i64, _d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+        let now = time::OffsetDateTime::now_utc();
+        Ok(Some(ClaimedReply { created_at: now, finished_at: Some(now) }))
+    }
+    async fn unsettled(&self, _after_id: i64, _limit: i64) -> anyhow::Result<Vec<i64>> {
+        Ok(Vec::new())
     }
 }
 

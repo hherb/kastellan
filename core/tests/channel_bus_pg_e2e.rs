@@ -17,6 +17,7 @@ use kastellan_core::channel::bus::{
     handle_completed, handle_inbound, AskWiring, CompletedTasks, PgAskResolver, PgChannelEvents,
     PgCompletedTasks,
 };
+use kastellan_core::channel::catch_up::Via;
 use kastellan_core::channel::ingest::{build_channel_task_payload, sha256_hex};
 use kastellan_core::channel::outbox::ChannelOutbox;
 use kastellan_core::channel::{
@@ -119,7 +120,7 @@ async fn channel_inbound_enqueues_and_completion_routes_a_reply() {
     let (tx, mut rx) = mpsc::channel::<OutgoingMessage>(4);
     let mut senders = HashMap::new();
     senders.insert(ChannelId("matrix".into()), tx);
-    let out = handle_completed(&completed, &events, &senders, id)
+    let out = handle_completed(&completed, &events, &senders, id, Via::Notify)
         .await
         .expect("routed reply");
     assert_eq!(out.body, "You have 2 meetings.");

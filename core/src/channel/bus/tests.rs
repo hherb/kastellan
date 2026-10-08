@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::channel::actions;
+use crate::channel::catch_up::Via;
 use crate::channel::auth::{AuthDecision, StaticPairings, UnauthenticReason};
 use crate::channel::outbox::ChannelOutbox;
 use crate::channel::{ChannelId, ConversationId, IncomingMessage, PeerEvidence, PeerId};
@@ -15,6 +16,8 @@ use std::sync::Mutex;
 mod dropped;
 /// #827: a pairing lookup that could not be completed has its own row.
 mod unverifiable;
+/// #825: the reply claim and the catch-up sweep.
+mod catch_up;
 
 #[derive(Default)]
 struct FakeEvents {
@@ -236,6 +239,16 @@ impl CompletedTasks for FakeCompleted {
     async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
         Ok(self.rows.get(&id).cloned())
     }
+    /// Claims always succeed: this fake predates the reply claim (#825),
+    /// whose own semantics are tested against `bus/tests/catch_up.rs`'s
+    /// `Backlog` and real Postgres.
+    async fn claim(&self, _id: i64, _d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+        let now = time::OffsetDateTime::now_utc();
+        Ok(Some(ClaimedReply { created_at: now, finished_at: Some(now) }))
+    }
+    async fn unsettled(&self, _after_id: i64, _limit: i64) -> anyhow::Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
 }
 
 #[tokio::test]
@@ -254,7 +267,7 @@ async fn outbound_routes_completed_channel_task_to_its_channel() {
     let mut senders = HashMap::new();
     senders.insert(ChannelId("matrix".into()), tx);
 
-    let out = handle_completed(&completed, &ev, &senders, 7).await.expect("routed");
+    let out = handle_completed(&completed, &ev, &senders, 7, Via::Notify).await.expect("routed");
     assert_eq!(out.body, "done");
     let delivered = rx.recv().await.unwrap();
     assert_eq!(delivered.peer, PeerId("@me:srv".into()));
@@ -355,7 +368,7 @@ async fn outbound_ignores_non_channel_completion() {
     );
     let completed = FakeCompleted { ids: Mutex::new(vec![9]), rows };
     let senders = HashMap::new();
-    assert!(handle_completed(&completed, &ev, &senders, 9).await.is_none());
+    assert!(handle_completed(&completed, &ev, &senders, 9, Via::Notify).await.is_none());
     assert!(ev.audited.lock().unwrap().is_empty()); // no reply audit for non-channel
 }
 
@@ -540,6 +553,16 @@ impl CompletedTasks for EndedCompleted {
     async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
         Ok(None)
     }
+    /// Claims always succeed: this fake predates the reply claim (#825),
+    /// whose own semantics are tested against `bus/tests/catch_up.rs`'s
+    /// `Backlog` and real Postgres.
+    async fn claim(&self, _id: i64, _d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+        let now = time::OffsetDateTime::now_utc();
+        Ok(Some(ClaimedReply { created_at: now, finished_at: Some(now) }))
+    }
+    async fn unsettled(&self, _after_id: i64, _limit: i64) -> anyhow::Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
 }
 
 /// The healthy steady state: a live LISTEN with nothing completing yet. Parks
@@ -553,6 +576,16 @@ impl CompletedTasks for ParkingCompleted {
     }
     async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
         Ok(None)
+    }
+    /// Claims always succeed: this fake predates the reply claim (#825),
+    /// whose own semantics are tested against `bus/tests/catch_up.rs`'s
+    /// `Backlog` and real Postgres.
+    async fn claim(&self, _id: i64, _d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+        let now = time::OffsetDateTime::now_utc();
+        Ok(Some(ClaimedReply { created_at: now, finished_at: Some(now) }))
+    }
+    async fn unsettled(&self, _after_id: i64, _limit: i64) -> anyhow::Result<Vec<i64>> {
+        Ok(Vec::new())
     }
 }
 
