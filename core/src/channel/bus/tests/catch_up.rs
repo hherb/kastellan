@@ -92,6 +92,10 @@ impl CompletedTasks for Arc<Backlog> {
         }))
     }
     async fn unsettled(&self, after_id: i64, limit: i64) -> anyhow::Result<Vec<i64>> {
+        // A real backlog read is a query, so it yields. Without this a sweep
+        // whose cursor never advanced would spin without yielding and hang the
+        // whole test binary instead of failing the one test.
+        tokio::task::yield_now().await;
         self.unsettled_calls.fetch_add(1, Ordering::SeqCst);
         if self.unsettled_fails.load(Ordering::SeqCst) {
             anyhow::bail!("SECRET-DB-TEXT: backlog read refused");
@@ -270,3 +274,6 @@ async fn a_queue_closing_after_the_claim_still_writes_queue_closed() {
     assert_eq!(audited[0].0, actions::REPLY_UNDELIVERED);
     assert_eq!(audited[0].1["reason"], "queue_closed");
 }
+
+/// The sweep through a running bus; a child so it shares `Backlog`.
+mod pump;

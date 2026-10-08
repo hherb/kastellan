@@ -13,6 +13,7 @@ use tracing::info;
 use kastellan_db::tasks::Lane;
 
 use super::auth::PeerAuthorizer;
+use super::catch_up::Via;
 use super::pump_liveness::DeathBell;
 use super::{Channel, ChannelId, OutgoingMessage, PeerId};
 
@@ -171,7 +172,7 @@ pub use super::bus_inbound::handle_inbound;
 
 /// The outbound half — `handle_completed`, `PgCompletedTasks` and the
 /// transport-failure row — in its own module since #825.
-pub use super::bus_outbound::{handle_completed, PgCompletedTasks};
+pub use super::bus_outbound::{handle_completed, sweep, PgCompletedTasks};
 use super::bus_outbound::send_or_record;
 
 /// A running bus. Owns the spawned pump tasks; `shutdown()` aborts them.
@@ -298,13 +299,35 @@ impl ChannelBus {
             }));
         }
 
-        // Outbound pump: NOTIFY → load → route → push into the per-channel sender.
+        // Outbound pump: sweep the backlog, then NOTIFY → load → route →
+        // claim → push into the per-channel sender, re-sweeping every
+        // `SWEEP_EVERY` (#825). The start sweep needs no ordering care:
+        // `completed`'s LISTEN was established before `spawn` was called, so
+        // a task finishing during the sweep is announced afterwards and its
+        // claim drops the duplicate.
         let events_out = events.clone();
         let life = bell.guard();
         handles.push(tokio::spawn(async move {
             let _life = life;
-            while let Some(id) = completed.next_completed().await {
-                handle_completed(&*completed, &*events_out, &senders, id, super::catch_up::Via::Notify).await;
+            sweep(&*completed, &*events_out, &senders).await;
+            let every = super::catch_up::SWEEP_EVERY;
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                // A tick that wins this race drops an in-flight
+                // `next_completed`, and sqlx does not document
+                // `PgListener::recv` as cancel-safe. A NOTIFY lost that way
+                // is still not a lost reply: its task stays unsettled, and
+                // the very sweep that won the race finds it.
+                tokio::select! {
+                    next = completed.next_completed() => match next {
+                        Some(id) => {
+                            handle_completed(&*completed, &*events_out, &senders, id, Via::Notify).await;
+                        }
+                        None => break,
+                    },
+                    _ = tick.tick() => sweep(&*completed, &*events_out, &senders).await,
+                }
             }
             info!("outbound pump stopped");
         }));

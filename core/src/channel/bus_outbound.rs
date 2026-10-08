@@ -196,3 +196,37 @@ async fn settle_unroutable(completed: &dyn CompletedTasks, events: &dyn ChannelE
         Err(e) => warn!(task_id = id, error = %e, "unroutable reply claim failed; left for catch-up"),
     }
 }
+
+/// Walk the reply backlog — finished channel tasks whose reply was never
+/// settled — and route each through [`handle_completed`] (#825). What it
+/// finds is what the live NOTIFY missed: a reply that finished while no bus
+/// listened, whose load or claim failed, or whose queue was closed.
+///
+/// Pages by ascending id and moves the cursor past every id, including the
+/// ones it skips (another bus's channel, a failed load), so a stuck set
+/// cannot starve the rest. A backlog read that fails ends **this** sweep
+/// with a WARN; the pump carries on and the next sweep retries.
+pub async fn sweep(
+    completed: &dyn CompletedTasks,
+    events: &dyn ChannelEvents,
+    senders: &HashMap<ChannelId, mpsc::Sender<OutgoingMessage>>,
+) {
+    let mut after = 0;
+    loop {
+        let page = match completed.unsettled(after, catch_up::SWEEP_PAGE).await {
+            Ok(page) => page,
+            Err(e) => {
+                warn!(error = %e, "reply catch-up sweep could not read the backlog; retrying next sweep");
+                return;
+            }
+        };
+        let Some(&last) = page.last() else { return };
+        for &id in &page {
+            handle_completed(completed, events, senders, id, Via::CatchUp).await;
+        }
+        if i64::try_from(page.len()).unwrap_or(i64::MAX) < catch_up::SWEEP_PAGE {
+            return;
+        }
+        after = last;
+    }
+}
