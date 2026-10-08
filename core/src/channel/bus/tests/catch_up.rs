@@ -275,5 +275,35 @@ async fn a_queue_closing_after_the_claim_still_writes_queue_closed() {
     assert_eq!(audited[0].1["reason"], "queue_closed");
 }
 
+/// A reply parked on a full queue must not be claimed yet: a bus stop that
+/// aborts it there (as `ChannelBus::shutdown` does to any pump) would
+/// otherwise leave a task marked `routed` that nobody sent and no row
+/// mentions. Queue space is reserved first, so the abort lands before the
+/// claim and the next sweep still finds the reply.
+#[tokio::test]
+async fn an_abort_while_waiting_for_queue_space_leaves_the_reply_unclaimed() {
+    let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
+    let ev = FakeEvents::default();
+    let (tx, _rx) = mpsc::channel::<OutgoingMessage>(1);
+    let filler = OutgoingMessage {
+        channel: ChannelId("matrix".into()),
+        peer: PeerId("@other:srv".into()),
+        conversation: ConversationId("!room:srv".into()),
+        body: "an earlier reply, not yet drained".into(),
+    };
+    tx.try_send(filler).expect("the one slot");
+    let senders = HashMap::from([(ChannelId("matrix".into()), tx)]);
+
+    let parked = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        handle_completed(&backlog, &ev, &senders, 7, Via::CatchUp),
+    )
+    .await;
+
+    assert!(parked.is_err(), "it waits for queue space");
+    assert_eq!(backlog.disposition(7), None, "aborted before the claim: still in the backlog");
+    assert!(actions_of(&ev).is_empty(), "{:?}", actions_of(&ev));
+}
+
 /// The sweep through a running bus; a child so it shares `Backlog`.
 mod pump;

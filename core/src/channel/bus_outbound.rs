@@ -97,8 +97,13 @@ pub(super) async fn send_or_record(
 /// queued (for tests).
 ///
 /// Anything that stops a reply *before* the claim leaves it in the backlog
-/// for the next sweep: a failed load, a failed claim, a closed queue. Only a
-/// claimed reply can be lost, and that loss always has a row.
+/// for the next sweep: a failed load, a failed claim, a closed queue — and a
+/// bus stop that aborts it while it waits for queue space, which is why the
+/// slot is reserved before the claim, not after. A claimed reply is lost only
+/// with a row (`queue_closed` here, `send_failed` in the per-channel pump),
+/// with one exception: an abort landing on the claim's own round-trip marks
+/// the task `routed` with no row and nothing sent — the window #832 covers
+/// for the bus's other awaits.
 pub async fn handle_completed(
     completed: &dyn CompletedTasks,
     events: &dyn ChannelEvents,
@@ -140,14 +145,17 @@ pub async fn handle_completed(
         debug!(channel = %out.channel.0, "reply is for a channel this bus does not serve; ignoring");
         return None;
     };
-    if tx.is_closed() {
+    // Reserve the queue slot BEFORE claiming. A full queue parks here, and a
+    // bus stop that aborts the pump while it is parked must find the reply
+    // still unclaimed — after the claim, nothing would ever send it.
+    let Ok(permit) = tx.reserve().await else {
         // The queue's only receiver is this channel's pump, so it has ended
         // and the bus is about to restart. Until #825 this was a drop with a
         // `queue_closed` row; now the reply stays unclaimed and the next
         // bus's start sweep delivers it.
         info!(channel = %out.channel.0, task_id = id, "send queue closed; reply left for catch-up");
         return None;
-    }
+    };
     let claimed = match completed.claim(id, ReplyDisposition::Routed).await {
         Ok(Some(c)) => c,
         Ok(None) => return None, // already routed: the other path or the other bus
@@ -161,15 +169,18 @@ pub async fn handle_completed(
     if let Some(note) = catch_up::delay_note(claimed.created_at, claimed.finished_at, now) {
         out.body = format!("{note}\n\n{}", out.body);
     }
-    if let Err(mpsc::error::SendError(dropped)) = tx.send(out.clone()).await {
-        // The queue closed between the check above and this send. The reply
-        // is claimed, so no sweep will find it again: this one IS lost, and
-        // says so (#815). No `channel.replied` — it was never routed.
-        warn!(channel = %dropped.channel.0, "outbound send queue closed; reply dropped");
-        let reply = super::UndeliveredReply::of(&dropped, super::UndeliveredReason::QueueClosed, now);
+    if tx.is_closed() {
+        // The pump ended while the claim was out. A permit's `send` would
+        // drop the reply without a word once the receiver is gone, so check
+        // first: the reply is claimed, no sweep will find it again, and this
+        // one IS lost — said with a row (#815). No `channel.replied`: it was
+        // never routed.
+        warn!(channel = %out.channel.0, "outbound send queue closed; reply dropped");
+        let reply = super::UndeliveredReply::of(&out, super::UndeliveredReason::QueueClosed, now);
         events.audit(actions::REPLY_UNDELIVERED, reply.payload()).await;
         return None;
     }
+    permit.send(out.clone());
     let mut row = serde_json::json!({
         "task_id": id, "channel": out.channel.0, "peer": out.peer.0, "via": via.as_str(),
     });
