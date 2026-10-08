@@ -40,7 +40,8 @@ pub const AUDIT_LOST_STDERR_MARKER: &str = "[audit-lost]";
 /// `matrix` is. Each label is a fixed word, so it needs no neutralising.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuditLostWriter {
-    /// The Matrix channel's `channel.reply_undelivered` sink.
+    /// The Matrix channel's sink: `channel.reply_undelivered` and, since
+    /// #826, `channel.inbound_dropped`.
     Matrix,
     /// The email channel's `channel.skipped_ack_only` sink.
     Email,

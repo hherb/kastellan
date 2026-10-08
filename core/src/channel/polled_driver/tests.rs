@@ -363,6 +363,7 @@ fn an_outage_warns_once_and_reports_recovery_once() {
 
 mod ack;
 mod audit;
+mod inbound_drop;
 mod refusal;
 mod replies;
 mod replies_driver;

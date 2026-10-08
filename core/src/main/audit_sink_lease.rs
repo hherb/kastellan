@@ -4,10 +4,11 @@
 //! by name.
 //!
 //! While a [`SinkWriter`] is alive, [`super::drain`] counts its driver as one
-//! that may still write a row. A sink's hook closure owns its writer, and the
-//! driver owns the hook, so the lease ends exactly when the driver drops its
-//! hooks — as its thread returns, after any `driver_exit` rows are spawned. No
-//! driver has to remember to report its exit.
+//! that may still write a row. A sink's hook closures own its writer (Matrix's
+//! two share it through an `Arc`), and the driver owns the hooks, so the lease
+//! ends exactly when the driver drops its last hook — as its thread returns,
+//! after any exit rows are spawned. No driver has to remember to report its
+//! exit.
 //!
 //! **A lease can start before its driver does**
 //! ([`SinkWriter::starting_with_ledger`]). Matrix builds its writer before a
@@ -35,7 +36,8 @@ use super::{Ledger, SinkWriter};
 pub(crate) enum SinkKind {
     /// The driver audits what it still holds as it exits — Matrix's: every
     /// reply still queued becomes a `channel.reply_undelivered` row, reason
-    /// `driver_exit`. Stuck past the drain bound (in a worker call, or
+    /// `driver_exit`, and an inbound batch the closed bus never took becomes
+    /// a `channel.inbound_dropped` row (#826). Stuck past the drain bound (in a worker call, or
     /// flushing a long queue) it never gets there, so those replies are
     /// **unaudited**: a possible loss, and reported as one.
     AuditsOnExit,
@@ -50,7 +52,8 @@ pub(crate) enum SinkKind {
 /// `[audit-lost]` lines name. Each channel's [`SinkKind`] follows from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SinkChannel {
-    /// `channel.reply_undelivered`, from the Matrix driver.
+    /// `channel.reply_undelivered` and `channel.inbound_dropped` (#826), from
+    /// the Matrix driver.
     Matrix,
     /// `channel.skipped_ack_only`, from the email driver.
     Email,

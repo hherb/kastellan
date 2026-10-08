@@ -12,6 +12,8 @@ use std::sync::Mutex;
 
 /// #815: the messages and replies the bus drops, and the rows they leave.
 mod dropped;
+/// #827: a pairing lookup that could not be completed has its own row.
+mod unverifiable;
 
 #[derive(Default)]
 struct FakeEvents {

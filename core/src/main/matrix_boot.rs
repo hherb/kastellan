@@ -23,6 +23,7 @@
 //! `MatrixEgress` wiring, and the 60-second login timeout that bounds a single
 //! attempt.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use sqlx::PgPool;
@@ -63,7 +64,8 @@ fn classify_homeserver(homeserver_url: &str, forced: bool) -> Option<BootOutcome
 /// The Matrix sink's channel (#807): its refused rows are thinned and counted
 /// as Matrix's, its `[audit-lost]` lines name `matrix`, and its `SinkKind`
 /// follows — the driver audits every reply still queued as it exits
-/// (`driver_exit`), so one stuck at shutdown is a possible loss (#802).
+/// (`driver_exit`), and an inbound batch the closed bus never took (#826), so
+/// a row stuck at shutdown is a possible loss (#802).
 const SINK_CHANNEL: crate::audit_sink::SinkChannel = crate::audit_sink::SinkChannel::Matrix;
 
 /// Pure: the `(actor, action, payload)` of the row
@@ -99,18 +101,19 @@ fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::D
 /// the poll wait on, so the insert is **spawned** through `writer`
 /// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost): a
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
-/// timeout per dropped reply. The closure owns `writer`, so the driver holds
-/// its lease until it exits, and — once the lease has started (see
-/// [`login_outcome`]) — the daemon's shutdown drain waits for it. A
-/// row that was not written is reported on the `[audit-lost]` marker
-/// ([`format_reply_row_lost`]).
+/// timeout per dropped reply. The closure holds an `Arc` of `writer` (shared
+/// with [`inbound_dropped_audit_sink`]'s when [`driver_sinks`] builds both, so
+/// one lease), and the driver owns the closure, so the driver holds that lease
+/// until it exits, and — once the lease has started (see [`login_outcome`]) —
+/// the daemon's shutdown drain waits for it. A row that was not written is
+/// reported on the `[audit-lost]` marker ([`format_reply_row_lost`]).
 ///
 /// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit
 ///
 /// `report` is how a lost row is said: [`crate::audit_sink::emit_report`] in
 /// the daemon, a recorder in a test (#799).
 fn reply_undelivered_audit_sink(
-    writer: crate::audit_sink::SinkWriter,
+    writer: Arc<crate::audit_sink::SinkWriter>,
     report: crate::audit_sink::Reporter,
 ) -> kastellan_core::channel::polled_driver::ReplyUndeliveredAudit {
     Box::new(move |reply| {
@@ -132,24 +135,75 @@ fn reply_undelivered_audit_sink(
     })
 }
 
-/// The Matrix sink as `attempt` builds it, on `ledger`: the reply-undelivered
-/// hook, and its lease's [`Starting`] token — a lease that counts only once
+/// Pure: the `(actor, action, payload)` of the row
+/// [`inbound_dropped_audit_sink`] writes for `dropped` — the bus's actor, like
+/// [`reply_undelivered_row`]'s.
+fn inbound_dropped_row(
+    dropped: &kastellan_core::channel::polled_driver::InboundDropped<'_>,
+) -> (&'static str, &'static str, serde_json::Value) {
+    ("channel", kastellan_core::channel::actions::INBOUND_DROPPED, dropped.payload())
+}
+
+/// Pure: the `[audit-lost]` report for a `channel.inbound_dropped` row the
+/// Matrix sink could not write, naming the count so it can be matched to the
+/// driver's `[worker-refusal]` line for the drop.
+fn format_inbound_row_lost(dropped: NonZeroUsize, why: &dyn std::fmt::Display) -> String {
+    format!(
+        "{} row for {dropped} dropped inbound message{} not written: {why}. The drop's \
+         [worker-refusal] line stands",
+        kastellan_core::channel::actions::INBOUND_DROPPED,
+        if dropped.get() == 1 { "" } else { "s" }
+    )
+}
+
+/// Build the [`InboundDroppedAudit`] closure the Matrix channel's polled
+/// driver calls when the bus closed on a batch its worker had already passed
+/// (#826): Matrix has no ack cursor, so nothing redelivers it. Writes the
+/// `channel.inbound_dropped` row — channel, count and the drop's time only
+/// ([`inbound_dropped_row`]). Spawned through `writer` and reported on
+/// `[audit-lost]` when not written, exactly like
+/// [`reply_undelivered_audit_sink`].
+///
+/// [`InboundDroppedAudit`]: kastellan_core::channel::polled_driver::InboundDroppedAudit
+fn inbound_dropped_audit_sink(
+    writer: Arc<crate::audit_sink::SinkWriter>,
+    report: crate::audit_sink::Reporter,
+) -> kastellan_core::channel::polled_driver::InboundDroppedAudit {
+    Box::new(move |dropped| {
+        let (actor, action, payload) = inbound_dropped_row(&dropped);
+        let n = dropped.dropped;
+        let label =
+            crate::audit_sink::RowLabel::with_count("matrix inbound messages dropped", n.get());
+        let who = writer.channel().writer();
+        // A refused row is reported through the closure, so its `Err` is not
+        // needed here.
+        let _ = writer.spawn(actor, action, payload, label, move |why| {
+            report(who, &format_inbound_row_lost(n, &why));
+        });
+    })
+}
+
+/// The Matrix driver's audit hooks as `attempt` builds them, on `ledger`: the
+/// reply-undelivered and inbound-dropped hooks, sharing one writer and so one
+/// lease, and that lease's [`Starting`] token — a lease that counts only once
 /// [`login_outcome`] says the worker is up (#802). A function, so a test can
 /// see the lease `attempt` takes.
 ///
 /// [`Starting`]: crate::audit_sink::Starting
-fn reply_sink(
+fn driver_sinks(
     ledger: &'static crate::audit_sink::Ledger,
     pool: PgPool,
     handle: tokio::runtime::Handle,
     report: crate::audit_sink::Reporter,
-) -> (
-    kastellan_core::channel::polled_driver::ReplyUndeliveredAudit,
-    crate::audit_sink::Starting,
-) {
+) -> (kastellan_core::channel::matrix::MatrixDriverAudit, crate::audit_sink::Starting) {
     let (writer, starting) =
         crate::audit_sink::SinkWriter::starting_with_ledger(ledger, pool, handle, SINK_CHANNEL);
-    (reply_undelivered_audit_sink(writer, report), starting)
+    let writer = Arc::new(writer);
+    let audit = kastellan_core::channel::matrix::MatrixDriverAudit {
+        reply_undelivered: Some(reply_undelivered_audit_sink(Arc::clone(&writer), report)),
+        inbound_dropped: Some(inbound_dropped_audit_sink(writer, report)),
+    };
+    (audit, starting)
 }
 
 /// Classify the login's outcome — the worker, or the [`BootOutcome::Retry`]
@@ -293,20 +347,19 @@ async fn attempt(
     // and a driver that never came up has no replies to audit, so the
     // shutdown drain must neither wait for it nor call it a loss. It counts
     // once `login_outcome` sees the worker up.
-    let (audit_undelivered, sink_started) = reply_sink(
+    let (driver_audit, sink_started) = driver_sinks(
         crate::audit_sink::daemon_ledger(),
         pool.clone(),
         tokio::runtime::Handle::current(),
         crate::audit_sink::emit_report,
     );
-    let audit_undelivered = Some(audit_undelivered);
     let spawn = tokio::task::spawn_blocking(move || {
         kastellan_core::channel::matrix::spawn_matrix_worker(
             backend,
             kastellan_core::channel::ChannelId("matrix".to_string()),
             &spawn_cfg,
             egress,
-            audit_undelivered,
+            driver_audit,
         )
     });
     let worker =

@@ -4,22 +4,21 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261007_826_pre-prune.md`](archive/handover_20261007_826_pre-prune.md),
+> [`archive/handover_20261006_813_pre-prune.md`](archive/handover_20261006_813_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-07 (#827 + #826 — a failed pairing lookup is audited as
-`channel.rejected_unverifiable`, and a Matrix batch the closed bus never took is counted and
-audited as `channel.inbound_dropped`, PR #834; the operator is still running the #773 live
-re-measure) ·
-**Recent PRs, newest first:** [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-06 (#813 + #828 — a bus audit insert abandoned at stop now leaves an
+`[audit-lost]` line, and the marker is on the tracing path too, PR #830; the operator is still
+running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
 #787 since the merge): 15 binaries, generated env **and** `.local` byte-identical to
 `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at
 attempt 1. `scripts/upgrade_from_git.sh` switches its checkout back to `main` by itself, so the next
-plain run is right. ⚠️ **None of #791, #795, #801, #806, #812, #819, #820, #824, #830 or #834 is deployed.** The live process runs thinking **ON**
+plain run is right. ⚠️ **None of #791, #795, #801, #806, #812, #819, #820, #824 or #830 is deployed.** The live process runs thinking **ON**
 (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`, `TIMEOUT_MS=600000`). The
 last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN]`, 4 `[SKIP]`
 (gliner opt-in). Rootfs images last rebuilt 2026-09-08.
@@ -60,61 +59,59 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-07): #827 + #826 — two inbound drops get truthful rows (PR #834)
+### This session (2026-10-06): #813 + #828 — no lost bus row goes unsaid (PR #830)
 
-- **#827:** `AuthDecision::RejectedUnverifiable` — `DbPeerAuthorizer`'s failed lookup. Fail-closed (no
-  enqueue, no ack) and **no pairing carve-out**; audited **`channel.rejected_unverifiable`**
-  (channel + peer). `rejected_unpaired` now means only "the lookup answered: not paired".
-- **#826:** the polled driver counts inbound messages a **closed bus** never took (whole batch
-  while a poll was out; mid-batch = the failed send + the rest) and, on a channel **without** an
-  ack method (Matrix), says so on `[worker-refusal]` (WARN) and calls the new
-  `DriverAudit::inbound_dropped` hook → **`channel.inbound_dropped`** (channel, `dropped`,
-  `observed_at` — never peer/id/body). An ack channel's batch is redelivered, so not reported; an
-  empty batch reports nothing. Both Matrix hooks share **one** `SinkWriter` via `Arc` (one lease);
-  `spawn_matrix_worker` now takes a **`MatrixDriverAudit`** (reply + inbound hooks only — there is
-  no `ack_only` field to pass a hook Matrix would never call). `InboundDropped::dropped` is a
-  `NonZeroUsize`. `polled_driver.rs` split first (→ `polled_driver/spec.rs`; the items moved
-  verbatim with a negative control, and the review round repointed their docs at `super`).
-- ⚠️ **`ack_method: None` now also means "does not redeliver"** — a channel whose upstream
-  redelivers without an ack must not leave it `None`, or it writes false `inbound_dropped` rows.
-- **Review round (`/fixall`):** comment fixes from the move; a decode failure on a channel that does
-  not redeliver now says "dropped … count unknown" (`inbound_drop::on_undecodable_batch`); new tests —
-  the no-sink drop line, a second mid-batch count, `observed_at` bounds, and the PG e2e
-  `a_failed_pairing_lookup_is_stored_as_rejected_unverifiable_against_real_postgres` (live code,
-  checked still claimable). Operator docs (`threat-model.md`, the Matrix runbook) name both rows.
-- ⚠️ **Still unsaid — a quiet `audit_log` is not proof of no loss:** messages unread in the bus at
-  stop (#832), queued inside the Matrix worker at driver exit (#835), an undecodable batch (#836).
-  Filed from the review: #837 (thinning per channel, not action), #838 (a failed pairing-code
-  redemption reads as `rejected_unpaired`), #839 (a persistent lookup failure never reaches ERROR),
-  #840 (sink closures' wiring to `SinkWriter::spawn` untested).
-
-### Previous (2026-10-06): #813 + #828 (PR #830) — what still binds
-
-- `pg_events::audit_or_report` holds a **`PendingInsert` drop guard** across the insert: a row
-  abandoned mid-await says `may not have been written` on `[audit-lost]`. ⚠️ No `.await` may precede
-  the guard's construction. ⚠️ `pg_events::test_support::connected` returns the accepted stream —
-  **hold it** (`let _held`), or the insert sees EOF instead of a hang.
-- `warn_and_fall_back!` arm **`level = ERROR, marked`** puts `[audit-lost]` on the traced path; the
-  daemon logs `.json()`, so the marker opens `fields.message` — alerts must be unanchored. Open from
-  it: #829, #831, #832, #833.
+- **#813:** `pg_events::audit_or_report` awaits the insert under a **`PendingInsert` drop guard**
+  (`settle_or_report`, generic over the insert future so every outcome is unit-tested without a
+  Postgres). `settle(result)` reports an `Err` and is silent on `Ok`; dropped unsettled it reports
+  `… may not have been written: its task was stopped before the insert returned` (or `the insert
+  panicked`, unwinding builds only). A bus stop (incl. one the supervisor triggers) abandons `bus`
+  rows; only a runtime drop can abandon `channel_supervisor` rows (its `emit` is awaited and
+  joined). Cancellation, not unwinding — `panic = "abort"` does not void it. Tested through the
+  `queue_closed` sequence (pump ends → bell → insert hangs on a stalled pool → `shutdown()`), real
+  `PgChannelEvents`, red first. ⚠️ No `.await` may precede the guard's construction.
+- **#828:** new `warn_and_fall_back!` arm **`level = ERROR, marked`** — the traced message is the
+  fallback's text, so `[audit-lost]` is in the tracing path at the default `RUST_LOG`. ⚠️ The daemon
+  logs `.json()`, so there the marker opens `fields.message`, not the line: an alert must be
+  unanchored or JSON-aware (pinned by a `.json()` subscriber test). Only `emit_audit_lost_report`
+  uses the arm; the worker markers have the same gap (**#831**). The arm is in `pretend_emitter`'s
+  field-scoped (`[{label}]`, `[{message}]`) and level tests like every other arm.
+- ⚠️ **`pg_events::test_support::connected` returns the accepted stream — hold it** (`let _held`):
+  dropped, the insert sees EOF instead of a hang (review finding). Lib's `stalled_pool` is a variant
+  of the daemon binary's (`main/audit_sink_test_support.rs`) — a bin's test items are invisible to
+  the lib. `pg_events` tests now live in `pg_events/tests.rs` (500-LOC cap).
+- **Filed:** #829 (#813's leftovers: unthinned bus lines; "not written" on a decode error after
+  `RETURNING id`); from the review round: **#831** (worker markers absent from the traced path),
+  **#832** (a bus stop on a *non-audit* await — inbound `enqueue`/pairing, queued replies — leaves
+  no row or line), **#833** (`write_fallback_line`'s `eprintln!` can panic inside the guard's `Drop`). ⚠️ rust-analyzer's `cargo check` held the build lock mid-sweep (twice) — kill it.
 
 ### Previous (2026-10-05): #815 + #814 — channel drops leave a trace (PR #824) — what still binds
 
 - `bus.rs` split → `bus_inbound.rs`. A reply to a closed send queue → `channel.reply_undelivered`
   (`queue_closed`); a failed enqueue → **`channel.enqueue_failed`** instead of `channel.received`; a
   refused inbound ack → `send_failed` via `bus::send_or_record`. The boot supervisor's lost rows go on
-  `[audit-lost]` as **`channel_supervisor`** (never `cause`). Open from its review: #825 (#826/#827 done in #834).
+  `[audit-lost]` as **`channel_supervisor`** (never `cause`). Open from its review: #825, #826, #827.
 - ⚠️ **`git push` over SSH fails here** — push over HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
 
-### Previous (2026-10-03/04): NUL (#816, #818 — PRs #819, #820) and thinning (#807/#808, PR #812)
+### Previous (2026-10-04): #818 — NUL in non-audit writes (PR #820) — what still binds
 
-- **Escape records, refuse identities** (`kastellan_db::nul`): records escape to `␀`; identities,
-  memories, pairings and graph upserts refuse with `DbError::NulRefused { column }` before SQL; the
-  bus refuses a NUL id at step 0 (`channel.rejected_malformed`). ⚠️ **`kastellan-db`'s next release
-  must be 0.3.0.** ⚠️ **`truncate_payload` must stay IDEMPOTENT**; `audit::stored_form` is the ONE
-  audit storage transform; top-level audit keys must stay core-spelled. Open: #821–#823.
-- Thinning is **per channel** (`BurstTally`); ⚠️ a burst's tail is said only by the next burst or a
-  graceful shutdown (#817).
+**Escape records, refuse identities** (`kastellan_db::nul`). Records (`tasks::finalize`,
+`asks::raise`) escape to `␀`; identities/memories/pairings/graph upserts refuse with
+`DbError::NulRefused { column }` before SQL. The bus refuses a NUL id at step 0
+(`channel.rejected_malformed`) and escapes + counts a NUL body (`nul_escaped_body`); NUL entity
+spans are dropped at the upsert chokepoint. UTF8 enforced at `initdb` and strictly at boot.
+⚠️ **`kastellan-db`'s next release must be 0.3.0** (`NulRefused`, removed `InitDbOptions.encoding`,
+`DbError` `#[non_exhaustive]`). ⚠️ A zsh `echo "$out" | grep` verdict eats `\0` — use `printf '%s'`
+[[bash-tool-runs-zsh-path-clobber]]. Open nearby: #821, #822, #823.
+
+### Previous (2026-10-03): #816 (PR #819) and #807/#808 (PR #812) — what still binds
+
+- ⚠️ **`truncate_payload` must stay IDEMPOTENT** — the tool path applies it twice. `audit::stored_form`
+  is the ONE audit storage transform (the `AuditSink` seam shares it). `_nul_escaped` is a
+  `PRESERVED_KEYS` member; top-level audit keys must stay core-spelled or a worker can forge it.
+- Thinning is **per channel**; every shed/late line carries a `BurstTally`. ⚠️ A burst's tail is said
+  only by the next burst or a graceful shutdown (#817). A failed bus insert goes on `[audit-lost]`
+  under the `bus` writer, and since #813 so does one abandoned at bus stop.
 
 ### Previous (2026-09-30 → 10-03): the audit sink — #788–#802 (PRs #791, #795, #801, #806) — what still binds
 
@@ -231,8 +228,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 > ⚠️ **A private `CARGO_TARGET_DIR` breaks daemon e2es** [[custom-cargo-target-dir-breaks-daemon-e2e]];
 > **rust-analyzer's `cargo check` holds `target/debug/.cargo-lock`** — ~10 min per save (all ~190
 > test targets). Iterate lib/bin unit tests in a private `CARGO_TARGET_DIR=$HOME/.cargo-target-<topic>`
-> (never for daemon e2es or the gate sweep), or kill the IDE's cargo child — it re-spawns on **every
-> save**, so `pkill -f "cargo check --workspace --message-format"` before each run (2026-10-07).
+> (never for daemon e2es or the gate sweep), or kill the IDE's cargo child (recurred 2026-09-30).
 
 > ⚠️ **Do NOT edit the tree while a sweep compiles in it — and give every reviewer its own worktree**
 > [[never-edit-tree-during-a-sweep]] [[worktree-cwd-lands-on-main]]. **A fresh worktree has no worker
@@ -291,7 +287,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824 + #830 + #834:** watch one restart for the `[audit-lost]` /
+5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824 + #830:** watch one restart for the `[audit-lost]` /
    INFO drain lines (since #830 the traced line carries `[audit-lost]` too; a Matrix login still in
    progress at shutdown should be INFO "not finished starting", not a loss; a bus stopped under a
    wedged Postgres now says `may not have been written`), and query an `observed_at` on the next `channel.*` row. Then
@@ -299,11 +295,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    line) and #809–#811. A deploy of #812 is the first time a thinned line's
    `refused row N of this burst` and a `bus` writer line can be seen live. The #820 deploy also
    adds a **boot-time `server_encoding` check** — the DGX cluster was made by `kastellan-db-init`
-   (UTF8), but confirm the daemon comes up. A restart mid-poll can now leave a `channel.inbound_dropped`
-   row, and a Postgres outage `channel.rejected_unverifiable` rows (#834). Natural next security
-   items: **#825** (replies lost while the bus is down; wants a catch-up sweep), then #832 (pump
-   awaits abandoned at stop, incl. the bus's unread inbound buffer), #833 (stderr panic in a `Drop`;
-   needs a design call), #829, #831 and #817.
+   (UTF8), but confirm the daemon comes up. Natural next security items: the channel drops #824's
+   review found — **#825** (replies lost while the bus is down; wants a catch-up sweep), #826, #827 —
+   then #832 (pump awaits abandoned at stop), #829 (#813's leftovers), #831 and #817.
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
@@ -370,8 +364,8 @@ keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memo
 #824 `channel/bus.rs` (→ `bus_inbound.rs`), #782 `report/delivery.rs` and `polled_driver/tests.rs`, #818 `audit/nul_escape.rs` → `db/src/nul.rs`, #816 `db/src/audit.rs` (→ `audit/truncate.rs`; ⚠️
 `audit/truncate/tests.rs` is still 833), #788 `channel/mod.rs` (→ `undelivered.rs`) and
 `polled_driver.rs` (→ `polled_driver/audit.rs`), #792 `main/audit_sink.rs` (→ `audit_sink_tests.rs`,
-`audit_sink_test_support.rs`), #806 `email_boot.rs`/`matrix_boot.rs` (→ `*_tests.rs`, proved byte-identical). ⚠️ **Near the cap:** `worker_stderr/report/delivery/tests.rs` **499** (one under), `polled_driver/replies.rs`
-**478** — split before the next change grows them. #826 split `polled_driver.rs` (→ `spec.rs`).
+`audit_sink_test_support.rs`), #806 `email_boot.rs`/`matrix_boot.rs` (→ `*_tests.rs`, proved byte-identical). ⚠️ **Near the cap:** `polled_driver.rs` **495**, `worker_stderr/report/delivery/tests.rs`
+**484**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
@@ -405,9 +399,9 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#827/#826 `/fixall` review round — **the gate that stands**) | PR #834 (review-round commit) | **4906 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`, log `~/.local/state/kastellan/gate-logs/sweep-834-fixall.log`. **Predicted exactly**: 4903 (the 3rd commit's 4902 + the review commit's 1) + core lib **2** (no-sink drop line, longer mid-batch tail) + `channel_bus_pg_e2e` **1** (`rejected_unverifiable` against real PG, also run alone under `KASTELLAN_PG_REQUIRE_E2E=1`: `[E2E]` lines, 0 `[SKIP]`). Mutants killed: `audit.is_some()`→`true`, `unsent = 2`, `Err`→`Rejected` (PG) | exit 0, **incremental** (default target dir — only the 3 crates touched re-checked; no cold run this round) | **23** Mac |
-| **Mac** (#827/#826 — superseded) | PR #834 (3rd commit, `b8e1cab9`) | **4902 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #830's 4888: core lib **+9** (`auth` 1, `bus/tests/unverifiable` 2, `polled_driver/tests/inbound_drop` 6), daemon bin **+5** (`matrix_boot` 4, `audit_sink::report` 1). The review commit adds **1** core lib test (ack-channel mid-batch), run in isolation — expect **4903** next sweep. Red first; 6 mutants all killed | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-826`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
-| **Mac** (#813/#828 review round — superseded) | PR #830 (2nd commit) | **4888 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly**: core lib 2368 → **2370** (`pg_events` every-outcome test, `.json()` marker test; the ERROR-arm level test was widened, not added). New assertions mutation-checked: marked arm minus `message`/`label`, guard armed on `Ok`, panic reported as a stop — all 4 killed | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-830`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
+| **Mac** (#813/#828 review round — **the gate that stands**) | PR #830 (2nd commit) | **4888 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly**: core lib 2368 → **2370** (`pg_events` every-outcome test, `.json()` marker test; the ERROR-arm level test was widened, not added). New assertions mutation-checked: marked arm minus `message`/`label`, guard armed on `Ok`, panic reported as a stop — all 4 killed | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-830`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
+| **Mac** (#813/#828 — superseded) | PR #830 (1st commit) | **4886 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**. **Per-suite diff against #820's 4877 log: only core lib moved, 2359 → 2368** (#824 +6, this PR +3) — so #824's row below was one short (real total **4883**, core lib +6 not +5). New tests red first | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-813`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
+| **Mac** (#815/#814 — superseded, ⚠️ miscounted by 1) | PR #824 | **4882 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` **0**, `[SKIP]` **23**; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast -- --test-threads=4 --nocapture`. **Predicted exactly** against #820's 4877: core lib **+5** (`bus/tests/dropped` 2, `pg_sink` 2, `pg_events` 1). Every new test seen red first | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-815`, **27** `Checking kastellan` (rustc **1.98**) | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -488,9 +482,9 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#834](https://github.com/hherb/kastellan/pull/834)** (#827, #826) — a failed pairing lookup audits `channel.rejected_unverifiable` (fail-closed, no carve-out); a Matrix inbound batch the closed bus never took is counted, said on `[worker-refusal]` and audited as `channel.inbound_dropped`.
 - **[#830](https://github.com/hherb/kastellan/pull/830)** (#813, #828) — an audit insert abandoned mid-await (bus stop; runtime drop) reports `may not have been written` via a `PendingInsert` drop guard; the `[audit-lost]` marker is on the tracing path too (`level = ERROR, marked` arm).
-- **#824, #820, #819, #812, #806, #804, #803, #801, #795, #791, #787, #786, #784, #781, #778, #776, #775, #770, #766** — audit-sink close-out; clippy 1.99 lockfile; TencentDB survey; shutdown names pending rows; `[audit-lost]` + drain; recovery lines, bounded sinks; reply queues + `[worker-refusal]`; recall excludes L0/L3; cognee survey; a refusal is not a death; route spellings; the thinking switch; `UPSTREAM_AUTH_FAILED`; the live mail shape gate. One-liners in the `802`/`815` archive snapshots (#824: channel drops leave rows; #820: NUL refused/escaped beyond `audit_log`; #819: NUL escaped in audit rows; #812: per-channel thinning + bus `[audit-lost]`).
+- **[#824](https://github.com/hherb/kastellan/pull/824)** (#815, #814) — a reply to a closed send queue writes `channel.reply_undelivered` (`queue_closed`), a failed enqueue writes `channel.enqueue_failed`, and the boot supervisor's lost rows go on `[audit-lost]` (`channel_supervisor`); `bus.rs` split (→ `bus_inbound.rs`).
+- **#820, #819, #812, #806, #804, #803, #801, #795, #791, #787, #786, #784, #781, #778, #776, #775, #770, #766** — audit-sink close-out; clippy 1.99 lockfile; TencentDB survey; shutdown names pending rows; `[audit-lost]` + drain; recovery lines, bounded sinks; reply queues + `[worker-refusal]`; recall excludes L0/L3; cognee survey; a refusal is not a death; route spellings; the thinking switch; `UPSTREAM_AUTH_FAILED`; the live mail shape gate. One-liners in the `802`/`815` archive snapshots (#820: NUL refused/escaped beyond `audit_log`; #819: NUL escaped in audit rows; #812: per-channel thinning + bus `[audit-lost]`).
 - **#764, #762, #761, #758, #748, #750, #745, #743, #740, #735, #731, #728, #726, #720, #727, #717, #709, #708, #702, #694,
   #692, #688, #685** and earlier — see git history and the [`archive/`](archive/) snapshots.
 
