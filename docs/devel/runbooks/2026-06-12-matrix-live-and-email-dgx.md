@@ -100,6 +100,18 @@ accepts **both**: a custom root CA **and** a CONNECT-over-UDS proxy.
   (the pairing lookup **failed** — a database error, not an unpaired peer; #827) and
   `channel.inbound_dropped` (Matrix messages lost because the bus closed while the
   driver held them, with a count; #826).
+- Replies the bus missed while it was down are **caught up**, not lost (#825): at bus
+  start and every 5 min it routes every finished channel task whose reply was never
+  settled, the late ones prefixed "(Delayed reply — you sent this … ago.)".
+  `channel.replied` carries `via` (`notify` or `catch_up`) and, when late,
+  `delayed_secs`; a channel task with no routing metadata is settled once as
+  `channel.reply_unroutable` (task id only). How often catch-up saved a reply:
+  `select payload->>'via', count(*) from audit_log where action = 'channel.replied' group by 1;`.
+  The backlog, which should be 0 or briefly small (a growing number means no running
+  bus serves that channel):
+  `select count(*) from tasks where reply_settled_at is null and payload->>'kind' = 'channel' and state in ('completed','failed','cancelled','blocked','timed_out','crashed','refused');`.
+  Migration 0027 runs at the first deploy and marks every earlier reply `backfilled`,
+  so history is not re-sent.
 - Update HANDOVER + ROADMAP ("Matrix inbound"/"Matrix outbound" → `[x]`), flip the
   `live-matrix` build on in the deployment, and record the A1 spike outcome.
 
