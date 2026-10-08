@@ -24,6 +24,7 @@ pub mod auth;
 pub mod boot_supervisor;
 pub mod bus;
 mod bus_inbound;
+mod bus_outbound;
 pub mod email;
 pub mod inbound_nul;
 pub mod ingest;

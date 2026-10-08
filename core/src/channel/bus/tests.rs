@@ -5,6 +5,7 @@
 //! a real cluster, plus the real `DbPeerAuthorizer`.
 
 use super::*;
+use crate::channel::actions;
 use crate::channel::auth::{AuthDecision, StaticPairings, UnauthenticReason};
 use crate::channel::outbox::ChannelOutbox;
 use crate::channel::{ChannelId, ConversationId, IncomingMessage, PeerEvidence, PeerId};
