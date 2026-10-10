@@ -3,7 +3,7 @@
 //! `KASTELLAN_PG_BIN_DIR`.
 
 use kastellan_db::tasks::reply_claim::{
-    claim_reply, unsettled_channel_replies, ReplyDisposition, REPLIED_STATES,
+    claim_reply, reply_settled, unsettled_channel_replies, ReplyDisposition, REPLIED_STATES,
 };
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
@@ -150,8 +150,7 @@ fn the_claim_has_one_winner_and_only_for_finished_tasks() {
             .await
             .expect("runtime pool");
 
-        // Every terminal state is in the backlog, in id order (pins the
-        // partial index's predicate against the const).
+        // Every terminal state is in the backlog, in id order.
         let mut by_state = Vec::new();
         for state in REPLIED_STATES {
             by_state.push(seed(&pool, channel_payload(), state).await);
@@ -184,6 +183,8 @@ fn the_claim_has_one_winner_and_only_for_finished_tasks() {
         // A task that has not finished can never be settled.
         assert_eq!(claim_reply(&pool, pending, ReplyDisposition::Routed).await.unwrap(), None);
         assert_eq!(disposition(&pool, pending).await, None);
+        assert!(!reply_settled(&pool, pending).await.unwrap(), "unsettled reads false");
+        assert!(!reply_settled(&pool, i64::MAX).await.unwrap(), "a missing row reads false");
 
         // Eight concurrent claimers, one winner.
         let target = by_state[0];
@@ -196,6 +197,7 @@ fn the_claim_has_one_winner_and_only_for_finished_tasks() {
         let won = claims.into_iter().find_map(|c| c.ok().flatten()).unwrap();
         assert!(won.finished_at.is_some());
         assert_eq!(disposition(&pool, target).await.as_deref(), Some("routed"));
+        assert!(reply_settled(&pool, target).await.unwrap(), "the re-read a failed claim relies on");
 
         // The other disposition is stored as itself.
         claim_reply(&pool, by_state[1], ReplyDisposition::Unroutable).await.unwrap().unwrap();

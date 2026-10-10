@@ -64,8 +64,8 @@ fn bodies(sent: &Mutex<Vec<OutgoingMessage>>) -> Vec<String> {
     sent.lock().unwrap().iter().map(|m| m.body.clone()).collect()
 }
 
-/// The backlog left while no bus listened goes out when one starts.
-/// (RF 4) In task-id order.
+/// The backlog left while no bus listened goes out when one starts, in
+/// task-id order.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_starting_bus_delivers_the_backlog_in_task_order() {
     let (backlog, _n) =
@@ -91,7 +91,7 @@ async fn a_notify_after_the_sweep_does_not_resend() {
     r.bus.shutdown().await;
 }
 
-/// (RF 5) A task for a channel no bus here serves is never claimed, and the
+/// A task for a channel no bus here serves is never claimed, and the
 /// cursor moves past it: more than a page of them does not starve the one
 /// behind.
 #[tokio::test(flavor = "multi_thread")]
@@ -112,7 +112,7 @@ async fn the_sweep_pages_past_tasks_it_does_not_serve() {
     r.bus.shutdown().await;
 }
 
-/// (RF 3) A backlog far bigger than the per-channel queue (32) all goes
+/// A backlog far bigger than the per-channel queue (32) all goes
 /// out: the sweep waits on the queue while the per-channel pump drains it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_backlog_larger_than_the_queue_is_all_delivered() {
@@ -123,7 +123,7 @@ async fn a_backlog_larger_than_the_queue_is_all_delivered() {
     r.bus.shutdown().await;
 }
 
-/// (RF 2) A transport that refuses every send — email's today — is tried
+/// A transport that refuses every send — email's today — is tried
 /// once per reply: claimed, refused, recorded, never swept again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_catch_up_reply_is_not_resent_by_later_sweeps() {
@@ -159,9 +159,12 @@ async fn a_failed_sweep_does_not_end_the_pump() {
     eventually("the start sweep ran", || backlog.unsettled_calls.load(Ordering::SeqCst) >= 1).await;
     let died = tokio::time::timeout(std::time::Duration::from_millis(200), r.bus.death_signal()).await;
     assert!(died.is_err(), "a failed sweep must not ring the death bell");
-    // The live path still works.
+    // The live path still works, and its row says which path it was.
     notify.send(1).unwrap();
     eventually("the NOTIFY's send", || r.sent.lock().unwrap().len() == 1).await;
+    let rows = r.ev.audited.lock().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].1["via"], "notify", "{rows:?}");
     r.bus.shutdown().await;
 }
 

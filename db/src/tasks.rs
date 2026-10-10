@@ -572,8 +572,11 @@ pub async fn mark_failed_running(pool: &PgPool, task_id: i64) -> Result<bool, Db
 /// The `detail` of the error result [`sweep_crashed`] stores on a task it
 /// marks `crashed`, so the reply its peer gets can say the task was
 /// interrupted (`core::channel::route::reply_body` matches on it). Until #825
-/// no reply was ever sent for one — the sweep runs at boot, before any
-/// channel is listening — so a NULL result was never seen.
+/// no reply was ever sent for a swept task — the sweep runs at boot, before
+/// any channel is listening — so its NULL result was never seen. Not every
+/// `crashed` task carries it: [`mark_failed_running`] (an operator's
+/// `kastellan-cli tasks fail`) still leaves the result NULL, and its peer
+/// reads "Task finished, but produced no result." (#843).
 pub const CRASHED_DETAIL: &str = "crashed";
 
 /// Startup sweep. Marks every task whose lease has elapsed but is

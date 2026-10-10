@@ -247,6 +247,7 @@ impl CompletedTasks for FakeCompleted {
         Ok(Some(ClaimedReply { created_at: now, finished_at: Some(now) }))
     }
     async fn unsettled(&self, _after_id: i64, _limit: i64) -> anyhow::Result<Vec<i64>> {
+        tokio::task::yield_now().await; // a real backlog read yields: no hang on a looping sweep
         Ok(Vec::new())
     }
 }
@@ -561,6 +562,7 @@ impl CompletedTasks for EndedCompleted {
         Ok(Some(ClaimedReply { created_at: now, finished_at: Some(now) }))
     }
     async fn unsettled(&self, _after_id: i64, _limit: i64) -> anyhow::Result<Vec<i64>> {
+        tokio::task::yield_now().await; // a real backlog read yields: no hang on a looping sweep
         Ok(Vec::new())
     }
 }
@@ -585,6 +587,7 @@ impl CompletedTasks for ParkingCompleted {
         Ok(Some(ClaimedReply { created_at: now, finished_at: Some(now) }))
     }
     async fn unsettled(&self, _after_id: i64, _limit: i64) -> anyhow::Result<Vec<i64>> {
+        tokio::task::yield_now().await; // a real backlog read yields: no hang on a looping sweep
         Ok(Vec::new())
     }
 }

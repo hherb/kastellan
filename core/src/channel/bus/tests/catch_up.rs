@@ -25,6 +25,11 @@ struct Backlog {
     settled: Mutex<HashMap<i64, ReplyDisposition>>,
     /// Ids whose next `load` fails (each once).
     load_fails_once: Mutex<HashSet<i64>>,
+    /// Ids whose next claim fails without committing (each once).
+    claim_fails_once: Mutex<HashSet<i64>>,
+    /// Ids whose next claim commits and then fails — an I/O error after the
+    /// server ran the `UPDATE` (each once).
+    claim_commits_then_fails: Mutex<HashSet<i64>>,
     /// When set, every `unsettled` call fails.
     unsettled_fails: AtomicBool,
     unsettled_calls: AtomicUsize,
@@ -51,6 +56,8 @@ impl Backlog {
             finished_ago: ago,
             settled: Mutex::new(HashMap::new()),
             load_fails_once: Mutex::new(HashSet::new()),
+            claim_fails_once: Mutex::new(HashSet::new()),
+            claim_commits_then_fails: Mutex::new(HashSet::new()),
             unsettled_fails: AtomicBool::new(false),
             unsettled_calls: AtomicUsize::new(0),
             claim_calls: AtomicUsize::new(0),
@@ -80,11 +87,17 @@ impl CompletedTasks for Arc<Backlog> {
     }
     async fn claim(&self, id: i64, d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
         self.claim_calls.fetch_add(1, Ordering::SeqCst);
+        if self.claim_fails_once.lock().unwrap().remove(&id) {
+            anyhow::bail!("SECRET-DB-TEXT: claim refused");
+        }
         let mut settled = self.settled.lock().unwrap();
         if settled.contains_key(&id) || !self.rows.lock().unwrap().contains_key(&id) {
             return Ok(None);
         }
         settled.insert(id, d);
+        if self.claim_commits_then_fails.lock().unwrap().remove(&id) {
+            anyhow::bail!("SECRET-DB-TEXT: connection reset after commit");
+        }
         let finished = time::OffsetDateTime::now_utc() - self.finished_ago;
         Ok(Some(ClaimedReply {
             created_at: finished - time::Duration::minutes(1),
@@ -112,6 +125,9 @@ impl CompletedTasks for Arc<Backlog> {
         ids.sort_unstable();
         ids.truncate(usize::try_from(limit).unwrap_or(0));
         Ok(ids)
+    }
+    async fn settled(&self, id: i64) -> anyhow::Result<bool> {
+        Ok(self.settled.lock().unwrap().contains_key(&id))
     }
 }
 
@@ -186,6 +202,146 @@ async fn a_closed_queue_leaves_the_reply_for_catch_up() {
     assert_eq!(backlog.disposition(7), None, "unclaimed: still in the backlog");
     assert_eq!(backlog.claim_calls.load(Ordering::SeqCst), 0);
     assert!(actions_of(&ev).is_empty(), "{:?}", actions_of(&ev));
+
+    // The next bus's sweep, with an open queue, delivers it.
+    let (senders, mut rx) = matrix_sender();
+    assert_eq!(sweep(&backlog, &ev, &senders).await.queued, 1);
+    assert_eq!(rx.recv().await.unwrap().body, "done");
+}
+
+/// A claim that failed without committing is what the WARN has always said:
+/// left for catch-up, which then delivers it once.
+#[tokio::test]
+async fn a_failed_claim_leaves_the_reply_for_catch_up() {
+    let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
+    backlog.claim_fails_once.lock().unwrap().insert(7);
+    let ev = FakeEvents::default();
+    let (senders, mut rx) = matrix_sender();
+
+    assert!(handle_completed(&backlog, &ev, &senders, 7, Via::Notify).await.is_none());
+    assert_eq!(backlog.disposition(7), None);
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    assert!(actions_of(&ev).is_empty(), "{:?}", actions_of(&ev));
+
+    handle_completed(&backlog, &ev, &senders, 7, Via::CatchUp).await.expect("delivered on retry");
+    assert_eq!(rx.recv().await.unwrap().body, "done");
+    assert_eq!(actions_of(&ev), vec![actions::REPLIED.to_string()]);
+}
+
+/// A claim that committed and then returned an error must not be called
+/// "left for catch-up": no sweep will find a settled task again. A re-read
+/// sees it settled, so the reply is recorded — and, at most once, not sent.
+#[tokio::test]
+async fn a_claim_that_committed_before_failing_is_recorded_not_lost() {
+    let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
+    backlog.claim_commits_then_fails.lock().unwrap().insert(7);
+    let ev = FakeEvents::default();
+    let (senders, mut rx) = matrix_sender();
+
+    assert!(handle_completed(&backlog, &ev, &senders, 7, Via::Notify).await.is_none());
+
+    assert_eq!(backlog.disposition(7), Some(ReplyDisposition::Routed));
+    assert!(rx.try_recv().is_err(), "not sent: another router may have sent it");
+    let audited = ev.audited.lock().unwrap().clone();
+    assert_eq!(audited.len(), 1, "{audited:?}");
+    assert_eq!(audited[0].0, actions::REPLY_UNDELIVERED);
+    assert_eq!(audited[0].1["reason"], "claim_unknown");
+    assert!(!audited[0].1.to_string().contains("SECRET"), "no DB text in the row: {}", audited[0].1);
+    assert_eq!(sweep(&backlog, &ev, &senders).await, Default::default(), "settled: out of the backlog");
+}
+
+/// The unroutable twin: a failed claim writes nothing (the sweep retries);
+/// one that committed first still leaves its row, marked uncertain.
+#[tokio::test]
+async fn a_failed_unroutable_claim_is_retried_or_recorded() {
+    let unroutable = || (serde_json::json!({"kind":"channel","peer":"@me:srv"}), None);
+    let (backlog, _n) = Backlog::new(vec![(8, unroutable()), (9, unroutable())]);
+    backlog.claim_fails_once.lock().unwrap().insert(8);
+    backlog.claim_commits_then_fails.lock().unwrap().insert(9);
+    let ev = FakeEvents::default();
+    let (senders, _rx) = matrix_sender();
+
+    assert!(handle_completed(&backlog, &ev, &senders, 8, Via::Notify).await.is_none());
+    assert_eq!(backlog.disposition(8), None, "left for catch-up");
+    assert!(actions_of(&ev).is_empty(), "{:?}", actions_of(&ev));
+    assert!(handle_completed(&backlog, &ev, &senders, 8, Via::CatchUp).await.is_none());
+    assert_eq!(backlog.disposition(8), Some(ReplyDisposition::Unroutable));
+
+    assert!(handle_completed(&backlog, &ev, &senders, 9, Via::Notify).await.is_none());
+    let audited = ev.audited.lock().unwrap().clone();
+    assert_eq!(audited.len(), 2, "one row each: {audited:?}");
+    assert!(audited.iter().all(|(a, _)| a == "channel.reply_unroutable"), "{audited:?}");
+    assert_eq!(audited[0].1["task_id"], 8);
+    assert!(audited[0].1.get("claim_uncertain").is_none(), "{}", audited[0].1);
+    assert_eq!(audited[1].1["task_id"], 9);
+    assert_eq!(audited[1].1["claim_uncertain"], true);
+}
+
+/// What a sweep reports: its queued, unserved and failed replies, and a
+/// failed read — the pump's streak and the INFO summary read it. A claim
+/// failure with nothing queued fails the sweep; a load failure does not.
+#[tokio::test]
+async fn a_sweep_reports_what_it_left_behind() {
+    let mut email = channel_row("not mine");
+    email.0["channel"] = "email".into();
+    let rows = vec![(1, channel_row("a")), (2, email), (3, channel_row("c")), (4, channel_row("d"))];
+    let (backlog, _n) = Backlog::new(rows);
+    backlog.load_fails_once.lock().unwrap().insert(3);
+    backlog.claim_fails_once.lock().unwrap().insert(4);
+    let ev = FakeEvents::default();
+    let (senders, _rx) = matrix_sender();
+
+    let report = sweep(&backlog, &ev, &senders).await;
+    let expected = crate::channel::catch_up::SweepReport {
+        read_failed: false, queued: 1, unserved: 1, load_failed: 1, claim_failed: 1,
+    };
+    assert_eq!(report, expected);
+    assert!(!report.is_failure(), "one got through");
+
+    // Next sweep: 3 now loads and is queued, 4's claim fails again — not a
+    // failed sweep. Then only a refused claim is left: a failed sweep.
+    backlog.claim_fails_once.lock().unwrap().insert(4);
+    let report = sweep(&backlog, &ev, &senders).await;
+    assert_eq!((report.queued, report.claim_failed), (1, 1), "{report:?}");
+    backlog.claim_fails_once.lock().unwrap().insert(4);
+    let report = sweep(&backlog, &ev, &senders).await;
+    assert_eq!((report.queued, report.claim_failed), (0, 1), "{report:?}");
+    assert!(report.is_failure(), "every claim it tried failed: {report:?}");
+
+    backlog.unsettled_fails.store(true, Ordering::SeqCst);
+    let report = sweep(&backlog, &ev, &senders).await;
+    assert!(report.read_failed && report.is_failure(), "{report:?}");
+}
+
+/// A backlog read that hands back the same full page whatever the cursor
+/// (a contract breach — the real query is `id > $after ORDER BY id`) must end
+/// the sweep, not spin inside the pump for ever.
+#[tokio::test]
+async fn a_backlog_read_that_does_not_advance_ends_the_sweep() {
+    struct SamePage;
+    #[async_trait::async_trait]
+    impl CompletedTasks for SamePage {
+        async fn next_completed(&mut self) -> Option<i64> {
+            std::future::pending().await
+        }
+        async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
+            Ok(None)
+        }
+        async fn claim(&self, _: i64, _: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+            Ok(None)
+        }
+        async fn unsettled(&self, _after: i64, limit: i64) -> anyhow::Result<Vec<i64>> {
+            tokio::task::yield_now().await;
+            Ok((1..=limit).collect())
+        }
+    }
+    let ev = FakeEvents::default();
+    let (senders, _rx) = matrix_sender();
+
+    let report = tokio::time::timeout(std::time::Duration::from_secs(5), sweep(&SamePage, &ev, &senders))
+        .await
+        .expect("the sweep ended");
+    assert!(report.read_failed, "{report:?}");
 }
 
 #[tokio::test]
@@ -238,8 +394,9 @@ async fn a_reply_for_a_channel_this_bus_does_not_serve_is_not_claimed() {
 }
 
 /// The narrow race #815's `queue_closed` row still covers: the queue closes
-/// between the closed-queue check and the send. Staged by a claim that drops
-/// the queue's receiver before it returns.
+/// after its slot was reserved and before the post-claim `is_closed` check —
+/// during the claim. Staged by a claim that drops the queue's receiver before
+/// it returns.
 #[tokio::test]
 async fn a_queue_closing_after_the_claim_still_writes_queue_closed() {
     struct ClosingClaim {

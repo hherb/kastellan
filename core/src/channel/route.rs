@@ -18,7 +18,8 @@ use super::OutgoingMessage;
 /// Build the reply for a finalized channel task. Returns `None` (with no error)
 /// when `payload.kind != "channel"` (an `ask`/`l3_run` completion the bus must
 /// ignore) or routing metadata is missing/malformed (the caller, which can
-/// tell the two apart by `kind`, warns for the second).
+/// tell the two apart by `kind`, settles the second as `unroutable`, and the
+/// claim's one winner warns and writes `channel.reply_unroutable` — #825).
 pub fn reply_for_completed_task(payload: &Value, result: Option<&Value>) -> Option<OutgoingMessage> {
     // The same four keys the ask-delivery path reads, through the same
     // function (spec D10) — so where an ask is asked and where its task's
@@ -229,11 +230,6 @@ mod tests {
         }
     }
 
-    /// D14. An expired ask already reaches the room — `notify_task_completed`
-    /// is an `AFTER UPDATE OF state` trigger and `awaiting_operator → failed`
-    /// crosses into its terminal set — so the only question is what it says.
-    /// "Sorry — that failed: ask_timeout" is true and useless; the user's
-    /// question stalled because nobody answered a question about it.
     /// A task the daemon's restart swept to `crashed` (#825 delivers its
     /// reply now, where before it was lost): the peer is told it was
     /// interrupted and should ask again — not "Task finished, but produced no
@@ -247,6 +243,11 @@ mod tests {
         assert!(!body.contains("finished, but"), "{body}");
     }
 
+    /// D14. An expired ask already reaches the room — `notify_task_completed`
+    /// is an `AFTER UPDATE OF state` trigger and `awaiting_operator → failed`
+    /// crosses into its terminal set — so the only question is what it says.
+    /// "Sorry — that failed: ask_timeout" is true and useless; the user's
+    /// question stalled because nobody answered a question about it.
     #[test]
     fn an_ask_timeout_reads_as_an_unanswered_question_not_a_crash() {
         let body = reply_body(Some(&json!({"kind": "error", "detail": "ask_timeout"})));

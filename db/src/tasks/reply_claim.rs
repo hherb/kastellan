@@ -2,12 +2,12 @@
 //! a reply, and the atomic step that settles one.
 //!
 //! Every route of a channel reply — from the live `tasks_completed` NOTIFY or
-//! from the catch-up sweep, on either bus (#497) — claims the task first. The
-//! claim is an `UPDATE … WHERE reply_settled_at IS NULL`, so it has exactly one
-//! winner and every other router backs off silently. It is **at-most-once**: a
-//! task is settled when its reply is *routed*; a transport failure after that
-//! is recorded as `channel.reply_undelivered`, never retried (see the spec's
-//! D2 for why not at-least-once).
+//! from the catch-up sweep, on either bus (#497) — claims the task before
+//! queueing its reply. The claim is an `UPDATE … WHERE reply_settled_at IS
+//! NULL`, so it has exactly one winner and every other router backs off
+//! silently. It is **at-most-once**: a task is settled just before its reply
+//! is queued; a failure after that is recorded as `channel.reply_undelivered`,
+//! never retried (see the spec's D2 for why not at-least-once).
 
 use sqlx::PgPool;
 use sqlx::Row;
@@ -21,9 +21,11 @@ use crate::DbError;
 ///
 /// One Rust copy, shared by the claim, the backlog read and
 /// `turns::conversation_turns`. Migration 0027's backfill and partial index
-/// hold reviewed SQL copies; `db/tests/reply_claim_e2e.rs` pins the index
-/// against this const. **If the trigger's list is ever widened, this list and
-/// 0027's move with it** — machine-checking the trigger is #712.
+/// hold reviewed SQL copies; `db/tests/reply_claim_e2e.rs` pins both against
+/// this const. **If the trigger's list is ever widened, this list moves and a
+/// new migration recreates `tasks_unsettled_channel_replies`** — 0027 itself
+/// is immutable once applied (sqlx checksums it), and its backfill is history.
+/// Machine-checking the trigger is #712.
 pub const REPLIED_STATES: [&str; 7] = [
     "completed", "failed", "cancelled", "blocked", "timed_out", "crashed", "refused",
 ];
@@ -32,7 +34,9 @@ pub const REPLIED_STATES: [&str; 7] = [
 /// migration 0027: no code path settles a task that way.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplyDisposition {
-    /// Handed to the owning channel's outbound queue.
+    /// Claimed for routing to the owning channel's queue. The claim comes
+    /// first, so a `routed` task may still have been dropped after it:
+    /// `channel.replied` / `channel.reply_undelivered` say what happened.
     Routed,
     /// A channel task with no routing metadata: there is no one to reply to.
     Unroutable,
@@ -91,10 +95,25 @@ pub async fn claim_reply(
     }))
 }
 
+/// Whether `task_id`'s reply has been settled. Asked after a claim that
+/// returned an error: the claim is one autocommit `UPDATE`, so an I/O error
+/// can arrive after the server ran it, and only a re-read tells "left for
+/// catch-up" from "settled, and nothing sent". `false` for a missing row.
+pub async fn reply_settled(pool: &PgPool, task_id: i64) -> Result<bool, DbError> {
+    let settled: Option<bool> =
+        sqlx::query_scalar("SELECT reply_settled_at IS NOT NULL FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| DbError::Query(format!("tasks reply_settled: {e}")))?;
+    Ok(settled.unwrap_or(false))
+}
+
 /// Up to `limit` ids of finished channel tasks whose reply is unsettled, with
 /// `id > after_id`, ascending — so a sweep pages through the backlog oldest
-/// first, and a caller that skips an id still moves past it. The predicate is
-/// 0027's partial index's, so this reads only the backlog.
+/// first, and a caller that skips an id still moves past it. The predicate
+/// matches 0027's partial index so the planner can use it; with the state
+/// list bound as a parameter that holds for a custom plan, not a generic one.
 pub async fn unsettled_channel_replies(
     pool: &PgPool,
     after_id: i64,

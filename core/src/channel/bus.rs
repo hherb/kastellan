@@ -1,5 +1,6 @@
 //! The channel bus runtime: an inbound pump per channel (recv → classify →
-//! audit + enqueue) and one outbound pump (completed-task NOTIFY → route → send).
+//! audit + enqueue) and one outbound pump (completed-task NOTIFY or backlog
+//! sweep → route → claim → send).
 //! All DB access is behind two seams so the pumps are testable without Postgres.
 
 use std::collections::HashMap;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{error, info};
 
 use kastellan_db::tasks::Lane;
 
@@ -52,6 +53,16 @@ pub trait CompletedTasks: Send + Sync {
     /// Up to `limit` unsettled finished channel task ids above `after_id`,
     /// ascending.
     async fn unsettled(&self, after_id: i64, limit: i64) -> anyhow::Result<Vec<i64>>;
+    /// Whether `id`'s reply is settled — asked only after `claim` returned an
+    /// error, which a real claim can do *after* committing. See
+    /// `kastellan_db::tasks::reply_claim::reply_settled`.
+    ///
+    /// The default, `false`, is right for an implementation whose failed
+    /// claim never commits — every in-memory fake. `PgCompletedTasks`
+    /// overrides it.
+    async fn settled(&self, _id: i64) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Pairing carve-out seam: consulted **only** for authorizer-rejected peers, and
@@ -170,8 +181,9 @@ pub use super::pg_events::PgChannelEvents;
 /// 500-LOC soft cap, and #815 was about to grow it).
 pub use super::bus_inbound::handle_inbound;
 
-/// The outbound half — `handle_completed`, `PgCompletedTasks` and the
-/// transport-failure row — in its own module since #825.
+/// The outbound half — `handle_completed`, the catch-up `sweep`,
+/// `PgCompletedTasks` and the transport-failure row — in its own module since
+/// #825.
 pub use super::bus_outbound::{handle_completed, sweep, PgCompletedTasks};
 use super::bus_outbound::send_or_record;
 
@@ -301,15 +313,27 @@ impl ChannelBus {
 
         // Outbound pump: sweep the backlog, then NOTIFY → load → route →
         // claim → push into the per-channel sender, re-sweeping every
-        // `SWEEP_EVERY` (#825). The start sweep needs no ordering care:
-        // `completed`'s LISTEN was established before `spawn` was called, so
-        // a task finishing during the sweep is announced afterwards and its
-        // claim drops the duplicate.
+        // `SWEEP_EVERY` (#825). The start sweep needs no ordering care: the
+        // production `completed` is a `PgCompletedTasks`, whose `connect()`
+        // established its LISTEN before `spawn` was called, so a task
+        // finishing during the sweep is announced afterwards and its claim
+        // drops the duplicate.
         let events_out = events.clone();
         let life = bell.guard();
         handles.push(tokio::spawn(async move {
             let _life = life;
-            sweep(&*completed, &*events_out, &senders).await;
+            // A failed sweep is a WARN and the pump carries on; a run of
+            // them is an ERROR, since replies are then piling up unseen.
+            let mut streak = super::catch_up::FailedSweeps::default();
+            let mut note = move |report| {
+                if let Some(n) = streak.record(&report) {
+                    error!(
+                        consecutive = n,
+                        "reply catch-up keeps failing; finished tasks' replies are not going out"
+                    );
+                }
+            };
+            note(sweep(&*completed, &*events_out, &senders).await);
             let every = super::catch_up::SWEEP_EVERY;
             let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -326,7 +350,7 @@ impl ChannelBus {
                         }
                         None => break,
                     },
-                    _ = tick.tick() => sweep(&*completed, &*events_out, &senders).await,
+                    _ = tick.tick() => note(sweep(&*completed, &*events_out, &senders).await),
                 }
             }
             info!("outbound pump stopped");

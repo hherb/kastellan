@@ -212,7 +212,9 @@ pub mod actions {
     /// reply the NOTIFY missed) — and, when the reply went out more than
     /// [`super::catch_up::LATE_AFTER`] after its task finished,
     /// `delayed_secs`. Every row is backed by the task's reply claim
-    /// (`kastellan_db::tasks::reply_claim`), so there is one per task.
+    /// (`kastellan_db::tasks::reply_claim`), so there is one per task. A
+    /// reply still in the per-channel queue when its pump ends keeps this row
+    /// and is never sent — #832's family, with no compensating row yet.
     pub const REPLIED: &str = "channel.replied";
     /// A message for a channel was not delivered: a reply, an ask, or an
     /// inbound ack — routed to its channel's queue or, for `queue_closed`,
@@ -225,10 +227,12 @@ pub mod actions {
     /// **Two writers.** The bus: its per-channel pump, when `Channel::send`
     /// fails (`send_failed`) — for a reply, an ask, or (since #824) the ack
     /// `handle_inbound` sends back — and, since #815, `handle_completed`, when
-    /// the channel's queue closes between the reply's claim and its queueing
-    /// (`queue_closed`; that reply has **no** [`REPLIED`] row) — since #825 a
-    /// queue found *already* closed leaves the reply unclaimed for the
-    /// catch-up sweep instead, and writes nothing. And, since #782, a polled channel's driver
+    /// the channel's queue closes during the reply's claim, after its slot was
+    /// reserved (`queue_closed`; that reply has **no** [`REPLIED`] row) — since
+    /// #825 a queue found *already* closed leaves the reply unclaimed for the
+    /// catch-up sweep instead, and writes nothing — or when a claim that
+    /// returned an error turns out to have settled the task anyway
+    /// (`claim_unknown`; no [`REPLIED`] row either). And, since #782, a polled channel's driver
     /// (`polled_driver::replies`), whose `send` only queues: it writes the row
     /// when it **gives up** on a reply its worker kept refusing (`gave_up`),
     /// drops one past a full conversation queue (`queue_full`), or exits with
@@ -247,7 +251,8 @@ pub mod actions {
     /// and is correlatable only by timestamp; carrying `ask_id` into the
     /// pump is tracked as its own issue. Two more orphan sources: an inbound
     /// ack the transport refused (it answers a message, not a task), and a
-    /// `queue_closed` row, which by definition has no `channel.replied`.
+    /// `queue_closed` or `claim_unknown` row, which by definition has no
+    /// `channel.replied`.
     pub const REPLY_UNDELIVERED: &str = "channel.reply_undelivered";
     /// A finished channel task's reply could not be routed at all: the task
     /// is `kind: "channel"` but carries no channel, peer or conversation, so
@@ -255,7 +260,9 @@ pub mod actions {
     /// event's time (`observed_at`) only — there is no channel or peer to
     /// name. Written once, by whichever bus wins the task's reply claim
     /// (`kastellan_db::tasks::reply_claim`); before #825 this was a WARN on
-    /// every bus, with no row.
+    /// every bus, with no row. A claim that returned an error but settled the
+    /// task anyway writes it with `"claim_uncertain": true` — possibly a
+    /// second row for the task, which beats none.
     pub const REPLY_UNROUTABLE: &str = "channel.reply_unroutable";
     /// A message failed transport authenticity (DMARC and/or token) — dropped
     /// before authorization, so it never reaches the pairing carve-out.
