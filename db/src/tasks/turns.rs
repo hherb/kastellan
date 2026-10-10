@@ -32,12 +32,15 @@
 //!
 //! # Why this state list
 //!
-//! [`REPLIED_STATES`] is exactly the set `notify_task_completed` fires on
+//! [`REPLIED_STATES`](super::reply_claim::REPLIED_STATES) — shared with the
+//! reply claim since #825 — is exactly the set `notify_task_completed` fires on
 //! (migration `0005`, widened with `refused` by `0012`), which is the set the
-//! outbound pump replies to. So every row this can return is a turn the peer
-//! actually received a reply for — which is what makes the rendered `answer`
-//! truthful. **If that trigger's list is ever widened, this list moves with
-//! it.** `every_replied_to_state_is_a_turn_and_an_unfinished_one_is_not`
+//! outbound pump replies to. So every row this can return is a turn the
+//! outbound pump tries to reply to — not one a reply is known to have reached:
+//! a swept-`crashed` task before #825, a reply still in the catch-up backlog,
+//! and one recorded as `channel.reply_undelivered` are turns too. Since #825
+//! `tasks.reply_disposition` would allow a precise filter. **If that trigger's
+//! list is ever widened, this list moves with it.** `every_replied_to_state_is_a_turn_and_an_unfinished_one_is_not`
 //! covers all seven plus a negative — but it hand-copies them as literals, so
 //! it catches a NARROWING of this const and is blind to a WIDENING of the SQL
 //! trigger, which is the direction that actually loses turns. **The coupling
@@ -49,6 +52,8 @@ use sqlx::Row;
 use time::OffsetDateTime;
 
 use crate::DbError;
+
+use super::reply_claim::REPLIED_STATES;
 
 /// One earlier turn of a conversation, exactly as stored.
 ///
@@ -72,12 +77,6 @@ pub struct ConversationTurnRow {
     pub result: Option<serde_json::Value>,
     pub turn_record: Option<serde_json::Value>,
 }
-
-/// The terminal states a channel peer was replied to for. See the module docs:
-/// this mirrors `notify_task_completed`.
-const REPLIED_STATES: [&str; 7] = [
-    "completed", "failed", "cancelled", "blocked", "timed_out", "crashed", "refused",
-];
 
 /// Which conversation to read, and how much of it.
 ///

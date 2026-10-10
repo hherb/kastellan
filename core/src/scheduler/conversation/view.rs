@@ -79,7 +79,8 @@ pub(crate) const STATUS_TOO_LARGE: &str = "too large for the conversation budget
 /// shape a live deployment sees on its first follow-up in each room — and
 /// **permanently** reachable for every channel turn that never reached
 /// `tasks::finalize` with a record: `sweep_crashed` and `mark_cancelled` write
-/// `state`/`finished_at` and nothing else, and the pre-plan denial and
+/// no `turn_record` (`sweep_crashed` also writes an error `result` since #825,
+/// but that is not a record), and the pre-plan denial and
 /// `failed_result` paths pass `turn_record: None`. `crashed`, `cancelled`,
 /// `failed`, `blocked` and `refused` are all in `REPLIED_STATES`, so such a
 /// turn IS loaded and IS shown — as having happened, with its text withheld.
