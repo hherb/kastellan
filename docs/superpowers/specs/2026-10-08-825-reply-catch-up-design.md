@@ -108,6 +108,13 @@ settled, or its real completion would find it already claimed.
 
 ## Bus: the outbound flow
 
+> **Superseded in part during review (PR #842).** Steps 4–5 below are the first design. The
+> shipped order is load → route → serves? → **reserve a queue slot** → claim → post-claim
+> `is_closed()` → `permit.send` (086f037f), so a bus stop that aborts the pump while it waits
+> for queue space leaves the reply unclaimed. A claim that returns an error is re-read: if the
+> task is settled anyway, the reply is recorded as `claim_unknown` rather than called "left for
+> catch-up". `core/src/channel/bus_outbound.rs` is authoritative.
+
 The `CompletedTasks` seam (`bus.rs`) gains:
 
 ```rust

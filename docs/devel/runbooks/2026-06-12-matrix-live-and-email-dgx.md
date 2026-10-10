@@ -106,10 +106,17 @@ accepts **both**: a custom root CA **and** a CONNECT-over-UDS proxy.
   `channel.replied` carries `via` (`notify` or `catch_up`) and, when late,
   `delayed_secs`; a channel task with no routing metadata is settled once as
   `channel.reply_unroutable` (task id only). How often catch-up saved a reply:
-  `select payload->>'via', count(*) from audit_log where action = 'channel.replied' group by 1;`.
+  `select payload->>'via', count(*) from audit_log where action = 'channel.replied' group by 1;`
+  (rows from before #825 have no `via` and land in the NULL bucket).
   The backlog, which should be 0 or briefly small (a growing number means no running
-  bus serves that channel):
-  `select count(*) from tasks where reply_settled_at is null and payload->>'kind' = 'channel' and state in ('completed','failed','cancelled','blocked','timed_out','crashed','refused');`.
+  bus serves that channel, or a task whose load keeps failing; each sweep that cannot
+  route every reply logs `reply catch-up sweep could not route every reply` with
+  `unserved`/`load_failed`/`claim_failed` counts, and three sweeps in a row that could not
+  read the backlog or had every claim refused log an ERROR):
+  `select count(*) from tasks where reply_settled_at is null and payload->>'kind' = 'channel' and state in ('completed','failed','cancelled','blocked','timed_out','crashed','refused');`
+  (the state list mirrors `REPLIED_STATES` in `db/src/tasks/reply_claim.rs` — copy it
+  from there if it ever changes). A `channel.reply_undelivered` row with reason
+  `claim_unknown` is a reply whose claim errored after settling the task: not sent.
   Migration 0027 runs at the first deploy and marks every earlier reply `backfilled`,
   so history is not re-sent.
 - Update HANDOVER + ROADMAP ("Matrix inbound"/"Matrix outbound" → `[x]`), flip the

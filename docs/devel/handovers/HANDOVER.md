@@ -8,8 +8,8 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-09 (#825 — a finished channel task's reply is no longer lost when the
-bus missed its NOTIFY: a claim column + a catch-up sweep, PR [#842](https://github.com/hherb/kastellan/pull/842); the operator is still
+**Last updated:** 2026-10-10 (#825 — a finished channel task's reply is no longer lost when the
+bus missed its NOTIFY: a claim column + a catch-up sweep, PR [#842](https://github.com/hherb/kastellan/pull/842), plus its review-fix round; the operator is still
 running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#842](https://github.com/hherb/kastellan/pull/842) (#825), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
@@ -77,16 +77,37 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   `{"kind":"error","detail":"crashed"}` (`tasks::CRASHED_DETAIL`); before #825 no such reply was ever
   sent, because the boot sweep runs before any channel listens.
 - ⚠️ **At-most-once, by design (spec D2):** a claimed reply whose send fails is
-  `reply_undelivered`, never retried. ⚠️ **One row-less window left:** an abort landing on the
-  claim's own round-trip marks the task `routed` with nothing sent (#832's family).
-  ⚠️ **`queue_closed` now means "closed between the claim and the send"** only; a queue found closed
-  writes no row (the sweep delivers it).
+  `reply_undelivered`, never retried. ⚠️ **A claim that returns an error is RE-READ**
+  (`CompletedTasks::settled` → `reply_claim::reply_settled`): the claim is one autocommit `UPDATE`,
+  so it can commit and still error; settled anyway → `reply_undelivered` reason **`claim_unknown`**,
+  not sent (the unroutable twin writes its row with `claim_uncertain: true`). The trait method
+  defaults to `Ok(false)` for fakes — **a new real `CompletedTasks` must override it.**
+  ⚠️ **Loss windows still without a row, all #832's family (commented there 2026-10-10):** an abort
+  on the claim's own round-trip (`routed`, nothing sent); a reply still in the 32-slot per-channel
+  queue when its pump ends (a `channel.replied` row, never sent — and the start sweep fills that
+  queue on purpose, so a flapping pump loses up to ~32 per flap); the `is_closed()`→`permit.send`
+  race. ⚠️ **`queue_closed` now means "closed during the claim"** (after the slot was reserved);
+  a queue found closed at `reserve()` writes no row (the sweep delivers it).
+- **Sweep reporting:** `sweep` returns `catch_up::SweepReport`; a sweep that cannot route every
+  reply logs one INFO `reply catch-up sweep could not route every reply`
+  (`unserved`/`load_failed`/`claim_failed`), and **3 failed sweeps in a row log an ERROR**
+  (`catch_up::FailedSweeps`; failed = backlog read failed, or nothing queued and every claim
+  refused). ⚠️ **Load failures deliberately do not count** — one poison row would otherwise ERROR
+  every 5 min for ever, falsely for every other reply. ⚠️ Nothing tests that the pump *feeds* the
+  streak (that would need a tracing capture, which flakes here). The cursor
+  advances on `max()` with a no-progress guard. `late_reply(&ClaimedReply, now)` returns the
+  lateness and the note together (`delay_note` is gone).
 - ⚠️ **The terminal-state list lives in four places** — trigger 0012, 0027's backfill + index, and
   `REPLIED_STATES`; `db/tests/reply_claim_e2e.rs` pins the index (`pg_index.indpred`) and the backfill
-  against the const; the trigger is still #712. ⚠️ **core's dev-dep tokio now has `test-util`**
+  against the const; the trigger is still #712. A fifth, unpinned copy is the runbook's backlog
+  query. ⚠️ **Widening the list needs a NEW migration** recreating the index — 0027 is immutable
+  once applied (sqlx checksum). ⚠️ **core's dev-dep tokio now has `test-util`**
   (paused-clock tick test). Spec/plan: `docs/superpowers/{specs,plans}/2026-10-08-825-reply-catch-up*`.
-- Review deferrals (minor): skew-free lateness via Postgres `now()`; a per-sweep summary line for
-  unserved/poison backlog tasks; a shared always-claims test fake — #841.
+- Review deferrals (minor): skew-free lateness via Postgres `now()`; a cheap channel read before
+  the full load for unserved/poison tasks (the summary line itself shipped); a shared always-claims
+  test fake — #841. `kastellan-cli tasks fail` still leaves a `crashed` task's result NULL, so its
+  peer reads "Task finished, but produced no result." — #843. The `pg` gate profile now runs
+  `reply_claim_e2e` + `reply_catch_up_pg_e2e`.
 
 ### Previous (2026-10-07): #827 + #826 (PR #834) — what still binds
 
