@@ -73,7 +73,7 @@ impl Backlog {
 
 #[async_trait::async_trait]
 impl CompletedTasks for Arc<Backlog> {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
         match self.notify_rx.lock().await.recv().await {
             Some(id) => Some(id),
             None => std::future::pending().await, // the test dropped its sender: park
@@ -321,7 +321,7 @@ async fn a_backlog_read_that_does_not_advance_ends_the_sweep() {
     struct SamePage;
     #[async_trait::async_trait]
     impl CompletedTasks for SamePage {
-        async fn next_completed(&mut self) -> Option<i64> {
+        async fn next_completed(&self) -> Option<i64> {
             std::future::pending().await
         }
         async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
@@ -405,7 +405,7 @@ async fn a_queue_closing_after_the_claim_still_writes_queue_closed() {
     }
     #[async_trait::async_trait]
     impl CompletedTasks for ClosingClaim {
-        async fn next_completed(&mut self) -> Option<i64> {
+        async fn next_completed(&self) -> Option<i64> {
             std::future::pending().await
         }
         async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {

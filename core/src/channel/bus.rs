@@ -42,8 +42,10 @@ pub use kastellan_db::tasks::reply_claim::{ClaimedReply, ReplyDisposition};
 /// row, and — since #825 — the reply claim and the backlog it settles.
 #[async_trait::async_trait]
 pub trait CompletedTasks: Send + Sync {
-    /// Next completed task id, or `None` when the stream ends.
-    async fn next_completed(&mut self) -> Option<i64>;
+    /// Next completed task id, or `None` when the stream ends. Called by the
+    /// outbound pump only; `&self` (since #832) so the per-channel pumps can
+    /// share the seam for their claims.
+    async fn next_completed(&self) -> Option<i64>;
     /// Fetch `(payload, result)` for a task id, or `None` if absent.
     async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>>;
     /// Settle `id`'s reply as `d`. `Ok(None)`: already settled, or not
@@ -212,7 +214,7 @@ impl ChannelBus {
         authorizer: Arc<dyn PeerAuthorizer>,
         pairing: Option<Arc<dyn PairingService>>,
         events: Arc<dyn ChannelEvents>,
-        mut completed: Box<dyn CompletedTasks>,
+        completed: Arc<dyn CompletedTasks>,
         asks: Option<Arc<AskWiring>>,
     ) -> Self {
         let mut handles = Vec::new();

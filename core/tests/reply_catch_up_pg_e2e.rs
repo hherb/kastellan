@@ -74,7 +74,7 @@ async fn spawn_bus(
         Arc::new(StaticPairings::new()),
         None,
         Arc::new(PgChannelEvents::new(pool.clone())),
-        Box::new(completed),
+        Arc::new(completed),
         None,
     );
     (bus, tx)

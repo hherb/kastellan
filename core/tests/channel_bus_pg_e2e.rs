@@ -94,7 +94,7 @@ async fn channel_inbound_enqueues_and_completion_routes_a_reply() {
 
     // ── Outbound: listen, finalize the task, route the completion to a reply. ──
     // LISTEN before finalize so the NOTIFY is not missed.
-    let mut completed = PgCompletedTasks::connect(pool.clone())
+    let completed = PgCompletedTasks::connect(pool.clone())
         .await
         .expect("connect completed-tasks listener");
 

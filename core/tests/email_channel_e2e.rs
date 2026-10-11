@@ -103,7 +103,7 @@ impl ChannelEvents for RecordingEvents {
 struct NeverCompleted;
 #[async_trait::async_trait]
 impl CompletedTasks for NeverCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
         std::future::pending::<()>().await;
         unreachable!("NeverCompleted never yields")
     }
@@ -284,7 +284,7 @@ async fn spawn_email_channel(events: Vec<Value>, skipped: Vec<Value>) -> Handle 
         Arc::new(TokenAuthorizer),
         None, // no pairing carve-out: email always carries evidence, see bus::handle_inbound.
         Arc::new(events_sink.clone()),
-        Box::new(NeverCompleted),
+        Arc::new(NeverCompleted),
         None,
     );
 

@@ -233,7 +233,7 @@ struct FakeCompleted {
 }
 #[async_trait::async_trait]
 impl CompletedTasks for FakeCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
         self.ids.lock().unwrap().pop()
     }
     async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
@@ -329,7 +329,7 @@ async fn a_refused_reply_audits_reply_undelivered_alongside_replied() {
         Arc::new(StaticPairings::new()),
         None,
         ev.clone(),
-        Box::new(completed),
+        Arc::new(completed),
         None,
     );
 
@@ -548,7 +548,7 @@ async fn evidence_bearing_unpaired_peer_never_reaches_the_pairing_carve_out() {
 struct EndedCompleted;
 #[async_trait::async_trait]
 impl CompletedTasks for EndedCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
         None
     }
     async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
@@ -573,7 +573,7 @@ impl CompletedTasks for EndedCompleted {
 struct ParkingCompleted;
 #[async_trait::async_trait]
 impl CompletedTasks for ParkingCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
         std::future::pending().await
     }
     async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
@@ -596,7 +596,7 @@ impl CompletedTasks for ParkingCompleted {
 /// hand back the bus and the inbound sender (kept alive by the caller — dropping
 /// it is how a test kills the *inbound* pump).
 fn bus_over(
-    completed: Box<dyn CompletedTasks>,
+    completed: Arc<dyn CompletedTasks>,
 ) -> (ChannelBus, mpsc::Sender<IncomingMessage>) {
     let (inbound_tx, inbound_rx) = mpsc::channel::<IncomingMessage>(1);
     let channel = RefusingChannel { id: ChannelId("email".into()), inbound_rx };
@@ -615,7 +615,7 @@ fn bus_over(
 /// the life of the process. The bus must say so.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dead_outbound_pump_fires_the_death_signal() {
-    let (bus, _inbound_tx) = bus_over(Box::new(EndedCompleted));
+    let (bus, _inbound_tx) = bus_over(Arc::new(EndedCompleted));
 
     tokio::time::timeout(std::time::Duration::from_secs(5), bus.death_signal())
         .await
@@ -629,7 +629,7 @@ async fn a_dead_outbound_pump_fires_the_death_signal() {
 /// supervisor does not care *which* pump stopped, only that one did.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_closed_inbound_fires_the_death_signal() {
-    let (bus, inbound_tx) = bus_over(Box::new(ParkingCompleted));
+    let (bus, inbound_tx) = bus_over(Arc::new(ParkingCompleted));
 
     // Closing the transport is what makes `recv()` return `None`.
     drop(inbound_tx);
@@ -646,7 +646,7 @@ async fn a_closed_inbound_fires_the_death_signal() {
 /// supervisor tears a healthy channel down and rebuilds it in a loop.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_healthy_bus_does_not_signal_death() {
-    let (bus, _inbound_tx) = bus_over(Box::new(ParkingCompleted));
+    let (bus, _inbound_tx) = bus_over(Arc::new(ParkingCompleted));
 
     let waited =
         tokio::time::timeout(std::time::Duration::from_millis(200), bus.death_signal()).await;
@@ -898,7 +898,7 @@ async fn the_bus_registers_its_channel_and_deregisters_on_shutdown() {
         Arc::new(StaticPairings::new()),
         None,
         Arc::new(FakeEvents::default()),
-        Box::new(FakeCompleted { ids: Mutex::new(vec![]), rows: HashMap::new() }),
+        Arc::new(FakeCompleted { ids: Mutex::new(vec![]), rows: HashMap::new() }),
         Some(Arc::new(AskWiring { outbox: outbox.clone(), resolver })),
     );
 

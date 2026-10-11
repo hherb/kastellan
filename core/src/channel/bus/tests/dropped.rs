@@ -89,7 +89,7 @@ async fn a_refused_ack_audits_reply_undelivered() {
         Arc::new(StaticPairings::new()),
         Some(Arc::new(FakePairing { code: Some("123456") })),
         ev.clone(),
-        Box::new(ParkingCompleted),
+        Arc::new(ParkingCompleted),
         None,
     );
 
@@ -122,13 +122,14 @@ async fn a_refused_ack_audits_reply_undelivered() {
 /// Yields one completed task once `release` fires, then parks: the
 /// completion arrives exactly when the test says.
 struct GatedCompleted {
-    release: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     row: (Value, Option<Value>),
 }
 #[async_trait::async_trait]
 impl CompletedTasks for GatedCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
-        match self.release.take() {
+    async fn next_completed(&self) -> Option<i64> {
+        let release = self.release.lock().unwrap().take();
+        match release {
             Some(release) => {
                 let _ = release.await;
                 Some(7)
@@ -200,7 +201,7 @@ async fn a_replied_row_abandoned_by_the_stop_is_reported() {
     let events = Arc::new(crate::channel::pg_events::PgChannelEvents::with_reporter(pool, record_lost));
     let (release, gate) = tokio::sync::oneshot::channel();
     let completed = GatedCompleted {
-        release: Some(gate),
+        release: Mutex::new(Some(gate)),
         row: (
             serde_json::json!({"kind":"channel","channel":"matrix","peer":"@me:srv","conversation":"!room:srv"}),
             Some(serde_json::json!({"kind":"completed","message": SECRET_BODY})),
@@ -213,7 +214,7 @@ async fn a_replied_row_abandoned_by_the_stop_is_reported() {
         Arc::new(StaticPairings::new()),
         None,
         events,
-        Box::new(completed),
+        Arc::new(completed),
         None,
     );
 

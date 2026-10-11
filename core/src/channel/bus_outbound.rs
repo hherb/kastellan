@@ -19,21 +19,24 @@ use super::{actions, Channel, ChannelId, OutgoingMessage};
 /// Real `CompletedTasks` over a `PgListener` on `tasks_completed` + `tasks::get`.
 /// Construct via [`PgCompletedTasks::connect`].
 pub struct PgCompletedTasks {
-    listener: sqlx::postgres::PgListener,
+    /// Locked only by `next_completed`, i.e. only by the outbound pump; a
+    /// `select!` that drops that future drops the guard with it.
+    listener: tokio::sync::Mutex<sqlx::postgres::PgListener>,
     pool: sqlx::PgPool,
 }
 impl PgCompletedTasks {
     pub async fn connect(pool: sqlx::PgPool) -> anyhow::Result<Self> {
         let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
         listener.listen("tasks_completed").await?;
-        Ok(Self { listener, pool })
+        Ok(Self { listener: tokio::sync::Mutex::new(listener), pool })
     }
 }
 #[async_trait::async_trait]
 impl CompletedTasks for PgCompletedTasks {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
+        let mut listener = self.listener.lock().await;
         loop {
-            match self.listener.recv().await {
+            match listener.recv().await {
                 Ok(n) => {
                     if let Ok(id) = n.payload().parse::<i64>() {
                         return Some(id);
