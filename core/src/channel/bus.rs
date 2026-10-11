@@ -195,6 +195,7 @@ pub use super::bus_inbound::handle_inbound;
 /// `PgCompletedTasks` and the transport-failure row — in its own module since
 /// #825.
 pub use super::bus_outbound::{handle_completed, sweep, PgCompletedTasks};
+use super::bus_guards::{InFlight, InFlightGuard};
 use super::bus_outbound::send_or_record;
 
 /// What a channel's queue carries, and the per-channel pump's delivery of
@@ -241,7 +242,7 @@ impl ChannelBus {
 
         for mut ch in channels {
             let id = ch.id();
-            let (tx, mut rx) = mpsc::channel::<Queued>(32);
+            let (tx, rx) = mpsc::channel::<Queued>(32);
             senders.insert(id.clone(), tx.clone());
 
             // Publish this channel's reply queue so core-initiated messages
@@ -257,6 +258,9 @@ impl ChannelBus {
             let events = events.clone();
             let asks_for_pump = asks.clone();
             let completed = completed.clone();
+            // Owns the receiver: whatever is still queued when this pump
+            // ends is counted (replies, recoverable) or said (asks) (#832).
+            let mut queue = super::bus_guards::PumpQueue::new(rx, events.clone(), id.clone());
             let life = bell.guard();
             handles.push(tokio::spawn(async move {
                 let _life = life;
@@ -267,6 +271,10 @@ impl ChannelBus {
                     tokio::select! {
                         inbound = ch.recv() => match inbound {
                             Some(msg) => {
+                                // The transport has handed this message over;
+                                // a stop from here to the ack's send would
+                                // lose it with no row (#832).
+                                let guard = InFlightGuard::arm(&*events, InFlight::Inbound, Some(&msg.channel), Some(&msg.peer));
                                 if let Some(ack) = handle_inbound(
                                     &*authorizer,
                                     pairing.as_deref(),
@@ -290,10 +298,11 @@ impl ChannelBus {
                                     // refuses every one.
                                     send_or_record(&*ch, &*events, &id, ack, "inbound ack send failed").await;
                                 }
+                                guard.settle();
                             }
                             None => { info!(channel = %id.0, "inbound closed"); break; }
                         },
-                        Some(item) = rx.recv() => {
+                        Some(item) = queue.recv() => {
                             // TWO producers feed this `rx` (see `Queued`): a
                             // finished task's reply from `handle_completed`,
                             // queued unclaimed — `deliver` claims it, writes

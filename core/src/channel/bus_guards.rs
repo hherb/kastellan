@@ -25,8 +25,13 @@
 //! `panic = "abort"`) says so instead of claiming the bus stopped, exactly as
 //! `PendingInsert` does.
 
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+
 use super::audit_text::quoted_id;
 use super::bus::ChannelEvents;
+use super::bus_deliver::Queued;
 use super::{ChannelId, PeerId};
 
 /// What a guard is protecting, for its line.
@@ -109,6 +114,53 @@ pub(crate) fn format_abandoned(what: InFlight, about: &str, panicked: bool) -> S
         InFlight::Unroutable { task_id } => format!(
             "task {task_id}'s unroutable reply may have been settled without its channel.reply_unroutable row: {cause}"
         ),
+    }
+}
+
+/// A channel's outbound queue, as its pump owns it: the receiver, plus what
+/// its `Drop` says about the items still in it when the pump ends — by
+/// returning, by panicking, or by being aborted.
+///
+/// A [`Queued::Reply`] left behind is fine: it was never claimed, so the
+/// catch-up sweep delivers it (#832), and it is only counted, at INFO. A
+/// [`Queued::Ask`] is not recoverable — it has no task reply to re-find, and
+/// `ask.delivered` was already written — so each one is said on
+/// `[audit-lost]`, by channel and peer.
+pub(crate) struct PumpQueue {
+    rx: mpsc::Receiver<Queued>,
+    events: Arc<dyn ChannelEvents>,
+    channel: ChannelId,
+}
+
+impl PumpQueue {
+    pub(crate) fn new(rx: mpsc::Receiver<Queued>, events: Arc<dyn ChannelEvents>, channel: ChannelId) -> Self {
+        Self { rx, events, channel }
+    }
+
+    /// The next item; cancel-safe, as `mpsc::Receiver::recv` is.
+    pub(crate) async fn recv(&mut self) -> Option<Queued> {
+        self.rx.recv().await
+    }
+}
+
+impl Drop for PumpQueue {
+    fn drop(&mut self) {
+        // Closing first stops producers from adding more while this drains;
+        // `try_recv` still returns everything already buffered.
+        self.rx.close();
+        let mut replies = 0usize;
+        while let Ok(item) = self.rx.try_recv() {
+            match item {
+                Queued::Reply { .. } => replies += 1,
+                Queued::Ask(out) => self.events.report_lost(&format_ask_unsent(&out.channel, &out.peer)),
+            }
+        }
+        if replies > 0 {
+            tracing::info!(
+                channel = %self.channel.0, replies,
+                "channel pump ended with replies queued; they were never claimed and are left for catch-up"
+            );
+        }
     }
 }
 

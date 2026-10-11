@@ -481,3 +481,5 @@ async fn an_abort_while_waiting_for_queue_space_leaves_the_reply_unclaimed() {
 mod pump;
 /// #832: the per-channel pump's half — the claim at the send.
 mod deliver;
+/// #832: what a bus stop abandons, through a running bus.
+mod stop;
