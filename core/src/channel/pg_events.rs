@@ -22,9 +22,10 @@
 //! Since #813 that includes an insert still awaited when the bus is stopped:
 //! `ChannelBus::shutdown` aborts its pumps, the awaited future is dropped and
 //! no `Err` arm runs, so a drop guard says it instead — as a row that *may*
-//! not have been written. What is still unsaid: a row lost to a crash, and a
-//! stop that lands on any *other* await of a pump — an inbound message's
-//! `enqueue` or pairing lookup, a reply still in a channel's queue (#832).
+//! not have been written. Since #832 a stop on any *other* await of a pump is
+//! said through the same writer too (`ChannelEvents::report_lost`, from
+//! `bus_guards`): an inbound message mid-handling, a reply mid-delivery, a
+//! raised ask still queued. What is still unsaid: a row lost to a crash.
 //! Separately, these lines are not thinned: one per lost row, where the
 //! daemon's sinks thin their shed and after-shutdown refusals (#829).
 

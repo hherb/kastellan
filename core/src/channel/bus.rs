@@ -334,11 +334,11 @@ impl ChannelBus {
 
         // Outbound pump: sweep the backlog, then NOTIFY → load → route →
         // push, unclaimed, into the per-channel queue, re-sweeping every
-        // `SWEEP_EVERY` (#825). The channel's pump claims at the send (#832). The start sweep needs no ordering care: the
-        // production `completed` is a `PgCompletedTasks`, whose `connect()`
-        // established its LISTEN before `spawn` was called, so a task
-        // finishing during the sweep is announced afterwards and its claim
-        // drops the duplicate.
+        // `SWEEP_EVERY` (#825); the channel's pump claims at the send (#832).
+        // The start sweep needs no ordering care: the production `completed`
+        // is a `PgCompletedTasks`, whose `connect()` established its LISTEN
+        // before `spawn` was called, so a task finishing during the sweep is
+        // announced afterwards, and the claim drops the duplicate.
         let events_out = events.clone();
         let life = bell.guard();
         handles.push(tokio::spawn(async move {
