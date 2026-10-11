@@ -82,7 +82,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - **Sweep reporting:** `sweep` returns `catch_up::SweepReport`; a sweep that cannot route every
   reply logs one INFO `reply catch-up sweep could not route every reply`
   (`unserved`/`load_failed`/`claim_failed`), and **3 failed sweeps in a row log an ERROR**
-  (`catch_up::FailedSweeps`; failed = backlog read failed, or nothing queued and every claim
+  (`catch_up::Streak`; failed = backlog read failed, or nothing queued and every claim
   refused). ⚠️ **Load failures deliberately do not count** — one poison row would otherwise ERROR
   every 5 min for ever, falsely for every other reply. ⚠️ Nothing tests that the pump *feeds* the
   streak (that would need a tracing capture, which flakes here). The cursor

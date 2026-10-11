@@ -324,9 +324,9 @@ impl ChannelBus {
             let _life = life;
             // A failed sweep is a WARN and the pump carries on; a run of
             // them is an ERROR, since replies are then piling up unseen.
-            let mut streak = super::catch_up::FailedSweeps::default();
-            let mut note = move |report| {
-                if let Some(n) = streak.record(&report) {
+            let mut streak = super::catch_up::Streak::default();
+            let mut note = move |report: super::catch_up::SweepReport| {
+                if let Some(n) = streak.record(report.is_failure()) {
                     error!(
                         consecutive = n,
                         "reply catch-up keeps failing; finished tasks' replies are not going out"

@@ -45,9 +45,10 @@ pub const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 
 /// Backlog ids read per page.
 pub const SWEEP_PAGE: i64 = 100;
 
-/// After this many failed sweeps in a row (10 minutes from the first at
-/// [`SWEEP_EVERY`]) the pump says so at ERROR: replies are piling up in the
-/// backlog while the bus otherwise looks healthy.
+/// After this many failures in a row — failed sweeps (10 minutes from the
+/// first at [`SWEEP_EVERY`]), or failed reply claims at a channel's pump — the
+/// pump says so at ERROR: replies are piling up in the backlog while the bus
+/// otherwise looks healthy.
 pub const SWEEP_FAILURES_LOUD: u32 = 3;
 
 /// What one sweep came to — its per-sweep summary, and what tells a failed
@@ -80,17 +81,19 @@ impl SweepReport {
     }
 }
 
-/// Consecutive failed sweeps. A sweep's own failure is a WARN and does not
-/// ring the death bell (one bad read is not a dead pump); this is what makes
-/// a failure that persists louder than one that passed.
+/// Consecutive failures of one kind: the outbound pump's failed sweeps, and
+/// (since #832) a per-channel pump's failed reply claims. A single failure is
+/// a WARN where it happens and does not ring the death bell (one bad read is
+/// not a dead pump); this is what makes a failure that persists louder than
+/// one that passed. Pure: the caller says what failed.
 #[derive(Debug, Default)]
-pub struct FailedSweeps(u32);
+pub struct Streak(u32);
 
-impl FailedSweeps {
-    /// Count one sweep. `Some(n)` when `n` consecutive failures have reached
-    /// [`SWEEP_FAILURES_LOUD`]; any sweep that did not fail resets the count.
-    pub fn record(&mut self, report: &SweepReport) -> Option<u32> {
-        if !report.is_failure() {
+impl Streak {
+    /// Count one outcome. `Some(n)` when `n` consecutive failures have reached
+    /// [`SWEEP_FAILURES_LOUD`]; any success resets the count.
+    pub fn record(&mut self, failed: bool) -> Option<u32> {
+        if !failed {
             self.0 = 0;
             return None;
         }
@@ -234,15 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_sweeps_get_loud_after_a_streak_and_reset_on_a_good_one() {
-        let mut streak = FailedSweeps::default();
-        let bad = report(true, 0, 0);
+    fn a_streak_gets_loud_after_enough_failures_and_resets_on_a_success() {
+        let mut streak = Streak::default();
         for _ in 1..SWEEP_FAILURES_LOUD {
-            assert_eq!(streak.record(&bad), None, "below the streak: WARN only");
+            assert_eq!(streak.record(true), None, "below the streak: WARN only");
         }
-        assert_eq!(streak.record(&bad), Some(SWEEP_FAILURES_LOUD));
-        assert_eq!(streak.record(&bad), Some(SWEEP_FAILURES_LOUD + 1), "stays loud");
-        assert_eq!(streak.record(&report(false, 0, 0)), None);
-        assert_eq!(streak.record(&bad), None, "a good sweep reset the count");
+        assert_eq!(streak.record(true), Some(SWEEP_FAILURES_LOUD));
+        assert_eq!(streak.record(true), Some(SWEEP_FAILURES_LOUD + 1), "stays loud");
+        assert_eq!(streak.record(false), None);
+        assert_eq!(streak.record(true), None, "a success reset the count");
     }
 }
