@@ -9,9 +9,9 @@
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-11 (#832 — a bus stop loses nothing silently: the reply claim moves to the
-send side, drop guards say what cannot be recovered; PR pending, gate green. PR [#842](https://github.com/hherb/kastellan/pull/842) (#825) **merged 2026-10-11**; the operator is still
+send side, drop guards say what cannot be recovered; PR [#847](https://github.com/hherb/kastellan/pull/847), gate green. PR [#842](https://github.com/hherb/kastellan/pull/842) (#825) **merged 2026-10-11**; the operator is still
 running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Recent PRs, newest first:** [#847](https://github.com/hherb/kastellan/pull/847) (#832, open), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
@@ -42,7 +42,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-11): #832 — a bus stop loses nothing silently (PR pending)
+### This session (2026-10-11): #832 — a bus stop loses nothing silently (PR [#847](https://github.com/hherb/kastellan/pull/847))
 
 - **Amends #825's D1: the claim moved to the send side.** `handle_completed`/`sweep` route and
   queue a reply **unclaimed** (`bus::Queued::Reply`); the channel's own pump runs
@@ -260,7 +260,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824 + #830 + #834 + #842 + #832's PR:** watch one restart for the `[audit-lost]` /
+5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824 + #830 + #834 + #842 + #847:** watch one restart for the `[audit-lost]` /
    INFO drain lines (since #830 the traced line carries `[audit-lost]` too; a Matrix login still in
    progress at shutdown should be INFO "not finished starting", not a loss; a bus stopped under a
    wedged Postgres now says `may not have been written`), and query an `observed_at` on the next `channel.*` row. Then
@@ -376,7 +376,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#832 after the review fix pass — **the gate that stands**) | #832's PR (`6df0a707`) | **4961 / 0 / 52**, **195** suites, `TEST_EXIT=0`, as predicted: #825's 4934 + **7** (#825's review commit, landed after its baseline sweep) + core lib **19** (guards 7, `pg_events` 1, `deliver` 5, stop 6) + `reply_catch_up_pg_e2e` **1**; `[WARN]` 0, `[SKIP]` **23** (`--nocapture`); log `sweep-832-final.log`. `pg` gate: 27 tests, 53 `[E2E]`, 0 SKIP. Mutants killed: claim back in `route_one` (also kills the PG e2e), unclaimed duplicate sent, guard never settled, no queue drain, inbound/unroutable guards settled early, reply guard armed after the claim, panic-or-cancelled count | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-832b`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#832 after the review fix pass — **the gate that stands**) | PR #847 (`6df0a707`) | **4961 / 0 / 52**, **195** suites, `TEST_EXIT=0`, as predicted: #825's 4934 + **7** (#825's review commit, landed after its baseline sweep) + core lib **19** (guards 7, `pg_events` 1, `deliver` 5, stop 6) + `reply_catch_up_pg_e2e` **1**; `[WARN]` 0, `[SKIP]` **23** (`--nocapture`); log `sweep-832-final.log`. `pg` gate: 27 tests, 53 `[E2E]`, 0 SKIP. Mutants killed: claim back in `route_one` (also kills the PG e2e), unclaimed duplicate sent, guard never settled, no queue drain, inbound/unroutable guards settled early, reply guard armed after the claim, panic-or-cancelled count | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-832b`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#825 — superseded) | PR #842 | 4934 tests / 195 suites (4931 + 3 #548/#676 flakes, each green alone), `[SKIP]` 23 | exit 0 | 23 Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
