@@ -2288,6 +2288,7 @@ name = "kastellan-db"
 version = "0.2.0"
 dependencies = [
  "aes-gcm",
+ "futures",
  "kastellan-supervisor",
  "kastellan-tests-common",
  "keyring",

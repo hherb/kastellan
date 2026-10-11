@@ -95,7 +95,8 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"]
 # loopback self-signed rustls TLS origin whose cert becomes the net-demo
 # worker's extra_ca. Versions/features copied verbatim from
 # workers/net-demo/Cargo.toml so the workspace lock stays unified.
-tokio            = { version = "1",    features = ["rt", "net", "io-util", "macros"] }
+# `test-util`: a paused clock for the reply catch-up's 5-minute tick test (#825).
+tokio            = { version = "1",    features = ["rt", "net", "io-util", "macros", "test-util"] }
 tokio-rustls     = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls           = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"] }
 rustls-pki-types = { version = "1",    features = ["std"] }

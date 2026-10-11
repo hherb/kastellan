@@ -15,22 +15,30 @@ use super::{ChannelId, ConversationId, OutgoingMessage, PeerId};
 pub enum UndeliveredReason {
     /// The bus's `Channel::send` failed (the email channel until slice 2).
     SendFailed,
-    /// The bus could not even queue the reply for its channel: that channel's
-    /// pump had already ended, so nothing drains its queue (#815).
+    /// The bus claimed a reply and then could not queue it for its channel:
+    /// that channel's pump ended in between, so nothing drains its queue
+    /// (#815).
     ///
-    /// A narrow window, not "every reply while the channel is down": a pump
-    /// that ends rings the bus's death bell, and the channel supervisor then
-    /// stops the whole bus, aborting the outbound pump that writes this row.
-    /// So it covers only a reply routed between the pump ending and that
-    /// stop — and its insert races the abort its own cause triggers: when
-    /// the abort lands on that insert, the bus's writer says so on
-    /// `[audit-lost]` (#813); when it lands earlier, on the completion's
-    /// `load`, nothing is said (#825, #832).
-    /// A reply that completes while the bus is down leaves no row at all
-    /// (#825). Not to be confused with the `OutboxError` label of the same
+    /// Since #825 a narrow race, not "a reply to a dead pump": a queue found
+    /// *already* closed when its slot is reserved leaves the reply unclaimed,
+    /// and the next bus's catch-up sweep delivers it with no row. This reason
+    /// is only for a queue that closes after the slot was reserved and before
+    /// the post-claim `is_closed` check — that is, during the claim — a reply
+    /// no sweep will find again. Its insert can still race the bus stop its
+    /// cause triggers; when the abort lands on that insert, the bus's writer
+    /// says so on `[audit-lost]` (#813).
+    ///
+    /// Not to be confused with the `OutboxError` label of the same
     /// spelling, which an `ask.delivery_failed` row carries when a raised ask
     /// meets a closed queue (`scheduler::asks::delivery`).
     QueueClosed,
+    /// The bus's reply claim returned an error, and a re-read found the task
+    /// settled anyway (#825 review): the claim may have committed before the
+    /// error reached the bus, so the reply was not sent — at most once.
+    /// Usually this bus's own claim, and the reply is lost; possibly another
+    /// router won meanwhile and delivered it, which a `channel.replied` row
+    /// for the same peer around `observed_at` would show.
+    ClaimUnknown,
     /// A polled driver gave up on a reply its worker kept refusing: look at
     /// the conversation (a room the bot was removed from).
     GaveUp,
@@ -49,6 +57,7 @@ impl UndeliveredReason {
         match self {
             Self::SendFailed => "send_failed",
             Self::QueueClosed => "queue_closed",
+            Self::ClaimUnknown => "claim_unknown",
             Self::GaveUp => "gave_up",
             Self::QueueFull => "queue_full",
             Self::DriverExit => "driver_exit",
@@ -204,7 +213,10 @@ mod tests {
     fn the_undelivered_reasons_are_pinned_literally() {
         use super::UndeliveredReason::*;
         let labels: Vec<_> =
-            [SendFailed, QueueClosed, GaveUp, QueueFull, DriverExit].map(|r| r.as_str()).into();
-        assert_eq!(labels, ["send_failed", "queue_closed", "gave_up", "queue_full", "driver_exit"]);
+            [SendFailed, QueueClosed, ClaimUnknown, GaveUp, QueueFull, DriverExit].map(|r| r.as_str()).into();
+        assert_eq!(
+            labels,
+            ["send_failed", "queue_closed", "claim_unknown", "gave_up", "queue_full", "driver_exit"]
+        );
     }
 }

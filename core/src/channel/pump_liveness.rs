@@ -161,8 +161,9 @@ mod tests {
     /// is between a slow test and a weak one. This is the weak-but-fast end,
     /// deliberately — a bell that rings spuriously does so from a `Drop` that
     /// already happened, i.e. immediately, not after a delay. (Tokio's
-    /// `start_paused` would let this be both fast and exhaustive, but it needs
-    /// the `test-util` feature, which nothing in this workspace enables.)
+    /// `start_paused` would let this be both fast and exhaustive; core's tests
+    /// have had the `test-util` feature it needs since #825, but this test
+    /// predates that and has not been moved onto it.)
     const SILENCE: Duration = Duration::from_millis(100);
 
     /// While every pump runs, the bell stays silent — otherwise the supervisor

@@ -50,8 +50,10 @@ fn a_refused_turn_carries_the_sentence_the_user_saw() {
 
 #[test]
 fn a_turn_with_no_result_still_renders_an_answer() {
-    // A crashed task never reached finalize, so its result is NULL. The user
-    // still got a reply; the turn must say the same thing.
+    // A task an operator force-failed (`kastellan-cli tasks fail`) never
+    // reached finalize, so its result is NULL (a swept crash carries an
+    // error result since #825). The user still got a reply; the turn must say
+    // the same thing.
     let turn = turn_from_row(row(None, None));
     assert!(!turn.answer.is_empty());
     assert!(turn.record.is_none());

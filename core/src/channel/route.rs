@@ -18,7 +18,8 @@ use super::OutgoingMessage;
 /// Build the reply for a finalized channel task. Returns `None` (with no error)
 /// when `payload.kind != "channel"` (an `ask`/`l3_run` completion the bus must
 /// ignore) or routing metadata is missing/malformed (the caller, which can
-/// tell the two apart by `kind`, warns for the second).
+/// tell the two apart by `kind`, settles the second as `unroutable`, and the
+/// claim's one winner warns and writes `channel.reply_unroutable` — #825).
 pub fn reply_for_completed_task(payload: &Value, result: Option<&Value>) -> Option<OutgoingMessage> {
     // The same four keys the ask-delivery path reads, through the same
     // function (spec D10) — so where an ask is asked and where its task's
@@ -52,6 +53,18 @@ pub fn reply_body(result: Option<&Value>) -> String {
         {
             "I needed an operator to approve something before continuing, and nobody \
              answered in time, so I stopped."
+                .to_string()
+        }
+        // The daemon restarted while this task ran, and the boot crash
+        // sweep marked it `crashed` (#825 now delivers that reply, which
+        // used to be lost). "Sorry — that failed: crashed" would read like
+        // the request itself broke something; it was interrupted.
+        Some("error")
+            if result.get("detail").and_then(Value::as_str)
+                == Some(kastellan_db::tasks::CRASHED_DETAIL) =>
+        {
+            "Sorry — I was restarted while working on that, so it never finished. \
+             Please ask again."
                 .to_string()
         }
         Some("error") => format!(
@@ -215,6 +228,19 @@ mod tests {
             assert!(!body.contains('{'), "never raw JSON: {body:?}");
             assert!(body.contains("declined"), "must read as a refusal: {body:?}");
         }
+    }
+
+    /// A task the daemon's restart swept to `crashed` (#825 delivers its
+    /// reply now, where before it was lost): the peer is told it was
+    /// interrupted and should ask again — not "Task finished, but produced no
+    /// result.", which it did not, nor the raw detail string.
+    #[test]
+    fn a_crashed_task_reads_as_interrupted_not_finished() {
+        let body = reply_body(Some(&json!({"kind": "error", "detail": "crashed"})));
+        assert!(body.contains("restarted"), "{body}");
+        assert!(body.contains("ask again"), "{body}");
+        assert!(!body.contains("crashed"), "the raw detail string is not user-facing: {body}");
+        assert!(!body.contains("finished, but"), "{body}");
     }
 
     /// D14. An expired ask already reaches the room — `notify_task_completed`
