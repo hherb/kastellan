@@ -22,6 +22,7 @@ use std::sync::RwLock;
 
 use tokio::sync::mpsc;
 
+use super::bus_deliver::Queued;
 use super::{ChannelId, OutgoingMessage};
 
 /// Why a delivery did not reach a channel's queue.
@@ -61,7 +62,7 @@ impl OutboxError {
 /// of deadlocks a lock plus async invites.
 #[derive(Default)]
 pub struct ChannelOutbox {
-    senders: RwLock<HashMap<ChannelId, mpsc::Sender<OutgoingMessage>>>,
+    senders: RwLock<HashMap<ChannelId, mpsc::Sender<Queued>>>,
 }
 
 impl ChannelOutbox {
@@ -72,7 +73,7 @@ impl ChannelOutbox {
     /// Register (or replace) a channel's outbound queue. Called by
     /// `ChannelBus::spawn` with the *same* sender its own reply pump uses,
     /// so there is one queue per channel and no second delivery path.
-    pub fn register(&self, id: ChannelId, tx: mpsc::Sender<OutgoingMessage>) {
+    pub fn register(&self, id: ChannelId, tx: mpsc::Sender<Queued>) {
         self.senders.write().expect("outbox lock not poisoned").insert(id, tx);
     }
 
@@ -83,7 +84,7 @@ impl ChannelOutbox {
         self.senders.write().expect("outbox lock not poisoned").remove(id);
     }
 
-    /// Queue `msg` for the channel it names.
+    /// Queue `msg` for the channel it names, as a [`Queued::Ask`].
     ///
     /// Never blocks — a full queue is `Err(QueueFull)`, not backpressure —
     /// which is what makes it callable from the sync `deliver_ask`. It can
@@ -93,7 +94,7 @@ impl ChannelOutbox {
     pub fn try_deliver(&self, msg: OutgoingMessage) -> Result<(), OutboxError> {
         let senders = self.senders.read().expect("outbox lock not poisoned");
         let tx = senders.get(&msg.channel).ok_or(OutboxError::NoSuchChannel)?;
-        tx.try_send(msg).map_err(|e| match e {
+        tx.try_send(Queued::Ask(msg)).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => OutboxError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => OutboxError::QueueClosed,
         })
@@ -123,7 +124,7 @@ mod tests {
         outbox.register(ChannelId("matrix".into()), tx);
 
         outbox.try_deliver(msg("matrix")).expect("delivered");
-        assert_eq!(rx.recv().await.expect("received").body, "hello");
+        assert_eq!(rx.recv().await.expect("received"), Queued::Ask(msg("matrix")));
     }
 
     #[test]
@@ -179,7 +180,7 @@ mod tests {
         outbox.register(ChannelId("matrix".into()), new_tx);
 
         outbox.try_deliver(msg("matrix")).expect("delivered to the new sender");
-        assert_eq!(new_rx.recv().await.expect("received").body, "hello");
+        assert_eq!(new_rx.recv().await.expect("received"), Queued::Ask(msg("matrix")));
     }
 
     /// Routing is per channel: an ask for a channel this outbox does not

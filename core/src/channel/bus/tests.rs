@@ -9,7 +9,7 @@ use crate::channel::actions;
 use crate::channel::catch_up::Via;
 use crate::channel::auth::{AuthDecision, StaticPairings, UnauthenticReason};
 use crate::channel::outbox::ChannelOutbox;
-use crate::channel::{ChannelId, ConversationId, IncomingMessage, PeerEvidence, PeerId};
+use crate::channel::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId};
 use std::sync::Mutex;
 
 /// #815: the messages and replies the bus drops, and the rows they leave.
@@ -269,19 +269,18 @@ async fn outbound_routes_completed_channel_task_to_its_channel() {
         ),
     );
     let completed = FakeCompleted { ids: Mutex::new(vec![7]), rows };
-    let (tx, mut rx) = mpsc::channel::<OutgoingMessage>(4);
+    let (tx, mut rx) = mpsc::channel::<Queued>(4);
     let mut senders = HashMap::new();
     senders.insert(ChannelId("matrix".into()), tx);
 
-    let out = handle_completed(&completed, &ev, &senders, 7, Via::Notify).await.expect("routed");
-    assert_eq!(out.body, "done");
+    let queued = handle_completed(&completed, &ev, &senders, 7, Via::Notify).await.expect("routed");
+    assert_eq!(queued.message().body, "done");
     let delivered = rx.recv().await.unwrap();
-    assert_eq!(delivered.peer, PeerId("@me:srv".into()));
-    // Exactly one row: a `reply_undelivered` (#815) beside it would claim a
-    // drop that did not happen.
+    assert_eq!(delivered.message().peer, PeerId("@me:srv".into()));
+    // No row yet: `channel.replied` is written by the per-channel pump when
+    // it claims and sends the reply (#832; `catch_up::deliver` tests it).
     let audited = ev.audited.lock().unwrap().clone();
-    assert_eq!(audited.len(), 1, "{audited:?}");
-    assert_eq!(audited[0].0, actions::REPLIED);
+    assert!(audited.is_empty(), "{audited:?}");
 }
 
 /// A channel whose `send` always fails — the exact shape `EmailChannel` has in

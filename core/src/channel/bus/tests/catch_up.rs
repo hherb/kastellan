@@ -3,6 +3,10 @@
 //! `Backlog` is a `CompletedTasks` with real claim semantics in memory: a
 //! task is claimable once, and only when it has a row. NOTIFY ids come in on
 //! an mpsc the test holds, so a test decides when "Postgres" announces one.
+//!
+//! Since #832 a reply is queued *unclaimed* and claimed where it is sent, so
+//! the claim tests below go through [`route_and_deliver`]: both halves, in
+//! the order the two pumps run them.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -132,9 +136,47 @@ impl CompletedTasks for Arc<Backlog> {
 }
 
 /// One open queue for `matrix`, plus its receiver.
-fn matrix_sender() -> (HashMap<ChannelId, mpsc::Sender<OutgoingMessage>>, mpsc::Receiver<OutgoingMessage>) {
-    let (tx, rx) = mpsc::channel::<OutgoingMessage>(64);
+fn matrix_sender() -> (HashMap<ChannelId, mpsc::Sender<Queued>>, mpsc::Receiver<Queued>) {
+    let (tx, rx) = mpsc::channel::<Queued>(64);
     (HashMap::from([(ChannelId("matrix".into()), tx)]), rx)
+}
+
+fn matrix() -> ChannelId {
+    ChannelId("matrix".into())
+}
+
+/// A channel whose `send` records and succeeds, and that never receives:
+/// the transport `deliver` hands a reply to.
+#[derive(Default)]
+struct SinkChannel {
+    sent: Mutex<Vec<OutgoingMessage>>,
+}
+#[async_trait::async_trait]
+impl Channel for SinkChannel {
+    fn id(&self) -> ChannelId {
+        matrix()
+    }
+    async fn recv(&mut self) -> Option<IncomingMessage> {
+        std::future::pending().await
+    }
+    async fn send(&self, msg: OutgoingMessage) -> anyhow::Result<()> {
+        self.sent.lock().unwrap().push(msg);
+        Ok(())
+    }
+}
+
+/// Route `id` (the outbound pump's half), then deliver whatever it queued
+/// (the per-channel pump's half) to a [`SinkChannel`]: the composed path
+/// every pre-#832 `handle_completed` test asserted on. Returns what was
+/// sent, if anything.
+async fn route_and_deliver(c: &dyn CompletedTasks, ev: &FakeEvents, id: i64, via: Via) -> Option<OutgoingMessage> {
+    let (senders, mut rx) = matrix_sender();
+    handle_completed(c, ev, &senders, id, via).await?;
+    let item = rx.try_recv().expect("handle_completed queued what it returned");
+    let sink = SinkChannel::default();
+    deliver(c, ev, &sink, &matrix(), item).await;
+    let sent = sink.sent.lock().unwrap().pop();
+    sent
 }
 
 fn actions_of(ev: &FakeEvents) -> Vec<String> {
@@ -145,12 +187,10 @@ fn actions_of(ev: &FakeEvents) -> Vec<String> {
 async fn a_routed_reply_is_claimed_and_its_row_says_via() {
     let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
     let ev = FakeEvents::default();
-    let (senders, mut rx) = matrix_sender();
 
-    let out = handle_completed(&backlog, &ev, &senders, 7, Via::Notify).await.expect("routed");
+    let out = route_and_deliver(&backlog, &ev, 7, Via::Notify).await.expect("routed");
 
     assert_eq!(out.body, "done", "on time: no note");
-    assert_eq!(rx.recv().await.unwrap().body, "done");
     assert_eq!(backlog.disposition(7), Some(ReplyDisposition::Routed));
     let audited = ev.audited.lock().unwrap().clone();
     assert_eq!(audited.len(), 1, "{audited:?}");
@@ -163,13 +203,10 @@ async fn a_routed_reply_is_claimed_and_its_row_says_via() {
 async fn a_second_route_of_a_settled_task_sends_nothing_and_writes_nothing() {
     let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
     let ev = FakeEvents::default();
-    let (senders, mut rx) = matrix_sender();
 
-    handle_completed(&backlog, &ev, &senders, 7, Via::Notify).await.expect("first wins");
-    assert!(handle_completed(&backlog, &ev, &senders, 7, Via::CatchUp).await.is_none());
+    route_and_deliver(&backlog, &ev, 7, Via::Notify).await.expect("first wins");
+    assert!(route_and_deliver(&backlog, &ev, 7, Via::CatchUp).await.is_none(), "exactly one send");
 
-    rx.recv().await.unwrap();
-    assert!(rx.try_recv().is_err(), "exactly one send");
     assert_eq!(actions_of(&ev), vec![actions::REPLIED.to_string()]);
 }
 
@@ -177,9 +214,8 @@ async fn a_second_route_of_a_settled_task_sends_nothing_and_writes_nothing() {
 async fn a_late_reply_carries_the_note_and_delayed_secs() {
     let (backlog, _n) = Backlog::finished(vec![(7, channel_row("done"))], time::Duration::hours(3));
     let ev = FakeEvents::default();
-    let (senders, _rx) = matrix_sender();
 
-    let out = handle_completed(&backlog, &ev, &senders, 7, Via::CatchUp).await.expect("routed");
+    let out = route_and_deliver(&backlog, &ev, 7, Via::CatchUp).await.expect("routed");
 
     assert_eq!(out.body, "(Delayed reply — you sent this 3 h 1 min ago.)\n\ndone");
     let row = ev.audited.lock().unwrap()[0].1.clone();
@@ -206,7 +242,7 @@ async fn a_closed_queue_leaves_the_reply_for_catch_up() {
     // The next bus's sweep, with an open queue, delivers it.
     let (senders, mut rx) = matrix_sender();
     assert_eq!(sweep(&backlog, &ev, &senders).await.queued, 1);
-    assert_eq!(rx.recv().await.unwrap().body, "done");
+    assert_eq!(rx.recv().await.unwrap().message().body, "done");
 }
 
 /// A claim that failed without committing is what the WARN has always said:
@@ -216,15 +252,13 @@ async fn a_failed_claim_leaves_the_reply_for_catch_up() {
     let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
     backlog.claim_fails_once.lock().unwrap().insert(7);
     let ev = FakeEvents::default();
-    let (senders, mut rx) = matrix_sender();
 
-    assert!(handle_completed(&backlog, &ev, &senders, 7, Via::Notify).await.is_none());
+    assert!(route_and_deliver(&backlog, &ev, 7, Via::Notify).await.is_none(), "nothing sent");
     assert_eq!(backlog.disposition(7), None);
-    assert!(rx.try_recv().is_err(), "nothing sent");
     assert!(actions_of(&ev).is_empty(), "{:?}", actions_of(&ev));
 
-    handle_completed(&backlog, &ev, &senders, 7, Via::CatchUp).await.expect("delivered on retry");
-    assert_eq!(rx.recv().await.unwrap().body, "done");
+    let out = route_and_deliver(&backlog, &ev, 7, Via::CatchUp).await.expect("delivered on retry");
+    assert_eq!(out.body, "done");
     assert_eq!(actions_of(&ev), vec![actions::REPLIED.to_string()]);
 }
 
@@ -236,12 +270,12 @@ async fn a_claim_that_committed_before_failing_is_recorded_not_lost() {
     let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
     backlog.claim_commits_then_fails.lock().unwrap().insert(7);
     let ev = FakeEvents::default();
-    let (senders, mut rx) = matrix_sender();
+    let (senders, _rx) = matrix_sender();
 
-    assert!(handle_completed(&backlog, &ev, &senders, 7, Via::Notify).await.is_none());
+    let sent = route_and_deliver(&backlog, &ev, 7, Via::Notify).await;
 
     assert_eq!(backlog.disposition(7), Some(ReplyDisposition::Routed));
-    assert!(rx.try_recv().is_err(), "not sent: another router may have sent it");
+    assert!(sent.is_none(), "not sent: another router may have sent it");
     let audited = ev.audited.lock().unwrap().clone();
     assert_eq!(audited.len(), 1, "{audited:?}");
     assert_eq!(audited[0].0, actions::REPLY_UNDELIVERED);
@@ -278,13 +312,16 @@ async fn a_failed_unroutable_claim_is_retried_or_recorded() {
 }
 
 /// What a sweep reports: its queued, unserved and failed replies, and a
-/// failed read — the pump's streak and the INFO summary read it. A claim
-/// failure with nothing queued fails the sweep; a load failure does not.
+/// failed read — the pump's streak and the INFO summary read it. Since #832
+/// the sweep claims nothing it queues (the per-channel pump does), so its
+/// only claims are the unroutable ones: a failed one with nothing queued
+/// fails the sweep; a load failure does not.
 #[tokio::test]
 async fn a_sweep_reports_what_it_left_behind() {
+    let unroutable = || (serde_json::json!({"kind":"channel","peer":"@me:srv"}), None);
     let mut email = channel_row("not mine");
     email.0["channel"] = "email".into();
-    let rows = vec![(1, channel_row("a")), (2, email), (3, channel_row("c")), (4, channel_row("d"))];
+    let rows = vec![(1, channel_row("a")), (2, email), (3, channel_row("c")), (4, unroutable())];
     let (backlog, _n) = Backlog::new(rows);
     backlog.load_fails_once.lock().unwrap().insert(3);
     backlog.claim_fails_once.lock().unwrap().insert(4);
@@ -297,14 +334,12 @@ async fn a_sweep_reports_what_it_left_behind() {
     };
     assert_eq!(report, expected);
     assert!(!report.is_failure(), "one got through");
+    assert_eq!(backlog.disposition(1), None, "queued, not claimed: no pump delivered it");
 
-    // Next sweep: 3 now loads and is queued, 4's claim fails again — not a
-    // failed sweep. Then only a refused claim is left: a failed sweep.
-    backlog.claim_fails_once.lock().unwrap().insert(4);
-    let report = sweep(&backlog, &ev, &senders).await;
-    assert_eq!((report.queued, report.claim_failed), (1, 1), "{report:?}");
-    backlog.claim_fails_once.lock().unwrap().insert(4);
-    let report = sweep(&backlog, &ev, &senders).await;
+    // A backlog that is only a refused unroutable claim: a failed sweep.
+    let (only, _n) = Backlog::new(vec![(4, unroutable())]);
+    only.claim_fails_once.lock().unwrap().insert(4);
+    let report = sweep(&only, &ev, &senders).await;
     assert_eq!((report.queued, report.claim_failed), (0, 1), "{report:?}");
     assert!(report.is_failure(), "every claim it tried failed: {report:?}");
 
@@ -349,14 +384,13 @@ async fn a_failed_load_leaves_the_reply_for_catch_up() {
     let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
     backlog.load_fails_once.lock().unwrap().insert(7);
     let ev = FakeEvents::default();
-    let (senders, mut rx) = matrix_sender();
 
-    assert!(handle_completed(&backlog, &ev, &senders, 7, Via::Notify).await.is_none());
+    assert!(route_and_deliver(&backlog, &ev, 7, Via::Notify).await.is_none());
     assert_eq!(backlog.disposition(7), None);
 
     // The next route (the sweep's) delivers it.
-    handle_completed(&backlog, &ev, &senders, 7, Via::CatchUp).await.expect("delivered on retry");
-    assert_eq!(rx.recv().await.unwrap().body, "done");
+    let out = route_and_deliver(&backlog, &ev, 7, Via::CatchUp).await.expect("delivered on retry");
+    assert_eq!(out.body, "done");
 }
 
 /// A channel task with no routing metadata has no one to reply to. The claim
@@ -393,62 +427,43 @@ async fn a_reply_for_a_channel_this_bus_does_not_serve_is_not_claimed() {
     assert!(actions_of(&ev).is_empty());
 }
 
-/// The narrow race #815's `queue_closed` row still covers: the queue closes
-/// after its slot was reserved and before the post-claim `is_closed` check —
-/// during the claim. Staged by a claim that drops the queue's receiver before
-/// it returns.
+/// What #815's `queue_closed` row used to cover — a queue that closes after
+/// the reply was routed to it — is no loss since #832: the reply was queued
+/// unclaimed, so it is still in the backlog when its queue goes, and the next
+/// bus's sweep delivers it. No row, because nothing was dropped.
 #[tokio::test]
-async fn a_queue_closing_after_the_claim_still_writes_queue_closed() {
-    struct ClosingClaim {
-        inner: Arc<Backlog>,
-        rx: Mutex<Option<mpsc::Receiver<OutgoingMessage>>>,
-    }
-    #[async_trait::async_trait]
-    impl CompletedTasks for ClosingClaim {
-        async fn next_completed(&self) -> Option<i64> {
-            std::future::pending().await
-        }
-        async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
-            self.inner.load(id).await
-        }
-        async fn claim(&self, id: i64, d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
-            drop(self.rx.lock().unwrap().take()); // the pump ends right now
-            self.inner.claim(id, d).await
-        }
-        async fn unsettled(&self, a: i64, l: i64) -> anyhow::Result<Vec<i64>> {
-            self.inner.unsettled(a, l).await
-        }
-    }
-    let (inner, _n) = Backlog::new(vec![(7, channel_row("done"))]);
-    let (senders, rx) = matrix_sender();
-    let completed = ClosingClaim { inner, rx: Mutex::new(Some(rx)) };
+async fn a_reply_queued_to_a_queue_that_then_closes_stays_unclaimed() {
+    let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
     let ev = FakeEvents::default();
+    let (senders, rx) = matrix_sender();
 
-    assert!(handle_completed(&completed, &ev, &senders, 7, Via::Notify).await.is_none());
+    handle_completed(&backlog, &ev, &senders, 7, Via::Notify).await.expect("queued");
+    drop(rx); // the pump ends with the reply still queued
 
-    let audited = ev.audited.lock().unwrap().clone();
-    assert_eq!(audited.len(), 1, "{audited:?}");
-    assert_eq!(audited[0].0, actions::REPLY_UNDELIVERED);
-    assert_eq!(audited[0].1["reason"], "queue_closed");
+    assert_eq!(backlog.disposition(7), None, "unclaimed: still in the backlog");
+    assert!(actions_of(&ev).is_empty(), "{:?}", actions_of(&ev));
+    let (senders, mut rx) = matrix_sender();
+    assert_eq!(sweep(&backlog, &ev, &senders).await.queued, 1, "the next bus finds it");
+    assert_eq!(rx.recv().await.unwrap().message().body, "done");
 }
 
-/// A reply parked on a full queue must not be claimed yet: a bus stop that
+/// A reply parked on a full queue must not be claimed: a bus stop that
 /// aborts it there (as `ChannelBus::shutdown` does to any pump) would
 /// otherwise leave a task marked `routed` that nobody sent and no row
-/// mentions. Queue space is reserved first, so the abort lands before the
-/// claim and the next sweep still finds the reply.
+/// mentions. Since #832 nothing on this side claims at all — the per-channel
+/// pump does, at the send — so the next sweep still finds the reply.
 #[tokio::test]
 async fn an_abort_while_waiting_for_queue_space_leaves_the_reply_unclaimed() {
     let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
     let ev = FakeEvents::default();
-    let (tx, _rx) = mpsc::channel::<OutgoingMessage>(1);
+    let (tx, _rx) = mpsc::channel::<Queued>(1);
     let filler = OutgoingMessage {
         channel: ChannelId("matrix".into()),
         peer: PeerId("@other:srv".into()),
         conversation: ConversationId("!room:srv".into()),
         body: "an earlier reply, not yet drained".into(),
     };
-    tx.try_send(filler).expect("the one slot");
+    tx.try_send(Queued::Ask(filler)).expect("the one slot");
     let senders = HashMap::from([(ChannelId("matrix".into()), tx)]);
 
     let parked = tokio::time::timeout(
@@ -464,3 +479,5 @@ async fn an_abort_while_waiting_for_queue_space_leaves_the_reply_unclaimed() {
 
 /// The sweep through a running bus; a child so it shares `Backlog`.
 mod pump;
+/// #832: the per-channel pump's half — the claim at the send.
+mod deliver;

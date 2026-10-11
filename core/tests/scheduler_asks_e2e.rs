@@ -282,6 +282,9 @@ async fn a_raised_ask_is_delivered_and_its_token_resolves_it() {
              this timeout is what turns that regression into a failure instead of a hang",
         )
         .expect("the ask was delivered");
+    let kastellan_core::channel::bus::Queued::Ask(sent) = sent else {
+        panic!("a raised ask is queued as an ask, with no reply to claim: {sent:?}");
+    };
     assert_eq!(sent.conversation.0, "!room:srv");
     let approve = sent
         .body

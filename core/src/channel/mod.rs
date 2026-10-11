@@ -26,6 +26,7 @@ pub mod bus;
 pub mod catch_up;
 mod bus_inbound;
 mod bus_outbound;
+mod bus_deliver;
 mod bus_guards;
 pub mod email;
 pub mod inbound_nul;
@@ -213,13 +214,15 @@ pub mod actions {
     /// reply the NOTIFY missed) — and, when the reply went out more than
     /// [`super::catch_up::LATE_AFTER`] after its task finished,
     /// `delayed_secs`. Every row is backed by the task's reply claim
-    /// (`kastellan_db::tasks::reply_claim`), so there is one per task. A
-    /// reply still in the per-channel queue when its pump ends keeps this row
-    /// and is never sent — #832's family, with no compensating row yet.
+    /// (`kastellan_db::tasks::reply_claim`), so there is one per task. Since
+    /// #832 the row is written by the channel's own pump, right after the
+    /// claim and right before the send: a reply still queued when its pump
+    /// ends has neither claim nor row, and the catch-up sweep delivers it.
+    /// A stop landing between this row and the send is said on
+    /// `[audit-lost]` (`bus_guards`).
     pub const REPLIED: &str = "channel.replied";
     /// A message for a channel was not delivered: a reply, an ask, or an
-    /// inbound ack — routed to its channel's queue or, for `queue_closed`,
-    /// not even that. Carries the channel, the peer, a fixed
+    /// inbound ack. Carries the channel, the peer, a fixed
     /// [`super::UndeliveredReason`] label and the event's time
     /// (`observed_at`, #792) only — never the reply body and never the error
     /// string (which is transport text, not a fixed label) — built by
@@ -227,13 +230,12 @@ pub mod actions {
     ///
     /// **Two writers.** The bus: its per-channel pump, when `Channel::send`
     /// fails (`send_failed`) — for a reply, an ask, or (since #824) the ack
-    /// `handle_inbound` sends back — and, since #815, `handle_completed`, when
-    /// the channel's queue closes during the reply's claim, after its slot was
-    /// reserved (`queue_closed`; that reply has **no** [`REPLIED`] row) — since
-    /// #825 a queue found *already* closed leaves the reply unclaimed for the
-    /// catch-up sweep instead, and writes nothing — or when a claim that
-    /// returned an error turns out to have settled the task anyway
-    /// (`claim_unknown`; no [`REPLIED`] row either). And, since #782, a polled channel's driver
+    /// `handle_inbound` sends back — or when a reply claim that returned an
+    /// error turns out to have settled the task anyway (`claim_unknown`; no
+    /// [`REPLIED`] row). From #815 to #832 the bus also wrote `queue_closed`,
+    /// for a reply claimed and then caught by its queue closing; since #832 a
+    /// reply is claimed only where it is sent, so a closing queue loses
+    /// nothing and that label is no longer written (older rows keep it). And, since #782, a polled channel's driver
     /// (`polled_driver::replies`), whose `send` only queues: it writes the row
     /// when it **gives up** on a reply its worker kept refusing (`gave_up`),
     /// drops one past a full conversation queue (`queue_full`), or exits with
@@ -252,8 +254,8 @@ pub mod actions {
     /// and is correlatable only by timestamp; carrying `ask_id` into the
     /// pump is tracked as its own issue. Two more orphan sources: an inbound
     /// ack the transport refused (it answers a message, not a task), and a
-    /// `queue_closed` or `claim_unknown` row, which by definition has no
-    /// `channel.replied`.
+    /// `claim_unknown` (or historical `queue_closed`) row, which by
+    /// definition has no `channel.replied`.
     pub const REPLY_UNDELIVERED: &str = "channel.reply_undelivered";
     /// A finished channel task's reply could not be routed at all: the task
     /// is `kind: "channel"` but carries no channel, peer or conversation, so

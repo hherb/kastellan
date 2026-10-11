@@ -149,7 +149,9 @@ mod tests {
             DeliveryOutcome::Delivered { channel: "matrix".into(), peer: "@horst:srv".into() }
         );
 
-        let sent = rx.recv().await.expect("message queued");
+        let crate::channel::bus::Queued::Ask(sent) = rx.recv().await.expect("message queued") else {
+            panic!("a raised ask is queued as an ask, with no reply to claim");
+        };
         assert_eq!(sent.conversation.0, "!room:srv");
         assert!(sent.body.contains("/approve tok9"), "{}", sent.body);
         assert!(sent.body.contains("writes outside scratch"), "{}", sent.body);

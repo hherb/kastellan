@@ -1,6 +1,7 @@
-//! The channel bus runtime: an inbound pump per channel (recv → classify →
-//! audit + enqueue) and one outbound pump (completed-task NOTIFY or backlog
-//! sweep → route → claim → send).
+//! The channel bus runtime: one pump per channel (inbound: recv → classify →
+//! audit + enqueue; outbound: its queue → claim → send) and one completed-task
+//! pump (NOTIFY or backlog sweep → route → that channel's queue). Since #832
+//! a reply is claimed where it is sent, not where it is routed.
 //! All DB access is behind two seams so the pumps are testable without Postgres.
 
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use kastellan_db::tasks::Lane;
 use super::auth::PeerAuthorizer;
 use super::catch_up::Via;
 use super::pump_liveness::DeathBell;
-use super::{Channel, ChannelId, OutgoingMessage, PeerId};
+use super::{Channel, ChannelId, PeerId};
 
 /// Body of the reply sent back when a peer pairs successfully.
 pub const PAIRED_ACK_BODY: &str = "\u{2713} Paired \u{2014} you can now message me.";
@@ -196,6 +197,10 @@ pub use super::bus_inbound::handle_inbound;
 pub use super::bus_outbound::{handle_completed, sweep, PgCompletedTasks};
 use super::bus_outbound::send_or_record;
 
+/// What a channel's queue carries, and the per-channel pump's delivery of
+/// it — the claim at the send (#832).
+pub use super::bus_deliver::{deliver, Delivery, Queued};
+
 /// A running bus. Owns the spawned pump tasks; `shutdown()` aborts them.
 pub struct ChannelBus {
     handles: Vec<JoinHandle<()>>,
@@ -225,7 +230,7 @@ impl ChannelBus {
         asks: Option<Arc<AskWiring>>,
     ) -> Self {
         let mut handles = Vec::new();
-        let mut senders: HashMap<ChannelId, mpsc::Sender<OutgoingMessage>> = HashMap::new();
+        let mut senders: HashMap<ChannelId, mpsc::Sender<Queued>> = HashMap::new();
         let mut registered = Vec::new();
         // Every pump below takes a guard off this bell. Each of them has at
         // least one terminal exit — a `break`, a `while let` that ends, a panic
@@ -236,7 +241,7 @@ impl ChannelBus {
 
         for mut ch in channels {
             let id = ch.id();
-            let (tx, mut rx) = mpsc::channel::<OutgoingMessage>(32);
+            let (tx, mut rx) = mpsc::channel::<Queued>(32);
             senders.insert(id.clone(), tx.clone());
 
             // Publish this channel's reply queue so core-initiated messages
@@ -251,9 +256,13 @@ impl ChannelBus {
             let pairing = pairing.clone();
             let events = events.clone();
             let asks_for_pump = asks.clone();
+            let completed = completed.clone();
             let life = bell.guard();
             handles.push(tokio::spawn(async move {
                 let _life = life;
+                // Consecutive failed reply claims: the claim happens here
+                // since #832, so this is where a database refusing it shows.
+                let mut claims = super::catch_up::Streak::default();
                 loop {
                     tokio::select! {
                         inbound = ch.recv() => match inbound {
@@ -284,36 +293,30 @@ impl ChannelBus {
                             }
                             None => { info!(channel = %id.0, "inbound closed"); break; }
                         },
-                        Some(out) = rx.recv() => {
-                            // TWO producers feed this `rx`, and they leave
-                            // different rows behind:
-                            //   - a completed-task reply from
-                            //     `handle_completed`, which already wrote
-                            //     `channel.replied` when it queued this —
-                            //     that row means "routed", not "delivered"
-                            //     (see `actions::REPLIED`);
-                            //   - a core-initiated message from the
-                            //     `ChannelOutbox` (#564 slice 2), i.e. a
-                            //     raised ask, which has `ask.delivered`
-                            //     behind it instead and NO `channel.replied`.
-                            // Until slice 2 the first was the only producer,
-                            // so "already wrote `channel.replied`" read as an
-                            // invariant; it is not one any more, which is why
-                            // a `channel.reply_undelivered` can now be an
-                            // orphan with no `channel.replied` to pair with.
+                        Some(item) = rx.recv() => {
+                            // TWO producers feed this `rx` (see `Queued`): a
+                            // finished task's reply from `handle_completed`,
+                            // queued unclaimed — `deliver` claims it, writes
+                            // `channel.replied` ("routed", see
+                            // `actions::REPLIED`) and sends it; and a
+                            // core-initiated message from the `ChannelOutbox`
+                            // (#564 slice 2), i.e. a raised ask, which has
+                            // `ask.delivered` behind it and NO
+                            // `channel.replied` — which is why a
+                            // `channel.reply_undelivered` can be an orphan.
                             //
-                            // The actual transport attempt is HERE either
-                            // way, so a failure must leave its own durable
-                            // trace (`send_or_record`), or the audit trail
-                            // asserts a delivery that never happened.
-                            // `EmailChannel::send` still always fails, so
-                            // without it every email answer looked
-                            // delivered. The row is channel + peer only, so
-                            // an ask failure recorded here names neither the
-                            // ask nor the task — correlating it needs the
-                            // outbound message to carry its `ask_id`,
-                            // tracked separately.
-                            send_or_record(&*ch, &*events, &id, out, "channel send failed").await;
+                            // The transport attempt is in `deliver` either
+                            // way, through `send_or_record`, so a refusal
+                            // leaves its own durable row rather than an audit
+                            // trail asserting a delivery that never happened
+                            // (`EmailChannel::send` still always fails).
+                            let d = deliver(&*completed, &*events, &*ch, &id, item).await;
+                            if let Some(n) = claims.record(d == Delivery::ClaimFailed) {
+                                error!(
+                                    channel = %id.0, consecutive = n,
+                                    "reply claims keep failing; finished tasks' replies are not going out"
+                                );
+                            }
                         }
                     }
                 }
@@ -321,8 +324,8 @@ impl ChannelBus {
         }
 
         // Outbound pump: sweep the backlog, then NOTIFY → load → route →
-        // claim → push into the per-channel sender, re-sweeping every
-        // `SWEEP_EVERY` (#825). The start sweep needs no ordering care: the
+        // push, unclaimed, into the per-channel queue, re-sweeping every
+        // `SWEEP_EVERY` (#825). The channel's pump claims at the send (#832). The start sweep needs no ordering care: the
         // production `completed` is a `PgCompletedTasks`, whose `connect()`
         // established its LISTEN before `spawn` was called, so a task
         // finishing during the sweep is announced afterwards and its claim
