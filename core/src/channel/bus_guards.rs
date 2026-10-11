@@ -43,6 +43,9 @@ pub(crate) enum InFlight {
     Reply { task_id: i64 },
     /// The claim that settles a channel task with no routing metadata.
     Unroutable { task_id: i64 },
+    /// A raised ask handed to the transport. Its `ask.delivered` row is
+    /// written and nothing will re-send it, so a stop mid-send is said.
+    Ask,
 }
 
 /// A drop guard held across one piece of in-flight work. [`settle`] it when
@@ -111,6 +114,7 @@ pub(crate) fn format_abandoned(what: InFlight, about: &str, panicked: bool) -> S
             "a message{about} was abandoned mid-handling: {cause}; it may not have been enqueued or recorded"
         ),
         InFlight::Reply { task_id } => format!("task {task_id}'s reply{about} may not have been sent: {cause}"),
+        InFlight::Ask => format!("an ask message{about} may not have been sent: {cause}"),
         InFlight::Unroutable { task_id } => format!(
             "task {task_id}'s unroutable reply may have been settled without its channel.reply_unroutable row: {cause}"
         ),
@@ -152,7 +156,10 @@ impl Drop for PumpQueue {
         while let Ok(item) = self.rx.try_recv() {
             match item {
                 Queued::Reply { .. } => replies += 1,
-                Queued::Ask(out) => self.events.report_lost(&format_ask_unsent(&out.channel, &out.peer)),
+                Queued::Ask(out) => {
+                    let line = format_ask_unsent(&out.channel, &out.peer, std::thread::panicking());
+                    self.events.report_lost(&line);
+                }
             }
         }
         if replies > 0 {
@@ -166,12 +173,10 @@ impl Drop for PumpQueue {
 
 /// Pure: the `[audit-lost]` line for a raised ask still queued when its
 /// channel's pump ended. Its body carries the approval token, so only the
-/// channel and the peer are named.
-pub(crate) fn format_ask_unsent(channel: &ChannelId, peer: &PeerId) -> String {
-    format!(
-        "an ask message{} was not sent: the bus stopped with it queued",
-        describe(Some(channel), Some(peer))
-    )
+/// channel and the peer are named. `panicked` tells a panic from a stop.
+pub(crate) fn format_ask_unsent(channel: &ChannelId, peer: &PeerId, panicked: bool) -> String {
+    let cause = if panicked { "its pump panicked with it queued" } else { "the bus stopped with it queued" };
+    format!("an ask message{} was not sent: {cause}", describe(Some(channel), Some(peer)))
 }
 
 #[cfg(test)]
@@ -273,8 +278,24 @@ mod tests {
     #[test]
     fn a_queued_ask_is_named_by_channel_and_peer_only() {
         assert_eq!(
-            format_ask_unsent(&matrix(), &me()),
+            format_ask_unsent(&matrix(), &me(), false),
             r#"an ask message for channel "matrix", peer "@me:srv" was not sent: the bus stopped with it queued"#
+        );
+        assert_eq!(
+            format_ask_unsent(&matrix(), &me(), true),
+            r#"an ask message for channel "matrix", peer "@me:srv" was not sent: its pump panicked with it queued"#
+        );
+    }
+
+    /// An ask already handed to the transport when the bus stops: `ask.delivered`
+    /// is written and nothing will re-send it, so it is said like a reply.
+    #[test]
+    fn an_ask_mid_send_is_said_by_channel_and_peer() {
+        let ev = RecordingEvents::default();
+        drop(InFlightGuard::arm(&ev, InFlight::Ask, Some(&matrix()), Some(&me())));
+        assert_eq!(
+            *ev.lost.lock().unwrap(),
+            [r#"an ask message for channel "matrix", peer "@me:srv" may not have been sent: the bus stopped while it was in flight"#]
         );
     }
 }

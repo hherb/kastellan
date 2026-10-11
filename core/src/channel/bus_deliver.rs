@@ -16,7 +16,8 @@
 //! which only one copy wins.
 //!
 //! What is still in flight at a stop is the claim → row → send span of the
-//! one reply being delivered; an [`InFlightGuard`] says so.
+//! one reply being delivered, or the send of one raised ask; an
+//! [`InFlightGuard`] says so.
 
 use tracing::warn;
 
@@ -53,14 +54,27 @@ pub enum Delivery {
     /// `send_or_record` (`send_failed`), not here.
     Sent,
     /// A reply this router did not win — already settled by a duplicate copy
-    /// of it, the other bus, or a claim that committed before it errored
-    /// (that last one recorded as `claim_unknown`). Nothing sent.
+    /// of it, or by the other bus. Nothing sent, and nothing wrong.
     NotClaimed,
-    /// The claim failed and the task is not settled: left for catch-up.
+    /// The claim returned an error. Usually the task is not settled and the
+    /// reply is left for catch-up; when a re-read finds it settled anyway (a
+    /// claim that committed before the error reached the bus) it is recorded
+    /// as `claim_unknown` and not sent. Either way a failed claim, for the
+    /// pump's streak: a link that commits and then drops the connection
+    /// turns every reply into "claimed, not sent".
     ClaimFailed,
 }
 
-/// Deliver one queued item on `ch`. An ask goes straight to the transport. A
+impl Delivery {
+    /// Does this outcome count toward the pump's run of failed claims (the
+    /// ERROR after [`catch_up::SWEEP_FAILURES_LOUD`] in a row)?
+    pub fn is_claim_failure(self) -> bool {
+        self == Self::ClaimFailed
+    }
+}
+
+/// Deliver one queued item on `ch`. An ask goes straight to the transport,
+/// under an [`InFlightGuard`] of its own. A
 /// reply is claimed, gets its delay note if late, is recorded as
 /// `channel.replied` (meaning *routed*: the transport attempt follows), and
 /// is sent — all under an [`InFlightGuard`], since a stop anywhere in that
@@ -74,7 +88,11 @@ pub async fn deliver(
 ) -> Delivery {
     match item {
         Queued::Ask(out) => {
+            // Nothing will re-send an ask (`ask.delivered` is written), so a
+            // stop mid-send is said, like a reply's.
+            let guard = InFlightGuard::arm(events, InFlight::Ask, Some(&out.channel), Some(&out.peer));
             send_or_record(ch, events, id, out, "channel send failed").await;
+            guard.settle();
             Delivery::Sent
         }
         Queued::Reply { task_id, via, out } => {
@@ -113,7 +131,7 @@ async fn deliver_reply(
             let now = time::OffsetDateTime::now_utc();
             let reply = super::UndeliveredReply::of(&out, super::UndeliveredReason::ClaimUnknown, now);
             events.audit(actions::REPLY_UNDELIVERED, reply.payload()).await;
-            return Delivery::NotClaimed;
+            return Delivery::ClaimFailed;
         }
     };
     let late = catch_up::late_reply(&claimed, time::OffsetDateTime::now_utc());

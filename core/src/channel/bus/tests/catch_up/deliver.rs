@@ -102,3 +102,23 @@ async fn a_refused_claim_is_reported_for_the_pump_streak() {
     assert_eq!(backlog.disposition(7), None, "left for catch-up");
     assert!(ev.lost.lock().unwrap().is_empty(), "the guard settled each time");
 }
+
+/// A claim that errored after committing is recorded (`claim_unknown`) and
+/// not sent — and it is a failed claim all the same: a link that commits
+/// and then drops the connection turns every reply into "claimed, not sent",
+/// so it must feed the pump's streak like any other refused claim.
+#[tokio::test]
+async fn a_claim_that_committed_then_failed_counts_as_a_failed_claim() {
+    let (backlog, _n) = Backlog::new(vec![(7, channel_row("done"))]);
+    backlog.claim_commits_then_fails.lock().unwrap().insert(7);
+    let ev = FakeEvents::default();
+    let sink = SinkChannel::default();
+
+    let d = deliver(&backlog, &ev, &sink, &matrix(), reply(7, Via::Notify)).await;
+
+    assert!(d.is_claim_failure(), "{d:?}");
+    assert!(sent_bodies(&sink).is_empty());
+    assert_eq!(actions_of(&ev), [actions::REPLY_UNDELIVERED]);
+    assert!(!Delivery::Sent.is_claim_failure() && !Delivery::NotClaimed.is_claim_failure());
+    assert!(Delivery::ClaimFailed.is_claim_failure());
+}

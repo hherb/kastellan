@@ -114,6 +114,10 @@ PG-free unless noted; each new arm mutation-checked.
 - A panicking pump is logged by `shutdown` (D7).
 - PG: `reply_catch_up_pg_e2e` gains a stop-with-queued-replies → restart → delivered case.
 
+**Amended after the final review:** an ask mid-send gets its own guard (`InFlight::Ask`), the
+queued-ask line tells a panic from a stop, and a `claim_unknown` outcome counts as a failed claim
+for the pump's streak. Messages the bus had not yet *read* when it stopped are #846.
+
 ## Residual (documented, not closed)
 
 - A transport `send` in flight at abort may or may not have delivered — `ReplyInFlight` /

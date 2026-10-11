@@ -28,7 +28,9 @@
 //! it, so a quiet `audit_log` after a restart is not proof that nothing was
 //! lost:
 //!
-//! - messages the bus took but had not read when it stopped (#832);
+//! - messages the bus took but had not read when it stopped (follow-up:
+//!   #846; a message the bus *had* read and was still handling is said on
+//!   `[audit-lost]` since #832);
 //! - messages the worker had received but not yet returned from a poll when
 //!   the driver exited — the live Matrix worker queues them in memory, and
 //!   they die with it (#835);

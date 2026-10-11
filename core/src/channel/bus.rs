@@ -320,7 +320,7 @@ impl ChannelBus {
                             // trail asserting a delivery that never happened
                             // (`EmailChannel::send` still always fails).
                             let d = deliver(&*completed, &*events, &*ch, &id, item).await;
-                            if let Some(n) = claims.record(d == Delivery::ClaimFailed) {
+                            if let Some(n) = claims.record(d.is_claim_failure()) {
                                 error!(
                                     channel = %id.0, consecutive = n,
                                     "reply claims keep failing; finished tasks' replies are not going out"

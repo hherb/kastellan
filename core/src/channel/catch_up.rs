@@ -57,21 +57,26 @@ pub const SWEEP_FAILURES_LOUD: u32 = 3;
 pub struct SweepReport {
     /// The backlog read failed, or did not move past its cursor.
     pub read_failed: bool,
-    /// Replies claimed and queued.
+    /// Replies queued, unclaimed, for their channel's pump (which claims
+    /// each at its send since #832).
     pub queued: usize,
     /// Replies for a channel this bus does not serve, left unclaimed.
     pub unserved: usize,
     /// Replies whose load failed, left for the next sweep.
     pub load_failed: usize,
-    /// Replies whose claim failed — left for the next sweep, or recorded
-    /// (`claim_unknown`) when a re-read found the task settled anyway.
+    /// Unroutable replies whose settling claim failed — left for the next
+    /// sweep, or recorded (`claim_uncertain`) when a re-read found the task
+    /// settled anyway. Since #832 these are the sweep's only claims; a
+    /// routable reply's claim failures are counted by its channel's pump.
     pub claim_failed: usize,
 }
 
 impl SweepReport {
-    /// A sweep failed when it could not read the backlog, or when it claimed
-    /// nothing and every claim it tried failed — the shape of a database that
-    /// still answers `SELECT` but refuses the claim's `UPDATE`. A failed load
+    /// A sweep failed when it could not read the backlog, or when it queued
+    /// nothing and every (unroutable) claim it tried failed. A database that
+    /// answers `SELECT` but refuses a routable reply's claim `UPDATE` is no
+    /// longer seen here since #832: the channel's pump claims, and its own
+    /// streak says so (`reply claims keep failing`). A failed load
     /// is not a sweep failure: one task whose row will not load (a poison
     /// row) would otherwise make every sweep fail for ever, and the loud line
     /// would then be false for every other reply. Loads are in the INFO
@@ -228,7 +233,7 @@ mod tests {
     fn a_sweep_fails_when_it_cannot_read_or_every_claim_fails() {
         assert!(report(true, 0, 0).is_failure(), "the backlog read failed");
         assert!(report(false, 0, 2).is_failure(), "every claim it tried failed");
-        assert!(!report(false, 1, 2).is_failure(), "one got through: the claim path works");
+        assert!(!report(false, 1, 2).is_failure(), "one was queued: the sweep is doing its job");
         assert!(!report(false, 0, 0).is_failure(), "an empty backlog is a quiet sweep");
         let unserved = SweepReport { unserved: 5, ..SweepReport::default() };
         assert!(!unserved.is_failure(), "another bus's replies are not a failure");

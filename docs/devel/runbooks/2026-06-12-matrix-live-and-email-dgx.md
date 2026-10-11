@@ -122,8 +122,9 @@ accepts **both**: a custom root CA **and** a CONNECT-over-UDS proxy.
   On a bus stop or restart (#832), replies still queued were never claimed and go out
   from the next bus (INFO `channel pump ended with replies queued`); what a stop did
   abandon is on `[audit-lost]`: `task N's reply … may not have been sent`, `a message
-  for … was abandoned mid-handling`, `an ask message for … was not sent`. The bus no
-  longer writes `queue_closed`.
+  for … was abandoned mid-handling`, `an ask message for … may not have been sent` (mid-send)
+  or `… was not sent` (still queued), and `task N's unroutable reply may have been settled
+  without its channel.reply_unroutable row`. The bus no longer writes `queue_closed`.
   Migration 0027 runs at the first deploy and marks every earlier reply `backfilled`,
   so history is not re-sent.
 - Update HANDOVER + ROADMAP ("Matrix inbound"/"Matrix outbound" → `[x]`), flip the

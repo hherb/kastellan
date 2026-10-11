@@ -106,8 +106,9 @@ async fn a_stop_mid_enqueue_reports_the_inbound_message() {
 }
 
 /// W5: raised asks still queued when the pump ends are not recoverable (no
-/// task reply to re-find; `ask.delivered` was their row) — each is said,
-/// by channel and peer, never by its body, which carries the approval token.
+/// task reply to re-find; `ask.delivered` was their row) — each is said, as
+/// is the one mid-send, by channel and peer, never by its body, which carries
+/// the approval token.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stop_with_asks_queued_reports_each_ask() {
     let ev = Arc::new(FakeEvents::default());
@@ -130,9 +131,14 @@ async fn a_stop_with_asks_queued_reports_each_ask() {
     eventually("the first ask is in the transport", || s.sent.lock().unwrap().len() == 1).await;
     s.bus.shutdown().await;
 
+    // One line per ask: the one wedged mid-send, and the two still queued.
     let lost = ev.lost.lock().unwrap().clone();
-    let line = r#"an ask message for channel "matrix", peer "@me:srv" was not sent: the bus stopped with it queued"#;
-    assert_eq!(lost, [line, line], "one line per queued ask");
+    let mid_send = r#"an ask message for channel "matrix", peer "@me:srv" may not have been sent: the bus stopped while it was in flight"#;
+    let queued = r#"an ask message for channel "matrix", peer "@me:srv" was not sent: the bus stopped with it queued"#;
+    assert_eq!(lost.len(), 3, "{lost:?}");
+    assert_eq!(lost.iter().filter(|l| *l == mid_send).count(), 1, "{lost:?}");
+    assert_eq!(lost.iter().filter(|l| *l == queued).count(), 2, "{lost:?}");
+    assert!(lost.iter().all(|l| !l.contains("SECRET-ASK-BODY")), "never the body: {lost:?}");
 }
 
 /// W2: replies still queued at a stop were never claimed, so they say
@@ -163,31 +169,54 @@ async fn a_stop_with_replies_queued_leaves_them_unclaimed() {
     next.bus.shutdown().await;
 }
 
+/// A backlog whose claim never returns, after flagging that it was reached:
+/// a wedged Postgres on the claim's own round-trip.
+struct ParkingClaim {
+    inner: Arc<Backlog>,
+    entered: AtomicBool,
+}
+#[async_trait::async_trait]
+impl CompletedTasks for ParkingClaim {
+    async fn next_completed(&self) -> Option<i64> {
+        std::future::pending().await
+    }
+    async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
+        self.inner.load(id).await
+    }
+    async fn claim(&self, _id: i64, _d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+        self.entered.store(true, Ordering::SeqCst);
+        std::future::pending().await
+    }
+    async fn unsettled(&self, a: i64, l: i64) -> anyhow::Result<Vec<i64>> {
+        self.inner.unsettled(a, l).await
+    }
+}
+
+/// W3: a stop while a reply's claim is on its round-trip. The `UPDATE` may
+/// still commit after the abort, leaving the task `routed` with nothing sent
+/// and no row — so the reply's guard, armed before the claim, says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_mid_reply_claim_reports_it() {
+    let (inner, _n) = Backlog::new(vec![(7, channel_row("done"))]);
+    let completed = Arc::new(ParkingClaim { inner, entered: AtomicBool::new(false) });
+    let ev = Arc::new(FakeEvents::default());
+    let s = bus_with(ev.clone(), completed.clone(), false, None);
+
+    eventually("the reply's claim is under way", || completed.entered.load(Ordering::SeqCst)).await;
+    s.bus.shutdown().await;
+
+    assert!(s.sent.lock().unwrap().is_empty(), "nothing reached the transport");
+    assert_eq!(
+        *ev.lost.lock().unwrap(),
+        [r#"task 7's reply for channel "matrix", peer "@me:srv" may not have been sent: the bus stopped while it was in flight"#]
+    );
+}
+
 /// The unroutable twin of W3: a stop on the claim that settles a reply
 /// nobody can deliver may leave it settled with no row. Staged with a claim
 /// that never returns.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stop_mid_unroutable_claim_reports_it() {
-    struct ParkingClaim {
-        inner: Arc<Backlog>,
-        entered: AtomicBool,
-    }
-    #[async_trait::async_trait]
-    impl CompletedTasks for ParkingClaim {
-        async fn next_completed(&self) -> Option<i64> {
-            std::future::pending().await
-        }
-        async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
-            self.inner.load(id).await
-        }
-        async fn claim(&self, _id: i64, _d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
-            self.entered.store(true, Ordering::SeqCst);
-            std::future::pending().await
-        }
-        async fn unsettled(&self, a: i64, l: i64) -> anyhow::Result<Vec<i64>> {
-            self.inner.unsettled(a, l).await
-        }
-    }
     let unroutable = (serde_json::json!({"kind":"channel","peer":"@me:srv"}), None);
     let (inner, _n) = Backlog::new(vec![(9, unroutable)]);
     let completed = Arc::new(ParkingClaim { inner, entered: AtomicBool::new(false) });
