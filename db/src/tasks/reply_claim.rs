@@ -1,13 +1,17 @@
 //! The reply claim (#825): which finished channel tasks still owe their peer
 //! a reply, and the atomic step that settles one.
 //!
-//! Every route of a channel reply — from the live `tasks_completed` NOTIFY or
-//! from the catch-up sweep, on either bus (#497) — claims the task before
-//! queueing its reply. The claim is an `UPDATE … WHERE reply_settled_at IS
-//! NULL`, so it has exactly one winner and every other router backs off
-//! silently. It is **at-most-once**: a task is settled just before its reply
-//! is queued; a failure after that is recorded as `channel.reply_undelivered`,
-//! never retried (see the spec's D2 for why not at-least-once).
+//! Every channel reply — queued from the live `tasks_completed` NOTIFY or
+//! from the catch-up sweep, on either bus (#497) — is claimed by its
+//! channel's pump immediately before its send (since #832; from #825 until
+//! then, before it was queued — the #825 spec's D1, and migration 0027's
+//! comments, which sqlx's checksum keeps as they were). The claim is an
+//! `UPDATE … WHERE reply_settled_at IS NULL`, so it has exactly one winner
+//! and every other copy backs off silently. It is **at-most-once**: a task is
+//! settled just before its transport attempt; a failure after that is
+//! recorded as `channel.reply_undelivered` (or, for a stop mid-send, said on
+//! `[audit-lost]`), never retried (see the #825 spec's D2 for why not
+//! at-least-once).
 
 use sqlx::PgPool;
 use sqlx::Row;
@@ -34,9 +38,10 @@ pub const REPLIED_STATES: [&str; 7] = [
 /// migration 0027: no code path settles a task that way.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplyDisposition {
-    /// Claimed for routing to the owning channel's queue. The claim comes
-    /// first, so a `routed` task may still have been dropped after it:
-    /// `channel.replied` / `channel.reply_undelivered` say what happened.
+    /// Claimed by the owning channel's pump immediately before its send. The
+    /// claim comes first, so a `routed` task may still have been dropped
+    /// after it: `channel.replied` / `channel.reply_undelivered` (or an
+    /// `[audit-lost]` line, for a stop mid-send) say what happened.
     Routed,
     /// A channel task with no routing metadata: there is no one to reply to.
     Unroutable,
@@ -65,7 +70,8 @@ fn states() -> Vec<String> {
 }
 
 /// Settle `task_id`'s reply as `d`. `Ok(None)` means someone else already
-/// settled it (the other bus, the other path, an earlier sweep) **or** the
+/// settled it (the other bus, the other path, an earlier sweep, a duplicate
+/// queued copy of the same reply) **or** the
 /// task has not finished — and a task that has not finished must never be
 /// settled, or its real completion would find it already claimed.
 pub async fn claim_reply(

@@ -662,7 +662,7 @@ async fn a_raised_ask_travels_the_whole_runner_to_the_registered_channel() {
         .await
         .expect("the ask must reach the registered channel within 20s")
         .expect("the outbox sender must still be open");
-    let kastellan_core::channel::bus::Queued::Ask(sent) = sent else {
+    let kastellan_core::channel::bus::Queued::Ask { out: sent, .. } = sent else {
         panic!("a raised ask is queued as an ask, with no reply to claim: {sent:?}");
     };
 

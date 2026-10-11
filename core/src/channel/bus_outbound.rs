@@ -22,7 +22,7 @@ use super::{actions, Channel, ChannelId, OutgoingMessage};
 /// Real `CompletedTasks` over a `PgListener` on `tasks_completed` + `tasks::get`.
 /// Construct via [`PgCompletedTasks::connect`].
 pub struct PgCompletedTasks {
-    /// Locked only by `next_completed`, i.e. only by the outbound pump; a
+    /// Locked only by `next_completed`, i.e. only by the completed-task pump; a
     /// `select!` that drops that future drops the guard with it.
     listener: tokio::sync::Mutex<sqlx::postgres::PgListener>,
     pool: sqlx::PgPool,
@@ -107,13 +107,14 @@ pub(super) async fn send_or_record(
 /// `senders` maps `ChannelId` → that channel's queue. Returns the item
 /// queued (for tests).
 ///
-/// Nothing here claims a reply, so anything that stops one — a failed load,
-/// a closed queue, a bus stop aborting this while it waits for queue space,
-/// or the queue's pump ending with the reply still in it — leaves it in the
-/// backlog, and the next sweep delivers it. The one claim made here settles
+/// Nothing here claims a routable reply, so anything that stops one — a
+/// failed load, a closed queue, a bus stop aborting this while it waits for
+/// queue space, or the queue's pump ending with the reply still in it —
+/// leaves it in the backlog, and the next sweep delivers it. The one claim made here settles
 /// a channel task with no routing metadata (`channel.reply_unroutable`).
 /// What a stop can still lose is the reply a channel's pump is delivering at
-/// that moment, which `bus_deliver`'s guard reports.
+/// that moment, which `bus_deliver`'s guard reports — and an unroutable
+/// claim in flight, which `settle_unroutable`'s does.
 pub async fn handle_completed(
     completed: &dyn CompletedTasks,
     events: &dyn ChannelEvents,

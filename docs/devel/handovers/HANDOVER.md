@@ -8,8 +8,8 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-11 (#832 — a bus stop loses nothing silently: the reply claim moves to the
-send side, drop guards say what cannot be recovered; PR [#847](https://github.com/hherb/kastellan/pull/847), gate green. PR [#842](https://github.com/hherb/kastellan/pull/842) (#825) **merged 2026-10-11**; the operator is still
+**Last updated:** 2026-10-12 (#832 — a bus stop loses nothing silently: the reply claim moves to the
+send side, drop guards say what cannot be recovered; PR [#847](https://github.com/hherb/kastellan/pull/847), gate green, review round 2 applied. PR [#842](https://github.com/hherb/kastellan/pull/842) (#825) **merged 2026-10-11**; the operator is still
 running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#847](https://github.com/hherb/kastellan/pull/847) (#832, open), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
@@ -56,12 +56,22 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   writer `Bus`; `PgChannelEvents` routes it through its `Reporter`). ⚠️ A stop on the final
   `channel.replied` insert gives **two** lines (PendingInsert + Reply), by design.
 - `CompletedTasks::next_completed(&self)`; **`ChannelBus::spawn` takes `Arc<dyn CompletedTasks>`**;
-  `PgCompletedTasks` keeps its listener in a tokio `Mutex`. `catch_up::Streak` replaced
-  `FailedSweeps`; a channel pump ERRORs after 3 failed claims in a row (`Delivery::is_claim_failure`,
-  `claim_unknown` included). `shutdown()` returns + logs the panicked-pump count.
-- ⚠️ Not covered: messages the driver handed over that the bus had **not yet read** (#846); a crash.
-  Deferred minor: once loud, every failed claim ERRORs (≈N per 5 min for N stuck replies).
+  `PgCompletedTasks` keeps its listener in a tokio `Mutex`. `catch_up::Streak` (sweeps) replaced
+  `FailedSweeps`. `shutdown()` returns + logs (by pump name) the panicked-pump count.
+- **Review round 2 (2026-10-12, 5-agent review):** the claim ERROR is `catch_up::ClaimStreak` —
+  loud once a run is ≥ `CLAIM_FAILURES_LOUD` (3) long **and** ≥ `CLAIM_FAILURES_LOUD_AFTER` (60 s)
+  old, then only at each doubling (was: one ERROR per failed reply, and a sub-second blip tripped
+  it). An ask is `Delivery::AskSent`, which `Delivery::claim_failed() -> Option<bool>` maps to
+  `None`, so `note_claim` neither counts nor resets on it. A claim that errored **and** whose re-read
+  failed is now said on `[audit-lost]` (`format_claim_unknowable`), not WARN-only.
+  **`Queued::Ask { task_id, out }`** and `ChannelOutbox::try_deliver(task_id, msg)`: lost-ask lines
+  name the task. `OutgoingMessage`'s `Debug` leaves out the body (approval token). `InFlightGuard`
+  is `#[must_use]`; `PumpQueue::channel` constructs sender + wrapped receiver together. Stale "claim,
+  then queue" docs fixed (`reply_claim.rs`, `actions::REPLIED`; migration 0027 left as-is: checksum).
+- ⚠️ Not covered: messages the driver handed over that the bus had **not yet read** (#846); a crash;
+  `[audit-lost]`'s "audit rows from bus:" prefix on lost-*message* lines (#848).
   ⚠️ **A sweep without `-- --nocapture` under-counts `[SKIP]`** (12 vs 23 here) — pass counts agree.
+  ⚠️ **The `pg` gate needs `KASTELLAN_PG_BIN_DIR`** on this Mac, or it fails its positive control.
 
 ### Previous (2026-10-08/09): #825 — the reply catch-up (PR #842, merged) — what still binds
 

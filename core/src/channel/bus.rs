@@ -51,13 +51,13 @@ pub use kastellan_db::tasks::reply_claim::{ClaimedReply, ReplyDisposition};
 #[async_trait::async_trait]
 pub trait CompletedTasks: Send + Sync {
     /// Next completed task id, or `None` when the stream ends. Called by the
-    /// outbound pump only; `&self` (since #832) so the per-channel pumps can
-    /// share the seam for their claims.
+    /// completed-task pump only; `&self` (since #832) so the channels' pumps
+    /// can share the seam for their claims.
     async fn next_completed(&self) -> Option<i64>;
     /// Fetch `(payload, result)` for a task id, or `None` if absent.
     async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>>;
     /// Settle `id`'s reply as `d`. `Ok(None)`: already settled, or not
-    /// finished — either way, not this caller's to route. See
+    /// finished — either way, not this caller's to send. See
     /// `kastellan_db::tasks::reply_claim::claim_reply`.
     async fn claim(&self, id: i64, d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>>;
     /// Up to `limit` unsettled finished channel task ids above `after_id`,
@@ -200,11 +200,13 @@ use super::bus_outbound::send_or_record;
 
 /// What a channel's queue carries, and the per-channel pump's delivery of
 /// it — the claim at the send (#832).
-pub use super::bus_deliver::{deliver, Delivery, Queued};
+pub use super::bus_deliver::{deliver, note_claim, Delivery, Queued};
 
 /// A running bus. Owns the spawned pump tasks; `shutdown()` aborts them.
 pub struct ChannelBus {
-    handles: Vec<JoinHandle<()>>,
+    /// Each pump, with what `shutdown` calls it if it panicked: its channel's
+    /// id, or `completed-task`.
+    handles: Vec<(String, JoinHandle<()>)>,
     /// Rung by whichever pump ends first. Read by the channel supervisor
     /// through [`death_signal`](Self::death_signal) — see [`DeathBell`] for why
     /// the bus reports its own death rather than being polled for liveness.
@@ -242,7 +244,10 @@ impl ChannelBus {
 
         for mut ch in channels {
             let id = ch.id();
-            let (tx, rx) = mpsc::channel::<Queued>(32);
+            // The receiving end is owned by a `PumpQueue`: whatever is still
+            // queued when this pump ends is counted (replies, recoverable)
+            // or said (asks) (#832).
+            let (tx, mut queue) = super::bus_guards::PumpQueue::channel(32, events.clone(), id.clone());
             senders.insert(id.clone(), tx.clone());
 
             // Publish this channel's reply queue so core-initiated messages
@@ -258,15 +263,12 @@ impl ChannelBus {
             let events = events.clone();
             let asks_for_pump = asks.clone();
             let completed = completed.clone();
-            // Owns the receiver: whatever is still queued when this pump
-            // ends is counted (replies, recoverable) or said (asks) (#832).
-            let mut queue = super::bus_guards::PumpQueue::new(rx, events.clone(), id.clone());
             let life = bell.guard();
-            handles.push(tokio::spawn(async move {
+            handles.push((id.0.clone(), tokio::spawn(async move {
                 let _life = life;
                 // Consecutive failed reply claims: the claim happens here
                 // since #832, so this is where a database refusing it shows.
-                let mut claims = super::catch_up::Streak::default();
+                let mut claims = super::catch_up::ClaimStreak::default();
                 loop {
                     tokio::select! {
                         inbound = ch.recv() => match inbound {
@@ -303,7 +305,7 @@ impl ChannelBus {
                             None => { info!(channel = %id.0, "inbound closed"); break; }
                         },
                         Some(item) = queue.recv() => {
-                            // TWO producers feed this `rx` (see `Queued`): a
+                            // TWO producers feed this queue (see `Queued`): a
                             // finished task's reply from `handle_completed`,
                             // queued unclaimed — `deliver` claims it, writes
                             // `channel.replied` ("routed", see
@@ -320,7 +322,7 @@ impl ChannelBus {
                             // trail asserting a delivery that never happened
                             // (`EmailChannel::send` still always fails).
                             let d = deliver(&*completed, &*events, &*ch, &id, item).await;
-                            if let Some(n) = claims.record(d.is_claim_failure()) {
+                            if let Some(n) = note_claim(&mut claims, d, std::time::Instant::now()) {
                                 error!(
                                     channel = %id.0, consecutive = n,
                                     "reply claims keep failing; finished tasks' replies are not going out"
@@ -329,10 +331,10 @@ impl ChannelBus {
                         }
                     }
                 }
-            }));
+            })));
         }
 
-        // Outbound pump: sweep the backlog, then NOTIFY → load → route →
+        // Completed-task pump: sweep the backlog, then NOTIFY → load → route →
         // push, unclaimed, into the per-channel queue, re-sweeping every
         // `SWEEP_EVERY` (#825); the channel's pump claims at the send (#832).
         // The start sweep needs no ordering care: the production `completed`
@@ -341,7 +343,7 @@ impl ChannelBus {
         // announced afterwards, and the claim drops the duplicate.
         let events_out = events.clone();
         let life = bell.guard();
-        handles.push(tokio::spawn(async move {
+        handles.push(("completed-task".to_string(), tokio::spawn(async move {
             let _life = life;
             // A failed sweep is a WARN and the pump carries on; a run of
             // them is an ERROR, since replies are then piling up unseen.
@@ -375,7 +377,7 @@ impl ChannelBus {
                 }
             }
             info!("outbound pump stopped");
-        }));
+        })));
 
         Self { handles, bell, asks, registered }
     }
@@ -404,18 +406,20 @@ impl ChannelBus {
     }
 
     /// Abort all pump tasks (called on daemon shutdown), then join them so any
-    /// resources they hold are released before the caller proceeds. The
-    /// completed-task pump owns a `PgListener`, which holds a checked-out pool
-    /// connection that sqlx 0.9 only releases when the listener is dropped; the
-    /// daemon's shutdown closes the pool right after, and `Pool::close()` blocks
-    /// until every connection is returned. Aborting without joining would leave
-    /// that release racing the pool close. Mirrors the scheduler/audit-mirror
-    /// shutdowns, which signal-then-join for the same reason.
+    /// resources they hold are released before the caller proceeds. Every
+    /// pump holds a clone of the `Arc<dyn CompletedTasks>` (since #832), whose
+    /// `PgCompletedTasks` owns a `PgListener` — a checked-out pool connection
+    /// that sqlx 0.9 only releases when the listener is dropped, i.e. when the
+    /// last pump is. The daemon's shutdown closes the pool right after, and
+    /// `Pool::close()` blocks until every connection is returned, so aborting
+    /// without joining would leave that release racing the pool close. Mirrors
+    /// the scheduler/audit-mirror shutdowns, which signal-then-join for the
+    /// same reason.
     ///
-    /// Returns how many pumps had **panicked** (each logged at ERROR, #832):
-    /// the join used to discard that, leaving only the death signal. Always 0
-    /// in a release build, which is `panic = "abort"`. Callers that only stop
-    /// the bus can ignore it.
+    /// Returns how many pumps had **panicked** (each logged at ERROR with its
+    /// name, #832): the join used to discard that, leaving only the death
+    /// signal. Always 0 in a release build, which is `panic = "abort"`.
+    /// Callers that only stop the bus can ignore it.
     pub async fn shutdown(self) -> usize {
         // Stop being a delivery target first: an ask queued after this point
         // would go into a channel whose pump is about to be aborted, which
@@ -425,15 +429,15 @@ impl ChannelBus {
                 w.outbox.deregister(id);
             }
         }
-        for h in &self.handles {
+        for (_, h) in &self.handles {
             h.abort();
         }
         let mut panicked = 0;
-        for h in self.handles {
+        for (pump, h) in self.handles {
             // An aborted pump joins as a cancellation — the normal case here.
             if let Err(e) = h.await {
                 if e.is_panic() {
-                    error!(error = %e, "channel bus pump panicked");
+                    error!(pump = %pump, error = %e, "channel bus pump panicked");
                     panicked += 1;
                 }
             }

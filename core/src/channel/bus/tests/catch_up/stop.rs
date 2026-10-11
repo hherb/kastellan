@@ -2,6 +2,11 @@
 //! recoverable (a queued reply stays unclaimed) or said on `[audit-lost]`
 //! (through `FakeEvents::lost` here). A child of the claim tests for their
 //! `Backlog` fake.
+//!
+//! W1–W6 are the windows in the spec,
+//! `docs/superpowers/specs/2026-10-11-832-bus-stop-windows-design.md`; W4
+//! (the `is_closed` → `permit.send` race) no longer exists, since nothing is
+//! claimed before the send.
 
 use super::*;
 use std::sync::atomic::AtomicBool;
@@ -86,7 +91,7 @@ impl ChannelEvents for ParkingEnqueue {
     }
 }
 
-/// W1: the transport has handed the message over (Matrix's cursor is past
+/// W1: the transport has handed the message over (and will not redeliver
 /// it), and the stop lands while it is being enqueued. No task, no row — so
 /// the line is the only trace, and it must name the peer, never the body.
 #[tokio::test(flavor = "multi_thread")]
@@ -119,7 +124,7 @@ async fn a_stop_with_asks_queued_reports_each_ask() {
 
     for n in 0..3 {
         outbox
-            .try_deliver(OutgoingMessage {
+            .try_deliver(40 + n, OutgoingMessage {
                 channel: matrix(),
                 peer: PeerId("@me:srv".into()),
                 conversation: ConversationId("!room:srv".into()),
@@ -131,13 +136,18 @@ async fn a_stop_with_asks_queued_reports_each_ask() {
     eventually("the first ask is in the transport", || s.sent.lock().unwrap().len() == 1).await;
     s.bus.shutdown().await;
 
-    // One line per ask: the one wedged mid-send, and the two still queued.
-    let lost = ev.lost.lock().unwrap().clone();
-    let mid_send = r#"an ask message for channel "matrix", peer "@me:srv" may not have been sent: the bus stopped while it was in flight"#;
-    let queued = r#"an ask message for channel "matrix", peer "@me:srv" was not sent: the bus stopped with it queued"#;
-    assert_eq!(lost.len(), 3, "{lost:?}");
-    assert_eq!(lost.iter().filter(|l| *l == mid_send).count(), 1, "{lost:?}");
-    assert_eq!(lost.iter().filter(|l| *l == queued).count(), 2, "{lost:?}");
+    // One line per ask, by its task: the one wedged mid-send, and the two
+    // still queued.
+    let mut lost = ev.lost.lock().unwrap().clone();
+    lost.sort();
+    assert_eq!(
+        lost,
+        [
+            r#"task 40's ask message for channel "matrix", peer "@me:srv" may not have been sent: the bus stopped while it was in flight"#,
+            r#"task 41's ask message for channel "matrix", peer "@me:srv" was not sent: the bus stopped with it queued"#,
+            r#"task 42's ask message for channel "matrix", peer "@me:srv" was not sent: the bus stopped with it queued"#,
+        ]
+    );
     assert!(lost.iter().all(|l| !l.contains("SECRET-ASK-BODY")), "never the body: {lost:?}");
 }
 
@@ -152,6 +162,9 @@ async fn a_stop_with_replies_queued_leaves_them_unclaimed() {
     let s = bus_with(ev.clone(), Arc::new(backlog.clone()), true, None);
 
     eventually("the first reply is in the transport", || s.sent.lock().unwrap().len() == 1).await;
+    // …and the start sweep has routed all three, so a claim made at routing
+    // would already have settled 2 and 3: the stop cannot win that race.
+    eventually("the start sweep is done", || backlog.listen_calls.load(Ordering::SeqCst) >= 1).await;
     s.bus.shutdown().await;
 
     assert_eq!(backlog.disposition(1), Some(ReplyDisposition::Routed), "claimed, mid-send");
@@ -167,6 +180,29 @@ async fn a_stop_with_replies_queued_leaves_them_unclaimed() {
     let bodies: Vec<String> = next.sent.lock().unwrap().iter().map(|m| m.body.clone()).collect();
     assert_eq!(bodies, ["two", "three"]);
     next.bus.shutdown().await;
+}
+
+/// W1, its last await: the bus answers a message with an ack, and the stop
+/// lands on the ack's send. The guard covers the whole handling, ack
+/// included — settled before it, the message would be gone with no line.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_mid_ack_send_reports_the_inbound_message() {
+    let ev = Arc::new(FakeEvents::default());
+    let outbox = Arc::new(ChannelOutbox::new());
+    let resolver: Arc<dyn AskResolver> = Arc::new(RecordingResolver::default());
+    let wiring = Arc::new(AskWiring { outbox, resolver });
+    let s = bus_with(ev.clone(), Arc::new(ParkingCompleted), true, Some(wiring));
+
+    // A token that resolves nothing is answered with an ack; the transport
+    // wedges on it.
+    s.inbound.send(msg("@me:srv", "/deny nope")).await.unwrap();
+    eventually("the ack is in the transport", || s.sent.lock().unwrap().len() == 1).await;
+    s.bus.shutdown().await;
+
+    assert_eq!(
+        *ev.lost.lock().unwrap(),
+        [r#"a message for channel "matrix", peer "@me:srv" was abandoned mid-handling: the bus stopped while it was in flight; it may not have been enqueued or recorded"#]
+    );
 }
 
 /// A backlog whose claim never returns, after flagging that it was reached:
@@ -263,4 +299,68 @@ async fn a_panicked_pump_is_counted_at_shutdown() {
         .expect("the panicked pump rang the bell");
 
     assert_eq!(bus.shutdown().await, 1, "one pump panicked; the aborted one did not");
+}
+
+/// A pump that panics with an ask mid-send and another still queued: both are
+/// said, and as a panic — not as a stop, which nobody asked for. Pins that
+/// tokio drops a panicked task's future while still unwinding, which is what
+/// `thread::panicking()` in the guards relies on. Debug and test builds only.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pump_that_panics_says_its_asks_as_a_panic() {
+    struct PanickingSend {
+        entered: Arc<AtomicBool>,
+        go: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl Channel for PanickingSend {
+        fn id(&self) -> ChannelId {
+            matrix()
+        }
+        async fn recv(&mut self) -> Option<IncomingMessage> {
+            std::future::pending().await
+        }
+        async fn send(&self, _msg: OutgoingMessage) -> anyhow::Result<()> {
+            self.entered.store(true, Ordering::SeqCst);
+            self.go.notified().await;
+            panic!("test: the transport's send panicked");
+        }
+    }
+    let ev = Arc::new(FakeEvents::default());
+    let outbox = Arc::new(ChannelOutbox::new());
+    let resolver: Arc<dyn AskResolver> = Arc::new(RecordingResolver::default());
+    let wiring = Arc::new(AskWiring { outbox: outbox.clone(), resolver });
+    let (entered, go) = (Arc::new(AtomicBool::new(false)), Arc::new(tokio::sync::Notify::new()));
+    let bus = ChannelBus::spawn(
+        vec![Box::new(PanickingSend { entered: entered.clone(), go: go.clone() })],
+        Arc::new(StaticPairings::new()),
+        None,
+        ev.clone(),
+        Arc::new(ParkingCompleted),
+        Some(wiring),
+    );
+    let ask = |n: i64| OutgoingMessage {
+        channel: matrix(),
+        peer: PeerId("@me:srv".into()),
+        conversation: ConversationId("!room:srv".into()),
+        body: format!("SECRET-ASK-BODY {n}"),
+    };
+
+    outbox.try_deliver(40, ask(40)).expect("queued");
+    eventually("the first ask is in the transport", || entered.load(Ordering::SeqCst)).await;
+    outbox.try_deliver(41, ask(41)).expect("queued behind it");
+    go.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), bus.death_signal())
+        .await
+        .expect("the panicked pump rang the bell");
+    assert_eq!(bus.shutdown().await, 1);
+
+    let mut lost = ev.lost.lock().unwrap().clone();
+    lost.sort();
+    assert_eq!(
+        lost,
+        [
+            r#"task 40's ask message for channel "matrix", peer "@me:srv" may not have been sent: its handling panicked"#,
+            r#"task 41's ask message for channel "matrix", peer "@me:srv" was not sent: its pump panicked with it queued"#,
+        ]
+    );
 }

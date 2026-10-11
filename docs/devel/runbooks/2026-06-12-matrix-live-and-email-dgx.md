@@ -112,9 +112,10 @@ accepts **both**: a custom root CA **and** a CONNECT-over-UDS proxy.
   bus serves that channel, or a task whose load keeps failing; each sweep that cannot
   route every reply logs `reply catch-up sweep could not route every reply` with
   `unserved`/`load_failed`/`claim_failed` counts, three sweeps in a row that could not
-  read the backlog log an ERROR, and — since #832, which claims a reply in the channel's
-  own pump right before its send — three refused claims in a row there log
-  `reply claims keep failing` at ERROR):
+  read the backlog (or queued nothing and had an unroutable claim refused) log an ERROR,
+  and — since #832, which claims a reply in the channel's own pump right before its send —
+  a run of refused claims there that is at least 3 long and a minute old logs
+  `reply claims keep failing` at ERROR, per channel, and again each time the run doubles):
   `select count(*) from tasks where reply_settled_at is null and payload->>'kind' = 'channel' and state in ('completed','failed','cancelled','blocked','timed_out','crashed','refused');`
   (the state list mirrors `REPLIED_STATES` in `db/src/tasks/reply_claim.rs` — copy it
   from there if it ever changes). A `channel.reply_undelivered` row with reason

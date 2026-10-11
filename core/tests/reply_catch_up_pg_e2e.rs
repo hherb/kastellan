@@ -7,13 +7,16 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use kastellan_core::channel::auth::StaticPairings;
-use kastellan_core::channel::bus::{ChannelBus, PgChannelEvents, PgCompletedTasks};
+use kastellan_core::channel::bus::{
+    ChannelBus, ClaimedReply, CompletedTasks, PgChannelEvents, PgCompletedTasks, ReplyDisposition,
+};
 use kastellan_core::channel::{actions, Channel, ChannelId, IncomingMessage, OutgoingMessage};
 use kastellan_db::tasks::{self, Lane};
 use kastellan_tests_common::{
@@ -71,22 +74,50 @@ async fn finished_task(pool: &sqlx::PgPool, body: &str, finished_ago_mins: i32) 
     id
 }
 
+/// The real `PgCompletedTasks`, flagging its first `next_completed`: the
+/// completed-task pump makes that call only once its start sweep has routed
+/// everything, so a test can stop the bus knowing the sweep is done.
+struct Listening {
+    inner: PgCompletedTasks,
+    listening: Arc<AtomicBool>,
+}
+#[async_trait::async_trait]
+impl CompletedTasks for Listening {
+    async fn next_completed(&self) -> Option<i64> {
+        self.listening.store(true, Ordering::SeqCst);
+        self.inner.next_completed().await
+    }
+    async fn load(&self, id: i64) -> anyhow::Result<Option<(serde_json::Value, Option<serde_json::Value>)>> {
+        self.inner.load(id).await
+    }
+    async fn claim(&self, id: i64, d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+        self.inner.claim(id, d).await
+    }
+    async fn unsettled(&self, after_id: i64, limit: i64) -> anyhow::Result<Vec<i64>> {
+        self.inner.unsettled(after_id, limit).await
+    }
+    async fn settled(&self, id: i64) -> anyhow::Result<bool> {
+        self.inner.settled(id).await
+    }
+}
+
 async fn spawn_bus(
     pool: &sqlx::PgPool,
     sent: &Arc<Mutex<Vec<OutgoingMessage>>>,
     park_sends: bool,
-) -> (ChannelBus, mpsc::Sender<IncomingMessage>) {
+) -> (ChannelBus, mpsc::Sender<IncomingMessage>, Arc<AtomicBool>) {
     let (tx, inbound_rx) = mpsc::channel(1);
-    let completed = PgCompletedTasks::connect(pool.clone()).await.expect("LISTEN");
+    let inner = PgCompletedTasks::connect(pool.clone()).await.expect("LISTEN");
+    let listening = Arc::new(AtomicBool::new(false));
     let bus = ChannelBus::spawn(
         vec![Box::new(RecordingChannel { inbound_rx, sent: sent.clone(), park_sends })],
         Arc::new(StaticPairings::new()),
         None,
         Arc::new(PgChannelEvents::new(pool.clone())),
-        Arc::new(completed),
+        Arc::new(Listening { inner, listening: listening.clone() }),
         None,
     );
-    (bus, tx)
+    (bus, tx, listening)
 }
 
 async fn eventually(what: &str, cond: impl Fn() -> bool) {
@@ -126,8 +157,8 @@ async fn missed_replies_are_delivered_once_when_the_buses_start() {
 
     // Two buses serving the same channel: the claim must pick one router.
     let sent = Arc::new(Mutex::new(Vec::new()));
-    let (bus_a, _ia) = spawn_bus(&pool, &sent, false).await;
-    let (bus_b, _ib) = spawn_bus(&pool, &sent, false).await;
+    let (bus_a, _ia, _) = spawn_bus(&pool, &sent, false).await;
+    let (bus_b, _ib, _) = spawn_bus(&pool, &sent, false).await;
 
     eventually("two catch-up sends", || sent.lock().unwrap().len() >= 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await; // room for a wrong third
@@ -240,8 +271,11 @@ async fn replies_queued_at_a_stop_are_delivered_by_the_next_bus() {
     // Bus A: its start sweep queues all three; the pump claims the first and
     // wedges in the transport, so the other two stay queued. Then it stops.
     let sent_a = Arc::new(Mutex::new(Vec::new()));
-    let (bus_a, _ia) = spawn_bus(&pool, &sent_a, true).await;
+    let (bus_a, _ia, swept_a) = spawn_bus(&pool, &sent_a, true).await;
     eventually("the first reply in the transport", || sent_a.lock().unwrap().len() == 1).await;
+    // …and the start sweep has routed all three, so a claim made at routing
+    // would already have settled them: the stop cannot win that race.
+    eventually("bus A's start sweep is done", || swept_a.load(Ordering::SeqCst)).await;
     bus_a.shutdown().await;
 
     let in_flight = with_disposition(&pool, &ids, Some("routed")).await;
@@ -251,7 +285,7 @@ async fn replies_queued_at_a_stop_are_delivered_by_the_next_bus() {
 
     // Bus B delivers exactly those two.
     let sent_b = Arc::new(Mutex::new(Vec::new()));
-    let (bus_b, _ib) = spawn_bus(&pool, &sent_b, false).await;
+    let (bus_b, _ib, _) = spawn_bus(&pool, &sent_b, false).await;
     eventually("the two queued replies", || sent_b.lock().unwrap().len() >= 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await; // room for a wrong third
     bus_b.shutdown().await;

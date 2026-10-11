@@ -38,6 +38,11 @@ struct Backlog {
     unsettled_fails: AtomicBool,
     unsettled_calls: AtomicUsize,
     claim_calls: AtomicUsize,
+    /// `next_completed` calls. The completed-task pump makes its first only
+    /// once its start sweep has routed everything, so a test can wait on it.
+    listen_calls: AtomicUsize,
+    /// When set, every `settled` re-read fails.
+    settled_fails: AtomicBool,
     notify_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<i64>>,
 }
 
@@ -65,6 +70,8 @@ impl Backlog {
             unsettled_fails: AtomicBool::new(false),
             unsettled_calls: AtomicUsize::new(0),
             claim_calls: AtomicUsize::new(0),
+            listen_calls: AtomicUsize::new(0),
+            settled_fails: AtomicBool::new(false),
             notify_rx: tokio::sync::Mutex::new(rx),
         });
         (backlog, tx)
@@ -78,6 +85,7 @@ impl Backlog {
 #[async_trait::async_trait]
 impl CompletedTasks for Arc<Backlog> {
     async fn next_completed(&self) -> Option<i64> {
+        self.listen_calls.fetch_add(1, Ordering::SeqCst);
         match self.notify_rx.lock().await.recv().await {
             Some(id) => Some(id),
             None => std::future::pending().await, // the test dropped its sender: park
@@ -131,6 +139,9 @@ impl CompletedTasks for Arc<Backlog> {
         Ok(ids)
     }
     async fn settled(&self, id: i64) -> anyhow::Result<bool> {
+        if self.settled_fails.load(Ordering::SeqCst) {
+            anyhow::bail!("SECRET-DB-TEXT: re-read refused");
+        }
         Ok(self.settled.lock().unwrap().contains_key(&id))
     }
 }
@@ -165,7 +176,7 @@ impl Channel for SinkChannel {
     }
 }
 
-/// Route `id` (the outbound pump's half), then deliver whatever it queued
+/// Route `id` (the completed-task pump's half), then deliver whatever it queued
 /// (the per-channel pump's half) to a [`SinkChannel`]: the composed path
 /// every pre-#832 `handle_completed` test asserted on. Returns what was
 /// sent, if anything.
@@ -461,9 +472,9 @@ async fn an_abort_while_waiting_for_queue_space_leaves_the_reply_unclaimed() {
         channel: ChannelId("matrix".into()),
         peer: PeerId("@other:srv".into()),
         conversation: ConversationId("!room:srv".into()),
-        body: "an earlier reply, not yet drained".into(),
+        body: "an earlier message, not yet drained".into(),
     };
-    tx.try_send(Queued::Ask(filler)).expect("the one slot");
+    tx.try_send(Queued::Ask { task_id: 1, out: filler }).expect("the one slot");
     let senders = HashMap::from([(ChannelId("matrix".into()), tx)]);
 
     let parked = tokio::time::timeout(

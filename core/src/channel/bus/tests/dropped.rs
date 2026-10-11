@@ -154,9 +154,9 @@ impl CompletedTasks for GatedCompleted {
 }
 
 /// Accepts every send and parks on `recv`, so the only row the bus awaits is
-/// the outbound pump's own `channel.replied` — a refusing transport would add
-/// a second insert (`reply_undelivered`, `send_failed`) on the same stalled
-/// pool.
+/// the channel pump's `channel.replied` (written after its claim, #832) — a
+/// refusing transport would add a second insert (`reply_undelivered`,
+/// `send_failed`) on the same stalled pool.
 struct AcceptingChannel {
     inbound_rx: mpsc::Receiver<IncomingMessage>,
 }
@@ -220,8 +220,8 @@ async fn a_replied_row_abandoned_by_the_stop_is_reported() {
         None,
     );
 
-    // The completion: claimed, queued, and its `channel.replied` insert
-    // reaches the stalled pool, which holds it.
+    // The completion: queued, claimed by the channel's pump, and its
+    // `channel.replied` insert reaches the stalled pool, which holds it.
     release.send(()).unwrap();
     let _held = crate::channel::pg_events::test_support::connected(&listener).await;
 

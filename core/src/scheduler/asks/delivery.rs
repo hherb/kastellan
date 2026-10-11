@@ -34,7 +34,7 @@ pub const REASON_NO_CHANNEL: &str = "no_channel_configured";
 /// What happened to one delivery attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryOutcome {
-    /// Queued to the channel's outbound pump.
+    /// Queued to the channel's own pump.
     Delivered { channel: String, peer: String },
     /// Not sent, and expected — see [`REASON_NO_ORIGIN`] / [`REASON_NO_CHANNEL`].
     Undelivered { reason: &'static str },
@@ -68,7 +68,7 @@ pub fn deliver_ask(
         conversation: dest.conversation.clone(),
         body: render_ask(task_id, concern, token, deadline_at),
     };
-    match outbox.try_deliver(msg) {
+    match outbox.try_deliver(task_id, msg) {
         Ok(()) => DeliveryOutcome::Delivered {
             channel: dest.channel.0.clone(),
             peer: dest.peer.0.clone(),
@@ -149,9 +149,10 @@ mod tests {
             DeliveryOutcome::Delivered { channel: "matrix".into(), peer: "@horst:srv".into() }
         );
 
-        let crate::channel::bus::Queued::Ask(sent) = rx.recv().await.expect("message queued") else {
+        let crate::channel::bus::Queued::Ask { task_id, out: sent } = rx.recv().await.expect("message queued") else {
             panic!("a raised ask is queued as an ask, with no reply to claim");
         };
+        assert_eq!(task_id, 412, "the task id rides along, for a stop's line");
         assert_eq!(sent.conversation.0, "!room:srv");
         assert!(sent.body.contains("/approve tok9"), "{}", sent.body);
         assert!(sent.body.contains("writes outside scratch"), "{}", sent.body);

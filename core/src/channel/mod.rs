@@ -116,12 +116,30 @@ impl std::fmt::Debug for PeerEvidence {
 
 /// A reply the bus asks a [`Channel`] to deliver back to the originating peer +
 /// conversation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// [`Debug`] is hand-written to **leave out `body`**, as [`PeerEvidence`]'s
+/// is to leave out its token: a raised ask's body carries a live approval
+/// token (`bus::Queued::Ask`), and a reply's is the user's own content.
+/// Nothing debug-formats one today; this is for the day something does.
+#[derive(Clone, PartialEq, Eq)]
 pub struct OutgoingMessage {
     pub channel: ChannelId,
     pub peer: PeerId,
     pub conversation: ConversationId,
     pub body: String,
+}
+
+impl std::fmt::Debug for OutgoingMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The length is diagnostically useful ("was it empty?"); the text never
+        // is, and must never reach a log.
+        f.debug_struct("OutgoingMessage")
+            .field("channel", &self.channel)
+            .field("peer", &self.peer)
+            .field("conversation", &self.conversation)
+            .field("body", &format_args!("<{} bytes>", self.body.len()))
+            .finish()
+    }
 }
 
 /// The transport seam. One implementation per channel (slice #2: `MatrixChannel`;
@@ -191,12 +209,12 @@ pub mod actions {
     pub const PAIRED: &str = "channel.paired";
     /// A recognised peer's message was blocked by the injection guard.
     pub const INJECTION_BLOCKED: &str = "channel.injection_blocked";
-    /// A reply was routed to its channel for delivery.
+    /// A reply was claimed by its channel's pump and handed on for delivery.
     ///
-    /// Precisely: `handle_completed` resolved a completed task to an
-    /// [`super::OutgoingMessage`] and handed it to the owning channel's
-    /// outbound queue. It is **not** proof the transport delivered it — the
-    /// `send` happens afterwards, in the per-channel pump, and can still fail
+    /// Precisely: the channel's own pump took the reply from its queue, won
+    /// the task's reply claim, and is about to hand it to the transport
+    /// (`bus_deliver::deliver`). It is **not** proof the transport delivered
+    /// it — the `send` follows, and can still fail
     /// (in slice 1 `EmailChannel::send` fails *unconditionally*, since there is
     /// no outbound worker yet). A failure emits [`REPLY_UNDELIVERED`] for the
     /// same reply. So a `channel.replied` with no matching
@@ -235,8 +253,9 @@ pub mod actions {
     /// [`REPLIED`] row). From #815 to #832 the bus also wrote `queue_closed`,
     /// for a reply claimed and then caught by its queue closing; since #832 a
     /// reply is claimed only where it is sent, so a closing queue loses
-    /// nothing and that label is no longer written (older rows keep it). And, since #782, a polled channel's driver
-    /// (`polled_driver::replies`), whose `send` only queues: it writes the row
+    /// nothing and that label is no longer written (older rows keep it).
+    /// And, since #782, a polled channel's driver (`polled_driver::replies`),
+    /// whose `send` only queues: it writes the row
     /// when it **gives up** on a reply its worker kept refusing (`gave_up`),
     /// drops one past a full conversation queue (`queue_full`), or exits with
     /// replies still queued (`driver_exit`) — when the channel supplies an
@@ -476,6 +495,25 @@ mod tests {
         );
         assert_ne!(none, some);
         assert!(none.contains("None"), "{none}");
+    }
+
+    /// A raised ask queued as `bus::Queued::Ask` carries its approval token in
+    /// `body`; `Queued` derives `Debug` through this one, so the body must
+    /// not reach it — through the message or through the queue item.
+    #[test]
+    fn outgoing_message_debug_leaves_out_the_body() {
+        let out = OutgoingMessage {
+            channel: ChannelId("matrix".into()),
+            peer: PeerId("@me:srv".into()),
+            conversation: ConversationId("!room:srv".into()),
+            body: "SECRET-ASK-BODY: /approve tok9".into(),
+        };
+        let item = super::bus::Queued::Ask { task_id: 412, out: out.clone() };
+        for rendered in [format!("{out:?}"), format!("{item:?}")] {
+            assert!(!rendered.contains("SECRET-ASK-BODY"), "body leaked into Debug: {rendered}");
+            assert!(rendered.contains("<30 bytes>"), "the length stays: {rendered}");
+            assert!(rendered.contains("@me:srv"), "the peer stays: {rendered}");
+        }
     }
 
     /// Redacting `Debug` must not have cost the derived traits the rest of the

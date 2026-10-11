@@ -907,7 +907,7 @@ async fn the_bus_registers_its_channel_and_deregisters_on_shutdown() {
     );
 
     outbox
-        .try_deliver(OutgoingMessage {
+        .try_deliver(7, OutgoingMessage {
             channel: ChannelId("matrix".into()),
             peer: PeerId("@me:srv".into()),
             conversation: ConversationId("!room:srv".into()),
@@ -918,7 +918,7 @@ async fn the_bus_registers_its_channel_and_deregisters_on_shutdown() {
 
     bus.shutdown().await;
     assert_eq!(
-        outbox.try_deliver(OutgoingMessage {
+        outbox.try_deliver(7, OutgoingMessage {
             channel: ChannelId("matrix".into()),
             peer: PeerId("@me:srv".into()),
             conversation: ConversationId("!room:srv".into()),
