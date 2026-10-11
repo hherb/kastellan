@@ -4,14 +4,14 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261009_825_pre-prune.md`](archive/handover_20261009_825_pre-prune.md),
+> [`archive/handover_20261011_832_pre-prune.md`](archive/handover_20261011_832_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-10 (#825 — a finished channel task's reply is no longer lost when the
-bus missed its NOTIFY: a claim column + a catch-up sweep, PR [#842](https://github.com/hherb/kastellan/pull/842), plus its review-fix round; the operator is still
+**Last updated:** 2026-10-11 (#832 — a bus stop loses nothing silently: the reply claim moves to the
+send side, drop guards say what cannot be recovered; PR pending. PR [#842](https://github.com/hherb/kastellan/pull/842) (#825) **merged 2026-10-11**; the operator is still
 running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#842](https://github.com/hherb/kastellan/pull/842) (#825), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Recent PRs, newest first:** [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
@@ -29,37 +29,28 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 > `git log --oneline -1 origin/main` and `gh pr list --state open`. Run them before trusting a word
 > of this file.
 
-> ⚠️ **An issue's census can be wrong, and so can its diagnosis — read the rows, not the issue.**
-> #679 named 7 call sites (12), #690 named 4 subprocesses (10), #677 misread a schema rejection as a
-> duplicate search, #719 named 3 failing tests when 7 were broken, and **#749's "related" claim was
-> simply false** — the real default panic hook *does* print the `RUST_BACKTRACE=1` note at
-> `RUST_BACKTRACE=0`, measured, so "fixing" it would have created the divergence it alleged.
-> [[issue-as-filed-can-carry-a-regression]]
-
-> ⚠️ **A fix for a reviewer's finding can carry the next defect,** and **a passing mutation proof
-> is not a review** [[mutation-proof-counts-only-mutants-you-tried]]. #677's approved spec capped
-> strings at 512 B, breaking the question that worked [[plan-text-is-a-defect-source]]; #720's
-> review closed a fail-*open* hole with a check that made it fail *always* (fixed in #726).
-> **#750's own movement-only commit did it again**: hoisting `tail.snapshot()` above the wait is a
-> harmless-looking reorder and is #730 exactly — an existing test caught it. **And #750's REVIEW
-> round did it a third time**: making `decode_drain_end`'s unknown-byte arm loud put a
-> `tracing::error!` inside a function polled every 2 ms for 250 ms (~125 lines per failure) and
-> falsified the word `Pure:` one line above the edit. Self-review caught that one.
-
-> ⚠️ **A forward reference auto-closed issue #718.** #720's body said the gate profile is the acceptance
-> test for "whichever PR <closing-keyword> #718", and GitHub's scanner matched it — the fifth
-> recurrence of this hazard and a new shape (no negation at all). Never quote the phrase literally.
-> Reopened 2026-09-19. **Run the regex over every PR body and commit message before merging**, not
-> only over the negations [[pr-body-not-fixed-autocloses-issue]].
-
-> ⚠️ **A FIXTURE nobody rebuilds is a gate nobody runs** [[stale-fixture-turns-a-gate-into-a-formality]],
-> and **a guard built from a census shares the census's blind spot** [[guard-shares-the-census-blind-spot]].
+> ⚠️ **Standing review hazards (full prose in the archive snapshots).** An issue's census and
+> diagnosis can both be wrong — read the rows, not the issue [[issue-as-filed-can-carry-a-regression]].
+> A fix for a reviewer's finding can carry the next defect, and a passing mutation proof is not a
+> review [[mutation-proof-counts-only-mutants-you-tried]] [[plan-text-is-a-defect-source]] (#677,
+> #720, #750 ×2). A forward reference auto-closed #718 — run the closing-keyword regex over every
+> PR body and commit message [[pr-body-not-fixed-autocloses-issue]]. A fixture nobody rebuilds is a
+> gate nobody runs [[stale-fixture-turns-a-gate-into-a-formality]], and a guard built from a census
+> shares its blind spot [[guard-shares-the-census-blind-spot]].
 
 ---
 
 ## Current state
 
-### This session (2026-10-08/09): #825 — the reply catch-up (PR [#842](https://github.com/hherb/kastellan/pull/842))
+### This session (2026-10-11): #832 — a bus stop loses nothing silently (in progress)
+
+- Spec `docs/superpowers/specs/2026-10-11-832-bus-stop-windows-design.md`, plan
+  `docs/superpowers/plans/2026-10-11-832-bus-stop-windows.md`. **Amends #825's D1:** the reply is
+  queued *unclaimed* and the per-channel pump claims it right before `send`, so a reply dropped with
+  its queue (stop, flap, `is_closed`→`permit.send` race) stays in the backlog. Inbound mid-handling,
+  a claim/send in flight and queued raised asks are said on `[audit-lost]` by drop guards.
+
+### Previous (2026-10-08/09): #825 — the reply catch-up (PR [#842](https://github.com/hherb/kastellan/pull/842), merged)
 
 - **Migration 0027** adds `tasks.reply_settled_at` + `reply_disposition` (`routed` / `unroutable` /
   `backfilled`), backfills every finished channel task as `backfilled` (history is never re-sent),
@@ -109,24 +100,16 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   peer reads "Task finished, but produced no result." — #843. The `pg` gate profile now runs
   `reply_claim_e2e` + `reply_catch_up_pg_e2e`.
 
-### Previous (2026-10-07): #827 + #826 (PR #834) — what still binds
+### Previous (2026-10-03 → 10-07): #827/#826 (PR #834), #813/#828 (PR #830), #815/#814 (PR #824), NUL (#819, #820), thinning (#812)
 
-- `AuthDecision::RejectedUnverifiable` → **`channel.rejected_unverifiable`** (fail-closed, no carve-out).
-  A closed bus's untaken Matrix batch → **`channel.inbound_dropped`** (count, never peer/body).
-  ⚠️ **`ack_method: None` also means "does not redeliver"**. Open: #832, #835, #836, #837–#840.
-
-### Previous (2026-10-03 → 10-06): #813/#828 (PR #830), #815/#814 (PR #824), NUL (#819, #820), thinning (#812)
-
+- `RejectedUnverifiable` → `channel.rejected_unverifiable` (fail-closed); a closed bus's untaken
+  Matrix batch → `channel.inbound_dropped` (count only). ⚠️ `ack_method: None` = "does not redeliver".
 - `pg_events::audit_or_report` holds a **`PendingInsert` drop guard** — ⚠️ no `.await` before it;
-  `test_support::connected` returns the stream — **hold it**. `warn_and_fall_back!` arm `level = ERROR,
-  marked` puts `[audit-lost]` on the traced path (inside JSON `fields.message` — alerts unanchored).
-- `bus_inbound.rs`: a failed enqueue → `channel.enqueue_failed`; a refused ack → `send_failed` via
-  `send_or_record`. ⚠️ **`git push` over SSH fails here** — push over HTTPS via `gh`
-  [[git-push-ssh-no-identities-use-gh-https]].
-- **NUL:** records escape to `␀`, identities refuse (`DbError::NulRefused`). ⚠️ **`kastellan-db`'s next
-  release must be 0.3.0.** ⚠️ `truncate_payload` must stay IDEMPOTENT; `audit::stored_form` is the ONE
-  audit storage transform. Thinning is **per channel**; a burst's tail is said only by the next burst
-  or a graceful shutdown (#817). Open: #821–#823, #829, #831, #833.
+  `test_support::connected` returns the stream — **hold it**. `[audit-lost]` is on the traced path too.
+  ⚠️ **`git push` over SSH fails here** — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
+- **NUL:** records escape to `␀`, identities refuse. ⚠️ **`kastellan-db`'s next release must be
+  0.3.0.** ⚠️ `truncate_payload` must stay IDEMPOTENT; `audit::stored_form` is the ONE storage
+  transform. Thinning is per channel (#817). Open: #821–#823, #829, #831, #833, #835–#840.
 
 ### Previous (2026-09-30 → 10-03): the audit sink — #788–#802 (PRs #791, #795, #801, #806) — what still binds
 
@@ -416,7 +399,6 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **Mac** (#825 after the review fix pass — **the gate that stands**) | PR #842 (`213f0eb7` + docs) | **4934** tests / **195** suites as predicted (#834's 4906 + db `reply_claim_e2e` **3** as a new suite + core lib **24**: `catch_up` 7, claim 8 + abort-on-full-queue 1, sweep 7, `route` 1, the 2 retargeted `dropped` tests net 0 + core `reply_catch_up_pg_e2e` **1**, new suite) — **4931 passed + 3 failed** on `the database system is starting up` at probe connect (#548/#676: `channel_bus_pg_e2e` ask-resolver, `l3_surface_e2e`, `mail_e2e`), each **green in isolation** under `KASTELLAN_PG_REQUIRE_E2E=1`; `[WARN]` **0**, `[SKIP]` **23**; log `~/.local/state/kastellan/gate-logs/sweep-825-final.log`. The pre-review sweep was **4931 / 0 / 52**, 195 suites, `TEST_EXIT=0`. Mutants killed: claim `IS NULL` and terminal guards, `>`→`>=`, the 1-min floor, closed-queue check, lost-claim send, unroutable row on loss, no start sweep, stuck cursor, dead tick; negative controls on the index/backfill pins and the two-bus e2e | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-825`, **27** `Checking kastellan` | **23** Mac |
-| **Mac** (#827/#826 `/fixall` — superseded) | PR #834 | **4906 / 0 / 52**, **193** suites, `TEST_EXIT=0`, `[WARN]` 0, `[SKIP]` 23 | exit 0, incremental | 23 Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -494,8 +476,8 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#834](https://github.com/hherb/kastellan/pull/834)** (#827, #826) — a failed pairing lookup audits `channel.rejected_unverifiable` (fail-closed, no carve-out); a Matrix inbound batch the closed bus never took is counted, said on `[worker-refusal]` and audited as `channel.inbound_dropped`.
-- **#830, #824, #820, #819, #812, #806, #804, #803, #801, #795, #791, #787, #786, #784, #781, #778, #776, #775, #770, #766** — audit-sink close-out; clippy 1.99 lockfile; TencentDB survey; shutdown names pending rows; `[audit-lost]` + drain; recovery lines, bounded sinks; reply queues + `[worker-refusal]`; recall excludes L0/L3; cognee survey; a refusal is not a death; route spellings; the thinking switch; `UPSTREAM_AUTH_FAILED`; the live mail shape gate. One-liners in the `802`/`815`/`825` archive snapshots (#830: a stopped insert says `may not have been written`; #824: channel drops leave rows; #820: NUL refused/escaped beyond `audit_log`; #819: NUL escaped in audit rows; #812: per-channel thinning + bus `[audit-lost]`).
+- **[#842](https://github.com/hherb/kastellan/pull/842)** (#825, merged 2026-10-11) — the reply catch-up: a claim column + a sweep at start and every 5 min; late replies say so.
+- **#834, #830, #824, #820, #819, #812, #806, #804, #803, #801, #795, #791, #787, #786, #784, #781, #778, #776, #775, #770, #766** — audit-sink close-out; clippy 1.99 lockfile; TencentDB survey; shutdown names pending rows; `[audit-lost]` + drain; recovery lines, bounded sinks; reply queues + `[worker-refusal]`; recall excludes L0/L3; cognee survey; a refusal is not a death; route spellings; the thinking switch; `UPSTREAM_AUTH_FAILED`; the live mail shape gate. One-liners in the `802`/`815`/`825` archive snapshots (#830: a stopped insert says `may not have been written`; #824: channel drops leave rows; #820: NUL refused/escaped beyond `audit_log`; #819: NUL escaped in audit rows; #812: per-channel thinning + bus `[audit-lost]`).
 - **#764 … #685** and earlier — see git history and the [`archive/`](archive/) snapshots.
 
 ---
