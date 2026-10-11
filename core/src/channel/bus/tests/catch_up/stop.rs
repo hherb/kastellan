@@ -202,3 +202,36 @@ async fn a_stop_mid_unroutable_claim_reports_it() {
         ["task 9's unroutable reply may have been settled without its channel.reply_unroutable row: the bus stopped while it was in flight"]
     );
 }
+
+/// W6: `shutdown` used to `let _ = h.await`, so a pump that panicked left
+/// nothing behind but the death signal. It is now counted (and logged at
+/// ERROR). Debug and test builds only: release is `panic = "abort"`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicked_pump_is_counted_at_shutdown() {
+    struct PanickingChannel;
+    #[async_trait::async_trait]
+    impl Channel for PanickingChannel {
+        fn id(&self) -> ChannelId {
+            matrix()
+        }
+        async fn recv(&mut self) -> Option<IncomingMessage> {
+            panic!("test: the transport's recv panicked");
+        }
+        async fn send(&self, _msg: OutgoingMessage) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    let bus = ChannelBus::spawn(
+        vec![Box::new(PanickingChannel)],
+        Arc::new(StaticPairings::new()),
+        None,
+        Arc::new(FakeEvents::default()),
+        Arc::new(ParkingCompleted),
+        None,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), bus.death_signal())
+        .await
+        .expect("the panicked pump rang the bell");
+
+    assert_eq!(bus.shutdown().await, 1, "one pump panicked; the aborted one did not");
+}

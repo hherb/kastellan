@@ -64,7 +64,11 @@ impl StartedChannel {
     /// [`ChannelBus::death_signal`] hands back a `'static` future.
     pub fn from_bus(bus: ChannelBus) -> Self {
         let died = bus.death_signal();
-        Self::new(move || async move { bus.shutdown().await }).with_death(died)
+        // The panicked-pump count is already logged by `shutdown` itself.
+        Self::new(move || async move {
+            bus.shutdown().await;
+        })
+        .with_death(died)
     }
 
     /// Wait until the channel reports that it has stopped working.

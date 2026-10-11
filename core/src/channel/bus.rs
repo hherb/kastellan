@@ -411,7 +411,12 @@ impl ChannelBus {
     /// until every connection is returned. Aborting without joining would leave
     /// that release racing the pool close. Mirrors the scheduler/audit-mirror
     /// shutdowns, which signal-then-join for the same reason.
-    pub async fn shutdown(self) {
+    ///
+    /// Returns how many pumps had **panicked** (each logged at ERROR, #832):
+    /// the join used to discard that, leaving only the death signal. Always 0
+    /// in a release build, which is `panic = "abort"`. Callers that only stop
+    /// the bus can ignore it.
+    pub async fn shutdown(self) -> usize {
         // Stop being a delivery target first: an ask queued after this point
         // would go into a channel whose pump is about to be aborted, which
         // is a message that vanishes rather than one that fails.
@@ -423,9 +428,17 @@ impl ChannelBus {
         for h in &self.handles {
             h.abort();
         }
+        let mut panicked = 0;
         for h in self.handles {
-            let _ = h.await;
+            // An aborted pump joins as a cancellation — the normal case here.
+            if let Err(e) = h.await {
+                if e.is_panic() {
+                    error!(error = %e, "channel bus pump panicked");
+                    panicked += 1;
+                }
+            }
         }
+        panicked
     }
 }
 
