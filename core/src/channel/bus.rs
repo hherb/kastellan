@@ -32,6 +32,13 @@ pub trait ChannelEvents: Send + Sync {
     /// marker (#808) — and one whose future is dropped mid-insert, as
     /// `shutdown`'s abort does to a pump parked here (#813).
     async fn audit(&self, action: &str, payload: Value);
+    /// Say that work was lost without a row — a stop landing mid-flight
+    /// (#832, `bus_guards`). Sync, because it is called from `Drop`. The
+    /// default is the bus's own `[audit-lost]` writer; `PgChannelEvents`
+    /// routes it through its reporter so a test can read it.
+    fn report_lost(&self, line: &str) {
+        crate::worker_stderr::emit_audit_lost_report(crate::worker_stderr::AuditLostWriter::Bus, line);
+    }
 }
 
 /// The reply claim's types, re-exported so `CompletedTasks` implementors in

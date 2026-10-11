@@ -26,6 +26,7 @@ pub mod bus;
 pub mod catch_up;
 mod bus_inbound;
 mod bus_outbound;
+mod bus_guards;
 pub mod email;
 pub mod inbound_nul;
 pub mod ingest;

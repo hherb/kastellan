@@ -72,6 +72,12 @@ impl ChannelEvents for PgChannelEvents {
     async fn audit(&self, action: &str, payload: Value) {
         audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report).await;
     }
+
+    /// Work a bus stop abandoned (#832): the same writer and reporter as a
+    /// lost row, so both reach `[audit-lost]` — and a test's recorder.
+    fn report_lost(&self, line: &str) {
+        (self.report)(AuditLostWriter::Bus, line);
+    }
 }
 
 /// How a lost row is said: [`emit_report`] in production, a recorder in a

@@ -209,3 +209,22 @@ async fn each_outcome_of_an_insert_says_one_thing_or_nothing() {
         )]
     );
 }
+
+/// What [`record_in_flight`] was told — its own static, as above.
+static IN_FLIGHT: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_in_flight(writer: AuditLostWriter, line: &str) {
+    IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// #832: a guard's lost-work line goes through the same reporter as a lost
+/// row, as the bus's writer — so a test reading the real writer sees both,
+/// and production puts both on `[audit-lost]`.
+#[tokio::test]
+async fn work_lost_in_flight_is_reported_through_the_writer() {
+    let events = PgChannelEvents::with_reporter(test_support::refused_pool(), record_in_flight);
+    ChannelEvents::report_lost(&events, "task 7's reply may not have been sent");
+
+    let said = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    assert_eq!(said, [(AuditLostWriter::Bus, "task 7's reply may not have been sent".to_string())]);
+}

@@ -25,6 +25,8 @@ struct FakeEvents {
     audited: Mutex<Vec<(String, Value)>>,
     /// When set, `enqueue` fails with this text instead of recording.
     enqueue_fails_with: Option<&'static str>,
+    /// What the bus's guards reported as lost in flight (#832).
+    lost: Mutex<Vec<String>>,
 }
 #[async_trait::async_trait]
 impl ChannelEvents for FakeEvents {
@@ -37,6 +39,9 @@ impl ChannelEvents for FakeEvents {
     }
     async fn audit(&self, action: &str, payload: Value) {
         self.audited.lock().unwrap().push((action.to_string(), payload));
+    }
+    fn report_lost(&self, line: &str) {
+        self.lost.lock().unwrap().push(line.to_string());
     }
 }
 
