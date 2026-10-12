@@ -1,6 +1,7 @@
-//! The outbound half of the channel bus: completed task → route → claim →
-//! the owning channel's queue; the catch-up sweep over the reply backlog; and
-//! the transport attempt's failure row. Its own module since #825 (`bus.rs`
+//! The outbound half of the channel bus: completed task → route → the owning
+//! channel's queue, unclaimed (the channel's pump claims it at the send since
+//! #832, `bus_deliver`); the catch-up sweep over the reply backlog; and the
+//! transport attempt's failure row. Its own module since #825 (`bus.rs`
 //! was at 481 lines, and the reply catch-up was about to grow this half).
 
 use std::collections::HashMap;
@@ -12,6 +13,8 @@ use tracing::{debug, info, warn};
 use kastellan_db::tasks;
 
 use super::bus::{ChannelEvents, ClaimedReply, CompletedTasks, ReplyDisposition};
+use super::bus_deliver::{claim_outcome, Queued};
+use super::bus_guards::{InFlight, InFlightGuard};
 use super::catch_up::{self, Via};
 use super::route::reply_for_completed_task;
 use super::{actions, Channel, ChannelId, OutgoingMessage};
@@ -19,21 +22,24 @@ use super::{actions, Channel, ChannelId, OutgoingMessage};
 /// Real `CompletedTasks` over a `PgListener` on `tasks_completed` + `tasks::get`.
 /// Construct via [`PgCompletedTasks::connect`].
 pub struct PgCompletedTasks {
-    listener: sqlx::postgres::PgListener,
+    /// Locked only by `next_completed`, i.e. only by the completed-task pump; a
+    /// `select!` that drops that future drops the guard with it.
+    listener: tokio::sync::Mutex<sqlx::postgres::PgListener>,
     pool: sqlx::PgPool,
 }
 impl PgCompletedTasks {
     pub async fn connect(pool: sqlx::PgPool) -> anyhow::Result<Self> {
         let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
         listener.listen("tasks_completed").await?;
-        Ok(Self { listener, pool })
+        Ok(Self { listener: tokio::sync::Mutex::new(listener), pool })
     }
 }
 #[async_trait::async_trait]
 impl CompletedTasks for PgCompletedTasks {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
+        let mut listener = self.listener.lock().await;
         loop {
-            match self.listener.recv().await {
+            match listener.recv().await {
                 Ok(n) => {
                     if let Ok(id) = n.payload().parse::<i64>() {
                         return Some(id);
@@ -95,34 +101,29 @@ pub(super) async fn send_or_record(
 }
 
 /// Handle one completed-task id on the outbound side: load it, route it
-/// (pure), reserve queue space, claim it, and queue it for the matching
-/// channel. The single path for both the live NOTIFY and the catch-up sweep
-/// (`via` says which), so the claim (#825) is what makes a reply go out once
-/// whichever path — and whichever of the two buses (#497) — gets there first.
-/// `senders` maps `ChannelId` → an outbound `send` handle. Returns the
-/// `OutgoingMessage` queued (for tests).
+/// (pure), and queue it — **unclaimed** — for the matching channel's pump,
+/// which claims it right before sending (#832, `bus_deliver`). The single
+/// path for both the live NOTIFY and the catch-up sweep (`via` says which).
+/// `senders` maps `ChannelId` → that channel's queue. Returns the item
+/// queued (for tests).
 ///
-/// Anything that stops a reply *before* the claim leaves it in the backlog
-/// for the next sweep: a failed load, a failed claim, a closed queue — and a
-/// bus stop that aborts it while it waits for queue space, which is why the
-/// slot is reserved before the claim, not after. A claim that fails *after*
-/// committing is caught by a re-read and recorded (`claim_unknown`). A
-/// claimed reply is otherwise lost only with a row (`queue_closed` here,
-/// `send_failed` in the per-channel pump), with three exceptions, all #832's
-/// family: an abort landing on the claim's own round-trip (the task is
-/// `routed`, with no row and nothing sent); a reply still in the per-channel
-/// queue when that pump ends or is aborted (it has a `channel.replied` row
-/// and was never sent); and a receiver dropped between the post-claim
-/// `is_closed` check and `permit.send` (the same, by a hair).
+/// Nothing here claims a routable reply, so anything that stops one — a
+/// failed load, a closed queue, a bus stop aborting this while it waits for
+/// queue space, or the queue's pump ending with the reply still in it —
+/// leaves it in the backlog, and the next sweep delivers it. The one claim made here settles
+/// a channel task with no routing metadata (`channel.reply_unroutable`).
+/// What a stop can still lose is the reply a channel's pump is delivering at
+/// that moment, which `bus_deliver`'s guard reports — and an unroutable
+/// claim in flight, which `settle_unroutable`'s does.
 pub async fn handle_completed(
     completed: &dyn CompletedTasks,
     events: &dyn ChannelEvents,
-    senders: &HashMap<ChannelId, mpsc::Sender<OutgoingMessage>>,
+    senders: &HashMap<ChannelId, mpsc::Sender<Queued>>,
     id: i64,
     via: Via,
-) -> Option<OutgoingMessage> {
+) -> Option<Queued> {
     match route_one(completed, events, senders, id, via).await {
-        Routed::Queued(out) => Some(out),
+        Routed::Queued(item) => Some(item),
         Routed::Skipped | Routed::Unserved | Routed::LoadFailed | Routed::ClaimFailed => None,
     }
 }
@@ -130,26 +131,25 @@ pub async fn handle_completed(
 /// What one route of a completed task came to: [`handle_completed`]'s answer,
 /// and the sweep's tally.
 enum Routed {
-    /// Claimed and queued.
-    Queued(OutgoingMessage),
-    /// Nothing more for this route to do: not a channel task, already
-    /// settled, unroutable, recorded as undelivered — or a queue found closed
-    /// at `reserve()`, whose reply stays in the backlog for the next bus.
+    /// Queued, unclaimed, for its channel's pump.
+    Queued(Queued),
+    /// Nothing more for this route to do: not a channel task, unroutable
+    /// (settled, or another router's), or a queue found closed — whose reply
+    /// stays in the backlog for the next bus.
     Skipped,
-    /// For a channel this bus does not serve; left unclaimed for its own bus.
+    /// For a channel this bus does not serve; left for its own bus.
     Unserved,
     /// The load failed; the reply is left for catch-up.
     LoadFailed,
-    /// The claim failed. The reply is left for catch-up, or — when a re-read
-    /// found the task settled anyway — recorded (`claim_unknown`); when the
-    /// re-read failed too, neither is known.
+    /// An unroutable task's claim failed. Left for catch-up, or — when a
+    /// re-read found the task settled anyway — recorded (`claim_uncertain`).
     ClaimFailed,
 }
 
 async fn route_one(
     completed: &dyn CompletedTasks,
     events: &dyn ChannelEvents,
-    senders: &HashMap<ChannelId, mpsc::Sender<OutgoingMessage>>,
+    senders: &HashMap<ChannelId, mpsc::Sender<Queued>>,
     id: i64,
     via: Via,
 ) -> Routed {
@@ -164,7 +164,7 @@ async fn route_one(
             return Routed::LoadFailed;
         }
     };
-    let Some(mut out) = reply_for_completed_task(&payload, result.as_ref()) else {
+    let Some(out) = reply_for_completed_task(&payload, result.as_ref()) else {
         // `None` is the normal answer for a completion that is not a channel
         // task (an `ask`/`l3_run`). A channel task with no routing metadata
         // is a reply nobody can deliver: settle it, so the sweep stops
@@ -185,88 +185,21 @@ async fn route_one(
         // to ignore warnings (review finding). Unifying the buses would remove
         // the ambiguity outright and let this go back to being a real `warn!`
         // (it would then mean "nothing serves this channel at all") — #497.
-        // Unclaimed on purpose (#825): the bus that serves it claims it. A
-        // sweep counts these, so a channel nothing serves shows in its summary.
+        // A sweep counts these, so a channel nothing serves shows in its summary.
         debug!(channel = %out.channel.0, "reply is for a channel this bus does not serve; ignoring");
         return Routed::Unserved;
     };
-    // Reserve the queue slot BEFORE claiming. A full queue parks here, and a
-    // bus stop that aborts the pump while it is parked must find the reply
-    // still unclaimed — after the claim, nothing would ever send it.
-    let Ok(permit) = tx.reserve().await else {
-        // The queue's only receiver is this channel's pump, so it has ended
-        // and the bus is about to restart. Until #825 this was a drop with a
-        // `queue_closed` row; now the reply stays unclaimed and the next
-        // bus's start sweep delivers it.
-        info!(channel = %out.channel.0, task_id = id, "send queue closed; reply left for catch-up");
-        return Routed::Skipped;
-    };
-    let claimed = match completed.claim(id, ReplyDisposition::Routed).await {
-        Ok(Some(c)) => c,
-        Ok(None) => return Routed::Skipped, // already routed: the other path or the other bus
-        Err(e) => {
-            if claim_outcome(completed, id, &e).await == Some(true) {
-                // Settled, and this router does not know it won: sending
-                // could duplicate the other router's reply, so — at most
-                // once — it is recorded instead.
-                warn!(
-                    channel = %out.channel.0, task_id = id, error = %e,
-                    "reply claim failed, but the task is settled; reply dropped"
-                );
-                let now = time::OffsetDateTime::now_utc();
-                let reply = super::UndeliveredReply::of(&out, super::UndeliveredReason::ClaimUnknown, now);
-                events.audit(actions::REPLY_UNDELIVERED, reply.payload()).await;
-            }
-            return Routed::ClaimFailed;
-        }
-    };
-    let now = time::OffsetDateTime::now_utc();
-    let late = catch_up::late_reply(&claimed, now);
-    if let Some((_, note)) = &late {
-        out.body = format!("{note}\n\n{}", out.body);
-    }
-    if tx.is_closed() {
-        // The pump ended while the claim was out. A permit's `send` would
-        // drop the reply without a word once the receiver is gone, so check
-        // first — this narrows that window to the two lines below, it does
-        // not close it. The reply is claimed, no sweep will find it again,
-        // and this one IS lost — said with a row (#815). No
-        // `channel.replied`: it was never routed.
-        warn!(channel = %out.channel.0, "outbound send queue closed; reply dropped");
-        let reply = super::UndeliveredReply::of(&out, super::UndeliveredReason::QueueClosed, now);
-        events.audit(actions::REPLY_UNDELIVERED, reply.payload()).await;
-        return Routed::Skipped;
-    }
-    permit.send(out.clone());
-    let mut row = serde_json::json!({
-        "task_id": id, "channel": out.channel.0, "peer": out.peer.0, "via": via.as_str(),
-    });
-    if let Some((late_by, _)) = late {
-        row["delayed_secs"] = late_by.whole_seconds().into();
-    }
-    events.audit(actions::REPLIED, row).await;
-    Routed::Queued(out)
-}
-
-/// After a claim returned `e`: is the task settled? The claim is one
-/// autocommit `UPDATE`, so an I/O error can arrive after the server ran it —
-/// and then "left for catch-up" would be false, with no sweep ever finding
-/// the reply again. `Some(false)` is the WARN it always was; `Some(true)` is
-/// the caller's to record; `None` (the re-read failed too) is said here,
-/// since nothing more can be known.
-async fn claim_outcome(completed: &dyn CompletedTasks, id: i64, e: &anyhow::Error) -> Option<bool> {
-    match completed.settled(id).await {
-        Ok(false) => {
-            warn!(task_id = id, error = %e, "reply claim failed; reply left for catch-up");
-            Some(false)
-        }
-        Ok(true) => Some(true),
-        Err(reread) => {
-            warn!(
-                task_id = id, error = %e, reread_error = %reread,
-                "reply claim failed and its outcome is unknown; the reply is left for catch-up or lost"
-            );
-            None
+    // A full queue parks here. Nothing is claimed yet, so a bus stop that
+    // aborts the pump while it is parked loses nothing: the sweep finds it.
+    let item = Queued::Reply { task_id: id, via, out };
+    match tx.send(item.clone()).await {
+        Ok(()) => Routed::Queued(item),
+        Err(_) => {
+            // The queue's only receiver is this channel's pump, so it has
+            // ended and the bus is about to restart; the next bus's start
+            // sweep delivers the reply.
+            info!(channel = %item.message().channel.0, task_id = id, "send queue closed; reply left for catch-up");
+            Routed::Skipped
         }
     }
 }
@@ -277,6 +210,20 @@ async fn claim_outcome(completed: &dyn CompletedTasks, id: i64, e: &anyhow::Erro
 /// #825 this was a WARN on every bus and no row.
 async fn settle_unroutable(completed: &dyn CompletedTasks, events: &dyn ChannelEvents, id: i64) -> Routed {
     let observed_at = || super::undelivered::observed_at_json(time::OffsetDateTime::now_utc());
+    // A stop on the claim's round-trip can leave it committed with no row.
+    let guard = InFlightGuard::arm(events, InFlight::Unroutable { task_id: id }, None, None);
+    let routed = settle_unroutable_inner(completed, events, id, observed_at).await;
+    guard.settle();
+    routed
+}
+
+/// [`settle_unroutable`], inside its guard.
+async fn settle_unroutable_inner(
+    completed: &dyn CompletedTasks,
+    events: &dyn ChannelEvents,
+    id: i64,
+    observed_at: impl Fn() -> Value,
+) -> Routed {
     match completed.claim(id, ReplyDisposition::Unroutable).await {
         Ok(Some(_)) => {
             warn!(task_id = id, "channel task has no routing metadata; reply dropped");
@@ -316,7 +263,7 @@ async fn settle_unroutable(completed: &dyn CompletedTasks, events: &dyn ChannelE
 pub async fn sweep(
     completed: &dyn CompletedTasks,
     events: &dyn ChannelEvents,
-    senders: &HashMap<ChannelId, mpsc::Sender<OutgoingMessage>>,
+    senders: &HashMap<ChannelId, mpsc::Sender<Queued>>,
 ) -> catch_up::SweepReport {
     let mut report = catch_up::SweepReport::default();
     let mut after = 0;

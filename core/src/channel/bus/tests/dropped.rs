@@ -48,9 +48,9 @@ async fn a_failed_enqueue_audits_enqueue_failed_and_not_received() {
 /// Until #825 `handle_completed` wrote `channel.reply_undelivered`
 /// (`queue_closed`) here and the reply was lost. Now it leaves the reply
 /// unclaimed — the next bus's catch-up sweep delivers it — so there is no
-/// drop to record, and no row. The claim-then-close race that still writes
-/// `queue_closed` is
-/// `catch_up::a_queue_closing_after_the_claim_still_writes_queue_closed`.
+/// drop to record, and no row. Since #832 nothing is claimed before the
+/// per-channel pump sends, so a queue that closes *after* routing loses
+/// nothing either (`catch_up::a_reply_queued_to_a_queue_that_then_closes_stays_unclaimed`).
 #[tokio::test]
 async fn a_reply_to_a_closed_send_queue_writes_no_row() {
     let ev = FakeEvents::default();
@@ -63,7 +63,7 @@ async fn a_reply_to_a_closed_send_queue_writes_no_row() {
         ),
     );
     let completed = FakeCompleted { ids: Mutex::new(vec![7]), rows };
-    let (tx, rx) = mpsc::channel::<OutgoingMessage>(4);
+    let (tx, rx) = mpsc::channel::<Queued>(4);
     drop(rx); // the pump that drained this queue is gone
     let mut senders = HashMap::new();
     senders.insert(ChannelId("matrix".into()), tx);
@@ -89,7 +89,7 @@ async fn a_refused_ack_audits_reply_undelivered() {
         Arc::new(StaticPairings::new()),
         Some(Arc::new(FakePairing { code: Some("123456") })),
         ev.clone(),
-        Box::new(ParkingCompleted),
+        Arc::new(ParkingCompleted),
         None,
     );
 
@@ -122,13 +122,14 @@ async fn a_refused_ack_audits_reply_undelivered() {
 /// Yields one completed task once `release` fires, then parks: the
 /// completion arrives exactly when the test says.
 struct GatedCompleted {
-    release: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     row: (Value, Option<Value>),
 }
 #[async_trait::async_trait]
 impl CompletedTasks for GatedCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
-        match self.release.take() {
+    async fn next_completed(&self) -> Option<i64> {
+        let release = self.release.lock().unwrap().take();
+        match release {
             Some(release) => {
                 let _ = release.await;
                 Some(7)
@@ -153,9 +154,9 @@ impl CompletedTasks for GatedCompleted {
 }
 
 /// Accepts every send and parks on `recv`, so the only row the bus awaits is
-/// the outbound pump's own `channel.replied` — a refusing transport would add
-/// a second insert (`reply_undelivered`, `send_failed`) on the same stalled
-/// pool.
+/// the channel pump's `channel.replied` (written after its claim, #832) — a
+/// refusing transport would add a second insert (`reply_undelivered`,
+/// `send_failed`) on the same stalled pool.
 struct AcceptingChannel {
     inbound_rx: mpsc::Receiver<IncomingMessage>,
 }
@@ -181,8 +182,8 @@ fn record_lost(writer: crate::worker_stderr::AuditLostWriter, line: &str) {
     LOST.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
 }
 
-/// #813 through the outbound pump: a completion is claimed and routed, and
-/// the pump then awaits its `channel.replied` insert — which a wedged
+/// #813 through the channel's pump: a completion is routed, and the pump
+/// claims it (#832) and then awaits its `channel.replied` insert — which a wedged
 /// Postgres holds. The channel supervisor stops the bus (as it does on any
 /// death), aborting the pump mid-insert, and #813's guard reports the row
 /// that may not have been written.
@@ -190,7 +191,9 @@ fn record_lost(writer: crate::worker_stderr::AuditLostWriter, line: &str) {
 /// Until #825 this was staged through a `queue_closed` row (a completion for
 /// a channel whose pump had ended). A queue found closed now leaves the
 /// reply for catch-up and writes no row, so the abandoned insert is the
-/// `channel.replied` one — the same guard, the outbound pump's commonest row.
+/// `channel.replied` one — the same guard, the commonest reply row. Since
+/// #832 the reply's own guard (`bus_guards`) adds the second line: the reply
+/// was claimed, so nothing else will ever send it.
 ///
 /// The real writer (`PgChannelEvents`) over a stalled pool, not a fake: the
 /// guard under test lives in its insert.
@@ -200,7 +203,7 @@ async fn a_replied_row_abandoned_by_the_stop_is_reported() {
     let events = Arc::new(crate::channel::pg_events::PgChannelEvents::with_reporter(pool, record_lost));
     let (release, gate) = tokio::sync::oneshot::channel();
     let completed = GatedCompleted {
-        release: Some(gate),
+        release: Mutex::new(Some(gate)),
         row: (
             serde_json::json!({"kind":"channel","channel":"matrix","peer":"@me:srv","conversation":"!room:srv"}),
             Some(serde_json::json!({"kind":"completed","message": SECRET_BODY})),
@@ -213,12 +216,12 @@ async fn a_replied_row_abandoned_by_the_stop_is_reported() {
         Arc::new(StaticPairings::new()),
         None,
         events,
-        Box::new(completed),
+        Arc::new(completed),
         None,
     );
 
-    // The completion: claimed, queued, and its `channel.replied` insert
-    // reaches the stalled pool, which holds it.
+    // The completion: queued, claimed by the channel's pump, and its
+    // `channel.replied` insert reaches the stalled pool, which holds it.
     release.send(()).unwrap();
     let _held = crate::channel::pg_events::test_support::connected(&listener).await;
 
@@ -226,14 +229,20 @@ async fn a_replied_row_abandoned_by_the_stop_is_reported() {
     bus.shutdown().await;
     drop(inbound_tx);
 
+    // Two true lines, one per guard (#832): the insert's own, then the
+    // delivery's — the reply was claimed, so no sweep will send it again.
     let lost = LOST.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    assert_eq!(lost.len(), 1, "{lost:?}");
-    assert_eq!(lost[0].0, crate::worker_stderr::AuditLostWriter::Bus);
+    assert_eq!(lost.len(), 2, "{lost:?}");
+    assert!(lost.iter().all(|(w, _)| *w == crate::worker_stderr::AuditLostWriter::Bus), "{lost:?}");
     assert!(
         lost[0].1.starts_with(
             r#"channel.replied row for channel "matrix", peer "@me:srv", task_id 7 may not have been written"#
         ),
         "{lost:?}"
     );
-    assert!(!lost[0].1.contains(SECRET_BODY), "never the body: {lost:?}");
+    assert_eq!(
+        lost[1].1,
+        r#"task 7's reply for channel "matrix", peer "@me:srv" may not have been sent: the bus stopped while it was in flight"#
+    );
+    assert!(lost.iter().all(|(_, l)| !l.contains(SECRET_BODY)), "never the body: {lost:?}");
 }

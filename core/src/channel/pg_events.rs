@@ -22,9 +22,12 @@
 //! Since #813 that includes an insert still awaited when the bus is stopped:
 //! `ChannelBus::shutdown` aborts its pumps, the awaited future is dropped and
 //! no `Err` arm runs, so a drop guard says it instead — as a row that *may*
-//! not have been written. What is still unsaid: a row lost to a crash, and a
-//! stop that lands on any *other* await of a pump — an inbound message's
-//! `enqueue` or pairing lookup, a reply still in a channel's queue (#832).
+//! not have been written. Since #832 a stop on any other pump await that can
+//! lose work is said through the same writer too (`ChannelEvents::report_lost`,
+//! from `bus_guards`): an inbound message mid-handling, a reply or an ask
+//! mid-send, a raised ask still queued, an unroutable claim in flight — and a
+//! reply claim whose outcome cannot be known (`bus_deliver`). What is still
+//! unsaid: a crash, and inbound messages the bus had not yet read (#846).
 //! Separately, these lines are not thinned: one per lost row, where the
 //! daemon's sinks thin their shed and after-shutdown refusals (#829).
 
@@ -71,6 +74,12 @@ impl ChannelEvents for PgChannelEvents {
     /// when the bus stops (#813).
     async fn audit(&self, action: &str, payload: Value) {
         audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report).await;
+    }
+
+    /// Work a bus stop abandoned (#832): the same writer and reporter as a
+    /// lost row, so both reach `[audit-lost]` — and a test's recorder.
+    fn report_lost(&self, line: &str) {
+        (self.report)(AuditLostWriter::Bus, line);
     }
 }
 

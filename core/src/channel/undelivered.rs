@@ -19,14 +19,11 @@ pub enum UndeliveredReason {
     /// that channel's pump ended in between, so nothing drains its queue
     /// (#815).
     ///
-    /// Since #825 a narrow race, not "a reply to a dead pump": a queue found
-    /// *already* closed when its slot is reserved leaves the reply unclaimed,
-    /// and the next bus's catch-up sweep delivers it with no row. This reason
-    /// is only for a queue that closes after the slot was reserved and before
-    /// the post-claim `is_closed` check — that is, during the claim — a reply
-    /// no sweep will find again. Its insert can still race the bus stop its
-    /// cause triggers; when the abort lands on that insert, the bus's writer
-    /// says so on `[audit-lost]` (#813).
+    /// **No longer written since #832**: a reply is now claimed by the
+    /// channel's own pump right before its send, so a queue that closes
+    /// leaves the reply unclaimed and the catch-up sweep delivers it. Kept
+    /// (and pinned) because rows written from #815 to #832 carry it, and
+    /// operators' queries group on it.
     ///
     /// Not to be confused with the `OutboxError` label of the same
     /// spelling, which an `ask.delivery_failed` row carries when a raised ask

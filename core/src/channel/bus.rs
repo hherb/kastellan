@@ -1,6 +1,7 @@
-//! The channel bus runtime: an inbound pump per channel (recv → classify →
-//! audit + enqueue) and one outbound pump (completed-task NOTIFY or backlog
-//! sweep → route → claim → send).
+//! The channel bus runtime: one pump per channel (inbound: recv → classify →
+//! audit + enqueue; outbound: its queue → claim → send) and one completed-task
+//! pump (NOTIFY or backlog sweep → route → that channel's queue). Since #832
+//! a reply is claimed where it is sent, not where it is routed.
 //! All DB access is behind two seams so the pumps are testable without Postgres.
 
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use kastellan_db::tasks::Lane;
 use super::auth::PeerAuthorizer;
 use super::catch_up::Via;
 use super::pump_liveness::DeathBell;
-use super::{Channel, ChannelId, OutgoingMessage, PeerId};
+use super::{Channel, ChannelId, PeerId};
 
 /// Body of the reply sent back when a peer pairs successfully.
 pub const PAIRED_ACK_BODY: &str = "\u{2713} Paired \u{2014} you can now message me.";
@@ -32,6 +33,13 @@ pub trait ChannelEvents: Send + Sync {
     /// marker (#808) — and one whose future is dropped mid-insert, as
     /// `shutdown`'s abort does to a pump parked here (#813).
     async fn audit(&self, action: &str, payload: Value);
+    /// Say that work was lost without a row — a stop landing mid-flight
+    /// (#832, `bus_guards`). Sync, because it is called from `Drop`. The
+    /// default is the bus's own `[audit-lost]` writer; `PgChannelEvents`
+    /// routes it through its reporter so a test can read it.
+    fn report_lost(&self, line: &str) {
+        crate::worker_stderr::emit_audit_lost_report(crate::worker_stderr::AuditLostWriter::Bus, line);
+    }
 }
 
 /// The reply claim's types, re-exported so `CompletedTasks` implementors in
@@ -42,12 +50,14 @@ pub use kastellan_db::tasks::reply_claim::{ClaimedReply, ReplyDisposition};
 /// row, and — since #825 — the reply claim and the backlog it settles.
 #[async_trait::async_trait]
 pub trait CompletedTasks: Send + Sync {
-    /// Next completed task id, or `None` when the stream ends.
-    async fn next_completed(&mut self) -> Option<i64>;
+    /// Next completed task id, or `None` when the stream ends. Called by the
+    /// completed-task pump only; `&self` (since #832) so the channels' pumps
+    /// can share the seam for their claims.
+    async fn next_completed(&self) -> Option<i64>;
     /// Fetch `(payload, result)` for a task id, or `None` if absent.
     async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>>;
     /// Settle `id`'s reply as `d`. `Ok(None)`: already settled, or not
-    /// finished — either way, not this caller's to route. See
+    /// finished — either way, not this caller's to send. See
     /// `kastellan_db::tasks::reply_claim::claim_reply`.
     async fn claim(&self, id: i64, d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>>;
     /// Up to `limit` unsettled finished channel task ids above `after_id`,
@@ -185,11 +195,18 @@ pub use super::bus_inbound::handle_inbound;
 /// `PgCompletedTasks` and the transport-failure row — in its own module since
 /// #825.
 pub use super::bus_outbound::{handle_completed, sweep, PgCompletedTasks};
+use super::bus_guards::{InFlight, InFlightGuard};
 use super::bus_outbound::send_or_record;
+
+/// What a channel's queue carries, and the per-channel pump's delivery of
+/// it — the claim at the send (#832).
+pub use super::bus_deliver::{deliver, note_claim, Delivery, Queued};
 
 /// A running bus. Owns the spawned pump tasks; `shutdown()` aborts them.
 pub struct ChannelBus {
-    handles: Vec<JoinHandle<()>>,
+    /// Each pump, with what `shutdown` calls it if it panicked: its channel's
+    /// id, or `completed-task`.
+    handles: Vec<(String, JoinHandle<()>)>,
     /// Rung by whichever pump ends first. Read by the channel supervisor
     /// through [`death_signal`](Self::death_signal) — see [`DeathBell`] for why
     /// the bus reports its own death rather than being polled for liveness.
@@ -212,11 +229,11 @@ impl ChannelBus {
         authorizer: Arc<dyn PeerAuthorizer>,
         pairing: Option<Arc<dyn PairingService>>,
         events: Arc<dyn ChannelEvents>,
-        mut completed: Box<dyn CompletedTasks>,
+        completed: Arc<dyn CompletedTasks>,
         asks: Option<Arc<AskWiring>>,
     ) -> Self {
         let mut handles = Vec::new();
-        let mut senders: HashMap<ChannelId, mpsc::Sender<OutgoingMessage>> = HashMap::new();
+        let mut senders: HashMap<ChannelId, mpsc::Sender<Queued>> = HashMap::new();
         let mut registered = Vec::new();
         // Every pump below takes a guard off this bell. Each of them has at
         // least one terminal exit — a `break`, a `while let` that ends, a panic
@@ -227,7 +244,10 @@ impl ChannelBus {
 
         for mut ch in channels {
             let id = ch.id();
-            let (tx, mut rx) = mpsc::channel::<OutgoingMessage>(32);
+            // The receiving end is owned by a `PumpQueue`: whatever is still
+            // queued when this pump ends is counted (replies, recoverable)
+            // or said (asks) (#832).
+            let (tx, mut queue) = super::bus_guards::PumpQueue::channel(32, events.clone(), id.clone());
             senders.insert(id.clone(), tx.clone());
 
             // Publish this channel's reply queue so core-initiated messages
@@ -242,13 +262,21 @@ impl ChannelBus {
             let pairing = pairing.clone();
             let events = events.clone();
             let asks_for_pump = asks.clone();
+            let completed = completed.clone();
             let life = bell.guard();
-            handles.push(tokio::spawn(async move {
+            handles.push((id.0.clone(), tokio::spawn(async move {
                 let _life = life;
+                // Consecutive failed reply claims: the claim happens here
+                // since #832, so this is where a database refusing it shows.
+                let mut claims = super::catch_up::ClaimStreak::default();
                 loop {
                     tokio::select! {
                         inbound = ch.recv() => match inbound {
                             Some(msg) => {
+                                // The transport has handed this message over;
+                                // a stop from here to the ack's send would
+                                // lose it with no row (#832).
+                                let guard = InFlightGuard::arm(&*events, InFlight::Inbound, Some(&msg.channel), Some(&msg.peer));
                                 if let Some(ack) = handle_inbound(
                                     &*authorizer,
                                     pairing.as_deref(),
@@ -272,61 +300,56 @@ impl ChannelBus {
                                     // refuses every one.
                                     send_or_record(&*ch, &*events, &id, ack, "inbound ack send failed").await;
                                 }
+                                guard.settle();
                             }
                             None => { info!(channel = %id.0, "inbound closed"); break; }
                         },
-                        Some(out) = rx.recv() => {
-                            // TWO producers feed this `rx`, and they leave
-                            // different rows behind:
-                            //   - a completed-task reply from
-                            //     `handle_completed`, which already wrote
-                            //     `channel.replied` when it queued this —
-                            //     that row means "routed", not "delivered"
-                            //     (see `actions::REPLIED`);
-                            //   - a core-initiated message from the
-                            //     `ChannelOutbox` (#564 slice 2), i.e. a
-                            //     raised ask, which has `ask.delivered`
-                            //     behind it instead and NO `channel.replied`.
-                            // Until slice 2 the first was the only producer,
-                            // so "already wrote `channel.replied`" read as an
-                            // invariant; it is not one any more, which is why
-                            // a `channel.reply_undelivered` can now be an
-                            // orphan with no `channel.replied` to pair with.
+                        Some(item) = queue.recv() => {
+                            // TWO producers feed this queue (see `Queued`): a
+                            // finished task's reply from `handle_completed`,
+                            // queued unclaimed — `deliver` claims it, writes
+                            // `channel.replied` ("routed", see
+                            // `actions::REPLIED`) and sends it; and a
+                            // core-initiated message from the `ChannelOutbox`
+                            // (#564 slice 2), i.e. a raised ask, which has
+                            // `ask.delivered` behind it and NO
+                            // `channel.replied` — which is why a
+                            // `channel.reply_undelivered` can be an orphan.
                             //
-                            // The actual transport attempt is HERE either
-                            // way, so a failure must leave its own durable
-                            // trace (`send_or_record`), or the audit trail
-                            // asserts a delivery that never happened.
-                            // `EmailChannel::send` still always fails, so
-                            // without it every email answer looked
-                            // delivered. The row is channel + peer only, so
-                            // an ask failure recorded here names neither the
-                            // ask nor the task — correlating it needs the
-                            // outbound message to carry its `ask_id`,
-                            // tracked separately.
-                            send_or_record(&*ch, &*events, &id, out, "channel send failed").await;
+                            // The transport attempt is in `deliver` either
+                            // way, through `send_or_record`, so a refusal
+                            // leaves its own durable row rather than an audit
+                            // trail asserting a delivery that never happened
+                            // (`EmailChannel::send` still always fails).
+                            let d = deliver(&*completed, &*events, &*ch, &id, item).await;
+                            if let Some(n) = note_claim(&mut claims, d, std::time::Instant::now()) {
+                                error!(
+                                    channel = %id.0, consecutive = n,
+                                    "reply claims keep failing; finished tasks' replies are not going out"
+                                );
+                            }
                         }
                     }
                 }
-            }));
+            })));
         }
 
-        // Outbound pump: sweep the backlog, then NOTIFY → load → route →
-        // claim → push into the per-channel sender, re-sweeping every
-        // `SWEEP_EVERY` (#825). The start sweep needs no ordering care: the
-        // production `completed` is a `PgCompletedTasks`, whose `connect()`
-        // established its LISTEN before `spawn` was called, so a task
-        // finishing during the sweep is announced afterwards and its claim
-        // drops the duplicate.
+        // Completed-task pump: sweep the backlog, then NOTIFY → load → route →
+        // push, unclaimed, into the per-channel queue, re-sweeping every
+        // `SWEEP_EVERY` (#825); the channel's pump claims at the send (#832).
+        // The start sweep needs no ordering care: the production `completed`
+        // is a `PgCompletedTasks`, whose `connect()` established its LISTEN
+        // before `spawn` was called, so a task finishing during the sweep is
+        // announced afterwards, and the claim drops the duplicate.
         let events_out = events.clone();
         let life = bell.guard();
-        handles.push(tokio::spawn(async move {
+        handles.push(("completed-task".to_string(), tokio::spawn(async move {
             let _life = life;
             // A failed sweep is a WARN and the pump carries on; a run of
             // them is an ERROR, since replies are then piling up unseen.
-            let mut streak = super::catch_up::FailedSweeps::default();
-            let mut note = move |report| {
-                if let Some(n) = streak.record(&report) {
+            let mut streak = super::catch_up::Streak::default();
+            let mut note = move |report: super::catch_up::SweepReport| {
+                if let Some(n) = streak.record(report.is_failure()) {
                     error!(
                         consecutive = n,
                         "reply catch-up keeps failing; finished tasks' replies are not going out"
@@ -354,7 +377,7 @@ impl ChannelBus {
                 }
             }
             info!("outbound pump stopped");
-        }));
+        })));
 
         Self { handles, bell, asks, registered }
     }
@@ -383,14 +406,21 @@ impl ChannelBus {
     }
 
     /// Abort all pump tasks (called on daemon shutdown), then join them so any
-    /// resources they hold are released before the caller proceeds. The
-    /// completed-task pump owns a `PgListener`, which holds a checked-out pool
-    /// connection that sqlx 0.9 only releases when the listener is dropped; the
-    /// daemon's shutdown closes the pool right after, and `Pool::close()` blocks
-    /// until every connection is returned. Aborting without joining would leave
-    /// that release racing the pool close. Mirrors the scheduler/audit-mirror
-    /// shutdowns, which signal-then-join for the same reason.
-    pub async fn shutdown(self) {
+    /// resources they hold are released before the caller proceeds. Every
+    /// pump holds a clone of the `Arc<dyn CompletedTasks>` (since #832), whose
+    /// `PgCompletedTasks` owns a `PgListener` — a checked-out pool connection
+    /// that sqlx 0.9 only releases when the listener is dropped, i.e. when the
+    /// last pump is. The daemon's shutdown closes the pool right after, and
+    /// `Pool::close()` blocks until every connection is returned, so aborting
+    /// without joining would leave that release racing the pool close. Mirrors
+    /// the scheduler/audit-mirror shutdowns, which signal-then-join for the
+    /// same reason.
+    ///
+    /// Returns how many pumps had **panicked** (each logged at ERROR with its
+    /// name, #832): the join used to discard that, leaving only the death
+    /// signal. Always 0 in a release build, which is `panic = "abort"`.
+    /// Callers that only stop the bus can ignore it.
+    pub async fn shutdown(self) -> usize {
         // Stop being a delivery target first: an ask queued after this point
         // would go into a channel whose pump is about to be aborted, which
         // is a message that vanishes rather than one that fails.
@@ -399,12 +429,20 @@ impl ChannelBus {
                 w.outbox.deregister(id);
             }
         }
-        for h in &self.handles {
+        for (_, h) in &self.handles {
             h.abort();
         }
-        for h in self.handles {
-            let _ = h.await;
+        let mut panicked = 0;
+        for (pump, h) in self.handles {
+            // An aborted pump joins as a cancellation — the normal case here.
+            if let Err(e) = h.await {
+                if e.is_panic() {
+                    error!(pump = %pump, error = %e, "channel bus pump panicked");
+                    panicked += 1;
+                }
+            }
         }
+        panicked
     }
 }
 

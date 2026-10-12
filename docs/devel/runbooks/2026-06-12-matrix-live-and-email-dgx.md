@@ -111,12 +111,21 @@ accepts **both**: a custom root CA **and** a CONNECT-over-UDS proxy.
   The backlog, which should be 0 or briefly small (a growing number means no running
   bus serves that channel, or a task whose load keeps failing; each sweep that cannot
   route every reply logs `reply catch-up sweep could not route every reply` with
-  `unserved`/`load_failed`/`claim_failed` counts, and three sweeps in a row that could not
-  read the backlog or had every claim refused log an ERROR):
+  `unserved`/`load_failed`/`claim_failed` counts, three sweeps in a row that could not
+  read the backlog (or queued nothing and had an unroutable claim refused) log an ERROR,
+  and — since #832, which claims a reply in the channel's own pump right before its send —
+  a run of refused claims there that is at least 3 long and a minute old logs
+  `reply claims keep failing` at ERROR, per channel, and again each time the run doubles):
   `select count(*) from tasks where reply_settled_at is null and payload->>'kind' = 'channel' and state in ('completed','failed','cancelled','blocked','timed_out','crashed','refused');`
   (the state list mirrors `REPLIED_STATES` in `db/src/tasks/reply_claim.rs` — copy it
   from there if it ever changes). A `channel.reply_undelivered` row with reason
   `claim_unknown` is a reply whose claim errored after settling the task: not sent.
+  On a bus stop or restart (#832), replies still queued were never claimed and go out
+  from the next bus (INFO `channel pump ended with replies queued`); what a stop did
+  abandon is on `[audit-lost]`: `task N's reply … may not have been sent`, `a message
+  for … was abandoned mid-handling`, `an ask message for … may not have been sent` (mid-send)
+  or `… was not sent` (still queued), and `task N's unroutable reply may have been settled
+  without its channel.reply_unroutable row`. The bus no longer writes `queue_closed`.
   Migration 0027 runs at the first deploy and marks every earlier reply `backfilled`,
   so history is not re-sent.
 - Update HANDOVER + ROADMAP ("Matrix inbound"/"Matrix outbound" → `[x]`), flip the

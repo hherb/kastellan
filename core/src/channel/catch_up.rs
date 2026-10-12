@@ -34,7 +34,7 @@ impl Via {
 /// A reply this long after its task finished carries a delay note.
 pub const LATE_AFTER: Duration = Duration::minutes(5);
 
-/// How often the outbound pump re-sweeps the backlog while it runs. The
+/// How often the completed-task pump re-sweeps the backlog while it runs. The
 /// start-of-pump sweep covers everything missed while the bus was down; this
 /// one covers what goes missing while it is up: a load or claim that failed,
 /// a NOTIFY dropped when the tick won the pump's `select!`, and the NOTIFYs
@@ -46,9 +46,20 @@ pub const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 
 pub const SWEEP_PAGE: i64 = 100;
 
 /// After this many failed sweeps in a row (10 minutes from the first at
-/// [`SWEEP_EVERY`]) the pump says so at ERROR: replies are piling up in the
-/// backlog while the bus otherwise looks healthy.
+/// [`SWEEP_EVERY`]) the completed-task pump says so at ERROR: replies are
+/// piling up in the backlog while the bus otherwise looks healthy.
 pub const SWEEP_FAILURES_LOUD: u32 = 3;
+
+/// A channel's pump says its reply claims keep failing ([`ClaimStreak`]) once
+/// at least this many have failed in a row…
+pub const CLAIM_FAILURES_LOUD: u32 = 3;
+
+/// …and the run is at least this old. Claims come one per reply, so a queue
+/// of 30 drained through a one-second database blip is 30 failures in a row
+/// that the next sweep repairs; the count alone would call that an outage. A
+/// lone reply re-queued by each sweep reaches it at the third, 10 minutes in —
+/// the old per-sweep pace.
+pub const CLAIM_FAILURES_LOUD_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What one sweep came to — its per-sweep summary, and what tells a failed
 /// sweep from a quiet one.
@@ -56,21 +67,26 @@ pub const SWEEP_FAILURES_LOUD: u32 = 3;
 pub struct SweepReport {
     /// The backlog read failed, or did not move past its cursor.
     pub read_failed: bool,
-    /// Replies claimed and queued.
+    /// Replies queued, unclaimed, for their channel's pump (which claims
+    /// each at its send since #832).
     pub queued: usize,
     /// Replies for a channel this bus does not serve, left unclaimed.
     pub unserved: usize,
     /// Replies whose load failed, left for the next sweep.
     pub load_failed: usize,
-    /// Replies whose claim failed — left for the next sweep, or recorded
-    /// (`claim_unknown`) when a re-read found the task settled anyway.
+    /// Unroutable replies whose settling claim failed — left for the next
+    /// sweep, or recorded (`claim_uncertain`) when a re-read found the task
+    /// settled anyway. Since #832 these are the sweep's only claims; a
+    /// routable reply's claim failures are counted by its channel's pump.
     pub claim_failed: usize,
 }
 
 impl SweepReport {
-    /// A sweep failed when it could not read the backlog, or when it claimed
-    /// nothing and every claim it tried failed — the shape of a database that
-    /// still answers `SELECT` but refuses the claim's `UPDATE`. A failed load
+    /// A sweep failed when it could not read the backlog, or when it queued
+    /// nothing and at least one (unroutable) claim failed. A database that
+    /// answers `SELECT` but refuses a routable reply's claim `UPDATE` is no
+    /// longer seen here since #832: the channel's pump claims, and its own
+    /// streak says so (`reply claims keep failing`). A failed load
     /// is not a sweep failure: one task whose row will not load (a poison
     /// row) would otherwise make every sweep fail for ever, and the loud line
     /// would then be false for every other reply. Loads are in the INFO
@@ -80,22 +96,62 @@ impl SweepReport {
     }
 }
 
-/// Consecutive failed sweeps. A sweep's own failure is a WARN and does not
-/// ring the death bell (one bad read is not a dead pump); this is what makes
-/// a failure that persists louder than one that passed.
+/// The completed-task pump's run of failed sweeps. A single failure is a WARN
+/// where it happens and does not ring the death bell (one bad read is not a
+/// dead pump); this is what makes a failure that persists louder than one
+/// that passed. Pure: the caller says what failed.
 #[derive(Debug, Default)]
-pub struct FailedSweeps(u32);
+pub struct Streak(u32);
 
-impl FailedSweeps {
-    /// Count one sweep. `Some(n)` when `n` consecutive failures have reached
-    /// [`SWEEP_FAILURES_LOUD`]; any sweep that did not fail resets the count.
-    pub fn record(&mut self, report: &SweepReport) -> Option<u32> {
-        if !report.is_failure() {
+impl Streak {
+    /// Count one outcome. `Some(n)` when `n` consecutive failures have reached
+    /// [`SWEEP_FAILURES_LOUD`] — every sweep from then on, which at
+    /// [`SWEEP_EVERY`] is one line per five minutes; any success resets.
+    pub fn record(&mut self, failed: bool) -> Option<u32> {
+        if !failed {
             self.0 = 0;
             return None;
         }
         self.0 = self.0.saturating_add(1);
         (self.0 >= SWEEP_FAILURES_LOUD).then_some(self.0)
+    }
+}
+
+/// A channel pump's run of failed reply claims (#832: the claim happens at
+/// the send, so this is where a database refusing it shows). Unlike
+/// [`Streak`], one outcome per *reply*, not per five minutes — so it is loud
+/// only once the run is both [`CLAIM_FAILURES_LOUD`] long and
+/// [`CLAIM_FAILURES_LOUD_AFTER`] old, and then says so again only each time
+/// the count has doubled: a refusing database with a backlog of 500 is a
+/// handful of ERRORs, not 500. Pure: the caller passes the clock.
+#[derive(Debug, Default)]
+pub struct ClaimStreak {
+    failed: u32,
+    since: Option<std::time::Instant>,
+    /// The count last said, if this run has been said at all.
+    said: Option<u32>,
+}
+
+impl ClaimStreak {
+    /// Count one claim. `Some(n)` when the ERROR is due, `n` the failures in a
+    /// row; a claim that worked (won or lost) resets the run.
+    pub fn record(&mut self, failed: bool, now: std::time::Instant) -> Option<u32> {
+        if !failed {
+            *self = Self::default();
+            return None;
+        }
+        self.failed = self.failed.saturating_add(1);
+        let since = *self.since.get_or_insert(now);
+        if self.failed < CLAIM_FAILURES_LOUD || now.duration_since(since) < CLAIM_FAILURES_LOUD_AFTER {
+            return None;
+        }
+        match self.said {
+            Some(said) if self.failed < said.saturating_mul(2) => None,
+            _ => {
+                self.said = Some(self.failed);
+                Some(self.failed)
+            }
+        }
     }
 }
 
@@ -225,7 +281,7 @@ mod tests {
     fn a_sweep_fails_when_it_cannot_read_or_every_claim_fails() {
         assert!(report(true, 0, 0).is_failure(), "the backlog read failed");
         assert!(report(false, 0, 2).is_failure(), "every claim it tried failed");
-        assert!(!report(false, 1, 2).is_failure(), "one got through: the claim path works");
+        assert!(!report(false, 1, 2).is_failure(), "one was queued: the sweep is doing its job");
         assert!(!report(false, 0, 0).is_failure(), "an empty backlog is a quiet sweep");
         let unserved = SweepReport { unserved: 5, ..SweepReport::default() };
         assert!(!unserved.is_failure(), "another bus's replies are not a failure");
@@ -234,15 +290,53 @@ mod tests {
     }
 
     #[test]
-    fn failed_sweeps_get_loud_after_a_streak_and_reset_on_a_good_one() {
-        let mut streak = FailedSweeps::default();
-        let bad = report(true, 0, 0);
+    fn a_streak_gets_loud_after_enough_failures_and_resets_on_a_success() {
+        let mut streak = Streak::default();
         for _ in 1..SWEEP_FAILURES_LOUD {
-            assert_eq!(streak.record(&bad), None, "below the streak: WARN only");
+            assert_eq!(streak.record(true), None, "below the streak: WARN only");
         }
-        assert_eq!(streak.record(&bad), Some(SWEEP_FAILURES_LOUD));
-        assert_eq!(streak.record(&bad), Some(SWEEP_FAILURES_LOUD + 1), "stays loud");
-        assert_eq!(streak.record(&report(false, 0, 0)), None);
-        assert_eq!(streak.record(&bad), None, "a good sweep reset the count");
+        assert_eq!(streak.record(true), Some(SWEEP_FAILURES_LOUD));
+        assert_eq!(streak.record(true), Some(SWEEP_FAILURES_LOUD + 1), "stays loud");
+        assert_eq!(streak.record(false), None);
+        assert_eq!(streak.record(true), None, "a success reset the count");
+    }
+
+    /// A queue drained through a short blip: many failures, all inside the
+    /// age floor, so nothing is said — and the next good claim resets it.
+    #[test]
+    fn a_claim_streak_inside_its_age_floor_stays_quiet() {
+        let t0 = std::time::Instant::now();
+        let mut s = ClaimStreak::default();
+        for i in 0..30 {
+            assert_eq!(s.record(true, t0 + std::time::Duration::from_millis(i * 30)), None, "failure {i}");
+        }
+        assert_eq!(s.record(false, t0 + std::time::Duration::from_secs(1)), None);
+        let later = t0 + CLAIM_FAILURES_LOUD_AFTER * 2;
+        assert_eq!(s.record(true, later), None, "a success reset the run and its start");
+    }
+
+    /// Loud once the run is long enough AND old enough, then only at each
+    /// doubling: a refusing database with a large backlog is a few ERRORs.
+    #[test]
+    fn a_claim_streak_is_said_once_old_enough_then_at_each_doubling() {
+        let t0 = std::time::Instant::now();
+        let old = t0 + CLAIM_FAILURES_LOUD_AFTER;
+        let mut s = ClaimStreak::default();
+        assert_eq!(s.record(true, t0), None);
+        assert_eq!(s.record(true, old), None, "old enough, not long enough");
+        assert_eq!(s.record(true, old), Some(CLAIM_FAILURES_LOUD), "both: said");
+        let said: Vec<u32> = (0..50).filter_map(|_| s.record(true, old)).collect();
+        assert_eq!(said, [6, 12, 24, 48], "then only at each doubling");
+    }
+
+    /// A lone reply re-queued by each sweep fails once per `SWEEP_EVERY`: it
+    /// is said at the third, as the per-sweep streak was.
+    #[test]
+    fn a_claim_streak_paced_by_sweeps_is_said_at_the_third() {
+        let t0 = std::time::Instant::now();
+        let mut s = ClaimStreak::default();
+        assert_eq!(s.record(true, t0), None);
+        assert_eq!(s.record(true, t0 + SWEEP_EVERY), None);
+        assert_eq!(s.record(true, t0 + SWEEP_EVERY * 2), Some(3));
     }
 }

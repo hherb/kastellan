@@ -14,19 +14,39 @@ use kastellan_core::channel::auth::{
     AuthDecision, DbPeerAuthorizer, PeerAuthorizer, StaticPairings, UnauthenticReason,
 };
 use kastellan_core::channel::bus::{
-    handle_completed, handle_inbound, AskWiring, CompletedTasks, PgAskResolver, PgChannelEvents,
-    PgCompletedTasks,
+    deliver, handle_completed, handle_inbound, AskWiring, CompletedTasks, Delivery, PgAskResolver,
+    PgChannelEvents, PgCompletedTasks, Queued,
 };
 use kastellan_core::channel::catch_up::Via;
 use kastellan_core::channel::ingest::{build_channel_task_payload, sha256_hex};
 use kastellan_core::channel::outbox::ChannelOutbox;
 use kastellan_core::channel::{
-    actions, ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId,
+    actions, Channel, ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence,
+    PeerId,
 };
 use kastellan_db::tasks::{self, Lane};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix,
 };
+
+/// A transport whose `send` records and succeeds, and that never receives.
+#[derive(Default)]
+struct SinkChannel {
+    sent: std::sync::Mutex<Vec<OutgoingMessage>>,
+}
+#[async_trait::async_trait]
+impl Channel for SinkChannel {
+    fn id(&self) -> ChannelId {
+        ChannelId("matrix".into())
+    }
+    async fn recv(&mut self) -> Option<IncomingMessage> {
+        std::future::pending().await
+    }
+    async fn send(&self, msg: OutgoingMessage) -> anyhow::Result<()> {
+        self.sent.lock().unwrap().push(msg);
+        Ok(())
+    }
+}
 
 async fn probe_and_pool(conn_spec: &kastellan_db::conn::ConnectSpec) -> sqlx::PgPool {
     kastellan_db::probe::run(
@@ -94,7 +114,7 @@ async fn channel_inbound_enqueues_and_completion_routes_a_reply() {
 
     // ── Outbound: listen, finalize the task, route the completion to a reply. ──
     // LISTEN before finalize so the NOTIFY is not missed.
-    let mut completed = PgCompletedTasks::connect(pool.clone())
+    let completed = PgCompletedTasks::connect(pool.clone())
         .await
         .expect("connect completed-tasks listener");
 
@@ -117,16 +137,31 @@ async fn channel_inbound_enqueues_and_completion_routes_a_reply() {
     let id = completed.next_completed().await.expect("a completed-task id");
     assert_eq!(id, task.id);
 
-    let (tx, mut rx) = mpsc::channel::<OutgoingMessage>(4);
+    // The outbound pump's half routes and queues it, unclaimed; the channel
+    // pump's half (`deliver`) claims it against the real `tasks` row and
+    // sends it (#832).
+    let (tx, mut rx) = mpsc::channel::<Queued>(4);
     let mut senders = HashMap::new();
     senders.insert(ChannelId("matrix".into()), tx);
-    let out = handle_completed(&completed, &events, &senders, id, Via::Notify)
+    let queued = handle_completed(&completed, &events, &senders, id, Via::Notify)
         .await
         .expect("routed reply");
-    assert_eq!(out.body, "You have 2 meetings.");
-    assert_eq!(out.conversation, ConversationId("!room:srv".into()));
-    let delivered = rx.recv().await.expect("reply delivered to channel sender");
-    assert_eq!(delivered.peer, PeerId("@me:srv".into()));
+    assert_eq!(queued.message().body, "You have 2 meetings.");
+    assert_eq!(queued.message().conversation, ConversationId("!room:srv".into()));
+    let item = rx.recv().await.expect("reply queued for the channel");
+    let sink = SinkChannel::default();
+    let d = deliver(&completed, &events, &sink, &ChannelId("matrix".into()), item).await;
+    assert_eq!(d, Delivery::Sent);
+    let sent = sink.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].peer, PeerId("@me:srv".into()));
+    let disposition: Option<String> =
+        sqlx::query_scalar("SELECT reply_disposition FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the claim");
+    assert_eq!(disposition.as_deref(), Some("routed"), "claimed where it was sent");
 
     let audits = kastellan_db::audit::fetch_since(&pool, 0, 200).await.expect("audit fetch 2");
     assert!(

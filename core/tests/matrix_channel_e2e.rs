@@ -54,17 +54,17 @@ impl ChannelEvents for FakeEvents {
 
 struct FakeCompleted {
     enqueued: Arc<Mutex<Vec<Value>>>,
-    yielded: bool,
+    yielded: std::sync::atomic::AtomicBool,
 }
 #[async_trait::async_trait]
 impl CompletedTasks for FakeCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
-        if self.yielded {
+    async fn next_completed(&self) -> Option<i64> {
+        if self.yielded.load(std::sync::atomic::Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
         loop {
             if !self.enqueued.lock().unwrap().is_empty() {
-                self.yielded = true;
+                self.yielded.store(true, std::sync::atomic::Ordering::SeqCst);
                 return Some(1);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -140,13 +140,16 @@ async fn paired_inbound_round_trips_to_a_sent_reply() {
     let Some(ch) = spawn_matrix_channel(&sent_file, "@me:srv") else { return };
 
     let events = FakeEvents::default();
-    let completed = FakeCompleted { enqueued: events.enqueued.clone(), yielded: false };
+    let completed = FakeCompleted {
+        enqueued: events.enqueued.clone(),
+        yielded: std::sync::atomic::AtomicBool::new(false),
+    };
     let bus = ChannelBus::spawn(
         vec![Box::new(ch)],
         Arc::new(StaticPairings::from_peers([PeerId("@me:srv".into())])),
         None,
         Arc::new(events),
-        Box::new(completed),
+        Arc::new(completed),
         None,
     );
 
@@ -184,13 +187,16 @@ async fn unpaired_inbound_is_dropped_no_reply() {
     let Some(ch) = spawn_matrix_channel(&sent_file, "@stranger:srv") else { return };
 
     let events = FakeEvents::default();
-    let completed = FakeCompleted { enqueued: events.enqueued.clone(), yielded: false };
+    let completed = FakeCompleted {
+        enqueued: events.enqueued.clone(),
+        yielded: std::sync::atomic::AtomicBool::new(false),
+    };
     let bus = ChannelBus::spawn(
         vec![Box::new(ch)],
         Arc::new(StaticPairings::from_peers([PeerId("@me:srv".into())])), // stranger not paired
         None,
         Arc::new(events.clone()),
-        Box::new(completed),
+        Arc::new(completed),
         None,
     );
 

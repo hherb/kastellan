@@ -22,6 +22,7 @@ use std::sync::RwLock;
 
 use tokio::sync::mpsc;
 
+use super::bus_deliver::Queued;
 use super::{ChannelId, OutgoingMessage};
 
 /// Why a delivery did not reach a channel's queue.
@@ -61,7 +62,7 @@ impl OutboxError {
 /// of deadlocks a lock plus async invites.
 #[derive(Default)]
 pub struct ChannelOutbox {
-    senders: RwLock<HashMap<ChannelId, mpsc::Sender<OutgoingMessage>>>,
+    senders: RwLock<HashMap<ChannelId, mpsc::Sender<Queued>>>,
 }
 
 impl ChannelOutbox {
@@ -72,7 +73,7 @@ impl ChannelOutbox {
     /// Register (or replace) a channel's outbound queue. Called by
     /// `ChannelBus::spawn` with the *same* sender its own reply pump uses,
     /// so there is one queue per channel and no second delivery path.
-    pub fn register(&self, id: ChannelId, tx: mpsc::Sender<OutgoingMessage>) {
+    pub fn register(&self, id: ChannelId, tx: mpsc::Sender<Queued>) {
         self.senders.write().expect("outbox lock not poisoned").insert(id, tx);
     }
 
@@ -83,17 +84,18 @@ impl ChannelOutbox {
         self.senders.write().expect("outbox lock not poisoned").remove(id);
     }
 
-    /// Queue `msg` for the channel it names.
+    /// Queue `msg` — task `task_id`'s raised ask — for the channel it names,
+    /// as a [`Queued::Ask`].
     ///
     /// Never blocks — a full queue is `Err(QueueFull)`, not backpressure —
     /// which is what makes it callable from the sync `deliver_ask`. It can
     /// still panic on a poisoned lock, same as `register`/`deregister`; the
     /// `RwLock` is only ever held for a map lookup with no `await` inside,
     /// so the only way to poison it is a panic in `HashMap`.
-    pub fn try_deliver(&self, msg: OutgoingMessage) -> Result<(), OutboxError> {
+    pub fn try_deliver(&self, task_id: i64, msg: OutgoingMessage) -> Result<(), OutboxError> {
         let senders = self.senders.read().expect("outbox lock not poisoned");
         let tx = senders.get(&msg.channel).ok_or(OutboxError::NoSuchChannel)?;
-        tx.try_send(msg).map_err(|e| match e {
+        tx.try_send(Queued::Ask { task_id, out: msg }).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => OutboxError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => OutboxError::QueueClosed,
         })
@@ -122,14 +124,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         outbox.register(ChannelId("matrix".into()), tx);
 
-        outbox.try_deliver(msg("matrix")).expect("delivered");
-        assert_eq!(rx.recv().await.expect("received").body, "hello");
+        outbox.try_deliver(7, msg("matrix")).expect("delivered");
+        assert_eq!(rx.recv().await.expect("received"), Queued::Ask { task_id: 7, out: msg("matrix") });
     }
 
     #[test]
     fn delivering_to_an_unregistered_channel_is_an_error_not_a_silent_drop() {
         let outbox = ChannelOutbox::new();
-        assert_eq!(outbox.try_deliver(msg("matrix")), Err(OutboxError::NoSuchChannel));
+        assert_eq!(outbox.try_deliver(7, msg("matrix")), Err(OutboxError::NoSuchChannel));
     }
 
     #[test]
@@ -138,7 +140,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         outbox.register(ChannelId("matrix".into()), tx);
         outbox.deregister(&ChannelId("matrix".into()));
-        assert_eq!(outbox.try_deliver(msg("matrix")), Err(OutboxError::NoSuchChannel));
+        assert_eq!(outbox.try_deliver(7, msg("matrix")), Err(OutboxError::NoSuchChannel));
     }
 
     /// The bus is supervised and restarts, so a sender can outlive the pump
@@ -150,7 +152,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(4);
         outbox.register(ChannelId("matrix".into()), tx);
         drop(rx);
-        assert_eq!(outbox.try_deliver(msg("matrix")), Err(OutboxError::QueueClosed));
+        assert_eq!(outbox.try_deliver(7, msg("matrix")), Err(OutboxError::QueueClosed));
     }
 
     /// try_send, not send (spec D4): the raise path must never block on a
@@ -161,8 +163,8 @@ mod tests {
         let outbox = ChannelOutbox::new();
         let (tx, _rx) = mpsc::channel(1);
         outbox.register(ChannelId("matrix".into()), tx);
-        outbox.try_deliver(msg("matrix")).expect("first fits");
-        assert_eq!(outbox.try_deliver(msg("matrix")), Err(OutboxError::QueueFull));
+        outbox.try_deliver(7, msg("matrix")).expect("first fits");
+        assert_eq!(outbox.try_deliver(7, msg("matrix")), Err(OutboxError::QueueFull));
     }
 
     /// A restarted bus registers a fresh sender under the same id; the stale
@@ -178,8 +180,8 @@ mod tests {
         let (new_tx, mut new_rx) = mpsc::channel(4);
         outbox.register(ChannelId("matrix".into()), new_tx);
 
-        outbox.try_deliver(msg("matrix")).expect("delivered to the new sender");
-        assert_eq!(new_rx.recv().await.expect("received").body, "hello");
+        outbox.try_deliver(7, msg("matrix")).expect("delivered to the new sender");
+        assert_eq!(new_rx.recv().await.expect("received"), Queued::Ask { task_id: 7, out: msg("matrix") });
     }
 
     /// Routing is per channel: an ask for a channel this outbox does not
@@ -189,7 +191,7 @@ mod tests {
         let outbox = ChannelOutbox::new();
         let (tx, _rx) = mpsc::channel(4);
         outbox.register(ChannelId("matrix".into()), tx);
-        assert_eq!(outbox.try_deliver(msg("email")), Err(OutboxError::NoSuchChannel));
+        assert_eq!(outbox.try_deliver(7, msg("email")), Err(OutboxError::NoSuchChannel));
     }
 
     /// The audit labels are a fixed set, and the payloads that carry them

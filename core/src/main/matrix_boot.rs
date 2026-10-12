@@ -381,7 +381,7 @@ async fn attempt(
         authorizer,
         Some(pairing),
         events,
-        Box::new(completed),
+        Arc::new(completed),
         Some(asks),
     )))
 }

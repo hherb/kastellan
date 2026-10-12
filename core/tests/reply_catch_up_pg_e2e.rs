@@ -1,17 +1,22 @@
 //! PG-gated e2e for the reply catch-up (#825): replies that finished while no
 //! bus listened are delivered when the buses start — once, across two buses
 //! (#497) — the late one with its note, and the live NOTIFY path still works
-//! after. Skip-as-pass without a supervisor/PG.
+//! after. And (#832) replies still queued when a bus stops are not lost: they
+//! were never claimed, so the next bus delivers them. Skip-as-pass without a
+//! supervisor/PG.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use kastellan_core::channel::auth::StaticPairings;
-use kastellan_core::channel::bus::{ChannelBus, PgChannelEvents, PgCompletedTasks};
+use kastellan_core::channel::bus::{
+    ChannelBus, ClaimedReply, CompletedTasks, PgChannelEvents, PgCompletedTasks, ReplyDisposition,
+};
 use kastellan_core::channel::{actions, Channel, ChannelId, IncomingMessage, OutgoingMessage};
 use kastellan_db::tasks::{self, Lane};
 use kastellan_tests_common::{
@@ -20,9 +25,12 @@ use kastellan_tests_common::{
 
 /// Records every send and parks on `recv` (the test keeps the sender), so the
 /// per-channel pump stays alive the way a real one does between messages.
+/// With `park_sends`, a send also never returns after recording: a wedged
+/// transport, holding the pump on its first item.
 struct RecordingChannel {
     inbound_rx: mpsc::Receiver<IncomingMessage>,
     sent: Arc<Mutex<Vec<OutgoingMessage>>>,
+    park_sends: bool,
 }
 #[async_trait::async_trait]
 impl Channel for RecordingChannel {
@@ -34,6 +42,9 @@ impl Channel for RecordingChannel {
     }
     async fn send(&self, msg: OutgoingMessage) -> anyhow::Result<()> {
         self.sent.lock().unwrap().push(msg);
+        if self.park_sends {
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
 }
@@ -63,21 +74,50 @@ async fn finished_task(pool: &sqlx::PgPool, body: &str, finished_ago_mins: i32) 
     id
 }
 
+/// The real `PgCompletedTasks`, flagging its first `next_completed`: the
+/// completed-task pump makes that call only once its start sweep has routed
+/// everything, so a test can stop the bus knowing the sweep is done.
+struct Listening {
+    inner: PgCompletedTasks,
+    listening: Arc<AtomicBool>,
+}
+#[async_trait::async_trait]
+impl CompletedTasks for Listening {
+    async fn next_completed(&self) -> Option<i64> {
+        self.listening.store(true, Ordering::SeqCst);
+        self.inner.next_completed().await
+    }
+    async fn load(&self, id: i64) -> anyhow::Result<Option<(serde_json::Value, Option<serde_json::Value>)>> {
+        self.inner.load(id).await
+    }
+    async fn claim(&self, id: i64, d: ReplyDisposition) -> anyhow::Result<Option<ClaimedReply>> {
+        self.inner.claim(id, d).await
+    }
+    async fn unsettled(&self, after_id: i64, limit: i64) -> anyhow::Result<Vec<i64>> {
+        self.inner.unsettled(after_id, limit).await
+    }
+    async fn settled(&self, id: i64) -> anyhow::Result<bool> {
+        self.inner.settled(id).await
+    }
+}
+
 async fn spawn_bus(
     pool: &sqlx::PgPool,
     sent: &Arc<Mutex<Vec<OutgoingMessage>>>,
-) -> (ChannelBus, mpsc::Sender<IncomingMessage>) {
+    park_sends: bool,
+) -> (ChannelBus, mpsc::Sender<IncomingMessage>, Arc<AtomicBool>) {
     let (tx, inbound_rx) = mpsc::channel(1);
-    let completed = PgCompletedTasks::connect(pool.clone()).await.expect("LISTEN");
+    let inner = PgCompletedTasks::connect(pool.clone()).await.expect("LISTEN");
+    let listening = Arc::new(AtomicBool::new(false));
     let bus = ChannelBus::spawn(
-        vec![Box::new(RecordingChannel { inbound_rx, sent: sent.clone() })],
+        vec![Box::new(RecordingChannel { inbound_rx, sent: sent.clone(), park_sends })],
         Arc::new(StaticPairings::new()),
         None,
         Arc::new(PgChannelEvents::new(pool.clone())),
-        Box::new(completed),
+        Arc::new(Listening { inner, listening: listening.clone() }),
         None,
     );
-    (bus, tx)
+    (bus, tx, listening)
 }
 
 async fn eventually(what: &str, cond: impl Fn() -> bool) {
@@ -117,8 +157,8 @@ async fn missed_replies_are_delivered_once_when_the_buses_start() {
 
     // Two buses serving the same channel: the claim must pick one router.
     let sent = Arc::new(Mutex::new(Vec::new()));
-    let (bus_a, _ia) = spawn_bus(&pool, &sent).await;
-    let (bus_b, _ib) = spawn_bus(&pool, &sent).await;
+    let (bus_a, _ia, _) = spawn_bus(&pool, &sent, false).await;
+    let (bus_b, _ib, _) = spawn_bus(&pool, &sent, false).await;
 
     eventually("two catch-up sends", || sent.lock().unwrap().len() >= 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await; // room for a wrong third
@@ -176,5 +216,87 @@ async fn missed_replies_are_delivered_once_when_the_buses_start() {
     assert_eq!(row_for(fresh)["via"], "catch_up");
     assert!(row_for(fresh).get("delayed_secs").is_none());
     assert_eq!(row_for(live)["via"], "notify");
+    pool.close().await;
+}
+
+/// The task ids whose reply is settled as `disposition` (`None`: unsettled).
+async fn with_disposition(pool: &sqlx::PgPool, ids: &[i64], disposition: Option<&str>) -> Vec<i64> {
+    let mut hits = Vec::new();
+    for &id in ids {
+        let d: Option<String> = sqlx::query_scalar("SELECT reply_disposition FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read the claim");
+        if d.as_deref() == disposition {
+            hits.push(id);
+        }
+    }
+    hits
+}
+
+/// #832: a bus stopped with replies still in its channel's queue. Before
+/// #832 they were claimed (`routed`) before being queued, so the stop lost
+/// them for good. Now they are queued unclaimed: the stop leaves them in the
+/// backlog, and the next bus's start sweep delivers them — once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replies_queued_at_a_stop_are_delivered_by_the_next_bus() {
+    if skip_if_no_supervisor() {
+        return;
+    }
+    let Some(bin_dir) = pg_bin_dir_or_skip() else { return };
+    let suffix = unique_suffix();
+    let cluster = bring_up_pg_cluster(
+        &bin_dir,
+        "rcs-d",
+        "rcs-l",
+        &format!("kastellan-supervisor-test-pg-rcs-{suffix}"),
+    );
+    kastellan_db::probe::run(
+        &cluster.conn_spec,
+        "core",
+        "startup",
+        serde_json::json!({"version": "test", "purpose": "reply-stop-e2e"}),
+    )
+    .await
+    .expect("probe");
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec).await.expect("pool");
+
+    let ids = [
+        finished_task(&pool, "one", 0).await,
+        finished_task(&pool, "two", 0).await,
+        finished_task(&pool, "three", 0).await,
+    ];
+
+    // Bus A: its start sweep queues all three; the pump claims the first and
+    // wedges in the transport, so the other two stay queued. Then it stops.
+    let sent_a = Arc::new(Mutex::new(Vec::new()));
+    let (bus_a, _ia, swept_a) = spawn_bus(&pool, &sent_a, true).await;
+    eventually("the first reply in the transport", || sent_a.lock().unwrap().len() == 1).await;
+    // …and the start sweep has routed all three, so a claim made at routing
+    // would already have settled them: the stop cannot win that race.
+    eventually("bus A's start sweep is done", || swept_a.load(Ordering::SeqCst)).await;
+    bus_a.shutdown().await;
+
+    let in_flight = with_disposition(&pool, &ids, Some("routed")).await;
+    assert_eq!(in_flight.len(), 1, "only the reply mid-send was claimed: {in_flight:?}");
+    let queued = with_disposition(&pool, &ids, None).await;
+    assert_eq!(queued.len(), 2, "the queued two are still in the backlog: {queued:?}");
+
+    // Bus B delivers exactly those two.
+    let sent_b = Arc::new(Mutex::new(Vec::new()));
+    let (bus_b, _ib, _) = spawn_bus(&pool, &sent_b, false).await;
+    eventually("the two queued replies", || sent_b.lock().unwrap().len() >= 2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await; // room for a wrong third
+    bus_b.shutdown().await;
+
+    let first = sent_a.lock().unwrap()[0].body.clone();
+    let mut later: Vec<String> = sent_b.lock().unwrap().iter().map(|m| m.body.clone()).collect();
+    later.sort();
+    let mut expected: Vec<String> =
+        ["one", "two", "three"].iter().map(|b| b.to_string()).filter(|b| *b != first).collect();
+    expected.sort();
+    assert_eq!(later, expected, "the next bus sends the two the stop left, and only those");
+    assert_eq!(with_disposition(&pool, &ids, Some("routed")).await.len(), 3, "all settled now");
     pool.close().await;
 }

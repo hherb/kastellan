@@ -9,7 +9,7 @@ use crate::channel::actions;
 use crate::channel::catch_up::Via;
 use crate::channel::auth::{AuthDecision, StaticPairings, UnauthenticReason};
 use crate::channel::outbox::ChannelOutbox;
-use crate::channel::{ChannelId, ConversationId, IncomingMessage, PeerEvidence, PeerId};
+use crate::channel::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerEvidence, PeerId};
 use std::sync::Mutex;
 
 /// #815: the messages and replies the bus drops, and the rows they leave.
@@ -25,6 +25,8 @@ struct FakeEvents {
     audited: Mutex<Vec<(String, Value)>>,
     /// When set, `enqueue` fails with this text instead of recording.
     enqueue_fails_with: Option<&'static str>,
+    /// What the bus's guards reported as lost in flight (#832).
+    lost: Mutex<Vec<String>>,
 }
 #[async_trait::async_trait]
 impl ChannelEvents for FakeEvents {
@@ -37,6 +39,9 @@ impl ChannelEvents for FakeEvents {
     }
     async fn audit(&self, action: &str, payload: Value) {
         self.audited.lock().unwrap().push((action.to_string(), payload));
+    }
+    fn report_lost(&self, line: &str) {
+        self.lost.lock().unwrap().push(line.to_string());
     }
 }
 
@@ -233,7 +238,7 @@ struct FakeCompleted {
 }
 #[async_trait::async_trait]
 impl CompletedTasks for FakeCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
         self.ids.lock().unwrap().pop()
     }
     async fn load(&self, id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
@@ -264,19 +269,18 @@ async fn outbound_routes_completed_channel_task_to_its_channel() {
         ),
     );
     let completed = FakeCompleted { ids: Mutex::new(vec![7]), rows };
-    let (tx, mut rx) = mpsc::channel::<OutgoingMessage>(4);
+    let (tx, mut rx) = mpsc::channel::<Queued>(4);
     let mut senders = HashMap::new();
     senders.insert(ChannelId("matrix".into()), tx);
 
-    let out = handle_completed(&completed, &ev, &senders, 7, Via::Notify).await.expect("routed");
-    assert_eq!(out.body, "done");
+    let queued = handle_completed(&completed, &ev, &senders, 7, Via::Notify).await.expect("routed");
+    assert_eq!(queued.message().body, "done");
     let delivered = rx.recv().await.unwrap();
-    assert_eq!(delivered.peer, PeerId("@me:srv".into()));
-    // Exactly one row: a `reply_undelivered` (#815) beside it would claim a
-    // drop that did not happen.
+    assert_eq!(delivered.message().peer, PeerId("@me:srv".into()));
+    // No row yet: `channel.replied` is written by the per-channel pump when
+    // it claims and sends the reply (#832; `catch_up::deliver` tests it).
     let audited = ev.audited.lock().unwrap().clone();
-    assert_eq!(audited.len(), 1, "{audited:?}");
-    assert_eq!(audited[0].0, actions::REPLIED);
+    assert!(audited.is_empty(), "{audited:?}");
 }
 
 /// A channel whose `send` always fails — the exact shape `EmailChannel` has in
@@ -329,7 +333,7 @@ async fn a_refused_reply_audits_reply_undelivered_alongside_replied() {
         Arc::new(StaticPairings::new()),
         None,
         ev.clone(),
-        Box::new(completed),
+        Arc::new(completed),
         None,
     );
 
@@ -548,7 +552,7 @@ async fn evidence_bearing_unpaired_peer_never_reaches_the_pairing_carve_out() {
 struct EndedCompleted;
 #[async_trait::async_trait]
 impl CompletedTasks for EndedCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
         None
     }
     async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
@@ -573,7 +577,7 @@ impl CompletedTasks for EndedCompleted {
 struct ParkingCompleted;
 #[async_trait::async_trait]
 impl CompletedTasks for ParkingCompleted {
-    async fn next_completed(&mut self) -> Option<i64> {
+    async fn next_completed(&self) -> Option<i64> {
         std::future::pending().await
     }
     async fn load(&self, _id: i64) -> anyhow::Result<Option<(Value, Option<Value>)>> {
@@ -596,7 +600,7 @@ impl CompletedTasks for ParkingCompleted {
 /// hand back the bus and the inbound sender (kept alive by the caller — dropping
 /// it is how a test kills the *inbound* pump).
 fn bus_over(
-    completed: Box<dyn CompletedTasks>,
+    completed: Arc<dyn CompletedTasks>,
 ) -> (ChannelBus, mpsc::Sender<IncomingMessage>) {
     let (inbound_tx, inbound_rx) = mpsc::channel::<IncomingMessage>(1);
     let channel = RefusingChannel { id: ChannelId("email".into()), inbound_rx };
@@ -615,7 +619,7 @@ fn bus_over(
 /// the life of the process. The bus must say so.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dead_outbound_pump_fires_the_death_signal() {
-    let (bus, _inbound_tx) = bus_over(Box::new(EndedCompleted));
+    let (bus, _inbound_tx) = bus_over(Arc::new(EndedCompleted));
 
     tokio::time::timeout(std::time::Duration::from_secs(5), bus.death_signal())
         .await
@@ -629,7 +633,7 @@ async fn a_dead_outbound_pump_fires_the_death_signal() {
 /// supervisor does not care *which* pump stopped, only that one did.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_closed_inbound_fires_the_death_signal() {
-    let (bus, inbound_tx) = bus_over(Box::new(ParkingCompleted));
+    let (bus, inbound_tx) = bus_over(Arc::new(ParkingCompleted));
 
     // Closing the transport is what makes `recv()` return `None`.
     drop(inbound_tx);
@@ -646,7 +650,7 @@ async fn a_closed_inbound_fires_the_death_signal() {
 /// supervisor tears a healthy channel down and rebuilds it in a loop.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_healthy_bus_does_not_signal_death() {
-    let (bus, _inbound_tx) = bus_over(Box::new(ParkingCompleted));
+    let (bus, _inbound_tx) = bus_over(Arc::new(ParkingCompleted));
 
     let waited =
         tokio::time::timeout(std::time::Duration::from_millis(200), bus.death_signal()).await;
@@ -898,12 +902,12 @@ async fn the_bus_registers_its_channel_and_deregisters_on_shutdown() {
         Arc::new(StaticPairings::new()),
         None,
         Arc::new(FakeEvents::default()),
-        Box::new(FakeCompleted { ids: Mutex::new(vec![]), rows: HashMap::new() }),
+        Arc::new(FakeCompleted { ids: Mutex::new(vec![]), rows: HashMap::new() }),
         Some(Arc::new(AskWiring { outbox: outbox.clone(), resolver })),
     );
 
     outbox
-        .try_deliver(OutgoingMessage {
+        .try_deliver(7, OutgoingMessage {
             channel: ChannelId("matrix".into()),
             peer: PeerId("@me:srv".into()),
             conversation: ConversationId("!room:srv".into()),
@@ -914,7 +918,7 @@ async fn the_bus_registers_its_channel_and_deregisters_on_shutdown() {
 
     bus.shutdown().await;
     assert_eq!(
-        outbox.try_deliver(OutgoingMessage {
+        outbox.try_deliver(7, OutgoingMessage {
             channel: ChannelId("matrix".into()),
             peer: PeerId("@me:srv".into()),
             conversation: ConversationId("!room:srv".into()),

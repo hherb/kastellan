@@ -662,6 +662,9 @@ async fn a_raised_ask_travels_the_whole_runner_to_the_registered_channel() {
         .await
         .expect("the ask must reach the registered channel within 20s")
         .expect("the outbox sender must still be open");
+    let kastellan_core::channel::bus::Queued::Ask { out: sent, .. } = sent else {
+        panic!("a raised ask is queued as an ask, with no reply to claim: {sent:?}");
+    };
 
     assert_eq!(sent.channel.0, "matrix", "delivered to the task's own channel");
     assert_eq!(sent.peer.0, "@me:srv", "addressed to the peer the task came from");

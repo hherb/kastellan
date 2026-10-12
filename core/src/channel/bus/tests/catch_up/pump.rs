@@ -45,7 +45,7 @@ fn rig(backlog: &Arc<Backlog>, refuse: bool) -> Rig {
         Arc::new(StaticPairings::new()),
         None,
         ev.clone(),
-        Box::new(backlog.clone()),
+        Arc::new(backlog.clone()),
         None,
     );
     Rig { bus, sent, ev, _inbound: inbound_tx }
