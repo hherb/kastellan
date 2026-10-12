@@ -41,9 +41,10 @@ pub const AUDIT_LOST_STDERR_MARKER: &str = "[audit-lost]";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuditLostWriter {
     /// The Matrix channel's sink: `channel.reply_undelivered` and, since
-    /// #826, `channel.inbound_dropped`.
+    /// #826 (#846 for buffered messages), `channel.inbound_dropped`.
     Matrix,
-    /// The email channel's `channel.skipped_ack_only` sink.
+    /// The email channel's sink: `channel.skipped_ack_only` and, since #846,
+    /// `channel.inbound_dropped` (buffered messages only).
     Email,
     /// The channel bus's own writer (`channel::pg_events`, #808): the rows
     /// the bus writes itself — `channel.received`, `channel.enqueue_failed`,

@@ -258,7 +258,7 @@ fn the_reply_undelivered_row_is_the_bus_s_shape_without_the_body() {
 #[test]
 fn attempt_s_inbound_dropped_hook_shares_the_lease_and_names_its_row() {
     use crate::audit_sink::{Bounds, InFlight, Ledger};
-    use kastellan_core::channel::polled_driver::InboundDropped;
+    use kastellan_core::channel::polled_driver::{InboundDropStage, InboundDropped};
     use kastellan_core::channel::ChannelId;
     static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
     let rt = tokio::runtime::Runtime::new().expect("a runtime");
@@ -274,74 +274,10 @@ fn attempt_s_inbound_dropped_hook_shares_the_lease_and_names_its_row() {
     let channel = ChannelId("matrix".into());
     crate::audit_sink::test_support::assert_returns_at_once("the Matrix inbound-dropped sink", || {
         let dropped = std::num::NonZeroUsize::new(3).unwrap();
-        hook(InboundDropped { channel: &channel, dropped, observed_at: time::OffsetDateTime::now_utc() })
+        let stage = InboundDropStage::Polled;
+        hook(InboundDropped { channel: &channel, stage, dropped, observed_at: time::OffsetDateTime::now_utc() })
     });
     assert_eq!(LEDGER.named_pending(), ["matrix inbound messages dropped (3)"]);
     drop(audit);
     assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives the lease back when dropped");
-}
-
-static MATRIX_INBOUND_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>> =
-    std::sync::Mutex::new(Vec::new());
-
-/// #826: an inbound-dropped row the sink could not write (here, shed: no
-/// queue room) reaches the reporter as the MATRIX writer, naming the count.
-#[test]
-fn the_matrix_sink_reports_an_inbound_dropped_row_it_could_not_write() {
-    use kastellan_core::channel::polled_driver::InboundDropped;
-    use kastellan_core::channel::ChannelId;
-    let rt = tokio::runtime::Runtime::new().expect("a runtime");
-    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
-    static LEDGER: crate::audit_sink::Ledger =
-        crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 0, connections: 1 });
-    let sink = inbound_dropped_audit_sink(
-        std::sync::Arc::new(crate::audit_sink::SinkWriter::with_ledger(
-            &LEDGER,
-            pool,
-            rt.handle().clone(),
-            crate::audit_sink::SinkChannel::Matrix,
-        )),
-        |w, line| MATRIX_INBOUND_SAID.lock().unwrap().push((w, line.to_string())),
-    );
-    let channel = ChannelId("matrix".into());
-    let dropped = std::num::NonZeroUsize::new(5).unwrap();
-    sink(InboundDropped { channel: &channel, dropped, observed_at: time::OffsetDateTime::now_utc() });
-    let said = MATRIX_INBOUND_SAID.lock().unwrap();
-    assert_eq!(said.len(), 1, "{said:?}");
-    assert_eq!(said[0].0, AuditLostWriter::Matrix);
-    assert!(
-        said[0].1.starts_with("channel.inbound_dropped row for 5 dropped inbound messages not written: shed"),
-        "{said:?}"
-    );
-}
-
-/// #826: the lost-row line names the count, in number, and the cause.
-#[test]
-fn a_lost_inbound_dropped_row_names_its_count_and_cause() {
-    assert_eq!(
-        format_inbound_row_lost(std::num::NonZeroUsize::MIN, &"shed: too many"),
-        "channel.inbound_dropped row for 1 dropped inbound message not written: shed: too \
-         many. The drop's [worker-refusal] line stands"
-    );
-}
-
-/// #826: the row the Matrix sink writes — the bus's actor, the action
-/// spelled literally, channel + count + when. A recording hook in the driver
-/// tests sees only what the driver passed; this pins what the sink hands to
-/// the insert (whose `stored_form` changes nothing in this payload).
-#[test]
-fn the_inbound_dropped_row_is_the_bus_s_actor_and_channel_count_and_when() {
-    use kastellan_core::channel::polled_driver::InboundDropped;
-    use kastellan_core::channel::ChannelId;
-    let channel = ChannelId("matrix".into());
-    let at = time::macros::datetime!(2026-10-07 12:34:56 UTC);
-    let dropped = std::num::NonZeroUsize::new(2).unwrap();
-    let (actor, action, payload) =
-        inbound_dropped_row(&InboundDropped { channel: &channel, dropped, observed_at: at });
-    assert_eq!(actor, "channel");
-    assert_eq!(action, "channel.inbound_dropped");
-    assert_eq!(
-        payload,
-        serde_json::json!({"channel": "matrix", "dropped": 2, "observed_at": "2026-10-07T12:34:56Z"})
-    );
 }

@@ -30,11 +30,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use tokio::sync::mpsc as tok_mpsc;
-
 use kastellan_sandbox::SandboxBackend;
 
-use crate::channel::polled_driver::{AckOnlyAudit, DriverAudit, PolledWorkerDriver};
+use crate::channel::polled_driver::{
+    AckOnlyAudit, DriverAudit, InboundDroppedAudit, InboundReceiver, PolledWorkerDriver,
+};
 use crate::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
 use crate::egress::spawn::Mitm;
 use crate::worker_lifecycle::force_route::ForceRoutingConfig;
@@ -53,6 +53,49 @@ pub mod wire;
 
 use config::EmailConfig;
 
+/// The email driver's audit hooks: the [`DriverAudit`] hooks email can call,
+/// and no others. A skipped id and dropped inbound messages are always LOGGED
+/// regardless of these hooks — the skipped id by the driver, unread buffered
+/// messages by the bus-side receiver — and a hook only controls whether the
+/// event ALSO becomes a durable `audit_log` row.
+pub struct EmailDriverAudit {
+    /// Records every acked-but-never-an-event id (localmail's `skipped` list)
+    /// as a `channel.skipped_ack_only` row — see [`AckOnlyAudit`] for why it
+    /// is a closure rather than a `PgPool`, and why it must not block.
+    pub ack_only: Option<AckOnlyAudit>,
+    /// Records inbound messages lost when the bus stopped as a
+    /// `channel.inbound_dropped` row — see [`InboundDroppedAudit`]. On email
+    /// that is only ever the *buffered* stage (#846), called by the bus-side
+    /// receiver: messages the bus's buffer accepted, and the driver therefore
+    /// acked, that the bus never read (any held back by a refused ack, or
+    /// whose own ack failed, may be redelivered, and is counted anyway). A
+    /// batch the bus
+    /// never took is not acked, so the worker redelivers it, and the driver
+    /// never calls this hook for it (#826).
+    pub inbound_dropped: Option<InboundDroppedAudit>,
+}
+
+impl EmailDriverAudit {
+    /// No audit hooks, for a caller with no database (e.g. a future
+    /// `kastellan-cli email probe`): unread buffered messages are still
+    /// logged, and the line says they were not recorded.
+    pub fn none() -> Self {
+        Self { ack_only: None, inbound_dropped: None }
+    }
+
+    fn into_driver_audit(self) -> DriverAudit {
+        DriverAudit {
+            ack_only: self.ack_only,
+            // No reply ever reaches this driver's send: `EmailChannel::send`
+            // refuses every reply itself (outbound is slice 2), and the bus
+            // audits that refusal. Wire a sink here when slice 2 routes
+            // replies through `email.send`.
+            reply_undelivered: None,
+            inbound_dropped: self.inbound_dropped,
+        }
+    }
+}
+
 /// A live email channel: owns the driver thread; implements the [`Channel`]
 /// trait the [`super::bus::ChannelBus`] consumes. Structurally identical to
 /// `matrix::MatrixChannel` — see that type's docs for why dropping a
@@ -60,7 +103,8 @@ use config::EmailConfig;
 /// thread exits on its own once both channel endpoints are dropped).
 pub struct EmailChannel {
     id: ChannelId,
-    inbound_rx: tok_mpsc::Receiver<IncomingMessage>,
+    /// Reports, as it is dropped, what was still buffered unread (#846).
+    inbound_rx: InboundReceiver,
     // Never sent through in slice 1 (`send` always bails — no outbound
     // worker yet), but must stay owned here regardless: dropping BOTH driver
     // endpoints together is what stops the driver thread (see
@@ -174,15 +218,12 @@ fn email_backoff() -> RestartBackoff {
 /// the driver, so the very first `email.poll` result is parsed against the
 /// correct trust root.
 ///
-/// `audit_ack_only` is the same optional-hook shape as `egress`: `None` when
-/// the caller has no durable sink to write to (e.g. a `kastellan-cli email
-/// probe` diagnostic), `Some` to record every acked-but-never-an-event id
-/// (localmail's `skipped` list) as an `audit_log` row via
-/// [`crate::channel::polled_driver::AckOnlyAudit`] — see that type's docs for
-/// why it is a boxed closure rather than a `PgPool` parameter, and why it must
-/// not block (this module stays DB-free; the daemon wiring supplies the
-/// closure, which spawns its insert — `audit_sink::SinkWriter::spawn` in the
-/// daemon binary — rather than `block_on`ing it, #789).
+/// `audit` holds the driver's optional audit hooks ([`EmailDriverAudit`]):
+/// [`EmailDriverAudit::none`] when the caller has no durable sink to write to
+/// (e.g. a `kastellan-cli email probe` diagnostic). This module stays DB-free;
+/// the daemon wiring supplies closures that spawn their inserts —
+/// `audit_sink::SinkWriter::spawn` in the daemon binary — rather than
+/// `block_on`ing them (#789).
 ///
 /// [`SandboxPolicy`]: kastellan_sandbox::SandboxPolicy
 pub fn spawn_email_worker(
@@ -190,7 +231,7 @@ pub fn spawn_email_worker(
     id: ChannelId,
     cfg: &EmailConfig,
     egress: Option<EmailEgress>,
-    audit_ack_only: Option<AckOnlyAudit>,
+    audit: EmailDriverAudit,
 ) -> anyhow::Result<SpawnedEmailWorker> {
     let (host, port) = crate::channel::matrix::host_port_from_url(&cfg.endpoint)?;
 
@@ -311,236 +352,11 @@ pub fn spawn_email_worker(
         wire::encode_email_send,
         Some(wire::encode_email_ack),
         Some(wire::parse_email_skipped),
-        DriverAudit {
-            // A skipped id is always LOGGED (driver `tracing::warn!`, id +
-            // reason, never body) regardless of this hook — `audit_ack_only`
-            // only controls whether it ALSO becomes a durable `audit_log` row.
-            ack_only: audit_ack_only,
-            // No reply ever reaches this driver's send: `EmailChannel::send`
-            // refuses every reply itself (outbound is slice 2), and the bus
-            // audits that refusal. Wire a sink here when slice 2 routes
-            // replies through `email.send`.
-            reply_undelivered: None,
-            // An ack channel: a batch the bus never took is not acked, so the
-            // worker redelivers it, and the driver never calls this hook (#826).
-            inbound_dropped: None,
-        },
+        audit.into_driver_audit(),
         id.clone(),
     )?;
     Ok(SpawnedEmailWorker { channel: EmailChannel::from_driver(id, driver), identity })
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    use kastellan_sandbox::{Net, SandboxError, SandboxPolicy};
-
-    use super::*;
-
-    /// Records every policy it's asked to spawn under, then always refuses —
-    /// same pattern as `worker_lifecycle::force_route::tests::PolicyCapturingBackend`.
-    /// `PersistentWorker::spawn_with_backoff` calls the factory synchronously
-    /// once before returning, so a refusal here surfaces as `spawn_email_worker`
-    /// returning `Err` — no real process, no sandbox, fully hermetic.
-    struct PolicyCapturingBackend {
-        policies: Mutex<Vec<SandboxPolicy>>,
-    }
-    impl SandboxBackend for PolicyCapturingBackend {
-        fn spawn_under_policy(
-            &self,
-            policy: &SandboxPolicy,
-            _program: &str,
-            _args: &[&str],
-        ) -> Result<std::process::Child, SandboxError> {
-            self.policies.lock().expect("capture mutex poisoned").push(policy.clone());
-            Err(SandboxError::Backend("test: spawn refused".into()))
-        }
-    }
-
-    fn test_cfg() -> EmailConfig {
-        EmailConfig {
-            endpoint: "https://127.0.0.1:8443".into(),
-            subscription: "agent-inbox".into(),
-            address: "agent@example.org".into(),
-            authserv_id: "mx.example.net".into(),
-            token_file: PathBuf::from("/etc/kastellan/email.token"),
-            worker_bin: PathBuf::from("/bin/kastellan-worker-email-in"),
-        }
-    }
-
-    #[test]
-    fn egress_none_calls_the_worker_backend_directly_with_the_expected_allowlist() {
-        let backend = Arc::new(PolicyCapturingBackend { policies: Mutex::new(Vec::new()) });
-        let cfg = test_cfg();
-        let err = match spawn_email_worker(backend.clone(), ChannelId("email".into()), &cfg, None, None) {
-            Err(e) => e,
-            Ok(_) => panic!("PolicyCapturingBackend always refuses to spawn"),
-        };
-        assert!(err.to_string().contains("test: spawn refused"), "{err}");
-
-        let policies = backend.policies.lock().unwrap();
-        assert_eq!(
-            policies.len(),
-            1,
-            "egress: None must call the worker backend directly, exactly once, \
-             never a sidecar's backend"
-        );
-        let p = &policies[0];
-        assert!(
-            matches!(&p.net, Net::Allowlist(v) if v == &["127.0.0.1:8443".to_string()]),
-            "net = {:?}",
-            p.net
-        );
-        assert!(
-            p.proxy_uds.is_none(),
-            "the direct (egress: None) path must never force-route through a proxy UDS"
-        );
-    }
-
-    /// A no-op [`crate::worker_lifecycle::force_route::DecisionSinkFactory`] —
-    /// proves the wiring without a live audit sink, same convention as
-    /// `force_route::tests::noop_sink_factory`.
-    fn noop_sink() -> crate::worker_lifecycle::force_route::DecisionSinkFactory {
-        Box::new(|| Box::new(|_row: crate::egress::audit::EgressAuditRow| {}))
-    }
-
-    /// The positive half of Task 3's wiring, exercised end to end through the
-    /// public entry point (not just `upstream_ca::select_ca_for_allowlist` in
-    /// isolation, which only proves the first link in the chain and is already
-    /// covered by `egress::upstream_ca`'s own unit tests): a configured anchor
-    /// for this worker's own endpoint must reach the intercepting SIDECAR's
-    /// actual `SandboxPolicy` env, built by `proxy_policy` several calls deep
-    /// (`spawn_email_worker` → factory → `spawn_net_transport` →
-    /// `spawn_sidecar` → `proxy_policy`). Both backends refuse to spawn
-    /// (hermetic, no real process), but the sidecar backend still captures the
-    /// policy it was handed before refusing — same technique as
-    /// `force_route::tests::a_selected_extra_ca_reaches_the_sidecar_policy_env_and_fs_read`.
-    #[test]
-    fn egress_some_intercepts_and_the_selected_anchor_reaches_the_sidecar_policy() {
-        let worker_backend = Arc::new(PolicyCapturingBackend { policies: Mutex::new(Vec::new()) });
-        let sidecar_backend = Arc::new(PolicyCapturingBackend { policies: Mutex::new(Vec::new()) });
-        let cfg = test_cfg(); // endpoint https://127.0.0.1:8443 — host is 127.0.0.1
-        let ca_map = crate::egress::upstream_ca::parse_upstream_cas(
-            r#"{"127.0.0.1":"/etc/kastellan/localmail.pem"}"#,
-        )
-        .expect("valid config");
-        let scratch_root = tempfile::tempdir().expect("scratch root");
-        let routing = ForceRoutingConfig::new(
-            PathBuf::from("/bin/kastellan-worker-egress-proxy"),
-            scratch_root.path().to_path_buf(),
-            noop_sink(),
-            None,
-        )
-        .with_upstream_cas(Some(ca_map));
-        let egress = EmailEgress {
-            sidecar_backend: sidecar_backend.clone() as Arc<dyn SandboxBackend>,
-            routing: Arc::new(routing),
-        };
-
-        // The sidecar backend always refuses, so this always errors — the
-        // point is what got CAPTURED before the refusal, not the outcome.
-        let _ = spawn_email_worker(
-            worker_backend.clone() as Arc<dyn SandboxBackend>,
-            ChannelId("email".into()),
-            &cfg,
-            Some(egress),
-            None,
-        );
-
-        let sidecar_policies = sidecar_backend.policies.lock().expect("capture mutex poisoned");
-        let sidecar_policy =
-            sidecar_policies.first().expect("the sidecar spawn must have been attempted");
-        assert!(
-            sidecar_policy.env.iter().any(|(k, v)| k
-                == "KASTELLAN_EGRESS_PROXY_UPSTREAM_EXTRA_CA"
-                && v == "/etc/kastellan/localmail.pem"),
-            "the selected anchor must reach the sidecar's env: {:?}",
-            sidecar_policy.env
-        );
-        assert!(
-            !sidecar_policy.env.iter().any(|(k, _)| k == "KASTELLAN_EGRESS_PROXY_DISABLE_MITM"),
-            "an intercepting sidecar must NOT carry the disable-MITM key: {:?}",
-            sidecar_policy.env
-        );
-    }
-
-    /// `upstream_ca::select_ca_for_allowlist`'s two `Err` arms
-    /// (`MixedAllowlist`, `MultipleKeyedHosts`) both require the worker's OWN
-    /// allowlist to name at least two distinct hosts: `matched` is bounded by
-    /// the size of that host set, and once it has exactly one member `others`
-    /// is always empty (see that function's three-way match on `matched.as_slice()`).
-    /// `spawn_email_worker` always builds a single-entry allowlist
-    /// (`vec![format!("{host}:{port}")]`, derived once from `cfg.endpoint`), so
-    /// for THIS call site `upstream_ca_for` can only ever return `Ok(None)` or
-    /// `Ok(Some(_))` — never `Err` — no matter what else is in the operator's
-    /// CA map. This is not a gap: the refusal arms ARE reachable and tested
-    /// where a worker's allowlist genuinely has more than one host
-    /// (`egress::upstream_ca`'s own unit tests select the map in isolation;
-    /// `force_route::tests` exercises the full multi-host spawn path for the
-    /// general-purpose net-worker case). This test pins the email-specific
-    /// half of that invariant: a CA entry for a host this worker never dials
-    /// is simply irrelevant to it, never a refusal.
-    #[test]
-    fn an_unrelated_configured_origin_does_not_reach_or_block_the_sidecar() {
-        let worker_backend = Arc::new(PolicyCapturingBackend { policies: Mutex::new(Vec::new()) });
-        let sidecar_backend = Arc::new(PolicyCapturingBackend { policies: Mutex::new(Vec::new()) });
-        let cfg = test_cfg(); // endpoint host is 127.0.0.1
-        let ca_map = crate::egress::upstream_ca::parse_upstream_cas(
-            r#"{"10.0.0.3":"/etc/kastellan/unrelated.pem"}"#, // a different host
-        )
-        .expect("valid config");
-        let scratch_root = tempfile::tempdir().expect("scratch root");
-        let routing = ForceRoutingConfig::new(
-            PathBuf::from("/bin/kastellan-worker-egress-proxy"),
-            scratch_root.path().to_path_buf(),
-            noop_sink(),
-            None,
-        )
-        .with_upstream_cas(Some(ca_map));
-        let egress = EmailEgress {
-            sidecar_backend: sidecar_backend.clone() as Arc<dyn SandboxBackend>,
-            routing: Arc::new(routing),
-        };
-
-        let _ = spawn_email_worker(
-            worker_backend.clone() as Arc<dyn SandboxBackend>,
-            ChannelId("email".into()),
-            &cfg,
-            Some(egress),
-            None,
-        );
-
-        let sidecar_policies = sidecar_backend.policies.lock().expect("capture mutex poisoned");
-        let sidecar_policy = sidecar_policies.first().expect(
-            "an unrelated CA entry must not block the spawn from reaching the sidecar attempt",
-        );
-        assert!(
-            !sidecar_policy
-                .env
-                .iter()
-                .any(|(k, _)| k == "KASTELLAN_EGRESS_PROXY_UPSTREAM_EXTRA_CA"),
-            "a CA keyed to a host this worker never dials must not be handed to its sidecar: {:?}",
-            sidecar_policy.env
-        );
-        // Load-bearing design decision, pinned by mutation: this channel
-        // intercepts UNCONDITIONALLY, not "when an anchor happens to be
-        // configured". This call resolves to NO anchor for this worker (the
-        // map has only an unrelated host), so if `spawn_email_worker` ever
-        // switched to picking the posture from `upstream_extra_ca.is_some()`
-        // (i.e. `Mitm::Transparent` when anchorless), this is exactly the
-        // case that would flip — and `KASTELLAN_EGRESS_PROXY_DISABLE_MITM` is
-        // pushed only for the transparent posture (see `proxy_policy`), so
-        // its absence here is the proof the sidecar still intercepts.
-        assert!(
-            !sidecar_policy
-                .env
-                .iter()
-                .any(|(k, _)| k == "KASTELLAN_EGRESS_PROXY_DISABLE_MITM"),
-            "an anchorless email channel spawn must still intercept, never fall back to \
-             transparent: {:?}",
-            sidecar_policy.env
-        );
-    }
-}
+mod tests;

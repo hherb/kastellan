@@ -4,10 +4,14 @@
 //! by name.
 //!
 //! While a [`SinkWriter`] is alive, [`super::drain`] counts its driver as one
-//! that may still write a row. A sink's hook closures own its writer (Matrix's
-//! two share it through an `Arc`), and the driver owns the hooks, so the lease
-//! ends exactly when the driver drops its last hook — as its thread returns,
-//! after any exit rows are spawned. No driver has to remember to report its
+//! that may still write a row. A sink's hook closures own its writer (each
+//! channel's two share it through an `Arc`), and the driver owns the hooks —
+//! all but the inbound-dropped hook's second clone, which the bus-side
+//! receiver holds (#846). So the lease ends when the later of the two lets go
+//! — normally the driver, as its thread returns after any exit rows are
+//! spawned, since it exits *because* its endpoints closed. Either way each
+//! side spawns its rows before its own clone drops, so no row outlives the
+//! lease, whichever order they go in. No driver has to remember to report its
 //! exit.
 //!
 //! **A lease can start before its driver does**
@@ -43,7 +47,9 @@ pub(crate) enum SinkKind {
     AuditsOnExit,
     /// The driver audits nothing once its bus is gone — email's: the skipped
     /// ids' acks stop there, so a driver still in its 15 s long-poll costs
-    /// nothing. INFO.
+    /// nothing. INFO. (Its unread buffered messages are audited by the
+    /// bus-side receiver as the bus stops, before the drain — not by the
+    /// driver: #846.)
     SilentOnExit,
 }
 
@@ -53,9 +59,12 @@ pub(crate) enum SinkKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SinkChannel {
     /// `channel.reply_undelivered` and `channel.inbound_dropped` (#826), from
-    /// the Matrix driver.
+    /// the Matrix driver — and the latter, at the buffered stage, from its
+    /// bus-side receiver (#846).
     Matrix,
-    /// `channel.skipped_ack_only`, from the email driver.
+    /// `channel.skipped_ack_only`, from the email driver, and
+    /// `channel.inbound_dropped` at the buffered stage, from its bus-side
+    /// receiver (#846).
     Email,
 }
 

@@ -12,6 +12,8 @@ mod audit_sink;
 mod bootstrap;
 #[path = "main/email_boot.rs"]
 mod email_boot;
+#[path = "main/inbound_dropped_sink.rs"]
+mod inbound_dropped_sink;
 #[path = "main/matrix_boot.rs"]
 mod matrix_boot;
 

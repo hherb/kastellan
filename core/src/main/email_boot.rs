@@ -74,6 +74,7 @@ use kastellan_core::channel::boot_supervisor::pg_sink::pg_boot_audit_sink;
 use kastellan_core::channel::boot_supervisor::{
     BootOutcome, ChannelSupervisor, ReportingPolicy, StartedChannel,
 };
+use kastellan_core::channel::email::EmailDriverAudit;
 use kastellan_core::channel::polled_driver::AckOnlyAudit;
 use kastellan_core::channel::{ChannelBus, ChannelId};
 use kastellan_core::worker_lifecycle::force_route::ForceRoutingConfig;
@@ -132,7 +133,7 @@ fn format_skipped_row_lost(message_id: &str, why: &dyn std::fmt::Display) -> Str
 /// `report` is how a lost row is said: [`crate::audit_sink::emit_report`] in
 /// the daemon, a recorder in a test (#799).
 fn email_skipped_audit_sink(
-    writer: crate::audit_sink::SinkWriter,
+    writer: Arc<crate::audit_sink::SinkWriter>,
     report: crate::audit_sink::Reporter,
 ) -> AckOnlyAudit {
     Box::new(move |skipped| {
@@ -149,19 +150,27 @@ fn email_skipped_audit_sink(
     })
 }
 
-/// The email sink as `attempt` builds it, on `ledger`. Its lease is live at
-/// once, not *starting*: `attempt` hands the writer straight to
-/// `spawn_email_worker`, synchronously and with no timeout between, so a
-/// failed bring-up drops it rather than abandoning it. A function, so a test can
-/// see the lease `attempt` takes (#802).
-fn skipped_sink(
+/// The email driver's audit hooks as `attempt` builds them, on `ledger`: the
+/// skipped-id hook and the inbound-dropped hook (#846), sharing one writer
+/// and so one lease. That lease is live at once, not *starting*: `attempt`
+/// hands the hooks straight to `spawn_email_worker`, synchronously and with
+/// no timeout between, so a failed bring-up drops them rather than
+/// abandoning them. A function, so a test can see the lease `attempt` takes
+/// (#802).
+fn driver_sinks(
     ledger: &'static crate::audit_sink::Ledger,
     pool: PgPool,
     handle: tokio::runtime::Handle,
     report: crate::audit_sink::Reporter,
-) -> AckOnlyAudit {
-    let writer = crate::audit_sink::SinkWriter::with_ledger(ledger, pool, handle, SINK_CHANNEL);
-    email_skipped_audit_sink(writer, report)
+) -> EmailDriverAudit {
+    let writer =
+        Arc::new(crate::audit_sink::SinkWriter::with_ledger(ledger, pool, handle, SINK_CHANNEL));
+    EmailDriverAudit {
+        ack_only: Some(email_skipped_audit_sink(Arc::clone(&writer), report)),
+        inbound_dropped: Some(crate::inbound_dropped_sink::inbound_dropped_audit_sink(
+            writer, report,
+        )),
+    }
 }
 
 /// Pure: a configuration error can never be fixed without an operator edit
@@ -272,19 +281,19 @@ async fn attempt(
         }
     };
 
-    let audit_ack_only = Some(skipped_sink(
+    let audit = driver_sinks(
         crate::audit_sink::daemon_ledger(),
         pool.clone(),
         tokio::runtime::Handle::current(),
         crate::audit_sink::emit_report,
-    ));
+    );
 
     let spawned = match kastellan_core::channel::email::spawn_email_worker(
         backend,
         ChannelId("email".to_string()),
         &cfg,
         egress,
-        audit_ack_only,
+        audit,
     ) {
         Ok(s) => s,
         Err(e) => return classify_spawn_error(e),

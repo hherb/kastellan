@@ -26,8 +26,10 @@
 //! lose work is said through the same writer too (`ChannelEvents::report_lost`,
 //! from `bus_guards`): an inbound message mid-handling, a reply or an ask
 //! mid-send, a raised ask still queued, an unroutable claim in flight — and a
-//! reply claim whose outcome cannot be known (`bus_deliver`). What is still
-//! unsaid: a crash, and inbound messages the bus had not yet read (#846).
+//! reply claim whose outcome cannot be known (`bus_deliver`). Inbound messages
+//! the bus had not yet read are not this writer's: a polled channel's own
+//! receiver counts them into a `channel.inbound_dropped` row as the stop drops
+//! it (#846, `polled_driver/inbound_rx.rs`). What is still unsaid: a crash.
 //! Separately, these lines are not thinned: one per lost row, where the
 //! daemon's sinks thin their shed and after-shutdown refusals (#829).
 

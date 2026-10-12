@@ -4,15 +4,16 @@
 //! 500-LOC soft cap; re-exported there, so every path is unchanged.
 //!
 //! Every hook runs on the driver's only thread, which every conversation, the
-//! poll and the ack wait on, so **a hook must not block** (#789). A type cannot
-//! say that, so the driver times every hook call it makes ([`record_skipped`],
-//! [`record_undelivered`], [`record_inbound_dropped`]) and says so when one
-//! holds the thread past [`HOOK_BUDGET`] (#793): what cannot be enforced is at
-//! least detected.
+//! poll and the ack wait on — or, for an inbound drop at the buffered stage,
+//! inside the bus's stopping pump, which the channel's stop waits on (#846) —
+//! so **a hook must not block** (#789). A type cannot say that, so every hook
+//! call is timed ([`record_skipped`], [`record_undelivered`],
+//! [`record_inbound_dropped`]) and said when one holds its caller past
+//! [`HOOK_BUDGET`] (#793): what cannot be enforced is at least detected.
 
 use std::time::{Duration, Instant};
 
-use super::inbound_drop::InboundDropped;
+use super::inbound_drop::{InboundDropStage, InboundDropped};
 use crate::channel::{OutgoingMessage, SkippedId, UndeliveredReason, UndeliveredReply};
 
 /// Best-effort side channel for a caller to record "this id was discarded
@@ -46,17 +47,25 @@ pub type AckOnlyAudit = Box<dyn Fn(SkippedId<'_>) + Send + 'static>;
 /// stalled audit insert would stall every conversation and the poll with it.
 pub type ReplyUndeliveredAudit = Box<dyn Fn(UndeliveredReply<'_>) + Send + 'static>;
 
-/// Best-effort side channel for a caller to record "the bus closed while this
-/// channel's worker had already passed these inbound messages, and nothing
-/// redelivers them" durably — the `channel.inbound_dropped` row (#826). Called
-/// at most once per exit, and only for a channel with no ack method (Matrix):
-/// an ack channel's unacked batch is redelivered on the next start, so it is
-/// not a loss.
+/// Best-effort side channel for a caller to record "the bus closed and these
+/// inbound messages never reached it, and nothing redelivers them" durably —
+/// the `channel.inbound_dropped` row. Called from two places, so it is an
+/// `Arc` (and `Sync`):
 ///
-/// It is handed an [`InboundDropped`]: the channel, how many, and when — never
-/// a peer, an id or a body, all of which are peer-supplied. Called on the
-/// driver's own thread, so it must not block on I/O, like the hooks above.
-pub type InboundDroppedAudit = Box<dyn Fn(InboundDropped<'_>) + Send + 'static>;
+/// - **the driver**, at most once per exit, for a polled batch it could not
+///   hand over ([`InboundDropStage::Polled`], #826) — only on a channel with
+///   no ack method (Matrix): an ack channel's unacked batch is redelivered on
+///   the next start, so it is not a loss;
+/// - **the bus-side receiver**, at most once (only when something was
+///   unread), as the bus drops it, for what was still in the inbound buffer
+///   unread ([`InboundDropStage::Buffered`], #846) — on every channel,
+///   because an ack channel had already acked those.
+///
+/// It is handed an [`InboundDropped`]: the channel, the stage, how many, and
+/// when — never a peer, an id or a body, all of which are peer-supplied. It
+/// runs on the driver's own thread or inside the bus's stopping pump, so it
+/// must not block on I/O, like the hooks above.
+pub type InboundDroppedAudit = std::sync::Arc<dyn Fn(InboundDropped<'_>) + Send + Sync + 'static>;
 
 /// The driver's optional audit hooks.
 ///
@@ -68,8 +77,9 @@ pub struct DriverAudit {
     pub ack_only: Option<AckOnlyAudit>,
     /// See [`ReplyUndeliveredAudit`].
     pub reply_undelivered: Option<ReplyUndeliveredAudit>,
-    /// See [`InboundDroppedAudit`]. Only a channel with no ack method needs
-    /// one; the driver never calls it for an ack channel.
+    /// See [`InboundDroppedAudit`]. The driver calls it only on a channel with
+    /// no ack method; the bus-side receiver it hands a clone to calls it on
+    /// every channel (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
 }
 
@@ -83,19 +93,46 @@ impl DriverAudit {
     }
 }
 
-/// How long an audit hook may hold the driver thread before the driver says
-/// so (#793). A hook that spawns its insert returns in microseconds; one that
+/// How long an audit hook may hold its caller's thread before that is said
+/// (#793). A hook that spawns its insert returns in microseconds; one that
 /// waits for Postgres takes a round trip at best and the pool's acquire
 /// timeout at worst, so 100 ms separates the two with room for a loaded host.
 pub(super) const HOOK_BUDGET: Duration = Duration::from_millis(100);
 
-/// Pure: the line for an audit hook that held the driver thread for `held`,
-/// or `None` within [`HOOK_BUDGET`].
-pub(super) fn format_slow_hook_report(hook: &str, held: Duration) -> Option<String> {
+/// Who called an audit hook, for the slow-hook line: what it held, and what
+/// waited on that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HookCaller {
+    /// The driver's only thread: every hook but a buffered-stage drop.
+    DriverThread,
+    /// The bus's stopping pump, dropping its [`super::InboundReceiver`]
+    /// (#846).
+    StoppingBus,
+}
+
+impl HookCaller {
+    /// Pure: (what the hook held, what waits on it).
+    const fn held_and_waiting(self) -> (&'static str, &'static str) {
+        match self {
+            Self::DriverThread => {
+                ("the driver thread", "every conversation, the poll and the ack wait on this thread")
+            }
+            Self::StoppingBus => (
+                "the bus's stopping pump",
+                "the channel's stop, and so a restart or a daemon shutdown, waits on it",
+            ),
+        }
+    }
+}
+
+/// Pure: the line for an audit hook that held `caller` for `held`, or `None`
+/// within [`HOOK_BUDGET`].
+pub(super) fn format_slow_hook_report(hook: &str, caller: HookCaller, held: Duration) -> Option<String> {
     (held > HOOK_BUDGET).then(|| {
+        let (what, waiting) = caller.held_and_waiting();
         format!(
-            "the {hook} audit hook held the driver thread for {} ms; an audit hook must not \
-             block (#789): every conversation, the poll and the ack wait on this thread",
+            "the {hook} audit hook held {what} for {} ms; an audit hook must not block (#789): \
+             {waiting}",
             held.as_millis()
         )
     })
@@ -125,10 +162,10 @@ pub(super) fn slow_hook_reports_for(label: &str) -> Vec<String> {
 ///
 /// On `tracing` at WARN, not a marked emitter: a slow hook is a defect in the
 /// caller's sink; the WARN names the hook that held the thread.
-fn timed(label: &str, hook: &str, call: impl FnOnce()) {
+fn timed(label: &str, hook: &str, caller: HookCaller, call: impl FnOnce()) {
     let started = Instant::now();
     call();
-    if let Some(line) = format_slow_hook_report(hook, started.elapsed()) {
+    if let Some(line) = format_slow_hook_report(hook, caller, started.elapsed()) {
         #[cfg(test)]
         SLOW_HOOK_REPORTS
             .lock()
@@ -141,7 +178,7 @@ fn timed(label: &str, hook: &str, call: impl FnOnce()) {
 /// Hand a skipped id to the audit hook, if there is one, timed (#793).
 pub(super) fn record_skipped(audit: Option<&AckOnlyAudit>, label: &str, id: SkippedId<'_>) {
     if let Some(audit) = audit {
-        timed(label, "skipped-id", || audit(id));
+        timed(label, "skipped-id", HookCaller::DriverThread, || audit(id));
     }
 }
 
@@ -156,18 +193,23 @@ pub(super) fn record_undelivered(
 ) {
     if let Some(audit) = audit {
         let reply = UndeliveredReply::of(out, reason, time::OffsetDateTime::now_utc());
-        timed(label, "reply-undelivered", || audit(reply));
+        timed(label, "reply-undelivered", HookCaller::DriverThread, || audit(reply));
     }
 }
 
 /// Hand a dropped inbound batch to the audit hook, if there is one, timed
-/// (#793, #826).
+/// (#793, #826) — from the driver's thread or, at the buffered stage, the
+/// bus's stopping pump (#846).
 pub(super) fn record_inbound_dropped(
     audit: Option<&InboundDroppedAudit>,
     label: &str,
     dropped: InboundDropped<'_>,
 ) {
     if let Some(audit) = audit {
-        timed(label, "inbound-dropped", || audit(dropped));
+        let caller = match dropped.stage {
+            InboundDropStage::Polled => HookCaller::DriverThread,
+            InboundDropStage::Buffered => HookCaller::StoppingBus,
+        };
+        timed(label, "inbound-dropped", caller, || audit(dropped));
     }
 }

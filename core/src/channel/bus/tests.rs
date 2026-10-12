@@ -18,6 +18,8 @@ mod dropped;
 mod unverifiable;
 /// #825: the reply claim and the catch-up sweep.
 mod catch_up;
+/// #846: a stop reports the polled channel's unread inbound buffer.
+mod unread_stop;
 
 #[derive(Default)]
 struct FakeEvents {

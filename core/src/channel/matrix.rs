@@ -38,12 +38,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use tokio::sync::mpsc as tok_mpsc;
-
 use kastellan_sandbox::SandboxBackend;
 
 use crate::channel::polled_driver::{
-    DriverAudit, InboundDroppedAudit, PolledWorkerDriver, ReplyUndeliveredAudit,
+    DriverAudit, InboundDroppedAudit, InboundReceiver, PolledWorkerDriver, ReplyUndeliveredAudit,
 };
 use crate::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
 use crate::egress::spawn::Mitm;
@@ -81,7 +79,8 @@ use policy::{write_private, LOGIN_PASSWORD_FILE};
 /// trait the [`super::bus::ChannelBus`] consumes.
 pub struct MatrixChannel {
     id: ChannelId,
-    inbound_rx: tok_mpsc::Receiver<IncomingMessage>,
+    /// Reports, as it is dropped, what was still buffered unread (#846).
+    inbound_rx: InboundReceiver,
     outbound_tx: std_mpsc::Sender<OutgoingMessage>,
     // Kept for ownership clarity only (dropping a JoinHandle detaches, it does
     // not join): the driver thread exits on its own once both channel endpoints
@@ -156,8 +155,10 @@ pub struct MatrixDriverAudit {
     /// Records a reply the driver dropped as a `channel.reply_undelivered`
     /// row (#782) — see [`ReplyUndeliveredAudit`].
     pub reply_undelivered: Option<ReplyUndeliveredAudit>,
-    /// Records an inbound batch the bus closed on as a
-    /// `channel.inbound_dropped` row (#826) — see [`InboundDroppedAudit`].
+    /// Records inbound messages lost when the bus closed as a
+    /// `channel.inbound_dropped` row — see [`InboundDroppedAudit`]: a polled
+    /// batch the driver still held (#826), and, through the bus-side
+    /// receiver, messages buffered unread (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
 }
 
