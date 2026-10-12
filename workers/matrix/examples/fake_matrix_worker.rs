@@ -1,5 +1,5 @@
 //! Test fixture (NOT a production binary): a fake matrix worker that speaks the
-//! real `matrix.init` / `matrix.poll` / `matrix.send` JSON-RPC surface over stdio
+//! real `matrix.init` / `matrix.poll` / `matrix.send` / `matrix.drain` JSON-RPC surface over stdio
 //! so `core/tests/matrix_channel_e2e.rs` can exercise the full
 //! MatrixChannel → ChannelBus loop against a real worker process — with no
 //! matrix-rust-sdk, no homeserver, no network, no sandbox.
@@ -9,7 +9,9 @@
 //!   (peer = `FAKE_MATRIX_PEER`, room = `FAKE_MATRIX_ROOM`, body = `FAKE_MATRIX_BODY`),
 //!   empty on every subsequent poll;
 //! - appends each `matrix.send` as a JSON line to `FAKE_MATRIX_SENT` so the test
-//!   can assert the routed reply was delivered.
+//!   can assert the routed reply was delivered;
+//! - answers `matrix.drain` with `FAKE_MATRIX_HELD` (default 0) discarded
+//!   events, as if the worker still held that many when the driver exited.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +25,7 @@ struct FakeWorker {
     room: String,
     body: String,
     sent_file: Option<String>,
+    held: usize,
 }
 
 impl Handler for FakeWorker {
@@ -39,6 +42,9 @@ impl Handler for FakeWorker {
                         "body": self.body,
                     }]}))
                 }
+            }
+            "matrix.drain" => {
+                Ok(serde_json::json!({ "discarded": self.held, "interrupted": false }))
             }
             "matrix.send" => {
                 let conversation = params.get("conversation").and_then(Value::as_str).unwrap_or("");
@@ -68,6 +74,7 @@ fn main() -> std::io::Result<()> {
         room: std::env::var("FAKE_MATRIX_ROOM").unwrap_or_else(|_| "!room:srv".into()),
         body: std::env::var("FAKE_MATRIX_BODY").unwrap_or_else(|_| "hello from peer".into()),
         sent_file: std::env::var("FAKE_MATRIX_SENT").ok(),
+        held: std::env::var("FAKE_MATRIX_HELD").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
     };
     serve_stdio(&mut h)
 }

@@ -5,7 +5,7 @@
 //! that impl relies on is already proven — see `bridge.rs` + the `egress_spike`
 //! test.
 
-use kastellan_matrix_wire::{Event, InitResult};
+use kastellan_matrix_wire::{DrainResult, Event, InitResult};
 
 /// Synchronous facade over the (internally async) matrix client. The real impl
 /// holds a tokio runtime and `block_on`s the SDK calls behind these methods; the
@@ -19,6 +19,11 @@ pub trait MatrixSdk: Send {
     /// to `timeout_ms` for the first event (then return whatever arrived, possibly
     /// empty).
     fn poll(&mut self, timeout_ms: u64) -> Vec<Event>;
+
+    /// Stop receiving, then count and discard what is still buffered (#835).
+    /// Called once, as the core's driver exits: after it no event arrives,
+    /// and whatever was buffered is gone with the worker. A count only.
+    fn drain(&mut self) -> DrainResult;
 
     /// Send an E2E message to a room. A failure says whose problem it is
     /// ([`SendFailure`]), which the core's driver needs to tell a dead room

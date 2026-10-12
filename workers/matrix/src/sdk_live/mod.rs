@@ -45,16 +45,17 @@ use matrix_sdk::ruma::RoomId;
 use matrix_sdk::store::StateStoreDataKey;
 use matrix_sdk::Client;
 
-use kastellan_matrix_wire::{Event, InitResult};
+use kastellan_matrix_wire::{DrainResult, Event, InitResult};
 
 use crate::bridge::ProxyBridge;
 use crate::sdk::{MatrixSdk, SendError, SendEvidence};
-use crate::sync_retry;
 
 mod login;
 use login::{ensure_cross_signing, restore_or_login};
 mod room_gate;
 use room_gate::{register_autojoin_handler, register_message_handler};
+mod sync_loop;
+use sync_loop::{spawn_sync_loop, stop_sync, HandledToken};
 
 /// Bounded depth of the inbound buffer the sync task fills and `poll` drains. A
 /// single-user channel never reaches this; it is a backstop against a flooding
@@ -69,20 +70,6 @@ const SESSION_FILE: &str = "session.json";
 
 /// How long `poll` sleeps between buffer checks while long-polling.
 const POLL_TICK: Duration = Duration::from_millis(50);
-
-/// A `sync()` that ran at least this long before returning was healthy and
-/// serving; its return is a transient blip, so the consecutive-failure counter
-/// resets (see [`crate::sync_retry`]).
-const SYNC_HEALTHY_RUN: Duration = Duration::from_secs(60);
-/// Base + cap for the continuous-sync retry backoff (mirrors the core-side
-/// `MatrixChannel` respawn backoff).
-const SYNC_BACKOFF_BASE: Duration = Duration::from_secs(1);
-const SYNC_BACKOFF_MAX: Duration = Duration::from_secs(30);
-/// Consecutive *fast* `sync()` failures the loop tolerates before giving up and
-/// exiting for a fresh supervised respawn — a persistently-wedged client (bad
-/// token, corrupt store) only a fresh `connect` recovers, so retrying in place
-/// forever would never heal it.
-const SYNC_MAX_CONSECUTIVE: u32 = 10;
 
 /// Operator configuration for the live worker, read from its environment. The
 /// core-side spawn fills these in; the live e2e sets them directly.
@@ -170,9 +157,13 @@ pub struct LiveSdk {
     client: Option<Client>,
     identity: InitResult,
     buffer: Arc<Mutex<VecDeque<Event>>>,
-    // Kept alive for the worker's lifetime; both abort/close on drop.
+    // Kept alive for the worker's lifetime; it closes on drop.
     _bridge: Option<ProxyBridge>,
-    _sync_task: tokio::task::JoinHandle<()>,
+    // `Option` so `drain` can take and stop it (#835); `None` once stopped.
+    sync_task: Option<tokio::task::JoinHandle<()>>,
+    /// The `next_batch` of the last sync response whose handlers all ran —
+    /// what `drain` compares the store's token with (`sync_loop`).
+    handled: Arc<HandledToken>,
 }
 
 impl Drop for LiveSdk {
@@ -218,61 +209,12 @@ impl LiveSdk {
             .context("build tokio runtime")?;
         let buffer: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
 
-        let (client, identity, bridge) =
+        let (client, identity, bridge, initial_batch) =
             runtime.block_on(connect_client(&config, buffer.clone()))?;
+        // The initial sync's handlers have all run by the time it returns.
+        let handled: Arc<HandledToken> = Arc::new(Mutex::new(Some(initial_batch)));
 
-        // Continuous background sync: keeps the buffer filled for `poll` and the
-        // crypto state fresh for `send`. `client.sync` returns whenever the SDK
-        // hits an interruption — a transient server 5xx, a network blip through the
-        // egress tunnel, a long-poll hiccup — none of which is necessarily fatal.
-        //
-        // Treating *every* return as fatal (the original `process::exit(1)`) meant a
-        // single transient blip killed the whole worker and forced a supervised
-        // respawn — the ~20–90s churn of #348. Instead we **retry in place** with
-        // capped exponential backoff and only fail loud (exit → fresh respawn) after
-        // sustained consecutive fast failures, since a persistently-wedged client
-        // (bad token, corrupt store) only a fresh `connect` recovers (see
-        // [`crate::sync_retry`]). The task is aborted before its body re-runs when
-        // the client is dropped on shutdown, so the `process::exit` give-up path is
-        // reached only on a real failure run; it skips destructors deliberately —
-        // the deadpool SQLite teardown that needs a runtime context (see the `Drop`
-        // impl) never runs off-runtime; the OS reclaims everything.
-        let sync_client = client.clone();
-        let sync_task = runtime.spawn(async move {
-            let mut consecutive = 0u32;
-            loop {
-                let started = Instant::now();
-                let result = sync_client.sync(SyncSettings::default()).await;
-                let ran_for = started.elapsed();
-                match &result {
-                    Ok(()) => eprintln!(
-                        "kastellan-worker-matrix: sync loop returned (no error) after {ran_for:?}; retrying"
-                    ),
-                    Err(e) => eprintln!(
-                        "kastellan-worker-matrix: sync loop failed after {ran_for:?}: {e}; retrying"
-                    ),
-                }
-                consecutive =
-                    sync_retry::update_consecutive(consecutive, ran_for, SYNC_HEALTHY_RUN);
-                match sync_retry::next_action(
-                    consecutive,
-                    SYNC_MAX_CONSECUTIVE,
-                    SYNC_BACKOFF_BASE,
-                    SYNC_BACKOFF_MAX,
-                ) {
-                    sync_retry::SyncOutcome::Backoff(delay) => {
-                        tokio::time::sleep(delay).await;
-                    }
-                    sync_retry::SyncOutcome::GiveUp => {
-                        eprintln!(
-                            "kastellan-worker-matrix: sync loop failed {consecutive} times \
-                             consecutively; exiting for a fresh supervised respawn"
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
-        });
+        let sync_task = spawn_sync_loop(&runtime, client.clone(), handled.clone());
 
         Ok(Self {
             runtime,
@@ -280,7 +222,8 @@ impl LiveSdk {
             identity,
             buffer,
             _bridge: bridge,
-            _sync_task: sync_task,
+            sync_task: Some(sync_task),
+            handled,
         })
     }
 }
@@ -311,6 +254,18 @@ impl MatrixSdk for LiveSdk {
                 tokio::time::sleep(POLL_TICK).await;
             }
         })
+    }
+
+    /// Stop the sync, then count and discard the queue (#835). The order
+    /// matters: once the sync task has stopped, no handler can push another
+    /// event behind the count.
+    fn drain(&mut self) -> DrainResult {
+        let task = self.sync_task.take();
+        let client = self.client.as_ref().expect("live client present").clone();
+        let handled = self.handled.clone();
+        let interrupted =
+            self.runtime.block_on(async move { stop_sync(task, &client, &handled).await });
+        DrainResult { discarded: drain(&self.buffer).len(), interrupted }
     }
 
     fn send(&mut self, conversation: &str, body: &str) -> Result<(), SendError> {
@@ -396,11 +351,13 @@ fn drain(buffer: &Mutex<VecDeque<Event>>) -> Vec<Event> {
 }
 
 /// Build + log in the client and register the inbound handler. Returns the
-/// client, the resolved identity, and the bridge (kept alive by the caller).
+/// client, the resolved identity, the bridge (kept alive by the caller), and
+/// the initial sync's `next_batch` (the first position nothing was lost before,
+/// for `sync_loop`).
 async fn connect_client(
     config: &LiveSdkConfig,
     buffer: Arc<Mutex<VecDeque<Event>>>,
-) -> anyhow::Result<(Client, InitResult, Option<ProxyBridge>)> {
+) -> anyhow::Result<(Client, InitResult, Option<ProxyBridge>, String)> {
     std::fs::create_dir_all(&config.store_dir)
         .with_context(|| format!("create store dir {:?}", config.store_dir))?;
 
@@ -457,7 +414,7 @@ async fn connect_client(
 
     // One initial sync so room state + member device keys are present before we
     // start serving `send`; the continuous sync task takes over afterwards.
-    client
+    let initial = client
         .sync_once(SyncSettings::default())
         .await
         .context("initial sync")?;
@@ -465,7 +422,7 @@ async fn connect_client(
     // Backlog drained; surface inbound events from here on.
     live.store(true, Ordering::SeqCst);
 
-    Ok((client, identity, bridge))
+    Ok((client, identity, bridge, initial.next_batch))
 }
 
 #[cfg(test)]
