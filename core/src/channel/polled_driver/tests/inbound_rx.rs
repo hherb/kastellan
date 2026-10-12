@@ -8,7 +8,7 @@
 use super::inbound_drop::{counts, events, hook, Dropped};
 use super::*;
 use crate::worker_stderr::{emitted_refusal_lines_for, RefusalSeverity};
-use super::super::inbound_rx::drain_unread;
+use super::super::inbound_rx::{drain_unread, Drained};
 use tokio::sync::mpsc as tok_mpsc;
 
 fn message(body: &str) -> IncomingMessage {
@@ -38,20 +38,59 @@ fn buffered(
 
 // ----- the drain -----
 
-/// Pure: an empty buffer drains to 0, a buffer of 3 to 3 — with the sender
-/// still alive, which must not make the drain wait for more.
+/// An empty buffer drains to 0, a buffer of 3 to 3 — with the sender still
+/// alive, which must not make the drain wait for more: both SETTLE, i.e. the
+/// drain returned on `Disconnected`, not by running out of spins (which a
+/// timing bound could not tell apart — it is under a millisecond).
 #[test]
 fn the_drain_counts_what_is_buffered_and_does_not_wait_on_a_live_sender() {
     let (tx, mut rx) = tok_mpsc::channel::<u8>(8);
-    assert_eq!(drain_unread(&mut rx), 0);
+    assert_eq!(drain_unread(&mut rx), Drained { unread: 0, settled: true });
     let (tx2, mut rx2) = tok_mpsc::channel::<u8>(8);
     for i in 0..3 {
         tx2.try_send(i).unwrap();
     }
-    let started = Instant::now();
-    assert_eq!(drain_unread(&mut rx2), 3);
-    assert!(started.elapsed() < Duration::from_secs(1), "no wait: {:?}", started.elapsed());
+    assert_eq!(drain_unread(&mut rx2), Drained { unread: 3, settled: true });
     drop((tx, tx2));
+}
+
+/// The tokio contract the drain is built on, pinned so a tokio upgrade that
+/// changes it fails here rather than silently: after `close()`, a send that
+/// was granted its slot before the close reads as `Empty` (not
+/// `Disconnected`) until it lands, can still land, and only then does the
+/// buffer read `Disconnected`.
+#[test]
+fn a_send_granted_before_the_close_still_lands_and_holds_disconnected_back() {
+    use tok_mpsc::error::TryRecvError;
+    let (tx, mut rx) = tok_mpsc::channel::<u8>(8);
+    let permit = tx.try_reserve().expect("a slot");
+    rx.close();
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)), "not settled while a slot is held");
+    permit.send(7);
+    assert_eq!(rx.try_recv().ok(), Some(7), "the granted send lands after the close");
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)), "and then it settles");
+}
+
+/// A send granted its slot that never lands within the bound: the drain
+/// stops waiting, says the buffer did not settle, and the loss counts it —
+/// it would land in a buffer about to be dropped.
+#[test]
+fn an_unsettled_drain_counts_the_send_still_on_its_way() {
+    let (tx, mut rx) = tok_mpsc::channel::<u8>(8);
+    tx.try_send(1).unwrap();
+    let permit = tx.try_reserve().expect("a slot");
+    let drained = drain_unread(&mut rx);
+    assert_eq!(drained, Drained { unread: 1, settled: false });
+    assert_eq!(drained.lost(), 2);
+    drop(permit);
+}
+
+/// Pure: a settled drain loses exactly what it took out.
+#[test]
+fn a_settled_drain_loses_exactly_what_it_took_out() {
+    assert_eq!(Drained { unread: 0, settled: true }.lost(), 0);
+    assert_eq!(Drained { unread: 5, settled: true }.lost(), 5);
+    assert_eq!(Drained { unread: 0, settled: false }.lost(), 1);
 }
 
 /// The drain closes the buffer FIRST, so the driver cannot add a message the
@@ -60,7 +99,7 @@ fn the_drain_counts_what_is_buffered_and_does_not_wait_on_a_live_sender() {
 fn the_drain_closes_the_buffer_so_the_driver_s_next_send_fails() {
     let (tx, mut rx) = tok_mpsc::channel::<u8>(8);
     tx.try_send(1).unwrap();
-    assert_eq!(drain_unread(&mut rx), 1);
+    assert_eq!(drain_unread(&mut rx), Drained { unread: 1, settled: true });
     assert!(tx.is_closed(), "the sender sees the close");
     assert!(tx.try_send(2).is_err(), "and cannot add to the count it was not part of");
 }
@@ -153,8 +192,9 @@ fn the_unread_line_counts_and_gives_the_channel_s_reason() {
         line(3, true, true),
         "dropped 3 inbound messages: the bus stopped (the channel was restarted or shut down) \
          before reading them from its inbound buffer, and this channel acked them when they were \
-         handed to the bus, so unless that ack failed they are not redelivered; recording it as \
-         channel.inbound_dropped"
+         handed to the bus, so they are not redelivered (any whose ack failed, or was held back by \
+         a refused ack earlier in its batch, is redelivered, and counted here anyway); recording \
+         it as channel.inbound_dropped"
     );
     assert!(line(2, false, false).ends_with("this channel has no audit sink"), "{}", line(2, false, false));
 }

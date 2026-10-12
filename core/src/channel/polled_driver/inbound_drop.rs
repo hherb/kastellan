@@ -35,10 +35,16 @@
 //! Here **both** channels lose the messages. A channel without an ack method
 //! never redelivers; an ack channel acks each message as soon as the bus's
 //! buffer accepts it (`polled_driver::run`), not when the bus reads it — so a
-//! buffered message has already moved the worker's cursor past itself, unless
-//! that ack failed. The line says which, and over-counting the rare failed ack
-//! is the honest direction: an unsaid loss is the defect this module exists
-//! for.
+//! buffered message has already moved the worker's cursor past itself.
+//!
+//! ⚠️ Not every one, though, and the count cannot tell. An ack that fails, or
+//! that a refused ack earlier in the same batch held back (a refusal stops
+//! acking the rest of its batch, which is still handed over), leaves the
+//! cursor short, so those messages ARE redelivered. After a refusal that can
+//! be a whole batch tail. The receiver cannot see which buffered messages
+//! were acked, so it counts them all and the line says so: over-counting is
+//! the honest direction, because an unsaid loss is the defect this module
+//! exists for.
 //!
 //! ## What this does not count
 //!
@@ -146,8 +152,9 @@ pub(super) fn format_unread_drop_report(n: NonZeroUsize, acks: bool, sink: bool)
     let them = if one { "it" } else { "them" };
     let why = if acks {
         format!(
-            "this channel acked {them} when {} handed to the bus, so unless that ack failed {} \
-             not redelivered",
+            "this channel acked {them} when {} handed to the bus, so {} not redelivered (any \
+             whose ack failed, or was held back by a refused ack earlier in its batch, is \
+             redelivered, and counted here anyway)",
             if one { "it was" } else { "they were" },
             if one { "it is" } else { "they are" },
         )

@@ -307,7 +307,8 @@ pub mod actions {
     /// - `buffered` (#846): messages the driver had handed over, still in
     ///   the bus's inbound buffer unread when it stopped — on every channel,
     ///   because an ack channel (email) acks a message once the buffer takes
-    ///   it.
+    ///   it. Over-counts on email by any whose ack failed or was held back
+    ///   by a refused ack earlier in its batch: those are redelivered.
     ///
     /// Carries the channel, the stage, the count (`dropped`) and the event's
     /// time (`observed_at`) only: never a peer, an id or a body, all

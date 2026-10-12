@@ -38,7 +38,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-
 use kastellan_sandbox::SandboxBackend;
 
 use crate::channel::polled_driver::{
@@ -156,8 +155,10 @@ pub struct MatrixDriverAudit {
     /// Records a reply the driver dropped as a `channel.reply_undelivered`
     /// row (#782) — see [`ReplyUndeliveredAudit`].
     pub reply_undelivered: Option<ReplyUndeliveredAudit>,
-    /// Records an inbound batch the bus closed on as a
-    /// `channel.inbound_dropped` row (#826) — see [`InboundDroppedAudit`].
+    /// Records inbound messages lost when the bus closed as a
+    /// `channel.inbound_dropped` row — see [`InboundDroppedAudit`]: a polled
+    /// batch the driver still held (#826), and, through the bus-side
+    /// receiver, messages buffered unread (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
 }
 

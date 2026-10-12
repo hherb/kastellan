@@ -30,7 +30,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-
 use kastellan_sandbox::SandboxBackend;
 
 use crate::channel::polled_driver::{
@@ -55,8 +54,9 @@ pub mod wire;
 use config::EmailConfig;
 
 /// The email driver's audit hooks: the [`DriverAudit`] hooks email can call,
-/// and no others. A skipped id and a dropped inbound batch are always LOGGED
-/// by the driver regardless of these hooks; a hook only controls whether the
+/// and no others. A skipped id and dropped inbound messages are always LOGGED
+/// regardless of these hooks — the skipped id by the driver, unread buffered
+/// messages by the bus-side receiver — and a hook only controls whether the
 /// event ALSO becomes a durable `audit_log` row.
 pub struct EmailDriverAudit {
     /// Records every acked-but-never-an-event id (localmail's `skipped` list)
@@ -65,10 +65,12 @@ pub struct EmailDriverAudit {
     pub ack_only: Option<AckOnlyAudit>,
     /// Records inbound messages lost when the bus stopped as a
     /// `channel.inbound_dropped` row — see [`InboundDroppedAudit`]. On email
-    /// that is only ever the *buffered* stage (#846): messages the bus's
-    /// buffer accepted, and the driver therefore acked, that the bus never
-    /// read. A batch the bus never took is not acked, so the worker
-    /// redelivers it, and the driver never calls this hook for it (#826).
+    /// that is only ever the *buffered* stage (#846), called by the bus-side
+    /// receiver: messages the bus's buffer accepted, and the driver therefore
+    /// acked, that the bus never read (any whose ack failed or was held back
+    /// by a refused ack are redelivered, and counted anyway). A batch the bus
+    /// never took is not acked, so the worker redelivers it, and the driver
+    /// never calls this hook for it (#826).
     pub inbound_dropped: Option<InboundDroppedAudit>,
 }
 

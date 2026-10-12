@@ -10,7 +10,10 @@
 //!
 //! Neither channel brings them back: Matrix never redelivers, and email has
 //! already acked them, because the driver acks a message once the buffer
-//! accepts it, not once the bus reads it (`polled_driver::run`). So
+//! accepts it, not once the bus reads it (`polled_driver::run`) — all but any
+//! whose ack failed or was held back by a refused ack earlier in the batch,
+//! which are redelivered but cannot be told apart from here, so they are
+//! counted too (`inbound_drop`'s module docs). So
 //! [`InboundReceiver`] counts them as it is dropped and reports the count at
 //! the [`InboundDropStage::Buffered`] stage: one `[worker-refusal]` WARN and
 //! one `channel.inbound_dropped` row through the channel's
@@ -90,15 +93,44 @@ impl InboundReceiver {
 
 impl Drop for InboundReceiver {
     fn drop(&mut self) {
-        let unread = drain_unread(&mut self.rx);
+        let drained = drain_unread(&mut self.rx);
+        if !drained.settled {
+            // Diagnostic only: the count below already includes the send.
+            tracing::warn!(
+                label = self.label,
+                "a send was still landing in the closed inbound buffer after {SETTLE_SPINS} \
+                 spins; counting it as lost"
+            );
+        }
         report_inbound_dropped(
             self.label,
             &self.channel,
             InboundDropStage::Buffered,
-            unread,
+            drained.lost(),
             self.acks,
             self.audit.as_ref(),
         );
+    }
+}
+
+/// What [`drain_unread`] found in a closed buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Drained {
+    /// Messages taken out of the buffer and discarded.
+    pub(super) unread: usize,
+    /// Whether the buffer settled: closed, empty, and no send still on its
+    /// way in. `false` only when a send granted its slot before the close had
+    /// still not landed after [`SETTLE_SPINS`] looks.
+    pub(super) settled: bool,
+}
+
+impl Drained {
+    /// Pure: how many messages the stop lost. An unsettled send lands after
+    /// the drain, in a buffer about to be dropped, so it is lost too — and
+    /// there is at most one: the driver's thread is the buffer's only sender,
+    /// and it sends one message at a time.
+    pub(super) fn lost(self) -> usize {
+        self.unread + usize::from(!self.settled)
     }
 }
 
@@ -108,22 +140,24 @@ impl Drop for InboundReceiver {
 /// next send fails, and the driver reports what it still holds itself, at the
 /// [`InboundDropStage::Polled`] stage. One send can still land after the
 /// close, if it had been granted its slot just before; `try_recv` reports
-/// `Empty` (not `Disconnected`) until it has, so the loop waits for it —
-/// at most [`SETTLE_SPINS`] times, after which the count is a lower bound.
-pub(super) fn drain_unread<T>(rx: &mut tok_mpsc::Receiver<T>) -> usize {
+/// `Empty` (not `Disconnected`) until it has, so the loop waits for it — at
+/// most [`SETTLE_SPINS`] times, after which it says the buffer did not settle
+/// ([`Drained::settled`]) rather than return a count that silently misses it.
+pub(super) fn drain_unread<T>(rx: &mut tok_mpsc::Receiver<T>) -> Drained {
     rx.close();
     let mut unread = 0;
     let mut spins = 0;
     loop {
         match rx.try_recv() {
             Ok(_) => unread += 1,
-            Err(tok_mpsc::error::TryRecvError::Disconnected) => return unread,
+            Err(tok_mpsc::error::TryRecvError::Disconnected) => {
+                return Drained { unread, settled: true }
+            }
             Err(tok_mpsc::error::TryRecvError::Empty) if spins < SETTLE_SPINS => {
                 spins += 1;
                 std::thread::yield_now();
             }
-            Err(tok_mpsc::error::TryRecvError::Empty) => return unread,
+            Err(tok_mpsc::error::TryRecvError::Empty) => return Drained { unread, settled: false },
         }
     }
 }
-

@@ -26,9 +26,11 @@
 //! counted, said, and handed to [`InboundDroppedAudit`] (#826, see
 //! `inbound_drop.rs`). A message the bus's buffer *accepted* is acked at once,
 //! though, so one still unread when the bus stops is lost on every channel —
-//! [`InboundReceiver`] counts those (#846). A channel whose upstream redelivers without an ack must
-//! not leave `ack_method` `None` without revisiting that, or it writes false
-//! `channel.inbound_dropped` rows.
+//! [`InboundReceiver`] counts those (#846), including the few an ack failure
+//! or refusal left redeliverable, which it cannot tell apart. A channel whose
+//! upstream redelivers without an ack must not leave `ack_method` `None`
+//! without revisiting that, or it writes false `channel.inbound_dropped`
+//! rows.
 //!
 //! Why the ack fires *after* the event is handed to the bus, not before: if
 //! the worker died between receiving the poll result and the driver forwarding
