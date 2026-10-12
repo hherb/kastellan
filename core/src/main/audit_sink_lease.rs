@@ -43,7 +43,9 @@ pub(crate) enum SinkKind {
     AuditsOnExit,
     /// The driver audits nothing once its bus is gone — email's: the skipped
     /// ids' acks stop there, so a driver still in its 15 s long-poll costs
-    /// nothing. INFO.
+    /// nothing. INFO. (Its unread buffered messages are audited by the
+    /// bus-side receiver as the bus stops, before the drain — not by the
+    /// driver: #846.)
     SilentOnExit,
 }
 
@@ -53,9 +55,12 @@ pub(crate) enum SinkKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SinkChannel {
     /// `channel.reply_undelivered` and `channel.inbound_dropped` (#826), from
-    /// the Matrix driver.
+    /// the Matrix driver — and the latter, at the buffered stage, from its
+    /// bus-side receiver (#846).
     Matrix,
-    /// `channel.skipped_ack_only`, from the email driver.
+    /// `channel.skipped_ack_only`, from the email driver, and
+    /// `channel.inbound_dropped` at the buffered stage, from its bus-side
+    /// receiver (#846).
     Email,
 }
 

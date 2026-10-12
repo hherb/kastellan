@@ -30,11 +30,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use tokio::sync::mpsc as tok_mpsc;
 
 use kastellan_sandbox::SandboxBackend;
 
-use crate::channel::polled_driver::{AckOnlyAudit, DriverAudit, PolledWorkerDriver};
+use crate::channel::polled_driver::{
+    AckOnlyAudit, DriverAudit, InboundDroppedAudit, InboundReceiver, PolledWorkerDriver,
+};
 use crate::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
 use crate::egress::spawn::Mitm;
 use crate::worker_lifecycle::force_route::ForceRoutingConfig;
@@ -53,6 +54,43 @@ pub mod wire;
 
 use config::EmailConfig;
 
+/// The email driver's audit hooks: the [`DriverAudit`] hooks email can call,
+/// and no others. A skipped id and a dropped inbound batch are always LOGGED
+/// by the driver regardless of these hooks; a hook only controls whether the
+/// event ALSO becomes a durable `audit_log` row.
+pub struct EmailDriverAudit {
+    /// Records every acked-but-never-an-event id (localmail's `skipped` list)
+    /// as a `channel.skipped_ack_only` row — see [`AckOnlyAudit`] for why it
+    /// is a closure rather than a `PgPool`, and why it must not block.
+    pub ack_only: Option<AckOnlyAudit>,
+    /// Records inbound messages lost when the bus stopped as a
+    /// `channel.inbound_dropped` row — see [`InboundDroppedAudit`]. On email
+    /// that is only ever the *buffered* stage (#846): messages the bus's
+    /// buffer accepted, and the driver therefore acked, that the bus never
+    /// read. A batch the bus never took is not acked, so the worker
+    /// redelivers it, and the driver never calls this hook for it (#826).
+    pub inbound_dropped: Option<InboundDroppedAudit>,
+}
+
+impl EmailDriverAudit {
+    /// No audit hooks, for a caller with no database (the `email probe`).
+    pub fn none() -> Self {
+        Self { ack_only: None, inbound_dropped: None }
+    }
+
+    fn into_driver_audit(self) -> DriverAudit {
+        DriverAudit {
+            ack_only: self.ack_only,
+            // No reply ever reaches this driver's send: `EmailChannel::send`
+            // refuses every reply itself (outbound is slice 2), and the bus
+            // audits that refusal. Wire a sink here when slice 2 routes
+            // replies through `email.send`.
+            reply_undelivered: None,
+            inbound_dropped: self.inbound_dropped,
+        }
+    }
+}
+
 /// A live email channel: owns the driver thread; implements the [`Channel`]
 /// trait the [`super::bus::ChannelBus`] consumes. Structurally identical to
 /// `matrix::MatrixChannel` — see that type's docs for why dropping a
@@ -60,7 +98,8 @@ use config::EmailConfig;
 /// thread exits on its own once both channel endpoints are dropped).
 pub struct EmailChannel {
     id: ChannelId,
-    inbound_rx: tok_mpsc::Receiver<IncomingMessage>,
+    /// Reports, as it is dropped, what was still buffered unread (#846).
+    inbound_rx: InboundReceiver,
     // Never sent through in slice 1 (`send` always bails — no outbound
     // worker yet), but must stay owned here regardless: dropping BOTH driver
     // endpoints together is what stops the driver thread (see
@@ -174,15 +213,12 @@ fn email_backoff() -> RestartBackoff {
 /// the driver, so the very first `email.poll` result is parsed against the
 /// correct trust root.
 ///
-/// `audit_ack_only` is the same optional-hook shape as `egress`: `None` when
-/// the caller has no durable sink to write to (e.g. a `kastellan-cli email
-/// probe` diagnostic), `Some` to record every acked-but-never-an-event id
-/// (localmail's `skipped` list) as an `audit_log` row via
-/// [`crate::channel::polled_driver::AckOnlyAudit`] — see that type's docs for
-/// why it is a boxed closure rather than a `PgPool` parameter, and why it must
-/// not block (this module stays DB-free; the daemon wiring supplies the
-/// closure, which spawns its insert — `audit_sink::SinkWriter::spawn` in the
-/// daemon binary — rather than `block_on`ing it, #789).
+/// `audit` holds the driver's optional audit hooks ([`EmailDriverAudit`]):
+/// [`EmailDriverAudit::none`] when the caller has no durable sink to write to
+/// (e.g. a `kastellan-cli email probe` diagnostic). This module stays DB-free;
+/// the daemon wiring supplies closures that spawn their inserts —
+/// `audit_sink::SinkWriter::spawn` in the daemon binary — rather than
+/// `block_on`ing them (#789).
 ///
 /// [`SandboxPolicy`]: kastellan_sandbox::SandboxPolicy
 pub fn spawn_email_worker(
@@ -190,7 +226,7 @@ pub fn spawn_email_worker(
     id: ChannelId,
     cfg: &EmailConfig,
     egress: Option<EmailEgress>,
-    audit_ack_only: Option<AckOnlyAudit>,
+    audit: EmailDriverAudit,
 ) -> anyhow::Result<SpawnedEmailWorker> {
     let (host, port) = crate::channel::matrix::host_port_from_url(&cfg.endpoint)?;
 
@@ -311,20 +347,7 @@ pub fn spawn_email_worker(
         wire::encode_email_send,
         Some(wire::encode_email_ack),
         Some(wire::parse_email_skipped),
-        DriverAudit {
-            // A skipped id is always LOGGED (driver `tracing::warn!`, id +
-            // reason, never body) regardless of this hook — `audit_ack_only`
-            // only controls whether it ALSO becomes a durable `audit_log` row.
-            ack_only: audit_ack_only,
-            // No reply ever reaches this driver's send: `EmailChannel::send`
-            // refuses every reply itself (outbound is slice 2), and the bus
-            // audits that refusal. Wire a sink here when slice 2 routes
-            // replies through `email.send`.
-            reply_undelivered: None,
-            // An ack channel: a batch the bus never took is not acked, so the
-            // worker redelivers it, and the driver never calls this hook (#826).
-            inbound_dropped: None,
-        },
+        audit.into_driver_audit(),
         id.clone(),
     )?;
     Ok(SpawnedEmailWorker { channel: EmailChannel::from_driver(id, driver), identity })

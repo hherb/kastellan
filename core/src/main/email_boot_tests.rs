@@ -42,12 +42,12 @@ fn the_skipped_id_sink_does_not_hold_the_driver_thread() {
     let (pool, listener) = rt.block_on(async { stalled_pool() });
     static LEDGER: crate::audit_sink::Ledger = crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 8, connections: 8 });
     let sink = email_skipped_audit_sink(
-        crate::audit_sink::SinkWriter::with_ledger(
+        Arc::new(crate::audit_sink::SinkWriter::with_ledger(
             &LEDGER,
             pool,
             rt.handle().clone(),
             crate::audit_sink::SinkChannel::Email,
-        ),
+        )),
         |_, _| {},
     );
     let channel = ChannelId("email".into());
@@ -82,12 +82,12 @@ fn the_email_sink_reports_a_row_it_could_not_write() {
     static LEDGER: crate::audit_sink::Ledger =
         crate::audit_sink::Ledger::new(crate::audit_sink::Bounds { queued: 0, connections: 1 });
     let sink = email_skipped_audit_sink(
-        crate::audit_sink::SinkWriter::with_ledger(
+        Arc::new(crate::audit_sink::SinkWriter::with_ledger(
             &LEDGER,
             pool,
             rt.handle().clone(),
             crate::audit_sink::SinkChannel::Email,
-        ),
+        )),
         |w, line| EMAIL_SAID.lock().unwrap().push((w, line.to_string())),
     );
     let channel = ChannelId("email".into());
@@ -155,9 +155,14 @@ fn attempt_s_sink_is_live_at_once_and_silent_on_exit() {
     static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
     let rt = tokio::runtime::Runtime::new().expect("a runtime");
     let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
-    let sink = skipped_sink(&LEDGER, pool, rt.handle().clone(), |_, _| {});
-    assert_eq!(LEDGER.snapshot(), InFlight { sinks_live: 1, ..InFlight::default() });
-    drop(sink);
+    let audit = driver_sinks(&LEDGER, pool, rt.handle().clone(), |_, _| {});
+    assert!(audit.ack_only.is_some() && audit.inbound_dropped.is_some(), "both hooks (#846)");
+    assert_eq!(
+        LEDGER.snapshot(),
+        InFlight { sinks_live: 1, ..InFlight::default() },
+        "two hooks, one lease"
+    );
+    drop(audit);
     assert_eq!(LEDGER.snapshot(), InFlight::default());
 }
 
@@ -170,7 +175,8 @@ fn attempt_s_sink_names_its_pending_row() {
     static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
     let rt = tokio::runtime::Runtime::new().expect("a runtime");
     let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
-    let sink = skipped_sink(&LEDGER, pool, rt.handle().clone(), |_, _| {});
+    let audit = driver_sinks(&LEDGER, pool, rt.handle().clone(), |_, _| {});
+    let sink = audit.ack_only.as_ref().expect("the skipped-id hook");
     let channel = ChannelId("email".into());
     sink(kastellan_core::channel::SkippedId {
         channel: &channel,

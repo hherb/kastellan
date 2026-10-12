@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kastellan_core::channel::email::config::EmailConfig;
-use kastellan_core::channel::email::{spawn_email_worker, EmailEgress};
+use kastellan_core::channel::email::{spawn_email_worker, EmailDriverAudit, EmailEgress};
 use kastellan_core::channel::{Channel, ChannelId, IncomingMessage};
 use kastellan_core::egress::audit::EgressAuditRow;
 use kastellan_core::egress::upstream_ca::parse_upstream_cas;
@@ -166,7 +166,7 @@ async fn run_forced_email_poll_over_tls(
     // `email.init` is answered from the worker's own env — no network — so this
     // succeeds in BOTH cases. The anchor's absence surfaces later, on the first
     // poll, which is exactly where the negative control asserts.
-    let spawned = spawn_email_worker(worker_backend, ChannelId("email".into()), &cfg, Some(egress), None)
+    let spawned = spawn_email_worker(worker_backend, ChannelId("email".into()), &cfg, Some(egress), EmailDriverAudit::none())
         .expect("email channel bring-up (sidecar + jailed worker + email.init)");
     let mut channel = spawned.channel;
 

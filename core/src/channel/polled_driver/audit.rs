@@ -46,17 +46,27 @@ pub type AckOnlyAudit = Box<dyn Fn(SkippedId<'_>) + Send + 'static>;
 /// stalled audit insert would stall every conversation and the poll with it.
 pub type ReplyUndeliveredAudit = Box<dyn Fn(UndeliveredReply<'_>) + Send + 'static>;
 
-/// Best-effort side channel for a caller to record "the bus closed while this
-/// channel's worker had already passed these inbound messages, and nothing
-/// redelivers them" durably — the `channel.inbound_dropped` row (#826). Called
-/// at most once per exit, and only for a channel with no ack method (Matrix):
-/// an ack channel's unacked batch is redelivered on the next start, so it is
-/// not a loss.
+/// Best-effort side channel for a caller to record "the bus closed and these
+/// inbound messages never reached it, and nothing redelivers them" durably —
+/// the `channel.inbound_dropped` row. Called from two places, so it is an
+/// `Arc` (and `Sync`):
 ///
-/// It is handed an [`InboundDropped`]: the channel, how many, and when — never
-/// a peer, an id or a body, all of which are peer-supplied. Called on the
-/// driver's own thread, so it must not block on I/O, like the hooks above.
-pub type InboundDroppedAudit = Box<dyn Fn(InboundDropped<'_>) + Send + 'static>;
+/// - **the driver**, at most once per exit, for a polled batch it could not
+///   hand over ([`InboundDropStage::Polled`], #826) — only on a channel with
+///   no ack method (Matrix): an ack channel's unacked batch is redelivered on
+///   the next start, so it is not a loss;
+/// - **the bus-side receiver**, once, as the bus drops it, for what was still
+///   in the inbound buffer unread ([`InboundDropStage::Buffered`], #846) — on
+///   every channel, because an ack channel had already acked those.
+///
+/// It is handed an [`InboundDropped`]: the channel, the stage, how many, and
+/// when — never a peer, an id or a body, all of which are peer-supplied. It
+/// runs on the driver's own thread or inside the bus's stopping pump, so it
+/// must not block on I/O, like the hooks above.
+///
+/// [`InboundDropStage::Polled`]: super::InboundDropStage::Polled
+/// [`InboundDropStage::Buffered`]: super::InboundDropStage::Buffered
+pub type InboundDroppedAudit = std::sync::Arc<dyn Fn(InboundDropped<'_>) + Send + Sync + 'static>;
 
 /// The driver's optional audit hooks.
 ///
@@ -68,8 +78,9 @@ pub struct DriverAudit {
     pub ack_only: Option<AckOnlyAudit>,
     /// See [`ReplyUndeliveredAudit`].
     pub reply_undelivered: Option<ReplyUndeliveredAudit>,
-    /// See [`InboundDroppedAudit`]. Only a channel with no ack method needs
-    /// one; the driver never calls it for an ack channel.
+    /// See [`InboundDroppedAudit`]. The driver calls it only on a channel with
+    /// no ack method; the bus-side receiver it hands a clone to calls it on
+    /// every channel (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
 }
 
@@ -161,7 +172,8 @@ pub(super) fn record_undelivered(
 }
 
 /// Hand a dropped inbound batch to the audit hook, if there is one, timed
-/// (#793, #826).
+/// (#793, #826) — from the driver's thread or, at the buffered stage, the
+/// bus's (#846).
 pub(super) fn record_inbound_dropped(
     audit: Option<&InboundDroppedAudit>,
     label: &str,

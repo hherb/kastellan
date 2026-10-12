@@ -297,20 +297,29 @@ pub mod actions {
     /// [`super::polled_driver::AckOnlyAudit`]; the payload is
     /// [`super::SkippedId::payload`]'s.
     pub const SKIPPED_ACK_ONLY: &str = "channel.skipped_ack_only";
-    /// A polled channel that does not redeliver (Matrix) dropped inbound
-    /// messages because the bus had closed — a restart or shutdown that
-    /// landed while a poll was out or mid-batch — after its worker had
-    /// already moved past them (#826). Carries the channel, the count
-    /// (`dropped`) and the event's time (`observed_at`) only: never a peer,
-    /// an id or a body, all peer-supplied. Written by the channel's driver
-    /// audit hook; the payload is
-    /// [`super::polled_driver::InboundDropped::payload`]'s.
+    /// A polled channel lost inbound messages because the bus had closed —
+    /// a restart or a shutdown — and nothing redelivers them. Its `stage`
+    /// says where they were (`InboundDropStage`):
+    ///
+    /// - `polled` (#826): a batch the driver held — the bus closed while a
+    ///   poll was out or mid-batch — on a channel that does not redeliver
+    ///   (Matrix), whose worker had already moved past it;
+    /// - `buffered` (#846): messages the driver had handed over, still in
+    ///   the bus's inbound buffer unread when it stopped — on every channel,
+    ///   because an ack channel (email) acks a message once the buffer takes
+    ///   it.
+    ///
+    /// Carries the channel, the stage, the count (`dropped`) and the event's
+    /// time (`observed_at`) only: never a peer, an id or a body, all
+    /// peer-supplied. Written by the channel's driver audit hook (the driver
+    /// for `polled`, the bus-side receiver for `buffered`); the payload is
+    /// [`super::polled_driver::InboundDropped::payload`]'s. Rows written
+    /// before #846 have no `stage`; they are all `polled`.
     ///
     /// Not every inbound loss, so a quiet `audit_log` is not proof of none:
-    /// messages the driver DID hand over, still buffered unread in the bus
-    /// when it stopped, are #832's; messages the worker had received but not
-    /// yet returned from a poll when the driver exited are #835's; a batch
-    /// that did not decode has no count to give (#836).
+    /// messages the worker had received but not yet returned from a poll
+    /// when the driver exited are #835's; a batch that did not decode has no
+    /// count to give (#836); and a crash runs no `Drop`.
     pub const INBOUND_DROPPED: &str = "channel.inbound_dropped";
     /// A channel bus came up. Payload carries the channel and how many
     /// bring-up attempts it took, so "did it have to retry?" is answerable

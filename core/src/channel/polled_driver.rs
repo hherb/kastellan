@@ -24,7 +24,9 @@
 //! batch the driver could not hand to a closed bus stays unacked and comes
 //! back on the next start; without one, the driver treats it as **lost** —
 //! counted, said, and handed to [`InboundDroppedAudit`] (#826, see
-//! `inbound_drop.rs`). A channel whose upstream redelivers without an ack must
+//! `inbound_drop.rs`). A message the bus's buffer *accepted* is acked at once,
+//! though, so one still unread when the bus stops is lost on every channel —
+//! [`InboundReceiver`] counts those (#846). A channel whose upstream redelivers without an ack must
 //! not leave `ack_method` `None` without revisiting that, or it writes false
 //! `channel.inbound_dropped` rows.
 //!
@@ -93,8 +95,10 @@ use outage::{report_down, OutageLog};
 mod audit;
 pub use audit::{AckOnlyAudit, DriverAudit, InboundDroppedAudit, ReplyUndeliveredAudit};
 mod inbound_drop;
-pub use inbound_drop::InboundDropped;
+pub use inbound_drop::{InboundDropStage, InboundDropped};
 use inbound_drop::{on_bus_closed_during_poll, on_bus_closed_mid_batch, on_undecodable_batch};
+mod inbound_rx;
+pub use inbound_rx::InboundReceiver;
 mod refusal;
 use refusal::{accepted, check_refusal_backoff, is_refusal, refused, RefusalRun};
 mod replies;
@@ -142,9 +146,10 @@ pub const REFUSAL_BACKOFF: RestartBackoff = RestartBackoff {
 /// A running polled-worker driver: the endpoints a channel wraps. Dropping
 /// both endpoints stops the driver thread, which drops its [`WorkerCalls`] —
 /// for a [`PersistentHandle`] that is the supervisor shutdown (worker + any
-/// sidecar torn down via RAII).
+/// sidecar torn down via RAII). Dropping `inbound_rx` also reports whatever
+/// was still in the inbound buffer, unread (#846, [`InboundReceiver`]).
 pub struct PolledWorkerDriver {
-    pub(crate) inbound_rx: tok_mpsc::Receiver<IncomingMessage>,
+    pub(crate) inbound_rx: InboundReceiver,
     pub(crate) outbound_tx: std_mpsc::Sender<OutgoingMessage>,
     pub(crate) join: thread::JoinHandle<()>,
 }
@@ -172,6 +177,16 @@ impl PolledWorkerDriver {
             .call(spec.init_method, serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("{}: {e}", spec.init_method))?;
         let (inbound_tx, inbound_rx) = tok_mpsc::channel::<IncomingMessage>(INBOUND_BUFFER);
+        // The bus-side end shares the driver's inbound-dropped hook: it
+        // reports what the bus never read, the driver what it never handed
+        // over (#846, #826).
+        let inbound_rx = InboundReceiver::new(
+            inbound_rx,
+            spec.label,
+            cid.clone(),
+            spec.ack_method.is_some(),
+            audit.inbound_dropped.clone(),
+        );
         let (outbound_tx, outbound_rx) = std_mpsc::channel::<OutgoingMessage>();
         let join = thread::spawn(move || {
             run(
@@ -209,7 +224,8 @@ impl PolledWorkerDriver {
 /// line per conversation and an audit call per reply (`replies::discard_on_exit`).
 /// Inbound messages the closed bus never took are redelivered on an ack
 /// channel, and counted, said and audited on one without (#826,
-/// `inbound_drop`).
+/// `inbound_drop`); those it took but never read are counted by the
+/// bus-side [`InboundReceiver`] as it is dropped, on every channel (#846).
 ///
 /// A failed call is one of two things (#769), told apart by
 /// [`refusal::is_refusal`]:

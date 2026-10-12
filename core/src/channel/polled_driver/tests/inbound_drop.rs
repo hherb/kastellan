@@ -1,19 +1,27 @@
 //! #826: inbound messages the driver could not hand to a closed bus, through
 //! the real `run` loop. On a channel that does not redeliver (Matrix) they are
 //! counted, said and audited; on an ack channel (email) they are redelivered,
-//! so nothing is reported.
+//! so nothing is reported. A cut mid-send also leaves a full buffer, which the
+//! bus-side receiver reports at the buffered stage (#846, `inbound_rx.rs`).
 //!
 //! Each test that reads the emitted lines uses its own channel label, because
 //! the emitter's test record is shared by every test in the binary.
 use super::*;
 use crate::worker_stderr::{emitted_refusal_lines_for, RefusalSeverity};
 
-/// What the hook was handed, per call: `(channel, dropped, observed_at)`.
-type Dropped = Arc<Mutex<Vec<(String, usize, time::OffsetDateTime)>>>;
+/// One hook call: `(channel, stage, dropped, observed_at)`.
+pub(super) type DropCall = (String, InboundDropStage, usize, time::OffsetDateTime);
 
-/// The `(channel, dropped)` of each hook call, without the time.
-fn counts(dropped: &[(String, usize, time::OffsetDateTime)]) -> Vec<(String, usize)> {
-    dropped.iter().map(|(c, n, _)| (c.clone(), *n)).collect()
+/// What the hook was handed, per call.
+pub(super) type Dropped = Arc<Mutex<Vec<DropCall>>>;
+
+/// The `(channel, stage, dropped)` of each hook call, without the time,
+/// sorted: the receiver's report and the driver's race each other when both
+/// fire on one close.
+pub(super) fn counts(dropped: &[DropCall]) -> Vec<(String, InboundDropStage, usize)> {
+    let mut v: Vec<_> = dropped.iter().map(|(c, s, n, _)| (c.clone(), *s, *n)).collect();
+    v.sort_by_key(|(c, s, n)| (c.clone(), s.as_str(), *n));
+    v
 }
 
 /// A worker whose FIRST poll is held until the test closes the bus, then
@@ -42,7 +50,7 @@ impl WorkerCalls for BatchOutlivesTheBus {
     }
 }
 
-fn events(n: usize, with_ack_token: bool) -> Value {
+pub(super) fn events(n: usize, with_ack_token: bool) -> Value {
     let evs: Vec<Value> = (0..n)
         .map(|i| {
             let mut e = json!({"peer": "@me:srv", "conversation": "!room:srv", "body": format!("m{i}")});
@@ -55,10 +63,10 @@ fn events(n: usize, with_ack_token: bool) -> Value {
     json!({ "events": evs })
 }
 
-fn hook(dropped: &Dropped) -> InboundDroppedAudit {
+pub(super) fn hook(dropped: &Dropped) -> InboundDroppedAudit {
     let sink = dropped.clone();
-    Box::new(move |d: InboundDropped<'_>| {
-        sink.lock().unwrap().push((d.channel.0.clone(), d.dropped.get(), d.observed_at))
+    Arc::new(move |d: InboundDropped<'_>| {
+        sink.lock().unwrap().push((d.channel.0.clone(), d.stage, d.dropped.get(), d.observed_at))
     })
 }
 
@@ -71,7 +79,7 @@ fn run_until_the_bus_closes_mid_poll(
     batch: Value,
     encode_ack: Option<EncodeAck>,
     sink: bool,
-) -> (Vec<(String, usize, time::OffsetDateTime)>, Vec<String>) {
+) -> (Vec<DropCall>, Vec<String>) {
     let polling = Arc::new(AtomicBool::new(false));
     let bus_gone = Arc::new(AtomicBool::new(false));
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -113,8 +121,8 @@ fn a_batch_that_outlives_the_bus_is_counted_said_and_audited_when_nothing_redeli
     let before = time::OffsetDateTime::now_utc();
     let (dropped, _log) = run_until_the_bus_closes_mid_poll(spec, events(3, false), None, true);
     let after = time::OffsetDateTime::now_utc();
-    assert_eq!(counts(&dropped), [("t-drop-batch".to_string(), 3)]);
-    let at = dropped[0].2;
+    assert_eq!(counts(&dropped), [("t-drop-batch".to_string(), InboundDropStage::Polled, 3)]);
+    let at = dropped[0].3;
     assert!(before <= at && at <= after, "observed_at is the drop's time: {before} <= {at} <= {after}");
     let lines = emitted_refusal_lines_for("t-drop-batch");
     assert_eq!(lines.len(), 1, "{lines:?}");
@@ -171,7 +179,7 @@ fn run_cut_off_mid_send(
     label: &'static str,
     extra: usize,
     ack: bool,
-) -> (Vec<(String, usize)>, usize) {
+) -> (Vec<(String, InboundDropStage, usize)>, usize) {
     let (st, calls) = fake();
     st.polls.lock().unwrap().push_back(events(INBOUND_BUFFER + extra, ack));
     let base = if ack { spec_with_ack() } else { spec_without_ack() };
@@ -195,16 +203,26 @@ fn run_cut_off_mid_send(
 
 /// The bus closes MID-batch: the driver has handed over what fits in the
 /// inbound buffer and is blocked on the next send when the receiver drops.
-/// That message and the one after it never reached the bus: 2 are dropped.
-/// (The buffered ones were handed over; losing them unread is the bus's
-/// stop, #832.)
+/// That message and the one after it never reached the bus: 2 are dropped at
+/// the polled stage. The full buffer the bus never read is the receiver's
+/// report, at the buffered stage (#846) — two rows, never one count for both.
 #[test]
-fn a_batch_cut_off_mid_send_counts_only_what_was_never_handed_over() {
+fn a_batch_cut_off_mid_send_counts_what_was_never_handed_over_apart_from_the_buffer() {
     let (dropped, _acks) = run_cut_off_mid_send("t-drop-mid", 2, false);
-    assert_eq!(dropped, [("t-drop-mid".to_string(), 2)]);
+    assert_eq!(
+        dropped,
+        [
+            ("t-drop-mid".to_string(), InboundDropStage::Buffered, INBOUND_BUFFER),
+            ("t-drop-mid".to_string(), InboundDropStage::Polled, 2),
+        ]
+    );
     let lines = emitted_refusal_lines_for("t-drop-mid");
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].0.contains("dropped 2 inbound messages"), "{lines:?}");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines.iter().any(|l| l.0.contains("dropped 2 inbound messages: the bus closed")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.0.contains(&format!("dropped {INBOUND_BUFFER} inbound messages: the bus stopped"))),
+        "{lines:?}"
+    );
 }
 
 /// The same cut with a longer tail: the count is the failed send plus the
@@ -212,20 +230,28 @@ fn a_batch_cut_off_mid_send_counts_only_what_was_never_handed_over() {
 #[test]
 fn a_longer_tail_cut_off_mid_send_is_counted_whole() {
     let (dropped, _acks) = run_cut_off_mid_send("t-drop-mid-4", 4, false);
-    assert_eq!(dropped, [("t-drop-mid-4".to_string(), 4)]);
+    let polled: Vec<_> = dropped.iter().filter(|d| d.1 == InboundDropStage::Polled).collect();
+    assert_eq!(polled, [&("t-drop-mid-4".to_string(), InboundDropStage::Polled, 4)]);
 }
 
 /// The mid-batch twin of the ack-channel test above: an email-shaped channel
 /// cut off mid-send does not ack what the bus never took, so it is
-/// redelivered — no drop line (it would falsely say "does not redeliver") and
-/// no hook call. The buffered messages WERE acked, which is the bus's stop
-/// (#832), not this path.
+/// redelivered — no polled-stage line (it would falsely say "does not
+/// redeliver") and no polled-stage hook call. The buffered messages WERE
+/// acked, though, so the receiver reports them as lost (#846), saying that
+/// the ack is why.
 #[test]
-fn an_ack_channel_cut_off_mid_send_is_redelivered_so_not_reported() {
+fn an_ack_channel_cut_off_mid_send_reports_only_the_acked_buffer() {
     let (dropped, acks) = run_cut_off_mid_send("email-drop-mid", 2, true);
     assert_eq!(acks, INBOUND_BUFFER, "POSITIVE CONTROL: only what the bus took was acked");
-    assert!(dropped.is_empty(), "{dropped:?}");
-    assert!(emitted_refusal_lines_for("email-drop-mid").is_empty());
+    assert_eq!(
+        dropped,
+        [("email-drop-mid".to_string(), InboundDropStage::Buffered, INBOUND_BUFFER)],
+        "the acked buffer, and nothing at the polled stage"
+    );
+    let lines = emitted_refusal_lines_for("email-drop-mid");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].0.contains("this channel acked them"), "{lines:?}");
 }
 
 /// Pure: the line names the count, agrees in number, and says whether the
@@ -253,19 +279,26 @@ fn the_drop_line_counts_and_says_whether_it_is_recorded() {
     );
 }
 
-/// The row is channel + count + when, and the action is pinned literally:
+/// The row is channel + stage + count + when, and the action is pinned literally:
 /// operators query `audit_log` by that string.
 #[test]
 fn the_inbound_dropped_row_is_channel_count_and_when_only() {
     let v = InboundDropped {
         channel: &ChannelId("matrix".into()),
+        stage: InboundDropStage::Polled,
         dropped: std::num::NonZeroUsize::new(3).unwrap(),
         observed_at: time::macros::datetime!(2026-10-07 12:34:56 UTC),
     }
     .payload();
     assert_eq!(
         v,
-        json!({"channel": "matrix", "dropped": 3, "observed_at": "2026-10-07T12:34:56Z"})
+        json!({
+            "channel": "matrix",
+            "stage": "polled",
+            "dropped": 3,
+            "observed_at": "2026-10-07T12:34:56Z",
+        })
     );
     assert_eq!(crate::channel::actions::INBOUND_DROPPED, "channel.inbound_dropped");
+    assert_eq!(InboundDropStage::Buffered.as_str(), "buffered", "pinned: operators query by it");
 }

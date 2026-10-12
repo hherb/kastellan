@@ -40,7 +40,7 @@ fn test_cfg() -> EmailConfig {
 fn egress_none_calls_the_worker_backend_directly_with_the_expected_allowlist() {
     let backend = Arc::new(PolicyCapturingBackend { policies: Mutex::new(Vec::new()) });
     let cfg = test_cfg();
-    let err = match spawn_email_worker(backend.clone(), ChannelId("email".into()), &cfg, None, None) {
+    let err = match spawn_email_worker(backend.clone(), ChannelId("email".into()), &cfg, None, EmailDriverAudit::none()) {
         Err(e) => e,
         Ok(_) => panic!("PolicyCapturingBackend always refuses to spawn"),
     };
@@ -112,7 +112,7 @@ fn egress_some_intercepts_and_the_selected_anchor_reaches_the_sidecar_policy() {
         ChannelId("email".into()),
         &cfg,
         Some(egress),
-        None,
+        EmailDriverAudit::none(),
     );
 
     let sidecar_policies = sidecar_backend.policies.lock().expect("capture mutex poisoned");
@@ -175,7 +175,7 @@ fn an_unrelated_configured_origin_does_not_reach_or_block_the_sidecar() {
         ChannelId("email".into()),
         &cfg,
         Some(egress),
-        None,
+        EmailDriverAudit::none(),
     );
 
     let sidecar_policies = sidecar_backend.policies.lock().expect("capture mutex poisoned");
