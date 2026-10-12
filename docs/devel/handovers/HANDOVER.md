@@ -8,17 +8,17 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-12 (#835 — what the Matrix worker still held at a stop is counted; its PR
-is in the Recent PRs list below, gate green. PRs #849 (#846) and #847 (#832) merged 2026-10-12. The
+**Last updated:** 2026-10-12 (#835 — what the Matrix worker still held at a stop is counted; PR
+[#850](https://github.com/hherb/kastellan/pull/850), gate green, one review round applied. PRs #849 (#846) and #847 (#832) merged 2026-10-12. The
 operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Recent PRs, newest first:** [#850](https://github.com/hherb/kastellan/pull/850) (#835), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
 #787 since the merge): 15 binaries, generated env **and** `.local` byte-identical to
 `~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at
 attempt 1. `scripts/upgrade_from_git.sh` switches its checkout back to `main` by itself, so the next
-plain run is right. ⚠️ **None of #791, #795, #801, #806, #812, #819, #820, #824, #830, #834, #842, #847, #849 or #835's PR is deployed.** The live process runs thinking **ON**
+plain run is right. ⚠️ **None of #791, #795, #801, #806, #812, #819, #820, #824, #830, #834, #842, #847, #849 or #850 is deployed.** The live process runs thinking **ON**
 (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`, `TIMEOUT_MS=600000`). The
 last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN]`, 4 `[SKIP]`
 (gliner opt-in). Rootfs images last rebuilt 2026-09-08.
@@ -42,7 +42,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-12): #835 — what the worker still held
+### This session (2026-10-12): #835 — what the worker still held (PR [#850](https://github.com/hherb/kastellan/pull/850))
 
 - **`PolledWorkerSpec::drain: Option<WorkerDrainSpec>`.** The driver calls it **once, on every exit**
   (every `return` in `run` is now `break 'drive`), last, before `calls` drops. What it answers
@@ -259,7 +259,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824 + #830 + #834 + #842 + #847 + #849 + #835's PR:** watch one restart for the `[audit-lost]` /
+5. **First DGX deploy of #791 + #795 + #801 + #806 + #812 + #819 + #820 + #824 + #830 + #834 + #842 + #847 + #849 + #850:** watch one restart for the `[audit-lost]` /
    INFO drain lines (since #830 the traced line carries `[audit-lost]` too; a Matrix login still in
    progress at shutdown should be INFO "not finished starting", not a loss; a bus stopped under a
    wedged Postgres now says `may not have been written`), and query an `observed_at` on the next `channel.*` row. Then
@@ -382,7 +382,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#835 — **the gate that stands**) | #835's PR (`6e63beac`) | **5008 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, exactly as predicted: #846's 4993 + **15** (core lib `worker_drain` 9 + matrix 2, `matrix_channel_e2e` 1, worker `handler` 2, `matrix-wire` 1); `[WARN]` 0, `[SKIP]` **23**; log `~/sweep-835.log`. Separately, `-p kastellan-worker-matrix --features live-matrix`: 36 + 4 `sync_loop` tests. Mutants killed 7/7 (no drain call, poll-path exit skips it, `interrupted` ignored, failed drain silent, wrong stage, Matrix spec without drain, stage misspelled), plus the shared-bound assert (1000 ms fails to compile). The review commit changed no test count; its suites re-run green (core lib `channel::` 508, bin 88, `matrix_channel_e2e` 3) | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-835`, **27** `Checking kastellan`; plus `-p kastellan-worker-matrix --features live-matrix` exit 0 | **23** Mac |
+| **Mac** (#835 — **the gate that stands**) | #850 (`6e63beac`) | **5008 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, exactly as predicted: #846's 4993 + **15** (core lib `worker_drain` 9 + matrix 2, `matrix_channel_e2e` 1, worker `handler` 2, `matrix-wire` 1); `[WARN]` 0, `[SKIP]` **23**; log `~/sweep-835.log`. Separately, `-p kastellan-worker-matrix --features live-matrix`: 36 + 4 `sync_loop` tests. Mutants killed 7/7 (no drain call, poll-path exit skips it, `interrupted` ignored, failed drain silent, wrong stage, Matrix spec without drain, stage misspelled), plus the shared-bound assert (1000 ms fails to compile). The review commit changed no test count; its suites re-run green (core lib `channel::` 508, bin 88, `matrix_channel_e2e` 3) | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-835`, **27** `Checking kastellan`; plus `-p kastellan-worker-matrix --features live-matrix` exit 0 | **23** Mac |
 | **Mac** (#846 review round 2 — superseded) | PR #849 | **4993 / 0 / 52**, **195** suites, `[SKIP]` **23**; log `~/sweep-846-fix.log` | exit 0, 27 `Checking kastellan` | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
