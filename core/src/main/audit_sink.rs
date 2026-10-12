@@ -97,7 +97,9 @@ const _: () = assert!(
 /// their rows to land.
 ///
 /// Long enough for a Matrix driver to notice its channel is gone (it long-polls
-/// for [`kastellan_core::channel::matrix::POLL_MS`] at a time, asserted below)
+/// for [`kastellan_core::channel::matrix::POLL_MS`] at a time), ask its worker
+/// what it still held (`matrix.drain`, bounded worker-side by
+/// [`kastellan_matrix_wire::DRAIN_STOP_BOUND_MS`], #835) — both asserted below —
 /// and write its `driver_exit` rows. Short enough to leave most of the service
 /// manager's stop budget — 10 s from SIGTERM to SIGKILL on both hosts
 /// (`TimeoutStopSec` / `ExitTimeOut`, `kastellan-supervisor`) — to the
@@ -111,6 +113,14 @@ pub(crate) const DRAIN_BOUND: Duration = Duration::from_secs(3);
 const _: () = assert!(
     DRAIN_BOUND.as_millis() > kastellan_core::channel::matrix::POLL_MS as u128,
     "the drain must outlast one Matrix long-poll, or every shutdown reports its driver"
+);
+
+const _: () = assert!(
+    DRAIN_BOUND.as_millis()
+        > (kastellan_core::channel::matrix::POLL_MS + kastellan_matrix_wire::DRAIN_STOP_BOUND_MS)
+            as u128,
+    "the drain must outlast one Matrix long-poll plus its worker drain, or a held count's row \
+     lands after the ledger closes"
 );
 
 /// How often [`drain`] looks again.

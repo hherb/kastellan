@@ -66,6 +66,12 @@ pub struct DrainResult {
     pub interrupted: bool,
 }
 
+/// How long the worker may take to answer `matrix.drain`: to stop its sync
+/// and confirm the stop (#835). Past it, the answer is `interrupted`. Shared
+/// with the core because its shutdown waits for the Matrix driver to finish
+/// one long-poll **and** this drain (`DRAIN_BOUND`, asserted there).
+pub const DRAIN_STOP_BOUND_MS: u64 = 800;
+
 /// `matrix.init` result — confirms login + reports identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitResult {

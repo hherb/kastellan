@@ -21,11 +21,14 @@
 //!   (`interrupted`) — an unknown number of messages, possibly none, lost on
 //!   top of the count;
 //! - the worker **could not be asked**: it was down (being respawned, so what
-//!   it held died with the old process), or answered something that did not
-//!   decode (say, a stale binary without the method).
+//!   it held died with the old process), refused the call (say, a stale binary
+//!   without the method answers METHOD_NOT_FOUND), or answered something that
+//!   did not decode.
 //!
 //! The call has no timeout of its own, like every other call the driver makes
-//! (`PersistentHandle::call`); Matrix's worker bounds its side at 2 s.
+//! (`PersistentHandle::call`); Matrix's worker bounds its side at
+//! `kastellan_matrix_wire::DRAIN_STOP_BOUND_MS`, which the daemon's shutdown
+//! drain is asserted to outlast together with one long-poll.
 
 use super::inbound_drop::report_inbound_dropped;
 use super::{InboundDropStage, InboundDroppedAudit, PolledWorkerSpec, WorkerCalls, WorkerDrainSpec};

@@ -18,8 +18,9 @@
 //! after them). After the stop, the token the store holds is compared with it
 //! ([`sync_response_interrupted`]): if the store moved further, one response
 //! was cut short and the drain says so. A stop that lands after the handlers
-//! but before the callback reads the same way — an over-report, said as
-//! "possibly none", which is the honest direction.
+//! but before the callback reads the same way — and that gap includes
+//! `sync_once`'s trailing `send_outgoing_requests`, a network call — an
+//! over-report, said as "possibly none", which is the honest direction.
 //!
 //! ## Why the comparison needs a write first
 //!
@@ -27,14 +28,24 @@
 //! in-flight token save runs to commit regardless, and a store *read* goes
 //! through a separate connection that would not wait for it. matrix-sdk-sqlite
 //! runs every write on one connection whose blocking closures serialise on a
-//! mutex (deadpool-sync's `interact`), so [`stop_sync`] first saves an empty
-//! [`StateChanges`]: it commits nothing, and it cannot start until any save the
-//! abort left running has committed. ⚠️ That is an implementation detail of
-//! matrix-sdk-sqlite 0.18 — re-check it on an upgrade.
+//! `std::sync::Mutex` (deadpool-sync's `interact`), so [`stop_sync`] first
+//! saves an empty [`StateChanges`] — it commits nothing, and writes no token —
+//! which cannot run while a save holds that lock.
+//!
+//! ⚠️ **Mutual exclusion, not a queue.** The abort drops the save's tokio-level
+//! write guard, and a std mutex is not fair: a save closure submitted just
+//! before the abort, but not yet holding the lock, could lose the race to the
+//! barrier, which would then read the old token — a miss, the worst outcome.
+//! So the barrier runs [`BARRIERS`] times, [`BARRIER_GAP`] apart: a save
+//! submitted before the abort would have to stay unscheduled across all of
+//! them. That narrows the window to a stalled blocking pool; it does not close
+//! it, and the SDK offers no hook that would. ⚠️ All of this is
+//! matrix-sdk-sqlite 0.18's implementation — re-check it on an upgrade.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use kastellan_matrix_wire::DRAIN_STOP_BOUND_MS;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::{Client, LoopCtrl, StateChanges};
 use tokio::runtime::Runtime;
@@ -131,10 +142,16 @@ pub(super) fn spawn_sync_loop(
 pub(super) type HandledToken = Mutex<Option<String>>;
 
 /// How long [`stop_sync`] waits for the stop to land and the store to answer.
-/// An abort lands at the task's next await point, and the barrier write and
+/// An abort lands at the task's next await point, and the barrier writes and
 /// token read are local SQLite calls, so this is generous; it bounds the
-/// driver's exit (and with it the daemon's shutdown) against a wedged store.
-const STOP_BOUND: Duration = Duration::from_secs(2);
+/// driver's exit (and with it the daemon's shutdown, which the core asserts
+/// against) against a wedged store.
+const STOP_BOUND: Duration = Duration::from_millis(DRAIN_STOP_BOUND_MS);
+
+/// How many empty barrier writes [`stop_sync`] makes, and the pause before
+/// each after the first (module docs: the lock is not a queue).
+const BARRIERS: usize = 2;
+const BARRIER_GAP: Duration = Duration::from_millis(20);
 
 /// Record `next_batch` as handled. Called after a response's handlers ran.
 pub(super) fn record_handled(handled: &HandledToken, next_batch: String) {
@@ -170,8 +187,13 @@ pub(super) async fn stop_sync(
         }
         // The barrier: see the module docs. A failed write proves nothing
         // about the store's token, so it reads as interrupted.
-        if client.state_store().save_changes(&StateChanges::default()).await.is_err() {
-            return true;
+        for i in 0..BARRIERS {
+            if i > 0 {
+                tokio::time::sleep(BARRIER_GAP).await;
+            }
+            if client.state_store().save_changes(&StateChanges::default()).await.is_err() {
+                return true;
+            }
         }
         let stored = super::read_prior_sync_token(client).await;
         let handled = handled.lock().expect("handled-token lock not poisoned").clone();
