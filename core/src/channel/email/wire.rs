@@ -79,6 +79,9 @@ pub const EMAIL_POLLED_SPEC: PolledWorkerSpec = PolledWorkerSpec {
     poll_timeout_ms: POLL_MS,
     refusal_backoff: REFUSAL_BACKOFF,
     reply_give_up: REPLY_GIVE_UP,
+    // Nothing is held in the worker between polls: localmail keeps the
+    // messages, and the cursor redelivers what was never acked.
+    drain: None,
 };
 
 /// Configured authserv-id of our own MX. Set once at channel construction:

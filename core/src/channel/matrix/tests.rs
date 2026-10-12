@@ -3,6 +3,7 @@ use super::*;
 // parent) are imported from their sibling modules directly.
 use super::config::parse_daemon_spawn_config;
 use super::policy::matrix_vm_password_path;
+use crate::channel::polled_driver::WorkerHeld;
 use crate::channel::{ConversationId, PeerId};
 use kastellan_sandbox::{Net, Profile};
 
@@ -17,6 +18,24 @@ fn parse_matrix_poll_decodes_wire_events() {
     assert_eq!(evs[0].conversation, "!room:srv");
     assert_eq!(evs[0].body, "hi");
     assert!(parse_matrix_poll(serde_json::json!("garbage")).is_err());
+}
+
+/// #835: the drain's answer decodes from the worker's own wire type, so a
+/// field renamed on one side fails here rather than on every exit.
+#[test]
+fn parse_matrix_drain_decodes_the_worker_wire_type() {
+    let wire = kastellan_matrix_wire::DrainResult { discarded: 4, interrupted: true };
+    let held = parse_matrix_drain(serde_json::to_value(wire).unwrap()).unwrap();
+    assert_eq!(held, WorkerHeld { discarded: 4, interrupted: true });
+    assert!(parse_matrix_drain(serde_json::json!({"events": []})).is_err());
+}
+
+/// #835: the live worker queues events between polls, so Matrix's spec must
+/// name the drain — without it, what the worker held dies uncounted.
+#[test]
+fn the_matrix_spec_drains_its_worker_on_exit() {
+    let drain = MATRIX_POLLED_SPEC.drain.expect("Matrix names a drain method");
+    assert_eq!(drain.method, "matrix.drain");
 }
 
 #[test]

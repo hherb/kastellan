@@ -67,7 +67,7 @@ pub use config::{
     MatrixSpawnConfig,
 };
 pub use policy::{build_matrix_policy, build_matrix_vm_policy, forced_localhost_homeserver};
-pub use wire::{encode_matrix_send, parse_matrix_poll, MATRIX_POLLED_SPEC, POLL_MS};
+pub use wire::{encode_matrix_send, parse_matrix_drain, parse_matrix_poll, MATRIX_POLLED_SPEC, POLL_MS};
 
 // Internal helpers used by the spawn factory below on every platform. The
 // linux-only helpers (`matrix_vm_password_path`, `MATRIX_MICROVM_WORKER_BIN`) and

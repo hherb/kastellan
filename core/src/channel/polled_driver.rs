@@ -27,7 +27,9 @@
 //! `inbound_drop.rs`). A message the bus's buffer *accepted* is acked at once,
 //! though, so one still unread when the bus stops is lost on every channel —
 //! [`InboundReceiver`] counts those (#846), including any a refused (or
-//! failed) ack left redeliverable, which it cannot tell apart. A channel whose
+//! failed) ack left redeliverable, which it cannot tell apart. What the worker
+//! itself still held, received but not yet polled, is counted by its drain
+//! method as the driver exits (#835, `worker_drain.rs`). A channel whose
 //! upstream redelivers without an ack must not leave `ack_method` `None`
 //! without revisiting that, or it writes false `channel.inbound_dropped`
 //! rows.
@@ -107,8 +109,11 @@ mod replies;
 pub use replies::{ReplyGiveUp, REPLY_GIVE_UP};
 mod spec;
 pub use spec::{
-    EncodeAck, EncodeSend, ParseAckOnly, ParsePoll, PolledEvent, PolledWorkerSpec, WorkerCalls,
+    EncodeAck, EncodeSend, ParseAckOnly, ParseDrain, ParsePoll, PolledEvent, PolledWorkerSpec,
+    WorkerCalls, WorkerDrainSpec, WorkerHeld,
 };
+mod worker_drain;
+use worker_drain::drain_worker_on_exit;
 use replies::{
     check_reply_give_up, discard_on_exit, enqueue, flush, ReplyQueues, MAX_QUEUED_PER_CONVERSATION,
 };
@@ -230,6 +235,8 @@ impl PolledWorkerDriver {
 /// channel, and counted, said and audited on one without (#826,
 /// `inbound_drop`); those it took but never read are counted by the
 /// bus-side [`InboundReceiver`] as it is dropped, on every channel (#846).
+/// Last, a spec with a drain method asks the worker how many it still held,
+/// received but never polled (#835, `worker_drain`).
 ///
 /// A failed call is one of two things (#769), told apart by
 /// [`refusal::is_refusal`]:
@@ -266,7 +273,9 @@ fn run(
     // keep theirs per conversation, inside `replies` (#782).
     let mut poll_refusals = RefusalRun::default();
     let mut ack_refusals = RefusalRun::default();
-    loop {
+    // Every exit leaves this loop by `break 'drive`, so the worker is drained
+    // exactly once, below.
+    'drive: loop {
         // 1) Pull newly-queued replies into the local buffer (non-blocking).
         loop {
             match outbound_rx.try_recv() {
@@ -275,7 +284,7 @@ fn run(
                 Err(std_mpsc::TryRecvError::Disconnected) => {
                     tracing::info!(label = spec.label, "outbound sender dropped; polled driver exiting");
                     discard_on_exit(&mut replies, [], spec.label, reply_undelivered.as_ref());
-                    return;
+                    break 'drive;
                 }
             }
         }
@@ -311,7 +320,7 @@ fn run(
                         // audited on one that does not redeliver (#826).
                         on_bus_closed_during_poll(&spec, &cid, parse_poll, v, inbound_dropped.as_ref());
                         discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
-                        return;
+                        break 'drive;
                     }
                     polled = true;
                     accepted(&mut poll_refusals, &mut outage, spec.label, spec.poll_method, None);
@@ -341,7 +350,7 @@ fn run(
                                     let unsent = 1 + events.len();
                                     on_bus_closed_mid_batch(&spec, &cid, unsent, inbound_dropped.as_ref());
                                     discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
-                                    return;
+                                    break 'drive;
                                 }
 
                                 // Ack only after the bus has accepted the event
@@ -431,10 +440,16 @@ fn run(
             if inbound_tx.is_closed() {
                 tracing::info!(label = spec.label, "inbound receiver closed during retry; polled driver exiting");
                 discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
-                return;
+                break 'drive;
             }
             thread::sleep(RETRY_SLICE);
         }
+    }
+
+    // Last: what the worker itself still held (#835). After the reports
+    // above, and before `calls` drops and the worker dies with it.
+    if let Some(drain) = spec.drain {
+        drain_worker_on_exit(&*calls, &spec, drain, &cid, inbound_dropped.as_ref());
     }
 }
 

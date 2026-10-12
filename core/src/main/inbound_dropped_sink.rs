@@ -2,7 +2,8 @@
 //! (#826, #846).
 //!
 //! Matrix calls it from its driver for a polled batch the closed bus never
-//! took, and from its bus-side receiver for messages buffered unread; email
+//! took and for what its worker still held at exit (#835), and from its
+//! bus-side receiver for messages buffered unread; email
 //! from its receiver only (its polled batches are redelivered). One builder,
 //! so the row, the shutdown label and the lost-row line are spelled the same
 //! for both: what differs is the [`SinkWriter`](crate::audit_sink::SinkWriter)
@@ -52,6 +53,12 @@ fn row_what(channel: SinkChannel, stage: InboundDropStage) -> &'static str {
         }
         (SinkChannel::Email, InboundDropStage::Polled) => "email inbound messages dropped",
         (SinkChannel::Email, InboundDropStage::Buffered) => "email inbound messages dropped unread",
+        (SinkChannel::Matrix, InboundDropStage::Worker) => {
+            "matrix inbound messages dropped in the worker"
+        }
+        // Email's spec names no drain method, so this is never written; it is
+        // spelled anyway rather than mislabelled should that change.
+        (SinkChannel::Email, InboundDropStage::Worker) => "email inbound messages dropped in the worker",
     }
 }
 
