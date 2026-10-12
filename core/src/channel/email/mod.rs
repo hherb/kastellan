@@ -67,15 +67,18 @@ pub struct EmailDriverAudit {
     /// `channel.inbound_dropped` row — see [`InboundDroppedAudit`]. On email
     /// that is only ever the *buffered* stage (#846), called by the bus-side
     /// receiver: messages the bus's buffer accepted, and the driver therefore
-    /// acked, that the bus never read (any whose ack failed or was held back
-    /// by a refused ack are redelivered, and counted anyway). A batch the bus
+    /// acked, that the bus never read (any held back by a refused ack, or
+    /// whose own ack failed, may be redelivered, and is counted anyway). A
+    /// batch the bus
     /// never took is not acked, so the worker redelivers it, and the driver
     /// never calls this hook for it (#826).
     pub inbound_dropped: Option<InboundDroppedAudit>,
 }
 
 impl EmailDriverAudit {
-    /// No audit hooks, for a caller with no database (the `email probe`).
+    /// No audit hooks, for a caller with no database (e.g. a future
+    /// `kastellan-cli email probe`): unread buffered messages are still
+    /// logged, and the line says they were not recorded.
     pub fn none() -> Self {
         Self { ack_only: None, inbound_dropped: None }
     }

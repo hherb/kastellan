@@ -282,7 +282,7 @@ fn the_drop_line_counts_and_says_whether_it_is_recorded() {
 /// The row is channel + stage + count + when, and the action is pinned literally:
 /// operators query `audit_log` by that string.
 #[test]
-fn the_inbound_dropped_row_is_channel_count_and_when_only() {
+fn the_inbound_dropped_row_is_channel_stage_count_and_when_only() {
     let v = InboundDropped {
         channel: &ChannelId("matrix".into()),
         stage: InboundDropStage::Polled,

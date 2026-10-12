@@ -101,7 +101,8 @@ accepts **both**: a custom root CA **and** a CONNECT-over-UDS proxy.
   `channel.inbound_dropped` (messages lost because the bus closed, with a count and a
   `stage`: `polled` — Matrix messages the driver still held, #826; `buffered` — messages
   on either channel the bus had taken but not yet read, #846. On email `buffered` can
-  over-count: a message whose ack failed is redelivered but counted anyway).
+  over-count: a message held back by a refused ack earlier in its batch, or whose own ack
+  failed, may be redelivered but is counted anyway).
 - Replies the bus missed while it was down are **caught up**, not lost (#825): at bus
   start and every 5 min it routes every finished channel task whose reply was never
   settled, the late ones prefixed "(Delayed reply — you sent this … ago.)".

@@ -7,10 +7,12 @@
 //! that may still write a row. A sink's hook closures own its writer (each
 //! channel's two share it through an `Arc`), and the driver owns the hooks —
 //! all but the inbound-dropped hook's second clone, which the bus-side
-//! receiver holds (#846). The receiver is always dropped first (the driver
-//! exits *because* its endpoints closed), so the lease still ends exactly when
-//! the driver drops its last hook — as its thread returns, after any exit rows
-//! are spawned. No driver has to remember to report its exit.
+//! receiver holds (#846). So the lease ends when the later of the two lets go
+//! — normally the driver, as its thread returns after any exit rows are
+//! spawned, since it exits *because* its endpoints closed. Either way each
+//! side spawns its rows before its own clone drops, so no row outlives the
+//! lease, whichever order they go in. No driver has to remember to report its
+//! exit.
 //!
 //! **A lease can start before its driver does**
 //! ([`SinkWriter::starting_with_ledger`]). Matrix builds its writer before a

@@ -26,8 +26,8 @@
 //! counted, said, and handed to [`InboundDroppedAudit`] (#826, see
 //! `inbound_drop.rs`). A message the bus's buffer *accepted* is acked at once,
 //! though, so one still unread when the bus stops is lost on every channel —
-//! [`InboundReceiver`] counts those (#846), including the few an ack failure
-//! or refusal left redeliverable, which it cannot tell apart. A channel whose
+//! [`InboundReceiver`] counts those (#846), including any a refused (or
+//! failed) ack left redeliverable, which it cannot tell apart. A channel whose
 //! upstream redelivers without an ack must not leave `ack_method` `None`
 //! without revisiting that, or it writes false `channel.inbound_dropped`
 //! rows.
@@ -118,6 +118,8 @@ use super::{ChannelId, ConversationId, IncomingMessage, OutgoingMessage, PeerId}
 /// Bounded depth of the inbound buffer between the driver thread and the bus.
 /// Matches the Matrix channel's historical value; a single-user channel never
 /// reaches it (the driver `blocking_send`s past it — backpressure, not drop).
+/// At a stop, what is still in it is dropped, and counted by
+/// [`InboundReceiver`] (#846).
 const INBOUND_BUFFER: usize = 256;
 
 /// How long the driver sleeps between iterations that completed no poll: the
@@ -356,13 +358,15 @@ fn run(
                                 // lost. A failed ack call itself is also
                                 // non-fatal — it just leaves the worker's
                                 // cursor unadvanced, so the message is
-                                // redelivered. At-least-once, by design.
+                                // redelivered, unless a later ack in this
+                                // batch moves the monotonic cursor past it.
+                                // At-least-once, by design, bar that residual.
                                 if let (true, Some(method), Some(enc), Some(tok)) =
                                     (acking, spec.ack_method, encode_ack, ack_token.as_deref())
                                 {
                                     match ack(&*calls, &spec, method, enc(tok), &mut outage, &mut ack_refusals) {
                                         Ok(keep) => acking = keep,
-                                        Err(e) => tracing::warn!(label = spec.label, error = %e, "ack failed; event will be redelivered"),
+                                        Err(e) => tracing::warn!(label = spec.label, error = %e, "ack failed; event will be redelivered unless a later ack passes it"),
                                     }
                                 }
                             }

@@ -61,9 +61,9 @@ fn row_what(channel: SinkChannel, stage: InboundDropStage) -> &'static str {
 /// It is called from the driver's own std thread, which every conversation
 /// and the poll wait on, or from the bus's stopping pump, so the insert is
 /// **spawned** through `writer`, not awaited: a slow or unreachable Postgres
-/// must not stall either. The hook holds an `Arc` of `writer`, so its lease
-/// lasts until both the driver and the receiver have dropped their clones of
-/// it. A row that was not written is reported on the `[audit-lost]` marker
+/// must not stall either. The hook holds an `Arc` of `writer`, so the lease
+/// lasts until the driver, the receiver and any sibling hook built on the same
+/// writer have all dropped theirs. A row that was not written is reported on the `[audit-lost]` marker
 /// ([`format_inbound_row_lost`]), under the writer's channel.
 ///
 /// `report` is how a lost row is said: [`crate::audit_sink::emit_report`] in

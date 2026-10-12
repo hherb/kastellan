@@ -307,15 +307,16 @@ pub mod actions {
     /// - `buffered` (#846): messages the driver had handed over, still in
     ///   the bus's inbound buffer unread when it stopped — on every channel,
     ///   because an ack channel (email) acks a message once the buffer takes
-    ///   it. Over-counts on email by any whose ack failed or was held back
-    ///   by a refused ack earlier in its batch: those are redelivered.
+    ///   it. Over-counts on email by any held back by a refused ack earlier
+    ///   in its batch, which are redelivered, and by any whose own ack failed
+    ///   and that no later ack moved the cursor past.
     ///
     /// Carries the channel, the stage, the count (`dropped`) and the event's
     /// time (`observed_at`) only: never a peer, an id or a body, all
     /// peer-supplied. Written by the channel's driver audit hook (the driver
     /// for `polled`, the bus-side receiver for `buffered`); the payload is
     /// [`super::polled_driver::InboundDropped::payload`]'s. Rows written
-    /// before #846 have no `stage`; they are all `polled`.
+    /// before #846 shipped (PR #849) have no `stage`; they are all `polled`.
     ///
     /// Not every inbound loss, so a quiet `audit_log` is not proof of none:
     /// messages the worker had received but not yet returned from a poll

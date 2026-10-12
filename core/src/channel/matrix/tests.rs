@@ -241,3 +241,25 @@ fn vm_policy_has_persistent_store_at_data_and_microvm_env() {
     assert!(p.env.iter().any(|(k, v)| k == "KASTELLAN_MICROVM_ROOTFS"
         && v == "matrix.ext4"));
 }
+
+/// #846: the hooks a caller hands `spawn_matrix_worker` reach the driver (and,
+/// for `inbound_dropped`, the bus-side receiver it hands a clone to). A
+/// conversion that dropped either would leave Matrix's rows unwritten with
+/// nothing else failing.
+#[test]
+fn matrix_driver_audit_hands_both_hooks_to_the_driver() {
+    use crate::channel::polled_driver::InboundDropped;
+    use crate::channel::UndeliveredReply;
+    let inbound: InboundDroppedAudit = Arc::new(|_: InboundDropped<'_>| {});
+    let audit = MatrixDriverAudit {
+        reply_undelivered: Some(Box::new(|_: UndeliveredReply<'_>| {})),
+        inbound_dropped: Some(inbound.clone()),
+    }
+    .into_driver_audit();
+    assert!(audit.reply_undelivered.is_some(), "the reply hook reaches the driver");
+    assert!(
+        audit.inbound_dropped.as_ref().is_some_and(|h| Arc::ptr_eq(h, &inbound)),
+        "the inbound-dropped hook reaches the driver, the same one"
+    );
+    assert!(audit.ack_only.is_none(), "Matrix has no ack cursor");
+}

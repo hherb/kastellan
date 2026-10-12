@@ -37,14 +37,16 @@
 //! buffer accepts it (`polled_driver::run`), not when the bus reads it — so a
 //! buffered message has already moved the worker's cursor past itself.
 //!
-//! ⚠️ Not every one, though, and the count cannot tell. An ack that fails, or
-//! that a refused ack earlier in the same batch held back (a refusal stops
-//! acking the rest of its batch, which is still handed over), leaves the
-//! cursor short, so those messages ARE redelivered. After a refusal that can
-//! be a whole batch tail. The receiver cannot see which buffered messages
-//! were acked, so it counts them all and the line says so: over-counting is
-//! the honest direction, because an unsaid loss is the defect this module
-//! exists for.
+//! ⚠️ Not every one, though, and the count cannot tell. A refused ack stops
+//! acking the rest of its batch, which is still handed over, so that tail —
+//! possibly most of a batch — leaves the cursor short and IS redelivered. A
+//! failed ack (the worker down) does not stop acking: the message is
+//! redelivered only if no later ack in the batch moves the cursor past it,
+//! because the cursor is one monotonic high-water mark (`polled_driver`'s
+//! module docs); otherwise it is lost, and rightly counted. The receiver
+//! cannot see which buffered messages were acked, so it counts them all and
+//! the line says so: over-counting is the honest direction, because an
+//! unsaid loss is the defect this module exists for.
 //!
 //! ## What this does not count
 //!
@@ -153,8 +155,8 @@ pub(super) fn format_unread_drop_report(n: NonZeroUsize, acks: bool, sink: bool)
     let why = if acks {
         format!(
             "this channel acked {them} when {} handed to the bus, so {} not redelivered (any \
-             whose ack failed, or was held back by a refused ack earlier in its batch, is \
-             redelivered, and counted here anyway)",
+             held back by a refused ack earlier in its batch, or whose own ack failed, may be \
+             redelivered, and is counted here anyway)",
             if one { "it was" } else { "they were" },
             if one { "it is" } else { "they are" },
         )
@@ -171,7 +173,7 @@ pub(super) fn format_unread_drop_report(n: NonZeroUsize, acks: bool, sink: bool)
 /// Say that `n` inbound messages on `cid` were dropped at `stage`, and hand
 /// the count to the audit hook. Nothing for `n == 0`. `acks` is the channel's
 /// (it only changes the [`InboundDropStage::Buffered`] line: the polled stage
-/// is never reported on an ack channel).
+/// is never reported on an ack channel, so its callers pass `false`).
 pub(super) fn report_inbound_dropped(
     label: &str,
     cid: &ChannelId,
@@ -243,7 +245,8 @@ pub(super) fn on_bus_closed_during_poll(
         return;
     }
     tracing::info!(label = spec.label, "inbound receiver closed during a poll; polled driver exiting");
-    // Decoded only to count it: nothing in it is used.
+    // Decoded only to count it: nothing in it is used. `acks: false` — an
+    // ack channel returned above.
     match parse_poll(v) {
         Ok(events) => {
             report_inbound_dropped(spec.label, cid, InboundDropStage::Polled, events.len(), false, audit)
@@ -270,5 +273,6 @@ pub(super) fn on_bus_closed_mid_batch(
         return;
     }
     tracing::info!(label = spec.label, "inbound receiver closed; polled driver exiting");
+    // `acks: false` — an ack channel returned above.
     report_inbound_dropped(spec.label, cid, InboundDropStage::Polled, unsent, false, audit);
 }

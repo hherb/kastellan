@@ -4,7 +4,7 @@
 //! that called its hook directly, untimed, fails here. Each test
 //! reads the slow-hook record for its own channel label.
 use super::*;
-use crate::channel::polled_driver::audit::{format_slow_hook_report, slow_hook_reports_for, HOOK_BUDGET};
+use crate::channel::polled_driver::audit::{format_slow_hook_report, slow_hook_reports_for, HookCaller, HOOK_BUDGET};
 use crate::channel::polled_driver::outage::OutageLog;
 use crate::channel::polled_driver::refusal::RefusalRun;
 use crate::channel::polled_driver::replies::ReplyQueues;
@@ -16,13 +16,24 @@ const SLOW: Duration = Duration::from_millis(250);
 
 #[test]
 fn a_hook_is_reported_only_past_its_budget() {
-    assert_eq!(format_slow_hook_report("reply-undelivered", HOOK_BUDGET), None);
-    let line = format_slow_hook_report("reply-undelivered", HOOK_BUDGET + Duration::from_millis(1))
+    let over = HOOK_BUDGET + Duration::from_millis(1);
+    assert_eq!(format_slow_hook_report("reply-undelivered", HookCaller::DriverThread, HOOK_BUDGET), None);
+    let line = format_slow_hook_report("reply-undelivered", HookCaller::DriverThread, over)
         .expect("past the budget");
     assert_eq!(
         line,
         "the reply-undelivered audit hook held the driver thread for 101 ms; an audit hook must \
          not block (#789): every conversation, the poll and the ack wait on this thread"
+    );
+    // #846: a buffered-stage drop's hook runs in the bus's stopping pump, not
+    // on the driver thread, and the line says so.
+    let line = format_slow_hook_report("inbound-dropped", HookCaller::StoppingBus, over)
+        .expect("past the budget");
+    assert_eq!(
+        line,
+        "the inbound-dropped audit hook held the bus's stopping pump for 101 ms; an audit hook \
+         must not block (#789): the channel's stop, and so a restart or a daemon shutdown, \
+         waits on it"
     );
 }
 

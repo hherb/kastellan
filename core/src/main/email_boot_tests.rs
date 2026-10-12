@@ -146,9 +146,9 @@ fn the_skipped_id_row_is_the_bus_s_actor_and_the_view_s_payload() {
     assert_eq!(payload["message_id"], "<id@host>", "POSITIVE CONTROL: the view's own payload");
 }
 
-/// #802: the sink `attempt` builds holds a live lease at once, of a driver
-/// that audits nothing on exit — so one still in its long-poll at shutdown is
-/// waited for, then said at INFO, not as a loss.
+/// #802/#846: the two hooks `attempt` builds share one live lease, held at
+/// once, of a driver that audits nothing on exit — so one still in its
+/// long-poll at shutdown is waited for, then said at INFO, not as a loss.
 #[test]
 fn attempt_s_sink_is_live_at_once_and_silent_on_exit() {
     use crate::audit_sink::{Bounds, InFlight, Ledger};

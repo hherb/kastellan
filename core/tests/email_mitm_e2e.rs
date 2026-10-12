@@ -18,7 +18,7 @@
 //! re-originated TLS connection the anchor validated.
 //!
 //! Skips as-pass when the sandbox or a required binary is missing; no Postgres
-//! is involved (the channel path is DB-free — `audit_ack_only` is `None` here).
+//! is involved (the channel path is DB-free — `EmailDriverAudit::none()` here).
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 

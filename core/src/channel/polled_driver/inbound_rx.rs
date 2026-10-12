@@ -11,9 +11,10 @@
 //! Neither channel brings them back: Matrix never redelivers, and email has
 //! already acked them, because the driver acks a message once the buffer
 //! accepts it, not once the bus reads it (`polled_driver::run`) — all but any
-//! whose ack failed or was held back by a refused ack earlier in the batch,
-//! which are redelivered but cannot be told apart from here, so they are
-//! counted too (`inbound_drop`'s module docs). So
+//! held back by a refused ack earlier in the batch (or whose own ack failed
+//! and no later ack moved the cursor past it), which may be redelivered but
+//! cannot be told apart from here, so they are counted too (`inbound_drop`'s
+//! module docs). So
 //! [`InboundReceiver`] counts them as it is dropped and reports the count at
 //! the [`InboundDropStage::Buffered`] stage: one `[worker-refusal]` WARN and
 //! one `channel.inbound_dropped` row through the channel's
@@ -31,11 +32,17 @@ use super::InboundDroppedAudit;
 use crate::channel::{ChannelId, IncomingMessage};
 
 /// How many times [`drain_unread`] looks again at a buffer that is closed but
-/// not yet settled — a send the driver had already been granted a slot for
-/// when the buffer closed, still on its way in. That send is a few
-/// instructions on the driver's thread, so a short spin of `yield_now`s covers
-/// it; the bound keeps a `Drop` from ever spinning on a thread that is not
-/// coming back.
+/// not yet settled: a slot granted before the close is still held. Usually
+/// that is a send on its way in, a few instructions on the driver's thread.
+/// But on a full buffer the slot may just have been handed to the driver
+/// while it waited in `blocking_send`; then the driver has to be scheduled
+/// before it finds the buffer closed and gives the slot back, its send
+/// refused — a wake-up, which a loaded host can delay past the spin. A short
+/// spin of `yield_now`s covers the common case; the bound keeps a `Drop` from
+/// ever spinning on a thread that is not coming back. (It bounds a held slot
+/// only: tokio's own `try_recv` also waits, unbounded, on a send that has
+/// claimed its place in the list but not yet written it — a few atomic
+/// operations on the sending thread.)
 const SETTLE_SPINS: usize = 1_000;
 
 /// The receiving end of a polled driver's inbound buffer, as a channel holds
@@ -95,11 +102,12 @@ impl Drop for InboundReceiver {
     fn drop(&mut self) {
         let drained = drain_unread(&mut self.rx);
         if !drained.settled {
-            // Diagnostic only: the count below already includes the send.
+            // Diagnostic only: the count below already includes the slot.
             tracing::warn!(
                 label = self.label,
-                "a send was still landing in the closed inbound buffer after {SETTLE_SPINS} \
-                 spins; counting it as lost"
+                "a slot granted before the inbound buffer closed was still held after \
+                 {SETTLE_SPINS} spins; counting its message as lost (if the driver's send was \
+                 refused instead, the driver reports it too, or the channel redelivers it)"
             );
         }
         report_inbound_dropped(
@@ -118,17 +126,23 @@ impl Drop for InboundReceiver {
 pub(super) struct Drained {
     /// Messages taken out of the buffer and discarded.
     pub(super) unread: usize,
-    /// Whether the buffer settled: closed, empty, and no send still on its
-    /// way in. `false` only when a send granted its slot before the close had
-    /// still not landed after [`SETTLE_SPINS`] looks.
+    /// Whether the buffer settled: closed, empty, and no slot still held.
+    /// `false` only when a slot granted before the close was still held after
+    /// [`SETTLE_SPINS`] looks.
     pub(super) settled: bool,
 }
 
 impl Drained {
-    /// Pure: how many messages the stop lost. An unsettled send lands after
-    /// the drain, in a buffer about to be dropped, so it is lost too — and
-    /// there is at most one: the driver's thread is the buffer's only sender,
-    /// and it sends one message at a time.
+    /// Pure: how many messages the stop lost, counting an unsettled slot as
+    /// one. There is at most one such slot: the driver's thread is the
+    /// buffer's only sender (`PolledWorkerDriver::spawn` moves the sole
+    /// `Sender` into `run`; never clone it), and it sends one message at a
+    /// time. Its message either lands after the drain, in a buffer about to
+    /// be dropped — lost — or, when the slot was handed to a driver waiting
+    /// on a full buffer, its send is refused, and the driver reports it at the
+    /// polled stage (Matrix) or the worker redelivers it (email). The drain
+    /// cannot tell which, so it counts it: over-counting is the honest
+    /// direction (`inbound_drop`'s module docs).
     pub(super) fn lost(self) -> usize {
         self.unread + usize::from(!self.settled)
     }
@@ -140,9 +154,16 @@ impl Drained {
 /// next send fails, and the driver reports what it still holds itself, at the
 /// [`InboundDropStage::Polled`] stage. One send can still land after the
 /// close, if it had been granted its slot just before; `try_recv` reports
-/// `Empty` (not `Disconnected`) until it has, so the loop waits for it — at
-/// most [`SETTLE_SPINS`] times, after which it says the buffer did not settle
-/// ([`Drained::settled`]) rather than return a count that silently misses it.
+/// `Empty` (not `Disconnected`) while any slot is held, so the loop waits for
+/// it — at most [`SETTLE_SPINS`] times, after which it says the buffer did not
+/// settle ([`Drained::settled`]) rather than return a count that silently
+/// misses it. A held slot can also end in a refused send rather than a landed
+/// one (see [`SETTLE_SPINS`]); waiting tells the two apart, running out of
+/// spins does not.
+///
+/// Relies on tokio ≥ 1.52.3's `try_recv`: after `close()`, `Empty` while a
+/// slot is held and `Disconnected` once none is, even with the sender alive
+/// (the workspace pins that floor; `tests/inbound_rx.rs` pins the behaviour).
 pub(super) fn drain_unread<T>(rx: &mut tok_mpsc::Receiver<T>) -> Drained {
     rx.close();
     let mut unread = 0;

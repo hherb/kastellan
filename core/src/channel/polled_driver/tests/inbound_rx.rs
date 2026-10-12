@@ -85,9 +85,44 @@ fn an_unsettled_drain_counts_the_send_still_on_its_way() {
     drop(permit);
 }
 
-/// Pure: a settled drain loses exactly what it took out.
+/// The other end of a held slot: it need not land. On a full buffer the slot
+/// the bus frees goes straight to the driver waiting in its send; if the
+/// buffer closes before that driver runs, its send is refused and the slot
+/// given back — so an unsettled drain can count a message that never entered
+/// the buffer (which the driver then reports too, or the worker redelivers).
+/// The send future is polled by hand, so "before the driver runs" is exact,
+/// not a race.
 #[test]
-fn a_settled_drain_loses_exactly_what_it_took_out() {
+fn a_slot_handed_to_a_waiting_sender_can_end_in_a_refused_send() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Wake, Waker};
+    struct NoWake;
+    impl Wake for NoWake {
+        fn wake(self: Arc<Self>) {}
+    }
+    let waker = Waker::from(Arc::new(NoWake));
+    let mut cx = Context::from_waker(&waker);
+
+    let (tx, mut rx) = tok_mpsc::channel::<u8>(1);
+    tx.try_send(0).unwrap();
+    let mut send = Box::pin(tx.send(1));
+    assert!(send.as_mut().poll(&mut cx).is_pending(), "the buffer is full: the sender waits");
+    assert_eq!(rx.try_recv().ok(), Some(0), "the bus reads one, handing its slot to the waiter");
+    assert_eq!(
+        drain_unread(&mut rx),
+        Drained { unread: 0, settled: false },
+        "the waiter holds the slot, so the drain cannot settle"
+    );
+    assert!(
+        matches!(send.as_mut().poll(&mut cx), Poll::Ready(Err(_))),
+        "the waiter finds the buffer closed: its send is refused, not landed"
+    );
+    assert_eq!(drain_unread(&mut rx), Drained { unread: 0, settled: true }, "and the slot is given back");
+}
+
+/// Pure: a drain loses what it took out, plus one for an unsettled slot.
+#[test]
+fn lost_counts_what_was_taken_out_plus_an_unsettled_slot() {
     assert_eq!(Drained { unread: 0, settled: true }.lost(), 0);
     assert_eq!(Drained { unread: 5, settled: true }.lost(), 5);
     assert_eq!(Drained { unread: 0, settled: false }.lost(), 1);
@@ -138,6 +173,56 @@ fn messages_buffered_unread_are_counted_said_and_audited() {
     assert!(lines[0].0.contains("this channel does not redeliver"), "{lines:?}");
     assert!(lines[0].0.contains("recording it as channel.inbound_dropped"), "{lines:?}");
     assert!(!lines[0].0.contains("m0"), "never a body: {lines:?}");
+}
+
+/// A slot held as the receiver drops is counted in the row, not only by
+/// [`Drained::lost`]: the `Drop` reports what the drain lost, the slot with
+/// it.
+#[test]
+fn a_receiver_dropped_while_a_slot_is_held_counts_the_slot() {
+    let dropped: Dropped = Arc::default();
+    let (rx, tx) = buffered("t-unread-inflight", 1, false, Some(hook(&dropped)));
+    let permit = tx.try_reserve().expect("a slot");
+    drop(rx);
+    assert_eq!(counts(&dropped.lock().unwrap()), [("t-unread-inflight".into(), InboundDropStage::Buffered, 2)]);
+    let lines = emitted_refusal_lines_for("t-unread-inflight");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].0.contains("dropped 2 inbound messages"), "{lines:?}");
+    drop(permit);
+}
+
+/// The driver had already exited (its sender is gone): an empty buffer still
+/// reports nothing, and messages it left behind are still counted.
+#[test]
+fn a_receiver_whose_driver_has_exited_counts_only_what_it_left() {
+    let dropped: Dropped = Arc::default();
+    let (rx, tx) = buffered("t-unread-gone-empty", 0, false, Some(hook(&dropped)));
+    drop(tx);
+    drop(rx);
+    assert!(dropped.lock().unwrap().is_empty());
+    assert!(emitted_refusal_lines_for("t-unread-gone-empty").is_empty());
+
+    let (rx, tx) = buffered("t-unread-gone", 2, false, Some(hook(&dropped)));
+    drop(tx);
+    drop(rx);
+    assert_eq!(counts(&dropped.lock().unwrap()), [("t-unread-gone".into(), InboundDropStage::Buffered, 2)]);
+}
+
+/// A slow hook at the buffered stage is said — as holding the bus's stopping
+/// pump, which is where it runs, not the driver thread.
+#[test]
+fn a_slow_hook_at_the_buffered_stage_is_said_to_hold_the_stopping_bus() {
+    use super::super::audit::slow_hook_reports_for;
+    let slow: InboundDroppedAudit =
+        Arc::new(|_: InboundDropped<'_>| std::thread::sleep(Duration::from_millis(250)));
+    let (rx, _tx) = buffered("t-unread-slow-hook", 1, false, Some(slow));
+    drop(rx);
+    let lines = slow_hook_reports_for("t-unread-slow-hook");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("the inbound-dropped audit hook held the bus's stopping pump"),
+        "{lines:?}"
+    );
 }
 
 /// The common case: the bus had read everything. Nothing is said or recorded.
@@ -192,9 +277,9 @@ fn the_unread_line_counts_and_gives_the_channel_s_reason() {
         line(3, true, true),
         "dropped 3 inbound messages: the bus stopped (the channel was restarted or shut down) \
          before reading them from its inbound buffer, and this channel acked them when they were \
-         handed to the bus, so they are not redelivered (any whose ack failed, or was held back by \
-         a refused ack earlier in its batch, is redelivered, and counted here anyway); recording \
-         it as channel.inbound_dropped"
+         handed to the bus, so they are not redelivered (any held back by a refused ack earlier in \
+         its batch, or whose own ack failed, may be redelivered, and is counted here anyway); \
+         recording it as channel.inbound_dropped"
     );
     assert!(line(2, false, false).ends_with("this channel has no audit sink"), "{}", line(2, false, false));
 }
@@ -204,12 +289,23 @@ fn the_unread_line_counts_and_gives_the_channel_s_reason() {
 /// Spawn a driver whose one poll answers `n` events, wait until all `n` sit
 /// in the buffer unread, then drop the receiver (the bus stopping) and wait
 /// for the driver to exit. Returns what the hook was handed and how many acks
-/// the worker saw.
-fn run_bus_stops_unread(label: &'static str, n: usize, ack: bool) -> (Vec<(String, InboundDropStage, usize)>, usize) {
+/// the worker saw. `refuse_first_ack` (ack shape only) refuses the batch's
+/// first ack, so the driver acks none of the rest.
+fn run_bus_stops_unread(
+    label: &'static str,
+    n: usize,
+    ack: bool,
+    refuse_first_ack: bool,
+) -> (Vec<(String, InboundDropStage, usize)>, usize) {
     let (st, calls) = fake();
     st.polls.lock().unwrap().push_back(events(n, ack));
     let base = if ack { spec_with_ack() } else { spec_without_ack() };
     let spec = PolledWorkerSpec { label, ..base };
+    if refuse_first_ack {
+        *st.refuse.lock().unwrap() = Some((spec.ack_method.expect("an ack shape").into(), 1));
+    }
+    // The refused ack is still a call the worker saw.
+    let expected_acks = if refuse_first_ack { 1 } else { n };
     let encode_ack: Option<EncodeAck> = if ack { Some(encode_test_ack) } else { None };
     let dropped: Dropped = Arc::default();
     let audit = DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() };
@@ -221,7 +317,7 @@ fn run_bus_stops_unread(label: &'static str, n: usize, ack: bool) -> (Vec<(Strin
     wait_until(|| inbound_rx.len() == n);
     if ack {
         let log = &st.log;
-        wait_until(|| log.lock().unwrap().iter().filter(|(m, _)| m.ends_with(".ack")).count() == n);
+        wait_until(|| log.lock().unwrap().iter().filter(|(m, _)| m.ends_with(".ack")).count() == expected_acks);
     }
     drop(inbound_rx);
     join.join().expect("the driver exits cleanly");
@@ -236,15 +332,36 @@ fn run_bus_stops_unread(label: &'static str, n: usize, ack: bool) -> (Vec<(Strin
 /// buffered stage — the driver, exiting on its next poll, adds nothing.
 #[test]
 fn a_bus_that_stops_with_unread_messages_reports_them_once() {
-    let (dropped, _acks) = run_bus_stops_unread("t-unread-run", 3, false);
+    let (dropped, _acks) = run_bus_stops_unread("t-unread-run", 3, false, false);
     assert_eq!(dropped, [("t-unread-run".into(), InboundDropStage::Buffered, 3)]);
+    // The receiver the real spawn built knows this channel does not ack.
+    let lines = emitted_refusal_lines_for("t-unread-run");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].0.contains("this channel does not redeliver"), "{lines:?}");
+    assert!(!lines[0].0.contains("acked"), "{lines:?}");
 }
 
 /// The same on email's shape: the driver acked all three as the buffer took
 /// them (the positive control), so they are lost and reported.
 #[test]
 fn an_ack_channel_s_acked_unread_messages_are_reported_once() {
-    let (dropped, acks) = run_bus_stops_unread("email-unread-run", 3, true);
+    let (dropped, acks) = run_bus_stops_unread("email-unread-run", 3, true, false);
     assert_eq!(acks, 3, "POSITIVE CONTROL: the driver acked what the buffer took");
     assert_eq!(dropped, [("email-unread-run".into(), InboundDropStage::Buffered, 3)]);
+}
+
+/// The deliberate over-count, pinned as behaviour: a refused first ack stops
+/// the driver acking the rest of its batch, which the worker therefore
+/// redelivers — but the receiver cannot see that, so it counts all three, and
+/// its line says such messages may be redelivered.
+#[test]
+fn an_ack_channel_s_refused_ack_tail_is_still_counted() {
+    let (dropped, acks) = run_bus_stops_unread("email-unread-refused", 3, true, true);
+    assert_eq!(acks, 1, "POSITIVE CONTROL: the first ack was refused, and no other was tried");
+    assert_eq!(dropped, [("email-unread-refused".into(), InboundDropStage::Buffered, 3)]);
+    let lines = emitted_refusal_lines_for("email-unread-refused");
+    let drop_lines: Vec<_> = lines.iter().filter(|(l, _)| l.contains("inbound message")).collect();
+    assert_eq!(drop_lines.len(), 1, "{lines:?}");
+    assert!(drop_lines[0].0.contains("held back by a refused ack"), "{lines:?}");
+    assert!(drop_lines[0].0.contains("may be redelivered"), "{lines:?}");
 }

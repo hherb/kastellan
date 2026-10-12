@@ -9,7 +9,7 @@
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-12 (#846 — a stopping bus's unread inbound buffer is counted, on both
-channels; PR [#849](https://github.com/hherb/kastellan/pull/849), gate green, review applied. PR
+channels; PR [#849](https://github.com/hherb/kastellan/pull/849), gate green, two review rounds applied. PR
 [#847](https://github.com/hherb/kastellan/pull/847) (#832) **merged 2026-10-12**; the operator is still
 running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#849](https://github.com/hherb/kastellan/pull/849) (#846), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
@@ -53,12 +53,23 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - ⚠️ **Email IS counted, against the issue's text:** `run` acks right after `blocking_send` returns
   `Ok`, so a buffered email is already acked. ⚠️ **It over-counts on purpose:** a refused ack stops
   acking the rest of its batch (still handed over), and those ARE redelivered; the receiver cannot
-  tell, and the line says so.
+  tell, and the line says so ("may be redelivered"). A *failed* ack does NOT stop acking, so a later
+  ack can move the monotonic cursor past it — then it is really lost, and rightly counted.
 - `InboundDroppedAudit` is an **`Arc` (+ `Sync`)** — driver and receiver share it. The daemon builder
   is `core/src/main/inbound_dropped_sink.rs` (moved out of `matrix_boot`); email has
   **`EmailDriverAudit`** (`spawn_email_worker`'s last arg), both its hooks on one writer/lease.
-- `drain_unread` → `Drained { unread, settled }`; an unsettled drain (a send granted its slot before
-  the close, not landed after 1000 yields) counts that send via `Drained::lost` (one sender ⇒ ≤ 1).
+- `drain_unread` → `Drained { unread, settled }`; an unsettled drain (a slot granted before the
+  close, still held after 1000 yields) counts it via `Drained::lost` (one sender ⇒ ≤ 1). ⚠️ **A held
+  slot need not land** (review round 2): on a full buffer the slot the bus frees goes to the driver
+  waiting in `blocking_send`; if the close beats the driver's wake-up, tokio refuses its send
+  (`poll_acquire` checks `CLOSED` first) — so a loaded host can over-count by 1, and on Matrix the
+  driver counts the same message at `polled`. Kept as an over-count, said in the WARN; pinned by
+  `a_slot_handed_to_a_waiting_sender_can_end_in_a_refused_send` (hand-polled, not a race).
+- ⚠️ **The drain needs tokio ≥ 1.52.3** (`try_recv` → `Disconnected` after `close()` once no slot is
+  held, sender alive); older 1.x reads `Empty` and every stop would +1. The workspace floor is now
+  `1.52.3`. The slow-hook WARN names its caller (`HookCaller`): a buffered-stage hook holds the
+  bus's stopping pump, not the driver thread. #810 (drain skipped when signal registration fails)
+  now also covers the receiver's teardown-only row — commented there.
 - ⚠️ **A Mac sweep without `KASTELLAN_PG_BIN_DIR` in its command line is NOT evidence** — this
   session's first one was `4986/0/52`, exit 0, and **372 `[SKIP]`** (350 "no Postgres install
   found"). Only the `[SKIP]` count shows it [[postgres-app-bin-paths]].
@@ -288,7 +299,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    restart under inbound traffic can leave `channel.inbound_dropped` rows with `stage = 'buffered'`
    — on email too now (`select payload->>'channel', payload->>'stage', payload->>'dropped' from
    audit_log where action = 'channel.inbound_dropped' order by id desc`). Natural next security
-   items: #835 (events queued inside the Matrix worker — the last uncounted inbound stage), #836,
+   items: #835 (events queued inside the Matrix worker — the last uncounted inbound stage), #836, #810,
    #833 (stderr panic in a `Drop`; needs a design call, now also `bus_guards` and `InboundReceiver`),
    #829, #831 and #817.
 
@@ -391,7 +402,8 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#846 — **the gate that stands**) | PR #849 (`42d24a43`) | **4986 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set; reconciled per suite against the #832 row: core lib **+23** = #847's review commit **9** (landed after that row's sweep) + #849 **14**; bin **+2**; `[WARN]` 0, `[SKIP]` **23** (`--nocapture`); log `~/sweep-846-pg.log`. Mutants killed 9/9 (no count, no close, wrong stage, acks ignored, hook not shared, count-one, in-flight uncounted, report zero, claims settled) | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-846`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#846 review round 2 — **the gate that stands**) | PR #849 (review-2 commit, on `ff843913`) | **4993 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set; exactly the row below **+7**, all core lib (`inbound_rx` +5: refused waiting send, `Drop` with a held slot, driver already gone, slow hook at the stopping bus, refused-ack tail; email + Matrix `into_driver_audit` +2); `[WARN]` 0, `[SKIP]` **23**; log `~/sweep-846-fix.log`. Mutants killed 7/7 (`Drop` uses `unread`, ack flag const `true`, email `inbound_dropped`/`ack_only` → `None`, caller mapping swapped, Matrix `inbound_dropped`/`reply_undelivered` → `None`) — 3 of them survived round 1's suite | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-846fix`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#846 — superseded) | PR #849 (`42d24a43`) | **4986 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set; reconciled per suite against the #832 row: core lib **+23** = #847's review commit **9** (landed after that row's sweep) + #849 **14**; bin **+2**; `[WARN]` 0, `[SKIP]` **23** (`--nocapture`); log `~/sweep-846-pg.log`. Mutants killed 9/9 (no count, no close, wrong stage, acks ignored, hook not shared, count-one, in-flight uncounted, report zero, claims settled) | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-846`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#832 — superseded) | PR #847 (`6df0a707`) | **4961 / 0 / 52**, **195** suites, `TEST_EXIT=0`, as predicted: #825's 4934 + **7** (#825's review commit, landed after its baseline sweep) + core lib **19** (guards 7, `pg_events` 1, `deliver` 5, stop 6) + `reply_catch_up_pg_e2e` **1**; `[WARN]` 0, `[SKIP]` **23** (`--nocapture`); log `sweep-832-final.log`. `pg` gate: 27 tests, 53 `[E2E]`, 0 SKIP. Mutants killed: claim back in `route_one` (also kills the PG e2e), unclaimed duplicate sent, guard never settled, no queue drain, inbound/unroutable guards settled early, reply guard armed after the claim, panic-or-cancelled count | exit 0, cold `CARGO_TARGET_DIR=$HOME/.cargo-clippy-832b`, **27** `Checking kastellan` | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.

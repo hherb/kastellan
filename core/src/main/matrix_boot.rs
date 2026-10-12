@@ -102,9 +102,10 @@ fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::D
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
 /// timeout per dropped reply. The closure holds an `Arc` of `writer` (shared
 /// with the inbound-dropped hook's when [`driver_sinks`] builds both, so
-/// one lease), and the driver owns the closure, so the driver holds that lease
-/// until it exits, and — once the lease has started (see [`login_outcome`]) —
-/// the daemon's shutdown drain waits for it. A row that was not written is
+/// one lease), and the driver owns the closure — and the bus-side receiver a
+/// clone of the inbound-dropped hook — so the lease lasts until both have let
+/// go, and — once it has started (see [`login_outcome`]) — the daemon's
+/// shutdown drain waits for it. A row that was not written is
 /// reported on the `[audit-lost]` marker ([`format_reply_row_lost`]).
 ///
 /// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit

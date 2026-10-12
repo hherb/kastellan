@@ -209,3 +209,26 @@ fn an_unrelated_configured_origin_does_not_reach_or_block_the_sidecar() {
         sidecar_policy.env
     );
 }
+
+/// #846: the hooks a caller hands `spawn_email_worker` reach the driver — and
+/// so the bus-side receiver, which is the only caller of `inbound_dropped` on
+/// email. A conversion that dropped either would leave email's rows unwritten
+/// with every line still saying they were recorded nowhere, and nothing else
+/// failing.
+#[test]
+fn email_driver_audit_hands_both_hooks_to_the_driver() {
+    use crate::channel::polled_driver::InboundDropped;
+    use crate::channel::SkippedId;
+    let inbound: InboundDroppedAudit = Arc::new(|_: InboundDropped<'_>| {});
+    let audit = EmailDriverAudit {
+        ack_only: Some(Box::new(|_: SkippedId<'_>| {})),
+        inbound_dropped: Some(inbound.clone()),
+    }
+    .into_driver_audit();
+    assert!(audit.ack_only.is_some(), "the skipped-id hook reaches the driver");
+    assert!(
+        audit.inbound_dropped.as_ref().is_some_and(|h| Arc::ptr_eq(h, &inbound)),
+        "the inbound-dropped hook reaches the driver, the same one"
+    );
+    assert!(audit.reply_undelivered.is_none(), "email has no reply hook to wire");
+}
