@@ -74,7 +74,9 @@ fn main() -> std::io::Result<()> {
         room: std::env::var("FAKE_MATRIX_ROOM").unwrap_or_else(|_| "!room:srv".into()),
         body: std::env::var("FAKE_MATRIX_BODY").unwrap_or_else(|_| "hello from peer".into()),
         sent_file: std::env::var("FAKE_MATRIX_SENT").ok(),
-        held: std::env::var("FAKE_MATRIX_HELD").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+        // A malformed value fails loud: silently 0 would read as "held nothing".
+        held: std::env::var("FAKE_MATRIX_HELD")
+            .map_or(0, |v| v.parse().unwrap_or_else(|_| panic!("FAKE_MATRIX_HELD={v:?} is not a count"))),
     };
     serve_stdio(&mut h)
 }

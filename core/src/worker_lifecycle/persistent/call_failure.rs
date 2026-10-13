@@ -27,7 +27,7 @@
 //!   (`PersistentTransport::sidecar_exited`) and retires the pair if so.
 //! - **Recovering a wedged Matrix session.** Not this path's job: the Matrix
 //!   worker's sync task exits the process after sustained sync failures
-//!   (`workers/matrix/src/sdk_live.rs`, policy in `sync_retry.rs`, #348), and
+//!   (`workers/matrix/src/sdk_live/sync_loop.rs`, policy in `sync_retry.rs`, #348), and
 //!   that exit IS a death here. A refused *send* with healthy sync is a
 //!   room-level answer (unknown room, forbidden), which a restored session
 //!   cannot change. The worker tells the channel-wide answers apart (#782):

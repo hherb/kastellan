@@ -49,12 +49,15 @@ pub struct SendParams {
 
 /// `matrix.drain` result (#835): what the worker still held when the core
 /// stopped polling it, asked once as the core's driver exits. The worker
-/// stops its background sync first, so nothing more arrives after it answers.
+/// stops its background sync first, so nothing more arrives after it answers
+/// — unless the answer is `interrupted`, which also covers a stop that could
+/// not be confirmed within [`DRAIN_STOP_BOUND_MS`].
 ///
 /// **A count only** — never a room, a sender or a body: every one of those is
 /// peer-supplied (the same rule as the `channel.inbound_dropped` row the core
-/// writes from it).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// writes from it). Deliberately no `Default`: its value would be the
+/// all-clear answer, and an unknown count must never fall back to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DrainResult {
     /// Inbound events still queued in the worker, which no poll will now
     /// return. They are discarded with the worker.
@@ -134,8 +137,10 @@ mod tests {
         Event { conversation: "!room:srv".into(), peer: peer.into(), body: body.into() }
     }
 
-    /// The core decodes these field names (`matrix::wire`); a rename on one
-    /// side only would make every drain fail to decode.
+    /// Both sides share this type, but a worker binary built before a rename
+    /// (version skew) and the fixtures that spell the fields by hand
+    /// (`fake_matrix_worker.rs`, the driver's test fake) would not follow
+    /// one: pinned so a rename is deliberate.
     #[test]
     fn drain_result_wire_shape_is_pinned() {
         let v = serde_json::to_value(DrainResult { discarded: 3, interrupted: true }).unwrap();

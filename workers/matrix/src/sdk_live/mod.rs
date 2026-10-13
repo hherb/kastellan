@@ -6,11 +6,13 @@
 //! ## Shape
 //!
 //! `matrix-sdk` is async; the [`MatrixSdk`] seam is synchronous (the core-side
-//! driver thread issues one blocking `matrix.poll` / `matrix.send` at a time).
-//! `LiveSdk` therefore owns a multi-thread tokio [`Runtime`] and `block_on`s the
-//! SDK calls behind the sync methods. A background **sync task** runs on that
-//! same runtime, decrypts inbound room-text events in an event handler, and
-//! pushes them onto a bounded [`VecDeque`] that [`poll`](LiveSdk::poll) drains.
+//! driver thread issues one blocking `matrix.poll` / `matrix.send` /
+//! `matrix.drain` at a time). `LiveSdk` therefore owns a multi-thread tokio
+//! [`Runtime`] and `block_on`s the SDK calls behind the sync methods. A
+//! background **sync task** runs on that same runtime, decrypts inbound
+//! room-text events in an event handler, and pushes them onto a bounded
+//! [`VecDeque`] that [`poll`](LiveSdk::poll) drains; `drain` stops the sync
+//! task, then counts and discards what is left (`sync_loop`, #835).
 //!
 //! ## Egress transport
 //!
@@ -55,7 +57,9 @@ use login::{ensure_cross_signing, restore_or_login};
 mod room_gate;
 use room_gate::{register_autojoin_handler, register_message_handler};
 mod sync_loop;
-use sync_loop::{spawn_sync_loop, stop_sync, HandledToken};
+use sync_loop::{spawn_sync_loop, stop_sync};
+
+use crate::drain_policy::{stop_then_count, HandledToken};
 
 /// Bounded depth of the inbound buffer the sync task fills and `poll` drains. A
 /// single-user channel never reaches this; it is a backstop against a flooding
@@ -212,7 +216,7 @@ impl LiveSdk {
         let (client, identity, bridge, initial_batch) =
             runtime.block_on(connect_client(&config, buffer.clone()))?;
         // The initial sync's handlers have all run by the time it returns.
-        let handled: Arc<HandledToken> = Arc::new(Mutex::new(Some(initial_batch)));
+        let handled = Arc::new(HandledToken::new(initial_batch));
 
         let sync_task = spawn_sync_loop(&runtime, client.clone(), handled.clone());
 
@@ -257,15 +261,14 @@ impl MatrixSdk for LiveSdk {
     }
 
     /// Stop the sync, then count and discard the queue (#835). The order
-    /// matters: once the sync task has stopped, no handler can push another
-    /// event behind the count.
+    /// matters, and is [`stop_then_count`]'s: once the sync task has stopped,
+    /// no handler can push another event behind the count; a stop not
+    /// confirmed in time answers `interrupted`, which covers a late push.
     fn drain(&mut self) -> DrainResult {
         let task = self.sync_task.take();
         let client = self.client.as_ref().expect("live client present").clone();
         let handled = self.handled.clone();
-        let interrupted =
-            self.runtime.block_on(async move { stop_sync(task, &client, &handled).await });
-        DrainResult { discarded: drain(&self.buffer).len(), interrupted }
+        self.runtime.block_on(stop_then_count(stop_sync(task, &client, &handled), &self.buffer))
     }
 
     fn send(&mut self, conversation: &str, body: &str) -> Result<(), SendError> {
@@ -333,7 +336,9 @@ fn initial_live_state(prior_sync_token: Option<&str>) -> bool {
 /// store-read error (or an absent value) yields `None`, which routes
 /// [`initial_live_state`] to "fresh / suppress". A read failure can therefore
 /// never cause a stale-history replay — at worst it re-drops a downtime window,
-/// which is exactly the pre-#321 behavior.
+/// which is exactly the pre-#321 behavior. ⚠️ Fail-soft is right for this
+/// caller only: `sync_loop::stop_sync` reads the same key fail-CLOSED, because
+/// there an unreadable token must read as "possibly lost".
 async fn read_prior_sync_token(client: &Client) -> Option<String> {
     client
         .state_store()

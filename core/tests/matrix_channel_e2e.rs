@@ -252,6 +252,8 @@ async fn events_the_worker_still_held_at_stop_reach_the_audit_hook() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    // Settle, so a duplicate report arriving after the first is seen too.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let _ = std::fs::remove_file(&sent_file);
     let worker: Vec<_> =
         dropped.lock().unwrap().iter().filter(|(s, _)| *s == InboundDropStage::Worker).copied().collect();

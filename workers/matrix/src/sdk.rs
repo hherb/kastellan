@@ -1,9 +1,8 @@
 //! The SDK seam: the handler talks to Matrix only through this trait, so the
 //! JSON-RPC dispatch + buffering is unit-tested with a fake (no homeserver). The
-//! real `matrix-rust-sdk`-backed implementation will live in `sdk_live.rs`
-//! behind the `live-matrix` feature (Phase D, next slice). The egress transport
-//! that impl relies on is already proven — see `bridge.rs` + the `egress_spike`
-//! test.
+//! real `matrix-rust-sdk`-backed implementation is `sdk_live::LiveSdk`, behind
+//! the `live-matrix` feature; its egress transport is `bridge.rs`, proven by the
+//! `egress_spike` test.
 
 use kastellan_matrix_wire::{DrainResult, Event, InitResult};
 
@@ -21,8 +20,10 @@ pub trait MatrixSdk: Send {
     fn poll(&mut self, timeout_ms: u64) -> Vec<Event>;
 
     /// Stop receiving, then count and discard what is still buffered (#835).
-    /// Called once, as the core's driver exits: after it no event arrives,
-    /// and whatever was buffered is gone with the worker. A count only.
+    /// Called once, as the core's driver exits: after it no event arrives
+    /// (unless it answers `interrupted`, which covers a stop it could not
+    /// confirm), and whatever was buffered is gone with the worker. A count
+    /// only.
     fn drain(&mut self) -> DrainResult;
 
     /// Send an E2E message to a room. A failure says whose problem it is

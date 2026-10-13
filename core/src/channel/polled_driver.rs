@@ -113,7 +113,7 @@ pub use spec::{
     WorkerCalls, WorkerDrainSpec, WorkerHeld,
 };
 mod worker_drain;
-use worker_drain::drain_worker_on_exit;
+use worker_drain::{check_drain, drain_worker_on_exit};
 use replies::{
     check_reply_give_up, discard_on_exit, enqueue, flush, ReplyQueues, MAX_QUEUED_PER_CONVERSATION,
 };
@@ -182,6 +182,7 @@ impl PolledWorkerDriver {
     ) -> anyhow::Result<(Self, serde_json::Value)> {
         check_refusal_backoff(&spec.refusal_backoff)?;
         check_reply_give_up(&spec.reply_give_up)?;
+        check_drain(&spec)?;
         let identity = calls
             .call(spec.init_method, serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("{}: {e}", spec.init_method))?;
@@ -447,9 +448,10 @@ fn run(
     }
 
     // Last: what the worker itself still held (#835). After the reports
-    // above, and before `calls` drops and the worker dies with it.
+    // above, and before `calls` drops and the worker dies with it. Not asked
+    // when the last call found it down (`worker_drain`'s module docs).
     if let Some(drain) = spec.drain {
-        drain_worker_on_exit(&*calls, &spec, drain, &cid, inbound_dropped.as_ref());
+        drain_worker_on_exit(&*calls, &spec, drain, outage.is_down(), &cid, inbound_dropped.as_ref());
     }
 }
 

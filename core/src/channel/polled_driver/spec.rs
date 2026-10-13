@@ -50,6 +50,14 @@ pub struct PolledWorkerSpec {
     /// between polls and holds what it received in memory (Matrix's live
     /// sync); `None` for one that holds nothing between polls (email: the
     /// messages stay in localmail until acked).
+    ///
+    /// ⚠️ Only on a channel that does **not** redeliver (`ack_method`
+    /// `None`): the worker stage's line says "this channel does not
+    /// redeliver" and its count becomes a `channel.inbound_dropped` row, so on
+    /// an ack channel both would be false. [`PolledWorkerDriver::spawn`]
+    /// refuses a spec with both.
+    ///
+    /// [`PolledWorkerDriver::spawn`]: super::PolledWorkerDriver::spawn
     pub drain: Option<WorkerDrainSpec>,
 }
 
@@ -65,12 +73,16 @@ pub struct WorkerDrainSpec {
 }
 
 /// What a worker's drain answered: a count, never anything a peer wrote.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Deliberately no `Default`: its value would be the all-clear answer, and an
+/// unknown count must never fall back to it — that is an `Err` from
+/// [`ParseDrain`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkerHeld {
     /// Inbound messages the worker still held, now discarded.
     pub discarded: usize,
-    /// The worker's stop may have cut an upstream batch short: an unknown
-    /// number of messages, possibly none, are lost and NOT in `discarded`.
+    /// The worker's stop may have cut an upstream batch short, or could not
+    /// be confirmed: an unknown number of messages, possibly none, are lost
+    /// and NOT in `discarded`.
     pub interrupted: bool,
 }
 

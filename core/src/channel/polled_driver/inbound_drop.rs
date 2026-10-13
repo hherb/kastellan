@@ -56,20 +56,26 @@
 //! Only a channel whose spec names a drain method has one (Matrix: its live
 //! worker syncs continuously and queues what arrives between polls, behind a
 //! sync token it has already saved — the homeserver never sends those again).
-//! The driver asks once, as it exits, after the stages above.
+//! The driver asks once, as it exits, after its own polled-stage report (the
+//! buffered stage is the receiver's, and is not ordered against it).
 //!
 //! ## What this does not count
 //!
 //! A quiet `audit_log` after a restart is still not proof that nothing was
 //! lost (a message the bus *had* read and was still handling is said on
-//! `[audit-lost]` since #832). Outside the three stages, each said on
-//! `[worker-refusal]` but with no row, because there is no count to give:
+//! `[audit-lost]` since #832). Outside the three stages, each said but with
+//! no row, because there is no count to give:
 //!
 //! - a batch that did not decode: dropped on a channel that does not
-//!   redeliver ([`on_undecodable_batch`], #836);
+//!   redeliver (a `tracing` WARN, [`on_undecodable_batch`], #836);
 //! - a worker stop that cut one upstream batch short (Matrix: a sync response
-//!   whose token was saved before its events were all queued), and a worker
-//!   that could not be asked at all (`worker_drain.rs`, #835).
+//!   whose token was saved before its events were all queued) or could not be
+//!   confirmed, a worker that could not be asked, and one that was down when
+//!   the driver exited, so was not asked (on `[worker-refusal]`,
+//!   `worker_drain.rs`, #835).
+//!
+//! Not said at all: what a worker held when it died or was respawned **while
+//! the driver ran** (the respawned one resumes from the saved token).
 
 use std::num::NonZeroUsize;
 
@@ -200,8 +206,9 @@ pub(super) fn format_worker_drop_report(n: NonZeroUsize, sink: bool) -> String {
 
 /// Say that `n` inbound messages on `cid` were dropped at `stage`, and hand
 /// the count to the audit hook. Nothing for `n == 0`. `acks` is the channel's
-/// (it only changes the [`InboundDropStage::Buffered`] line: the polled stage
-/// is never reported on an ack channel, so its callers pass `false`).
+/// (it only changes the [`InboundDropStage::Buffered`] line: the polled and
+/// worker stages are never reported on an ack channel, so their callers pass
+/// `false`).
 pub(super) fn report_inbound_dropped(
     label: &str,
     cid: &ChannelId,

@@ -20,8 +20,10 @@ fn parse_matrix_poll_decodes_wire_events() {
     assert!(parse_matrix_poll(serde_json::json!("garbage")).is_err());
 }
 
-/// #835: the drain's answer decodes from the worker's own wire type, so a
-/// field renamed on one side fails here rather than on every exit.
+/// #835: `parse_matrix_drain` maps the worker's wire type onto `WorkerHeld`
+/// field-for-field, and a non-drain answer is an error (an unknown count),
+/// never zero. The wire spelling itself is pinned in matrix-wire
+/// (`drain_result_wire_shape_is_pinned`).
 #[test]
 fn parse_matrix_drain_decodes_the_worker_wire_type() {
     let wire = kastellan_matrix_wire::DrainResult { discarded: 4, interrupted: true };

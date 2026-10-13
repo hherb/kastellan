@@ -1,7 +1,11 @@
 //! The worker's continuous background sync, and stopping it for
 //! `matrix.drain` (#835) while telling whether the stop cost an uncounted sync
-//! response. Split out of `mod.rs` when #835 grew it past the 500-LOC soft cap
-//! (the loop moved verbatim, as a function).
+//! response. Split out of `mod.rs` when #835 grew it past the 500-LOC soft cap.
+//! The retry loop moved as a function; its one change is `sync` →
+//! `sync_with_callback`, so each fully handled response's token is recorded.
+//! The pure pieces (the handled token, the comparison, the stop-then-count
+//! order) are in [`crate::drain_policy`], ungated, so their tests run in the
+//! default build.
 //!
 //! ## Why the stop can lose events the count cannot see
 //!
@@ -14,9 +18,9 @@
 //! not in the queue to be counted.
 //!
 //! So the sync loop records the `next_batch` of every response whose handlers
-//! all ran ([`record_handled`], from `sync_with_callback`'s callback, which runs
-//! after them). After the stop, the token the store holds is compared with it
-//! ([`sync_response_interrupted`]): if the store moved further, one response
+//! all ran ([`HandledToken::record`], from `sync_with_callback`'s callback,
+//! which runs after them). After the stop, the token the store holds is
+//! compared with it ([`sync_response_interrupted`]): if the store moved further, one response
 //! was cut short and the drain says so. A stop that lands after the handlers
 //! but before the callback reads the same way — and that gap includes
 //! `sync_once`'s trailing `send_outgoing_requests`, a network call — an
@@ -42,14 +46,16 @@
 //! it, and the SDK offers no hook that would. ⚠️ All of this is
 //! matrix-sdk-sqlite 0.18's implementation — re-check it on an upgrade.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kastellan_matrix_wire::DRAIN_STOP_BOUND_MS;
 use matrix_sdk::config::SyncSettings;
+use matrix_sdk::store::StateStoreDataKey;
 use matrix_sdk::{Client, LoopCtrl, StateChanges};
 use tokio::runtime::Runtime;
 
+use crate::drain_policy::{sync_response_interrupted, HandledToken};
 use crate::sync_retry;
 
 /// A `sync()` that ran at least this long before returning was healthy and
@@ -93,7 +99,7 @@ pub(super) fn spawn_sync_loop(
     //
     // `sync_with_callback` with `Continue` is exactly what `sync` runs; the
     // callback runs after each response's event handlers, so it records the
-    // newest position nothing was lost before (#835, below).
+    // newest position nothing was lost before (#835, module docs).
     runtime.spawn(async move {
         let mut consecutive = 0u32;
         loop {
@@ -101,7 +107,7 @@ pub(super) fn spawn_sync_loop(
             let handled = handled.clone();
             let result = client
                 .sync_with_callback(SyncSettings::default(), move |response| {
-                    record_handled(&handled, response.next_batch);
+                    handled.record(response.next_batch);
                     async { LoopCtrl::Continue }
                 })
                 .await;
@@ -137,10 +143,6 @@ pub(super) fn spawn_sync_loop(
     })
 }
 
-/// The `next_batch` of the last sync response whose event handlers all ran —
-/// the newest position nothing was lost before. `None` until the first one.
-pub(super) type HandledToken = Mutex<Option<String>>;
-
 /// How long [`stop_sync`] waits for the stop to land and the store to answer.
 /// An abort lands at the task's next await point, and the barrier writes and
 /// token read are local SQLite calls, so this is generous; it bounds the
@@ -153,26 +155,15 @@ const STOP_BOUND: Duration = Duration::from_millis(DRAIN_STOP_BOUND_MS);
 const BARRIERS: usize = 2;
 const BARRIER_GAP: Duration = Duration::from_millis(20);
 
-/// Record `next_batch` as handled. Called after a response's handlers ran.
-pub(super) fn record_handled(handled: &HandledToken, next_batch: String) {
-    *handled.lock().expect("handled-token lock not poisoned") = Some(next_batch);
-}
-
-/// Pure: did the stop cut a sync response short? True when the token the
-/// store holds is not the last one whose handlers all ran — the store moved
-/// past events the queue may never have received. A store that could not be
-/// read (`stored` is `None` while something was handled) also reads as
-/// interrupted: unknown is said, never assumed away.
-pub(super) fn sync_response_interrupted(stored: Option<&str>, handled: Option<&str>) -> bool {
-    stored != handled
-}
-
 /// Stop the background sync and say whether the stop cut a sync response
 /// short (see the module docs). `task` is `None` when an earlier drain already
 /// stopped it; the comparison is still made, and still holds.
 ///
-/// Returns `true` — "possibly lost" — whenever the answer cannot be had within
-/// [`STOP_BOUND`]: the task did not finish, or the store did not answer.
+/// Returns `true` — "possibly lost" — whenever the answer cannot be had: the
+/// stop was not confirmed within [`STOP_BOUND`], a barrier write failed, or
+/// the store's token could not be read. Each cause is said on stderr (no ids),
+/// because the core's line can only say "may have cut short, or could not be
+/// confirmed".
 pub(super) async fn stop_sync(
     task: Option<tokio::task::JoinHandle<()>>,
     client: &Client,
@@ -181,9 +172,21 @@ pub(super) async fn stop_sync(
     let stop = async {
         if let Some(task) = task {
             task.abort();
-            // `Err(JoinError::Cancelled)` is the expected result; either way
-            // the task is no longer running when this returns.
-            let _ = task.await;
+            // `Err(JoinError::Cancelled)` is the expected result; any of them
+            // means the task is no longer running. This is the first time
+            // anyone looks at its handle, so a task that had already ended is
+            // said: the worker was deaf from then on.
+            match task.await {
+                Err(e) if e.is_cancelled() => {}
+                Err(_) => eprintln!(
+                    "kastellan-worker-matrix: drain: the sync task had panicked before the \
+                     drain; the worker was not receiving since"
+                ),
+                Ok(()) => eprintln!(
+                    "kastellan-worker-matrix: drain: the sync task had ended before the drain; \
+                     the worker was not receiving since"
+                ),
+            }
         }
         // The barrier: see the module docs. A failed write proves nothing
         // about the store's token, so it reads as interrupted.
@@ -191,42 +194,113 @@ pub(super) async fn stop_sync(
             if i > 0 {
                 tokio::time::sleep(BARRIER_GAP).await;
             }
-            if client.state_store().save_changes(&StateChanges::default()).await.is_err() {
+            if let Err(e) = client.state_store().save_changes(&StateChanges::default()).await {
+                eprintln!(
+                    "kastellan-worker-matrix: drain: barrier write failed ({e}); answering interrupted"
+                );
                 return true;
             }
         }
-        let stored = super::read_prior_sync_token(client).await;
-        let handled = handled.lock().expect("handled-token lock not poisoned").clone();
-        sync_response_interrupted(stored.as_deref(), handled.as_deref())
+        // Read fail-CLOSED here — the opposite of `read_prior_sync_token`'s
+        // fail-soft `None`, which is the safe direction for its caller only.
+        let stored = match client.state_store().get_kv_data(StateStoreDataKey::SyncToken).await {
+            Ok(value) => value.and_then(|value| value.into_sync_token()),
+            Err(e) => {
+                eprintln!(
+                    "kastellan-worker-matrix: drain: the stored sync token could not be read \
+                     ({e}); answering interrupted"
+                );
+                return true;
+            }
+        };
+        sync_response_interrupted(stored.as_deref(), &handled.get())
     };
-    tokio::time::timeout(STOP_BOUND, stop).await.unwrap_or(true)
+    match tokio::time::timeout(STOP_BOUND, stop).await {
+        Ok(interrupted) => interrupted,
+        Err(_) => {
+            eprintln!(
+                "kastellan-worker-matrix: drain: the stop was not confirmed within {STOP_BOUND:?}; \
+                 answering interrupted"
+            );
+            true
+        }
+    }
 }
 
+/// `stop_sync` against a real matrix-sdk client and SQLite store, offline (no
+/// homeserver is ever contacted). The pure comparison is tested in
+/// `drain_policy`; these pin the wiring: the abort, the store read, the bound.
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use super::*;
 
-    #[test]
-    fn a_store_that_holds_the_last_handled_token_lost_nothing() {
-        assert!(!sync_response_interrupted(Some("s2"), Some("s2")));
+    /// A client over a fresh store whose saved sync token is `token`.
+    async fn client_with_token(name: &str, token: &str) -> (Client, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("kastellan-stop-sync-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = Client::builder()
+            .homeserver_url("https://fake-homeserver.invalid")
+            .sqlite_store(&dir, None)
+            .build()
+            .await
+            .expect("client builds offline");
+        let changes = StateChanges { sync_token: Some(token.into()), ..Default::default() };
+        client.state_store().save_changes(&changes).await.expect("token saved");
+        (client, dir)
     }
 
-    #[test]
-    fn a_store_past_the_last_handled_token_cut_a_response_short() {
-        // The SDK saved `s3`, but the handlers of that response never all ran.
-        assert!(sync_response_interrupted(Some("s3"), Some("s2")));
+    /// A running sync is stopped (it makes no progress after), and a store
+    /// that holds the last handled token lost nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_clean_stop_of_a_running_sync_lost_nothing() {
+        let (client, dir) = client_with_token("clean", "s2").await;
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let t = ticks.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                t.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        let interrupted = stop_sync(Some(task), &client, &HandledToken::new("s2".into())).await;
+        assert!(!interrupted);
+        let after = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(ticks.load(Ordering::SeqCst), after, "the sync task still runs");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn an_unreadable_store_is_said_not_assumed_away() {
-        assert!(sync_response_interrupted(None, Some("s2")));
+    /// The store saved a token past the last handled one: interrupted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_store_past_the_handled_token_reads_as_interrupted() {
+        let (client, dir) = client_with_token("past", "s3").await;
+        assert!(stop_sync(None, &client, &HandledToken::new("s2".into())).await);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn record_handled_keeps_the_newest_token() {
-        let handled = HandledToken::default();
-        record_handled(&handled, "s1".into());
-        record_handled(&handled, "s2".into());
-        assert_eq!(handled.lock().unwrap().as_deref(), Some("s2"));
+    /// A task with no await point cannot be aborted: the stop is bounded by
+    /// `STOP_BOUND` and answers interrupted, never "nothing lost".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_that_cannot_land_in_time_reads_as_interrupted() {
+        let (client, dir) = client_with_token("wedged", "s2").await;
+        let started = Arc::new(AtomicBool::new(false));
+        let s = started.clone();
+        let task = tokio::spawn(async move {
+            s.store(true, Ordering::SeqCst);
+            std::thread::sleep(STOP_BOUND * 2);
+        });
+        while !started.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let begun = Instant::now();
+        let interrupted = stop_sync(Some(task), &client, &HandledToken::new("s2".into())).await;
+        let took = begun.elapsed();
+        assert!(interrupted, "a stop that could not be confirmed is never 'nothing lost'");
+        assert!(took >= STOP_BOUND, "{took:?}");
+        assert!(took < STOP_BOUND + Duration::from_millis(400), "unbounded: {took:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

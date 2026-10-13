@@ -1,8 +1,8 @@
 //! The room edge: the event handlers that decide what reaches the inbound
 //! buffer (text from an allowed peer, in a two-party room, once the sync is
-//! live) and which invites the bot accepts. Split out of `sdk_live.rs` (#835)
-//! to keep that file under the 500-LOC soft cap before the drain grew it; the
-//! items moved verbatim (only their visibility changed).
+//! live) and which invites the bot accepts. Split out of the former
+//! `sdk_live.rs` (now `sdk_live/mod.rs`) for the 500-LOC soft cap; the items
+//! moved verbatim (only their visibility changed).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};

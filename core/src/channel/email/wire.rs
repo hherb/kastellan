@@ -262,6 +262,14 @@ mod tests {
         serde_json::json!({ "events": events, "skipped": [] })
     }
 
+    /// #835: localmail keeps what was never acked, so email names no drain
+    /// method — a copied `matrix.drain` would WARN "could not ask" on every
+    /// exit, and its count would be a false loss on a channel that redelivers.
+    #[test]
+    fn the_email_spec_names_no_drain_method() {
+        assert!(EMAIL_POLLED_SPEC.drain.is_none());
+    }
+
     #[test]
     fn parse_builds_evidence_from_our_mx_and_strips_the_token() {
         let v = poll_result(vec![event(

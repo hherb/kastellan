@@ -1,8 +1,8 @@
 //! Session bring-up for the live worker: restore the persisted login session
 //! (or password-login and persist it, `0600`, fsync'd), and bootstrap the
-//! account's cross-signing identity. Split out of `sdk_live.rs` (#835) to keep
-//! that file under the 500-LOC soft cap before the drain grew it; the items
-//! moved verbatim (only their visibility changed).
+//! account's cross-signing identity. Split out of the former `sdk_live.rs`
+//! (now `sdk_live/mod.rs`) for the 500-LOC soft cap; the items moved verbatim
+//! (only their visibility changed).
 
 use anyhow::Context as _;
 use matrix_sdk::authentication::matrix::MatrixSession;
