@@ -81,6 +81,7 @@ pub(super) fn format_undecodable_report(
     let retry = retry_in.map(|d| d.as_millis());
     let tail = match (redelivers, retry) {
         (true, Some(ms)) => {
+            // "15 min" is `REFUSAL_REPEAT`, pinned by a test in `tests/refusal.rs`.
             format!(" Polling again in {ms} ms with backoff. Repeated every 15 min while it lasts")
         }
         // The driver is exiting: an ack channel never decodes then, so this
