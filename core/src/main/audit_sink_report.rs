@@ -72,6 +72,12 @@ impl RowLabel {
         Self(format!("{what} ({n})"))
     }
 
+    /// `what` alone, for a row about one thing that has neither an id nor a
+    /// count: e.g. `matrix inbound batch lost undecodable` (#836).
+    pub(crate) fn named(what: &'static str) -> Self {
+        Self(what.to_string())
+    }
+
     pub(super) fn into_string(self) -> String {
         self.0
     }

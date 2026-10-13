@@ -97,10 +97,12 @@ use ack::{ack, ack_skipped};
 mod outage;
 use outage::{report_down, OutageLog};
 mod audit;
-pub use audit::{AckOnlyAudit, DriverAudit, InboundDroppedAudit, ReplyUndeliveredAudit};
+pub use audit::{
+    AckOnlyAudit, DriverAudit, InboundDroppedAudit, InboundUndecodableAudit, ReplyUndeliveredAudit,
+};
 mod inbound_drop;
 pub use inbound_drop::{InboundDropStage, InboundDropped};
-use inbound_drop::{on_bus_closed_during_poll, on_bus_closed_mid_batch, on_undecodable_batch};
+use inbound_drop::{on_bus_closed_during_poll, on_bus_closed_mid_batch};
 mod inbound_rx;
 pub use inbound_rx::InboundReceiver;
 mod refusal;
@@ -112,6 +114,9 @@ pub use spec::{
     EncodeAck, EncodeSend, ParseAckOnly, ParseDrain, ParsePoll, PolledEvent, PolledWorkerSpec,
     WorkerCalls, WorkerDrainSpec, WorkerHeld,
 };
+mod undecodable;
+pub use undecodable::UndecodableBatch;
+use undecodable::{decoded, on_undecodable_batch};
 mod worker_drain;
 use worker_drain::{check_drain, drain_worker_on_exit};
 use replies::{
@@ -225,7 +230,10 @@ impl PolledWorkerDriver {
 ///    (a refused credential, an unavailable upstream: #782) — unsent messages
 ///    STAY queued, so a death mid-send loses nothing;
 /// 3. long-poll for inbound events, forward them to the bus, then — for a
-///    spec with `ack_method` set — ack the ones that carried an `ack_token`;
+///    spec with `ack_method` set — ack the ones that carried an `ack_token`.
+///    A batch that does not decode is said at ERROR (and, on a channel that
+///    does not redeliver, recorded as `channel.inbound_undecodable`), and the
+///    next poll waits out the refusal backoff (#836, `undecodable`);
 /// 4. unless a poll just completed (its long-poll paces the loop), sleep one
 ///    short slice (shutdown-responsive) and go round again.
 ///
@@ -264,7 +272,8 @@ fn run(
     outbound_rx: std_mpsc::Receiver<OutgoingMessage>,
     cid: ChannelId,
 ) {
-    let DriverAudit { ack_only: audit_ack_only, reply_undelivered, inbound_dropped } = audit;
+    let DriverAudit { ack_only: audit_ack_only, reply_undelivered, inbound_dropped, inbound_undecodable } =
+        audit;
     let mut replies = ReplyQueues::new(MAX_QUEUED_PER_CONVERSATION);
     // Latches the down/up transitions so they log once per outage instead of
     // once per retry slice (see `OutageLog`).
@@ -274,6 +283,10 @@ fn run(
     // keep theirs per conversation, inside `replies` (#782).
     let mut poll_refusals = RefusalRun::default();
     let mut ack_refusals = RefusalRun::default();
+    // A run of poll results that did not decode holds the poll the same way
+    // (#836, `undecodable`): an ack channel would otherwise re-poll the same
+    // unacked batch as fast as the worker answers.
+    let mut undecodable = RefusalRun::default();
     // Every exit leaves this loop by `break 'drive`, so the worker is drained
     // exactly once, below.
     'drive: loop {
@@ -301,11 +314,11 @@ fn run(
         );
 
         // 3) Long-poll for inbound events → push to the bus. Skipped while the
-        //    worker is down, or while a refused poll or ack waits out its
-        //    backoff.
+        //    worker is down, or while a refused poll or ack, or an
+        //    undecodable batch, waits out its backoff.
         let mut polled = false;
         let now = Instant::now();
-        if !down && poll_refusals.ready(now) && ack_refusals.ready(now) {
+        if !down && poll_refusals.ready(now) && ack_refusals.ready(now) && undecodable.ready(now) {
             match calls.call(spec.poll_method, serde_json::json!({ "timeout_ms": spec.poll_timeout_ms })) {
                 Ok(v) => {
                     // The bus went away while the poll was out (the channel
@@ -319,7 +332,14 @@ fn run(
                     if inbound_tx.is_closed() {
                         // Redelivered on an ack channel; counted, said and
                         // audited on one that does not redeliver (#826).
-                        on_bus_closed_during_poll(&spec, &cid, parse_poll, v, inbound_dropped.as_ref());
+                        on_bus_closed_during_poll(
+                            &spec,
+                            &cid,
+                            parse_poll,
+                            v,
+                            inbound_dropped.as_ref(),
+                            inbound_undecodable.as_ref(),
+                        );
                         discard_on_exit(&mut replies, outbound_rx.try_iter(), spec.label, reply_undelivered.as_ref());
                         break 'drive;
                     }
@@ -333,6 +353,7 @@ fn run(
                     let ack_only_ids = parse_ack_only.map(|f| f(&v)).unwrap_or_default();
                     match parse_poll(v) {
                         Ok(events) => {
+                            decoded(&mut undecodable, spec.label);
                             let mut events = events.into_iter();
                             while let Some(ev) = events.next() {
                                 // Captured before `ev`'s other fields move into
@@ -406,14 +427,16 @@ fn run(
                         }
                         Err(e) => {
                             // A malformed poll result is a worker bug, not a
-                            // death — log the batch, keep polling. The
+                            // death — say it (and record it where it is a
+                            // loss), hold the next poll for the backoff, and
+                            // keep going (#836). The
                             // skipped ids from THIS batch are deliberately NOT
                             // acked here (see the comment above the ack-only
                             // loop): they share the worker's one monotonic
                             // cursor with the events that just failed to
                             // decode, and acking them would silently drag
                             // that cursor past messages nobody ever saw.
-                            on_undecodable_batch(&spec, &e);
+                            on_undecodable_batch(&spec, &cid, &e, &mut undecodable, inbound_undecodable.as_ref());
                         }
                     }
                 }
@@ -434,7 +457,7 @@ fn run(
 
         // 4) No poll completed — the worker is down (the supervisor owns
         //    respawn/backoff/alarm), or the poll was refused or is held by a
-        //    poll or ack refusal backoff: wait a short, shutdown-responsive
+        //    poll, ack or undecodable-batch backoff: wait a short, shutdown-responsive
         //    slice and go round again. A completed poll needs no wait; its
         //    long-poll already paced this iteration.
         if !polled {

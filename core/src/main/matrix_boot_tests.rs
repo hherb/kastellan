@@ -281,3 +281,28 @@ fn attempt_s_inbound_dropped_hook_shares_the_lease_and_names_its_row() {
     drop(audit);
     assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives the lease back when dropped");
 }
+
+/// #836: `attempt`'s driver also gets the undecodable hook, on the SAME
+/// writer — still one lease — and its row is named for the shutdown line.
+#[test]
+fn attempt_s_undecodable_hook_shares_the_lease_and_names_its_row() {
+    use crate::audit_sink::{Bounds, InFlight, Ledger};
+    use kastellan_core::channel::polled_driver::UndecodableBatch;
+    use kastellan_core::channel::ChannelId;
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let rt = tokio::runtime::Runtime::new().expect("a runtime");
+    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+    let (audit, starting) = driver_sinks(&LEDGER, pool, rt.handle().clone(), |_, _| {});
+    starting.started();
+    assert_eq!(
+        LEDGER.snapshot(),
+        InFlight { sinks_live: 1, auditing_live: 1, ..InFlight::default() },
+        "three hooks, one lease"
+    );
+    let hook = audit.inbound_undecodable.as_ref().expect("the undecodable hook");
+    let channel = ChannelId("matrix".into());
+    hook(UndecodableBatch { channel: &channel, observed_at: time::OffsetDateTime::now_utc() });
+    assert_eq!(LEDGER.named_pending(), ["matrix inbound batch lost undecodable"]);
+    drop(audit);
+    assert_eq!(LEDGER.snapshot().sinks_live, 0, "and gives the lease back when dropped");
+}

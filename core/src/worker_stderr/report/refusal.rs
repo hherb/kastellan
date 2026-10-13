@@ -50,7 +50,10 @@ pub enum RefusalSeverity {
     /// fallback and stay WARN: each is also a durable row where the channel
     /// has an audit sink, and the line says so when it has none.
     Warn,
-    /// The upstream refused the channel's credential: an operator action.
+    /// The upstream refused the channel's credential: an operator action. Or
+    /// a poll result that did not decode (#836): the worker sent output the
+    /// core cannot read — a worker bug, or a compromised worker — and on a
+    /// channel that does not redeliver, a batch of unknown size is lost.
     Error,
 }
 

@@ -136,8 +136,8 @@ fn reply_undelivered_audit_sink(
 }
 
 /// The Matrix driver's audit hooks as `attempt` builds them, on `ledger`: the
-/// reply-undelivered and inbound-dropped hooks, sharing one writer and so one
-/// lease, and that lease's [`Starting`] token — a lease that counts only once
+/// reply-undelivered, inbound-dropped and inbound-undecodable (#836) hooks,
+/// sharing one writer and so one lease, and that lease's [`Starting`] token — a lease that counts only once
 /// [`login_outcome`] says the worker is up (#802). A function, so a test can
 /// see the lease `attempt` takes.
 ///
@@ -154,6 +154,10 @@ fn driver_sinks(
     let audit = kastellan_core::channel::matrix::MatrixDriverAudit {
         reply_undelivered: Some(reply_undelivered_audit_sink(Arc::clone(&writer), report)),
         inbound_dropped: Some(crate::inbound_dropped_sink::inbound_dropped_audit_sink(
+            Arc::clone(&writer),
+            report,
+        )),
+        inbound_undecodable: Some(crate::inbound_dropped_sink::inbound_undecodable_audit_sink(
             writer, report,
         )),
     };

@@ -382,4 +382,5 @@ mod inbound_rx;
 mod refusal;
 mod replies;
 mod replies_driver;
+mod undecodable;
 mod worker_drain;

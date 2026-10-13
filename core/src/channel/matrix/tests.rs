@@ -263,21 +263,23 @@ fn vm_policy_has_persistent_store_at_data_and_microvm_env() {
         && v == "matrix.ext4"));
 }
 
-/// #846: the hooks a caller hands `spawn_matrix_worker` reach the driver (and,
-/// for `inbound_dropped`, the bus-side receiver it hands a clone to). A
-/// conversion that dropped either would leave Matrix's rows unwritten with
+/// #846, #836: the hooks a caller hands `spawn_matrix_worker` reach the driver
+/// (and, for `inbound_dropped`, the bus-side receiver it hands a clone to). A
+/// conversion that dropped any would leave Matrix's rows unwritten with
 /// nothing else failing.
 #[test]
-fn matrix_driver_audit_hands_both_hooks_to_the_driver() {
-    use crate::channel::polled_driver::InboundDropped;
+fn matrix_driver_audit_hands_every_hook_to_the_driver() {
+    use crate::channel::polled_driver::{InboundDropped, UndecodableBatch};
     use crate::channel::UndeliveredReply;
     let inbound: InboundDroppedAudit = Arc::new(|_: InboundDropped<'_>| {});
     let audit = MatrixDriverAudit {
         reply_undelivered: Some(Box::new(|_: UndeliveredReply<'_>| {})),
         inbound_dropped: Some(inbound.clone()),
+        inbound_undecodable: Some(Box::new(|_: UndecodableBatch<'_>| {})),
     }
     .into_driver_audit();
     assert!(audit.reply_undelivered.is_some(), "the reply hook reaches the driver");
+    assert!(audit.inbound_undecodable.is_some(), "the undecodable hook reaches the driver");
     assert!(
         audit.inbound_dropped.as_ref().is_some_and(|h| Arc::ptr_eq(h, &inbound)),
         "the inbound-dropped hook reaches the driver, the same one"
