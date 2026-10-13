@@ -304,7 +304,7 @@ jobs:
             --deselect tests/test_model_live.py::test_real_model_loads_and_extracts
           PYTHONPATH=src uv run --no-project --with pytest pytest tests/test_scratch.py -q -rs
 
-  # The Matrix worker's live SDK path (`workers/matrix/src/sdk_live.rs`) is
+  # The Matrix worker's live SDK path (`workers/matrix/src/sdk_live/`) is
   # behind the optional `live-matrix` feature (`dep:matrix-sdk`). The `check`
   # job above builds the default `--workspace`, which deliberately excludes that
   # heavy, non-hermetic dependency — so a regression under `--features
@@ -315,7 +315,7 @@ jobs:
   #
   # `--all-targets` mirrors the `check` job above for the same reason: it also
   # type-checks + lints the crate's `#[cfg(test)]` code, including the
-  # feature-gated test modules in `sdk_live.rs` (and its `#[cfg(all(test,
+  # feature-gated test modules in `sdk_live/` (and its `#[cfg(all(test,
   # feature = "live-matrix"))]` sibling wired in at `main.rs`). Without it those
   # test modules are compiled by NO CI job — the default `check` excludes them
   # (feature off) and a bare `cargo check` here excludes them (test cfg off) —
@@ -339,3 +339,10 @@ jobs:
 
       - name: cargo clippy (matrix worker, all targets, live-matrix feature, deny warnings)
         run: cargo clippy -p kastellan-worker-matrix --all-targets --features live-matrix --locked -- -D warnings
+
+      # Compiling the gated tests is not running them: `sdk_live::sync_loop`'s
+      # offline `stop_sync` tests (#835) — the abort, the store read, the bound
+      # on a shutdown — ran in no gate before this step. All of the crate's
+      # tests are offline (a fake `.invalid` homeserver, a local stub proxy).
+      - name: cargo test (matrix worker, live-matrix feature)
+        run: cargo test -p kastellan-worker-matrix --features live-matrix --locked

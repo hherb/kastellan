@@ -45,7 +45,50 @@ pub struct PolledWorkerSpec {
     /// When to give up on a reply the worker keeps refusing (#782).
     /// Production specs use [`REPLY_GIVE_UP`](super::REPLY_GIVE_UP).
     pub reply_give_up: ReplyGiveUp,
+    /// How to ask the worker, as the driver exits, how many inbound messages
+    /// it still held (#835). `Some` for a worker that receives on its own
+    /// between polls and holds what it received in memory (Matrix's live
+    /// sync); `None` for one that holds nothing between polls (email: the
+    /// messages stay in localmail until acked).
+    ///
+    /// ⚠️ Only on a channel that does **not** redeliver (`ack_method`
+    /// `None`): the worker stage's line says "this channel does not
+    /// redeliver" and its count becomes a `channel.inbound_dropped` row, so on
+    /// an ack channel both would be false. [`PolledWorkerDriver::spawn`]
+    /// refuses a spec with both.
+    ///
+    /// [`PolledWorkerDriver::spawn`]: super::PolledWorkerDriver::spawn
+    pub drain: Option<WorkerDrainSpec>,
 }
+
+/// A worker's drain method (#835): called once, with `{}`, on every exit of
+/// the driver. The worker stops receiving, discards what it still held, and
+/// answers with how many — decoded by `parse`.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkerDrainSpec {
+    /// The method, e.g. `matrix.drain`.
+    pub method: &'static str,
+    /// Decodes its result.
+    pub parse: ParseDrain,
+}
+
+/// What a worker's drain answered: a count, never anything a peer wrote.
+/// Deliberately no `Default`: its value would be the all-clear answer, and an
+/// unknown count must never fall back to it — that is an `Err` from
+/// [`ParseDrain`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerHeld {
+    /// Inbound messages the worker still held, now discarded.
+    pub discarded: usize,
+    /// The worker's stop may have cut an upstream batch short, or could not
+    /// be confirmed: an unknown number of messages, possibly none, are lost
+    /// and NOT in `discarded`.
+    pub interrupted: bool,
+}
+
+/// Decode a drain method's RESULT. An error means the count is unknown, and
+/// the driver says so.
+pub type ParseDrain = fn(serde_json::Value) -> anyhow::Result<WorkerHeld>;
 
 /// One inbound event as the channel layer sees it, before the driver stamps
 /// its [`ChannelId`](crate::channel::ChannelId) on. Produced by a [`ParsePoll`] fn from the poll result.

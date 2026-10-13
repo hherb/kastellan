@@ -97,8 +97,13 @@ const _: () = assert!(
 /// their rows to land.
 ///
 /// Long enough for a Matrix driver to notice its channel is gone (it long-polls
-/// for [`kastellan_core::channel::matrix::POLL_MS`] at a time, asserted below)
-/// and write its `driver_exit` rows. Short enough to leave most of the service
+/// for [`kastellan_core::channel::matrix::POLL_MS`] at a time), ask its worker
+/// what it still held (`matrix.drain`, bounded worker-side by
+/// [`kastellan_matrix_wire::DRAIN_STOP_BOUND_MS`], #835) — both asserted below,
+/// with [`DRAIN_SLACK_MS`] left over — and write its `driver_exit` rows. That
+/// is the budget of a **live** worker: a down one is not asked (it would hold
+/// the exit for a respawn, `polled_driver::worker_drain`), and a reply send
+/// already in flight at shutdown is not bounded here at all. Short enough to leave most of the service
 /// manager's stop budget — 10 s from SIGTERM to SIGKILL on both hosts
 /// (`TimeoutStopSec` / `ExitTimeOut`, `kastellan-supervisor`) — to the
 /// scheduler shutdown it runs beside. An email driver long-polls for 15 s, so
@@ -108,9 +113,18 @@ const _: () = assert!(
 /// [`report_drained`] says so at INFO, not as a loss.
 pub(crate) const DRAIN_BOUND: Duration = Duration::from_secs(3);
 
+/// What [`DRAIN_BOUND`] must leave over after one Matrix long-poll and its
+/// worker drain: the poll's tick overshoot (≤ 50 ms), two RPC round trips
+/// (vsock on the micro-VM path), and the held count's row insert.
+const DRAIN_SLACK_MS: u64 = 150;
+
 const _: () = assert!(
-    DRAIN_BOUND.as_millis() > kastellan_core::channel::matrix::POLL_MS as u128,
-    "the drain must outlast one Matrix long-poll, or every shutdown reports its driver"
+    DRAIN_BOUND.as_millis()
+        > (kastellan_core::channel::matrix::POLL_MS
+            + kastellan_matrix_wire::DRAIN_STOP_BOUND_MS
+            + DRAIN_SLACK_MS) as u128,
+    "the drain must outlast one Matrix long-poll plus its worker drain plus slack, or every \
+     shutdown reports its driver and a held count's row lands after the ledger closes"
 );
 
 /// How often [`drain`] looks again.

@@ -1,5 +1,5 @@
 //! JSON-RPC handler for the matrix worker: `matrix.init` / `matrix.poll` /
-//! `matrix.send`, dispatched over the [`MatrixSdk`] seam so the wire contract +
+//! `matrix.send` / `matrix.drain`, dispatched over the [`MatrixSdk`] seam so the wire contract +
 //! param validation are unit-tested without a homeserver.
 
 use kastellan_protocol::{codes, server::Handler, RpcError};
@@ -31,6 +31,11 @@ impl<S: MatrixSdk> Handler for MatrixHandler<S> {
                 })?;
                 let events = self.sdk.poll(p.timeout_ms);
                 Ok(serde_json::to_value(PollResult { events }).expect("PollResult serialises"))
+            }
+            // Params are ignored: the core sends `{}`, and a stray field is
+            // no reason to lose the count (#835).
+            "matrix.drain" => {
+                Ok(serde_json::to_value(self.sdk.drain()).expect("DrainResult serialises"))
             }
             "matrix.send" => {
                 let p: SendParams = serde_json::from_value(params).map_err(|e| {
@@ -87,7 +92,7 @@ mod tests {
     use crate::sdk::SendEvidence;
     use std::collections::VecDeque;
 
-    use kastellan_matrix_wire::{Event, InitResult};
+    use kastellan_matrix_wire::{DrainResult, Event, InitResult};
 
     /// Fake SDK: canned identity, a FIFO of queued inbound events, recorded
     /// sends. `fail`, when set, is what every send fails with.
@@ -95,10 +100,12 @@ mod tests {
         queued: VecDeque<Event>,
         sent: Vec<(String, String)>,
         fail: Option<SendEvidence>,
+        /// What `drain` reports as `interrupted`.
+        interrupted: bool,
     }
     impl FakeSdk {
         fn new(queued: Vec<Event>) -> Self {
-            Self { queued: queued.into_iter().collect(), sent: vec![], fail: None }
+            Self { queued: queued.into_iter().collect(), sent: vec![], fail: None, interrupted: false }
         }
     }
     impl MatrixSdk for FakeSdk {
@@ -107,6 +114,10 @@ mod tests {
         }
         fn poll(&mut self, _timeout_ms: u64) -> Vec<Event> {
             self.queued.drain(..).collect()
+        }
+        fn drain(&mut self) -> DrainResult {
+            let discarded = self.queued.drain(..).count();
+            DrainResult { discarded, interrupted: self.interrupted }
         }
         fn send(&mut self, conversation: &str, body: &str) -> Result<(), SendError> {
             if let Some(evidence) = self.fail {
@@ -139,6 +150,29 @@ mod tests {
         // Second poll: buffer now empty.
         let out2 = h.call("matrix.poll", serde_json::json!({})).unwrap();
         assert!(out2["events"].as_array().unwrap().is_empty());
+    }
+
+    /// #835: what the worker still held is counted and discarded — a count
+    /// only, nothing a peer wrote — and a second drain finds nothing.
+    #[test]
+    fn drain_reports_and_discards_what_is_still_queued() {
+        let mut h = MatrixHandler::new(FakeSdk::new(vec![ev("a"), ev("b")]));
+        let out = h.call("matrix.drain", serde_json::json!({})).unwrap();
+        assert_eq!(out, serde_json::json!({ "discarded": 2, "interrupted": false }));
+        let again = h.call("matrix.drain", serde_json::json!({})).unwrap();
+        assert_eq!(again["discarded"], 0);
+        let poll = h.call("matrix.poll", serde_json::json!({"timeout_ms": 0})).unwrap();
+        assert!(poll["events"].as_array().unwrap().is_empty(), "drained events are gone");
+    }
+
+    #[test]
+    fn drain_carries_an_interrupted_stop_and_ignores_its_params() {
+        let mut sdk = FakeSdk::new(vec![]);
+        sdk.interrupted = true;
+        let mut h = MatrixHandler::new(sdk);
+        // The core sends `{}`; anything else is not a reason to lose the count.
+        let out = h.call("matrix.drain", serde_json::json!({"unexpected": 1})).unwrap();
+        assert_eq!(out, serde_json::json!({ "discarded": 0, "interrupted": true }));
     }
 
     #[test]

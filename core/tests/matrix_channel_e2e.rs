@@ -21,7 +21,9 @@ use kastellan_core::channel::bus::{
 use kastellan_core::channel::matrix::{
     encode_matrix_send, parse_matrix_poll, MatrixChannel, MATRIX_POLLED_SPEC,
 };
-use kastellan_core::channel::polled_driver::{DriverAudit, PolledWorkerDriver};
+use kastellan_core::channel::polled_driver::{
+    DriverAudit, InboundDropStage, InboundDropped, PolledWorkerDriver,
+};
 use kastellan_core::channel::{ChannelId, PeerId};
 use kastellan_core::worker_lifecycle::persistent::{
     ClientTransport, PersistentFactory, PersistentTransport, PersistentWorker,
@@ -91,6 +93,17 @@ impl CompletedTasks for FakeCompleted {
 /// stack: PersistentWorker (supervision) + PolledWorkerDriver (poll/identity/
 /// pending) + MatrixChannel — everything but the sandbox and the sidecar.
 fn spawn_matrix_channel(sent_file: &Path, peer: &str) -> Option<MatrixChannel> {
+    spawn_matrix_channel_with(sent_file, peer, 0, DriverAudit::none())
+}
+
+/// [`spawn_matrix_channel`], with the fixture holding `held` events at drain
+/// time (`FAKE_MATRIX_HELD`) and the driver given `audit`.
+fn spawn_matrix_channel_with(
+    sent_file: &Path,
+    peer: &str,
+    held: usize,
+    audit: DriverAudit,
+) -> Option<MatrixChannel> {
     let bin = fixture_bin();
     if !bin.exists() {
         eprintln!(
@@ -110,6 +123,7 @@ fn spawn_matrix_channel(sent_file: &Path, peer: &str) -> Option<MatrixChannel> {
             .env("FAKE_MATRIX_PEER", &peer)
             .env("FAKE_MATRIX_ROOM", "!room:srv")
             .env("FAKE_MATRIX_BODY", "hello from peer")
+            .env("FAKE_MATRIX_HELD", held.to_string())
             .spawn()
             .map_err(|e| anyhow::anyhow!("spawn fake matrix worker: {e}"))?;
         let client = Client::from_child(child)
@@ -124,7 +138,7 @@ fn spawn_matrix_channel(sent_file: &Path, peer: &str) -> Option<MatrixChannel> {
         encode_matrix_send,
         None, // Matrix has no ack cursor — MATRIX_POLLED_SPEC.ack_method is None too.
         None, // No skipped-id extraction either: parse_matrix_poll never drops anything.
-        DriverAudit::none(), // No audit hooks: this suite has no database.
+        audit, // No database here: a test that needs a hook passes a recorder.
         ChannelId("matrix".into()),
     )
     .expect("polled driver spawn");
@@ -208,4 +222,40 @@ async fn unpaired_inbound_is_dropped_no_reply() {
     let sent = std::fs::read_to_string(&sent_file).unwrap_or_default();
     assert!(sent.trim().is_empty(), "no reply should be sent for an unpaired peer");
     let _ = std::fs::remove_file(&sent_file);
+}
+
+/// #835 through a real worker process: the fixture says it still held 2
+/// events when the channel stopped, and the driver's last call — the real
+/// `matrix.drain` over real pipes, decoded by `parse_matrix_drain` — hands
+/// that count to the inbound-dropped hook at the `worker` stage.
+#[tokio::test]
+async fn events_the_worker_still_held_at_stop_reach_the_audit_hook() {
+    let sent_file = std::env::temp_dir().join(format!("kastellan-matrix-held-{}", std::process::id()));
+    let _ = std::fs::remove_file(&sent_file);
+    let dropped: Arc<Mutex<Vec<(InboundDropStage, usize)>>> = Arc::default();
+    let sink = Arc::clone(&dropped);
+    let audit = DriverAudit {
+        inbound_dropped: Some(Arc::new(move |d: InboundDropped<'_>| {
+            sink.lock().unwrap().push((d.stage, d.dropped.get()))
+        })),
+        ..DriverAudit::none()
+    };
+    let Some(ch) = spawn_matrix_channel_with(&sent_file, "@stranger:srv", 2, audit) else { return };
+
+    // Dropping the channel stops the driver (detached thread): wait for its
+    // last report rather than for the thread.
+    drop(ch);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if dropped.lock().unwrap().iter().any(|(s, _)| *s == InboundDropStage::Worker) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Settle, so a duplicate report arriving after the first is seen too.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = std::fs::remove_file(&sent_file);
+    let worker: Vec<_> =
+        dropped.lock().unwrap().iter().filter(|(s, _)| *s == InboundDropStage::Worker).copied().collect();
+    assert_eq!(worker, [(InboundDropStage::Worker, 2)], "all hook calls: {:?}", dropped.lock().unwrap());
 }

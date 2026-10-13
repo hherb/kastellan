@@ -1,6 +1,7 @@
 //! Pure retry policy for the live worker's continuous sync loop.
 //!
-//! The live `sync()` call (`sdk_live::LiveSdk::connect`) returns whenever
+//! The live sync (`sdk_live::sync_loop::spawn_sync_loop`, which runs
+//! `sync_with_callback`) returns whenever
 //! `matrix-rust-sdk` hits an interruption — a transient server 5xx, a network
 //! blip through the egress tunnel, a long-poll hiccup. Treating *every* such
 //! return as fatal (the original `process::exit(1)`) means a single transient

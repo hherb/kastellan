@@ -86,6 +86,7 @@ async fn a_bus_stop_reports_the_messages_its_pump_never_read_before_shutdown_ret
         poll_timeout_ms: 5,
         refusal_backoff: REFUSAL_BACKOFF,
         reply_give_up: REPLY_GIVE_UP,
+        drain: None,
     };
     let polls = Arc::new(AtomicUsize::new(0));
     let dropped: Arc<Mutex<Vec<(InboundDropStage, usize)>>> = Arc::default();

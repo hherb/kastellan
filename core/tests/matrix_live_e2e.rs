@@ -162,7 +162,7 @@ fn matrix_send_recv_round_trip() {
 /// Regression proof for **issue #321**: a message sent to a room while the bot
 /// worker was down must be surfaced after the bot restarts.
 ///
-/// The fix in `workers/matrix/src/sdk_live.rs` reads the SDK's persisted sync
+/// The fix in `workers/matrix/src/sdk_live/mod.rs` reads the SDK's persisted sync
 /// token before the initial sync (`read_prior_sync_token`) and seeds a `live`
 /// flag via `initial_live_state(Option<&str>) -> bool`. When a token is present
 /// (restart path), `live` starts `true` so the incremental catch-up sync —

@@ -43,6 +43,13 @@ impl OutageLog {
     pub(super) fn on_answer(&mut self) -> bool {
         std::mem::take(&mut self.down)
     }
+
+    /// Whether the last worker call found the worker down. Read once, as the
+    /// driver exits, so it does not drain a worker that is being respawned
+    /// (#835, `worker_drain.rs`).
+    pub(super) fn is_down(&self) -> bool {
+        self.down
+    }
 }
 
 /// The worker answered a call (accepted or refused), so it is up: log "back

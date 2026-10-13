@@ -309,19 +309,28 @@ pub mod actions {
     ///   because an ack channel (email) acks a message once the buffer takes
     ///   it. Over-counts on email by any held back by a refused ack earlier
     ///   in its batch, which are redelivered, and by any whose own ack failed
-    ///   and that no later ack moved the cursor past.
+    ///   and that no later ack moved the cursor past;
+    /// - `worker` (#835): messages the **worker** had received but not yet
+    ///   returned from a poll when the driver exited — the live Matrix worker
+    ///   queues them between polls, behind a sync token it has already saved —
+    ///   counted by the worker's drain method as the driver exits.
     ///
     /// Carries the channel, the stage, the count (`dropped`) and the event's
     /// time (`observed_at`) only: never a peer, an id or a body, all
     /// peer-supplied. Written by the channel's driver audit hook (the driver
-    /// for `polled`, the bus-side receiver for `buffered`); the payload is
+    /// for `polled` and `worker`, the bus-side receiver for `buffered`); the payload is
     /// [`super::polled_driver::InboundDropped::payload`]'s. Rows written
     /// before #846 shipped (PR #849) have no `stage`; they are all `polled`.
     ///
-    /// Not every inbound loss, so a quiet `audit_log` is not proof of none:
-    /// messages the worker had received but not yet returned from a poll
-    /// when the driver exited are #835's; a batch that did not decode has no
-    /// count to give (#836); and a crash runs no `Drop`.
+    /// Not every inbound loss, so a quiet `audit_log` is not proof of none: a
+    /// batch that did not decode has no count to give (#836); a worker stop
+    /// that cut one of the homeserver's sync responses short or could not be
+    /// confirmed, a worker that could not be asked, and one that was down
+    /// when the driver exited (so was not asked) have none either (all said
+    /// on `[worker-refusal]`, without a row); a worker that dies or is
+    /// respawned **while the driver runs** takes what it held with it, with
+    /// no line and no row (the respawned one resumes from the saved sync
+    /// token); and a crash runs no `Drop`.
     pub const INBOUND_DROPPED: &str = "channel.inbound_dropped";
     /// A channel bus came up. Payload carries the channel and how many
     /// bring-up attempts it took, so "did it have to retry?" is answerable

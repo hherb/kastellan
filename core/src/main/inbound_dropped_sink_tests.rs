@@ -86,6 +86,8 @@ fn the_shutdown_name_says_the_channel_and_whether_the_bus_had_the_messages() {
         (SinkChannel::Matrix, InboundDropStage::Buffered),
         (SinkChannel::Email, InboundDropStage::Polled),
         (SinkChannel::Email, InboundDropStage::Buffered),
+        (SinkChannel::Matrix, InboundDropStage::Worker),
+        (SinkChannel::Email, InboundDropStage::Worker),
     ];
     let names: Vec<&str> = all.iter().map(|&(c, s)| row_what(c, s)).collect();
     for (i, a) in names.iter().enumerate() {
@@ -95,6 +97,9 @@ fn the_shutdown_name_says_the_channel_and_whether_the_bus_had_the_messages() {
     }
     assert!(names[0].starts_with("matrix ") && names[3].starts_with("email "), "{names:?}");
     assert!(names[1].ends_with("unread") && names[3].ends_with("unread"), "{names:?}");
+    // #835: held in the worker, never reached the driver.
+    assert!(names[4].starts_with("matrix ") && names[5].starts_with("email "), "{names:?}");
+    assert!(names[4].ends_with("in the worker") && names[5].ends_with("in the worker"), "{names:?}");
 }
 
 static EMAIL_INBOUND_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>> =

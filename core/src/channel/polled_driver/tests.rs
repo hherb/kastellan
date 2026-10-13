@@ -44,11 +44,17 @@ struct FakeState {
     /// `Some(c)`: every `*.send` whose params' `conversation` is `c` is
     /// refused with `OPERATION_FAILED` (#782's stuck room).
     refuse_conversation: Mutex<Option<String>>,
+    /// What a `*.drain` answers (#835): by default, nothing held.
+    drain: Mutex<Value>,
+    /// Every call made while `down`, by method — `log` holds only the calls
+    /// the worker took, so this is how a test sees a call it never answered.
+    down_attempts: Mutex<Vec<String>>,
 }
 struct FakeCalls(Arc<FakeState>);
 impl WorkerCalls for FakeCalls {
     fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
         if self.0.down.load(Ordering::SeqCst) {
+            self.0.down_attempts.lock().unwrap().push(method.to_string());
             anyhow::bail!("persistent worker is restarting");
         }
         self.0.log.lock().unwrap().push((method.to_string(), params.clone()));
@@ -88,6 +94,9 @@ impl WorkerCalls for FakeCalls {
         if method.ends_with(".ack") {
             return Ok(json!({}));
         }
+        if method.ends_with(".drain") {
+            return Ok(self.0.drain.lock().unwrap().clone());
+        }
         anyhow::bail!("unknown method {method}")
     }
 }
@@ -103,6 +112,8 @@ fn fake() -> (Arc<FakeState>, Box<dyn WorkerCalls>) {
         refuse: Mutex::new(None),
         refuse_code: std::sync::atomic::AtomicI32::new(codes::OPERATION_FAILED),
         refuse_conversation: Mutex::new(None),
+        drain: Mutex::new(json!({"discarded": 0, "interrupted": false})),
+        down_attempts: Mutex::new(Vec::new()),
     });
     (st.clone(), Box::new(FakeCalls(st)))
 }
@@ -136,6 +147,7 @@ const TEST_SPEC: PolledWorkerSpec = PolledWorkerSpec {
     poll_timeout_ms: 5,
     refusal_backoff: REFUSAL_BACKOFF,
     reply_give_up: REPLY_GIVE_UP,
+    drain: None,
 };
 
 fn spawn_test_driver(
@@ -157,6 +169,7 @@ fn spec_with_ack() -> PolledWorkerSpec {
         poll_timeout_ms: 50,
         refusal_backoff: REFUSAL_BACKOFF,
         reply_give_up: REPLY_GIVE_UP,
+        drain: None,
     }
 }
 
@@ -173,6 +186,7 @@ fn spec_without_ack() -> PolledWorkerSpec {
         poll_timeout_ms: 50,
         refusal_backoff: REFUSAL_BACKOFF,
         reply_give_up: REPLY_GIVE_UP,
+        drain: None,
     }
 }
 
@@ -368,3 +382,4 @@ mod inbound_rx;
 mod refusal;
 mod replies;
 mod replies_driver;
+mod worker_drain;

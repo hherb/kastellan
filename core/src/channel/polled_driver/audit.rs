@@ -55,7 +55,10 @@ pub type ReplyUndeliveredAudit = Box<dyn Fn(UndeliveredReply<'_>) + Send + 'stat
 /// - **the driver**, at most once per exit, for a polled batch it could not
 ///   hand over ([`InboundDropStage::Polled`], #826) — only on a channel with
 ///   no ack method (Matrix): an ack channel's unacked batch is redelivered on
-///   the next start, so it is not a loss;
+///   the next start, so it is not a loss — and, at most once per exit (only
+///   when it held something), for what its worker still held
+///   ([`InboundDropStage::Worker`], #835) — only on a channel whose spec
+///   names a drain method (Matrix);
 /// - **the bus-side receiver**, at most once (only when something was
 ///   unread), as the bus drops it, for what was still in the inbound buffer
 ///   unread ([`InboundDropStage::Buffered`], #846) — on every channel,
@@ -207,7 +210,7 @@ pub(super) fn record_inbound_dropped(
 ) {
     if let Some(audit) = audit {
         let caller = match dropped.stage {
-            InboundDropStage::Polled => HookCaller::DriverThread,
+            InboundDropStage::Polled | InboundDropStage::Worker => HookCaller::DriverThread,
             InboundDropStage::Buffered => HookCaller::StoppingBus,
         };
         timed(label, "inbound-dropped", caller, || audit(dropped));

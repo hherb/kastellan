@@ -2,7 +2,7 @@
 //! sandboxed `kastellan-worker-matrix` and the core-side `MatrixChannel` driver
 //! share. Pure serde — no logic, no I/O — so both sides depend on it without
 //! drift. The worker is a pure JSON-RPC server over these shapes
-//! (`matrix.init` / `matrix.poll` / `matrix.send`); see
+//! (`matrix.init` / `matrix.poll` / `matrix.send` / `matrix.drain`); see
 //! `docs/superpowers/specs/2026-06-12-matrix-inbound-sandboxed-worker-design.md`.
 
 use std::collections::VecDeque;
@@ -46,6 +46,34 @@ pub struct SendParams {
     /// Plaintext body to send (the worker E2E-encrypts it).
     pub body: String,
 }
+
+/// `matrix.drain` result (#835): what the worker still held when the core
+/// stopped polling it, asked once as the core's driver exits. The worker
+/// stops its background sync first, so nothing more arrives after it answers
+/// — unless the answer is `interrupted`, which also covers a stop that could
+/// not be confirmed within [`DRAIN_STOP_BOUND_MS`].
+///
+/// **A count only** — never a room, a sender or a body: every one of those is
+/// peer-supplied (the same rule as the `channel.inbound_dropped` row the core
+/// writes from it). Deliberately no `Default`: its value would be the
+/// all-clear answer, and an unknown count must never fall back to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrainResult {
+    /// Inbound events still queued in the worker, which no poll will now
+    /// return. They are discarded with the worker.
+    pub discarded: usize,
+    /// The sync was stopped while it was handing one sync response's events
+    /// to the queue (or the stop could not be confirmed). The homeserver
+    /// will not send that response again, so an unknown number of its events
+    /// — possibly none — are lost, and they are **not** in `discarded`.
+    pub interrupted: bool,
+}
+
+/// How long the worker may take to answer `matrix.drain`: to stop its sync
+/// and confirm the stop (#835). Past it, the answer is `interrupted`. Shared
+/// with the core because its shutdown waits for the Matrix driver to finish
+/// one long-poll **and** this drain (`DRAIN_BOUND`, asserted there).
+pub const DRAIN_STOP_BOUND_MS: u64 = 800;
 
 /// `matrix.init` result — confirms login + reports identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +135,16 @@ mod tests {
 
     fn ev_from(peer: &str, body: &str) -> Event {
         Event { conversation: "!room:srv".into(), peer: peer.into(), body: body.into() }
+    }
+
+    /// Both sides share this type, but a worker binary built before a rename
+    /// (version skew) and the fixtures that spell the fields by hand
+    /// (`fake_matrix_worker.rs`, the driver's test fake) would not follow
+    /// one: pinned so a rename is deliberate.
+    #[test]
+    fn drain_result_wire_shape_is_pinned() {
+        let v = serde_json::to_value(DrainResult { discarded: 3, interrupted: true }).unwrap();
+        assert_eq!(v, serde_json::json!({ "discarded": 3, "interrupted": true }));
     }
 
     #[test]

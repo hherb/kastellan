@@ -1,7 +1,8 @@
 //! Matrix wire codecs + the polled-driver spec.
 //!
 //! The matrix-specific glue the channel-generic [`PolledWorkerDriver`] needs:
-//! the [`MATRIX_POLLED_SPEC`] (method names + poll timeout) and the two pure
+//! the [`MATRIX_POLLED_SPEC`] (method names + poll timeout), the drain decoder
+//! [`parse_matrix_drain`] (#835), and the two pure
 //! codecs that translate between the JSON-RPC wire ([`kastellan_matrix_wire`])
 //! and the driver's [`PolledEvent`] / [`OutgoingMessage`] value types.
 //!
@@ -10,9 +11,11 @@
 //!
 //! [`PolledWorkerDriver`]: crate::channel::polled_driver::PolledWorkerDriver
 
-use kastellan_matrix_wire::PollResult;
+use kastellan_matrix_wire::{DrainResult, PollResult};
 
-use crate::channel::polled_driver::{PolledEvent, PolledWorkerSpec, REFUSAL_BACKOFF, REPLY_GIVE_UP};
+use crate::channel::polled_driver::{
+    PolledEvent, PolledWorkerSpec, WorkerDrainSpec, WorkerHeld, REFUSAL_BACKOFF, REPLY_GIVE_UP,
+};
 use crate::channel::OutgoingMessage;
 
 /// How long the driver waits in one `matrix.poll` before looping to check the
@@ -31,7 +34,20 @@ pub const MATRIX_POLLED_SPEC: PolledWorkerSpec = PolledWorkerSpec {
     poll_timeout_ms: POLL_MS,
     refusal_backoff: REFUSAL_BACKOFF,
     reply_give_up: REPLY_GIVE_UP,
+    // The live worker syncs continuously and queues what arrives between
+    // polls, behind a sync token it has already saved: whatever it still holds
+    // when the driver exits is lost, so the driver asks how many (#835).
+    drain: Some(WorkerDrainSpec { method: "matrix.drain", parse: parse_matrix_drain }),
 };
+
+/// Decode a `matrix.drain` result (wire [`DrainResult`]): how many inbound
+/// events the worker still held, and whether its stop cut a sync response
+/// short (#835).
+pub fn parse_matrix_drain(v: serde_json::Value) -> anyhow::Result<WorkerHeld> {
+    let d: DrainResult =
+        serde_json::from_value(v).map_err(|e| anyhow::anyhow!("decode drain result: {e}"))?;
+    Ok(WorkerHeld { discarded: d.discarded, interrupted: d.interrupted })
+}
 
 /// Decode a `matrix.poll` result (wire [`PollResult`]) into driver events.
 pub fn parse_matrix_poll(v: serde_json::Value) -> anyhow::Result<Vec<PolledEvent>> {

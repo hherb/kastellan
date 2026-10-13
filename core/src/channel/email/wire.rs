@@ -79,6 +79,9 @@ pub const EMAIL_POLLED_SPEC: PolledWorkerSpec = PolledWorkerSpec {
     poll_timeout_ms: POLL_MS,
     refusal_backoff: REFUSAL_BACKOFF,
     reply_give_up: REPLY_GIVE_UP,
+    // Nothing is held in the worker between polls: localmail keeps the
+    // messages, and the cursor redelivers what was never acked.
+    drain: None,
 };
 
 /// Configured authserv-id of our own MX. Set once at channel construction:
@@ -257,6 +260,14 @@ mod tests {
 
     fn poll_result(events: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({ "events": events, "skipped": [] })
+    }
+
+    /// #835: localmail keeps what was never acked, so email names no drain
+    /// method — a copied `matrix.drain` would WARN "could not ask" on every
+    /// exit, and its count would be a false loss on a channel that redelivers.
+    #[test]
+    fn the_email_spec_names_no_drain_method() {
+        assert!(EMAIL_POLLED_SPEC.drain.is_none());
     }
 
     #[test]
