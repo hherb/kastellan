@@ -32,7 +32,7 @@
 //! method as the driver exits (#835, `worker_drain.rs`). A channel whose
 //! upstream redelivers without an ack must not leave `ack_method` `None`
 //! without revisiting that, or it writes false `channel.inbound_dropped`
-//! rows.
+//! rows — and false `channel.inbound_undecodable` ones (#836).
 //!
 //! Why the ack fires *after* the event is handed to the bus, not before: if
 //! the worker died between receiving the poll result and the driver forwarding
@@ -116,7 +116,7 @@ pub use spec::{
 };
 mod undecodable;
 pub use undecodable::UndecodableBatch;
-use undecodable::{decoded, on_undecodable_batch};
+use undecodable::{check_undecodable_audit, decoded, on_undecodable_batch, UndecodableRun};
 mod worker_drain;
 use worker_drain::{check_drain, drain_worker_on_exit};
 use replies::{
@@ -134,13 +134,15 @@ const INBOUND_BUFFER: usize = 256;
 
 /// How long the driver sleeps between iterations that completed no poll: the
 /// worker is down (the supervisor is respawning it underneath), or a refused
-/// poll or ack is waiting out its backoff — so it is also the resolution at
-/// which such a backoff is honoured. Short so recovery latency is low; the
-/// shutdown check runs every slice so a dead channel's thread exits fast.
+/// poll or ack, or an undecodable batch (#836), is waiting out its backoff —
+/// so it is also the resolution at which such a backoff is honoured. Short so
+/// recovery latency is low; the shutdown check runs every slice so a dead
+/// channel's thread exits fast.
 const RETRY_SLICE: Duration = Duration::from_millis(200);
 
-/// How a channel paces retries of a call its worker **refused** (#769): 1 s,
-/// doubling, capped at 60 s. The channels' specs use it; see
+/// How a channel paces retries of a call its worker **refused** (#769), and
+/// the poll after a result that did not decode (#836): 1 s, doubling, capped
+/// at 60 s. The channels' specs use it; see
 /// [`PolledWorkerSpec::refusal_backoff`].
 ///
 /// Why these numbers: the base matches the ~1 s the supervisor's respawn used
@@ -188,6 +190,7 @@ impl PolledWorkerDriver {
         check_refusal_backoff(&spec.refusal_backoff)?;
         check_reply_give_up(&spec.reply_give_up)?;
         check_drain(&spec)?;
+        check_undecodable_audit(&spec, &audit)?;
         let identity = calls
             .call(spec.init_method, serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("{}: {e}", spec.init_method))?;
@@ -286,7 +289,7 @@ fn run(
     // A run of poll results that did not decode holds the poll the same way
     // (#836, `undecodable`): an ack channel would otherwise re-poll the same
     // unacked batch as fast as the worker answers.
-    let mut undecodable = RefusalRun::default();
+    let mut undecodable = UndecodableRun::default();
     // Every exit leaves this loop by `break 'drive`, so the worker is drained
     // exactly once, below.
     'drive: loop {
@@ -436,7 +439,7 @@ fn run(
                             // cursor with the events that just failed to
                             // decode, and acking them would silently drag
                             // that cursor past messages nobody ever saw.
-                            on_undecodable_batch(&spec, &cid, &e, &mut undecodable, inbound_undecodable.as_ref());
+                            on_undecodable_batch(&spec, &cid, &e, &mut undecodable, &outage, inbound_undecodable.as_ref());
                         }
                     }
                 }

@@ -251,7 +251,8 @@ fn the_reply_undelivered_row_is_the_bus_s_shape_without_the_body() {
 
 // ----- #826: the inbound-dropped hook -----
 
-/// #826: `attempt`'s driver gets both hooks, on ONE writer — one lease, so
+/// #826: `attempt`'s driver gets its inbound-dropped hook on the same ONE
+/// writer as the others — one lease, so
 /// the shutdown drain waits for the driver once — and the inbound-dropped
 /// row is named for the shutdown line by its count. No connection is ever
 /// free, so the row stays pending, and named, while the test reads it.
@@ -268,7 +269,7 @@ fn attempt_s_inbound_dropped_hook_shares_the_lease_and_names_its_row() {
     assert_eq!(
         LEDGER.snapshot(),
         InFlight { sinks_live: 1, auditing_live: 1, ..InFlight::default() },
-        "two hooks, one lease"
+        "three hooks, one lease"
     );
     let hook = audit.inbound_dropped.as_ref().expect("the inbound-dropped hook");
     let channel = ChannelId("matrix".into());

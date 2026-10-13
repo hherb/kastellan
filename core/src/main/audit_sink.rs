@@ -63,8 +63,8 @@
 //! of being refused is counted as pending there and then refused — reported,
 //! or counted in the last lines — over-counting, which is the safe direction.
 //!
-//! One writer for both channels (Matrix's `channel.reply_undelivered` and
-//! `channel.inbound_dropped`, email's `channel.skipped_ack_only` and
+//! One writer for both channels (Matrix's `channel.reply_undelivered`,
+//! `channel.inbound_dropped` and `channel.inbound_undecodable`, email's `channel.skipped_ack_only` and
 //! `channel.inbound_dropped`). Before #789
 //! each sink hand-rolled its own insert, and the two had already drifted: one
 //! spawned, one blocked.

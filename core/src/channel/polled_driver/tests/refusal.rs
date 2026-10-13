@@ -128,9 +128,9 @@ fn only_a_due_credential_refusal_gets_the_error_line() {
     assert_eq!(refusal_line(&other, &not_due), RefusalLine::Silent);
 }
 
-/// Both refusal lines say "Repeated every 15 min", and so does the line for a
-/// redelivered batch that did not decode, which follows the same cadence
-/// (#836, `undecodable::format_undecodable_report`).
+/// Both refusal lines say "Repeated every 15 min". The line for a redelivered
+/// batch that did not decode builds its minutes from the constant, and
+/// `tests/undecodable.rs` pins its text to "15 min" too (#836).
 #[test]
 fn the_repeat_interval_is_the_one_the_log_lines_name() {
     assert_eq!(REFUSAL_REPEAT, Duration::from_secs(15 * 60));

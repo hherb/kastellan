@@ -341,8 +341,9 @@ pub mod actions {
     ///
     /// Carries the channel and the event's time (`observed_at`) only — no
     /// count, and never the decode error, which can quote a peer's message
-    /// (the `[worker-refusal]` ERROR line names it). Written by the driver's
-    /// audit hook; the payload is
+    /// (the `[worker-refusal]` ERROR line names it). Written through the
+    /// driver's `InboundUndecodableAudit` hook, from the driver's thread only;
+    /// the payload is
     /// [`super::polled_driver::UndecodableBatch::payload`]'s. An ack channel
     /// (email) does not ack such a batch, so it is redelivered and writes no
     /// row.

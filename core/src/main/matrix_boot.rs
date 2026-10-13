@@ -101,8 +101,8 @@ fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::D
 /// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost): a
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
 /// timeout per dropped reply. The closure holds an `Arc` of `writer` (shared
-/// with the inbound-dropped hook's when [`driver_sinks`] builds both, so
-/// one lease), and the driver owns the closure — and the bus-side receiver a
+/// with the inbound-dropped and inbound-undecodable hooks when
+/// [`driver_sinks`] builds all three, so one lease), and the driver owns the closure — and the bus-side receiver a
 /// clone of the inbound-dropped hook — so the lease lasts until both have let
 /// go, and — once it has started (see [`login_outcome`]) — the daemon's
 /// shutdown drain waits for it. A row that was not written is

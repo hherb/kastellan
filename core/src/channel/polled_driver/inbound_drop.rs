@@ -80,7 +80,7 @@
 use std::num::NonZeroUsize;
 
 use super::audit::{record_inbound_dropped, InboundDroppedAudit, InboundUndecodableAudit};
-use super::undecodable::report_undecodable;
+use super::undecodable::report_lost_undecodable;
 use super::{ParsePoll, PolledWorkerSpec};
 use crate::channel::actions;
 use crate::channel::undelivered::observed_at_json;
@@ -268,7 +268,7 @@ pub(super) fn on_bus_closed_during_poll(
             report_inbound_dropped(spec.label, cid, InboundDropStage::Polled, events.len(), false, audit)
         }
         // Said and recorded as while the bus is up, with no next poll (#836).
-        Err(e) => report_undecodable(spec, cid, &e, None, undecodable),
+        Err(e) => report_lost_undecodable(spec, cid, &e.to_string(), None, undecodable),
     }
 }
 

@@ -5,7 +5,8 @@
 //!
 //! While a [`SinkWriter`] is alive, [`super::drain`] counts its driver as one
 //! that may still write a row. A sink's hook closures own its writer (each
-//! channel's two share it through an `Arc`), and the driver owns the hooks —
+//! channel's hooks — Matrix's three, email's two — share it through an
+//! `Arc`), and the driver owns the hooks —
 //! all but the inbound-dropped hook's second clone, which the bus-side
 //! receiver holds (#846). So the lease ends when the later of the two lets go
 //! — normally the driver, as its thread returns after any exit rows are

@@ -75,7 +75,8 @@ pub type InboundDroppedAudit = std::sync::Arc<dyn Fn(InboundDropped<'_>) + Send 
 /// decode, and the batch is lost" durably — the `channel.inbound_undecodable`
 /// row (#836). Called by the driver, once per such batch, only on a channel
 /// with no ack method (Matrix): an ack channel's undecodable batch is not
-/// acked, so it is redelivered, and is not a loss.
+/// acked, so it is redelivered, and is not a loss — so
+/// [`super::PolledWorkerDriver::spawn`] refuses this hook on an ack channel.
 ///
 /// It is handed an [`UndecodableBatch`]: the channel and when — no count
 /// (the batch did not decode, so it is unknown) and no error text (a decode
@@ -97,16 +98,16 @@ pub struct DriverAudit {
     /// no ack method; the bus-side receiver it hands a clone to calls it on
     /// every channel (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
-    /// See [`InboundUndecodableAudit`]. Called only on a channel with no ack
-    /// method.
+    /// See [`InboundUndecodableAudit`]. Only on a channel with no ack method:
+    /// `spawn` refuses one on an ack channel.
     pub inbound_undecodable: Option<InboundUndecodableAudit>,
 }
 
 impl DriverAudit {
     /// No audit hooks: every drop and skip is still logged (on the
-    /// `[worker-refusal]` emitter for a dropped reply or a dropped inbound
-    /// batch, whose line then says it was **not** recorded), but nothing is
-    /// written durably.
+    /// `[worker-refusal]` emitter for a dropped reply or a dropped or
+    /// undecodable inbound batch, whose line then says it was **not**
+    /// recorded), but nothing is written durably.
     pub fn none() -> Self {
         Self {
             ack_only: None,

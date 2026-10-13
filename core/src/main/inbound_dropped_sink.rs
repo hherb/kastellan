@@ -2,8 +2,8 @@
 //! (#826, #846), and its Matrix-only sibling for a batch lost undecodable,
 //! `channel.inbound_undecodable` (#836).
 //!
-//! Matrix calls it from its driver for a polled batch the closed bus never
-//! took and for what its worker still held at exit (#835), and from its
+//! The inbound-dropped hook: Matrix calls it from its driver for a polled
+//! batch the closed bus never took and for what its worker still held at exit (#835), and from its
 //! bus-side receiver for messages buffered unread; email
 //! from its receiver only (its polled batches are redelivered). One builder,
 //! so the row, the shutdown label and the lost-row line are spelled the same
@@ -141,6 +141,8 @@ pub(crate) fn inbound_undecodable_audit_sink(
         let (actor, action, payload) = inbound_undecodable_row(&batch);
         let label = crate::audit_sink::RowLabel::named(undecodable_row_what(writer.channel()));
         let who = writer.channel().writer();
+        // A refused row is reported through the closure, so its `Err` is not
+        // needed here.
         let _ = writer.spawn(actor, action, payload, label, move |why| {
             report(who, &format_undecodable_row_lost(&why));
         });

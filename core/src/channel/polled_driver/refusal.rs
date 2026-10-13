@@ -13,7 +13,9 @@
 //! (200 ms) — five requests a second at an upstream that is saying no. So each
 //! run of consecutive refusals ([`RefusalRun`]: poll, ack, each conversation's
 //! sends, and the channel-wide send hold) backs off exponentially (the
-//! channel's [`super::PolledWorkerSpec::refusal_backoff`]).
+//! channel's [`super::PolledWorkerSpec::refusal_backoff`]). A run of poll
+//! results that did not decode backs off the same way, on a `RefusalRun`
+//! wrapped in its own type (#836, `super::undecodable::UndecodableRun`).
 //!
 //! Everything here is pure except [`refused`], [`accepted`] and
 //! [`report_refusal`], which only emit the lines the pure parts chose. The
@@ -36,8 +38,9 @@ use super::PolledWorkerSpec;
 /// How often a refusal that is still happening is logged again. One line per
 /// run is not enough: a refusal can last for days (an expired credential), and
 /// a single line from the start of it scrolls away. Four lines an hour stay
-/// findable without becoming a flood. The log lines say "every 15 min"; a test
-/// pins the two together.
+/// findable without becoming a flood. The two refusal lines say "every 15
+/// min", which a test pins to this; the line for a redelivered batch that did
+/// not decode is built from it (#836, `super::undecodable`).
 pub(super) const REFUSAL_REPEAT: Duration = Duration::from_secs(15 * 60);
 
 /// The longest refusal backoff a spec may ask for (see
@@ -95,8 +98,10 @@ pub(super) struct Refused {
 /// One run of consecutive refusals: when the call may be made again, and when
 /// the run was last reported. Pure — the clock is passed in.
 ///
-/// The driver keeps one for poll and one for ack; sends keep one per
-/// conversation plus one channel-wide hold (`super::replies`, #782). They are
+/// The driver keeps one for poll and one for ack, and one inside the
+/// [`super::undecodable::UndecodableRun`] that holds the poll after a result
+/// that did not decode (#836); sends keep one per conversation plus one
+/// channel-wide hold (`super::replies`, #782). They are
 /// refused independently: a Matrix homeserver can reject a send to one room
 /// while sync, and so every poll, is healthy.
 #[derive(Debug, Default)]
@@ -145,6 +150,11 @@ impl RefusalRun {
             self.reported_code = Some(code);
         }
         Refused { delay, report }
+    }
+
+    /// How many refusals this run has had; 0 when there is no run.
+    pub(super) fn consecutive(&self) -> u32 {
+        self.consecutive
     }
 
     /// When this run's first refusal happened; `None` when there is no run.

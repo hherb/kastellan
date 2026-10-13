@@ -161,9 +161,8 @@ pub struct MatrixDriverAudit {
     /// batch the driver still held (#826), and, through the bus-side
     /// receiver, messages buffered unread (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
-    /// Records a batch lost because its poll result did not decode as a
-    /// `channel.inbound_undecodable` row (#836) — see
-    /// [`InboundUndecodableAudit`].
+    /// Records, as a `channel.inbound_undecodable` row, a batch lost because
+    /// its poll result did not decode (#836) — see [`InboundUndecodableAudit`].
     pub inbound_undecodable: Option<InboundUndecodableAudit>,
 }
 
