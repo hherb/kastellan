@@ -17,11 +17,13 @@ the second a five-agent review, follow-ups [#852](https://github.com/hherb/kaste
 **Recent PRs, newest first:** [#851](https://github.com/hherb/kastellan/pull/851) (#836), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs PR #787's tree** (deployed 2026-09-29 evening from its branch, which is `main` @
-#787 since the merge): 15 binaries, generated env **and** `.local` byte-identical to
-`~/kastellan.env*.bak-pre787`, live-matrix worker digest `4b60a6ce…`, `NRestarts=0`, Matrix up at
-attempt 1. `scripts/upgrade_from_git.sh` switches its checkout back to `main` by itself, so the next
-plain run is right. ⚠️ **None of #791, #795, #801, #806, #812, #819, #820, #824, #830, #834, #842, #847, #849, #850 or #851 is deployed.** The live process runs thinking **ON**
+**Both hosts run PR #851's tree** (deployed 2026-10-14). **DGX:** plain `scripts/upgrade_from_git.sh`
+(exit 0), 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre851`,
+live-matrix worker digest `94c86940…`, migrations 27/27, `NRestarts=0`, Matrix up. **Mac:** first
+redeploy since 2026-08-17 (install recipe in [[mac-kastellan-install-recipe]]), env identical,
+migrations 27/27. **localmail** on both hosts: its PR #397 (security floors, pypdf 6.20.1), same day.
+The DGX boot ERROR `install dir is writable … group-writable (mode 0775)` is **pre-existing** (72 of
+111 boots since 2026-07-31; `~/.local` is 0700) — not a deploy regression. The live process runs thinking **ON**
 (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`, `TIMEOUT_MS=600000`). The
 last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN]`, 4 `[SKIP]`
 (gliner opt-in). Rootfs images last rebuilt 2026-09-08.
