@@ -92,6 +92,9 @@ impl EmailDriverAudit {
             // replies through `email.send`.
             reply_undelivered: None,
             inbound_dropped: self.inbound_dropped,
+            // An ack channel: an undecodable batch is not acked, so the
+            // worker redelivers it, and the driver never calls this (#836).
+            inbound_undecodable: None,
         }
     }
 }

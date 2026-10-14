@@ -5,7 +5,8 @@
 //!
 //! While a [`SinkWriter`] is alive, [`super::drain`] counts its driver as one
 //! that may still write a row. A sink's hook closures own its writer (each
-//! channel's two share it through an `Arc`), and the driver owns the hooks —
+//! channel's hooks — Matrix's three, email's two — share it through an
+//! `Arc`), and the driver owns the hooks —
 //! all but the inbound-dropped hook's second clone, which the bus-side
 //! receiver holds (#846). So the lease ends when the later of the two lets go
 //! — normally the driver, as its thread returns after any exit rows are
@@ -41,8 +42,9 @@ pub(crate) enum SinkKind {
     /// The driver audits what it still holds as it exits — Matrix's: every
     /// reply still queued becomes a `channel.reply_undelivered` row, reason
     /// `driver_exit`, and an inbound batch the closed bus never took becomes
-    /// a `channel.inbound_dropped` row (#826). Stuck past the drain bound (in a worker call, or
-    /// flushing a long queue) it never gets there, so those replies are
+    /// a `channel.inbound_dropped` row (#826) — or, when it did not decode, a
+    /// `channel.inbound_undecodable` row (#836). Stuck past the drain bound (in a worker call,
+    /// or flushing a long queue) it never gets there, so those replies are
     /// **unaudited**: a possible loss, and reported as one.
     AuditsOnExit,
     /// The driver audits nothing once its bus is gone — email's: the skipped
@@ -58,9 +60,10 @@ pub(crate) enum SinkKind {
 /// `[audit-lost]` lines name. Each channel's [`SinkKind`] follows from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SinkChannel {
-    /// `channel.reply_undelivered` and `channel.inbound_dropped` (#826), from
-    /// the Matrix driver — and the latter, at the buffered stage, from its
-    /// bus-side receiver (#846).
+    /// `channel.reply_undelivered`, `channel.inbound_dropped` (#826) and
+    /// `channel.inbound_undecodable` (#836), from the Matrix driver — and
+    /// `channel.inbound_dropped`, at the buffered stage, from its bus-side
+    /// receiver (#846).
     Matrix,
     /// `channel.skipped_ack_only`, from the email driver, and
     /// `channel.inbound_dropped` at the buffered stage, from its bus-side

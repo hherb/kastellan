@@ -231,4 +231,8 @@ fn email_driver_audit_hands_both_hooks_to_the_driver() {
         "the inbound-dropped hook reaches the driver, the same one"
     );
     assert!(audit.reply_undelivered.is_none(), "email has no reply hook to wire");
+    assert!(
+        audit.inbound_undecodable.is_none(),
+        "email redelivers an undecodable batch, so it has no row to write (#836)"
+    );
 }

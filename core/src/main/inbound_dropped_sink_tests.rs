@@ -135,3 +135,65 @@ fn the_email_sink_names_email_on_its_pending_row_and_its_lost_line() {
     assert_eq!(said[0].0, AuditLostWriter::Email);
     assert!(said[0].1.contains("4 dropped inbound messages (buffered)"), "{said:?}");
 }
+
+// ----- #836: the inbound-undecodable hook -----
+
+static MATRIX_UNDECODABLE_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// #836: the row the sink writes — the bus's actor, the action spelled
+/// literally, channel + when, and no count: the batch did not decode.
+#[test]
+fn the_inbound_undecodable_row_is_the_bus_s_actor_and_channel_and_when() {
+    let channel = ChannelId("matrix".into());
+    let at = time::macros::datetime!(2026-10-13 12:34:56 UTC);
+    let (actor, action, payload) =
+        inbound_undecodable_row(&UndecodableBatch { channel: &channel, observed_at: at });
+    assert_eq!(actor, "channel");
+    assert_eq!(action, "channel.inbound_undecodable");
+    assert_eq!(
+        payload,
+        serde_json::json!({"channel": "matrix", "observed_at": "2026-10-13T12:34:56Z"})
+    );
+}
+
+/// #836: the lost-row line names the row and the cause, and points at the
+/// batch's own line.
+#[test]
+fn a_lost_inbound_undecodable_row_names_its_cause() {
+    assert_eq!(
+        format_undecodable_row_lost(&"shed: too many"),
+        "channel.inbound_undecodable row for an inbound batch lost undecodable not written: \
+         shed: too many. The batch's [worker-refusal] line stands"
+    );
+}
+
+/// #836: a row the sink could not write (shed: no queue room) reaches the
+/// reporter as the MATRIX writer; a pending one is named for the shutdown
+/// line by its channel.
+#[test]
+fn the_matrix_undecodable_sink_names_its_pending_row_and_reports_a_lost_one() {
+    let rt = tokio::runtime::Runtime::new().expect("a runtime");
+    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+    let channel = ChannelId("matrix".into());
+    let batch = || UndecodableBatch { channel: &channel, observed_at: time::OffsetDateTime::now_utc() };
+
+    static PENDING: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let sink = inbound_undecodable_audit_sink(
+        Arc::new(SinkWriter::with_ledger(&PENDING, pool.clone(), rt.handle().clone(), SinkChannel::Matrix)),
+        |_, _| {},
+    );
+    crate::audit_sink::test_support::assert_returns_at_once("the Matrix undecodable sink", || sink(batch()));
+    assert_eq!(PENDING.named_pending(), ["matrix inbound batch lost undecodable"]);
+
+    static SHED: Ledger = Ledger::new(Bounds { queued: 0, connections: 1 });
+    let sink = inbound_undecodable_audit_sink(
+        Arc::new(SinkWriter::with_ledger(&SHED, pool, rt.handle().clone(), SinkChannel::Matrix)),
+        |w, line| MATRIX_UNDECODABLE_SAID.lock().unwrap().push((w, line.to_string())),
+    );
+    sink(batch());
+    let said = MATRIX_UNDECODABLE_SAID.lock().unwrap();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert_eq!(said[0].0, AuditLostWriter::Matrix);
+    assert!(said[0].1.starts_with("channel.inbound_undecodable row for "), "{said:?}");
+}

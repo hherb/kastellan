@@ -63,11 +63,11 @@
 //!
 //! A quiet `audit_log` after a restart is still not proof that nothing was
 //! lost (a message the bus *had* read and was still handling is said on
-//! `[audit-lost]` since #832). Outside the three stages, each said but with
-//! no row, because there is no count to give:
+//! `[audit-lost]` since #832). A batch that did not decode is lost on a
+//! channel that does not redeliver with no count to give, so it has its own
+//! row, `channel.inbound_undecodable` (#836, `undecodable.rs`). Outside the
+//! three stages, said but with no row, because there is no count to give:
 //!
-//! - a batch that did not decode: dropped on a channel that does not
-//!   redeliver (a `tracing` WARN, [`on_undecodable_batch`], #836);
 //! - a worker stop that cut one upstream batch short (Matrix: a sync response
 //!   whose token was saved before its events were all queued) or could not be
 //!   confirmed, a worker that could not be asked, and one that was down when
@@ -79,7 +79,8 @@
 
 use std::num::NonZeroUsize;
 
-use super::audit::{record_inbound_dropped, InboundDroppedAudit};
+use super::audit::{record_inbound_dropped, InboundDroppedAudit, InboundUndecodableAudit};
+use super::undecodable::report_lost_undecodable;
 use super::{ParsePoll, PolledWorkerSpec};
 use crate::channel::actions;
 use crate::channel::undelivered::observed_at_json;
@@ -241,28 +242,6 @@ pub(super) fn report_inbound_dropped(
     record_inbound_dropped(audit, label, dropped);
 }
 
-/// A poll result that did not decode: a worker bug, not a death, so the
-/// driver logs it and keeps going — whether the bus is up or has just closed.
-/// What happened to the batch depends on the channel: an ack channel did not
-/// ack it, so it is redelivered; one that does not redeliver has lost it, and
-/// cannot say how many messages it held (#836).
-pub(super) fn on_undecodable_batch(spec: &PolledWorkerSpec, e: &anyhow::Error) {
-    if spec.ack_method.is_some() {
-        tracing::warn!(
-            label = spec.label,
-            error = %e,
-            "poll result decode failed; batch skipped (not acked, so the worker redelivers it)"
-        );
-    } else {
-        tracing::warn!(
-            label = spec.label,
-            error = %e,
-            "poll result decode failed; batch dropped: this channel does not redeliver, and how \
-             many messages it held is unknown"
-        );
-    }
-}
-
 /// The bus closed while a poll was out: the whole batch `v` never reached it.
 /// Consumes `v`, because the driver exits right after.
 pub(super) fn on_bus_closed_during_poll(
@@ -271,6 +250,7 @@ pub(super) fn on_bus_closed_during_poll(
     parse_poll: ParsePoll,
     v: serde_json::Value,
     audit: Option<&InboundDroppedAudit>,
+    undecodable: Option<&InboundUndecodableAudit>,
 ) {
     if spec.ack_method.is_some() {
         tracing::info!(
@@ -287,8 +267,8 @@ pub(super) fn on_bus_closed_during_poll(
         Ok(events) => {
             report_inbound_dropped(spec.label, cid, InboundDropStage::Polled, events.len(), false, audit)
         }
-        // Said exactly as while the bus is up: no count to report.
-        Err(e) => on_undecodable_batch(spec, &e),
+        // Said and recorded as while the bus is up, with no next poll (#836).
+        Err(e) => report_lost_undecodable(spec, cid, &e.to_string(), None, undecodable),
     }
 }
 

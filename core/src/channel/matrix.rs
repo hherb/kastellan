@@ -41,7 +41,8 @@ use std::time::Duration;
 use kastellan_sandbox::SandboxBackend;
 
 use crate::channel::polled_driver::{
-    DriverAudit, InboundDroppedAudit, InboundReceiver, PolledWorkerDriver, ReplyUndeliveredAudit,
+    DriverAudit, InboundDroppedAudit, InboundReceiver, InboundUndecodableAudit, PolledWorkerDriver,
+    ReplyUndeliveredAudit,
 };
 use crate::egress::persistent_net::{spawn_net_transport, NetTransportSpawn};
 use crate::egress::spawn::Mitm;
@@ -160,6 +161,9 @@ pub struct MatrixDriverAudit {
     /// batch the driver still held (#826), and, through the bus-side
     /// receiver, messages buffered unread (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
+    /// Records, as a `channel.inbound_undecodable` row, a batch lost because
+    /// its poll result did not decode (#836) — see [`InboundUndecodableAudit`].
+    pub inbound_undecodable: Option<InboundUndecodableAudit>,
 }
 
 impl MatrixDriverAudit {
@@ -167,7 +171,7 @@ impl MatrixDriverAudit {
     /// the driver still logs every drop, and its lines say nothing was
     /// recorded.
     pub fn none() -> Self {
-        Self { reply_undelivered: None, inbound_dropped: None }
+        Self { reply_undelivered: None, inbound_dropped: None, inbound_undecodable: None }
     }
 
     fn into_driver_audit(self) -> DriverAudit {
@@ -177,6 +181,7 @@ impl MatrixDriverAudit {
             ack_only: None,
             reply_undelivered: self.reply_undelivered,
             inbound_dropped: self.inbound_dropped,
+            inbound_undecodable: self.inbound_undecodable,
         }
     }
 }

@@ -26,6 +26,10 @@
 pub(super) struct OutageLog {
     /// The last worker call failed because the worker was down.
     down: bool,
+    /// How many outages have ended, whichever call noticed: a run kept
+    /// outside the refusal path compares it to see that the worker came back
+    /// since it last spoke (#836, `super::undecodable`).
+    ended: u64,
 }
 
 impl OutageLog {
@@ -41,7 +45,14 @@ impl OutageLog {
     /// "back up" once.
     #[must_use]
     pub(super) fn on_answer(&mut self) -> bool {
-        std::mem::take(&mut self.down)
+        let ended = std::mem::take(&mut self.down);
+        self.ended += u64::from(ended);
+        ended
+    }
+
+    /// How many outages have ended so far.
+    pub(super) fn ended(&self) -> u64 {
+        self.ended
     }
 
     /// Whether the last worker call found the worker down. Read once, as the

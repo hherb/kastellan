@@ -323,7 +323,8 @@ pub mod actions {
     /// before #846 shipped (PR #849) have no `stage`; they are all `polled`.
     ///
     /// Not every inbound loss, so a quiet `audit_log` is not proof of none: a
-    /// batch that did not decode has no count to give (#836); a worker stop
+    /// batch that did not decode has no count to give, so it is
+    /// [`INBOUND_UNDECODABLE`] instead (#836); a worker stop
     /// that cut one of the homeserver's sync responses short or could not be
     /// confirmed, a worker that could not be asked, and one that was down
     /// when the driver exited (so was not asked) have none either (all said
@@ -332,6 +333,21 @@ pub mod actions {
     /// no line and no row (the respawned one resumes from the saved sync
     /// token); and a crash runs no `Drop`.
     pub const INBOUND_DROPPED: &str = "channel.inbound_dropped";
+    /// A polled channel that does not redeliver (Matrix) lost a batch whose
+    /// poll result did not decode (#836): a worker bug, or a compromised
+    /// worker. How many messages it held is unknown, so this is its own
+    /// action, not an [`INBOUND_DROPPED`] row with a made-up count: a
+    /// `sum(dropped)` over those stays true.
+    ///
+    /// Carries the channel and the event's time (`observed_at`) only — no
+    /// count, and never the decode error, which can quote a peer's message
+    /// (the `[worker-refusal]` ERROR line names it). Written through the
+    /// driver's `InboundUndecodableAudit` hook, from the driver's thread only;
+    /// the payload is
+    /// [`super::polled_driver::UndecodableBatch::payload`]'s. An ack channel
+    /// (email) does not ack such a batch, so it is redelivered and writes no
+    /// row.
+    pub const INBOUND_UNDECODABLE: &str = "channel.inbound_undecodable";
     /// A channel bus came up. Payload carries the channel and how many
     /// bring-up attempts it took, so "did it have to retry?" is answerable
     /// after the fact — `attempts: 1` is the healthy shape (#514).

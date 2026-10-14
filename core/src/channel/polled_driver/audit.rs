@@ -1,6 +1,6 @@
 //! The polled driver's optional audit hooks: the caller's way to record a
-//! skipped id, a dropped reply or a dropped inbound batch durably, while the
-//! driver itself stays DB-free. Split out of [`super`] to keep it under the
+//! skipped id, a dropped reply, a dropped inbound batch or an undecodable one
+//! durably, while the driver itself stays DB-free. Split out of [`super`] to keep it under the
 //! 500-LOC soft cap; re-exported there, so every path is unchanged.
 //!
 //! Every hook runs on the driver's only thread, which every conversation, the
@@ -8,12 +8,13 @@
 //! inside the bus's stopping pump, which the channel's stop waits on (#846) —
 //! so **a hook must not block** (#789). A type cannot say that, so every hook
 //! call is timed ([`record_skipped`], [`record_undelivered`],
-//! [`record_inbound_dropped`]) and said when one holds its caller past
+//! [`record_inbound_dropped`], [`record_undecodable`]) and said when one holds its caller past
 //! [`HOOK_BUDGET`] (#793): what cannot be enforced is at least detected.
 
 use std::time::{Duration, Instant};
 
 use super::inbound_drop::{InboundDropStage, InboundDropped};
+use super::undecodable::UndecodableBatch;
 use crate::channel::{OutgoingMessage, SkippedId, UndeliveredReason, UndeliveredReply};
 
 /// Best-effort side channel for a caller to record "this id was discarded
@@ -70,6 +71,19 @@ pub type ReplyUndeliveredAudit = Box<dyn Fn(UndeliveredReply<'_>) + Send + 'stat
 /// must not block on I/O, like the hooks above.
 pub type InboundDroppedAudit = std::sync::Arc<dyn Fn(InboundDropped<'_>) + Send + Sync + 'static>;
 
+/// Best-effort side channel for a caller to record "a poll result did not
+/// decode, and the batch is lost" durably — the `channel.inbound_undecodable`
+/// row (#836). Called by the driver, once per such batch, only on a channel
+/// with no ack method (Matrix): an ack channel's undecodable batch is not
+/// acked, so it is redelivered, and is not a loss — so
+/// [`super::PolledWorkerDriver::spawn`] refuses this hook on an ack channel.
+///
+/// It is handed an [`UndecodableBatch`]: the channel and when — no count
+/// (the batch did not decode, so it is unknown) and no error text (a decode
+/// error can quote a peer's message). It runs on the driver's own thread, so
+/// it must not block on I/O, like the hooks above.
+pub type InboundUndecodableAudit = Box<dyn Fn(UndecodableBatch<'_>) + Send + 'static>;
+
 /// The driver's optional audit hooks.
 ///
 /// No `Default`, on purpose: "no audit sink" means the driver's drops are
@@ -84,15 +98,23 @@ pub struct DriverAudit {
     /// no ack method; the bus-side receiver it hands a clone to calls it on
     /// every channel (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
+    /// See [`InboundUndecodableAudit`]. Only on a channel with no ack method:
+    /// `spawn` refuses one on an ack channel.
+    pub inbound_undecodable: Option<InboundUndecodableAudit>,
 }
 
 impl DriverAudit {
     /// No audit hooks: every drop and skip is still logged (on the
-    /// `[worker-refusal]` emitter for a dropped reply or a dropped inbound
-    /// batch, whose line then says it was **not** recorded), but nothing is
-    /// written durably.
+    /// `[worker-refusal]` emitter for a dropped reply or a dropped or
+    /// undecodable inbound batch, whose line then says it was **not**
+    /// recorded), but nothing is written durably.
     pub fn none() -> Self {
-        Self { ack_only: None, reply_undelivered: None, inbound_dropped: None }
+        Self {
+            ack_only: None,
+            reply_undelivered: None,
+            inbound_dropped: None,
+            inbound_undecodable: None,
+        }
     }
 }
 
@@ -214,5 +236,17 @@ pub(super) fn record_inbound_dropped(
             InboundDropStage::Buffered => HookCaller::StoppingBus,
         };
         timed(label, "inbound-dropped", caller, || audit(dropped));
+    }
+}
+
+/// Hand a lost undecodable batch to the audit hook, if there is one, timed
+/// (#793, #836).
+pub(super) fn record_undecodable(
+    audit: Option<&InboundUndecodableAudit>,
+    label: &str,
+    batch: UndecodableBatch<'_>,
+) {
+    if let Some(audit) = audit {
+        timed(label, "inbound-undecodable", HookCaller::DriverThread, || audit(batch));
     }
 }

@@ -101,8 +101,8 @@ fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::D
 /// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost): a
 /// slow or unreachable Postgres must not stall the channel for a pool-acquire
 /// timeout per dropped reply. The closure holds an `Arc` of `writer` (shared
-/// with the inbound-dropped hook's when [`driver_sinks`] builds both, so
-/// one lease), and the driver owns the closure — and the bus-side receiver a
+/// with the inbound-dropped and inbound-undecodable hooks when
+/// [`driver_sinks`] builds all three, so one lease), and the driver owns the closure — and the bus-side receiver a
 /// clone of the inbound-dropped hook — so the lease lasts until both have let
 /// go, and — once it has started (see [`login_outcome`]) — the daemon's
 /// shutdown drain waits for it. A row that was not written is
@@ -136,8 +136,8 @@ fn reply_undelivered_audit_sink(
 }
 
 /// The Matrix driver's audit hooks as `attempt` builds them, on `ledger`: the
-/// reply-undelivered and inbound-dropped hooks, sharing one writer and so one
-/// lease, and that lease's [`Starting`] token — a lease that counts only once
+/// reply-undelivered, inbound-dropped and inbound-undecodable (#836) hooks,
+/// sharing one writer and so one lease, and that lease's [`Starting`] token — a lease that counts only once
 /// [`login_outcome`] says the worker is up (#802). A function, so a test can
 /// see the lease `attempt` takes.
 ///
@@ -154,6 +154,10 @@ fn driver_sinks(
     let audit = kastellan_core::channel::matrix::MatrixDriverAudit {
         reply_undelivered: Some(reply_undelivered_audit_sink(Arc::clone(&writer), report)),
         inbound_dropped: Some(crate::inbound_dropped_sink::inbound_dropped_audit_sink(
+            Arc::clone(&writer),
+            report,
+        )),
+        inbound_undecodable: Some(crate::inbound_dropped_sink::inbound_undecodable_audit_sink(
             writer, report,
         )),
     };

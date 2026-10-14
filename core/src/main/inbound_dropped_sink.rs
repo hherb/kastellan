@@ -1,8 +1,9 @@
 //! The daemon's `channel.inbound_dropped` hook, shared by both polled channels
-//! (#826, #846).
+//! (#826, #846), and its Matrix-only sibling for a batch lost undecodable,
+//! `channel.inbound_undecodable` (#836).
 //!
-//! Matrix calls it from its driver for a polled batch the closed bus never
-//! took and for what its worker still held at exit (#835), and from its
+//! The inbound-dropped hook: Matrix calls it from its driver for a polled
+//! batch the closed bus never took and for what its worker still held at exit (#835), and from its
 //! bus-side receiver for messages buffered unread; email
 //! from its receiver only (its polled batches are redelivered). One builder,
 //! so the row, the shutdown label and the lost-row line are spelled the same
@@ -12,7 +13,9 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use kastellan_core::channel::polled_driver::{InboundDropStage, InboundDropped, InboundDroppedAudit};
+use kastellan_core::channel::polled_driver::{
+    InboundDropStage, InboundDropped, InboundDroppedAudit, InboundUndecodableAudit, UndecodableBatch,
+};
 
 use crate::audit_sink::SinkChannel;
 
@@ -90,6 +93,58 @@ pub(crate) fn inbound_dropped_audit_sink(
         // needed here.
         let _ = writer.spawn(actor, action, payload, label, move |why| {
             report(who, &format_inbound_row_lost(stage, n, &why));
+        });
+    })
+}
+
+/// Pure: the `(actor, action, payload)` of the row
+/// [`inbound_undecodable_audit_sink`] writes for `batch` — the bus's actor,
+/// and [`UndecodableBatch::payload`]: channel and when, no count.
+pub(crate) fn inbound_undecodable_row(
+    batch: &UndecodableBatch<'_>,
+) -> (&'static str, &'static str, serde_json::Value) {
+    ("channel", kastellan_core::channel::actions::INBOUND_UNDECODABLE, batch.payload())
+}
+
+/// Pure: the `[audit-lost]` report for a `channel.inbound_undecodable` row a
+/// sink could not write.
+pub(crate) fn format_undecodable_row_lost(why: &dyn std::fmt::Display) -> String {
+    format!(
+        "{} row for an inbound batch lost undecodable not written: {why}. The batch's \
+         [worker-refusal] line stands",
+        kastellan_core::channel::actions::INBOUND_UNDECODABLE,
+    )
+}
+
+/// Pure: the shutdown line's name for a pending `channel.inbound_undecodable`
+/// row of `channel`'s.
+fn undecodable_row_what(channel: SinkChannel) -> &'static str {
+    match channel {
+        SinkChannel::Matrix => "matrix inbound batch lost undecodable",
+        // Email acks, so an undecodable batch is redelivered and never
+        // written; spelled anyway rather than mislabelled should that change.
+        SinkChannel::Email => "email inbound batch lost undecodable",
+    }
+}
+
+/// Build the [`InboundUndecodableAudit`] hook for a polled channel that does
+/// not redeliver (Matrix): it writes the `channel.inbound_undecodable` row
+/// ([`inbound_undecodable_row`]) through `writer`, spawned rather than
+/// awaited — it is called from the driver's own thread, like the hook above —
+/// and reports a row it could not write on `[audit-lost]`
+/// ([`format_undecodable_row_lost`]).
+pub(crate) fn inbound_undecodable_audit_sink(
+    writer: Arc<crate::audit_sink::SinkWriter>,
+    report: crate::audit_sink::Reporter,
+) -> InboundUndecodableAudit {
+    Box::new(move |batch| {
+        let (actor, action, payload) = inbound_undecodable_row(&batch);
+        let label = crate::audit_sink::RowLabel::named(undecodable_row_what(writer.channel()));
+        let who = writer.channel().writer();
+        // A refused row is reported through the closure, so its `Err` is not
+        // needed here.
+        let _ = writer.spawn(actor, action, payload, label, move |why| {
+            report(who, &format_undecodable_row_lost(&why));
         });
     })
 }

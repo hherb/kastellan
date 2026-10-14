@@ -80,6 +80,25 @@ fn run_until_the_bus_closes_mid_poll(
     encode_ack: Option<EncodeAck>,
     sink: bool,
 ) -> (Vec<DropCall>, Vec<String>) {
+    let dropped: Dropped = Arc::default();
+    let audit = if sink {
+        DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() }
+    } else {
+        DriverAudit::none()
+    };
+    let log = run_until_the_bus_closes_mid_poll_with(spec, batch, encode_ack, audit);
+    let dropped = dropped.lock().unwrap().clone();
+    (dropped, log)
+}
+
+/// [`run_until_the_bus_closes_mid_poll`] with the caller's own hooks (#836's
+/// undecodable batch). Returns the worker's calls.
+pub(super) fn run_until_the_bus_closes_mid_poll_with(
+    spec: PolledWorkerSpec,
+    batch: Value,
+    encode_ack: Option<EncodeAck>,
+    audit: DriverAudit,
+) -> Vec<String> {
     let polling = Arc::new(AtomicBool::new(false));
     let bus_gone = Arc::new(AtomicBool::new(false));
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -89,12 +108,6 @@ fn run_until_the_bus_closes_mid_poll(
         bus_gone: bus_gone.clone(),
         polls: AtomicUsize::new(0),
         log: log.clone(),
-    };
-    let dropped: Dropped = Arc::default();
-    let audit = if sink {
-        DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() }
-    } else {
-        DriverAudit::none()
     };
     let (driver, _identity) = PolledWorkerDriver::spawn(
         spec, Box::new(calls), test_parse, test_encode, encode_ack, None, audit,
@@ -107,9 +120,8 @@ fn run_until_the_bus_closes_mid_poll(
     bus_gone.store(true, Ordering::SeqCst);
     join.join().expect("the driver exits cleanly");
     drop(outbound_tx);
-    let dropped = dropped.lock().unwrap().clone();
     let log = log.lock().unwrap().clone();
-    (dropped, log)
+    log
 }
 
 /// The headline: on Matrix's shape (no ack method), a batch the worker had
