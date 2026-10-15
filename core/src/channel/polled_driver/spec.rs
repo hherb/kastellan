@@ -107,9 +107,47 @@ pub struct PolledEvent {
     pub ack_token: Option<String>,
 }
 
-/// Decode one poll RESULT into events. A decode error marks the batch as a
-/// worker bug (logged + skipped), NOT a worker death.
-pub type ParsePoll = fn(serde_json::Value) -> anyhow::Result<Vec<PolledEvent>>;
+/// What a [`ParsePoll`] fn read from one poll result: the events it decoded,
+/// and how many it could not (#852).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolledBatch {
+    /// The events that decoded, in the worker's order.
+    pub events: Vec<PolledEvent>,
+    /// The events that did not, if any. Only a decoder that reads events one
+    /// at a time reports these; one that reads the result whole fails the
+    /// whole result instead (an `Err` from [`ParsePoll`]).
+    ///
+    /// ⚠️ On a channel with an ack method the driver treats a batch with any
+    /// of these as wholly undecodable and acks none of it: its cursor is one
+    /// monotonic high-water mark, so acking the events after a bad one would
+    /// move it past the bad one for good (see [`super`]'s module docs).
+    pub undecodable: Option<UndecodableEvents>,
+}
+
+impl PolledBatch {
+    /// A batch whose every event decoded.
+    pub fn whole(events: Vec<PolledEvent>) -> Self {
+        Self { events, undecodable: None }
+    }
+}
+
+/// The events of a poll result that did not decode (#852): how many, and why
+/// the first did not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndecodableEvents {
+    /// How many. Never 0 — a batch whose every event decoded has no
+    /// [`PolledBatch::undecodable`] — and the type says so.
+    pub count: std::num::NonZeroUsize,
+    /// The first one's decode error. For the driver's line only, never a row:
+    /// a decode error can quote a field of the message, and so a peer's words.
+    pub first_error: String,
+}
+
+/// Decode one poll RESULT. An `Err` means the result as a whole could not be
+/// read — a worker bug (said, held, and on a channel that does not redeliver
+/// recorded), NOT a worker death; events that could not be read one at a time
+/// are an `Ok` with [`PolledBatch::undecodable`] set.
+pub type ParsePoll = fn(serde_json::Value) -> anyhow::Result<PolledBatch>;
 
 /// Encode one outbound message into the send method's params.
 pub type EncodeSend = fn(&OutgoingMessage) -> serde_json::Value;

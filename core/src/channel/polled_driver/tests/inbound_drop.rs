@@ -99,6 +99,18 @@ pub(super) fn run_until_the_bus_closes_mid_poll_with(
     encode_ack: Option<EncodeAck>,
     audit: DriverAudit,
 ) -> Vec<String> {
+    run_until_the_bus_closes_mid_poll_parsed(spec, batch, test_parse, encode_ack, audit)
+}
+
+/// [`run_until_the_bus_closes_mid_poll_with`], decoding the batch with
+/// `parse` (#852's per-event decoder).
+pub(super) fn run_until_the_bus_closes_mid_poll_parsed(
+    spec: PolledWorkerSpec,
+    batch: Value,
+    parse: ParsePoll,
+    encode_ack: Option<EncodeAck>,
+    audit: DriverAudit,
+) -> Vec<String> {
     let polling = Arc::new(AtomicBool::new(false));
     let bus_gone = Arc::new(AtomicBool::new(false));
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -110,7 +122,7 @@ pub(super) fn run_until_the_bus_closes_mid_poll_with(
         log: log.clone(),
     };
     let (driver, _identity) = PolledWorkerDriver::spawn(
-        spec, Box::new(calls), test_parse, test_encode, encode_ack, None, audit,
+        spec, Box::new(calls), parse, test_encode, encode_ack, None, audit,
         ChannelId(spec.label.into()),
     )
     .expect("driver spawn");

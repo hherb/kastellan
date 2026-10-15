@@ -137,7 +137,7 @@ fn spawn_matrix_channel_with(
         parse_matrix_poll,
         encode_matrix_send,
         None, // Matrix has no ack cursor — MATRIX_POLLED_SPEC.ack_method is None too.
-        None, // No skipped-id extraction either: parse_matrix_poll never drops anything.
+        None, // No skipped-id extraction either: parse_matrix_poll counts what it cannot decode itself (#852).
         audit, // No database here: a test that needs a hook passes a recorder.
         ChannelId("matrix".into()),
     )

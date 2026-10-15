@@ -14,7 +14,7 @@ use super::inbound_drop::run_until_the_bus_closes_mid_poll_with;
 use super::super::audit::slow_hook_reports_for;
 use super::super::undecodable::{
     error_code, format_decodes_again_report, format_undecodable_report, report_lost_undecodable, Fate,
-    DECODE_ERROR_CAP_CHARS,
+    LostPart, DECODE_ERROR_CAP_CHARS,
 };
 use super::*;
 use crate::worker_lifecycle::RestartBackoff;
@@ -32,31 +32,31 @@ fn failing_with(why: &str) -> Value {
 
 /// `test_parse`, except that a batch with a `fail` field fails with its text
 /// as the error — so a test can choose the decode error.
-fn parse_failing_with(v: Value) -> anyhow::Result<Vec<PolledEvent>> {
+fn parse_failing_with(v: Value) -> anyhow::Result<PolledBatch> {
     match v["fail"].as_str() {
         Some(why) => Err(anyhow::anyhow!("{why}")),
         None => test_parse(v),
     }
 }
 
-/// What the hook was handed, per call: `(channel, observed_at)`.
-type Undecodables = Arc<Mutex<Vec<(String, time::OffsetDateTime)>>>;
+/// What the hook was handed, per call: `(channel, part, observed_at)`.
+pub(super) type Undecodables = Arc<Mutex<Vec<(String, UndecodablePart, time::OffsetDateTime)>>>;
 
-fn undecodable_hook(seen: &Undecodables) -> InboundUndecodableAudit {
+pub(super) fn undecodable_hook(seen: &Undecodables) -> InboundUndecodableAudit {
     let sink = seen.clone();
-    Box::new(move |b: UndecodableBatch<'_>| {
-        sink.lock().unwrap().push((b.channel.0.clone(), b.observed_at))
+    Box::new(move |b: InboundUndecodable<'_>| {
+        sink.lock().unwrap().push((b.channel.0.clone(), b.part, b.observed_at))
     })
 }
 
 /// A backoff whose first wait is `base`, so a test can see the poll held.
-fn backoff(base: Duration) -> RestartBackoff {
+pub(super) fn backoff(base: Duration) -> RestartBackoff {
     RestartBackoff { base, ..REFUSAL_BACKOFF }
 }
 
 /// Spawn a driver over the scripted fake with `polls` queued, decoded by
 /// `parse`, and the undecodable hook wired to `seen` when given.
-fn spawn_with(
+pub(super) fn spawn_with(
     spec: PolledWorkerSpec,
     polls: Vec<Value>,
     parse: ParsePoll,
@@ -74,21 +74,21 @@ fn spawn_with(
     (st, driver)
 }
 
-fn polls(st: &FakeState) -> usize {
+pub(super) fn polls(st: &FakeState) -> usize {
     st.log.lock().unwrap().iter().filter(|(m, _)| m.ends_with(".poll")).count()
 }
 
 /// The lines for `label`, once `n` of them are out and a short settle has
 /// passed with no more — so a count that is too high fails rather than
 /// racing the next one.
-fn settled_lines_for(label: &str, n: usize) -> Vec<(String, RefusalSeverity)> {
+pub(super) fn settled_lines_for(label: &str, n: usize) -> Vec<(String, RefusalSeverity)> {
     wait_until(|| emitted_refusal_lines_for(label).len() >= n);
     std::thread::sleep(Duration::from_millis(100));
     emitted_refusal_lines_for(label)
 }
 
 /// The next inbound message, failing rather than hanging if none comes.
-fn recv_within_5s(driver: &mut PolledWorkerDriver) -> IncomingMessage {
+pub(super) fn recv_within_5s(driver: &mut PolledWorkerDriver) -> IncomingMessage {
     let mut got = None;
     wait_until(|| {
         got = driver.inbound_rx.try_recv().ok();
@@ -119,7 +119,8 @@ fn an_undecodable_batch_that_is_not_redelivered_is_said_at_error_and_recorded() 
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert_eq!(seen[0].0, label);
-    assert!(before <= seen[0].1, "observed_at is the drop's time");
+    assert_eq!(seen[0].1, UndecodablePart::Batch, "a whole result");
+    assert!(before <= seen[0].2, "observed_at is the drop's time");
 
     let lines = settled_lines_for(label, 2);
     assert_eq!(lines.len(), 2, "{lines:?}");
@@ -306,8 +307,8 @@ fn a_refused_poll_does_not_end_an_undecodable_run() {
 fn a_slow_undecodable_hook_is_said() {
     let label = "slow-undecodable-hook";
     let spec = PolledWorkerSpec { label, ..spec_without_ack() };
-    let slow: InboundUndecodableAudit = Box::new(|_: UndecodableBatch<'_>| std::thread::sleep(Duration::from_millis(250)));
-    report_lost_undecodable(&spec, &ChannelId(label.into()), "e", None, Some(&slow));
+    let slow: InboundUndecodableAudit = Box::new(|_: InboundUndecodable<'_>| std::thread::sleep(Duration::from_millis(250)));
+    report_lost_undecodable(&spec, &ChannelId(label.into()), "e", LostPart::Batch, None, Some(&slow));
     let lines = slow_hook_reports_for(label);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("inbound-undecodable"), "{lines:?}");
@@ -325,7 +326,9 @@ fn an_undecodable_batch_that_outlives_the_bus_is_said_and_recorded() {
         DriverAudit { inbound_undecodable: Some(undecodable_hook(&seen)), ..DriverAudit::none() };
     let log = run_until_the_bus_closes_mid_poll_with(spec, undecodable(), None, audit);
     assert!(log.iter().any(|m| m.ends_with(".poll")), "POSITIVE CONTROL: the poll ran: {log:?}");
-    assert_eq!(seen.lock().unwrap().len(), 1);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1, UndecodablePart::Batch);
     let lines = emitted_refusal_lines_for(label);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(lines[0].1, RefusalSeverity::Error);
@@ -343,16 +346,27 @@ fn an_ack_channel_s_batch_that_outlives_the_bus_is_not_decoded() {
     assert!(emitted_refusal_lines_for(label).is_empty());
 }
 
-/// Pure: the row is the channel and when, and nothing else — no count (it is
-/// unknown), no error text (a decode error can quote a peer's message).
+/// Pure: the row is the channel, the part and when, and nothing else — no
+/// count for a whole batch or a drain answer (it is unknown), the count for
+/// events, and never error text (a decode error can quote a peer's message).
 #[test]
-fn the_inbound_undecodable_row_is_channel_and_when_only() {
-    let v = UndecodableBatch {
-        channel: &ChannelId("matrix".into()),
-        observed_at: time::macros::datetime!(2026-10-13 12:34:56 UTC),
-    }
-    .payload();
-    assert_eq!(v, json!({"channel": "matrix", "observed_at": "2026-10-13T12:34:56Z"}));
+fn the_inbound_undecodable_row_is_channel_part_and_when_only() {
+    let row = |part| {
+        InboundUndecodable {
+            channel: &ChannelId("matrix".into()),
+            part,
+            observed_at: time::macros::datetime!(2026-10-13 12:34:56 UTC),
+        }
+        .payload()
+    };
+    let at = "2026-10-13T12:34:56Z";
+    assert_eq!(row(UndecodablePart::Batch), json!({"channel": "matrix", "part": "batch", "observed_at": at}));
+    assert_eq!(row(UndecodablePart::Drain), json!({"channel": "matrix", "part": "drain", "observed_at": at}));
+    let two = std::num::NonZeroUsize::new(2).unwrap();
+    assert_eq!(
+        row(UndecodablePart::Events(two)),
+        json!({"channel": "matrix", "part": "events", "undecodable": 2, "observed_at": at})
+    );
     assert_eq!(
         crate::channel::actions::INBOUND_UNDECODABLE,
         "channel.inbound_undecodable",
@@ -367,13 +381,13 @@ fn the_inbound_undecodable_row_is_channel_and_when_only() {
 fn the_undecodable_line_says_where_the_batch_went() {
     let ms = Duration::from_millis(1000);
     assert_eq!(
-        format_undecodable_report("bad event", Fate::Lost { retry_in: Some(ms), recorded: true }),
+        format_undecodable_report("bad event", Fate::Lost { part: LostPart::Batch, retry_in: Some(ms), recorded: true }),
         "a poll result did not decode (bad event), so its batch is lost: this channel does not \
          redeliver, and how many messages it held is unknown. The worker sent output the core \
          cannot read: a worker bug, or a compromised worker. Polling again in 1000 ms; \
          recording it as channel.inbound_undecodable"
     );
-    assert!(format_undecodable_report("e", Fate::Lost { retry_in: None, recorded: false }).ends_with(
+    assert!(format_undecodable_report("e", Fate::Lost { part: LostPart::Batch, retry_in: None, recorded: false }).ends_with(
         "cannot read: a worker bug, or a compromised worker. NOT recorded as \
          channel.inbound_undecodable: this channel has no audit sink"
     ));
@@ -392,10 +406,10 @@ fn the_undecodable_line_says_where_the_batch_went() {
 #[test]
 fn a_long_decode_error_is_capped_in_its_line() {
     let long = "x".repeat(DECODE_ERROR_CAP_CHARS + 1000);
-    let line = format_undecodable_report(&long, Fate::Lost { retry_in: None, recorded: true });
+    let line = format_undecodable_report(&long, Fate::Lost { part: LostPart::Batch, retry_in: None, recorded: true });
     let kept = format!("({}{})", "x".repeat(DECODE_ERROR_CAP_CHARS), crate::channel::audit_text::TRUNCATION_MARKER);
     assert!(line.contains(&kept), "{line}");
-    let short = format_undecodable_report("short", Fate::Lost { retry_in: None, recorded: true });
+    let short = format_undecodable_report("short", Fate::Lost { part: LostPart::Batch, retry_in: None, recorded: true });
     assert!(short.contains("(short)"), "POSITIVE CONTROL: a short error is whole: {short}");
 }
 

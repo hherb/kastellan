@@ -80,7 +80,7 @@
 use std::num::NonZeroUsize;
 
 use super::audit::{record_inbound_dropped, InboundDroppedAudit, InboundUndecodableAudit};
-use super::undecodable::report_lost_undecodable;
+use super::undecodable::{report_lost_undecodable, LostPart};
 use super::{ParsePoll, PolledWorkerSpec};
 use crate::channel::actions;
 use crate::channel::undelivered::observed_at_json;
@@ -262,13 +262,18 @@ pub(super) fn on_bus_closed_during_poll(
     }
     tracing::info!(label = spec.label, "inbound receiver closed during a poll; polled driver exiting");
     // Decoded only to count it: nothing in it is used. `acks: false` — an
-    // ack channel returned above.
+    // ack channel returned above. What did not decode is said and recorded as
+    // while the bus is up, with no next poll (#836, #852).
     match parse_poll(v) {
-        Ok(events) => {
-            report_inbound_dropped(spec.label, cid, InboundDropStage::Polled, events.len(), false, audit)
+        Ok(batch) => {
+            let of = batch.events.len();
+            report_inbound_dropped(spec.label, cid, InboundDropStage::Polled, of, false, audit);
+            if let Some(u) = batch.undecodable {
+                let part = LostPart::Events { lost: u.count, of: u.count.get() + of };
+                report_lost_undecodable(spec, cid, &u.first_error, part, None, undecodable);
+            }
         }
-        // Said and recorded as while the bus is up, with no next poll (#836).
-        Err(e) => report_lost_undecodable(spec, cid, &e.to_string(), None, undecodable),
+        Err(e) => report_lost_undecodable(spec, cid, &e.to_string(), LostPart::Batch, None, undecodable),
     }
 }
 

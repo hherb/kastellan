@@ -52,7 +52,9 @@
 use std::sync::OnceLock;
 
 use crate::channel::email::gate::{extract_token, trusted_dmarc_pass};
-use crate::channel::polled_driver::{PolledEvent, PolledWorkerSpec, REFUSAL_BACKOFF, REPLY_GIVE_UP};
+use crate::channel::polled_driver::{
+    PolledBatch, PolledEvent, PolledWorkerSpec, REFUSAL_BACKOFF, REPLY_GIVE_UP,
+};
 use crate::channel::PeerEvidence;
 
 /// Long-poll window for one `email.poll` call. Longer than Matrix's 2s: email
@@ -118,9 +120,12 @@ pub fn set_authserv_id(id: &str) {
 
 /// `ParsePoll` entry point (the fn-pointer shape `PolledWorkerDriver` needs).
 /// An unset authserv-id yields `""`, which `trusted_dmarc_pass` treats as
-/// fail-closed (never admits).
-pub fn parse_email_poll(v: serde_json::Value) -> anyhow::Result<Vec<PolledEvent>> {
-    parse_email_poll_with(v, AUTHSERV_ID.get().map(String::as_str).unwrap_or(""))
+/// fail-closed (never admits). Decodes the result whole — one event that does
+/// not decode fails the batch, which is then not acked and so redelivered:
+/// email acks behind one monotonic cursor, so it must never skip a bad event
+/// the way Matrix does (#852).
+pub fn parse_email_poll(v: serde_json::Value) -> anyhow::Result<PolledBatch> {
+    parse_email_poll_with(v, AUTHSERV_ID.get().map(String::as_str).unwrap_or("")).map(PolledBatch::whole)
 }
 
 /// Pure core: decode one `email.poll` result's `events` array into driver

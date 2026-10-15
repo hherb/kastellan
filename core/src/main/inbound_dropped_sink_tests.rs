@@ -142,29 +142,67 @@ static MATRIX_UNDECODABLE_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>>
     std::sync::Mutex::new(Vec::new());
 
 /// #836: the row the sink writes — the bus's actor, the action spelled
-/// literally, channel + when, and no count: the batch did not decode.
+/// literally, channel + part + when, and no count: the batch did not decode.
 #[test]
 fn the_inbound_undecodable_row_is_the_bus_s_actor_and_channel_and_when() {
     let channel = ChannelId("matrix".into());
     let at = time::macros::datetime!(2026-10-13 12:34:56 UTC);
+    let part = UndecodablePart::Batch;
     let (actor, action, payload) =
-        inbound_undecodable_row(&UndecodableBatch { channel: &channel, observed_at: at });
+        inbound_undecodable_row(&InboundUndecodable { channel: &channel, part, observed_at: at });
     assert_eq!(actor, "channel");
     assert_eq!(action, "channel.inbound_undecodable");
     assert_eq!(
         payload,
-        serde_json::json!({"channel": "matrix", "observed_at": "2026-10-13T12:34:56Z"})
+        serde_json::json!({"channel": "matrix", "part": "batch", "observed_at": "2026-10-13T12:34:56Z"})
     );
 }
 
-/// #836: the lost-row line names the row and the cause, and points at the
-/// batch's own line.
+/// #836, #852, #853: the lost-row line names the row, what it was for and
+/// the cause, and points at the loss's own line.
 #[test]
 fn a_lost_inbound_undecodable_row_names_its_cause() {
     assert_eq!(
-        format_undecodable_row_lost(&"shed: too many"),
+        format_undecodable_row_lost(UndecodablePart::Batch, &"shed: too many"),
         "channel.inbound_undecodable row for an inbound batch lost undecodable not written: \
-         shed: too many. The batch's [worker-refusal] line stands"
+         shed: too many. Its [worker-refusal] line stands"
+    );
+    let one = NonZeroUsize::new(1).unwrap();
+    let three = NonZeroUsize::new(3).unwrap();
+    assert!(format_undecodable_row_lost(UndecodablePart::Events(one), &"x")
+        .contains("row for 1 inbound event lost undecodable not written"));
+    assert!(format_undecodable_row_lost(UndecodablePart::Events(three), &"x")
+        .contains("row for 3 inbound events lost undecodable not written"));
+    assert!(format_undecodable_row_lost(UndecodablePart::Drain, &"x")
+        .contains("row for an undecodable drain answer not written"));
+}
+
+/// #852, #853: a pending row is named for the shutdown line by its part, and
+/// carries its count only for events — a batch or a drain answer has none.
+#[test]
+fn a_pending_undecodable_row_is_labelled_by_its_part() {
+    let rt = tokio::runtime::Runtime::new().expect("a runtime");
+    let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
+    // No connections, so every row stays pending and named.
+    static PENDING: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
+    let sink = inbound_undecodable_audit_sink(
+        Arc::new(SinkWriter::with_ledger(&PENDING, pool, rt.handle().clone(), SinkChannel::Matrix)),
+        |_, _| {},
+    );
+    let channel = ChannelId("matrix".into());
+    let four = UndecodablePart::Events(NonZeroUsize::new(4).unwrap());
+    for part in [UndecodablePart::Batch, four, UndecodablePart::Drain] {
+        sink(InboundUndecodable { channel: &channel, part, observed_at: time::OffsetDateTime::now_utc() });
+    }
+    let mut named = PENDING.named_pending();
+    named.sort();
+    assert_eq!(
+        named,
+        [
+            "matrix inbound batch lost undecodable",
+            "matrix inbound events lost undecodable (4)",
+            "matrix undecodable drain answer",
+        ]
     );
 }
 
@@ -176,7 +214,11 @@ fn the_matrix_undecodable_sink_names_its_pending_row_and_reports_a_lost_one() {
     let rt = tokio::runtime::Runtime::new().expect("a runtime");
     let (pool, _listener) = rt.block_on(async { crate::audit_sink::test_support::stalled_pool() });
     let channel = ChannelId("matrix".into());
-    let batch = || UndecodableBatch { channel: &channel, observed_at: time::OffsetDateTime::now_utc() };
+    let batch = || InboundUndecodable {
+        channel: &channel,
+        part: UndecodablePart::Batch,
+        observed_at: time::OffsetDateTime::now_utc(),
+    };
 
     static PENDING: Ledger = Ledger::new(Bounds { queued: 8, connections: 0 });
     let sink = inbound_undecodable_audit_sink(

@@ -9,7 +9,10 @@
 use std::num::NonZeroUsize;
 use std::thread::JoinHandle;
 
+use super::super::undecodable::DECODE_ERROR_CAP_CHARS;
+use super::super::worker_drain::format_drain_undecodable_report;
 use super::inbound_drop::{counts, events, hook, Dropped};
+use super::undecodable::{undecodable_hook, Undecodables};
 use super::*;
 use crate::worker_stderr::{emitted_refusal_lines_for, RefusalSeverity};
 
@@ -164,34 +167,81 @@ fn an_interrupted_stop_with_a_count_records_the_count_and_says_both() {
     assert!(lines.iter().any(|l| l.0.contains("an unknown number")), "{lines:?}");
 }
 
-/// A worker that cannot answer (down, or a stale binary without the method)
-/// leaves the count unknown: said, never assumed to be zero.
+/// Exit a drain-spec driver at once and return what each hook was handed.
+/// `answer` is what the fake's `.drain` says; `None` makes the call fail.
+fn exit_with_drain_answer(label: &'static str, answer: Option<Value>) -> (Dropped, Undecodables) {
+    let (st, calls) = fake();
+    match answer {
+        None => *st.fail_method.lock().unwrap() = Some("matrix.drain".into()),
+        Some(v) => *st.drain.lock().unwrap() = v,
+    }
+    let dropped: Dropped = Arc::default();
+    let seen: Undecodables = Arc::default();
+    let audit = DriverAudit {
+        inbound_dropped: Some(hook(&dropped)),
+        inbound_undecodable: Some(undecodable_hook(&seen)),
+        ..DriverAudit::none()
+    };
+    let (driver, _) = PolledWorkerDriver::spawn(
+        spec_with_drain(label), calls, test_parse, test_encode, None, None, audit, ChannelId(label.into()),
+    )
+    .expect("driver spawn");
+    let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
+    drop(inbound_rx);
+    drop(outbound_tx);
+    join_within(join, &st);
+    (dropped, seen)
+}
+
+/// A worker that cannot be asked (it died on the call, or a stale binary
+/// without the method) leaves the count unknown: said at WARN, never assumed
+/// to be zero, and no row — nothing the worker sent was unreadable.
 #[test]
 fn a_drain_the_worker_cannot_answer_is_said_and_records_nothing() {
-    for (label, answer) in [("t-held-err", None), ("t-held-junk", Some(json!({"events": []})))] {
-        let (st, calls) = fake();
-        match &answer {
-            None => *st.fail_method.lock().unwrap() = Some("matrix.drain".into()),
-            Some(v) => *st.drain.lock().unwrap() = v.clone(),
-        }
-        let dropped: Dropped = Arc::default();
-        let audit = DriverAudit { inbound_dropped: Some(hook(&dropped)), ..DriverAudit::none() };
-        let spec = spec_with_drain(label);
-        let (driver, _) = PolledWorkerDriver::spawn(
-            spec, calls, test_parse, test_encode, None, None, audit, ChannelId(label.into()),
-        )
-        .expect("driver spawn");
-        let PolledWorkerDriver { inbound_rx, outbound_tx, join } = driver;
-        drop(inbound_rx);
-        drop(outbound_tx);
-        join_within(join, &st);
-        assert!(dropped.lock().unwrap().is_empty(), "{label}");
-        let lines = emitted_refusal_lines_for(label);
-        assert_eq!(lines.len(), 1, "{label}: {lines:?}");
-        assert!(lines[0].0.contains("could not ask the worker"), "{label}: {lines:?}");
-        assert!(lines[0].0.contains("lost uncounted"), "{label}: {lines:?}");
-        assert_eq!(lines[0].1, RefusalSeverity::Warn);
-    }
+    let label = "t-held-err";
+    let (dropped, seen) = exit_with_drain_answer(label, None);
+    assert!(dropped.lock().unwrap().is_empty());
+    assert!(seen.lock().unwrap().is_empty(), "a failed call is not an undecodable answer");
+    let lines = emitted_refusal_lines_for(label);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].0.contains("could not ask the worker"), "{lines:?}");
+    assert!(lines[0].0.contains("lost uncounted"), "{lines:?}");
+    assert_eq!(lines[0].1, RefusalSeverity::Warn);
+}
+
+/// #853: a drain answer that does not decode is the #836 event — the worker
+/// sent output the core cannot read — so it is said at ERROR with the decode
+/// error, and recorded as `channel.inbound_undecodable` with part `drain`;
+/// never as a count, and never mixed in with "could not ask".
+#[test]
+fn an_undecodable_drain_answer_is_said_at_error_and_recorded() {
+    let label = "t-held-junk";
+    let (dropped, seen) = exit_with_drain_answer(label, Some(json!({"events": []})));
+    assert!(dropped.lock().unwrap().is_empty(), "no count to record");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!((seen[0].0.as_str(), seen[0].1), (label, UndecodablePart::Drain));
+    let lines = emitted_refusal_lines_for(label);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].1, RefusalSeverity::Error);
+    assert_eq!(
+        lines[0].0,
+        "channel worker t-held-junk: the worker's answer to matrix.drain did not decode (no discarded), so how many inbound \
+         messages it still held is unknown; any it held, received but not yet polled, are lost \
+         uncounted. The worker sent output the core cannot read: a worker bug, or a compromised \
+         worker. recording it as channel.inbound_undecodable"
+    );
+}
+
+/// Pure: with no sink the drain line says it was NOT recorded, and a long
+/// decode error is capped as a poll's is.
+#[test]
+fn the_undecodable_drain_line_caps_its_error_and_says_when_unrecorded() {
+    let long = "x".repeat(DECODE_ERROR_CAP_CHARS + 50);
+    let line = format_drain_undecodable_report("matrix.drain", &long, false);
+    assert!(line.ends_with("NOT recorded as channel.inbound_undecodable: this channel has no audit sink"), "{line}");
+    assert!(!line.contains(&"x".repeat(DECODE_ERROR_CAP_CHARS + 1)), "capped: {line}");
+    assert!(line.contains(&"x".repeat(DECODE_ERROR_CAP_CHARS)), "POSITIVE CONTROL: the cap keeps its share");
 }
 
 /// The exit from step 4's retry slice: every poll is refused, so no poll ever

@@ -111,12 +111,15 @@ mod replies;
 pub use replies::{ReplyGiveUp, REPLY_GIVE_UP};
 mod spec;
 pub use spec::{
-    EncodeAck, EncodeSend, ParseAckOnly, ParseDrain, ParsePoll, PolledEvent, PolledWorkerSpec,
-    WorkerCalls, WorkerDrainSpec, WorkerHeld,
+    EncodeAck, EncodeSend, ParseAckOnly, ParseDrain, ParsePoll, PolledBatch, PolledEvent,
+    PolledWorkerSpec, UndecodableEvents, WorkerCalls, WorkerDrainSpec, WorkerHeld,
 };
 mod undecodable;
-pub use undecodable::UndecodableBatch;
-use undecodable::{check_undecodable_audit, decoded, on_undecodable_batch, UndecodableRun};
+pub use undecodable::{InboundUndecodable, UndecodablePart};
+use undecodable::{
+    check_undecodable_audit, on_decoded_batch, on_undecodable_batch, whole_batch_on_ack_channel,
+    UndecodableRun,
+};
 mod worker_drain;
 use worker_drain::{check_drain, drain_worker_on_exit};
 use replies::{
@@ -234,9 +237,11 @@ impl PolledWorkerDriver {
 ///    STAY queued, so a death mid-send loses nothing;
 /// 3. long-poll for inbound events, forward them to the bus, then — for a
 ///    spec with `ack_method` set — ack the ones that carried an `ack_token`.
-///    A batch that does not decode is said at ERROR (and, on a channel that
-///    does not redeliver, recorded as `channel.inbound_undecodable`), and the
-///    next poll waits out the refusal backoff (#836, `undecodable`);
+///    A batch that does not decode, or some of whose events do not, is said
+///    at ERROR (and, on a channel that does not redeliver, recorded as
+///    `channel.inbound_undecodable` while its other events go on to the bus),
+///    and the next poll waits out the refusal backoff (#836, #852,
+///    `undecodable`);
 /// 4. unless a poll just completed (its long-poll paces the loop), sleep one
 ///    short slice (shutdown-responsive) and go round again.
 ///
@@ -354,9 +359,13 @@ fn run(
                     // Extracted BEFORE `parse_poll` consumes `v` by value —
                     // both extractors see the identical raw poll result.
                     let ack_only_ids = parse_ack_only.map(|f| f(&v)).unwrap_or_default();
-                    match parse_poll(v) {
-                        Ok(events) => {
-                            decoded(&mut undecodable, spec.label);
+                    // On an ack channel a batch with any undecodable event
+                    // is wholly undecodable, so none of it is acked (#852).
+                    match parse_poll(v).and_then(|b| whole_batch_on_ack_channel(b, spec.ack_method.is_some())) {
+                        Ok(batch) => {
+                            // Events that did not decode are said and recorded
+                            // first, and hold the next poll (#852).
+                            let events = on_decoded_batch(&spec, &cid, batch, &mut undecodable, &outage, inbound_undecodable.as_ref());
                             let mut events = events.into_iter();
                             while let Some(ev) = events.next() {
                                 // Captured before `ev`'s other fields move into
@@ -477,7 +486,8 @@ fn run(
     // above, and before `calls` drops and the worker dies with it. Not asked
     // when the last call found it down (`worker_drain`'s module docs).
     if let Some(drain) = spec.drain {
-        drain_worker_on_exit(&*calls, &spec, drain, outage.is_down(), &cid, inbound_dropped.as_ref());
+        let audit = (inbound_dropped.as_ref(), inbound_undecodable.as_ref());
+        drain_worker_on_exit(&*calls, &spec, drain, outage.is_down(), &cid, audit);
     }
 }
 

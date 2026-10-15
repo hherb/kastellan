@@ -161,8 +161,10 @@ pub struct MatrixDriverAudit {
     /// batch the driver still held (#826), and, through the bus-side
     /// receiver, messages buffered unread (#846).
     pub inbound_dropped: Option<InboundDroppedAudit>,
-    /// Records, as a `channel.inbound_undecodable` row, a batch lost because
-    /// its poll result did not decode (#836) — see [`InboundUndecodableAudit`].
+    /// Records, as a `channel.inbound_undecodable` row, inbound messages lost
+    /// because the worker's answer did not decode: a poll result (#836), some
+    /// of its events (#852), or the drain answer (#853) — see
+    /// [`InboundUndecodableAudit`].
     pub inbound_undecodable: Option<InboundUndecodableAudit>,
 }
 
@@ -393,7 +395,7 @@ pub fn spawn_matrix_worker(
         parse_matrix_poll,
         encode_matrix_send,
         None, // Matrix has no ack cursor — MATRIX_POLLED_SPEC.ack_method is None too.
-        None, // No skipped-id extraction either: parse_matrix_poll never drops anything.
+        None, // No skipped-id extraction either: parse_matrix_poll counts what it cannot decode itself (#852).
         audit.into_driver_audit(),
         id.clone(),
     )?;
