@@ -8,13 +8,10 @@
 > which holds the verbose pre-prune version of everything summarised here.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-14 (#836 — an undecodable poll batch: a `channel.inbound_undecodable`
-row on Matrix, ERROR, and a poll backoff on every channel; PR
-[#851](https://github.com/hherb/kastellan/pull/851), Mac sweep green, two review rounds applied —
-the second a five-agent review, follow-ups [#852](https://github.com/hherb/kastellan/issues/852) and
-[#853](https://github.com/hherb/kastellan/issues/853). PR
-#850 (#835) merged 2026-10-13. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-16 (#852 + #853 — Matrix poll results decode event by event, and an
+undecodable drain answer is the #836 event; PR [#855](https://github.com/hherb/kastellan/pull/855), Mac sweep green. PR #851 (#836) merged and
+deployed on both hosts 2026-10-14. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #851's tree** (deployed 2026-10-14). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -47,31 +44,33 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-13): #836 — an undecodable poll batch (PR [#851](https://github.com/hherb/kastellan/pull/851))
+### This session (2026-10-15/16): #852 + #853 — what an undecodable answer loses (PR [#855](https://github.com/hherb/kastellan/pull/855))
 
-- **`polled_driver/undecodable.rs`.** A poll result `parse_poll` cannot read is said at **ERROR** on
-  `[worker-refusal]` (decode error in the line, **never in a row** — it can quote a peer). On a
-  channel **without** an ack method (Matrix) the batch is lost: every one is said and handed to the
-  new `DriverAudit::inbound_undecodable` hook → **`channel.inbound_undecodable`** row (`channel`,
-  `observed_at`; **no count** — a separate action so `sum(dropped)` stays true). Email redelivers,
-  so no row (`EmailDriverAudit` has no such field, on purpose).
-- **Every channel now holds the poll** after an undecodable batch: its own `UndecodableRun` (a
-  `RefusalRun` in a newtype, so `run`'s three runs cannot be swapped) on `spec.refusal_backoff`
-  (1 s → 60 s). Before, email re-polled an unacked bad batch **at once, forever**. A redelivered
-  batch is said on the run's cadence (first, then every 15 min — `REFUSAL_REPEAT`, which the line
-  now builds its minutes from), **and at once** when the decode error's text changes (`error_code`,
-  a hash) or when an outage ended since the last batch (`OutageLog::ended`, a counter — whichever
-  call noticed, a send included, so a "back up" line is never the last word). Its line says it
-  stalls inbound and counts "N in a row". The decode error is capped at 256 chars
-  (`DECODE_ERROR_CAP_CHARS`). The first good decode says one INFO `Recovered` line (an empty batch
-  counts).
-- **`spawn` refuses an undecodable hook on an ack channel** (`check_undecodable_audit`, beside
-  `check_drain`): it would never be called. ⚠️ The Matrix hold is a deliberate trade-off — it
-  enlarges what a repeat failure loses (the worker buffers meanwhile) but bounds the row rate of a
-  worker answering garbage at once; per-event decoding is #852. An undecodable `matrix.drain`
-  answer is still a WARN with no row: #853.
-- Daemon: `inbound_undecodable_audit_sink` in `main/inbound_dropped_sink.rs`, on Matrix's one
-  writer/lease; `RowLabel::named` for a row with neither id nor count.
+- **`ParsePoll` returns a `PolledBatch`** (`spec.rs`): the decoded `events` plus
+  `undecodable: Option<UndecodableEvents>` (a `NonZeroUsize` count + the first error, **line only**).
+  `parse_matrix_poll` decodes a private `PollEnvelope { events: Vec<Value> }`, then each `Event` on
+  its own; only an envelope with no `events` array is an `Err`. ⚠️ The envelope must follow
+  `kastellan_matrix_wire::PollResult` — `parse_matrix_poll_reads_what_the_worker_writes` pins it.
+  Email still decodes whole (`PolledBatch::whole`).
+- ⚠️ **On an ack channel a batch with undecodable events is wholly undecodable**
+  (`whole_batch_on_ack_channel`, applied in `run` before the `match`): acking past a bad event would
+  move the monotonic cursor past it for good. A new ack-channel decoder may return events one at a
+  time without losing anything.
+- **The row:** `channel.inbound_undecodable` gains **`part`** — `batch` (#836; pre-#852 rows have no
+  `part`), `events` (+ `undecodable: N`; the batch's good events reached the bus), `drain` (#853).
+  The hook's type is renamed `UndecodableBatch` → **`InboundUndecodable`** (pairs with
+  `InboundDropped`). Pending-row labels: `matrix inbound events lost undecodable (N)`, `matrix
+  undecodable drain answer`.
+- **Undecodable events hold the poll** like a whole batch (same `UndecodableRun`, which only a batch
+  that decodes **whole** ends). Decided: the hold stays on Matrix — since #852 its cost is latency,
+  not loss, unless the next result fails whole; it still bounds a garbage-answering worker's row rate.
+- **#853:** `drain_worker_on_exit` has two arms — a failed call stays WARN `could not ask`; an answer
+  `drain.parse` rejects is ERROR on `[worker-refusal]` + a `drain` row. It now takes both hooks.
+
+### Previous (2026-10-13): #836 — an undecodable poll batch (PR #851, merged)
+
+ERROR on `[worker-refusal]` (error capped at 256 chars, never in a row); every channel then holds
+the poll on its own `UndecodableRun`; `spawn` refuses the hook on an ack channel. Full prose: git history.
 
 ### Previous (2026-10-12/13): #835 — what the worker still held (PR #850, merged)
 
@@ -100,8 +99,8 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - **#827/#826 (PR #834):** `RejectedUnverifiable` (fail-closed); `ack_method: None` = "does not
   redeliver". `pg_events::audit_or_report` holds a **`PendingInsert` drop guard** — ⚠️ no `.await`
   before it. **NUL (#819/#820):** records escape to `␀`; ⚠️ `kastellan-db`'s next release must be
-  **0.3.0**; `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #829, #831, #833, #837–#840; #836
-  in PR #851, its follow-ups #852, #853.
+  **0.3.0**; `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #829, #831, #833, #837–#840; #852
+  and #853 in PR [#855](https://github.com/hherb/kastellan/pull/855).
 - ⚠️ **A Mac sweep without `KASTELLAN_PG_BIN_DIR` in its command line is NOT evidence** (372
   `[SKIP]`, exit 0) [[postgres-app-bin-paths]]; a sweep without `-- --nocapture` under-counts
   `[SKIP]`. ⚠️ **`git push` over SSH fails here** — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
@@ -237,10 +236,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 ## Read these first
 
-1. [`docs/architecture.md`](../../architecture.md) — process model, cross-platform table
-2. [`docs/threat-model.md`](../../threat-model.md) — the invariant, scenarios, defence layers
-3. [`docs/devel/ROADMAP.md`](../ROADMAP.md) — the master sequenced TODO with commit hashes
-4. Memory notes (auto-loaded) and [`archive/`](archive/) — the full prose for everything summarised here
+[`docs/architecture.md`](../../architecture.md) (process model), [`docs/threat-model.md`](../../threat-model.md)
+(the invariant), [`docs/devel/ROADMAP.md`](../ROADMAP.md), then the memory notes and [`archive/`](archive/).
 
 ---
 
@@ -299,7 +296,10 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    script): a stale one answers `matrix.drain` with METHOD_NOT_FOUND and every stop WARNs "could not
    ask the worker"; a restart under traffic can leave `stage = 'worker'` rows. The #851 deploy: a
    `channel.inbound_undecodable` row (or an ERROR `did not decode` line) is a **finding about the
-   worker**, none expected. Natural next security items: #810,
+   worker**, none expected. The [#855](https://github.com/hherb/kastellan/pull/855) deploy (#852/#853) adds `part` to those rows (`batch` /
+   `events` + `undecodable` / `drain`) — `select payload->>'part', payload->>'undecodable' from
+   audit_log where action = 'channel.inbound_undecodable' order by id desc`; no rebuilt worker or
+   rootfs needed (core only). Natural next security items: #810,
    #833 (stderr panic in a `Drop`; needs a design call, now also `bus_guards` and `InboundReceiver`),
    #829, #831 and #817.
 
@@ -356,7 +356,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `llm-router/src/messages.rs`,
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
-`worker_stderr/report/tool_worker.rs` 710, `core/src/channel/mod.rs` **564** (+10 in #849, +6 in #835, +16 in #836, docs — the `actions` consts are the natural cut).
+`worker_stderr/report/tool_worker.rs` 710, `core/src/channel/mod.rs` **568** (+10 in #849, +6 in #835, +16 in #836, +4 in #852, docs — the `actions` consts are the natural cut).
 Also over (grew in #818 without a split): `db/src/tasks.rs` **819** (+11 in #825: `CRASHED_DETAIL`),
 `db/src/graph.rs` **~935**, `core/src/entity_extraction/batch_upsert.rs` **~520**.
 Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
@@ -368,7 +368,7 @@ keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memo
 `audit/truncate/tests.rs` is still 833), #788 `channel/mod.rs` (→ `undelivered.rs`) and
 `polled_driver.rs` (→ `polled_driver/audit.rs`), #792 `main/audit_sink.rs` (→ `audit_sink_tests.rs`,
 `audit_sink_test_support.rs`), #806 `email_boot.rs`/`matrix_boot.rs` (→ `*_tests.rs`, proved byte-identical). ⚠️ **Near the cap:** `worker_stderr/report/delivery/tests.rs` **499** (one under), `polled_driver.rs`
-**485** (+26 in #836), `polled_driver/replies.rs` **478** — split before the next change grows them. #826 split `polled_driver.rs` (→ `spec.rs`).
+**495** (+26 in #836, +10 in #852), `polled_driver/replies.rs` **478** — split before the next change grows them. #826 split `polled_driver.rs` (→ `spec.rs`).
 Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
@@ -402,9 +402,8 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#836 review round 2 — targeted, **not** a full sweep) | PR #851 (round-2 commit) | `cargo test -p kastellan-core --lib --bins`: lib **2497** / 0 / 1, bins 92 + 96, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `[SKIP]` 0; `--test email_channel_e2e --test matrix_channel_e2e --test email_mitm_e2e -- --nocapture`: 8 + 2 + 3, `[SKIP]` 0. **+10** core lib tests (`polled_driver::tests::undecodable` 9 → 19), so a full sweep should read **5042 / 0 / 52** (predicted, not run — only `kastellan-core` changed). Mutants killed **9/9** (re-arm removed, sleep instead of gate, Matrix on cadence, constant error code, `decoded()` on a refused poll, spawn check removed, hook untimed, no error cap, outage counter stuck) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-836-cold`, **27** `Checking kastellan` | 0 (targeted) |
-| **Mac** (#836 — **the full sweep that stands**) | PR #851 (`7270a1d5`; the review commit is doc-only, core clippy re-run) | **5032 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, exactly as predicted: #835's 5008 + its review round's 11 + **13** (core lib `polled_driver::tests::undecodable` 9; daemon bin 4: `inbound_dropped_sink` 3, `matrix_boot` 1). `[WARN]` 0, `[SKIP]` **23**; log `~/sweep-836.log`. Mutants killed 7/7 (poll gate removed, `decoded()` never called, record polarity inverted, cadence ignored, WARN for ERROR, bus-closed path silent, sink always claimed) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-836`, **27** `Checking kastellan` | **23** Mac |
-| **Mac** (#835 — superseded) | #850 (`6e63beac`) | **5008 / 0 / 52**, **195** suites, `[SKIP]` 23; log `~/sweep-835.log`. Its review round 2 added 11 (predicted 5019, confirmed by #836's reconcile) | exit 0, 27 `Checking kastellan`; `--features live-matrix` exit 0 | **23** Mac |
+| **Mac** (#852 + #853 — **the full sweep that stands**) | PR [#855](https://github.com/hherb/kastellan/pull/855) | **5053 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-852.log`. Reconciled per suite against `~/sweep-836.log` (5032): core lib 2488 → **2508** (+9 from #836's review round — its row said +10, but its measured 2497 says 9 — and +11 here: `matrix::tests` 3, `tests::undecodable_events` 6, `tests::worker_drain` 2), daemon bin 92 → **93** (`inbound_dropped_sink_tests` 1); every other suite identical. Mutants killed **11/11** (no hold for bad events, run ended by a partial batch, ack channel acks a partial batch, events row without a count, events recorded as a batch, bus-closed path ignores bad events, Matrix decodes whole, drain junk at WARN, drain junk unrecorded, a failed drain call recorded, a line that overclaims the rest) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-852`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#836 — superseded) | PR #851 (`7270a1d5`) | **5032 / 0 / 52**, 195 suites, `[SKIP]` 23; log `~/sweep-836.log` | exit 0, 27 `Checking kastellan` | 23 Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -486,6 +485,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **[#851](https://github.com/hherb/kastellan/pull/851)** (#836, merged, deployed on both hosts 2026-10-14) — an undecodable poll batch is ERROR + a `channel.inbound_undecodable` row on Matrix, and holds the poll on every channel.
 - **[#850](https://github.com/hherb/kastellan/pull/850)** (#835, merged 2026-10-13) — what the Matrix worker still held at a stop is counted (`stage = 'worker'`).
 - **[#849](https://github.com/hherb/kastellan/pull/849)** (#846, merged 2026-10-12) — a stopping bus's unread inbound buffer is counted (`stage = 'buffered'`), on both channels.
 - **[#847](https://github.com/hherb/kastellan/pull/847)** (#832, merged 2026-10-12) — a bus stop loses nothing silently: the reply claim at the send, drop guards for what a stop abandons.
