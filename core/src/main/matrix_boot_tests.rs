@@ -2,7 +2,9 @@
 //! soft cap; `#[path]`-included there, so `super::` is `matrix_boot`.
 
 use super::*;
+use crate::audit_sink::Unwritten;
 use kastellan_core::worker_stderr::AuditLostWriter;
+use kastellan_db::audit::InsertOutcome;
 
 /// The classification #514's fix depends on: a `localhost`-NAME homeserver
 /// under force-routing can NEVER succeed (the proxy resolves the name to
@@ -112,7 +114,7 @@ fn the_matrix_sink_reports_a_row_it_could_not_write() {
 #[test]
 fn a_hostile_conversation_id_is_capped_in_the_lost_row_line() {
     let long = "!".repeat(10_000);
-    let line = format_reply_row_lost(&long, "gave_up", &"shed");
+    let line = format_reply_row_lost(&long, "gave_up", &Unwritten::failed_insert(InsertOutcome::NotWritten, "x"));
     assert!(line.len() < 1_000, "{} bytes", line.len());
 }
 
@@ -120,12 +122,18 @@ fn a_hostile_conversation_id_is_capped_in_the_lost_row_line() {
 /// belonged to, and why it was not written.
 #[test]
 fn a_lost_reply_row_names_its_conversation_reason_and_cause() {
-    let line = format_reply_row_lost("!room:srv", "gave_up", &"shed: too many");
+    let refused = Unwritten::failed_insert(InsertOutcome::NotWritten, "read-only");
+    let line = format_reply_row_lost("!room:srv", "gave_up", &refused);
     assert_eq!(
         line,
         "channel.reply_undelivered row for a reply to conversation \"!room:srv\" (gave_up) not \
-         written: shed: too many. The dropped reply's [worker-refusal] line stands"
+         written: postgres query failed: read-only; refused row 1 of this burst. The dropped \
+         reply's [worker-refusal] line stands"
     );
+    // #858: a row whose insert lost its connection may be in the table.
+    let unknown = Unwritten::failed_insert(InsertOutcome::Unknown, "reset");
+    assert!(format_reply_row_lost("!room:srv", "gave_up", &unknown)
+        .contains("(gave_up) may not have been written: "));
 }
 
 /// #802: the sink `attempt` builds takes a *starting* lease — not waited for,

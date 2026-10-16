@@ -2,7 +2,9 @@
 //! soft cap; `#[path]`-included there, so `super::` is `email_boot`.
 
 use super::*;
+use crate::audit_sink::Unwritten;
 use kastellan_core::worker_stderr::AuditLostWriter;
+use kastellan_db::audit::InsertOutcome;
 
 /// A PARTIAL config must be FATAL: the process environment is fixed for
 /// this daemon's lifetime, so no number of retries can complete it. The
@@ -108,7 +110,7 @@ fn the_email_sink_reports_a_row_it_could_not_write() {
 #[test]
 fn a_hostile_message_id_is_capped_in_the_lost_row_line() {
     let long = "x".repeat(10_000);
-    let line = format_skipped_row_lost(&long, &"shed");
+    let line = format_skipped_row_lost(&long, &Unwritten::failed_insert(InsertOutcome::NotWritten, "x"));
     assert!(line.len() < 1_000, "{} bytes", line.len());
     assert!(line.contains("...(truncated)"), "POSITIVE CONTROL: the cap bit");
 }
@@ -117,13 +119,19 @@ fn a_hostile_message_id_is_capped_in_the_lost_row_line() {
 /// and says the id will not come back.
 #[test]
 fn a_lost_skipped_row_names_its_message_and_cause() {
-    let line = format_skipped_row_lost("<id@host>", &"shed: too many");
+    let refused = Unwritten::failed_insert(InsertOutcome::NotWritten, "read-only");
+    let line = format_skipped_row_lost("<id@host>", &refused);
     assert_eq!(
         line,
-        "channel.skipped_ack_only row for message \"<id@host>\" not written: shed: too many. \
-         The driver's line for the skip stands; the id's ack was about to be sent, and \
-         unless that ack then failed it is not redelivered"
+        "channel.skipped_ack_only row for message \"<id@host>\" not written: postgres query \
+         failed: read-only; refused row 1 of this burst. The driver's line for the skip \
+         stands; the id's ack was about to be sent, and unless that ack then failed it is not \
+         redelivered"
     );
+    // #858: a row whose insert lost its connection may be in the table.
+    let unknown = Unwritten::failed_insert(InsertOutcome::Unknown, "reset");
+    assert!(format_skipped_row_lost("<id@host>", &unknown)
+        .starts_with("channel.skipped_ack_only row for message \"<id@host>\" may not have been written: "));
 }
 
 /// The row the email sink writes: the bus's actor, the skipped-ack-only

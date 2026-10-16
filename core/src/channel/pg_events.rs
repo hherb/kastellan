@@ -40,13 +40,16 @@
 //! ([`report_unsaid_lost_rows`]). And the insert no longer decodes an id it
 //! discards (`kastellan_db::audit::insert_without_id`), so "not written" is
 //! no longer said of a row that was written but whose `RETURNING id` failed
-//! to decode.
+//! to decode. Since #858 nor is it said of a row whose insert lost its
+//! connection, which may have been committed: that line says the row "may
+//! not have been written" (`InsertFailure`).
 
 use serde_json::Value;
 
+use kastellan_db::audit::InsertOutcome;
 use kastellan_db::tasks::{self, Lane};
 
-use super::audit_text::quoted_id;
+use super::audit_text::{insert_verdict, quoted_id};
 use super::bus::ChannelEvents;
 use crate::audit_thinning::BurstTally;
 use crate::worker_stderr::{emit_audit_lost_report, AuditLostWriter};
@@ -202,7 +205,7 @@ struct RowReport<'a> {
 /// outcome is said. Generic over the insert so a test can drive every
 /// outcome — `Ok`, `Err`, abandoned, panicked — without a Postgres; creating
 /// the insert future above runs none of it, so nothing is awaited unguarded.
-async fn settle_or_report<E: std::fmt::Display>(
+async fn settle_or_report<E: InsertFailure>(
     insert: impl std::future::Future<Output = Result<(), E>>,
     row: RowReport<'_>,
 ) {
@@ -233,14 +236,15 @@ impl<'a> PendingInsert<'a> {
     }
 
     /// The insert returned: disarm, and report it if it failed.
-    fn settle<E: std::fmt::Display>(mut self, result: Result<(), E>) {
+    fn settle<E: InsertFailure>(mut self, result: Result<(), E>) {
         self.settled = true;
         if let Err(e) = result {
             let row = self.row;
             // `lose` releases its lock before the report, which can block.
             let lost = row.lost.lose(row.writer, row.channel);
             if lost.report {
-                (row.report)(row.writer, &format_row_lost(row.action, row.about, &e, lost.tally));
+                let line = format_row_lost(row.action, row.about, &e, e.outcome(), lost.tally);
+                (row.report)(row.writer, &line);
             }
         }
     }
@@ -255,6 +259,20 @@ impl Drop for PendingInsert<'_> {
             let row = self.row;
             (row.report)(row.writer, &format_row_abandoned(row.action, row.about, cause));
         }
+    }
+}
+
+/// A failed insert, as [`settle_or_report`] reports it: what to print, and
+/// whether the row may still be in the table (#858). The real one is
+/// [`kastellan_db::audit::InsertError`]; a trait so the tests can drive
+/// every outcome with a plain string and no Postgres.
+trait InsertFailure: std::fmt::Display {
+    fn outcome(&self) -> InsertOutcome;
+}
+
+impl InsertFailure for kastellan_db::audit::InsertError {
+    fn outcome(&self) -> InsertOutcome {
+        kastellan_db::audit::InsertError::outcome(self)
     }
 }
 
@@ -311,12 +329,19 @@ fn describe_row(payload: &Value) -> String {
     }
 }
 
-/// Pure: the `[audit-lost]` report for a `channel.*` row that was not written
-/// — the action, what it was about ([`describe_row`]), why, and where it
-/// stands in its writer's and channel's burst of lost rows (#829), so a
-/// thinned flood's lines still say how big it is.
-fn format_row_lost(action: &str, about: &str, why: &dyn std::fmt::Display, tally: BurstTally) -> String {
-    format!("{action} row{about} not written: {why}; {tally}")
+/// Pure: the `[audit-lost]` report for a `channel.*` row whose insert failed
+/// — the action, what it was about ([`describe_row`]), whether it is known
+/// not to be in the table ([`insert_verdict`] of `outcome`, #858), why, and
+/// where it stands in its writer's and channel's burst of lost rows (#829),
+/// so a thinned flood's lines still say how big it is.
+fn format_row_lost(
+    action: &str,
+    about: &str,
+    why: &dyn std::fmt::Display,
+    outcome: InsertOutcome,
+    tally: BurstTally,
+) -> String {
+    format!("{action} row{about} {}: {why}; {tally}", insert_verdict(outcome))
 }
 
 /// Pure: the `[audit-lost]` report for a row whose insert was abandoned
@@ -361,6 +386,33 @@ pub(crate) mod test_support {
             .database("nothing");
         sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy_with(options)
+    }
+
+    /// A lazy pool whose every connection is accepted and **closed at once**:
+    /// a Postgres that drops the connection mid-conversation, with no
+    /// Postgres. The insert fails fast with a broken connection — not a
+    /// refused one, which sqlx retries until its acquire timeout
+    /// ([`refused_pool`]) — and that is the failure #858 calls *unknown*: the
+    /// client cannot tell whether a statement it sent was committed. The
+    /// accepting thread lives as long as the test process.
+    ///
+    /// Build it inside a runtime, as [`stalled_pool`].
+    pub(crate) fn closing_pool() -> sqlx::PgPool {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+        let options = sqlx::postgres::PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(port)
+            .username("nobody")
+            .database("nothing");
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(5))
             .connect_lazy_with(options)
     }
 

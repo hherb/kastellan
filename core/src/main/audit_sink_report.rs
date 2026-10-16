@@ -17,8 +17,10 @@ use super::{
 /// Why a row was not written, as `on_failure` is told.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Unwritten<'a> {
-    /// The insert ran and failed.
-    Insert(&'a kastellan_db::DbError),
+    /// The insert ran and failed: the error — which says whether the row may
+    /// have been committed anyway (#858) — and the row's place in its
+    /// channel's burst of failed inserts, thinned like the others (#861).
+    Insert { failed: &'a kastellan_db::audit::InsertError, tally: BurstTally },
     /// Never tried: the queue was full. With where the row stands in its
     /// channel's burst of shed rows (#807), so a thinned flood's lines still
     /// say how big it is.
@@ -32,7 +34,7 @@ pub(crate) enum Unwritten<'a> {
 impl std::fmt::Display for Unwritten<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Insert(e) => e.fmt(f),
+            Self::Insert { failed, tally } => write!(f, "{failed}; {tally}"),
             Self::Shed(tally) => write!(
                 f,
                 "shed: too many audit inserts already waiting for the pool (a flood of \
@@ -44,6 +46,33 @@ impl std::fmt::Display for Unwritten<'_> {
                  writes; {tally}"
             ),
         }
+    }
+}
+
+impl Unwritten<'_> {
+    /// What a sink's line says of the row: `not written`, unless its insert
+    /// failed in a way that may have committed it (#858) — the same words
+    /// the channel bus uses ([`kastellan_core::channel::audit_text::insert_verdict`]).
+    /// A shed or late row was never tried, so it is not written.
+    pub(crate) fn verdict(&self) -> &'static str {
+        match self {
+            Self::Insert { failed, .. } => {
+                kastellan_core::channel::audit_text::insert_verdict(failed.outcome())
+            }
+            Self::Shed(_) | Self::AfterShutdown(_) => "not written",
+        }
+    }
+}
+
+/// Test builds only: a failed insert whose error reads `postgres query
+/// failed: {msg}`, first of its burst — for a sink's line tests. Leaked, so
+/// the `Unwritten` can borrow it for `'static`.
+#[cfg(test)]
+impl Unwritten<'static> {
+    pub(crate) fn failed_insert(outcome: kastellan_db::audit::InsertOutcome, msg: &str) -> Self {
+        let failed = kastellan_db::audit::InsertError::new(outcome, kastellan_db::DbError::Query(msg.into()));
+        let tally = BurstTally { nth: 1, unsaid_before: 0, ended: None };
+        Self::Insert { failed: Box::leak(Box::new(failed)), tally }
     }
 }
 
@@ -171,11 +200,12 @@ pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<St
     })
 }
 
-/// Pure: the `[audit-lost]` line for one channel's refused rows that got no
+/// Pure: the `[audit-lost]` line for one channel's lost rows that got no
 /// report of their own (`audit_sink_thinning.rs`), or `None` when there were
-/// none (#798). Said at shutdown, but not all refused then: shed and late are
-/// said apart (#807), because rows shed in last week's flood are not this
-/// shutdown's.
+/// none (#798). Said at shutdown, but not all lost then: shed, late and
+/// failed are said apart (#807, #861), because rows shed in last week's
+/// flood are not this shutdown's. Failed inserts are counted whatever their
+/// outcome (#858), so that kind says only that they "failed".
 pub(crate) fn format_unreported_at_shutdown(counts: UnsaidCounts) -> Option<String> {
     let total = counts.total();
     (total > 0).then(|| {
@@ -189,25 +219,33 @@ pub(crate) fn format_unreported_at_shutdown(counts: UnsaidCounts) -> Option<Stri
         if counts.late > 0 {
             kinds.push(format!("{} tried after shutdown began", counts.late));
         }
+        if counts.failed > 0 {
+            kinds.push(format!(
+                "{} failed to insert over the daemon's life (refused by Postgres, or lost with \
+                 the connection)",
+                counts.failed
+            ));
+        }
         format!(
-            "{} refused without a line of {}, to keep a flood from stalling its driver: {}",
-            counted(total, "channel audit row", "was", "were"),
+            "{} no line of {} (thinned past a flood): {}",
+            counted(total, "channel audit row", "had", "had"),
             if total == 1 { "its own" } else { "their own" },
             kinds.join("; "),
         )
     })
 }
 
-/// Pure: a last `[audit-lost]` line, for `n` of one channel's refused rows
+/// Pure: a last `[audit-lost]` line, for `n` of one channel's lost rows
 /// thinned out since the drain's snapshot (or since the line before it), or
 /// `None` when there were none (#802). Said under that channel's writer
 /// ([`report_unreported_since`]).
 pub(crate) fn format_unreported_since(n: usize) -> Option<String> {
     (n > 0).then(|| {
         format!(
-            "{} refused after the shutdown report without a line of its own (a driver still \
-             running past the drain)",
-            counted(n, "more channel audit row", "was", "were"),
+            "{} no line of {} after the shutdown report (a driver still running past the \
+             drain, or an insert still pending at it)",
+            counted(n, "more channel audit row", "had", "had"),
+            if n == 1 { "its own" } else { "their own" },
         )
     })
 }

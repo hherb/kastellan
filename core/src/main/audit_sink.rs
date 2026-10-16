@@ -22,7 +22,9 @@
 //!   and at most [`MAX_QUEUED`] are in flight in all, running or waiting; past
 //!   that a row is **shed**, and the
 //!   sink's `on_failure` says so (thinned past a flood, `audit_sink_thinning.rs`),
-//!   like any other row that was not written.
+//!   like any other row that was not written — a failed insert included,
+//!   since #861, so a Postgres that refuses every insert at once does not
+//!   give every audited event a line of its own.
 //! - **After the fact.** The row is written after the hook returns, so an
 //!   email id is acked before its row exists: a crash in between loses the
 //!   row, and the id is not redelivered. Rows can also land out of order
@@ -285,10 +287,11 @@ impl SinkWriter {
     /// thread, if the row is shed or the daemon is shutting down (see the
     /// module docs). It should report the row on the `[audit-lost]` marker
     /// with enough to match it to the caller's own line for the event (a
-    /// conversation, a message id), and must not block either. On the caller's
-    /// thread — and on the runtime, for a row refused there — it is called
-    /// only for the rows `audit_sink_thinning.rs` lets through; the shutdown
-    /// lines count the rest.
+    /// conversation, a message id), and must not block either. Whichever the
+    /// thread, it is called only for the rows `audit_sink_thinning.rs` lets
+    /// through — shed, late and, since #861, failed inserts alike; the
+    /// shutdown lines count the rest. A failed insert's [`Unwritten::verdict`]
+    /// says whether its row may have been committed anyway (#858).
     ///
     /// `label` names the row for that shutdown line (#797), which cannot ask
     /// `on_failure` — a task cancelled with the runtime never runs it. A
@@ -352,9 +355,12 @@ impl SinkWriter {
             };
             // No `RETURNING id` (#829): the id is discarded, and an `Err` is
             // said as a row "not written" — which a decode step failing
-            // after the write would make untrue.
-            if let Err(e) = kastellan_db::audit::insert_without_id(&pool, actor, action, payload).await {
-                on_failure(Unwritten::Insert(&e));
+            // after the write would make untrue. The `Err` says whether the
+            // row may have been committed anyway (#858), and a flood of them
+            // is thinned like a flood of shed rows (#861).
+            if let Err(failed) = kastellan_db::audit::insert_without_id(&pool, actor, action, payload).await {
+                let why = |tally| Unwritten::Insert { failed: &failed, tally };
+                refuse(ledger.refusals.failed(channel), why, on_failure);
             }
         }))
     }
@@ -483,3 +489,7 @@ pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "audit_sink_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "audit_sink_insert_failed_tests.rs"]
+mod insert_failed_tests;

@@ -103,10 +103,11 @@ const SINK_CHANNEL: crate::audit_sink::SinkChannel = crate::audit_sink::SinkChan
 /// Pure: the `[audit-lost]` report for a `channel.skipped_ack_only` row the
 /// email sink could not write, naming the message id (capped by `quoted_id`, neutralised
 /// by `format_audit_lost_line`) so it can be matched to the driver's own line for the skip.
-fn format_skipped_row_lost(message_id: &str, why: &dyn std::fmt::Display) -> String {
+fn format_skipped_row_lost(message_id: &str, why: &crate::audit_sink::Unwritten<'_>) -> String {
     let message_id = crate::audit_sink::quoted_id(message_id);
+    let verdict = why.verdict();
     format!(
-        "channel.skipped_ack_only row for message {message_id} not written: {why}. The \
+        "channel.skipped_ack_only row for message {message_id} {verdict}: {why}. The \
          driver's line for the skip stands; the id's ack was about to be sent, and unless \
          that ack then failed it is not redelivered"
     )

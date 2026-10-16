@@ -54,6 +54,20 @@ pub fn quoted_id(id: &str) -> String {
     format!("{:?}", cap_chars(id, QUOTED_ID_CAP_CHARS))
 }
 
+/// Pure: how an `[audit-lost]` line words the row of a failed insert (#858):
+/// `not written` only when it is known not to be in the table, else `may not
+/// have been written` — a connection that broke after the statement was sent
+/// can leave a committed row behind
+/// ([`kastellan_db::audit::insert_outcome::outcome_of`]). One wording for the
+/// channel bus's lost-row lines and the daemon's audit sinks', so both say
+/// the same thing of the same failure.
+pub fn insert_verdict(outcome: kastellan_db::audit::InsertOutcome) -> &'static str {
+    match outcome {
+        kastellan_db::audit::InsertOutcome::NotWritten => "not written",
+        kastellan_db::audit::InsertOutcome::Unknown => "may not have been written",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

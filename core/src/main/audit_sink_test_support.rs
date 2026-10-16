@@ -78,3 +78,30 @@ pub(crate) fn assert_insert_attempted(what: &str, listener: &TcpListener) {
         "{what} must actually try its insert: nothing connected to the pool"
     );
 }
+
+/// A pool whose every connection is accepted and **closed at once**: a
+/// Postgres that drops the connection mid-conversation, with no Postgres.
+/// Each insert fails fast, with a broken connection rather than a refused
+/// one (which sqlx retries until its acquire timeout) — the failure whose
+/// row #858 calls *unknown*. The accepting thread lives as long as the test
+/// process. (The library's `pg_events::test_support` has the same fixture;
+/// a binary's test items are not visible to the library's, nor the reverse.)
+///
+/// Build it inside a runtime, as [`stalled_pool`].
+pub(crate) fn closing_pool() -> PgPool {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+    let port = listener.local_addr().expect("local addr").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(port)
+        .username("nobody")
+        .database("nothing");
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_lazy_with(options)
+}

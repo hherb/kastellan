@@ -19,7 +19,7 @@ use kastellan_core::channel::polled_driver::{
     InboundUndecodableAudit, UndecodablePart,
 };
 
-use crate::audit_sink::SinkChannel;
+use crate::audit_sink::{SinkChannel, Unwritten};
 
 /// Pure: the `(actor, action, payload)` of the row [`inbound_dropped_audit_sink`]
 /// writes for `dropped` — the bus's actor, and [`InboundDropped::payload`]:
@@ -36,14 +36,15 @@ pub(crate) fn inbound_dropped_row(
 pub(crate) fn format_inbound_row_lost(
     stage: InboundDropStage,
     dropped: NonZeroUsize,
-    why: &dyn std::fmt::Display,
+    why: &Unwritten<'_>,
 ) -> String {
     format!(
-        "{} row for {dropped} dropped inbound message{} ({}) not written: {why}. The drop's \
+        "{} row for {dropped} dropped inbound message{} ({}) {}: {why}. The drop's \
          [worker-refusal] line stands",
         kastellan_core::channel::actions::INBOUND_DROPPED,
         if dropped.get() == 1 { "" } else { "s" },
         stage.as_str(),
+        why.verdict(),
     )
 }
 
@@ -124,11 +125,12 @@ fn undecodable_row_for(part: UndecodablePart) -> String {
 
 /// Pure: the `[audit-lost]` report for a `channel.inbound_undecodable` row of
 /// `part` a sink could not write.
-pub(crate) fn format_undecodable_row_lost(part: UndecodablePart, why: &dyn std::fmt::Display) -> String {
+pub(crate) fn format_undecodable_row_lost(part: UndecodablePart, why: &Unwritten<'_>) -> String {
     format!(
-        "{} row for {} not written: {why}. Its [worker-refusal] line stands",
+        "{} row for {} {}: {why}. Its [worker-refusal] line stands",
         kastellan_core::channel::actions::INBOUND_UNDECODABLE,
         undecodable_row_for(part),
+        why.verdict(),
     )
 }
 

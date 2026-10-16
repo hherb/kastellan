@@ -80,11 +80,16 @@ fn reply_undelivered_row(
 /// Matrix sink could not write, naming the conversation (capped by `quoted_id`, neutralised
 /// by `format_audit_lost_line`) and reason so it can be matched to the driver's `[worker-refusal]`
 /// line for the drop.
-fn format_reply_row_lost(conversation: &str, reason: &str, why: &dyn std::fmt::Display) -> String {
+fn format_reply_row_lost(
+    conversation: &str,
+    reason: &str,
+    why: &crate::audit_sink::Unwritten<'_>,
+) -> String {
     let conversation = crate::audit_sink::quoted_id(conversation);
+    let verdict = why.verdict();
     format!(
         "channel.reply_undelivered row for a reply to conversation {conversation} \
-         ({reason}) not written: {why}. The dropped reply's [worker-refusal] line stands"
+         ({reason}) {verdict}: {why}. The dropped reply's [worker-refusal] line stands"
     )
 }
 
