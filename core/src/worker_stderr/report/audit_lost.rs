@@ -20,10 +20,10 @@
 //! channel boot supervisor's `channel.started`/`boot_failed`/`died` rows.
 //! "Sees" means *line or count*: past a flood, lines are thinned — the
 //! daemon's sinks' shed and after-shutdown lines since #798, the bus's and
-//! the boot supervisor's failed-insert lines since #829 — and the rows
-//! thinned out are counted, the count said on this marker at a graceful
-//! shutdown. A daemon sink's failed insert, and a row or work abandoned by a
-//! stop (#813, #832), always has a line of its own.
+//! the boot supervisor's failed-insert lines since #829, the daemon's sinks'
+//! own failed-insert lines since #861 — and the rows thinned out are
+//! counted, the count said on this marker at a graceful shutdown. A row or
+//! work abandoned by a stop (#813, #832) always has a line of its own.
 
 use super::delivery::warn_and_fall_back;
 use super::shared::format_stderr_fallback;

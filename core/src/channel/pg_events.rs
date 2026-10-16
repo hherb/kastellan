@@ -128,7 +128,7 @@ pub(crate) fn production_writer() -> (Reporter, &'static LostRows) {
     (emit_report, &LOST_ROWS)
 }
 
-/// Say, once, how many rows every bus writer could not write and gave no line
+/// Say, once, how many rows every bus writer lost (failed to insert) and gave no line
 /// of their own (#829) — one `[audit-lost]` line per writer and channel that
 /// has any. The daemon calls it after the channels stop, when nothing writes
 /// through these writers any more; called twice, it would say the same rows
@@ -243,7 +243,7 @@ impl<'a> PendingInsert<'a> {
             // `lose` releases its lock before the report, which can block.
             let lost = row.lost.lose(row.writer, row.channel);
             if lost.report {
-                let line = format_row_lost(row.action, row.about, &e, e.outcome(), lost.tally);
+                let line = format_row_lost(row.action, row.about, &e, lost.tally);
                 (row.report)(row.writer, &line);
             }
         }
@@ -265,7 +265,8 @@ impl Drop for PendingInsert<'_> {
 /// A failed insert, as [`settle_or_report`] reports it: what to print, and
 /// whether the row may still be in the table (#858). The real one is
 /// [`kastellan_db::audit::InsertError`]; a trait so the tests can drive
-/// every outcome with a plain string and no Postgres.
+/// every outcome with no Postgres — a plain string is one known not written,
+/// and `tests.rs`'s `Unknown` one that may have been.
 trait InsertFailure: std::fmt::Display {
     fn outcome(&self) -> InsertOutcome;
 }
@@ -331,17 +332,11 @@ fn describe_row(payload: &Value) -> String {
 
 /// Pure: the `[audit-lost]` report for a `channel.*` row whose insert failed
 /// — the action, what it was about ([`describe_row`]), whether it is known
-/// not to be in the table ([`insert_verdict`] of `outcome`, #858), why, and
-/// where it stands in its writer's and channel's burst of lost rows (#829),
-/// so a thinned flood's lines still say how big it is.
-fn format_row_lost(
-    action: &str,
-    about: &str,
-    why: &dyn std::fmt::Display,
-    outcome: InsertOutcome,
-    tally: BurstTally,
-) -> String {
-    format!("{action} row{about} {}: {why}; {tally}", insert_verdict(outcome))
+/// not to be in the table ([`insert_verdict`] of `why`'s own outcome, #858),
+/// why, and where it stands in its writer's and channel's burst of lost rows
+/// (#829), so a thinned flood's lines still say how big it is.
+fn format_row_lost(action: &str, about: &str, why: &impl InsertFailure, tally: BurstTally) -> String {
+    format!("{action} row{about} {}: {why}; {tally}", insert_verdict(why.outcome()))
 }
 
 /// Pure: the `[audit-lost]` report for a row whose insert was abandoned
@@ -353,7 +348,7 @@ fn format_row_abandoned(action: &str, about: &str, cause: Abandoned) -> String {
         Abandoned::Stopped => "its task was stopped before the insert returned",
         Abandoned::Panicked => "the insert panicked",
     };
-    format!("{action} row{about} may not have been written: {cause}")
+    format!("{action} row{about} {}: {cause}", insert_verdict(InsertOutcome::Unknown))
 }
 
 /// Test fixtures for [`audit_or_report`]'s two writers: this module's tests,
@@ -389,13 +384,14 @@ pub(crate) mod test_support {
             .connect_lazy_with(options)
     }
 
-    /// A lazy pool whose every connection is accepted and **closed at once**:
-    /// a Postgres that drops the connection mid-conversation, with no
-    /// Postgres. The insert fails fast with a broken connection — not a
-    /// refused one, which sqlx retries until its acquire timeout
-    /// ([`refused_pool`]) — and that is the failure #858 calls *unknown*: the
-    /// client cannot tell whether a statement it sent was committed. The
-    /// accepting thread lives as long as the test process.
+    /// A lazy pool whose every connection is accepted and **closed at once**,
+    /// during the startup handshake, with no Postgres. The insert fails fast
+    /// with a broken connection — not a refused one, which sqlx retries until
+    /// its acquire timeout ([`refused_pool`]). No statement is ever sent, but
+    /// `sqlx::Error` does not say which phase an `Io` error came from, so #858
+    /// calls it *unknown* — the over-hedge `outcome_of`'s doc describes, and
+    /// the same error a connection lost mid-statement gives. The accepting
+    /// thread lives as long as the test process.
     ///
     /// Build it inside a runtime, as [`stalled_pool`].
     pub(crate) fn closing_pool() -> sqlx::PgPool {

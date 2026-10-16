@@ -40,7 +40,7 @@ fn the_shutdown_lines_count_rows_and_drivers_and_are_silent_at_zero() {
     let bound = Duration::from_secs(3);
     let none = Drained::default();
     assert_eq!(format_starting_at_shutdown(&none), None);
-    assert_eq!(format_unreported_since(0), None);
+    assert_eq!(format_unreported_since(UnsaidCounts::default()), None);
     assert_eq!(format_pending_at_shutdown(&none, bound), None);
     assert_eq!(format_stuck_replies_at_shutdown(&none, bound), None);
     assert_eq!(format_live_at_shutdown(&none, bound), None);
@@ -224,9 +224,19 @@ fn the_starting_and_residual_lines_say_what_they_count() {
     );
     assert_eq!(format_stuck_replies_at_shutdown(&starting, Duration::from_secs(3)), None);
     assert_eq!(
-        format_unreported_since(1).unwrap(),
+        format_unreported_since(UnsaidCounts { shed: 0, late: 1, failed: 0 }).unwrap(),
         "1 more channel audit row had no line of its own after the shutdown report (a driver \
-         still running past the drain, or an insert still pending at it)"
+         still running past the drain, or an insert still pending at it): 1 tried after \
+         shutdown began"
+    );
+    // The last lines keep the kinds apart too: a row never tried is not a
+    // failed insert, which may have been committed.
+    assert_eq!(
+        format_unreported_since(UnsaidCounts { shed: 0, late: 2, failed: 3 }).unwrap(),
+        "5 more channel audit rows had no line of their own after the shutdown report (a \
+         driver still running past the drain, or an insert still pending at it): 2 tried \
+         after shutdown began; 3 failed to insert (refused by Postgres, never sent, or lost \
+         with the connection)"
     );
 }
 
@@ -254,7 +264,8 @@ fn the_unreported_line_says_each_kind_apart() {
     assert_eq!(
         format_unreported_at_shutdown(UnsaidCounts { shed: 0, late: 0, failed: 7 }).unwrap(),
         "7 channel audit rows had no line of their own (thinned past a flood): 7 failed to \
-         insert over the daemon's life (refused by Postgres, or lost with the connection)"
+         insert over the daemon's life (refused by Postgres, never sent, or lost with the \
+         connection)"
     );
     assert_eq!(format_unreported_at_shutdown(UnsaidCounts::default()), None);
 }
@@ -266,12 +277,13 @@ fn the_unreported_line_says_each_kind_apart() {
 fn a_failed_inserts_line_says_what_is_known_and_its_tally() {
     use kastellan_db::audit::{InsertError, InsertOutcome};
     let tally = crate::audit_sink::BurstTally { nth: 17, unsaid_before: 0, ended: None };
-    let refused = InsertError::new(InsertOutcome::NotWritten, kastellan_db::DbError::Query("ro".into()));
-    let unknown = InsertError::new(InsertOutcome::Unknown, kastellan_db::DbError::Query("reset".into()));
+    let refused = InsertError::assumed_for_test(InsertOutcome::NotWritten, kastellan_db::DbError::Query("ro".into()));
+    let unknown = InsertError::assumed_for_test(InsertOutcome::Unknown, kastellan_db::DbError::Query("reset".into()));
     let refused = Unwritten::Insert { failed: &refused, tally };
     let unknown = Unwritten::Insert { failed: &unknown, tally };
     assert_eq!(refused.verdict(), "not written");
     assert_eq!(unknown.verdict(), "may not have been written");
+    assert_eq!(unknown.said(), "may not have been written: postgres query failed: reset; refused row 17 of this burst");
     assert_eq!(refused.to_string(), "postgres query failed: ro; refused row 17 of this burst");
     assert_eq!(Unwritten::Shed(tally).verdict(), "not written");
     assert_eq!(Unwritten::AfterShutdown(tally).verdict(), "not written");

@@ -46,22 +46,34 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 ### This session (2026-10-17): #858 + #861 — insert outcomes, and the sinks thin failed inserts (PR [#863](https://github.com/hherb/kastellan/pull/863))
 
 - **#858:** `kastellan_db::audit::insert_without_id` returns **`InsertError`** (`outcome()` +
-  `error()`; displays as its `DbError`, `?`-converts into one). **`InsertOutcome::{NotWritten,
-  Unknown}`** from one pure classifier, `audit::insert_outcome::outcome_of`: `Database`, `PoolTimedOut`,
-  `PoolClosed`, `Configuration`, `InvalidArgument`, `Encode` → NotWritten; everything else (`Io`,
-  `Tls`, `Protocol`, …) → Unknown. ⚠️ A connect-phase `Io` is Unknown too (sqlx doesn't say the
+  `error()`; displays as its `DbError`). ⚠️ **No `From` into `DbError`** — `into_db_error()` drops
+  the outcome by name — and **`new` is `pub(crate)`**: only the db crate's classifiers make one
+  (tests outside use `#[doc(hidden)] assumed_for_test`). **`InsertOutcome::{NotWritten, Unknown}`**
+  from one pure classifier, `audit::insert_outcome::outcome_of`: `Database` **at severity `ERROR`**
+  (`answered_with`), `PoolTimedOut`, `PoolClosed`, `Configuration`, `InvalidArgument`, `Encode` →
+  NotWritten; ⚠️ a **`PANIC`** (can follow a durable commit record: the commit's critical section
+  promotes every error) or `FATAL` answer, a non-Postgres `Database` error, and everything else
+  (`Io`, `Tls`, `Protocol`, …) → Unknown. A connect-phase `Io` is Unknown too (sqlx doesn't say the
   phase) — over-hedging on purpose. Wording in ONE place: `channel::audit_text::insert_verdict`
-  ("not written" / "may not have been written"), used by the bus (`pg_events::InsertFailure`) and
-  the daemon sinks (`Unwritten::verdict`, all four formatters). The bus's shutdown summary says
-  "failed to insert" (outcome-blind count).
+  ("not written" / "may not have been written"), used by the bus (`format_row_lost` takes the
+  `InsertFailure` itself, `format_row_abandoned`) and the daemon sinks (`Unwritten::said()` —
+  verdict + why in one call — in all four formatters). Summaries say "failed to insert"
+  (outcome-blind count, #864).
 - **#861:** the sinks' ledger thins failed inserts in a third per-channel `Thinning`
   (`Refusals::failed`, `UnsaidCounts.failed`); `Unwritten::Insert { failed, tally }`. The shutdown
-  lines now read `N channel audit rows had no line of their own (thinned past a flood): …`.
-- Fixtures: **`closing_pool`** (accepts, closes at once → Unknown) in both
-  `pg_events::test_support` and the bin's `audit_sink_test_support.rs`; `postgres_e2e` gets a real
-  `Database` error from a read-only session. New split `main/audit_sink_flood_tests.rs`.
-- Mutants **16/16 killed**; one review agent (own worktree): no correctness issue, its stale-doc
-  and test-gap findings fixed in the PR. Still open from #857's review: #859, #860, #862.
+  lines now read `N channel audit rows had no line of their own (thinned past a flood): …`, and the
+  last lines after the drain say the same kinds apart (`by_kind`). ⚠️ A row pending at the drain whose
+  insert fails after `pool.close` (waiting on the ledger's connection semaphore → `PoolClosed`) is
+  said only by the pending line — `pool.close` does not wait for the ledger's tasks.
+- Fixtures: **`closing_pool`** (accepts, closes during the startup handshake — no statement sent —
+  → Unknown) in both `pg_events::test_support` and the bin's `audit_sink_test_support.rs`;
+  `postgres_e2e` gets a real `ERROR` from a read-only session, and is now in the **`pg` gate profile**
+  (it was in none, so the `Database` → NotWritten path could skip-as-pass). New split
+  `main/audit_sink_flood_tests.rs`.
+- Mutants **16/16 killed**, plus 7/7 on the review fixes. A 5-agent review: its PANIC finding, stale
+  `[audit-lost]` contract docs and type-design hardening fixed in the PR; filed **#864** (outcome-split
+  counts, "refused" tally wording) and **#865** (per-action thinning); slow-outage case added to
+  #817. Still open from #857's review: #859, #860, #862.
 
 ### Previous (2026-10-16): #829 and #810 (PRs #857, #856, merged) — what still binds
 
@@ -109,7 +121,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - **#827/#826 (PR #834):** `RejectedUnverifiable` (fail-closed); `ack_method: None` = "does not
   redeliver". `pg_events::audit_or_report` holds a **`PendingInsert` drop guard** — ⚠️ no `.await`
   before it. **NUL (#819/#820):** records escape to `␀`; ⚠️ `kastellan-db`'s next release must be
-  **0.3.0** (now also `audit::insert_without_id`, #829, and its `InsertError`, #858); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #837–#840, #859, #860, #862.
+  **0.3.0** (now also `audit::insert_without_id`, #829, and its `InsertError`, #858); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #837–#840, #859, #860, #862, #864, #865.
 - ⚠️ **A Mac sweep without `KASTELLAN_PG_BIN_DIR` in its command line is NOT evidence** (372
   `[SKIP]`, exit 0) [[postgres-app-bin-paths]]; a sweep without `-- --nocapture` under-counts
   `[SKIP]`. ⚠️ **`git push` over SSH fails here** — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].

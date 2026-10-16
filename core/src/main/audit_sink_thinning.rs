@@ -102,8 +102,9 @@ pub(crate) struct UnsaidCounts {
     pub(super) shed: usize,
     /// Tried after the shutdown drain closed the ledger.
     pub(super) late: usize,
-    /// Tried, and the insert failed — refused by Postgres, or lost with the
-    /// connection, whichever its outcome (#861).
+    /// Tried, and the insert failed — refused by Postgres, never sent (no
+    /// connection: Postgres unreachable, or the pool closed), or lost with
+    /// the connection — whichever its outcome (#858, #861).
     pub(super) failed: usize,
 }
 

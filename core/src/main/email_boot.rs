@@ -105,11 +105,11 @@ const SINK_CHANNEL: crate::audit_sink::SinkChannel = crate::audit_sink::SinkChan
 /// by `format_audit_lost_line`) so it can be matched to the driver's own line for the skip.
 fn format_skipped_row_lost(message_id: &str, why: &crate::audit_sink::Unwritten<'_>) -> String {
     let message_id = crate::audit_sink::quoted_id(message_id);
-    let verdict = why.verdict();
     format!(
-        "channel.skipped_ack_only row for message {message_id} {verdict}: {why}. The \
+        "channel.skipped_ack_only row for message {message_id} {}. The \
          driver's line for the skip stands; the id's ack was about to be sent, and unless \
-         that ack then failed it is not redelivered"
+         that ack then failed it is not redelivered",
+        why.said()
     )
 }
 
@@ -127,9 +127,9 @@ fn format_skipped_row_lost(message_id: &str, why: &crate::audit_sink::Unwritten<
 /// poll and the ack wait on, so the insert is **spawned** through `writer`
 /// ([`crate::audit_sink::SinkWriter`], whose module doc gives the cost), not
 /// `block_on`'d (#789): a slow or unreachable Postgres stalled the email
-/// channel for a pool-acquire timeout per skipped id. A row that was not
-/// written is reported on the `[audit-lost]` marker
-/// ([`format_skipped_row_lost`]).
+/// channel for a pool-acquire timeout per skipped id. A lost row is
+/// reported on the `[audit-lost]` marker ([`format_skipped_row_lost`]) —
+/// past a flood, counted instead (`audit_sink_thinning.rs`).
 ///
 /// `report` is how a lost row is said: [`crate::audit_sink::emit_report`] in
 /// the daemon, a recorder in a test (#799).

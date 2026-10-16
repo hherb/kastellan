@@ -6,9 +6,10 @@
 //! one per writer and channel). Moved here from the daemon binary in #829 so
 //! both can share it: a binary's items are not visible to the library.
 //!
-//! A row that is not written is reported by the thread or task that tried to
-//! write it — a daemon sink's on the channel's driver thread, the bus's on
-//! its pump — as a tracing ERROR, or the marked stderr line when nothing
+//! A lost row is reported by the thread or task that tried to write it — a
+//! daemon sink's shed or late row on the channel's driver thread, its failed
+//! insert on the spawned insert task (#861), the bus's on its pump — as a
+//! tracing ERROR, or the marked stderr line when nothing
 //! records it; either can block. A flood (email's `skipped` list has no
 //! length cap; a Postgres that answers every insert at once with an error)
 //! would have that writer do so for every row. So within one burst the

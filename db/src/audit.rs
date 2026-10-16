@@ -241,14 +241,18 @@ where
 /// `decode audit_log.id` error comes back once Postgres has already
 /// answered `RETURNING id`. A writer that reports a failed insert as "not
 /// written" (the channel bus's `[audit-lost]` lines) would then say so of a
-/// row that is in the table. Here an `Err` is the statement's own: Postgres
-/// refused it, or the connection failed before an answer came back.
+/// row that is in the table. Here an `Err` comes before or from the
+/// statement: no connection was handed out, Postgres refused it, or the
+/// connection failed before an answer came back.
 ///
 /// In that last case the row may still have been committed — no client can
-/// tell — so the `Err` says which it is (#858): [`InsertError::outcome`] is
-/// [`InsertOutcome::NotWritten`] or [`InsertOutcome::Unknown`]
-/// ([`insert_outcome::outcome_of`] has the rules). A writer reporting the
-/// loss words the unknown case "may not have been written".
+/// tell — so the `Err` says whether the row is known not to be there (#858):
+/// [`InsertError::outcome`] is [`InsertOutcome::NotWritten`] or
+/// [`InsertOutcome::Unknown`] ([`insert_outcome::outcome_of`] has the rules).
+/// A writer reporting the loss words the unknown case "may not have been
+/// written". The rules are for an autocommitted statement — `executor` a pool
+/// or a bare connection; inside a transaction a "not written" holds only if
+/// the transaction is not committed after all.
 ///
 /// One step `insert` had for free is kept: its `fetch_one` fails on a
 /// statement that writes no row, and `execute` would not, so the count is

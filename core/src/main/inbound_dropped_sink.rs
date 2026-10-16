@@ -39,12 +39,12 @@ pub(crate) fn format_inbound_row_lost(
     why: &Unwritten<'_>,
 ) -> String {
     format!(
-        "{} row for {dropped} dropped inbound message{} ({}) {}: {why}. The drop's \
+        "{} row for {dropped} dropped inbound message{} ({}) {}. The drop's \
          [worker-refusal] line stands",
         kastellan_core::channel::actions::INBOUND_DROPPED,
         if dropped.get() == 1 { "" } else { "s" },
         stage.as_str(),
-        why.verdict(),
+        why.said(),
     )
 }
 
@@ -76,8 +76,9 @@ fn row_what(channel: SinkChannel, stage: InboundDropStage) -> &'static str {
 /// **spawned** through `writer`, not awaited: a slow or unreachable Postgres
 /// must not stall either. The hook holds an `Arc` of `writer`, so the lease
 /// lasts until the driver, the receiver and any sibling hook built on the same
-/// writer have all dropped theirs. A row that was not written is reported on the `[audit-lost]` marker
-/// ([`format_inbound_row_lost`]), under the writer's channel.
+/// writer have all dropped theirs. A lost row is reported on the `[audit-lost]` marker
+/// ([`format_inbound_row_lost`]), under the writer's channel — past a flood,
+/// counted instead (`audit_sink_thinning.rs`).
 ///
 /// `report` is how a lost row is said: [`crate::audit_sink::emit_report`] in
 /// the daemon, a recorder in a test (#799).
@@ -127,10 +128,10 @@ fn undecodable_row_for(part: UndecodablePart) -> String {
 /// `part` a sink could not write.
 pub(crate) fn format_undecodable_row_lost(part: UndecodablePart, why: &Unwritten<'_>) -> String {
     format!(
-        "{} row for {} {}: {why}. Its [worker-refusal] line stands",
+        "{} row for {} {}. Its [worker-refusal] line stands",
         kastellan_core::channel::actions::INBOUND_UNDECODABLE,
         undecodable_row_for(part),
-        why.verdict(),
+        why.said(),
     )
 }
 

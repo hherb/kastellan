@@ -22,9 +22,9 @@
 //!   and at most [`MAX_QUEUED`] are in flight in all, running or waiting; past
 //!   that a row is **shed**, and the
 //!   sink's `on_failure` says so (thinned past a flood, `audit_sink_thinning.rs`),
-//!   like any other row that was not written — a failed insert included,
-//!   since #861, so a Postgres that refuses every insert at once does not
-//!   give every audited event a line of its own.
+//!   like any other lost row — a failed insert included, since #861, so a
+//!   Postgres that refuses every insert at once does not give every audited
+//!   event a line of its own.
 //! - **After the fact.** The row is written after the hook returns, so an
 //!   email id is acked before its row exists: a crash in between loses the
 //!   row, and the id is not redelivered. Rows can also land out of order
@@ -64,9 +64,12 @@
 //! What may be said twice: a row caught by the final snapshot in the middle
 //! of being refused is counted as pending there and then refused — reported,
 //! or counted in the last lines — over-counting, which is the safe direction.
-//! So is a row still pending at the snapshot whose insert then fails (#861):
-//! named in the pending line, and then reported, or counted in the last
-//! lines, as a failed insert.
+//! So may a row still pending at the snapshot whose insert then fails (#861):
+//! the pending line counts it (naming it if among the first few), and that is
+//! its guarantee. Its failure is reported, or counted in the last lines, only
+//! if it comes before them: `pool.close` does not wait for this writer's
+//! tasks, so a row still waiting for one of its connections then fails with
+//! `PoolClosed` after the last line, or is dropped with the runtime.
 //!
 //! One writer for both channels (Matrix's `channel.reply_undelivered`,
 //! `channel.inbound_dropped` and `channel.inbound_undecodable`, email's `channel.skipped_ack_only` and
@@ -285,8 +288,7 @@ impl SinkWriter {
     /// Insert one audit row on the runtime, without waiting for it.
     ///
     /// Returns at once — call it from a thread that must not block (the polled
-    /// driver's). `on_failure` is told of a row that was not written, with
-    /// why: on the runtime if the insert fails, or right here, on the caller's
+    /// driver's). `on_failure` is told of a lost row, with why: on the runtime if the insert fails, or right here, on the caller's
     /// thread, if the row is shed or the daemon is shutting down (see the
     /// module docs). It should report the row on the `[audit-lost]` marker
     /// with enough to match it to the caller's own line for the event (a
@@ -356,11 +358,10 @@ impl SinkWriter {
                 refuse(ledger.refusals.late(channel), Unwritten::AfterShutdown, on_failure);
                 return;
             };
-            // No `RETURNING id` (#829): the id is discarded, and an `Err` is
-            // said as a row "not written" — which a decode step failing
-            // after the write would make untrue. The `Err` says whether the
-            // row may have been committed anyway (#858), and a flood of them
-            // is thinned like a flood of shed rows (#861).
+            // No `RETURNING id` (#829): no decode step can fail after the row
+            // is written. The `Err` says whether the row may have been
+            // committed anyway (#858) — `Unwritten::verdict` words it — and a
+            // flood of them is thinned like a flood of shed rows (#861).
             if let Err(failed) = kastellan_db::audit::insert_without_id(&pool, actor, action, payload).await {
                 let why = |tally| Unwritten::Insert { failed: &failed, tally };
                 refuse(ledger.refusals.failed(channel), why, on_failure);
@@ -483,8 +484,8 @@ pub(crate) use report::{
     Unwritten,
 };
 
-/// Test builds only: a Postgres that never answers, for proving a sink does
-/// not wait for its insert — and that it did try one. Shared by this module's
+/// Test builds only: a Postgres that never answers (a sink does not wait for
+/// its insert, yet tries one), and one that hangs up (a failed insert). Shared by this module's
 /// tests and each sink's own.
 #[cfg(test)]
 #[path = "audit_sink_test_support.rs"]

@@ -55,8 +55,9 @@ fn closing_writer(ledger: &'static Ledger) -> (tokio::runtime::Runtime, SinkWrit
 /// #861: a Postgres that fails every insert at once gets a line for the
 /// first few rows, then one per power of two — as a flood of shed rows does —
 /// each saying its place in the burst, and the rest are counted for the
-/// shutdown line. #858: each line says the row *may* not have been written,
-/// because a closed connection cannot say whether the statement committed.
+/// shutdown line. #858: each line says the row *may* not have been written:
+/// the fixture's connection closes before any statement is sent, but the
+/// `Io` error it gives is the one a connection lost mid-statement gives too.
 ///
 /// The rows are written one at a time (each task awaited) so their order is
 /// the burst's.
@@ -69,7 +70,7 @@ fn a_flood_of_failed_inserts_is_reported_one_by_one_then_thinned() {
         let told = told.clone();
         let task = writer
             .spawn("a", "b", serde_json::json!({}), "t".into(), move |why| {
-                told.lock().unwrap().push(format!("{}: {why}", why.verdict()));
+                told.lock().unwrap().push(why.said());
             })
             .expect("never shed: one row at a time");
         rt.block_on(task).expect("the insert task ran to completion");
@@ -161,7 +162,8 @@ fn a_failed_insert_pending_at_the_drain_is_counted_in_the_last_line() {
         [(
             AuditLostWriter::Email,
             "1 more channel audit row had no line of its own after the shutdown report (a driver \
-             still running past the drain, or an insert still pending at it)"
+             still running past the drain, or an insert still pending at it): 1 failed to \
+             insert (refused by Postgres, never sent, or lost with the connection)"
                 .to_string()
         )],
         "said once, after the close, as email's — and nothing for Matrix's reported row"

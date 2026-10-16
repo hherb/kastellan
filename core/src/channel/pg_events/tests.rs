@@ -60,14 +60,14 @@ fn the_line_names_what_the_row_is_about_and_nothing_else() {
     });
     let first = BurstTally { nth: 1, unsaid_before: 0, ended: None };
     let about = describe_row(&payload);
-    let line = format_row_lost("channel.reply_undelivered", &about, &"boom", InsertOutcome::NotWritten, first);
+    let line = format_row_lost("channel.reply_undelivered", &about, &"boom", first);
     assert_eq!(
         line,
         r#"channel.reply_undelivered row for channel "matrix", peer "@a:srv", task_id 7, reason "send_failed" not written: boom; refused row 1 of this burst"#
     );
     assert!(!line.contains("NEVER-IN-A-LINE"), "only the named fields are read: {line}");
     // #858: an insert whose connection broke may have been committed.
-    let unknown = format_row_lost("channel.received", "", &"reset", InsertOutcome::Unknown, first);
+    let unknown = format_row_lost("channel.received", "", &Unknown("reset"), first);
     assert_eq!(unknown, "channel.received row may not have been written: reset; refused row 1 of this burst");
 }
 

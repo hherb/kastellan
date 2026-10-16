@@ -1,5 +1,5 @@
-//! Test builds only: the stalled-Postgres fixture for `audit_sink` and each
-//! sink's own tests. Split out of `audit_sink.rs` to keep it under the 500-LOC
+//! Test builds only: the stalled-Postgres and closing-Postgres fixtures for
+//! `audit_sink` and each sink's own tests. Split out of `audit_sink.rs` to keep it under the 500-LOC
 //! soft cap; `#[path]`-included there as `audit_sink::test_support`.
 
 use sqlx::PgPool;
@@ -79,11 +79,11 @@ pub(crate) fn assert_insert_attempted(what: &str, listener: &TcpListener) {
     );
 }
 
-/// A pool whose every connection is accepted and **closed at once**: a
-/// Postgres that drops the connection mid-conversation, with no Postgres.
-/// Each insert fails fast, with a broken connection rather than a refused
-/// one (which sqlx retries until its acquire timeout) — the failure whose
-/// row #858 calls *unknown*. The accepting thread lives as long as the test
+/// A pool whose every connection is accepted and **closed at once**, during
+/// the startup handshake, with no Postgres. Each insert fails fast, with a
+/// broken connection rather than a refused one (which sqlx retries until its
+/// acquire timeout). No statement is sent, but the `Io` error is the one a
+/// connection lost mid-statement gives, so #858 calls the row *unknown*. The accepting thread lives as long as the test
 /// process. (The library's `pg_events::test_support` has the same fixture;
 /// a binary's test items are not visible to the library's, nor the reverse.)
 ///

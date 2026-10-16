@@ -86,10 +86,10 @@ fn format_reply_row_lost(
     why: &crate::audit_sink::Unwritten<'_>,
 ) -> String {
     let conversation = crate::audit_sink::quoted_id(conversation);
-    let verdict = why.verdict();
     format!(
         "channel.reply_undelivered row for a reply to conversation {conversation} \
-         ({reason}) {verdict}: {why}. The dropped reply's [worker-refusal] line stands"
+         ({reason}) {}. The dropped reply's [worker-refusal] line stands",
+        why.said()
     )
 }
 
@@ -110,8 +110,9 @@ fn format_reply_row_lost(
 /// [`driver_sinks`] builds all three, so one lease), and the driver owns the closure — and the bus-side receiver a
 /// clone of the inbound-dropped hook — so the lease lasts until both have let
 /// go, and — once it has started (see [`login_outcome`]) — the daemon's
-/// shutdown drain waits for it. A row that was not written is
-/// reported on the `[audit-lost]` marker ([`format_reply_row_lost`]).
+/// shutdown drain waits for it. A lost row is reported on the
+/// `[audit-lost]` marker ([`format_reply_row_lost`]) — past a flood,
+/// counted instead (`audit_sink_thinning.rs`).
 ///
 /// [`ReplyUndeliveredAudit`]: kastellan_core::channel::polled_driver::ReplyUndeliveredAudit
 ///

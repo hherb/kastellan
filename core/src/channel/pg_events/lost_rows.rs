@@ -8,8 +8,8 @@
 //! REVOKE) it is one line per inbound message: a flood of messages is a flood
 //! of lines, each of which the reporter may block on. This module thins them
 //! with the daemon's sinks' thinning ([`crate::audit_thinning`]), which those
-//! sinks apply to their shed and after-shutdown refusals
-//! (`main/audit_sink_thinning.rs`) — not to their own failed inserts.
+//! sinks apply to their shed, after-shutdown and (since #861) failed-insert
+//! rows (`main/audit_sink_thinning.rs`).
 //!
 //! **Counted per writer and per channel**, as the daemon's sinks count per
 //! channel (#807): one channel's flood must not thin the other's lines, and

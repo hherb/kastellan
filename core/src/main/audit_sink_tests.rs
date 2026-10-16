@@ -71,7 +71,7 @@ fn the_insert_does_not_hold_the_calling_thread() {
 
     let told: Arc<Mutex<Option<String>>> = Arc::default();
     let seen = told.clone();
-    let on_failure = move |u: Unwritten<'_>| *seen.lock().unwrap() = Some(format!("{}: {u}", u.verdict()));
+    let on_failure = move |u: Unwritten<'_>| *seen.lock().unwrap() = Some(u.said());
     let mut task = None;
     assert_returns_at_once("SinkWriter::spawn", || {
         task = Some(writer.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure));
