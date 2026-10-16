@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 use super::audit::{record_undecodable, DriverAudit, InboundUndecodableAudit};
 use super::outage::OutageLog;
 use super::refusal::{RefusalRun, REFUSAL_REPEAT};
-use super::{PolledBatch, PolledEvent, PolledWorkerSpec};
+use super::{PolledBatch, PolledEvent, PolledWorkerSpec, UndecodableEvents};
 use crate::channel::actions;
 use crate::channel::audit_text::cap_chars;
 use crate::channel::undelivered::observed_at_json;
@@ -80,8 +80,10 @@ pub(super) const WHY_UNDECODABLE: &str =
 pub enum UndecodablePart {
     /// A whole poll result. How many messages it held is unknown.
     Batch,
-    /// This many events of a poll result whose other events reached the bus
-    /// (#852).
+    /// This many events of a poll result whose envelope decoded — possibly
+    /// all of them (#852). Any others decoded and went on to the bus, or, if
+    /// it had closed, were counted as `channel.inbound_dropped` at the
+    /// `polled` stage.
     Events(NonZeroUsize),
     /// The worker's drain answer as the driver exited: how many messages it
     /// still held is unknown (#853).
@@ -90,7 +92,7 @@ pub enum UndecodablePart {
 
 impl UndecodablePart {
     /// The row's spelling, pinned: operators query `audit_log` by it. A row
-    /// written before #852 has no `part`, and is a batch.
+    /// written before #852 shipped (PR #855) has no `part`, and is a batch.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Batch => "batch",
@@ -150,14 +152,18 @@ pub(super) fn check_undecodable_audit(spec: &PolledWorkerSpec, audit: &DriverAud
 /// is an undecodable batch: none of it may be acked, because acking the
 /// events after the bad one would move the monotonic cursor past it for good.
 /// Anything else passes through unchanged.
+///
+/// The counts are the error's context and the first decode error its root
+/// cause: the line says both, but the run's cadence follows only the cause
+/// ([`on_undecodable_batch`]), so a redelivered batch that grows as new
+/// messages arrive behind the bad one is still the same error.
 pub(super) fn whole_batch_on_ack_channel(batch: PolledBatch, acks: bool) -> anyhow::Result<PolledBatch> {
     match (&batch.undecodable, acks) {
-        (Some(u), true) => Err(anyhow::anyhow!(
-            "{} of the batch's {} events did not decode; first: {}",
+        (Some(u), true) => Err(anyhow::anyhow!("{}", u.first_error).context(format!(
+            "{} of the batch's {} events did not decode",
             u.count,
             u.count.get() + batch.events.len(),
-            u.first_error,
-        )),
+        ))),
         _ => Ok(batch),
     }
 }
@@ -212,11 +218,17 @@ pub(super) fn error_code(error: &str) -> i32 {
 pub(super) enum LostPart {
     /// The whole result: how many messages it held is unknown.
     Batch,
-    /// `lost` of its `of` events; the rest decoded (#852).
-    Events { lost: NonZeroUsize, of: usize },
+    /// `lost` of its events, besides the `decoded` ones (#852). Two counts
+    /// that add, not a part and a total, so no pair is inconsistent.
+    Events { lost: NonZeroUsize, decoded: usize },
 }
 
 impl LostPart {
+    /// The events of a result that did not decode, beside the `decoded` ones.
+    pub(super) fn events(u: &UndecodableEvents, decoded: usize) -> Self {
+        Self::Events { lost: u.count, decoded }
+    }
+
     /// The row's part for this loss.
     fn row_part(self) -> UndecodablePart {
         match self {
@@ -226,7 +238,7 @@ impl LostPart {
     }
 }
 
-/// What became of an undecodable batch, for its line.
+/// What became of what did not decode, for its line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fate {
     /// The channel acks, so the batch comes back (email). The poll runs again
@@ -248,8 +260,9 @@ pub(super) fn recorded_as(recorded: bool) -> String {
     }
 }
 
-/// Pure: the line for one undecodable batch: the decode error (capped at
-/// [`DECODE_ERROR_CAP_CHARS`]) and what became of the batch.
+/// Pure: the line for a poll result that did not decode, wholly or in part:
+/// the decode error — the first event's, for part of one — capped at
+/// [`DECODE_ERROR_CAP_CHARS`], and what became of what did not decode.
 pub(super) fn format_undecodable_report(error: &str, fate: Fate) -> String {
     let error = cap_chars(error, DECODE_ERROR_CAP_CHARS);
     let why = WHY_UNDECODABLE;
@@ -270,11 +283,11 @@ pub(super) fn format_undecodable_report(error: &str, fate: Fate) -> String {
                     "a poll result did not decode ({error}), so its batch is lost: this channel \
                      does not redeliver, and how many messages it held is unknown."
                 ),
-                LostPart::Events { lost, of } => {
-                    let rest = of - lost.get();
+                LostPart::Events { lost, decoded } => {
+                    let of = lost.get() + decoded;
                     // "decoded", not "reached the bus": when the bus has
                     // closed they did not, and their own line says so.
-                    let rest = match rest {
+                    let rest = match decoded {
                         0 => String::new(),
                         1 => " The other one decoded.".to_string(),
                         n => format!(" The other {n} decoded."),
@@ -291,15 +304,12 @@ pub(super) fn format_undecodable_report(error: &str, fate: Fate) -> String {
     }
 }
 
-/// Pure: the line that ends a run of `n` undecodable batches, or `None` when
-/// no run ended (`n == 0`).
+/// Pure: the line that ends a run of `n` poll results that did not decode
+/// whole, or `None` when no run ended (`n == 0`). "Whole", not "undecodable":
+/// the run counts results some of whose events did not decode too (#852),
+/// whose good events reached the bus.
 pub(super) fn format_decodes_again_report(n: u32) -> Option<String> {
-    (n > 0).then(|| {
-        format!(
-            "poll results decode again after {n} undecodable batch{}; that run has ended",
-            if n == 1 { "" } else { "es" }
-        )
-    })
+    (n > 0).then(|| format!("poll results decode whole again after {n} that did not; that run has ended"))
 }
 
 /// A poll result did not decode while the bus is up: hold the next poll for
@@ -314,8 +324,10 @@ pub(super) fn on_undecodable_batch(
     outage: &OutageLog,
     audit: Option<&InboundUndecodableAudit>,
 ) {
-    let error = e.to_string();
-    let (delay, report) = run.on_undecodable(&error, spec, outage);
+    // The line says the whole chain; the cadence follows the root cause only
+    // (see `whole_batch_on_ack_channel`).
+    let error = format!("{e:#}");
+    let (delay, report) = run.on_undecodable(&e.root_cause().to_string(), spec, outage);
     if spec.ack_method.is_none() {
         report_lost_undecodable(spec, cid, &error, LostPart::Batch, Some(delay), audit);
     } else if report {
@@ -341,9 +353,10 @@ pub(super) fn on_decoded_batch(
     let PolledBatch { events, undecodable } = batch;
     match undecodable {
         Some(u) => {
+            // The cadence's `report` is ignored, as for a lost batch: each
+            // lost event is a different one, so every loss is said.
             let (delay, _) = run.on_undecodable(&u.first_error, spec, outage);
-            let part = LostPart::Events { lost: u.count, of: u.count.get() + events.len() };
-            report_lost_undecodable(spec, cid, &u.first_error, part, Some(delay), audit);
+            report_lost_undecodable(spec, cid, &u.first_error, LostPart::events(&u, events.len()), Some(delay), audit);
         }
         None => decoded(run, spec.label),
     }

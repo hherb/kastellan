@@ -5,9 +5,10 @@
 //! `RpcError` and was kept. The polled channel driver
 //! (`channel::polled_driver::refusal`) decides *when* a refusal is worth a line
 //! and *what* it says. This module only carries that line to whoever is
-//! reading, like the other three emitters in `report`. One line on it is not
-//! a refusal: a poll result that did not decode (#836,
-//! `channel::polled_driver::undecodable`) — see
+//! reading, like the other three emitters in `report`. Two lines on it are
+//! not refusals: a poll result that did not decode, wholly or in part (#836,
+//! #852), and a drain answer that did not (#853) — see
+//! `channel::polled_driver::undecodable` and
 //! [`WORKER_REFUSAL_STDERR_MARKER`].
 //!
 //! Before #783 the refusal lines went through `tracing` alone. A binary with no
@@ -24,11 +25,13 @@ use super::shared::format_stderr_fallback;
 /// **Distinct from `[worker-death]` and `[worker-down]`, and the distinction is
 /// the point.** A refusal says the worker is alive and its *upstream* said no:
 /// look at the credential, at the room, at the upstream. A death or a down
-/// report says the worker *process* is the problem. One exception: a poll
-/// result that did not decode (#836) is said here too, though it blames the
+/// report says the worker *process* is the problem. One exception: worker
+/// output that did not decode is said here too, though it blames the
 /// worker's own output — a worker bug, or a compromised worker — because it is
-/// the driver's line, paced by the driver's runs, and its recovery pairs with
-/// it as a `Recovered` line does with a refusal. Its text says which it is.
+/// the driver's line. A poll result that did not decode, wholly or in part
+/// (#836, #852), is paced by the driver's runs, and its recovery pairs with it
+/// as a `Recovered` line does with a refusal; a drain answer that did not
+/// (#853) is said once, at exit, with no recovery. Its text says which it is.
 /// Shares the `[worker-…]`
 /// shape so a reader who wants any of them can grep `^\[worker-`; see
 /// [`super::STDERR_FALLBACK_MARKERS`] for the whole set.
@@ -59,9 +62,11 @@ pub enum RefusalSeverity {
     /// has an audit sink, and the line says so when it has none.
     Warn,
     /// The upstream refused the channel's credential: an operator action. Or
-    /// a poll result that did not decode (#836): the worker sent output the
-    /// core cannot read — a worker bug, or a compromised worker — and on a
-    /// channel that does not redeliver, a batch of unknown size is lost.
+    /// worker output that did not decode: the worker sent output the core
+    /// cannot read — a worker bug, or a compromised worker — and on a channel
+    /// that does not redeliver, a poll result of unknown size (#836), a
+    /// counted part of one (#852), or the unknown number the worker held at
+    /// exit (#853, its drain answer) is lost.
     Error,
 }
 

@@ -130,7 +130,7 @@ fn an_undecodable_batch_that_is_not_redelivered_is_said_at_error_and_recorded() 
     assert!(lines[0].0.contains("bad event"), "names the decode error: {lines:?}");
     assert!(lines[0].0.contains("recording it as channel.inbound_undecodable"), "{lines:?}");
     assert_eq!(lines[1].1, RefusalSeverity::Recovered, "{lines:?}");
-    assert!(lines[1].0.contains("decode again after 1 undecodable batch"), "{lines:?}");
+    assert!(lines[1].0.contains("decode whole again after 1 that did not"), "{lines:?}");
 }
 
 /// Every loss is said and recorded, not just a run's first: each lost batch
@@ -151,7 +151,7 @@ fn every_lost_undecodable_batch_is_said_and_recorded() {
         assert!(lines[i].0.contains(&format!("Polling again in {ms} ms;")), "{i}: {lines:?}");
     }
     assert_eq!(lines[3].1, RefusalSeverity::Recovered, "{lines:?}");
-    assert!(lines[3].0.contains("decode again after 3 undecodable batches"), "{lines:?}");
+    assert!(lines[3].0.contains("decode whole again after 3 that did not"), "{lines:?}");
     assert_eq!(seen.lock().unwrap().len(), 3, "one row per lost batch");
 }
 
@@ -242,7 +242,7 @@ fn a_run_of_redelivered_undecodable_batches_is_said_once() {
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert_eq!(lines[0].1, RefusalSeverity::Error);
     assert_eq!(lines[1].1, RefusalSeverity::Recovered);
-    assert!(lines[1].0.contains("decode again after 3 undecodable batches"), "{lines:?}");
+    assert!(lines[1].0.contains("decode whole again after 3 that did not"), "{lines:?}");
 }
 
 /// A redelivered batch whose decode error changes is said again at once —
@@ -296,9 +296,9 @@ fn a_refused_poll_does_not_end_an_undecodable_run() {
     *st.refuse.lock().unwrap() = Some(("email.poll".into(), 2));
     let lines = settled_lines_for(label, 4);
     let accepted = lines.iter().position(|(l, _)| l.contains("accepted email.poll again")).expect("{lines:?}");
-    let decoded = lines.iter().position(|(l, _)| l.contains("decode again after 1")).expect("{lines:?}");
+    let decoded = lines.iter().position(|(l, _)| l.contains("decode whole again after 1")).expect("{lines:?}");
     assert!(accepted < decoded, "the run ends at a decode, not at a refusal: {lines:?}");
-    assert_eq!(lines.iter().filter(|(l, _)| l.contains("decode again")).count(), 1, "{lines:?}");
+    assert_eq!(lines.iter().filter(|(l, _)| l.contains("decode whole again")).count(), 1, "{lines:?}");
 }
 
 /// The hook runs on the driver's thread, so it is timed like the others
@@ -350,7 +350,7 @@ fn an_ack_channel_s_batch_that_outlives_the_bus_is_not_decoded() {
 /// count for a whole batch or a drain answer (it is unknown), the count for
 /// events, and never error text (a decode error can quote a peer's message).
 #[test]
-fn the_inbound_undecodable_row_is_channel_part_and_when_only() {
+fn the_inbound_undecodable_row_is_channel_part_when_and_an_events_count() {
     let row = |part| {
         InboundUndecodable {
             channel: &ChannelId("matrix".into()),
@@ -428,7 +428,7 @@ fn the_decodes_again_line_counts_the_run() {
     assert_eq!(format_decodes_again_report(0), None);
     assert_eq!(
         format_decodes_again_report(1).as_deref(),
-        Some("poll results decode again after 1 undecodable batch; that run has ended")
+        Some("poll results decode whole again after 1 that did not; that run has ended")
     );
-    assert!(format_decodes_again_report(2).unwrap().contains("after 2 undecodable batches"));
+    assert!(format_decodes_again_report(2).unwrap().contains("after 2 that did not"));
 }

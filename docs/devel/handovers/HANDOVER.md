@@ -57,7 +57,8 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   move the monotonic cursor past it for good. A new ack-channel decoder may return events one at a
   time without losing anything.
 - **The row:** `channel.inbound_undecodable` gains **`part`** — `batch` (#836; pre-#852 rows have no
-  `part`), `events` (+ `undecodable: N`; the batch's good events reached the bus), `drain` (#853).
+  `part`), `events` (+ `undecodable: N`, possibly all of the result's; the rest reached the bus, or
+  an `inbound_dropped` row if it had closed), `drain` (#853).
   The hook's type is renamed `UndecodableBatch` → **`InboundUndecodable`** (pairs with
   `InboundDropped`). Pending-row labels: `matrix inbound events lost undecodable (N)`, `matrix
   undecodable drain answer`.
@@ -66,6 +67,10 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   not loss, unless the next result fails whole; it still bounds a garbage-answering worker's row rate.
 - **#853:** `drain_worker_on_exit` has two arms — a failed call stays WARN `could not ask`; an answer
   `drain.parse` rejects is ERROR on `[worker-refusal]` + a `drain` row. It now takes both hooks.
+- **Review round (2026-10-16, five agents, no code bug):** tests for repeated partial batches and the
+  bus-closed count; `LostPart::Events { lost, decoded }`; `UndecodableEvents::note`. ⚠️ The ack-channel
+  error is counts-as-`context` over the first error: the line prints `{e:#}`, the cadence hashes
+  `e.root_cause()` only. Recovery line: `decode whole again after N that did not`.
 
 ### Previous (2026-10-13): #836 — an undecodable poll batch (PR #851, merged)
 
@@ -356,7 +361,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `llm-router/src/messages.rs`,
 `core/src/main.rs`, `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
-`worker_stderr/report/tool_worker.rs` 710, `core/src/channel/mod.rs` **568** (+10 in #849, +6 in #835, +16 in #836, +4 in #852, docs — the `actions` consts are the natural cut).
+`worker_stderr/report/tool_worker.rs` 710, `core/src/channel/mod.rs` **569** (+10 in #849, +6 in #835, +16 in #836, +5 in #852, docs — the `actions` consts are the natural cut).
 Also over (grew in #818 without a split): `db/src/tasks.rs` **819** (+11 in #825: `CRASHED_DETAIL`),
 `db/src/graph.rs` **~935**, `core/src/entity_extraction/batch_upsert.rs` **~520**.
 Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
@@ -368,7 +373,7 @@ keep): #750 `worker_stderr/`, #769 `persistent.rs`, #767 `attach.rs`, #785 `memo
 `audit/truncate/tests.rs` is still 833), #788 `channel/mod.rs` (→ `undelivered.rs`) and
 `polled_driver.rs` (→ `polled_driver/audit.rs`), #792 `main/audit_sink.rs` (→ `audit_sink_tests.rs`,
 `audit_sink_test_support.rs`), #806 `email_boot.rs`/`matrix_boot.rs` (→ `*_tests.rs`, proved byte-identical). ⚠️ **Near the cap:** `worker_stderr/report/delivery/tests.rs` **499** (one under), `polled_driver.rs`
-**495** (+26 in #836, +10 in #852), `polled_driver/replies.rs` **478** — split before the next change grows them. #826 split `polled_driver.rs` (→ `spec.rs`).
+**498** (+26 in #836, +13 in #852), `polled_driver/replies.rs` **478** — split before the next change grows them. #826 split `polled_driver.rs` (→ `spec.rs`).
 Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_785_pre-prune.md).
 
 **Standing deferrals (no owner):** egress #242, #251, #304, #260; micro-VM #381 and **true `jailer`**
@@ -402,7 +407,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#852 + #853 — **the full sweep that stands**) | PR [#855](https://github.com/hherb/kastellan/pull/855) | **5053 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-852.log`. Reconciled per suite against `~/sweep-836.log` (5032): core lib 2488 → **2508** (+9 from #836's review round — its row said +10, but its measured 2497 says 9 — and +11 here: `matrix::tests` 3, `tests::undecodable_events` 6, `tests::worker_drain` 2), daemon bin 92 → **93** (`inbound_dropped_sink_tests` 1); every other suite identical. Mutants killed **11/11** (no hold for bad events, run ended by a partial batch, ack channel acks a partial batch, events row without a count, events recorded as a batch, bus-closed path ignores bad events, Matrix decodes whole, drain junk at WARN, drain junk unrecorded, a failed drain call recorded, a line that overclaims the rest) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-852`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#852 + #853 review round — **the full sweep that stands**) | PR [#855](https://github.com/hherb/kastellan/pull/855) | **5058 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/fixall-855-sweep.log`. Against the 5053 below: core lib 2508 → **2513** (`tests::undecodable_events` 4, `email::wire` 1), every other suite identical; 4/4 review-round mutants killed (partial-batch loss gated on `report`, cadence hashing the counts, wrong bus-closed count, `note` not counting). Comment-only trims to `polled_driver.rs` after it. The pre-review run: **5053 / 0 / 52**, log `~/sweep-852.log`. Reconciled per suite against `~/sweep-836.log` (5032): core lib 2488 → **2508** (+9 from #836's review round — its row said +10, but its measured 2497 says 9 — and +11 here: `matrix::tests` 3, `tests::undecodable_events` 6, `tests::worker_drain` 2), daemon bin 92 → **93** (`inbound_dropped_sink_tests` 1); every other suite identical. Mutants killed **11/11** (no hold for bad events, run ended by a partial batch, ack channel acks a partial batch, events row without a count, events recorded as a batch, bus-closed path ignores bad events, Matrix decodes whole, drain junk at WARN, drain junk unrecorded, a failed drain call recorded, a line that overclaims the rest) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-852`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#836 — superseded) | PR #851 (`7270a1d5`) | **5032 / 0 / 52**, 195 suites, `[SKIP]` 23; log `~/sweep-836.log` | exit 0, 27 `Checking kastellan` | 23 Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.

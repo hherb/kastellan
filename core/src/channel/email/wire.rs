@@ -134,8 +134,9 @@ pub fn parse_email_poll(v: serde_json::Value) -> anyhow::Result<PolledBatch> {
 /// separate on purpose (see the module docs).
 ///
 /// Fails closed on a missing/non-array `events` field (a malformed poll
-/// result is a worker bug, surfaced as an error so the driver logs it and
-/// skips the batch — never silently treated as "no events").
+/// result is a worker bug, surfaced as an error so the driver says it, does
+/// not ack the batch — it is redelivered — and holds the next poll; never
+/// silently treated as "no events").
 pub fn parse_email_poll_with(
     v: serde_json::Value,
     authserv_id: &str,
@@ -328,6 +329,17 @@ mod tests {
     #[test]
     fn malformed_poll_result_is_an_error_not_a_silent_empty() {
         assert!(parse_email_poll_with(serde_json::json!({"nope": 1}), "mx").is_err());
+    }
+
+    /// #852: email decodes whole — one bad event fails the batch, so nothing
+    /// in it is acked and the cursor never moves past the bad one. Matrix
+    /// decodes event by event; email must not.
+    #[test]
+    fn one_bad_event_fails_the_whole_email_batch() {
+        let good = event(vec![], true, "hello");
+        assert!(parse_email_poll(poll_result(vec![good.clone()])).is_ok(), "POSITIVE CONTROL");
+        let bad = serde_json::json!({"peer": 42, "conversation": "<mid-2@example.org>", "body": "x"});
+        assert!(parse_email_poll(poll_result(vec![good.clone(), bad.clone(), good])).is_err());
     }
 
     #[test]

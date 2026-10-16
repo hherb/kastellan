@@ -26,18 +26,13 @@ fn test_parse_each(v: Value) -> anyhow::Result<PolledBatch> {
     let Some(raw) = v["events"].as_array() else {
         anyhow::bail!("no events array");
     };
-    let (mut events, mut bad, mut first_error) = (Vec::new(), 0, None);
+    let (mut events, mut undecodable) = (Vec::new(), None);
     for e in raw {
         match test_parse_event(e) {
             Ok(ev) => events.push(ev),
-            Err(err) => {
-                bad += 1;
-                first_error.get_or_insert(err.to_string());
-            }
+            Err(err) => UndecodableEvents::note(&mut undecodable, || err.to_string()),
         }
     }
-    let undecodable = NonZeroUsize::new(bad)
-        .map(|count| UndecodableEvents { count, first_error: first_error.unwrap_or_default() });
     Ok(PolledBatch { events, undecodable })
 }
 
@@ -58,7 +53,8 @@ fn bad() -> Value {
 #[test]
 fn the_good_events_of_a_batch_reach_the_bus_and_the_bad_one_is_said_and_recorded() {
     let label = "t-undec-events";
-    let base = Duration::from_millis(300);
+    // Wide enough that the upper bound below cannot flake on a loaded sweep.
+    let base = Duration::from_secs(1);
     let spec = PolledWorkerSpec { label, refusal_backoff: backoff(base), ..spec_without_ack() };
     let seen: Undecodables = Arc::default();
     let batches = vec![json!({"events": [good("a"), bad(), good("b")]}), json!({"events": [good("c")]})];
@@ -86,9 +82,36 @@ fn the_good_events_of_a_batch_reach_the_bus_and_the_bad_one_is_said_and_recorded
         "{lines:?}"
     );
     assert!(lines[0].0.contains("recording it as channel.inbound_undecodable"), "{lines:?}");
-    assert!(!lines[0].0.contains("a peer's words"), "POSITIVE CONTROL: the bad event's body is not in it");
     assert_eq!(lines[1].1, RefusalSeverity::Recovered, "{lines:?}");
-    assert!(lines[1].0.contains("decode again after 1 undecodable batch"), "{lines:?}");
+    assert!(lines[1].0.contains("decode whole again after 1 that did not"), "{lines:?}");
+}
+
+/// Every partial batch's loss is said and recorded, not just a run's first —
+/// each holds different events, so the cadence that thins a redelivered
+/// batch's lines does not apply. Each extends the run and waits out a growing
+/// backoff; their good events all reach the bus.
+#[test]
+fn every_partly_undecodable_batch_is_said_and_recorded() {
+    let label = "t-undec-events-run";
+    let spec = PolledWorkerSpec { label, refusal_backoff: backoff(Duration::from_millis(20)), ..spec_without_ack() };
+    let seen: Undecodables = Arc::default();
+    let partial = json!({"events": [good("a"), bad(), good("b")]});
+    let (st, mut driver) = spawn_with(spec, vec![partial; 3], test_parse_each, None, Some(&seen));
+    let bodies: Vec<String> = (0..6).map(|_| recv_within_5s(&mut driver).body).collect();
+    assert_eq!(bodies, ["a", "b", "a", "b", "a", "b"]);
+    wait_until(|| polls(&st) >= 4);
+    let lines = settled_lines_for(label, 4);
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    for (i, ms) in [20, 40, 80].into_iter().enumerate() {
+        assert_eq!(lines[i].1, RefusalSeverity::Error, "{lines:?}");
+        assert!(lines[i].0.contains("1 of the 3 events in a poll result did not decode"), "{i}: {lines:?}");
+        assert!(lines[i].0.contains(&format!("Polling again in {ms} ms;")), "{i}: {lines:?}");
+    }
+    assert_eq!(lines[3].1, RefusalSeverity::Recovered, "{lines:?}");
+    assert!(lines[3].0.contains("decode whole again after 3 that did not"), "{lines:?}");
+    let seen = seen.lock().unwrap().clone();
+    let one = UndecodablePart::Events(NonZeroUsize::new(1).unwrap());
+    assert_eq!(seen.iter().map(|s| s.1).collect::<Vec<_>>(), [one; 3], "one row per partial batch");
 }
 
 /// A channel with no sink says the loss, and that it was NOT recorded.
@@ -130,11 +153,33 @@ fn on_an_ack_channel_a_batch_with_an_undecodable_event_is_not_acked_at_all() {
     assert_eq!(lines[0].1, RefusalSeverity::Error);
     assert!(
         lines[0].0.contains(
-            "a poll result did not decode (1 of the batch's 3 events did not decode; first: bad \
-             event), so its batch was not acked"
+            "a poll result did not decode (1 of the batch's 3 events did not decode: bad event), \
+             so its batch was not acked"
         ),
         "{lines:?}"
     );
+}
+
+/// On an ack channel a redelivered batch with a bad event can grow as new
+/// messages arrive behind it. Its line names the counts, but its cadence
+/// follows only the decode error: the same bad event in a bigger batch is
+/// not a different error, so it is not said again inside the repeat window.
+#[test]
+fn a_growing_redelivered_batch_with_the_same_bad_event_is_said_once() {
+    let label = "email-undec-grows";
+    let spec = PolledWorkerSpec { label, refusal_backoff: backoff(Duration::from_millis(20)), ..spec_with_ack() };
+    let batches = vec![
+        json!({"events": [good("a"), bad()]}),
+        json!({"events": [good("a"), bad(), good("b")]}),
+        json!({"events": [good("a"), bad(), good("b"), good("c")]}),
+    ];
+    let (st, _driver) = spawn_with(spec, batches, test_parse_each, Some(encode_test_ack), None);
+    wait_until(|| polls(&st) >= 4);
+    let lines = settled_lines_for(label, 2);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].0.contains("(1 of the batch's 2 events did not decode: bad event)"), "{lines:?}");
+    assert_eq!(lines[1].1, RefusalSeverity::Recovered, "{lines:?}");
+    assert!(lines[1].0.contains("after 3 that did not"), "POSITIVE CONTROL: all three were bad: {lines:?}");
 }
 
 /// The bus closed while the poll was out (Matrix's shape): the good events are
@@ -162,11 +207,38 @@ fn a_partly_undecodable_batch_that_outlives_the_bus_is_counted_both_ways() {
     assert_eq!(lines.len(), 2, "{lines:?}");
     let undecodable = lines.iter().find(|(l, _)| l.contains("did not decode")).expect("{lines:?}");
     assert_eq!(undecodable.1, RefusalSeverity::Error);
+    assert!(undecodable.0.contains("1 of the 3 events in a poll result did not decode"), "{lines:?}");
     assert!(!undecodable.0.contains("Polling again"), "the driver is exiting: {lines:?}");
 }
 
+/// The bus closed while the poll was out, and no event of the result decoded:
+/// nothing was dropped at the polled stage, so there is no such row or line;
+/// all of it is lost undecodable.
+#[test]
+fn a_wholly_bad_batch_that_outlives_the_bus_is_lost_undecodable_only() {
+    let label = "t-undec-events-closed-bad";
+    let spec = PolledWorkerSpec { label, ..spec_without_ack() };
+    let dropped: Dropped = Arc::default();
+    let seen: Undecodables = Arc::default();
+    let audit = DriverAudit {
+        inbound_dropped: Some(hook(&dropped)),
+        inbound_undecodable: Some(undecodable_hook(&seen)),
+        ..DriverAudit::none()
+    };
+    let batch = json!({"events": [bad(), bad()]});
+    let log = run_until_the_bus_closes_mid_poll_parsed(spec, batch, test_parse_each, None, audit);
+    assert!(log.iter().any(|m| m.ends_with(".poll")), "POSITIVE CONTROL: the poll ran: {log:?}");
+    assert!(dropped.lock().unwrap().is_empty(), "nothing decoded, so nothing was dropped");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.iter().map(|s| s.1).collect::<Vec<_>>(), [UndecodablePart::Events(NonZeroUsize::new(2).unwrap())]);
+    let lines = emitted_refusal_lines_for(label);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].0.contains("2 of the 2 events in a poll result did not decode"), "{lines:?}");
+}
+
 /// Pure: on an ack channel, a batch with undecodable events becomes an
-/// `Err` that names the count, the batch's size and the first error; every
+/// `Err` that names the count, the batch's size and the first error — the
+/// counts as context, the error as the root cause the cadence follows; every
 /// other batch passes through unchanged.
 #[test]
 fn only_an_ack_channel_turns_undecodable_events_into_an_undecodable_batch() {
@@ -175,7 +247,8 @@ fn only_an_ack_channel_turns_undecodable_events_into_an_undecodable_batch() {
         undecodable: Some(UndecodableEvents { count: NonZeroUsize::new(2).unwrap(), first_error: "why".into() }),
     };
     let e = whole_batch_on_ack_channel(partial(), true).expect_err("an ack channel");
-    assert_eq!(e.to_string(), "2 of the batch's 3 events did not decode; first: why");
+    assert_eq!(format!("{e:#}"), "2 of the batch's 3 events did not decode: why");
+    assert_eq!(e.root_cause().to_string(), "why", "the cadence key carries no count");
     assert_eq!(whole_batch_on_ack_channel(partial(), false).unwrap(), partial(), "no ack method");
     let whole = PolledBatch::whole(vec![]);
     assert_eq!(whole_batch_on_ack_channel(whole.clone(), true).unwrap(), whole, "nothing undecodable");
@@ -186,7 +259,7 @@ fn only_an_ack_channel_turns_undecodable_events_into_an_undecodable_batch() {
 #[test]
 fn the_undecodable_events_line_counts_both_sides() {
     let lost = |lost: usize, of: usize| {
-        let part = LostPart::Events { lost: NonZeroUsize::new(lost).unwrap(), of };
+        let part = LostPart::Events { lost: NonZeroUsize::new(lost).unwrap(), decoded: of - lost };
         format_undecodable_report("why", Fate::Lost { part, retry_in: None, recorded: true })
     };
     assert!(lost(1, 2).starts_with(
@@ -195,4 +268,14 @@ fn the_undecodable_events_line_counts_both_sides() {
     ));
     assert!(lost(2, 5).contains("so they are lost: this channel does not redeliver. The other 3 decoded."));
     assert!(lost(3, 3).contains("does not redeliver. The worker sent output"), "{}", lost(3, 3));
+}
+
+/// Pure: `note` keeps the first error and counts every one.
+#[test]
+fn undecodable_events_keep_the_first_error_and_count_them_all() {
+    let mut u = None;
+    UndecodableEvents::note(&mut u, || "first".into());
+    UndecodableEvents::note(&mut u, || unreachable!("only the first error is kept"));
+    UndecodableEvents::note(&mut u, || unreachable!("only the first error is kept"));
+    assert_eq!(u, Some(UndecodableEvents { count: NonZeroUsize::new(3).unwrap(), first_error: "first".into() }));
 }

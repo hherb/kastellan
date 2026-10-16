@@ -4,14 +4,13 @@
 //! the [`MATRIX_POLLED_SPEC`] (method names + poll timeout), the drain decoder
 //! [`parse_matrix_drain`] (#835), and the two pure
 //! codecs that translate between the JSON-RPC wire ([`kastellan_matrix_wire`])
-//! and the driver's [`PolledEvent`] / [`OutgoingMessage`] value types.
+//! and the driver's [`PolledBatch`] / [`PolledEvent`] / [`OutgoingMessage`]
+//! value types.
 //!
 //! Split out of the parent `matrix.rs` (2026-07-07 prod-split, Item 9b); every
 //! `matrix::…` path is byte-identical via the parent's `pub use` re-exports.
 //!
 //! [`PolledWorkerDriver`]: crate::channel::polled_driver::PolledWorkerDriver
-
-use std::num::NonZeroUsize;
 
 use kastellan_matrix_wire::{DrainResult, Event};
 
@@ -70,9 +69,8 @@ pub fn parse_matrix_poll(v: serde_json::Value) -> anyhow::Result<PolledBatch> {
     let envelope: PollEnvelope =
         serde_json::from_value(v).map_err(|e| anyhow::anyhow!("decode poll result: {e}"))?;
     let mut events = Vec::with_capacity(envelope.events.len());
-    let mut bad = 0;
-    let mut first_error = None;
-    for raw in envelope.events {
+    let mut undecodable = None;
+    for (i, raw) in envelope.events.into_iter().enumerate() {
         match serde_json::from_value::<Event>(raw) {
             Ok(e) => events.push(PolledEvent {
                 peer: e.peer,
@@ -83,14 +81,11 @@ pub fn parse_matrix_poll(v: serde_json::Value) -> anyhow::Result<PolledBatch> {
                 evidence: None,
                 ack_token: None,
             }),
-            Err(e) => {
-                bad += 1;
-                first_error.get_or_insert_with(|| format!("decode poll event: {e}"));
-            }
+            // The index is the core's own count, not the worker's text, so
+            // the line can place the event in the result.
+            Err(e) => UndecodableEvents::note(&mut undecodable, || format!("decode poll event at index {i}: {e}")),
         }
     }
-    let undecodable = NonZeroUsize::new(bad)
-        .map(|count| UndecodableEvents { count, first_error: first_error.unwrap_or_default() });
     Ok(PolledBatch { events, undecodable })
 }
 

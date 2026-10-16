@@ -144,7 +144,7 @@ static MATRIX_UNDECODABLE_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>>
 /// #836: the row the sink writes — the bus's actor, the action spelled
 /// literally, channel + part + when, and no count: the batch did not decode.
 #[test]
-fn the_inbound_undecodable_row_is_the_bus_s_actor_and_channel_and_when() {
+fn the_inbound_undecodable_row_is_the_bus_s_actor_and_channel_part_and_when() {
     let channel = ChannelId("matrix".into());
     let at = time::macros::datetime!(2026-10-13 12:34:56 UTC);
     let part = UndecodablePart::Batch;

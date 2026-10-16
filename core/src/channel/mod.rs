@@ -336,10 +336,11 @@ pub mod actions {
     /// A polled channel that does not redeliver (Matrix) lost inbound
     /// messages because the worker's answer did not decode: a worker bug, or
     /// a compromised worker. Its `part` says which answer —
-    /// `batch`, a whole poll result (#836); `events`, some events of one,
-    /// whose others reached the bus (#852); `drain`, the worker's answer to
-    /// how many it still held at exit (#853). Rows written before #852 have
-    /// no `part`; they are all `batch`. Its own action, not an
+    /// `batch`, a whole poll result (#836); `events`, some or all events of
+    /// a result whose envelope decoded — the rest went to the bus, or were
+    /// counted as [`INBOUND_DROPPED`] if it had closed (#852); `drain`, the
+    /// worker's answer to how many it still held at exit (#853). Rows written
+    /// before #852 shipped (PR #855) have no `part`; they are all `batch`. Its own action, not an
     /// [`INBOUND_DROPPED`] row: that one counts messages a closed bus never
     /// took, and a batch or a drain answer has no count to give.
     ///

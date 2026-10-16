@@ -40,7 +40,8 @@ fn parse_matrix_poll_decodes_events_one_at_a_time() {
     assert_eq!(bodies, ["first", "second", "third"]);
     let u = batch.undecodable.expect("two did not decode");
     assert_eq!(u.count.get(), 2);
-    assert!(u.first_error.starts_with("decode poll event: invalid type: integer `42`"), "{}", u.first_error);
+    // The first bad one, by its index in the result — not the last.
+    assert!(u.first_error.starts_with("decode poll event at index 1: invalid type: integer `42`"), "{}", u.first_error);
 }
 
 /// #852: only a result whose envelope does not decode — no `events` array —

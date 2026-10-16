@@ -143,6 +143,18 @@ pub struct UndecodableEvents {
     pub first_error: String,
 }
 
+impl UndecodableEvents {
+    /// One more event that did not decode, folded into `slot`: the first sets
+    /// the count to 1 and keeps `error()`, each after it only counts. One
+    /// value, so a decoder cannot keep a count with no error to say.
+    pub fn note(slot: &mut Option<Self>, error: impl FnOnce() -> String) {
+        match slot {
+            Some(u) => u.count = u.count.saturating_add(1),
+            None => *slot = Some(Self { count: std::num::NonZeroUsize::MIN, first_error: error() }),
+        }
+    }
+}
+
 /// Decode one poll RESULT. An `Err` means the result as a whole could not be
 /// read — a worker bug (said, held, and on a channel that does not redeliver
 /// recorded), NOT a worker death; events that could not be read one at a time
@@ -162,7 +174,8 @@ pub type EncodeAck = fn(&str) -> serde_json::Value;
 /// never become an event". Run against the raw poll [`serde_json::Value`], in
 /// addition to (and before) `parse_poll` consumes it. Extraction itself is
 /// unconditional, but `super::run` only actually *acks* the resulting ids when
-/// the same batch's `parse_poll` call also succeeded — see the monotonic-cursor
+/// the same batch decoded whole: `parse_poll` succeeded **and** reported no
+/// undecodable events (`whole_batch_on_ack_channel`, #852) — see the monotonic-cursor
 /// note in [`super`]'s module docs. Only ever invoked when
 /// `PolledWorkerSpec::ack_method` and an `EncodeAck` are both present too.
 /// `reason` is a short, static-ish diagnostic (never message content) — it is

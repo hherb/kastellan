@@ -74,9 +74,10 @@ pub type InboundDroppedAudit = std::sync::Arc<dyn Fn(InboundDropped<'_>) + Send 
 /// Best-effort side channel for a caller to record "the worker's answer did
 /// not decode, and inbound messages are lost" durably — the
 /// `channel.inbound_undecodable` row (#836). Called by the driver, only on a
-/// channel with no ack method (Matrix): once per poll result that did not
-/// decode whole, once per one some of whose events did not (#852), and at
-/// most once per exit for a drain answer that did not (#853). An ack
+/// channel with no ack method (Matrix): once per poll result whose envelope
+/// did not decode (`batch`), once per one some of whose events did not
+/// (`events`, #852), and at most once per exit for a drain answer that did
+/// not (`drain`, #853). An ack
 /// channel's undecodable batch is not acked, so it is redelivered, and is not
 /// a loss — so [`super::PolledWorkerDriver::spawn`] refuses this hook on an
 /// ack channel.
@@ -109,9 +110,10 @@ pub struct DriverAudit {
 
 impl DriverAudit {
     /// No audit hooks: every drop and skip is still logged (on the
-    /// `[worker-refusal]` emitter for a dropped reply or a dropped or
-    /// undecodable inbound batch, whose line then says it was **not**
-    /// recorded), but nothing is written durably.
+    /// `[worker-refusal]` emitter for a dropped reply, a dropped inbound
+    /// batch, or inbound messages lost undecodable — a batch, some events, or
+    /// a drain answer — whose line then says it was **not** recorded), but
+    /// nothing is written durably.
     pub fn none() -> Self {
         Self {
             ack_only: None,

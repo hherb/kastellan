@@ -119,7 +119,8 @@ fn fake() -> (Arc<FakeState>, Box<dyn WorkerCalls>) {
 }
 
 /// The tests' decoder: decodes `v["events"]` whole, as email's does — one bad
-/// event fails the batch. `tests/undecodable_events.rs` has the per-event one.
+/// event fails the batch (unlike email's, a missing `events` array is an empty
+/// batch). `tests/undecodable_events.rs` has the per-event one.
 fn test_parse(v: Value) -> anyhow::Result<PolledBatch> {
     test_parse_events(v).map(PolledBatch::whole)
 }

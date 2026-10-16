@@ -69,8 +69,9 @@
 //! (Matrix's case) means this extraction step never runs at all: no extra
 //! RPC, byte-identical to before this existed.
 //!
-//! **The ack calls themselves only fire once the same batch's `events`
-//! decoded successfully** (i.e. inside `parse_poll`'s `Ok` arm), even though
+//! **The ack calls themselves only fire once every event of the same batch
+//! decoded** (`parse_poll`'s `Ok` arm after `whole_batch_on_ack_channel`,
+//! #852 — an `Ok` alone can carry undecodable events), even though
 //! the *extraction* runs unconditionally on the raw value beforehand. This is
 //! not a stylistic choice: the worker's ack advances one MONOTONIC
 //! high-water-mark cursor shared by every message in the poll result —
@@ -291,9 +292,9 @@ fn run(
     // keep theirs per conversation, inside `replies` (#782).
     let mut poll_refusals = RefusalRun::default();
     let mut ack_refusals = RefusalRun::default();
-    // A run of poll results that did not decode holds the poll the same way
-    // (#836, `undecodable`): an ack channel would otherwise re-poll the same
-    // unacked batch as fast as the worker answers.
+    // A run of poll results that did not decode, wholly or in part, holds the
+    // poll the same way (#836, #852, `undecodable`): an ack channel would
+    // otherwise re-poll the same unacked batch as fast as the worker answers.
     let mut undecodable = UndecodableRun::default();
     // Every exit leaves this loop by `break 'drive`, so the worker is drained
     // exactly once, below.
@@ -417,7 +418,8 @@ fn run(
                             // Ack ids that never became a `PolledEvent` at all
                             // (e.g. email's `skipped` list) — see the module
                             // docs' "Acking ids that never become an event".
-                            // Deliberately INSIDE the `Ok(events)` arm, not
+                            // Deliberately INSIDE the `Ok(batch)` arm (on an
+                            // ack channel, a batch that decoded whole: #852), not
                             // after the whole `match`: the worker's polling
                             // cursor is a single MONOTONIC high-water mark
                             // shared by both lists (localmail's `GREATEST`
@@ -438,16 +440,17 @@ fn run(
                             }
                         }
                         Err(e) => {
-                            // A malformed poll result is a worker bug, not a
+                            // A malformed poll result (on an ack channel, any
+                            // undecodable event, #852) is a worker bug, not a
                             // death — say it (and record it where it is a
                             // loss), hold the next poll for the backoff, and
                             // keep going (#836). The
                             // skipped ids from THIS batch are deliberately NOT
                             // acked here (see the comment above the ack-only
                             // loop): they share the worker's one monotonic
-                            // cursor with the events that just failed to
-                            // decode, and acking them would silently drag
-                            // that cursor past messages nobody ever saw.
+                            // cursor with this batch's unacked events, and
+                            // acking them would silently drag that cursor
+                            // past messages nobody ever saw.
                             on_undecodable_batch(&spec, &cid, &e, &mut undecodable, &outage, inbound_undecodable.as_ref());
                         }
                     }
