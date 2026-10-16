@@ -151,15 +151,17 @@ fn entry<'a>(entries: &'a mut Vec<Entry>, writer: AuditLostWriter, channel: Opti
 
 /// Pure: the shutdown's line for one writer's and channel's rows that got
 /// no line of their own — said once, so a flood's tail is not lost with the
-/// process (the per-line tally says the rest).
+/// process (the per-line tally says the rest). "Failed to insert", not "not
+/// written": since #858 some of those inserts lost their connection and may
+/// have been committed, and the count does not say which.
 pub(crate) fn format_unsaid(channel: &RowChannel, rows: usize) -> String {
     let whose = match channel {
         RowChannel::Named(name) => format!(" for channel {}", super::quoted_id(name)),
         RowChannel::Unnamed => " naming no channel".to_string(),
         RowChannel::Other => format!(" for channels past the first {MAX_NAMED_CHANNELS}"),
     };
-    let (row, was, its) = if rows == 1 { ("row", "was", "its own") } else { ("rows", "were", "their own") };
-    format!("{rows} audit {row}{whose} {was} not written and had no line of {its} (thinned past a flood)")
+    let (row, its) = if rows == 1 { ("row", "its own") } else { ("rows", "their own") };
+    format!("{rows} audit {row}{whose} failed to insert and had no line of {its} (thinned past a flood)")
 }
 
 #[cfg(test)]
@@ -253,15 +255,15 @@ mod tests {
     fn the_unsaid_line_names_its_channel_and_count() {
         assert_eq!(
             format_unsaid(&RowChannel::Named("matrix".into()), 83),
-            r#"83 audit rows for channel "matrix" were not written and had no line of their own (thinned past a flood)"#
+            r#"83 audit rows for channel "matrix" failed to insert and had no line of their own (thinned past a flood)"#
         );
         assert_eq!(
             format_unsaid(&RowChannel::Unnamed, 1),
-            "1 audit row naming no channel was not written and had no line of its own (thinned past a flood)"
+            "1 audit row naming no channel failed to insert and had no line of its own (thinned past a flood)"
         );
         assert_eq!(
             format_unsaid(&RowChannel::Other, 2),
-            "2 audit rows for channels past the first 16 were not written and had no line of their own \
+            "2 audit rows for channels past the first 16 failed to insert and had no line of their own \
              (thinned past a flood)"
         );
         let hostile = format_unsaid(&RowChannel::Named("x\"\n[SKIP]".into()), 2);

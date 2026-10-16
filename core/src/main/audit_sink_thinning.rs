@@ -138,7 +138,7 @@ impl Unreported {
         }
     }
 
-    /// Test builds only: every channel's, both kinds. The daemon says each
+    /// Test builds only: every channel's, all three kinds. The daemon says each
     /// channel's apart and never sums them (#807).
     #[cfg(test)]
     pub(super) fn total(self) -> usize {

@@ -35,9 +35,12 @@
 //! shutdown — and by neither if the daemon crashes first, or no row on that
 //! count is ever refused again (#817).
 //!
-//! "Refused" is the daemon sinks' word, and the lines say it for the bus's
-//! failed inserts too: there it means the row was not written, for whatever
-//! reason the line gives.
+//! "Refused" is the daemon sinks' word, and the tally says it of failed
+//! inserts too — the bus's, and since #861 the daemon sinks' own — whatever
+//! their outcome: a line can read "may not have been written: …; refused row
+//! 17 of this burst" (#858). In the tally it means only "counted as lost in
+//! this burst"; the line's own words say whether the row is known not to be
+//! in the table.
 
 use std::time::{Duration, Instant};
 
@@ -134,8 +137,9 @@ pub struct Refusal {
     pub tally: BurstTally,
 }
 
-/// The refused rows of one count — a daemon sink's channel and kind (shed, or
-/// refused after shutdown), or a bus writer's channel (failed inserts): where
+/// The refused rows of one count — a daemon sink's channel and kind (shed,
+/// refused after shutdown, or a failed insert, #861), or a bus writer's
+/// channel (failed inserts): where
 /// the current burst stands, and what earlier bursts left unreported.
 #[derive(Debug)]
 pub struct Thinning {

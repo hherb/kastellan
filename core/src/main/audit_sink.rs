@@ -64,6 +64,9 @@
 //! What may be said twice: a row caught by the final snapshot in the middle
 //! of being refused is counted as pending there and then refused — reported,
 //! or counted in the last lines — over-counting, which is the safe direction.
+//! So is a row still pending at the snapshot whose insert then fails (#861):
+//! named in the pending line, and then reported, or counted in the last
+//! lines, as a failed insert.
 //!
 //! One writer for both channels (Matrix's `channel.reply_undelivered`,
 //! `channel.inbound_dropped` and `channel.inbound_undecodable`, email's `channel.skipped_ack_only` and
@@ -168,8 +171,8 @@ pub(crate) struct Ledger {
     starting: AtomicUsize,
     /// Set by [`drain`]: no row starts after it.
     closed: AtomicBool,
-    /// Rows refused — shed, or tried after the close — thinned and counted
-    /// per channel and per kind (#798, #807).
+    /// Rows lost — shed, tried after the close, or whose insert failed
+    /// (#861) — thinned and counted per channel and per kind (#798, #807).
     refusals: Refusals,
     /// Who the pending rows are, oldest first, for the shutdown line (#797).
     /// Only for naming: the count that gates `drain` is `pending`.
@@ -456,9 +459,10 @@ fn close_and_count(ledger: &'static Ledger, between: impl FnOnce()) -> Drained {
     ledger.final_snapshot()
 }
 
-/// The refused rows thinned out since `drained` was taken — late rows a
-/// still-running driver tried after the drain's snapshot (#802) — per channel
-/// and kind, so the last lines still say whose they were (#807).
+/// The lost rows thinned out since `drained` was taken — late rows a
+/// still-running driver tried after the drain's snapshot (#802), and rows
+/// pending at it whose insert then failed (#861) — per channel and kind, so
+/// the last lines still say whose they were (#807).
 fn unreported_on_since(ledger: &'static Ledger, drained: &Drained) -> Unreported {
     ledger.unreported().since(drained.unreported)
 }
@@ -491,5 +495,5 @@ pub(crate) mod test_support;
 mod tests;
 
 #[cfg(test)]
-#[path = "audit_sink_insert_failed_tests.rs"]
-mod insert_failed_tests;
+#[path = "audit_sink_flood_tests.rs"]
+mod flood_tests;

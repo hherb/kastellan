@@ -379,7 +379,7 @@ async fn a_flood_of_failed_inserts_is_thinned_and_its_tail_said_at_shutdown() {
         said,
         [(
             AuditLostWriter::Bus,
-            r#"22 audit rows for channel "matrix" were not written and had no line of their own (thinned past a flood)"#
+            r#"22 audit rows for channel "matrix" failed to insert and had no line of their own (thinned past a flood)"#
                 .to_string()
         )],
         "40 failed, 18 said"
