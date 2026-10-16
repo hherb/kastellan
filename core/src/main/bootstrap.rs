@@ -5,14 +5,13 @@
 //! probe, the audit-log JSONL mirror, the two-step shutdown signals (install,
 //! then wait — #810), the two best-effort startup audit-row writers, and the
 //! two pure env-parse helpers. Lifted out of `main.rs` to keep the binary
-//! entrypoint under the 500-LOC cap (Item 9b), visibility widened to
-//! `pub(crate)` so the parent can call across the module boundary. The
-//! shutdown-signal wait has since been split in two (#810); see
-//! [`ShutdownSignals`].
+//! entrypoint under the 500-LOC cap (Item 9b), with visibility widened to
+//! `pub(crate)` so the parent can call across the module boundary. See
+//! [`ShutdownSignals`] for why the signals take two steps.
 //!
-//! The unit tests for the pure parse helpers live in the sibling
-//! `main/bootstrap_tests.rs` (`#[path]`-included below); `super::` there
-//! resolves to this module.
+//! The unit tests for the pure parse helpers and for the shutdown-signal
+//! contract live in the sibling `main/bootstrap_tests.rs` (`#[path]`-included
+//! below); `super::` there resolves to this module.
 
 use anyhow::{anyhow, Context, Result};
 use kastellan_db::conn::ConnectSpec;
@@ -122,7 +121,8 @@ pub(crate) async fn start_audit_mirror(pool: PgPool) -> Option<MirrorHandle> {
 /// `cargo run` in dev.
 ///
 /// Shutdown is split into two steps (#810) so that the step which can FAIL
-/// runs before anything is started that the graceful shutdown must stop:
+/// runs before the scheduler and the channels start — the background writers
+/// whose audit rows the graceful shutdown must drain:
 ///
 /// 1. [`install_shutdown_signals`] registers the handlers. Registration can
 ///    fail, so `main` does it BEFORE it spawns the scheduler and the channel
@@ -136,7 +136,10 @@ pub(crate) async fn start_audit_mirror(pool: PgPool) -> Option<MirrorHandle> {
 ///    with no line at all.)
 ///
 /// A signal delivered between the two steps is not lost: once registered,
-/// tokio's handler records it, and `wait` returns at once.
+/// tokio's handler records it, the runtime forwards it to every stream
+/// registered so far, and `wait` returns at once. (A stream registered only
+/// AFTER the forwarding never sees it — which is why the streams are created
+/// in step 1, not in `wait`.)
 pub(crate) struct ShutdownSignals {
     sigterm: Signal,
     sigint: Signal,
@@ -145,7 +148,10 @@ pub(crate) struct ShutdownSignals {
 /// Register the SIGTERM and SIGINT handlers — step 1 of [`ShutdownSignals`].
 ///
 /// From this call on, the process no longer dies on SIGTERM/SIGINT; the
-/// signal is held for [`ShutdownSignals::wait`] instead.
+/// signal is held for [`ShutdownSignals::wait`] instead. That stays so after
+/// `wait` returns: tokio never restores the default disposition, so a second
+/// SIGTERM or Ctrl-C during the graceful drain is ignored, and only SIGKILL
+/// (or the service manager's stop timeout, which sends it) ends a stuck one.
 pub(crate) fn install_shutdown_signals() -> Result<ShutdownSignals> {
     let sigterm = signal(SignalKind::terminate()).context("registering the SIGTERM handler")?;
     let sigint = signal(SignalKind::interrupt()).context("registering the SIGINT handler")?;
@@ -163,14 +169,19 @@ impl ShutdownSignals {
     ///
     /// Deliberately returns `()`, not `Result`: there must be no `?` between
     /// the channels starting and the audit drain in `main`.
+    ///
+    /// Says which signal arrived, at INFO, before returning: the drain and the
+    /// pool close that follow have no line of their own until the last one,
+    /// and the close has no bound — so without this, a shutdown the stop
+    /// timeout's SIGKILL cuts short leaves no trace that it ever began.
     pub(crate) async fn wait(mut self) {
-        // `recv` yields `None` only once the signal driver is gone, which
-        // happens when the runtime shuts down — then there is nothing left to
-        // wait for either way, so `None` also ends the wait.
-        tokio::select! {
-            _ = self.sigterm.recv() => {}
-            _ = self.sigint.recv() => {}
-        }
+        // `recv` returns `Option<()>` but never yields `None` (tokio documents
+        // the `Option` as accidentally exposed), so the value is ignored.
+        let signal = tokio::select! {
+            _ = self.sigterm.recv() => "SIGTERM",
+            _ = self.sigint.recv() => "SIGINT",
+        };
+        info!(signal, "shutdown signal received; stopping the channels and draining audit rows");
     }
 }
 

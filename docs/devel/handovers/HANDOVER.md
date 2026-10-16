@@ -4,8 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261013_836_pre-prune.md`](archive/handover_20261013_836_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here.
+> [`archive/handover_20261016_855_pre-prune.md`](archive/handover_20261016_855_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (the full #852/#853 prose
+> included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-16 (#810 — the stop signals are registered before the scheduler and the
@@ -49,13 +50,22 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 - `bootstrap::wait_for_shutdown` is split in two: **`install_shutdown_signals() -> Result<ShutdownSignals>`**
   runs in `main` **before `spawn_scheduler`**, and **`ShutdownSignals::wait(self)` returns `()`**.
-  A registration failure now aborts start-up while nothing audits in the background, and there is no
-  `?` between the channels starting and the audit drain. ⚠️ Keep it that way: the ordering in `main`
-  has **no test** (only the type stops a `?`); the three `bootstrap::tests` signal tests pin the two
-  halves (a signal raised between install and wait is held; no signal → no return). They raise real
-  SIGTERM/SIGINT at the test process — safe only **after** the install, serialised by a tokio mutex.
+  A registration failure now aborts start-up while nothing writes audit rows in the background, and
+  there is no `?` between the channels starting and the audit drain.
+- **Four `bootstrap::tests`.** Three signal tests pin `install`/`wait` (a signal raised between them
+  is held; no signal → no return). They raise real SIGTERM/SIGINT at the test process — safe only
+  **after** the install, serialised by a tokio mutex. ⚠️ The raise tests **await a probe stream
+  before polling `wait`**: a current-thread runtime forwards a signal only on its next driver turn,
+  so without the probe a `wait` that registered its own streams passed (10/40 runs, found in review).
+  The fourth, `main_installs_the_signals_before_anything_audits`, reads `main.rs` with
+  `include_str!`: the install precedes `spawn_scheduler(` and both `supervise_*(`, and no `?`,
+  `.unwrap()`, `.expect(`, `return` or `panic!` sits between it and `audit_sink::drain()`. It strips
+  whole-line comments and needs each call **exactly once**, so a rename fails it loudly — update it.
+- `wait` logs `shutdown signal received` (with `signal = SIGTERM|SIGINT`) at INFO: before, nothing
+  said a shutdown had begun until its last line, after an unbounded pool close.
 - Side effect: a SIGTERM during the scheduler/channel start-up window is now held and handled
-  gracefully, instead of killing the process with the default action.
+  gracefully, instead of killing the process with the default action. Unchanged: after `wait`, a
+  second SIGTERM/Ctrl-C is ignored (tokio never restores the default) — only SIGKILL ends a stuck drain.
 
 ### Previous (2026-10-15/16): #852 + #853 — what an undecodable answer loses (PR [#855](https://github.com/hherb/kastellan/pull/855), merged)
 
@@ -70,7 +80,8 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   batch (one `UndecodableRun`, ended only by a batch that decodes **whole**). `drain_worker_on_exit`:
   a failed call is WARN `could not ask`; an answer `drain.parse` rejects is ERROR + a `drain` row.
   From #836 (PR #851): the ERROR is on `[worker-refusal]` (error capped at 256 chars, never in a
-  row); `spawn` refuses the hook on an ack channel.
+  row); `spawn` refuses the hook on an ack channel. ⚠️ The ack-channel error is counts-as-`context`
+  over the first error: the line prints `{e:#}`, the cadence hashes `e.root_cause()` only.
 
 ### Previous (2026-10-12/13): #835 — what the worker still held (PR #850, merged)
 
@@ -298,8 +309,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    worker**, none expected. The [#855](https://github.com/hherb/kastellan/pull/855) deploy (#852/#853) adds `part` to those rows (`batch` /
    `events` + `undecodable` / `drain`) — `select payload->>'part', payload->>'undecodable' from
    audit_log where action = 'channel.inbound_undecodable' order by id desc`; no rebuilt worker or
-   rootfs needed (core only). **Neither #855 (merged) nor [#856](https://github.com/hherb/kastellan/pull/856) (#810) is deployed** — one
-   `scripts/upgrade_from_git.sh` per host covers both (core only). Natural next security items:
+   rootfs needed (core only). **Neither #855 (merged) nor [#856](https://github.com/hherb/kastellan/pull/856) (#810) is deployed** — once #856
+   merges, one `scripts/upgrade_from_git.sh` per host covers both (core only). After the #856 deploy,
+   a stop logs INFO `shutdown signal received` with `signal = "SIGTERM"`. Natural next security items:
    #833 (stderr panic in a `Drop`; needs a design call, now also `bus_guards` and `InboundReceiver`),
    #829, #831 and #817.
 
@@ -402,7 +414,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#810 — **the full sweep that stands**) | PR [#856](https://github.com/hherb/kastellan/pull/856) | **5061 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-810.log`. Against #855's 5058: daemon bin 93 → **96** (`bootstrap::tests` signal tests 3), every other suite identical — as predicted. Mutants killed 2/2 (`wait` returns at once; `wait` ignores SIGINT). One doc-comment line in `bootstrap_tests.rs` reworded after it | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-810`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#810 + its review fixes — **the full sweep that stands**) | PR [#856](https://github.com/hherb/kastellan/pull/856) | **5061 / 1 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-810-review.log`. The 1 is the known #548/#676 flake, this time in `secret_vault_e2e` (`the database system is starting up`); that suite then passed 5/5 alone. So 5062 = #855's 5058 + 4: daemon bin 93 → **97** (`bootstrap::tests`: 3 signal tests + the `main.rs` source-order test), every other suite identical. Mutants killed **6/6**: `wait` returns at once; `wait` ignores SIGINT; `wait` re-registers its own streams (survived 10/40 before the probe fix, 0/10 after); install moved below the channels; a `?` after the wait; an `.expect(` before it | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-810`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#852 + #853 — superseded) | PR [#855](https://github.com/hherb/kastellan/pull/855) | **5058 / 0 / 52**, 195 suites, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/fixall-855-sweep.log` | exit 0, 27 `Checking kastellan` | 23 Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
@@ -427,7 +439,7 @@ touching the gliner path.**
 
 ⚠️ **Known sweep flakes, not regressions** — re-read the failure text each time, because a flake
 attributed once gets re-attributed forever: `scheduler_ask_expiry_e2e`, `asks_e2e`,
-`conversation_turns_e2e` under a full sweep (`the database system is starting up` / a vanished
+`conversation_turns_e2e`, `secret_vault_e2e` under a full sweep (`the database system is starting up` / a vanished
 per-test socket — #548/#676). A dropped ephemeral port is not a reserved one (fixed by confirming).
 
 ⚠️ **On this Mac the DEFAULT full sweep is red and `-- --test-threads=4` is green** — #548/#676

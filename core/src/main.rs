@@ -769,9 +769,11 @@ async fn main() -> Result<()> {
 
     // Register the stop signals NOW, before the scheduler and the channels
     // start (#810). Registration is the one shutdown step that can fail; done
-    // here, a failure aborts start-up while nothing is yet auditing in the
-    // background. The wait below cannot fail, so every path from here on
-    // reaches the audit drain.
+    // here, a failure aborts start-up while nothing yet writes audit rows in
+    // the background (the scheduler and the channel drivers are the writers
+    // the drain waits for). The wait below cannot fail, so no `?` from here on
+    // can skip the audit drain. `bootstrap::tests` pins this ordering by
+    // reading this file (`main_installs_the_signals_before_anything_audits`).
     let shutdown_signals = bootstrap::install_shutdown_signals()?;
 
     let scheduler = kastellan_core::scheduler::spawn_scheduler(
