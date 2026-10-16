@@ -9,10 +9,10 @@
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-16 (#810 — the stop signals are registered before the scheduler and the
-channels start, so no failure after them can skip the audit drain; PR #PRNUM, Mac sweep green.
+channels start, so no failure after them can skip the audit drain; PR [#856](https://github.com/hherb/kastellan/pull/856), Mac sweep green.
 PR [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853) merged 2026-10-16, **not yet
 deployed**. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** #PRNUM (#810), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Recent PRs, newest first:** [#856](https://github.com/hherb/kastellan/pull/856) (#810), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #851's tree** (deployed 2026-10-14). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -45,7 +45,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-16): #810 — the stop signals before the channels (PR #PRNUM)
+### This session (2026-10-16): #810 — the stop signals before the channels (PR [#856](https://github.com/hherb/kastellan/pull/856))
 
 - `bootstrap::wait_for_shutdown` is split in two: **`install_shutdown_signals() -> Result<ShutdownSignals>`**
   runs in `main` **before `spawn_scheduler`**, and **`ShutdownSignals::wait(self)` returns `()`**.
@@ -298,7 +298,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    worker**, none expected. The [#855](https://github.com/hherb/kastellan/pull/855) deploy (#852/#853) adds `part` to those rows (`batch` /
    `events` + `undecodable` / `drain`) — `select payload->>'part', payload->>'undecodable' from
    audit_log where action = 'channel.inbound_undecodable' order by id desc`; no rebuilt worker or
-   rootfs needed (core only). **#855 and #PRNUM (#810) are merged-or-pending, not deployed** — one
+   rootfs needed (core only). **Neither #855 (merged) nor [#856](https://github.com/hherb/kastellan/pull/856) (#810) is deployed** — one
    `scripts/upgrade_from_git.sh` per host covers both (core only). Natural next security items:
    #833 (stderr panic in a `Drop`; needs a design call, now also `bus_guards` and `InboundReceiver`),
    #829, #831 and #817.
@@ -402,7 +402,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#810 — **the full sweep that stands**) | PR #PRNUM | **5061 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-810.log`. Against #855's 5058: daemon bin 93 → **96** (`bootstrap::tests` signal tests 3), every other suite identical — as predicted. Mutants killed 2/2 (`wait` returns at once; `wait` ignores SIGINT). One doc-comment line in `bootstrap_tests.rs` reworded after it | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-810`, **27** `Checking kastellan` | **23** Mac |
+| **Mac** (#810 — **the full sweep that stands**) | PR [#856](https://github.com/hherb/kastellan/pull/856) | **5061 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-810.log`. Against #855's 5058: daemon bin 93 → **96** (`bootstrap::tests` signal tests 3), every other suite identical — as predicted. Mutants killed 2/2 (`wait` returns at once; `wait` ignores SIGINT). One doc-comment line in `bootstrap_tests.rs` reworded after it | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-810`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#852 + #853 — superseded) | PR [#855](https://github.com/hherb/kastellan/pull/855) | **5058 / 0 / 52**, 195 suites, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/fixall-855-sweep.log` | exit 0, 27 `Checking kastellan` | 23 Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
