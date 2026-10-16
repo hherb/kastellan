@@ -4,9 +4,9 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261016_855_pre-prune.md`](archive/handover_20261016_855_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (the full #852/#853 prose
-> included).
+> [`archive/handover_20261016_857_pre-prune.md`](archive/handover_20261016_857_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (the full #835/#852/#853
+> and #810 prose included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-16 (#829 — the bus writers' `[audit-lost]` lines are thinned per writer
@@ -76,31 +76,18 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   reads `main.rs` and needs each call **exactly once** — a rename fails it loudly; update it.
 - After `wait`, a second SIGTERM/Ctrl-C is ignored — only SIGKILL ends a stuck drain.
 
-### Previous (2026-10-15/16): #852 + #853 — what an undecodable answer loses (PR [#855](https://github.com/hherb/kastellan/pull/855), merged)
+### Previous (2026-10-12 → 16): the Matrix inbound path — #835, #852, #853 (PRs #850, #855, merged)
 
-- **`ParsePoll` returns a `PolledBatch`** (`spec.rs`): decoded `events` + `undecodable:
-  Option<UndecodableEvents>` (count + first error, **line only**). `parse_matrix_poll` decodes each
-  `Event` on its own; ⚠️ the envelope must follow `kastellan_matrix_wire::PollResult`
-  (`parse_matrix_poll_reads_what_the_worker_writes`). Email still decodes whole.
-- ⚠️ **On an ack channel a batch with undecodable events is wholly undecodable**
-  (`whole_batch_on_ack_channel`): acking past a bad event would move the cursor past it for good.
-- **The row:** `channel.inbound_undecodable` gains **`part`** — `batch` (#836; pre-#852 rows have
-  none), `events` (+ `undecodable: N`), `drain` (#853). Undecodable events hold the poll like a whole
-  batch (one `UndecodableRun`, ended only by a batch that decodes **whole**). `drain_worker_on_exit`:
-  a failed call is WARN `could not ask`; an answer `drain.parse` rejects is ERROR + a `drain` row.
-  From #836 (PR #851): the ERROR is on `[worker-refusal]` (error capped at 256 chars, never in a
-  row); `spawn` refuses the hook on an ack channel. ⚠️ The ack-channel error is counts-as-`context`
-  over the first error: the line prints `{e:#}`, the cadence hashes `e.root_cause()` only.
-
-### Previous (2026-10-12/13): #835 — what the worker still held (PR #850, merged)
-
-- `PolledWorkerSpec::drain` is called once on every driver exit (`break 'drive`); answers land at the
-  `worker` stage of `channel.inbound_dropped`. ⚠️ matrix-sdk 0.18 **saves the sync token before
-  running handlers**: `workers/matrix/src/sdk_live/sync_loop.rs` compares the stored token (behind
-  two empty `save_changes`, a mutual-exclusion barrier — **narrowed, not closed**; re-check on an SDK
-  upgrade) with the last fully handled `next_batch` → `interrupted`. A worker **down** at the last call
-  is not asked. ⚠️ `sdk_live` compiles **only with `--features live-matrix`** — sweep and clippy it
-  with the feature. **Owed:** a live `matrix_live_e2e` leg for `LiveSdk::drain` (DGX).
+- **`ParsePoll` returns a `PolledBatch`** (`spec.rs`): decoded `events` + `undecodable` (count + first
+  error, **line only**); Matrix decodes each `Event` on its own — ⚠️ the envelope must follow
+  `kastellan_matrix_wire::PollResult`. ⚠️ **On an ack channel a batch with undecodable events is
+  wholly undecodable** (acking past a bad event loses it). `channel.inbound_undecodable` has **`part`**
+  = `batch` (#836; pre-#852 rows none) / `events` + `undecodable` / `drain` (#853). ⚠️ The
+  ack-channel ERROR prints `{e:#}`; its cadence hashes `e.root_cause()` only.
+- **#835:** `PolledWorkerSpec::drain` runs once on every driver exit → `stage = 'worker'` rows.
+  ⚠️ matrix-sdk 0.18 **saves the sync token before running handlers**; `sdk_live/sync_loop.rs`'s
+  empty-`save_changes` barrier **narrows, not closes** it — re-check on an SDK upgrade. ⚠️ `sdk_live`
+  compiles **only with `--features live-matrix`**. **Owed:** a live `LiveSdk::drain` leg (DGX).
 
 ### Previous (2026-10-08 → 12): #825, #832, #846 (PRs #842, #847, #849, merged) — what still binds
 
@@ -119,7 +106,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - **#827/#826 (PR #834):** `RejectedUnverifiable` (fail-closed); `ack_method: None` = "does not
   redeliver". `pg_events::audit_or_report` holds a **`PendingInsert` drop guard** — ⚠️ no `.await`
   before it. **NUL (#819/#820):** records escape to `␀`; ⚠️ `kastellan-db`'s next release must be
-  **0.3.0**; `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #829, #831, #833, #837–#840.
+  **0.3.0** (now also `audit::insert_without_id`, #829); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #837–#840.
 - ⚠️ **A Mac sweep without `KASTELLAN_PG_BIN_DIR` in its command line is NOT evidence** (372
   `[SKIP]`, exit 0) [[postgres-app-bin-paths]]; a sweep without `-- --nocapture` under-counts
   `[SKIP]`. ⚠️ **`git push` over SSH fails here** — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
@@ -294,37 +281,22 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **Watch the deployed #791 … #851 tree (both hosts, since 2026-10-14):** watch one restart for the `[audit-lost]` /
-   INFO drain lines (since #830 the traced line carries `[audit-lost]` too; a Matrix login still in
-   progress at shutdown should be INFO "not finished starting", not a loss; a bus stopped under a
-   wedged Postgres now says `may not have been written`), and query an `observed_at` on the next `channel.*` row. Then
-   [#805](https://github.com/hherb/kastellan/issues/805) (the runtime drop can outlive the last
-   line) and #809–#811. A deploy of #812 is the first time a thinned line's
-   `refused row N of this burst` and a `bus` writer line can be seen live. The #820 deploy also
-   adds a **boot-time `server_encoding` check** — the DGX cluster was made by `kastellan-db-init`
-   (UTF8), but confirm the daemon comes up. A restart mid-poll can now leave a `channel.inbound_dropped`
-   row, and a Postgres outage `channel.rejected_unverifiable` rows (#834). ⚠️ **#825's deploy runs
-   migration 0027**, which backfills every finished channel task as `backfilled` — check the daemon
-   comes up, then query `select payload->>'via', count(*) from audit_log where action =
-   'channel.replied' group by 1` after a restart. The #832 deploy: a restart should show only
-   INFO `channel pump ended with replies queued` and no `queue_closed` rows. The #849 deploy: a
-   restart under inbound traffic can leave `channel.inbound_dropped` rows with `stage = 'buffered'`
-   — on email too now (`select payload->>'channel', payload->>'stage', payload->>'dropped' from
-   audit_log where action = 'channel.inbound_dropped' order by id desc`). The #835 deploy needs the
-   Matrix worker **and `matrix.ext4` rebuilt** (`bash scripts/build-release.sh`, then the rootfs
-   script): a stale one answers `matrix.drain` with METHOD_NOT_FOUND and every stop WARNs "could not
-   ask the worker"; a restart under traffic can leave `stage = 'worker'` rows. The #851 deploy: a
-   `channel.inbound_undecodable` row (or an ERROR `did not decode` line) is a **finding about the
-   worker**, none expected. The [#855](https://github.com/hherb/kastellan/pull/855) deploy (#852/#853) adds `part` to those rows (`batch` /
-   `events` + `undecodable` / `drain`) — `select payload->>'part', payload->>'undecodable' from
-   audit_log where action = 'channel.inbound_undecodable' order by id desc`; no rebuilt worker or
-   rootfs needed (core only). **Neither #855 nor #856 (#810) is deployed** (both merged) —
-   one `scripts/upgrade_from_git.sh` per host covers both, and [#857](https://github.com/hherb/kastellan/pull/857) (#829) once merged (all core only). After the #856 deploy,
-   a stop logs INFO `shutdown signal received` with `signal = "SIGTERM"`; after #829's, a bus
-   `[audit-lost]` line ends `; refused row N of this burst`, and a stop after a flood of lost bus rows
-   says `N audit rows for channel … (thinned past a flood)` — none expected. Natural next security items:
-   #833 (stderr panic in a `Drop`; needs a design call, now also `bus_guards` and `InboundReceiver`),
-   #831 and #817 (now also the bus writers' thinned tail).
+5. **Deploy, then watch one restart.** **#855, #856 (#810) and [#857](https://github.com/hherb/kastellan/pull/857) (#829, once merged)
+   are not deployed** — one `scripts/upgrade_from_git.sh` per host covers them (all core only). On the
+   next restart look for: INFO `shutdown signal received` (`signal = "SIGTERM"`, #856); `[audit-lost]`
+   / INFO drain lines (a Matrix login still starting at shutdown is INFO "not finished starting", not
+   a loss; a bus stopped under a wedged Postgres says `may not have been written`); since #829 a bus
+   `[audit-lost]` line ends `; refused row N of this burst`, and a flood of lost bus rows ends in
+   `N audit rows for channel … (thinned past a flood)` — none expected. INFO `channel pump ended
+   with replies queued` and no `queue_closed` rows (#832). Rows a restart under traffic can leave:
+   `channel.inbound_dropped` with `stage` `polled`/`buffered`/`worker` (`select payload->>'channel',
+   payload->>'stage', payload->>'dropped' from audit_log where action = 'channel.inbound_dropped' order
+   by id desc`); a `channel.inbound_undecodable` row is a **finding about the worker** (`select
+   payload->>'part', payload->>'undecodable' … where action = 'channel.inbound_undecodable'`, #855).
+   ⚠️ A stale `matrix.ext4` answers `matrix.drain` with METHOD_NOT_FOUND (rebuild with
+   `bash scripts/build-release.sh` + the rootfs script). Then [#805](https://github.com/hherb/kastellan/issues/805)
+   and #809–#811. Natural next security items: #833 (stderr panic in a `Drop`; needs a design call,
+   now also `bus_guards` and `InboundReceiver`), #831 and #817 (now also the bus writers' thinned tail).
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
