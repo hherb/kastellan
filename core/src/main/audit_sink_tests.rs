@@ -258,9 +258,10 @@ fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
 }
 
 /// #798: a flood of rows refused through a sink reports its first few, then
-/// thins out — the ledger wired to `audit_sink_thinning.rs`, whose own tests
-/// pin the predicate. #807: each line it lets through says where the row
-/// stands in its burst, so the flood's size is in the lines themselves.
+/// thins out — the ledger wired to `audit_sink_thinning.rs`, whose predicate
+/// `kastellan_core::audit_thinning`'s tests pin. #807: each line it lets
+/// through says where the row stands in its burst, so the flood's size is in
+/// the lines themselves.
 #[test]
 fn a_flood_of_shed_rows_is_reported_one_by_one_then_thinned() {
     static LEDGER: Ledger = Ledger::new(bounds(0, 1));

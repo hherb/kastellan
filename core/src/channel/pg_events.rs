@@ -31,7 +31,8 @@
 //! receiver counts them into a `channel.inbound_dropped` row as the stop drops
 //! it (#846, `polled_driver/inbound_rx.rs`). What is still unsaid: a crash —
 //! and with it, since #829, the count of a flood's rows thinned out after its
-//! last 2^k-th line, which only the shutdown's line says.
+//! last 2^k-th line, which only the next burst's first line on the same
+//! writer and channel, or the shutdown's line, says (#817).
 //!
 //! Since #829 a failed insert's lines are **thinned** past a flood, per
 //! writer and channel ([`lost_rows`]), each carrying its place in the burst,
@@ -70,7 +71,8 @@ pub struct PgChannelEvents {
 
 impl PgChannelEvents {
     pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool, report: emit_report, lost: &LOST_ROWS }
+        let (report, lost) = production_writer();
+        Self { pool, report, lost }
     }
 
     /// Test builds only: lost rows said to `report` and counted apart from
@@ -111,17 +113,27 @@ pub(crate) type Reporter = fn(AuditLostWriter, &str);
 /// The production [`Reporter`]. Whether the stderr fallback was written is
 /// dropped: nothing more can be done for a row the report itself could not
 /// reach anyone about (the daemon's sinks drop it for the same reason).
-pub(crate) fn emit_report(writer: AuditLostWriter, line: &str) {
+fn emit_report(writer: AuditLostWriter, line: &str) {
     emit_audit_lost_report(writer, line);
+}
+
+/// The production reporter and count, for every writer built on
+/// [`audit_or_report`] — the bus's, the boot supervisor's — and for the
+/// shutdown that reads the count: one place names [`LOST_ROWS`], so no writer
+/// can count where the shutdown does not read (#829).
+pub(crate) fn production_writer() -> (Reporter, &'static LostRows) {
+    (emit_report, &LOST_ROWS)
 }
 
 /// Say, once, how many rows every bus writer could not write and gave no line
 /// of their own (#829) — one `[audit-lost]` line per writer and channel that
 /// has any. The daemon calls it after the channels stop, when nothing writes
 /// through these writers any more; called twice, it would say the same rows
-/// again.
+/// again. The count is every burst's, so it includes rows a later burst's
+/// first line already summed up ("the burst before it ended after …").
 pub fn report_unsaid_lost_rows() {
-    report_unsaid(&LOST_ROWS, emit_report);
+    let (report, lost) = production_writer();
+    report_unsaid(lost, report);
 }
 
 /// [`report_unsaid_lost_rows`] over `lost`, through `report`.
@@ -166,7 +178,7 @@ pub(crate) async fn audit_or_report(
     let about = describe_row(&payload);
     let channel = row_channel_name(&payload).map(str::to_owned);
     // No `RETURNING id` (#829): the id is discarded here, and decoding it was
-    // the one way an insert could fail after its row was written.
+    // the one step of ours that could fail after a row known to be written.
     let insert = kastellan_db::audit::insert_without_id(pool, ACTOR, action, payload);
     let row = RowReport { writer, action, about: &about, channel: channel.as_deref(), report, lost };
     settle_or_report(insert, row).await;
@@ -268,8 +280,9 @@ const WHY_FIELDS: [&str; 2] = ["field", "reason"];
 const ID_FIELDS: [&str; 2] = ["task_id", "ask_id"];
 
 /// Pure: the channel a row's loss is counted under (#829) — its own
-/// `channel` field, a string the bus sets from its own registered channel
-/// ids, never from a peer. `None` for a row with no such field
+/// `channel` field, a string spelled by the core's own code (the bus's
+/// registered channel ids, the boot supervisor's channel name), never by a
+/// peer. `None` for a row with no such field
 /// (`ask.resolved`, `channel.reply_unroutable`).
 fn row_channel_name(payload: &Value) -> Option<&str> {
     payload.get("channel").and_then(Value::as_str)

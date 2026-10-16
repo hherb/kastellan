@@ -37,7 +37,7 @@ use sqlx::PgPool;
 
 use super::{BootAudit, BootAuditSink};
 use crate::channel::actions;
-use crate::channel::pg_events::{audit_or_report, emit_report, LostRows, Reporter, LOST_ROWS};
+use crate::channel::pg_events::{audit_or_report, production_writer, LostRows, Reporter};
 use crate::worker_stderr::AuditLostWriter;
 
 /// Build the sink for one channel. `channel` is captured, so every row carries
@@ -46,7 +46,8 @@ use crate::worker_stderr::AuditLostWriter;
 /// Payloads carry the channel name, counters and the (already capped) cause —
 /// never message content, and never anything a peer supplied.
 pub fn pg_boot_audit_sink(pool: PgPool, channel: &str) -> BootAuditSink {
-    sink_reporting_to(pool, channel, emit_report, &LOST_ROWS)
+    let (report, lost) = production_writer();
+    sink_reporting_to(pool, channel, report, lost)
 }
 
 /// [`pg_boot_audit_sink`], with a lost row said through `report` and counted

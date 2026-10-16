@@ -6,11 +6,13 @@
 //! one per writer and channel). Moved here from the daemon binary in #829 so
 //! both can share it: a binary's items are not visible to the library.
 //!
-//! A shed or refused row is reported by its sink **on the driver thread** (a
-//! tracing ERROR, or the marked stderr line when nothing records it — either
-//! can block), and a flood —
-//! email's `skipped` list has no length cap — would have the driver do that
-//! for every id. So within one burst the first [`REPORT_EACH_UP_TO`] are
+//! A row that is not written is reported by the thread or task that tried to
+//! write it — a daemon sink's on the channel's driver thread, the bus's on
+//! its pump — as a tracing ERROR, or the marked stderr line when nothing
+//! records it; either can block. A flood (email's `skipped` list has no
+//! length cap; a Postgres that answers every insert at once with an error)
+//! would have that writer do so for every row. So within one burst the
+//! first [`REPORT_EACH_UP_TO`] are
 //! reported, then only the 2^k-th: the reports stay logarithmic in the flood.
 //! The rows left out are counted, and the shutdown says how many.
 //!
@@ -28,14 +30,19 @@
 //! it ended.
 //!
 //! What that leaves unsaid until then: the rows after a burst's last 2^k-th
-//! line. They are said by the next burst's first line on the same channel and
-//! kind, or by a graceful shutdown — and by neither if the daemon crashes
-//! first, or no row of that channel and kind is ever refused again (#817).
+//! line. They are said by the next burst's first line on the same count (a
+//! daemon sink's channel and kind, a bus writer's channel), or by a graceful
+//! shutdown — and by neither if the daemon crashes first, or no row on that
+//! count is ever refused again (#817).
+//!
+//! "Refused" is the daemon sinks' word, and the lines say it for the bus's
+//! failed inserts too: there it means the row was not written, for whatever
+//! reason the line gives.
 
 use std::time::{Duration, Instant};
 
 /// How many refused rows of one burst are reported one by one before
-/// [`should_report`] thins them out.
+/// `should_report` thins them out.
 pub const REPORT_EACH_UP_TO: usize = 16;
 
 // `unreported_of`'s closed form counts REPORT_EACH_UP_TO as the first power of
@@ -50,11 +57,11 @@ pub const BURST_QUIET_GAP: Duration = Duration::from_secs(60);
 
 /// Pure: whether the `n`th (0-based) refused row of a burst gets its own
 /// report.
-pub fn should_report(n: usize) -> bool {
+fn should_report(n: usize) -> bool {
     n < REPORT_EACH_UP_TO || n.is_power_of_two()
 }
 
-/// Pure: how many of a burst's first `refused` rows [`should_report`] leaves
+/// Pure: how many of a burst's first `refused` rows `should_report` leaves
 /// out — closed form, so a shutdown after a huge flood does not loop over it.
 pub fn unreported_of(refused: usize) -> usize {
     // Reported: indices 0..REPORT_EACH_UP_TO, then each power of two from
@@ -127,9 +134,9 @@ pub struct Refusal {
     pub tally: BurstTally,
 }
 
-/// The refused rows of one kind (shed, or refused after shutdown) on one
-/// channel: where the current burst stands, and what earlier bursts left
-/// unreported.
+/// The refused rows of one count — a daemon sink's channel and kind (shed, or
+/// refused after shutdown), or a bus writer's channel (failed inserts): where
+/// the current burst stands, and what earlier bursts left unreported.
 #[derive(Debug)]
 pub struct Thinning {
     /// Rows refused in the current burst.

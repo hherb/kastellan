@@ -49,13 +49,16 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 ### This session (2026-10-16): #829 — the bus writers' lost-row lines are thinned (PR [#857](https://github.com/hherb/kastellan/pull/857))
 
 - **The pure thinning core is the library's** `kastellan_core::audit_thinning` (`Thinning`,
-  `BurstTally`, `should_report`, …), moved from `main/audit_sink_thinning.rs` (proved byte-identical
-  but for visibility). The daemon's `Refusals` / per-channel counts stay in the binary.
+  `BurstTally`, `unreported_of`, …), moved from `main/audit_sink_thinning.rs` (byte-identical but
+  for visibility, an added `Default` for `Thinning`, and its docs). ⚠️ The module is
+  **`#[doc(hidden)] pub`** — `pub` only for the binary, not committed API (the `untrusted_text`
+  rule); `should_report` is private. The daemon's `Refusals` / per-channel counts stay in the binary.
 - **`channel/pg_events/lost_rows.rs`: `LostRows`**, one `Thinning` per **writer** (`Bus`,
   `ChannelSupervisor`) **and the row's own `channel` field** (`row_channel_name`; `Unnamed` for
   `ask.resolved` / `channel.reply_unroutable`; past 16 named channels per writer, `Other`). ⚠️ **One
   process-wide `LOST_ROWS`**, because a bus is rebuilt on every bring-up — a per-bus count would drop
-  a restart's unsaid tail; a pointer test pins `PgChannelEvents::new` to it.
+  a restart's unsaid tail. Every production user (bus, boot-supervisor sink, the shutdown report)
+  takes it from **`pg_events::production_writer()`**, and a pointer test pins that.
 - Each failed-insert line ends `; refused row N of this burst (…)`; after `matrix`/`email`
   `.shutdown()`, `main` calls `channel::bus::report_unsaid_lost_rows()` →
   `N audit rows for channel "x" were not written and had no line of their own (thinned past a flood)`
@@ -63,10 +66,19 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   abandoned-at-stop rows and #832's abandoned work (once per stop, not per message). ⚠️ A crash
   loses the thinned tail, as #817 for the daemon's sinks.
 - **`kastellan_db::audit::insert_without_id`** — no `RETURNING`, so no decode error after the row
-  is written; shares `stored_form` + `warn_if_nul_escaped`. The bus writer uses it.
+  is written; shares `stored_form` + `warn_if_nul_escaped`, and **checks `rows_affected() == 1`**
+  (`one_row_written`: `insert`'s `fetch_one` failed on a suppressed row, `execute` would not). Used
+  by both `audit_or_report` writers (bus, boot supervisor) **and the daemon's sinks**
+  (`main/audit_sink.rs`, which had the same decode-after-write false "not written").
 - Mutants: **11/11 killed** (incl. one against real Postgres). Review (one agent, own worktree):
   no correctness/security finding; its test gap (the channel key, the shared count) and stale docs
   were fixed in the PR.
+- **Second review (5 agents)**: no correctness bug. Fixed: the above, a routing test through
+  `audit_or_report` (a dropped channel/writer survived every test before it), `unsaid()` attribution,
+  abandoned rows uncounted, ~12 overclaiming comments (⚠️ daemon sinks thin **shed/late only**).
+  **Filed:** #858 (unknown-outcome error says "not written"), #859 (cause-blind thinning), #860
+  (`Unnamed` shared across buses), #861 (daemon sinks' failed inserts unthinned), #862 (unsaid count
+  behind unbounded shutdowns); #817 commented (bus shares its quiet-tail gap).
 
 ### Previous (2026-10-16): #810 — the stop signals before the channels (PR #856, merged)
 
@@ -106,7 +118,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - **#827/#826 (PR #834):** `RejectedUnverifiable` (fail-closed); `ack_method: None` = "does not
   redeliver". `pg_events::audit_or_report` holds a **`PendingInsert` drop guard** — ⚠️ no `.await`
   before it. **NUL (#819/#820):** records escape to `␀`; ⚠️ `kastellan-db`'s next release must be
-  **0.3.0** (now also `audit::insert_without_id`, #829); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #837–#840.
+  **0.3.0** (now also `audit::insert_without_id`, #829); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #837–#840, #858–#862.
 - ⚠️ **A Mac sweep without `KASTELLAN_PG_BIN_DIR` in its command line is NOT evidence** (372
   `[SKIP]`, exit 0) [[postgres-app-bin-paths]]; a sweep without `-- --nocapture` under-counts
   `[SKIP]`. ⚠️ **`git push` over SSH fails here** — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
@@ -286,7 +298,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    next restart look for: INFO `shutdown signal received` (`signal = "SIGTERM"`, #856); `[audit-lost]`
    / INFO drain lines (a Matrix login still starting at shutdown is INFO "not finished starting", not
    a loss; a bus stopped under a wedged Postgres says `may not have been written`); since #829 a bus
-   `[audit-lost]` line ends `; refused row N of this burst`, and a flood of lost bus rows ends in
+   or boot-supervisor failed-insert `[audit-lost]` line carries `; refused row N of this burst` (then
+   possibly `(… before it had no line …)` / `; the burst before it ended …`), and a flood of lost bus rows ends in
    `N audit rows for channel … (thinned past a flood)` — none expected. INFO `channel pump ended
    with replies queued` and no `queue_closed` rows (#832). Rows a restart under traffic can leave:
    `channel.inbound_dropped` with `stage` `polled`/`buffered`/`worker` (`select payload->>'channel',
@@ -397,6 +410,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
+| **Mac** (#829 second-review fixes — **targeted, NOT a full sweep**) | PR [#857](https://github.com/hherb/kastellan/pull/857) | `kastellan-db` lib **242** (+1 `one_row_written`), `postgres_e2e` **60** (its `insert_without_id` leg now escapes a NUL in `action`), `kastellan-core` lib **2531** / 1 ignored (+1 routing test), daemon bin **90**, cli **96**, `channel_bus_pg_e2e` **6** — all exit 0, `KASTELLAN_PG_BIN_DIR` + `KASTELLAN_PG_REQUIRE_E2E=1`, `[SKIP]` 0, `[WARN]` 0, `[E2E]` 147; log `~/.local/state/kastellan/gate-logs/fixall-829-tests.log`. A full sweep should read **5074** (5072 + 2). Mutants **4/4 killed**: the row's channel dropped, the writer hard-coded to `Bus`, `unsaid()`'s writer hard-coded, an abandoned row counted (`fixall-829-mutants.log`) | workspace, exit 0 (default target dir) | — |
 | **Mac** (#829 + its review fixes — **the full sweep that stands**) | PR [#857](https://github.com/hherb/kastellan/pull/857) | **5072 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-829-review.log`. Predicted exactly: 5062 + 10 = lib +17 (8 moved thinning tests, 5 `lost_rows`, 4 `pg_events`), daemon bin −7 (−8 moved, +1 `bootstrap` order test); `postgres_e2e` unchanged in count (its round trip gained the `insert_without_id` leg, run under `KASTELLAN_PG_REQUIRE_E2E=1` with `[E2E]` markers) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-829b`, **27** `Checking kastellan` | **23** Mac |
 | **Mac** (#810 + its review fixes — superseded) | PR [#856](https://github.com/hherb/kastellan/pull/856) | **5061 / 1 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-810-review.log`. The 1 is the known #548/#676 flake, this time in `secret_vault_e2e` (`the database system is starting up`); that suite then passed 5/5 alone. So 5062 = #855's 5058 + 4: daemon bin 93 → **97** (`bootstrap::tests`: 3 signal tests + the `main.rs` source-order test), every other suite identical. Mutants killed **6/6**: `wait` returns at once; `wait` ignores SIGINT; `wait` re-registers its own streams (survived 10/40 before the probe fix, 0/10 after); install moved below the channels; a `?` after the wait; an `.expect(` before it | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-810`, **27** `Checking kastellan` | **23** Mac |
 

@@ -1,14 +1,15 @@
 //! Which of the bus writers' lost rows get a line of their own (#829).
 //!
-//! [`super::audit_or_report`] says each `channel.*` row it could not write on
-//! `[audit-lost]` at ERROR. Against a Postgres that is *refused or wedged*
-//! that is about one line per 10 s per pump — each insert waits out the
-//! pool's acquire timeout first. Against one that **answers quickly with an
-//! error** (read-only, disk full, a permission REVOKE) it is one line per
-//! inbound message: a flood of messages is a flood of lines, each of which
-//! the reporter may block on. The daemon's own sinks thin theirs
-//! (`main/audit_sink_thinning.rs`); this is the same thinning
-//! ([`crate::audit_thinning`]) for the bus's writers.
+//! Before #829, [`super::audit_or_report`] said each `channel.*` (or
+//! `ask.resolved`) row it could not write on `[audit-lost]` at ERROR. Against
+//! a Postgres that is *refused or wedged* that is about one line per 10 s per
+//! pump — each insert waits out the pool's acquire timeout first. Against one
+//! that **answers quickly with an error** (read-only, disk full, a permission
+//! REVOKE) it is one line per inbound message: a flood of messages is a flood
+//! of lines, each of which the reporter may block on. This module thins them
+//! with the daemon's sinks' thinning ([`crate::audit_thinning`]), which those
+//! sinks apply to their shed and after-shutdown refusals
+//! (`main/audit_sink_thinning.rs`) — not to their own failed inserts.
 //!
 //! **Counted per writer and per channel**, as the daemon's sinks count per
 //! channel (#807): one channel's flood must not thin the other's lines, and
@@ -35,10 +36,10 @@ use crate::audit_thinning::{Refusal, Thinning};
 use crate::worker_stderr::AuditLostWriter;
 
 /// The most channels counted apart per writer; past it, rows count under
-/// [`RowChannel::Other`]. Channel names are spelled by the daemon's own
-/// config, never by a peer, so this is never reached in practice — it bounds
+/// [`RowChannel::Other`]. Channel names are spelled by the core's own code,
+/// never by a peer, so this is never reached in practice — it bounds
 /// the count's memory if that ever stops being true.
-pub(crate) const MAX_NAMED_CHANNELS: usize = 16;
+const MAX_NAMED_CHANNELS: usize = 16;
 
 /// Which channel a lost row is counted under.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,8 +64,9 @@ struct Entry {
 /// Every writer's and channel's lost rows, each thinned on its own.
 #[derive(Debug)]
 pub(crate) struct LostRows {
-    /// A `Vec`, not a map, so the static can be built at compile time; it
-    /// holds a handful of entries.
+    /// A `Vec`, not a map: it keeps the order each entry was first lost in,
+    /// which [`Self::unsaid`] reports by, and it holds at most a few dozen
+    /// (per writer, [`MAX_NAMED_CHANNELS`] plus `Unnamed` and `Other`).
     entries: Mutex<Vec<Entry>>,
 }
 
@@ -125,7 +127,7 @@ impl LostRows {
 fn row_channel(entries: &[Entry], writer: AuditLostWriter, channel: Option<&str>) -> RowChannel {
     let Some(name) = channel else { return RowChannel::Unnamed };
     let mine = |e: &&Entry| e.writer == writer;
-    let known = entries.iter().filter(mine).any(|e| e.channel == RowChannel::Named(name.to_string()));
+    let known = entries.iter().filter(mine).any(|e| matches!(&e.channel, RowChannel::Named(n) if n == name));
     let named = entries.iter().filter(mine).filter(|e| matches!(e.channel, RowChannel::Named(_))).count();
     if known || named < MAX_NAMED_CHANNELS {
         RowChannel::Named(name.to_string())
@@ -197,7 +199,18 @@ mod tests {
         assert!(supervisor.report && supervisor.tally.nth == 1, "another writer's first row: {supervisor:?}");
         let ask = rows.lose_at(AuditLostWriter::Bus, None, t0);
         assert!(ask.report && ask.tally.nth == 1, "a row with no channel counts apart: {ask:?}");
-        assert_eq!(rows.unsaid().len(), 1, "only the email flood left rows unsaid: {:?}", rows.unsaid());
+        // The shutdown's count is said as each writer's own, in the order
+        // each was first lost.
+        let supervisor_said = 1 + lose_n(&rows, AuditLostWriter::ChannelSupervisor, Some("email"), 99, t0);
+        let bus_said = REPORT_EACH_UP_TO + 3;
+        let email = || RowChannel::Named("email".into());
+        assert_eq!(
+            rows.unsaid(),
+            [
+                Unsaid { writer: AuditLostWriter::Bus, channel: email(), rows: 100 - bus_said },
+                Unsaid { writer: AuditLostWriter::ChannelSupervisor, channel: email(), rows: 100 - supervisor_said },
+            ]
+        );
     }
 
     /// A quiet gap starts a new burst, whose first line says how the last

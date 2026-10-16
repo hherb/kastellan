@@ -18,10 +18,12 @@
 //! of the channel bus's own rows, which it awaits (`channel::pg_events` — its
 //! module doc says what that writer still misses), and, since #814, of the
 //! channel boot supervisor's `channel.started`/`boot_failed`/`died` rows.
-//! "Sees" means *line or count*: past a flood, every writer's lines are
-//! thinned — the daemon's sinks' since #798, the bus's and the boot
-//! supervisor's since #829 — and the rows thinned out are counted, the
-//! count said on this marker at a graceful shutdown.
+//! "Sees" means *line or count*: past a flood, lines are thinned — the
+//! daemon's sinks' shed and after-shutdown lines since #798, the bus's and
+//! the boot supervisor's failed-insert lines since #829 — and the rows
+//! thinned out are counted, the count said on this marker at a graceful
+//! shutdown. A daemon sink's failed insert, and a row or work abandoned by a
+//! stop (#813, #832), always has a line of its own.
 
 use super::delivery::warn_and_fall_back;
 use super::shared::format_stderr_fallback;
@@ -53,10 +55,11 @@ pub enum AuditLostWriter {
     Email,
     /// The channel bus's own writer (`channel::pg_events`, #808): the rows
     /// the bus writes itself — `channel.received`, `channel.enqueue_failed`,
-    /// a `channel.reply_undelivered` for a failed `send` or a closed queue,
-    /// the bus's other `channel.*` rows, and `ask.resolved`. This writer serves
-    /// every channel, so the line names the row's channel and peer, and its
-    /// ids, when the payload has them.
+    /// a `channel.reply_undelivered` for a failed `send`, the bus's other
+    /// `channel.*` rows, and `ask.resolved`. This writer serves every
+    /// channel, so the line names the row's channel and peer, and its ids,
+    /// when the payload has them — and, since #829, where the row stands in
+    /// its burst, its line thinned out past a flood.
     Bus,
     /// The channel boot supervisor's sink (`channel::boot_supervisor::pg_sink`,
     /// #814): `channel.started`, `channel.boot_failed` and `channel.died`. The

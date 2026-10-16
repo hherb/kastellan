@@ -350,7 +350,10 @@ impl SinkWriter {
                 refuse(ledger.refusals.late(channel), Unwritten::AfterShutdown, on_failure);
                 return;
             };
-            if let Err(e) = kastellan_db::audit::insert(&pool, actor, action, payload).await {
+            // No `RETURNING id` (#829): the id is discarded, and an `Err` is
+            // said as a row "not written" — which a decode step failing
+            // after the write would make untrue.
+            if let Err(e) = kastellan_db::audit::insert_without_id(&pool, actor, action, payload).await {
                 on_failure(Unwritten::Insert(&e));
             }
         }))
