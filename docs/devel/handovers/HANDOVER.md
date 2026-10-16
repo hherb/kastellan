@@ -10,10 +10,10 @@
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-16 (#810 — the stop signals are registered before the scheduler and the
-channels start, so no failure after them can skip the audit drain; PR [#856](https://github.com/hherb/kastellan/pull/856), Mac sweep green.
-PR [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853) merged 2026-10-16, **not yet
-deployed**. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#856](https://github.com/hherb/kastellan/pull/856) (#810), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+channels start, so no failure after them can skip the audit drain; PR [#856](https://github.com/hherb/kastellan/pull/856), merged 2026-10-16.
+PRs #855 (#852, #853) and #856 are both merged and **not yet deployed**. The operator is still
+running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #851's tree** (deployed 2026-10-14). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -309,8 +309,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    worker**, none expected. The [#855](https://github.com/hherb/kastellan/pull/855) deploy (#852/#853) adds `part` to those rows (`batch` /
    `events` + `undecodable` / `drain`) — `select payload->>'part', payload->>'undecodable' from
    audit_log where action = 'channel.inbound_undecodable' order by id desc`; no rebuilt worker or
-   rootfs needed (core only). **Neither #855 (merged) nor [#856](https://github.com/hherb/kastellan/pull/856) (#810) is deployed** — once #856
-   merges, one `scripts/upgrade_from_git.sh` per host covers both (core only). After the #856 deploy,
+   rootfs needed (core only). **Neither #855 nor [#856](https://github.com/hherb/kastellan/pull/856) (#810) is deployed** (both merged) —
+   one `scripts/upgrade_from_git.sh` per host covers both (core only). After the #856 deploy,
    a stop logs INFO `shutdown signal received` with `signal = "SIGTERM"`. Natural next security items:
    #833 (stderr panic in a `Drop`; needs a design call, now also `bus_guards` and `InboundReceiver`),
    #829, #831 and #817.
