@@ -52,7 +52,7 @@
 //! What still goes unreported: a row lost to a crash (SIGKILL, OOM, a panic
 //! under `panic = "abort"`), because nothing runs after one — and with it the
 //! count of a burst's rows after its last 2^k-th line, which only the next
-//! burst's first line or a graceful shutdown says (`audit_sink_thinning.rs`,
+//! burst's first line or a graceful shutdown says (`kastellan_core::audit_thinning`,
 //! #817); a row refused, past the thinning, during a pool close the service
 //! manager's SIGKILL ends; and one refused between the last line and the process's exit. That last
 //! gap is usually an instant, but not always: dropping the runtime waits for
@@ -350,7 +350,10 @@ impl SinkWriter {
                 refuse(ledger.refusals.late(channel), Unwritten::AfterShutdown, on_failure);
                 return;
             };
-            if let Err(e) = kastellan_db::audit::insert(&pool, actor, action, payload).await {
+            // No `RETURNING id` (#829): the id is discarded, and an `Err` is
+            // said as a row "not written" — which a decode step failing
+            // after the write would make untrue.
+            if let Err(e) = kastellan_db::audit::insert_without_id(&pool, actor, action, payload).await {
                 on_failure(Unwritten::Insert(&e));
             }
         }))

@@ -1,9 +1,24 @@
 //! `pg_events`' tests, split out to keep the module under the 500-LOC soft cap.
 
 use super::*;
+use crate::audit_thinning::REPORT_EACH_UP_TO;
 use crate::channel::undelivered::{UndeliveredReason, UndeliveredReply};
 use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
 use std::sync::Mutex;
+use test_support::own_lost_rows;
+
+/// A bus `channel.received` row for channel `matrix`, said through `report`
+/// and counted in `lost`.
+fn received_row(report: Reporter, lost: &'static LostRows) -> RowReport<'static> {
+    RowReport {
+        writer: AuditLostWriter::Bus,
+        action: "channel.received",
+        about: r#" for channel "matrix""#,
+        channel: Some("matrix"),
+        report,
+        lost,
+    }
+}
 
 #[test]
 fn the_line_names_what_the_row_is_about_and_nothing_else() {
@@ -14,10 +29,11 @@ fn the_line_names_what_the_row_is_about_and_nothing_else() {
         "reason": "send_failed",
         "body": "NEVER-IN-A-LINE",
     });
-    let line = format_row_lost("channel.reply_undelivered", &describe_row(&payload), &"boom");
+    let first = BurstTally { nth: 1, unsaid_before: 0, ended: None };
+    let line = format_row_lost("channel.reply_undelivered", &describe_row(&payload), &"boom", first);
     assert_eq!(
         line,
-        r#"channel.reply_undelivered row for channel "matrix", peer "@a:srv", task_id 7, reason "send_failed" not written: boom"#
+        r#"channel.reply_undelivered row for channel "matrix", peer "@a:srv", task_id 7, reason "send_failed" not written: boom; refused row 1 of this burst"#
     );
     assert!(!line.contains("NEVER-IN-A-LINE"), "only the named fields are read: {line}");
 }
@@ -171,19 +187,22 @@ fn take_settled() -> Vec<(AuditLostWriter, String)> {
 /// been written" for every row the bus ever wrote, at ERROR.
 #[tokio::test]
 async fn each_outcome_of_an_insert_says_one_thing_or_nothing() {
-    type Insert = std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64, String>> + Send>>;
+    type Insert = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+    static LOST: LostRows = LostRows::new();
     async fn settle(insert: Insert) {
-        settle_or_report(insert, AuditLostWriter::Bus, "channel.received", r#" for channel "matrix""#, record_settled)
-            .await;
+        settle_or_report(insert, received_row(record_settled, &LOST)).await;
     }
 
-    settle(Box::pin(async { Ok(1) })).await;
+    settle(Box::pin(async { Ok(()) })).await;
     assert_eq!(take_settled(), [], "a written row says nothing");
 
     settle(Box::pin(async { Err("boom".to_string()) })).await;
     assert_eq!(
         take_settled(),
-        [(AuditLostWriter::Bus, r#"channel.received row for channel "matrix" not written: boom"#.to_string())]
+        [(
+            AuditLostWriter::Bus,
+            r#"channel.received row for channel "matrix" not written: boom; refused row 1 of this burst"#.to_string()
+        )]
     );
 
     let stopped = tokio::spawn(settle(Box::pin(std::future::pending())));
@@ -208,6 +227,17 @@ async fn each_outcome_of_an_insert_says_one_thing_or_nothing() {
             r#"channel.received row for channel "matrix" may not have been written: the insert panicked"#.to_string()
         )]
     );
+
+    // An abandoned row is said, not counted (#829 thins failed inserts only):
+    // the next failure is the burst's second, after the first `Err` above.
+    settle(Box::pin(async { Err("again".to_string()) })).await;
+    assert_eq!(
+        take_settled(),
+        [(
+            AuditLostWriter::Bus,
+            r#"channel.received row for channel "matrix" not written: again; refused row 2 of this burst"#.to_string()
+        )]
+    );
 }
 
 /// What [`record_in_flight`] was told — its own static, as above.
@@ -227,4 +257,124 @@ async fn work_lost_in_flight_is_reported_through_the_writer() {
 
     let said = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner()).clone();
     assert_eq!(said, [(AuditLostWriter::Bus, "task 7's reply may not have been sent".to_string())]);
+}
+
+/// What [`record_flood`] was told — its own static, as above.
+static FLOOD: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_flood(writer: AuditLostWriter, line: &str) {
+    FLOOD.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// #829: against a Postgres that refuses every insert at once, a flood of
+/// inbound messages is a flood of failed rows. Their lines are thinned like
+/// the daemon's sinks' — the first [`REPORT_EACH_UP_TO`] each, then the
+/// 2^k-th — each saying where it stands in the burst, and the shutdown says
+/// how many got no line of their own. Written rows say nothing and count
+/// for nothing.
+#[tokio::test]
+async fn a_flood_of_failed_inserts_is_thinned_and_its_tail_said_at_shutdown() {
+    let lost = own_lost_rows();
+    for _ in 0..40 {
+        settle_or_report(async { Err::<(), _>("read-only") }, received_row(record_flood, lost)).await;
+        settle_or_report(async { Ok::<(), &str>(()) }, received_row(record_flood, lost)).await;
+    }
+    let said = std::mem::take(&mut *FLOOD.lock().unwrap_or_else(|p| p.into_inner()));
+    assert_eq!(said.len(), REPORT_EACH_UP_TO + 2, "rows 1..=16, then 17 and 33: {said:#?}");
+    assert!(said.iter().all(|(w, _)| *w == AuditLostWriter::Bus));
+    assert_eq!(
+        said[REPORT_EACH_UP_TO + 1].1,
+        r#"channel.received row for channel "matrix" not written: read-only; refused row 33 of this burst (15 before it had no line of their own)"#
+    );
+
+    report_unsaid(lost, record_flood);
+    let said = std::mem::take(&mut *FLOOD.lock().unwrap_or_else(|p| p.into_inner()));
+    assert_eq!(
+        said,
+        [(
+            AuditLostWriter::Bus,
+            r#"22 audit rows for channel "matrix" were not written and had no line of their own (thinned past a flood)"#
+                .to_string()
+        )],
+        "40 failed, 18 said"
+    );
+}
+
+/// What [`record_quiet`] was told — its own static, as above.
+static QUIET: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_quiet(writer: AuditLostWriter, line: &str) {
+    QUIET.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// A shutdown with nothing left unsaid says nothing.
+#[test]
+fn a_shutdown_with_every_loss_said_says_nothing_more() {
+    let lost = own_lost_rows();
+    lost.lose(AuditLostWriter::Bus, Some("matrix"));
+    report_unsaid(lost, record_quiet);
+    assert!(QUIET.lock().unwrap().is_empty());
+}
+
+/// #829: a row's loss is counted under its own `channel` field — the key
+/// that keeps one channel's flood from thinning another's lines (#807).
+#[test]
+fn a_rows_loss_is_counted_under_its_own_channel() {
+    assert_eq!(row_channel_name(&serde_json::json!({"channel": "email", "peer": "a"})), Some("email"));
+    assert_eq!(row_channel_name(&serde_json::json!({"ask_id": 3, "task_id": 9})), None);
+    assert_eq!(row_channel_name(&serde_json::json!({"channel": 7})), None, "only a string names one");
+}
+
+/// #829: the production writers count in the one count the shutdown reads —
+/// a writer with a count of its own would leave its flood's tail unsaid. The
+/// bus, the boot supervisor's sink and the shutdown all take theirs from
+/// [`production_writer`], pinned here; the bus's is checked through it.
+#[tokio::test]
+async fn the_production_writer_counts_in_the_count_the_shutdown_reads() {
+    assert!(std::ptr::eq(production_writer().1, &LOST_ROWS));
+    let events = PgChannelEvents::new(test_support::refused_pool());
+    assert!(std::ptr::eq(events.lost, &LOST_ROWS));
+    fn say_nothing(_: AuditLostWriter, _: &str) {}
+    let test_events = PgChannelEvents::with_reporter(test_support::refused_pool(), say_nothing);
+    assert!(!std::ptr::eq(test_events.lost, &LOST_ROWS), "POSITIVE CONTROL: a test's is its own");
+}
+
+/// What [`record_routed`] was told — its own static, as above.
+static ROUTED: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_routed(writer: AuditLostWriter, line: &str) {
+    ROUTED.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// #829, #807's lesson: [`audit_or_report`] counts a row's loss under its
+/// writer and its own `channel` field. With 100 email rows of the bus's
+/// already lost, the bus's next email row is thinned out — while its matrix
+/// row and the boot supervisor's email row are each the first of their own
+/// count. A writer or channel dropped on the way to the count would put all
+/// three in one, and the latter two would go silent too.
+#[tokio::test]
+async fn a_rows_loss_is_counted_under_its_writer_and_channel() {
+    let lost = own_lost_rows();
+    for _ in 0..100 {
+        lost.lose(AuditLostWriter::Bus, Some("email"));
+    }
+    let pool = test_support::refused_pool();
+    let row = |writer, channel: &str| {
+        let payload = serde_json::json!({"channel": channel});
+        audit_or_report(&pool, writer, "channel.received", payload, record_routed, lost)
+    };
+    tokio::join!(
+        row(AuditLostWriter::Bus, "email"),
+        row(AuditLostWriter::Bus, "matrix"),
+        row(AuditLostWriter::ChannelSupervisor, "email"),
+    );
+
+    let mut said = std::mem::take(&mut *ROUTED.lock().unwrap_or_else(|p| p.into_inner()));
+    said.sort_by_key(|(writer, _)| *writer == AuditLostWriter::ChannelSupervisor);
+    assert_eq!(said.len(), 2, "the bus's 101st email row is thinned out: {said:#?}");
+    assert_eq!(said[0].0, AuditLostWriter::Bus);
+    assert!(said[0].1.starts_with(r#"channel.received row for channel "matrix" not written: "#), "{said:#?}");
+    assert_eq!(said[1].0, AuditLostWriter::ChannelSupervisor);
+    assert!(said[1].1.starts_with(r#"channel.received row for channel "email" not written: "#), "{said:#?}");
+    assert!(said.iter().all(|(_, line)| line.ends_with("; refused row 1 of this burst")), "{said:#?}");
 }

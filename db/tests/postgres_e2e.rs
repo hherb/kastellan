@@ -575,6 +575,27 @@ fn audit_helpers_pool_and_notify_round_trip() {
         assert!(env.contains_key("sha256"));
         assert!(env.contains_key("len"));
 
+        // ---------- insert_without_id: the same stored row, no id ----------
+        // #829: the channel bus's writers, which discard the id, use an
+        // insert with no `RETURNING`, so no decode step can fail after the
+        // row is written. It must store exactly what `insert` would —
+        // `stored_form`, NUL escape included — so both the payload and a
+        // column carry a NUL.
+        let payload = serde_json::json!({"channel": "matrix", "peer": "@a\u{0}:srv"});
+        let action = "channel.rec\u{0}eived";
+        kastellan_db::audit::insert_without_id(&pool, "channel", action, payload.clone())
+            .await
+            .expect("audit::insert_without_id under runtime-role pool");
+        let rows = kastellan_db::audit::fetch_since(&pool, truncated_id, 10)
+            .await
+            .expect("fetch_since after insert_without_id");
+        assert_eq!(rows.len(), 1, "exactly the one row: {rows:?}");
+        let expected = kastellan_db::audit::stored_form("channel", action, payload);
+        assert!(expected.columns_escaped(), "POSITIVE CONTROL: the action carries a NUL");
+        assert_eq!(rows[0].actor, "channel");
+        assert_eq!(rows[0].action, expected.action, "the stored form, NUL escaped");
+        assert_eq!(rows[0].payload, expected.payload, "the stored form, NUL escaped");
+
         // Drop the listener before pool.close() — PgListener holds a
         // checked-out PoolConnection; pool.close() blocks until every
         // permit is released, so listeners still in scope at close-time

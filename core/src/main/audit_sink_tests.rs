@@ -258,9 +258,10 @@ fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
 }
 
 /// #798: a flood of rows refused through a sink reports its first few, then
-/// thins out — the ledger wired to `audit_sink_thinning.rs`, whose own tests
-/// pin the predicate. #807: each line it lets through says where the row
-/// stands in its burst, so the flood's size is in the lines themselves.
+/// thins out — the ledger wired to `audit_sink_thinning.rs`, whose predicate
+/// `kastellan_core::audit_thinning`'s tests pin. #807: each line it lets
+/// through says where the row stands in its burst, so the flood's size is in
+/// the lines themselves.
 #[test]
 fn a_flood_of_shed_rows_is_reported_one_by_one_then_thinned() {
     static LEDGER: Ledger = Ledger::new(bounds(0, 1));
@@ -340,7 +341,8 @@ fn an_email_flood_after_the_drain_does_not_thin_a_matrix_rows_line() {
         "the late Matrix row is its own burst's first, and reported: {told:?}"
     );
     assert_eq!(LEDGER.unreported().matrix, UnsaidCounts::default());
-    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late: thinning::unreported_of(100) });
+    let late = kastellan_core::audit_thinning::unreported_of(100);
+    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late });
 }
 
 /// #797: the final snapshot names pending rows — a cancelled task cannot —

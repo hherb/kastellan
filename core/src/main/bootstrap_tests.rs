@@ -237,3 +237,16 @@ fn main_installs_the_signals_before_anything_audits() {
         );
     }
 }
+
+/// #829: the buses' lost rows thinned past a flood are said once, after the
+/// channel supervisors have stopped every writer of them — said earlier, the
+/// count would miss the rows lost during the stop; never said, a flood's tail
+/// would be lost with the process.
+#[test]
+fn main_says_the_buses_unsaid_lost_rows_after_the_channels_stop() {
+    let code = code_only(MAIN_RS);
+    let said = sole_offset(&code, "channel::bus::report_unsaid_lost_rows()");
+    for stop in ["matrix.shutdown().await", "email.shutdown().await"] {
+        assert!(sole_offset(&code, stop) < said, "say the unsaid rows after `{stop}` (#829)");
+    }
+}

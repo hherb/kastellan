@@ -150,7 +150,8 @@ impl StoredForm<'_> {
     }
 }
 
-/// Every storage transform [`insert`] applies, as one pure function.
+/// Every storage transform [`insert`] and [`insert_without_id`] apply, as
+/// one pure function.
 ///
 /// `payload` goes through [`truncate_payload`] (which escapes NUL first).
 /// `actor` and `action` are `text` columns, which refuse NUL just as
@@ -194,6 +195,10 @@ pub fn stored_form<'a>(
 /// The insert is a single round-trip (`INSERT … RETURNING id`) — there is
 /// no separate SELECT.
 ///
+/// A caller that discards the id and reports an `Err` as "not written"
+/// wants [`insert_without_id`]: this one's `Err` can come after the row is
+/// in the table (#829).
+///
 /// `executor` is generic so this works against both a `&PgPool`
 /// (production: dispatcher write site) and a `&mut PgConnection`
 /// (tests: deterministic single-connection setup against a per-test
@@ -213,6 +218,82 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let stored = stored_form(actor, action, payload);
+    warn_if_nul_escaped(&stored);
+    let row = sqlx::query(INSERT_RETURNING_ID_SQL)
+        .bind(stored.actor.as_ref())
+        .bind(stored.action.as_ref())
+        .bind(stored.payload)
+        .fetch_one(executor)
+        .await
+        .map_err(|e| DbError::Query(format!("audit_log insert: {e}")))?;
+    row.try_get::<i64, _>(0)
+        .map_err(|e| DbError::Query(format!("decode audit_log.id: {e}")))
+}
+
+/// [`insert`], for a writer that has no use for the row's `id`: the same
+/// stored row ([`stored_form`]) and the same NUL warning, with no
+/// `RETURNING` and so no decode step (#829).
+///
+/// Why it exists: [`insert`] can fail *after* the row is written — its
+/// `decode audit_log.id` error comes back once Postgres has already
+/// answered `RETURNING id`. A writer that reports a failed insert as "not
+/// written" (the channel bus's `[audit-lost]` lines) would then say so of a
+/// row that is in the table. Here an `Err` is the statement's own: Postgres
+/// refused it, or the connection failed before an answer came back. (In
+/// that last case the row may still have been committed — no client can
+/// tell — but that is true of every insert, not a step of ours.)
+///
+/// One step `insert` had for free is kept: its `fetch_one` fails on a
+/// statement that writes no row, and `execute` would not, so the count is
+/// checked (`one_row_written`). Nothing on `audit_log` can suppress a row
+/// today (its one trigger runs AFTER INSERT); a BEFORE trigger or a rule
+/// that ever does must not turn a dropped row into a silent `Ok`.
+pub async fn insert_without_id<'e, E>(
+    executor: E,
+    actor: &str,
+    action: &str,
+    payload: serde_json::Value,
+) -> Result<(), DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let stored = stored_form(actor, action, payload);
+    warn_if_nul_escaped(&stored);
+    let done = sqlx::query(INSERT_SQL)
+        .bind(stored.actor.as_ref())
+        .bind(stored.action.as_ref())
+        .bind(stored.payload)
+        .execute(executor)
+        .await
+        .map_err(|e| DbError::Query(format!("audit_log insert: {e}")))?;
+    one_row_written(done.rows_affected())
+}
+
+/// Pure: [`insert_without_id`]'s verdict on the statement's row count —
+/// `Ok` for exactly the one row it inserts.
+fn one_row_written(rows_affected: u64) -> Result<(), DbError> {
+    match rows_affected {
+        1 => Ok(()),
+        n => Err(DbError::Query(format!("audit_log insert: {n} rows written, expected 1"))),
+    }
+}
+
+/// The statement both inserts run, as a literal so [`INSERT_RETURNING_ID_SQL`]
+/// can extend it at compile time (sqlx takes only `'static` SQL text).
+macro_rules! insert_sql {
+    () => {
+        "INSERT INTO audit_log (actor, action, payload) VALUES ($1, $2, $3)"
+    };
+}
+
+/// [`insert_without_id`]'s statement.
+const INSERT_SQL: &str = insert_sql!();
+
+/// [`insert`]'s: the same statement, returning the new row's `id`.
+const INSERT_RETURNING_ID_SQL: &str = concat!(insert_sql!(), " RETURNING id");
+
+/// Log a row that carried escaped NULs at `warn` — see [`insert`] for why.
+fn warn_if_nul_escaped(stored: &StoredForm<'_>) {
     let payload_nuls = stored.payload.get(NUL_ESCAPED_KEY);
     if payload_nuls.is_some() || stored.columns_escaped() {
         tracing::warn!(
@@ -223,18 +304,6 @@ where
             "audit row carried NUL; escaped to U+2400 before storing (#816)"
         );
     }
-    let row = sqlx::query(
-        "INSERT INTO audit_log (actor, action, payload) \
-         VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(stored.actor.as_ref())
-    .bind(stored.action.as_ref())
-    .bind(stored.payload)
-    .fetch_one(executor)
-    .await
-    .map_err(|e| DbError::Query(format!("audit_log insert: {e}")))?;
-    row.try_get::<i64, _>(0)
-        .map_err(|e| DbError::Query(format!("decode audit_log.id: {e}")))
 }
 
 /// Fetch one row by `id`. Used by the audit-mirror task to expand a
@@ -306,4 +375,20 @@ fn decode_audit_row(row: &sqlx::postgres::PgRow) -> Result<AuditRow, DbError> {
             .try_get(4)
             .map_err(|e| DbError::Query(format!("decode audit_log.payload: {e}")))?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #829: a statement that wrote no row — a BEFORE trigger or a rule
+    /// suppressing it — is an `Err`, as `insert`'s `fetch_one` makes it.
+    #[test]
+    fn only_the_one_row_is_a_written_row() {
+        assert!(one_row_written(1).is_ok());
+        for n in [0, 2] {
+            let err = one_row_written(n).expect_err("not one row").to_string();
+            assert!(err.contains(&format!("{n} rows written, expected 1")), "{err}");
+        }
+    }
 }

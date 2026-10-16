@@ -12,6 +12,12 @@
 
 pub mod audit_mirror;
 pub mod audit_tail;
+/// The audit-row thinning core, shared by the daemon binary's sinks and the
+/// channel bus (#829). `pub` only so the binary can reach it — and
+/// `#[doc(hidden)]` for the reason `untrusted_text` is, below: not committed
+/// API of a published crate.
+#[doc(hidden)]
+pub mod audit_thinning;
 pub mod cassandra;
 pub mod channel;
 pub mod classification_inference;

@@ -29,9 +29,18 @@
 //! reply claim whose outcome cannot be known (`bus_deliver`). Inbound messages
 //! the bus had not yet read are not this writer's: a polled channel's own
 //! receiver counts them into a `channel.inbound_dropped` row as the stop drops
-//! it (#846, `polled_driver/inbound_rx.rs`). What is still unsaid: a crash.
-//! Separately, these lines are not thinned: one per lost row, where the
-//! daemon's sinks thin their shed and after-shutdown refusals (#829).
+//! it (#846, `polled_driver/inbound_rx.rs`). What is still unsaid: a crash —
+//! and with it, since #829, the count of a flood's rows thinned out after its
+//! last 2^k-th line, which only the next burst's first line on the same
+//! writer and channel, or the shutdown's line, says (#817).
+//!
+//! Since #829 a failed insert's lines are **thinned** past a flood, per
+//! writer and channel ([`lost_rows`]), each carrying its place in the burst,
+//! and the shutdown says how many got no line of their own
+//! ([`report_unsaid_lost_rows`]). And the insert no longer decodes an id it
+//! discards (`kastellan_db::audit::insert_without_id`), so "not written" is
+//! no longer said of a row that was written but whose `RETURNING id` failed
+//! to decode.
 
 use serde_json::Value;
 
@@ -39,7 +48,12 @@ use kastellan_db::tasks::{self, Lane};
 
 use super::audit_text::quoted_id;
 use super::bus::ChannelEvents;
+use crate::audit_thinning::BurstTally;
 use crate::worker_stderr::{emit_audit_lost_report, AuditLostWriter};
+
+mod lost_rows;
+use lost_rows::format_unsaid;
+pub(crate) use lost_rows::{LostRows, LOST_ROWS};
 
 /// The `actor` every row [`audit_or_report`] writes is under: the bus's, and
 /// since #814 the boot supervisor's.
@@ -50,18 +64,23 @@ pub struct PgChannelEvents {
     pool: sqlx::PgPool,
     /// How a lost row is said: [`emit_report`], but for a test's recorder.
     report: Reporter,
+    /// Which lost rows get a line of their own (#829): the process-wide
+    /// [`LOST_ROWS`], but for a test's own.
+    lost: &'static LostRows,
 }
 
 impl PgChannelEvents {
     pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool, report: emit_report }
+        let (report, lost) = production_writer();
+        Self { pool, report, lost }
     }
 
-    /// Test builds only: lost rows said to `report`, so a test can read them
-    /// through the trait method production calls.
+    /// Test builds only: lost rows said to `report` and counted apart from
+    /// every other test's, so a test can read them through the trait method
+    /// production calls.
     #[cfg(test)]
     pub(crate) fn with_reporter(pool: sqlx::PgPool, report: Reporter) -> Self {
-        Self { pool, report }
+        Self { pool, report, lost: test_support::own_lost_rows() }
     }
 }
 
@@ -75,7 +94,7 @@ impl ChannelEvents for PgChannelEvents {
     /// fails is reported on `[audit-lost]` (#808), as is one still awaited
     /// when the bus stops (#813).
     async fn audit(&self, action: &str, payload: Value) {
-        audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report).await;
+        audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report, self.lost).await;
     }
 
     /// Work a bus stop abandoned (#832): the same writer and reporter as a
@@ -94,12 +113,40 @@ pub(crate) type Reporter = fn(AuditLostWriter, &str);
 /// The production [`Reporter`]. Whether the stderr fallback was written is
 /// dropped: nothing more can be done for a row the report itself could not
 /// reach anyone about (the daemon's sinks drop it for the same reason).
-pub(crate) fn emit_report(writer: AuditLostWriter, line: &str) {
+fn emit_report(writer: AuditLostWriter, line: &str) {
     emit_audit_lost_report(writer, line);
 }
 
+/// The production reporter and count, for every writer built on
+/// [`audit_or_report`] — the bus's, the boot supervisor's — and for the
+/// shutdown that reads the count: one place names [`LOST_ROWS`], so no writer
+/// can count where the shutdown does not read (#829).
+pub(crate) fn production_writer() -> (Reporter, &'static LostRows) {
+    (emit_report, &LOST_ROWS)
+}
+
+/// Say, once, how many rows every bus writer could not write and gave no line
+/// of their own (#829) — one `[audit-lost]` line per writer and channel that
+/// has any. The daemon calls it after the channels stop, when nothing writes
+/// through these writers any more; called twice, it would say the same rows
+/// again. The count is every burst's, so it includes rows a later burst's
+/// first line already summed up ("the burst before it ended after …").
+pub fn report_unsaid_lost_rows() {
+    let (report, lost) = production_writer();
+    report_unsaid(lost, report);
+}
+
+/// [`report_unsaid_lost_rows`] over `lost`, through `report`.
+fn report_unsaid(lost: &LostRows, report: Reporter) {
+    for unsaid in lost.unsaid() {
+        report(unsaid.writer, &format_unsaid(&unsaid.channel, unsaid.rows));
+    }
+}
+
 /// Insert one `channel`-actor audit row; report it through `report`, as
-/// `writer`'s, if the insert fails or is abandoned mid-await.
+/// `writer`'s, if the insert fails or is abandoned mid-await. A failed
+/// insert counts in `lost` under the row's `channel`, which thins its line
+/// past a flood (#829).
 ///
 /// Two writers share it: the bus ([`AuditLostWriter::Bus`]) and, since #814,
 /// the channel boot supervisor's sink
@@ -126,10 +173,29 @@ pub(crate) async fn audit_or_report(
     action: &str,
     payload: Value,
     report: Reporter,
+    lost: &LostRows,
 ) {
     let about = describe_row(&payload);
-    let insert = kastellan_db::audit::insert(pool, ACTOR, action, payload);
-    settle_or_report(insert, writer, action, &about, report).await;
+    let channel = row_channel_name(&payload).map(str::to_owned);
+    // No `RETURNING id` (#829): the id is discarded here, and decoding it was
+    // the one step of ours that could fail after a row known to be written.
+    let insert = kastellan_db::audit::insert_without_id(pool, ACTOR, action, payload);
+    let row = RowReport { writer, action, about: &about, channel: channel.as_deref(), report, lost };
+    settle_or_report(insert, row).await;
+}
+
+/// Who says a row's loss, and what they name — everything
+/// [`settle_or_report`] needs besides the insert.
+#[derive(Clone, Copy)]
+struct RowReport<'a> {
+    writer: AuditLostWriter,
+    action: &'a str,
+    /// [`describe_row`]'s words.
+    about: &'a str,
+    /// The row's own `channel` field, which its loss is counted under.
+    channel: Option<&'a str>,
+    report: Reporter,
+    lost: &'a LostRows,
 }
 
 /// Await `insert` under a [`PendingInsert`] guard: the one place a row's
@@ -137,28 +203,24 @@ pub(crate) async fn audit_or_report(
 /// outcome — `Ok`, `Err`, abandoned, panicked — without a Postgres; creating
 /// the insert future above runs none of it, so nothing is awaited unguarded.
 async fn settle_or_report<E: std::fmt::Display>(
-    insert: impl std::future::Future<Output = Result<i64, E>>,
-    writer: AuditLostWriter,
-    action: &str,
-    about: &str,
-    report: Reporter,
+    insert: impl std::future::Future<Output = Result<(), E>>,
+    row: RowReport<'_>,
 ) {
     // No `.await` may come before this line: a stop landing there would
     // abandon the row with nothing said.
-    let pending = PendingInsert::new(writer, action, about, report);
+    let pending = PendingInsert::new(row);
     pending.settle(insert.await);
 }
 
 /// A drop guard held across one audit insert. Every way the insert can end
-/// says exactly one thing, or nothing: [`PendingInsert::settle`] reports an
-/// `Err` and stays quiet on `Ok`; dropped unsettled — the future awaiting
-/// the insert was dropped (an aborted task, a runtime shutting down) — it
-/// reports the row as abandoned (#813).
+/// says at most one thing: [`PendingInsert::settle`] reports an `Err` —
+/// unless its burst has passed the thinning, when it is only counted (#829)
+/// — and stays quiet on `Ok`; dropped unsettled — the future awaiting the
+/// insert was dropped (an aborted task, a runtime shutting down) — it
+/// reports the row as abandoned (#813), unthinned: that happens once per
+/// pump a stop finds parked here, never once per inbound message.
 struct PendingInsert<'a> {
-    writer: AuditLostWriter,
-    action: &'a str,
-    about: &'a str,
-    report: Reporter,
+    row: RowReport<'a>,
     /// Set by [`PendingInsert::settle`]; a guard dropped with it unset says
     /// the row was abandoned.
     settled: bool,
@@ -166,15 +228,20 @@ struct PendingInsert<'a> {
 
 impl<'a> PendingInsert<'a> {
     /// Arm the guard. Construct it directly before awaiting the insert.
-    fn new(writer: AuditLostWriter, action: &'a str, about: &'a str, report: Reporter) -> Self {
-        Self { writer, action, about, report, settled: false }
+    fn new(row: RowReport<'a>) -> Self {
+        Self { row, settled: false }
     }
 
     /// The insert returned: disarm, and report it if it failed.
-    fn settle<E: std::fmt::Display>(mut self, result: Result<i64, E>) {
+    fn settle<E: std::fmt::Display>(mut self, result: Result<(), E>) {
         self.settled = true;
         if let Err(e) = result {
-            (self.report)(self.writer, &format_row_lost(self.action, self.about, &e));
+            let row = self.row;
+            // `lose` releases its lock before the report, which can block.
+            let lost = row.lost.lose(row.writer, row.channel);
+            if lost.report {
+                (row.report)(row.writer, &format_row_lost(row.action, row.about, &e, lost.tally));
+            }
         }
     }
 }
@@ -185,7 +252,8 @@ impl Drop for PendingInsert<'_> {
             // Only an unwinding build gets here mid-panic (release is
             // `panic = "abort"`), but there a panic is not a stop.
             let cause = if std::thread::panicking() { Abandoned::Panicked } else { Abandoned::Stopped };
-            (self.report)(self.writer, &format_row_abandoned(self.action, self.about, cause));
+            let row = self.row;
+            (row.report)(row.writer, &format_row_abandoned(row.action, row.about, cause));
         }
     }
 }
@@ -211,6 +279,15 @@ const WHY_FIELDS: [&str; 2] = ["field", "reason"];
 /// `tasks` table or an ask (`ask.resolved` has no channel or peer).
 const ID_FIELDS: [&str; 2] = ["task_id", "ask_id"];
 
+/// Pure: the channel a row's loss is counted under (#829) — its own
+/// `channel` field, a string spelled by the core's own code (the bus's
+/// registered channel ids, the boot supervisor's channel name), never by a
+/// peer. `None` for a row with no such field
+/// (`ask.resolved`, `channel.reply_unroutable`).
+fn row_channel_name(payload: &Value) -> Option<&str> {
+    payload.get("channel").and_then(Value::as_str)
+}
+
 /// Pure: what a `channel.*` (or `ask.resolved`) row is about, for its
 /// lost-row line — ` for channel "x", peer "y", task_id 7, reason "z"`,
 /// each part left out when the payload has no such field of that type, and
@@ -235,9 +312,11 @@ fn describe_row(payload: &Value) -> String {
 }
 
 /// Pure: the `[audit-lost]` report for a `channel.*` row that was not written
-/// — the action, what it was about ([`describe_row`]), and why.
-fn format_row_lost(action: &str, about: &str, why: &dyn std::fmt::Display) -> String {
-    format!("{action} row{about} not written: {why}")
+/// — the action, what it was about ([`describe_row`]), why, and where it
+/// stands in its writer's and channel's burst of lost rows (#829), so a
+/// thinned flood's lines still say how big it is.
+fn format_row_lost(action: &str, about: &str, why: &dyn std::fmt::Display, tally: BurstTally) -> String {
+    format!("{action} row{about} not written: {why}; {tally}")
 }
 
 /// Pure: the `[audit-lost]` report for a row whose insert was abandoned
@@ -257,6 +336,15 @@ fn format_row_abandoned(action: &str, about: &str, cause: Abandoned) -> String {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::time::Duration;
+
+    use super::LostRows;
+
+    /// A lost-row count of the test's own, so no other test's lost rows can
+    /// thin its lines or add to its counts. Leaked: the writers hold it as
+    /// `'static`, as production holds [`super::LOST_ROWS`].
+    pub(crate) fn own_lost_rows() -> &'static LostRows {
+        Box::leak(Box::new(LostRows::new()))
+    }
 
     /// A lazy pool aimed at a port nothing listens on, so every insert fails.
     /// sqlx retries a refused connect until its acquire timeout, kept short

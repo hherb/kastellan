@@ -37,7 +37,7 @@ use sqlx::PgPool;
 
 use super::{BootAudit, BootAuditSink};
 use crate::channel::actions;
-use crate::channel::pg_events::{audit_or_report, emit_report, Reporter};
+use crate::channel::pg_events::{audit_or_report, production_writer, LostRows, Reporter};
 use crate::worker_stderr::AuditLostWriter;
 
 /// Build the sink for one channel. `channel` is captured, so every row carries
@@ -46,12 +46,14 @@ use crate::worker_stderr::AuditLostWriter;
 /// Payloads carry the channel name, counters and the (already capped) cause —
 /// never message content, and never anything a peer supplied.
 pub fn pg_boot_audit_sink(pool: PgPool, channel: &str) -> BootAuditSink {
-    sink_reporting_to(pool, channel, emit_report)
+    let (report, lost) = production_writer();
+    sink_reporting_to(pool, channel, report, lost)
 }
 
-/// [`pg_boot_audit_sink`], with a lost row said through `report` — the
-/// production emitter there, a recorder in a test.
-fn sink_reporting_to(pool: PgPool, channel: &str, report: Reporter) -> BootAuditSink {
+/// [`pg_boot_audit_sink`], with a lost row said through `report` and counted
+/// in `lost` (#829, which thins its line past a flood) — the production
+/// emitter and count there, a test's own in a test.
+fn sink_reporting_to(pool: PgPool, channel: &str, report: Reporter, lost: &'static LostRows) -> BootAuditSink {
     let channel = channel.to_string();
     Box::new(move |event: BootAudit| {
         let pool = pool.clone();
@@ -61,7 +63,7 @@ fn sink_reporting_to(pool: PgPool, channel: &str, report: Reporter) -> BootAudit
             // Non-fatal, as before #814 — but a row that is not written is
             // now said on `[audit-lost]` at ERROR, not a WARN that
             // `RUST_LOG=error` hides.
-            audit_or_report(&pool, AuditLostWriter::ChannelSupervisor, action, payload, report)
+            audit_or_report(&pool, AuditLostWriter::ChannelSupervisor, action, payload, report, lost)
                 .await;
         }) as BoxFuture<'static, ()>
     })
@@ -98,7 +100,7 @@ fn row_for(channel: &str, event: BootAudit) -> (&'static str, serde_json::Value)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::pg_events::test_support::refused_pool;
+    use crate::channel::pg_events::test_support::{own_lost_rows, refused_pool};
     use crate::worker_stderr::AuditLostWriter;
     use std::sync::Mutex;
 
@@ -145,7 +147,7 @@ mod tests {
     /// `warn!`-only arm fails here.
     #[tokio::test]
     async fn a_failed_insert_is_reported_on_the_marker_without_its_cause() {
-        let sink = sink_reporting_to(refused_pool(), "matrix", record);
+        let sink = sink_reporting_to(refused_pool(), "matrix", record, own_lost_rows());
         sink(BootAudit::Died { ran_ms: 5, retry_in_ms: 10 }).await;
         sink(BootAudit::Failed {
             attempt: 1,
