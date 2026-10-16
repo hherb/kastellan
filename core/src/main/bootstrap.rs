@@ -2,12 +2,13 @@
 //!
 //! These are the cohesive infrastructure pieces `async fn main` (in the parent
 //! `main.rs`) delegates to during startup and graceful shutdown: the database
-//! probe, the audit-log JSONL mirror, the shutdown-signal wait, the two
-//! best-effort startup audit-row writers, and the two pure env-parse helpers.
-//! Lifted out of `main.rs` to keep the binary entrypoint under the 500-LOC cap
-//! (Item 9b); every function's behaviour is byte-identical to its former inline
-//! form — only the visibility widened to `pub(crate)` so the parent can call
-//! across the module boundary.
+//! probe, the audit-log JSONL mirror, the two-step shutdown signals (install,
+//! then wait — #810), the two best-effort startup audit-row writers, and the
+//! two pure env-parse helpers. Lifted out of `main.rs` to keep the binary
+//! entrypoint under the 500-LOC cap (Item 9b), visibility widened to
+//! `pub(crate)` so the parent can call across the module boundary. The
+//! shutdown-signal wait has since been split in two (#810); see
+//! [`ShutdownSignals`].
 //!
 //! The unit tests for the pure parse helpers live in the sibling
 //! `main/bootstrap_tests.rs` (`#[path]`-included below); `super::` there
@@ -17,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use kastellan_db::conn::ConnectSpec;
 use kastellan_db::default_data_dir;
 use sqlx::PgPool;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{signal, Signal, SignalKind};
 use tracing::info;
 
 use kastellan_core::audit_mirror::{self, MirrorHandle};
@@ -114,22 +115,63 @@ pub(crate) async fn start_audit_mirror(pool: PgPool) -> Option<MirrorHandle> {
     }
 }
 
-/// Block until the supervisor (or an interactive operator) tells us
-/// to stop. systemd's `systemctl --user stop` sends SIGTERM by default;
-/// macOS launchd's `bootout` sends SIGTERM too. SIGINT is the Ctrl-C
-/// path for `cargo run` in dev. Either signal returns Ok and lets
-/// `main` log a clean shutdown line and exit 0 — exactly what
-/// `Restart=on-failure` (systemd's translation of `keep_alive=true`)
-/// treats as success, so a stop-induced exit doesn't trip the restart
-/// policy and trigger an unwanted respawn.
-pub(crate) async fn wait_for_shutdown() -> Result<()> {
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
-    tokio::select! {
-        _ = sigterm.recv() => {}
-        _ = sigint.recv() => {}
+/// The daemon's stop signals, registered but not yet awaited.
+///
+/// systemd's `systemctl --user stop` sends SIGTERM by default; macOS
+/// launchd's `bootout` sends SIGTERM too. SIGINT is the Ctrl-C path for
+/// `cargo run` in dev.
+///
+/// Shutdown is split into two steps (#810) so that the step which can FAIL
+/// runs before anything is started that the graceful shutdown must stop:
+///
+/// 1. [`install_shutdown_signals`] registers the handlers. Registration can
+///    fail, so `main` does it BEFORE it spawns the scheduler and the channel
+///    supervisors. A failure there aborts start-up while nothing is yet
+///    writing audit rows in the background, so nothing can be lost.
+/// 2. [`ShutdownSignals::wait`] awaits them, and cannot fail. So once the
+///    channels are running, `main` always reaches the audit drain, the ledger
+///    close and the `[audit-lost]` report. (Before #810 the registration ran
+///    here, after the channels had started, and a failure returned straight
+///    out of `main`: the runtime drop then cancelled every pending audit row
+///    with no line at all.)
+///
+/// A signal delivered between the two steps is not lost: once registered,
+/// tokio's handler records it, and `wait` returns at once.
+pub(crate) struct ShutdownSignals {
+    sigterm: Signal,
+    sigint: Signal,
+}
+
+/// Register the SIGTERM and SIGINT handlers — step 1 of [`ShutdownSignals`].
+///
+/// From this call on, the process no longer dies on SIGTERM/SIGINT; the
+/// signal is held for [`ShutdownSignals::wait`] instead.
+pub(crate) fn install_shutdown_signals() -> Result<ShutdownSignals> {
+    let sigterm = signal(SignalKind::terminate()).context("registering the SIGTERM handler")?;
+    let sigint = signal(SignalKind::interrupt()).context("registering the SIGINT handler")?;
+    Ok(ShutdownSignals { sigterm, sigint })
+}
+
+impl ShutdownSignals {
+    /// Block until the supervisor (or an interactive operator) tells us to
+    /// stop — step 2 of [`ShutdownSignals`].
+    ///
+    /// Returning lets `main` log a clean shutdown line and exit 0 — exactly
+    /// what `Restart=on-failure` (systemd's translation of `keep_alive=true`)
+    /// treats as success, so a stop-induced exit doesn't trip the restart
+    /// policy and trigger an unwanted respawn.
+    ///
+    /// Deliberately returns `()`, not `Result`: there must be no `?` between
+    /// the channels starting and the audit drain in `main`.
+    pub(crate) async fn wait(mut self) {
+        // `recv` yields `None` only once the signal driver is gone, which
+        // happens when the runtime shuts down — then there is nothing left to
+        // wait for either way, so `None` also ends the wait.
+        tokio::select! {
+            _ = self.sigterm.recv() => {}
+            _ = self.sigint.recv() => {}
+        }
     }
-    Ok(())
 }
 
 /// Best-effort `registry.loaded` audit row. Written after the tool registry is
