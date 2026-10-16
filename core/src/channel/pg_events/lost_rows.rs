@@ -14,13 +14,15 @@
 //! channel (#807): one channel's flood must not thin the other's lines, and
 //! the bus and the boot supervisor are separate writers. The channel is read
 //! from the row's own `channel` field, because one [`super::PgChannelEvents`]
-//! serves every row its bus writes. A row with no `channel` (`ask.resolved`)
+//! serves every row its bus writes. A row with no `channel` (`ask.resolved`,
+//! `channel.reply_unroutable`)
 //! is counted under [`RowChannel::Unnamed`].
 //!
 //! **One process-wide count** ([`LOST_ROWS`]): a channel's bus is rebuilt on
 //! every bring-up, so a count held by the bus would start afresh after each
 //! restart — and the rows a restart's count had left unsaid would be said by
-//! no one. The shutdown says what is left ([`super::report_unsaid_lost_rows`]).
+//! no one. The shutdown says what is left ([`super::report_unsaid_lost_rows`]);
+//! a crash loses it, as it loses the daemon's sinks' (#817).
 //!
 //! What is **not** thinned: a row abandoned mid-insert by a stop (#813) and
 //! work a stop abandoned (#832). Both are said once per stop, per pump or per
@@ -43,7 +45,8 @@ pub(crate) const MAX_NAMED_CHANNELS: usize = 16;
 pub(crate) enum RowChannel {
     /// The row's own `channel` field.
     Named(String),
-    /// The row has no `channel` field (`ask.resolved`).
+    /// The row has no `channel` field (`ask.resolved`,
+    /// `channel.reply_unroutable`).
     Unnamed,
     /// A channel past [`MAX_NAMED_CHANNELS`] for this writer.
     Other,

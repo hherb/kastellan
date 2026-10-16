@@ -18,6 +18,10 @@
 //! of the channel bus's own rows, which it awaits (`channel::pg_events` — its
 //! module doc says what that writer still misses), and, since #814, of the
 //! channel boot supervisor's `channel.started`/`boot_failed`/`died` rows.
+//! "Sees" means *line or count*: past a flood, every writer's lines are
+//! thinned — the daemon's sinks' since #798, the bus's and the boot
+//! supervisor's since #829 — and the rows thinned out are counted, the
+//! count said on this marker at a graceful shutdown.
 
 use super::delivery::warn_and_fall_back;
 use super::shared::format_stderr_fallback;

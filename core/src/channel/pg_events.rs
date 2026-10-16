@@ -29,7 +29,9 @@
 //! reply claim whose outcome cannot be known (`bus_deliver`). Inbound messages
 //! the bus had not yet read are not this writer's: a polled channel's own
 //! receiver counts them into a `channel.inbound_dropped` row as the stop drops
-//! it (#846, `polled_driver/inbound_rx.rs`). What is still unsaid: a crash.
+//! it (#846, `polled_driver/inbound_rx.rs`). What is still unsaid: a crash —
+//! and with it, since #829, the count of a flood's rows thinned out after its
+//! last 2^k-th line, which only the shutdown's line says.
 //!
 //! Since #829 a failed insert's lines are **thinned** past a flood, per
 //! writer and channel ([`lost_rows`]), each carrying its place in the burst,
@@ -162,7 +164,7 @@ pub(crate) async fn audit_or_report(
     lost: &LostRows,
 ) {
     let about = describe_row(&payload);
-    let channel = payload.get("channel").and_then(Value::as_str).map(str::to_owned);
+    let channel = row_channel_name(&payload).map(str::to_owned);
     // No `RETURNING id` (#829): the id is discarded here, and decoding it was
     // the one way an insert could fail after its row was written.
     let insert = kastellan_db::audit::insert_without_id(pool, ACTOR, action, payload);
@@ -264,6 +266,14 @@ const WHY_FIELDS: [&str; 2] = ["field", "reason"];
 /// The integer fields it names: the core's own ids, to match the loss to the
 /// `tasks` table or an ask (`ask.resolved` has no channel or peer).
 const ID_FIELDS: [&str; 2] = ["task_id", "ask_id"];
+
+/// Pure: the channel a row's loss is counted under (#829) — its own
+/// `channel` field, a string the bus sets from its own registered channel
+/// ids, never from a peer. `None` for a row with no such field
+/// (`ask.resolved`, `channel.reply_unroutable`).
+fn row_channel_name(payload: &Value) -> Option<&str> {
+    payload.get("channel").and_then(Value::as_str)
+}
 
 /// Pure: what a `channel.*` (or `ask.resolved`) row is about, for its
 /// lost-row line — ` for channel "x", peer "y", task_id 7, reason "z"`,

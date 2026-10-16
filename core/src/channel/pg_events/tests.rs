@@ -303,3 +303,22 @@ fn a_shutdown_with_every_loss_said_says_nothing_more() {
     report_unsaid(lost, record_quiet);
     assert!(QUIET.lock().unwrap().is_empty());
 }
+
+/// #829: a row's loss is counted under its own `channel` field — the key
+/// that keeps one channel's flood from thinning another's lines (#807).
+#[test]
+fn a_rows_loss_is_counted_under_its_own_channel() {
+    assert_eq!(row_channel_name(&serde_json::json!({"channel": "email", "peer": "a"})), Some("email"));
+    assert_eq!(row_channel_name(&serde_json::json!({"ask_id": 3, "task_id": 9})), None);
+    assert_eq!(row_channel_name(&serde_json::json!({"channel": 7})), None, "only a string names one");
+}
+
+/// #829: the production writer counts in the one count the shutdown reads —
+/// a writer with a count of its own would leave its flood's tail unsaid.
+#[tokio::test]
+async fn the_production_writer_counts_in_the_count_the_shutdown_reads() {
+    let events = PgChannelEvents::new(test_support::refused_pool());
+    assert!(std::ptr::eq(events.lost, &LOST_ROWS));
+    let test_events = PgChannelEvents::with_reporter(test_support::refused_pool(), record_quiet);
+    assert!(!std::ptr::eq(test_events.lost, &LOST_ROWS), "POSITIVE CONTROL: a test's is its own");
+}

@@ -52,7 +52,7 @@
 //! What still goes unreported: a row lost to a crash (SIGKILL, OOM, a panic
 //! under `panic = "abort"`), because nothing runs after one — and with it the
 //! count of a burst's rows after its last 2^k-th line, which only the next
-//! burst's first line or a graceful shutdown says (`audit_sink_thinning.rs`,
+//! burst's first line or a graceful shutdown says (`kastellan_core::audit_thinning`,
 //! #817); a row refused, past the thinning, during a pool close the service
 //! manager's SIGKILL ends; and one refused between the last line and the process's exit. That last
 //! gap is usually an instant, but not always: dropping the runtime waits for
