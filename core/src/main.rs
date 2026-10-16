@@ -767,6 +767,15 @@ async fn main() -> Result<()> {
     // its bus underneath. See `channel::outbox`.
     let outbox = std::sync::Arc::new(kastellan_core::channel::outbox::ChannelOutbox::new());
 
+    // Register the stop signals NOW, before the scheduler and the channels
+    // start (#810). Registration is the one shutdown step that can fail; done
+    // here, a failure aborts start-up while nothing yet writes audit rows in
+    // the background (the scheduler and the channel drivers are the writers
+    // the drain waits for). The wait below cannot fail, so no `?` from here on
+    // can skip the audit drain. `bootstrap::tests` pins this ordering by
+    // reading this file (`main_installs_the_signals_before_anything_audits`).
+    let shutdown_signals = bootstrap::install_shutdown_signals()?;
+
     let scheduler = kastellan_core::scheduler::spawn_scheduler(
         pool.clone(),
         formulator,
@@ -806,7 +815,7 @@ async fn main() -> Result<()> {
     let email =
         email_boot::supervise_email_channel(&pool, &sandboxes, &force_routing, outbox.clone());
 
-    bootstrap::wait_for_shutdown().await?;
+    shutdown_signals.wait().await;
 
     // Stop the channel supervisors first: each stops its bus if it started one,
     // so no further inbound messages are enqueued and each worker's stdin

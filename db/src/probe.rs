@@ -2,7 +2,8 @@
 //! bring-up `audit_log` row.
 //!
 //! This is the function `core/src/main.rs` calls just after
-//! `tracing_subscriber::init` and before `wait_for_shutdown`. The
+//! `tracing_subscriber::init`, long before it registers the stop signals
+//! (`install_shutdown_signals`) and starts the scheduler. The
 //! contract is fail-closed: any error short-circuits the daemon
 //! startup and propagates `?` all the way to a non-zero exit, so
 //! the supervisor (`Restart=on-failure` on systemd, `KeepAlive=true`
