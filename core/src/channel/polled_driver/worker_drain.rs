@@ -29,8 +29,13 @@
 //!   shutdown bound, only to be answered by a process that never held
 //!   anything the driver missed;
 //! - the worker **could not be asked**: the call failed (it died on the call,
-//!   or a stale binary without the method answers METHOD_NOT_FOUND), or it
-//!   answered something that did not decode.
+//!   or a stale binary without the method answers METHOD_NOT_FOUND).
+//!
+//! One more has no count either, but is not like those: the worker
+//! **answered something that did not decode** (#853). That is the same event
+//! as an undecodable poll result (#836) — a worker bug, or a compromised
+//! worker — so it is said the same way, at ERROR, and recorded through the
+//! same hook as a `channel.inbound_undecodable` row whose part is `drain`.
 //!
 //! The call has no timeout of its own, like every other call the driver makes
 //! (`PersistentHandle::call`); Matrix's worker bounds its side at
@@ -39,7 +44,14 @@
 //! for a live worker only, which is why a down one is not asked.
 
 use super::inbound_drop::report_inbound_dropped;
-use super::{InboundDropStage, InboundDroppedAudit, PolledWorkerSpec, WorkerCalls, WorkerDrainSpec};
+use super::undecodable::{
+    record_lost, recorded_as, UndecodablePart, DECODE_ERROR_CAP_CHARS, WHY_UNDECODABLE,
+};
+use super::{
+    InboundDropStage, InboundDroppedAudit, InboundUndecodableAudit, PolledWorkerSpec, WorkerCalls,
+    WorkerDrainSpec,
+};
+use crate::channel::audit_text::cap_chars;
 use crate::channel::actions;
 use crate::channel::ChannelId;
 use crate::worker_stderr::{emit_worker_refusal_report, RefusalSeverity};
@@ -67,13 +79,26 @@ pub(super) fn format_drain_skipped_down_report(method: &str) -> String {
     )
 }
 
-/// Pure: the line for a drain that got no usable answer.
+/// Pure: the line for a drain whose call failed: the worker could not be
+/// asked.
 pub(super) fn format_drain_failed_report(method: &str, e: &anyhow::Error) -> String {
     format!(
         "could not ask the worker how many inbound messages it still held ({method}: {e:#}); \
          any it held, received but not yet polled, are lost uncounted; NOT recorded as {}: \
          there is no count to record",
         actions::INBOUND_DROPPED,
+    )
+}
+
+/// Pure: the line for a drain answer that did not decode (#853): the decode
+/// error, capped like a poll's, and whether the loss is recorded.
+pub(super) fn format_drain_undecodable_report(method: &str, error: &str, recorded: bool) -> String {
+    let error = cap_chars(error, DECODE_ERROR_CAP_CHARS);
+    format!(
+        "the worker's answer to {method} did not decode ({error}), so how many inbound messages \
+         it still held is unknown; any it held, received but not yet polled, are lost uncounted. \
+         {WHY_UNDECODABLE} {}",
+        recorded_as(recorded),
     )
 }
 
@@ -95,25 +120,38 @@ pub(super) fn check_drain(spec: &PolledWorkerSpec) -> anyhow::Result<()> {
 /// Ask the worker what it still held and report it. Called once, as the
 /// driver exits, for a spec with a drain method. `worker_down` is whether the
 /// driver's last call found the worker down; then it is not asked (see the
-/// module docs).
+/// module docs). `audit` is the driver's inbound-dropped hook (for a count)
+/// and its inbound-undecodable one (for an answer that did not decode).
 pub(super) fn drain_worker_on_exit(
     calls: &dyn WorkerCalls,
     spec: &PolledWorkerSpec,
     drain: WorkerDrainSpec,
     worker_down: bool,
     cid: &ChannelId,
-    audit: Option<&InboundDroppedAudit>,
+    audit: (Option<&InboundDroppedAudit>, Option<&InboundUndecodableAudit>),
 ) {
+    let (audit, undecodable) = audit;
     if worker_down {
         let report = format_drain_skipped_down_report(drain.method);
         emit_worker_refusal_report(spec.label, &report, RefusalSeverity::Warn);
         return;
     }
-    let held = match calls.call(drain.method, serde_json::json!({})).and_then(drain.parse) {
-        Ok(held) => held,
+    // Two arms, not one `and_then`: a worker that could not be asked is a
+    // WARN, one that answered garbage is the #836 event (#853).
+    let answer = match calls.call(drain.method, serde_json::json!({})) {
+        Ok(answer) => answer,
         Err(e) => {
             let report = format_drain_failed_report(drain.method, &e);
             emit_worker_refusal_report(spec.label, &report, RefusalSeverity::Warn);
+            return;
+        }
+    };
+    let held = match (drain.parse)(answer) {
+        Ok(held) => held,
+        Err(e) => {
+            let report = format_drain_undecodable_report(drain.method, &e.to_string(), undecodable.is_some());
+            emit_worker_refusal_report(spec.label, &report, RefusalSeverity::Error);
+            record_lost(spec.label, cid, UndecodablePart::Drain, undecodable);
             return;
         }
     };

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use super::*;
 use crate::channel::matrix::MatrixChannel;
 use crate::channel::polled_driver::{
-    DriverAudit, InboundDropStage, InboundDropped, PolledEvent, PolledWorkerDriver,
+    DriverAudit, InboundDropStage, InboundDropped, PolledBatch, PolledEvent, PolledWorkerDriver,
     PolledWorkerSpec, WorkerCalls, REFUSAL_BACKOFF, REPLY_GIVE_UP,
 };
 
@@ -34,9 +34,9 @@ impl WorkerCalls for ThreeThenNothing {
     }
 }
 
-fn parse(v: Value) -> anyhow::Result<Vec<PolledEvent>> {
+fn parse(v: Value) -> anyhow::Result<PolledBatch> {
     let events = v["events"].as_array().cloned().unwrap_or_default();
-    Ok(events
+    Ok(PolledBatch::whole(events
         .into_iter()
         .map(|e| PolledEvent {
             peer: e["peer"].as_str().unwrap_or_default().into(),
@@ -45,7 +45,7 @@ fn parse(v: Value) -> anyhow::Result<Vec<PolledEvent>> {
             evidence: None,
             ack_token: None,
         })
-        .collect())
+        .collect()))
 }
 
 fn encode(_m: &OutgoingMessage) -> Value {

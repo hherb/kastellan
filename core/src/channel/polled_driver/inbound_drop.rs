@@ -63,9 +63,10 @@
 //!
 //! A quiet `audit_log` after a restart is still not proof that nothing was
 //! lost (a message the bus *had* read and was still handling is said on
-//! `[audit-lost]` since #832). A batch that did not decode is lost on a
-//! channel that does not redeliver with no count to give, so it has its own
-//! row, `channel.inbound_undecodable` (#836, `undecodable.rs`). Outside the
+//! `[audit-lost]` since #832). What a channel that does not redeliver lost
+//! because the worker's answer did not decode — a whole poll result, some of
+//! its events, or the drain answer — has its own row,
+//! `channel.inbound_undecodable` (#836, #852, #853, `undecodable.rs`). Outside the
 //! three stages, said but with no row, because there is no count to give:
 //!
 //! - a worker stop that cut one upstream batch short (Matrix: a sync response
@@ -80,7 +81,7 @@
 use std::num::NonZeroUsize;
 
 use super::audit::{record_inbound_dropped, InboundDroppedAudit, InboundUndecodableAudit};
-use super::undecodable::report_lost_undecodable;
+use super::undecodable::{report_lost_undecodable, LostPart};
 use super::{ParsePoll, PolledWorkerSpec};
 use crate::channel::actions;
 use crate::channel::undelivered::observed_at_json;
@@ -262,13 +263,18 @@ pub(super) fn on_bus_closed_during_poll(
     }
     tracing::info!(label = spec.label, "inbound receiver closed during a poll; polled driver exiting");
     // Decoded only to count it: nothing in it is used. `acks: false` — an
-    // ack channel returned above.
+    // ack channel returned above. What did not decode is said and recorded as
+    // while the bus is up, with no next poll (#836, #852).
     match parse_poll(v) {
-        Ok(events) => {
-            report_inbound_dropped(spec.label, cid, InboundDropStage::Polled, events.len(), false, audit)
+        Ok(batch) => {
+            let decoded = batch.events.len();
+            report_inbound_dropped(spec.label, cid, InboundDropStage::Polled, decoded, false, audit);
+            if let Some(u) = batch.undecodable {
+                let part = LostPart::events(&u, decoded);
+                report_lost_undecodable(spec, cid, &u.first_error, part, None, undecodable);
+            }
         }
-        // Said and recorded as while the bus is up, with no next poll (#836).
-        Err(e) => report_lost_undecodable(spec, cid, &e.to_string(), None, undecodable),
+        Err(e) => report_lost_undecodable(spec, cid, &e.to_string(), LostPart::Batch, None, undecodable),
     }
 }
 

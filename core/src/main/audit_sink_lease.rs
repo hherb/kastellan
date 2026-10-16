@@ -43,7 +43,8 @@ pub(crate) enum SinkKind {
     /// reply still queued becomes a `channel.reply_undelivered` row, reason
     /// `driver_exit`, and an inbound batch the closed bus never took becomes
     /// a `channel.inbound_dropped` row (#826) — or, when it did not decode, a
-    /// `channel.inbound_undecodable` row (#836). Stuck past the drain bound (in a worker call,
+    /// `channel.inbound_undecodable` row (#836, #852), as does a drain answer
+    /// that did not decode (#853). Stuck past the drain bound (in a worker call,
     /// or flushing a long queue) it never gets there, so those replies are
     /// **unaudited**: a possible loss, and reported as one.
     AuditsOnExit,
@@ -61,7 +62,7 @@ pub(crate) enum SinkKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SinkChannel {
     /// `channel.reply_undelivered`, `channel.inbound_dropped` (#826) and
-    /// `channel.inbound_undecodable` (#836), from the Matrix driver — and
+    /// `channel.inbound_undecodable` (#836, #852, #853), from the Matrix driver — and
     /// `channel.inbound_dropped`, at the buffered stage, from its bus-side
     /// receiver (#846).
     Matrix,

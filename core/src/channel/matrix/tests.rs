@@ -12,12 +12,60 @@ fn parse_matrix_poll_decodes_wire_events() {
     let v = serde_json::json!({"events": [
         {"peer": "@me:srv", "conversation": "!room:srv", "body": "hi"}
     ]});
-    let evs = parse_matrix_poll(v).unwrap();
+    let batch = parse_matrix_poll(v).unwrap();
+    assert_eq!(batch.undecodable, None, "every event decoded");
+    let evs = batch.events;
     assert_eq!(evs.len(), 1);
     assert_eq!(evs[0].peer, "@me:srv");
     assert_eq!(evs[0].conversation, "!room:srv");
     assert_eq!(evs[0].body, "hi");
     assert!(parse_matrix_poll(serde_json::json!("garbage")).is_err());
+}
+
+/// #852: Matrix does not redeliver, so one event the core cannot read must
+/// not take its batch with it. The good events come back in order; the bad
+/// ones are counted, with the first one's error.
+#[test]
+fn parse_matrix_poll_decodes_events_one_at_a_time() {
+    let ok = |body: &str| serde_json::json!({"peer": "@me:srv", "conversation": "!room:srv", "body": body});
+    let v = serde_json::json!({"events": [
+        ok("first"),
+        {"peer": 42, "conversation": "!room:srv", "body": "bad peer"},
+        ok("second"),
+        {"conversation": "!room:srv"},
+        ok("third"),
+    ]});
+    let batch = parse_matrix_poll(v).unwrap();
+    let bodies: Vec<&str> = batch.events.iter().map(|e| e.body.as_str()).collect();
+    assert_eq!(bodies, ["first", "second", "third"]);
+    let u = batch.undecodable.expect("two did not decode");
+    assert_eq!(u.count.get(), 2);
+    // The first bad one, by its index in the result — not the last.
+    assert!(u.first_error.starts_with("decode poll event at index 1: invalid type: integer `42`"), "{}", u.first_error);
+}
+
+/// #852: only a result whose envelope does not decode — no `events` array —
+/// fails as a whole.
+#[test]
+fn parse_matrix_poll_fails_whole_only_on_its_envelope() {
+    for v in [serde_json::json!({}), serde_json::json!({"events": "nope"}), serde_json::json!([1])] {
+        let e = parse_matrix_poll(v.clone()).expect_err("no events array");
+        assert!(e.to_string().starts_with("decode poll result:"), "{v}: {e}");
+    }
+    let empty = parse_matrix_poll(serde_json::json!({"events": []})).unwrap();
+    assert_eq!(empty, crate::channel::polled_driver::PolledBatch::whole(vec![]), "POSITIVE CONTROL");
+}
+
+/// #852: the decoder reads its own envelope, not the worker's `PollResult`
+/// type, so the two must not drift: what the worker serializes decodes whole.
+#[test]
+fn parse_matrix_poll_reads_what_the_worker_writes() {
+    use kastellan_matrix_wire::{Event, PollResult};
+    let ev = |body: &str| Event { conversation: "!r:srv".into(), peer: "@p:srv".into(), body: body.into() };
+    let wire = PollResult { events: vec![ev("a"), ev("b")] };
+    let batch = parse_matrix_poll(serde_json::to_value(wire).unwrap()).unwrap();
+    assert_eq!(batch.undecodable, None);
+    assert_eq!(batch.events.iter().map(|e| e.body.as_str()).collect::<Vec<_>>(), ["a", "b"]);
 }
 
 /// #835: `parse_matrix_drain` maps the worker's wire type onto `WorkerHeld`
@@ -269,13 +317,13 @@ fn vm_policy_has_persistent_store_at_data_and_microvm_env() {
 /// nothing else failing.
 #[test]
 fn matrix_driver_audit_hands_every_hook_to_the_driver() {
-    use crate::channel::polled_driver::{InboundDropped, UndecodableBatch};
+    use crate::channel::polled_driver::{InboundDropped, InboundUndecodable};
     use crate::channel::UndeliveredReply;
     let inbound: InboundDroppedAudit = Arc::new(|_: InboundDropped<'_>| {});
     let audit = MatrixDriverAudit {
         reply_undelivered: Some(Box::new(|_: UndeliveredReply<'_>| {})),
         inbound_dropped: Some(inbound.clone()),
-        inbound_undecodable: Some(Box::new(|_: UndecodableBatch<'_>| {})),
+        inbound_undecodable: Some(Box::new(|_: InboundUndecodable<'_>| {})),
     }
     .into_driver_audit();
     assert!(audit.reply_undelivered.is_some(), "the reply hook reaches the driver");

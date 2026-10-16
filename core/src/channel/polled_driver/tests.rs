@@ -118,23 +118,30 @@ fn fake() -> (Arc<FakeState>, Box<dyn WorkerCalls>) {
     (st.clone(), Box::new(FakeCalls(st)))
 }
 
-fn test_parse(v: Value) -> anyhow::Result<Vec<PolledEvent>> {
-    let evs = v["events"].as_array().cloned().unwrap_or_default();
-    evs.into_iter()
-        .map(|e| {
-            Ok(PolledEvent {
-                peer: e["peer"].as_str().ok_or_else(|| anyhow::anyhow!("bad event"))?.into(),
-                conversation: e["conversation"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("bad event"))?
-                    .into(),
-                body: e["body"].as_str().ok_or_else(|| anyhow::anyhow!("bad event"))?.into(),
-                evidence: None,
-                ack_token: e["ack_token"].as_str().map(String::from),
-            })
-        })
-        .collect()
+/// The tests' decoder: decodes `v["events"]` whole, as email's does — one bad
+/// event fails the batch (unlike email's, a missing `events` array is an empty
+/// batch). `tests/undecodable_events.rs` has the per-event one.
+fn test_parse(v: Value) -> anyhow::Result<PolledBatch> {
+    test_parse_events(v).map(PolledBatch::whole)
 }
+
+/// One event of `test_parse`'s shape: `peer`, `conversation` and `body` must
+/// be strings ("bad event" otherwise).
+fn test_parse_event(e: &Value) -> anyhow::Result<PolledEvent> {
+    Ok(PolledEvent {
+        peer: e["peer"].as_str().ok_or_else(|| anyhow::anyhow!("bad event"))?.into(),
+        conversation: e["conversation"].as_str().ok_or_else(|| anyhow::anyhow!("bad event"))?.into(),
+        body: e["body"].as_str().ok_or_else(|| anyhow::anyhow!("bad event"))?.into(),
+        evidence: None,
+        ack_token: e["ack_token"].as_str().map(String::from),
+    })
+}
+
+fn test_parse_events(v: Value) -> anyhow::Result<Vec<PolledEvent>> {
+    let evs = v["events"].as_array().cloned().unwrap_or_default();
+    evs.iter().map(test_parse_event).collect()
+}
+
 fn test_encode(m: &OutgoingMessage) -> Value {
     json!({"conversation": m.conversation.0, "body": m.body})
 }
@@ -383,4 +390,5 @@ mod refusal;
 mod replies;
 mod replies_driver;
 mod undecodable;
+mod undecodable_events;
 mod worker_drain;

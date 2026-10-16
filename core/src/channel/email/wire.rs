@@ -52,7 +52,9 @@
 use std::sync::OnceLock;
 
 use crate::channel::email::gate::{extract_token, trusted_dmarc_pass};
-use crate::channel::polled_driver::{PolledEvent, PolledWorkerSpec, REFUSAL_BACKOFF, REPLY_GIVE_UP};
+use crate::channel::polled_driver::{
+    PolledBatch, PolledEvent, PolledWorkerSpec, REFUSAL_BACKOFF, REPLY_GIVE_UP,
+};
 use crate::channel::PeerEvidence;
 
 /// Long-poll window for one `email.poll` call. Longer than Matrix's 2s: email
@@ -118,9 +120,12 @@ pub fn set_authserv_id(id: &str) {
 
 /// `ParsePoll` entry point (the fn-pointer shape `PolledWorkerDriver` needs).
 /// An unset authserv-id yields `""`, which `trusted_dmarc_pass` treats as
-/// fail-closed (never admits).
-pub fn parse_email_poll(v: serde_json::Value) -> anyhow::Result<Vec<PolledEvent>> {
-    parse_email_poll_with(v, AUTHSERV_ID.get().map(String::as_str).unwrap_or(""))
+/// fail-closed (never admits). Decodes the result whole — one event that does
+/// not decode fails the batch, which is then not acked and so redelivered:
+/// email acks behind one monotonic cursor, so it must never skip a bad event
+/// the way Matrix does (#852).
+pub fn parse_email_poll(v: serde_json::Value) -> anyhow::Result<PolledBatch> {
+    parse_email_poll_with(v, AUTHSERV_ID.get().map(String::as_str).unwrap_or("")).map(PolledBatch::whole)
 }
 
 /// Pure core: decode one `email.poll` result's `events` array into driver
@@ -129,8 +134,9 @@ pub fn parse_email_poll(v: serde_json::Value) -> anyhow::Result<Vec<PolledEvent>
 /// separate on purpose (see the module docs).
 ///
 /// Fails closed on a missing/non-array `events` field (a malformed poll
-/// result is a worker bug, surfaced as an error so the driver logs it and
-/// skips the batch — never silently treated as "no events").
+/// result is a worker bug, surfaced as an error so the driver says it, does
+/// not ack the batch — it is redelivered — and holds the next poll; never
+/// silently treated as "no events").
 pub fn parse_email_poll_with(
     v: serde_json::Value,
     authserv_id: &str,
@@ -323,6 +329,17 @@ mod tests {
     #[test]
     fn malformed_poll_result_is_an_error_not_a_silent_empty() {
         assert!(parse_email_poll_with(serde_json::json!({"nope": 1}), "mx").is_err());
+    }
+
+    /// #852: email decodes whole — one bad event fails the batch, so nothing
+    /// in it is acked and the cursor never moves past the bad one. Matrix
+    /// decodes event by event; email must not.
+    #[test]
+    fn one_bad_event_fails_the_whole_email_batch() {
+        let good = event(vec![], true, "hello");
+        assert!(parse_email_poll(poll_result(vec![good.clone()])).is_ok(), "POSITIVE CONTROL");
+        let bad = serde_json::json!({"peer": 42, "conversation": "<mid-2@example.org>", "body": "x"});
+        assert!(parse_email_poll(poll_result(vec![good.clone(), bad.clone(), good])).is_err());
     }
 
     #[test]

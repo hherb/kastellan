@@ -37,7 +37,9 @@ pub(super) fn ack(
 /// Ack the ids that never became a `PolledEvent` (e.g. email's `skipped` list)
 /// — see the module docs' "Acking ids that never become an event". Only once
 /// the same batch's events reached the bus, which the caller guarantees by
-/// calling this from `parse_poll`'s `Ok` arm; and like the event acks, it stops
+/// calling this from the `Ok` arm of `parse_poll` followed by
+/// `whole_batch_on_ack_channel` — a batch whose every event decoded (#852);
+/// and like the event acks, it stops
 /// at the first refusal. A spec without `ack_method` acks nothing.
 ///
 /// `channel` is the bus's id for the channel, which the audit row names.
