@@ -1,9 +1,24 @@
 //! `pg_events`' tests, split out to keep the module under the 500-LOC soft cap.
 
 use super::*;
+use crate::audit_thinning::REPORT_EACH_UP_TO;
 use crate::channel::undelivered::{UndeliveredReason, UndeliveredReply};
 use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
 use std::sync::Mutex;
+use test_support::own_lost_rows;
+
+/// A bus `channel.received` row for channel `matrix`, said through `report`
+/// and counted in `lost`.
+fn received_row(report: Reporter, lost: &'static LostRows) -> RowReport<'static> {
+    RowReport {
+        writer: AuditLostWriter::Bus,
+        action: "channel.received",
+        about: r#" for channel "matrix""#,
+        channel: Some("matrix"),
+        report,
+        lost,
+    }
+}
 
 #[test]
 fn the_line_names_what_the_row_is_about_and_nothing_else() {
@@ -14,10 +29,11 @@ fn the_line_names_what_the_row_is_about_and_nothing_else() {
         "reason": "send_failed",
         "body": "NEVER-IN-A-LINE",
     });
-    let line = format_row_lost("channel.reply_undelivered", &describe_row(&payload), &"boom");
+    let first = BurstTally { nth: 1, unsaid_before: 0, ended: None };
+    let line = format_row_lost("channel.reply_undelivered", &describe_row(&payload), &"boom", first);
     assert_eq!(
         line,
-        r#"channel.reply_undelivered row for channel "matrix", peer "@a:srv", task_id 7, reason "send_failed" not written: boom"#
+        r#"channel.reply_undelivered row for channel "matrix", peer "@a:srv", task_id 7, reason "send_failed" not written: boom; refused row 1 of this burst"#
     );
     assert!(!line.contains("NEVER-IN-A-LINE"), "only the named fields are read: {line}");
 }
@@ -171,19 +187,21 @@ fn take_settled() -> Vec<(AuditLostWriter, String)> {
 /// been written" for every row the bus ever wrote, at ERROR.
 #[tokio::test]
 async fn each_outcome_of_an_insert_says_one_thing_or_nothing() {
-    type Insert = std::pin::Pin<Box<dyn std::future::Future<Output = Result<i64, String>> + Send>>;
+    type Insert = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
     async fn settle(insert: Insert) {
-        settle_or_report(insert, AuditLostWriter::Bus, "channel.received", r#" for channel "matrix""#, record_settled)
-            .await;
+        settle_or_report(insert, received_row(record_settled, own_lost_rows())).await;
     }
 
-    settle(Box::pin(async { Ok(1) })).await;
+    settle(Box::pin(async { Ok(()) })).await;
     assert_eq!(take_settled(), [], "a written row says nothing");
 
     settle(Box::pin(async { Err("boom".to_string()) })).await;
     assert_eq!(
         take_settled(),
-        [(AuditLostWriter::Bus, r#"channel.received row for channel "matrix" not written: boom"#.to_string())]
+        [(
+            AuditLostWriter::Bus,
+            r#"channel.received row for channel "matrix" not written: boom; refused row 1 of this burst"#.to_string()
+        )]
     );
 
     let stopped = tokio::spawn(settle(Box::pin(std::future::pending())));
@@ -227,4 +245,61 @@ async fn work_lost_in_flight_is_reported_through_the_writer() {
 
     let said = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner()).clone();
     assert_eq!(said, [(AuditLostWriter::Bus, "task 7's reply may not have been sent".to_string())]);
+}
+
+/// What [`record_flood`] was told — its own static, as above.
+static FLOOD: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_flood(writer: AuditLostWriter, line: &str) {
+    FLOOD.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// #829: against a Postgres that refuses every insert at once, a flood of
+/// inbound messages is a flood of failed rows. Their lines are thinned like
+/// the daemon's sinks' — the first [`REPORT_EACH_UP_TO`] each, then the
+/// 2^k-th — each saying where it stands in the burst, and the shutdown says
+/// how many got no line of their own. Written rows say nothing and count
+/// for nothing.
+#[tokio::test]
+async fn a_flood_of_failed_inserts_is_thinned_and_its_tail_said_at_shutdown() {
+    let lost = own_lost_rows();
+    for _ in 0..40 {
+        settle_or_report(async { Err::<(), _>("read-only") }, received_row(record_flood, lost)).await;
+        settle_or_report(async { Ok::<(), &str>(()) }, received_row(record_flood, lost)).await;
+    }
+    let said = std::mem::take(&mut *FLOOD.lock().unwrap_or_else(|p| p.into_inner()));
+    assert_eq!(said.len(), REPORT_EACH_UP_TO + 2, "rows 1..=16, then 17 and 33: {said:#?}");
+    assert!(said.iter().all(|(w, _)| *w == AuditLostWriter::Bus));
+    assert_eq!(
+        said[REPORT_EACH_UP_TO + 1].1,
+        r#"channel.received row for channel "matrix" not written: read-only; refused row 33 of this burst (15 before it had no line of their own)"#
+    );
+
+    report_unsaid(lost, record_flood);
+    let said = std::mem::take(&mut *FLOOD.lock().unwrap_or_else(|p| p.into_inner()));
+    assert_eq!(
+        said,
+        [(
+            AuditLostWriter::Bus,
+            r#"22 audit rows for channel "matrix" were not written and had no line of their own (thinned past a flood)"#
+                .to_string()
+        )],
+        "40 failed, 18 said"
+    );
+}
+
+/// What [`record_quiet`] was told — its own static, as above.
+static QUIET: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_quiet(writer: AuditLostWriter, line: &str) {
+    QUIET.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// A shutdown with nothing left unsaid says nothing.
+#[test]
+fn a_shutdown_with_every_loss_said_says_nothing_more() {
+    let lost = own_lost_rows();
+    lost.lose(AuditLostWriter::Bus, Some("matrix"));
+    report_unsaid(lost, record_quiet);
+    assert!(QUIET.lock().unwrap().is_empty());
 }

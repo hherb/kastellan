@@ -823,6 +823,9 @@ async fn main() -> Result<()> {
     // started a channel, or is still retrying, shuts down to a no-op.
     matrix.shutdown().await;
     email.shutdown().await;
+    // Every writer of the buses' own rows has stopped with them, so their
+    // count of lost rows thinned past a flood is final: say it (#829).
+    kastellan_core::channel::bus::report_unsaid_lost_rows();
 
     // Stop the scheduler before the audit-mirror so any final audit
     // rows it writes during graceful drain land in the mirror's

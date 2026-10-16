@@ -110,6 +110,14 @@ impl std::fmt::Display for BurstTally {
     }
 }
 
+/// No row refused yet — [`Thinning::new`], which is also `const` so a
+/// `static` can hold one.
+impl Default for Thinning {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One refused row's verdict from [`Thinning::refuse`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Refusal {
