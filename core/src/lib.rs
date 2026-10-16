@@ -12,6 +12,7 @@
 
 pub mod audit_mirror;
 pub mod audit_tail;
+pub mod audit_thinning;
 pub mod cassandra;
 pub mod channel;
 pub mod classification_inference;

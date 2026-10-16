@@ -340,7 +340,8 @@ fn an_email_flood_after_the_drain_does_not_thin_a_matrix_rows_line() {
         "the late Matrix row is its own burst's first, and reported: {told:?}"
     );
     assert_eq!(LEDGER.unreported().matrix, UnsaidCounts::default());
-    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late: thinning::unreported_of(100) });
+    let late = kastellan_core::audit_thinning::unreported_of(100);
+    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late });
 }
 
 /// #797: the final snapshot names pending rows — a cancelled task cannot —
