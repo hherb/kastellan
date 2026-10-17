@@ -9,8 +9,8 @@
 > and #810 prose included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-17 (#837 + #859 + #864 + #865 — a lost row's `[audit-lost]` line is thinned only behind rows lost the same way: per action, per outcome, never past a new cause; PR [#PRNUM](https://github.com/hherb/kastellan/pull/PRNUM), Mac sweep green. PRs #855, #856, #857, #863 are merged and **not yet deployed**. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#PRNUM](https://github.com/hherb/kastellan/pull/PRNUM) (#837, #859, #864, #865), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-17 (#837 + #859 + #864 + #865 — a lost row's `[audit-lost]` line is thinned only behind rows lost the same way: per action, per outcome, never past a new cause; PR [#866](https://github.com/hherb/kastellan/pull/866), Mac sweep green. PRs #855, #856, #857, #863 are merged and **not yet deployed**. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #851's tree** (deployed 2026-10-14). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,7 +43,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-17): #837/#865, #859, #864 — thinning by kind (PR [#PRNUM](https://github.com/hherb/kastellan/pull/PRNUM))
+### This session (2026-10-17): #837/#865, #859, #864 — thinning by kind (PR [#866](https://github.com/hherb/kastellan/pull/866))
 
 - **Count keys.** Daemon sinks (`main/audit_sink_thinning.rs`): one `Thinning` per **channel × action ×
   kind** (`shed`, `late`, `not_written`, `unknown`), `Loss::{Shed, Late, Failed{outcome, cause}}`;
@@ -280,12 +280,12 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **Deploy, then watch one restart.** **#855, #856 (#810), [#857](https://github.com/hherb/kastellan/pull/857) (#829), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861) and #PRNUM (once merged)
+5. **Deploy, then watch one restart.** **#855, #856 (#810), [#857](https://github.com/hherb/kastellan/pull/857) (#829), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861) and #866 (once merged)
    are not deployed** — one `scripts/upgrade_from_git.sh` per host covers them (all core only). On the
    next restart look for: INFO `shutdown signal received` (`signal = "SIGTERM"`, #856); `[audit-lost]`
    / INFO drain lines (a Matrix login still starting at shutdown is INFO "not finished starting", not
    a loss; a bus stopped under a wedged Postgres says `may not have been written`); since #829 a bus
-   or boot-supervisor failed-insert `[audit-lost]` line carries `; row N of this burst` (since #PRNUM; then
+   or boot-supervisor failed-insert `[audit-lost]` line carries `; row N of this burst` (since #866; then
    possibly `(… before it had no line …)` / `; the burst before it ended …`), and a flood of lost bus rows ends in
    `N <action> audit rows for channel … failed to insert (not written) …` — none expected (and
    since #863 a line saying a row "may not have been written" means the connection broke, so
@@ -400,7 +400,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#837/#859/#864/#865 — **the full sweep that stands**, first commit) | PR [#PRNUM](https://github.com/hherb/kastellan/pull/PRNUM) | **5105 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-837-859-864-865.log`. Predicted +18, reconciled per suite against `sweep-858-861.log`: db lib +3 (vs `origin/main` **248**, measured — #863's review commit added **2 db tests** the last handover missed, so main read **5087**, not 5085), core lib +10 (2533 → 2543), daemon bin +5 (95 → 100). The review commit is a type/doc change (0 tests; core lib + bin + `channel_bus_e2e` re-run green). `postgres_e2e` 60 under `KASTELLAN_PG_REQUIRE_E2E=1`. Mutants **30/30** | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-837`, **27** `Checking kastellan`, on the review commit | **23** Mac |
+| **Mac** (#837/#859/#864/#865 — **the full sweep that stands**, first commit) | PR [#866](https://github.com/hherb/kastellan/pull/866) | **5105 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-837-859-864-865.log`. Predicted +18, reconciled per suite against `sweep-858-861.log`: db lib +3 (vs `origin/main` **248**, measured — #863's review commit added **2 db tests** the last handover missed, so main read **5087**, not 5085), core lib +10 (2533 → 2543), daemon bin +5 (95 → 100). The review commit is a type/doc change (0 tests; core lib + bin + `channel_bus_e2e` re-run green). `postgres_e2e` 60 under `KASTELLAN_PG_REQUIRE_E2E=1`. Mutants **30/30** | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-837`, **27** `Checking kastellan`, on the review commit | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
