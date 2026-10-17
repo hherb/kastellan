@@ -32,21 +32,21 @@
 //! it (#846, `polled_driver/inbound_rx.rs`). What is still unsaid: a crash —
 //! and with it, since #829, the count of a flood's rows thinned out after its
 //! last 2^k-th line, which only the next burst's first line on the same
-//! count, or the shutdown's line, says (#817).
+//! count, or the shutdown's lines, say (#817).
 //!
 //! Since #829 a failed insert's lines are **thinned** past a flood, per
 //! writer, channel, action and outcome ([`lost_rows`]; action since #865,
 //! outcome since #864) — but for the first row of each new cause (#859) —
-//! each carrying its place in the burst,
-//! and the shutdown says how many got no line of their own: before the
-//! channels stop ([`report_unsaid_lost_rows`]) and, for the rows thinned
-//! during the stop, after ([`report_unsaid_lost_rows_since`], #862). A row
-//! naming no channel is counted under its bus's (#860). And the insert no
-//! longer decodes an id it discards (`kastellan_db::audit::insert_without_id`),
-//! so "not written" is no longer said of a row that was written but whose
-//! `RETURNING id` failed to decode. Since #858 nor is it said of a row whose insert lost its
-//! connection, which may have been committed: that line says the row "may
-//! not have been written" (`InsertFailure`).
+//! each carrying its place in the burst, and the shutdown says how many got
+//! no line of their own: before the channels stop
+//! ([`report_unsaid_lost_rows`]) and, for the rows thinned during each stop,
+//! after it ([`report_unsaid_lost_rows_since`], #862). A row naming no
+//! channel is counted under its bus's (#860). And the insert no longer
+//! decodes an id it discards (`kastellan_db::audit::insert_without_id`), so
+//! "not written" is no longer said of a row that was written but whose
+//! `RETURNING id` failed to decode. Since #858 nor is it said of a row whose
+//! insert lost its connection, which may have been committed: that line says
+//! the row "may not have been written" (`InsertFailure`).
 
 use serde_json::Value;
 
@@ -142,13 +142,37 @@ pub(crate) fn production_writer() -> (Reporter, &'static LostRows) {
     (emit_report, &LOST_ROWS)
 }
 
-/// What [`report_unsaid_lost_rows`] said: the counts
-/// [`report_unsaid_lost_rows_since`] counts from, so no row is said twice.
-/// Its contents are this module's, so the only baseline that call can be
-/// given is the first call's own.
+/// What the shutdown has said of the buses' lost rows so far: the counts
+/// [`report_unsaid_lost_rows_since`] counts from, and moves on to what it
+/// said, so no row is said twice. Its contents are this module's, so only
+/// [`report_unsaid_lost_rows`] makes one. That call says every row thinned
+/// so far, whoever said it before: called twice, it would say the same rows
+/// again — so `main` calls it once, and the rest through the baseline.
 #[derive(Debug)]
 #[must_use = "say the rows lost while the channels stop with `report_unsaid_lost_rows_since`"]
 pub struct SaidLostRows(Vec<Unsaid>);
+
+impl SaidLostRows {
+    /// [`report_unsaid_lost_rows`] through `(report, lost)`.
+    fn say((report, lost): (Reporter, &LostRows)) -> Self {
+        let unsaid = lost.unsaid();
+        for count in &unsaid {
+            report(count.key.writer, &format_unsaid(count, UnsaidPart::BeforeStop));
+        }
+        Self(unsaid)
+    }
+
+    /// [`report_unsaid_lost_rows_since`] through `(report, lost)`: say what
+    /// was thinned since `self` was taken, and take what was said as the
+    /// next call's baseline.
+    fn say_since(&mut self, (report, lost): (Reporter, &LostRows)) {
+        let now = lost.unsaid();
+        for count in unsaid_since(now.clone(), &self.0) {
+            report(count.key.writer, &format_unsaid(&count, UnsaidPart::DuringStop));
+        }
+        self.0 = now;
+    }
+}
 
 /// Say how many rows every bus writer lost (failed to insert) and gave no
 /// line of their own (#829) — one `[audit-lost]` line per writer, channel,
@@ -158,49 +182,31 @@ pub struct SaidLostRows(Vec<Unsaid>);
 /// after …").
 ///
 /// **Called before the channels stop** (#862), and then
-/// [`report_unsaid_lost_rows_since`] after: a channel supervisor's
+/// [`report_unsaid_lost_rows_since`] after each stop: a channel supervisor's
 /// `shutdown` joins its run loop, which may be awaiting a `channel.*` insert
 /// that nothing bounds against a wedged Postgres (there is no statement
 /// timeout). Said only after that, the count would die with the process when
-/// the service manager's SIGKILL came first — as the daemon's own sinks say
-/// theirs before the pool's unbounded close (#802).
+/// the service manager's SIGKILL came first. The daemon's own sinks say
+/// theirs before the channels stop too (`main/audit_sink_report.rs`).
 pub fn report_unsaid_lost_rows() -> SaidLostRows {
-    let (report, lost) = production_writer();
-    SaidLostRows(report_unsaid(lost, report))
+    SaidLostRows::say(production_writer())
 }
 
-/// After the channels stopped, when nothing writes through these writers any
-/// more: say the rows thinned out since `said` was taken — those lost while
-/// the channels stopped — one line per count, as
-/// [`report_unsaid_lost_rows`] says them (#862). Takes `said` by value, so
-/// its baseline is used once.
-pub fn report_unsaid_lost_rows_since(said: SaidLostRows) {
-    let (report, lost) = production_writer();
-    report_unsaid_since(lost, &said.0, report);
-}
-
-/// [`report_unsaid_lost_rows`] over `lost`, through `report`: returns what
-/// it said.
-fn report_unsaid(lost: &LostRows, report: Reporter) -> Vec<Unsaid> {
-    let unsaid = lost.unsaid();
-    for count in &unsaid {
-        report(count.key.writer, &format_unsaid(count, UnsaidPart::BeforeStop));
-    }
-    unsaid
-}
-
-/// [`report_unsaid_lost_rows_since`] over `lost`, through `report`.
-fn report_unsaid_since(lost: &LostRows, said: &[Unsaid], report: Reporter) {
-    for count in unsaid_since(lost.unsaid(), said) {
-        report(count.key.writer, &format_unsaid(&count, UnsaidPart::DuringStop));
-    }
+/// After a channel stopped: say the rows thinned out since `said` was taken
+/// — those lost while it stopped — one line per count, as
+/// [`report_unsaid_lost_rows`] says them (#862), and move `said` on to
+/// what was said. So it can be called after each channel's stop, and a
+/// channel whose stop never ends costs only the rows thinned during it, not
+/// those of the stops before it.
+pub fn report_unsaid_lost_rows_since(said: &mut SaidLostRows) {
+    said.say_since(production_writer());
 }
 
 /// Insert one `channel`-actor audit row; report it through `report`, as
 /// `writer`'s — the `[audit-lost]` writer and the channel it writes for — if
 /// the insert fails or is abandoned mid-await. A failed insert counts in
-/// `lost` under the row's `channel` (or, for a row naming none, the
-/// writer's: #860), action and outcome, which thins its line past a flood
+/// `lost` under its writer, the row's `channel` (or, for a row naming none,
+/// the writer's: #860), action and outcome, which thins its line past a flood
 /// (#829, #864) — unless its cause is new in the burst (#859).
 ///
 /// Two writers share it: the bus ([`AuditLostWriter::Bus`]) and, since #814,

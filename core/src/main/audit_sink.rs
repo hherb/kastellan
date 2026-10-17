@@ -44,18 +44,19 @@
 //! never runs its `on_failure`), counts a stuck driver that audits on exit as
 //! a possible loss (#796: its queued replies go unaudited) but not one that
 //! never finished starting (#802, `audit_sink_lease.rs`), and counts the
-//! refused rows whose reports were thinned out (#798, `audit_sink_thinning.rs`)
-//! — the lines are in `audit_sink_report.rs`. Rows refused after the drain's
-//! snapshot, past the thinning, are counted afresh for the daemon's last
-//! lines ([`close_then_report_unreported`], #802): said once before the pool
-//! closes, because that close has no bound, and once more after it.
+//! refused rows thinned out (#798, `audit_sink_thinning.rs`) since the lines
+//! said before the channels stopped ([`report_unreported_before_stop`], as
+//! the bus says its own, #862); the lines are in `audit_sink_report.rs`. Rows
+//! refused after the drain's snapshot are counted afresh for the last lines
+//! ([`close_then_report_unreported`], #802): said once before the pool closes,
+//! because that close has no bound, and once more after it.
 //!
 //! What still goes unreported: a row lost to a crash (SIGKILL, OOM, a panic
 //! under `panic = "abort"`), because nothing runs after one — and with it the
 //! count of a burst's rows after its last 2^k-th line, which only the next
-//! burst's first line or a graceful shutdown says (`kastellan_core::audit_thinning`,
-//! #817); a row refused, past the thinning, during a pool close the service
-//! manager's SIGKILL ends; and one refused between the last line and the process's exit. That last
+//! burst's first line or a graceful shutdown says (`audit_thinning`, #817); a
+//! row thinned out during a channel stop or a pool close the service manager's
+//! SIGKILL ends; and one refused between the last line and the exit. That last
 //! gap is usually an instant, but not always: dropping the runtime waits for
 //! its blocking tasks, so a Matrix login abandoned at its timeout can hold the
 //! process open until the SDK's own timeouts end it, or the SIGKILL (#805).
@@ -480,13 +481,12 @@ pub(crate) use thinning::{ActionUnsaid, BurstTally, UnsaidCounts, Unreported};
 #[path = "audit_sink_report.rs"]
 mod report;
 pub(crate) use report::{
-    close_then_report_unreported, emit_report, quoted_id, report_drained, Reporter, RowLabel,
-    Unwritten,
+    close_then_report_unreported, emit_report, quoted_id, report_drained,
+    report_unreported_before_stop, Reporter, RowLabel, Unwritten,
 };
 
-/// Test builds only: a Postgres that never answers (a sink does not wait for
-/// its insert, yet tries one), and one that hangs up (a failed insert). Shared by this module's
-/// tests and each sink's own.
+/// Test builds only: the Postgres fixtures — one that never answers, one that
+/// hangs up, one that garbles its answer — for this module's tests and each sink's own.
 #[cfg(test)]
 #[path = "audit_sink_test_support.rs"]
 pub(crate) mod test_support;

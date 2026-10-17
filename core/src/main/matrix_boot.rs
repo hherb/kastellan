@@ -317,10 +317,15 @@ async fn attempt(
         tokio::runtime::Handle::current(),
         crate::audit_sink::emit_report,
     );
+    // The channel the worker serves, and the one its bus's lost rows that
+    // name no channel are counted under (#860): one value, so the two
+    // cannot drift apart.
+    let cid = kastellan_core::channel::ChannelId("matrix".to_string());
+    let worker_cid = cid.clone();
     let spawn = tokio::task::spawn_blocking(move || {
         kastellan_core::channel::matrix::spawn_matrix_worker(
             backend,
-            kastellan_core::channel::ChannelId("matrix".to_string()),
+            worker_cid,
             &spawn_cfg,
             egress,
             driver_audit,
@@ -335,10 +340,7 @@ async fn attempt(
     info!(identity = %worker.identity, "matrix worker logged in; starting channel bus");
     let authorizer = Arc::new(kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()));
     let pairing = Arc::new(kastellan_core::channel::pairing::DbPairingService::new(pool.clone()));
-    let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(
-        pool.clone(),
-        kastellan_core::channel::ChannelId("matrix".to_string()),
-    ));
+    let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(pool.clone(), cid));
     let asks = Arc::new(kastellan_core::channel::bus::AskWiring {
         outbox,
         resolver: Arc::new(kastellan_core::channel::bus::PgAskResolver::new(pool.clone())),

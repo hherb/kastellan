@@ -1,6 +1,6 @@
-//! `pg_events`' tests of the lost-row count (#829, #859, #864, #865): how
-//! failed inserts are thinned, by what they are counted, and what the
-//! shutdown says of them. Split from `tests.rs` to keep both under the
+//! `pg_events`' tests of the lost-row count (#829, #859, #860, #862, #864,
+//! #865): how failed inserts are thinned, by what they are counted, and what
+//! the shutdown says of them. Split from `tests.rs` to keep both under the
 //! 500-LOC soft cap; its fixtures are `super::`'s.
 
 use super::*;
@@ -27,7 +27,7 @@ async fn an_unknown_outcome_counts_apart_from_a_refusal() {
         settle_or_report(async { Err::<(), _>(Unknown("reset")) }, received_row(record_unknown_burst, &LOST)).await;
     }
     UNKNOWN_BURST.lock().unwrap_or_else(|p| p.into_inner()).clear();
-    report_unsaid(&LOST, record_unknown_burst);
+    let _ = SaidLostRows::say((record_unknown_burst, &LOST));
     let said = std::mem::take(&mut *UNKNOWN_BURST.lock().unwrap_or_else(|p| p.into_inner()));
     assert_eq!(
         said.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>(),
@@ -122,7 +122,8 @@ async fn a_flood_of_failed_inserts_is_thinned_and_its_tail_said_at_shutdown() {
         r#"channel.received row for channel "matrix" not written: read-only; row 33 of this burst (15 before it had no line of their own)"#
     );
 
-    report_unsaid(lost, record_flood);
+    // #862: the shutdown says the count before the channels stop ...
+    let mut said_so_far = SaidLostRows::say((record_flood, lost));
     let said = std::mem::take(&mut *FLOOD.lock().unwrap_or_else(|p| p.into_inner()));
     assert_eq!(
         said,
@@ -134,17 +135,16 @@ async fn a_flood_of_failed_inserts_is_thinned_and_its_tail_said_at_shutdown() {
         "40 failed, 18 said"
     );
 
-    // #862: the shutdown says the count before the channels stop, and after
-    // they stopped only the rows thinned meanwhile — none of the 22 again.
-    let said_before = report_unsaid(lost, record_flood);
-    FLOOD.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    // ... and after each channel's stop only the rows thinned meanwhile —
+    // none of the 22 again.
     for _ in 0..30 {
         settle_or_report(async { Err::<(), _>("read-only") }, received_row(record_flood, lost)).await;
     }
     FLOOD.lock().unwrap_or_else(|p| p.into_inner()).clear();
-    report_unsaid_since(lost, &said_before, record_flood);
+    said_so_far.say_since((record_flood, lost));
     let said = std::mem::take(&mut *FLOOD.lock().unwrap_or_else(|p| p.into_inner()));
-    // Rows 41..=70: only row 64 gets a line, so 29 more are thinned.
+    // Rows 41..=70: only row 65 gets a line (index 64 from 0, a power of
+    // two), so 29 more are thinned.
     assert_eq!(
         said,
         [(
@@ -153,7 +153,18 @@ async fn a_flood_of_failed_inserts_is_thinned_and_its_tail_said_at_shutdown() {
                 .to_string()
         )]
     );
-    report_unsaid_since(lost, &lost.unsaid(), record_flood);
+    // The baseline moved on to what was said: the next stop's line counts
+    // from it — rows 71..=75, all thinned — not from the first (which would
+    // say 34, the 29 again among them).
+    for _ in 0..5 {
+        settle_or_report(async { Err::<(), _>("read-only") }, received_row(record_flood, lost)).await;
+    }
+    assert!(FLOOD.lock().unwrap_or_else(|p| p.into_inner()).is_empty(), "POSITIVE CONTROL: rows 71..=75 are thinned");
+    said_so_far.say_since((record_flood, lost));
+    let said = std::mem::take(&mut *FLOOD.lock().unwrap_or_else(|p| p.into_inner()));
+    assert_eq!(said.len(), 1, "{said:#?}");
+    assert!(said[0].1.starts_with("5 more channel.received audit rows"), "{said:#?}");
+    said_so_far.say_since((record_flood, lost));
     assert!(FLOOD.lock().unwrap_or_else(|p| p.into_inner()).is_empty(), "nothing new, nothing said");
 }
 
@@ -176,7 +187,7 @@ fn a_shutdown_with_every_loss_said_says_nothing_more() {
         outcome: InsertOutcome::NotWritten,
     };
     lost.lose(key, InsertCause::RowCount);
-    report_unsaid(lost, record_quiet);
+    let _ = SaidLostRows::say((record_quiet, lost));
     assert!(QUIET.lock().unwrap().is_empty());
 }
 
@@ -307,30 +318,32 @@ fn record_wired(writer: AuditLostWriter, line: &str) {
     WIRED.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
 }
 
-/// #860, through the trait method the bus calls: an email bus's row naming
-/// no channel is counted under *its* channel. With 100 such rows of the
-/// email bus already lost, its next one is thinned out and counted there —
-/// which a `PgChannelEvents` passing any other channel (say, Matrix's) to
-/// [`audit_or_report`] would instead report, as the first of a count of
-/// its own.
+/// #860, through the trait method the bus calls: a bus's row naming no
+/// channel is counted under *its* channel. With 100 such rows of the bus
+/// already lost, its next one is thinned out and counted there — which a
+/// `PgChannelEvents` passing any other channel to [`audit_or_report`] would
+/// instead report, as the first of a count of its own. Both buses the daemon
+/// builds, so a channel spelled into the call (either one) fails one of them.
 #[tokio::test]
 async fn a_buss_own_channel_reaches_the_count() {
-    let events = PgChannelEvents::with_reporter(test_support::refused_pool(), ChannelId("email".into()), record_wired);
-    let refused = kastellan_db::audit::insert_without_id(&events.pool, "channel", "ask.resolved", serde_json::json!({}))
-        .await
-        .expect_err("POSITIVE CONTROL: the pool refuses");
-    let key = RowKey {
-        writer: AuditLostWriter::Bus,
-        writer_channel: "email",
-        channel: None,
-        action: "ask.resolved",
-        outcome: refused.outcome(),
-    };
-    let said_before = (0..100).filter(|_| events.lost.lose(key, refused.cause()).report()).count();
-    ChannelEvents::audit(&events, "ask.resolved", serde_json::json!({"ask_id": 3})).await;
+    for channel in ["email", "matrix"] {
+        let events = PgChannelEvents::with_reporter(test_support::refused_pool(), ChannelId(channel.into()), record_wired);
+        let refused = kastellan_db::audit::insert_without_id(&events.pool, "channel", "ask.resolved", serde_json::json!({}))
+            .await
+            .expect_err("POSITIVE CONTROL: the pool refuses");
+        let key = RowKey {
+            writer: AuditLostWriter::Bus,
+            writer_channel: channel,
+            channel: None,
+            action: "ask.resolved",
+            outcome: refused.outcome(),
+        };
+        let said_before = (0..100).filter(|_| events.lost.lose(key, refused.cause()).report()).count();
+        ChannelEvents::audit(&events, "ask.resolved", serde_json::json!({"ask_id": 3})).await;
 
-    let said = std::mem::take(&mut *WIRED.lock().unwrap_or_else(|p| p.into_inner()));
-    assert!(said.is_empty(), "the email bus's 101st such row is thinned out: {said:#?}");
-    let unsaid: Vec<_> = events.lost.unsaid().into_iter().map(|u| (u.key.channel, u.rows)).collect();
-    assert_eq!(unsaid, [(lost_rows::RowChannel::Unnamed("email".into()), 101 - said_before)]);
+        let said = std::mem::take(&mut *WIRED.lock().unwrap_or_else(|p| p.into_inner()));
+        assert!(said.is_empty(), "the {channel} bus's 101st such row is thinned out: {said:#?}");
+        let unsaid: Vec<_> = events.lost.unsaid().into_iter().map(|u| (u.key.channel, u.rows)).collect();
+        assert_eq!(unsaid, [(lost_rows::RowChannel::Unnamed(channel.into()), 101 - said_before)]);
+    }
 }

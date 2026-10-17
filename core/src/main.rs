@@ -817,21 +817,24 @@ async fn main() -> Result<()> {
 
     shutdown_signals.wait().await;
 
-    // The buses' count of lost rows thinned past a flood (#829), said BEFORE
-    // the channels stop (#862): a supervisor's shutdown can await an insert
-    // nothing bounds against a wedged Postgres, and a count said only after
-    // it would die with the SIGKILL. The rows thinned during the stop follow.
-    let said = kastellan_core::channel::bus::report_unsaid_lost_rows();
+    // The lost rows thinned past a flood — the buses' (#829) and the daemon's
+    // own sinks' (#798) — said BEFORE the channels stop (#862): a
+    // supervisor's shutdown can await an insert nothing bounds against a
+    // wedged Postgres, and so can the scheduler's, so a count said only after
+    // them would die with the SIGKILL. The rows thinned meanwhile follow.
+    let mut bus_said = kastellan_core::channel::bus::report_unsaid_lost_rows();
+    let sinks_said = audit_sink::report_unreported_before_stop(audit_sink::emit_report);
 
     // Stop the channel supervisors first: each stops its bus if it started one,
     // so no further inbound messages are enqueued and each worker's stdin
     // closes (clean worker exit). Unconditional — a supervisor that never
-    // started a channel, or is still retrying, shuts down to a no-op.
+    // started a channel, or is still retrying, shuts down to a no-op. After
+    // each, say what its buses' writers thinned during the stop, so a later
+    // stop that never ends costs only its own rows.
     matrix.shutdown().await;
+    kastellan_core::channel::bus::report_unsaid_lost_rows_since(&mut bus_said);
     email.shutdown().await;
-    // Every writer of the buses' own rows has stopped with them, so their
-    // count is final: say what was thinned during the stop.
-    kastellan_core::channel::bus::report_unsaid_lost_rows_since(said);
+    kastellan_core::channel::bus::report_unsaid_lost_rows_since(&mut bus_said);
 
     // Stop the scheduler before the audit-mirror so any final audit
     // rows it writes during graceful drain land in the mirror's
@@ -840,11 +843,18 @@ async fn main() -> Result<()> {
     // stopped channels' drivers exit on their own thread, a Matrix driver
     // auditing its still-queued replies as it goes, and each row is spawned
     // rather than awaited. Bounded (`audit_sink::DRAIN_BOUND`); what is still
-    // pending then is reported on the `[audit-lost]` marker, and a row tried
-    // after it is refused (and reported, thinned past a flood) rather than
-    // silently dropped with the runtime.
-    let (drained, ()) = tokio::join!(audit_sink::drain(), scheduler.shutdown());
-    audit_sink::report_drained(&drained, audit_sink::emit_report);
+    // pending then is reported on the `[audit-lost]` marker — as soon as the
+    // drain ends, not after the scheduler's unbounded shutdown — and a row
+    // tried after it is refused (and reported, thinned past a flood) rather
+    // than silently dropped with the runtime.
+    let (drained, ()) = tokio::join!(
+        async {
+            let drained = audit_sink::drain().await;
+            audit_sink::report_drained(&drained, sinks_said, audit_sink::emit_report);
+            drained
+        },
+        scheduler.shutdown(),
+    );
 
     // Graceful shutdown: stop the mirror task first so any in-flight
     // catch-up SELECT completes its fsync, then close the pool. Around that

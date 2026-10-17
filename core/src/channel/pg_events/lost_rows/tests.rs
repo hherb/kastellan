@@ -112,6 +112,27 @@ fn a_row_naming_no_channel_counts_under_its_buss_channel() {
     );
 }
 
+/// #829, #860: a row that names a channel is counted under *its* name, not
+/// its writer's — the row says best whose it is. Every other fixture writes
+/// a row for the channel it names, so here the two differ: a flood of the
+/// Matrix bus's rows naming email is counted as email's, and leaves the
+/// first Matrix row its line. A count by the writer's channel would put
+/// both in one and thin that line.
+#[test]
+fn a_row_naming_a_channel_counts_under_its_own_name_not_its_writers() {
+    let rows = LostRows::new();
+    let t0 = Instant::now();
+    let email_from_matrix = RowKey { writer_channel: "matrix", ..received(AuditLostWriter::Bus, Some("email")) };
+    let said = lose_n(&rows, email_from_matrix, 100, t0);
+    let matrix = rows.lose_at(received(AuditLostWriter::Bus, Some("matrix")), READ_ONLY, t0);
+    assert!(matrix.report() && matrix.tally.nth == 1, "the writer's own channel's first row: {matrix:?}");
+    let nw = InsertOutcome::NotWritten;
+    assert_eq!(
+        rows.unsaid(),
+        [unsaid(AuditLostWriter::Bus, RowChannel::Named("email".into()), "channel.received", nw, 100 - said)]
+    );
+}
+
 /// #864: the rows that may have been written are counted apart from
 /// those that certainly were not, and said apart at shutdown.
 #[test]
@@ -276,8 +297,8 @@ fn the_cap_counts_names_both_ways_spelled_and_each_once() {
     let channel_of = |rows: &LostRows, i: usize| rows.entries.lock().unwrap()[i].key.channel.clone();
     assert_eq!(channel_of(&rows, MAX_NAMED_CHANNELS - 1), RowChannel::Unnamed("c0".into()));
     assert_eq!(channel_of(&rows, MAX_NAMED_CHANNELS), RowChannel::Unnamed("bus".into()), "POSITIVE CONTROL: under the cap");
-    // Sixteen names now, half-spelled each way: a further one is past the cap,
-    // whichever way it is spelled.
+    // Sixteen names now — "c0" spelled both ways, counted once: a further one
+    // is past the cap, whichever way it is spelled.
     rows.lose_at(received(AuditLostWriter::Bus, Some("one-more")), READ_ONLY, t0);
     rows.lose_at(ask_resolved("and-another"), READ_ONLY, t0);
     assert_eq!(channel_of(&rows, MAX_NAMED_CHANNELS + 1), RowChannel::Other, "a row's own name past the cap");

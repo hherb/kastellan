@@ -30,9 +30,9 @@
 //! every bring-up, so a count held by the bus would start afresh after each
 //! restart — and the rows a restart's count had left unsaid would be said by
 //! no one. The shutdown says what is left ([`super::report_unsaid_lost_rows`])
-//! — before the channels stop, and the rows thinned during the stop after it
-//! ([`unsaid_since`], #862); a crash loses it, as it loses the daemon's
-//! sinks' (#817).
+//! — before the channels stop, and the rows thinned during each stop after
+//! it ([`super::report_unsaid_lost_rows_since`], via [`unsaid_since`], #862);
+//! a crash loses it, as it loses the daemon's sinks' (#817).
 //!
 //! What is **not** thinned: a row abandoned mid-insert by a stop (#813) and
 //! work a stop abandoned (#832). Both are said once per stop, per pump or per
@@ -220,6 +220,10 @@ fn entry<'a>(entries: &'a mut Vec<Entry>, key: RowKey<'_>) -> &'a mut Entry {
 /// from `now` — the shutdown's second line says only the rows thinned since
 /// its first (#862).
 pub(crate) fn unsaid_since(now: Vec<Unsaid>, base: &[Unsaid]) -> Vec<Unsaid> {
+    debug_assert!(
+        base.iter().all(|b| now.iter().any(|u| u.key == b.key && u.rows >= b.rows)),
+        "a count shrank or lost its entry: {base:?} -> {now:?}"
+    );
     now.into_iter()
         .map(|u| {
             let before = base.iter().find(|b| b.key == u.key).map_or(0, |b| b.rows);

@@ -9,7 +9,7 @@
 > review, #858/#861 and #829/#810 prose included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-17 (#867 + #862 + #860 — the thinning family's shutdown residue: the sinks' unsaid lines per action, the bus's count said before the unbounded channel shutdowns, a no-channel row counted under its own bus; PR #869, Mac sweep green but for two #548/#676 contention failures that pass isolated; two-reviewer pass, fixes in-PR. PRs #855, #856, #857, #863, #866 are merged and **not yet deployed**. The operator is still running the #773 live re-measure) ·
+**Last updated:** 2026-10-17 (#867 + #862 + #860 — the thinning family's shutdown residue: the sinks' unsaid lines per action, the bus's count said before the unbounded channel shutdowns, a no-channel row counted under its own bus; PR #869, Mac sweep green but for two #548/#676 contention failures that pass isolated; two-reviewer pass, then a five-agent pass (the daemon sinks' count now said before the channels stop too), fixes in-PR. PRs #855, #856, #857, #863, #866 are merged and **not yet deployed**. The operator is still running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
@@ -56,9 +56,21 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   beside `closing_pool`'s `Io(UnexpectedEof)` — ⚠️ one byte alone reads as EOF (this sqlx sends no SSL
   request), i.e. the *same* cause.
 - **#862:** `channel::bus::report_unsaid_lost_rows()` now runs **before** `matrix/email.shutdown()` and
-  returns a `#[must_use]` **`SaidLostRows`**; `report_unsaid_lost_rows_since(said)` after them says only
-  the delta (`lost_rows::unsaid_since`, wording `N more … (thinned past a flood, while the channels
-  stopped)`). `bootstrap_tests` pins both orders.
+  returns a `#[must_use]` **`SaidLostRows`**; `report_unsaid_lost_rows_since(&mut said)` runs **after each
+  stop**, says only the delta (`lost_rows::unsaid_since`, wording `N more … (thinned past a flood, while
+  the channels stopped)`) and moves the baseline on — so a hung email stop no longer costs Matrix's tail.
+  The logic is `SaidLostRows::{say, say_since}((report, lost))`; the pub fns only pass
+  `production_writer()`. ⚠️ `report_unsaid_lost_rows()` twice says every row twice — call it once.
+- **#862 for the daemon's own sinks (review finding, fixed in-PR):** their lifetime per-action count was
+  first said in `report_drained`, i.e. after both unbounded channel stops **and** inside a `tokio::join!`
+  with the unbounded `scheduler.shutdown()` — so a SIGKILL there lost the `channel.reply_undelivered`
+  counts #867 had just split out. Now **`audit_sink::report_unreported_before_stop`** says them before
+  the channels stop and returns a `#[must_use]` **`SaidUnreported`**; `report_drained(&d, said, report)`
+  says only the rows since (`N more <action> audit rows … (thinned past a flood, while the channels
+  stopped and their drivers drained)`, `format_unreported_while_stopping`), and runs **inside the drain's
+  arm of the join**, so the scheduler no longer holds the drain's lines back. `close_then_report_unreported`
+  is unchanged (it counts from `drained`, the full count). `bootstrap_tests` pins both orders, for both
+  writers. `debug_assert!`s now pin "counts only grow" in `UnsaidCounts::since` and `unsaid_since`.
 - **#860:** **`PgChannelEvents::new(pool, ChannelId)`** (pub API change; `with_reporter(pool, channel,
   report)` in tests); `audit_or_report` takes `(writer, writer_channel)`; `RowKey.writer_channel`. A row
   with no `channel` counts under **`RowChannel::Unnamed(bus channel)`**, said `naming no channel (written
@@ -68,6 +80,14 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   `pg_events/lost_rows/tests.rs`, and the sinks' `audit_sink_thinning_tests.rs`.
 - Reviews (two, read-only, own worktrees): no bug; the #860 wiring and the mixed-spelling cap were
   untested (each mutant now killed by exactly its new test), two weak assertions, stale docs — all fixed.
+- Third pass (`/pr-review-toolkit:review-pr`, five agents): the sinks' late count above (HIGH,
+  pre-existing), a wrong row number in a test comment (row **65**, not 64: the thinning predicate is
+  0-based), Matrix's `ChannelId` spelled twice (now one `cid`, as email), and three untested mutants —
+  a row's own channel vs its writer's, a bus channel hard-coded to `"email"`, a baseline not moved on —
+  each now killed by its own test (5 mutants, 5 killed, files restored by copy). Not done, by choice:
+  an `_around(stop)` API in place of the tokens (it cannot say after *each* stop); a shared
+  `KeyedThinning` (two copies, different value shapes — revisit at a third); a `Writer` struct for the
+  `(AuditLostWriter, &str)` pair.
 
 ### Previous (2026-10-16/17): #829, #810, #858/#861, #837/#859/#864/#865 (PRs #856, #857, #863, #866, merged) — what still binds
 
@@ -295,8 +315,10 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    with replies queued` and no `queue_closed` rows (#832). Rows a restart under traffic can leave:
    `channel.inbound_dropped` with `stage` `polled`/`buffered`/`worker` (`select payload->>'channel',
    payload->>'stage', payload->>'dropped' from audit_log where action = 'channel.inbound_dropped' order
-   by id desc`); since #869 the shutdown's thinned-row summaries name the action (`N <action> audit rows
-   had no line …`; the bus's come before the channels stop, then `N more … while the channels stopped`); a `channel.inbound_undecodable` row is a **finding about the worker** (`select
+   by id desc`); since #869 the daemon sinks' thinned-row summaries name the action too (`N <action>
+   audit rows had no line …`, as the bus's `N <action> audit rows for channel … and had no line …` have
+   since #866), and **both writers'** come before the channels stop, then `N more … while the channels
+   stopped` (the bus's after each stop; the sinks' after the drain, `… and their drivers drained`); a `channel.inbound_undecodable` row is a **finding about the worker** (`select
    payload->>'part', payload->>'undecodable' … where action = 'channel.inbound_undecodable'`, #855).
    ⚠️ A stale `matrix.ext4` answers `matrix.drain` with METHOD_NOT_FOUND (rebuild with
    `bash scripts/build-release.sh` + the rootfs script). Then [#805](https://github.com/hherb/kastellan/issues/805)
@@ -356,7 +378,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `llm-router/src/messages.rs`,
-`core/src/main.rs` **870** (+7 in #810, +3 in #829, +6 in #862), `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
+`core/src/main.rs` **880** (+7 in #810, +3 in #829, +6 in #862, +10 in #869's review), `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
 `worker_stderr/report/tool_worker.rs` 710, `core/src/channel/mod.rs` **569** (+10 in #849, +6 in #835, +16 in #836, +5 in #852, docs — the `actions` consts are the natural cut).
 Also over (grew in #818 without a split): `db/src/tasks.rs` **819** (+11 in #825: `CRASHED_DETAIL`),
 `db/src/graph.rs` **~935**, `core/src/entity_extraction/batch_upsert.rs` **~520**.
@@ -402,7 +424,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **Mac** (#866 five-agent review fixes) | PR [#866](https://github.com/hherb/kastellan/pull/866) | **5102 / 6 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/sweep-866-review.log`. ⚠️ **All 6 failures are #548/#676 cluster contention** (`probe: Connect(… the database system is starting up)`) in `embedding_recall_e2e` (1), `entity_extraction_e2e` (2), `postgres_e2e` (3); isolated at `--test-threads=4` *other* tests in the same suites failed the same way (it moves), and at `--test-threads=1` under `KASTELLAN_PG_REQUIRE_E2E=1` all pass: **60 / 4 / 17**, incl. `audit_helpers_pool_and_notify_round_trip` (the new 42P01 cause). 5102 + 6 = **5108** = predicted +3 (core lib 2543 → **2544**, daemon bin 100 → **102**, db lib 251 unchanged). The flood tests' `closing_pool` now reads before closing (FIN → always EOF): before, RST-vs-EOF was a race, i.e. **two causes**, which the per-stretch rule (rightly) gave a line each | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-866` (fresh dir), **27** `Checking kastellan`, after the `.flatten()` fix | **23** Mac |
-| **Mac** (#867/#862/#860) | PR [#869](https://github.com/hherb/kastellan/pull/869), sweep on the split commit | **5112 / 2 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/sweep-867.log`. Both failures **#548/#676 contention** (`the database system is starting up`) in `cli_memory_l1_e2e` / `cli_memory_l3_e2e` (untouched); isolated at `--test-threads=1` under `KASTELLAN_PG_REQUIRE_E2E=1`: **3/3, 12/12**. 5114 = predicted 5108 + 6 (core lib 2544 → **2548**, daemon bin 102 → **104**). The review commit (+2 lib tests, docs) re-ran lib `channel::` **570** and bin **104** green | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-867` (fresh dir), **27** `Checking kastellan`, on the review commit | **23** Mac |
+| **Mac** (#867/#862/#860) | PR [#869](https://github.com/hherb/kastellan/pull/869), sweep on the split commit | **5112 / 2 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/sweep-867.log`. Both failures **#548/#676 contention** (`the database system is starting up`) in `cli_memory_l1_e2e` / `cli_memory_l3_e2e` (untouched); isolated at `--test-threads=1` under `KASTELLAN_PG_REQUIRE_E2E=1`: **3/3, 12/12**. 5114 = predicted 5108 + 6 (core lib 2544 → **2548**, daemon bin 102 → **104**). The review commit (+2 lib tests, docs) re-ran lib `channel::` **570** and bin **104** green. The third-pass fixes (+1 lib, +2 bin): `kastellan-core` package **3132 / 0 / 40**, **118** suites, lib **2551**, bin **106**, `KASTELLAN_PG_BIN_DIR` set, `[WARN]` 0, `[SKIP]` 12 (container 8, gliner 4); log `~/.local/state/kastellan/review-869/core-tests.log`; clippy (warm) exit 0 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-867` (fresh dir), **27** `Checking kastellan`, on the review commit | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 

@@ -189,7 +189,10 @@ pub struct AskWiring {
 
 /// Real DB-backed `ChannelEvents`; its own module since #808, which made a
 /// failed audit insert an `[audit-lost]` report. Since #829 also the
-/// shutdown's report of the lost rows its lines left out, for `main`.
+/// shutdown's report of the lost rows its lines left out, for `main` — since
+/// #862 said before the channels stop (`report_unsaid_lost_rows`, handing
+/// back a `SaidLostRows`) and, for the rows thinned during each stop, after
+/// it (`report_unsaid_lost_rows_since`).
 pub use super::pg_events::{
     report_unsaid_lost_rows, report_unsaid_lost_rows_since, PgChannelEvents, SaidLostRows,
 };

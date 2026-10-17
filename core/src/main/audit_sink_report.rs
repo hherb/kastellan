@@ -213,14 +213,14 @@ pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<St
 
 /// Pure: the `[audit-lost]` line for one channel's lost rows of one action
 /// that got no report of their own (`audit_sink_thinning.rs`), or `None`
-/// when there were none (#798). Said at shutdown, but not all lost then:
-/// shed, late and failed are said apart (#807, #861), because rows shed in
-/// last week's flood are not this shutdown's — and failed inserts by outcome
-/// (#864): the rows known not to be in `audit_log` apart from those that may
-/// be. Named by action (#867), as the channel bus names its own, so the
-/// operator can tell whether any were `channel.reply_undelivered` rows — the
-/// ones that name a conversation whose reply was lost. The channel is the
-/// line's writer's ([`report_drained`]).
+/// when there were none (#798). Said at shutdown, before the channels stop
+/// ([`report_unreported_before_stop`]), but not all lost then: shed, late
+/// and failed are said apart (#807, #861), because rows shed in last week's
+/// flood are not this shutdown's — and failed inserts by outcome (#864): the
+/// rows known not to be in `audit_log` apart from those that may be. Named by
+/// action (#867), as the channel bus names its own, so the operator can tell
+/// whether any were `channel.reply_undelivered` rows — the ones that name a
+/// conversation whose reply was lost. The channel is the line's writer's.
 pub(crate) fn format_unreported_at_shutdown(unsaid: ActionUnsaid) -> Option<String> {
     let total = unsaid.counts.total();
     (total > 0).then(|| {
@@ -229,6 +229,23 @@ pub(crate) fn format_unreported_at_shutdown(unsaid: ActionUnsaid) -> Option<Stri
             counted(total, &format!("{} audit row", unsaid.action), "had", "had"),
             if total == 1 { "its own" } else { "their own" },
             by_kind(unsaid.counts, " over the daemon's life"),
+        )
+    })
+}
+
+/// Pure: the drain's `[audit-lost]` line for one channel's lost rows of one
+/// action thinned out since [`format_unreported_at_shutdown`]'s line — while
+/// the channels stopped and their drivers drained — kind by kind, or `None`
+/// when there were none (#862's lesson, for the daemon's sinks).
+pub(crate) fn format_unreported_while_stopping(unsaid: ActionUnsaid) -> Option<String> {
+    let n = unsaid.counts.total();
+    (n > 0).then(|| {
+        format!(
+            "{} no line of {} (thinned past a flood, while the channels stopped and their \
+             drivers drained): {}",
+            counted(n, &format!("more {} audit row", unsaid.action), "had", "had"),
+            if n == 1 { "its own" } else { "their own" },
+            by_kind(unsaid.counts, ""),
         )
     })
 }
@@ -301,11 +318,43 @@ pub(crate) fn emit_report(writer: AuditLostWriter, line: &str) {
     kastellan_core::worker_stderr::emit_audit_lost_report(writer, line);
 }
 
-/// Say what [`super::drain`] left behind: lost rows, stuck drivers that audit on
-/// exit and thinned reports (under each channel's own writer) on the
-/// `[audit-lost]` marker through `report`;
-/// other drivers still running, and bring-ups that never finished, at INFO.
-pub(crate) fn report_drained(d: &Drained, report: Reporter) {
+/// What [`report_unreported_before_stop`] said: the counts
+/// [`report_drained`] counts the drain's line from, so no row is said twice.
+/// Its contents are this module's, so outside tests only that call makes one.
+#[derive(Debug)]
+#[cfg_attr(test, derive(Default))]
+#[must_use = "say the rows thinned while the channels stop with `report_drained`"]
+pub(crate) struct SaidUnreported(Unreported);
+
+/// Say how many of the daemon's sinks' lost rows got no line of their own
+/// over its life — one `[audit-lost]` line per channel and action that has
+/// any, under the channel's own writer (#807, #867) — and hand back what was
+/// said, for [`report_drained`] to count from.
+///
+/// **Called before the channels stop**, as the channel bus says its own
+/// (#862): a channel supervisor's `shutdown` can await an insert nothing
+/// bounds against a wedged Postgres, and the scheduler's shutdown beside the
+/// drain is unbounded too. Said only after them, the count — a thinned
+/// `channel.reply_undelivered` row's among them — would die with the service
+/// manager's SIGKILL.
+pub(crate) fn report_unreported_before_stop(report: Reporter) -> SaidUnreported {
+    report_unreported_on(&LEDGER, report)
+}
+
+/// [`report_unreported_before_stop`] on `ledger`.
+pub(super) fn report_unreported_on(ledger: &Ledger, report: Reporter) -> SaidUnreported {
+    let unreported = ledger.unreported();
+    report_each(&unreported, format_unreported_at_shutdown, report);
+    SaidUnreported(unreported)
+}
+
+/// Say what [`super::drain`] left behind: lost rows, stuck drivers that audit
+/// on exit and the rows thinned since `said` was taken — while the channels
+/// stopped and their drivers drained, under each channel's own writer — on
+/// the `[audit-lost]` marker through `report`; other drivers still running,
+/// and bring-ups that never finished, at INFO. Takes `said` by value, so its
+/// baseline is used once.
+pub(crate) fn report_drained(d: &Drained, said: SaidUnreported, report: Reporter) {
     let lost = [
         format_pending_at_shutdown(d, DRAIN_BOUND),
         format_stuck_replies_at_shutdown(d, DRAIN_BOUND),
@@ -313,32 +362,30 @@ pub(crate) fn report_drained(d: &Drained, report: Reporter) {
     for line in lost.into_iter().flatten() {
         report(AuditLostWriter::Shutdown, &line);
     }
-    // Under each channel's own writer (#807): whose rows they were — one
-    // line per action (#867).
-    for channel in SinkChannel::ALL {
-        for &unsaid in d.unreported.of(channel) {
-            if let Some(line) = format_unreported_at_shutdown(unsaid) {
-                report(channel.writer(), &line);
-            }
-        }
-    }
+    report_each(&d.unreported.since(&said.0), format_unreported_while_stopping, report);
     let info = [format_live_at_shutdown(d, DRAIN_BOUND), format_starting_at_shutdown(d)];
     for line in info.into_iter().flatten() {
         tracing::info!("{line}");
     }
 }
 
-/// Say `unreported` thinned-out rows on the `[audit-lost]` marker, if any:
-/// one line per channel and action, under the channel's own writer (#807,
-/// #867), as [`report_drained`] says the drain's.
-fn report_unreported_since(unreported: &Unreported, report: Reporter) {
+/// Say `unreported` thinned-out rows on the `[audit-lost]` marker, if any,
+/// as `format` words them: one line per channel and action, under the
+/// channel's own writer (#807: whose rows they were; #867: never a sum of a
+/// channel's actions).
+fn report_each(unreported: &Unreported, format: fn(ActionUnsaid) -> Option<String>, report: Reporter) {
     for channel in SinkChannel::ALL {
         for &unsaid in unreported.of(channel) {
-            if let Some(line) = format_unreported_since(unsaid) {
+            if let Some(line) = format(unsaid) {
                 report(channel.writer(), &line);
             }
         }
     }
+}
+
+/// [`report_each`] with the last lines' words ([`format_unreported_since`]).
+fn report_unreported_since(unreported: &Unreported, report: Reporter) {
+    report_each(unreported, format_unreported_since, report);
 }
 
 /// The end of `main`'s shutdown, after [`report_drained`]: the daemon's last

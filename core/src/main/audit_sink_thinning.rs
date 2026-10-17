@@ -4,10 +4,9 @@
 //! outcome since #864 — and [`refuse`] reads the clock and reports. The
 //! pure core — [`Thinning`], the predicates and [`BurstTally`] — is the
 //! library's `kastellan_core::audit_thinning` since #829, which the channel
-//! bus's lost-row writer shares; why rows are
-//! thinned at all is said there. Split out of `audit_sink.rs` to keep it
-//! under the 500-LOC soft cap; `#[path]`-included there. Its tests are in
-//! `audit_sink_thinning_tests.rs`.
+//! bus's lost-row writer shares; why rows are thinned at all is said there.
+//! Split out of `audit_sink.rs` to keep it under the 500-LOC soft cap;
+//! `#[path]`-included there. Its tests are in `audit_sink_thinning_tests.rs`.
 //!
 //! **Each channel thins on its own** ([`Refusals`], #807). One shared count
 //! let a compromised email worker — its `skipped` list has no cap — hold a
@@ -205,8 +204,15 @@ impl UnsaidCounts {
     }
 
     /// The rows counted since `base` was taken. Each count only grows, so the
-    /// saturation hides nothing.
+    /// saturation hides nothing — asserted in debug builds.
     fn since(self, base: Self) -> Self {
+        debug_assert!(
+            self.shed >= base.shed
+                && self.late >= base.late
+                && self.failed_not_written >= base.failed_not_written
+                && self.failed_unknown >= base.failed_unknown,
+            "a count shrank: {base:?} -> {self:?}"
+        );
         Self {
             shed: self.shed.saturating_sub(base.shed),
             late: self.late.saturating_sub(base.late),
