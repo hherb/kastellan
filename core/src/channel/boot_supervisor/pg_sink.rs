@@ -63,8 +63,8 @@ fn sink_reporting_to(pool: PgPool, channel: &str, report: Reporter, lost: &'stat
             // Non-fatal, as before #814 — but a row that is not written is
             // now said on `[audit-lost]` at ERROR, not a WARN that
             // `RUST_LOG=error` hides.
-            audit_or_report(&pool, AuditLostWriter::ChannelSupervisor, action, payload, report, lost)
-                .await;
+            let writer = (AuditLostWriter::ChannelSupervisor, channel.as_str());
+            audit_or_report(&pool, writer, action, payload, report, lost).await;
         }) as BoxFuture<'static, ()>
     })
 }

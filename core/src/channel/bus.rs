@@ -190,7 +190,9 @@ pub struct AskWiring {
 /// Real DB-backed `ChannelEvents`; its own module since #808, which made a
 /// failed audit insert an `[audit-lost]` report. Since #829 also the
 /// shutdown's report of the lost rows its lines left out, for `main`.
-pub use super::pg_events::{report_unsaid_lost_rows, PgChannelEvents};
+pub use super::pg_events::{
+    report_unsaid_lost_rows, report_unsaid_lost_rows_since, PgChannelEvents, SaidLostRows,
+};
 
 /// The inbound path; its own module since #824 (`bus.rs` was already over the
 /// 500-LOC soft cap, and #815 was about to grow it).

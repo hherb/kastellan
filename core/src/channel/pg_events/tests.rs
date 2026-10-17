@@ -57,6 +57,7 @@ impl InsertFailure for Unknown {
 fn received_row(report: Reporter, lost: &'static LostRows) -> RowReport<'static> {
     RowReport {
         writer: AuditLostWriter::Bus,
+        writer_channel: "matrix",
         action: "channel.received",
         about: r#" for channel "matrix""#,
         channel: Some("matrix"),

@@ -111,3 +111,38 @@ pub(crate) fn closing_pool() -> PgPool {
         .acquire_timeout(Duration::from_secs(5))
         .connect_lazy_with(options)
 }
+
+/// A pool whose every connection is accepted and answered with **garbage**:
+/// a whole message header (a type byte, then a 4-byte length) of a type no
+/// Postgres sends, in reply to the client's startup message. Each insert
+/// fails fast with a `Protocol` error — an outcome
+/// as unknown as [`closing_pool`]'s, but another cause (#859), so the two
+/// pools together are two faults of one outcome. The answering thread lives
+/// as long as the test process.
+///
+/// Build it inside a runtime, as [`stalled_pool`].
+pub(crate) fn garbage_pool() -> PgPool {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+    let port = listener.local_addr().expect("local addr").port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            // Read the client's first message, then answer it with an empty
+            // message of type `X` — a frontend type (Terminate), never a
+            // backend's. Whole, so the client reads a message it does not
+            // know rather than a short read (which is an EOF, `closing_pool`'s
+            // cause); then wait for the client to close.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            let _ = std::io::Read::read(&mut stream, &mut [0u8; 1024]);
+            let _ = std::io::Write::write_all(&mut stream, b"X\0\0\0\x04");
+            let _ = std::io::Read::read(&mut stream, &mut [0u8; 1024]);
+        }
+    });
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(port)
+        .username("nobody")
+        .database("nothing");
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_lazy_with(options)
+}

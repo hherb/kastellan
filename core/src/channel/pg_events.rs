@@ -53,20 +53,26 @@ use kastellan_db::tasks::{self, Lane};
 
 use super::audit_text::{insert_verdict, quoted_id};
 use super::bus::ChannelEvents;
+use super::ChannelId;
 use crate::audit_thinning::BurstTally;
 use crate::worker_stderr::{emit_audit_lost_report, AuditLostWriter};
 
 mod lost_rows;
-use lost_rows::{format_unsaid, RowKey};
+use lost_rows::{format_unsaid, unsaid_since, RowKey, Unsaid, UnsaidPart};
 pub(crate) use lost_rows::{LostRows, LOST_ROWS};
 
 /// The `actor` every row [`audit_or_report`] writes is under: the bus's, and
 /// since #814 the boot supervisor's.
 const ACTOR: &str = "channel";
 
-/// Real DB-backed `ChannelEvents` over the runtime pool.
+/// Real DB-backed `ChannelEvents` over the runtime pool, for one channel's
+/// bus.
 pub struct PgChannelEvents {
     pool: sqlx::PgPool,
+    /// The channel this bus serves: a lost row naming no channel of its own
+    /// (`ask.resolved`, `channel.reply_unroutable`) is counted under it, so
+    /// one bus's flood of them cannot thin another bus's lines (#860).
+    channel: ChannelId,
     /// How a lost row is said: [`emit_report`], but for a test's recorder.
     report: Reporter,
     /// Which lost rows get a line of their own (#829): the process-wide
@@ -75,17 +81,20 @@ pub struct PgChannelEvents {
 }
 
 impl PgChannelEvents {
-    pub fn new(pool: sqlx::PgPool) -> Self {
+    /// The events of the bus serving `channel` — the one channel its bus
+    /// runs, as every bus the daemon builds does (`matrix_boot.rs`,
+    /// `email_boot.rs`).
+    pub fn new(pool: sqlx::PgPool, channel: ChannelId) -> Self {
         let (report, lost) = production_writer();
-        Self { pool, report, lost }
+        Self { pool, channel, report, lost }
     }
 
-    /// Test builds only: lost rows said to `report` and counted apart from
-    /// every other test's, so a test can read them through the trait method
-    /// production calls.
+    /// Test builds only: a Matrix bus's events, with lost rows said to
+    /// `report` and counted apart from every other test's, so a test can read
+    /// them through the trait method production calls.
     #[cfg(test)]
     pub(crate) fn with_reporter(pool: sqlx::PgPool, report: Reporter) -> Self {
-        Self { pool, report, lost: test_support::own_lost_rows() }
+        Self { pool, channel: ChannelId("matrix".into()), report, lost: test_support::own_lost_rows() }
     }
 }
 
@@ -99,7 +108,8 @@ impl ChannelEvents for PgChannelEvents {
     /// fails is reported on `[audit-lost]` (#808), as is one still awaited
     /// when the bus stops (#813).
     async fn audit(&self, action: &'static str, payload: Value) {
-        audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report, self.lost).await;
+        let writer = (AuditLostWriter::Bus, self.channel.0.as_str());
+        audit_or_report(&self.pool, writer, action, payload, self.report, self.lost).await;
     }
 
     /// Work a bus stop abandoned (#832): the same writer and reporter as a
@@ -130,29 +140,66 @@ pub(crate) fn production_writer() -> (Reporter, &'static LostRows) {
     (emit_report, &LOST_ROWS)
 }
 
-/// Say, once, how many rows every bus writer lost (failed to insert) and gave no line
-/// of their own (#829) — one `[audit-lost]` line per writer, channel, action
-/// and outcome that has any (action #865, outcome #864). The daemon calls it after the channels stop, when nothing writes
-/// through these writers any more; called twice, it would say the same rows
-/// again. The count is every burst's, so it includes rows a later burst's
-/// first line already summed up ("the burst before it ended after …").
-pub fn report_unsaid_lost_rows() {
+/// What [`report_unsaid_lost_rows`] said: the counts
+/// [`report_unsaid_lost_rows_since`] counts from, so no row is said twice.
+/// Its contents are this module's, so the only baseline that call can be
+/// given is the first call's own.
+#[derive(Debug)]
+#[must_use = "say the rows lost while the channels stop with `report_unsaid_lost_rows_since`"]
+pub struct SaidLostRows(Vec<Unsaid>);
+
+/// Say how many rows every bus writer lost (failed to insert) and gave no
+/// line of their own (#829) — one `[audit-lost]` line per writer, channel,
+/// action and outcome that has any (action #865, outcome #864) — and hand
+/// back what was said. The count is every burst's, so it includes rows a
+/// later burst's first line already summed up ("the burst before it ended
+/// after …").
+///
+/// **Called before the channels stop** (#862), and then
+/// [`report_unsaid_lost_rows_since`] after: a channel supervisor's
+/// `shutdown` joins its run loop, which may be awaiting a `channel.*` insert
+/// that nothing bounds against a wedged Postgres (there is no statement
+/// timeout). Said only after that, the count would die with the process when
+/// the service manager's SIGKILL came first — as the daemon's own sinks say
+/// theirs before the pool's unbounded close (#802).
+pub fn report_unsaid_lost_rows() -> SaidLostRows {
     let (report, lost) = production_writer();
-    report_unsaid(lost, report);
+    SaidLostRows(report_unsaid(lost, report))
 }
 
-/// [`report_unsaid_lost_rows`] over `lost`, through `report`.
-fn report_unsaid(lost: &LostRows, report: Reporter) {
-    for unsaid in lost.unsaid() {
-        report(unsaid.key.writer, &format_unsaid(&unsaid));
+/// After the channels stopped, when nothing writes through these writers any
+/// more: say the rows thinned out since `said` was taken — those lost while
+/// the channels stopped — one line per count, as
+/// [`report_unsaid_lost_rows`] says them (#862). Takes `said` by value, so
+/// its baseline is used once.
+pub fn report_unsaid_lost_rows_since(said: SaidLostRows) {
+    let (report, lost) = production_writer();
+    report_unsaid_since(lost, &said.0, report);
+}
+
+/// [`report_unsaid_lost_rows`] over `lost`, through `report`: returns what
+/// it said.
+fn report_unsaid(lost: &LostRows, report: Reporter) -> Vec<Unsaid> {
+    let unsaid = lost.unsaid();
+    for count in &unsaid {
+        report(count.key.writer, &format_unsaid(count, UnsaidPart::BeforeStop));
+    }
+    unsaid
+}
+
+/// [`report_unsaid_lost_rows_since`] over `lost`, through `report`.
+fn report_unsaid_since(lost: &LostRows, said: &[Unsaid], report: Reporter) {
+    for count in unsaid_since(lost.unsaid(), said) {
+        report(count.key.writer, &format_unsaid(&count, UnsaidPart::DuringStop));
     }
 }
 
 /// Insert one `channel`-actor audit row; report it through `report`, as
-/// `writer`'s, if the insert fails or is abandoned mid-await. A failed
-/// insert counts in `lost` under the row's `channel`, action and outcome,
-/// which thins its line past a flood (#829, #864) — unless its cause is new
-/// in the burst (#859).
+/// `writer`'s — the `[audit-lost]` writer and the channel it writes for — if
+/// the insert fails or is abandoned mid-await. A failed insert counts in
+/// `lost` under the row's `channel` (or, for a row naming none, the
+/// writer's: #860), action and outcome, which thins its line past a flood
+/// (#829, #864) — unless its cause is new in the burst (#859).
 ///
 /// Two writers share it: the bus ([`AuditLostWriter::Bus`]) and, since #814,
 /// the channel boot supervisor's sink
@@ -175,7 +222,7 @@ fn report_unsaid(lost: &LostRows, report: Reporter) {
 /// not void it).
 pub(crate) async fn audit_or_report(
     pool: &sqlx::PgPool,
-    writer: AuditLostWriter,
+    (writer, writer_channel): (AuditLostWriter, &str),
     action: &'static str,
     payload: Value,
     report: Reporter,
@@ -186,7 +233,7 @@ pub(crate) async fn audit_or_report(
     // No `RETURNING id` (#829): the id is discarded here, and decoding it was
     // the one step of ours that could fail after a row known to be written.
     let insert = kastellan_db::audit::insert_without_id(pool, ACTOR, action, payload);
-    let row = RowReport { writer, action, about: &about, channel: channel.as_deref(), report, lost };
+    let row = RowReport { writer, writer_channel, action, about: &about, channel: channel.as_deref(), report, lost };
     settle_or_report(insert, row).await;
 }
 
@@ -195,6 +242,9 @@ pub(crate) async fn audit_or_report(
 #[derive(Clone, Copy)]
 struct RowReport<'a> {
     writer: AuditLostWriter,
+    /// The channel `writer` writes for, which a row naming none is counted
+    /// under (#860).
+    writer_channel: &'a str,
     action: &'static str,
     /// [`describe_row`]'s words.
     about: &'a str,
@@ -244,7 +294,13 @@ impl<'a> PendingInsert<'a> {
         if let Err(e) = result {
             let row = self.row;
             // `lose` releases its lock before the report, which can block.
-            let key = RowKey { writer: row.writer, channel: row.channel, action: row.action, outcome: e.outcome() };
+            let key = RowKey {
+                writer: row.writer,
+                writer_channel: row.writer_channel,
+                channel: row.channel,
+                action: row.action,
+                outcome: e.outcome(),
+            };
             let lost = row.lost.lose(key, e.cause());
             if lost.report() {
                 let line = format_row_lost(row.action, row.about, &e, lost.tally);

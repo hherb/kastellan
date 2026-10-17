@@ -303,7 +303,7 @@ async fn attempt(
     info!(identity = %spawned.identity, "email worker started; starting channel bus");
     let authorizer = Arc::new(kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()));
     let pairing = Arc::new(kastellan_core::channel::pairing::DbPairingService::new(pool.clone()));
-    let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(pool.clone()));
+    let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(pool.clone(), ChannelId("email".to_string())));
     // Wired so an email peer can still ANSWER an ask (the inbound half
     // works today); outbound SMTP is a later slice.
     //

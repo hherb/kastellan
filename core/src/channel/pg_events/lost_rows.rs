@@ -22,13 +22,17 @@
 //! [`crate::audit_thinning`]). The channel is read from the row's own
 //! `channel` field, because one [`super::PgChannelEvents`] serves every row
 //! its bus writes. A row with no `channel` (`ask.resolved`,
-//! `channel.reply_unroutable`) is counted under [`RowChannel::Unnamed`].
+//! `channel.reply_unroutable`) is counted under the channel its writer
+//! writes for ([`RowChannel::Unnamed`], #860): before, every bus's such rows
+//! shared one count, so one bus's flood thinned the other's lines.
 //!
 //! **One process-wide count** ([`LOST_ROWS`]): a channel's bus is rebuilt on
 //! every bring-up, so a count held by the bus would start afresh after each
 //! restart — and the rows a restart's count had left unsaid would be said by
-//! no one. The shutdown says what is left ([`super::report_unsaid_lost_rows`]);
-//! a crash loses it, as it loses the daemon's sinks' (#817).
+//! no one. The shutdown says what is left ([`super::report_unsaid_lost_rows`])
+//! — before the channels stop, and the rows thinned during the stop after it
+//! ([`unsaid_since`], #862); a crash loses it, as it loses the daemon's
+//! sinks' (#817).
 //!
 //! What is **not** thinned: a row abandoned mid-insert by a stop (#813) and
 //! work a stop abandoned (#832). Both are said once per stop, per pump or per
@@ -58,18 +62,23 @@ pub(crate) enum RowChannel {
     /// The row's own `channel` field.
     Named(String),
     /// The row has no `channel` field (`ask.resolved`,
-    /// `channel.reply_unroutable`).
-    Unnamed,
+    /// `channel.reply_unroutable`): the channel its writer writes for — its
+    /// bus's (#860). Apart from [`Self::Named`], so the shutdown line can say
+    /// the rows themselves name none (a query by `payload->>'channel'` would
+    /// not find them).
+    Unnamed(String),
     /// A channel past [`MAX_NAMED_CHANNELS`] for this writer.
     Other,
 }
 
 /// What a lost row is counted by: who wrote it, the row's own `channel`
-/// field (if it has one), its action, and what its failed insert says about
-/// it (#858).
+/// field (if it has one) — else the channel its writer writes for (#860) —
+/// its action, and what its failed insert says about it (#858).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RowKey<'a> {
     pub(crate) writer: AuditLostWriter,
+    /// The channel `writer` writes for: a bus's own, a boot supervisor's.
+    pub(crate) writer_channel: &'a str,
     pub(crate) channel: Option<&'a str>,
     pub(crate) action: &'static str,
     pub(crate) outcome: InsertOutcome,
@@ -100,8 +109,8 @@ struct Entry {
 pub(crate) struct LostRows {
     /// A `Vec`, not a map: it keeps the order each entry was first lost in,
     /// which [`Self::unsaid`] reports by, and it stays short (per writer,
-    /// [`MAX_NAMED_CHANNELS`] plus `Unnamed` and `Other` channels, each with
-    /// the few actions the core writes, by two outcomes).
+    /// [`MAX_NAMED_CHANNELS`] channels plus `Other`, each with the few
+    /// actions the core writes, by two outcomes).
     entries: Mutex<Vec<Entry>>,
 }
 
@@ -156,23 +165,28 @@ impl LostRows {
     }
 }
 
-/// Pure: which channel `writer`'s row on `channel` counts under, given the
-/// entries so far — its own name, until the writer already has
-/// [`MAX_NAMED_CHANNELS`] distinct ones.
-fn row_channel(entries: &[Entry], writer: AuditLostWriter, channel: Option<&str>) -> RowChannel {
-    let Some(name) = channel else { return RowChannel::Unnamed };
+/// Pure: which channel `key`'s row counts under, given the entries so far —
+/// its own `channel` field, or else its writer's channel (#860), until the
+/// writer already has [`MAX_NAMED_CHANNELS`] distinct names. A row's own
+/// name and a writer's count alike: the cap bounds the names, whoever spelled
+/// them.
+fn row_channel(entries: &[Entry], key: RowKey<'_>) -> RowChannel {
+    let (name, channel): (&str, fn(String) -> RowChannel) = match key.channel {
+        Some(own) => (own, RowChannel::Named),
+        None => (key.writer_channel, RowChannel::Unnamed),
+    };
     let mut named: Vec<&str> = entries
         .iter()
-        .filter(|e| e.key.writer == writer)
+        .filter(|e| e.key.writer == key.writer)
         .filter_map(|e| match &e.key.channel {
-            RowChannel::Named(n) => Some(n.as_str()),
-            _ => None,
+            RowChannel::Named(n) | RowChannel::Unnamed(n) => Some(n.as_str()),
+            RowChannel::Other => None,
         })
         .collect();
     named.sort_unstable();
     named.dedup();
     if named.contains(&name) || named.len() < MAX_NAMED_CHANNELS {
-        RowChannel::Named(name.to_string())
+        channel(name.to_string())
     } else {
         RowChannel::Other
     }
@@ -182,7 +196,7 @@ fn row_channel(entries: &[Entry], writer: AuditLostWriter, channel: Option<&str>
 fn entry<'a>(entries: &'a mut Vec<Entry>, key: RowKey<'_>) -> &'a mut Entry {
     let key = CountKey {
         writer: key.writer,
-        channel: row_channel(entries, key.writer, key.channel),
+        channel: row_channel(entries, key),
         action: key.action,
         outcome: key.outcome,
     };
@@ -196,23 +210,55 @@ fn entry<'a>(entries: &'a mut Vec<Entry>, key: RowKey<'_>) -> &'a mut Entry {
     &mut entries[at]
 }
 
+/// Pure: each of `now`'s counts less its rows in `base` (none, if `base` has
+/// no entry for its key); the counts with none left out. Each count only
+/// grows and an entry, once made, stays, so nothing in `base` is missing
+/// from `now` — the shutdown's second line says only the rows thinned since
+/// its first (#862).
+pub(crate) fn unsaid_since(now: Vec<Unsaid>, base: &[Unsaid]) -> Vec<Unsaid> {
+    now.into_iter()
+        .map(|u| {
+            let before = base.iter().find(|b| b.key == u.key).map_or(0, |b| b.rows);
+            Unsaid { rows: u.rows.saturating_sub(before), ..u }
+        })
+        .filter(|u| u.rows > 0)
+        .collect()
+}
+
+/// Which of the shutdown's two lines for a count [`format_unsaid`] words
+/// (#862).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnsaidPart {
+    /// Said before the channels stop: every row thinned so far.
+    BeforeStop,
+    /// Said after they stopped: the rows thinned since the first line.
+    DuringStop,
+}
+
 /// Pure: the shutdown's line for one count's rows that got no line of their
-/// own — said once, so a flood's tail is not lost with the process (the
-/// per-line tally says the rest). It says whether they are known not to be
-/// in `audit_log` (#864): since #858 an insert that failed in a way that
-/// does not prove its row absent — a lost connection, a server crash — is
-/// "may not have been written", and those are counted apart.
-pub(crate) fn format_unsaid(unsaid: &Unsaid) -> String {
+/// own — said, so a flood's tail is not lost with the process (the per-line
+/// tally says the rest): once before the channels stop and, for the rows
+/// thinned during the stop, once after (`part`, #862). It says whether they
+/// are known not to be in `audit_log` (#864): since #858 an insert that
+/// failed in a way that does not prove its row absent — a lost connection,
+/// a server crash — is "may not have been written", and those are counted
+/// apart.
+pub(crate) fn format_unsaid(unsaid: &Unsaid, part: UnsaidPart) -> String {
     let key = &unsaid.key;
     let whose = match &key.channel {
         RowChannel::Named(name) => format!(" for channel {}", super::quoted_id(name)),
-        RowChannel::Unnamed => " naming no channel".to_string(),
+        RowChannel::Unnamed(name) => format!(" naming no channel (written for channel {})", super::quoted_id(name)),
         RowChannel::Other => format!(" for channels past the first {MAX_NAMED_CHANNELS}"),
     };
     let rows = unsaid.rows;
     let (row, its) = if rows == 1 { ("row", "its own") } else { ("rows", "their own") };
+    let (more, when) = match part {
+        UnsaidPart::BeforeStop => ("", ""),
+        UnsaidPart::DuringStop => (" more", ", while the channels stopped"),
+    };
     format!(
-        "{rows} {} audit {row}{whose} failed to insert ({}) and had no line of {its} (thinned past a flood)",
+        "{rows}{more} {} audit {row}{whose} failed to insert ({}) and had no line of {its} (thinned past a \
+         flood{when})",
         key.action,
         super::insert_verdict(key.outcome),
     )
@@ -227,9 +273,23 @@ mod tests {
     /// Postgres's 25006, read_only_sql_transaction.
     const READ_ONLY: InsertCause = InsertCause::Answered(SqlState::parse("25006").unwrap());
 
-    /// A `channel.received` row of `writer` on `channel`, known not written.
+    /// A `channel.received` row of `writer` on `channel` — written for that
+    /// channel too, or for Matrix if the row names none — known not written.
     fn received(writer: AuditLostWriter, channel: Option<&str>) -> RowKey<'_> {
-        RowKey { writer, channel, action: "channel.received", outcome: InsertOutcome::NotWritten }
+        let writer_channel = channel.unwrap_or("matrix");
+        RowKey { writer, writer_channel, channel, action: "channel.received", outcome: InsertOutcome::NotWritten }
+    }
+
+    /// An `ask.resolved` row — which names no channel — of the bus written
+    /// for `writer_channel`, known not written.
+    fn ask_resolved(writer_channel: &str) -> RowKey<'_> {
+        RowKey {
+            writer: AuditLostWriter::Bus,
+            writer_channel,
+            channel: None,
+            action: "ask.resolved",
+            outcome: InsertOutcome::NotWritten,
+        }
     }
 
     /// Lose `n` rows counted by `key` at `at`, returning how many got a line.
@@ -295,6 +355,26 @@ mod tests {
         let reply = RowKey { action: "channel.reply_undelivered", ..received(AuditLostWriter::Bus, Some("matrix")) };
         let first = rows.lose_at(reply, READ_ONLY, t0);
         assert!(first.report() && first.tally.nth == 1, "another action's first row: {first:?}");
+    }
+
+    /// #860: a row naming no channel is counted under its bus's channel, so
+    /// one bus's flood of them leaves another bus's first such row its line
+    /// — and the shutdown says which bus's they were.
+    #[test]
+    fn a_row_naming_no_channel_counts_under_its_buss_channel() {
+        let rows = LostRows::new();
+        let t0 = Instant::now();
+        let email_said = lose_n(&rows, ask_resolved("email"), 100, t0);
+        let matrix = rows.lose_at(ask_resolved("matrix"), READ_ONLY, t0);
+        assert!(matrix.report() && matrix.tally.nth == 1, "the other bus's first such row: {matrix:?}");
+        // Apart from the bus's rows that name the channel themselves, too.
+        let named = rows.lose_at(RowKey { action: "ask.resolved", ..received(AuditLostWriter::Bus, Some("email")) }, READ_ONLY, t0);
+        assert!(named.report() && named.tally.nth == 1, "a row naming its channel counts apart: {named:?}");
+        let nw = InsertOutcome::NotWritten;
+        assert_eq!(
+            rows.unsaid(),
+            [unsaid(AuditLostWriter::Bus, RowChannel::Unnamed("email".into()), "ask.resolved", nw, 100 - email_said)]
+        );
     }
 
     /// #864: the rows that may have been written are counted apart from
@@ -381,22 +461,58 @@ mod tests {
         assert_eq!(other, 1);
     }
 
+    /// #862: the second line says only the rows thinned since the first —
+    /// a count in both by the difference, one new since whole — and none
+    /// for a count with nothing new.
+    #[test]
+    fn unsaid_since_subtracts_count_by_count() {
+        let matrix = || RowChannel::Named("matrix".into());
+        let nw = InsertOutcome::NotWritten;
+        let base = [
+            unsaid(AuditLostWriter::Bus, matrix(), "channel.received", nw, 40),
+            unsaid(AuditLostWriter::Bus, matrix(), "ask.resolved", nw, 7),
+        ];
+        let now = vec![
+            unsaid(AuditLostWriter::Bus, matrix(), "channel.received", nw, 43),
+            unsaid(AuditLostWriter::Bus, matrix(), "ask.resolved", nw, 7),
+            unsaid(AuditLostWriter::ChannelSupervisor, matrix(), "channel.received", nw, 2),
+        ];
+        assert_eq!(
+            unsaid_since(now, &base),
+            [
+                unsaid(AuditLostWriter::Bus, matrix(), "channel.received", nw, 3),
+                unsaid(AuditLostWriter::ChannelSupervisor, matrix(), "channel.received", nw, 2),
+            ]
+        );
+        assert_eq!(unsaid_since(base.to_vec(), &base), [], "nothing new");
+    }
+
+    /// #862: the second line says its rows are more, thinned during the stop.
+    #[test]
+    fn the_line_after_the_stop_says_its_rows_are_more() {
+        let key = unsaid(AuditLostWriter::Bus, RowChannel::Named("matrix".into()), "channel.received", InsertOutcome::NotWritten, 3);
+        assert_eq!(
+            format_unsaid(&key, UnsaidPart::DuringStop),
+            r#"3 more channel.received audit rows for channel "matrix" failed to insert (not written) and had no line of their own (thinned past a flood, while the channels stopped)"#
+        );
+    }
+
     /// The shutdown's line names the action and the channel quoted, says
     /// what is known of the rows (#864), and agrees in number.
     #[test]
     fn the_unsaid_line_names_its_count_and_what_is_known() {
         let nw = InsertOutcome::NotWritten;
         let line = |channel, outcome, rows| {
-            format_unsaid(&unsaid(AuditLostWriter::Bus, channel, "channel.received", outcome, rows))
+            format_unsaid(&unsaid(AuditLostWriter::Bus, channel, "channel.received", outcome, rows), UnsaidPart::BeforeStop)
         };
         assert_eq!(
             line(RowChannel::Named("matrix".into()), nw, 83),
             r#"83 channel.received audit rows for channel "matrix" failed to insert (not written) and had no line of their own (thinned past a flood)"#
         );
         assert_eq!(
-            line(RowChannel::Unnamed, InsertOutcome::Unknown, 1),
-            "1 channel.received audit row naming no channel failed to insert (may not have been written) and had no \
-             line of its own (thinned past a flood)"
+            line(RowChannel::Unnamed("email".into()), InsertOutcome::Unknown, 1),
+            "1 channel.received audit row naming no channel (written for channel \"email\") failed to insert (may not \
+             have been written) and had no line of its own (thinned past a flood)"
         );
         assert_eq!(
             line(RowChannel::Other, nw, 2),
