@@ -6,11 +6,12 @@
 //!
 //! As there, every test uses its own `static` [`Ledger`].
 
-use super::test_support::{closing_pool, stalled_pool};
+use super::test_support::{closing_pool, garbage_pool, stalled_pool};
 use super::tests::{bounds, stalled_writer};
 use super::*;
 use kastellan_core::audit_thinning::unreported_of;
 use kastellan_core::worker_stderr::AuditLostWriter;
+use kastellan_db::audit::InsertOutcome;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,8 +39,9 @@ fn a_flood_of_shed_rows_is_reported_one_by_one_then_thinned() {
         "{:?}",
         told[17]
     );
-    assert_eq!(LEDGER.final_snapshot().unreported.email, UnsaidCounts { shed: 15, late: 0, failed_not_written: 0, failed_unknown: 0 });
-    assert_eq!(LEDGER.final_snapshot().unreported.matrix, UnsaidCounts::default(), "email's flood is email's");
+    let unreported = LEDGER.final_snapshot().unreported;
+    assert_eq!(unreported.email, [ActionUnsaid { action: "b", counts: UnsaidCounts { shed: 15, ..UnsaidCounts::default() } }]);
+    assert!(unreported.matrix.is_empty(), "email's flood is email's");
     assert!(LEDGER.final_snapshot().named.is_empty(), "a refused row leaves no label behind");
 }
 
@@ -86,9 +88,10 @@ fn a_flood_of_failed_inserts_is_reported_one_by_one_then_thinned() {
         told[17]
     );
     let unreported = LEDGER.final_snapshot().unreported;
-    assert_eq!(unreported.email, UnsaidCounts { failed_unknown: 15, ..UnsaidCounts::default() });
-    assert_eq!(unreported.matrix, UnsaidCounts::default(), "email's flood is email's");
-    let line = report::format_unreported_at_shutdown(unreported.email).expect("a shutdown line");
+    let flood = ActionUnsaid { action: "b", counts: UnsaidCounts { failed_unknown: 15, ..UnsaidCounts::default() } };
+    assert_eq!(unreported.email, [flood]);
+    assert!(unreported.matrix.is_empty(), "email's flood is email's");
+    let line = report::format_unreported_at_shutdown(flood).expect("a shutdown line");
     assert!(line.contains("15 failed to insert over the daemon's life, may not have been written ("), "{line}");
 }
 
@@ -135,7 +138,11 @@ fn a_flood_of_one_actions_failed_inserts_does_not_thin_anothers_line() {
     rt.block_on(task.expect("not shed")).expect("the insert task ran to completion");
     let told = told.lock().unwrap().clone().expect("the other action's row has a line of its own");
     assert!(told.ends_with("; row 1 of this burst"), "{told}");
-    assert_eq!(LEDGER.unreported().email.failed_unknown, unreported_of(40), "the channel sums its actions");
+    // #867: and the flood is counted as its own action's, apart from the
+    // other action's reported row.
+    let unreported = LEDGER.unreported();
+    let dropped = UnsaidCounts { failed_unknown: unreported_of(40), ..UnsaidCounts::default() };
+    assert_eq!(unreported.email, [ActionUnsaid { action: "channel.inbound_dropped", counts: dropped }]);
 }
 
 /// What [`record_last`] was told, with whose line it was.
@@ -164,7 +171,7 @@ fn a_failed_insert_pending_at_the_drain_is_counted_in_the_last_line() {
         let task = email.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}).expect("not shed");
         rt.block_on(task).expect("the insert task ran to completion");
     }
-    assert_eq!(LEDGER.unreported().email.failed_unknown, 0, "POSITIVE CONTROL: rows 1-17 all got lines");
+    assert_eq!(LEDGER.unreported(), Unreported::default(), "POSITIVE CONTROL: rows 1-17 all got lines");
 
     let (stalled, _listener) = rt.block_on(async { stalled_pool() });
     let holder = SinkWriter::with_ledger(&LEDGER, stalled, rt.handle().clone(), SinkChannel::Matrix);
@@ -184,7 +191,7 @@ fn a_failed_insert_pending_at_the_drain_is_counted_in_the_last_line() {
         said,
         [(
             AuditLostWriter::Email,
-            "1 more channel audit row had no line of its own after the shutdown report (a driver \
+            "1 more b audit row had no line of its own after the shutdown report (a driver \
              still running past the drain, or an insert still pending at it): 1 failed to \
              insert, may not have been written (the insert failed in a way that does not prove \
              the row absent — a lost connection, a server crash, an ended session: look for them \
@@ -193,4 +200,48 @@ fn a_failed_insert_pending_at_the_drain_is_counted_in_the_last_line() {
         )],
         "said once, after the close, as email's — and nothing for Matrix's reported row"
     );
+}
+
+/// #859, through the writer (a gap #867's issue noted): two writers on one channel, one
+/// action, whose inserts fail with the same outcome (unknown) but two causes
+/// — a closed connection, a garbled answer. A flood of the first leaves the
+/// first row of the second its own line, saying it is a new cause; the next
+/// is thinned again. `Loss::failed` dropping the cause would put both in one
+/// stretch, and the new fault would go silent.
+#[test]
+fn a_new_cause_mid_flood_gets_its_line_through_the_writer() {
+    static LEDGER: Ledger = Ledger::new(bounds(8, 1));
+    let (rt, closing) = closing_writer(&LEDGER);
+    let garbled = SinkWriter::with_ledger(&LEDGER, rt.block_on(async { garbage_pool() }), rt.handle().clone(), SinkChannel::Email);
+    let write = |writer: &SinkWriter| {
+        let told: Arc<Mutex<Option<String>>> = Arc::default();
+        let seen = told.clone();
+        let task = writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |why| {
+            *seen.lock().unwrap() = Some(why.said());
+        });
+        rt.block_on(task.expect("not shed")).expect("the insert task ran to completion");
+        let told = told.lock().unwrap().clone();
+        told
+    };
+    // POSITIVE CONTROL, read from real inserts (outside the ledger): one
+    // outcome, two causes.
+    let fail = |writer: &SinkWriter| {
+        let insert = kastellan_db::audit::insert_without_id(&writer.pool, "a", "b", serde_json::json!({}));
+        rt.block_on(insert).expect_err("the fixture fails every insert")
+    };
+    let (eof, garbage) = (fail(&closing), fail(&garbled));
+    assert_eq!((eof.outcome(), garbage.outcome()), (InsertOutcome::Unknown, InsertOutcome::Unknown), "{eof} / {garbage}");
+    assert_ne!(eof.cause(), garbage.cause(), "{eof} / {garbage}");
+    for _ in 0..40 {
+        write(&closing);
+    }
+    assert_eq!(write(&closing), None, "POSITIVE CONTROL: row 41 of the flood is thinned");
+    let new = write(&garbled).expect("the first garbled row has a line of its own");
+    assert!(new.starts_with("may not have been written: "), "the same outcome: {new}");
+    // Rows 18-32 and 34-41 were thinned: 23 with no line of their own.
+    assert!(
+        new.ends_with("; row 42 of this burst, the first with its cause since row 33 (23 before it had no line of their own)"),
+        "{new}"
+    );
+    assert_eq!(write(&garbled), None, "then thinned again");
 }

@@ -5,7 +5,7 @@
 //! `super::` is the report module and `super::super::` is `audit_sink`.
 
 use super::*;
-use crate::audit_sink::{Drained, InFlight, UnsaidCounts, Unreported};
+use crate::audit_sink::{ActionUnsaid, Drained, InFlight, UnsaidCounts, Unreported};
 use kastellan_core::worker_stderr::AuditLostWriter;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -28,6 +28,11 @@ fn said_containing(needle: &str) -> Vec<(AuditLostWriter, String)> {
     SAID.lock().unwrap().iter().filter(|(_, l)| l.contains(needle)).cloned().collect()
 }
 
+/// `counts` of the `channel.inbound_dropped` action, for a line's tests.
+fn dropped(counts: UnsaidCounts) -> ActionUnsaid {
+    ActionUnsaid { action: "channel.inbound_dropped", counts }
+}
+
 #[test]
 fn the_counting_words_agree_with_their_number() {
     assert_eq!(counted(1, "row", "was", "were"), "1 row was");
@@ -40,11 +45,11 @@ fn the_shutdown_lines_count_rows_and_drivers_and_are_silent_at_zero() {
     let bound = Duration::from_secs(3);
     let none = Drained::default();
     assert_eq!(format_starting_at_shutdown(&none), None);
-    assert_eq!(format_unreported_since(UnsaidCounts::default()), None);
+    assert_eq!(format_unreported_since(dropped(UnsaidCounts::default())), None);
     assert_eq!(format_pending_at_shutdown(&none, bound), None);
     assert_eq!(format_stuck_replies_at_shutdown(&none, bound), None);
     assert_eq!(format_live_at_shutdown(&none, bound), None);
-    assert_eq!(format_unreported_at_shutdown(none.unreported.email), None);
+    assert_eq!(format_unreported_at_shutdown(dropped(UnsaidCounts::default())), None);
 
     let one = drained(1, 1, 0);
     assert_eq!(
@@ -107,49 +112,129 @@ fn record_clean(_: AuditLostWriter, line: &str) {
 /// bring-up (#802); and no residual line is said for zero rows.
 #[test]
 fn a_clean_drain_and_a_stuck_email_driver_report_no_loss() {
-    report_drained(&Drained::default(), record_clean);
-    report_drained(&drained(0, 1, 0), record_clean);
-    report_drained(&Drained { in_flight: InFlight { starting: 1, ..InFlight::default() }, ..Drained::default() }, record_clean);
-    report_unreported_since(Unreported::default(), record_clean);
+    report_drained(&Drained::default(), SaidUnreported::default(), record_clean);
+    report_drained(&drained(0, 1, 0), SaidUnreported::default(), record_clean);
+    let starting = Drained { in_flight: InFlight { starting: 1, ..InFlight::default() }, ..Drained::default() };
+    report_drained(&starting, SaidUnreported::default(), record_clean);
+    report_unreported_since(&Unreported::default(), record_clean);
     assert_eq!(*CLEAN_SAID.lock().unwrap(), Vec::<String>::new());
 }
 
 /// `report_drained` sends each loss to the reporter — what is no one
-/// channel's under the shutdown writer, each channel's thinned rows under its
-/// own — and nothing for a clean drain.
+/// channel's under the shutdown writer, each channel's rows thinned since the
+/// line before the stop under its own, one line per action (#867) — and
+/// nothing for a clean drain.
 #[test]
 fn report_drained_reports_each_loss_through_the_reporter() {
-    report_drained(&Drained::default(), record);
+    report_drained(&Drained::default(), SaidUnreported::default(), record);
+    let shed = |n| UnsaidCounts { shed: n, ..UnsaidCounts::default() };
+    let late = |n| UnsaidCounts { late: n, ..UnsaidCounts::default() };
+    // Said before the channels stopped: two of Matrix's undelivered replies.
+    let before_stop = SaidUnreported(Unreported {
+        matrix: vec![ActionUnsaid { action: "channel.reply_undelivered", counts: shed(2) }],
+        email: vec![],
+    });
     let d = Drained {
         named: vec!["REPORT-DRAINED-ROW".into()],
         unreported: Unreported {
-            matrix: UnsaidCounts { shed: 2, late: 0, failed_not_written: 0, failed_unknown: 0 },
-            email: UnsaidCounts { shed: 4, late: 0, failed_not_written: 0, failed_unknown: 0 },
+            matrix: vec![
+                ActionUnsaid { action: "channel.reply_undelivered", counts: shed(3) },
+                ActionUnsaid { action: "channel.inbound_dropped", counts: shed(5) },
+            ],
+            email: vec![ActionUnsaid { action: "channel.skipped_ack_only", counts: shed(4) }],
         },
         ..drained(1, 1, 1)
     };
-    report_drained(&d, record);
+    report_drained(&d, before_stop, record);
     report_unreported_since(
-        Unreported {
-            matrix: UnsaidCounts { shed: 0, late: 3, failed_not_written: 0, failed_unknown: 0 },
-            email: UnsaidCounts { shed: 0, late: 6, failed_not_written: 0, failed_unknown: 0 },
+        &Unreported {
+            matrix: vec![ActionUnsaid { action: "channel.reply_undelivered", counts: late(3) }],
+            email: vec![ActionUnsaid { action: "channel.skipped_ack_only", counts: late(6) }],
         },
         record,
     );
+    let stopping = "had no line of its own (thinned past a flood, while the channels stopped";
+    let stopping_many = "had no line of their own (thinned past a flood, while the channels stopped";
     for (needle, writer) in [
         ("REPORT-DRAINED-ROW", AuditLostWriter::Shutdown),
         ("1 channel driver had not exited after", AuditLostWriter::Shutdown),
         // #807: a channel's thinned rows are said under its own writer —
-        // the drain's, and the residual after it.
-        ("2 channel audit rows had no line", AuditLostWriter::Matrix),
-        ("4 channel audit rows had no line", AuditLostWriter::Email),
-        ("3 more channel audit rows had no line of their own after the shutdown report", AuditLostWriter::Matrix),
-        ("6 more channel audit rows had no line of their own after the shutdown report", AuditLostWriter::Email),
+        // the drain's, and the residual after it. #867: one line per
+        // action, never a sum of the channel's. #862: the drain's counts
+        // only the rows since the line before the stop (3 - 2).
+        (&format!("1 more channel.reply_undelivered audit row {stopping}"), AuditLostWriter::Matrix),
+        (&format!("5 more channel.inbound_dropped audit rows {stopping_many}"), AuditLostWriter::Matrix),
+        (&format!("4 more channel.skipped_ack_only audit rows {stopping_many}"), AuditLostWriter::Email),
+        (
+            "3 more channel.reply_undelivered audit rows had no line of their own after the shutdown report",
+            AuditLostWriter::Matrix,
+        ),
+        (
+            "6 more channel.skipped_ack_only audit rows had no line of their own after the shutdown report",
+            AuditLostWriter::Email,
+        ),
     ] {
         let said = said_containing(needle);
         assert_eq!(said.len(), 1, "{needle}: {said:?}");
         assert_eq!(said[0].0, writer, "{needle}");
     }
+    // #867: and no line has the pre-#867 shape, which summed a channel's
+    // actions ("7 channel audit rows had no line"), singular or plural.
+    let summed = SAID.lock().unwrap().iter().filter(|(_, l)| l.contains(" channel audit row") && l.contains("had no line")).count();
+    assert_eq!(summed, 0, "{:?}", SAID.lock().unwrap());
+}
+
+/// What [`record_stop`] was told, with whose line it was.
+static STOP_SAID: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_stop(writer: AuditLostWriter, line: &str) {
+    STOP_SAID.lock().unwrap().push((writer, line.to_string()));
+}
+
+/// #862's lesson, for the daemon's sinks: their thinned rows are said before
+/// the channels stop — so a stop the SIGKILL ends cannot take the count with
+/// it — and the drain's line says only the rows thinned since, never the
+/// first line's again. Through a ledger, as `main` calls it.
+#[test]
+fn the_sinks_thinned_rows_are_said_before_the_stop_and_only_the_rest_after_the_drain() {
+    use crate::audit_sink::{Bounds, Ledger, Loss, SinkChannel};
+    use kastellan_core::audit_thinning::unreported_of;
+    static LEDGER: Ledger = Ledger::new(Bounds { queued: 1, connections: 1 });
+    let lose = |n| {
+        for _ in 0..n {
+            LEDGER.refusals.refuse(SinkChannel::Matrix, "channel.reply_undelivered", Loss::Shed);
+        }
+    };
+    lose(20);
+    let said = report_unreported_on(&LEDGER, record_stop);
+    assert_eq!(
+        std::mem::take(&mut *STOP_SAID.lock().unwrap()),
+        [(
+            AuditLostWriter::Matrix,
+            format!(
+                "{} channel.reply_undelivered audit rows had no line of their own (thinned past a flood): {} shed \
+                 over the daemon's life (too many inserts already waiting for the pool)",
+                unreported_of(20),
+                unreported_of(20)
+            )
+        )]
+    );
+
+    lose(5);
+    report_drained(&LEDGER.final_snapshot(), said, record_stop);
+    let more = unreported_of(25) - unreported_of(20);
+    assert!(more > 0, "POSITIVE CONTROL: rows 21-25 are thinned");
+    assert_eq!(
+        std::mem::take(&mut *STOP_SAID.lock().unwrap()),
+        [(
+            AuditLostWriter::Matrix,
+            format!(
+                "{more} more channel.reply_undelivered audit rows had no line of their own (thinned past a flood, \
+                 while the channels stopped and their drivers drained): {more} shed (too many inserts already \
+                 waiting for the pool)"
+            )
+        )]
+    );
 }
 
 /// Whether `inner` (a quoted string's inside) holds a `"` that no backslash
@@ -224,18 +309,18 @@ fn the_starting_and_residual_lines_say_what_they_count() {
     );
     assert_eq!(format_stuck_replies_at_shutdown(&starting, Duration::from_secs(3)), None);
     assert_eq!(
-        format_unreported_since(UnsaidCounts { shed: 0, late: 1, failed_not_written: 0, failed_unknown: 0 }).unwrap(),
-        "1 more channel audit row had no line of its own after the shutdown report (a driver \
+        format_unreported_since(dropped(UnsaidCounts { shed: 0, late: 1, failed_not_written: 0, failed_unknown: 0 })).unwrap(),
+        "1 more channel.inbound_dropped audit row had no line of its own after the shutdown report (a driver \
          still running past the drain, or an insert still pending at it): 1 tried after \
          shutdown began"
     );
     // The last lines keep the kinds apart too: a row never tried is not a
     // failed insert, which may have been committed.
     assert_eq!(
-        format_unreported_since(UnsaidCounts { shed: 0, late: 2, failed_not_written: 3, failed_unknown: 1 })
+        format_unreported_since(dropped(UnsaidCounts { shed: 0, late: 2, failed_not_written: 3, failed_unknown: 1 }))
             .unwrap(),
         format!(
-            "6 more channel audit rows had no line of their own after the shutdown report (a \
+            "6 more channel.inbound_dropped audit rows had no line of their own after the shutdown report (a \
              driver still running past the drain, or an insert still pending at it): 2 tried \
              after shutdown began; 3 failed to insert, {NOT_WRITTEN}; 1 failed to insert, \
              {MAY_BE_WRITTEN}"
@@ -256,40 +341,40 @@ const MAY_BE_WRITTEN: &str = "may not have been written (the insert failed in a 
 #[test]
 fn the_unreported_line_says_each_kind_apart() {
     assert_eq!(
-        format_unreported_at_shutdown(UnsaidCounts { shed: 3, late: 2, failed_not_written: 0, failed_unknown: 0 }).unwrap(),
-        "5 channel audit rows had no line of their own (thinned past a flood): 3 shed over the \
+        format_unreported_at_shutdown(dropped(UnsaidCounts { shed: 3, late: 2, failed_not_written: 0, failed_unknown: 0 })).unwrap(),
+        "5 channel.inbound_dropped audit rows had no line of their own (thinned past a flood): 3 shed over the \
          daemon's life (too many inserts already waiting for the pool); 2 tried after shutdown \
          began"
     );
     assert_eq!(
-        format_unreported_at_shutdown(UnsaidCounts { shed: 0, late: 1, failed_not_written: 0, failed_unknown: 0 }).unwrap(),
-        "1 channel audit row had no line of its own (thinned past a flood): 1 tried after \
+        format_unreported_at_shutdown(dropped(UnsaidCounts { shed: 0, late: 1, failed_not_written: 0, failed_unknown: 0 })).unwrap(),
+        "1 channel.inbound_dropped audit row had no line of its own (thinned past a flood): 1 tried after \
          shutdown began"
     );
     assert_eq!(
-        format_unreported_at_shutdown(UnsaidCounts { shed: 3, late: 0, failed_not_written: 0, failed_unknown: 0 }).unwrap(),
-        "3 channel audit rows had no line of their own (thinned past a flood): 3 shed over the \
+        format_unreported_at_shutdown(dropped(UnsaidCounts { shed: 3, late: 0, failed_not_written: 0, failed_unknown: 0 })).unwrap(),
+        "3 channel.inbound_dropped audit rows had no line of their own (thinned past a flood): 3 shed over the \
          daemon's life (too many inserts already waiting for the pool)"
     );
     assert_eq!(
-        format_unreported_at_shutdown(UnsaidCounts { failed_not_written: 7, ..Default::default() }).unwrap(),
+        format_unreported_at_shutdown(dropped(UnsaidCounts { failed_not_written: 7, ..Default::default() })).unwrap(),
         format!(
-            "7 channel audit rows had no line of their own (thinned past a flood): 7 failed to \
+            "7 channel.inbound_dropped audit rows had no line of their own (thinned past a flood): 7 failed to \
              insert over the daemon's life, {NOT_WRITTEN}"
         )
     );
     // #864: the rows that may be in audit_log are said apart from those that
     // are certainly not.
     assert_eq!(
-        format_unreported_at_shutdown(UnsaidCounts { failed_not_written: 2, failed_unknown: 5, ..Default::default() })
+        format_unreported_at_shutdown(dropped(UnsaidCounts { failed_not_written: 2, failed_unknown: 5, ..Default::default() }))
             .unwrap(),
         format!(
-            "7 channel audit rows had no line of their own (thinned past a flood): 2 failed to \
+            "7 channel.inbound_dropped audit rows had no line of their own (thinned past a flood): 2 failed to \
              insert over the daemon's life, {NOT_WRITTEN}; 5 failed to insert over the daemon's \
              life, {MAY_BE_WRITTEN}"
         )
     );
-    assert_eq!(format_unreported_at_shutdown(UnsaidCounts::default()), None);
+    assert_eq!(format_unreported_at_shutdown(dropped(UnsaidCounts::default())), None);
 }
 
 /// #858: a failed insert's line says "not written" only when the row is

@@ -289,9 +289,12 @@ async fn attempt(
         crate::audit_sink::emit_report,
     );
 
+    // The channel the worker serves, and the one its bus's lost rows that
+    // name no channel are counted under (#860).
+    let cid = ChannelId("email".to_string());
     let spawned = match kastellan_core::channel::email::spawn_email_worker(
         backend,
-        ChannelId("email".to_string()),
+        cid.clone(),
         &cfg,
         egress,
         audit,
@@ -303,7 +306,7 @@ async fn attempt(
     info!(identity = %spawned.identity, "email worker started; starting channel bus");
     let authorizer = Arc::new(kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()));
     let pairing = Arc::new(kastellan_core::channel::pairing::DbPairingService::new(pool.clone()));
-    let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(pool.clone()));
+    let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(pool.clone(), cid));
     // Wired so an email peer can still ANSWER an ask (the inbound half
     // works today); outbound SMTP is a later slice.
     //

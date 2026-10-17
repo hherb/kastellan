@@ -85,7 +85,7 @@ fn a_lease_that_never_started_is_not_waited_for_or_called_a_loss() {
     let d = rt.block_on(drain_ledger(&LEDGER, NEVER));
     assert!(t.elapsed() < NEVER / 2, "a starting lease must not be waited for: {:?}", t.elapsed());
     assert_eq!(d.in_flight, InFlight { starting: 1, ..InFlight::default() });
-    report_drained(&d, record_clean);
+    report_drained(&d, Default::default(), record_clean);
     assert_eq!(*CLEAN_SAID.lock().unwrap(), Vec::<String>::new(), "and is no loss");
     assert!(
         crate::audit_sink::report::format_starting_at_shutdown(&d).is_some(),

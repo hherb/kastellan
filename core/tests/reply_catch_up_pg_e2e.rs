@@ -113,7 +113,7 @@ async fn spawn_bus(
         vec![Box::new(RecordingChannel { inbound_rx, sent: sent.clone(), park_sends })],
         Arc::new(StaticPairings::new()),
         None,
-        Arc::new(PgChannelEvents::new(pool.clone())),
+        Arc::new(PgChannelEvents::new(pool.clone(), ChannelId("matrix".into()))),
         Arc::new(Listening { inner, listening: listening.clone() }),
         None,
     );

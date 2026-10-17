@@ -238,15 +238,41 @@ fn main_installs_the_signals_before_anything_audits() {
     }
 }
 
-/// #829: the buses' lost rows thinned past a flood are said once, after the
-/// channel supervisors have stopped every writer of them — said earlier, the
-/// count would miss the rows lost during the stop; never said, a flood's tail
-/// would be lost with the process.
+/// #829, #862: the buses' lost rows thinned past a flood are said before the
+/// channel supervisors stop — whose shutdown can await an unbounded insert, so
+/// a count said only after it could die with the SIGKILL — and the rows
+/// thinned during each stop right after it, so a later stop that hangs costs
+/// only its own. Never said, a flood's tail would be lost with the process.
 #[test]
-fn main_says_the_buses_unsaid_lost_rows_after_the_channels_stop() {
+fn main_says_the_buses_unsaid_lost_rows_around_each_channels_stop() {
     let code = code_only(MAIN_RS);
-    let said = sole_offset(&code, "channel::bus::report_unsaid_lost_rows()");
-    for stop in ["matrix.shutdown().await", "email.shutdown().await"] {
-        assert!(sole_offset(&code, stop) < said, "say the unsaid rows after `{stop}` (#829)");
-    }
+    let before = sole_offset(&code, "channel::bus::report_unsaid_lost_rows()");
+    let since = "channel::bus::report_unsaid_lost_rows_since(&mut bus_said)";
+    let after: Vec<usize> = code.match_indices(since).map(|(at, _)| at).collect();
+    assert_eq!(after.len(), 2, "`{since}` once after each channel's stop");
+    let matrix = sole_offset(&code, "matrix.shutdown().await");
+    let email = sole_offset(&code, "email.shutdown().await");
+    assert!(before < matrix, "say the unsaid rows before the first stop (#862)");
+    assert!(matrix < after[0] && after[0] < email, "Matrix's tail before email's stop");
+    assert!(email < after[1], "and email's after it (#829)");
+}
+
+/// #862's lesson, for the daemon's own sinks: their lost rows thinned past a
+/// flood — a `channel.reply_undelivered` row's among them — are said before
+/// the channel supervisors stop, not first after the drain, which follows
+/// two unbounded channel stops and sits beside the scheduler's. And the
+/// drain's lines are said inside the drain's half of the join, so the
+/// scheduler's unbounded shutdown beside it cannot hold them back.
+#[test]
+fn main_says_the_sinks_unsaid_lost_rows_before_the_channels_stop() {
+    let code = code_only(MAIN_RS);
+    let before = sole_offset(&code, "audit_sink::report_unreported_before_stop(");
+    assert!(before < sole_offset(&code, "matrix.shutdown().await"), "before the first stop");
+    let drain = sole_offset(&code, "audit_sink::drain().await");
+    let reported = sole_offset(&code, "audit_sink::report_drained(&drained, sinks_said");
+    let scheduler = sole_offset(&code, "scheduler.shutdown()");
+    assert!(
+        drain < reported && reported < scheduler,
+        "report the drain in the join's first arm, before the scheduler's arm"
+    );
 }

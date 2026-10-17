@@ -200,7 +200,8 @@ fn record_lost(writer: crate::worker_stderr::AuditLostWriter, line: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replied_row_abandoned_by_the_stop_is_reported() {
     let (pool, listener) = crate::channel::pg_events::test_support::stalled_pool();
-    let events = Arc::new(crate::channel::pg_events::PgChannelEvents::with_reporter(pool, record_lost));
+    let matrix = crate::channel::ChannelId("matrix".into());
+    let events = Arc::new(crate::channel::pg_events::PgChannelEvents::with_reporter(pool, matrix, record_lost));
     let (release, gate) = tokio::sync::oneshot::channel();
     let completed = GatedCompleted {
         release: Mutex::new(Some(gate)),

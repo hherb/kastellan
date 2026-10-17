@@ -80,7 +80,8 @@ accepts **both**: a custom root CA **and** a CONNECT-over-UDS proxy.
 - In `main.rs`, replace the slice-#4 placeholder log block with:
   - `let authorizer = Arc::new(DbPeerAuthorizer::new(pool.clone()));`
   - `let pairing = Arc::new(DbPairingService::new(pool.clone()));`
-  - `let events = Arc::new(PgChannelEvents::new(pool.clone()));`
+  - `let events = Arc::new(PgChannelEvents::new(pool.clone()));` (since #860
+    `PgChannelEvents::new(pool, ChannelId)` — the channel its bus serves)
   - `let completed = Box::new(PgCompletedTasks::connect(pool.clone()).await?);`
   - `let bus = ChannelBus::spawn(vec![Box::new(channel)], authorizer, Some(pairing), events, completed);`
   - add `bus.shutdown().await` + the spawn guard teardown to the graceful-shutdown

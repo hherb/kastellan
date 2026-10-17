@@ -2,10 +2,11 @@
 //! (#837, #865) and per kind: [`Refusals`] holds one [`Thinning`] per
 //! channel, action and kind — shed, late, and since #861 failed inserts, by
 //! outcome since #864 — and [`refuse`] reads the clock and reports. The
-//! pure core — [`Thinning`], the predicates and [`BurstTally`] — is the library's `kastellan_core::audit_thinning`
-//! since #829, which the channel bus's lost-row writer shares; why rows are
-//! thinned at all is said there. Split out of `audit_sink.rs` to keep it
-//! under the 500-LOC soft cap; `#[path]`-included there.
+//! pure core — [`Thinning`], the predicates and [`BurstTally`] — is the
+//! library's `kastellan_core::audit_thinning` since #829, which the channel
+//! bus's lost-row writer shares; why rows are thinned at all is said there.
+//! Split out of `audit_sink.rs` to keep it under the 500-LOC soft cap;
+//! `#[path]`-included there. Its tests are in `audit_sink_thinning_tests.rs`.
 //!
 //! **Each channel thins on its own** ([`Refusals`], #807). One shared count
 //! let a compromised email worker — its `skipped` list has no cap — hold a
@@ -18,7 +19,9 @@
 //! `channel.inbound_dropped` and `channel.inbound_undecodable` — and one
 //! count for all of them let a flood of one push another past the thinning:
 //! a failed `channel.reply_undelivered` row, the one line naming the
-//! conversation whose audit row is missing, became an anonymous count.
+//! conversation whose audit row is missing, became an anonymous count. And
+//! what each action's thinning left unsaid is said per action at shutdown
+//! too ([`Unreported`], #867), as the channel bus says its own.
 //!
 //! **Failed inserts are thinned too** (#861). Before, only rows never tried
 //! (shed, late) were: a Postgres that answers every insert at once with an
@@ -129,10 +132,17 @@ impl ChannelRefusals {
         actions[at].refuse(Instant::now(), loss)
     }
 
-    /// Every action's, summed: the shutdown says a channel's by kind.
-    fn unreported(&self) -> UnsaidCounts {
+    /// Each action's, in the order each first lost a row; the actions with
+    /// none left out. Never summed across actions (#867): the shutdown says
+    /// each action's apart, so a thinned `channel.reply_undelivered` row is
+    /// not hidden in a total with the channel's other rows.
+    fn unreported(&self) -> Vec<ActionUnsaid> {
         let actions = self.actions.lock().unwrap_or_else(|p| p.into_inner());
-        actions.iter().map(ActionRefusals::unreported).fold(UnsaidCounts::default(), UnsaidCounts::plus)
+        actions
+            .iter()
+            .map(|a| ActionUnsaid { action: a.action, counts: a.unreported() })
+            .filter(|a| a.counts.total() > 0)
+            .collect()
     }
 }
 
@@ -162,14 +172,16 @@ impl Refusals {
         self.of(channel).refuse(action, loss)
     }
 
-    /// The refused rows that got no line of their own, so far, per channel.
+    /// The refused rows that got no line of their own, so far, per channel
+    /// and action.
     pub(super) fn unreported(&self) -> Unreported {
         Unreported { matrix: self.matrix.unreported(), email: self.email.unreported() }
     }
 }
 
-/// One channel's refused rows with no line of their own, by kind (#807: said
-/// apart at shutdown, so last week's flood reads apart from this shutdown).
+/// One action's refused rows with no line of their own on one channel, by
+/// kind (#807: said apart at shutdown, so last week's flood reads apart from
+/// this shutdown).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct UnsaidCounts {
     /// Shed: too many inserts already waiting for the pool.
@@ -191,19 +203,16 @@ impl UnsaidCounts {
         self.shed + self.late + self.failed_not_written + self.failed_unknown
     }
 
-    /// Both counts, kind by kind.
-    fn plus(self, other: Self) -> Self {
-        Self {
-            shed: self.shed + other.shed,
-            late: self.late + other.late,
-            failed_not_written: self.failed_not_written + other.failed_not_written,
-            failed_unknown: self.failed_unknown + other.failed_unknown,
-        }
-    }
-
     /// The rows counted since `base` was taken. Each count only grows, so the
-    /// saturation hides nothing.
+    /// saturation hides nothing — asserted in debug builds.
     fn since(self, base: Self) -> Self {
+        debug_assert!(
+            self.shed >= base.shed
+                && self.late >= base.late
+                && self.failed_not_written >= base.failed_not_written
+                && self.failed_unknown >= base.failed_unknown,
+            "a count shrank: {base:?} -> {self:?}"
+        );
         Self {
             shed: self.shed.saturating_sub(base.shed),
             late: self.late.saturating_sub(base.late),
@@ -213,33 +222,73 @@ impl UnsaidCounts {
     }
 }
 
-/// Every channel's [`UnsaidCounts`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// One action's [`UnsaidCounts`] on one channel: what one shutdown line says
+/// (#867).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActionUnsaid {
+    pub(super) action: &'static str,
+    pub(super) counts: UnsaidCounts,
+}
+
+/// Every channel's refused rows with no line of their own: per action, in
+/// the order each action first lost a row, the actions with none left out —
+/// so [`Unreported::default`] is "nothing unsaid".
+///
+/// Per action, not summed per channel (#867): the channel bus's shutdown
+/// says its rows per action too (`pg_events/lost_rows.rs`), and a sum would
+/// fold a thinned `channel.reply_undelivered` row — the one row naming a
+/// conversation whose reply was lost — into an anonymous total with the
+/// channel's `channel.inbound_dropped` ones.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Unreported {
-    pub(super) matrix: UnsaidCounts,
-    pub(super) email: UnsaidCounts,
+    pub(super) matrix: Vec<ActionUnsaid>,
+    pub(super) email: Vec<ActionUnsaid>,
 }
 
 impl Unreported {
-    pub(super) fn of(self, channel: SinkChannel) -> UnsaidCounts {
+    /// `channel`'s actions.
+    pub(super) fn of(&self, channel: SinkChannel) -> &[ActionUnsaid] {
         match channel {
-            SinkChannel::Matrix => self.matrix,
-            SinkChannel::Email => self.email,
+            SinkChannel::Matrix => &self.matrix,
+            SinkChannel::Email => &self.email,
         }
     }
 
-    /// Test builds only: every channel's, all kinds. The daemon says each
-    /// channel's apart and never sums them (#807).
+    /// Test builds only: every channel's and action's, all kinds. The daemon
+    /// says each channel's (#807) and action's (#867) apart and never sums
+    /// them.
     #[cfg(test)]
-    pub(super) fn total(self) -> usize {
-        self.matrix.total() + self.email.total()
+    pub(super) fn total(&self) -> usize {
+        self.matrix.iter().chain(&self.email).map(|a| a.counts.total()).sum()
     }
 
-    /// The rows counted since `base` was taken, per channel and kind — so a
-    /// residual line can still say whose they were (#807).
-    pub(super) fn since(self, base: Self) -> Self {
-        Self { matrix: self.matrix.since(base.matrix), email: self.email.since(base.email) }
+    /// Test builds only: `channel`'s counts of `action`, none if it has no
+    /// entry.
+    #[cfg(test)]
+    pub(super) fn counts(&self, channel: SinkChannel, action: &str) -> UnsaidCounts {
+        self.of(channel).iter().find(|a| a.action == action).map(|a| a.counts).unwrap_or_default()
     }
+
+    /// The rows counted since `base` was taken, per channel, action and kind
+    /// — so a residual line can still say whose they were (#807) and of
+    /// which action (#867).
+    pub(super) fn since(&self, base: &Self) -> Self {
+        Self { matrix: actions_since(&self.matrix, &base.matrix), email: actions_since(&self.email, &base.email) }
+    }
+}
+
+/// Pure: each of `now`'s actions less its count in `base` (none, if `base`
+/// has no entry for it), kind by kind; the actions with none left out. Each
+/// count only grows and an action, once counted, keeps its entry, so nothing
+/// in `base` is missing from `now`.
+fn actions_since(now: &[ActionUnsaid], base: &[ActionUnsaid]) -> Vec<ActionUnsaid> {
+    now.iter()
+        .map(|a| {
+            let before = base.iter().find(|b| b.action == a.action).map(|b| b.counts).unwrap_or_default();
+            ActionUnsaid { action: a.action, counts: a.counts.since(before) }
+        })
+        .filter(|a| a.counts.total() > 0)
+        .collect()
 }
 
 /// Tell `on_failure` of `channel`'s lost row of `action` — unless its burst
@@ -266,153 +315,5 @@ pub(super) fn refuse<'a>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use kastellan_core::audit_thinning::unreported_of;
-    use kastellan_db::audit::SqlState;
-
-    /// Postgres's 25006, read_only_sql_transaction.
-    const READ_ONLY: Loss = Loss::Failed {
-        outcome: InsertOutcome::NotWritten,
-        cause: InsertCause::Answered(SqlState::parse("25006").unwrap()),
-    };
-    const RESET: Loss = Loss::Failed {
-        outcome: InsertOutcome::Unknown,
-        cause: InsertCause::Io { kind: std::io::ErrorKind::ConnectionReset, os: None },
-    };
-
-    /// Lose `n` of `channel`'s rows of `action` as `loss`.
-    fn lose(refusals: &Refusals, channel: SinkChannel, action: &'static str, loss: Loss, n: usize) {
-        for _ in 0..n {
-            refusals.refuse(channel, action, loss);
-        }
-    }
-
-    /// #807: one channel's flood leaves the other's rows reported, and the
-    /// counts stay apart by channel and by kind.
-    #[test]
-    fn one_channels_flood_does_not_thin_the_others_lines() {
-        let refusals = Refusals::new();
-        lose(&refusals, SinkChannel::Email, "a", Loss::Shed, 100);
-        let matrix = refusals.refuse(SinkChannel::Matrix, "a", Loss::Shed);
-        assert!(matrix.report(), "Matrix's first shed row is its own burst's first");
-        assert_eq!(matrix.tally.nth, 1);
-        refusals.refuse(SinkChannel::Email, "a", Loss::Late);
-        let unreported = refusals.unreported();
-        assert_eq!(unreported.email, UnsaidCounts { shed: unreported_of(100), ..UnsaidCounts::default() });
-        assert_eq!(unreported.matrix, UnsaidCounts::default());
-        assert_eq!(unreported.total(), unreported_of(100));
-    }
-
-    /// #837, #865: one action's flood leaves the same channel's other
-    /// actions their lines — and the channel's count sums every action's.
-    #[test]
-    fn one_actions_flood_does_not_thin_anothers_lines() {
-        let refusals = Refusals::new();
-        lose(&refusals, SinkChannel::Matrix, "channel.inbound_dropped", READ_ONLY, 100);
-        let reply = refusals.refuse(SinkChannel::Matrix, "channel.reply_undelivered", READ_ONLY);
-        assert!(reply.report() && reply.tally.nth == 1, "another action's first row: {reply:?}");
-        // Unequal counts per action, so a sum that took one side twice
-        // could not pass.
-        lose(&refusals, SinkChannel::Matrix, "channel.reply_undelivered", Loss::Shed, 20);
-        lose(&refusals, SinkChannel::Matrix, "channel.inbound_dropped", Loss::Shed, 40);
-        let matrix = refusals.unreported().matrix;
-        assert_eq!(
-            matrix,
-            UnsaidCounts {
-                shed: unreported_of(20) + unreported_of(40),
-                failed_not_written: unreported_of(100),
-                ..Default::default()
-            }
-        );
-    }
-
-    /// The channel's count sums every action's, every kind: late rows and
-    /// the unknown outcome included, from two actions with unequal counts.
-    #[test]
-    fn a_channels_count_sums_every_actions_kinds() {
-        let refusals = Refusals::new();
-        lose(&refusals, SinkChannel::Email, "a", Loss::Late, 20);
-        lose(&refusals, SinkChannel::Email, "b", Loss::Late, 40);
-        lose(&refusals, SinkChannel::Email, "a", RESET, 40);
-        lose(&refusals, SinkChannel::Email, "b", RESET, 20);
-        assert_eq!(
-            refusals.unreported().email,
-            UnsaidCounts {
-                late: unreported_of(20) + unreported_of(40),
-                failed_unknown: unreported_of(40) + unreported_of(20),
-                ..Default::default()
-            }
-        );
-    }
-
-    /// `plus` adds kind by kind, each its own.
-    #[test]
-    fn plus_adds_kind_by_kind() {
-        let a = UnsaidCounts { shed: 1, late: 2, failed_not_written: 3, failed_unknown: 4 };
-        let b = UnsaidCounts { shed: 10, late: 20, failed_not_written: 30, failed_unknown: 40 };
-        assert_eq!(a.plus(b), UnsaidCounts { shed: 11, late: 22, failed_not_written: 33, failed_unknown: 44 });
-    }
-
-    /// #861: failed inserts are a kind of their own — a flood of them leaves
-    /// the same channel's first shed row its burst's first — and they are in
-    /// the channel's total, so the shutdown line counts them.
-    #[test]
-    fn failed_inserts_thin_apart_from_shed_rows() {
-        let refusals = Refusals::new();
-        lose(&refusals, SinkChannel::Email, "a", READ_ONLY, 100);
-        let shed = refusals.refuse(SinkChannel::Email, "a", Loss::Shed);
-        assert!(shed.report(), "the first shed row is its own burst's first");
-        assert_eq!(shed.tally.nth, 1);
-        let email = refusals.unreported().email;
-        assert_eq!(email, UnsaidCounts { failed_not_written: unreported_of(100), ..Default::default() });
-        assert_eq!(email.total(), unreported_of(100));
-        let base = UnsaidCounts { failed_not_written: 10, ..Default::default() };
-        assert_eq!(email.since(base).failed_not_written, unreported_of(100) - 10, "`since` counts it too");
-    }
-
-    /// #864: a failed insert's outcome is its count's, so the shutdown can
-    /// say how many rows are certainly missing and how many may be there —
-    /// and a flood of one outcome leaves the other's lines.
-    #[test]
-    fn failed_inserts_are_counted_by_outcome() {
-        let refusals = Refusals::new();
-        lose(&refusals, SinkChannel::Email, "a", READ_ONLY, 100);
-        let reset = refusals.refuse(SinkChannel::Email, "a", RESET);
-        assert!(reset.report() && reset.tally.nth == 1, "the other outcome's first row: {reset:?}");
-        lose(&refusals, SinkChannel::Email, "a", RESET, 39);
-        let email = refusals.unreported().email;
-        assert_eq!(
-            email,
-            UnsaidCounts { failed_not_written: unreported_of(100), failed_unknown: unreported_of(40), ..Default::default() }
-        );
-        let base = UnsaidCounts { failed_unknown: 1, ..Default::default() };
-        assert_eq!(email.since(base).failed_unknown, unreported_of(40) - 1, "`since` counts it too");
-    }
-
-    /// A failed insert's loss is its own outcome and cause.
-    #[test]
-    fn a_failed_inserts_loss_is_its_outcome_and_cause() {
-        let cause = InsertCause::Io { kind: std::io::ErrorKind::BrokenPipe, os: None };
-        let error = InsertError::assumed_for_test(InsertOutcome::Unknown, cause, kastellan_db::DbError::Query("x".into()));
-        assert!(matches!(
-            Loss::failed(&error),
-            Loss::Failed { outcome: InsertOutcome::Unknown, cause: c } if c == cause
-        ));
-    }
-
-    /// #859, reached through the sinks' count: a new cause of the same
-    /// outcome gets its line mid-flood.
-    #[test]
-    fn a_new_cause_mid_flood_gets_its_line() {
-        let refusals = Refusals::new();
-        lose(&refusals, SinkChannel::Email, "a", READ_ONLY, 100);
-        let revoked = Loss::Failed {
-            outcome: InsertOutcome::NotWritten,
-            cause: InsertCause::Answered(SqlState::parse("42501").unwrap()),
-        };
-        let new = refusals.refuse(SinkChannel::Email, "a", revoked);
-        assert_eq!(new.tally.new_cause_since, Some(65), "{new:?}");
-        assert!(!refusals.refuse(SinkChannel::Email, "a", revoked).report(), "then thinned again");
-    }
-}
+#[path = "audit_sink_thinning_tests.rs"]
+mod tests;
