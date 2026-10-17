@@ -141,8 +141,8 @@ fn a_flood_of_one_actions_failed_inserts_does_not_thin_anothers_line() {
     // #867: and the flood is counted as its own action's, apart from the
     // other action's reported row.
     let unreported = LEDGER.unreported();
-    assert_eq!(unreported.counts(SinkChannel::Email, "channel.inbound_dropped").failed_unknown, unreported_of(40));
-    assert_eq!(unreported.counts(SinkChannel::Email, "channel.reply_undelivered"), UnsaidCounts::default());
+    let dropped = UnsaidCounts { failed_unknown: unreported_of(40), ..UnsaidCounts::default() };
+    assert_eq!(unreported.email, [ActionUnsaid { action: "channel.inbound_dropped", counts: dropped }]);
 }
 
 /// What [`record_last`] was told, with whose line it was.
@@ -202,7 +202,7 @@ fn a_failed_insert_pending_at_the_drain_is_counted_in_the_last_line() {
     );
 }
 
-/// #859, through the writer (#867's gap): two writers on one channel, one
+/// #859, through the writer (a gap #867's issue noted): two writers on one channel, one
 /// action, whose inserts fail with the same outcome (unknown) but two causes
 /// — a closed connection, a garbled answer. A flood of the first leaves the
 /// first row of the second its own line, saying it is a new cause; the next

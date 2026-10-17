@@ -38,11 +38,13 @@
 //! writer, channel, action and outcome ([`lost_rows`]; action since #865,
 //! outcome since #864) — but for the first row of each new cause (#859) —
 //! each carrying its place in the burst,
-//! and the shutdown says how many got no line of their own
-//! ([`report_unsaid_lost_rows`]). And the insert no longer decodes an id it
-//! discards (`kastellan_db::audit::insert_without_id`), so "not written" is
-//! no longer said of a row that was written but whose `RETURNING id` failed
-//! to decode. Since #858 nor is it said of a row whose insert lost its
+//! and the shutdown says how many got no line of their own: before the
+//! channels stop ([`report_unsaid_lost_rows`]) and, for the rows thinned
+//! during the stop, after ([`report_unsaid_lost_rows_since`], #862). A row
+//! naming no channel is counted under its bus's (#860). And the insert no
+//! longer decodes an id it discards (`kastellan_db::audit::insert_without_id`),
+//! so "not written" is no longer said of a row that was written but whose
+//! `RETURNING id` failed to decode. Since #858 nor is it said of a row whose insert lost its
 //! connection, which may have been committed: that line says the row "may
 //! not have been written" (`InsertFailure`).
 
@@ -89,12 +91,12 @@ impl PgChannelEvents {
         Self { pool, channel, report, lost }
     }
 
-    /// Test builds only: a Matrix bus's events, with lost rows said to
+    /// Test builds only: `channel`'s bus's events, with lost rows said to
     /// `report` and counted apart from every other test's, so a test can read
     /// them through the trait method production calls.
     #[cfg(test)]
-    pub(crate) fn with_reporter(pool: sqlx::PgPool, report: Reporter) -> Self {
-        Self { pool, channel: ChannelId("matrix".into()), report, lost: test_support::own_lost_rows() }
+    pub(crate) fn with_reporter(pool: sqlx::PgPool, channel: ChannelId, report: Reporter) -> Self {
+        Self { pool, channel, report, lost: test_support::own_lost_rows() }
     }
 }
 

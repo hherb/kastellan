@@ -19,12 +19,12 @@
 //! separate writers. The outcome (#864) keeps the rows known not to be in
 //! `audit_log` apart from those that may be, so the shutdown can say both.
 //! Within a count, the first row of each new cause gets its own line (#859,
-//! [`crate::audit_thinning`]). The channel is read from the row's own
-//! `channel` field, because one [`super::PgChannelEvents`] serves every row
-//! its bus writes. A row with no `channel` (`ask.resolved`,
-//! `channel.reply_unroutable`) is counted under the channel its writer
-//! writes for ([`RowChannel::Unnamed`], #860): before, every bus's such rows
-//! shared one count, so one bus's flood thinned the other's lines.
+//! [`crate::audit_thinning`]). A row is counted under its own `channel`
+//! field when it has one — the row says best whose it is. Only a row with no
+//! `channel` (`ask.resolved`, `channel.reply_unroutable`) falls back to the
+//! channel its writer writes for ([`RowChannel::Unnamed`], #860): before,
+//! every bus's such rows shared one count, so one bus's flood thinned the
+//! other's lines.
 //!
 //! **One process-wide count** ([`LOST_ROWS`]): a channel's bus is rebuilt on
 //! every bring-up, so a count held by the bus would start afresh after each
@@ -67,7 +67,10 @@ pub(crate) enum RowChannel {
     /// the rows themselves name none (a query by `payload->>'channel'` would
     /// not find them).
     Unnamed(String),
-    /// A channel past [`MAX_NAMED_CHANNELS`] for this writer.
+    /// A channel past [`MAX_NAMED_CHANNELS`] for this writer — a row's own
+    /// name or, for a row naming none, its writer's. The latter's line then
+    /// no longer says the rows name no channel; the cap is never reached in
+    /// practice (see [`MAX_NAMED_CHANNELS`]).
     Other,
 }
 
@@ -109,8 +112,9 @@ struct Entry {
 pub(crate) struct LostRows {
     /// A `Vec`, not a map: it keeps the order each entry was first lost in,
     /// which [`Self::unsaid`] reports by, and it stays short (per writer,
-    /// [`MAX_NAMED_CHANNELS`] channels plus `Other`, each with the few
-    /// actions the core writes, by two outcomes).
+    /// [`MAX_NAMED_CHANNELS`] names — each possibly both a `Named` and an
+    /// `Unnamed` channel — plus `Other`, each with the few actions the core
+    /// writes, by two outcomes).
     entries: Mutex<Vec<Entry>>,
 }
 

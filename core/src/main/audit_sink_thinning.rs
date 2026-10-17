@@ -2,8 +2,9 @@
 //! (#837, #865) and per kind: [`Refusals`] holds one [`Thinning`] per
 //! channel, action and kind — shed, late, and since #861 failed inserts, by
 //! outcome since #864 — and [`refuse`] reads the clock and reports. The
-//! pure core — [`Thinning`], the predicates and [`BurstTally`] — is the library's `kastellan_core::audit_thinning`
-//! since #829, which the channel bus's lost-row writer shares; why rows are
+//! pure core — [`Thinning`], the predicates and [`BurstTally`] — is the
+//! library's `kastellan_core::audit_thinning` since #829, which the channel
+//! bus's lost-row writer shares; why rows are
 //! thinned at all is said there. Split out of `audit_sink.rs` to keep it
 //! under the 500-LOC soft cap; `#[path]`-included there. Its tests are in
 //! `audit_sink_thinning_tests.rs`.
@@ -172,7 +173,8 @@ impl Refusals {
         self.of(channel).refuse(action, loss)
     }
 
-    /// The refused rows that got no line of their own, so far, per channel.
+    /// The refused rows that got no line of their own, so far, per channel
+    /// and action.
     pub(super) fn unreported(&self) -> Unreported {
         Unreported { matrix: self.matrix.unreported(), email: self.email.unreported() }
     }
@@ -305,7 +307,6 @@ pub(super) fn refuse<'a>(
     }
     why
 }
-
 
 #[cfg(test)]
 #[path = "audit_sink_thinning_tests.rs"]

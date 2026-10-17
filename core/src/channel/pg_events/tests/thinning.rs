@@ -199,7 +199,7 @@ async fn the_production_writer_counts_in_the_count_the_shutdown_reads() {
     let events = PgChannelEvents::new(test_support::refused_pool(), ChannelId("matrix".into()));
     assert!(std::ptr::eq(events.lost, &LOST_ROWS));
     fn say_nothing(_: AuditLostWriter, _: &str) {}
-    let test_events = PgChannelEvents::with_reporter(test_support::refused_pool(), say_nothing);
+    let test_events = PgChannelEvents::with_reporter(test_support::refused_pool(), ChannelId("matrix".into()), say_nothing);
     assert!(!std::ptr::eq(test_events.lost, &LOST_ROWS), "POSITIVE CONTROL: a test's is its own");
 }
 
@@ -298,4 +298,39 @@ async fn a_row_naming_no_channel_is_counted_under_its_buss_channel() {
     assert!(said[0].1.ends_with("; row 1 of this burst"), "{said:#?}");
     let whose: Vec<_> = lost.unsaid().into_iter().map(|u| u.key.channel).collect();
     assert_eq!(whose, [lost_rows::RowChannel::Unnamed("email".into())], "the thinned rows are the email bus's");
+}
+
+/// What [`record_wired`] was told — its own static, as above.
+static WIRED: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_wired(writer: AuditLostWriter, line: &str) {
+    WIRED.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// #860, through the trait method the bus calls: an email bus's row naming
+/// no channel is counted under *its* channel. With 100 such rows of the
+/// email bus already lost, its next one is thinned out and counted there —
+/// which a `PgChannelEvents` passing any other channel (say, Matrix's) to
+/// [`audit_or_report`] would instead report, as the first of a count of
+/// its own.
+#[tokio::test]
+async fn a_buss_own_channel_reaches_the_count() {
+    let events = PgChannelEvents::with_reporter(test_support::refused_pool(), ChannelId("email".into()), record_wired);
+    let refused = kastellan_db::audit::insert_without_id(&events.pool, "channel", "ask.resolved", serde_json::json!({}))
+        .await
+        .expect_err("POSITIVE CONTROL: the pool refuses");
+    let key = RowKey {
+        writer: AuditLostWriter::Bus,
+        writer_channel: "email",
+        channel: None,
+        action: "ask.resolved",
+        outcome: refused.outcome(),
+    };
+    let said_before = (0..100).filter(|_| events.lost.lose(key, refused.cause()).report()).count();
+    ChannelEvents::audit(&events, "ask.resolved", serde_json::json!({"ask_id": 3})).await;
+
+    let said = std::mem::take(&mut *WIRED.lock().unwrap_or_else(|p| p.into_inner()));
+    assert!(said.is_empty(), "the email bus's 101st such row is thinned out: {said:#?}");
+    let unsaid: Vec<_> = events.lost.unsaid().into_iter().map(|u| (u.key.channel, u.rows)).collect();
+    assert_eq!(unsaid, [(lost_rows::RowChannel::Unnamed("email".into()), 101 - said_before)]);
 }

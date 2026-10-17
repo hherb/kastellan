@@ -168,6 +168,10 @@ fn report_drained_reports_each_loss_through_the_reporter() {
         assert_eq!(said.len(), 1, "{needle}: {said:?}");
         assert_eq!(said[0].0, writer, "{needle}");
     }
+    // #867: and no line sums a channel's actions, the pre-#867 shape (Matrix's
+    // 2 + 5 would read "7 channel audit rows had no line").
+    assert!(said_containing(" channel audit rows had no line").is_empty(), "{:?}", SAID.lock().unwrap());
+    assert!(said_containing(" more channel audit rows had no line").is_empty(), "{:?}", SAID.lock().unwrap());
 }
 
 /// Whether `inner` (a quoted string's inside) holds a `"` that no backslash

@@ -257,3 +257,29 @@ fn the_unsaid_line_names_its_count_and_what_is_known() {
     let hostile = line(RowChannel::Named("x\"\n[SKIP]".into()), nw, 2);
     assert!(!hostile.contains('\n'), "a channel name is quoted: {hostile}");
 }
+
+/// #860: the cap counts a writer's channel names however they were spelled —
+/// a row's own (`Named`) or its writer's, for a row naming none
+/// (`Unnamed`) — and one name spelled both ways counts once.
+#[test]
+fn the_cap_counts_names_both_ways_spelled_and_each_once() {
+    let rows = LostRows::new();
+    let t0 = Instant::now();
+    let names: Vec<String> = (0..MAX_NAMED_CHANNELS - 1).map(|i| format!("c{i}")).collect();
+    for name in &names {
+        rows.lose_at(received(AuditLostWriter::Bus, Some(name)), READ_ONLY, t0);
+    }
+    // "c0" again, now as a writer's channel: an entry of its own, not a name.
+    rows.lose_at(ask_resolved("c0"), READ_ONLY, t0);
+    // The last name under the cap, as a writer's channel.
+    rows.lose_at(ask_resolved("bus"), READ_ONLY, t0);
+    let channel_of = |rows: &LostRows, i: usize| rows.entries.lock().unwrap()[i].key.channel.clone();
+    assert_eq!(channel_of(&rows, MAX_NAMED_CHANNELS - 1), RowChannel::Unnamed("c0".into()));
+    assert_eq!(channel_of(&rows, MAX_NAMED_CHANNELS), RowChannel::Unnamed("bus".into()), "POSITIVE CONTROL: under the cap");
+    // Sixteen names now, half-spelled each way: a further one is past the cap,
+    // whichever way it is spelled.
+    rows.lose_at(received(AuditLostWriter::Bus, Some("one-more")), READ_ONLY, t0);
+    rows.lose_at(ask_resolved("and-another"), READ_ONLY, t0);
+    assert_eq!(channel_of(&rows, MAX_NAMED_CHANNELS + 1), RowChannel::Other, "a row's own name past the cap");
+    assert_eq!(channel_of(&rows, MAX_NAMED_CHANNELS + 2), RowChannel::Other, "a writer's name past the cap");
+}
