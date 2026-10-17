@@ -621,10 +621,38 @@ fn audit_helpers_pool_and_notify_round_trip() {
             "POSITIVE CONTROL: Postgres's own refusal: {refused}"
         );
         assert_eq!(refused.outcome(), kastellan_db::audit::InsertOutcome::NotWritten, "{refused}");
+        // #859: classed by its SQLSTATE (25006, read_only_sql_transaction),
+        // which only a real Postgres answer carries.
+        let read_only = kastellan_db::audit::SqlState::parse("25006").expect("a SQLSTATE");
+        assert_eq!(refused.cause(), kastellan_db::audit::InsertCause::Answered(read_only), "{refused}");
         sqlx::query("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
             .execute(&mut *conn)
             .await
             .expect("make the session read-write again");
+        // #859: a second real fault is a second cause — what gives a REVOKE
+        // in the middle of a read-only flood its own line. The runtime role
+        // cannot REVOKE, so a search path that hides `audit_log` stands in:
+        // 42P01 (undefined_table), also Postgres's own answer.
+        sqlx::query("SET search_path TO pg_catalog")
+            .execute(&mut *conn)
+            .await
+            .expect("hide audit_log from the session");
+        let hidden = kastellan_db::audit::insert_without_id(
+            &mut *conn,
+            "channel",
+            "channel.received",
+            serde_json::json!({}),
+        )
+        .await
+        .expect_err("an insert into a table the session cannot see is refused");
+        assert_eq!(hidden.outcome(), kastellan_db::audit::InsertOutcome::NotWritten, "{hidden}");
+        let undefined_table = kastellan_db::audit::SqlState::parse("42P01").expect("a SQLSTATE");
+        assert_eq!(hidden.cause(), kastellan_db::audit::InsertCause::Answered(undefined_table), "{hidden}");
+        assert_ne!(hidden.cause(), refused.cause(), "two faults, two causes");
+        sqlx::query("RESET search_path")
+            .execute(&mut *conn)
+            .await
+            .expect("restore the search path");
         drop(conn);
         let after = kastellan_db::audit::fetch_since(&pool, written_id, 10)
             .await

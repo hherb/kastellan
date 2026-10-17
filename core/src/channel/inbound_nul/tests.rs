@@ -96,7 +96,7 @@ impl ChannelEvents for FakeEvents {
         self.enqueued.lock().unwrap().push((lane, payload));
         Ok(7)
     }
-    async fn audit(&self, action: &str, payload: Value) {
+    async fn audit(&self, action: &'static str, payload: Value) {
         self.audited.lock().unwrap().push((action.to_string(), payload));
     }
 }

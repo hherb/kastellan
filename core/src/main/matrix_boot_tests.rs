@@ -127,7 +127,7 @@ fn a_lost_reply_row_names_its_conversation_reason_and_cause() {
     assert_eq!(
         line,
         "channel.reply_undelivered row for a reply to conversation \"!room:srv\" (gave_up) not \
-         written: postgres query failed: read-only; refused row 1 of this burst. The dropped \
+         written: postgres query failed: read-only; row 1 of this burst. The dropped \
          reply's [worker-refusal] line stands"
     );
     // #858: a row whose insert lost its connection may be in the table.

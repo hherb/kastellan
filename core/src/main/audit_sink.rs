@@ -22,9 +22,8 @@
 //!   and at most [`MAX_QUEUED`] are in flight in all, running or waiting; past
 //!   that a row is **shed**, and the
 //!   sink's `on_failure` says so (thinned past a flood, `audit_sink_thinning.rs`),
-//!   like any other lost row — a failed insert included, since #861, so a
-//!   Postgres that refuses every insert at once does not give every audited
-//!   event a line of its own.
+//!   like any other lost row — a failed insert included (#861), so a Postgres
+//!   that refuses every insert at once does not give each event a line.
 //! - **After the fact.** The row is written after the hook returns, so an
 //!   email id is acked before its row exists: a crash in between loses the
 //!   row, and the id is not redelivered. Rows can also land out of order
@@ -72,10 +71,10 @@
 //! `PoolClosed` after the last line, or is dropped with the runtime.
 //!
 //! One writer for both channels (Matrix's `channel.reply_undelivered`,
-//! `channel.inbound_dropped` and `channel.inbound_undecodable`, email's `channel.skipped_ack_only` and
-//! `channel.inbound_dropped`). Before #789
-//! each sink hand-rolled its own insert, and the two had already drifted: one
-//! spawned, one blocked.
+//! `channel.inbound_dropped` and `channel.inbound_undecodable`, email's
+//! `channel.skipped_ack_only` and `channel.inbound_dropped`), each action's
+//! lost rows thinned on its own (#837). Before #789 each sink hand-rolled its
+//! own insert, and the two had already drifted: one spawned, one blocked.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -175,7 +174,8 @@ pub(crate) struct Ledger {
     /// Set by [`drain`]: no row starts after it.
     closed: AtomicBool,
     /// Rows lost — shed, tried after the close, or whose insert failed
-    /// (#861) — thinned and counted per channel and per kind (#798, #807).
+    /// (#861) — thinned and counted per channel, action and kind (#798,
+    /// #807, #837).
     refusals: Refusals,
     /// Who the pending rows are, oldest first, for the shutdown line (#797).
     /// Only for naming: the count that gates `drain` is `pending`.
@@ -329,19 +329,19 @@ impl SinkWriter {
         on_failure: impl FnOnce(Unwritten<'_>) + Send + 'static,
         between: impl FnOnce(),
     ) -> Result<tokio::task::JoinHandle<()>, Unwritten<'static>> {
-        let (ledger, channel) = (self.ledger, self.channel);
+        let (ledger, whose) = (self.ledger, (self.channel, action));
         // Counts the row (see `Ledger`'s doc for why before `closed` is read).
         let row = PendingRow::new(ledger, label);
         between();
         // A refused row is counted as refused BEFORE it stops counting as
         // pending, so a snapshot between the two sees it twice, never neither.
         if ledger.closed.load(Ordering::SeqCst) {
-            let why = refuse(ledger.refusals.late(channel), Unwritten::AfterShutdown, on_failure);
+            let why = refuse(&ledger.refusals, whose, Loss::Late, Unwritten::AfterShutdown, on_failure);
             drop(row);
             return Err(why);
         }
         let Ok(queued) = ledger.queued.try_acquire() else {
-            let why = refuse(ledger.refusals.shed(channel), Unwritten::Shed, on_failure);
+            let why = refuse(&ledger.refusals, whose, Loss::Shed, Unwritten::Shed, on_failure);
             drop(row);
             return Err(why);
         };
@@ -355,7 +355,7 @@ impl SinkWriter {
             // `AfterShutdown` says — so the row is refused like a late one:
             // counted, and reported unless thinned out (#802, #807).
             let Ok(_connection) = ledger.connections.acquire().await else {
-                refuse(ledger.refusals.late(channel), Unwritten::AfterShutdown, on_failure);
+                refuse(&ledger.refusals, whose, Loss::Late, Unwritten::AfterShutdown, on_failure);
                 return;
             };
             // No `RETURNING id` (#829): no decode step can fail after the row
@@ -364,7 +364,7 @@ impl SinkWriter {
             // flood of them is thinned like a flood of shed rows (#861).
             if let Err(failed) = kastellan_db::audit::insert_without_id(&pool, actor, action, payload).await {
                 let why = |tally| Unwritten::Insert { failed: &failed, tally };
-                refuse(ledger.refusals.failed(channel), why, on_failure);
+                refuse(&ledger.refusals, whose, Loss::failed(&failed), why, on_failure);
             }
         }))
     }
@@ -474,7 +474,7 @@ pub(crate) use lease::{SinkChannel, Starting};
 
 #[path = "audit_sink_thinning.rs"]
 mod thinning;
-use thinning::{refuse, Refusals};
+use thinning::{refuse, Loss, Refusals};
 pub(crate) use thinning::{BurstTally, UnsaidCounts, Unreported};
 
 #[path = "audit_sink_report.rs"]

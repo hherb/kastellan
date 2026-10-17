@@ -9,6 +9,7 @@
 use super::test_support::{closing_pool, stalled_pool};
 use super::tests::{bounds, stalled_writer};
 use super::*;
+use kastellan_core::audit_thinning::unreported_of;
 use kastellan_core::worker_stderr::AuditLostWriter;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,13 +32,13 @@ fn a_flood_of_shed_rows_is_reported_one_by_one_then_thinned() {
     }
     let told = told.lock().unwrap().clone();
     assert_eq!(told.len(), 18, "n = 0..15 each, then n = 16 and 32 (powers of two); the rest thinned out");
-    assert!(told[16].ends_with("; refused row 17 of this burst"), "{:?}", told[16]);
+    assert!(told[16].ends_with("; row 17 of this burst"), "{:?}", told[16]);
     assert!(
-        told[17].ends_with("; refused row 33 of this burst (15 before it had no line of their own)"),
+        told[17].ends_with("; row 33 of this burst (15 before it had no line of their own)"),
         "{:?}",
         told[17]
     );
-    assert_eq!(LEDGER.final_snapshot().unreported.email, UnsaidCounts { shed: 15, late: 0, failed: 0 });
+    assert_eq!(LEDGER.final_snapshot().unreported.email, UnsaidCounts { shed: 15, late: 0, failed_not_written: 0, failed_unknown: 0 });
     assert_eq!(LEDGER.final_snapshot().unreported.matrix, UnsaidCounts::default(), "email's flood is email's");
     assert!(LEDGER.final_snapshot().named.is_empty(), "a refused row leaves no label behind");
 }
@@ -76,19 +77,19 @@ fn a_flood_of_failed_inserts_is_reported_one_by_one_then_thinned() {
         rt.block_on(task).expect("the insert task ran to completion");
     }
     let told = told.lock().unwrap().clone();
-    assert_eq!(told.len(), 18, "n = 0..15 each, then n = 16 and 32 (powers of two); the rest thinned out");
+    assert_eq!(told.len(), 18, "n = 0..15 each, then n = 16 and 32 (powers of two); the rest thinned out: {told:#?}");
     assert!(told.iter().all(|l| l.starts_with("may not have been written: ")), "{told:#?}");
-    assert!(told[16].ends_with("; refused row 17 of this burst"), "{:?}", told[16]);
+    assert!(told[16].ends_with("; row 17 of this burst"), "{:?}", told[16]);
     assert!(
-        told[17].ends_with("; refused row 33 of this burst (15 before it had no line of their own)"),
+        told[17].ends_with("; row 33 of this burst (15 before it had no line of their own)"),
         "{:?}",
         told[17]
     );
     let unreported = LEDGER.final_snapshot().unreported;
-    assert_eq!(unreported.email, UnsaidCounts { shed: 0, late: 0, failed: 15 });
+    assert_eq!(unreported.email, UnsaidCounts { failed_unknown: 15, ..UnsaidCounts::default() });
     assert_eq!(unreported.matrix, UnsaidCounts::default(), "email's flood is email's");
     let line = report::format_unreported_at_shutdown(unreported.email).expect("a shutdown line");
-    assert!(line.contains("15 failed to insert"), "{line}");
+    assert!(line.contains("15 failed to insert over the daemon's life, may not have been written ("), "{line}");
 }
 
 /// #861: failed inserts thin in a kind of their own. A flood of them leaves
@@ -112,7 +113,29 @@ fn a_flood_of_failed_inserts_does_not_thin_a_shed_rows_line() {
     });
     assert!(matches!(shed, Err(Unwritten::Shed(_))), "POSITIVE CONTROL: the slot is taken: {shed:?}");
     let told = told.lock().unwrap().clone().expect("the shed row has a line of its own");
-    assert!(told.ends_with("; refused row 1 of this burst"), "{told}");
+    assert!(told.ends_with("; row 1 of this burst"), "{told}");
+}
+
+/// #837, #865: the writer counts a row under its own action. A flood of one
+/// action's failed inserts leaves another action's first failure on the same
+/// channel a line of its own — the row a dropped action would have thinned.
+#[test]
+fn a_flood_of_one_actions_failed_inserts_does_not_thin_anothers_line() {
+    static LEDGER: Ledger = Ledger::new(bounds(8, 1));
+    let (rt, writer) = closing_writer(&LEDGER);
+    for _ in 0..40 {
+        let task = writer.spawn("a", "channel.inbound_dropped", serde_json::json!({}), "t".into(), |_| {});
+        rt.block_on(task.expect("not shed")).expect("the insert task ran to completion");
+    }
+    let told: Arc<Mutex<Option<String>>> = Arc::default();
+    let seen = told.clone();
+    let task = writer.spawn("a", "channel.reply_undelivered", serde_json::json!({}), "t".into(), move |why| {
+        *seen.lock().unwrap() = Some(why.to_string());
+    });
+    rt.block_on(task.expect("not shed")).expect("the insert task ran to completion");
+    let told = told.lock().unwrap().clone().expect("the other action's row has a line of its own");
+    assert!(told.ends_with("; row 1 of this burst"), "{told}");
+    assert_eq!(LEDGER.unreported().email.failed_unknown, unreported_of(40), "the channel sums its actions");
 }
 
 /// What [`record_last`] was told, with whose line it was.
@@ -141,7 +164,7 @@ fn a_failed_insert_pending_at_the_drain_is_counted_in_the_last_line() {
         let task = email.spawn("a", "b", serde_json::json!({}), "t".into(), |_| {}).expect("not shed");
         rt.block_on(task).expect("the insert task ran to completion");
     }
-    assert_eq!(LEDGER.unreported().email.failed, 0, "POSITIVE CONTROL: rows 1-17 all got lines");
+    assert_eq!(LEDGER.unreported().email.failed_unknown, 0, "POSITIVE CONTROL: rows 1-17 all got lines");
 
     let (stalled, _listener) = rt.block_on(async { stalled_pool() });
     let holder = SinkWriter::with_ledger(&LEDGER, stalled, rt.handle().clone(), SinkChannel::Matrix);
@@ -163,7 +186,9 @@ fn a_failed_insert_pending_at_the_drain_is_counted_in_the_last_line() {
             AuditLostWriter::Email,
             "1 more channel audit row had no line of its own after the shutdown report (a driver \
              still running past the drain, or an insert still pending at it): 1 failed to \
-             insert (refused by Postgres, never sent, or lost with the connection)"
+             insert, may not have been written (the insert failed in a way that does not prove \
+             the row absent — a lost connection, a server crash, an ended session: look for them \
+             in audit_log)"
                 .to_string()
         )],
         "said once, after the close, as email's — and nothing for Matrix's reported row"

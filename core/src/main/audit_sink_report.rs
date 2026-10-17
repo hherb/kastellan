@@ -7,7 +7,9 @@
 use std::future::Future;
 use std::time::Duration;
 
+use kastellan_core::channel::audit_text::insert_verdict;
 use kastellan_core::worker_stderr::AuditLostWriter;
+use kastellan_db::audit::InsertOutcome;
 
 use super::{
     unreported_on_since, BurstTally, Drained, Ledger, SinkChannel, UnsaidCounts, Unreported,
@@ -20,15 +22,16 @@ use super::{
 pub(crate) enum Unwritten<'a> {
     /// The insert ran and failed: the error — which says whether the row may
     /// have been committed anyway (#858) — and the row's place in its
-    /// channel's burst of failed inserts, thinned like the others (#861).
+    /// channel's and action's burst of failed inserts of that outcome,
+    /// thinned like the others (#861, #864).
     Insert { failed: &'a kastellan_db::audit::InsertError, tally: BurstTally },
     /// Never tried: the queue was full. With where the row stands in its
-    /// channel's burst of shed rows (#807), so a thinned flood's lines still
-    /// say how big it is.
+    /// channel's and action's burst of shed rows (#807, #837), so a thinned
+    /// flood's lines still say how big it is.
     Shed(BurstTally),
     /// Never tried: the daemon had already drained its audit writes and was
-    /// shutting down (#792). With its place in the channel's burst of late
-    /// rows (#807).
+    /// shutting down (#792). With its place in the channel's and action's
+    /// burst of late rows (#807, #837).
     AfterShutdown(BurstTally),
 }
 
@@ -56,8 +59,6 @@ impl Unwritten<'_> {
     /// the channel bus uses ([`kastellan_core::channel::audit_text::insert_verdict`]).
     /// A shed or late row was never tried, so it is not written.
     pub(crate) fn verdict(&self) -> &'static str {
-        use kastellan_core::channel::audit_text::insert_verdict;
-        use kastellan_db::audit::InsertOutcome;
         match self {
             Self::Insert { failed, .. } => insert_verdict(failed.outcome()),
             Self::Shed(_) | Self::AfterShutdown(_) => insert_verdict(InsertOutcome::NotWritten),
@@ -77,9 +78,11 @@ impl Unwritten<'_> {
 /// the `Unwritten` can borrow it for `'static`.
 #[cfg(test)]
 impl Unwritten<'static> {
-    pub(crate) fn failed_insert(outcome: kastellan_db::audit::InsertOutcome, msg: &str) -> Self {
-        let failed = kastellan_db::audit::InsertError::assumed_for_test(outcome, kastellan_db::DbError::Query(msg.into()));
-        let tally = BurstTally { nth: 1, unsaid_before: 0, ended: None };
+    pub(crate) fn failed_insert(outcome: InsertOutcome, msg: &str) -> Self {
+        // A row count other than one: the one cause that comes with either outcome.
+        let cause = kastellan_db::audit::InsertCause::RowCount;
+        let failed = kastellan_db::audit::InsertError::assumed_for_test(outcome, cause, kastellan_db::DbError::Query(msg.into()));
+        let tally = BurstTally { nth: 1, new_cause_since: None, unsaid_before: 0, ended: None };
         Self::Insert { failed: Box::leak(Box::new(failed)), tally }
     }
 }
@@ -212,8 +215,8 @@ pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<St
 /// report of their own (`audit_sink_thinning.rs`), or `None` when there were
 /// none (#798). Said at shutdown, but not all lost then: shed, late and
 /// failed are said apart (#807, #861), because rows shed in last week's
-/// flood are not this shutdown's. Failed inserts are counted whatever their
-/// outcome (#858), so that kind says only that they "failed".
+/// flood are not this shutdown's — and failed inserts by outcome (#864): the
+/// rows known not to be in `audit_log` apart from those that may be.
 pub(crate) fn format_unreported_at_shutdown(counts: UnsaidCounts) -> Option<String> {
     let total = counts.total();
     (total > 0).then(|| {
@@ -256,11 +259,23 @@ fn by_kind(counts: UnsaidCounts, span: &str) -> String {
     if counts.late > 0 {
         kinds.push(format!("{} tried after shutdown began", counts.late));
     }
-    if counts.failed > 0 {
+    // The verdicts are the per-row lines' own words (`insert_verdict`), so the
+    // summary cannot drift from them; the parentheses say what each covers.
+    if counts.failed_not_written > 0 {
         kinds.push(format!(
-            "{} failed to insert{span} (refused by Postgres, never sent, or lost with the \
-             connection)",
-            counts.failed
+            "{} failed to insert{span}, {} (Postgres answered with an error or wrote no row, or \
+             it was never sent)",
+            counts.failed_not_written,
+            insert_verdict(InsertOutcome::NotWritten),
+        ));
+    }
+    if counts.failed_unknown > 0 {
+        kinds.push(format!(
+            "{} failed to insert{span}, {} (the insert failed in a way that does not prove the \
+             row absent — a lost connection, a server crash, an ended session: look for them in \
+             audit_log)",
+            counts.failed_unknown,
+            insert_verdict(InsertOutcome::Unknown),
         ));
     }
     kinds.join("; ")

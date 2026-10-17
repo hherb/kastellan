@@ -32,10 +32,12 @@
 //! it (#846, `polled_driver/inbound_rx.rs`). What is still unsaid: a crash —
 //! and with it, since #829, the count of a flood's rows thinned out after its
 //! last 2^k-th line, which only the next burst's first line on the same
-//! writer and channel, or the shutdown's line, says (#817).
+//! count, or the shutdown's line, says (#817).
 //!
 //! Since #829 a failed insert's lines are **thinned** past a flood, per
-//! writer and channel ([`lost_rows`]), each carrying its place in the burst,
+//! writer, channel, action and outcome ([`lost_rows`]; action since #865,
+//! outcome since #864) — but for the first row of each new cause (#859) —
+//! each carrying its place in the burst,
 //! and the shutdown says how many got no line of their own
 //! ([`report_unsaid_lost_rows`]). And the insert no longer decodes an id it
 //! discards (`kastellan_db::audit::insert_without_id`), so "not written" is
@@ -46,7 +48,7 @@
 
 use serde_json::Value;
 
-use kastellan_db::audit::InsertOutcome;
+use kastellan_db::audit::{InsertCause, InsertOutcome};
 use kastellan_db::tasks::{self, Lane};
 
 use super::audit_text::{insert_verdict, quoted_id};
@@ -55,7 +57,7 @@ use crate::audit_thinning::BurstTally;
 use crate::worker_stderr::{emit_audit_lost_report, AuditLostWriter};
 
 mod lost_rows;
-use lost_rows::format_unsaid;
+use lost_rows::{format_unsaid, RowKey};
 pub(crate) use lost_rows::{LostRows, LOST_ROWS};
 
 /// The `actor` every row [`audit_or_report`] writes is under: the bus's, and
@@ -96,7 +98,7 @@ impl ChannelEvents for PgChannelEvents {
     /// Best-effort, as the trait says — never fatal — and a row whose insert
     /// fails is reported on `[audit-lost]` (#808), as is one still awaited
     /// when the bus stops (#813).
-    async fn audit(&self, action: &str, payload: Value) {
+    async fn audit(&self, action: &'static str, payload: Value) {
         audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report, self.lost).await;
     }
 
@@ -129,8 +131,8 @@ pub(crate) fn production_writer() -> (Reporter, &'static LostRows) {
 }
 
 /// Say, once, how many rows every bus writer lost (failed to insert) and gave no line
-/// of their own (#829) — one `[audit-lost]` line per writer and channel that
-/// has any. The daemon calls it after the channels stop, when nothing writes
+/// of their own (#829) — one `[audit-lost]` line per writer, channel, action
+/// and outcome that has any (action #865, outcome #864). The daemon calls it after the channels stop, when nothing writes
 /// through these writers any more; called twice, it would say the same rows
 /// again. The count is every burst's, so it includes rows a later burst's
 /// first line already summed up ("the burst before it ended after …").
@@ -142,14 +144,15 @@ pub fn report_unsaid_lost_rows() {
 /// [`report_unsaid_lost_rows`] over `lost`, through `report`.
 fn report_unsaid(lost: &LostRows, report: Reporter) {
     for unsaid in lost.unsaid() {
-        report(unsaid.writer, &format_unsaid(&unsaid.channel, unsaid.rows));
+        report(unsaid.key.writer, &format_unsaid(&unsaid));
     }
 }
 
 /// Insert one `channel`-actor audit row; report it through `report`, as
 /// `writer`'s, if the insert fails or is abandoned mid-await. A failed
-/// insert counts in `lost` under the row's `channel`, which thins its line
-/// past a flood (#829).
+/// insert counts in `lost` under the row's `channel`, action and outcome,
+/// which thins its line past a flood (#829, #864) — unless its cause is new
+/// in the burst (#859).
 ///
 /// Two writers share it: the bus ([`AuditLostWriter::Bus`]) and, since #814,
 /// the channel boot supervisor's sink
@@ -173,7 +176,7 @@ fn report_unsaid(lost: &LostRows, report: Reporter) {
 pub(crate) async fn audit_or_report(
     pool: &sqlx::PgPool,
     writer: AuditLostWriter,
-    action: &str,
+    action: &'static str,
     payload: Value,
     report: Reporter,
     lost: &LostRows,
@@ -192,7 +195,7 @@ pub(crate) async fn audit_or_report(
 #[derive(Clone, Copy)]
 struct RowReport<'a> {
     writer: AuditLostWriter,
-    action: &'a str,
+    action: &'static str,
     /// [`describe_row`]'s words.
     about: &'a str,
     /// The row's own `channel` field, which its loss is counted under.
@@ -217,8 +220,8 @@ async fn settle_or_report<E: InsertFailure>(
 
 /// A drop guard held across one audit insert. Every way the insert can end
 /// says at most one thing: [`PendingInsert::settle`] reports an `Err` —
-/// unless its burst has passed the thinning, when it is only counted (#829)
-/// — and stays quiet on `Ok`; dropped unsettled — the future awaiting the
+/// unless its burst has passed the thinning and its cause is not new (#859),
+/// when it is only counted (#829) — and stays quiet on `Ok`; dropped unsettled — the future awaiting the
 /// insert was dropped (an aborted task, a runtime shutting down) — it
 /// reports the row as abandoned (#813), unthinned: that happens once per
 /// pump a stop finds parked here, never once per inbound message.
@@ -241,8 +244,9 @@ impl<'a> PendingInsert<'a> {
         if let Err(e) = result {
             let row = self.row;
             // `lose` releases its lock before the report, which can block.
-            let lost = row.lost.lose(row.writer, row.channel);
-            if lost.report {
+            let key = RowKey { writer: row.writer, channel: row.channel, action: row.action, outcome: e.outcome() };
+            let lost = row.lost.lose(key, e.cause());
+            if lost.report() {
                 let line = format_row_lost(row.action, row.about, &e, lost.tally);
                 (row.report)(row.writer, &line);
             }
@@ -262,18 +266,24 @@ impl Drop for PendingInsert<'_> {
     }
 }
 
-/// A failed insert, as [`settle_or_report`] reports it: what to print, and
-/// whether the row may still be in the table (#858). The real one is
+/// A failed insert, as [`settle_or_report`] reports it: what to print,
+/// whether the row may still be in the table (#858), and what kind of
+/// failure it was (#859). The real one is
 /// [`kastellan_db::audit::InsertError`]; a trait so the tests can drive
 /// every outcome with no Postgres — a plain string is one known not written,
 /// and `tests.rs`'s `Unknown` one that may have been.
 trait InsertFailure: std::fmt::Display {
     fn outcome(&self) -> InsertOutcome;
+    fn cause(&self) -> InsertCause;
 }
 
 impl InsertFailure for kastellan_db::audit::InsertError {
     fn outcome(&self) -> InsertOutcome {
         kastellan_db::audit::InsertError::outcome(self)
+    }
+
+    fn cause(&self) -> InsertCause {
+        kastellan_db::audit::InsertError::cause(self)
     }
 }
 
@@ -333,8 +343,9 @@ fn describe_row(payload: &Value) -> String {
 /// Pure: the `[audit-lost]` report for a `channel.*` row whose insert failed
 /// — the action, what it was about ([`describe_row`]), whether it is known
 /// not to be in the table ([`insert_verdict`] of `why`'s own outcome, #858),
-/// why, and where it stands in its writer's and channel's burst of lost rows
-/// (#829), so a thinned flood's lines still say how big it is.
+/// why, and where it stands in its count's burst of lost rows — its writer,
+/// channel, action and outcome (#829, #864, #865) — so a thinned flood's
+/// lines still say how big it is.
 fn format_row_lost(action: &str, about: &str, why: &impl InsertFailure, tally: BurstTally) -> String {
     format!("{action} row{about} {}: {why}; {tally}", insert_verdict(why.outcome()))
 }
@@ -398,8 +409,14 @@ pub(crate) mod test_support {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                drop(stream);
+            for mut stream in listener.incoming().flatten() {
+                // Read the client's first message before closing, so the close
+                // is a FIN and the insert's error always EOF. Closed with it
+                // unread, the close is a RST instead, and whether the client then
+                // reads a reset or an EOF is a race: two causes (#859), and a
+                // flood of them got a line for each, as two real faults would.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let _ = std::io::Read::read(&mut stream, &mut [0u8; 1024]);
             }
         });
         let options = sqlx::postgres::PgConnectOptions::new()

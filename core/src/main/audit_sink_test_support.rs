@@ -92,8 +92,14 @@ pub(crate) fn closing_pool() -> PgPool {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
     let port = listener.local_addr().expect("local addr").port();
     std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            drop(stream);
+        for mut stream in listener.incoming().flatten() {
+            // Read the client's first message before closing, so the close
+            // is a FIN and the insert's error always EOF. Closed with it
+            // unread, the close is a RST instead, and whether the client then
+            // reads a reset or an EOF is a race: two causes (#859), and a
+            // flood of them got a line for each, as two real faults would.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            let _ = std::io::Read::read(&mut stream, &mut [0u8; 1024]);
         }
     });
     let options = sqlx::postgres::PgConnectOptions::new()

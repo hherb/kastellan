@@ -31,8 +31,12 @@ pub trait ChannelEvents: Send + Sync {
     /// Best-effort audit row: never fatal. The production impl,
     /// `PgChannelEvents`, reports a failed insert on the `[audit-lost]`
     /// marker (#808) — and one whose future is dropped mid-insert, as
-    /// `shutdown`'s abort does to a pump parked here (#813).
-    async fn audit(&self, action: &str, payload: Value);
+    /// `shutdown`'s abort does to a pump parked here (#813). `action` is
+    /// `'static` because the lost-row count is kept per action (#865): every
+    /// caller passes a compile-time constant ([`actions`](super::actions)',
+    /// or `scheduler::audit::ACTION_ASK_RESOLVED`), and no peer- or
+    /// runtime-spelled string reaches it short of a deliberate leak.
+    async fn audit(&self, action: &'static str, payload: Value);
     /// Say that work was lost without a row — a stop landing mid-flight
     /// (#832, `bus_guards`). Sync, because it is called from `Drop`. The
     /// default is the bus's own `[audit-lost]` writer; `PgChannelEvents`
