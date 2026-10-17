@@ -93,12 +93,15 @@ use sqlx::Row;
 
 use crate::DbError;
 
+pub mod insert_cause;
 pub mod insert_outcome;
 pub mod nul_escape;
 pub mod req_summary;
 mod truncate;
 
 pub use crate::nul::NUL_ESCAPE;
+use insert_cause::cause_of;
+pub use insert_cause::{InsertCause, SqlState};
 pub use insert_outcome::{InsertError, InsertOutcome};
 use insert_outcome::outcome_of;
 pub use nul_escape::NUL_ESCAPED_KEY;
@@ -277,7 +280,8 @@ where
         .execute(executor)
         .await
         .map_err(|e| {
-            InsertError::new(outcome_of(&e), DbError::Query(format!("audit_log insert: {e}")))
+            let error = DbError::Query(format!("audit_log insert: {e}"));
+            InsertError::new(outcome_of(&e), cause_of(&e), error)
         })?;
     one_row_written(done.rows_affected())
 }
@@ -291,6 +295,7 @@ fn one_row_written(rows_affected: u64) -> Result<(), InsertError> {
         1 => Ok(()),
         n => Err(InsertError::new(
             if n == 0 { InsertOutcome::NotWritten } else { InsertOutcome::Unknown },
+            InsertCause::RowCount,
             DbError::Query(format!("audit_log insert: {n} rows written, expected 1")),
         )),
     }
@@ -417,5 +422,8 @@ mod tests {
         let outcome = |n| one_row_written(n).expect_err("not one row").outcome();
         assert_eq!(outcome(0), InsertOutcome::NotWritten);
         assert_eq!(outcome(2), InsertOutcome::Unknown);
+        for n in [0, 2] {
+            assert_eq!(one_row_written(n).expect_err("not one row").cause(), InsertCause::RowCount);
+        }
     }
 }

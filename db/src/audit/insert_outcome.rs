@@ -15,6 +15,7 @@
 //! statement that ran but wrote other than one row is classified by
 //! `super::one_row_written`.
 
+use super::insert_cause::InsertCause;
 use crate::DbError;
 
 /// Whether the row of a failed insert may still be in the table.
@@ -31,8 +32,9 @@ pub enum InsertOutcome {
     Unknown,
 }
 
-/// A failed [`super::insert_without_id`]: the error, and what it says about
-/// the row ([`InsertOutcome`]).
+/// A failed [`super::insert_without_id`]: the error, what it says about
+/// the row ([`InsertOutcome`]), and what kind of failure it was
+/// ([`InsertCause`], #859).
 ///
 /// It reads (`Display`) exactly as the [`DbError`] it wraps, so a line that
 /// prints it is unchanged; the outcome is for the caller's own wording.
@@ -45,27 +47,35 @@ pub enum InsertOutcome {
 #[error("{error}")]
 pub struct InsertError {
     outcome: InsertOutcome,
+    cause: InsertCause,
     error: DbError,
 }
 
 impl InsertError {
-    /// `error`, which leaves the row `outcome` — for this crate's
-    /// classifiers only.
-    pub(crate) fn new(outcome: InsertOutcome, error: DbError) -> Self {
-        Self { outcome, error }
+    /// `error`, of class `cause`, which leaves the row `outcome` — for this
+    /// crate's classifiers only.
+    pub(crate) fn new(outcome: InsertOutcome, cause: InsertCause, error: DbError) -> Self {
+        Self { outcome, cause, error }
     }
 
     /// Test fixtures outside this crate only: an `InsertError` whose outcome
-    /// is the caller's say-so, not a classifier's. Production code never
-    /// builds one; it gets it from [`super::insert_without_id`].
+    /// and cause are the caller's say-so, not a classifier's. Production code
+    /// never builds one; it gets it from [`super::insert_without_id`].
     #[doc(hidden)]
-    pub fn assumed_for_test(outcome: InsertOutcome, error: DbError) -> Self {
-        Self::new(outcome, error)
+    pub fn assumed_for_test(outcome: InsertOutcome, cause: InsertCause, error: DbError) -> Self {
+        Self::new(outcome, cause, error)
     }
 
     /// Whether the row may still be in the table.
     pub fn outcome(&self) -> InsertOutcome {
         self.outcome
+    }
+
+    /// What kind of failure it was: the same for the same fault on any row
+    /// (#859), so a writer thinning a flood can tell a new fault from the
+    /// same one again.
+    pub fn cause(&self) -> InsertCause {
+        self.cause
     }
 
     /// The error itself.
@@ -184,8 +194,9 @@ mod tests {
     /// that only wants a `DbError` takes it by name.
     #[test]
     fn an_insert_error_reads_as_its_db_error() {
-        let failed = InsertError::new(InsertOutcome::Unknown, DbError::Query("boom".into()));
+        let failed = InsertError::new(InsertOutcome::Unknown, InsertCause::RowCount, DbError::Query("boom".into()));
         assert_eq!(failed.outcome(), InsertOutcome::Unknown);
+        assert_eq!(failed.cause(), InsertCause::RowCount);
         assert_eq!(failed.to_string(), "postgres query failed: boom");
         assert!(matches!(failed.into_db_error(), DbError::Query(m) if m == "boom"));
     }
@@ -234,5 +245,7 @@ mod tests {
         }
         let e = sqlx::Error::Database(Box::new(NotPostgres));
         assert_eq!(outcome_of(&e), InsertOutcome::Unknown);
+        // Nor for its SQLSTATE (#859): one class for every such error.
+        assert_eq!(super::super::insert_cause::cause_of(&e), InsertCause::Client("database"));
     }
 }

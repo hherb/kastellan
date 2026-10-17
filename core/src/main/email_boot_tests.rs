@@ -124,7 +124,7 @@ fn a_lost_skipped_row_names_its_message_and_cause() {
     assert_eq!(
         line,
         "channel.skipped_ack_only row for message \"<id@host>\" not written: postgres query \
-         failed: read-only; refused row 1 of this burst. The driver's line for the skip \
+         failed: read-only; row 1 of this burst. The driver's line for the skip \
          stands; the id's ack was about to be sent, and unless that ack then failed it is not \
          redelivered"
     );

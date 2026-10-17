@@ -621,6 +621,10 @@ fn audit_helpers_pool_and_notify_round_trip() {
             "POSITIVE CONTROL: Postgres's own refusal: {refused}"
         );
         assert_eq!(refused.outcome(), kastellan_db::audit::InsertOutcome::NotWritten, "{refused}");
+        // #859: classed by its SQLSTATE (25006, read_only_sql_transaction),
+        // which only a real Postgres answer carries.
+        let read_only = kastellan_db::audit::SqlState::parse("25006").expect("a SQLSTATE");
+        assert_eq!(refused.cause(), kastellan_db::audit::InsertCause::Answered(read_only), "{refused}");
         sqlx::query("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
             .execute(&mut *conn)
             .await

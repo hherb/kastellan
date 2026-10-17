@@ -286,7 +286,7 @@ fn an_email_flood_does_not_thin_a_matrix_rows_line() {
     let _ = matrix.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure);
     let told = told.lock().unwrap().clone();
     assert!(
-        told.as_deref().is_some_and(|t| t.ends_with("; refused row 1 of this burst")),
+        told.as_deref().is_some_and(|t| t.ends_with("; row 1 of this burst")),
         "the Matrix row is its own burst's first, and reported: {told:?}"
     );
 }
@@ -313,12 +313,12 @@ fn an_email_flood_after_the_drain_does_not_thin_a_matrix_rows_line() {
     let _ = matrix.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure);
     let told = told.lock().unwrap().clone();
     assert!(
-        told.as_deref().is_some_and(|t| t.ends_with("; refused row 1 of this burst")),
+        told.as_deref().is_some_and(|t| t.ends_with("; row 1 of this burst")),
         "the late Matrix row is its own burst's first, and reported: {told:?}"
     );
     assert_eq!(LEDGER.unreported().matrix, UnsaidCounts::default());
     let late = kastellan_core::audit_thinning::unreported_of(100);
-    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late, failed: 0 });
+    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late, failed_not_written: 0, failed_unknown: 0 });
 }
 
 /// #797: the final snapshot names pending rows — a cancelled task cannot —
@@ -432,7 +432,7 @@ fn rows_thinned_after_the_drain_are_counted_for_the_last_line() {
     assert_eq!(unreported_on_since(&LEDGER, &d), Unreported::default(), "so none is counted twice");
     assert_eq!(refuse_20(), 17, "20 refused after the drain, a burst of their own");
     let since = unreported_on_since(&LEDGER, &d);
-    assert_eq!(since.email, UnsaidCounts { shed: 0, late: 3, failed: 0 }, "only the late ones, and email's");
+    assert_eq!(since.email, UnsaidCounts { shed: 0, late: 3, failed_not_written: 0, failed_unknown: 0 }, "only the late ones, and email's");
     assert_eq!(since.matrix, UnsaidCounts::default());
 }
 

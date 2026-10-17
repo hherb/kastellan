@@ -45,7 +45,7 @@ fn a_lost_inbound_dropped_row_names_its_count_stage_and_cause() {
     assert_eq!(
         format_inbound_row_lost(InboundDropStage::Polled, NonZeroUsize::MIN, &refused),
         "channel.inbound_dropped row for 1 dropped inbound message (polled) not written: \
-         postgres query failed: read-only; refused row 1 of this burst. The drop's \
+         postgres query failed: read-only; row 1 of this burst. The drop's \
          [worker-refusal] line stands"
     );
     // #858: a row whose insert lost its connection may be in the table.
@@ -174,7 +174,7 @@ fn a_lost_inbound_undecodable_row_names_its_cause() {
     assert_eq!(
         format_undecodable_row_lost(UndecodablePart::Batch, &x),
         "channel.inbound_undecodable row for an inbound batch lost undecodable not written: \
-         postgres query failed: x; refused row 1 of this burst. Its [worker-refusal] line stands"
+         postgres query failed: x; row 1 of this burst. Its [worker-refusal] line stands"
     );
     let one = NonZeroUsize::new(1).unwrap();
     let three = NonZeroUsize::new(3).unwrap();
