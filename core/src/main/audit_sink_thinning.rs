@@ -102,8 +102,9 @@ impl ActionRefusals {
 }
 
 /// One channel's lost rows, one [`ActionRefusals`] per action it has lost a
-/// row of. A `Vec`: an action is a `&'static str` the core's own sinks
-/// spell (a few per channel), so it stays short — and never a peer's word.
+/// row of. A `Vec`: an action is a `&'static str` — in practice the core's
+/// own sinks' constants, a few per channel — so it stays short, and no peer-
+/// or runtime-spelled string reaches it short of a deliberate leak.
 #[derive(Debug)]
 struct ChannelRefusals {
     actions: Mutex<Vec<ActionRefusals>>,
@@ -136,7 +137,7 @@ impl ChannelRefusals {
 }
 
 /// Every channel's refused rows, each action and kind thinned on its own
-/// (#807, #837).
+/// (#807; per action #837, #865).
 #[derive(Debug)]
 pub(super) struct Refusals {
     matrix: ChannelRefusals,
@@ -176,10 +177,12 @@ pub(crate) struct UnsaidCounts {
     /// Tried after the shutdown drain closed the ledger.
     pub(super) late: usize,
     /// Tried, and the insert failed with the row known not to be in the
-    /// table: refused by Postgres, or never sent (#858, #864).
+    /// table: Postgres answered with an error or wrote no row, or it was
+    /// never sent (#858, #864).
     pub(super) failed_not_written: usize,
-    /// Tried, and the insert failed in a way that may have committed the
-    /// row: the connection was lost mid-insert (#858, #864).
+    /// Tried, and the insert failed in a way that does not prove the row
+    /// absent — a lost connection, a server crash, an ended session — so it
+    /// may have been committed (#858, #864; `InsertOutcome::Unknown`).
     pub(super) failed_unknown: usize,
 }
 
@@ -240,7 +243,8 @@ impl Unreported {
 }
 
 /// Tell `on_failure` of `channel`'s lost row of `action` — unless its burst
-/// has passed the thinning, in which case it is only counted — and hand the
+/// has passed the thinning and its cause is not new (#859), in which case it
+/// is only counted — and hand the
 /// [`Unwritten`] (`why`, given the row's tally) back for the caller's `Err`.
 /// Called on the caller's thread for a shed or late row, and from the
 /// spawned task for a failed insert (#861) and on its (unreachable)
@@ -255,7 +259,7 @@ pub(super) fn refuse<'a>(
     // The lock is released before `on_failure` runs: a report can block.
     let refusal = refusals.refuse(channel, action, loss);
     let why = why(refusal.tally);
-    if refusal.report {
+    if refusal.report() {
         on_failure(why);
     }
     why
@@ -265,12 +269,16 @@ pub(super) fn refuse<'a>(
 mod tests {
     use super::*;
     use kastellan_core::audit_thinning::unreported_of;
+    use kastellan_db::audit::SqlState;
 
-    const READ_ONLY: Loss =
-        Loss::Failed { outcome: InsertOutcome::NotWritten, cause: InsertCause::Client("read-only") };
+    /// Postgres's 25006, read_only_sql_transaction.
+    const READ_ONLY: Loss = Loss::Failed {
+        outcome: InsertOutcome::NotWritten,
+        cause: InsertCause::Answered(SqlState::parse("25006").unwrap()),
+    };
     const RESET: Loss = Loss::Failed {
         outcome: InsertOutcome::Unknown,
-        cause: InsertCause::Io(std::io::ErrorKind::ConnectionReset),
+        cause: InsertCause::Io { kind: std::io::ErrorKind::ConnectionReset, os: None },
     };
 
     /// Lose `n` of `channel`'s rows of `action` as `loss`.
@@ -287,7 +295,7 @@ mod tests {
         let refusals = Refusals::new();
         lose(&refusals, SinkChannel::Email, "a", Loss::Shed, 100);
         let matrix = refusals.refuse(SinkChannel::Matrix, "a", Loss::Shed);
-        assert!(matrix.report, "Matrix's first shed row is its own burst's first");
+        assert!(matrix.report(), "Matrix's first shed row is its own burst's first");
         assert_eq!(matrix.tally.nth, 1);
         refusals.refuse(SinkChannel::Email, "a", Loss::Late);
         let unreported = refusals.unreported();
@@ -303,14 +311,47 @@ mod tests {
         let refusals = Refusals::new();
         lose(&refusals, SinkChannel::Matrix, "channel.inbound_dropped", READ_ONLY, 100);
         let reply = refusals.refuse(SinkChannel::Matrix, "channel.reply_undelivered", READ_ONLY);
-        assert!(reply.report && reply.tally.nth == 1, "another action's first row: {reply:?}");
+        assert!(reply.report() && reply.tally.nth == 1, "another action's first row: {reply:?}");
+        // Unequal counts per action, so a sum that took one side twice
+        // could not pass.
         lose(&refusals, SinkChannel::Matrix, "channel.reply_undelivered", Loss::Shed, 20);
-        lose(&refusals, SinkChannel::Matrix, "channel.inbound_dropped", Loss::Shed, 20);
+        lose(&refusals, SinkChannel::Matrix, "channel.inbound_dropped", Loss::Shed, 40);
         let matrix = refusals.unreported().matrix;
         assert_eq!(
             matrix,
-            UnsaidCounts { shed: 2 * unreported_of(20), failed_not_written: unreported_of(100), ..Default::default() }
+            UnsaidCounts {
+                shed: unreported_of(20) + unreported_of(40),
+                failed_not_written: unreported_of(100),
+                ..Default::default()
+            }
         );
+    }
+
+    /// The channel's count sums every action's, every kind: late rows and
+    /// the unknown outcome included, from two actions with unequal counts.
+    #[test]
+    fn a_channels_count_sums_every_actions_kinds() {
+        let refusals = Refusals::new();
+        lose(&refusals, SinkChannel::Email, "a", Loss::Late, 20);
+        lose(&refusals, SinkChannel::Email, "b", Loss::Late, 40);
+        lose(&refusals, SinkChannel::Email, "a", RESET, 40);
+        lose(&refusals, SinkChannel::Email, "b", RESET, 20);
+        assert_eq!(
+            refusals.unreported().email,
+            UnsaidCounts {
+                late: unreported_of(20) + unreported_of(40),
+                failed_unknown: unreported_of(40) + unreported_of(20),
+                ..Default::default()
+            }
+        );
+    }
+
+    /// `plus` adds kind by kind, each its own.
+    #[test]
+    fn plus_adds_kind_by_kind() {
+        let a = UnsaidCounts { shed: 1, late: 2, failed_not_written: 3, failed_unknown: 4 };
+        let b = UnsaidCounts { shed: 10, late: 20, failed_not_written: 30, failed_unknown: 40 };
+        assert_eq!(a.plus(b), UnsaidCounts { shed: 11, late: 22, failed_not_written: 33, failed_unknown: 44 });
     }
 
     /// #861: failed inserts are a kind of their own — a flood of them leaves
@@ -321,7 +362,7 @@ mod tests {
         let refusals = Refusals::new();
         lose(&refusals, SinkChannel::Email, "a", READ_ONLY, 100);
         let shed = refusals.refuse(SinkChannel::Email, "a", Loss::Shed);
-        assert!(shed.report, "the first shed row is its own burst's first");
+        assert!(shed.report(), "the first shed row is its own burst's first");
         assert_eq!(shed.tally.nth, 1);
         let email = refusals.unreported().email;
         assert_eq!(email, UnsaidCounts { failed_not_written: unreported_of(100), ..Default::default() });
@@ -338,7 +379,7 @@ mod tests {
         let refusals = Refusals::new();
         lose(&refusals, SinkChannel::Email, "a", READ_ONLY, 100);
         let reset = refusals.refuse(SinkChannel::Email, "a", RESET);
-        assert!(reset.report && reset.tally.nth == 1, "the other outcome's first row: {reset:?}");
+        assert!(reset.report() && reset.tally.nth == 1, "the other outcome's first row: {reset:?}");
         lose(&refusals, SinkChannel::Email, "a", RESET, 39);
         let email = refusals.unreported().email;
         assert_eq!(
@@ -347,13 +388,12 @@ mod tests {
         );
         let base = UnsaidCounts { failed_unknown: 1, ..Default::default() };
         assert_eq!(email.since(base).failed_unknown, unreported_of(40) - 1, "`since` counts it too");
-        assert_eq!(email.plus(email).failed_unknown, 2 * unreported_of(40), "`plus` counts it too");
     }
 
     /// A failed insert's loss is its own outcome and cause.
     #[test]
     fn a_failed_inserts_loss_is_its_outcome_and_cause() {
-        let cause = InsertCause::Io(std::io::ErrorKind::BrokenPipe);
+        let cause = InsertCause::Io { kind: std::io::ErrorKind::BrokenPipe, os: None };
         let error = InsertError::assumed_for_test(InsertOutcome::Unknown, cause, kastellan_db::DbError::Query("x".into()));
         assert!(matches!(
             Loss::failed(&error),
@@ -367,9 +407,12 @@ mod tests {
     fn a_new_cause_mid_flood_gets_its_line() {
         let refusals = Refusals::new();
         lose(&refusals, SinkChannel::Email, "a", READ_ONLY, 100);
-        let revoked = Loss::Failed { outcome: InsertOutcome::NotWritten, cause: InsertCause::Client("revoked") };
+        let revoked = Loss::Failed {
+            outcome: InsertOutcome::NotWritten,
+            cause: InsertCause::Answered(SqlState::parse("42501").unwrap()),
+        };
         let new = refusals.refuse(SinkChannel::Email, "a", revoked);
-        assert!(new.report && new.tally.first_of_cause, "{new:?}");
-        assert!(!refusals.refuse(SinkChannel::Email, "a", revoked).report, "then thinned again");
+        assert_eq!(new.tally.new_cause_since, Some(65), "{new:?}");
+        assert!(!refusals.refuse(SinkChannel::Email, "a", revoked).report(), "then thinned again");
     }
 }

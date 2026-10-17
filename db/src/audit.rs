@@ -101,7 +101,7 @@ mod truncate;
 
 pub use crate::nul::NUL_ESCAPE;
 use insert_cause::cause_of;
-pub use insert_cause::{InsertCause, SqlState};
+pub use insert_cause::{ClientFault, InsertCause, SqlState};
 pub use insert_outcome::{InsertError, InsertOutcome};
 use insert_outcome::outcome_of;
 pub use nul_escape::NUL_ESCAPED_KEY;
@@ -255,7 +255,9 @@ where
 /// A writer reporting the loss words the unknown case "may not have been
 /// written". The rules are for an autocommitted statement — `executor` a pool
 /// or a bare connection; inside a transaction a "not written" holds only if
-/// the transaction is not committed after all.
+/// the transaction is not committed after all. [`InsertError::cause`] says
+/// what kind of failure it was (#859), so a writer thinning its lines past a
+/// flood can still give a new fault one.
 ///
 /// One step `insert` had for free is kept: its `fetch_one` fails on a
 /// statement that writes no row, and `execute` would not, so the count is

@@ -45,9 +45,11 @@ use crate::worker_stderr::AuditLostWriter;
 /// The most channels counted apart per writer; past it, rows count under
 /// [`RowChannel::Other`]. Channel names are spelled by the core's own code,
 /// never by a peer, so this is never reached in practice — it bounds
-/// the count's memory if that ever stops being true. (Actions need no such
-/// bound: [`RowKey::action`] is `&'static str`, so only the core's own
-/// constants can be one — a few dozen at most.)
+/// the count's memory if that ever stops being true. (Actions get no such
+/// bound: [`RowKey::action`] is `&'static str`, which no peer- or
+/// runtime-spelled string reaches short of a deliberate leak — in practice
+/// the core's constants, `channel::actions` and `ask.resolved`, a few dozen
+/// at most.)
 const MAX_NAMED_CHANNELS: usize = 16;
 
 /// Which channel a lost row is counted under.
@@ -73,14 +75,23 @@ pub(crate) struct RowKey<'a> {
     pub(crate) outcome: InsertOutcome,
 }
 
+/// One count, resolved: a [`RowKey`] with its channel looked up
+/// ([`row_channel`]). One struct, so the entry, its comparison and what
+/// [`LostRows::unsaid`] hands back cannot fall out of step when a part is
+/// added.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CountKey {
+    pub(crate) writer: AuditLostWriter,
+    pub(crate) channel: RowChannel,
+    pub(crate) action: &'static str,
+    pub(crate) outcome: InsertOutcome,
+}
+
 /// The rows one writer could not write on one channel, of one action and
 /// outcome.
 #[derive(Debug)]
 struct Entry {
-    writer: AuditLostWriter,
-    channel: RowChannel,
-    action: &'static str,
-    outcome: InsertOutcome,
+    key: CountKey,
     thinning: Thinning<InsertCause>,
 }
 
@@ -100,10 +111,7 @@ pub(crate) static LOST_ROWS: LostRows = LostRows::new();
 /// One count's rows that got no line of their own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Unsaid {
-    pub(crate) writer: AuditLostWriter,
-    pub(crate) channel: RowChannel,
-    pub(crate) action: &'static str,
-    pub(crate) outcome: InsertOutcome,
+    pub(crate) key: CountKey,
     pub(crate) rows: usize,
 }
 
@@ -135,13 +143,7 @@ impl LostRows {
         let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries
             .iter()
-            .map(|e| Unsaid {
-                writer: e.writer,
-                channel: e.channel.clone(),
-                action: e.action,
-                outcome: e.outcome,
-                rows: e.thinning.unreported(),
-            })
+            .map(|e| Unsaid { key: e.key.clone(), rows: e.thinning.unreported() })
             .filter(|u| u.rows > 0)
             .collect()
     }
@@ -161,8 +163,8 @@ fn row_channel(entries: &[Entry], writer: AuditLostWriter, channel: Option<&str>
     let Some(name) = channel else { return RowChannel::Unnamed };
     let mut named: Vec<&str> = entries
         .iter()
-        .filter(|e| e.writer == writer)
-        .filter_map(|e| match &e.channel {
+        .filter(|e| e.key.writer == writer)
+        .filter_map(|e| match &e.key.channel {
             RowChannel::Named(n) => Some(n.as_str()),
             _ => None,
         })
@@ -178,19 +180,16 @@ fn row_channel(entries: &[Entry], writer: AuditLostWriter, channel: Option<&str>
 
 /// The entry a row counted by `key` goes in, made on first use.
 fn entry<'a>(entries: &'a mut Vec<Entry>, key: RowKey<'_>) -> &'a mut Entry {
-    let channel = row_channel(entries, key.writer, key.channel);
-    let mine =
-        |e: &Entry| e.writer == key.writer && e.channel == channel && e.action == key.action && e.outcome == key.outcome;
-    let at = match entries.iter().position(mine) {
+    let key = CountKey {
+        writer: key.writer,
+        channel: row_channel(entries, key.writer, key.channel),
+        action: key.action,
+        outcome: key.outcome,
+    };
+    let at = match entries.iter().position(|e| e.key == key) {
         Some(at) => at,
         None => {
-            entries.push(Entry {
-                writer: key.writer,
-                channel,
-                action: key.action,
-                outcome: key.outcome,
-                thinning: Thinning::new(),
-            });
+            entries.push(Entry { key, thinning: Thinning::new() });
             entries.len() - 1
         }
     };
@@ -200,10 +199,12 @@ fn entry<'a>(entries: &'a mut Vec<Entry>, key: RowKey<'_>) -> &'a mut Entry {
 /// Pure: the shutdown's line for one count's rows that got no line of their
 /// own — said once, so a flood's tail is not lost with the process (the
 /// per-line tally says the rest). It says whether they are known not to be
-/// in `audit_log` (#864): since #858 some failed inserts lost their
-/// connection and may have been committed, and those are counted apart.
+/// in `audit_log` (#864): since #858 an insert that failed in a way that
+/// does not prove its row absent — a lost connection, a server crash — is
+/// "may not have been written", and those are counted apart.
 pub(crate) fn format_unsaid(unsaid: &Unsaid) -> String {
-    let whose = match &unsaid.channel {
+    let key = &unsaid.key;
+    let whose = match &key.channel {
         RowChannel::Named(name) => format!(" for channel {}", super::quoted_id(name)),
         RowChannel::Unnamed => " naming no channel".to_string(),
         RowChannel::Other => format!(" for channels past the first {MAX_NAMED_CHANNELS}"),
@@ -212,8 +213,8 @@ pub(crate) fn format_unsaid(unsaid: &Unsaid) -> String {
     let (row, its) = if rows == 1 { ("row", "its own") } else { ("rows", "their own") };
     format!(
         "{rows} {} audit {row}{whose} failed to insert ({}) and had no line of {its} (thinned past a flood)",
-        unsaid.action,
-        super::insert_verdict(unsaid.outcome),
+        key.action,
+        super::insert_verdict(key.outcome),
     )
 }
 
@@ -221,8 +222,10 @@ pub(crate) fn format_unsaid(unsaid: &Unsaid) -> String {
 mod tests {
     use super::*;
     use crate::audit_thinning::{BURST_QUIET_GAP, REPORT_EACH_UP_TO};
+    use kastellan_db::audit::SqlState;
 
-    const READ_ONLY: InsertCause = InsertCause::Client("read-only");
+    /// Postgres's 25006, read_only_sql_transaction.
+    const READ_ONLY: InsertCause = InsertCause::Answered(SqlState::parse("25006").unwrap());
 
     /// A `channel.received` row of `writer` on `channel`, known not written.
     fn received(writer: AuditLostWriter, channel: Option<&str>) -> RowKey<'_> {
@@ -231,11 +234,11 @@ mod tests {
 
     /// Lose `n` rows counted by `key` at `at`, returning how many got a line.
     fn lose_n(rows: &LostRows, key: RowKey<'_>, n: usize, at: Instant) -> usize {
-        (0..n).filter(|_| rows.lose_at(key, READ_ONLY, at).report).count()
+        (0..n).filter(|_| rows.lose_at(key, READ_ONLY, at).report()).count()
     }
 
     fn unsaid(writer: AuditLostWriter, channel: RowChannel, action: &'static str, outcome: InsertOutcome, rows: usize) -> Unsaid {
-        Unsaid { writer, channel, action, outcome, rows }
+        Unsaid { key: CountKey { writer, channel, action, outcome }, rows }
     }
 
     /// A flood is thinned like the daemon's: the first rows each, then the
@@ -261,12 +264,12 @@ mod tests {
         let t0 = Instant::now();
         lose_n(&rows, received(AuditLostWriter::Bus, Some("email")), 100, t0);
         let matrix = rows.lose_at(received(AuditLostWriter::Bus, Some("matrix")), READ_ONLY, t0);
-        assert!(matrix.report && matrix.tally.nth == 1, "another channel's first row: {matrix:?}");
+        assert!(matrix.report() && matrix.tally.nth == 1, "another channel's first row: {matrix:?}");
         let supervisor_email = received(AuditLostWriter::ChannelSupervisor, Some("email"));
         let supervisor = rows.lose_at(supervisor_email, READ_ONLY, t0);
-        assert!(supervisor.report && supervisor.tally.nth == 1, "another writer's first row: {supervisor:?}");
+        assert!(supervisor.report() && supervisor.tally.nth == 1, "another writer's first row: {supervisor:?}");
         let ask = rows.lose_at(received(AuditLostWriter::Bus, None), READ_ONLY, t0);
-        assert!(ask.report && ask.tally.nth == 1, "a row with no channel counts apart: {ask:?}");
+        assert!(ask.report() && ask.tally.nth == 1, "a row with no channel counts apart: {ask:?}");
         // The shutdown's count is said as each writer's own, in the order
         // each was first lost.
         let supervisor_said = 1 + lose_n(&rows, supervisor_email, 99, t0);
@@ -291,7 +294,7 @@ mod tests {
         lose_n(&rows, received(AuditLostWriter::Bus, Some("matrix")), 100, t0);
         let reply = RowKey { action: "channel.reply_undelivered", ..received(AuditLostWriter::Bus, Some("matrix")) };
         let first = rows.lose_at(reply, READ_ONLY, t0);
-        assert!(first.report && first.tally.nth == 1, "another action's first row: {first:?}");
+        assert!(first.report() && first.tally.nth == 1, "another action's first row: {first:?}");
     }
 
     /// #864: the rows that may have been written are counted apart from
@@ -304,7 +307,7 @@ mod tests {
         let reset = RowKey { outcome: InsertOutcome::Unknown, ..refused };
         let refused_said = lose_n(&rows, refused, 100, t0);
         let first = rows.lose_at(reset, READ_ONLY, t0);
-        assert!(first.report && first.tally.nth == 1, "the other outcome's first row: {first:?}");
+        assert!(first.report() && first.tally.nth == 1, "the other outcome's first row: {first:?}");
         let reset_said = 1 + lose_n(&rows, reset, 39, t0);
         let matrix = || RowChannel::Named("matrix".into());
         assert_eq!(
@@ -323,9 +326,9 @@ mod tests {
         let t0 = Instant::now();
         let key = received(AuditLostWriter::Bus, Some("matrix"));
         lose_n(&rows, key, 100, t0);
-        let revoked = rows.lose_at(key, InsertCause::Client("revoked"), t0);
-        assert!(revoked.report && revoked.tally.first_of_cause, "{revoked:?}");
-        assert!(!rows.lose_at(key, READ_ONLY, t0).report, "the flood's own cause is still thinned");
+        let revoked = rows.lose_at(key, InsertCause::Answered(SqlState::parse("42501").unwrap()), t0);
+        assert!(revoked.report() && revoked.tally.new_cause_since.is_some(), "{revoked:?}");
+        assert!(!rows.lose_at(key, READ_ONLY, t0).report(), "the flood's own cause is still thinned");
     }
 
     /// A quiet gap starts a new burst, whose first line says how the last
@@ -337,7 +340,7 @@ mod tests {
         let key = received(AuditLostWriter::Bus, Some("matrix"));
         lose_n(&rows, key, 20, t0);
         let next = rows.lose_at(key, READ_ONLY, t0 + BURST_QUIET_GAP);
-        assert!(next.report, "{next:?}");
+        assert!(next.report(), "{next:?}");
         assert_eq!(next.tally.nth, 1);
         assert!(next.tally.ended.is_some(), "it says how the 20-row burst ended: {next:?}");
     }
@@ -364,7 +367,7 @@ mod tests {
         let entries = |rows: &LostRows| rows.entries.lock().unwrap().len();
         assert_eq!(entries(&rows), MAX_NAMED_CHANNELS + 1, "POSITIVE CONTROL: each channel named apart");
         assert!(
-            rows.entries.lock().unwrap().iter().all(|e| e.channel != RowChannel::Other),
+            rows.entries.lock().unwrap().iter().all(|e| e.key.channel != RowChannel::Other),
             "no channel past the cap yet"
         );
         rows.lose_at(received(AuditLostWriter::Bus, Some("one-more")), READ_ONLY, t0);
@@ -374,7 +377,7 @@ mod tests {
         assert_eq!(c0.tally.nth, 2, "c0 keeps its own count");
         rows.lose_at(received(AuditLostWriter::ChannelSupervisor, Some("new")), READ_ONLY, t0);
         assert_eq!(entries(&rows), MAX_NAMED_CHANNELS + 3, "another writer names its own");
-        let other = rows.entries.lock().unwrap().iter().filter(|e| e.channel == RowChannel::Other).count();
+        let other = rows.entries.lock().unwrap().iter().filter(|e| e.key.channel == RowChannel::Other).count();
         assert_eq!(other, 1);
     }
 

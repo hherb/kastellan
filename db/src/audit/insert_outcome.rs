@@ -246,6 +246,6 @@ mod tests {
         let e = sqlx::Error::Database(Box::new(NotPostgres));
         assert_eq!(outcome_of(&e), InsertOutcome::Unknown);
         // Nor for its SQLSTATE (#859): one class for every such error.
-        assert_eq!(super::super::insert_cause::cause_of(&e), InsertCause::Client("database"));
+        assert_eq!(super::super::insert_cause::cause_of(&e), InsertCause::Client(super::super::insert_cause::ClientFault::Database));
     }
 }

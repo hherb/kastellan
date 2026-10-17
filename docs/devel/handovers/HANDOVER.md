@@ -9,7 +9,7 @@
 > and #810 prose included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-17 (#837 + #859 + #864 + #865 — a lost row's `[audit-lost]` line is thinned only behind rows lost the same way: per action, per outcome, never past a new cause; PR [#866](https://github.com/hherb/kastellan/pull/866), Mac sweep green. PRs #855, #856, #857, #863 are merged and **not yet deployed**. The operator is still running the #773 live re-measure) ·
+**Last updated:** 2026-10-17 (#837 + #859 + #864 + #865 — a lost row's `[audit-lost]` line is thinned only behind rows lost the same way: per action, per outcome, never past a new cause; PR [#866](https://github.com/hherb/kastellan/pull/866), Mac sweep green; then a five-agent review, its findings addressed in-PR, #867/#868 filed. PRs #855, #856, #857, #863 are merged and **not yet deployed**. The operator is still running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
@@ -47,21 +47,40 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 - **Count keys.** Daemon sinks (`main/audit_sink_thinning.rs`): one `Thinning` per **channel × action ×
   kind** (`shed`, `late`, `not_written`, `unknown`), `Loss::{Shed, Late, Failed{outcome, cause}}`;
-  `UnsaidCounts.failed` → **`failed_not_written` + `failed_unknown`**, said apart at shutdown ("not
-  written" / "may have been written … look for them in audit_log"). Bus (`pg_events/lost_rows.rs`):
-  **`RowKey { writer, channel, action, outcome }`**; the channel cap counts **distinct** names.
+  `UnsaidCounts.failed` → **`failed_not_written` + `failed_unknown`**, said apart at shutdown in
+  `insert_verdict`'s own words ("not written" / "may not have been written (… a lost connection, a
+  server crash, an ended session: look for them in audit_log)" — ⚠️ never one named cause: `Unknown`
+  is also `PANIC`, `FATAL`, TLS). The shutdown still **sums actions per channel** → #867. Bus
+  (`pg_events/lost_rows.rs`): **`RowKey { writer, channel, action, outcome }`**, resolved into one
+  **`CountKey`** (entry, comparison and `Unsaid` share it); the channel cap counts **distinct** names.
   ⚠️ **`ChannelEvents::audit` takes `action: &'static str`** (pub trait change) — that is what bounds
-  the per-action count; never widen it to `&str`.
-- **#859: `kastellan_db::audit::InsertCause`** (`audit/insert_cause.rs`: SQLSTATE / `io::ErrorKind` /
-  sqlx variant / `RowCount` — ⚠️ **never the error text**, which carries row values). `Thinning<C = ()>`
-  reports the **first row of each cause per burst** (≤ `MAX_CAUSES_PER_BURST` = 8), tally `, the
-  first with its cause`. ⚠️ **Deliberately NOT #859's "differs from the last reported cause"**: two
-  interleaved faults would then print every row (`interleaved_causes_stay_thinned`). `Thinning` now
-  counts reported rows; `unreported_of` is only the tests' reference.
+  the per-action count; never widen it to `&str`. A convention, not a construction (`Box::leak`) → #868.
+- **#859: `kastellan_db::audit::InsertCause`** (`audit/insert_cause.rs`: `Answered(SqlState)` /
+  `Io { kind, os }` (the OS errno too: `EMFILE`/`ENFILE` share a kind) / `Client(ClientFault)` (a
+  **closed** enum) / `RowCount` — ⚠️ **never the error text**, which carries row values).
+  `SqlState::parse` is `const` (`[0-9A-Z]{5}`), so tests name real codes. `Thinning<C = ()>` reports
+  the **first row of each cause per stretch** — ⚠️ **a stretch runs from one 2^k-th line to the next**,
+  not the whole burst: counted per burst, a flood that never pauses filled the 8 slots
+  (now `MAX_CAUSES_PER_STRETCH`, was `…_PER_BURST`) with its first transients and a late `PANIC` got no line. Tally `, the first
+  with its cause since row N`. ⚠️ **Deliberately NOT #859's "differs from the last reported cause"**:
+  two interleaved faults would then print every row (`interleaved_causes_stay_thinned`: one extra line
+  per stretch). `Refusal::report()` is **derived** from the tally (`BurstTally::has_own_line`), not a
+  stored field. `Thinning` counts reported rows; `unreported_of` is only the tests' reference.
 - **Tally wording:** `row N of this burst` (no "refused"). `InsertError::assumed_for_test` takes a cause.
 - Mutants **30/30** (`837-859-864-865-mutants.log`; one survivor — the cap's `dedup` — killed by a
   stronger test). One reviewer: no bug; its doc nits fixed, its unbounded-action note → the `'static`
-  change. Bus thinning tests moved to `pg_events/tests/thinning.rs` (byte-identical).
+  change. Bus thinning tests moved to `pg_events/tests/thinning.rs` — **and updated** for the new keys
+  and wording in the same commit (`an_unknown_outcome_counts_in_the_same_burst` became
+  `…_apart_from_a_refusal`, which asserts the opposite).
+- **Five-agent review (`/review-pr`), all fixed here except #867/#868:** the per-stretch causes, the
+  shutdown's `Unknown` wording, the `'static` overclaims, `Refusal::report()`, `CountKey`,
+  `ClientFault`, `Io { os }`, `plus` across actions + unequal-count fixtures, a new cause on a 2^k
+  row, `seen` bounded in memory, and a **second real cause in `postgres_e2e`** (42P01 via a
+  `search_path` that hides `audit_log`, ≠ 25006). The routed bus test reads the refused pool's real
+  cause instead of assuming `PoolTimedOut`. #817 commented: per-key counts widen its tail gap.
+  `audit_thinning.rs`'s tests moved to `audit_thinning/tests.rs` (519 → 283 lines). Both
+  `closing_pool` fixtures read the client's first message before closing, so every insert fails with
+  EOF — closing unread sent a RST, and reset-vs-EOF was a race between two causes.
 
 ### Previous (2026-10-17): #858 + #861 (PR #863, merged) — what still binds
 
@@ -116,7 +135,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - **#827/#826 (PR #834):** `RejectedUnverifiable` (fail-closed); `ack_method: None` = "does not
   redeliver". `pg_events::audit_or_report` holds a **`PendingInsert` drop guard** — ⚠️ no `.await`
   before it. **NUL (#819/#820):** records escape to `␀`; ⚠️ `kastellan-db`'s next release must be
-  **0.3.0** (now also `audit::insert_without_id`, #829, its `InsertError`, #858, and `InsertCause`, #859); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #838–#840, #860, #862.
+  **0.3.0** (now also `audit::insert_without_id`, #829, its `InsertError`, #858, and `InsertCause`/`ClientFault`, #859); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #838–#840, #860, #862, #867, #868 (#837/#859/#864/#865 close with #866).
 - ⚠️ **A Mac sweep without `KASTELLAN_PG_BIN_DIR` in its command line is NOT evidence** (372
   `[SKIP]`, exit 0) [[postgres-app-bin-paths]]; a sweep without `-- --nocapture` under-counts
   `[SKIP]`. ⚠️ **`git push` over SSH fails here** — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
@@ -288,8 +307,10 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    or boot-supervisor failed-insert `[audit-lost]` line carries `; row N of this burst` (since #866; then
    possibly `(… before it had no line …)` / `; the burst before it ended …`), and a flood of lost bus rows ends in
    `N <action> audit rows for channel … failed to insert (not written) …` — none expected (and
-   since #863 a line saying a row "may not have been written" means the connection broke, so
-   check `audit_log` before calling it lost). INFO `channel pump ended
+   since #863 a line saying a row "may not have been written" means the insert failed in a way that
+   does not prove the row absent — a lost connection, a server crash, an ended session — so check
+   `audit_log` before calling it lost; since #866 a thinned line may end `, the first with its cause
+   since row N`: a new fault mid-flood). INFO `channel pump ended
    with replies queued` and no `queue_closed` rows (#832). Rows a restart under traffic can leave:
    `channel.inbound_dropped` with `stage` `polled`/`buffered`/`worker` (`select payload->>'channel',
    payload->>'stage', payload->>'dropped' from audit_log where action = 'channel.inbound_dropped' order
@@ -297,8 +318,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    payload->>'part', payload->>'undecodable' … where action = 'channel.inbound_undecodable'`, #855).
    ⚠️ A stale `matrix.ext4` answers `matrix.drain` with METHOD_NOT_FOUND (rebuild with
    `bash scripts/build-release.sh` + the rootfs script). Then [#805](https://github.com/hherb/kastellan/issues/805)
-   and #809–#811. The rest of the thinning family: **#860, #862** (bus shutdown ordering, no-channel
-   rows shared across buses) and #817 (a crash loses the thinned tail). Natural next security items: #833 (stderr panic in a `Drop`; needs a design call,
+   and #809–#811. The rest of the thinning family: **#860, #862** (no-channel rows shared across
+   buses, bus shutdown ordering), #867 (the sinks' shutdown sums actions), #868 (compiler-checked
+   bounds) and #817 (a crash loses the thinned tail). Natural next security items: #833 (stderr panic in a `Drop`; needs a design call,
    now also `bus_guards` and `InboundReceiver`), #831 and #817 (now also the bus writers' thinned tail).
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
@@ -400,7 +422,8 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#837/#859/#864/#865 — **the full sweep that stands**, first commit) | PR [#866](https://github.com/hherb/kastellan/pull/866) | **5105 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-837-859-864-865.log`. Predicted +18, reconciled per suite against `sweep-858-861.log`: db lib +3 (vs `origin/main` **248**, measured — #863's review commit added **2 db tests** the last handover missed, so main read **5087**, not 5085), core lib +10 (2533 → 2543), daemon bin +5 (95 → 100). The review commit is a type/doc change (0 tests; core lib + bin + `channel_bus_e2e` re-run green). `postgres_e2e` 60 under `KASTELLAN_PG_REQUIRE_E2E=1`. Mutants **30/30** | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-837`, **27** `Checking kastellan`, on the review commit | **23** Mac |
+| **Mac** (#866 five-agent review fixes) | PR [#866](https://github.com/hherb/kastellan/pull/866) | **5102 / 6 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/sweep-866-review.log`. ⚠️ **All 6 failures are #548/#676 cluster contention** (`probe: Connect(… the database system is starting up)`) in `embedding_recall_e2e` (1), `entity_extraction_e2e` (2), `postgres_e2e` (3); isolated at `--test-threads=4` *other* tests in the same suites failed the same way (it moves), and at `--test-threads=1` under `KASTELLAN_PG_REQUIRE_E2E=1` all pass: **60 / 4 / 17**, incl. `audit_helpers_pool_and_notify_round_trip` (the new 42P01 cause). 5102 + 6 = **5108** = predicted +3 (core lib 2543 → **2544**, daemon bin 100 → **102**, db lib 251 unchanged). The flood tests' `closing_pool` now reads before closing (FIN → always EOF): before, RST-vs-EOF was a race, i.e. **two causes**, which the per-stretch rule (rightly) gave a line each | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-866` (fresh dir), **27** `Checking kastellan`, after the `.flatten()` fix | **23** Mac |
+| **Mac** (#837/#859/#864/#865 — first commit) | PR [#866](https://github.com/hherb/kastellan/pull/866) | **5105 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-837-859-864-865.log`. Predicted +18, reconciled per suite against `sweep-858-861.log`: db lib +3 (vs `origin/main` **248**, measured — #863's review commit added **2 db tests** the last handover missed, so main read **5087**, not 5085), core lib +10 (2533 → 2543), daemon bin +5 (95 → 100). The review commit is a type/doc change (0 tests; core lib + bin + `channel_bus_e2e` re-run green). `postgres_e2e` 60 under `KASTELLAN_PG_REQUIRE_E2E=1`. Mutants **30/30** | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-837`, **27** `Checking kastellan`, on the review commit | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 

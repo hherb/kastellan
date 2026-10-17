@@ -7,6 +7,9 @@ use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
 use std::sync::Mutex;
 use test_support::own_lost_rows;
 
+/// Postgres's 25006, read_only_sql_transaction: a plain string's cause.
+const READ_ONLY: InsertCause = InsertCause::Answered(kastellan_db::audit::SqlState::parse("25006").unwrap());
+
 /// A test's failed insert as a plain string: known not written, the shape
 /// every test before #858 was written against — all of one cause (#859),
 /// whatever the text says, as a real fault's rows are.
@@ -16,7 +19,7 @@ impl InsertFailure for &str {
     }
 
     fn cause(&self) -> InsertCause {
-        InsertCause::Client("test")
+        READ_ONLY
     }
 }
 
@@ -26,7 +29,7 @@ impl InsertFailure for String {
     }
 
     fn cause(&self) -> InsertCause {
-        InsertCause::Client("test")
+        READ_ONLY
     }
 }
 
@@ -45,7 +48,7 @@ impl InsertFailure for Unknown {
     }
 
     fn cause(&self) -> InsertCause {
-        InsertCause::Io(std::io::ErrorKind::ConnectionReset)
+        InsertCause::Io { kind: std::io::ErrorKind::ConnectionReset, os: None }
     }
 }
 
@@ -71,7 +74,7 @@ fn the_line_names_what_the_row_is_about_and_nothing_else() {
         "reason": "send_failed",
         "body": "NEVER-IN-A-LINE",
     });
-    let first = BurstTally { nth: 1, first_of_cause: false, unsaid_before: 0, ended: None };
+    let first = BurstTally { nth: 1, new_cause_since: None, unsaid_before: 0, ended: None };
     let about = describe_row(&payload);
     let line = format_row_lost("channel.reply_undelivered", &about, &"boom", first);
     assert_eq!(

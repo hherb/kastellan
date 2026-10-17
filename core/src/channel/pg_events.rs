@@ -35,8 +35,8 @@
 //! count, or the shutdown's line, says (#817).
 //!
 //! Since #829 a failed insert's lines are **thinned** past a flood, per
-//! writer, channel, action and outcome ([`lost_rows`]; the last two since
-//! #864/#865) — but for the first row of each new cause in a burst (#859) —
+//! writer, channel, action and outcome ([`lost_rows`]; action since #865,
+//! outcome since #864) — but for the first row of each new cause (#859) —
 //! each carrying its place in the burst,
 //! and the shutdown says how many got no line of their own
 //! ([`report_unsaid_lost_rows`]). And the insert no longer decodes an id it
@@ -132,7 +132,7 @@ pub(crate) fn production_writer() -> (Reporter, &'static LostRows) {
 
 /// Say, once, how many rows every bus writer lost (failed to insert) and gave no line
 /// of their own (#829) — one `[audit-lost]` line per writer, channel, action
-/// and outcome that has any (#864). The daemon calls it after the channels stop, when nothing writes
+/// and outcome that has any (action #865, outcome #864). The daemon calls it after the channels stop, when nothing writes
 /// through these writers any more; called twice, it would say the same rows
 /// again. The count is every burst's, so it includes rows a later burst's
 /// first line already summed up ("the burst before it ended after …").
@@ -144,7 +144,7 @@ pub fn report_unsaid_lost_rows() {
 /// [`report_unsaid_lost_rows`] over `lost`, through `report`.
 fn report_unsaid(lost: &LostRows, report: Reporter) {
     for unsaid in lost.unsaid() {
-        report(unsaid.writer, &format_unsaid(&unsaid));
+        report(unsaid.key.writer, &format_unsaid(&unsaid));
     }
 }
 
@@ -220,8 +220,8 @@ async fn settle_or_report<E: InsertFailure>(
 
 /// A drop guard held across one audit insert. Every way the insert can end
 /// says at most one thing: [`PendingInsert::settle`] reports an `Err` —
-/// unless its burst has passed the thinning, when it is only counted (#829)
-/// — and stays quiet on `Ok`; dropped unsettled — the future awaiting the
+/// unless its burst has passed the thinning and its cause is not new (#859),
+/// when it is only counted (#829) — and stays quiet on `Ok`; dropped unsettled — the future awaiting the
 /// insert was dropped (an aborted task, a runtime shutting down) — it
 /// reports the row as abandoned (#813), unthinned: that happens once per
 /// pump a stop finds parked here, never once per inbound message.
@@ -246,7 +246,7 @@ impl<'a> PendingInsert<'a> {
             // `lose` releases its lock before the report, which can block.
             let key = RowKey { writer: row.writer, channel: row.channel, action: row.action, outcome: e.outcome() };
             let lost = row.lost.lose(key, e.cause());
-            if lost.report {
+            if lost.report() {
                 let line = format_row_lost(row.action, row.about, &e, lost.tally);
                 (row.report)(row.writer, &line);
             }
@@ -409,8 +409,14 @@ pub(crate) mod test_support {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                drop(stream);
+            for mut stream in listener.incoming().flatten() {
+                // Read the client's first message before closing, so the close
+                // is a FIN and the insert's error always EOF. Closed with it
+                // unread, the close is a RST instead, and whether the client then
+                // reads a reset or an EOF is a race: two causes (#859), and a
+                // flood of them got a line for each, as two real faults would.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let _ = std::io::Read::read(&mut stream, &mut [0u8; 1024]);
             }
         });
         let options = sqlx::postgres::PgConnectOptions::new()

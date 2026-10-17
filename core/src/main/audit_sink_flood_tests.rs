@@ -77,7 +77,7 @@ fn a_flood_of_failed_inserts_is_reported_one_by_one_then_thinned() {
         rt.block_on(task).expect("the insert task ran to completion");
     }
     let told = told.lock().unwrap().clone();
-    assert_eq!(told.len(), 18, "n = 0..15 each, then n = 16 and 32 (powers of two); the rest thinned out");
+    assert_eq!(told.len(), 18, "n = 0..15 each, then n = 16 and 32 (powers of two); the rest thinned out: {told:#?}");
     assert!(told.iter().all(|l| l.starts_with("may not have been written: ")), "{told:#?}");
     assert!(told[16].ends_with("; row 17 of this burst"), "{:?}", told[16]);
     assert!(
@@ -89,7 +89,7 @@ fn a_flood_of_failed_inserts_is_reported_one_by_one_then_thinned() {
     assert_eq!(unreported.email, UnsaidCounts { failed_unknown: 15, ..UnsaidCounts::default() });
     assert_eq!(unreported.matrix, UnsaidCounts::default(), "email's flood is email's");
     let line = report::format_unreported_at_shutdown(unreported.email).expect("a shutdown line");
-    assert!(line.contains("15 failed to insert over the daemon's life, may have been written"), "{line}");
+    assert!(line.contains("15 failed to insert over the daemon's life, may not have been written ("), "{line}");
 }
 
 /// #861: failed inserts thin in a kind of their own. A flood of them leaves
@@ -186,7 +186,8 @@ fn a_failed_insert_pending_at_the_drain_is_counted_in_the_last_line() {
             AuditLostWriter::Email,
             "1 more channel audit row had no line of its own after the shutdown report (a driver \
              still running past the drain, or an insert still pending at it): 1 failed to \
-             insert, may have been written (the connection was lost mid-insert: look for them \
+             insert, may not have been written (the insert failed in a way that does not prove \
+             the row absent — a lost connection, a server crash, an ended session: look for them \
              in audit_log)"
                 .to_string()
         )],

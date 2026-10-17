@@ -54,7 +54,8 @@ impl InsertFailure for Revoked {
     }
 
     fn cause(&self) -> InsertCause {
-        InsertCause::Client("revoked")
+        // 42501, insufficient_privilege.
+        InsertCause::Answered(kastellan_db::audit::SqlState::parse("42501").unwrap())
     }
 }
 
@@ -75,7 +76,7 @@ async fn a_new_cause_or_another_action_mid_flood_gets_its_line() {
     assert_eq!(
         said.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>(),
         [
-            r#"channel.received row for channel "matrix" not written: permission denied; row 41 of this burst, the first with its cause (22 before it had no line of their own)"#,
+            r#"channel.received row for channel "matrix" not written: permission denied; row 41 of this burst, the first with its cause since row 33 (22 before it had no line of their own)"#,
             r#"channel.reply_undelivered row for channel "matrix" not written: read-only; row 1 of this burst"#,
         ]
     );
@@ -196,11 +197,17 @@ async fn a_rows_loss_is_counted_under_its_writer_and_channel() {
         action: "channel.received",
         outcome: InsertOutcome::NotWritten,
     };
-    for _ in 0..100 {
-        // The cause a refused connection gives, so the 101st is not new (#859).
-        lost.lose(email, InsertCause::Client("pool timed out"));
-    }
     let pool = test_support::refused_pool();
+    // The cause a refused connection gives, so the 101st is not new (#859) —
+    // read from a real insert, not assumed: a driver that classed it
+    // otherwise would fail here, not as a row "thinned out" miscounted.
+    let refused = kastellan_db::audit::insert_without_id(&pool, "channel", "channel.received", serde_json::json!({}))
+        .await
+        .expect_err("POSITIVE CONTROL: the pool refuses");
+    assert_eq!(refused.outcome(), InsertOutcome::NotWritten, "{refused}");
+    for _ in 0..100 {
+        lost.lose(email, refused.cause());
+    }
     let row = |writer, channel: &str| {
         let payload = serde_json::json!({"channel": channel});
         audit_or_report(&pool, writer, "channel.received", payload, record_routed, lost)

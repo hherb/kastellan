@@ -234,13 +234,21 @@ fn the_starting_and_residual_lines_say_what_they_count() {
     assert_eq!(
         format_unreported_since(UnsaidCounts { shed: 0, late: 2, failed_not_written: 3, failed_unknown: 1 })
             .unwrap(),
-        "6 more channel audit rows had no line of their own after the shutdown report (a \
-         driver still running past the drain, or an insert still pending at it): 2 tried \
-         after shutdown began; 3 failed to insert, not written (refused by Postgres, or never \
-         sent); 1 failed to insert, may have been written (the connection was lost \
-         mid-insert: look for them in audit_log)"
+        format!(
+            "6 more channel audit rows had no line of their own after the shutdown report (a \
+             driver still running past the drain, or an insert still pending at it): 2 tried \
+             after shutdown began; 3 failed to insert, {NOT_WRITTEN}; 1 failed to insert, \
+             {MAY_BE_WRITTEN}"
+        )
     );
 }
+
+/// What the shutdown says of each failed-insert outcome: the per-row lines'
+/// verdict, then what it covers — and for the unknown one, no single cause
+/// (it is a lost connection, a `PANIC`, a `FATAL` such as a rotated password,
+/// …), since naming one would send the operator after the wrong fault.
+const NOT_WRITTEN: &str = "not written (Postgres answered with an error or wrote no row, or it was never sent)";
+const MAY_BE_WRITTEN: &str = "may not have been written (the insert failed in a way that does not prove the row absent — a lost connection, a server crash, an ended session: look for them in audit_log)";
 
 /// #807: shed and late are said apart, so last week's flood reads apart from
 /// this shutdown's refusals; one kind alone names only itself. #861: failed
@@ -265,18 +273,21 @@ fn the_unreported_line_says_each_kind_apart() {
     );
     assert_eq!(
         format_unreported_at_shutdown(UnsaidCounts { failed_not_written: 7, ..Default::default() }).unwrap(),
-        "7 channel audit rows had no line of their own (thinned past a flood): 7 failed to \
-         insert over the daemon's life, not written (refused by Postgres, or never sent)"
+        format!(
+            "7 channel audit rows had no line of their own (thinned past a flood): 7 failed to \
+             insert over the daemon's life, {NOT_WRITTEN}"
+        )
     );
     // #864: the rows that may be in audit_log are said apart from those that
     // are certainly not.
     assert_eq!(
         format_unreported_at_shutdown(UnsaidCounts { failed_not_written: 2, failed_unknown: 5, ..Default::default() })
             .unwrap(),
-        "7 channel audit rows had no line of their own (thinned past a flood): 2 failed to \
-         insert over the daemon's life, not written (refused by Postgres, or never sent); 5 \
-         failed to insert over the daemon's life, may have been written (the connection was \
-         lost mid-insert: look for them in audit_log)"
+        format!(
+            "7 channel audit rows had no line of their own (thinned past a flood): 2 failed to \
+             insert over the daemon's life, {NOT_WRITTEN}; 5 failed to insert over the daemon's \
+             life, {MAY_BE_WRITTEN}"
+        )
     );
     assert_eq!(format_unreported_at_shutdown(UnsaidCounts::default()), None);
 }
@@ -288,7 +299,7 @@ fn the_unreported_line_says_each_kind_apart() {
 fn a_failed_inserts_line_says_what_is_known_and_its_tally() {
     use kastellan_db::audit::{InsertError, InsertOutcome};
     use kastellan_db::audit::InsertCause::RowCount;
-    let tally = crate::audit_sink::BurstTally { nth: 17, first_of_cause: false, unsaid_before: 0, ended: None };
+    let tally = crate::audit_sink::BurstTally { nth: 17, new_cause_since: None, unsaid_before: 0, ended: None };
     let refused = InsertError::assumed_for_test(InsertOutcome::NotWritten, RowCount, kastellan_db::DbError::Query("ro".into()));
     let unknown = InsertError::assumed_for_test(InsertOutcome::Unknown, RowCount, kastellan_db::DbError::Query("reset".into()));
     let refused = Unwritten::Insert { failed: &refused, tally };
@@ -304,7 +315,7 @@ fn a_failed_inserts_line_says_what_is_known_and_its_tally() {
 /// #807: a shed or late row's own line says where it stands in its burst.
 #[test]
 fn a_refused_rows_line_carries_its_tally() {
-    let tally = crate::audit_sink::BurstTally { nth: 33, first_of_cause: false, unsaid_before: 15, ended: None };
+    let tally = crate::audit_sink::BurstTally { nth: 33, new_cause_since: None, unsaid_before: 15, ended: None };
     let shed = Unwritten::Shed(tally).to_string();
     assert!(shed.starts_with("shed: "), "{shed}");
     assert!(shed.ends_with("; row 33 of this burst (15 before it had no line of their own)"), "{shed}");

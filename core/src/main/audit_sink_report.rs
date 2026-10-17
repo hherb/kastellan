@@ -7,7 +7,9 @@
 use std::future::Future;
 use std::time::Duration;
 
+use kastellan_core::channel::audit_text::insert_verdict;
 use kastellan_core::worker_stderr::AuditLostWriter;
+use kastellan_db::audit::InsertOutcome;
 
 use super::{
     unreported_on_since, BurstTally, Drained, Ledger, SinkChannel, UnsaidCounts, Unreported,
@@ -57,8 +59,6 @@ impl Unwritten<'_> {
     /// the channel bus uses ([`kastellan_core::channel::audit_text::insert_verdict`]).
     /// A shed or late row was never tried, so it is not written.
     pub(crate) fn verdict(&self) -> &'static str {
-        use kastellan_core::channel::audit_text::insert_verdict;
-        use kastellan_db::audit::InsertOutcome;
         match self {
             Self::Insert { failed, .. } => insert_verdict(failed.outcome()),
             Self::Shed(_) | Self::AfterShutdown(_) => insert_verdict(InsertOutcome::NotWritten),
@@ -78,10 +78,11 @@ impl Unwritten<'_> {
 /// the `Unwritten` can borrow it for `'static`.
 #[cfg(test)]
 impl Unwritten<'static> {
-    pub(crate) fn failed_insert(outcome: kastellan_db::audit::InsertOutcome, msg: &str) -> Self {
-        let cause = kastellan_db::audit::InsertCause::Client("test");
+    pub(crate) fn failed_insert(outcome: InsertOutcome, msg: &str) -> Self {
+        // A row count other than one: the one cause that comes with either outcome.
+        let cause = kastellan_db::audit::InsertCause::RowCount;
         let failed = kastellan_db::audit::InsertError::assumed_for_test(outcome, cause, kastellan_db::DbError::Query(msg.into()));
-        let tally = BurstTally { nth: 1, first_of_cause: false, unsaid_before: 0, ended: None };
+        let tally = BurstTally { nth: 1, new_cause_since: None, unsaid_before: 0, ended: None };
         Self::Insert { failed: Box::leak(Box::new(failed)), tally }
     }
 }
@@ -258,17 +259,23 @@ fn by_kind(counts: UnsaidCounts, span: &str) -> String {
     if counts.late > 0 {
         kinds.push(format!("{} tried after shutdown began", counts.late));
     }
+    // The verdicts are the per-row lines' own words (`insert_verdict`), so the
+    // summary cannot drift from them; the parentheses say what each covers.
     if counts.failed_not_written > 0 {
         kinds.push(format!(
-            "{} failed to insert{span}, not written (refused by Postgres, or never sent)",
-            counts.failed_not_written
+            "{} failed to insert{span}, {} (Postgres answered with an error or wrote no row, or \
+             it was never sent)",
+            counts.failed_not_written,
+            insert_verdict(InsertOutcome::NotWritten),
         ));
     }
     if counts.failed_unknown > 0 {
         kinds.push(format!(
-            "{} failed to insert{span}, may have been written (the connection was lost mid-insert: \
-             look for them in audit_log)",
-            counts.failed_unknown
+            "{} failed to insert{span}, {} (the insert failed in a way that does not prove the \
+             row absent — a lost connection, a server crash, an ended session: look for them in \
+             audit_log)",
+            counts.failed_unknown,
+            insert_verdict(InsertOutcome::Unknown),
         ));
     }
     kinds.join("; ")
