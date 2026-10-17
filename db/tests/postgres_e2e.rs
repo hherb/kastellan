@@ -596,6 +596,41 @@ fn audit_helpers_pool_and_notify_round_trip() {
         assert_eq!(rows[0].action, expected.action, "the stored form, NUL escaped");
         assert_eq!(rows[0].payload, expected.payload, "the stored form, NUL escaped");
 
+        // ---------- insert_without_id refused by Postgres: not written ----------
+        // #858: an error that is Postgres's own answer to the statement means
+        // the row is not in the table — a read-only session here, as a
+        // read-only (or disk-full) Postgres would answer every insert. The
+        // session is set back to read-write before the connection returns to
+        // the pool, so the rest of the test is unaffected.
+        let written_id = rows[0].id;
+        let mut conn = pool.acquire().await.expect("acquire a connection");
+        sqlx::query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            .execute(&mut *conn)
+            .await
+            .expect("make the session read-only");
+        let refused = kastellan_db::audit::insert_without_id(
+            &mut *conn,
+            "channel",
+            "channel.received",
+            serde_json::json!({}),
+        )
+        .await
+        .expect_err("a read-only session refuses the insert");
+        assert!(
+            matches!(refused.error(), kastellan_db::DbError::Query(m) if m.contains("read-only")),
+            "POSITIVE CONTROL: Postgres's own refusal: {refused}"
+        );
+        assert_eq!(refused.outcome(), kastellan_db::audit::InsertOutcome::NotWritten, "{refused}");
+        sqlx::query("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
+            .execute(&mut *conn)
+            .await
+            .expect("make the session read-write again");
+        drop(conn);
+        let after = kastellan_db::audit::fetch_since(&pool, written_id, 10)
+            .await
+            .expect("fetch_since after the refused insert");
+        assert!(after.is_empty(), "the refused row is not in the table: {after:?}");
+
         // Drop the listener before pool.close() — PgListener holds a
         // checked-out PoolConnection; pool.close() blocks until every
         // permit is released, so listeners still in scope at close-time

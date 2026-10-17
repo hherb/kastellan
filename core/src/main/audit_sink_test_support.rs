@@ -1,5 +1,5 @@
-//! Test builds only: the stalled-Postgres fixture for `audit_sink` and each
-//! sink's own tests. Split out of `audit_sink.rs` to keep it under the 500-LOC
+//! Test builds only: the stalled-Postgres and closing-Postgres fixtures for
+//! `audit_sink` and each sink's own tests. Split out of `audit_sink.rs` to keep it under the 500-LOC
 //! soft cap; `#[path]`-included there as `audit_sink::test_support`.
 
 use sqlx::PgPool;
@@ -77,4 +77,31 @@ pub(crate) fn assert_insert_attempted(what: &str, listener: &TcpListener) {
         connected_within(listener, ACQUIRE_TIMEOUT),
         "{what} must actually try its insert: nothing connected to the pool"
     );
+}
+
+/// A pool whose every connection is accepted and **closed at once**, during
+/// the startup handshake, with no Postgres. Each insert fails fast, with a
+/// broken connection rather than a refused one (which sqlx retries until its
+/// acquire timeout). No statement is sent, but the `Io` error is the one a
+/// connection lost mid-statement gives, so #858 calls the row *unknown*. The accepting thread lives as long as the test
+/// process. (The library's `pg_events::test_support` has the same fixture;
+/// a binary's test items are not visible to the library's, nor the reverse.)
+///
+/// Build it inside a runtime, as [`stalled_pool`].
+pub(crate) fn closing_pool() -> PgPool {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+    let port = listener.local_addr().expect("local addr").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(port)
+        .username("nobody")
+        .database("nothing");
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_lazy_with(options)
 }

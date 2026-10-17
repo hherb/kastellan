@@ -1,5 +1,5 @@
 //! What the daemon says about audit rows it could not write (#792, #796, #797,
-//! #798, #802): why a row was not written, how a row is named, the pure line
+//! #798, #802): why a row was lost, how a row is named, the pure line
 //! formatters, and the functions that report a [`Drained`]. Split out of
 //! `audit_sink.rs` to keep it under the 500-LOC soft cap; `#[path]`-included
 //! there and re-exported by name, so every path is `audit_sink::…`.
@@ -14,11 +14,14 @@ use super::{
     DRAIN_BOUND, LEDGER,
 };
 
-/// Why a row was not written, as `on_failure` is told.
+/// Why a row was lost — never tried, or tried and failed — as `on_failure`
+/// is told.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Unwritten<'a> {
-    /// The insert ran and failed.
-    Insert(&'a kastellan_db::DbError),
+    /// The insert ran and failed: the error — which says whether the row may
+    /// have been committed anyway (#858) — and the row's place in its
+    /// channel's burst of failed inserts, thinned like the others (#861).
+    Insert { failed: &'a kastellan_db::audit::InsertError, tally: BurstTally },
     /// Never tried: the queue was full. With where the row stands in its
     /// channel's burst of shed rows (#807), so a thinned flood's lines still
     /// say how big it is.
@@ -32,7 +35,7 @@ pub(crate) enum Unwritten<'a> {
 impl std::fmt::Display for Unwritten<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Insert(e) => e.fmt(f),
+            Self::Insert { failed, tally } => write!(f, "{failed}; {tally}"),
             Self::Shed(tally) => write!(
                 f,
                 "shed: too many audit inserts already waiting for the pool (a flood of \
@@ -44,6 +47,40 @@ impl std::fmt::Display for Unwritten<'_> {
                  writes; {tally}"
             ),
         }
+    }
+}
+
+impl Unwritten<'_> {
+    /// What a sink's line says of the row: `not written`, unless its insert
+    /// failed in a way that may have committed it (#858) — the same words
+    /// the channel bus uses ([`kastellan_core::channel::audit_text::insert_verdict`]).
+    /// A shed or late row was never tried, so it is not written.
+    pub(crate) fn verdict(&self) -> &'static str {
+        use kastellan_core::channel::audit_text::insert_verdict;
+        use kastellan_db::audit::InsertOutcome;
+        match self {
+            Self::Insert { failed, .. } => insert_verdict(failed.outcome()),
+            Self::Shed(_) | Self::AfterShutdown(_) => insert_verdict(InsertOutcome::NotWritten),
+        }
+    }
+
+    /// What a sink's line says after naming the row: its [`Self::verdict`],
+    /// then why — `not written: shed: …` or `may not have been written: …`.
+    /// One call, so no sink's formatter can leave the verdict out.
+    pub(crate) fn said(&self) -> String {
+        format!("{}: {self}", self.verdict())
+    }
+}
+
+/// Test builds only: a failed insert whose error reads `postgres query
+/// failed: {msg}`, first of its burst — for a sink's line tests. Leaked, so
+/// the `Unwritten` can borrow it for `'static`.
+#[cfg(test)]
+impl Unwritten<'static> {
+    pub(crate) fn failed_insert(outcome: kastellan_db::audit::InsertOutcome, msg: &str) -> Self {
+        let failed = kastellan_db::audit::InsertError::assumed_for_test(outcome, kastellan_db::DbError::Query(msg.into()));
+        let tally = BurstTally { nth: 1, unsaid_before: 0, ended: None };
+        Self::Insert { failed: Box::leak(Box::new(failed)), tally }
     }
 }
 
@@ -171,45 +208,62 @@ pub(crate) fn format_live_at_shutdown(d: &Drained, bound: Duration) -> Option<St
     })
 }
 
-/// Pure: the `[audit-lost]` line for one channel's refused rows that got no
+/// Pure: the `[audit-lost]` line for one channel's lost rows that got no
 /// report of their own (`audit_sink_thinning.rs`), or `None` when there were
-/// none (#798). Said at shutdown, but not all refused then: shed and late are
-/// said apart (#807), because rows shed in last week's flood are not this
-/// shutdown's.
+/// none (#798). Said at shutdown, but not all lost then: shed, late and
+/// failed are said apart (#807, #861), because rows shed in last week's
+/// flood are not this shutdown's. Failed inserts are counted whatever their
+/// outcome (#858), so that kind says only that they "failed".
 pub(crate) fn format_unreported_at_shutdown(counts: UnsaidCounts) -> Option<String> {
     let total = counts.total();
     (total > 0).then(|| {
-        let mut kinds = Vec::new();
-        if counts.shed > 0 {
-            kinds.push(format!(
-                "{} shed over the daemon's life (too many inserts already waiting for the pool)",
-                counts.shed
-            ));
-        }
-        if counts.late > 0 {
-            kinds.push(format!("{} tried after shutdown began", counts.late));
-        }
         format!(
-            "{} refused without a line of {}, to keep a flood from stalling its driver: {}",
-            counted(total, "channel audit row", "was", "were"),
+            "{} no line of {} (thinned past a flood): {}",
+            counted(total, "channel audit row", "had", "had"),
             if total == 1 { "its own" } else { "their own" },
-            kinds.join("; "),
+            by_kind(counts, " over the daemon's life"),
         )
     })
 }
 
-/// Pure: a last `[audit-lost]` line, for `n` of one channel's refused rows
-/// thinned out since the drain's snapshot (or since the line before it), or
-/// `None` when there were none (#802). Said under that channel's writer
-/// ([`report_unreported_since`]).
-pub(crate) fn format_unreported_since(n: usize) -> Option<String> {
+/// Pure: a last `[audit-lost]` line, for one channel's lost rows thinned out
+/// since the drain's snapshot (or since the line before it), kind by kind as
+/// [`format_unreported_at_shutdown`] says them, or `None` when there were
+/// none (#802). Said under that channel's writer ([`report_unreported_since`]).
+pub(crate) fn format_unreported_since(counts: UnsaidCounts) -> Option<String> {
+    let n = counts.total();
     (n > 0).then(|| {
         format!(
-            "{} refused after the shutdown report without a line of its own (a driver still \
-             running past the drain)",
-            counted(n, "more channel audit row", "was", "were"),
+            "{} no line of {} after the shutdown report (a driver still running past the \
+             drain, or an insert still pending at it): {}",
+            counted(n, "more channel audit row", "had", "had"),
+            if n == 1 { "its own" } else { "their own" },
+            by_kind(counts, ""),
         )
     })
+}
+
+/// Pure: `counts` said kind by kind, the kinds with none left out; `span`
+/// follows the shed and failed counts (e.g. " over the daemon's life").
+fn by_kind(counts: UnsaidCounts, span: &str) -> String {
+    let mut kinds = Vec::new();
+    if counts.shed > 0 {
+        kinds.push(format!(
+            "{} shed{span} (too many inserts already waiting for the pool)",
+            counts.shed
+        ));
+    }
+    if counts.late > 0 {
+        kinds.push(format!("{} tried after shutdown began", counts.late));
+    }
+    if counts.failed > 0 {
+        kinds.push(format!(
+            "{} failed to insert{span} (refused by Postgres, never sent, or lost with the \
+             connection)",
+            counts.failed
+        ));
+    }
+    kinds.join("; ")
 }
 
 /// How an `[audit-lost]` report is delivered: the emitter in production, a
@@ -256,14 +310,14 @@ pub(crate) fn report_drained(d: &Drained, report: Reporter) {
 /// says the drain's.
 fn report_unreported_since(unreported: Unreported, report: Reporter) {
     for channel in SinkChannel::ALL {
-        if let Some(line) = format_unreported_since(unreported.of(channel).total()) {
+        if let Some(line) = format_unreported_since(unreported.of(channel)) {
             report(channel.writer(), &line);
         }
     }
 }
 
 /// The end of `main`'s shutdown, after [`report_drained`]: the daemon's last
-/// word on audit rows (#802). Say how many refused rows were thinned out since
+/// word on audit rows (#802). Say how many lost rows were thinned out since
 /// `drained` was taken, run `close` (the audit mirror, then the pool), and say
 /// how many more were thinned out while it ran. Takes `drained` by value, so
 /// its baseline is used once.

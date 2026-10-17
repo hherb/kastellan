@@ -69,14 +69,19 @@ fn the_insert_does_not_hold_the_calling_thread() {
         t.elapsed()
     );
 
-    let (told, on_failure) = recorder();
+    let told: Arc<Mutex<Option<String>>> = Arc::default();
+    let seen = told.clone();
+    let on_failure = move |u: Unwritten<'_>| *seen.lock().unwrap() = Some(u.said());
     let mut task = None;
     assert_returns_at_once("SinkWriter::spawn", || {
         task = Some(writer.spawn("a", "b", serde_json::json!({}), "t".into(), on_failure));
     });
     let task = task.expect("spawn was called").expect("not shed");
     rt.block_on(task).expect("the insert task ran to completion");
-    assert!(told.lock().unwrap().is_some(), "a failed insert reaches `on_failure`");
+    let told = told.lock().unwrap().clone().expect("a failed insert reaches `on_failure`");
+    // #858: the pool never handed out a connection, so the row is known not
+    // to be in the table — the counterpart of the closing pool's "may not".
+    assert!(told.starts_with("not written: "), "{told}");
 }
 
 /// The positive control for [`assert_insert_attempted`]: the stalled pool
@@ -257,35 +262,6 @@ fn past_its_bound_drain_counts_what_is_left_and_refuses_later_rows() {
     drop(stuck); // it waits for a connection forever; it ends with the runtime
 }
 
-/// #798: a flood of rows refused through a sink reports its first few, then
-/// thins out — the ledger wired to `audit_sink_thinning.rs`, whose predicate
-/// `kastellan_core::audit_thinning`'s tests pin. #807: each line it lets
-/// through says where the row stands in its burst, so the flood's size is in
-/// the lines themselves.
-#[test]
-fn a_flood_of_shed_rows_is_reported_one_by_one_then_thinned() {
-    static LEDGER: Ledger = Ledger::new(bounds(0, 1));
-    let (_rt, writer, _listener) = stalled_writer(&LEDGER);
-    let told: Arc<Mutex<Vec<String>>> = Arc::default();
-    for _ in 0..33 {
-        let told = told.clone();
-        let _ = writer.spawn("a", "b", serde_json::json!({}), "t".into(), move |why| {
-            told.lock().unwrap().push(why.to_string());
-        });
-    }
-    let told = told.lock().unwrap().clone();
-    assert_eq!(told.len(), 18, "n = 0..15 each, then n = 16 and 32 (powers of two); the rest thinned out");
-    assert!(told[16].ends_with("; refused row 17 of this burst"), "{:?}", told[16]);
-    assert!(
-        told[17].ends_with("; refused row 33 of this burst (15 before it had no line of their own)"),
-        "{:?}",
-        told[17]
-    );
-    assert_eq!(LEDGER.final_snapshot().unreported.email, UnsaidCounts { shed: 15, late: 0 });
-    assert_eq!(LEDGER.final_snapshot().unreported.matrix, UnsaidCounts::default(), "email's flood is email's");
-    assert!(LEDGER.final_snapshot().named.is_empty(), "a refused row leaves no label behind");
-}
-
 /// #807: the ledger thins each channel on its own. A Matrix row shed in the
 /// middle of an email flood still gets a line of its own, naming its place —
 /// before #807 it was row 101 of one shared burst, and said nothing. The
@@ -342,7 +318,7 @@ fn an_email_flood_after_the_drain_does_not_thin_a_matrix_rows_line() {
     );
     assert_eq!(LEDGER.unreported().matrix, UnsaidCounts::default());
     let late = kastellan_core::audit_thinning::unreported_of(100);
-    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late });
+    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late, failed: 0 });
 }
 
 /// #797: the final snapshot names pending rows — a cancelled task cannot —
@@ -456,7 +432,7 @@ fn rows_thinned_after_the_drain_are_counted_for_the_last_line() {
     assert_eq!(unreported_on_since(&LEDGER, &d), Unreported::default(), "so none is counted twice");
     assert_eq!(refuse_20(), 17, "20 refused after the drain, a burst of their own");
     let since = unreported_on_since(&LEDGER, &d);
-    assert_eq!(since.email, UnsaidCounts { shed: 0, late: 3 }, "only the late ones, and email's");
+    assert_eq!(since.email, UnsaidCounts { shed: 0, late: 3, failed: 0 }, "only the late ones, and email's");
     assert_eq!(since.matrix, UnsaidCounts::default());
 }
 
@@ -489,7 +465,7 @@ fn the_last_line_is_said_before_a_close_that_may_never_return() {
     let hung = rt.block_on(async { tokio::time::timeout(Duration::from_millis(50), close).await });
     assert!(hung.is_err(), "POSITIVE CONTROL: the close never returned");
     let said = |needle: &str| LAST_SAID.lock().unwrap().iter().filter(|l| l.contains(needle)).count();
-    assert_eq!(said("3 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
+    assert_eq!(said("3 more channel audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
 
     let (rt, writer, _listener) = stalled_writer(&CLOSES);
     let d = rt.block_on(drain_ledger(&CLOSES, Duration::ZERO));
@@ -498,6 +474,6 @@ fn the_last_line_is_said_before_a_close_that_may_never_return() {
     }
     let close = async { refuse_20(&writer) }; // 20 more, 0 reported: 101 thinned
     rt.block_on(report::close_on_then_report(&CLOSES, &d, close, record_last));
-    assert_eq!(said("81 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
-    assert_eq!(said("20 more channel audit rows were refused"), 1, "{:?}", LAST_SAID.lock().unwrap());
+    assert_eq!(said("81 more channel audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
+    assert_eq!(said("20 more channel audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
 }

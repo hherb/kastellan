@@ -7,6 +7,35 @@ use crate::channel::{ChannelId, ConversationId, OutgoingMessage, PeerId};
 use std::sync::Mutex;
 use test_support::own_lost_rows;
 
+/// A test's failed insert as a plain string: known not written, the shape
+/// every test before #858 was written against.
+impl InsertFailure for &str {
+    fn outcome(&self) -> InsertOutcome {
+        InsertOutcome::NotWritten
+    }
+}
+
+impl InsertFailure for String {
+    fn outcome(&self) -> InsertOutcome {
+        InsertOutcome::NotWritten
+    }
+}
+
+/// A test's failed insert whose row may have been committed (#858).
+struct Unknown(&'static str);
+
+impl std::fmt::Display for Unknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl InsertFailure for Unknown {
+    fn outcome(&self) -> InsertOutcome {
+        InsertOutcome::Unknown
+    }
+}
+
 /// A bus `channel.received` row for channel `matrix`, said through `report`
 /// and counted in `lost`.
 fn received_row(report: Reporter, lost: &'static LostRows) -> RowReport<'static> {
@@ -30,12 +59,16 @@ fn the_line_names_what_the_row_is_about_and_nothing_else() {
         "body": "NEVER-IN-A-LINE",
     });
     let first = BurstTally { nth: 1, unsaid_before: 0, ended: None };
-    let line = format_row_lost("channel.reply_undelivered", &describe_row(&payload), &"boom", first);
+    let about = describe_row(&payload);
+    let line = format_row_lost("channel.reply_undelivered", &about, &"boom", first);
     assert_eq!(
         line,
         r#"channel.reply_undelivered row for channel "matrix", peer "@a:srv", task_id 7, reason "send_failed" not written: boom; refused row 1 of this burst"#
     );
     assert!(!line.contains("NEVER-IN-A-LINE"), "only the named fields are read: {line}");
+    // #858: an insert whose connection broke may have been committed.
+    let unknown = format_row_lost("channel.received", "", &Unknown("reset"), first);
+    assert_eq!(unknown, "channel.received row may not have been written: reset; refused row 1 of this burst");
 }
 
 #[test]
@@ -128,6 +161,59 @@ async fn a_failed_insert_is_reported_on_the_marker() {
         said[0].1.starts_with(r#"channel.reply_undelivered row for channel "matrix", peer "@lost:srv" not written: "#),
         "{said:?}"
     );
+}
+
+/// What [`record_unknown`] was told — its own static, as the others.
+static UNKNOWN: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_unknown(writer: AuditLostWriter, line: &str) {
+    UNKNOWN.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
+}
+
+/// #858: an insert that lost its connection says its row *may* not have
+/// been written — through the `ChannelEvents::audit` the bus calls, against
+/// a pool whose every connection is closed at once
+/// ([`test_support::closing_pool`]). The refused pool above is the positive
+/// control: the same path still says "not written" of a row Postgres never
+/// got.
+#[tokio::test]
+async fn an_insert_that_lost_its_connection_may_not_have_been_written() {
+    let events = PgChannelEvents::with_reporter(test_support::closing_pool(), record_unknown);
+    let payload = serde_json::json!({"channel": "matrix", "peer": "@maybe:srv"});
+    ChannelEvents::audit(&events, "channel.received", payload).await;
+
+    let said = UNKNOWN.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].1.starts_with(
+            r#"channel.received row for channel "matrix", peer "@maybe:srv" may not have been written: "#
+        ),
+        "{said:?}"
+    );
+}
+
+/// #858: an unknown outcome is thinned in the same burst as a refusal — one
+/// flood of lost rows, whatever each insert's error — and only its wording
+/// differs.
+#[tokio::test]
+async fn an_unknown_outcome_counts_in_the_same_burst() {
+    static LOST: LostRows = LostRows::new();
+    settle_or_report(async { Err::<(), _>("refused") }, received_row(record_unknown_burst, &LOST)).await;
+    settle_or_report(async { Err::<(), _>(Unknown("reset")) }, received_row(record_unknown_burst, &LOST)).await;
+    let said = UNKNOWN_BURST.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    assert_eq!(
+        said.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>(),
+        [
+            r#"channel.received row for channel "matrix" not written: refused; refused row 1 of this burst"#,
+            r#"channel.received row for channel "matrix" may not have been written: reset; refused row 2 of this burst"#,
+        ]
+    );
+}
+
+static UNKNOWN_BURST: Mutex<Vec<(AuditLostWriter, String)>> = Mutex::new(Vec::new());
+
+fn record_unknown_burst(writer: AuditLostWriter, line: &str) {
+    UNKNOWN_BURST.lock().unwrap_or_else(|p| p.into_inner()).push((writer, line.to_string()));
 }
 
 /// What [`record_abandoned`] was told — its own static, so the test above
@@ -293,7 +379,7 @@ async fn a_flood_of_failed_inserts_is_thinned_and_its_tail_said_at_shutdown() {
         said,
         [(
             AuditLostWriter::Bus,
-            r#"22 audit rows for channel "matrix" were not written and had no line of their own (thinned past a flood)"#
+            r#"22 audit rows for channel "matrix" failed to insert and had no line of their own (thinned past a flood)"#
                 .to_string()
         )],
         "40 failed, 18 said"

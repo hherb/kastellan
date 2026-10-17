@@ -40,7 +40,7 @@ fn the_shutdown_lines_count_rows_and_drivers_and_are_silent_at_zero() {
     let bound = Duration::from_secs(3);
     let none = Drained::default();
     assert_eq!(format_starting_at_shutdown(&none), None);
-    assert_eq!(format_unreported_since(0), None);
+    assert_eq!(format_unreported_since(UnsaidCounts::default()), None);
     assert_eq!(format_pending_at_shutdown(&none, bound), None);
     assert_eq!(format_stuck_replies_at_shutdown(&none, bound), None);
     assert_eq!(format_live_at_shutdown(&none, bound), None);
@@ -123,16 +123,16 @@ fn report_drained_reports_each_loss_through_the_reporter() {
     let d = Drained {
         named: vec!["REPORT-DRAINED-ROW".into()],
         unreported: Unreported {
-            matrix: UnsaidCounts { shed: 2, late: 0 },
-            email: UnsaidCounts { shed: 4, late: 0 },
+            matrix: UnsaidCounts { shed: 2, late: 0, failed: 0 },
+            email: UnsaidCounts { shed: 4, late: 0, failed: 0 },
         },
         ..drained(1, 1, 1)
     };
     report_drained(&d, record);
     report_unreported_since(
         Unreported {
-            matrix: UnsaidCounts { shed: 0, late: 3 },
-            email: UnsaidCounts { shed: 0, late: 6 },
+            matrix: UnsaidCounts { shed: 0, late: 3, failed: 0 },
+            email: UnsaidCounts { shed: 0, late: 6, failed: 0 },
         },
         record,
     );
@@ -141,10 +141,10 @@ fn report_drained_reports_each_loss_through_the_reporter() {
         ("1 channel driver had not exited after", AuditLostWriter::Shutdown),
         // #807: a channel's thinned rows are said under its own writer —
         // the drain's, and the residual after it.
-        ("2 channel audit rows were refused", AuditLostWriter::Matrix),
-        ("4 channel audit rows were refused", AuditLostWriter::Email),
-        ("3 more channel audit rows were refused after the shutdown report", AuditLostWriter::Matrix),
-        ("6 more channel audit rows were refused after the shutdown report", AuditLostWriter::Email),
+        ("2 channel audit rows had no line", AuditLostWriter::Matrix),
+        ("4 channel audit rows had no line", AuditLostWriter::Email),
+        ("3 more channel audit rows had no line of their own after the shutdown report", AuditLostWriter::Matrix),
+        ("6 more channel audit rows had no line of their own after the shutdown report", AuditLostWriter::Email),
     ] {
         let said = said_containing(needle);
         assert_eq!(said.len(), 1, "{needle}: {said:?}");
@@ -224,33 +224,69 @@ fn the_starting_and_residual_lines_say_what_they_count() {
     );
     assert_eq!(format_stuck_replies_at_shutdown(&starting, Duration::from_secs(3)), None);
     assert_eq!(
-        format_unreported_since(1).unwrap(),
-        "1 more channel audit row was refused after the shutdown report without a line of its \
-         own (a driver still running past the drain)"
+        format_unreported_since(UnsaidCounts { shed: 0, late: 1, failed: 0 }).unwrap(),
+        "1 more channel audit row had no line of its own after the shutdown report (a driver \
+         still running past the drain, or an insert still pending at it): 1 tried after \
+         shutdown began"
+    );
+    // The last lines keep the kinds apart too: a row never tried is not a
+    // failed insert, which may have been committed.
+    assert_eq!(
+        format_unreported_since(UnsaidCounts { shed: 0, late: 2, failed: 3 }).unwrap(),
+        "5 more channel audit rows had no line of their own after the shutdown report (a \
+         driver still running past the drain, or an insert still pending at it): 2 tried \
+         after shutdown began; 3 failed to insert (refused by Postgres, never sent, or lost \
+         with the connection)"
     );
 }
 
 /// #807: shed and late are said apart, so last week's flood reads apart from
-/// this shutdown's refusals; one kind alone names only itself.
+/// this shutdown's refusals; one kind alone names only itself. #861: failed
+/// inserts are a third kind, said apart from both.
 #[test]
-fn the_unreported_line_says_shed_and_late_apart() {
+fn the_unreported_line_says_each_kind_apart() {
     assert_eq!(
-        format_unreported_at_shutdown(UnsaidCounts { shed: 3, late: 2 }).unwrap(),
-        "5 channel audit rows were refused without a line of their own, to keep a flood from \
-         stalling its driver: 3 shed over the daemon's life (too many inserts already waiting for \
-         the pool); 2 tried after shutdown began"
+        format_unreported_at_shutdown(UnsaidCounts { shed: 3, late: 2, failed: 0 }).unwrap(),
+        "5 channel audit rows had no line of their own (thinned past a flood): 3 shed over the \
+         daemon's life (too many inserts already waiting for the pool); 2 tried after shutdown \
+         began"
     );
     assert_eq!(
-        format_unreported_at_shutdown(UnsaidCounts { shed: 0, late: 1 }).unwrap(),
-        "1 channel audit row was refused without a line of its own, to keep a flood from stalling \
-         its driver: 1 tried after shutdown began"
+        format_unreported_at_shutdown(UnsaidCounts { shed: 0, late: 1, failed: 0 }).unwrap(),
+        "1 channel audit row had no line of its own (thinned past a flood): 1 tried after \
+         shutdown began"
     );
     assert_eq!(
-        format_unreported_at_shutdown(UnsaidCounts { shed: 3, late: 0 }).unwrap(),
-        "3 channel audit rows were refused without a line of their own, to keep a flood from \
-         stalling its driver: 3 shed over the daemon's life (too many inserts already waiting for \
-         the pool)"
+        format_unreported_at_shutdown(UnsaidCounts { shed: 3, late: 0, failed: 0 }).unwrap(),
+        "3 channel audit rows had no line of their own (thinned past a flood): 3 shed over the \
+         daemon's life (too many inserts already waiting for the pool)"
     );
+    assert_eq!(
+        format_unreported_at_shutdown(UnsaidCounts { shed: 0, late: 0, failed: 7 }).unwrap(),
+        "7 channel audit rows had no line of their own (thinned past a flood): 7 failed to \
+         insert over the daemon's life (refused by Postgres, never sent, or lost with the \
+         connection)"
+    );
+    assert_eq!(format_unreported_at_shutdown(UnsaidCounts::default()), None);
+}
+
+/// #858: a failed insert's line says "not written" only when the row is
+/// known not to be in the table; a shed or late row was never tried. #861:
+/// it carries its tally, like a refused row's.
+#[test]
+fn a_failed_inserts_line_says_what_is_known_and_its_tally() {
+    use kastellan_db::audit::{InsertError, InsertOutcome};
+    let tally = crate::audit_sink::BurstTally { nth: 17, unsaid_before: 0, ended: None };
+    let refused = InsertError::assumed_for_test(InsertOutcome::NotWritten, kastellan_db::DbError::Query("ro".into()));
+    let unknown = InsertError::assumed_for_test(InsertOutcome::Unknown, kastellan_db::DbError::Query("reset".into()));
+    let refused = Unwritten::Insert { failed: &refused, tally };
+    let unknown = Unwritten::Insert { failed: &unknown, tally };
+    assert_eq!(refused.verdict(), "not written");
+    assert_eq!(unknown.verdict(), "may not have been written");
+    assert_eq!(unknown.said(), "may not have been written: postgres query failed: reset; refused row 17 of this burst");
+    assert_eq!(refused.to_string(), "postgres query failed: ro; refused row 17 of this burst");
+    assert_eq!(Unwritten::Shed(tally).verdict(), "not written");
+    assert_eq!(Unwritten::AfterShutdown(tally).verdict(), "not written");
 }
 
 /// #807: a shed or late row's own line says where it stands in its burst.

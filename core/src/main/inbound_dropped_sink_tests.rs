@@ -6,6 +6,7 @@ use super::*;
 use crate::audit_sink::{Bounds, Ledger, SinkWriter};
 use kastellan_core::channel::ChannelId;
 use kastellan_core::worker_stderr::AuditLostWriter;
+use kastellan_db::audit::InsertOutcome;
 
 static MATRIX_INBOUND_SAID: std::sync::Mutex<Vec<(AuditLostWriter, String)>> =
     std::sync::Mutex::new(Vec::new());
@@ -40,14 +41,21 @@ fn the_matrix_sink_reports_an_inbound_dropped_row_it_could_not_write() {
 /// the cause.
 #[test]
 fn a_lost_inbound_dropped_row_names_its_count_stage_and_cause() {
+    let refused = Unwritten::failed_insert(InsertOutcome::NotWritten, "read-only");
     assert_eq!(
-        format_inbound_row_lost(InboundDropStage::Polled, NonZeroUsize::MIN, &"shed: too many"),
-        "channel.inbound_dropped row for 1 dropped inbound message (polled) not written: shed: \
-         too many. The drop's [worker-refusal] line stands"
+        format_inbound_row_lost(InboundDropStage::Polled, NonZeroUsize::MIN, &refused),
+        "channel.inbound_dropped row for 1 dropped inbound message (polled) not written: \
+         postgres query failed: read-only; refused row 1 of this burst. The drop's \
+         [worker-refusal] line stands"
     );
+    // #858: a row whose insert lost its connection may be in the table.
+    let unknown = Unwritten::failed_insert(InsertOutcome::Unknown, "reset");
     assert!(
-        format_inbound_row_lost(InboundDropStage::Buffered, NonZeroUsize::new(2).unwrap(), &"x")
-            .starts_with("channel.inbound_dropped row for 2 dropped inbound messages (buffered) "),
+        format_inbound_row_lost(InboundDropStage::Buffered, NonZeroUsize::new(2).unwrap(), &unknown)
+            .starts_with(
+                "channel.inbound_dropped row for 2 dropped inbound messages (buffered) may not \
+                 have been written: "
+            ),
     );
 }
 
@@ -162,19 +170,22 @@ fn the_inbound_undecodable_row_is_the_bus_s_actor_and_channel_part_and_when() {
 /// the cause, and points at the loss's own line.
 #[test]
 fn a_lost_inbound_undecodable_row_names_its_cause() {
+    let x = Unwritten::failed_insert(InsertOutcome::NotWritten, "x");
     assert_eq!(
-        format_undecodable_row_lost(UndecodablePart::Batch, &"shed: too many"),
+        format_undecodable_row_lost(UndecodablePart::Batch, &x),
         "channel.inbound_undecodable row for an inbound batch lost undecodable not written: \
-         shed: too many. Its [worker-refusal] line stands"
+         postgres query failed: x; refused row 1 of this burst. Its [worker-refusal] line stands"
     );
     let one = NonZeroUsize::new(1).unwrap();
     let three = NonZeroUsize::new(3).unwrap();
-    assert!(format_undecodable_row_lost(UndecodablePart::Events(one), &"x")
+    assert!(format_undecodable_row_lost(UndecodablePart::Events(one), &x)
         .contains("row for 1 inbound event lost undecodable not written"));
-    assert!(format_undecodable_row_lost(UndecodablePart::Events(three), &"x")
+    assert!(format_undecodable_row_lost(UndecodablePart::Events(three), &x)
         .contains("row for 3 inbound events lost undecodable not written"));
-    assert!(format_undecodable_row_lost(UndecodablePart::Drain, &"x")
-        .contains("row for an undecodable drain answer not written"));
+    // #858: the verdict follows the insert's outcome.
+    let unknown = Unwritten::failed_insert(InsertOutcome::Unknown, "x");
+    assert!(format_undecodable_row_lost(UndecodablePart::Drain, &unknown)
+        .contains("row for an undecodable drain answer may not have been written: "));
 }
 
 /// #852, #853: a pending row is named for the shutdown line by its part, and

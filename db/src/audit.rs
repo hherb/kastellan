@@ -93,11 +93,14 @@ use sqlx::Row;
 
 use crate::DbError;
 
+pub mod insert_outcome;
 pub mod nul_escape;
 pub mod req_summary;
 mod truncate;
 
 pub use crate::nul::NUL_ESCAPE;
+pub use insert_outcome::{InsertError, InsertOutcome};
+use insert_outcome::outcome_of;
 pub use nul_escape::NUL_ESCAPED_KEY;
 pub use req_summary::{HEAD_MAX_BYTES, REQ_KEY, REQ_SUMMARY_KEY};
 pub use truncate::{
@@ -238,10 +241,18 @@ where
 /// `decode audit_log.id` error comes back once Postgres has already
 /// answered `RETURNING id`. A writer that reports a failed insert as "not
 /// written" (the channel bus's `[audit-lost]` lines) would then say so of a
-/// row that is in the table. Here an `Err` is the statement's own: Postgres
-/// refused it, or the connection failed before an answer came back. (In
-/// that last case the row may still have been committed — no client can
-/// tell — but that is true of every insert, not a step of ours.)
+/// row that is in the table. Here an `Err` comes before or from the
+/// statement: no connection was handed out, Postgres refused it, or the
+/// connection failed before an answer came back.
+///
+/// In that last case the row may still have been committed — no client can
+/// tell — so the `Err` says whether the row is known not to be there (#858):
+/// [`InsertError::outcome`] is [`InsertOutcome::NotWritten`] or
+/// [`InsertOutcome::Unknown`] ([`insert_outcome::outcome_of`] has the rules).
+/// A writer reporting the loss words the unknown case "may not have been
+/// written". The rules are for an autocommitted statement — `executor` a pool
+/// or a bare connection; inside a transaction a "not written" holds only if
+/// the transaction is not committed after all.
 ///
 /// One step `insert` had for free is kept: its `fetch_one` fails on a
 /// statement that writes no row, and `execute` would not, so the count is
@@ -253,7 +264,7 @@ pub async fn insert_without_id<'e, E>(
     actor: &str,
     action: &str,
     payload: serde_json::Value,
-) -> Result<(), DbError>
+) -> Result<(), InsertError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
@@ -265,16 +276,23 @@ where
         .bind(stored.payload)
         .execute(executor)
         .await
-        .map_err(|e| DbError::Query(format!("audit_log insert: {e}")))?;
+        .map_err(|e| {
+            InsertError::new(outcome_of(&e), DbError::Query(format!("audit_log insert: {e}")))
+        })?;
     one_row_written(done.rows_affected())
 }
 
 /// Pure: [`insert_without_id`]'s verdict on the statement's row count —
-/// `Ok` for exactly the one row it inserts.
-fn one_row_written(rows_affected: u64) -> Result<(), DbError> {
+/// `Ok` for exactly the one row it inserts. No row is a row not written;
+/// more than one is a row written (and then some), so "not written" would
+/// be untrue and the outcome is unknown (#858).
+fn one_row_written(rows_affected: u64) -> Result<(), InsertError> {
     match rows_affected {
         1 => Ok(()),
-        n => Err(DbError::Query(format!("audit_log insert: {n} rows written, expected 1"))),
+        n => Err(InsertError::new(
+            if n == 0 { InsertOutcome::NotWritten } else { InsertOutcome::Unknown },
+            DbError::Query(format!("audit_log insert: {n} rows written, expected 1")),
+        )),
     }
 }
 
@@ -390,5 +408,14 @@ mod tests {
             let err = one_row_written(n).expect_err("not one row").to_string();
             assert!(err.contains(&format!("{n} rows written, expected 1")), "{err}");
         }
+    }
+
+    /// #858: a statement that wrote no row did not write it; one that wrote
+    /// two did write it, so "not written" would be untrue — say unknown.
+    #[test]
+    fn a_wrong_row_count_says_what_it_knows() {
+        let outcome = |n| one_row_written(n).expect_err("not one row").outcome();
+        assert_eq!(outcome(0), InsertOutcome::NotWritten);
+        assert_eq!(outcome(2), InsertOutcome::Unknown);
     }
 }
