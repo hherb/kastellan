@@ -45,8 +45,9 @@ use crate::worker_stderr::AuditLostWriter;
 /// The most channels counted apart per writer; past it, rows count under
 /// [`RowChannel::Other`]. Channel names are spelled by the core's own code,
 /// never by a peer, so this is never reached in practice — it bounds
-/// the count's memory if that ever stops being true. (Actions are always
-/// the core's own constants, a few dozen at most.)
+/// the count's memory if that ever stops being true. (Actions need no such
+/// bound: [`RowKey::action`] is `&'static str`, so only the core's own
+/// constants can be one — a few dozen at most.)
 const MAX_NAMED_CHANNELS: usize = 16;
 
 /// Which channel a lost row is counted under.
@@ -68,7 +69,7 @@ pub(crate) enum RowChannel {
 pub(crate) struct RowKey<'a> {
     pub(crate) writer: AuditLostWriter,
     pub(crate) channel: Option<&'a str>,
-    pub(crate) action: &'a str,
+    pub(crate) action: &'static str,
     pub(crate) outcome: InsertOutcome,
 }
 
@@ -78,7 +79,7 @@ pub(crate) struct RowKey<'a> {
 struct Entry {
     writer: AuditLostWriter,
     channel: RowChannel,
-    action: String,
+    action: &'static str,
     outcome: InsertOutcome,
     thinning: Thinning<InsertCause>,
 }
@@ -101,7 +102,7 @@ pub(crate) static LOST_ROWS: LostRows = LostRows::new();
 pub(crate) struct Unsaid {
     pub(crate) writer: AuditLostWriter,
     pub(crate) channel: RowChannel,
-    pub(crate) action: String,
+    pub(crate) action: &'static str,
     pub(crate) outcome: InsertOutcome,
     pub(crate) rows: usize,
 }
@@ -137,7 +138,7 @@ impl LostRows {
             .map(|e| Unsaid {
                 writer: e.writer,
                 channel: e.channel.clone(),
-                action: e.action.clone(),
+                action: e.action,
                 outcome: e.outcome,
                 rows: e.thinning.unreported(),
             })
@@ -186,7 +187,7 @@ fn entry<'a>(entries: &'a mut Vec<Entry>, key: RowKey<'_>) -> &'a mut Entry {
             entries.push(Entry {
                 writer: key.writer,
                 channel,
-                action: key.action.to_string(),
+                action: key.action,
                 outcome: key.outcome,
                 thinning: Thinning::new(),
             });
@@ -233,8 +234,8 @@ mod tests {
         (0..n).filter(|_| rows.lose_at(key, READ_ONLY, at).report).count()
     }
 
-    fn unsaid(writer: AuditLostWriter, channel: RowChannel, action: &str, outcome: InsertOutcome, rows: usize) -> Unsaid {
-        Unsaid { writer, channel, action: action.into(), outcome, rows }
+    fn unsaid(writer: AuditLostWriter, channel: RowChannel, action: &'static str, outcome: InsertOutcome, rows: usize) -> Unsaid {
+        Unsaid { writer, channel, action, outcome, rows }
     }
 
     /// A flood is thinned like the daemon's: the first rows each, then the

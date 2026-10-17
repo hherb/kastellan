@@ -51,7 +51,7 @@ impl ChannelEvents for FakeEvents {
         self.enqueued.lock().unwrap().push(payload);
         Ok(1)
     }
-    async fn audit(&self, _action: &str, _payload: Value) {}
+    async fn audit(&self, _action: &'static str, _payload: Value) {}
 }
 
 struct FakeCompleted {

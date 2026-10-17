@@ -92,7 +92,7 @@ impl ChannelEvents for RecordingEvents {
         self.enqueued.lock().unwrap().push(payload);
         Ok(1)
     }
-    async fn audit(&self, action: &str, _payload: Value) {
+    async fn audit(&self, action: &'static str, _payload: Value) {
         self.audited.lock().unwrap().push(action.to_string());
     }
 }

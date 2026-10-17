@@ -233,7 +233,7 @@ mod tests {
         async fn enqueue(&self, _lane: Lane, _payload: Value) -> anyhow::Result<i64> {
             unreachable!("a guard never enqueues")
         }
-        async fn audit(&self, _action: &str, _payload: Value) {
+        async fn audit(&self, _action: &'static str, _payload: Value) {
             unreachable!("a guard never audits: it runs in Drop")
         }
         fn report_lost(&self, line: &str) {

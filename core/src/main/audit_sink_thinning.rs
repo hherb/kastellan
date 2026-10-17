@@ -1,8 +1,8 @@
 //! The daemon's lost audit rows, thinned per channel (#807), per action
 //! (#837, #865) and per kind: [`Refusals`] holds one [`Thinning`] per
 //! channel, action and kind — shed, late, and since #861 failed inserts, by
-//! outcome since #864 — and [`refuse`] reads the clock and reports. The pure core — [`Thinning`], the predicates
-//! and [`BurstTally`] — is the library's `kastellan_core::audit_thinning`
+//! outcome since #864 — and [`refuse`] reads the clock and reports. The
+//! pure core — [`Thinning`], the predicates and [`BurstTally`] — is the library's `kastellan_core::audit_thinning`
 //! since #829, which the channel bus's lost-row writer shares; why rows are
 //! thinned at all is said there. Split out of `audit_sink.rs` to keep it
 //! under the 500-LOC soft cap; `#[path]`-included there.

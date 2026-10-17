@@ -20,15 +20,16 @@ use super::{
 pub(crate) enum Unwritten<'a> {
     /// The insert ran and failed: the error — which says whether the row may
     /// have been committed anyway (#858) — and the row's place in its
-    /// channel's burst of failed inserts, thinned like the others (#861).
+    /// channel's and action's burst of failed inserts of that outcome,
+    /// thinned like the others (#861, #864).
     Insert { failed: &'a kastellan_db::audit::InsertError, tally: BurstTally },
     /// Never tried: the queue was full. With where the row stands in its
-    /// channel's burst of shed rows (#807), so a thinned flood's lines still
-    /// say how big it is.
+    /// channel's and action's burst of shed rows (#807, #837), so a thinned
+    /// flood's lines still say how big it is.
     Shed(BurstTally),
     /// Never tried: the daemon had already drained its audit writes and was
-    /// shutting down (#792). With its place in the channel's burst of late
-    /// rows (#807).
+    /// shutting down (#792). With its place in the channel's and action's
+    /// burst of late rows (#807, #837).
     AfterShutdown(BurstTally),
 }
 

@@ -85,7 +85,7 @@ impl ChannelEvents for ParkingEnqueue {
         self.entered.store(true, Ordering::SeqCst);
         std::future::pending().await
     }
-    async fn audit(&self, _action: &str, _payload: Value) {}
+    async fn audit(&self, _action: &'static str, _payload: Value) {}
     fn report_lost(&self, line: &str) {
         self.lost.lock().unwrap().push(line.to_string());
     }

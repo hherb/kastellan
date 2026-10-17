@@ -98,7 +98,7 @@ impl ChannelEvents for PgChannelEvents {
     /// Best-effort, as the trait says — never fatal — and a row whose insert
     /// fails is reported on `[audit-lost]` (#808), as is one still awaited
     /// when the bus stops (#813).
-    async fn audit(&self, action: &str, payload: Value) {
+    async fn audit(&self, action: &'static str, payload: Value) {
         audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report, self.lost).await;
     }
 
@@ -176,7 +176,7 @@ fn report_unsaid(lost: &LostRows, report: Reporter) {
 pub(crate) async fn audit_or_report(
     pool: &sqlx::PgPool,
     writer: AuditLostWriter,
-    action: &str,
+    action: &'static str,
     payload: Value,
     report: Reporter,
     lost: &LostRows,
@@ -195,7 +195,7 @@ pub(crate) async fn audit_or_report(
 #[derive(Clone, Copy)]
 struct RowReport<'a> {
     writer: AuditLostWriter,
-    action: &'a str,
+    action: &'static str,
     /// [`describe_row`]'s words.
     about: &'a str,
     /// The row's own `channel` field, which its loss is counted under.
@@ -343,8 +343,9 @@ fn describe_row(payload: &Value) -> String {
 /// Pure: the `[audit-lost]` report for a `channel.*` row whose insert failed
 /// — the action, what it was about ([`describe_row`]), whether it is known
 /// not to be in the table ([`insert_verdict`] of `why`'s own outcome, #858),
-/// why, and where it stands in its writer's and channel's burst of lost rows
-/// (#829), so a thinned flood's lines still say how big it is.
+/// why, and where it stands in its count's burst of lost rows — its writer,
+/// channel, action and outcome (#829, #864, #865) — so a thinned flood's
+/// lines still say how big it is.
 fn format_row_lost(action: &str, about: &str, why: &impl InsertFailure, tally: BurstTally) -> String {
     format!("{action} row{about} {}: {why}; {tally}", insert_verdict(why.outcome()))
 }
