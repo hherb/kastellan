@@ -24,7 +24,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kastellan_supervisor::launchd_agents::{probe, LaunchAgents};
-use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor};
+use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
 
 /// Serialize all smoke-test bodies. The launchd GUI domain and
 /// `~/Library/LaunchAgents/` are shared global resources; running
@@ -218,6 +218,68 @@ fn start_after_install_is_idempotent() {
     // Cleanup is the guard's job; we still call uninstall here so
     // the test exits clean on the happy path.
     sup.uninstall(&name).expect("uninstall");
+}
+
+/// `stop_target` immediately followed by `start_target` must leave the
+/// agent running, even when the agent takes a while to exit.
+///
+/// This is exactly what `kastellan-cli install` does. `launchctl bootout`
+/// can return before launchd has finished removing a slow-to-exit agent,
+/// and `start` skips `bootstrap` for an agent still in the domain. Without
+/// the wait in `stop_target` the `bootstrap` was skipped and the agent then
+/// vanished. The live Mac install lost Postgres this way on 2026-10-18.
+#[test]
+fn start_target_right_after_stop_target_leaves_a_slow_exiting_agent_running() {
+    let _serial = serial_lock();
+    if skip_if_no_gui_domain() {
+        return;
+    }
+    let sup = LaunchAgents::new();
+    let name = unique_service_name();
+    let _guard = TestAgentGuard {
+        sup: LaunchAgents::new(),
+        name: name.clone(),
+    };
+    let target = TargetSpec {
+        name: format!("{name}-target"),
+        members: vec![name.clone()],
+    };
+    // Exits 2 s after SIGTERM, like a database flushing on shutdown.
+    let spec = ServiceSpec {
+        name: name.clone(),
+        program: PathBuf::from("/bin/sh"),
+        args: vec![
+            "-c".into(),
+            "trap 'sleep 2; exit 0' TERM; while :; do sleep 1; done".into(),
+        ],
+        env: vec![],
+        working_dir: None,
+        keep_alive: false,
+        stdout_log: None,
+        stderr_log: None,
+        after: vec![],
+        part_of: None,
+        restart_backoff: None,
+        environment_files: Vec::new(),
+    };
+    sup.install_target(&target, &[spec]).expect("install_target");
+    sup.start_target(&target).expect("first start_target");
+    wait_for_status(&sup, &name, ServiceStatus::Active, Duration::from_secs(5))
+        .expect("first start: Active");
+
+    sup.stop_target(&target).expect("stop_target");
+    sup.start_target(&target).expect("start_target right after stop_target");
+    // Look only after the old instance's 2 s exit: until then a skipped
+    // `bootstrap` still reads as Active (the dying instance), and the
+    // agent vanishes only once that instance is gone.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        sup.status(&name).expect("status after stop_target + start_target"),
+        ServiceStatus::Active,
+        "the agent must be running again after stop_target + start_target"
+    );
+
+    sup.uninstall_target(&target).expect("uninstall_target");
 }
 
 #[test]

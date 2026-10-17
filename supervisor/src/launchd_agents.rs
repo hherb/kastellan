@@ -127,6 +127,8 @@ const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(20);
 mod builders;
 pub use builders::{build_plist, validate_service_name};
 
+mod unload_wait;
+
 /// `launchctl` driver for user LaunchAgents.
 ///
 /// `agents_dir` is the directory the plist is written to. Defaults to
@@ -321,6 +323,28 @@ impl Supervisor for LaunchAgents {
             Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    /// Stop the members in reverse order, each one **gone from the
+    /// domain** before the next is asked to stop.
+    ///
+    /// `kastellan-cli install` stops the target and then starts it, and
+    /// `start` skips `bootstrap` for an agent launchd has not finished
+    /// removing (see `unload_wait`) — so without this wait a slow-exiting
+    /// Postgres was left unloaded. Waiting member by member also lets core
+    /// drop its connections before Postgres is told to stop.
+    ///
+    /// The wait lives here, not in `stop`: a caller of `stop` may itself
+    /// hold connections to the agent (the PG test harness does), and
+    /// Postgres's SIGTERM shutdown waits for every client — the caller
+    /// would block it until launchd's SIGKILL, which leaks the cluster's
+    /// SysV shared-memory segment.
+    fn stop_target(&self, target: &crate::TargetSpec) -> Result<(), SupervisorError> {
+        for name in target.members.iter().rev() {
+            self.stop(name)?;
+            unload_wait::wait_until_unloaded(&format!("{}/{name}", user_domain_target()?))?;
+        }
+        Ok(())
     }
 
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
