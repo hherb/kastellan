@@ -4,25 +4,25 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261017_867_pre-prune.md`](archive/handover_20261017_867_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (the full #866 five-agent
-> review, #858/#861 and #829/#810 prose included).
+> [`archive/handover_20261018_870_pre-prune.md`](archive/handover_20261018_870_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (the full #869 review
+> passes and the #866 baseline row included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-17 (#867 + #862 + #860 — the thinning family's shutdown residue: the sinks' unsaid lines per action, the bus's count said before the unbounded channel shutdowns, a no-channel row counted under its own bus; PR #869, Mac sweep green but for two #548/#676 contention failures that pass isolated; two-reviewer pass, then a five-agent pass (the daemon sinks' count now said before the channels stop too), fixes in-PR. PRs #855, #856, #857, #863, #866 are merged and **not yet deployed**. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-18 (deploy of #855–#869 on both hosts, one restart watched on each; the Mac install lost its Postgres agent → #870, fixed in PR #871. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#871](https://github.com/hherb/kastellan/pull/871) (#870), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**Both hosts run PR #851's tree** (deployed 2026-10-14). **DGX:** plain `scripts/upgrade_from_git.sh`
-(exit 0), 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre851`,
-live-matrix worker digest `94c86940…`, migrations 27/27, `NRestarts=0`, Matrix up. **Mac:** first
-redeploy since 2026-08-17 (install recipe in [[mac-kastellan-install-recipe]]), env identical,
-migrations 27/27. **localmail** on both hosts: its PR #397 (security floors, pypdf 6.20.1), same day.
-The DGX boot ERROR `install dir is writable … group-writable (mode 0775)` is **pre-existing** (72 of
-111 boots since 2026-07-31; `~/.local` is 0700) — not a deploy regression. The live process runs thinking **ON**
-(`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`, `TIMEOUT_MS=600000`). The
-last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN]`, 4 `[SKIP]`
-(gliner opt-in). Rootfs images last rebuilt 2026-09-08.
+**Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
+(exit 0), 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre869`,
+live-matrix worker digest `94c86940…` (unchanged — no worker crate changed), migrations 27/27,
+`NRestarts=0`, Matrix up in ~31 s. **Mac:** manual recipe [[mac-kastellan-install-recipe]], env + plist
+identical, migrations 27/27 — but `install` left `kastellan-postgres` **unloaded** (#870, bootstrapped by
+hand). **localmail** on both hosts: its PR #397. The DGX boot ERROR `install dir is writable …
+group-writable (mode 0775)` is **pre-existing** (since 2026-07-31) — not a deploy regression. The live
+process runs thinking **ON** (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`,
+`TIMEOUT_MS=600000`). The last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**.
+Rootfs images last rebuilt 2026-09-08.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -43,51 +43,38 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 
 ## Current state
 
-### This session (2026-10-17): #867, #862, #860 — the shutdown residue (PR [#869](https://github.com/hherb/kastellan/pull/869))
+### This session (2026-10-18): deploy of #855–#869, and #870 (PR [#871](https://github.com/hherb/kastellan/pull/871))
 
-- **#867:** the daemon sinks' `Unreported` is **per channel, per action** (`Vec<ActionUnsaid>`, first-loss
-  order, zero entries dropped — so `Unreported::default()` = nothing unsaid); `since` subtracts action by
-  action (`actions_since`). Lines name the action: `N channel.reply_undelivered audit rows had no line of
-  their own (thinned past a flood): …` / `N more <action> audit rows … after the shutdown report …`.
-  ⚠️ **Grep break:** the sinks' lines no longer say `channel audit rows had no line` (the pending line
-  still says `channel audit row(s) was/were still unwritten`); `audit rows? .*had no line` matches both
-  writers' summaries. `UnsaidCounts::plus` is gone. New fixture **`garbage_pool`** (bin
-  `audit_sink_test_support.rs`): answers the startup with a whole `X` message header → `Client(Protocol)`,
-  beside `closing_pool`'s `Io(UnexpectedEof)` — ⚠️ one byte alone reads as EOF (this sqlx sends no SSL
-  request), i.e. the *same* cause.
-- **#862:** `channel::bus::report_unsaid_lost_rows()` now runs **before** `matrix/email.shutdown()` and
-  returns a `#[must_use]` **`SaidLostRows`**; `report_unsaid_lost_rows_since(&mut said)` runs **after each
-  stop**, says only the delta (`lost_rows::unsaid_since`, wording `N more … (thinned past a flood, while
-  the channels stopped)`) and moves the baseline on — so a hung email stop no longer costs Matrix's tail.
-  The logic is `SaidLostRows::{say, say_since}((report, lost))`; the pub fns only pass
-  `production_writer()`. ⚠️ `report_unsaid_lost_rows()` twice says every row twice — call it once.
-- **#862 for the daemon's own sinks (review finding, fixed in-PR):** their lifetime per-action count was
-  first said in `report_drained`, i.e. after both unbounded channel stops **and** inside a `tokio::join!`
-  with the unbounded `scheduler.shutdown()` — so a SIGKILL there lost the `channel.reply_undelivered`
-  counts #867 had just split out. Now **`audit_sink::report_unreported_before_stop`** says them before
-  the channels stop and returns a `#[must_use]` **`SaidUnreported`**; `report_drained(&d, said, report)`
-  says only the rows since (`N more <action> audit rows … (thinned past a flood, while the channels
-  stopped and their drivers drained)`, `format_unreported_while_stopping`), and runs **inside the drain's
-  arm of the join**, so the scheduler no longer holds the drain's lines back. `close_then_report_unreported`
-  is unchanged (it counts from `drained`, the full count). `bootstrap_tests` pins both orders, for both
-  writers. `debug_assert!`s now pin "counts only grow" in `UnsaidCounts::since` and `unsaid_since`.
-- **#860:** **`PgChannelEvents::new(pool, ChannelId)`** (pub API change; `with_reporter(pool, channel,
-  report)` in tests); `audit_or_report` takes `(writer, writer_channel)`; `RowKey.writer_channel`. A row
-  with no `channel` counts under **`RowChannel::Unnamed(bus channel)`**, said `naming no channel (written
-  for channel "email")`. The 16-name cap counts names **both ways spelled, once each**; past it a
-  no-channel row is `Other` and loses that wording (never reached in practice).
-- Split (movement only, proved byte-identical + negative control): `pg_events/test_support.rs`,
-  `pg_events/lost_rows/tests.rs`, and the sinks' `audit_sink_thinning_tests.rs`.
-- Reviews (two, read-only, own worktrees): no bug; the #860 wiring and the mixed-spelling cap were
-  untested (each mutant now killed by exactly its new test), two weak assertions, stale docs — all fixed.
-- Third pass (`/pr-review-toolkit:review-pr`, five agents): the sinks' late count above (HIGH,
-  pre-existing), a wrong row number in a test comment (row **65**, not 64: the thinning predicate is
-  0-based), Matrix's `ChannelId` spelled twice (now one `cid`, as email), and three untested mutants —
-  a row's own channel vs its writer's, a bus channel hard-coded to `"email"`, a baseline not moved on —
-  each now killed by its own test (5 mutants, 5 killed, files restored by copy). Not done, by choice:
-  an `_around(stop)` API in place of the tokens (it cannot say after *each* stop); a shared
-  `KeyedThinning` (two copies, different value shapes — revisit at a third); a `Writer` struct for the
-  `(AuditLostWriter, &str)` pair.
+- **Deployed both hosts** (header). **One restart watched on each** under the new tree: INFO `shutdown
+  signal received; stopping the channels and draining audit rows` with `signal = "SIGTERM"` (#856), a
+  clean drain, **no** `[audit-lost]` / thinned-row / `may not have been written` lines (nothing was lost),
+  DGX Matrix back in ~31 s, only `channel.started` rows. The thinning family's lines are therefore still
+  **unseen live** — they need a loss to appear.
+- **#870 (found deploying the Mac, fixed in PR #871):** `kastellan-cli install` does `stop_target` →
+  `start_target`; `launchctl bootout` can return **before** launchd has removed a not-yet-exited agent, and
+  `LaunchAgents::start` skips `bootstrap` for an agent still in the domain — so Postgres (stopped last,
+  started first, ms apart) was left unloaded and core restart-looped. Fix: **`LaunchAgents::stop_target`**
+  boots each member out and polls `launchctl print` until it is gone (≤ 30 s, an error past that) before
+  the next (`launchd_agents/unload_wait.rs`, pure poll loop). ⚠️ **The wait must NOT go in `stop`:** the
+  first version did, and a Mac sweep failed **152** tests — the PG harness stops its cluster while
+  holding pool connections, Postgres's SIGTERM shutdown waits for every client, launchd SIGKILLs at 10 s,
+  and each killed postmaster leaks a SysV segment until `kern.sysv.shmmni` (32) is full and every `initdb`
+  fails [[mac-sysv-shm-exhaustion-from-killed-postgres]]. Linux is unaffected (`systemctl` stop is
+  synchronous).
+
+### Previous (2026-10-17): #867, #862, #860 — the shutdown residue (PR #869, merged + deployed) — what still binds
+
+- **#867:** the daemon sinks' `Unreported` is per channel **per action** (`Vec<ActionUnsaid>`). ⚠️ **Grep
+  break:** their lines no longer say `channel audit rows had no line`; `audit rows? .*had no line` matches
+  both writers. Fixture **`garbage_pool`** → `Client(Protocol)`; ⚠️ one byte alone reads as EOF.
+- **#862:** `channel::bus::report_unsaid_lost_rows()` runs **before** the channel stops and returns a
+  `#[must_use]` `SaidLostRows`; `report_unsaid_lost_rows_since(&mut said)` after each stop says only the
+  delta. ⚠️ Call `report_unsaid_lost_rows()` **once** (twice says every row twice). The sinks' twin:
+  `audit_sink::report_unreported_before_stop` → `SaidUnreported`, then `report_drained(&d, said, report)`
+  inside the drain's arm of the `join!`. `bootstrap_tests` pins both orders.
+- **#860:** **`PgChannelEvents::new(pool, ChannelId)`** (pub API change); a row with no `channel` counts
+  under `RowChannel::Unnamed(bus channel)`. Not done, by choice: an `_around(stop)` API, a shared
+  `KeyedThinning` (revisit at a third copy), a `Writer` struct.
 
 ### Previous (2026-10-16/17): #829, #810, #858/#861, #837/#859/#864/#865 (PRs #856, #857, #863, #866, merged) — what still binds
 
@@ -134,7 +121,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
   is an `Arc`; the daemon builder is `core/src/main/inbound_dropped_sink.rs`.
 - **#832:** routes queue a reply **unclaimed**; the pump claims at `send` (`bus_deliver::deliver`).
   ⚠️ The bus no longer writes `queue_closed`. `bus_guards.rs` (`InFlightGuard`, `PumpQueue`) say
-  what a stop abandons. Open: #848.
+  what a stop abandons (#848 closed).
 - **#825:** migration 0027 (`tasks.reply_settled_at` + `reply_disposition`), one claim winner
   across both buses; sweep at start + every 5 min. ⚠️ **At-most-once**; a new real
   `CompletedTasks` must override `settled`. ⚠️ **The terminal-state list lives in four places**;
@@ -142,7 +129,7 @@ last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**, 0 `[WARN
 - **#827/#826 (PR #834):** `RejectedUnverifiable` (fail-closed); `ack_method: None` = "does not
   redeliver". `pg_events::audit_or_report` holds a **`PendingInsert` drop guard** — ⚠️ no `.await`
   before it. **NUL (#819/#820):** records escape to `␀`; ⚠️ `kastellan-db`'s next release must be
-  **0.3.0** (now also `audit::insert_without_id`, #829, its `InsertError`, #858, and `InsertCause`/`ClientFault`, #859); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #838–#840, #868 (#867/#862/#860 close with #869).
+  **0.3.0** (now also `audit::insert_without_id`, #829, its `InsertError`, #858, and `InsertCause`/`ClientFault`, #859); `truncate_payload` must stay IDEMPOTENT. Open: #821–#823, #831, #833, #838–#840, #868.
 - ⚠️ **A Mac sweep without `KASTELLAN_PG_BIN_DIR` in its command line is NOT evidence** (372
   `[SKIP]`, exit 0) [[postgres-app-bin-paths]]; a sweep without `-- --nocapture` under-counts
   `[SKIP]`. ⚠️ **`git push` over SSH fails here** — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
@@ -195,19 +182,13 @@ test needs a **`connections: 0`** ledger; the `stalled_pool` fixture is built **
 `UPSTREAM_UNAVAILABLE`, NOT `UPSTREAM_AUTH_FAILED`.** ⚠️ Never test a driver line through a scoped
 `tracing` subscriber [[tracing-scoped-subscriber-interest-cache-flake]]. **#785:** recall excludes L0/L3.
 
-**#673/#674 (PR #770):** `UPSTREAM_AUTH_FAILED = -32004` for localmail 401/403; ⚠️ only
-`ClientError::Rpc` keeps its type through `client_error_to_anyhow`.
-
-**#769 (PR #781) — a refusal is not a death.** One classifier, `persistent/call_failure.rs`
+**#769 (PR #781) — a refusal is not a death;** #673/#674 (PR #770): `UPSTREAM_AUTH_FAILED = -32004`
+for localmail 401/403 (⚠️ only `ClientError::Rpc` keeps its type through `client_error_to_anyhow`). One classifier, `persistent/call_failure.rs`
 (`Gone` / `Refused` / `CredentialRefused` / `Unavailable`), read by the supervisor **and** the polled
 driver. ⚠️ A worker reads its credential **once, at spawn**. ⚠️ **A refused ack holds the next poll.**
 ⚠️ **Workspace MSRV is 1.78.** The cognee survey (#784, [notes](../notes/2026-09-28-cognee-survey.md))
 is **not a dependency**. **#767/#768:** route spellings are pure `pub fn`s in `localmail_contract.rs`;
 the live gate pages from offset **2** [[probe-value-equal-to-default-hides-dropped-param]].
-
-**#694 (#617).** `truncate_payload` derives `req_summary = {head, sha256, len}` centrally, over the
-**whole** request. ⚠️ **No sink double can test it** [[audit-sink-doubles-hide-storage-transforms]].
-⚠️ **Review subagents mutate the working tree** — give each its own `git worktree`.
 
 **#692 / #688 / #685 / #683 / #680 — micro-VM budgets and freshness.** `kastellan_sandbox::bounded_command`
 for any host probe; ⚠️ **a bounded runner must not join its drains** [[bounded-subprocess-must-not-join-drains]].
@@ -220,7 +201,9 @@ fixtures (missing `KASTELLAN_SECCOMP_PROFILE`, an unenforceable Landlock ruleset
 token). Per-spawn dirs via `create_private_dir` — **do not "fix" back to `create_dir_all`**.
 **Before release: flip force-routing on.** Deferred list in `docs/security-audit-2026-09-02.md`.
 
-**One-liners.** #681: a lean tail plus recovery beat a fat verbatim tail (68.3 % vs 45.8 %). #675: a
+**One-liners.** #694: `truncate_payload` derives `req_summary = {head, sha256, len}` centrally, over the
+**whole** request — ⚠️ no sink double can test it [[audit-sink-doubles-hide-storage-transforms]];
+⚠️ review subagents mutate the working tree — give each its own `git worktree`. #681: a lean tail plus recovery beat a fat verbatim tail (68.3 % vs 45.8 %). #675: a
 failed micro-VM boot leaves `console.log` in the kept run dir [[microvm-guest-failures-are-invisible]];
 the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `panic = "abort"`
 [[release-profile-panic-abort-kills-raii]].
@@ -300,31 +283,18 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg.
 
-5. **Deploy, then watch one restart.** **#855, #856 (#810), [#857](https://github.com/hherb/kastellan/pull/857) (#829), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861), #866 and #869 (once merged)
-   are not deployed** — one `scripts/upgrade_from_git.sh` per host covers them (all core only). On the
-   next restart look for: INFO `shutdown signal received` (`signal = "SIGTERM"`, #856); `[audit-lost]`
-   / INFO drain lines (a Matrix login still starting at shutdown is INFO "not finished starting", not
-   a loss; a bus stopped under a wedged Postgres says `may not have been written`); since #829 a bus
-   or boot-supervisor failed-insert `[audit-lost]` line carries `; row N of this burst` (since #866; then
-   possibly `(… before it had no line …)` / `; the burst before it ended …`), and a flood of lost bus rows ends in
-   `N <action> audit rows for channel … failed to insert (not written) …` — none expected (and
-   since #863 a line saying a row "may not have been written" means the insert failed in a way that
-   does not prove the row absent — a lost connection, a server crash, an ended session — so check
-   `audit_log` before calling it lost; since #866 a thinned line may end `, the first with its cause
-   since row N`: a new fault mid-flood). INFO `channel pump ended
-   with replies queued` and no `queue_closed` rows (#832). Rows a restart under traffic can leave:
-   `channel.inbound_dropped` with `stage` `polled`/`buffered`/`worker` (`select payload->>'channel',
-   payload->>'stage', payload->>'dropped' from audit_log where action = 'channel.inbound_dropped' order
-   by id desc`); since #869 the daemon sinks' thinned-row summaries name the action too (`N <action>
-   audit rows had no line …`, as the bus's `N <action> audit rows for channel … and had no line …` have
-   since #866), and **both writers'** come before the channels stop, then `N more … while the channels
-   stopped` (the bus's after each stop; the sinks' after the drain, `… and their drivers drained`); a `channel.inbound_undecodable` row is a **finding about the worker** (`select
-   payload->>'part', payload->>'undecodable' … where action = 'channel.inbound_undecodable'`, #855).
-   ⚠️ A stale `matrix.ext4` answers `matrix.drain` with METHOD_NOT_FOUND (rebuild with
-   `bash scripts/build-release.sh` + the rootfs script). Then [#805](https://github.com/hherb/kastellan/issues/805)
-   and #809–#811. The rest of the thinning family: #868 (compiler-checked bounds) and #817 (a crash
-   loses the thinned tail). Natural next security items: #833 (stderr panic in a `Drop`; needs a design call,
-   now also `bus_guards` and `InboundReceiver`), #831 and #817 (now also the bus writers' thinned tail).
+5. **The thinning family, now deployed (2026-10-18) — its loss lines are still unseen live.** A quiet
+   restart says nothing (verified on both hosts); a **restart under traffic or a wedged Postgres** is what
+   shows them. Look for: `[audit-lost]` with `; row N of this burst` (#829/#866), `N <action> audit rows
+   … had no line …` before the channels stop and `N more … while the channels stopped` after (#869),
+   `may not have been written` = check `audit_log` before calling a row lost (#863), INFO `channel pump
+   ended with replies queued` (#832), `channel.inbound_dropped` (`stage`) and
+   `channel.inbound_undecodable` (`part`) rows (#846/#855). ⚠️ A stale `matrix.ext4` answers
+   `matrix.drain` with METHOD_NOT_FOUND (rebuild with `bash scripts/build-release.sh` + the rootfs
+   script). Open: [#805](https://github.com/hherb/kastellan/issues/805), #809–#811, #868
+   (compiler-checked bounds), #817 (a crash loses the thinned tail, both writers). Security items:
+   #833 (stderr panic in a `Drop`; a design call, now also `bus_guards` and `InboundReceiver`), #831.
+   **#870** — merge PR #871, then the next Mac install needs no hand `bootstrap`.
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
@@ -423,8 +393,8 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#866 five-agent review fixes) | PR [#866](https://github.com/hherb/kastellan/pull/866) | **5102 / 6 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/sweep-866-review.log`. ⚠️ **All 6 failures are #548/#676 cluster contention** (`probe: Connect(… the database system is starting up)`) in `embedding_recall_e2e` (1), `entity_extraction_e2e` (2), `postgres_e2e` (3); isolated at `--test-threads=4` *other* tests in the same suites failed the same way (it moves), and at `--test-threads=1` under `KASTELLAN_PG_REQUIRE_E2E=1` all pass: **60 / 4 / 17**, incl. `audit_helpers_pool_and_notify_round_trip` (the new 42P01 cause). 5102 + 6 = **5108** = predicted +3 (core lib 2543 → **2544**, daemon bin 100 → **102**, db lib 251 unchanged). The flood tests' `closing_pool` now reads before closing (FIN → always EOF): before, RST-vs-EOF was a race, i.e. **two causes**, which the per-stretch rule (rightly) gave a line each | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-866` (fresh dir), **27** `Checking kastellan`, after the `.flatten()` fix | **23** Mac |
 | **Mac** (#867/#862/#860) | PR [#869](https://github.com/hherb/kastellan/pull/869), sweep on the split commit | **5112 / 2 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/sweep-867.log`. Both failures **#548/#676 contention** (`the database system is starting up`) in `cli_memory_l1_e2e` / `cli_memory_l3_e2e` (untouched); isolated at `--test-threads=1` under `KASTELLAN_PG_REQUIRE_E2E=1`: **3/3, 12/12**. 5114 = predicted 5108 + 6 (core lib 2544 → **2548**, daemon bin 102 → **104**). The review commit (+2 lib tests, docs) re-ran lib `channel::` **570** and bin **104** green. The third-pass fixes (+1 lib, +2 bin): `kastellan-core` package **3132 / 0 / 40**, **118** suites, lib **2551**, bin **106**, `KASTELLAN_PG_BIN_DIR` set, `[WARN]` 0, `[SKIP]` 12 (container 8, gliner 4); log `~/.local/state/kastellan/review-869/core-tests.log`; clippy (warm) exit 0 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-867` (fresh dir), **27** `Checking kastellan`, on the review commit | **23** Mac |
+| **Mac** (#870) | PR [#871](https://github.com/hherb/kastellan/pull/871) | **5124 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23, SysV shm segments 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-870.log`. 5124 = #869's tree (5114 + its review's +2 lib and third pass's +3) **5119** + 5 (supervisor lib 115 → **119**, `launchd_agents_smoke` 4 → **5**). No contention failures this run. ⚠️ The first sweep of this branch (wait in `stop`) was **4970 / 154**: every failure `initdb` → `could not create shared memory segment` (#870's harness interaction, see This session) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-launchd` (fresh dir), **27** `Checking kastellan`; supervisor also cross-clippy'd for `aarch64-unknown-linux-gnu` | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -506,9 +476,10 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **[#866](https://github.com/hherb/kastellan/pull/866)** (#837, #859, #864, #865) — merged 2026-10-17, **not yet deployed**: a lost row's line is thinned only behind its own kind — per action, per outcome, never past a new cause.
-- **[#863](https://github.com/hherb/kastellan/pull/863)** (#858, #861, 2026-10-17): an unknown insert outcome says "may not have been written"; the sinks thin failed inserts. **[#857](https://github.com/hherb/kastellan/pull/857)** (#829), **[#856](https://github.com/hherb/kastellan/pull/856)** (#810), **[#855](https://github.com/hherb/kastellan/pull/855)** (#852, #853) — merged 2026-10-16, **not yet deployed**: thinned bus `[audit-lost]` lines + `insert_without_id`; stop signals before the channels; Matrix polls decoded event by event, an undecodable drain answer recorded.
-- **[#851](https://github.com/hherb/kastellan/pull/851)** (#836, merged, deployed on both hosts 2026-10-14) — an undecodable poll batch is ERROR + a `channel.inbound_undecodable` row on Matrix, and holds the poll on every channel.
+- **[#869](https://github.com/hherb/kastellan/pull/869)** (#867, #862, #860) — merged 2026-10-17, **deployed both hosts 2026-10-18** with #855–#866: lost-row tails said per action, before the channels stop, under their own bus.
+- **[#866](https://github.com/hherb/kastellan/pull/866)** (#837, #859, #864, #865) — merged 2026-10-17: a lost row's line is thinned only behind its own kind — per action, per outcome, never past a new cause.
+- **[#863](https://github.com/hherb/kastellan/pull/863)** (#858, #861, 2026-10-17): an unknown insert outcome says "may not have been written"; the sinks thin failed inserts. **[#857](https://github.com/hherb/kastellan/pull/857)** (#829), **[#856](https://github.com/hherb/kastellan/pull/856)** (#810), **[#855](https://github.com/hherb/kastellan/pull/855)** (#852, #853) — merged 2026-10-16: thinned bus `[audit-lost]` lines + `insert_without_id`; stop signals before the channels; Matrix polls decoded event by event, an undecodable drain answer recorded.
+- **[#851](https://github.com/hherb/kastellan/pull/851)** (#836, merged, deployed 2026-10-14) — an undecodable poll batch is ERROR + a `channel.inbound_undecodable` row on Matrix, and holds the poll on every channel.
 - **#850, #849, #847, #842, #834, #830, #824, #820, #819, #812, #806, #804, #803, #801, #795, #791, #787, #786, #784, #781, #778, #776, #775, #770, #766** — Matrix worker held count (`worker` stage); unread bus buffer (`buffered`); reply claim at send; reply catch-up (0027); audit-sink close-out; clippy 1.99 lockfile; TencentDB survey; shutdown names pending rows; `[audit-lost]` + drain; recovery lines, bounded sinks; reply queues + `[worker-refusal]`; recall excludes L0/L3; cognee survey; a refusal is not a death; route spellings; the thinking switch; `UPSTREAM_AUTH_FAILED`; the live mail shape gate. One-liners in the `802`/`815`/`825` archive snapshots (#830: a stopped insert says `may not have been written`; #824: channel drops leave rows; #820: NUL refused/escaped beyond `audit_log`; #819: NUL escaped in audit rows; #812: per-channel thinning + bus `[audit-lost]`). **#764 … #685** and earlier: git history and the [`archive/`](archive/) snapshots.
 
 ---
