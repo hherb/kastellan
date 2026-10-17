@@ -817,6 +817,12 @@ async fn main() -> Result<()> {
 
     shutdown_signals.wait().await;
 
+    // The buses' count of lost rows thinned past a flood (#829), said BEFORE
+    // the channels stop (#862): a supervisor's shutdown can await an insert
+    // nothing bounds against a wedged Postgres, and a count said only after
+    // it would die with the SIGKILL. The rows thinned during the stop follow.
+    let said = kastellan_core::channel::bus::report_unsaid_lost_rows();
+
     // Stop the channel supervisors first: each stops its bus if it started one,
     // so no further inbound messages are enqueued and each worker's stdin
     // closes (clean worker exit). Unconditional — a supervisor that never
@@ -824,8 +830,8 @@ async fn main() -> Result<()> {
     matrix.shutdown().await;
     email.shutdown().await;
     // Every writer of the buses' own rows has stopped with them, so their
-    // count of lost rows thinned past a flood is final: say it (#829).
-    kastellan_core::channel::bus::report_unsaid_lost_rows();
+    // count is final: say what was thinned during the stop.
+    kastellan_core::channel::bus::report_unsaid_lost_rows_since(said);
 
     // Stop the scheduler before the audit-mirror so any final audit
     // rows it writes during graceful drain land in the mirror's

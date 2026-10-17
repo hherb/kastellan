@@ -57,6 +57,7 @@ impl InsertFailure for Unknown {
 fn received_row(report: Reporter, lost: &'static LostRows) -> RowReport<'static> {
     RowReport {
         writer: AuditLostWriter::Bus,
+        writer_channel: "matrix",
         action: "channel.received",
         about: r#" for channel "matrix""#,
         channel: Some("matrix"),
@@ -166,7 +167,7 @@ fn record(writer: AuditLostWriter, line: &str) {
 /// port nothing listens on ([`test_support::refused_pool`]).
 #[tokio::test]
 async fn a_failed_insert_is_reported_on_the_marker() {
-    let events = PgChannelEvents::with_reporter(test_support::refused_pool(), record);
+    let events = PgChannelEvents::with_reporter(test_support::refused_pool(), ChannelId("matrix".into()), record);
     let payload = serde_json::json!({"channel": "matrix", "peer": "@lost:srv"});
     ChannelEvents::audit(&events, "channel.reply_undelivered", payload).await;
 
@@ -194,7 +195,7 @@ fn record_unknown(writer: AuditLostWriter, line: &str) {
 /// got.
 #[tokio::test]
 async fn an_insert_that_lost_its_connection_may_not_have_been_written() {
-    let events = PgChannelEvents::with_reporter(test_support::closing_pool(), record_unknown);
+    let events = PgChannelEvents::with_reporter(test_support::closing_pool(), ChannelId("matrix".into()), record_unknown);
     let payload = serde_json::json!({"channel": "matrix", "peer": "@maybe:srv"});
     ChannelEvents::audit(&events, "channel.received", payload).await;
 
@@ -223,7 +224,7 @@ fn record_abandoned(writer: AuditLostWriter, line: &str) {
 #[tokio::test]
 async fn an_insert_abandoned_mid_await_is_reported() {
     let (pool, listener) = test_support::stalled_pool();
-    let events = std::sync::Arc::new(PgChannelEvents::with_reporter(pool, record_abandoned));
+    let events = std::sync::Arc::new(PgChannelEvents::with_reporter(pool, ChannelId("matrix".into()), record_abandoned));
     let task = tokio::spawn({
         let events = events.clone();
         async move {
@@ -330,7 +331,7 @@ fn record_in_flight(writer: AuditLostWriter, line: &str) {
 /// and production puts both on `[audit-lost]`.
 #[tokio::test]
 async fn work_lost_in_flight_is_reported_through_the_writer() {
-    let events = PgChannelEvents::with_reporter(test_support::refused_pool(), record_in_flight);
+    let events = PgChannelEvents::with_reporter(test_support::refused_pool(), ChannelId("matrix".into()), record_in_flight);
     ChannelEvents::report_lost(&events, "task 7's reply may not have been sent");
 
     let said = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner()).clone();

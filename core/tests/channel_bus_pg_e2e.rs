@@ -84,7 +84,7 @@ async fn channel_inbound_enqueues_and_completion_routes_a_reply() {
     let pool = probe_and_pool(&cluster.conn_spec).await;
 
     // ── Inbound: a paired, clean message must enqueue a `channel` task + audit. ──
-    let events = PgChannelEvents::new(pool.clone());
+    let events = PgChannelEvents::new(pool.clone(), ChannelId("matrix".into()));
     let authorizer = StaticPairings::from_peers([PeerId("@me:srv".into())]);
     let msg = IncomingMessage {
         channel: ChannelId("matrix".into()),
@@ -395,7 +395,7 @@ async fn a_failed_pairing_lookup_is_stored_as_rejected_unverifiable_against_real
         .expect("lazy pool construction does not connect");
     let authorizer = DbPeerAuthorizer::new(dead);
     let pairing = kastellan_core::channel::pairing::DbPairingService::new(pool.clone());
-    let events = PgChannelEvents::new(pool.clone());
+    let events = PgChannelEvents::new(pool.clone(), ChannelId("matrix".into()));
     let msg = IncomingMessage {
         channel: ChannelId("matrix".into()),
         peer: PeerId("@me:srv".into()),
@@ -513,7 +513,7 @@ async fn a_real_pg_ask_resolver_resolves_an_answer_arriving_over_the_bus() {
     // rendered message the operator would be copying from.
     let token = raised.nonce.expose().to_string();
 
-    let events = PgChannelEvents::new(pool.clone());
+    let events = PgChannelEvents::new(pool.clone(), ChannelId("matrix".into()));
     let authorizer = StaticPairings::from_peers([peer.clone()]);
     let wiring = AskWiring {
         outbox: std::sync::Arc::new(ChannelOutbox::new()),
@@ -678,7 +678,7 @@ async fn a_paired_peer_who_does_not_own_the_task_cannot_answer_its_ask() {
     .await
     .expect("raise");
 
-    let events = PgChannelEvents::new(pool.clone());
+    let events = PgChannelEvents::new(pool.clone(), ChannelId("matrix".into()));
     // Both peers are PAIRED — the bystander is authorized to talk to the
     // bot. Entitlement to answer THIS ask is a separate question, and that
     // separation is the whole of D16.
@@ -769,7 +769,7 @@ async fn containment_holds_end_to_end_against_real_postgres() {
     .expect("raise");
     let token = raised.nonce.expose().to_string();
 
-    let events = PgChannelEvents::new(pool.clone());
+    let events = PgChannelEvents::new(pool.clone(), ChannelId("matrix".into()));
     let authorizer = StaticPairings::from_peers([owner.clone()]);
     let wiring = AskWiring {
         outbox: std::sync::Arc::new(ChannelOutbox::new()),

@@ -38,11 +38,13 @@
 //! writer, channel, action and outcome ([`lost_rows`]; action since #865,
 //! outcome since #864) — but for the first row of each new cause (#859) —
 //! each carrying its place in the burst,
-//! and the shutdown says how many got no line of their own
-//! ([`report_unsaid_lost_rows`]). And the insert no longer decodes an id it
-//! discards (`kastellan_db::audit::insert_without_id`), so "not written" is
-//! no longer said of a row that was written but whose `RETURNING id` failed
-//! to decode. Since #858 nor is it said of a row whose insert lost its
+//! and the shutdown says how many got no line of their own: before the
+//! channels stop ([`report_unsaid_lost_rows`]) and, for the rows thinned
+//! during the stop, after ([`report_unsaid_lost_rows_since`], #862). A row
+//! naming no channel is counted under its bus's (#860). And the insert no
+//! longer decodes an id it discards (`kastellan_db::audit::insert_without_id`),
+//! so "not written" is no longer said of a row that was written but whose
+//! `RETURNING id` failed to decode. Since #858 nor is it said of a row whose insert lost its
 //! connection, which may have been committed: that line says the row "may
 //! not have been written" (`InsertFailure`).
 
@@ -53,20 +55,26 @@ use kastellan_db::tasks::{self, Lane};
 
 use super::audit_text::{insert_verdict, quoted_id};
 use super::bus::ChannelEvents;
+use super::ChannelId;
 use crate::audit_thinning::BurstTally;
 use crate::worker_stderr::{emit_audit_lost_report, AuditLostWriter};
 
 mod lost_rows;
-use lost_rows::{format_unsaid, RowKey};
+use lost_rows::{format_unsaid, unsaid_since, RowKey, Unsaid, UnsaidPart};
 pub(crate) use lost_rows::{LostRows, LOST_ROWS};
 
 /// The `actor` every row [`audit_or_report`] writes is under: the bus's, and
 /// since #814 the boot supervisor's.
 const ACTOR: &str = "channel";
 
-/// Real DB-backed `ChannelEvents` over the runtime pool.
+/// Real DB-backed `ChannelEvents` over the runtime pool, for one channel's
+/// bus.
 pub struct PgChannelEvents {
     pool: sqlx::PgPool,
+    /// The channel this bus serves: a lost row naming no channel of its own
+    /// (`ask.resolved`, `channel.reply_unroutable`) is counted under it, so
+    /// one bus's flood of them cannot thin another bus's lines (#860).
+    channel: ChannelId,
     /// How a lost row is said: [`emit_report`], but for a test's recorder.
     report: Reporter,
     /// Which lost rows get a line of their own (#829): the process-wide
@@ -75,17 +83,20 @@ pub struct PgChannelEvents {
 }
 
 impl PgChannelEvents {
-    pub fn new(pool: sqlx::PgPool) -> Self {
+    /// The events of the bus serving `channel` — the one channel its bus
+    /// runs, as every bus the daemon builds does (`matrix_boot.rs`,
+    /// `email_boot.rs`).
+    pub fn new(pool: sqlx::PgPool, channel: ChannelId) -> Self {
         let (report, lost) = production_writer();
-        Self { pool, report, lost }
+        Self { pool, channel, report, lost }
     }
 
-    /// Test builds only: lost rows said to `report` and counted apart from
-    /// every other test's, so a test can read them through the trait method
-    /// production calls.
+    /// Test builds only: `channel`'s bus's events, with lost rows said to
+    /// `report` and counted apart from every other test's, so a test can read
+    /// them through the trait method production calls.
     #[cfg(test)]
-    pub(crate) fn with_reporter(pool: sqlx::PgPool, report: Reporter) -> Self {
-        Self { pool, report, lost: test_support::own_lost_rows() }
+    pub(crate) fn with_reporter(pool: sqlx::PgPool, channel: ChannelId, report: Reporter) -> Self {
+        Self { pool, channel, report, lost: test_support::own_lost_rows() }
     }
 }
 
@@ -99,7 +110,8 @@ impl ChannelEvents for PgChannelEvents {
     /// fails is reported on `[audit-lost]` (#808), as is one still awaited
     /// when the bus stops (#813).
     async fn audit(&self, action: &'static str, payload: Value) {
-        audit_or_report(&self.pool, AuditLostWriter::Bus, action, payload, self.report, self.lost).await;
+        let writer = (AuditLostWriter::Bus, self.channel.0.as_str());
+        audit_or_report(&self.pool, writer, action, payload, self.report, self.lost).await;
     }
 
     /// Work a bus stop abandoned (#832): the same writer and reporter as a
@@ -130,29 +142,66 @@ pub(crate) fn production_writer() -> (Reporter, &'static LostRows) {
     (emit_report, &LOST_ROWS)
 }
 
-/// Say, once, how many rows every bus writer lost (failed to insert) and gave no line
-/// of their own (#829) — one `[audit-lost]` line per writer, channel, action
-/// and outcome that has any (action #865, outcome #864). The daemon calls it after the channels stop, when nothing writes
-/// through these writers any more; called twice, it would say the same rows
-/// again. The count is every burst's, so it includes rows a later burst's
-/// first line already summed up ("the burst before it ended after …").
-pub fn report_unsaid_lost_rows() {
+/// What [`report_unsaid_lost_rows`] said: the counts
+/// [`report_unsaid_lost_rows_since`] counts from, so no row is said twice.
+/// Its contents are this module's, so the only baseline that call can be
+/// given is the first call's own.
+#[derive(Debug)]
+#[must_use = "say the rows lost while the channels stop with `report_unsaid_lost_rows_since`"]
+pub struct SaidLostRows(Vec<Unsaid>);
+
+/// Say how many rows every bus writer lost (failed to insert) and gave no
+/// line of their own (#829) — one `[audit-lost]` line per writer, channel,
+/// action and outcome that has any (action #865, outcome #864) — and hand
+/// back what was said. The count is every burst's, so it includes rows a
+/// later burst's first line already summed up ("the burst before it ended
+/// after …").
+///
+/// **Called before the channels stop** (#862), and then
+/// [`report_unsaid_lost_rows_since`] after: a channel supervisor's
+/// `shutdown` joins its run loop, which may be awaiting a `channel.*` insert
+/// that nothing bounds against a wedged Postgres (there is no statement
+/// timeout). Said only after that, the count would die with the process when
+/// the service manager's SIGKILL came first — as the daemon's own sinks say
+/// theirs before the pool's unbounded close (#802).
+pub fn report_unsaid_lost_rows() -> SaidLostRows {
     let (report, lost) = production_writer();
-    report_unsaid(lost, report);
+    SaidLostRows(report_unsaid(lost, report))
 }
 
-/// [`report_unsaid_lost_rows`] over `lost`, through `report`.
-fn report_unsaid(lost: &LostRows, report: Reporter) {
-    for unsaid in lost.unsaid() {
-        report(unsaid.key.writer, &format_unsaid(&unsaid));
+/// After the channels stopped, when nothing writes through these writers any
+/// more: say the rows thinned out since `said` was taken — those lost while
+/// the channels stopped — one line per count, as
+/// [`report_unsaid_lost_rows`] says them (#862). Takes `said` by value, so
+/// its baseline is used once.
+pub fn report_unsaid_lost_rows_since(said: SaidLostRows) {
+    let (report, lost) = production_writer();
+    report_unsaid_since(lost, &said.0, report);
+}
+
+/// [`report_unsaid_lost_rows`] over `lost`, through `report`: returns what
+/// it said.
+fn report_unsaid(lost: &LostRows, report: Reporter) -> Vec<Unsaid> {
+    let unsaid = lost.unsaid();
+    for count in &unsaid {
+        report(count.key.writer, &format_unsaid(count, UnsaidPart::BeforeStop));
+    }
+    unsaid
+}
+
+/// [`report_unsaid_lost_rows_since`] over `lost`, through `report`.
+fn report_unsaid_since(lost: &LostRows, said: &[Unsaid], report: Reporter) {
+    for count in unsaid_since(lost.unsaid(), said) {
+        report(count.key.writer, &format_unsaid(&count, UnsaidPart::DuringStop));
     }
 }
 
 /// Insert one `channel`-actor audit row; report it through `report`, as
-/// `writer`'s, if the insert fails or is abandoned mid-await. A failed
-/// insert counts in `lost` under the row's `channel`, action and outcome,
-/// which thins its line past a flood (#829, #864) — unless its cause is new
-/// in the burst (#859).
+/// `writer`'s — the `[audit-lost]` writer and the channel it writes for — if
+/// the insert fails or is abandoned mid-await. A failed insert counts in
+/// `lost` under the row's `channel` (or, for a row naming none, the
+/// writer's: #860), action and outcome, which thins its line past a flood
+/// (#829, #864) — unless its cause is new in the burst (#859).
 ///
 /// Two writers share it: the bus ([`AuditLostWriter::Bus`]) and, since #814,
 /// the channel boot supervisor's sink
@@ -175,7 +224,7 @@ fn report_unsaid(lost: &LostRows, report: Reporter) {
 /// not void it).
 pub(crate) async fn audit_or_report(
     pool: &sqlx::PgPool,
-    writer: AuditLostWriter,
+    (writer, writer_channel): (AuditLostWriter, &str),
     action: &'static str,
     payload: Value,
     report: Reporter,
@@ -186,7 +235,7 @@ pub(crate) async fn audit_or_report(
     // No `RETURNING id` (#829): the id is discarded here, and decoding it was
     // the one step of ours that could fail after a row known to be written.
     let insert = kastellan_db::audit::insert_without_id(pool, ACTOR, action, payload);
-    let row = RowReport { writer, action, about: &about, channel: channel.as_deref(), report, lost };
+    let row = RowReport { writer, writer_channel, action, about: &about, channel: channel.as_deref(), report, lost };
     settle_or_report(insert, row).await;
 }
 
@@ -195,6 +244,9 @@ pub(crate) async fn audit_or_report(
 #[derive(Clone, Copy)]
 struct RowReport<'a> {
     writer: AuditLostWriter,
+    /// The channel `writer` writes for, which a row naming none is counted
+    /// under (#860).
+    writer_channel: &'a str,
     action: &'static str,
     /// [`describe_row`]'s words.
     about: &'a str,
@@ -244,7 +296,13 @@ impl<'a> PendingInsert<'a> {
         if let Err(e) = result {
             let row = self.row;
             // `lose` releases its lock before the report, which can block.
-            let key = RowKey { writer: row.writer, channel: row.channel, action: row.action, outcome: e.outcome() };
+            let key = RowKey {
+                writer: row.writer,
+                writer_channel: row.writer_channel,
+                channel: row.channel,
+                action: row.action,
+                outcome: e.outcome(),
+            };
             let lost = row.lost.lose(key, e.cause());
             if lost.report() {
                 let line = format_row_lost(row.action, row.about, &e, lost.tally);
@@ -365,121 +423,7 @@ fn format_row_abandoned(action: &str, about: &str, cause: Abandoned) -> String {
 /// Test fixtures for [`audit_or_report`]'s two writers: this module's tests,
 /// the bus's (`bus/tests/dropped.rs`), and the boot supervisor's sink.
 #[cfg(test)]
-pub(crate) mod test_support {
-    use std::time::Duration;
-
-    use super::LostRows;
-
-    /// A lost-row count of the test's own, so no other test's lost rows can
-    /// thin its lines or add to its counts. Leaked: the writers hold it as
-    /// `'static`, as production holds [`super::LOST_ROWS`].
-    pub(crate) fn own_lost_rows() -> &'static LostRows {
-        Box::leak(Box::new(LostRows::new()))
-    }
-
-    /// A lazy pool aimed at a port nothing listens on, so every insert fails.
-    /// sqlx retries a refused connect until its acquire timeout, kept short
-    /// here (1 s).
-    pub(crate) fn refused_pool() -> sqlx::PgPool {
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            listener.local_addr().expect("addr").port()
-        }; // dropped: the port now refuses
-        let options = sqlx::postgres::PgConnectOptions::new()
-            .host("127.0.0.1")
-            .port(port)
-            .username("nobody")
-            .database("nothing");
-        sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_secs(1))
-            .connect_lazy_with(options)
-    }
-
-    /// A lazy pool whose every connection is accepted and **closed at once**,
-    /// during the startup handshake, with no Postgres. The insert fails fast
-    /// with a broken connection — not a refused one, which sqlx retries until
-    /// its acquire timeout ([`refused_pool`]). No statement is ever sent, but
-    /// `sqlx::Error` does not say which phase an `Io` error came from, so #858
-    /// calls it *unknown* — the over-hedge `outcome_of`'s doc describes, and
-    /// the same error a connection lost mid-statement gives. The accepting
-    /// thread lives as long as the test process.
-    ///
-    /// Build it inside a runtime, as [`stalled_pool`].
-    pub(crate) fn closing_pool() -> sqlx::PgPool {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                // Read the client's first message before closing, so the close
-                // is a FIN and the insert's error always EOF. Closed with it
-                // unread, the close is a RST instead, and whether the client then
-                // reads a reset or an EOF is a race: two causes (#859), and a
-                // flood of them got a line for each, as two real faults would.
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                let _ = std::io::Read::read(&mut stream, &mut [0u8; 1024]);
-            }
-        });
-        let options = sqlx::postgres::PgConnectOptions::new()
-            .host("127.0.0.1")
-            .port(port)
-            .username("nobody")
-            .database("nothing");
-        sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_secs(5))
-            .connect_lazy_with(options)
-    }
-
-    /// A lazy pool whose every insert **hangs** until its 30 s acquire
-    /// timeout, long after any test's stop: a listener that takes the TCP
-    /// handshake and never answers Postgres's startup message — a wedged
-    /// Postgres, with no Postgres. The insert is still awaited when the test
-    /// stops its task, which is the case #813 is about.
-    ///
-    /// The listener is returned so it outlives the test's calls, and so
-    /// [`connected`] can tell the test the insert has started. (The daemon
-    /// binary's `audit_sink::test_support` has a variant of this fixture —
-    /// a shorter timeout, a synchronous wait — since a binary's test items
-    /// are not visible to the library's.)
-    ///
-    /// Build it inside a runtime: a lazy pool spawns its maintenance task as
-    /// it is made.
-    pub(crate) fn stalled_pool() -> (sqlx::PgPool, std::net::TcpListener) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.set_nonblocking(true).expect("non-blocking listener");
-        let port = listener.local_addr().expect("addr").port();
-        let options = sqlx::postgres::PgConnectOptions::new()
-            .host("127.0.0.1")
-            .port(port)
-            .username("nobody")
-            .database("nothing");
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_secs(30))
-            .connect_lazy_with(options);
-        (pool, listener)
-    }
-
-    /// Wait (up to 5 s) until something connects to `listener`: the insert
-    /// against [`stalled_pool`] is under way. Async, and sleeping between
-    /// polls, so the task making the connection can run on the same runtime.
-    ///
-    /// Returns the accepted stream, which the caller must **hold** until the
-    /// stop it is testing: dropped, it would close the connection, and the
-    /// insert would see an EOF — an error that could return before the stop
-    /// — rather than a Postgres that never answers.
-    #[must_use = "dropping the stream closes the connection the insert is waiting on"]
-    pub(crate) async fn connected(listener: &std::net::TcpListener) -> std::net::TcpStream {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => return stream,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => panic!("accept on the stalled pool's listener: {e}"),
-            }
-            assert!(std::time::Instant::now() < deadline, "the insert never connected");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-}
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests;

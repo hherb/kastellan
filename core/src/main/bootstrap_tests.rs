@@ -238,15 +238,19 @@ fn main_installs_the_signals_before_anything_audits() {
     }
 }
 
-/// #829: the buses' lost rows thinned past a flood are said once, after the
-/// channel supervisors have stopped every writer of them — said earlier, the
-/// count would miss the rows lost during the stop; never said, a flood's tail
-/// would be lost with the process.
+/// #829, #862: the buses' lost rows thinned past a flood are said before the
+/// channel supervisors stop — whose shutdown can await an unbounded insert, so
+/// a count said only after it could die with the SIGKILL — and the rows
+/// thinned during the stop once every writer of them has stopped. Never said,
+/// a flood's tail would be lost with the process.
 #[test]
-fn main_says_the_buses_unsaid_lost_rows_after_the_channels_stop() {
+fn main_says_the_buses_unsaid_lost_rows_around_the_channels_stop() {
     let code = code_only(MAIN_RS);
-    let said = sole_offset(&code, "channel::bus::report_unsaid_lost_rows()");
+    let before = sole_offset(&code, "channel::bus::report_unsaid_lost_rows()");
+    let after = sole_offset(&code, "channel::bus::report_unsaid_lost_rows_since(said)");
     for stop in ["matrix.shutdown().await", "email.shutdown().await"] {
-        assert!(sole_offset(&code, stop) < said, "say the unsaid rows after `{stop}` (#829)");
+        let at = sole_offset(&code, stop);
+        assert!(before < at, "say the unsaid rows before `{stop}` (#862)");
+        assert!(at < after, "and the rest after `{stop}` (#829)");
     }
 }

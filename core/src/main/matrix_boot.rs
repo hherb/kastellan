@@ -335,7 +335,10 @@ async fn attempt(
     info!(identity = %worker.identity, "matrix worker logged in; starting channel bus");
     let authorizer = Arc::new(kastellan_core::channel::auth::DbPeerAuthorizer::new(pool.clone()));
     let pairing = Arc::new(kastellan_core::channel::pairing::DbPairingService::new(pool.clone()));
-    let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(pool.clone()));
+    let events = Arc::new(kastellan_core::channel::bus::PgChannelEvents::new(
+        pool.clone(),
+        kastellan_core::channel::ChannelId("matrix".to_string()),
+    ));
     let asks = Arc::new(kastellan_core::channel::bus::AskWiring {
         outbox,
         resolver: Arc::new(kastellan_core::channel::bus::PgAskResolver::new(pool.clone())),

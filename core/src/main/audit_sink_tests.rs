@@ -316,9 +316,9 @@ fn an_email_flood_after_the_drain_does_not_thin_a_matrix_rows_line() {
         told.as_deref().is_some_and(|t| t.ends_with("; row 1 of this burst")),
         "the late Matrix row is its own burst's first, and reported: {told:?}"
     );
-    assert_eq!(LEDGER.unreported().matrix, UnsaidCounts::default());
+    assert!(LEDGER.unreported().matrix.is_empty(), "the Matrix row had its line");
     let late = kastellan_core::audit_thinning::unreported_of(100);
-    assert_eq!(LEDGER.unreported().email, UnsaidCounts { shed: 0, late, failed_not_written: 0, failed_unknown: 0 });
+    assert_eq!(LEDGER.unreported().counts(SinkChannel::Email, "b"), UnsaidCounts { late, ..UnsaidCounts::default() });
 }
 
 /// #797: the final snapshot names pending rows — a cancelled task cannot —
@@ -432,8 +432,12 @@ fn rows_thinned_after_the_drain_are_counted_for_the_last_line() {
     assert_eq!(unreported_on_since(&LEDGER, &d), Unreported::default(), "so none is counted twice");
     assert_eq!(refuse_20(), 17, "20 refused after the drain, a burst of their own");
     let since = unreported_on_since(&LEDGER, &d);
-    assert_eq!(since.email, UnsaidCounts { shed: 0, late: 3, failed_not_written: 0, failed_unknown: 0 }, "only the late ones, and email's");
-    assert_eq!(since.matrix, UnsaidCounts::default());
+    assert_eq!(
+        since.email,
+        [ActionUnsaid { action: "b", counts: UnsaidCounts { late: 3, ..UnsaidCounts::default() } }],
+        "only the late ones, and email's"
+    );
+    assert!(since.matrix.is_empty());
 }
 
 /// What the last lines said, for the test below.
@@ -465,7 +469,7 @@ fn the_last_line_is_said_before_a_close_that_may_never_return() {
     let hung = rt.block_on(async { tokio::time::timeout(Duration::from_millis(50), close).await });
     assert!(hung.is_err(), "POSITIVE CONTROL: the close never returned");
     let said = |needle: &str| LAST_SAID.lock().unwrap().iter().filter(|l| l.contains(needle)).count();
-    assert_eq!(said("3 more channel audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
+    assert_eq!(said("3 more b audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
 
     let (rt, writer, _listener) = stalled_writer(&CLOSES);
     let d = rt.block_on(drain_ledger(&CLOSES, Duration::ZERO));
@@ -474,6 +478,6 @@ fn the_last_line_is_said_before_a_close_that_may_never_return() {
     }
     let close = async { refuse_20(&writer) }; // 20 more, 0 reported: 101 thinned
     rt.block_on(report::close_on_then_report(&CLOSES, &d, close, record_last));
-    assert_eq!(said("81 more channel audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
-    assert_eq!(said("20 more channel audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
+    assert_eq!(said("81 more b audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
+    assert_eq!(said("20 more b audit rows had no line"), 1, "{:?}", LAST_SAID.lock().unwrap());
 }

@@ -232,7 +232,7 @@ impl Ledger {
         InFlight { rows_pending, sinks_live, auditing_live, starting }
     }
 
-    /// Refused rows that got no report of their own, per channel and kind.
+    /// Refused rows that got no report of their own, per channel, action and kind.
     fn unreported(&self) -> Unreported {
         self.refusals.unreported()
     }
@@ -429,7 +429,7 @@ pub(crate) struct Drained {
     /// Labels of the oldest pending rows, at most [`NAMED_AT_SHUTDOWN`].
     named: Vec<String>,
     /// Refused rows that never got a report of their own, so far, per
-    /// channel and kind (#807).
+    /// channel (#807), action (#867) and kind.
     unreported: Unreported,
 }
 
@@ -462,10 +462,10 @@ fn close_and_count(ledger: &'static Ledger, between: impl FnOnce()) -> Drained {
 
 /// The lost rows thinned out since `drained` was taken — late rows a
 /// still-running driver tried after the drain's snapshot (#802), and rows
-/// pending at it whose insert then failed (#861) — per channel and kind, so
-/// the last lines still say whose they were (#807).
+/// pending at it whose insert then failed (#861) — per channel, action and
+/// kind, so the last lines still say whose they were (#807, #867).
 fn unreported_on_since(ledger: &'static Ledger, drained: &Drained) -> Unreported {
-    ledger.unreported().since(drained.unreported)
+    ledger.unreported().since(&drained.unreported)
 }
 
 #[path = "audit_sink_lease.rs"]
@@ -475,7 +475,7 @@ pub(crate) use lease::{SinkChannel, Starting};
 #[path = "audit_sink_thinning.rs"]
 mod thinning;
 use thinning::{refuse, Loss, Refusals};
-pub(crate) use thinning::{BurstTally, UnsaidCounts, Unreported};
+pub(crate) use thinning::{ActionUnsaid, BurstTally, UnsaidCounts, Unreported};
 
 #[path = "audit_sink_report.rs"]
 mod report;
