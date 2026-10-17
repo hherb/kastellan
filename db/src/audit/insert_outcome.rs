@@ -107,7 +107,7 @@ impl InsertError {
 /// - `Configuration`, `InvalidArgument`, `Encode`: refused before anything
 ///   was sent.
 ///
-/// **Unknown** — a `Database` error at `PANIC` or `FATAL` ([`answered_with`]),
+/// **Unknown** — a `Database` error at `PANIC` or `FATAL` (`answered_with`),
 /// and everything else, first of all `Io`, `Tls`, `Protocol` and
 /// `WorkerCrashed`: the connection failed somewhere, possibly after the
 /// statement was sent, possibly after it was committed. An `Io` error while
