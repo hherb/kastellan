@@ -8,11 +8,11 @@
 //!   - The `alpine:3.20` image already pulled
 //!     (`container image pull alpine:3.20`)
 //!
-//! Tests that can't run are printed as `[SKIP]` lines on stderr via
-//! `eprintln!`. Per project convention, green output with `[SKIP]` lines
-//! means the test was skipped, NOT that the container actually contained
-//! anything — always check `cargo test -- --nocapture` if you suspect a
-//! false green.
+//! Tests that can't run are printed as `[SKIP]` lines on stderr. Green
+//! output with `[SKIP]` lines means the test was skipped, NOT that the
+//! container contained anything — run `bash scripts/run-e2e-gate.sh
+//! container` (which sets `KASTELLAN_MICROVM_REQUIRE_E2E=1`) when a run is
+//! meant to be evidence.
 //!
 //! Parallel to `macos_smoke.rs` for the Seatbelt backend.
 //!
@@ -32,42 +32,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use kastellan_sandbox::macos_container::{MacosContainer, DEFAULT_IMAGE};
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
-/// Skip the test if Apple `container` is unavailable on this host. Prints
-/// to stderr via `eprintln!` so `cargo test -- --nocapture` shows the
-/// reason. Same pattern as [`skip_if_no_seatbelt`] in `macos_smoke.rs`.
+/// Skip the test if Apple `container` or `alpine:3.20` is unusable on this
+/// host — or panic, under a truthy `KASTELLAN_MICROVM_REQUIRE_E2E` (the
+/// `container` gate profile, #875).
 ///
-/// ⚠️ **This is the fourth copy of a container precondition, and the only one
-/// the micro-VM source guard cannot see** — that guard's census is
-/// `core/tests`, so a helper living in `sandbox/tests` is outside it by
-/// construction [[guard-shares-the-census-blind-spot]]. It cannot be replaced
-/// by the shared `kastellan_tests_common::microvm` preflight either:
-/// `tests-common` depends on `kastellan-sandbox`, so this crate's own tests
-/// using it would be a dependency cycle. What it CAN do is stop repeating the
-/// two defects #684 removed from the other three, which is what it now does.
+/// Delegates to the shared preflight the `core` container suites use, so the
+/// CLI/service/image faults are classified in one place (#684, #690) and the
+/// met path prints the tier's `[E2E]` line. `alpine:3.20` is upstream, so it
+/// has no freshness rule; the knob still turns a stopped service or a missing
+/// image into a failure, which a file-local `[SKIP]` never could.
 ///
-/// It stays a `[SKIP]` with no REQUIRE knob deliberately: `alpine:3.20` is an
-/// upstream image with no source in this tree, so there is no staleness rule
-/// to enforce and nothing for a freshness gate to say.
+/// The dev-dep on `kastellan-tests-common` is a dev-only cycle (that crate
+/// depends on this one); Cargo permits it, and an integration test links one
+/// `kastellan_sandbox`, so no type is duplicated.
 fn skip_if_no_container() -> bool {
-    if let Err(e) = MacosContainer::probe() {
-        eprintln!("\n[SKIP] Apple `container` probe failed: {e}\n");
-        return true;
-    }
-    // ⚠️ `probe_image`, NOT a `container image list` substring scan. The old
-    // scan had both defects #684 retired from the `core/tests` copies: an
-    // `Err` from the spawn became "image absent" (sending the operator to a
-    // pull for a problem no pull fixes), and `starts_with("alpine")` matched
-    // any tag with that prefix, so a hand-tagged image certified the run.
-    // `probe_image` takes the tag as an argument, so there is nothing to
-    // match loosely, and it carries the CLI's own stderr in its error.
-    if let Err(e) = MacosContainer::probe_image(DEFAULT_IMAGE) {
-        eprintln!(
-            "\n[SKIP] {DEFAULT_IMAGE} unusable for the container smoke tests ({e}) — \
-             run `container image pull {DEFAULT_IMAGE}` if it is simply not pulled\n"
-        );
-        return true;
-    }
-    false
+    kastellan_tests_common::microvm::skip_if_no_container(DEFAULT_IMAGE)
 }
 
 fn strict_policy() -> SandboxPolicy {

@@ -2366,6 +2366,7 @@ dependencies = [
 name = "kastellan-sandbox"
 version = "0.2.0"
 dependencies = [
+ "kastellan-tests-common",
  "libc",
  "serde",
  "serde_json",
