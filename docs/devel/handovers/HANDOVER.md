@@ -54,6 +54,12 @@ Rootfs images last rebuilt 2026-09-08.
   macos_container_smoke` (named, since `container_suites` greps `core/tests` only): **18 passed, 18
   `[E2E]`, 4 binaries, 0 `[SKIP]`/`[WARN]`/`[panic]`**. Negative control (old knob-free helper put
   back): the gate refuses `macos_container_smoke` as **unhooked** — the per-binary check sees it.
+- **Review round (2026-10-19):** the last hand-written `[SKIP]` in the file (a post-preflight spawn
+  `Err` in `macos_container_argv_with_init_runs_alpine_cleanly`, knob-blind) is now an `expect`; the
+  local `fn skip_if_no_container()` wrapper is gone (a file that DEFINES that name is excluded by
+  `gates_on_shared_preflight`) — call sites use the shared helper directly. `container` re-run: 18
+  passed, 18 `[E2E]`, 0 `[SKIP]`. Still not CI-guarded: the micro-VM source guard scans `core/tests`
+  only; the gate's per-binary `[panic-hook]` check is what catches a revert.
 - ⚠️ **Any `Cargo.lock` edit makes `kastellan/python-exec:dev` "stale"** (it is in the #687 mtime
   closure): this PR's one-line lock change made the first gate run panic 4×. Remedy as named —
   `bash scripts/workers/python-exec/build-image.sh` (cached, ~1 min). Same family as #691.

@@ -66,10 +66,10 @@ pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, CliFault
 /// meaning — or panic when [`super::super::REQUIRE_ENV`] demanded a real
 /// micro-VM run.
 ///
-/// The single entry point the three container suites call, replacing the
-/// three byte-copied private helpers that each folded a CLI fault into
-/// "image not present" (#684) and none of which checked staleness at all
-/// (#687).
+/// The single entry point the three `core` container suites and `sandbox`'s
+/// `macos_container_smoke` (#875) call, replacing the byte-copied private
+/// helpers that each folded a CLI fault into "image not present" (#684) and
+/// none of which checked staleness at all (#687).
 ///
 /// On a met preflight, and only under a truthy knob, prints
 /// `[E2E] micro-VM: container preflight met for <image> (image built <date>)`
