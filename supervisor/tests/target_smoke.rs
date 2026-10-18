@@ -8,7 +8,9 @@
 //! Postgres + core bring-up is a heavier system test, out of scope here.
 //!
 //! Skips silently (`[SKIP]` on `--nocapture`) when the per-user service
-//! manager is unreachable, mirroring `systemd_user_smoke.rs`.
+//! manager is unreachable, mirroring `systemd_user_smoke.rs`. The macOS
+//! half's skip is knob-routed (`KASTELLAN_PG_REQUIRE_E2E`, the `launchd`
+//! gate profile — #872); the Linux half's is still hand-written (#718).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -240,7 +242,8 @@ mod linux {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use kastellan_supervisor::launchd_agents::{probe, LaunchAgents};
+    use kastellan_supervisor::launchd_agents::LaunchAgents;
+    use kastellan_tests_common::skip::skip_if_no_supervisor;
 
     struct Guard {
         sup: LaunchAgents,
@@ -254,8 +257,8 @@ mod macos {
 
     #[test]
     fn target_round_trip_generic_bundle() {
-        if let Err(e) = probe() {
-            eprintln!("\n[SKIP] launchctl probe failed: {e}\n");
+        // Knob-routed (#872): a failure, not a skip, under the `launchd` gate profile.
+        if skip_if_no_supervisor() {
             return;
         }
         let sup = LaunchAgents::new();

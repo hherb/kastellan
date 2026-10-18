@@ -9,8 +9,8 @@
 > passes and the #866 baseline row included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-18 (deploy of #855–#869 on both hosts, one restart watched on each; the Mac install lost its Postgres agent → #870, fixed in PR #871. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#871](https://github.com/hherb/kastellan/pull/871) (#870), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-18 (#872: the launchd smoke suites are now demanded by a `launchd` gate profile; earlier the same day, the deploy of #855–#869 on both hosts and #870, PR #871 merged. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** #872's PR (this session), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,30 +43,30 @@ Rootfs images last rebuilt 2026-09-08.
 
 ## Current state
 
-### This session (2026-10-18): deploy of #855–#869, and #870 (PR [#871](https://github.com/hherb/kastellan/pull/871))
+### This session (2026-10-18, later): #872 — the launchd smoke suites get a knob and a profile
 
-- **Deployed both hosts** (header). **One restart watched on each** under the new tree: INFO `shutdown
-  signal received; stopping the channels and draining audit rows` with `signal = "SIGTERM"` (#856), a
-  clean drain, **no** `[audit-lost]` / thinned-row / `may not have been written` lines (nothing was lost),
-  DGX Matrix back in ~31 s, only `channel.started` rows. The thinning family's lines are therefore still
-  **unseen live** — they need a loss to appear.
-- **#870 (found deploying the Mac, fixed in PR #871):** `kastellan-cli install` does `stop_target` →
-  `start_target`; `launchctl bootout` can return **before** launchd has removed a not-yet-exited agent, and
-  `LaunchAgents::start` skips `bootstrap` for an agent still in the domain — so Postgres (stopped last,
-  started first, ms apart) was left unloaded and core restart-looped. Fix: **`LaunchAgents::stop_target`**
-  boots each member out and polls `launchctl print` until it is gone (30 s of sleep, an error past that)
-  before the next (`launchd_agents/unload_wait.rs`, pure loops). Review fixes: only launchd's "could not
-  find service" counts as gone — a `print` timeout (capped via `run_launchctl`) or any other error fails
-  the wait; and **`run_install` now propagates a `stop_target` error** (it was `let _`, so a timeout would
-  have re-run the race and still printed "is up" — `verify_running` passes on a *dying* Postgres). The
-  smoke test asserts a **new PID**, not `Active` after a sleep (no timing margin); a second pins that
-  `stop` returns in < 1 s. ⚠️ **The wait must NOT go in `stop`:** the first version did, and a Mac sweep
-  failed **154** tests — PG tests stop their cluster through its `ServiceGuard` while their own pools may
-  still be connected, Postgres's SIGTERM shutdown waits for every client, launchd SIGKILLs at 10 s, and
-  each killed postmaster leaks a SysV segment until `kern.sysv.shmmni` (32) is full and every `initdb`
-  fails [[mac-sysv-shm-exhaustion-from-killed-postgres]]. Linux has neither problem: `systemctl stop`
-  blocks and a start during deactivation is queued, not skipped (the race); the shm leak needs launchd's
-  SIGKILL plus the Mac's tiny `shmmni`.
+- `supervisor/tests/launchd_agents_smoke.rs` and `target_smoke.rs`'s macOS half now skip through
+  **`tests_common::skip::skip_if_no_supervisor`** (`KASTELLAN_PG_REQUIRE_E2E`, tier `supervisor-backed`)
+  — a **macOS-only** dev-dependency on `kastellan-tests-common` (a dev-only cycle, like core's). ⚠️ **Not
+  on Linux on purpose:** tests-common pulls in `core`, whose `ring` breaks the Mac → Linux cross-clippy of
+  the supervisor crate [[cross-clippy-pure-rust-crates]]. The Linux smoke skips stay hand-written (#718).
+- New **`launchd` profile** (Darwin, MAX_SKIP 0, MAX_PANIC 0 — measured): `bash scripts/run-e2e-gate.sh
+  launchd` → **7 passed, 6 `[E2E] supervisor-backed`, 0 `[SKIP]`**. Negative control: the pre-#872 test
+  files fail it on both the `[E2E]` floor and the per-binary panic-hook check. ⚠️ Needs a GUI login
+  session; from bare SSH the knob fails it (that is the point).
+- ⚠️ `cargo test -p kastellan-supervisor` on the Mac now builds `core` (via tests-common).
+
+### Earlier (2026-10-18): deploy of #855–#869, and #870 (PR [#871](https://github.com/hherb/kastellan/pull/871), merged) — what still binds
+
+- **Deploy:** one restart watched per host — SIGTERM line (#856), clean drain, **no** loss lines (so the
+  thinning family is still **unseen live**), DGX Matrix back in ~31 s.
+- **#870:** `bootout` can return before launchd removes a not-yet-exited agent, and `start` skips
+  `bootstrap` for one still in the domain. **`LaunchAgents::stop_target`** polls until each member is gone
+  (`launchd_agents/unload_wait.rs`); only "could not find service" counts as gone; `run_install`
+  propagates a failed stop. ⚠️ **The wait must NOT go in `stop`:** PG tests stop clusters with pools
+  still connected, launchd SIGKILLs at 10 s, and each killed postmaster leaks a SysV segment until
+  `shmmni` (32) is full — the first version failed **154** tests [[mac-sysv-shm-exhaustion-from-killed-postgres]].
+  Linux has neither problem (`systemctl stop` blocks; a start during deactivation is queued).
 
 ### Previous (2026-10-17): #867, #862, #860 — the shutdown residue (PR #869, merged + deployed) — what still binds
 
@@ -300,7 +300,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    script). Open: [#805](https://github.com/hherb/kastellan/issues/805), #809–#811, #868
    (compiler-checked bounds), #817 (a crash loses the thinned tail, both writers). Security items:
    #833 (stderr panic in a `Drop`; a design call, now also `bus_guards` and `InboundReceiver`), #831.
-   **#870** — merge PR #871, then the next Mac install needs no hand `bootstrap`.
+   **#870** (PR #871, merged): ⚠️ **unverified live** — the next Mac install should need no hand
+   `bootstrap`; check `launchctl print gui/$(id -u)/kastellan-postgres` after it.
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
@@ -401,6 +402,7 @@ Per-PR growth history: the [`785` archive snapshot](archive/handover_20260929_78
 | --- | --- | --- | --- | --- |
 | **Mac** (#867/#862/#860) | PR [#869](https://github.com/hherb/kastellan/pull/869), sweep on the split commit | **5112 / 2 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23; log `~/.local/state/kastellan/gate-logs/sweep-867.log`. Both failures **#548/#676 contention** (`the database system is starting up`) in `cli_memory_l1_e2e` / `cli_memory_l3_e2e` (untouched); isolated at `--test-threads=1` under `KASTELLAN_PG_REQUIRE_E2E=1`: **3/3, 12/12**. 5114 = predicted 5108 + 6 (core lib 2544 → **2548**, daemon bin 102 → **104**). The review commit (+2 lib tests, docs) re-ran lib `channel::` **570** and bin **104** green. The third-pass fixes (+1 lib, +2 bin): `kastellan-core` package **3132 / 0 / 40**, **118** suites, lib **2551**, bin **106**, `KASTELLAN_PG_BIN_DIR` set, `[WARN]` 0, `[SKIP]` 12 (container 8, gliner 4); log `~/.local/state/kastellan/review-869/core-tests.log`; clippy (warm) exit 0 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-867` (fresh dir), **27** `Checking kastellan`, on the review commit | **23** Mac |
 | **Mac** (#870) | PR [#871](https://github.com/hherb/kastellan/pull/871) | **5124 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23, SysV shm segments 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-870.log`. 5124 = #869's tree (5114 + its review's +2 lib and third pass's +3) **5119** + 5 (supervisor lib 115 → **119**, `launchd_agents_smoke` 4 → **5**). No contention failures this run. ⚠️ **Not re-swept after the review fixes** (20fb7870: supervisor lib 119 → **122**, `launchd_agents_smoke` 5 → **6**, so the tree is **5128**); those ran green alone (no `[SKIP]`, PID test red against a no-op wait) and clippy is clean. ⚠️ The first sweep of this branch (wait in `stop`) was **4970 / 154**: every failure `initdb` → `could not create shared memory segment` (#870's harness interaction, see This session) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-launchd` (fresh dir), **27** `Checking kastellan`; supervisor also cross-clippy'd for `aarch64-unknown-linux-gnu` | **23** Mac |
+| **Mac** (#872) | #872's PR | **5127 / 1 / 52**, **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 23, SysV shm 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-872.log`. 5128 = #871's tree as predicted (no new tests) — also the first full sweep over #871's review fixes. The one failure is **#548/#676 contention** (`the database system is starting up`) in `cli_entities_e2e` (untouched); isolated under `KASTELLAN_PG_REQUIRE_E2E=1`, `--test-threads=1`: **6/6**. `launchd` profile: 7 passed, 6 `[E2E]`, 0 `[SKIP]` | exit 0, `-p kastellan-supervisor -p kastellan-tests-common --all-targets` (warm) + supervisor cross-clippy `aarch64-unknown-linux-gnu` | **23** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -482,6 +484,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **[#871](https://github.com/hherb/kastellan/pull/871)** (#870) — merged 2026-10-18: `LaunchAgents::stop_target` waits for each member to leave the launchd domain; `install` propagates a failed stop.
 - **[#869](https://github.com/hherb/kastellan/pull/869)** (#867, #862, #860) — merged 2026-10-17, **deployed both hosts 2026-10-18** with #855–#866: lost-row tails said per action, before the channels stop, under their own bus.
 - **[#866](https://github.com/hherb/kastellan/pull/866)** (#837, #859, #864, #865) — merged 2026-10-17: a lost row's line is thinned only behind its own kind — per action, per outcome, never past a new cause.
 - **[#863](https://github.com/hherb/kastellan/pull/863)** (#858, #861, 2026-10-17): an unknown insert outcome says "may not have been written"; the sinks thin failed inserts. **[#857](https://github.com/hherb/kastellan/pull/857)** (#829), **[#856](https://github.com/hherb/kastellan/pull/856)** (#810), **[#855](https://github.com/hherb/kastellan/pull/855)** (#852, #853) — merged 2026-10-16: thinned bus `[audit-lost]` lines + `insert_without_id`; stop signals before the channels; Matrix polls decoded event by event, an undecodable drain answer recorded.
