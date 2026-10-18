@@ -24,7 +24,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kastellan_supervisor::launchd_agents::{probe, LaunchAgents};
-use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor};
+use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
 
 /// Serialize all smoke-test bodies. The launchd GUI domain and
 /// `~/Library/LaunchAgents/` are shared global resources; running
@@ -217,6 +217,138 @@ fn start_after_install_is_idempotent() {
 
     // Cleanup is the guard's job; we still call uninstall here so
     // the test exits clean on the happy path.
+    sup.uninstall(&name).expect("uninstall");
+}
+
+/// The running PID of agent `name`, from `launchctl print`'s `pid = `
+/// line; `None` while it is not running or not in the domain at all.
+fn running_pid(name: &str) -> Option<String> {
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let out = std::process::Command::new("launchctl")
+        .args(["print", &format!("gui/{uid}/{name}")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("pid = ").map(str::to_string))
+}
+
+/// Poll until `name` runs under a PID other than `not`, or `timeout`.
+fn wait_for_pid_other_than(name: &str, not: Option<&str>, timeout: Duration) -> Option<String> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Some(pid) = running_pid(name).filter(|p| Some(p.as_str()) != not) {
+            return Some(pid);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
+/// An agent that exits 2 s after SIGTERM, like a database flushing on
+/// shutdown. (`sleep & wait`, not a foreground `sleep`: `wait` is
+/// interrupted by the signal, so the trap runs at once.)
+fn slow_exiting_spec(name: &str) -> ServiceSpec {
+    ServiceSpec {
+        name: name.to_string(),
+        program: PathBuf::from("/bin/sh"),
+        args: vec![
+            "-c".into(),
+            "trap 'sleep 2; exit 0' TERM; while :; do sleep 1 & wait $!; done".into(),
+        ],
+        env: vec![],
+        working_dir: None,
+        keep_alive: false,
+        stdout_log: None,
+        stderr_log: None,
+        after: vec![],
+        part_of: None,
+        restart_backoff: None,
+        environment_files: Vec::new(),
+    }
+}
+
+/// `stop_target` immediately followed by `start_target` must leave the
+/// agent running again — as a **new** process — even when the old one
+/// takes a while to exit.
+///
+/// This is exactly what `kastellan-cli install` does. `launchctl bootout`
+/// can return before launchd has finished removing a slow-to-exit agent,
+/// and `start` skips `bootstrap` for an agent still in the domain. Without
+/// the wait in `stop_target` the `bootstrap` was skipped and the agent then
+/// vanished. The live Mac install lost Postgres this way on 2026-10-18.
+///
+/// Asserting a different PID (rather than `Active` after a sleep) needs no
+/// timing margin: a skipped `bootstrap` only ever shows the old PID, until
+/// it exits, and then none.
+#[test]
+fn start_target_right_after_stop_target_leaves_a_slow_exiting_agent_running() {
+    let _serial = serial_lock();
+    if skip_if_no_gui_domain() {
+        return;
+    }
+    let sup = LaunchAgents::new();
+    let name = unique_service_name();
+    let _guard = TestAgentGuard {
+        sup: LaunchAgents::new(),
+        name: name.clone(),
+    };
+    let target = TargetSpec {
+        name: format!("{name}-target"),
+        members: vec![name.clone()],
+    };
+    sup.install_target(&target, &[slow_exiting_spec(&name)])
+        .expect("install_target");
+    sup.start_target(&target).expect("first start_target");
+    let old = wait_for_pid_other_than(&name, None, Duration::from_secs(5))
+        .expect("first start: the agent must be running");
+
+    sup.stop_target(&target).expect("stop_target");
+    sup.start_target(&target).expect("start_target right after stop_target");
+    let new = wait_for_pid_other_than(&name, Some(&old), Duration::from_secs(6));
+    assert!(
+        new.is_some(),
+        "the agent must run again, under a new PID, after stop_target + start_target \
+         (old PID {old})"
+    );
+
+    sup.uninstall_target(&target).expect("uninstall_target");
+}
+
+/// `stop` itself must NOT wait for the agent to exit: PG tests call it
+/// while their own pools may still hold connections, and Postgres's
+/// SIGTERM shutdown waits for those clients — a waiting `stop` would
+/// block until launchd's SIGKILL and leak the cluster's SysV shared
+/// memory (#870's first attempt failed 154 PG tests exactly this way).
+#[test]
+fn stop_returns_without_waiting_for_a_slow_exiting_agent() {
+    let _serial = serial_lock();
+    if skip_if_no_gui_domain() {
+        return;
+    }
+    let sup = LaunchAgents::new();
+    let name = unique_service_name();
+    let _guard = TestAgentGuard {
+        sup: LaunchAgents::new(),
+        name: name.clone(),
+    };
+    sup.install(&slow_exiting_spec(&name)).expect("install");
+    sup.start(&name).expect("start");
+    wait_for_pid_other_than(&name, None, Duration::from_secs(5))
+        .expect("the agent must be running");
+
+    let t = Instant::now();
+    sup.stop(&name).expect("stop");
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "stop took {:?} on an agent that exits 2 s after SIGTERM — it must not wait",
+        t.elapsed()
+    );
+
     sup.uninstall(&name).expect("uninstall");
 }
 

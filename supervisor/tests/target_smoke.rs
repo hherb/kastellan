@@ -281,8 +281,9 @@ mod macos {
         wait_for(&sup, &core, ServiceStatus::Active, Duration::from_secs(5)).expect("core active");
 
         sup.stop_target(&target).expect("stop_target");
-        // launchctl bootout is synchronous, so no wait_for poll is needed
-        // here (unlike the systemd path, where stop returns asynchronously).
+        // No wait_for poll needed: `bootout` itself can return before the
+        // agent is gone, but launchd's `stop_target` waits until each
+        // member has left the domain (#870).
         sup.uninstall_target(&target).expect("uninstall_target");
         assert_eq!(sup.status(&pg).unwrap(), ServiceStatus::NotInstalled);
         assert_eq!(sup.status(&core).unwrap(), ServiceStatus::NotInstalled);
