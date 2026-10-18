@@ -11,9 +11,9 @@
 //! guard's Drop calls `uninstall` so we never pollute
 //! `~/Library/LaunchAgents/`.
 //!
-//! The test skips on hosts where the GUI launchd domain is unreachable
-//! (e.g. SSH session without an active console login), printing a
-//! `[SKIP]` line to stderr (`cargo test -- --nocapture` to see it) —
+//! Every test that touches launchd skips on hosts where the GUI launchd
+//! domain is unreachable (e.g. SSH session without an active console
+//! login), printing a `[SKIP]` line to stderr (`cargo test -- --nocapture` to see it) —
 //! **unless** `KASTELLAN_PG_REQUIRE_E2E` is truthy, in which case the
 //! skip is a failure and a reachable domain prints an
 //! `[E2E] supervisor-backed:` line. Run it as evidence with

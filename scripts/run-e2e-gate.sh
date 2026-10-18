@@ -177,8 +177,11 @@ done
 #
 # `launchd` (#872) demands the real-launchctl smoke suites, #870's regression
 # tests among them. Darwin-only: `launchd_agents_smoke` is a whole-file
-# `#![cfg(target_os = "macos")]`. MAX_SKIP 0: every probe in both suites goes
-# through `skip_if_no_supervisor`. ⚠️ Needs a GUI login session — from a bare
+# `#![cfg(target_os = "macos")]`. MAX_SKIP 0: every probe these suites compile
+# on macOS goes through `skip_if_no_supervisor`, which panics rather than skips
+# under the knob — so a `[SKIP]` here is a later bypass of the helper. Both
+# suites share one tier; the per-binary `[panic-hook]` check is what proves
+# each of them ran. ⚠️ Needs a GUI login session — from a bare
 # SSH session the knob fails it, which is the point.
 # ---------------------------------------------------------------------------
 PROFILES=(

@@ -490,6 +490,30 @@ fn a_malformed_max_panic_is_refused_before_anything_runs() {
 }
 
 #[test]
+fn a_profile_for_another_os_is_refused_with_exit_2_before_cargo_runs() {
+    // `microvm` is Linux and `launchd` Darwin, so every host has one to refuse.
+    let host = String::from_utf8(Command::new("uname").arg("-s").output().expect("uname").stdout)
+        .expect("uname -s is UTF-8");
+    let other = profiles()
+        .into_iter()
+        .find(|p| p.os != "any" && p.os != host.trim())
+        .expect("a profile for an OS other than this host's");
+    let out = run_gate_profile(&other.name, "wrong-host", "FAKE-CARGO-RAN", 0);
+    assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains(&format!("profile '{}' requires {}, this host is", other.name, other.os)),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("FAKE-CARGO-RAN"),
+        "a wrong-host profile must be refused before cargo runs\n{}",
+        describe(&out)
+    );
+}
+
+#[test]
 fn a_failing_awk_refuses_a_verdict() {
     // A failed awk prints nothing, and "nothing" is exactly what "every binary
     // reached the hook" looks like. The exit status is what tells them apart.

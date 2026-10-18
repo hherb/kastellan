@@ -7,10 +7,11 @@
 //! validates the *target orchestration mechanics* in isolation — real
 //! Postgres + core bring-up is a heavier system test, out of scope here.
 //!
-//! Skips silently (`[SKIP]` on `--nocapture`) when the per-user service
-//! manager is unreachable, mirroring `systemd_user_smoke.rs`. The macOS
-//! half's skip is knob-routed (`KASTELLAN_PG_REQUIRE_E2E`, the `launchd`
-//! gate profile — #872); the Linux half's is still hand-written (#718).
+//! Skips with a `[SKIP]` line (`--nocapture` to see it) when the per-user
+//! service manager is unreachable. On macOS the skip is knob-routed: under a
+//! truthy `KASTELLAN_PG_REQUIRE_E2E` (the `launchd` gate profile, #872) it is
+//! a failure, and a reachable domain prints `[E2E] supervisor-backed:`. The
+//! Linux half's skip is still hand-written, like `systemd_user_smoke.rs` (#718).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -257,7 +258,6 @@ mod macos {
 
     #[test]
     fn target_round_trip_generic_bundle() {
-        // Knob-routed (#872): a failure, not a skip, under the `launchd` gate profile.
         if skip_if_no_supervisor() {
             return;
         }

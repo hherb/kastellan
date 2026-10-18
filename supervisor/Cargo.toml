@@ -26,6 +26,7 @@ libc = { workspace = true }
 # `skip_if_no_supervisor` (`KASTELLAN_PG_REQUIRE_E2E`, the `launchd` gate
 # profile — #872). A dev-only cycle (tests-common depends on this crate), the
 # same kind core already has. Not on Linux because tests-common pulls in
-# `core`, whose `ring` dep breaks the Mac → Linux cross-clippy of this crate.
+# `ring` (directly via rustls/rcgen, and through `core`), which breaks the
+# Mac → Linux cross-clippy of this crate.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 kastellan-tests-common = { path = "../tests-common" }

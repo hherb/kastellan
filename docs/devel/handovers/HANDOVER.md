@@ -48,13 +48,16 @@ Rootfs images last rebuilt 2026-09-08.
 - `supervisor/tests/launchd_agents_smoke.rs` and `target_smoke.rs`'s macOS half now skip through
   **`tests_common::skip::skip_if_no_supervisor`** (`KASTELLAN_PG_REQUIRE_E2E`, tier `supervisor-backed`)
   — a **macOS-only** dev-dependency on `kastellan-tests-common` (a dev-only cycle, like core's). ⚠️ **Not
-  on Linux on purpose:** tests-common pulls in `core`, whose `ring` breaks the Mac → Linux cross-clippy of
-  the supervisor crate [[cross-clippy-pure-rust-crates]]. The Linux smoke skips stay hand-written (#718).
+  on Linux on purpose:** tests-common pulls in `ring` (directly via rustls/rcgen, and through `core`), which
+  breaks the Mac → Linux cross-clippy of the supervisor crate [[cross-clippy-pure-rust-crates]]. The Linux smoke skips stay hand-written (#718).
 - New **`launchd` profile** (Darwin, MAX_SKIP 0, MAX_PANIC 0 — measured): `bash scripts/run-e2e-gate.sh
   launchd` → **7 passed, 6 `[E2E] supervisor-backed`, 0 `[SKIP]`**. Negative control: the pre-#872 test
   files fail it on both the `[E2E]` floor and the per-binary panic-hook check. ⚠️ Needs a GUI login
   session; from bare SSH the knob fails it (that is the point).
 - ⚠️ `cargo test -p kastellan-supervisor` on the Mac now builds `core` (via tests-common).
+- Review follow-up (same PR): `the_launchd_profile_demands_both_launchd_smoke_suites` pins the row (CI is
+  Linux-only, so it is the only CI check on it), and `a_profile_for_another_os_is_refused_with_exit_2_before_cargo_runs`
+  covers the wrong-host refusal for the first time. Both mutation-checked; gate-script tests 41 → 43.
 
 ### Earlier (2026-10-18): deploy of #855–#869, and #870 (PR [#871](https://github.com/hherb/kastellan/pull/871), merged) — what still binds
 
