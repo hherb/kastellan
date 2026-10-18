@@ -11,11 +11,13 @@
 //! guard's Drop calls `uninstall` so we never pollute
 //! `~/Library/LaunchAgents/`.
 //!
-//! The test skips silently on hosts where the GUI launchd domain is
-//! unreachable (e.g. SSH session without an active console login).
-//! Skipped runs print a `[SKIP]` line to stderr (`cargo test --
-//! --nocapture` to see them), mirroring the pattern in the Linux
-//! supervisor smoke test and `sandbox/tests/macos_smoke.rs`.
+//! Every test that touches launchd skips on hosts where the GUI launchd
+//! domain is unreachable (e.g. SSH session without an active console
+//! login), printing a `[SKIP]` line to stderr (`cargo test -- --nocapture` to see it) —
+//! **unless** `KASTELLAN_PG_REQUIRE_E2E` is truthy, in which case the
+//! skip is a failure and a reachable domain prints an
+//! `[E2E] supervisor-backed:` line. Run it as evidence with
+//! `bash scripts/run-e2e-gate.sh launchd` (#872).
 
 #![cfg(target_os = "macos")]
 
@@ -23,8 +25,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use kastellan_supervisor::launchd_agents::{probe, LaunchAgents};
+use kastellan_supervisor::launchd_agents::LaunchAgents;
 use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
+use kastellan_tests_common::skip::skip_if_no_supervisor;
 
 /// Serialize all smoke-test bodies. The launchd GUI domain and
 /// `~/Library/LaunchAgents/` are shared global resources; running
@@ -39,17 +42,6 @@ fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-}
-
-/// Skip the test when there's no usable GUI launchd domain.
-fn skip_if_no_gui_domain() -> bool {
-    match probe() {
-        Ok(()) => false,
-        Err(e) => {
-            eprintln!("\n[SKIP] launchctl gui-domain probe failed: {e}\n");
-            true
-        }
-    }
 }
 
 /// Generate a unique, easily-greppable agent label for this run.
@@ -115,7 +107,7 @@ fn wait_for_status(
 #[test]
 fn install_start_status_stop_uninstall_round_trip() {
     let _serial = serial_lock();
-    if skip_if_no_gui_domain() {
+    if skip_if_no_supervisor() {
         return;
     }
     let sup = LaunchAgents::new();
@@ -179,7 +171,7 @@ fn install_start_status_stop_uninstall_round_trip() {
 #[test]
 fn start_after_install_is_idempotent() {
     let _serial = serial_lock();
-    if skip_if_no_gui_domain() {
+    if skip_if_no_supervisor() {
         return;
     }
     let sup = LaunchAgents::new();
@@ -288,7 +280,7 @@ fn slow_exiting_spec(name: &str) -> ServiceSpec {
 #[test]
 fn start_target_right_after_stop_target_leaves_a_slow_exiting_agent_running() {
     let _serial = serial_lock();
-    if skip_if_no_gui_domain() {
+    if skip_if_no_supervisor() {
         return;
     }
     let sup = LaunchAgents::new();
@@ -327,7 +319,7 @@ fn start_target_right_after_stop_target_leaves_a_slow_exiting_agent_running() {
 #[test]
 fn stop_returns_without_waiting_for_a_slow_exiting_agent() {
     let _serial = serial_lock();
-    if skip_if_no_gui_domain() {
+    if skip_if_no_supervisor() {
         return;
     }
     let sup = LaunchAgents::new();
@@ -355,7 +347,7 @@ fn stop_returns_without_waiting_for_a_slow_exiting_agent() {
 #[test]
 fn stop_when_not_started_is_idempotent() {
     let _serial = serial_lock();
-    if skip_if_no_gui_domain() {
+    if skip_if_no_supervisor() {
         return;
     }
     let sup = LaunchAgents::new();

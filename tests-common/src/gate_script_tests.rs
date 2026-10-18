@@ -357,6 +357,33 @@ fn the_worker_report_profile_demands_every_worker_report_suite() {
     assert!(p.harness_args.contains("--nocapture"), "the profile must pass --nocapture");
 }
 
+/// The launchd smoke suites — #870's regression tests among them — are
+/// demanded by the `launchd` profile (#872).
+///
+/// CI is Linux-only, so this is the only check CI ever runs on that row. Drop
+/// `launchd_agents_smoke` from it and the run stays green on `target_smoke`'s
+/// one `[E2E]` line alone; hand-written for the same reason as worker-report's.
+#[test]
+fn the_launchd_profile_demands_both_launchd_smoke_suites() {
+    let p = profiles()
+        .into_iter()
+        .find(|p| p.name == "launchd")
+        .expect("a `launchd` profile exists (#872)");
+    for suite in ["launchd_agents_smoke", "target_smoke"] {
+        assert!(
+            p.cargo_args.split_whitespace().any(|t| t == suite),
+            "the launchd profile does not select `{suite}`"
+        );
+    }
+    assert!(
+        p.knobs.contains("KASTELLAN_PG_REQUIRE_E2E=1"),
+        "skip_if_no_supervisor answers to the PG knob; without it a dead launchd domain is a green skip"
+    );
+    assert_eq!(p.os, "Darwin", "launchd_agents_smoke is #![cfg(target_os = \"macos\")]");
+    assert_eq!(p.max_skip, "0", "under the knob a [SKIP] here can only be a bypass of it");
+    assert!(p.harness_args.contains("--nocapture"), "the profile must pass --nocapture");
+}
+
 /// Every `--test` a profile names is a real integration-test file.
 ///
 /// Cargo errors loudly on a missing target, so this is not about a false

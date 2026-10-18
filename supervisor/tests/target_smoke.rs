@@ -7,8 +7,11 @@
 //! validates the *target orchestration mechanics* in isolation — real
 //! Postgres + core bring-up is a heavier system test, out of scope here.
 //!
-//! Skips silently (`[SKIP]` on `--nocapture`) when the per-user service
-//! manager is unreachable, mirroring `systemd_user_smoke.rs`.
+//! Skips with a `[SKIP]` line (`--nocapture` to see it) when the per-user
+//! service manager is unreachable. On macOS the skip is knob-routed: under a
+//! truthy `KASTELLAN_PG_REQUIRE_E2E` (the `launchd` gate profile, #872) it is
+//! a failure, and a reachable domain prints `[E2E] supervisor-backed:`. The
+//! Linux half's skip is still hand-written, like `systemd_user_smoke.rs` (#718).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -240,7 +243,8 @@ mod linux {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use kastellan_supervisor::launchd_agents::{probe, LaunchAgents};
+    use kastellan_supervisor::launchd_agents::LaunchAgents;
+    use kastellan_tests_common::skip::skip_if_no_supervisor;
 
     struct Guard {
         sup: LaunchAgents,
@@ -254,8 +258,7 @@ mod macos {
 
     #[test]
     fn target_round_trip_generic_bundle() {
-        if let Err(e) = probe() {
-            eprintln!("\n[SKIP] launchctl probe failed: {e}\n");
+        if skip_if_no_supervisor() {
             return;
         }
         let sup = LaunchAgents::new();

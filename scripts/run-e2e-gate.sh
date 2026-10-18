@@ -174,6 +174,15 @@ done
 # from the daemon's config and then runs this profile. `--ignored` for the same
 # reason as `microvm`: the test is `#[ignore]`d so a plain sweep never talks to
 # the live service, and without the flag the profile would select nothing.
+#
+# `launchd` (#872) demands the real-launchctl smoke suites, #870's regression
+# tests among them. Darwin-only: `launchd_agents_smoke` is a whole-file
+# `#![cfg(target_os = "macos")]`. MAX_SKIP 0: every probe these suites compile
+# on macOS goes through `skip_if_no_supervisor`, which panics rather than skips
+# under the knob — so a `[SKIP]` here is a later bypass of the helper. Both
+# suites share one tier; the per-binary `[panic-hook]` check is what proves
+# each of them ran. ⚠️ Needs a GUI login session — from a bare
+# SSH session the knob fails it, which is the point.
 # ---------------------------------------------------------------------------
 PROFILES=(
   "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0"
@@ -182,6 +191,7 @@ PROFILES=(
   "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux|0"
   "worker-report|KASTELLAN_SANDBOX_REQUIRE_E2E=1|sandboxed=1|1|0|-p kastellan-core -p kastellan-tests-common --test worker_early_exit_stderr_fallback_e2e --test persistent_worker_death_stderr_fallback_e2e --test panic_hook_gate_safety_e2e --test worker_report_broken_stderr_e2e --test panic_hook_broken_stderr_e2e|--nocapture|any|0"
   "mail-live|KASTELLAN_MAIL_LIVE_REQUIRE_E2E=1|live-localmail=1|1|0|-p kastellan-core --test mail_live_shape_e2e|--nocapture --ignored|any|0"
+  "launchd|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1|1|0|-p kastellan-supervisor --test launchd_agents_smoke --test target_smoke|--nocapture|Darwin|0"
 )
 
 # ⚠️ There is deliberately NO `sandbox` profile yet, and the reason is a
