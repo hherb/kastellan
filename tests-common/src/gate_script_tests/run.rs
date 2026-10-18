@@ -131,6 +131,10 @@ pub(super) struct GateEdits<'a> {
     pub(super) tools: &'a [(&'a str, &'a str)],
     /// Extra environment for the gate script, e.g. a UTF-8 locale.
     pub(super) env: &'a [(&'a str, &'a str)],
+    /// Run from a copy even with no table edit, so the script's repo root is
+    /// the scratch dir — where `core/tests` does not exist and every suite
+    /// discovery finds nothing.
+    pub(super) relocated: bool,
 }
 
 /// The gate script's text with `profile`'s MAX_PANIC field replaced.
@@ -184,17 +188,20 @@ pub(super) fn run_gate_bytes(
     for (name, body) in edits.tools {
         write_executable(&scratch.root.join("bin").join(name), &format!("#!/bin/sh\n{body}\n"));
     }
-    // An edited table runs from a copy under `<scratch>/scripts/`. The script
-    // `cd`s to its own `..`, which is then the scratch root: harmless, since
-    // cargo is fake and the log goes under `$HOME`.
-    let script = match edits.max_panic {
-        None => script_path(),
-        Some((row, value)) => {
-            let copy = scratch.root.join("scripts/run-e2e-gate.sh");
-            std::fs::create_dir_all(copy.parent().unwrap()).expect("mkdir scripts/");
-            std::fs::write(&copy, script_with_max_panic(row, value)).expect("write the edited script");
-            copy
-        }
+    // An edited table (or a `relocated` run) runs from a copy under
+    // `<scratch>/scripts/`. The script `cd`s to its own `..`, which is then the
+    // scratch root: harmless, since cargo is fake and the log goes under `$HOME`.
+    let script = if edits.max_panic.is_none() && !edits.relocated {
+        script_path()
+    } else {
+        let text = match edits.max_panic {
+            Some((row, value)) => script_with_max_panic(row, value),
+            None => std::fs::read_to_string(script_path()).expect("read the gate script"),
+        };
+        let copy = scratch.root.join("scripts/run-e2e-gate.sh");
+        std::fs::create_dir_all(copy.parent().unwrap()).expect("mkdir scripts/");
+        std::fs::write(&copy, text).expect("write the copied script");
+        copy
     };
     let fake_cargo = scratch.root.join("bin/cargo");
     // The log is `cat` from a file rather than a heredoc, so it reaches the
