@@ -15,7 +15,7 @@ use super::container::{
     classify_inspect_exit, cli_unavailable_reason, container_preflight, image_age,
     image_missing_reason, indeterminate_age_reason, stale_image_reason,
     unreadable_inspect_reason, unverified_age_reason, ContainerImage, ImageAge, InspectExit,
-    cli_fault_reason, wedged_cli_reason, CliFault, SourceStamp, FUTURE_BUILD_SLACK_SECS,
+    cli_fault_reason, met_detail, wedged_cli_reason, CliFault, SourceStamp, FUTURE_BUILD_SLACK_SECS,
     PYTHON_EXEC_BUILD_SCRIPT,
 };
 
@@ -717,4 +717,23 @@ fn the_wedge_reason_is_one_line_and_keeps_its_detail() {
     let reason = wedged_cli_reason("`container system status` did not answer\nsecond line");
     assert!(reason.contains("did not answer"), "{reason}");
     assert!(!reason.contains('\n'), "must be one line: {reason}");
+}
+
+/// The `[E2E]` line names the image AND when it was built (#722). #684 was a
+/// 69-day-stale image behind eight green e2es; a count cannot show that, and a
+/// printed build stamp can.
+#[test]
+fn the_met_detail_names_the_image_and_its_build_date() {
+    let detail = met_detail(PY_IMAGE, Some(IMAGE_BUILT));
+    assert!(detail.contains(PY_IMAGE), "{detail}");
+    assert!(detail.contains("2026-06-26 03:54 UTC"), "{detail}");
+    assert!(!detail.contains('\n'), "an [E2E] detail must be one line: {detail}");
+}
+
+/// No build time is said as such, never rendered as a date it is not.
+#[test]
+fn the_met_detail_says_when_the_build_time_is_unknown() {
+    let detail = met_detail(PY_IMAGE, None);
+    assert!(detail.contains(PY_IMAGE), "{detail}");
+    assert!(detail.contains("build time unknown"), "{detail}");
 }

@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use super::{gate_script, script_path};
 
 /// Run a snippet of bash with the gate script's `count_test_targets` and
-/// `firecracker_suites` functions defined, from the repository root.
+/// suite-discovery functions defined, from the repository root.
 ///
 /// Extracted by name rather than by sourcing the script, which would run its
 /// preflight and profile validation.
 fn run_with_script_functions(snippet: &str) -> String {
     let src = gate_script();
     let mut defs = String::new();
-    for name in ["count_test_targets", "firecracker_suites"] {
+    for name in ["count_test_targets", "firecracker_suites", "container_suites"] {
         let start = src
             .find(&format!("\n{name}() {{\n"))
             .unwrap_or_else(|| panic!("the gate script defines no `{name}()`"));
@@ -53,15 +53,56 @@ fn the_target_count_counts_targets_not_lines() {
 /// so the Mac, which the profile itself refuses, checks it too.
 #[test]
 fn the_real_firecracker_discovery_clears_its_own_floor() {
+    assert_discovery_clears_its_floor("firecracker_suites", "MIN_FIRECRACKER_SUITES");
+}
+
+/// The same positive control for the container tier's discovery (#722).
+#[test]
+fn the_real_container_discovery_clears_its_own_floor() {
+    assert_discovery_clears_its_floor("container_suites", "MIN_CONTAINER_SUITES");
+}
+
+/// The two discoveries partition the `core` suites that use the shared
+/// micro-VM module: none is selected by both, so neither profile runs a suite
+/// its host compiles to an empty binary, and none is selected by neither.
+///
+/// The container half was first a grep for `skip_if_no_container`, which also
+/// selected `gliner_relex_e2e`'s file-local helper of that name (#722).
+#[test]
+fn the_firecracker_and_container_discoveries_partition_the_microvm_suites() {
+    let names = |snippet: &str| -> Vec<String> {
+        run_with_script_functions(snippet)
+            .split_whitespace()
+            .filter(|t| *t != "--test")
+            .map(str::to_string)
+            .collect()
+    };
+    let (fc, ct) = (names("firecracker_suites"), names("container_suites"));
+    assert!(!ct.is_empty() && !fc.is_empty(), "a discovery found nothing");
+    for suite in &ct {
+        assert!(!fc.contains(suite), "`{suite}` is selected by both discoveries");
+    }
+    let all = names(
+        "for f in core/tests/*.rs; do if grep -q 'kastellan_tests_common::microvm' \"$f\"; \
+         then printf -- '--test %s ' \"$(basename \"$f\" .rs)\"; fi; done",
+    );
+    assert_eq!(
+        fc.len() + ct.len(),
+        all.len(),
+        "the discoveries do not partition the micro-VM suites: {fc:?} + {ct:?} vs {all:?}"
+    );
+}
+
+fn assert_discovery_clears_its_floor(discover: &str, floor_var: &str) {
     let floor: usize = gate_script()
         .lines()
-        .find_map(|l| l.strip_prefix("MIN_FIRECRACKER_SUITES="))
-        .expect("the script sets MIN_FIRECRACKER_SUITES")
+        .find_map(|l| l.strip_prefix(&format!("{floor_var}=")))
+        .unwrap_or_else(|| panic!("the script sets {floor_var}"))
         .trim()
         .parse()
-        .expect("MIN_FIRECRACKER_SUITES is a number");
-    let n: usize = run_with_script_functions("count_test_targets \"$(firecracker_suites)\"")
+        .unwrap_or_else(|_| panic!("{floor_var} is a number"));
+    let n: usize = run_with_script_functions(&format!("count_test_targets \"$({discover})\""))
         .parse()
         .expect("count_test_targets prints a number");
-    assert!(n >= floor, "discovery found {n} micro-VM suites, the script's floor is {floor}");
+    assert!(n >= floor, "`{discover}` found {n} suites, the script's floor is {floor}");
 }

@@ -183,6 +183,15 @@ done
 # suites share one tier; the per-binary `[panic-hook]` check is what proves
 # each of them ran. ⚠️ Needs a GUI login session — from a bare
 # SSH session the knob fails it, which is the point.
+#
+# `container` (#722) demands the macOS Apple-`container` micro-VM suites — the
+# tier of #684, a 69-day-stale image behind eight green e2es. Darwin-only, for
+# the reason `microvm` is Linux-only. It shares the `micro-VM` knob and tier:
+# the two backends never compile on the same host, so one knob cannot turn an
+# honest skip on one into a failure on the other. Each `[E2E]` line names the
+# image and its build date — the fact #684 hid. MAX_SKIP 0: the suites' one
+# precondition, `skip_if_no_container`, panics rather than skips under the knob.
+# `@CONTAINER_SUITES` is resolved by grep, like `@FIRECRACKER_SUITES`.
 # ---------------------------------------------------------------------------
 PROFILES=(
   "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0"
@@ -192,6 +201,7 @@ PROFILES=(
   "worker-report|KASTELLAN_SANDBOX_REQUIRE_E2E=1|sandboxed=1|1|0|-p kastellan-core -p kastellan-tests-common --test worker_early_exit_stderr_fallback_e2e --test persistent_worker_death_stderr_fallback_e2e --test panic_hook_gate_safety_e2e --test worker_report_broken_stderr_e2e --test panic_hook_broken_stderr_e2e|--nocapture|any|0"
   "mail-live|KASTELLAN_MAIL_LIVE_REQUIRE_E2E=1|live-localmail=1|1|0|-p kastellan-core --test mail_live_shape_e2e|--nocapture --ignored|any|0"
   "launchd|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1|1|0|-p kastellan-supervisor --test launchd_agents_smoke --test target_smoke|--nocapture|Darwin|0"
+  "container|KASTELLAN_MICROVM_REQUIRE_E2E=1|micro-VM=1|1|0|-p kastellan-core @CONTAINER_SUITES|--nocapture|Darwin|0"
 )
 
 # ⚠️ There is deliberately NO `sandbox` profile yet, and the reason is a
@@ -214,13 +224,6 @@ PROFILES=(
 # `KASTELLAN_SANDBOX_REQUIRE_E2E` itself IS live — the `guard-tier` profile
 # sets it, and `skip_if_sandbox_unavailable` in `tests-common` honours it for
 # every suite that goes through that helper.
-#
-# ⚠️ There is also no `container` profile, for the macOS Apple-`container`
-# tier — the tier of #684, one of the four false greens this contract cites.
-# Its three suites gate through `skip_if_no_container` / `skip_if_image_missing`,
-# which have no knob and no `announce`, so a profile would be red on every Mac
-# for the same reason the `sandbox` one would. Tracked separately; adding it is
-# the acceptance test for whichever PR gives those two helpers a knob.
 
 # Every LINUX integration suite that gates on the shared micro-VM preflight, by
 # reading the sources rather than by remembering them.
@@ -236,6 +239,23 @@ firecracker_suites() {
   for f in core/tests/*.rs; do
     grep -q 'kastellan_tests_common::microvm' "$f" || continue
     grep -q '^#!\[cfg(target_os = "macos")\]' "$f" && continue
+    names+="--test $(basename "$f" .rs) "
+  done
+  printf '%s' "$names"
+}
+
+# Every macOS integration suite that gates on the Apple-`container` preflight
+# (#722): the exact complement of `firecracker_suites` — the same module, the
+# other whole-file cfg.
+#
+# ⚠️ Not a grep for `skip_if_no_container`: `gliner_relex_e2e` defines a
+# FILE-LOCAL helper of that name (a hand-written `[SKIP]`, #718) that answers
+# to no knob, and the first version of this rule selected it.
+container_suites() {
+  local f names=""
+  for f in core/tests/*.rs; do
+    grep -q 'kastellan_tests_common::microvm' "$f" || continue
+    grep -q '^#!\[cfg(target_os = "macos")\]' "$f" || continue
     names+="--test $(basename "$f" .rs) "
   done
   printf '%s' "$names"
@@ -265,6 +285,8 @@ count_test_targets() {
 # 93% did not run — a guard sharing its census's blind spot, one step milder.
 # Raise this deliberately when suites are added; a drop means the rule broke.
 MIN_FIRECRACKER_SUITES=12
+# The same floor for `container_suites` (3 suites when #722 added it).
+MIN_CONTAINER_SUITES=3
 
 # ---------------------------------------------------------------------------
 # Profile hygiene, enforced rather than asserted in a comment.
@@ -378,17 +400,23 @@ if [ "$os" != "any" ] && [ "$os" != "$HOST_OS" ]; then
   exit 2
 fi
 
-if [[ "$cargo_args" == *"@FIRECRACKER_SUITES"* ]]; then
-  resolved="$(firecracker_suites)"
+# Replace a `@<NAME>_SUITES` token in cargo_args with what its discovery
+# function finds, refusing a discovery below its floor.
+expand_suites() {
+  local token="$1" discover="$2" floor="$3" resolved discovered
+  [[ "$cargo_args" == *"$token"* ]] || return 0
+  resolved="$("$discover")"
   discovered="$(count_test_targets "$resolved")"
-  if [ "$discovered" -lt "$MIN_FIRECRACKER_SUITES" ]; then
-    echo "run-e2e-gate.sh: discovered $discovered micro-VM suites, floor is $MIN_FIRECRACKER_SUITES." >&2
+  if [ "$discovered" -lt "$floor" ]; then
+    echo "run-e2e-gate.sh: $discover discovered $discovered suites, floor is $floor." >&2
     echo "  Either the grep rule is stale, this is not the workspace root, or suites" >&2
     echo "  were deleted. Refusing to report a gate over a tier it mostly did not select." >&2
     exit 2
   fi
-  cargo_args="${cargo_args/@FIRECRACKER_SUITES/$resolved}"
-fi
+  cargo_args="${cargo_args/$token/$resolved}"
+}
+expand_suites @FIRECRACKER_SUITES firecracker_suites "$MIN_FIRECRACKER_SUITES"
+expand_suites @CONTAINER_SUITES container_suites "$MIN_CONTAINER_SUITES"
 
 # ---------------------------------------------------------------------------
 # The log lives under $HOME, WHOLE.

@@ -508,6 +508,16 @@ pub fn indeterminate_age_reason(reference: &str, detail: &str) -> String {
     )
 }
 
+/// The detail of the `[E2E]` line a met container preflight emits (#722).
+///
+/// Names the image **and its build time**: #684 was a 69-day-stale image
+/// behind eight green e2es, which an `[E2E]` count cannot show and a printed
+/// build stamp can. Pure, so both hosts test it; the macOS adapter only calls it.
+pub fn met_detail(reference: &str, built_unix: Option<i64>) -> String {
+    let built = built_unix.map_or_else(|| "build time unknown".to_string(), format_unix_date);
+    format!("container preflight met for {reference} (image built {built})")
+}
+
 /// This host's wall clock, seconds since the Unix epoch.
 ///
 /// The single impure input to the age rule, injected at the one call site so

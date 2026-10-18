@@ -385,6 +385,31 @@ fn the_launchd_profile_demands_both_launchd_smoke_suites() {
     assert!(p.harness_args.contains("--nocapture"), "the profile must pass --nocapture");
 }
 
+/// The macOS Apple-`container` tier is demanded by the `container` profile
+/// (#722) — #684's tier, one of the four false greens the REQUIRE contract
+/// cites, and until then the one tier with no profile.
+///
+/// CI is Linux-only, so this is the only check CI runs on that row.
+#[test]
+fn the_container_profile_demands_the_container_suites() {
+    let p = profiles()
+        .into_iter()
+        .find(|p| p.name == "container")
+        .expect("a `container` profile exists (#722)");
+    assert!(
+        p.cargo_args.split_whitespace().any(|t| t == "@CONTAINER_SUITES"),
+        "the container profile must resolve its suites by grep, not by a roster"
+    );
+    assert!(
+        p.knobs.contains("KASTELLAN_MICROVM_REQUIRE_E2E=1"),
+        "skip_if_no_container answers to the micro-VM knob; without it a stale image is a green skip"
+    );
+    assert!(p.e2e_floors.contains("micro-VM="), "the container announce is a micro-VM tier line");
+    assert_eq!(p.os, "Darwin", "the container suites are #![cfg(target_os = \"macos\")]");
+    assert_eq!(p.max_skip, "0", "under the knob a [SKIP] here can only be a bypass of it");
+    assert!(p.harness_args.contains("--nocapture"), "the profile must pass --nocapture");
+}
+
 /// Every `--test` a profile names is a real integration-test file.
 ///
 /// Cargo errors loudly on a missing target, so this is not about a false

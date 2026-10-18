@@ -1,6 +1,6 @@
 use super::{
     classify_inspect_exit, container_preflight, find_image, image_age, parse_image_list,
-    ContainerImage, InspectExit, CliFault,
+    met_detail, ContainerImage, InspectExit, CliFault,
 };
 
 /// Look one image up: `Ok(Some)` present, `Ok(None)` absent, `Err` a
@@ -76,7 +76,10 @@ pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, CliFault
 /// Under [`crate::gliner_e2e::UnmetAction::Fail`], naming the knob and the
 /// reason.
 pub fn skip_if_no_container(reference: &str) -> bool {
-    container_preflight(
+    // The inspect step is the only one that sees the image, so it leaves the
+    // build time here for the `[E2E]` line below (#722).
+    let built_unix = std::cell::Cell::new(None);
+    let skipping = container_preflight(
         reference,
         // `probe_fault`, not `probe`: the flattened `SandboxError` could
         // only be re-classified by matching on its prose, which is what
@@ -93,12 +96,26 @@ pub fn skip_if_no_container(reference: &str) -> bool {
                 },
             )
         },
-        || inspect_image(reference),
+        || {
+            let inspected = inspect_image(reference);
+            if let Ok(Some(image)) = &inspected {
+                built_unix.set(image.created_unix);
+            }
+            inspected
+        },
         |image, built| {
             let (stamps, unstat) = super::stamps_for(built);
             image_age(image.created_unix, &stamps, &unstat, super::now_unix())
         },
         super::super::report_unmet_microvm,
         super::super::report_caveat_microvm,
-    )
+    );
+    if !skipping {
+        // The tier's positive control, outside the pure `container_preflight`
+        // for the reason `skip_if_no_microvm` gives for its own: a "nothing
+        // was unmet" callback threaded through it would buy nothing this line
+        // does not. Printed only under a truthy knob.
+        super::super::announce_microvm(&met_detail(reference, built_unix.get()));
+    }
+    skipping
 }

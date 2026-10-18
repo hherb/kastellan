@@ -85,7 +85,7 @@ pub use images::{
 pub use container::{inspect_image, skip_if_no_container};
 pub use container::{
     built_image, classify_inspect_exit, cli_unavailable_reason, container_preflight, find_image,
-    cli_fault_reason, image_age, image_missing_reason, indeterminate_age_reason,
+    cli_fault_reason, image_age, image_missing_reason, indeterminate_age_reason, met_detail,
     normalize_reference, now_unix, parse_image_list, source_stamps, stale_image_reason, stamps_for,
     unreadable_inspect_reason, wedged_cli_reason,
     unverified_age_reason, BuiltImage, CliFault, ContainerImage, ImageAge, InspectExit,
