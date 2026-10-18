@@ -724,9 +724,18 @@ fn the_wedge_reason_is_one_line_and_keeps_its_detail() {
 /// printed build stamp can.
 #[test]
 fn the_met_detail_names_the_image_and_its_build_date() {
-    let detail = met_detail(PY_IMAGE, Some(IMAGE_BUILT));
-    assert!(detail.contains(PY_IMAGE), "{detail}");
-    assert!(detail.contains("2026-06-26 03:54 UTC"), "{detail}");
+    assert_eq!(
+        met_detail(PY_IMAGE, Some(IMAGE_BUILT)),
+        "container preflight met for kastellan/python-exec:dev (image built 2026-06-26 03:54 UTC)"
+    );
+}
+
+/// An image this repo does not build was never age-checked, so its date must
+/// not read as a freshness verdict (#722 review).
+#[test]
+fn the_met_detail_of_an_unbuilt_image_says_no_freshness_rule_applies() {
+    let detail = met_detail("alpine:3.20", Some(IMAGE_BUILT));
+    assert!(detail.contains("no freshness rule: not built here"), "{detail}");
     assert!(!detail.contains('\n'), "an [E2E] detail must be one line: {detail}");
 }
 

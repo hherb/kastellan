@@ -786,7 +786,7 @@ pub use linux::{firecracker_backend, firecracker_image_for, skip_if_no_microvm};
 mod preflight_tests;
 
 #[cfg(test)]
-mod call_site_tests;
+pub(crate) mod call_site_tests;
 #[cfg(test)]
 mod guard_tests;
 #[cfg(test)]

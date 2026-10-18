@@ -387,9 +387,10 @@ fn the_launchd_profile_demands_both_launchd_smoke_suites() {
 
 /// The macOS Apple-`container` tier is demanded by the `container` profile
 /// (#722) — #684's tier, one of the four false greens the REQUIRE contract
-/// cites, and until then the one tier with no profile.
+/// cites, and until then the only one of the four with no profile.
 ///
-/// CI is Linux-only, so this is the only check CI runs on that row.
+/// CI is Linux-only and never runs this profile, so these assertions, with the
+/// discovery tests in `discovery.rs`, are all CI holds the row to.
 #[test]
 fn the_container_profile_demands_the_container_suites() {
     let p = profiles()
@@ -414,8 +415,8 @@ fn the_container_profile_demands_the_container_suites() {
 ///
 /// Cargo errors loudly on a missing target, so this is not about a false
 /// green; it is about finding the typo in CI rather than on the one host that
-/// can run the profile. `@FIRECRACKER_SUITES` is resolved by the script at run
-/// time and skipped here.
+/// can run the profile. `@FIRECRACKER_SUITES` and `@CONTAINER_SUITES` are
+/// resolved by the script at run time and skipped here.
 #[test]
 fn every_test_target_a_profile_names_exists() {
     let root = script_path().parent().and_then(|p| p.parent()).map(PathBuf::from).unwrap();
@@ -469,7 +470,8 @@ fn count_ignored_tests(src: &str) -> (usize, usize) {
 /// someone runs it on a host with the fixture (the floors), never in CI. The
 /// Firecracker tier hid exactly that way; `mail-live` (#763) is the other
 /// all-ignored profile. `@FIRECRACKER_SUITES` is resolved at run time, and
-/// that profile's `--ignored` is pinned by its own floors.
+/// that profile's `--ignored` is pinned by its own floors; `@CONTAINER_SUITES`
+/// too, and its suites are not `#[ignore]`d, so it needs no `--ignored`.
 #[test]
 fn a_profile_of_only_ignored_tests_passes_ignored() {
     let root = script_path().parent().and_then(|p| p.parent()).map(PathBuf::from).unwrap();

@@ -1,7 +1,9 @@
 //! The gate script's suite discovery and target count, run as real bash.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use super::run::{describe, run_gate_with, GateEdits};
 use super::{gate_script, script_path};
 
 /// Run a snippet of bash with the gate script's `count_test_targets` and
@@ -62,15 +64,19 @@ fn the_real_container_discovery_clears_its_own_floor() {
     assert_discovery_clears_its_floor("container_suites", "MIN_CONTAINER_SUITES");
 }
 
-/// The two discoveries partition the `core` suites that use the shared
-/// micro-VM module: none is selected by both, so neither profile runs a suite
-/// its host compiles to an empty binary, and none is selected by neither.
+/// The two discoveries partition the `core` suites that gate on the shared
+/// micro-VM preflight: none is selected by both, so neither profile runs a
+/// suite its host compiles to an empty binary, and none is selected by neither.
 ///
-/// The container half was first a grep for `skip_if_no_container`, which also
-/// selected `gliner_relex_e2e`'s file-local helper of that name (#722).
+/// "Every such suite" comes from `microvm_suites`, NOT from the script's own
+/// grep: that census parses imports (`gates_on_shared_preflight`), so a suite
+/// the grep misses — a brace-grouped `use kastellan_tests_common::{microvm::…}`
+/// — fails here instead of dropping out of both profiles. The container half
+/// was first a grep for `skip_if_no_container`, which also selected
+/// `gliner_relex_e2e`'s file-local helper of that name (#722).
 #[test]
 fn the_firecracker_and_container_discoveries_partition_the_microvm_suites() {
-    let names = |snippet: &str| -> Vec<String> {
+    let names = |snippet: &str| -> BTreeSet<String> {
         run_with_script_functions(snippet)
             .split_whitespace()
             .filter(|t| *t != "--test")
@@ -79,18 +85,45 @@ fn the_firecracker_and_container_discoveries_partition_the_microvm_suites() {
     };
     let (fc, ct) = (names("firecracker_suites"), names("container_suites"));
     assert!(!ct.is_empty() && !fc.is_empty(), "a discovery found nothing");
-    for suite in &ct {
-        assert!(!fc.contains(suite), "`{suite}` is selected by both discoveries");
+    let both: Vec<_> = fc.intersection(&ct).collect();
+    assert!(both.is_empty(), "selected by both discoveries: {both:?}");
+
+    let census = crate::microvm::call_site_tests::microvm_suites();
+    let stem = |p: &std::path::Path| p.file_stem().unwrap().to_string_lossy().into_owned();
+    let all: BTreeSet<String> = census.iter().map(|(p, _)| stem(p)).collect();
+    let selected: BTreeSet<String> = fc.union(&ct).cloned().collect();
+    assert_eq!(selected, all, "the discoveries do not cover exactly the micro-VM suites");
+
+    // The cfg half, cross-checked loosely: a macOS-only suite whose cfg is
+    // spelled otherwise (`all(target_os = "macos", …)`) must not fall to the
+    // Linux profile, where it would compile empty.
+    let mac_only: BTreeSet<String> = census
+        .iter()
+        .filter(|(_, src)| src.contains("target_os = \"macos\"") && !src.contains("target_os = \"linux\""))
+        .map(|(p, _)| stem(p))
+        .collect();
+    assert_eq!(ct, mac_only, "container_suites is not the macOS-only micro-VM suites");
+}
+
+/// The script REFUSES a discovery below its floor (#722 review).
+///
+/// The floor tests above prove the real discovery clears the floor, not that
+/// the script acts on a miss: deleting the `if` in `expand_suites`, flipping
+/// its `-lt`, or misspelling a token all passed them. Run from a copy whose
+/// repo root has no `core/tests`, behind a fake `uname` so either host reaches
+/// the check for either profile.
+#[test]
+fn a_discovery_below_its_floor_is_refused() {
+    for (profile, os, refusal) in [
+        ("container", "Darwin", "container_suites discovered 0 suites, floor is 3."),
+        ("microvm", "Linux", "firecracker_suites discovered 0 suites, floor is 12."),
+    ] {
+        let uname = format!("echo {os}");
+        let edits = GateEdits { tools: &[("uname", &uname)], relocated: true, ..Default::default() };
+        let out = run_gate_with(profile, &format!("floor-{profile}"), "", 0, &edits);
+        assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
+        assert!(String::from_utf8_lossy(&out.stderr).contains(refusal), "{}", describe(&out));
     }
-    let all = names(
-        "for f in core/tests/*.rs; do if grep -q 'kastellan_tests_common::microvm' \"$f\"; \
-         then printf -- '--test %s ' \"$(basename \"$f\" .rs)\"; fi; done",
-    );
-    assert_eq!(
-        fc.len() + ct.len(),
-        all.len(),
-        "the discoveries do not partition the micro-VM suites: {fc:?} + {ct:?} vs {all:?}"
-    );
 }
 
 fn assert_discovery_clears_its_floor(discover: &str, floor_var: &str) {

@@ -125,7 +125,9 @@ done
 # `skip_if_sandbox_unavailable`, and the other four suites' parents read no knob.
 # `mail-live` is 0: its one precondition, `live_localmail::credentials_or_skip`,
 # is knob-routed, and `scripts/mail/live-shape-gate.sh` refuses to start
-# without the credentials. The rest stay `any` while #718's 92 hand-written `[SKIP]` sites exist.
+# without the credentials. `launchd` and `container` are 0 for the reasons in
+# their own paragraphs below. `pg`, `gliner` and `microvm` stay `any` while
+# #718's 92 hand-written `[SKIP]` sites exist.
 #
 # ⚠️ Harness args are per profile because the Firecracker suites are `#[ignore]`:
 # WITHOUT `--ignored` the whole tier reports green having booted no VM, every
@@ -189,8 +191,10 @@ done
 # the reason `microvm` is Linux-only. It shares the `micro-VM` knob and tier:
 # the two backends never compile on the same host, so one knob cannot turn an
 # honest skip on one into a failure on the other. Each `[E2E]` line names the
-# image and its build date — the fact #684 hid. MAX_SKIP 0: the suites' one
-# precondition, `skip_if_no_container`, panics rather than skips under the knob.
+# image and its build date — the fact #684 hid (for `alpine:3.20`, which this
+# repo does not build, the line says no freshness rule applies). MAX_SKIP 0:
+# the suites' one precondition, `skip_if_no_container`, panics rather than
+# skips under the knob.
 # `@CONTAINER_SUITES` is resolved by grep, like `@FIRECRACKER_SUITES`.
 # ---------------------------------------------------------------------------
 PROFILES=(
@@ -251,6 +255,11 @@ firecracker_suites() {
 # ⚠️ Not a grep for `skip_if_no_container`: `gliner_relex_e2e` defines a
 # FILE-LOCAL helper of that name (a hand-written `[SKIP]`, #718) that answers
 # to no knob, and the first version of this rule selected it.
+#
+# ⚠️ Both discoveries key on the flat-path `kastellan_tests_common::microvm`,
+# which a brace-grouped import does not contain. `gate_script_tests` checks
+# them against the import-parsing census (`microvm_suites`), so such a suite
+# fails CI rather than dropping out of both profiles.
 container_suites() {
   local f names=""
   for f in core/tests/*.rs; do

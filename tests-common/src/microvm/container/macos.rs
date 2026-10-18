@@ -71,13 +71,18 @@ pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, CliFault
 /// "image not present" (#684) and none of which checked staleness at all
 /// (#687).
 ///
+/// On a met preflight, and only under a truthy knob, prints
+/// `[E2E] micro-VM: container preflight met for <image> (image built <date>)`
+/// — the `container` gate profile's positive control (#722).
+///
 /// # Panics
 ///
 /// Under [`crate::gliner_e2e::UnmetAction::Fail`], naming the knob and the
 /// reason.
 pub fn skip_if_no_container(reference: &str) -> bool {
-    // The inspect step is the only one that sees the image, so it leaves the
-    // build time here for the `[E2E]` line below (#722).
+    // Captured in `inspect`, not `age`: `age` never runs for an image this
+    // repo does not build, and `container_preflight` returns only a bool. The
+    // build time is kept for the `[E2E]` line below (#722).
     let built_unix = std::cell::Cell::new(None);
     let skipping = container_preflight(
         reference,

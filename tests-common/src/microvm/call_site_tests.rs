@@ -88,7 +88,7 @@ const KNOWN_MICROVM_SUITES: [&str; 13] = [
 ///
 /// Returns `(path, source)` pairs so a failure can name the file and the
 /// caller does not read twice.
-fn microvm_suites() -> Vec<(PathBuf, String)> {
+pub(crate) fn microvm_suites() -> Vec<(PathBuf, String)> {
     let dir = repo_root().join("core").join("tests");
     let entries = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));

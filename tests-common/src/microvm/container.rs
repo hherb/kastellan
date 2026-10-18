@@ -513,9 +513,13 @@ pub fn indeterminate_age_reason(reference: &str, detail: &str) -> String {
 /// Names the image **and its build time**: #684 was a 69-day-stale image
 /// behind eight green e2es, which an `[E2E]` count cannot show and a printed
 /// build stamp can. Pure, so both hosts test it; the macOS adapter only calls it.
+///
+/// For an image this repo does not build (`alpine:3.20`) the date was never
+/// age-checked, so the line says so rather than imply a freshness verdict.
 pub fn met_detail(reference: &str, built_unix: Option<i64>) -> String {
     let built = built_unix.map_or_else(|| "build time unknown".to_string(), format_unix_date);
-    format!("container preflight met for {reference} (image built {built})")
+    let rule = if built_image(reference).is_some() { "" } else { "; no freshness rule: not built here" };
+    format!("container preflight met for {reference} (image built {built}{rule})")
 }
 
 /// This host's wall clock, seconds since the Unix epoch.
