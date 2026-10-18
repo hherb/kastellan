@@ -26,7 +26,7 @@ use crate::ServiceSpec;
 /// 10 s matches the systemd backend's `TimeoutStopSec` so behaviour is
 /// uniform across OSes; long enough for a graceful exit, short enough
 /// that test teardown does not hang on a misbehaving inner process.
-const DEFAULT_EXIT_TIMEOUT_SEC: u32 = 10;
+pub(super) const DEFAULT_EXIT_TIMEOUT_SEC: u32 = 10;
 
 /// Build the XML body of a `<name>.plist` LaunchAgent file.
 ///

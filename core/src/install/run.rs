@@ -364,7 +364,9 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
     // member is already active, so a re-install/upgrade would keep running the
     // OLD binaries/env. Stopping first guarantees the new artifacts take effect.
     // On a fresh install nothing is running, so the stop is a harmless no-op.
-    let _ = sup.stop_target(&specs.target);
+    // A failed stop is fatal: starting anyway would skip whatever is still
+    // loaded and leave it unloaded once it exits (#870).
+    sup.stop_target(&specs.target).map_err(|e| format!("stop kastellan.target before restart: {e}"))?;
     sup.start_target(&specs.target).map_err(|e| format!("start kastellan.target: {e}"))?;
     verify_running(sup.as_ref(), &layout)?;
     eprintln!("kastellan.target is up. Inspect: {INSPECT_LOGS_HINT}");

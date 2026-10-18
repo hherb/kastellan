@@ -54,13 +54,19 @@ Rootfs images last rebuilt 2026-09-08.
   `start_target`; `launchctl bootout` can return **before** launchd has removed a not-yet-exited agent, and
   `LaunchAgents::start` skips `bootstrap` for an agent still in the domain — so Postgres (stopped last,
   started first, ms apart) was left unloaded and core restart-looped. Fix: **`LaunchAgents::stop_target`**
-  boots each member out and polls `launchctl print` until it is gone (≤ 30 s, an error past that) before
-  the next (`launchd_agents/unload_wait.rs`, pure poll loop). ⚠️ **The wait must NOT go in `stop`:** the
-  first version did, and a Mac sweep failed **152** tests — the PG harness stops its cluster while
-  holding pool connections, Postgres's SIGTERM shutdown waits for every client, launchd SIGKILLs at 10 s,
-  and each killed postmaster leaks a SysV segment until `kern.sysv.shmmni` (32) is full and every `initdb`
-  fails [[mac-sysv-shm-exhaustion-from-killed-postgres]]. Linux is unaffected (`systemctl` stop is
-  synchronous).
+  boots each member out and polls `launchctl print` until it is gone (30 s of sleep, an error past that)
+  before the next (`launchd_agents/unload_wait.rs`, pure loops). Review fixes: only launchd's "could not
+  find service" counts as gone — a `print` timeout (capped via `run_launchctl`) or any other error fails
+  the wait; and **`run_install` now propagates a `stop_target` error** (it was `let _`, so a timeout would
+  have re-run the race and still printed "is up" — `verify_running` passes on a *dying* Postgres). The
+  smoke test asserts a **new PID**, not `Active` after a sleep (no timing margin); a second pins that
+  `stop` returns in < 1 s. ⚠️ **The wait must NOT go in `stop`:** the first version did, and a Mac sweep
+  failed **154** tests — PG tests stop their cluster through its `ServiceGuard` while their own pools may
+  still be connected, Postgres's SIGTERM shutdown waits for every client, launchd SIGKILLs at 10 s, and
+  each killed postmaster leaks a SysV segment until `kern.sysv.shmmni` (32) is full and every `initdb`
+  fails [[mac-sysv-shm-exhaustion-from-killed-postgres]]. Linux has neither problem: `systemctl stop`
+  blocks and a start during deactivation is queued, not skipped (the race); the shm leak needs launchd's
+  SIGKILL plus the Mac's tiny `shmmni`.
 
 ### Previous (2026-10-17): #867, #862, #860 — the shutdown residue (PR #869, merged + deployed) — what still binds
 

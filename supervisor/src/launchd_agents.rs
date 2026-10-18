@@ -334,17 +334,24 @@ impl Supervisor for LaunchAgents {
     /// Postgres was left unloaded. Waiting member by member also lets core
     /// drop its connections before Postgres is told to stop.
     ///
-    /// The wait lives here, not in `stop`: a caller of `stop` may itself
-    /// hold connections to the agent (the PG test harness does), and
+    /// Fail-fast like the trait default: if a member does not leave the
+    /// domain in time, the members before it are not stopped, and the
+    /// caller must not go on to `start_target` as if they were.
+    ///
+    /// The wait lives here, not in `stop`: a caller of `stop` may still
+    /// hold connections to the agent (PG tests stop a `PgCluster` through
+    /// its `ServiceGuard` while their own pools may be connected), and
     /// Postgres's SIGTERM shutdown waits for every client — the caller
     /// would block it until launchd's SIGKILL, which leaks the cluster's
-    /// SysV shared-memory segment.
+    /// SysV shared-memory segment (for good, once the test deletes the
+    /// data dir that would have let a later postmaster reclaim it).
     fn stop_target(&self, target: &crate::TargetSpec) -> Result<(), SupervisorError> {
-        for name in target.members.iter().rev() {
-            self.stop(name)?;
-            unload_wait::wait_until_unloaded(&format!("{}/{name}", user_domain_target()?))?;
-        }
-        Ok(())
+        let domain = user_domain_target()?;
+        unload_wait::stop_each_in_reverse(
+            &target.members,
+            |name| self.stop(name),
+            |name| unload_wait::wait_until_unloaded(&format!("{domain}/{name}")),
+        )
     }
 
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
