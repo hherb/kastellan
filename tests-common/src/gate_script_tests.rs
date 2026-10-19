@@ -216,7 +216,7 @@ fn every_knob_the_tree_defines_is_set_by_some_profile() {
             all_knobs.contains(knob.env()),
             "no gate profile sets {} ({}), so nothing demands that tier. Add it to a \
              profile in scripts/run-e2e-gate.sh, or say in the script why it cannot be \
-             gated yet — as the sandbox and container tiers do.",
+             gated yet — as the sandbox tier does.",
             knob.env(),
             knob.tier()
         );
@@ -400,6 +400,12 @@ fn the_container_profile_demands_the_container_suites() {
     assert!(
         p.cargo_args.split_whitespace().any(|t| t == "@CONTAINER_SUITES"),
         "the container profile must resolve its suites by grep, not by a roster"
+    );
+    // The sandbox crate's own container containment tests (#875). Named, not
+    // discovered: `container_suites` greps `core/tests` only.
+    assert!(
+        p.cargo_args.split_whitespace().any(|t| t == "macos_container_smoke"),
+        "the container profile does not select `macos_container_smoke`"
     );
     assert!(
         p.knobs.contains("KASTELLAN_MICROVM_REQUIRE_E2E=1"),

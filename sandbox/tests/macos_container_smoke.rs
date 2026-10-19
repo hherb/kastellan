@@ -8,11 +8,11 @@
 //!   - The `alpine:3.20` image already pulled
 //!     (`container image pull alpine:3.20`)
 //!
-//! Tests that can't run are printed as `[SKIP]` lines on stderr via
-//! `eprintln!`. Per project convention, green output with `[SKIP]` lines
-//! means the test was skipped, NOT that the container actually contained
-//! anything — always check `cargo test -- --nocapture` if you suspect a
-//! false green.
+//! Tests that can't run are printed as `[SKIP]` lines on stderr. Green
+//! output with `[SKIP]` lines means the test was skipped, NOT that the
+//! container contained anything — run `bash scripts/run-e2e-gate.sh
+//! container` (which sets `KASTELLAN_MICROVM_REQUIRE_E2E=1`) when a run is
+//! meant to be evidence.
 //!
 //! Parallel to `macos_smoke.rs` for the Seatbelt backend.
 //!
@@ -32,43 +32,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use kastellan_sandbox::macos_container::{MacosContainer, DEFAULT_IMAGE};
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
-/// Skip the test if Apple `container` is unavailable on this host. Prints
-/// to stderr via `eprintln!` so `cargo test -- --nocapture` shows the
-/// reason. Same pattern as [`skip_if_no_seatbelt`] in `macos_smoke.rs`.
-///
-/// ⚠️ **This is the fourth copy of a container precondition, and the only one
-/// the micro-VM source guard cannot see** — that guard's census is
-/// `core/tests`, so a helper living in `sandbox/tests` is outside it by
-/// construction [[guard-shares-the-census-blind-spot]]. It cannot be replaced
-/// by the shared `kastellan_tests_common::microvm` preflight either:
-/// `tests-common` depends on `kastellan-sandbox`, so this crate's own tests
-/// using it would be a dependency cycle. What it CAN do is stop repeating the
-/// two defects #684 removed from the other three, which is what it now does.
-///
-/// It stays a `[SKIP]` with no REQUIRE knob deliberately: `alpine:3.20` is an
-/// upstream image with no source in this tree, so there is no staleness rule
-/// to enforce and nothing for a freshness gate to say.
-fn skip_if_no_container() -> bool {
-    if let Err(e) = MacosContainer::probe() {
-        eprintln!("\n[SKIP] Apple `container` probe failed: {e}\n");
-        return true;
-    }
-    // ⚠️ `probe_image`, NOT a `container image list` substring scan. The old
-    // scan had both defects #684 retired from the `core/tests` copies: an
-    // `Err` from the spawn became "image absent" (sending the operator to a
-    // pull for a problem no pull fixes), and `starts_with("alpine")` matched
-    // any tag with that prefix, so a hand-tagged image certified the run.
-    // `probe_image` takes the tag as an argument, so there is nothing to
-    // match loosely, and it carries the CLI's own stderr in its error.
-    if let Err(e) = MacosContainer::probe_image(DEFAULT_IMAGE) {
-        eprintln!(
-            "\n[SKIP] {DEFAULT_IMAGE} unusable for the container smoke tests ({e}) — \
-             run `container image pull {DEFAULT_IMAGE}` if it is simply not pulled\n"
-        );
-        return true;
-    }
-    false
-}
+// Each test skips if Apple `container` or `alpine:3.20` is unusable on this
+// host — or panics, under a truthy `KASTELLAN_MICROVM_REQUIRE_E2E` (the
+// `container` gate profile, #875). This is the shared preflight the `core`
+// container suites use, so the CLI/service/image faults are classified in one
+// place (#684, #690) and, under the knob, the met path prints the tier's
+// `[E2E]` line. `alpine:3.20` is upstream, so it has no freshness rule; the
+// knob still turns a stopped service or a missing image into a failure, which
+// a file-local `[SKIP]` never could.
+//
+// Called directly, not through a local wrapper of the same name: the micro-VM
+// source guard (`gates_on_shared_preflight`) treats a file that DEFINES
+// `skip_if_no_container` as not gating on the shared one. Its census is
+// `core/tests` only, so nothing here is guarded — the gate's per-binary
+// `[panic-hook]` check is what refuses a revert to a knob-free helper.
+//
+// The dev-dep on `kastellan-tests-common` is a dev-only cycle (that crate
+// depends on this one); Cargo permits it, and an integration test links one
+// `kastellan_sandbox`, so no type is duplicated.
+use kastellan_tests_common::microvm::skip_if_no_container;
 
 fn strict_policy() -> SandboxPolicy {
     SandboxPolicy {
@@ -106,7 +88,7 @@ fn tempdir(prefix: &str) -> PathBuf {
 fn scaffold_compiles_and_skip_helper_runs() {
     // This test exists so we verify the scaffolding builds and the skip
     // helper executes without panicking on hosts without container.
-    let _ = skip_if_no_container();
+    let _ = skip_if_no_container(DEFAULT_IMAGE);
     let _ = strict_policy();
     let _: fn(&mut Option<std::process::ChildStdout>) -> String = read_to_string;
 }
@@ -117,7 +99,7 @@ fn scaffold_compiles_and_skip_helper_runs() {
 /// end-to-end, not just at the unit level.
 #[test]
 fn echo_runs_inside_container() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let backend = MacosContainer::new();
@@ -139,7 +121,7 @@ fn echo_runs_inside_container() {
 /// started mounting the host's home tree, this test would fire.
 #[test]
 fn host_users_dir_is_invisible_when_not_mounted() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let host_user = std::env::var("USER").ok();
@@ -174,7 +156,7 @@ fn host_users_dir_is_invisible_when_not_mounted() {
 /// flag wiring.
 #[test]
 fn fs_read_bind_mount_makes_host_file_visible_to_container() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let dir = tempdir("kastellan-container-smoke-fsread");
@@ -215,7 +197,7 @@ fn fs_read_bind_mount_makes_host_file_visible_to_container() {
 /// bwrap `--ro-bind` posture.
 #[test]
 fn fs_read_bind_mount_rejects_writes() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let dir = tempdir("kastellan-container-smoke-fsread-rw");
@@ -277,7 +259,7 @@ fn fs_read_bind_mount_rejects_writes() {
 /// must fail. Validates the strict profile's `--read-only` plumbing.
 #[test]
 fn strict_profile_makes_root_fs_readonly() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let backend = MacosContainer::new();
@@ -321,7 +303,7 @@ fn strict_profile_makes_root_fs_readonly() {
 /// refactor that drops the tmpfs flag is loud.
 #[test]
 fn strict_profile_allows_writes_to_tmp_scratch() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let backend = MacosContainer::new();
@@ -350,7 +332,7 @@ fn strict_profile_allows_writes_to_tmp_scratch() {
 /// fails loudly instead of letting the broken argv ship.
 #[test]
 fn macos_container_argv_with_init_runs_alpine_cleanly() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     let backend = MacosContainer::new();  // default image = alpine:3.20
@@ -370,17 +352,11 @@ fn macos_container_argv_with_init_runs_alpine_cleanly() {
         broker_uds: None,
         persistent_store: None,
     };
-    let mut child = match backend.spawn_under_policy(
-        &policy,
-        "/bin/sh",
-        &["-c", "echo init-ok"],
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("\n[SKIP] alpine:3.20 image likely missing: {e}\n");
-            return;
-        }
-    };
+    // The preflight already confirmed the image, so a spawn error here is a
+    // real failure, not a skip (#875).
+    let mut child = backend
+        .spawn_under_policy(&policy, "/bin/sh", &["-c", "echo init-ok"])
+        .expect("container run --init alpine:3.20 should spawn");
     let stderr = read_to_string(&mut child.stderr);
     let status = child.wait().expect("wait on container run");
     assert!(
@@ -403,7 +379,7 @@ fn macos_container_argv_with_init_runs_alpine_cleanly() {
 /// expected reference image (`alpine:3.20`) is not cached on the host.
 #[test]
 fn probe_image_returns_ok_for_cached_image_and_err_for_missing_tag() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
 
@@ -471,7 +447,7 @@ fn probe_image_returns_ok_for_cached_image_and_err_for_missing_tag() {
 /// it should not rest there silently and indefinitely.
 #[test]
 fn the_guest_kernel_still_has_no_landlock_so_the_opt_out_still_applies() {
-    if skip_if_no_container() {
+    if skip_if_no_container(DEFAULT_IMAGE) {
         return;
     }
     // Three outcomes have to stay apart, or the detector reports the one that

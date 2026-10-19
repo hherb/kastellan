@@ -73,3 +73,12 @@ doc = false
 
 [dev-dependencies]
 tempfile = "3"
+
+# macOS-only: `macos_container_smoke` skips through the shared, knob-routed
+# `kastellan_tests_common::microvm::skip_if_no_container`
+# (`KASTELLAN_MICROVM_REQUIRE_E2E`, the `container` gate profile — #875). A
+# dev-only cycle (tests-common depends on this crate), the same kind core and
+# supervisor already have. Not on Linux, so this crate's Mac → Linux
+# cross-clippy stays free of tests-common's `ring`.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+kastellan-tests-common = { path = "../tests-common" }

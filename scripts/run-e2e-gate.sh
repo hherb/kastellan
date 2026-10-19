@@ -196,6 +196,9 @@ done
 # the suites' one precondition, `skip_if_no_container`, panics rather than
 # skips under the knob.
 # `@CONTAINER_SUITES` is resolved by grep, like `@FIRECRACKER_SUITES`.
+# `macos_container_smoke` (#875) is `kastellan-sandbox`'s own containment suite,
+# routed through the same shared preflight; named, because the grep reads
+# `core/tests` only.
 # ---------------------------------------------------------------------------
 PROFILES=(
   "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0"
@@ -205,7 +208,7 @@ PROFILES=(
   "worker-report|KASTELLAN_SANDBOX_REQUIRE_E2E=1|sandboxed=1|1|0|-p kastellan-core -p kastellan-tests-common --test worker_early_exit_stderr_fallback_e2e --test persistent_worker_death_stderr_fallback_e2e --test panic_hook_gate_safety_e2e --test worker_report_broken_stderr_e2e --test panic_hook_broken_stderr_e2e|--nocapture|any|0"
   "mail-live|KASTELLAN_MAIL_LIVE_REQUIRE_E2E=1|live-localmail=1|1|0|-p kastellan-core --test mail_live_shape_e2e|--nocapture --ignored|any|0"
   "launchd|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1|1|0|-p kastellan-supervisor --test launchd_agents_smoke --test target_smoke|--nocapture|Darwin|0"
-  "container|KASTELLAN_MICROVM_REQUIRE_E2E=1|micro-VM=1|1|0|-p kastellan-core @CONTAINER_SUITES|--nocapture|Darwin|0"
+  "container|KASTELLAN_MICROVM_REQUIRE_E2E=1|micro-VM=1|1|0|-p kastellan-core -p kastellan-sandbox @CONTAINER_SUITES --test macos_container_smoke|--nocapture|Darwin|0"
 )
 
 # ⚠️ There is deliberately NO `sandbox` profile yet, and the reason is a
@@ -216,9 +219,10 @@ PROFILES=(
 #     tests passed : 147
 #     [SKIP] lines : 10
 #
-# `kastellan-sandbox`'s own integration tests do not depend on
-# `kastellan-tests-common`, so they cannot see `skip_if_sandbox_unavailable`
-# and their ten `[SKIP]`s are hand-written — bypassing `skip_line` AND every
+# `kastellan-sandbox`'s own bwrap/Seatbelt tests do not go through
+# `kastellan-tests-common` (only `macos_container_smoke` does, macOS-only,
+# since #875), so they cannot see `skip_if_sandbox_unavailable` and their
+# `[SKIP]`s are hand-written — bypassing `skip_line` AND every
 # knob. That is issue #718 (92 such sites in 47 files), and it means the
 # sandbox tier genuinely CANNOT be gated yet. Shipping a profile that is red on
 # every host would train everyone to ignore a red gate, which is the failure
