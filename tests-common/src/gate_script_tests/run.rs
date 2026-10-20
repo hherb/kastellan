@@ -130,6 +130,8 @@ pub(super) struct GateEdits<'a> {
     /// The same for MAX_IGNORED (#876): every profile but `worker-report` caps
     /// it at 0, so a copy is how a test reaches a non-zero or malformed cap.
     pub(super) max_ignored: Option<(&'a str, &'a str)>,
+    /// The same for MAX_FILTERED (#880): only `microvm` is above 0.
+    pub(super) max_filtered: Option<(&'a str, &'a str)>,
     /// Extra fake tools, `(name, sh body)`, put on `PATH` beside the fake cargo.
     pub(super) tools: &'a [(&'a str, &'a str)],
     /// Extra environment for the gate script, e.g. a UTF-8 locale.
@@ -143,6 +145,7 @@ pub(super) struct GateEdits<'a> {
 /// Zero-based positions of the capped fields in a profile row.
 const MAX_PANIC_FIELD: usize = 8;
 const MAX_IGNORED_FIELD: usize = 9;
+const MAX_FILTERED_FIELD: usize = 10;
 
 /// `text` (the gate script) with field `index` of `profile`'s row set to `value`.
 fn with_field(text: &str, profile: &str, index: usize, value: &str) -> String {
@@ -197,7 +200,7 @@ pub(super) fn run_gate_bytes(
     // An edited table (or a `relocated` run) runs from a copy under
     // `<scratch>/scripts/`. The script `cd`s to its own `..`, which is then the
     // scratch root: harmless, since cargo is fake and the log goes under `$HOME`.
-    let script = if edits.max_panic.is_none() && edits.max_ignored.is_none() && !edits.relocated {
+    let script = if edits.max_panic.is_none() && edits.max_ignored.is_none() && edits.max_filtered.is_none() && !edits.relocated {
         script_path()
     } else {
         let mut text = std::fs::read_to_string(script_path()).expect("read the gate script");
@@ -206,6 +209,9 @@ pub(super) fn run_gate_bytes(
         }
         if let Some((row, value)) = edits.max_ignored {
             text = with_field(&text, row, MAX_IGNORED_FIELD, value);
+        }
+        if let Some((row, value)) = edits.max_filtered {
+            text = with_field(&text, row, MAX_FILTERED_FIELD, value);
         }
         let copy = scratch.root.join("scripts/run-e2e-gate.sh");
         std::fs::create_dir_all(copy.parent().unwrap()).expect("mkdir scripts/");

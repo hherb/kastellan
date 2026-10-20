@@ -41,6 +41,8 @@
 #      where every anchored count above is blind to it (#755).
 #   6. libtest's `N ignored`, summed across the run's suites, is at most the
 #      profile's MAX_IGNORED (#876).
+#   7. libtest's `N filtered out`, summed the same way, is at most the
+#      profile's MAX_FILTERED (#880).
 #
 # ⚠️ **The `[E2E]` floors are per TIER, not per run, and that is load-bearing.**
 # A single total is satisfied by whichever knob happens to be chattiest: the
@@ -103,7 +105,7 @@ done
 
 # ---------------------------------------------------------------------------
 # Profiles.
-#   name | knobs | E2E floors | MIN_PASSED | MAX_SKIP | cargo args | harness args | os | MAX_PANIC | MAX_IGNORED
+#   name | knobs | E2E floors | MIN_PASSED | MAX_SKIP | cargo args | harness args | os | MAX_PANIC | MAX_IGNORED | MAX_FILTERED
 #
 # E2E floors are `tier=N[,tier=N...]`, where `tier` is the phrase the knob was
 # constructed with and the string that appears in `[E2E] <tier>: <detail>`:
@@ -174,11 +176,27 @@ done
 # ignored test, which is the direction a reader notices. Measured, per profile:
 #   * 0 almost everywhere: no suite these profiles select has an `#[ignore]`.
 #   * 0 for `microvm` and `mail-live` too, by construction: under `--ignored`
-#     libtest runs ONLY the ignored tests and counts the rest as `filtered out`.
+#     libtest runs ONLY the ignored tests and counts the rest as `filtered out`
+#     — which is why MAX_FILTERED exists.
 #   * 13 for `worker-report`: its suites' `#[ignore = "inner fixture: …"]`
 #     tests, which fail or panic on purpose and are run by their parent test in
 #     a re-exec'd child. Adding an inner fixture there means raising this cap
 #     in the same commit.
+#
+# MAX_FILTERED is a number — never `any` — and caps libtest's `N filtered out`,
+# summed across the run (#880). It is MAX_IGNORED's mirror image on the two
+# `--ignored` profiles: there, a test that LOSES its `#[ignore]` is filtered
+# out, never runs under the demanded knobs, and every floor is still met by the
+# tests that kept theirs. It also refuses an operator name filter passed after
+# the profile name, which would otherwise narrow any profile silently.
+# Measured with libtest, per profile:
+#   * 0 everywhere a profile selects whole `--test` binaries with no filter.
+#   * 4 for `microvm`: the pure plan tests in its suites that are deliberately
+#     NOT `#[ignore]`d, because a plain `cargo test` runs them —
+#     `browser_driver_firecracker_e2e` 1, `web_research_firecracker_broker_e2e`
+#     2, `web_research_search_broker_e2e` 1 (DGX, 2026-09-23 → 2026-10-19).
+#     Adding such a test to a Firecracker suite means raising this cap in the
+#     same commit.
 #
 # `worker-report` (#748) demands the suites that prove a dying worker's last
 # words reach a failing test. Only the sandbox knob: one suite needs a sandbox,
@@ -217,14 +235,14 @@ done
 # `core/tests` only.
 # ---------------------------------------------------------------------------
 PROFILES=(
-  "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0|0"
-  "pg|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1,Postgres-backed=1|1|any|-p kastellan-core -p kastellan-db --test postgres_e2e --test injection_guard_e2e --test secret_vault_e2e --test conversation_continuity_e2e --test memory_recall_layer_gate_e2e --test audit_nul_e2e --test nul_non_audit_e2e --test reply_claim_e2e --test reply_catch_up_pg_e2e|--nocapture|any|0|0"
-  "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|gliner-relex=1|1|any|-p kastellan-core --test gliner_relex_e2e|--nocapture|any|0|0"
-  "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux|0|0"
-  "worker-report|KASTELLAN_SANDBOX_REQUIRE_E2E=1|sandboxed=1|1|0|-p kastellan-core -p kastellan-tests-common --test worker_early_exit_stderr_fallback_e2e --test persistent_worker_death_stderr_fallback_e2e --test panic_hook_gate_safety_e2e --test worker_report_broken_stderr_e2e --test panic_hook_broken_stderr_e2e|--nocapture|any|0|13"
-  "mail-live|KASTELLAN_MAIL_LIVE_REQUIRE_E2E=1|live-localmail=1|1|0|-p kastellan-core --test mail_live_shape_e2e|--nocapture --ignored|any|0|0"
-  "launchd|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1|1|0|-p kastellan-supervisor --test launchd_agents_smoke --test target_smoke|--nocapture|Darwin|0|0"
-  "container|KASTELLAN_MICROVM_REQUIRE_E2E=1|micro-VM=1|1|0|-p kastellan-core -p kastellan-sandbox @CONTAINER_SUITES --test macos_container_smoke|--nocapture|Darwin|0|0"
+  "guard-tier|KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1 KASTELLAN_GUARD_REQUIRE_E2E=1|supervisor-backed=1,sandboxed=1,Postgres-backed=1,guard-tier=1|1|0|-p kastellan-core --test guard_tier_e2e|--nocapture|any|0|0|0"
+  "pg|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1,Postgres-backed=1|1|any|-p kastellan-core -p kastellan-db --test postgres_e2e --test injection_guard_e2e --test secret_vault_e2e --test conversation_continuity_e2e --test memory_recall_layer_gate_e2e --test audit_nul_e2e --test nul_non_audit_e2e --test reply_claim_e2e --test reply_catch_up_pg_e2e|--nocapture|any|0|0|0"
+  "gliner|KASTELLAN_GLINER_RELEX_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1|gliner-relex=1|1|any|-p kastellan-core --test gliner_relex_e2e|--nocapture|any|0|0|0"
+  "microvm|KASTELLAN_MICROVM_REQUIRE_E2E=1 KASTELLAN_PG_REQUIRE_E2E=1 KASTELLAN_SANDBOX_REQUIRE_E2E=1|micro-VM=1|1|any|-p kastellan-core @FIRECRACKER_SUITES|--nocapture --ignored|Linux|0|0|4"
+  "worker-report|KASTELLAN_SANDBOX_REQUIRE_E2E=1|sandboxed=1|1|0|-p kastellan-core -p kastellan-tests-common --test worker_early_exit_stderr_fallback_e2e --test persistent_worker_death_stderr_fallback_e2e --test panic_hook_gate_safety_e2e --test worker_report_broken_stderr_e2e --test panic_hook_broken_stderr_e2e|--nocapture|any|0|13|0"
+  "mail-live|KASTELLAN_MAIL_LIVE_REQUIRE_E2E=1|live-localmail=1|1|0|-p kastellan-core --test mail_live_shape_e2e|--nocapture --ignored|any|0|0|0"
+  "launchd|KASTELLAN_PG_REQUIRE_E2E=1|supervisor-backed=1|1|0|-p kastellan-supervisor --test launchd_agents_smoke --test target_smoke|--nocapture|Darwin|0|0|0"
+  "container|KASTELLAN_MICROVM_REQUIRE_E2E=1|micro-VM=1|1|0|-p kastellan-core -p kastellan-sandbox @CONTAINER_SUITES --test macos_container_smoke|--nocapture|Darwin|0|0|0"
 )
 
 # ⚠️ There is deliberately NO `sandbox` profile yet, and the reason is a
@@ -327,17 +345,18 @@ MIN_CONTAINER_SUITES=3
 # A malformed profile must be a usage error, not a quiet ✅.
 # ---------------------------------------------------------------------------
 validate_profiles() {
-  local spec name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored extra
+  local spec name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored max_filtered extra
   local bad=0 pair tier floor
   for spec in "${PROFILES[@]}"; do
-    IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored extra \
+    IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored \
+      max_filtered extra \
       <<<"$spec"
     if [ -z "$name" ] || [ -n "$extra" ]; then
-      echo "run-e2e-gate.sh: profile '${name:-<unnamed>}' does not have exactly 10 fields" >&2
+      echo "run-e2e-gate.sh: profile '${name:-<unnamed>}' does not have exactly 11 fields" >&2
       bad=1
       continue
     fi
-    for field in knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored; do
+    for field in knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored max_filtered; do
       if [ -z "${!field}" ]; then
         echo "run-e2e-gate.sh: profile '$name' has an empty '$field' field" >&2
         bad=1
@@ -363,6 +382,10 @@ validate_profiles() {
     case "$max_ignored" in
       '') ;;  # already reported as an empty field above
       *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_IGNORED must be a number (never 'any')" >&2; bad=1 ;;
+    esac
+    case "$max_filtered" in
+      '') ;;  # already reported as an empty field above
+      *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_FILTERED must be a number (never 'any')" >&2; bad=1 ;;
     esac
     [ -n "$e2e_floors" ] || { echo "run-e2e-gate.sh: profile '$name' names no E2E floor" >&2; bad=1; }
     for pair in ${e2e_floors//,/ }; do
@@ -396,7 +419,7 @@ list_profiles() {
   for spec in "${PROFILES[@]}"; do
     # The trailing `_`s (one per field after `os`) are load-bearing: `read` puts
     # the REST of the line in its last variable, so `os` would swallow them.
-    IFS='|' read -r name knobs _ _ _ _ _ os _ _ <<<"$spec"
+    IFS='|' read -r name knobs _ _ _ _ _ os _ _ _ <<<"$spec"
     printf '  %-14s [%-6s] %s\n' "$name" "$os" "$knobs"
   done
 }
@@ -409,7 +432,7 @@ WANT="$1"; shift
 FOUND=""
 for spec in "${PROFILES[@]}"; do
   IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored \
-    <<<"$spec"
+    max_filtered <<<"$spec"
   if [ "$name" = "$WANT" ]; then FOUND=1; break; fi
 done
 [ -n "$FOUND" ] || { echo "run-e2e-gate.sh: unknown profile: $WANT" >&2; list_profiles >&2; exit 2; }
@@ -537,6 +560,9 @@ PASSED_COUNT="$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i == "pass
 PASSED_COUNT="${PASSED_COUNT:-0}"
 IGNORED_COUNT="$(awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i == "ignored;") s += $(i-1) } END { print s + 0 }' "$LOG" || true)"
 IGNORED_COUNT="${IGNORED_COUNT:-0}"
+# `filtered` is followed by `out;`, so the count is two fields before `out;`.
+FILTERED_COUNT="$(awk '/^test result:/ { for (i = 3; i <= NF; i++) if ($i == "out;" && $(i-1) == "filtered") s += $(i-2) } END { print s + 0 }' "$LOG" || true)"
+FILTERED_COUNT="${FILTERED_COUNT:-0}"
 PANIC_COUNT="$(grep -c '^\[panic\]' "$LOG" || true)"; PANIC_COUNT="${PANIC_COUNT:-0}"
 BINARY_COUNT="$(grep -cE '^[[:space:]]+Running ' "$LOG" || true)"; BINARY_COUNT="${BINARY_COUNT:-0}"
 
@@ -609,13 +635,13 @@ esac
 # between them moves that binary's counts onto a line the sums above never read
 # — for MAX_IGNORED, a false GREEN. The mid-line scan above anchors on per-test
 # lines and cannot see it. Refuse the shape rather than guess at the counts.
-WHOLE_RESULT='^test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed; [0-9]+ ignored; '
+WHOLE_RESULT='^test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed; [0-9]+ ignored; [0-9]+ measured; [0-9]+ filtered out; '
 TORN_COUNT="$(grep -a '^test result: ' "$LOG" | grep -acvE "$WHOLE_RESULT" || true)"
 TORN_COUNT="${TORN_COUNT:-0}"
 
 # Belt and braces: an operand that is somehow still not a number must refuse a
 # verdict rather than silently satisfy every floor.
-for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT IGNORED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND TORN_COUNT; do
+for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT IGNORED_COUNT FILTERED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND TORN_COUNT; do
   case "${!var}" in
     ''|*[!0-9]*)
       echo "run-e2e-gate.sh: $var is \"${!var}\", which is not a count — refusing a verdict." >&2
@@ -628,6 +654,7 @@ echo ""
 echo "==> evidence"
 echo "    tests passed : $PASSED_COUNT   (floor $min_passed)"
 echo "    tests ignored: $IGNORED_COUNT   (max $max_ignored)"
+echo "    filtered out : $FILTERED_COUNT   (max $max_filtered)"
 echo "    [E2E]  lines : $E2E_TOTAL   (per-tier floors: $e2e_floors)"
 echo "    [SKIP] lines : $SKIP_COUNT   (max $max_skip)"
 echo "    [WARN] lines : $WARN_COUNT   (max 0)"
@@ -653,6 +680,16 @@ if [ "$IGNORED_COUNT" -gt "$max_ignored" ]; then
   echo "   is met by the tests that remain (#876). Remove the #[ignore], or — for a"
   echo "   deliberate one, like worker-report's inner fixtures — raise MAX_IGNORED."
   grep -a ' \.\.\. ignored' "$LOG" | sort -u | sed 's/^/     /'
+  FAIL=1
+fi
+if [ "$FILTERED_COUNT" -gt "$max_filtered" ]; then
+  echo "❌ $FILTERED_COUNT test(s) were \`filtered out\`, max is $max_filtered (MAX_FILTERED)."
+  echo "   A filtered-out test never ran under this profile's knobs (#880). On an"
+  echo "   --ignored profile that is a test which lost its #[ignore]: restore it, or —"
+  echo "   for a deliberate plain test — raise MAX_FILTERED. Otherwise drop any name"
+  echo "   filter passed after the profile name."
+  # libtest never names a filtered-out test, so name the binary it came from.
+  awk '/^[[:space:]]+Running / { cur = $2 } /^test result: / && !/ 0 filtered out;/ { print "     " cur ": " $0 }' "$LOG"
   FAIL=1
 fi
 if [ "$TORN_COUNT" -ne 0 ]; then
