@@ -99,7 +99,7 @@ struct Profile {
     harness_args: String,
     os: String,
     max_panic: String,
-    max_ignored: String,
+    ignored: String,
     filtered_out: String,
     fields: usize,
 }
@@ -117,7 +117,7 @@ fn parse(spec: &str) -> Profile {
         harness_args: at(6),
         os: at(7),
         max_panic: at(8),
-        max_ignored: at(9),
+        ignored: at(9),
         filtered_out: at(10),
         fields: f.len(),
     }
@@ -166,12 +166,12 @@ fn every_profile_row_is_well_formed() {
             p.name,
             p.max_panic
         );
-        // A number, never `any`: an uncapped ignored count is #876's hole.
+        // A number, never `any`: an unchecked ignored count is #876's hole.
         assert!(
-            p.max_ignored.parse::<u32>().is_ok(),
-            "profile '{}' MAX_IGNORED must be a number, got {:?}",
+            p.ignored.parse::<u32>().is_ok(),
+            "profile '{}' IGNORED must be a number, got {:?}",
             p.name,
-            p.max_ignored
+            p.ignored
         );
         // The same for FILTERED_OUT: an uncapped filtered count is #880's hole.
         assert!(

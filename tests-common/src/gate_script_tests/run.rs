@@ -127,9 +127,9 @@ pub(super) struct GateEdits<'a> {
     /// script. The committed table has every MAX_PANIC at 0, so without a copy
     /// no test can reach a cap above zero, `any`, or a malformed value.
     pub(super) max_panic: Option<(&'a str, &'a str)>,
-    /// The same for MAX_IGNORED (#876): every profile but `worker-report` caps
-    /// it at 0, so a copy is how a test reaches a non-zero or malformed cap.
-    pub(super) max_ignored: Option<(&'a str, &'a str)>,
+    /// The same for IGNORED (#876): every profile but `worker-report` expects
+    /// 0, so a copy is how a test reaches a non-zero or malformed count.
+    pub(super) ignored: Option<(&'a str, &'a str)>,
     /// The same for FILTERED_OUT (#880), most of whose rows are 0.
     pub(super) filtered_out: Option<(&'a str, &'a str)>,
     /// Extra fake tools, `(name, sh body)`, put on `PATH` beside the fake cargo.
@@ -144,7 +144,7 @@ pub(super) struct GateEdits<'a> {
 
 /// Zero-based positions of the capped fields in a profile row.
 const MAX_PANIC_FIELD: usize = 8;
-const MAX_IGNORED_FIELD: usize = 9;
+const IGNORED_FIELD: usize = 9;
 const FILTERED_OUT_FIELD: usize = 10;
 
 /// `text` (the gate script) with field `index` of `profile`'s row set to `value`.
@@ -200,15 +200,15 @@ pub(super) fn run_gate_bytes(
     // An edited table (or a `relocated` run) runs from a copy under
     // `<scratch>/scripts/`. The script `cd`s to its own `..`, which is then the
     // scratch root: harmless, since cargo is fake and the log goes under `$HOME`.
-    let script = if edits.max_panic.is_none() && edits.max_ignored.is_none() && edits.filtered_out.is_none() && !edits.relocated {
+    let script = if edits.max_panic.is_none() && edits.ignored.is_none() && edits.filtered_out.is_none() && !edits.relocated {
         script_path()
     } else {
         let mut text = std::fs::read_to_string(script_path()).expect("read the gate script");
         if let Some((row, value)) = edits.max_panic {
             text = with_field(&text, row, MAX_PANIC_FIELD, value);
         }
-        if let Some((row, value)) = edits.max_ignored {
-            text = with_field(&text, row, MAX_IGNORED_FIELD, value);
+        if let Some((row, value)) = edits.ignored {
+            text = with_field(&text, row, IGNORED_FIELD, value);
         }
         if let Some((row, value)) = edits.filtered_out {
             text = with_field(&text, row, FILTERED_OUT_FIELD, value);

@@ -1,7 +1,7 @@
 //! #880: the gate reads libtest's `N filtered out` and demands an exact,
 //! per-profile count of it.
 //!
-//! `MAX_IGNORED` (#876, `ignored.rs`) is blind on the profiles that pass
+//! `IGNORED` (#876, `ignored.rs`) is blind on the profiles that pass
 //! `--ignored` (`microvm`, `mail-live`): there libtest runs only the ignored
 //! tests and counts the rest as `filtered out`. So a Firecracker test that LOST
 //! its `#[ignore]` stopped running under the demanded knobs, and every floor was
@@ -9,8 +9,8 @@
 //! operator name filter passed after the profile name, which narrows any
 //! profile silently.
 //!
-//! Like `MAX_IGNORED`, it is a MEASURED number (see FILTERED_OUT in the
-//! script's profile table) — but EXACT, not a cap: under `≤`, deleting one
+//! Like `IGNORED`, it is a MEASURED number (see FILTERED_OUT in the
+//! script's profile table) and EXACT, not a cap: under `≤`, deleting one
 //! deliberate plain test would leave room for one lost `#[ignore]`.
 
 use super::profiles;

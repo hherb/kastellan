@@ -106,8 +106,8 @@ bash scripts/run-e2e-gate.sh guard-tier      # run one as evidence
 
 It sets the profile's knobs, keeps the **whole** log under `~/.local/state/kastellan/gate-logs/`,
 and then asserts: tests passed ≥ the profile's floor, a **per-tier** `[E2E]` floor, zero `[WARN]`,
-(per profile) a cap on `[SKIP]` and libtest's `ignored`, and an **exact** `filtered out` count
-(#876/#880 — measured numbers, never `any`; a name filter after the profile name fails the verdict
+(per profile) a cap on `[SKIP]`, and an **exact** count of libtest's `ignored` and `filtered out`
+(#876/#880/#882 — measured numbers, never `any`; a name filter after the profile name fails the verdict
 after the run), one whole `test result:` line per test binary, and no marker stranded mid-line where the anchored counts miss it
 (#755 — build any new marker line with `skip_line`/`warn_line`/`e2e_line`/`panic_hook::own_line`,
 which start with `\n`, and print it in **one** write). Three evidence markers are greppable in any
