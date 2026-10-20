@@ -67,7 +67,7 @@ fn e2e_evidence_for_profile() -> String {
 ///
 /// Derived from the profile table rather than written out, so renaming a tier
 /// or adding a floor does not turn these tests into tests of a stale copy.
-fn e2e_evidence_for(name: &str) -> String {
+pub(super) fn e2e_evidence_for(name: &str) -> String {
     let profile = profiles()
         .into_iter()
         .find(|p| p.name == name)
@@ -95,7 +95,7 @@ fn e2e_evidence_for(name: &str) -> String {
 
 /// Cargo's header for one test binary, followed by the hook's announcement —
 /// the section a binary that reached the panic hook produces (#748).
-fn hooked_binary(name: &str) -> String {
+pub(super) fn hooked_binary(name: &str) -> String {
     format!("{}{}\n", unhooked_binary(name), crate::panic_hook::install_line())
 }
 
@@ -123,10 +123,13 @@ fn run_gate_profile(profile: &str, tag: &str, log: &str, exit_code: i32) -> Outp
 /// What a test changes about the gate's world beyond the canned log.
 #[derive(Default)]
 pub(super) struct GateEdits<'a> {
-    /// Replace the LAST `|`-field (MAX_PANIC) of this profile's row in a COPY
-    /// of the script. The committed table has every cap at 0, so without a
-    /// copy no test can reach a cap above zero, `any`, or a malformed value.
+    /// Replace the MAX_PANIC field of this profile's row in a COPY of the
+    /// script. The committed table has every MAX_PANIC at 0, so without a copy
+    /// no test can reach a cap above zero, `any`, or a malformed value.
     pub(super) max_panic: Option<(&'a str, &'a str)>,
+    /// The same for MAX_IGNORED (#876): every profile but `worker-report` caps
+    /// it at 0, so a copy is how a test reaches a non-zero or malformed cap.
+    pub(super) max_ignored: Option<(&'a str, &'a str)>,
     /// Extra fake tools, `(name, sh body)`, put on `PATH` beside the fake cargo.
     pub(super) tools: &'a [(&'a str, &'a str)],
     /// Extra environment for the gate script, e.g. a UTF-8 locale.
@@ -137,9 +140,12 @@ pub(super) struct GateEdits<'a> {
     pub(super) relocated: bool,
 }
 
-/// The gate script's text with `profile`'s MAX_PANIC field replaced.
-fn script_with_max_panic(profile: &str, value: &str) -> String {
-    let text = std::fs::read_to_string(script_path()).expect("read the gate script");
+/// Zero-based positions of the capped fields in a profile row.
+const MAX_PANIC_FIELD: usize = 8;
+const MAX_IGNORED_FIELD: usize = 9;
+
+/// `text` (the gate script) with field `index` of `profile`'s row set to `value`.
+fn with_field(text: &str, profile: &str, index: usize, value: &str) -> String {
     let prefix = format!("  \"{profile}|");
     let mut hits = 0;
     let edited: Vec<String> = text
@@ -149,11 +155,11 @@ fn script_with_max_panic(profile: &str, value: &str) -> String {
                 return line.to_string();
             }
             hits += 1;
-            let (head, _) = line
-                .trim_end_matches('"')
-                .rsplit_once('|')
-                .unwrap_or_else(|| panic!("profile row has no `|`: {line}"));
-            format!("{head}|{value}\"")
+            let body = line[3..].strip_suffix('"').unwrap_or_else(|| panic!("unterminated row: {line}"));
+            let mut fields: Vec<&str> = body.split('|').collect();
+            assert!(index < fields.len(), "profile row has no field {index}: {line}");
+            fields[index] = value;
+            format!("  \"{}\"", fields.join("|"))
         })
         .collect();
     assert_eq!(hits, 1, "expected exactly one `{profile}` row in the gate script");
@@ -191,13 +197,16 @@ pub(super) fn run_gate_bytes(
     // An edited table (or a `relocated` run) runs from a copy under
     // `<scratch>/scripts/`. The script `cd`s to its own `..`, which is then the
     // scratch root: harmless, since cargo is fake and the log goes under `$HOME`.
-    let script = if edits.max_panic.is_none() && !edits.relocated {
+    let script = if edits.max_panic.is_none() && edits.max_ignored.is_none() && !edits.relocated {
         script_path()
     } else {
-        let text = match edits.max_panic {
-            Some((row, value)) => script_with_max_panic(row, value),
-            None => std::fs::read_to_string(script_path()).expect("read the gate script"),
-        };
+        let mut text = std::fs::read_to_string(script_path()).expect("read the gate script");
+        if let Some((row, value)) = edits.max_panic {
+            text = with_field(&text, row, MAX_PANIC_FIELD, value);
+        }
+        if let Some((row, value)) = edits.max_ignored {
+            text = with_field(&text, row, MAX_IGNORED_FIELD, value);
+        }
         let copy = scratch.root.join("scripts/run-e2e-gate.sh");
         std::fs::create_dir_all(copy.parent().unwrap()).expect("mkdir scripts/");
         std::fs::write(&copy, text).expect("write the copied script");

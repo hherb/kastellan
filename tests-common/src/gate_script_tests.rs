@@ -42,6 +42,7 @@ use crate::require::{RequireKnob, KNOBS};
 
 mod callers;
 mod discovery;
+mod ignored;
 mod mid_line;
 mod run;
 
@@ -97,6 +98,7 @@ struct Profile {
     harness_args: String,
     os: String,
     max_panic: String,
+    max_ignored: String,
     fields: usize,
 }
 
@@ -113,6 +115,7 @@ fn parse(spec: &str) -> Profile {
         harness_args: at(6),
         os: at(7),
         max_panic: at(8),
+        max_ignored: at(9),
         fields: f.len(),
     }
 }
@@ -136,7 +139,7 @@ fn profiles() -> Vec<Profile> {
 #[test]
 fn every_profile_row_is_well_formed() {
     for p in profiles() {
-        assert_eq!(p.fields, 9, "profile '{}' has {} fields, want 9", p.name, p.fields);
+        assert_eq!(p.fields, 10, "profile '{}' has {} fields, want 10", p.name, p.fields);
         assert!(!p.name.is_empty(), "a profile has no name");
         assert!(!p.knobs.is_empty(), "profile '{}' sets no knob", p.name);
 
@@ -159,6 +162,13 @@ fn every_profile_row_is_well_formed() {
             "profile '{}' MAX_PANIC must be a number or 'any', got {:?}",
             p.name,
             p.max_panic
+        );
+        // A number, never `any`: an uncapped ignored count is #876's hole.
+        assert!(
+            p.max_ignored.parse::<u32>().is_ok(),
+            "profile '{}' MAX_IGNORED must be a number, got {:?}",
+            p.name,
+            p.max_ignored
         );
         assert!(
             matches!(p.os.as_str(), "any" | "Linux" | "Darwin"),
