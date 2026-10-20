@@ -38,7 +38,7 @@ fn log_with_filtered(per_binary: &[u32]) -> String {
 
 /// [`PROFILE`]'s committed count, which these tests assume is 0.
 #[test]
-fn the_profile_these_tests_drive_caps_filtered_at_zero() {
+fn the_profile_these_tests_drive_expects_zero_filtered() {
     let p = profiles().into_iter().find(|p| p.name == PROFILE).expect("PROFILE row");
     assert_eq!(p.filtered_out, "0", "the tests below assume `{PROFILE}` expects FILTERED_OUT = 0");
 }
@@ -82,10 +82,11 @@ fn filtered_counts_are_summed_across_binaries_and_must_match_exactly() {
     // Below: a deliberate plain test went away, leaving room for a lost #[ignore].
     let under = run_gate_with(PROFILE, "filtered-under", &log_with_filtered(&[1, 2]), 0, &edits);
     assert_eq!(under.status.code(), Some(1), "a count of 4 must refuse 3\n{}", describe(&under));
+    let stdout = String::from_utf8_lossy(&under.stdout);
+    assert!(stdout.contains("only 3 test(s) were `filtered out`, expected exactly 4"), "{}", describe(&under));
     assert!(
-        String::from_utf8_lossy(&under.stdout)
-            .contains("only 3 test(s) were `filtered out`, expected exactly 4"),
-        "{}",
+        stdout.contains("     tests/suite_0_e2e.rs: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;"),
+        "every suite's summary is listed\n{}",
         describe(&under)
     );
 }
@@ -108,7 +109,7 @@ fn a_non_numeric_filtered_out_is_refused_before_anything_runs() {
 
 #[test]
 fn an_empty_filtered_out_is_refused_before_anything_runs() {
-    // `[ "$n" -gt "" ]` errors, which `if` reads as "within the cap".
+    // `-gt ""` and `-lt ""` both error, which `if`/`elif` read as exact.
     let edits = GateEdits { filtered_out: Some((PROFILE, "")), ..Default::default() };
     let out = run_gate_with(PROFILE, "filtered-empty", &log_with_filtered(&[5]), 0, &edits);
     assert_eq!(out.status.code(), Some(2), "{}", describe(&out));

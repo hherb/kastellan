@@ -49,14 +49,18 @@ fn the_profile_these_tests_drive_expects_zero_ignored() {
 fn one_ignored_test_fails_a_profile_expecting_zero() {
     // The acceptance test the issue names: `1 ignored`, refused, and the
     // refusal names the field rather than crashing.
-    let out = run_gate_with(PROFILE, "ignored-one", &log_with_ignored(&[1]), 0, &GateEdits::default());
+    let mut log = log_with_ignored(&[1]);
+    log.push_str("test skipped_containment ... ignored\n");
+    let out = run_gate_with(PROFILE, "ignored-one", &log, 0, &GateEdits::default());
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .contains("1 test(s) reported `ignored`, expected exactly 0 (IGNORED)"),
+        stdout.contains("1 test(s) reported `ignored`, expected exactly 0 (IGNORED)"),
         "{}",
         describe(&out)
     );
+    // libtest names an ignored test, so the refusal does too.
+    assert!(stdout.contains("     test skipped_containment ... ignored"), "{}", describe(&out));
 }
 
 #[test]
@@ -77,9 +81,15 @@ fn ignored_counts_are_summed_across_binaries_and_must_match_exactly() {
     // to gain an `#[ignore]` with the sum back at 2.
     let under = run_gate_with(PROFILE, "ignored-under", &log_with_ignored(&[0, 1]), 0, &edits);
     assert_eq!(under.status.code(), Some(1), "a count of 2 must refuse 1\n{}", describe(&under));
+    let stdout = String::from_utf8_lossy(&under.stdout);
     assert!(
-        String::from_utf8_lossy(&under.stdout)
-            .contains("only 1 test(s) reported `ignored`, expected exactly 2 (IGNORED)"),
+        stdout.contains("only 1 test(s) reported `ignored`, expected exactly 2 (IGNORED)"),
+        "{}",
+        describe(&under)
+    );
+    // Every suite's summary, so the one that lost its fixture can be found.
+    assert!(
+        stdout.contains("     tests/suite_0_e2e.rs: test result: ok. 5 passed; 0 failed; 0 ignored;"),
         "{}",
         describe(&under)
     );
@@ -104,8 +114,9 @@ fn a_non_numeric_ignored_is_refused_before_anything_runs() {
 
 #[test]
 fn an_empty_ignored_is_refused_before_anything_runs() {
-    // An empty count makes `[ "$n" -gt "" ]` error, which `if` reads as "not
-    // over" — the empty-operand false green this check exists to refuse.
+    // An empty count makes both `-gt ""` and `-lt ""` error, which `if`/`elif`
+    // read as "neither over nor under", i.e. exact — the empty-operand false
+    // green this check exists to refuse.
     let edits = GateEdits { ignored: Some((PROFILE, "")), ..Default::default() };
     let out = run_gate_with(PROFILE, "ignored-empty", &log_with_ignored(&[5]), 0, &edits);
     assert_eq!(out.status.code(), Some(2), "{}", describe(&out));

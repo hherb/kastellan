@@ -142,7 +142,7 @@ pub(super) struct GateEdits<'a> {
     pub(super) relocated: bool,
 }
 
-/// Zero-based positions of the capped fields in a profile row.
+/// Zero-based positions of the per-profile count fields in a profile row.
 const MAX_PANIC_FIELD: usize = 8;
 const IGNORED_FIELD: usize = 9;
 const FILTERED_OUT_FIELD: usize = 10;

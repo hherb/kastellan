@@ -47,11 +47,20 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 - The 10th column is renamed **`MAX_IGNORED` → `IGNORED`** and refused in **both** directions (an
   `-lt` branch beside `-gt`, as #880's `FILTERED_OUT`). `worker-report` = **13** — counted from the
-  five suites' `#[ignore = "inner fixture: …"]` attributes (1+4+3+2+3), none `cfg`-gated, so the
-  number is host-independent. ⚠️ **Adding OR deleting an inner fixture means changing it in the
-  same commit.** Under-count message: `only N test(s) reported \`ignored\`, expected exactly M`.
-- Tests: still **61** in `gate_script_tests` (the under-count half joins the existing sum test);
-  the old script fails 4 of them, and the `-lt` → `-le` mutant is killed.
+  five suites' `#[ignore = "inner fixture: …"]` attributes (`worker_early_exit_stderr_fallback` 3,
+  `persistent_worker_death_stderr_fallback` 4, `panic_hook_gate_safety` 1,
+  `worker_report_broken_stderr` 2, `panic_hook_broken_stderr` 3), none `cfg`-gated, so the number
+  is host-independent. ⚠️ **Adding OR deleting an inner fixture means changing it in the same
+  commit** — and since the review round a CI test
+  (`ignored_matches_the_ignored_tests_in_the_selected_suites`) recounts the attributes of every
+  profile that is not `--ignored` and has no `@…` discovery, so a missed edit is red in CI.
+  Under-count message: `only N test(s) reported \`ignored\`, expected exactly M`.
+- Tests: **62** in `gate_script_tests` (61 + the CI recount; the under-count half joins the
+  existing sum test). The old script fails 4 of them, and the `-lt` → `-le` mutant is killed. The
+  review round also: both under-count branches list each suite's summary line, the `IGNORED` one
+  names a trailing name filter as a cause, the counter recognises `#[tokio::test…]`, and four
+  mutants (table 13 → 12, one deleted inner-fixture `#[ignore]`, each per-suite listing dropped)
+  are each killed.
 
 ### Earlier (2026-10-20): #880 — the gate demands an exact `N filtered out` (PR #881, merged) — what still binds
 
@@ -392,7 +401,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#882) | PR [#883](https://github.com/hherb/kastellan/pull/883) | **5143 / 8 / 52** (5151 total), **195** suites, same flags; log `sweep-882.log`. 5151 = 5149 + 2: #881's review round added 2 `gate_script_tests` (59 → 61) **after** its sweep, so #880's row is the pre-review tree; this diff adds no test. Sweep exit 101 on **8** PG-contention failures (`the database system is starting up`: `cli_entities_e2e` 5, `asks_e2e` 2, `nul_non_audit_e2e` 1) — all 42 of those suites' tests pass in isolation (#548/#676). `[SKIP]` **15** = 5 + 3 (worktree has no gliner `.venv`) + 7 (`python-exec:dev` stale: a fresh checkout restamps every mtime, #691 family). `worker-report` gate green: `ignored: 13 (exactly 13)` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-882`, **27** | **15** (worktree) |
+| **Mac** (#882) | PR [#883](https://github.com/hherb/kastellan/pull/883) | **5143 / 8 / 52** (5151 total), **195** suites, same flags; log `sweep-882.log`. 5151 = 5149 + 2: #881's review round added 2 `gate_script_tests` (59 → 61) **after** its sweep, so #880's row is the pre-review tree; this diff adds no test (its review round then adds 1, `gate_script_tests` 61 → 62, after this sweep). Sweep exit 101 on **8** PG-contention failures (`the database system is starting up`: `cli_entities_e2e` 5, `asks_e2e` 2, `nul_non_audit_e2e` 1) — all 42 of those suites' tests pass in isolation (#548/#676). `[SKIP]` **15** = 5 + 3 (worktree has no gliner `.venv`) + 7 (`python-exec:dev` stale: a fresh checkout restamps every mtime, #691 family). `worker-report` gate green: `tests ignored: 13   (exactly 13)` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-882`, **27** | **15** (worktree) |
 | **Mac** (#880) | PR [#881](https://github.com/hherb/kastellan/pull/881) | **5149 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-880.log`. 5149 = 5141 + 2 (#876's review tests, after its sweep) + 6 (`gate_script_tests/filtered.rs`). DGX `microvm` green (`--no-fail-fast`) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-880` (fresh dir), **27** `Checking kastellan` | **5** Mac |
 | **Mac** (#876) | PR [#879](https://github.com/hherb/kastellan/pull/879) | **5141 / 0 / 52**, **195** suites, same flags; `[SKIP]` 5; log `sweep-876.log`. Every gate profile re-run green on both hosts (DGX `microvm` red only on #878) | exit 0, fresh dir, **27** | **5** Mac |
 
@@ -462,7 +471,7 @@ Only the rows that tell you *where to look when something goes red*.
 | `core` (`injection_guard_e2e`, `secret_vault_e2e`, `guard_boot_row_e2e`) | 10 / 9 / 1 | **PG-required** policy rows, privacy invariant, fail-closed redemption |
 | worker-report (5 suites, 2 crates) | 13 | a dying worker's last words reach a failing test; a real broken fd 2, re-exec'd. `bash scripts/run-e2e-gate.sh worker-report` (both hosts) |
 | `core` `mail_live_shape_e2e` (`#[ignore]`) | 1 | our reading of localmail against the **live** service. `bash scripts/mail/live-shape-gate.sh` (both hosts) |
-| `tests-common` `gate_script_tests` | 61 | the gate script's table **and** its verdict (floors, caps incl. `ignored`/`filtered out`, per-binary hook check), run against a fake `cargo` |
+| `tests-common` `gate_script_tests` | 62 | the gate script's table **and** its verdict (floors, caps, exact `ignored` (recounted from the suites' attributes) and `filtered out` counts, per-binary hook check), run against a fake `cargo` |
 | container (`core`: `python_exec_container_e2e`, `python_exec_warm_idle_e2e`, `lifecycle_container_routing_e2e`; `sandbox`: `macos_container_smoke`; macOS) | 4 / 3 / 1 / 10 | **real** Apple `container` micro-VM round-trips, mem cap, warm reuse. `bash scripts/run-e2e-gate.sh container` |
 
 ## Key design decisions locked in

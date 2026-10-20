@@ -705,7 +705,9 @@ elif [ "$IGNORED_COUNT" -lt "$ignored" ]; then
   echo "   A deliberate #[ignore] (an inner fixture) was deleted or un-ignored, or its"
   echo "   suite left the selection — and that slack would let a real test GAIN an"
   echo "   #[ignore] unseen (#882). Lower IGNORED to the new measured count. (A"
-  echo "   fail-fast red run also lands here: its later binaries never ran.)"
+  echo "   name filter passed after the profile name, or a fail-fast red run whose"
+  echo "   later binaries never ran, also lands here.) Per suite:"
+  awk '/^[[:space:]]+Running / { cur = $2 } /^test result: / { print "     " cur ": " $0 }' "$LOG"
   FAIL=1
 fi
 if [ "$FILTERED_COUNT" -gt "$filtered_out" ]; then
@@ -722,14 +724,15 @@ elif [ "$FILTERED_COUNT" -lt "$filtered_out" ]; then
   echo "   A deliberate plain test was deleted or #[ignore]d, or its suite left the"
   echo "   selection — and that slack would let a test that LOSES its #[ignore] pass"
   echo "   unseen (#880). Lower FILTERED_OUT to the new measured count. (A fail-fast"
-  echo "   red run also lands here: its later binaries never ran.)"
+  echo "   red run also lands here: its later binaries never ran.) Per suite:"
+  awk '/^[[:space:]]+Running / { cur = $2 } /^test result: / { print "     " cur ": " $0 }' "$LOG"
   FAIL=1
 fi
 if [ "$WHOLE_COUNT" -ne "$BINARY_COUNT" ]; then
   echo "❌ $BINARY_COUNT test binaries ran but the log has $WHOLE_COUNT whole \`test result:\`"
   echo "   line(s): a binary ended without its summary (crashed, exited inside a test),"
   echo "   or output landed in front of it. That binary's counts were never read, so"
-  echo "   every cap above is unproven. Suites with no whole summary:"
+  echo "   every count above is unproven. Suites with no whole summary:"
   WHOLE_RESULT="$WHOLE_RESULT" awk '
     function report() { if (cur != "" && !seen) print "     " cur }
     /^[[:space:]]+Running / { report(); cur = $2; seen = 0 }
@@ -740,7 +743,7 @@ fi
 if [ "$TORN_COUNT" -ne 0 ]; then
   echo "❌ $TORN_COUNT \`test result:\` line(s) are not whole: output landed inside libtest's"
   echo "   summary, so that binary's passed/ignored/filtered counts were never read and every"
-  echo "   cap above is unproven. Rerun; if it recurs, find what is still writing to"
+  echo "   count above is unproven. Rerun; if it recurs, find what is still writing to"
   echo "   stderr after the binary's last test finished."
   grep -a '^test result: ' "$LOG" | grep -avE "$WHOLE_RESULT" | sed 's/^/     /'
   FAIL=1
