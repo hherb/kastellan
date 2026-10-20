@@ -9,7 +9,7 @@
 > the #875 baseline row included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-20 (#880: the gate caps `N filtered out`. #876 merged as PR #879 the same night. The operator is still running the #773 live re-measure) ·
+**Last updated:** 2026-10-20 (#880: the gate demands an exact `N filtered out`, and one whole summary per binary. #876 merged as PR #879 the same night. The operator is still running the #773 live re-measure) ·
 **Recent PRs, newest first:** [#881](https://github.com/hherb/kastellan/pull/881) (#880), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
@@ -43,17 +43,26 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-20, latest): #880 — the gate caps libtest's `N filtered out`
+### This session (2026-10-20, latest): #880 — the gate demands an exact `N filtered out`
 
-- `run-e2e-gate.sh` gains an **11th column, `MAX_FILTERED`** (a number — ⚠️ **never `any`**), summing
-  `N filtered out` like `MAX_IGNORED`. **Measured with libtest:** `microvm` = **4** (the plain plan
-  tests `browser_driver_firecracker_e2e` 1, `web_research_firecracker_broker_e2e` 2,
-  `web_research_search_broker_e2e` 1 — ⚠️ a new non-`#[ignore]` test in a Firecracker suite means
-  raising the cap in the same commit); every other profile **0**. The refusal names each offending
-  binary. ⚠️ **An operator name filter after the profile name is now refused** (by design) — run a
-  single test with plain `cargo test`, not through the gate. The whole-line `test result:` regex now
-  reaches `filtered out;`. Tests: `gate_script_tests/filtered.rs` (53 → **59**); mutation-checked
-  4/5 (the survivor is the not-a-count backstop, untested for `IGNORED_COUNT` too).
+- `run-e2e-gate.sh` gains an **11th column, `FILTERED_OUT`** (a number — ⚠️ **never `any`**), summing
+  `N filtered out` like `MAX_IGNORED` — but ⚠️ **EXACT, not a cap** (review round: under `≤`,
+  deleting one plain test left room for one lost `#[ignore]`). **Measured with libtest:** `microvm`
+  = **4** (the plain plan tests `browser_driver_firecracker_e2e` 1,
+  `web_research_firecracker_broker_e2e` 2, `web_research_search_broker_e2e` 1 — ⚠️ adding, deleting
+  or `#[ignore]`ing one means changing the count in the same commit); every other profile **0**
+  (`mail-live` only because its one test is `#[ignore]`d). Over-count names each offending suite.
+  ⚠️ **An operator name filter after the profile name fails the verdict** (after the run, by design)
+  — run a single test with plain `cargo test`, not through the gate. The whole-line `test result:`
+  regex now reaches `filtered out;`.
+- **Review round (same PR):** the gate also demands **one whole `test result:` line per `Running`
+  binary** — a binary that printed no summary, or one with stderr in FRONT of it (libtest writes
+  `\n` and `test result: ` separately), was read by no sum (reproduced ✅ at exit 0 with a fake
+  cargo; pre-existing). The torn-line test now cuts at libtest's real last split (`filtered out` |
+  `; finished in`); the old cut let both one-line regex weakenings survive. Tests: 53 → **61**;
+  the five new-code mutants (under-count, binary/summary count, its suite listing, both regex
+  weakenings) all killed. Filed [#882](https://github.com/hherb/kastellan/issues/882):
+  `worker-report`'s `MAX_IGNORED` of 13 has the same `≤` slack.
 - **Verified:** Mac `worker-report` green (filtered 0), partial name filter refused (25 filtered);
   DGX `microvm` **green** — 30 passed / 15 binaries / filtered **4** (cap 4), #878's heavy-page test
   passed this run. ⚠️ **`cargo test` is fail-fast across binaries**, so a plain `microvm` run with
@@ -351,7 +360,7 @@ Also over (grew in #818 without a split): `db/src/tasks.rs` **819** (+11 in #825
 `db/src/graph.rs` **~935**, `core/src/entity_extraction/batch_upsert.rs` **~520**.
 Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
 `tool_dispatch.rs` 722, `attach/tests.rs` 727, `require.rs` 661,
-`scripts/run-e2e-gate.sh` ~690 (shell). ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
+`scripts/run-e2e-gate.sh` 812 (shell), `gate_script_tests/run.rs` 562, `gate_script_tests.rs` 538. ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
 its next leg** (the attachment half is the natural cut). ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.

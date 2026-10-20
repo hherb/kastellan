@@ -100,7 +100,7 @@ struct Profile {
     os: String,
     max_panic: String,
     max_ignored: String,
-    max_filtered: String,
+    filtered_out: String,
     fields: usize,
 }
 
@@ -118,7 +118,7 @@ fn parse(spec: &str) -> Profile {
         os: at(7),
         max_panic: at(8),
         max_ignored: at(9),
-        max_filtered: at(10),
+        filtered_out: at(10),
         fields: f.len(),
     }
 }
@@ -173,12 +173,12 @@ fn every_profile_row_is_well_formed() {
             p.name,
             p.max_ignored
         );
-        // The same for MAX_FILTERED: an uncapped filtered count is #880's hole.
+        // The same for FILTERED_OUT: an uncapped filtered count is #880's hole.
         assert!(
-            p.max_filtered.parse::<u32>().is_ok(),
-            "profile '{}' MAX_FILTERED must be a number, got {:?}",
+            p.filtered_out.parse::<u32>().is_ok(),
+            "profile '{}' FILTERED_OUT must be a number, got {:?}",
             p.name,
-            p.max_filtered
+            p.filtered_out
         );
         assert!(
             matches!(p.os.as_str(), "any" | "Linux" | "Darwin"),
