@@ -1,15 +1,14 @@
 //! #876: the gate reads libtest's `N ignored` and caps it per profile.
 //!
 //! Before this, nothing read that field. `#[ignore]` every test but one in each
-//! binary of a profile, and the gate still printed ✅: the one survivor per
-//! binary cleared `MIN_PASSED`, announced its `[E2E]` line and reached the
-//! panic hook, while the rest — containment tests among them — stopped running
-//! unseen.
+//! binary of a profile, and the gate still printed ✅: the survivors cleared
+//! `MIN_PASSED`, each announced its `[E2E]` line and reached the panic hook,
+//! while the rest — containment tests among them — stopped running unseen.
 //!
 //! The cap is a MEASURED number per profile, not a blanket zero: the
 //! `worker-report` suites carry `#[ignore]`d *inner fixtures* that their parent
 //! tests re-run in a child process, and a zero there would make a healthy gate
-//! red on every host. Profiles that pass `--ignored` (micro-VM, mail-live)
+//! red on every host. Profiles that pass `--ignored` (`microvm`, `mail-live`)
 //! report 0 ignored by construction — libtest counts the non-ignored tests as
 //! `filtered out` — so a cap of 0 holds for them too.
 
@@ -50,7 +49,8 @@ fn one_ignored_test_fails_a_profile_capped_at_zero() {
     let out = run_gate_with(PROFILE, "ignored-one", &log_with_ignored(&[1]), 0, &GateEdits::default());
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("1 test(s) reported `ignored`, max is 0"),
+        String::from_utf8_lossy(&out.stdout)
+            .contains("1 test(s) reported `ignored`, max is 0 (MAX_IGNORED)"),
         "{}",
         describe(&out)
     );
@@ -87,4 +87,39 @@ fn a_non_numeric_max_ignored_is_refused_before_anything_runs() {
         );
         assert!(!String::from_utf8_lossy(&out.stdout).contains("==> evidence"), "{}", describe(&out));
     }
+}
+
+#[test]
+fn an_empty_max_ignored_is_refused_before_anything_runs() {
+    // An empty cap makes `[ "$n" -gt "" ]` error, which `if` reads as "within
+    // the cap" — the empty-operand false green this check exists to refuse.
+    let edits = GateEdits { max_ignored: Some((PROFILE, "")), ..Default::default() };
+    let out = run_gate_with(PROFILE, "ignored-empty", &log_with_ignored(&[5]), 0, &edits);
+    assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains(&format!("profile '{PROFILE}' has an empty 'max_ignored' field")),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_torn_test_result_line_is_refused() {
+    // libtest flushes `\ntest result: `, `ok` and `. N passed; …` separately,
+    // so stderr between them pushes `3 ignored` onto a line the sum never reads.
+    // Without the whole-line check this log reads as 0 ignored and passes.
+    let mut log = e2e_evidence_for(PROFILE);
+    log.push_str(&hooked_binary("torn_e2e"));
+    log.push_str("test result: worker exited: status 0\n");
+    log.push_str("ok. 4 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.01s\n");
+    log.push_str(&hooked_binary("whole_e2e"));
+    log.push_str(&summary(5, 0));
+    let out = run_gate_with(PROFILE, "torn-result", &log, 0, &GateEdits::default());
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("1 `test result:` line(s) are not whole"),
+        "{}",
+        describe(&out)
+    );
 }

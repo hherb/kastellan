@@ -52,8 +52,17 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   every other profile **0** (`microvm`/`mail-live` by construction: under `--ignored` libtest counts
   the rest as `filtered out`). Tests: `gate_script_tests/ignored.rs` (47 → **51**); the harness edits
   any capped column by index (`with_field`).
-- **Every profile re-measured green on its host.** Mac: worker-report 13/13, pg 87, gliner 5,
-  launchd 7, container 18, mail-live 1. DGX: worker-report 13/13, pg 87, guard-tier 21, mail-live 1
+- **Review fixes (same PR):** the gate also refuses a **torn `test result:` line** — libtest flushes
+  `\ntest result: `, `ok`, `. N passed; …` separately, so stderr between them hid that binary's
+  `ignored` from the sum (a false green; mutation-checked). Plus an empty-`MAX_IGNORED` runtime test
+  (51 → **53**), and `browser_driver_firecracker_e2e` now floors the rendered text at 50 bytes (DGX
+  runs render 1289), since the raw-text fallback includes the `<title>`. **Not re-run after the fixes:**
+  the gate profiles and the full sweep (the 5141 below predates the +2 tests). Filed
+  [#880](https://github.com/hherb/kastellan/issues/880): on `--ignored` profiles a test that LOSES its
+  `#[ignore]` is `filtered out`, which nothing caps.
+- **Every profile re-run on its host; all green except DGX `microvm`** (red only on #878). Mac:
+  worker-report 13 passed / 13 ignored (cap 13), pg 87, gliner 5, launchd 7, container 18, mail-live 1.
+  DGX: worker-report 13 passed / 13 ignored, pg 87, guard-tier 21, mail-live 1
   (the owed DGX run — done), microvm 24 passed / ignored 0, red only on [#878](https://github.com/hherb/kastellan/issues/878).
 - **DGX micro-VM images were all stale** (2026-09-08): `build-release.sh` + `rebuild-all-rootfs.sh`
   rebuilt all 8 in ~2 min, matrix digest `94c86940…` unchanged. ⚠️ **DGX SearxNG

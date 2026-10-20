@@ -168,8 +168,8 @@ done
 #
 # MAX_IGNORED is a number — never `any` — and caps libtest's `N ignored`,
 # summed across the run (#876). Without it, `#[ignore]` on every test but one
-# per binary still printed ✅: each survivor cleared MIN_PASSED, announced its
-# `[E2E]` line and reached the panic hook, while the rest stopped running
+# per binary still printed ✅: the survivors cleared MIN_PASSED, each announced
+# its `[E2E]` line and reached the panic hook, while the rest stopped running
 # unseen. It is a CAP, not a census: it fails closed when a suite gains an
 # ignored test, which is the direction a reader notices. Measured, per profile:
 #   * 0 almost everywhere: no suite these profiles select has an `#[ignore]`.
@@ -394,8 +394,8 @@ list_profiles() {
   echo "profiles:"
   local spec name knobs os
   for spec in "${PROFILES[@]}"; do
-    # The trailing `_` is load-bearing: `read` puts the REST of the line in its
-    # last variable, so without it `os` would read as `any|<MAX_PANIC>`.
+    # The trailing `_`s (one per field after `os`) are load-bearing: `read` puts
+    # the REST of the line in its last variable, so `os` would swallow them.
     IFS='|' read -r name knobs _ _ _ _ _ os _ _ <<<"$spec"
     printf '  %-14s [%-6s] %s\n' "$name" "$os" "$knobs"
   done
@@ -604,9 +604,18 @@ case "$MID_LINE_EXIT" in
     ;;
 esac
 
+# Every `test result:` line must be WHOLE. libtest writes it as three flushed
+# pieces (`\ntest result: `, `ok`/`FAILED`, `. N passed; …`), so stderr landing
+# between them moves that binary's counts onto a line the sums above never read
+# — for MAX_IGNORED, a false GREEN. The mid-line scan above anchors on per-test
+# lines and cannot see it. Refuse the shape rather than guess at the counts.
+WHOLE_RESULT='^test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed; [0-9]+ ignored; '
+TORN_COUNT="$(grep -a '^test result: ' "$LOG" | grep -acvE "$WHOLE_RESULT" || true)"
+TORN_COUNT="${TORN_COUNT:-0}"
+
 # Belt and braces: an operand that is somehow still not a number must refuse a
 # verdict rather than silently satisfy every floor.
-for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT IGNORED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND; do
+for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT IGNORED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND TORN_COUNT; do
   case "${!var}" in
     ''|*[!0-9]*)
       echo "run-e2e-gate.sh: $var is \"${!var}\", which is not a count — refusing a verdict." >&2
@@ -644,6 +653,14 @@ if [ "$IGNORED_COUNT" -gt "$max_ignored" ]; then
   echo "   is met by the tests that remain (#876). Remove the #[ignore], or — for a"
   echo "   deliberate one, like worker-report's inner fixtures — raise MAX_IGNORED."
   grep -a ' \.\.\. ignored' "$LOG" | sort -u | sed 's/^/     /'
+  FAIL=1
+fi
+if [ "$TORN_COUNT" -ne 0 ]; then
+  echo "❌ $TORN_COUNT \`test result:\` line(s) are not whole: output landed inside libtest's"
+  echo "   summary, so that binary's passed/ignored counts were never read and every"
+  echo "   cap above is unproven. Rerun; if it recurs, find what is still writing to"
+  echo "   stderr after the binary's last test finished."
+  grep -a '^test result: ' "$LOG" | grep -avE "$WHOLE_RESULT" | sed 's/^/     /'
   FAIL=1
 fi
 for pair in ${e2e_floors//,/ }; do

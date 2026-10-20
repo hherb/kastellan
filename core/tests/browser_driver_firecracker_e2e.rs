@@ -91,9 +91,15 @@ const DEFAULT_ORIGIN_URL: &str = "https://example.org/";
 /// `<h1>`, and IANA has since dropped that heading (the body now opens with
 /// "This domain is for use in documentation examples…"), which made the gate
 /// read an upstream copy edit as a failed render. `web_fetch_firecracker_egress_e2e`
-/// made the same correction for the same reason; the `<title>` has outlived
-/// every rewrite so far.
+/// made the same title-anchoring correction; the `<title>` has outlived every
+/// rewrite so far.
 const DEFAULT_ORIGIN_TITLE: &str = "Example Domain";
+
+/// A floor on the rendered text, as `web_fetch_firecracker_egress_e2e` has: a
+/// real body came back, without pinning its wording. Non-empty alone is not
+/// enough — the worker's raw-text fallback includes the `<title>`, so a render
+/// with an empty body would still return the title's 14 bytes.
+const MIN_RENDERED_TEXT_BYTES: usize = 50;
 
 /// A deliberately heavy real page for the memory measurement: a large DOM,
 /// unlike [`DEFAULT_ORIGIN_URL`], which is far too small to exercise the
@@ -676,8 +682,9 @@ async fn vm_booted_browser_driver_launches_chromium() {
 ///
 /// ## What is asserted
 ///
-/// 1. The dispatch **succeeds** and the post-JS text contains `Example Domain` —
-///    a completed render, not merely an attempt.
+/// 1. The dispatch **succeeds** with status 200, the reported `title` is
+///    `Example Domain`, and the post-JS text clears [`MIN_RENDERED_TEXT_BYTES`]
+///    — a completed render, not merely an attempt.
 /// 2. A sidecar decision `allowed` for `example.org:443` — the render went
 ///    *through* the sidecar, not around it.
 /// 3. Real wall-clock **headroom** under the entry's own `wall_clock_ms`. Merely
@@ -751,7 +758,11 @@ async fn vm_renders_real_page_through_real_sidecar() {
     );
     assert_eq!(value["status"], 200, "render result: {value}");
     assert_eq!(value["title"], DEFAULT_ORIGIN_TITLE, "render result: {value}");
-    assert!(!text.trim().is_empty(), "the render returned no body text: {value}");
+    assert!(
+        text.trim().len() >= MIN_RENDERED_TEXT_BYTES,
+        "rendered only {} bytes of text (floor {MIN_RENDERED_TEXT_BYTES}): {value}",
+        text.trim().len()
+    );
 
     // The render must have gone THROUGH the sidecar. Match host AND port: a bare
     // host check would pass on any decision mentioning the host (#469's

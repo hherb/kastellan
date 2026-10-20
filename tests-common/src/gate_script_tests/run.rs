@@ -124,10 +124,11 @@ fn run_gate_profile(profile: &str, tag: &str, log: &str, exit_code: i32) -> Outp
 #[derive(Default)]
 pub(super) struct GateEdits<'a> {
     /// Replace the MAX_PANIC field of this profile's row in a COPY of the
-    /// script. The committed table has every cap at 0, so without a copy no
-    /// test can reach a cap above zero, `any`, or a malformed value.
+    /// script. The committed table has every MAX_PANIC at 0, so without a copy
+    /// no test can reach a cap above zero, `any`, or a malformed value.
     pub(super) max_panic: Option<(&'a str, &'a str)>,
-    /// The same for MAX_IGNORED (#876).
+    /// The same for MAX_IGNORED (#876): every profile but `worker-report` caps
+    /// it at 0, so a copy is how a test reaches a non-zero or malformed cap.
     pub(super) max_ignored: Option<(&'a str, &'a str)>,
     /// Extra fake tools, `(name, sh body)`, put on `PATH` beside the fake cargo.
     pub(super) tools: &'a [(&'a str, &'a str)],
@@ -249,7 +250,7 @@ pub(super) fn describe(out: &Output) -> String {
     )
 }
 
-pub(super) const PASSED_FIVE: &str =
+const PASSED_FIVE: &str =
     "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s";
 
 #[test]
