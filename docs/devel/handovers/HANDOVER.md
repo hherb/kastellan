@@ -4,13 +4,13 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261019_876_pre-prune.md`](archive/handover_20261019_876_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (#875's and #722's full
-> sections and the #722 baseline row included).
+> [`archive/handover_20261020_880_pre-prune.md`](archive/handover_20261020_880_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (#876's full section and
+> the #875 baseline row included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-19 (#876: the gate caps `N ignored`; the DGX micro-VM images rebuilt and its SearxNG restarted. #875 (PR #877) merged earlier the same day. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#879](https://github.com/hherb/kastellan/pull/879) (#876), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-20 (#880: the gate demands an exact `N filtered out`, and one whole summary per binary. #876 merged as PR #879 the same night. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#881](https://github.com/hherb/kastellan/pull/881) (#880), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,34 +43,42 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-19, latest): #876 — the gate caps libtest's `N ignored`
+### This session (2026-10-20, latest): #880 — the gate demands an exact `N filtered out`
 
-- `run-e2e-gate.sh` sums `ignored;` over every `test result:` line and refuses a run over the new
-  **10th column, `MAX_IGNORED`** (a number — ⚠️ **never `any`**, validated at startup and in
-  `gate_script_tests`). **Measured:** `worker-report` = **13** (its `#[ignore = "inner fixture: …"]`
-  tests, re-run by their parents in a child — ⚠️ a new one means raising the cap in the same commit);
-  every other profile **0** (`microvm`/`mail-live` by construction: under `--ignored` libtest counts
-  the rest as `filtered out`). Tests: `gate_script_tests/ignored.rs` (47 → **51**); the harness edits
-  any capped column by index (`with_field`).
-- **Review fixes (same PR):** the gate also refuses a **torn `test result:` line** — libtest flushes
-  `\ntest result: `, `ok`, `. N passed; …` separately, so stderr between them hid that binary's
-  `ignored` from the sum (a false green; mutation-checked). Plus an empty-`MAX_IGNORED` runtime test
-  (51 → **53**), and `browser_driver_firecracker_e2e` now floors the rendered text at 50 bytes (DGX
-  runs render 1289), since the raw-text fallback includes the `<title>`. **Not re-run after the fixes:**
-  the gate profiles and the full sweep (the 5141 below predates the +2 tests). Filed
-  [#880](https://github.com/hherb/kastellan/issues/880): on `--ignored` profiles a test that LOSES its
-  `#[ignore]` is `filtered out`, which nothing caps.
-- **Every profile re-run on its host; all green except DGX `microvm`** (red only on #878). Mac:
-  worker-report 13 passed / 13 ignored (cap 13), pg 87, gliner 5, launchd 7, container 18, mail-live 1.
-  DGX: worker-report 13 passed / 13 ignored, pg 87, guard-tier 21, mail-live 1
-  (the owed DGX run — done), microvm 24 passed / ignored 0, red only on [#878](https://github.com/hherb/kastellan/issues/878).
-- **DGX micro-VM images were all stale** (2026-09-08): `build-release.sh` + `rebuild-all-rootfs.sh`
-  rebuilt all 8 in ~2 min, matrix digest `94c86940…` unchanged. ⚠️ **DGX SearxNG
-  (`kastellan-searxng`, docker) was DOWN since the host's reboot — restart policy `no`**, so live web
-  search was dead too. Started by hand; **operator: `docker update --restart unless-stopped kastellan-searxng`.**
-- **Fixed in passing:** `browser_driver_firecracker_e2e` asserted `"Example Domain"` in example.org's
-  body; IANA dropped that heading. It now asserts the reported `title` (verified in the DGX VM).
-- ⚠️ The Mac `pg` profile hit #548/#676 once (3 tests, `database system is starting up`); green on re-run.
+- `run-e2e-gate.sh` gains an **11th column, `FILTERED_OUT`** (a number — ⚠️ **never `any`**), summing
+  `N filtered out` like `MAX_IGNORED` — but ⚠️ **EXACT, not a cap** (review round: under `≤`,
+  deleting one plain test left room for one lost `#[ignore]`). **Measured with libtest:** `microvm`
+  = **4** (the plain plan tests `browser_driver_firecracker_e2e` 1,
+  `web_research_firecracker_broker_e2e` 2, `web_research_search_broker_e2e` 1 — ⚠️ adding, deleting
+  or `#[ignore]`ing one means changing the count in the same commit); every other profile **0**
+  (`mail-live` only because its one test is `#[ignore]`d). Over-count names each offending suite.
+  ⚠️ **An operator name filter after the profile name fails the verdict** (after the run, by design)
+  — run a single test with plain `cargo test`, not through the gate. The whole-line `test result:`
+  regex now reaches `filtered out;`.
+- **Review round (same PR):** the gate also demands **one whole `test result:` line per `Running`
+  binary** — a binary that printed no summary, or one with stderr in FRONT of it (libtest writes
+  `\n` and `test result: ` separately), was read by no sum (reproduced ✅ at exit 0 with a fake
+  cargo; pre-existing). The torn-line test now cuts at libtest's real last split (`filtered out` |
+  `; finished in`); the old cut let both one-line regex weakenings survive. Tests: 53 → **61**;
+  the five new-code mutants (under-count, binary/summary count, its suite listing, both regex
+  weakenings) all killed. Filed [#882](https://github.com/hherb/kastellan/issues/882):
+  `worker-report`'s `MAX_IGNORED` of 13 has the same `≤` slack.
+- **Verified:** Mac `worker-report` green (filtered 0), partial name filter refused (25 filtered);
+  DGX `microvm` **green** — 30 passed / 15 binaries / filtered **4** (cap 4), #878's heavy-page test
+  passed this run. ⚠️ **`cargo test` is fail-fast across binaries**, so a plain `microvm` run with
+  #878 red stops after the FIRST binary (1 filtered, 2 passed) — pass `--no-fail-fast` after the
+  profile name when measuring.
+- ⚠️ A 0-byte gate script exits 0 — check `wc -c` after copying one to the DGX [[ssh-stdin-copy-can-write-zero-bytes]].
+
+### Earlier (2026-10-19): #876 — the gate caps `N ignored` (PR #879, merged) — what still binds
+
+- 10th column **`MAX_IGNORED`**: `worker-report` = **13** (its `#[ignore = "inner fixture: …"]`
+  tests — ⚠️ a new one means raising the cap in the same commit), every other profile 0. The gate
+  also refuses a **torn `test result:` line** (libtest flushes it in three pieces).
+  `browser_driver_firecracker_e2e` asserts example.org's reported `title` (IANA dropped the heading).
+- ⚠️ **DGX SearxNG (`kastellan-searxng`, docker) has restart policy `no`** — down after every reboot;
+  **operator: `docker update --restart unless-stopped kastellan-searxng`.** DGX micro-VM images
+  rebuilt 2026-10-19.
 
 ### Earlier (2026-10-18/19): #875, #722, #872, #870 (PRs #877, #874, #873, #871, merged) — what still binds
 
@@ -121,29 +129,20 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 - Both **`closing_pool`** fixtures read the client's first message before closing (else a RST races EOF).
 - **#810:** `install_shutdown_signals()` before `spawn_scheduler`; ⚠️ signal tests await a probe stream first.
 
-### Previous (2026-10-12 → 16): the Matrix inbound path — #835, #852, #853 (PRs #850, #855, merged)
+### Previous (2026-10-08 → 16): the Matrix inbound path and reply claims — #835, #852, #853, #825, #832, #846, #827/#826 (merged) — what still binds
 
-- **`ParsePoll` returns a `PolledBatch`** (`spec.rs`): decoded `events` + `undecodable` (count + first
-  error, **line only**); Matrix decodes each `Event` on its own — ⚠️ the envelope must follow
-  `kastellan_matrix_wire::PollResult`. ⚠️ **On an ack channel a batch with undecodable events is
-  wholly undecodable** (acking past a bad event loses it). `channel.inbound_undecodable` has **`part`**
-  = `batch` (#836; pre-#852 rows none) / `events` + `undecodable` / `drain` (#853). ⚠️ The
-  ack-channel ERROR prints `{e:#}`; its cadence hashes `e.root_cause()` only.
-- **#835:** `PolledWorkerSpec::drain` runs once on every driver exit → `stage = 'worker'` rows.
-  ⚠️ matrix-sdk 0.18 **saves the sync token before running handlers**; `sdk_live/sync_loop.rs`'s
-  empty-`save_changes` barrier **narrows, not closes** it — re-check on an SDK upgrade. ⚠️ `sdk_live`
-  compiles **only with `--features live-matrix`**. **Owed:** a live `LiveSdk::drain` leg (DGX).
-
-### Previous (2026-10-08 → 12): #825, #832, #846, #827/#826 (PRs #834, #842, #847, #849, merged) — what still binds
-
-- **#846:** `InboundReceiver` counts the bus's unread buffer on `Drop` (`stage = 'buffered'`), over-counts
-  on purpose; ⚠️ needs tokio ≥ 1.52.3. **#832:** replies queue **unclaimed**, the pump claims at `send`.
-- **#825:** migration 0027, one claim winner across both buses. ⚠️ **At-most-once**; ⚠️ **the
-  terminal-state list lives in four places** — widening it needs a NEW migration.
-- **#827/#826:** `PendingInsert` drop guard in `pg_events::audit_or_report` — ⚠️ no `.await` before it.
-  ⚠️ `kastellan-db`'s next release must be **0.3.0**; `truncate_payload` must stay IDEMPOTENT.
-- ⚠️ **A Mac sweep without `KASTELLAN_PG_BIN_DIR` is NOT evidence** [[postgres-app-bin-paths]].
-  ⚠️ **`git push` over SSH fails here** — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
+- **`ParsePoll` → `PolledBatch`** (`events` + `undecodable`, first error **line only**); the envelope must
+  follow `kastellan_matrix_wire::PollResult`. ⚠️ **On an ack channel a batch with any undecodable event is
+  wholly undecodable.** `channel.inbound_undecodable.part` = `batch` / `events` + `undecodable` / `drain`.
+- **#835:** `PolledWorkerSpec::drain` on every driver exit (`stage = 'worker'`). ⚠️ matrix-sdk 0.18 saves
+  the sync token **before** handlers; the `save_changes` barrier narrows, not closes it. ⚠️ `sdk_live`
+  needs `--features live-matrix`. **Owed:** a live `LiveSdk::drain` leg (DGX).
+- **#846:** `InboundReceiver` counts the unread buffer on `Drop` (`buffered`); ⚠️ tokio ≥ 1.52.3. **#832:**
+  replies queue unclaimed, claimed at `send`. **#825:** migration 0027, ⚠️ at-most-once; the terminal-state
+  list lives in **four** places (widening = a NEW migration). **#827:** `PendingInsert` guard — ⚠️ no
+  `.await` before it; `kastellan-db`'s next release is **0.3.0**; `truncate_payload` stays IDEMPOTENT.
+- ⚠️ A Mac sweep without `KASTELLAN_PG_BIN_DIR` is NOT evidence [[postgres-app-bin-paths]]; `git push`
+  over SSH fails — HTTPS via `gh` [[git-push-ssh-no-identities-use-gh-https]].
 
 ### Previous (2026-09-30 → 10-03): the audit sink — #788–#802 (PRs #791, #795, #801, #806) — what still binds
 
@@ -286,8 +285,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), #237's absent macOS CI leg, and #823 (a zero-test suite still clears the
    aggregate floors — the per-binary hook check now covers part of it; re-read before starting).
-   [#878](https://github.com/hherb/kastellan/issues/878): the `microvm` profile's last red test
-   (Wikipedia heavy-page render times out in the VM, undiagnosed).
+   [#878](https://github.com/hherb/kastellan/issues/878): the `microvm` profile's intermittent red
+   test (Wikipedia heavy-page render times out in the VM; passed 2026-10-20, undiagnosed).
 
 5. **The thinning family, now deployed (2026-10-18) — its loss lines are still unseen live.** A quiet
    restart says nothing (verified on both hosts); a **restart under traffic or a wedged Postgres** is what
@@ -361,7 +360,7 @@ Also over (grew in #818 without a split): `db/src/tasks.rs` **819** (+11 in #825
 `db/src/graph.rs` **~935**, `core/src/entity_extraction/batch_upsert.rs` **~520**.
 Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
 `tool_dispatch.rs` 722, `attach/tests.rs` 727, `require.rs` 661,
-`scripts/run-e2e-gate.sh` ~690 (shell). ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
+`scripts/run-e2e-gate.sh` 812 (shell), `gate_script_tests/run.rs` 562, `gate_script_tests.rs` 538. ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
 its next leg** (the attachment half is the natural cut). ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
@@ -400,8 +399,8 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#876) | PR [#879](https://github.com/hherb/kastellan/pull/879) | **5141 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-876.log`. 5141 = 5137 + 4 (`gate_script_tests/ignored.rs`). Every gate profile re-run green on both hosts (see the session note; DGX `microvm` red only on #878) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-876` (fresh dir), **27** `Checking kastellan` | **5** Mac |
-| **Mac** (#875) | PR [#877](https://github.com/hherb/kastellan/pull/877) | **5137 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-875.log`. 5137 = #874's tree exactly (no new tests; one assertion added to an existing one) — also the first full sweep over #874's review fixes. `container` profile: 18 passed, 18 `[E2E]`, 0 `[SKIP]` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-875` (fresh dir), **27** `Checking kastellan`; `kastellan-sandbox` cross-clippy'd for `aarch64-unknown-linux-gnu` | **5** Mac |
+| **Mac** (#880) | PR [#881](https://github.com/hherb/kastellan/pull/881) | **5149 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-880.log`. 5149 = 5141 + 2 (#876's review tests, after its sweep) + 6 (`gate_script_tests/filtered.rs`). DGX `microvm` green (`--no-fail-fast`) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-880` (fresh dir), **27** `Checking kastellan` | **5** Mac |
+| **Mac** (#876) | PR [#879](https://github.com/hherb/kastellan/pull/879) | **5141 / 0 / 52**, **195** suites, same flags; `[SKIP]` 5; log `sweep-876.log`. Every gate profile re-run green on both hosts (DGX `microvm` red only on #878) | exit 0, fresh dir, **27** | **5** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -469,7 +468,7 @@ Only the rows that tell you *where to look when something goes red*.
 | `core` (`injection_guard_e2e`, `secret_vault_e2e`, `guard_boot_row_e2e`) | 10 / 9 / 1 | **PG-required** policy rows, privacy invariant, fail-closed redemption |
 | worker-report (5 suites, 2 crates) | 13 | a dying worker's last words reach a failing test; a real broken fd 2, re-exec'd. `bash scripts/run-e2e-gate.sh worker-report` (both hosts) |
 | `core` `mail_live_shape_e2e` (`#[ignore]`) | 1 | our reading of localmail against the **live** service. `bash scripts/mail/live-shape-gate.sh` (both hosts) |
-| `tests-common` `gate_script_tests` | 51 | the gate script's table **and** its verdict (floors, caps, per-binary hook check), run against a fake `cargo` |
+| `tests-common` `gate_script_tests` | 59 | the gate script's table **and** its verdict (floors, caps incl. `ignored`/`filtered out`, per-binary hook check), run against a fake `cargo` |
 | container (`core`: `python_exec_container_e2e`, `python_exec_warm_idle_e2e`, `lifecycle_container_routing_e2e`; `sandbox`: `macos_container_smoke`; macOS) | 4 / 3 / 1 / 10 | **real** Apple `container` micro-VM round-trips, mem cap, warm reuse. `bash scripts/run-e2e-gate.sh container` |
 
 ## Key design decisions locked in
@@ -484,6 +483,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#879** (#876) — merged 2026-10-20: `MAX_IGNORED` + the torn-result-line refusal.
 - **#877** (#875), **#874** (#722), **#873** (#872), **#871** (#870) — merged 2026-10-18/19: the Apple-`container` tier's `[E2E]` line + `container` profile (with `macos_container_smoke`); launchd suites through a knob + `launchd` profile; `stop_target` waits for launchd.
 - **#869** (#867/#862/#860), **#866**, **#863**, **#857**, **#856**, **#855** — merged 2026-10-16/17, **deployed both hosts 2026-10-18**: the audit-loss thinning family.
 - **[#851](https://github.com/hherb/kastellan/pull/851)** (#836, merged, deployed 2026-10-14) — an undecodable poll batch is ERROR + a `channel.inbound_undecodable` row on Matrix, and holds the poll on every channel.

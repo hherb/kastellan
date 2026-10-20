@@ -10,7 +10,8 @@
 //! tests re-run in a child process, and a zero there would make a healthy gate
 //! red on every host. Profiles that pass `--ignored` (`microvm`, `mail-live`)
 //! report 0 ignored by construction — libtest counts the non-ignored tests as
-//! `filtered out` — so a cap of 0 holds for them too.
+//! `filtered out` — so a cap of 0 holds for them too, and #880's
+//! `FILTERED_OUT` (`filtered.rs`) is what gates them.
 
 use super::profiles;
 use super::run::{
