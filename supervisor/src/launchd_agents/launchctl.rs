@@ -1,0 +1,123 @@
+//! The `launchctl` invocations and the pure readers of their answers.
+//!
+//! Lifted out of `launchd_agents.rs` when that file outgrew the 500-LOC
+//! cap. Everything here is `pub(super)`: the driver in the parent module
+//! and its sibling `unload_wait` are the only callers.
+
+use std::process::{Command, Stdio};
+
+use super::LAUNCHCTL_TIMEOUT;
+use crate::bounded_command::{run_capped, CappedOutcome};
+use crate::SupervisorError;
+
+/// Build the `gui/<uid>` domain target string used by `launchctl`.
+///
+/// The UID comes from `getuid(2)`; the value is whatever the calling
+/// process happens to run as. We do not honour `$SUDO_UID` or similar
+/// because the supervisor crate is *user-level only* (running it as
+/// root would put the agent into `gui/0`, which is not a regular user
+/// session).
+pub(super) fn user_domain_target() -> Result<String, SupervisorError> {
+    Ok(format!("gui/{}", current_uid()))
+}
+
+/// Current real UID via `libc::getuid()`.
+///
+/// `getuid` is async-signal-safe and infallible, so no error path is
+/// possible here. Wrapped in a function so the type stays `u32` at
+/// the call sites without forcing every caller to write a libc cast.
+#[cfg(target_os = "macos")]
+pub(super) fn current_uid() -> u32 {
+    // SAFETY: `getuid` is documented as always-succeeding and
+    // async-signal-safe; it has no preconditions.
+    unsafe { libc::getuid() as u32 }
+}
+
+/// Run `launchctl <args>` with stdio captured. Maps non-zero exits to
+/// [`SupervisorError::Backend`] with the trimmed stderr.
+pub(super) fn run_launchctl(args: &[&str]) -> Result<String, SupervisorError> {
+    // Bounded so a hung `bootstrap`/`bootout` against a churn-degraded
+    // GUI domain fails fast instead of wedging the thread at 0 % CPU.
+    // `run_capped` sets the stdio (stdin null, stdout/stderr piped) for us.
+    let mut cmd = Command::new("launchctl");
+    cmd.args(args);
+    let out = match run_capped(&mut cmd, LAUNCHCTL_TIMEOUT)
+        .map_err(|e| SupervisorError::Io(format!("run launchctl: {e}")))?
+    {
+        CappedOutcome::Completed(out) => out,
+        CappedOutcome::TimedOut => {
+            return Err(SupervisorError::Backend(format!(
+                "launchctl {} timed out after {}s (the gui/<uid> launchd domain may be \
+                 churn-degraded under heavy service load — see issue #130)",
+                args.join(" "),
+                LAUNCHCTL_TIMEOUT.as_secs()
+            )));
+        }
+    };
+    if !out.status.success() {
+        // `launchctl` writes most diagnostics to stdout (yes, stdout)
+        // and only some to stderr. Fold both so the error message
+        // surfaces whichever the tool happened to use.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let combined = format!("{} {}", stderr.trim(), stdout.trim()).trim().to_string();
+        let exit = out
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        return Err(SupervisorError::Backend(format!(
+            "launchctl {} (exit {exit}): {combined}",
+            args.join(" ")
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Parse the `state = <word>` line out of `launchctl print` output.
+///
+/// `launchctl print` emits a verbose nested dict; the `state` line
+/// looks like `state = running`, indented by some whitespace. This
+/// helper finds the first such line and returns the word — `running`,
+/// `not running`, `waiting`, etc. Returns `None` if no `state` line
+/// is present.
+pub(super) fn parse_print_state(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(val) = trimmed.strip_prefix("state = ") {
+            return Some(val.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Is the service loaded into the given launchd domain?
+///
+/// `launchctl print <target>` exits 0 when the service is bootstrapped
+/// (regardless of whether it's currently running, exited, waiting,
+/// or transitional) and non-zero when there's no such service. We
+/// use the exit code, not stdout parsing, so the check is robust to
+/// macOS version differences in the verbose `print` output format.
+///
+/// Used to make `start` idempotent without parsing version-specific
+/// `bootstrap` error strings.
+pub(super) fn is_loaded_in_domain(target: &str) -> bool {
+    Command::new("launchctl")
+        .args(["print", target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Heuristic: does `msg` look like the "no such service" error
+/// `launchctl bootout` emits when the agent isn't in the domain?
+/// Used to make `stop` idempotent.
+pub(super) fn is_no_such_service_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("could not find service")
+        || m.contains("no such process")
+        || m.contains("could not find specified service")
+}
