@@ -1,17 +1,19 @@
-//! #876: the gate reads libtest's `N ignored` and caps it per profile.
+//! #876: the gate reads libtest's `N ignored` and demands an exact, per-profile
+//! count of it (a cap until #882).
 //!
 //! Before this, nothing read that field. `#[ignore]` every test but one in each
 //! binary of a profile, and the gate still printed ✅: the survivors cleared
 //! `MIN_PASSED`, each announced its `[E2E]` line and reached the panic hook,
 //! while the rest — containment tests among them — stopped running unseen.
 //!
-//! The cap is a MEASURED number per profile, not a blanket zero: the
+//! The count is a MEASURED number per profile, not a blanket zero: the
 //! `worker-report` suites carry `#[ignore]`d *inner fixtures* that their parent
 //! tests re-run in a child process, and a zero there would make a healthy gate
-//! red on every host. Profiles that pass `--ignored` (`microvm`, `mail-live`)
-//! report 0 ignored by construction — libtest counts the non-ignored tests as
-//! `filtered out` — so a cap of 0 holds for them too, and #880's
-//! `FILTERED_OUT` (`filtered.rs`) is what gates them.
+//! red on every host. ⚠️ Exact, not a cap (#882): under `≤`, deleting one inner
+//! fixture left room for one real test to gain an `#[ignore]` unseen. Profiles
+//! that pass `--ignored` (`microvm`, `mail-live`) report 0 ignored by
+//! construction — libtest counts the non-ignored tests as `filtered out` — and
+//! #880's `FILTERED_OUT` (`filtered.rs`) is what gates them.
 
 use super::profiles;
 use super::run::{
@@ -36,53 +38,73 @@ fn log_with_ignored(per_binary: &[u32]) -> String {
     log
 }
 
-/// [`PROFILE`]'s committed cap, which these tests assume is 0.
+/// [`PROFILE`]'s committed count, which these tests assume is 0.
 #[test]
-fn the_profile_these_tests_drive_caps_ignored_at_zero() {
+fn the_profile_these_tests_drive_expects_zero_ignored() {
     let p = profiles().into_iter().find(|p| p.name == PROFILE).expect("PROFILE row");
-    assert_eq!(p.max_ignored, "0", "the tests below assume `{PROFILE}` caps MAX_IGNORED at 0");
+    assert_eq!(p.ignored, "0", "the tests below assume `{PROFILE}` expects IGNORED = 0");
 }
 
 #[test]
-fn one_ignored_test_fails_a_profile_capped_at_zero() {
+fn one_ignored_test_fails_a_profile_expecting_zero() {
     // The acceptance test the issue names: `1 ignored`, refused, and the
     // refusal names the field rather than crashing.
-    let out = run_gate_with(PROFILE, "ignored-one", &log_with_ignored(&[1]), 0, &GateEdits::default());
+    let mut log = log_with_ignored(&[1]);
+    log.push_str("test skipped_containment ... ignored\n");
+    let out = run_gate_with(PROFILE, "ignored-one", &log, 0, &GateEdits::default());
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .contains("1 test(s) reported `ignored`, max is 0 (MAX_IGNORED)"),
+        stdout.contains("1 test(s) reported `ignored`, expected exactly 0 (IGNORED)"),
         "{}",
         describe(&out)
     );
+    // libtest names an ignored test, so the refusal does too.
+    assert!(stdout.contains("     test skipped_containment ... ignored"), "{}", describe(&out));
 }
 
 #[test]
-fn ignored_counts_are_summed_across_binaries_and_the_cap_is_inclusive() {
-    // A cap of 2 on a copy: 1 + 1 across two binaries passes, 1 + 2 is refused.
-    // A per-binary check, or `-ge` for `-gt`, fails one of the two halves.
-    let edits = GateEdits { max_ignored: Some((PROFILE, "2")), ..Default::default() };
-    let at = run_gate_with(PROFILE, "ignored-at-cap", &log_with_ignored(&[1, 1]), 0, &edits);
-    assert!(at.status.success(), "a cap of 2 must allow 2\n{}", describe(&at));
+fn ignored_counts_are_summed_across_binaries_and_must_match_exactly() {
+    // A count of 2 on a copy: 1 + 1 across two binaries passes; 1 + 2 and
+    // 0 + 1 are both refused. A per-binary check fails the first half.
+    let edits = GateEdits { ignored: Some((PROFILE, "2")), ..Default::default() };
+    let at = run_gate_with(PROFILE, "ignored-exact", &log_with_ignored(&[1, 1]), 0, &edits);
+    assert!(at.status.success(), "a count of 2 must allow 2\n{}", describe(&at));
     let over = run_gate_with(PROFILE, "ignored-over", &log_with_ignored(&[1, 2]), 0, &edits);
-    assert_eq!(over.status.code(), Some(1), "a cap of 2 must refuse 3\n{}", describe(&over));
+    assert_eq!(over.status.code(), Some(1), "a count of 2 must refuse 3\n{}", describe(&over));
     assert!(
-        String::from_utf8_lossy(&over.stdout).contains("3 test(s) reported `ignored`, max is 2"),
+        String::from_utf8_lossy(&over.stdout).contains("3 test(s) reported `ignored`, expected exactly 2"),
         "{}",
         describe(&over)
+    );
+    // Below (#882): an inner fixture went away, leaving room for a real test
+    // to gain an `#[ignore]` with the sum back at 2.
+    let under = run_gate_with(PROFILE, "ignored-under", &log_with_ignored(&[0, 1]), 0, &edits);
+    assert_eq!(under.status.code(), Some(1), "a count of 2 must refuse 1\n{}", describe(&under));
+    let stdout = String::from_utf8_lossy(&under.stdout);
+    assert!(
+        stdout.contains("only 1 test(s) reported `ignored`, expected exactly 2 (IGNORED)"),
+        "{}",
+        describe(&under)
+    );
+    // Every suite's summary, so the one that lost its fixture can be found.
+    assert!(
+        stdout.contains("     tests/suite_0_e2e.rs: test result: ok. 5 passed; 0 failed; 0 ignored;"),
+        "{}",
+        describe(&under)
     );
 }
 
 #[test]
-fn a_non_numeric_max_ignored_is_refused_before_anything_runs() {
-    // `any` too: an uncapped ignored count is the hole this column closes.
+fn a_non_numeric_ignored_is_refused_before_anything_runs() {
+    // `any` too: an unchecked ignored count is the hole this column closes.
     for value in ["any", "zero"] {
-        let edits = GateEdits { max_ignored: Some((PROFILE, value)), ..Default::default() };
+        let edits = GateEdits { ignored: Some((PROFILE, value)), ..Default::default() };
         let out = run_gate_with(PROFILE, "ignored-malformed", &log_with_ignored(&[0]), 0, &edits);
         assert_eq!(out.status.code(), Some(2), "{value}: {}", describe(&out));
         assert!(
             String::from_utf8_lossy(&out.stderr)
-                .contains(&format!("profile '{PROFILE}' MAX_IGNORED must be a number")),
+                .contains(&format!("profile '{PROFILE}' IGNORED must be a number")),
             "{value}: {}",
             describe(&out)
         );
@@ -91,15 +113,16 @@ fn a_non_numeric_max_ignored_is_refused_before_anything_runs() {
 }
 
 #[test]
-fn an_empty_max_ignored_is_refused_before_anything_runs() {
-    // An empty cap makes `[ "$n" -gt "" ]` error, which `if` reads as "within
-    // the cap" — the empty-operand false green this check exists to refuse.
-    let edits = GateEdits { max_ignored: Some((PROFILE, "")), ..Default::default() };
+fn an_empty_ignored_is_refused_before_anything_runs() {
+    // An empty count makes both `-gt ""` and `-lt ""` error, which `if`/`elif`
+    // read as "neither over nor under", i.e. exact — the empty-operand false
+    // green this check exists to refuse.
+    let edits = GateEdits { ignored: Some((PROFILE, "")), ..Default::default() };
     let out = run_gate_with(PROFILE, "ignored-empty", &log_with_ignored(&[5]), 0, &edits);
     assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
     assert!(
         String::from_utf8_lossy(&out.stderr)
-            .contains(&format!("profile '{PROFILE}' has an empty 'max_ignored' field")),
+            .contains(&format!("profile '{PROFILE}' has an empty 'ignored' field")),
         "{}",
         describe(&out)
     );

@@ -9,8 +9,8 @@
 > the #875 baseline row included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-20 (#880: the gate demands an exact `N filtered out`, and one whole summary per binary. #876 merged as PR #879 the same night. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#881](https://github.com/hherb/kastellan/pull/881) (#880), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-21 (#882: `IGNORED` is an exact count, like #880's `FILTERED_OUT`. #880 merged as PR #881. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#883](https://github.com/hherb/kastellan/pull/883) (#882), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,37 +43,39 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-20, latest): #880 — the gate demands an exact `N filtered out`
+### This session (2026-10-21, latest): #882 — `IGNORED` is exact, not a cap
 
-- `run-e2e-gate.sh` gains an **11th column, `FILTERED_OUT`** (a number — ⚠️ **never `any`**), summing
-  `N filtered out` like `MAX_IGNORED` — but ⚠️ **EXACT, not a cap** (review round: under `≤`,
-  deleting one plain test left room for one lost `#[ignore]`). **Measured with libtest:** `microvm`
-  = **4** (the plain plan tests `browser_driver_firecracker_e2e` 1,
-  `web_research_firecracker_broker_e2e` 2, `web_research_search_broker_e2e` 1 — ⚠️ adding, deleting
-  or `#[ignore]`ing one means changing the count in the same commit); every other profile **0**
-  (`mail-live` only because its one test is `#[ignore]`d). Over-count names each offending suite.
-  ⚠️ **An operator name filter after the profile name fails the verdict** (after the run, by design)
-  — run a single test with plain `cargo test`, not through the gate. The whole-line `test result:`
-  regex now reaches `filtered out;`.
-- **Review round (same PR):** the gate also demands **one whole `test result:` line per `Running`
-  binary** — a binary that printed no summary, or one with stderr in FRONT of it (libtest writes
-  `\n` and `test result: ` separately), was read by no sum (reproduced ✅ at exit 0 with a fake
-  cargo; pre-existing). The torn-line test now cuts at libtest's real last split (`filtered out` |
-  `; finished in`); the old cut let both one-line regex weakenings survive. Tests: 53 → **61**;
-  the five new-code mutants (under-count, binary/summary count, its suite listing, both regex
-  weakenings) all killed. Filed [#882](https://github.com/hherb/kastellan/issues/882):
-  `worker-report`'s `MAX_IGNORED` of 13 has the same `≤` slack.
-- **Verified:** Mac `worker-report` green (filtered 0), partial name filter refused (25 filtered);
-  DGX `microvm` **green** — 30 passed / 15 binaries / filtered **4** (cap 4), #878's heavy-page test
-  passed this run. ⚠️ **`cargo test` is fail-fast across binaries**, so a plain `microvm` run with
-  #878 red stops after the FIRST binary (1 filtered, 2 passed) — pass `--no-fail-fast` after the
-  profile name when measuring.
-- ⚠️ A 0-byte gate script exits 0 — check `wc -c` after copying one to the DGX [[ssh-stdin-copy-can-write-zero-bytes]].
+- The 10th column is renamed **`MAX_IGNORED` → `IGNORED`** and refused in **both** directions (an
+  `-lt` branch beside `-gt`, as #880's `FILTERED_OUT`). `worker-report` = **13** — counted from the
+  five suites' `#[ignore = "inner fixture: …"]` attributes (`worker_early_exit_stderr_fallback` 3,
+  `persistent_worker_death_stderr_fallback` 4, `panic_hook_gate_safety` 1,
+  `worker_report_broken_stderr` 2, `panic_hook_broken_stderr` 3), none `cfg`-gated, so the number
+  is host-independent. ⚠️ **Adding OR deleting an inner fixture means changing it in the same
+  commit** — and since the review round a CI test
+  (`ignored_matches_the_ignored_tests_in_the_selected_suites`) recounts the attributes of every
+  profile that is not `--ignored` and has no `@…` discovery, so a missed edit is red in CI.
+  Under-count message: `only N test(s) reported \`ignored\`, expected exactly M`.
+- Tests: **62** in `gate_script_tests` (61 + the CI recount; the under-count half joins the
+  existing sum test). The old script fails 4 of them, and the `-lt` → `-le` mutant is killed. The
+  review round also: both under-count branches list each suite's summary line, the `IGNORED` one
+  names a trailing name filter as a cause, the counter recognises `#[tokio::test…]`, and four
+  mutants (table 13 → 12, one deleted inner-fixture `#[ignore]`, each per-suite listing dropped)
+  are each killed.
+
+### Earlier (2026-10-20): #880 — the gate demands an exact `N filtered out` (PR #881, merged) — what still binds
+
+- 11th column **`FILTERED_OUT`**, exact: `microvm` = **4** (plain plan tests in
+  `browser_driver_firecracker_e2e` 1, `web_research_firecracker_broker_e2e` 2,
+  `web_research_search_broker_e2e` 1 — ⚠️ change it with them), every other profile **0**.
+  ⚠️ **An operator name filter after the profile name fails the verdict** — run a single test with
+  plain `cargo test`. The gate also demands **one whole `test result:` line per `Running` binary**.
+- ⚠️ **`cargo test` is fail-fast across binaries** — pass `--no-fail-fast` after the profile name
+  when measuring. ⚠️ A 0-byte gate script exits 0 — check `wc -c` after copying one to the DGX
+  [[ssh-stdin-copy-can-write-zero-bytes]].
 
 ### Earlier (2026-10-19): #876 — the gate caps `N ignored` (PR #879, merged) — what still binds
 
-- 10th column **`MAX_IGNORED`**: `worker-report` = **13** (its `#[ignore = "inner fixture: …"]`
-  tests — ⚠️ a new one means raising the cap in the same commit), every other profile 0. The gate
+- 10th column (now **`IGNORED`**, exact since #882): `worker-report` = **13**, every other profile 0. The gate
   also refuses a **torn `test result:` line** (libtest flushes it in three pieces).
   `browser_driver_firecracker_e2e` asserts example.org's reported `title` (IANA dropped the heading).
 - ⚠️ **DGX SearxNG (`kastellan-searxng`, docker) has restart policy `no`** — down after every reboot;
@@ -399,6 +401,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
+| **Mac** (#882) | PR [#883](https://github.com/hherb/kastellan/pull/883) | **5143 / 8 / 52** (5151 total), **195** suites, same flags; log `sweep-882.log`. 5151 = 5149 + 2: #881's review round added 2 `gate_script_tests` (59 → 61) **after** its sweep, so #880's row is the pre-review tree; this diff adds no test (its review round then adds 1, `gate_script_tests` 61 → 62, after this sweep). Sweep exit 101 on **8** PG-contention failures (`the database system is starting up`: `cli_entities_e2e` 5, `asks_e2e` 2, `nul_non_audit_e2e` 1) — all 42 of those suites' tests pass in isolation (#548/#676). `[SKIP]` **15** = 5 + 3 (worktree has no gliner `.venv`) + 7 (`python-exec:dev` stale: a fresh checkout restamps every mtime, #691 family). `worker-report` gate green: `tests ignored: 13   (exactly 13)` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-882`, **27** | **15** (worktree) |
 | **Mac** (#880) | PR [#881](https://github.com/hherb/kastellan/pull/881) | **5149 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-880.log`. 5149 = 5141 + 2 (#876's review tests, after its sweep) + 6 (`gate_script_tests/filtered.rs`). DGX `microvm` green (`--no-fail-fast`) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-880` (fresh dir), **27** `Checking kastellan` | **5** Mac |
 | **Mac** (#876) | PR [#879](https://github.com/hherb/kastellan/pull/879) | **5141 / 0 / 52**, **195** suites, same flags; `[SKIP]` 5; log `sweep-876.log`. Every gate profile re-run green on both hosts (DGX `microvm` red only on #878) | exit 0, fresh dir, **27** | **5** Mac |
 
@@ -468,7 +471,7 @@ Only the rows that tell you *where to look when something goes red*.
 | `core` (`injection_guard_e2e`, `secret_vault_e2e`, `guard_boot_row_e2e`) | 10 / 9 / 1 | **PG-required** policy rows, privacy invariant, fail-closed redemption |
 | worker-report (5 suites, 2 crates) | 13 | a dying worker's last words reach a failing test; a real broken fd 2, re-exec'd. `bash scripts/run-e2e-gate.sh worker-report` (both hosts) |
 | `core` `mail_live_shape_e2e` (`#[ignore]`) | 1 | our reading of localmail against the **live** service. `bash scripts/mail/live-shape-gate.sh` (both hosts) |
-| `tests-common` `gate_script_tests` | 59 | the gate script's table **and** its verdict (floors, caps incl. `ignored`/`filtered out`, per-binary hook check), run against a fake `cargo` |
+| `tests-common` `gate_script_tests` | 62 | the gate script's table **and** its verdict (floors, caps, exact `ignored` (recounted from the suites' attributes) and `filtered out` counts, per-binary hook check), run against a fake `cargo` |
 | container (`core`: `python_exec_container_e2e`, `python_exec_warm_idle_e2e`, `lifecycle_container_routing_e2e`; `sandbox`: `macos_container_smoke`; macOS) | 4 / 3 / 1 / 10 | **real** Apple `container` micro-VM round-trips, mem cap, warm reuse. `bash scripts/run-e2e-gate.sh container` |
 
 ## Key design decisions locked in
@@ -483,7 +486,8 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#879** (#876) — merged 2026-10-20: `MAX_IGNORED` + the torn-result-line refusal.
+- **#881** (#880) — merged 2026-10-20: exact `FILTERED_OUT` + one whole summary per binary.
+- **#879** (#876) — merged 2026-10-20: `MAX_IGNORED` (exact `IGNORED` since #882) + the torn-result-line refusal.
 - **#877** (#875), **#874** (#722), **#873** (#872), **#871** (#870) — merged 2026-10-18/19: the Apple-`container` tier's `[E2E]` line + `container` profile (with `macos_container_smoke`); launchd suites through a knob + `launchd` profile; `stop_target` waits for launchd.
 - **#869** (#867/#862/#860), **#866**, **#863**, **#857**, **#856**, **#855** — merged 2026-10-16/17, **deployed both hosts 2026-10-18**: the audit-loss thinning family.
 - **[#851](https://github.com/hherb/kastellan/pull/851)** (#836, merged, deployed 2026-10-14) — an undecodable poll batch is ERROR + a `channel.inbound_undecodable` row on Matrix, and holds the poll on every channel.

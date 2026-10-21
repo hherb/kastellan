@@ -39,8 +39,8 @@
 #      optional per-profile cap on `[panic]` lines (#748).
 #   5. no counted marker landed MID-LINE, after libtest's `test <name> ... `,
 #      where every anchored count above is blind to it (#755).
-#   6. libtest's `N ignored`, summed across the run's suites, is at most the
-#      profile's MAX_IGNORED (#876).
+#   6. libtest's `N ignored`, summed across the run's suites, is exactly the
+#      profile's IGNORED (#876; a cap until #882).
 #   7. libtest's `N filtered out`, summed the same way, is exactly the
 #      profile's FILTERED_OUT (#880).
 #   8. every `Running` binary printed exactly one whole `test result:` line, so
@@ -109,7 +109,7 @@ done
 
 # ---------------------------------------------------------------------------
 # Profiles.
-#   name | knobs | E2E floors | MIN_PASSED | MAX_SKIP | cargo args | harness args | os | MAX_PANIC | MAX_IGNORED | FILTERED_OUT
+#   name | knobs | E2E floors | MIN_PASSED | MAX_SKIP | cargo args | harness args | os | MAX_PANIC | IGNORED | FILTERED_OUT
 #
 # E2E floors are `tier=N[,tier=N...]`, where `tier` is the phrase the knob was
 # constructed with and the string that appears in `[E2E] <tier>: <detail>`:
@@ -172,23 +172,24 @@ done
 # first knob read (libtest runs tests in parallel) is still the default hook's,
 # in a section that nonetheless reads as hooked. Neither check sees it (#757).
 #
-# MAX_IGNORED is a number — never `any` — and caps libtest's `N ignored`,
-# summed across the run (#876). Without it, `#[ignore]` on every test but one
-# per binary still printed ✅: the survivors cleared MIN_PASSED, each announced
-# its `[E2E]` line and reached the panic hook, while the rest stopped running
-# unseen. It is a CAP, not a census: it fails closed when a suite gains an
-# ignored test, which is the direction a reader notices. Measured, per profile:
+# IGNORED is a number — never `any` — and is the EXACT `N ignored` libtest
+# must report, summed across the run (#876). Without it, `#[ignore]` on every
+# test but one per binary still printed ✅: the survivors cleared MIN_PASSED,
+# each announced its `[E2E]` line and reached the panic hook, while the rest
+# stopped running unseen. ⚠️ Exact, not a cap (#882): under `≤`, deleting one
+# inner fixture left room for one real test to gain an `#[ignore]` with the sum
+# unchanged. Measured, per profile:
 #   * 0 almost everywhere: no suite these profiles select has an `#[ignore]`.
 #   * 0 for `microvm` and `mail-live` too, by construction: under `--ignored`
 #     libtest runs ONLY the ignored tests and counts the rest as `filtered out`
 #     — which is why FILTERED_OUT exists.
 #   * 13 for `worker-report`: its suites' `#[ignore = "inner fixture: …"]`
 #     tests, which fail or panic on purpose and are run by their parent test in
-#     a re-exec'd child. Adding an inner fixture there means raising this cap
-#     in the same commit.
+#     a re-exec'd child. Adding or deleting an inner fixture there means
+#     changing this count in the same commit.
 #
 # FILTERED_OUT is a number — never `any` — and is the EXACT `N filtered out`
-# libtest must report, summed across the run (#880). It is MAX_IGNORED's mirror
+# libtest must report, summed across the run (#880). It is IGNORED's mirror
 # image on the two `--ignored` profiles: there, a test that LOSES its
 # `#[ignore]` is filtered out, never runs under the demanded knobs, and every
 # floor is still met by the tests that kept theirs. ⚠️ Exact, not a cap: under
@@ -354,10 +355,10 @@ MIN_CONTAINER_SUITES=3
 # A malformed profile must be a usage error, not a quiet ✅.
 # ---------------------------------------------------------------------------
 validate_profiles() {
-  local spec name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored filtered_out extra
+  local spec name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic ignored filtered_out extra
   local bad=0 pair tier floor
   for spec in "${PROFILES[@]}"; do
-    IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored \
+    IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic ignored \
       filtered_out extra \
       <<<"$spec"
     if [ -z "$name" ] || [ -n "$extra" ]; then
@@ -365,7 +366,7 @@ validate_profiles() {
       bad=1
       continue
     fi
-    for field in knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored filtered_out; do
+    for field in knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic ignored filtered_out; do
       if [ -z "${!field}" ]; then
         echo "run-e2e-gate.sh: profile '$name' has an empty '$field' field" >&2
         bad=1
@@ -388,9 +389,9 @@ validate_profiles() {
       '') ;;  # already reported as an empty field above
       *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_PANIC must be a number or 'any'" >&2; bad=1 ;;
     esac
-    case "$max_ignored" in
+    case "$ignored" in
       '') ;;  # already reported as an empty field above
-      *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' MAX_IGNORED must be a number (never 'any')" >&2; bad=1 ;;
+      *[!0-9]*) echo "run-e2e-gate.sh: profile '$name' IGNORED must be a number (never 'any')" >&2; bad=1 ;;
     esac
     case "$filtered_out" in
       '') ;;  # already reported as an empty field above
@@ -440,7 +441,7 @@ WANT="$1"; shift
 
 FOUND=""
 for spec in "${PROFILES[@]}"; do
-  IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic max_ignored \
+  IFS='|' read -r name knobs e2e_floors min_passed max_skip cargo_args harness_args os max_panic ignored \
     filtered_out <<<"$spec"
   if [ "$name" = "$WANT" ]; then FOUND=1; break; fi
 done
@@ -642,7 +643,7 @@ esac
 # Every `test result:` line must be WHOLE. libtest writes it as four flushed
 # pieces (`\ntest result: `, `ok`/`FAILED`, `. N passed; … N filtered out`,
 # `; finished in …`), so stderr landing between them moves that binary's counts
-# onto a line the sums above never read — for MAX_IGNORED and FILTERED_OUT, a
+# onto a line the sums above never read — for IGNORED and FILTERED_OUT, a
 # false GREEN. The mid-line scan above anchors on per-test lines and cannot see
 # it. Refuse the shape rather than guess at the counts.
 WHOLE_RESULT='^test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed; [0-9]+ ignored; [0-9]+ measured; [0-9]+ filtered out; '
@@ -671,7 +672,7 @@ done
 echo ""
 echo "==> evidence"
 echo "    tests passed : $PASSED_COUNT   (floor $min_passed)"
-echo "    tests ignored: $IGNORED_COUNT   (max $max_ignored)"
+echo "    tests ignored: $IGNORED_COUNT   (exactly $ignored)"
 echo "    filtered out : $FILTERED_COUNT   (exactly $filtered_out)"
 echo "    [E2E]  lines : $E2E_TOTAL   (per-tier floors: $e2e_floors)"
 echo "    [SKIP] lines : $SKIP_COUNT   (max $max_skip)"
@@ -692,12 +693,21 @@ if [ "$PASSED_COUNT" -lt "$min_passed" ]; then
   echo "   collection. This is issue #664's shape."
   FAIL=1
 fi
-if [ "$IGNORED_COUNT" -gt "$max_ignored" ]; then
-  echo "❌ $IGNORED_COUNT test(s) reported \`ignored\`, max is $max_ignored (MAX_IGNORED)."
+if [ "$IGNORED_COUNT" -gt "$ignored" ]; then
+  echo "❌ $IGNORED_COUNT test(s) reported \`ignored\`, expected exactly $ignored (IGNORED)."
   echo "   An #[ignore]d test in a selected suite never runs, and every floor above"
   echo "   is met by the tests that remain (#876). Remove the #[ignore], or — for a"
-  echo "   deliberate one, like worker-report's inner fixtures — raise MAX_IGNORED."
+  echo "   deliberate one, like worker-report's inner fixtures — raise IGNORED."
   grep -a ' \.\.\. ignored' "$LOG" | sort -u | sed 's/^/     /'
+  FAIL=1
+elif [ "$IGNORED_COUNT" -lt "$ignored" ]; then
+  echo "❌ only $IGNORED_COUNT test(s) reported \`ignored\`, expected exactly $ignored (IGNORED)."
+  echo "   A deliberate #[ignore] (an inner fixture) was deleted or un-ignored, or its"
+  echo "   suite left the selection — and that slack would let a real test GAIN an"
+  echo "   #[ignore] unseen (#882). Lower IGNORED to the new measured count. (A"
+  echo "   name filter passed after the profile name, or a fail-fast red run whose"
+  echo "   later binaries never ran, also lands here.) Per suite:"
+  awk '/^[[:space:]]+Running / { cur = $2 } /^test result: / { print "     " cur ": " $0 }' "$LOG"
   FAIL=1
 fi
 if [ "$FILTERED_COUNT" -gt "$filtered_out" ]; then
@@ -714,14 +724,15 @@ elif [ "$FILTERED_COUNT" -lt "$filtered_out" ]; then
   echo "   A deliberate plain test was deleted or #[ignore]d, or its suite left the"
   echo "   selection — and that slack would let a test that LOSES its #[ignore] pass"
   echo "   unseen (#880). Lower FILTERED_OUT to the new measured count. (A fail-fast"
-  echo "   red run also lands here: its later binaries never ran.)"
+  echo "   red run also lands here: its later binaries never ran.) Per suite:"
+  awk '/^[[:space:]]+Running / { cur = $2 } /^test result: / { print "     " cur ": " $0 }' "$LOG"
   FAIL=1
 fi
 if [ "$WHOLE_COUNT" -ne "$BINARY_COUNT" ]; then
   echo "❌ $BINARY_COUNT test binaries ran but the log has $WHOLE_COUNT whole \`test result:\`"
   echo "   line(s): a binary ended without its summary (crashed, exited inside a test),"
   echo "   or output landed in front of it. That binary's counts were never read, so"
-  echo "   every cap above is unproven. Suites with no whole summary:"
+  echo "   every count above is unproven. Suites with no whole summary:"
   WHOLE_RESULT="$WHOLE_RESULT" awk '
     function report() { if (cur != "" && !seen) print "     " cur }
     /^[[:space:]]+Running / { report(); cur = $2; seen = 0 }
@@ -732,7 +743,7 @@ fi
 if [ "$TORN_COUNT" -ne 0 ]; then
   echo "❌ $TORN_COUNT \`test result:\` line(s) are not whole: output landed inside libtest's"
   echo "   summary, so that binary's passed/ignored/filtered counts were never read and every"
-  echo "   cap above is unproven. Rerun; if it recurs, find what is still writing to"
+  echo "   count above is unproven. Rerun; if it recurs, find what is still writing to"
   echo "   stderr after the binary's last test finished."
   grep -a '^test result: ' "$LOG" | grep -avE "$WHOLE_RESULT" | sed 's/^/     /'
   FAIL=1

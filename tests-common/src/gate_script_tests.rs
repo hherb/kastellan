@@ -35,7 +35,7 @@
 //!
 //! [#664]: https://github.com/hherb/kastellan/issues/664
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::panic_hook::{HOOK_INSTALLED_MARKER, PANIC_MARKER};
 use crate::require::{RequireKnob, KNOBS};
@@ -99,7 +99,7 @@ struct Profile {
     harness_args: String,
     os: String,
     max_panic: String,
-    max_ignored: String,
+    ignored: String,
     filtered_out: String,
     fields: usize,
 }
@@ -117,7 +117,7 @@ fn parse(spec: &str) -> Profile {
         harness_args: at(6),
         os: at(7),
         max_panic: at(8),
-        max_ignored: at(9),
+        ignored: at(9),
         filtered_out: at(10),
         fields: f.len(),
     }
@@ -166,14 +166,14 @@ fn every_profile_row_is_well_formed() {
             p.name,
             p.max_panic
         );
-        // A number, never `any`: an uncapped ignored count is #876's hole.
+        // A number, never `any`: an unchecked ignored count is #876's hole.
         assert!(
-            p.max_ignored.parse::<u32>().is_ok(),
-            "profile '{}' MAX_IGNORED must be a number, got {:?}",
+            p.ignored.parse::<u32>().is_ok(),
+            "profile '{}' IGNORED must be a number, got {:?}",
             p.name,
-            p.max_ignored
+            p.ignored
         );
-        // The same for FILTERED_OUT: an uncapped filtered count is #880's hole.
+        // The same for FILTERED_OUT: an unchecked filtered count is #880's hole.
         assert!(
             p.filtered_out.parse::<u32>().is_ok(),
             "profile '{}' FILTERED_OUT must be a number, got {:?}",
@@ -472,14 +472,15 @@ fn every_test_target_a_profile_names_exists() {
     assert!(checked >= 9, "only {checked} --test targets parsed — the table shape changed");
 }
 
-/// `(tests, ignored)`: how many `#[test]` fns a source file holds, and how many
-/// of those also carry an `#[ignore…]` in the same attribute block.
+/// `(tests, ignored)`: how many `#[test]`/`#[tokio::test…]` fns a source file
+/// holds, and how many of those also carry an `#[ignore…]` in the same
+/// attribute block.
 fn count_ignored_tests(src: &str) -> (usize, usize) {
     let (mut tests, mut ignored) = (0, 0);
     let (mut is_test, mut is_ignored) = (false, false);
     for line in src.lines().map(str::trim) {
         if line.starts_with("#[") {
-            is_test |= line == "#[test]";
+            is_test |= line == "#[test]" || line.starts_with("#[tokio::test");
             is_ignored |= line.starts_with("#[ignore");
         } else if !line.starts_with("//") {
             // The attribute block ended at an item (or at anything else).
@@ -489,6 +490,17 @@ fn count_ignored_tests(src: &str) -> (usize, usize) {
         }
     }
     (tests, ignored)
+}
+
+/// The source of `--test target` in each of `packages` that has one.
+fn suite_sources(root: &Path, packages: &[&str], target: &str) -> Vec<String> {
+    packages
+        .iter()
+        .filter_map(|pkg| {
+            let dir = pkg.strip_prefix("kastellan-").unwrap_or(pkg);
+            std::fs::read_to_string(root.join(dir).join("tests").join(format!("{target}.rs"))).ok()
+        })
+        .collect()
 }
 
 /// A profile whose suites hold only `#[ignore]`d tests must pass `--ignored`.
@@ -507,14 +519,11 @@ fn a_profile_of_only_ignored_tests_passes_ignored() {
         let packages: Vec<&str> = tokens.windows(2).filter(|w| w[0] == "-p").map(|w| w[1]).collect();
         let (mut tests, mut ignored) = (0, 0);
         for target in tokens.windows(2).filter(|w| w[0] == "--test").map(|w| w[1]) {
-            for pkg in &packages {
-                let dir = pkg.strip_prefix("kastellan-").unwrap_or(pkg);
-                if let Ok(src) = std::fs::read_to_string(root.join(dir).join("tests").join(format!("{target}.rs"))) {
-                    let (t, i) = count_ignored_tests(&src);
-                    tests += t;
-                    ignored += i;
-                    all_ignored_targets += usize::from(t > 0 && t == i);
-                }
+            for src in suite_sources(&root, &packages, target) {
+                let (t, i) = count_ignored_tests(&src);
+                tests += t;
+                ignored += i;
+                all_ignored_targets += usize::from(t > 0 && t == i);
             }
         }
         if tests > 0 && tests == ignored {
@@ -531,8 +540,49 @@ fn a_profile_of_only_ignored_tests_passes_ignored() {
     assert!(all_ignored_targets >= 1, "no all-#[ignore] --test target found — the counter is blind");
 }
 
+/// IGNORED is exact (#882), so it must equal the `#[ignore]`d tests in the
+/// profile's suites: an inner fixture added or deleted without the table edit
+/// is red here, in CI, instead of on the next manual run of the gate. Not
+/// checked: `--ignored` profiles (0 by construction) and `@…` discovery, whose
+/// suites are known only at run time.
+#[test]
+fn ignored_matches_the_ignored_tests_in_the_selected_suites() {
+    let root = script_path().parent().and_then(|p| p.parent()).map(PathBuf::from).unwrap();
+    let mut checked = 0usize;
+    for p in profiles() {
+        let tokens: Vec<&str> = p.cargo_args.split_whitespace().collect();
+        if p.harness_args.split_whitespace().any(|a| a == "--ignored") || tokens.iter().any(|t| t.starts_with('@')) {
+            continue;
+        }
+        let packages: Vec<&str> = tokens.windows(2).filter(|w| w[0] == "-p").map(|w| w[1]).collect();
+        let mut ignored = 0usize;
+        for target in tokens.windows(2).filter(|w| w[0] == "--test").map(|w| w[1]) {
+            let sources = suite_sources(&root, &packages, target);
+            assert_eq!(
+                sources.len(),
+                1,
+                "profile '{}': --test {target} must be one source file across {packages:?}",
+                p.name
+            );
+            ignored += count_ignored_tests(&sources[0]).1;
+        }
+        assert_eq!(
+            p.ignored,
+            ignored.to_string(),
+            "profile '{}' IGNORED is {}, but its suites hold {ignored} #[ignore]d tests — \
+             change the count in the commit that adds or deletes the fixture",
+            p.name,
+            p.ignored
+        );
+        checked += 1;
+    }
+    // Positive control: guard-tier, pg, gliner, worker-report and launchd.
+    assert!(checked >= 5, "only {checked} profiles checked — the skip rule swallowed the table");
+}
+
 #[test]
 fn count_ignored_tests_reads_the_attribute_block() {
-    let src = "#[test]\nfn a() {}\n\n/// doc\n#[test]\n#[ignore = \"live\"]\nfn b() {}\n#[ignore]\n#[test]\nfn c() {}\n#[cfg(test)]\nmod m {}\n";
-    assert_eq!(count_ignored_tests(src), (3, 2));
+    let src = "#[test]\nfn a() {}\n\n/// doc\n#[test]\n#[ignore = \"live\"]\nfn b() {}\n#[ignore]\n#[test]\nfn c() {}\n#[cfg(test)]\nmod m {}\n\
+               #[tokio::test(flavor = \"multi_thread\")]\n#[ignore]\nasync fn d() {}\n";
+    assert_eq!(count_ignored_tests(src), (4, 3));
 }
