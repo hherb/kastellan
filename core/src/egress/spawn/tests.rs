@@ -477,6 +477,13 @@ fn exit_status_reports_a_dead_sidecar_and_not_a_live_one() {
     let err = stolen.exit_status().expect_err("a reaped pid cannot be polled");
     assert_eq!(err.raw_os_error(), Some(libc::ECHILD));
     assert!(stolen.not_our_child, "terminate must skip the kill after ECHILD");
+    // Skipping the kill must not skip the rest of the teardown. (The skipped
+    // kill itself is unobservable without the pid being reused.)
+    let scratch = tempfile::tempdir().expect("tempdir");
+    stolen.uds_path = scratch.path().join("proxy.sock");
+    std::fs::write(&stolen.uds_path, b"").expect("stand-in socket file");
+    stolen.terminate();
+    assert!(!stolen.uds_path.exists(), "terminate must still remove the UDS after ECHILD");
 
     let mut dead = spawn("exit 3");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -492,7 +499,8 @@ fn exit_status_reports_a_dead_sidecar_and_not_a_live_one() {
     assert!(!dead.not_our_child, "a clean exit leaves the kill to terminate");
 }
 
-/// `kill -0 <pid>` succeeds only for a live, signalable process. The flag and
+/// `kill -0 <pid>` succeeds only for a live, signalable process. Shelled out
+/// rather than `libc::kill` to keep this test body free of `unsafe`. The flag and
 /// its meaning are identical on Linux and macOS (POSIX), unlike the coreutils *output* skew
 /// that has bitten shell-driven tests here before. Deliberately not
 /// `#[cfg(unix)]`-gated: kastellan is Linux + macOS only, and a cfg here

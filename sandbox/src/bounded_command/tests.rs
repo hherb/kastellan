@@ -325,3 +325,17 @@ fn an_interrupted_read_is_retried() {
     ]);
     assert_eq!(pipe.whole().expect("EINTR must not end the capture"), b"ab");
 }
+
+/// #892 wiring: the `Exited` arm goes through `whole`, so a stdout OR stderr
+/// cut short is no answer — `take` here would pass the half as the whole.
+#[test]
+fn an_exited_child_with_a_cut_short_pipe_has_no_answer() {
+    use std::os::unix::process::ExitStatusExt;
+    let ok = ExitStatus::from_raw(0);
+    let eio = || Err(std::io::Error::from_raw_os_error(libc::EIO));
+    let out = exited_output(ok, &drained(vec![Ok(b"all")]), &drained(vec![]))
+        .expect("two whole pipes are an answer");
+    assert_eq!((out.stdout.as_slice(), out.stderr.as_slice()), (&b"all"[..], &b""[..]));
+    assert!(exited_output(ok, &drained(vec![Ok(b"half"), eio()]), &drained(vec![])).is_err());
+    assert!(exited_output(ok, &drained(vec![]), &drained(vec![Ok(b"half"), eio()])).is_err());
+}

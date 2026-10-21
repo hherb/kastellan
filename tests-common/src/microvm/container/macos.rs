@@ -5,6 +5,7 @@ use super::{
 
 /// Look one image up: `Ok(Some)` present, `Ok(None)` absent, `Err` a
 /// fault — [`CliFault::Unavailable`] when the CLI could not answer,
+/// [`CliFault::Unread`] when its answer could not be read to the end,
 /// [`CliFault::Unreadable`] when it answered unintelligibly.
 ///
 /// Uses `container image inspect`, via the **production** argv producer
@@ -42,7 +43,7 @@ pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, CliFault
             CliFault::Unavailable(format!("could not spawn `{command}`: {e}"))
         }
         kastellan_sandbox::bounded_command::ProbeFailure::Unread(e) => {
-            CliFault::Unavailable(format!("could not read `{command}`'s answer: {e}"))
+            CliFault::Unread(format!("could not read `{command}`'s answer: {e}"))
         }
     })?;
     // The exit status is the presence signal, and ONLY exit 1 means
@@ -100,6 +101,9 @@ pub fn skip_if_no_container(reference: &str) -> bool {
                     }
                     kastellan_sandbox::macos_container::ProbeFault::Unavailable(reason) => {
                         CliFault::Unavailable(reason)
+                    }
+                    kastellan_sandbox::macos_container::ProbeFault::Unread(reason) => {
+                        CliFault::Unread(reason)
                     }
                 },
             )

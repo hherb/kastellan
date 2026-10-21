@@ -81,13 +81,14 @@ impl Drop for SidecarHandle {
 }
 
 impl SidecarHandle {
-    /// Kill the sidecar and reap it. Idempotent-ish (errors ignored).
+    /// [`terminate`](Self::terminate), consuming the handle.
     pub fn shutdown(mut self) {
         self.terminate();
     }
 
-    /// Kill + reap the sidecar and remove its UDS, in place. Idempotent-ish
-    /// (errors ignored). Shared by [`shutdown`](Self::shutdown) and by the
+    /// Kill + reap the sidecar (skipped once [`exit_status`](Self::exit_status)
+    /// saw `ECHILD`) and remove its UDS, in place. Idempotent-ish (errors
+    /// ignored). Shared by [`shutdown`](Self::shutdown) and by the
     /// coupled-teardown `Drop` of `egress::net_worker::EgressSidecar`, which
     /// holds the handle by value and cannot consume `self`.
     pub fn terminate(&mut self) {

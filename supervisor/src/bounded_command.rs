@@ -64,8 +64,8 @@ pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutc
     // would risk a deadlock for a child that fills a pipe buffer (it
     // blocks on write, never exits, we never read) — concurrent drains
     // keep both sides making progress regardless of output volume. Each
-    // closure *returns* the captured bytes, so `join()` hands them back
-    // directly (no channel needed).
+    // closure *returns* its capture (or the read error that cut it short),
+    // so `join()` hands it back directly (no channel needed).
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
     let o_handle = thread::spawn(move || read_whole("stdout", stdout_pipe.as_mut()));
@@ -98,12 +98,20 @@ pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutc
 
     // The child exited on its own, so its pipe write-ends are closed and
     // the drain threads have hit (or are about to hit) EOF — these joins
-    // return promptly, handing back the captured bytes. (As with
+    // return promptly, handing back each capture. (As with
     // `Command::output`, a still-open inherited pipe could delay this; on
     // the non-timeout path that is the same contract the std API offers.)
-    let stdout = o_handle.join().unwrap_or_else(|_| Ok(Vec::new()))?;
-    let stderr = e_handle.join().unwrap_or_else(|_| Ok(Vec::new()))?;
+    let stdout = joined("stdout", o_handle)?;
+    let stderr = joined("stderr", e_handle)?;
     Ok(CappedOutcome::Completed(Output { status, stdout, stderr }))
+}
+
+/// A drain thread's capture. A panicked drain lost it, which is no answer
+/// either — not an empty one (#892).
+fn joined(name: &str, drain: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    drain
+        .join()
+        .map_err(|_| io::Error::other(format!("the child's {name} drain panicked; its output is lost")))?
 }
 
 /// Read `pipe` to EOF. A read error is `Err` naming the pipe and how much
@@ -182,6 +190,14 @@ mod tests {
         let e = read_whole("stdout", Some(&mut HalfThenEio(false))).expect_err("truncated");
         assert!(e.to_string().contains("child's stdout failed after 4 bytes"), "{e}");
         assert_eq!(read_whole("stdout", Some(&mut &b"all"[..])).unwrap(), b"all");
+    }
+
+    /// #892: a panicked drain is an `Err`, not an empty capture.
+    #[test]
+    fn joined_refuses_a_panicked_drain() {
+        let e = joined("stdout", thread::spawn(|| panic!("drain died"))).expect_err("lost");
+        assert!(e.to_string().contains("stdout drain panicked"), "{e}");
+        assert_eq!(joined("stdout", thread::spawn(|| Ok(b"all".to_vec()))).unwrap(), b"all");
     }
 
     /// A non-zero exit is a normal `Completed` outcome carrying the

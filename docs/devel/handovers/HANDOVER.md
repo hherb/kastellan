@@ -52,13 +52,25 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   (`libc::waitpid` behind `Child`'s back).
 - **#892:** sandbox `bounded_command`'s drain records a read error (retries `EINTR`); an exit with a
   cut-short capture, or a failed `try_wait`, is the new **`ProbeFailure::Unread`** (⚠️ a new
-  variant; all six callers say "could not read `<cmd>`'s answer"). `output_within` keeps its
-  signature (a private `run_within` + `NoAnswer` beneath). Supervisor `run_capped` reads through the
-  pure `read_whole`, which errs instead of truncating. ⚠️ **supervisor has `libc` only on macOS** —
+  variant; six exhaustive matches handle it — five say "could not read `<cmd>`'s answer", debugfs
+  folds it into `Unreadable`; Apple `container` maps it to its **own** `ProbeFault::Unread` /
+  `CliFault::Unread` whose remedy is *retry*, never start/install). `output_within` keeps its
+  signature (a private `run_within` + `NoAnswer` beneath; the exited arm is the tested
+  `exited_output`). Supervisor `run_capped` reads through `read_whole` (generic over `Read`), which
+  errs instead of truncating, and a panicked drain is an `Err` via `joined`, not an empty capture.
+  ⚠️ **One short capture is still `Ok` by design:** a grandchild holding a pipe past `DRAIN_GRACE`
+  — refusing it would fail every probe that leaves a background helper. ⚠️ **supervisor has `libc` only on macOS** —
   its test uses `io::Error::other`.
 - ⚠️ **DGX was unreachable (ssh timeout)** — no native-Linux run of this diff; cross-clippy of
   sandbox + supervisor for `aarch64-unknown-linux-gnu` was clean. `egress/spawn/tests.rs` is now
-  **509** lines (over the cap by 9).
+  **517** lines (over the cap by 17).
+- **Review follow-up (same PR):** the four-agent review's fixes above landed as a second commit
+  (+3 tests: sandbox lib **127**, supervisor lib **124**, tests-common +1; the core ECHILD test now
+  also checks `terminate` still removes the UDS). Verified by focused runs + workspace clippy (27) +
+  Linux cross-clippy — **the sweep row below predates it**. Filed, pre-existing:
+  [#894](https://github.com/hherb/kastellan/issues/894) (launchd `uninstall` ignores a failed
+  `bootout`), [#895](https://github.com/hherb/kastellan/issues/895) (`status()` reads an
+  unparseable `print` as `Inactive`).
 
 ### Earlier (2026-10-21): #888 + #754 (PR #889, merged) — what still binds
 

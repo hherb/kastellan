@@ -24,7 +24,9 @@
 //! # What it guarantees
 //!
 //! [`output_within`] either returns the child's real [`Output`] or reports
-//! [`Bounded::TimedOut`] — and a timeout **carries content**: the budget that
+//! [`Bounded::TimedOut`] — or `Err` when there is no answer to trust (no
+//! spawn, a failed poll, a read error that cut the capture short) — and a
+//! timeout **carries content**: the budget that
 //! elapsed and whatever the child had already written to stderr. An error with
 //! no content is a defect *multiplier* (#660/#669: three independent
 //! production defects once hid behind one contentless `Protocol(EarlyExit)`),
@@ -40,7 +42,7 @@
 //! Issue #690.
 
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -118,8 +120,10 @@ pub struct TimedOut {
 ///
 /// `Err` means there is no answer to trust: the child could not be
 /// **spawned** (a missing binary, a permission error), or it ran but its exit
-/// could not be polled or its output could not be read to the end (#892 — a
-/// truncated capture must never pass as the child's whole answer). It never
+/// could not be polled or a read error cut its output short (#892 — such a
+/// capture must never pass as the child's whole answer). The one short capture
+/// still returned as `Ok` is a grandchild holding a pipe past [`DRAIN_GRACE`]:
+/// refusing it would fail every probe that leaves a background helper. It never
 /// means the child failed or overran. Those are [`Bounded::Exited`] with a
 /// non-zero status and [`Bounded::TimedOut`] respectively, and keeping them
 /// apart is the whole point: #684's folding defect was one CLI fault reported
@@ -155,9 +159,10 @@ fn run_within(cmd: &mut Command, budget: Duration) -> Result<Bounded, NoAnswer> 
         // Look for an exit BEFORE looking at the clock, so a child that
         // finished during the last sleep is reported as exited rather than
         // racing the deadline by a few microseconds.
-        // A failed poll is not killed: a `WNOHANG` `waitpid` fails only with
-        // `ECHILD`, once the pid is no longer our unreaped child — and then it
-        // may belong to another process. So nothing live is stranded (#892).
+        // A failed poll is not killed: for a non-blocking `waitpid` on our own
+        // pid, POSIX's other errnos (`EINTR`, `EINVAL`) are unreachable, so it
+        // is `ECHILD` — the pid is no longer our unreaped child and may belong
+        // to another process. So nothing live is stranded (#892).
         if let Some(status) = child.try_wait().map_err(NoAnswer::Unread)? {
             break Some(status);
         }
@@ -170,8 +175,7 @@ fn run_within(cmd: &mut Command, budget: Duration) -> Result<Bounded, NoAnswer> 
     match exited {
         Some(status) => {
             settle(&[&out, &err]);
-            let (stdout, stderr) = (out.whole().map_err(NoAnswer::Unread)?, err.whole().map_err(NoAnswer::Unread)?);
-            Ok(Bounded::Exited(Output { status, stdout, stderr }))
+            exited_output(status, &out, &err).map(Bounded::Exited).map_err(NoAnswer::Unread)
         }
         None => {
             // Kill first, THEN settle: killing closes the child's fds, which is
@@ -183,6 +187,13 @@ fn run_within(cmd: &mut Command, budget: Duration) -> Result<Bounded, NoAnswer> 
             Ok(Bounded::TimedOut(TimedOut { budget, partial_stderr: partial }))
         }
     }
+}
+
+/// The answer of a child that exited — `Err` if either capture was cut short
+/// (#892). Split out so a test can hand it a pipe that failed mid-read, which
+/// no real child can be made to produce.
+fn exited_output(status: ExitStatus, out: &Pipe, err: &Pipe) -> std::io::Result<Output> {
+    Ok(Output { status, stdout: out.whole()?, stderr: err.whole()? })
 }
 
 /// A pipe being read on its own thread, with what it has read so far.
@@ -201,8 +212,9 @@ struct Pipe {
 }
 
 impl Pipe {
-    /// Everything the child wrote — or `Err` if a read error cut the capture
-    /// short, since a truncated stdout parsed as complete is a wrong verdict.
+    /// What [`take`](Self::take) returns — or `Err` if a read error cut the
+    /// capture short, since a truncated stdout parsed as complete is a wrong
+    /// verdict. (A grandchild still writing is not a read error; see `take`.)
     fn whole(&self) -> std::io::Result<Vec<u8>> {
         let bytes = self.take();
         match self.fault.lock().unwrap_or_else(|p| p.into_inner()).take() {

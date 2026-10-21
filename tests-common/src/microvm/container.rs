@@ -270,16 +270,17 @@ pub(crate) fn workspace_closure_dirs(package: &str) -> Result<Vec<String>, Strin
 /// Why the `container` CLI could not answer the question asked — whether that
 /// question was `system status` or `image inspect`.
 ///
-/// Three variants, because the three faults have **different remedies** and
+/// Four variants, because the four faults have **different remedies** and
 /// folding any two is the same mistake as folding a CLI fault into an absent
 /// image (#684). A service that is down is fixed by starting it; one that is
 /// *wedged* needs a `stop` first, so the same sentence is the wrong advice; and
 /// a CLI whose output this gate can no longer read is fixed by changing this
 /// gate, where telling the operator to restart a service would waste their
-/// time exactly as `build-image.sh` did.
+/// time exactly as `build-image.sh` did. A read that failed mid-answer is a
+/// host I/O fault that neither the service nor this gate causes (#892).
 ///
 /// One type serves both the probe and the inspect deliberately: they can fail
-/// the same three ways, and two near-identical enums would be the drift
+/// the same ways, and two near-identical enums would be the drift
 /// channel #669 spent a session closing. The probe never parses output, so it
 /// simply never produces [`CliFault::Unreadable`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +299,9 @@ pub enum CliFault {
     Wedged(String),
     /// The CLI answered and the answer could not be read. Remedy: this gate.
     Unreadable(String),
+    /// The CLI ran, but its exit could not be polled or its output read to
+    /// the end (#892). Remedy: retry — not the service, not this gate.
+    Unread(String),
 }
 
 /// What a finished `container image inspect` says, before its stdout is read.
@@ -398,6 +402,18 @@ pub fn wedged_cli_reason(detail: &str) -> String {
     )
 }
 
+/// Why the `container` CLI's answer was lost in transit (#892).
+///
+/// ⚠️ **Not** [`cli_unavailable_reason`]: the CLI ran, so
+/// "start it, or install it" would send the operator after a working service.
+pub fn unread_cli_reason(detail: &str) -> String {
+    format!(
+        "Apple `container` ran but its answer could not be read ({}); \
+         a host I/O fault — retry; no service restart, install or image build will change it",
+        crate::skip::one_line(detail)
+    )
+}
+
 /// Why the `container` CLI itself cannot be used.
 ///
 /// ⚠️ **This must never mention the image build.** Folding a CLI or
@@ -429,6 +445,7 @@ pub fn cli_fault_reason(reference: &str, fault: &CliFault) -> String {
         CliFault::Unavailable(detail) => cli_unavailable_reason(detail),
         CliFault::Wedged(detail) => wedged_cli_reason(detail),
         CliFault::Unreadable(detail) => unreadable_inspect_reason(reference, detail),
+        CliFault::Unread(detail) => unread_cli_reason(detail),
     }
 }
 
