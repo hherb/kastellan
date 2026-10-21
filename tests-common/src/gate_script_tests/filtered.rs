@@ -171,3 +171,32 @@ fn a_summary_with_output_in_front_of_it_is_refused() {
         describe(&out)
     );
 }
+
+#[test]
+fn a_binary_that_ran_zero_tests_is_refused_even_when_the_others_clear_every_floor() {
+    // #823: the floors are run-wide, so one suite that ran nothing (a whole-file
+    // `cfg`, every test `#[ignore]`d or renamed away) hid behind the others.
+    // Hooked on purpose: the per-binary hook check must not be what proves a
+    // suite ran, since a hook install outside a test would reopen the gap.
+    let mut log = log_with_filtered(&[0]);
+    log.push_str(&hooked_binary("empty_e2e"));
+    log.push_str(&summary(0, 0));
+    let out = run_gate_with(PROFILE, "zero-test-binary", &log, 0, &GateEdits::default());
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("1 test binary(ies) ran zero tests"), "{}", describe(&out));
+    assert!(stdout.contains("     tests/empty_e2e.rs\n"), "the empty suite is named\n{}", describe(&out));
+    assert!(!stdout.contains("     tests/suite_0_e2e.rs\n"), "a suite that ran is not named\n{}", describe(&out));
+}
+
+#[test]
+fn a_binary_whose_only_tests_failed_is_not_called_empty() {
+    // `0 passed; 2 failed` ran tests; the red exit already fails it, and calling
+    // it empty would send the reader after the wrong cause.
+    let mut log = log_with_filtered(&[0]);
+    log.push_str(&hooked_binary("red_e2e"));
+    log.push_str("test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n");
+    let out = run_gate_with(PROFILE, "red-not-empty", &log, 101, &GateEdits::default());
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("ran zero tests"), "{}", describe(&out));
+}
