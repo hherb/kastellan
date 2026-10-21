@@ -550,6 +550,23 @@ fn a_failing_awk_refuses_a_verdict() {
 }
 
 #[test]
+fn a_failing_per_binary_count_awk_refuses_a_verdict() {
+    // #823's awk alone fails (it is the only call given WHOLE_RESULT on a
+    // healthy run): a silent failure would read as "no binary ran zero tests".
+    let edits = GateEdits {
+        tools: &[("awk", "[ -n \"$WHOLE_RESULT\" ] && exit 2\nexec /usr/bin/awk \"$@\"")],
+        ..Default::default()
+    };
+    let out = run_gate_with(PROFILE, "awk-fails-empty", &healthy_log_for(PROFILE), 0, &edits);
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("awk failed (2) reading per-binary test counts"),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
 fn the_install_announcement_is_not_counted_as_a_panic() {
     // `[panic-hook]` begins with `[panic`, so an unanchored or bracket-less
     // grep would count every announcement as a panic and fail every healthy

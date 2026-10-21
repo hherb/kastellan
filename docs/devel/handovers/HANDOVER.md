@@ -50,8 +50,12 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   `0 passed` cleared every run-wide floor (reproduced red with a fake cargo); in practice the
   `[panic-hook]` check (#748) and the exact `IGNORED`/`FILTERED_OUT` counts caught most shapes,
   but only by proxy. `passed + failed`, not `passed`: an all-red binary ran its tests.
-- Tests: `gate_script_tests` 62 → **64** (`filtered.rs`); both mutants (`passed` only, check
-  disarmed) killed. **Verified:** Mac `worker-report` gate green on real cargo; a name filter
+- Tests: `gate_script_tests` 62 → **67** (`filtered.rs` 4, `run.rs` 1). Review round added the
+  realistic shapes (all-`#[ignore]`d / all-filtered with the exact count absorbing the empty suite),
+  two empty suites named, and the check-9 awk failing alone → exit 3. Five mutants killed (`passed`
+  only, check disarmed, literal `0 passed; 0 failed; 0 ignored` match, awk-exit check dropped,
+  first-match-only). Filed [#885](https://github.com/hherb/kastellan/issues/885): check 8 compares
+  summary COUNTS, so 0 + 2 summaries across two binaries still passes. **Verified:** Mac `worker-report` gate green on real cargo; a name filter
   leaving one suite running names exactly the other four as empty.
 
 ### Earlier (2026-10-21): #882 — `IGNORED` is exact, not a cap (PR #883, merged) — what still binds
@@ -399,7 +403,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#823) | PR [#884](https://github.com/hherb/kastellan/pull/884) | **No full sweep** — the diff is the gate script + `gate_script_tests` only. `kastellan-tests-common` **488 / 0 / 11** (480 lib incl. 64 `gate_script_tests`); `worker-report` gate green on real cargo (13 passed, 5 binaries). Baseline row stays #882's | `-p kastellan-tests-common --all-targets` exit 0 (warm) | — |
+| **Mac** (#823) | PR [#884](https://github.com/hherb/kastellan/pull/884) | **No full sweep** — the diff is the gate script + `gate_script_tests` only. `kastellan-tests-common` **491 / 0 / 11** (483 lib incl. 67 `gate_script_tests`); `worker-report` gate green on real cargo (13 passed, 5 binaries). Baseline row stays #882's | `-p kastellan-tests-common --all-targets` exit 0 (warm) | — |
 | **Mac** (#882) | PR [#883](https://github.com/hherb/kastellan/pull/883) | **5143 / 8 / 52** (5151 total), **195** suites, same flags; log `sweep-882.log`. 5151 = 5149 + 2: #881's review round added 2 `gate_script_tests` (59 → 61) **after** its sweep, so #880's row is the pre-review tree; this diff adds no test (its review round then adds 1, `gate_script_tests` 61 → 62, after this sweep). Sweep exit 101 on **8** PG-contention failures (`the database system is starting up`: `cli_entities_e2e` 5, `asks_e2e` 2, `nul_non_audit_e2e` 1) — all 42 of those suites' tests pass in isolation (#548/#676). `[SKIP]` **15** = 5 + 3 (worktree has no gliner `.venv`) + 7 (`python-exec:dev` stale: a fresh checkout restamps every mtime, #691 family). `worker-report` gate green: `tests ignored: 13   (exactly 13)` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-882`, **27** | **15** (worktree) |
 | **Mac** (#880) | PR [#881](https://github.com/hherb/kastellan/pull/881) | **5149 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-880.log`. 5149 = 5141 + 2 (#876's review tests, after its sweep) + 6 (`gate_script_tests/filtered.rs`). DGX `microvm` green (`--no-fail-fast`) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-880` (fresh dir), **27** `Checking kastellan` | **5** Mac |
 | **Mac** (#876) | PR [#879](https://github.com/hherb/kastellan/pull/879) | **5141 / 0 / 52**, **195** suites, same flags; `[SKIP]` 5; log `sweep-876.log`. Every gate profile re-run green on both hosts (DGX `microvm` red only on #878) | exit 0, fresh dir, **27** | **5** Mac |
@@ -470,7 +474,7 @@ Only the rows that tell you *where to look when something goes red*.
 | `core` (`injection_guard_e2e`, `secret_vault_e2e`, `guard_boot_row_e2e`) | 10 / 9 / 1 | **PG-required** policy rows, privacy invariant, fail-closed redemption |
 | worker-report (5 suites, 2 crates) | 13 | a dying worker's last words reach a failing test; a real broken fd 2, re-exec'd. `bash scripts/run-e2e-gate.sh worker-report` (both hosts) |
 | `core` `mail_live_shape_e2e` (`#[ignore]`) | 1 | our reading of localmail against the **live** service. `bash scripts/mail/live-shape-gate.sh` (both hosts) |
-| `tests-common` `gate_script_tests` | 64 | the gate script's table **and** its verdict (floors, caps, ≥ 1 test per binary, exact `ignored` (recounted from the suites' attributes) and `filtered out` counts, per-binary hook check), run against a fake `cargo` |
+| `tests-common` `gate_script_tests` | 67 | the gate script's table **and** its verdict (floors, caps, ≥ 1 test per binary, exact `ignored` (recounted from the suites' attributes) and `filtered out` counts, per-binary hook check), run against a fake `cargo` |
 | container (`core`: `python_exec_container_e2e`, `python_exec_warm_idle_e2e`, `lifecycle_container_routing_e2e`; `sandbox`: `macos_container_smoke`; macOS) | 4 / 3 / 1 / 10 | **real** Apple `container` micro-VM round-trips, mem cap, warm reuse. `bash scripts/run-e2e-gate.sh container` |
 
 ## Key design decisions locked in

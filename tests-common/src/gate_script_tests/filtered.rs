@@ -12,6 +12,9 @@
 //! Like `IGNORED`, it is a MEASURED number (see FILTERED_OUT in the
 //! script's profile table) and EXACT, not a cap: under `≤`, deleting one
 //! deliberate plain test would leave room for one lost `#[ignore]`.
+//!
+//! The tests at the bottom are #823's: a binary whose summary ran zero tests is
+//! refused even when the exact counts above already absorb it.
 
 use super::profiles;
 use super::run::{
@@ -199,4 +202,43 @@ fn a_binary_whose_only_tests_failed_is_not_called_empty() {
     let out = run_gate_with(PROFILE, "red-not-empty", &log, 101, &GateEdits::default());
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
     assert!(!String::from_utf8_lossy(&out.stdout).contains("ran zero tests"), "{}", describe(&out));
+}
+
+#[test]
+fn an_empty_binary_is_refused_when_the_exact_counts_already_absorb_it() {
+    // The shapes #823 is really about: every test `#[ignore]`d, or every test
+    // filtered away, with IGNORED / FILTERED_OUT set to the measured count that
+    // already includes the empty suite. Then check 9 is the only defence.
+    for (tag, line, edits) in [
+        (
+            "zero-all-ignored",
+            "test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.01s\n".to_string(),
+            GateEdits { ignored: Some((PROFILE, "3")), ..Default::default() },
+        ),
+        ("zero-all-filtered", summary(0, 7), GateEdits { filtered_out: Some((PROFILE, "7")), ..Default::default() }),
+    ] {
+        let mut log = log_with_filtered(&[0]);
+        log.push_str(&hooked_binary("empty_e2e"));
+        log.push_str(&line);
+        let out = run_gate_with(PROFILE, tag, &log, 0, &edits);
+        assert_eq!(out.status.code(), Some(1), "{tag}\n{}", describe(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("1 test binary(ies) ran zero tests"), "{tag}\n{}", describe(&out));
+        assert!(stdout.contains("     tests/empty_e2e.rs\n"), "{tag}\n{}", describe(&out));
+        assert!(!stdout.contains("expected exactly"), "{tag}: the exact counts must be satisfied\n{}", describe(&out));
+    }
+}
+
+#[test]
+fn every_empty_binary_is_counted_and_named() {
+    let mut log = log_with_filtered(&[0]);
+    for name in ["empty_a_e2e", "healthy_mid_e2e", "empty_b_e2e"] {
+        log.push_str(&hooked_binary(name));
+        log.push_str(&summary(if name.starts_with("healthy") { 5 } else { 0 }, 0));
+    }
+    let out = run_gate_with(PROFILE, "zero-two", &log, 0, &GateEdits::default());
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("2 test binary(ies) ran zero tests"), "{}", describe(&out));
+    assert!(stdout.contains("     tests/empty_a_e2e.rs\n     tests/empty_b_e2e.rs\n"), "{}", describe(&out));
 }
