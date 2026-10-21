@@ -324,3 +324,15 @@ fn spawn_net_worker_spawns_sidecar_under_sidecar_backend() {
         "the worker backend must not be touched when the sidecar fails"
     );
 }
+
+/// #890: a failed exit poll retires the pair. Read as `None` ("still running"),
+/// a worker whose egress is gone kept refusing with no line saying why.
+#[test]
+fn sidecar_exit_reason_retires_the_pair_on_a_failed_poll() {
+    assert_eq!(sidecar_exit_reason(Ok(None)), None);
+    let status = std::process::Command::new("true").status().expect("run `true`");
+    assert_eq!(sidecar_exit_reason(Ok(Some(status))).as_deref(), Some("egress sidecar exited (exit status: 0)"));
+    let why = sidecar_exit_reason(Err(std::io::Error::from_raw_os_error(libc::ECHILD)))
+        .expect("a failed poll must not read as a running sidecar");
+    assert!(why.contains("could not poll") && why.contains("waitpid failed"), "{why}");
+}

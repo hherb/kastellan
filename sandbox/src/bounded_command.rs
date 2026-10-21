@@ -24,7 +24,9 @@
 //! # What it guarantees
 //!
 //! [`output_within`] either returns the child's real [`Output`] or reports
-//! [`Bounded::TimedOut`] — and a timeout **carries content**: the budget that
+//! [`Bounded::TimedOut`] — or `Err` when there is no answer to trust (no
+//! spawn, a failed poll, a read error that cut the capture short) — and a
+//! timeout **carries content**: the budget that
 //! elapsed and whatever the child had already written to stderr. An error with
 //! no content is a defect *multiplier* (#660/#669: three independent
 //! production defects once hid behind one contentless `Protocol(EarlyExit)`),
@@ -40,7 +42,7 @@
 //! Issue #690.
 
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -116,11 +118,16 @@ pub struct TimedOut {
 /// stdin null, stdout and stderr captured — so a caller's own `.stdout(…)` /
 /// `.stderr(…)` settings are overridden, just as they are by `output()`.
 ///
-/// `Err` means the child could not be **spawned** (a missing binary, a
-/// permission error); it never means the child failed or overran. Those are
-/// [`Bounded::Exited`] with a non-zero status and [`Bounded::TimedOut`]
-/// respectively, and keeping the three apart is the whole point:
-/// #684's folding defect was one CLI fault reported as another.
+/// `Err` means there is no answer to trust: the child could not be
+/// **spawned** (a missing binary, a permission error), or it ran but its exit
+/// could not be polled or a read error cut its output short (#892 — such a
+/// capture must never pass as the child's whole answer). The one short capture
+/// still returned as `Ok` is a grandchild holding a pipe past [`DRAIN_GRACE`]:
+/// refusing it would fail every probe that leaves a background helper. It never
+/// means the child failed or overran. Those are [`Bounded::Exited`] with a
+/// non-zero status and [`Bounded::TimedOut`] respectively, and keeping them
+/// apart is the whole point: #684's folding defect was one CLI fault reported
+/// as another. [`probe_output`] keeps the spawn and read failures apart too.
 ///
 /// ⚠️ **Both pipes are drained on their own threads, and that is
 /// load-bearing.** A child that writes more than one pipe buffer (64 KiB on
@@ -129,19 +136,34 @@ pub struct TimedOut {
 /// that is merely waiting for **us** — a self-inflicted false positive on
 /// exactly the class this module is supposed to make legible.
 pub fn output_within(cmd: &mut Command, budget: Duration) -> std::io::Result<Bounded> {
+    run_within(cmd, budget).map_err(|(NoAnswer::Spawn(e) | NoAnswer::Unread(e))| e)
+}
+
+/// Why [`run_within`] has no answer. Private: [`output_within`] folds it into
+/// one `io::Error`, [`probe_output`] into the matching [`ProbeFailure`].
+enum NoAnswer {
+    Spawn(std::io::Error),
+    Unread(std::io::Error),
+}
+
+fn run_within(cmd: &mut Command, budget: Duration) -> Result<Bounded, NoAnswer> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn()?;
+    let mut child = cmd.spawn().map_err(NoAnswer::Spawn)?;
 
     // `.take()` cannot fail: both pipes were just configured above.
-    let out = drain(child.stdout.take().expect("stdout was piped"));
-    let err = drain(child.stderr.take().expect("stderr was piped"));
+    let out = drain("stdout", child.stdout.take().expect("stdout was piped"));
+    let err = drain("stderr", child.stderr.take().expect("stderr was piped"));
 
     let deadline = Instant::now() + budget;
     let exited = loop {
         // Look for an exit BEFORE looking at the clock, so a child that
         // finished during the last sleep is reported as exited rather than
         // racing the deadline by a few microseconds.
-        if let Some(status) = child.try_wait()? {
+        // A failed poll is not killed: for a non-blocking `waitpid` on our own
+        // pid, POSIX's other errnos (`EINTR`, `EINVAL`) are unreachable, so it
+        // is `ECHILD` — the pid is no longer our unreaped child and may belong
+        // to another process. So nothing live is stranded (#892).
+        if let Some(status) = child.try_wait().map_err(NoAnswer::Unread)? {
             break Some(status);
         }
         if Instant::now() >= deadline {
@@ -153,7 +175,7 @@ pub fn output_within(cmd: &mut Command, budget: Duration) -> std::io::Result<Bou
     match exited {
         Some(status) => {
             settle(&[&out, &err]);
-            Ok(Bounded::Exited(Output { status, stdout: out.take(), stderr: err.take() }))
+            exited_output(status, &out, &err).map(Bounded::Exited).map_err(NoAnswer::Unread)
         }
         None => {
             // Kill first, THEN settle: killing closes the child's fds, which is
@@ -167,6 +189,13 @@ pub fn output_within(cmd: &mut Command, budget: Duration) -> std::io::Result<Bou
     }
 }
 
+/// The answer of a child that exited — `Err` if either capture was cut short
+/// (#892). Split out so a test can hand it a pipe that failed mid-read, which
+/// no real child can be made to produce.
+fn exited_output(status: ExitStatus, out: &Pipe, err: &Pipe) -> std::io::Result<Output> {
+    Ok(Output { status, stdout: out.whole()?, stderr: err.whole()? })
+}
+
 /// A pipe being read on its own thread, with what it has read so far.
 ///
 /// ⚠️ **Never joined.** See [`DRAIN_GRACE`]: a grandchild holding the write end
@@ -174,11 +203,33 @@ pub fn output_within(cmd: &mut Command, budget: Duration) -> std::io::Result<Bou
 /// never return is a far smaller problem than a caller parked on that thread.
 /// The thread ends on its own the moment the fd finally closes.
 struct Pipe {
+    /// `stdout` / `stderr`, for the read-failure message.
+    name: &'static str,
     buf: Arc<Mutex<Vec<u8>>>,
     done: Arc<AtomicBool>,
+    /// The read error that ended the drain early, if one did.
+    fault: Arc<Mutex<Option<std::io::Error>>>,
 }
 
 impl Pipe {
+    /// What [`take`](Self::take) returns — or `Err` if a read error cut the
+    /// capture short, since a truncated stdout parsed as complete is a wrong
+    /// verdict. (A grandchild still writing is not a read error; see `take`.)
+    fn whole(&self) -> std::io::Result<Vec<u8>> {
+        let bytes = self.take();
+        match self.fault.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            None => Ok(bytes),
+            Some(e) => Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "reading the child's {} failed after {} bytes, so its output is incomplete: {e}",
+                    self.name,
+                    bytes.len()
+                ),
+            )),
+        }
+    }
+
     /// Whatever has been read so far, which after [`settle`] is everything in
     /// every case but a grandchild still writing.
     fn take(&self) -> Vec<u8> {
@@ -195,17 +246,25 @@ impl Pipe {
 /// somebody reads. A waiter that only polled for exit would therefore report a
 /// timeout for a process that is merely waiting for **us** — a false positive
 /// manufactured by the very thing meant to remove false verdicts.
-fn drain(mut pipe: impl Read + Send + 'static) -> Pipe {
+fn drain(name: &'static str, mut pipe: impl Read + Send + 'static) -> Pipe {
     let buf = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(AtomicBool::new(false));
-    let (thread_buf, thread_done) = (Arc::clone(&buf), Arc::clone(&done));
+    let fault = Arc::new(Mutex::new(None));
+    let (thread_buf, thread_done, thread_fault) =
+        (Arc::clone(&buf), Arc::clone(&done), Arc::clone(&fault));
     std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         loop {
             match pipe.read(&mut chunk) {
-                // EOF, or a read error: either way there is nothing more to
-                // get, and what arrived first is still worth keeping.
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                // A signal, not an end: `read_to_end` retries it too.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                // Keep what arrived (a timeout still shows it), but remember
+                // the capture is short so an exit never reports it whole (#892).
+                Err(e) => {
+                    *thread_fault.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+                    break;
+                }
                 Ok(n) => thread_buf
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
@@ -214,7 +273,7 @@ fn drain(mut pipe: impl Read + Send + 'static) -> Pipe {
         }
         thread_done.store(true, Ordering::SeqCst);
     });
-    Pipe { buf, done }
+    Pipe { name, buf, done, fault }
 }
 
 /// Wait up to [`DRAIN_GRACE`] for every pipe to reach EOF, then give up.
@@ -231,9 +290,9 @@ fn settle(pipes: &[&Pipe]) {
     }
 }
 
-/// Why a probe never produced an exit status.
+/// Why a probe produced no answer to trust.
 ///
-/// Two unrelated causes that need two unrelated remedies, kept apart by the
+/// Unrelated causes that need unrelated remedies, kept apart by the
 /// type rather than by prose. #684's defect was exactly this collapse — one
 /// CLI fault reported as another, sending the operator to a ten-minute build
 /// for a problem no build can fix — and #688's review split
@@ -246,21 +305,26 @@ pub enum ProbeFailure {
     /// The command ran and never answered inside its budget, and was killed.
     /// The remedy is whatever unwedges *that* helper.
     Wedged(TimedOut),
+    /// The command ran, but its exit could not be polled or its output could
+    /// not be read to the end (#892). Rare, and not the command's fault — but
+    /// a partial answer must not be read as a whole one.
+    Unread(std::io::Error),
 }
 
-/// Run a host probe under `budget`, keeping the two no-answer causes apart.
+/// Run a host probe under `budget`, keeping the no-answer causes apart.
 ///
 /// A **non-zero exit is `Ok`** — the probe answered, and "no" is an answer.
-/// Only the two ways of producing no answer at all become `Err`, and each
+/// Only the ways of producing no answer at all become `Err`, and each
 /// carries what its caller needs to name a remedy. Rendering is deliberately
 /// left to the caller ([`timed_out_reason`]): a wedged `container-apiserver`
 /// and a wedged user-systemd need different sentences, and one generic line
 /// would be the folding defect again.
 pub fn probe_output(cmd: &mut Command, budget: Duration) -> Result<Output, ProbeFailure> {
-    match output_within(cmd, budget) {
+    match run_within(cmd, budget) {
         Ok(Bounded::Exited(out)) => Ok(out),
         Ok(Bounded::TimedOut(t)) => Err(ProbeFailure::Wedged(t)),
-        Err(e) => Err(ProbeFailure::Spawn(e)),
+        Err(NoAnswer::Spawn(e)) => Err(ProbeFailure::Spawn(e)),
+        Err(NoAnswer::Unread(e)) => Err(ProbeFailure::Unread(e)),
     }
 }
 

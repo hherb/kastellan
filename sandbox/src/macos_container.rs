@@ -388,7 +388,7 @@ pub const WEDGED_APISERVER_HINT: &str = "the `container-apiserver` may be wedged
 
 /// Why an Apple `container` probe could not answer (#690).
 ///
-/// Two causes with two different remedies, kept apart by the **type** rather
+/// Three causes with three different remedies, kept apart by the **type** rather
 /// than by prose a caller would have to match on. This module already refuses
 /// to decide anything by matching on another program's wording, and a caller
 /// that has to grep a sentence to learn what to suggest is that rule broken
@@ -406,6 +406,10 @@ pub enum ProbeFault {
     /// The CLI was spawned and never answered inside its budget, and was
     /// killed. Remedy: unwedge the apiserver.
     Wedged(String),
+    /// The CLI ran, but its exit could not be polled or its output read to
+    /// the end (#892). Not the service's fault, so neither remedy above
+    /// applies. Remedy: retry.
+    Unread(String),
 }
 
 impl ProbeFault {
@@ -413,7 +417,7 @@ impl ProbeFault {
     /// use for the classification.
     pub fn reason(&self) -> &str {
         match self {
-            Self::Unavailable(reason) | Self::Wedged(reason) => reason,
+            Self::Unavailable(reason) | Self::Wedged(reason) | Self::Unread(reason) => reason,
         }
     }
 }
@@ -443,6 +447,9 @@ fn container_probe_output(
         ),
         bounded_command::ProbeFailure::Spawn(e) => {
             ProbeFault::Unavailable(format!("could not spawn `{command}`: {e}{spawn_suffix}"))
+        }
+        bounded_command::ProbeFailure::Unread(e) => {
+            ProbeFault::Unread(format!("could not read `{command}`'s answer: {e}"))
         }
     })
 }

@@ -15,7 +15,7 @@ use super::container::{
     classify_inspect_exit, cli_unavailable_reason, container_preflight, image_age,
     image_missing_reason, indeterminate_age_reason, stale_image_reason,
     unreadable_inspect_reason, unverified_age_reason, ContainerImage, ImageAge, InspectExit,
-    cli_fault_reason, met_detail, wedged_cli_reason, CliFault, SourceStamp, FUTURE_BUILD_SLACK_SECS,
+    cli_fault_reason, met_detail, unread_cli_reason, wedged_cli_reason, CliFault, SourceStamp, FUTURE_BUILD_SLACK_SECS,
     PYTHON_EXEC_BUILD_SCRIPT,
 };
 
@@ -683,12 +683,12 @@ fn a_wedged_inspect_reaches_the_wedge_remedy_too() {
     );
 }
 
-/// ⚠️ **Three faults, three distinct sentences.** The property is not that
+/// ⚠️ **Four faults, four distinct sentences.** The property is not that
 /// each contains some phrase — it is that no two are the same string, which is
 /// what "different remedies" has to mean for the operator reading one line.
 ///
-/// This is the guard against a fourth variant being added and quietly rendered
-/// as one of the existing three, which is exactly how the probe arm came to
+/// This is the guard against a fifth variant being added and quietly rendered
+/// as one of the existing four, which is exactly how the probe arm came to
 /// render a wedge as an unavailability.
 #[test]
 fn every_cli_fault_renders_to_its_own_sentence() {
@@ -696,6 +696,7 @@ fn every_cli_fault_renders_to_its_own_sentence() {
         CliFault::Unavailable("detail".to_string()),
         CliFault::Wedged("detail".to_string()),
         CliFault::Unreadable("detail".to_string()),
+        CliFault::Unread("detail".to_string()),
     ]
     .iter()
     .map(|fault| cli_fault_reason(PY_IMAGE, fault))
@@ -708,6 +709,17 @@ fn every_cli_fault_renders_to_its_own_sentence() {
         assert!(!a.is_empty(), "a fault with no sentence is a fault with no content");
         assert!(!a.contains('\n'), "a reason with a newline orphans a [SKIP] line: {a}");
     }
+}
+
+/// #892: a lost answer came from a CLI that ran, so the stopped-service and
+/// install remedies are wrong advice for it.
+#[test]
+fn an_unread_answer_does_not_send_the_operator_to_start_or_install() {
+    let reason = unread_cli_reason("could not read `container system status`'s answer: EIO\nx");
+    assert!(reason.contains("retry"), "{reason}");
+    assert!(!reason.contains("container system start"), "{reason}");
+    assert!(!reason.contains("brew install"), "{reason}");
+    assert!(!reason.contains('\n'), "must be one line: {reason}");
 }
 
 /// The wedge sentence must read as one line and carry the detail it was given

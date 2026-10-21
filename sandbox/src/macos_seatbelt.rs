@@ -135,6 +135,9 @@ impl MacosSeatbelt {
                 crate::bounded_command::ProbeFailure::Spawn(e) => {
                     format!("could not spawn sandbox-exec: {e}")
                 }
+                crate::bounded_command::ProbeFailure::Unread(e) => {
+                    format!("could not read sandbox-exec's answer: {e}")
+                }
             })
         })?;
         if output.status.success() {

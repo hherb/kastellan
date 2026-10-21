@@ -126,6 +126,9 @@ impl LinuxBwrap {
                 crate::bounded_command::ProbeFailure::Spawn(e) => {
                     format!("could not spawn bwrap: {e}")
                 }
+                crate::bounded_command::ProbeFailure::Unread(e) => {
+                    format!("could not read bwrap's answer: {e}")
+                }
             })
         })?;
 

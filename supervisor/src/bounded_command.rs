@@ -48,8 +48,9 @@ pub enum CappedOutcome {
 /// dedicated threads, so a child that writes more than one pipe
 /// buffer's worth of output cannot deadlock against the wait.
 ///
-/// Returns `Err` only when the child cannot be spawned (or `try_wait`
-/// itself fails). A non-zero exit is a [`CappedOutcome::Completed`]
+/// Returns `Err` when the child cannot be spawned, `try_wait` itself
+/// fails, or a pipe read fails mid-capture — a truncated stdout must not
+/// pass as the child's whole answer (#892). A non-zero exit is a [`CappedOutcome::Completed`]
 /// (the caller inspects [`Output::status`]); exceeding `timeout` is a
 /// [`CappedOutcome::TimedOut`] — never an `Err`.
 pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutcome> {
@@ -63,24 +64,12 @@ pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutc
     // would risk a deadlock for a child that fills a pipe buffer (it
     // blocks on write, never exits, we never read) — concurrent drains
     // keep both sides making progress regardless of output volume. Each
-    // closure *returns* the captured bytes, so `join()` hands them back
-    // directly (no channel needed).
+    // closure *returns* its capture (or the read error that cut it short),
+    // so `join()` hands it back directly (no channel needed).
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
-    let o_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = stdout_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let e_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = stderr_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let o_handle = thread::spawn(move || read_whole("stdout", stdout_pipe.as_mut()));
+    let e_handle = thread::spawn(move || read_whole("stderr", stderr_pipe.as_mut()));
 
     // Poll for exit until the deadline. `try_wait` reaps the child the
     // moment it exits; the small sleep keeps the loop from busy-spinning.
@@ -109,12 +98,35 @@ pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutc
 
     // The child exited on its own, so its pipe write-ends are closed and
     // the drain threads have hit (or are about to hit) EOF — these joins
-    // return promptly, handing back the captured bytes. (As with
+    // return promptly, handing back each capture. (As with
     // `Command::output`, a still-open inherited pipe could delay this; on
     // the non-timeout path that is the same contract the std API offers.)
-    let stdout = o_handle.join().unwrap_or_default();
-    let stderr = e_handle.join().unwrap_or_default();
+    let stdout = joined("stdout", o_handle)?;
+    let stderr = joined("stderr", e_handle)?;
     Ok(CappedOutcome::Completed(Output { status, stdout, stderr }))
+}
+
+/// A drain thread's capture. A panicked drain lost it, which is no answer
+/// either — not an empty one (#892).
+fn joined(name: &str, drain: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    drain
+        .join()
+        .map_err(|_| io::Error::other(format!("the child's {name} drain panicked; its output is lost")))?
+}
+
+/// Read `pipe` to EOF. A read error is `Err` naming the pipe and how much
+/// arrived, never a short buffer passed off as the whole output (#892).
+fn read_whole(name: &str, pipe: Option<&mut impl Read>) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    if let Some(p) = pipe {
+        p.read_to_end(&mut buf).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("reading the child's {name} failed after {} bytes: {e}", buf.len()),
+            )
+        })?;
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -160,6 +172,32 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "timeout must return promptly (bounded), took {elapsed:?}"
         );
+    }
+
+    /// #892: a mid-capture read error is an `Err`, not a short `Completed`.
+    #[test]
+    fn read_whole_refuses_a_cut_short_capture() {
+        struct HalfThenEio(bool);
+        impl Read for HalfThenEio {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if std::mem::replace(&mut self.0, true) {
+                    return Err(io::Error::other("EIO stand-in"));
+                }
+                buf[..4].copy_from_slice(b"half");
+                Ok(4)
+            }
+        }
+        let e = read_whole("stdout", Some(&mut HalfThenEio(false))).expect_err("truncated");
+        assert!(e.to_string().contains("child's stdout failed after 4 bytes"), "{e}");
+        assert_eq!(read_whole("stdout", Some(&mut &b"all"[..])).unwrap(), b"all");
+    }
+
+    /// #892: a panicked drain is an `Err`, not an empty capture.
+    #[test]
+    fn joined_refuses_a_panicked_drain() {
+        let e = joined("stdout", thread::spawn(|| panic!("drain died"))).expect_err("lost");
+        assert!(e.to_string().contains("stdout drain panicked"), "{e}");
+        assert_eq!(joined("stdout", thread::spawn(|| Ok(b"all".to_vec()))).unwrap(), b"all");
     }
 
     /// A non-zero exit is a normal `Completed` outcome carrying the
