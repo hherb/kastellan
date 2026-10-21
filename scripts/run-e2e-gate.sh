@@ -659,6 +659,26 @@ TORN_COUNT="${TORN_COUNT:-0}"
 # targets only, so no `Doc-tests` section adds an unheaded summary.
 WHOLE_COUNT="$(grep -acE "$WHOLE_RESULT" "$LOG" || true)"
 WHOLE_COUNT="${WHOLE_COUNT:-0}"
+# Counted PER SECTION, not as a total against BINARY_COUNT (#885): one binary
+# with no summary and another with two (a re-exec'd child libtest's stdout in
+# the log) balance the totals. A summary before the first `Running` line has no
+# binary to belong to, so that preamble must hold none. Exit checked, as above.
+MISSUMMARISED="$(WHOLE_RESULT="$WHOLE_RESULT" awk '
+  function report() {
+    if (cur == "" && n > 0) print "     (before any `Running` line): " n " whole summaries"
+    if (cur != "" && n != 1) print "     " cur ": " n " whole summaries"
+  }
+  /^[[:space:]]+Running / { report(); cur = $2; n = 0 }
+  $0 ~ ENVIRON["WHOLE_RESULT"] { n++ }
+  END { report() }
+' "$LOG")"
+AWK_EXIT=$?
+if [ "$AWK_EXIT" -ne 0 ]; then
+  echo "run-e2e-gate.sh: awk failed ($AWK_EXIT) counting whole summaries per binary — refusing a verdict." >&2
+  exit 3
+fi
+MISSUMMARISED_COUNT="$(printf '%s' "$MISSUMMARISED" | grep -c . || true)"
+MISSUMMARISED_COUNT="${MISSUMMARISED_COUNT:-0}"
 # ...and every binary must have RUN at least one test (#823). The floors above
 # are run-wide, so a suite that ran nothing (a whole-file `cfg`, every test
 # `#[ignore]`d or renamed away) hid behind the others. `passed + failed == 0`,
@@ -679,7 +699,7 @@ EMPTY_COUNT="${EMPTY_COUNT:-0}"
 
 # Belt and braces: an operand that is somehow still not a number must refuse a
 # verdict rather than silently satisfy every floor.
-for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT IGNORED_COUNT FILTERED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND TORN_COUNT WHOLE_COUNT EMPTY_COUNT; do
+for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT IGNORED_COUNT FILTERED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND TORN_COUNT WHOLE_COUNT MISSUMMARISED_COUNT EMPTY_COUNT; do
   case "${!var}" in
     ''|*[!0-9]*)
       echo "run-e2e-gate.sh: $var is \"${!var}\", which is not a count — refusing a verdict." >&2
@@ -747,16 +767,13 @@ elif [ "$FILTERED_COUNT" -lt "$filtered_out" ]; then
   awk '/^[[:space:]]+Running / { cur = $2 } /^test result: / { print "     " cur ": " $0 }' "$LOG"
   FAIL=1
 fi
-if [ "$WHOLE_COUNT" -ne "$BINARY_COUNT" ]; then
-  echo "❌ $BINARY_COUNT test binaries ran but the log has $WHOLE_COUNT whole \`test result:\`"
-  echo "   line(s): a binary ended without its summary (crashed, exited inside a test),"
-  echo "   or output landed in front of it. That binary's counts were never read, so"
-  echo "   every count above is unproven. Suites with no whole summary:"
-  WHOLE_RESULT="$WHOLE_RESULT" awk '
-    function report() { if (cur != "" && !seen) print "     " cur }
-    /^[[:space:]]+Running / { report(); cur = $2; seen = 0 }
-    $0 ~ ENVIRON["WHOLE_RESULT"] { seen = 1 }
-    END { report() }' "$LOG"
+if [ "$MISSUMMARISED_COUNT" -ne 0 ]; then
+  echo "❌ $MISSUMMARISED_COUNT test binary(ies) did not print exactly one whole \`test result:\`"
+  echo "   line. With none, the binary ended without its summary (crashed, exited inside a"
+  echo "   test) or output landed in front of it, so its counts were never read. With two"
+  echo "   or more, another process's summary (a re-exec'd child) is in its section. Either"
+  echo "   way every count above is unproven (#885). Per section:"
+  printf '%s\n' "$MISSUMMARISED"
   FAIL=1
 fi
 if [ "$EMPTY_COUNT" -ne 0 ]; then

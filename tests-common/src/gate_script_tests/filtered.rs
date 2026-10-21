@@ -153,9 +153,44 @@ fn a_binary_with_no_summary_line_is_refused() {
     let out = run_gate_with(PROFILE, "filtered-no-summary", &log, 0, &GateEdits::default());
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("2 test binaries ran but the log has 1 whole `test result:`"), "{}", describe(&out));
-    assert!(stdout.contains("     tests/silent_e2e.rs\n"), "the silent suite is named\n{}", describe(&out));
-    assert!(!stdout.contains("     tests/suite_0_e2e.rs\n"), "a whole suite is not named\n{}", describe(&out));
+    assert!(stdout.contains("1 test binary(ies) did not print exactly one whole `test result:`"), "{}", describe(&out));
+    assert!(stdout.contains("     tests/silent_e2e.rs: 0 whole summaries\n"), "the silent suite is named\n{}", describe(&out));
+    assert!(!stdout.contains("tests/suite_0_e2e.rs: "), "a whole suite is not named\n{}", describe(&out));
+}
+
+#[test]
+fn a_missing_summary_is_not_hidden_by_a_doubled_one() {
+    // #885: one binary printed no summary and another printed two (a
+    // re-exec'd child libtest's stdout in the log). The TOTALS match, 2 and 2,
+    // so the check must be per binary, and name both.
+    let mut log = log_with_filtered(&[0]);
+    log.push_str(&hooked_binary("silent_e2e"));
+    log.push_str("\nrunning 9 tests\n");
+    log.push_str(&hooked_binary("doubled_e2e"));
+    log.push_str(&summary(1, 0));
+    log.push_str(&summary(1, 0));
+    let out = run_gate_with(PROFILE, "summary-zero-plus-two", &log, 0, &GateEdits::default());
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("2 test binary(ies) did not print exactly one whole `test result:`"), "{}", describe(&out));
+    assert!(stdout.contains("     tests/silent_e2e.rs: 0 whole summaries\n"), "{}", describe(&out));
+    assert!(stdout.contains("     tests/doubled_e2e.rs: 2 whole summaries\n"), "{}", describe(&out));
+    assert!(!stdout.contains("tests/suite_0_e2e.rs: "), "a suite with one summary is not named\n{}", describe(&out));
+}
+
+#[test]
+fn a_summary_before_any_running_line_is_refused() {
+    // No binary to attribute it to; the old total comparison caught it, so the
+    // per-binary one must too.
+    let mut log = summary(5, 0);
+    log.push_str(&log_with_filtered(&[0]));
+    let out = run_gate_with(PROFILE, "summary-preamble", &log, 0, &GateEdits::default());
+    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("     (before any `Running` line): 1 whole summaries\n"),
+        "{}",
+        describe(&out)
+    );
 }
 
 #[test]
@@ -169,7 +204,7 @@ fn a_summary_with_output_in_front_of_it_is_refused() {
     let out = run_gate_with(PROFILE, "filtered-prefixed", &log, 0, &GateEdits::default());
     assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("     tests/prefixed_e2e.rs\n"),
+        String::from_utf8_lossy(&out.stdout).contains("     tests/prefixed_e2e.rs: 0 whole summaries\n"),
         "{}",
         describe(&out)
     );

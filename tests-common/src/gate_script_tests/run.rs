@@ -551,19 +551,26 @@ fn a_failing_awk_refuses_a_verdict() {
 
 #[test]
 fn a_failing_per_binary_count_awk_refuses_a_verdict() {
-    // #823's awk alone fails (it is the only call given WHOLE_RESULT on a
-    // healthy run): a silent failure would read as "no binary ran zero tests".
-    let edits = GateEdits {
-        tools: &[("awk", "[ -n \"$WHOLE_RESULT\" ] && exit 2\nexec /usr/bin/awk \"$@\"")],
-        ..Default::default()
-    };
-    let out = run_gate_with(PROFILE, "awk-fails-empty", &healthy_log_for(PROFILE), 0, &edits);
-    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("awk failed (2) reading per-binary test counts"),
-        "{}",
-        describe(&out)
-    );
+    // Each per-binary awk fails alone, picked out by a fragment of its program:
+    // a silent failure would read as "every binary has one summary" (#885) or
+    // "no binary ran zero tests" (#823).
+    for (tag, stub, message) in [
+        (
+            "awk-fails-summaries",
+            "case \"$*\" in *'n++'*) exit 2 ;; esac\nexec /usr/bin/awk \"$@\"",
+            "awk failed (2) counting whole summaries per binary",
+        ),
+        (
+            "awk-fails-empty",
+            "case \"$*\" in *'$4 + $6'*) exit 2 ;; esac\nexec /usr/bin/awk \"$@\"",
+            "awk failed (2) reading per-binary test counts",
+        ),
+    ] {
+        let edits = GateEdits { tools: &[("awk", stub)], ..Default::default() };
+        let out = run_gate_with(PROFILE, tag, &healthy_log_for(PROFILE), 0, &edits);
+        assert_eq!(out.status.code(), Some(3), "{tag}\n{}", describe(&out));
+        assert!(String::from_utf8_lossy(&out.stderr).contains(message), "{tag}\n{}", describe(&out));
+    }
 }
 
 #[test]
