@@ -148,7 +148,7 @@ pub fn format_worker_failure_report(
     let what = happened_clause(cause, program, method);
     let ms = crate::worker_stderr::TAIL_DRAIN_WAIT.as_millis();
     let Some(tail) = stderr_tail else {
-        return format!("{what}; its stderr was not piped, so there is nothing to report");
+        return format!("{what}; {}", super::shared::STDERR_NOT_PIPED);
     };
     match tail.state() {
         // KNOWN silent — the drain reached EOF and there was nothing in it.

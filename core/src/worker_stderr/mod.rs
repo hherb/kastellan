@@ -16,7 +16,7 @@
 //! | `tool_host::spawn_worker` | [`spawn_drain_with_tail`] — tool workers |
 //! | `egress::spawn` | [`spawn_drain_with_tail`] — the egress proxy sidecar |
 //! | `worker_lifecycle::persistent::ClientTransport` | [`spawn_drain_with_tail`] — persistent workers |
-//! | `broker::spawn` | [`spawn_drain`] — the trusted brokers, no tail retained |
+//! | `broker::spawn` | [`spawn_drain`] (stderr) and `spawn_unread_drain` (stdout) — the trusted brokers, no tail retained |
 //!
 //! The **tail** ([`spawn_drain_with_tail`]) is what makes a death report
 //! possible: it retains a bounded window of recent lines so the worker's own
@@ -285,22 +285,36 @@ fn push_trimmed(tail: &StderrTail, line: &str) {
 /// the pipe empty so the worker can't deadlock writing to a full stderr buffer;
 /// the thread ends when the worker's stderr closes (process exit).
 pub fn spawn_drain(pid: u32, stderr: std::process::ChildStderr) {
+    spawn_unread_drain(pid, stderr, "stderr");
+}
+
+/// [`spawn_drain`] for any pipe core never reads — `pipe` names it in the
+/// warning. The brokers drain their stdout through this too (#888): before, that
+/// drain discarded its [`DrainEnd`], so a failed read never said the pipe had
+/// stopped draining.
+pub(crate) fn spawn_unread_drain<R: Read + Send + 'static>(pid: u32, reader: R, pipe: &'static str) {
     std::thread::spawn(move || {
-        // With no tail there is no *report* to qualify — but a `ReadError` is
-        // still operator-actionable here, and in a way the tailed paths are
-        // not. This thread is the only thing keeping the pipe empty (see the
-        // module header: a worker past the ~64 KiB buffer "would then block on
-        // write and deadlock"). After a read error that protection is gone and
-        // the thread exits, so the sidecar can hang on its next large write
-        // with nothing in the log pointing at the pipe.
-        if matches!(drain_reader(pid, stderr, None), DrainEnd::ReadError(_)) {
-            tracing::warn!(
-                worker_pid = pid,
-                "stderr drain ended on a READ ERROR; this stderr is no longer drained and \
-                 the process may block writing to a full pipe"
-            );
+        if let Some(warning) = unread_drain_warning(drain_reader(pid, reader, None), pipe) {
+            tracing::warn!(worker_pid = pid, "{warning}");
         }
     });
+}
+
+/// Pure: what to warn when the drain of an unread pipe ends, if anything.
+///
+/// With no tail there is no *report* to qualify — but a `ReadError` is still
+/// operator-actionable here, and in a way the tailed paths are not. The drain
+/// thread is the only thing keeping the pipe empty (see the module header: a
+/// worker past the ~64 KiB buffer "would then block on write and deadlock").
+/// After a read error that protection is gone and the thread exits, so the
+/// sidecar can hang on its next large write with nothing in the log pointing at
+/// the pipe.
+fn unread_drain_warning(end: DrainEnd, pipe: &str) -> Option<String> {
+    let DrainEnd::ReadError(fault) = end else { return None };
+    Some(format!(
+        "{pipe} drain ended on a READ ERROR ({fault}); this {pipe} is no longer drained and \
+         the process may block writing to a full pipe"
+    ))
 }
 
 /// Drain `reader` into `tail` and record **how the drain ended** on it.

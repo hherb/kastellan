@@ -307,7 +307,7 @@ fn stderr_note(tail: Option<&crate::worker_stderr::StderrTail>) -> String {
     let Some(tail) = tail else {
         // NOT "no stderr captured": that is a claim about the proxy, and this
         // is a fact about our own spawn path.
-        return "its stderr was not piped, so there is nothing to report".to_string();
+        return crate::worker_stderr::STDERR_NOT_PIPED.to_string();
     };
     render_stderr_note(&crate::worker_stderr::collect_tail_after_drain(tail))
 }
@@ -427,11 +427,26 @@ pub fn spawn_sidecar(
         // that exit as soon as it happens: otherwise it only ever surfaces as the
         // READY_TIMEOUT below — a five-second wait whose message blames the UDS
         // bind rather than the config that actually failed.
-        if let Ok(Some(status)) = child.try_wait() {
-            anyhow::bail!(
+        match child.try_wait() {
+            Ok(Some(status)) => anyhow::bail!(
                 "egress-proxy sidecar exited before becoming ready ({status}); {}",
                 stderr_note(stderr_tail.as_ref())
-            );
+            ),
+            Ok(None) => {}
+            // A failed `waitpid` is a fact about us (#754). Read as "still
+            // running", it spun to the timeout below, which blames the UDS bind.
+            // `ECHILD`: no longer our child, so its pid is not ours to signal.
+            Err(e) => {
+                if e.raw_os_error() != Some(libc::ECHILD) {
+                    child.kill().ok();
+                    child.wait().ok();
+                }
+                anyhow::bail!(
+                    "could not poll the egress-proxy sidecar's exit status while waiting for it \
+                     to become ready ({e}) — our waitpid failed, not the proxy's bind; {}",
+                    stderr_note(stderr_tail.as_ref())
+                );
+            }
         }
         if Instant::now() >= deadline {
             let mut handle = SidecarHandle { child, uds_path: uds_path.clone() };

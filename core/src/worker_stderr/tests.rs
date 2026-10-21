@@ -353,3 +353,44 @@ fn a_drain_that_never_finishes_is_reported_as_incomplete() {
     );
 }
 
+
+#[test]
+fn an_unread_pipe_that_stops_draining_says_which_pipe_and_why() {
+    // #888: the broker's STDOUT drain threw its `DrainEnd` away, so the one
+    // line saying "this pipe is no longer drained" — the line an operator
+    // chasing a hung broker needs — was never emitted for it. The warning must
+    // name the pipe it is about (the broker drains both) and the fault.
+    let fault = ReadFault::os(libc::EIO);
+    let w = unread_drain_warning(DrainEnd::ReadError(fault), "stdout")
+        .expect("a failed drain of an unread pipe must warn");
+    assert!(w.starts_with("stdout drain ended on a READ ERROR"), "{w}");
+    assert!(w.contains("this stdout is no longer drained"), "{w}");
+    assert!(w.contains(&fault.to_string()), "the errno must be on the line: {w}");
+    assert_eq!(
+        unread_drain_warning(DrainEnd::Eof, "stdout"),
+        None,
+        "EOF is the process closing its pipe — nothing is left undrained"
+    );
+}
+
+#[test]
+fn a_torn_down_pty_is_a_read_error_on_linux_and_eof_on_macos() {
+    // #754: every other `ReadError` in the tree comes from a fixture `Read`.
+    // This one comes from the kernel: a pty master whose slave has closed —
+    // the shape of #747's torn-down guest fd. The platforms differ, and the
+    // test pins both, so nothing here may assume the Mac ever sees this arm.
+    use std::os::fd::FromRawFd;
+    let (mut master, mut slave) = (-1, -1);
+    use std::ptr::null_mut;
+    // SAFETY: valid out-pointers; the name/termios/winsize args may be null.
+    let rc = unsafe { libc::openpty(&mut master, &mut slave, null_mut(), null_mut(), null_mut()) };
+    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+    // SAFETY: `slave` is ours and closed exactly once; `master` moves into the File.
+    unsafe { libc::close(slave) };
+    let master = unsafe { std::fs::File::from_raw_fd(master) };
+    let end = drain_reader(0, master, None);
+    #[cfg(target_os = "linux")]
+    assert_eq!(end, DrainEnd::ReadError(ReadFault::os(libc::EIO)));
+    #[cfg(target_os = "macos")]
+    assert_eq!(end, DrainEnd::Eof);
+}

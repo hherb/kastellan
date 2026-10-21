@@ -125,10 +125,11 @@ impl PersistentTransport for ClientTransport {
         let tail = crate::worker_stderr::collect_tail_after_drain(self.stderr_tail.as_ref()?);
         // A SINGLE non-blocking reap, deliberately: unlike the drain above there
         // is no flag to wait on, so this would be an unbounded poll loop against
-        // a slow-exiting VM launcher. `format_death_report` renders a `None`
-        // status as "not yet reaped", so an un-exited child degrades the
-        // message, not the supervisor's responsiveness.
-        let status = self.client.try_wait().ok().flatten();
+        // a slow-exiting VM launcher. `format_death_report` renders an
+        // `Ok(None)` status as "not yet reaped", so an un-exited child degrades
+        // the message, not the supervisor's responsiveness. The `Result` is
+        // passed whole: a failed `waitpid` is a fact about us (#754).
+        let status = self.client.try_wait();
         Some(crate::worker_stderr::format_death_report(status, &tail))
     }
 }

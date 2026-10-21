@@ -36,10 +36,17 @@ use super::tool_worker::{
 /// the system cannot quietly inherit whichever arm happens to be last. See
 /// `TailState` for why that replaced an order-dependent guard chain.
 /// (Named, not linked: both are `pub(crate)`.)
-pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTail) -> String {
+///
+/// `status` is `try_wait`'s own result, kept whole: an `Err` is our `waitpid`
+/// failing, which must not read as the child not having exited yet (#754).
+pub fn format_death_report(
+    status: std::io::Result<Option<ExitStatus>>,
+    stderr_tail: &CapturedTail,
+) -> String {
     let status_str = match status {
-        Some(s) => s.to_string(),
-        None => "exit status unknown (not yet reaped)".to_string(),
+        Ok(Some(s)) => s.to_string(),
+        Ok(None) => "exit status unknown (not yet reaped)".to_string(),
+        Err(e) => format!("exit status unknown: our waitpid failed ({e})"),
     };
     let ms = crate::worker_stderr::TAIL_DRAIN_WAIT.as_millis();
     match stderr_tail.state() {
@@ -237,7 +244,7 @@ mod tests {
         // email channel workers. "no stderr captured" is a claim about the
         // WORKER; an empty tail whose drain timed out only supports a claim
         // about us.
-        let r = format_death_report(None, &CapturedTail::partial(vec![]));
+        let r = format_death_report(Ok(None), &CapturedTail::partial(vec![]));
         assert!(
             !r.contains("no stderr captured"),
             "a PARTIAL capture must not report the worker as having written nothing: {r}"
@@ -250,7 +257,7 @@ mod tests {
         // POSITIVE CONTROL: the complete case must keep the original sentence,
         // or this test would also pass against a renderer that simply deleted
         // it.
-        let known = format_death_report(None, &CapturedTail::complete(vec![]));
+        let known = format_death_report(Ok(None), &CapturedTail::complete(vec![]));
         assert!(
             known.contains("no stderr captured"),
             "a COMPLETE empty tail really is a silent worker and must still say so: {known}"
@@ -263,7 +270,7 @@ mod tests {
         // lines. "recent stderr" would point a reader correlating against the
         // crash at the worker's boot messages instead.
         let partial = CapturedTail::partial(vec!["worker booting".into()]);
-        let r = format_death_report(None, &partial);
+        let r = format_death_report(Ok(None), &partial);
         assert!(
             !r.contains("recent stderr"),
             "an incomplete tail holds the FIRST lines, not the most recent ones: {r}"
@@ -273,7 +280,7 @@ mod tests {
             "POSITIVE CONTROL: whatever arrived must still be reported: {r}"
         );
         assert!(
-            format_death_report(None, &CapturedTail::complete(vec!["boom".into()]))
+            format_death_report(Ok(None), &CapturedTail::complete(vec!["boom".into()]))
                 .contains("recent stderr"),
             "a COMPLETE tail really is the most recent output and must still say so"
         );
@@ -284,7 +291,7 @@ mod tests {
         // #747 for the persistent path. A Matrix or email worker whose stderr
         // fd dies on teardown must not be reported as having written nothing —
         // that sends an operator after a kill that never happened.
-        let r = format_death_report(None, &CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO)));
+        let r = format_death_report(Ok(None), &CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO)));
         assert!(
             !r.contains("no stderr captured"),
             "a FAILED drain must not report the worker as having written nothing: {r}"
@@ -298,14 +305,14 @@ mod tests {
         // With lines too, and a second errno so the fault is passed through,
         // not hard-coded — with the guess that errno earns.
         let words =
-            format_death_report(None, &CapturedTail::drain_failed(vec!["boom".into()], ReadFault::os(libc::EBADF)));
+            format_death_report(Ok(None), &CapturedTail::drain_failed(vec!["boom".into()], ReadFault::os(libc::EBADF)));
         assert!(
             words.contains(&format!("os error {}", libc::EBADF)) && words.contains("fd handling"),
             "a failed drain with lines names its errno and guess as well: {words}"
         );
         // POSITIVE CONTROL, as above: the complete case keeps its sentence.
         assert!(
-            format_death_report(None, &CapturedTail::complete(vec![])).contains("no stderr captured"),
+            format_death_report(Ok(None), &CapturedTail::complete(vec![])).contains("no stderr captured"),
             "a COMPLETE empty tail really is a silent worker and must still say so"
         );
     }
@@ -332,7 +339,7 @@ mod tests {
             CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO)),
         ]
         .iter()
-        .map(|t| format_death_report(None, t))
+        .map(|t| format_death_report(Ok(None), t))
         .collect();
         let mut seen = rendered.clone();
         seen.sort();
@@ -347,7 +354,7 @@ mod tests {
 
     #[test]
     fn death_report_no_status_no_stderr() {
-        let report = format_death_report(None, &CapturedTail::complete(vec![]));
+        let report = format_death_report(Ok(None), &CapturedTail::complete(vec![]));
         assert!(report.contains("exit status unknown"), "{report}");
         assert!(report.contains("no stderr captured"), "{report}");
     }
@@ -359,9 +366,28 @@ mod tests {
         let status = std::process::Command::new("false")
             .status()
             .expect("spawn /usr/bin/false");
-        let report = format_death_report(Some(status), &CapturedTail::complete(vec!["boom".into(), "trace".into()]));
+        let report = format_death_report(Ok(Some(status)), &CapturedTail::complete(vec!["boom".into(), "trace".into()]));
         assert!(report.contains("exit status"), "{report}");
         assert!(report.contains("boom | trace"), "{report}");
+    }
+
+    #[test]
+    fn a_failed_exit_poll_is_not_reported_as_an_unreaped_worker() {
+        // #754: "not yet reaped" is a claim about the CHILD; a `try_wait` that
+        // errored is a fact about OUR `waitpid`. Inside a report whose whole
+        // purpose is keeping those apart, they must not render the same.
+        let failed = format_death_report(
+            Err(std::io::Error::from_raw_os_error(libc::ECHILD)),
+            &CapturedTail::complete(vec![]),
+        );
+        assert!(!failed.contains("not yet reaped"), "{failed}");
+        assert!(failed.contains("our waitpid failed"), "{failed}");
+        assert!(
+            failed.contains(&std::io::Error::from_raw_os_error(libc::ECHILD).to_string()),
+            "the errno must be on the line: {failed}"
+        );
+        let unreaped = format_death_report(Ok(None), &CapturedTail::complete(vec![]));
+        assert!(unreaped.contains("not yet reaped"), "{unreaped}");
     }
 
     #[test]

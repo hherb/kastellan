@@ -75,6 +75,7 @@ pub use refusal::{
 #[cfg(test)]
 pub(crate) use refusal::emitted_for as emitted_refusal_lines_for;
 pub use shared::STDERR_FALLBACK_MARKERS;
+pub(crate) use shared::STDERR_NOT_PIPED;
 pub use tool_worker::{
     emit_worker_failure_report, format_worker_failure_report,
     format_worker_failure_stderr_fallback, WORKER_FAILED_STDERR_MARKER,

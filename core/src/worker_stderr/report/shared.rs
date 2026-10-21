@@ -16,6 +16,12 @@ use super::persistent::{WORKER_DEATH_STDERR_MARKER, WORKER_DOWN_STDERR_MARKER};
 use super::refusal::WORKER_REFUSAL_STDERR_MARKER;
 use super::tool_worker::WORKER_FAILED_STDERR_MARKER;
 
+/// What a report says when our own spawn path piped no stderr. One copy for the
+/// tool-worker report and the egress bring-up note (#754): both mean the same
+/// thing, and two hand-copied strings are the drift shape this module exists to
+/// prevent. ⚠️ NOT "no stderr captured" — that is a claim about the worker.
+pub(crate) const STDERR_NOT_PIPED: &str = "its stderr was not piped, so there is nothing to report";
+
 /// Every marker this module can put at the start of a fallback line.
 ///
 /// Exists so the rules that bind *all* fallback markers — not a gate evidence

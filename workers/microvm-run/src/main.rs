@@ -132,8 +132,9 @@ fn main() -> std::io::Result<()> {
     // Host-initiated hybrid-vsock connect: dial the base UDS and `CONNECT` to
     // the guest's listening port (DGX-verified direction). Retries while the
     // guest boots and binds its listener.
-    let Some(stream) = bridge::connect_hybrid_vsock(&vsock_uds, port, Duration::from_secs(20))
-    else {
+    let stream = match bridge::connect_hybrid_vsock(&vsock_uds, port, Duration::from_secs(20)) {
+        Ok(stream) => stream,
+        Err(last_attempt) => {
         // ⚠️ Explicit, NOT a panic through an RAII guard, and that is a
         // correctness point rather than a style one: the workspace release
         // profile sets `panic = "abort"`, and this launcher ships in release.
@@ -147,7 +148,10 @@ fn main() -> std::io::Result<()> {
         // and the core daemon drains. The caller sees `Protocol(EarlyExit)`
         // whatever happens here; this is the only channel that carries a reason.
         let report = console::boot_failure_report(
-            "the guest vsock listener did not come up within 20s",
+            &format!(
+                "the guest vsock listener did not come up within 20s (last handshake attempt: \
+                 {last_attempt})"
+            ),
             console_path.as_deref(),
             read_console_lossy(console_path.as_deref()).as_deref(),
         );
@@ -158,6 +162,7 @@ fn main() -> std::io::Result<()> {
         // launcher's pid is observed dead, so this is a deferred clean.
         teardown_run_dir(run_dir.as_deref(), &vsock_uds, true);
         std::process::exit(1);
+        }
     };
 
     // Past the boot: the guard now covers the pump. It kills firecracker on
