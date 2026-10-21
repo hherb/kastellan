@@ -50,8 +50,7 @@ pub use report::*;
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Default number of recent stderr lines retained for a death report.
@@ -66,69 +65,6 @@ pub const DEFAULT_TAIL_LINES: usize = 50;
 /// and start fresh, so memory stays bounded regardless of worker output.
 const MAX_CARRY_BYTES: usize = 64 * 1024;
 
-/// Encoding of [`StderrTail::drain_end`]'s three states in one `AtomicU8`.
-///
-/// An atomic rather than a `Mutex<Option<DrainEnd>>` because
-/// [`StderrTail::wait_for_drain`] polls it every 2 ms while the drain thread
-/// holds the *lines* mutex, and a waiter that can never block is one fewer
-/// thing to reason about on a failure path.
-const DRAIN_IN_PROGRESS: u8 = 0;
-const DRAIN_EOF: u8 = 1;
-const DRAIN_READ_ERROR: u8 = 2;
-
-/// Pure: encode a finished drain's outcome for the atomic.
-fn encode_drain_end(end: DrainEnd) -> u8 {
-    match end {
-        DrainEnd::Eof => DRAIN_EOF,
-        DrainEnd::ReadError => DRAIN_READ_ERROR,
-    }
-}
-
-/// Pure: is `raw` a value [`encode_drain_end`] can actually produce?
-///
-/// ⚠️ **Exists so the warning can live OUTSIDE [`decode_drain_end`].** Both an
-/// in-progress drain and a corrupt byte decode to `None` — correctly, since
-/// both mean "we may not claim completeness" — but only the second is worth
-/// telling anyone about, and [`StderrTail::wait_for_drain`] calls the decoder
-/// **every 2 ms for the full [`TAIL_DRAIN_WAIT`]**. A `tracing::error!` inside
-/// the decoder is therefore ~125 identical lines per worker failure, on the one
-/// path that has to stay readable. Splitting the question keeps the decoder
-/// pure and lets the waiter warn exactly once.
-fn is_known_drain_byte(raw: u8) -> bool {
-    matches!(raw, DRAIN_IN_PROGRESS | DRAIN_EOF | DRAIN_READ_ERROR)
-}
-
-/// Pure: decode the atomic back into "how the drain ended, if it has".
-///
-/// A free function rather than an inline `match` so the encoding has exactly
-/// one reader and a unit test can pin every input — including the impossible
-/// one, whose fail direction matters: an unrecognised byte must read as *still
-/// draining*, so a caller waits rather than claiming a completeness it has not
-/// established.
-///
-/// ⚠️ **An unrecognised byte must fail SAFE, and it must not be silent — but
-/// the noise belongs to the caller, not here.** [`encode_drain_end`] matches
-/// exhaustively, so adding a [`DrainEnd`] variant breaks it and forces the
-/// author to pick a byte; *this* arm would go on compiling and map the new byte
-/// to "still draining", which costs a caller the full [`TAIL_DRAIN_WAIT`] and
-/// then renders as `NothingCapturedYet` — a fact about *waiting* standing in
-/// for a fact about the *encoding*, which is the collapse #732/#746/#747 were.
-/// [`StderrTail::wait_for_drain`] says so once, using [`is_known_drain_byte`].
-///
-/// ⚠️ **Stays pure, and the doc line above is load-bearing.** Logging here
-/// looks equivalent and is not: the waiter calls this every 2 ms for the whole
-/// cap, so a `tracing::error!` in this function is ~125 identical lines per
-/// worker failure. Deliberately not a `debug_assert!` either — that would make
-/// the fail-safe `None` untestable and diverge debug from release on a failure
-/// path.
-fn decode_drain_end(raw: u8) -> Option<DrainEnd> {
-    match raw {
-        DRAIN_EOF => Some(DrainEnd::Eof),
-        DRAIN_READ_ERROR => Some(DrainEnd::ReadError),
-        _ => None,
-    }
-}
-
 /// A bounded, shared ring of a worker's most-recent stderr lines. Cloneable
 /// (it's `Arc`-backed): the drain thread pushes, the owning caller snapshots when
 /// the worker dies.
@@ -136,7 +72,7 @@ fn decode_drain_end(raw: u8) -> Option<DrainEnd> {
 pub struct StderrTail {
     lines: Arc<Mutex<VecDeque<String>>>,
     cap: usize,
-    /// How the drain thread finished, encoded by [`encode_drain_end`].
+    /// How the drain thread finished; unset while it is still draining.
     ///
     /// Without this a caller that reacts to a worker's death races the drainer
     /// and usually wins: it snapshots an EMPTY tail and reports "no stderr
@@ -151,8 +87,16 @@ pub struct StderrTail {
     /// on a pipe that broke. Recording that as EOF is what let an unreadable
     /// pipe earn the "the worker wrote NOTHING" diagnosis.
     ///
+    /// ⚠️ **Write-once, enforced by the cell** (#752): a drain ends once, so
+    /// a second `mark_drained` cannot overwrite an observed outcome. A
+    /// `OnceLock` rather than a `Mutex<Option<_>>` because the waiter polls it
+    /// on a death-report path, where a second poisonable lock would add a
+    /// second `.expect` that can panic; rather than a hand-rolled `AtomicU8`
+    /// because [`DrainEnd`] carries a [`ReadFault`] no byte holds, and the cell
+    /// gives write-once for free.
+    ///
     /// [#747]: https://github.com/hherb/kastellan/issues/747
-    drain_end: Arc<AtomicU8>,
+    drain_end: Arc<OnceLock<DrainEnd>>,
 }
 
 impl StderrTail {
@@ -162,7 +106,7 @@ impl StderrTail {
         Self {
             lines: Arc::new(Mutex::new(VecDeque::new())),
             cap,
-            drain_end: Arc::new(AtomicU8::new(DRAIN_IN_PROGRESS)),
+            drain_end: Arc::new(OnceLock::new()),
         }
     }
 
@@ -175,8 +119,23 @@ impl StderrTail {
     /// stand in for the drain thread — the death-tail tests need to land a
     /// line *after* the collector is already waiting, which is the production
     /// race and cannot be staged without it.
+    ///
+    /// **First write wins**: a later call is ignored, so a stray second mark
+    /// cannot turn an observed `ReadError` into `Eof` (or back). A *different*
+    /// second outcome is a bug in our own drain wiring (two drainers on one
+    /// tail?) — and the kept value may be the wrong one — so it warns rather
+    /// than vanishing.
     pub(crate) fn mark_drained(&self, end: DrainEnd) {
-        self.drain_end.store(encode_drain_end(end), Ordering::Release);
+        if let Err(rejected) = self.drain_end.set(end) {
+            let kept = self.drain_end.get();
+            if kept != Some(&rejected) {
+                tracing::warn!(
+                    ?rejected,
+                    ?kept,
+                    "conflicting second drain_end mark ignored; two drainers on one stderr tail?"
+                );
+            }
+        }
     }
 
     /// Block until the drain thread finishes, or `timeout` elapses.
@@ -187,32 +146,15 @@ impl StderrTail {
     /// spending to get one. A `None` return still leaves whatever arrived so
     /// far readable — the tail is a bounded ring, not a transaction.
     ///
-    /// ⚠️ **`Some(DrainEnd::ReadError)` is not success** ([#747]). It means the
+    /// ⚠️ **`Some(DrainEnd::ReadError(_))` is not success** ([#747]). It means the
     /// wait is over, not that we read everything; see [`DrainEnd`].
     ///
     /// [#747]: https://github.com/hherb/kastellan/issues/747
     pub fn wait_for_drain(&self, timeout: Duration) -> Option<DrainEnd> {
         let deadline = Instant::now() + timeout;
-        // ⚠️ Once per WAIT, not once per poll: this loop runs every 2 ms for the
-        // whole cap, so an unconditional log here is ~125 identical lines on a
-        // worker-failure path. The flag is the whole reason the warning is not
-        // inside `decode_drain_end`.
-        let mut warned = false;
         loop {
-            let raw = self.drain_end.load(Ordering::Acquire);
-            if let Some(end) = decode_drain_end(raw) {
-                return Some(end);
-            }
-            // Unrecognised is NOT the same as in-progress, though both wait.
-            // Only the first means something is wrong with us.
-            if !warned && !is_known_drain_byte(raw) {
-                warned = true;
-                tracing::error!(
-                    raw,
-                    "unrecognised drain_end encoding; treating as still-draining, so this \
-                     caller will burn the full stderr drain wait and then report a PARTIAL \
-                     capture for a worker whose drain may well have finished"
-                );
+            if let Some(end) = self.drain_end.get() {
+                return Some(*end);
             }
             if Instant::now() >= deadline {
                 return None;
@@ -302,14 +244,10 @@ pub fn drain_reader<R: Read>(pid: u32, mut reader: R, tail: Option<&StderrTail>)
             // to drain — but this is emphatically NOT the same as EOF, because
             // we do not know what the worker wrote after it (#747).
             //
-            // ⚠️ **Logged here because this is the only place the errno
-            // exists.** `DrainEnd` is `Copy` and lives in an `AtomicU8`, so it
-            // cannot carry the error, and the renderers' "suspect the
-            // transport (a torn-down guest's vsock/pty fd)" sentence is a
-            // hard-coded guess. It is right for `EIO`; for `EBADF` the fault
-            // is a double-close in OUR fd handling and that sentence sends the
-            // operator to audit a guest that is fine. Dropping the kind here
-            // would leave nothing anywhere to tell the two apart.
+            // The errno travels on in the `ReadFault` (#752), so the
+            // renderers can name it and guess only when it tells them where
+            // to look; the log line keeps the full message, which the `Copy`
+            // fault cannot.
             Err(e) => {
                 tracing::warn!(
                     worker_pid = pid,
@@ -317,7 +255,7 @@ pub fn drain_reader<R: Read>(pid: u32, mut reader: R, tail: Option<&StderrTail>)
                     kind = ?e.kind(),
                     "worker stderr drain ended on a READ ERROR; the remainder is unrecoverable"
                 );
-                break DrainEnd::ReadError;
+                break DrainEnd::ReadError(ReadFault::of(&e));
             }
         }
     };
@@ -355,7 +293,7 @@ pub fn spawn_drain(pid: u32, stderr: std::process::ChildStderr) {
         // write and deadlock"). After a read error that protection is gone and
         // the thread exits, so the sidecar can hang on its next large write
         // with nothing in the log pointing at the pipe.
-        if drain_reader(pid, stderr, None) == DrainEnd::ReadError {
+        if matches!(drain_reader(pid, stderr, None), DrainEnd::ReadError(_)) {
             tracing::warn!(
                 worker_pid = pid,
                 "stderr drain ended on a READ ERROR; this stderr is no longer drained and \
@@ -494,6 +432,8 @@ mod tests {
         data: Cursor<Vec<u8>>,
         /// Errors yielded before any real read, to exercise the `EINTR` arm.
         interrupts: usize,
+        /// The errno the final read fails with.
+        errno: i32,
     }
 
     impl Read for FailsAfterData {
@@ -505,7 +445,7 @@ mod tests {
             match self.data.read(buf)? {
                 // Where a real pipe would report EOF, report a hard failure
                 // instead: the drain stops, but NOT because the worker is done.
-                0 => Err(std::io::Error::other("EIO: transport went away")),
+                0 => Err(std::io::Error::from_raw_os_error(self.errno)),
                 n => Ok(n),
             }
         }
@@ -522,12 +462,13 @@ mod tests {
         let reader = FailsAfterData {
             data: Cursor::new(b"worker booting\n".to_vec()),
             interrupts: 0,
+            errno: libc::EIO,
         };
         assert_eq!(
             drain_reader(0, reader, Some(&tail)),
-            DrainEnd::ReadError,
-            "a drain stopped by a read error must say so; reporting EOF is what lets a \
-             renderer diagnose the worker for a fault in our own transport"
+            DrainEnd::ReadError(ReadFault::os(libc::EIO)),
+            "a drain stopped by a read error must say so — and say WHICH (#752); reporting EOF \
+             is what lets a renderer diagnose the worker for a fault in our own transport"
         );
         assert_eq!(
             tail.snapshot(),
@@ -535,6 +476,10 @@ mod tests {
             "POSITIVE CONTROL: whatever DID arrive before the error is still retained — a \
              failed drain is not a reason to discard the lines we got"
         );
+        // A second errno, so the fault must come from the read and not from a
+        // constant that happens to match the motivating case.
+        let ebadf = FailsAfterData { data: Cursor::new(vec![]), interrupts: 0, errno: libc::EBADF };
+        assert_eq!(drain_reader(0, ebadf, None), DrainEnd::ReadError(ReadFault::os(libc::EBADF)));
     }
 
     #[test]
@@ -546,8 +491,9 @@ mod tests {
         let reader = FailsAfterData {
             data: Cursor::new(b"survived the signal\n".to_vec()),
             interrupts: 3,
+            errno: libc::EIO,
         };
-        assert_eq!(drain_reader(0, reader, Some(&tail)), DrainEnd::ReadError);
+        assert_eq!(drain_reader(0, reader, Some(&tail)), DrainEnd::ReadError(ReadFault::os(libc::EIO)));
         assert_eq!(
             tail.snapshot(),
             vec!["survived the signal".to_string()],
@@ -566,12 +512,12 @@ mod tests {
         let tail = StderrTail::new(8);
         drain_and_mark(
             0,
-            FailsAfterData { data: Cursor::new(b"last thing\n".to_vec()), interrupts: 0 },
+            FailsAfterData { data: Cursor::new(b"last thing\n".to_vec()), interrupts: 0, errno: libc::EIO },
             &tail,
         );
         assert_eq!(
             tail.wait_for_drain(Duration::from_millis(0)),
-            Some(DrainEnd::ReadError),
+            Some(DrainEnd::ReadError(ReadFault::os(libc::EIO))),
             "the drain thread must record WHY it stopped, not merely that it stopped"
         );
 
@@ -590,61 +536,35 @@ mod tests {
         // `collect_tail_after_drain` must carry it into the rendered state
         // rather than flattening it to "complete".
         let tail = StderrTail::new(8);
-        tail.mark_drained(DrainEnd::ReadError);
+        tail.mark_drained(DrainEnd::ReadError(ReadFault::os(libc::EIO)));
         let collected = collect_tail_after_drain(&tail);
         assert_eq!(
             collected.state(),
-            TailState::DrainFailedSilent,
+            TailState::DrainFailedSilent(ReadFault::os(libc::EIO)),
             "an empty tail whose drain FAILED must never reach a renderer as KnownSilent — \
              that is the one state licensed to print a diagnosis"
         );
     }
 
     #[test]
-    fn an_unrecognised_drain_byte_is_distinguishable_from_a_drain_still_in_progress() {
-        // Both decode to `None` — that is the fail-safe, and it is right — but a
-        // caller must be able to tell "not finished yet" from "this encoding is
-        // broken", because the second deserves a log line and the first must
-        // never produce one. Without this split the warning would have to live
-        // inside `decode_drain_end`, which `wait_for_drain` calls every 2 ms for
-        // the full 250 ms cap: ~125 identical error lines per worker failure,
-        // on the one path that must stay readable.
-        for known in [DRAIN_IN_PROGRESS, DRAIN_EOF, DRAIN_READ_ERROR] {
-            assert!(
-                is_known_drain_byte(known),
-                "{known} is part of the encoding and must never be reported as corrupt"
-            );
-        }
-        for unknown in [3u8, 99, 255] {
-            assert!(
-                !is_known_drain_byte(unknown),
-                "{unknown} is not a value `encode_drain_end` can produce, so a tail holding it \
-                 means the encoding has drifted and someone must be told"
-            );
-        }
-    }
-
-    #[test]
-    fn the_drain_end_encoding_round_trips_and_fails_safe() {
-        // The atomic's three states are the only thing between a drain outcome
-        // and the renderer. Pinned including the impossible input, whose fail
-        // direction matters: an unrecognised byte must read as STILL DRAINING,
-        // so a caller waits rather than claiming a completeness it has not
-        // established.
-        for end in [DrainEnd::Eof, DrainEnd::ReadError] {
-            assert_eq!(decode_drain_end(encode_drain_end(end)), Some(end), "{end:?}");
-        }
-        assert_eq!(decode_drain_end(DRAIN_IN_PROGRESS), None);
+    fn a_drain_end_is_recorded_once_and_a_second_mark_cannot_overwrite_it() {
+        // #752: a drain ends once; a second mark must not turn a read failure
+        // into EOF (the #747 lie, through the back door).
+        let tail = StderrTail::new(4);
+        let failed = DrainEnd::ReadError(ReadFault::os(libc::EIO));
+        tail.mark_drained(failed);
+        tail.mark_drained(DrainEnd::Eof);
         assert_eq!(
-            decode_drain_end(99),
-            None,
-            "an unknown byte must not decode as a finished drain"
+            tail.wait_for_drain(Duration::ZERO),
+            Some(failed),
+            "the FIRST recorded outcome must stand; a later mark must not overwrite it"
         );
-        // The two encodings must differ, or the distinction the whole issue is
-        // about cannot survive the atomic.
-        assert_ne!(encode_drain_end(DrainEnd::Eof), encode_drain_end(DrainEnd::ReadError));
-        assert_ne!(encode_drain_end(DrainEnd::Eof), DRAIN_IN_PROGRESS);
-        assert_ne!(encode_drain_end(DrainEnd::ReadError), DRAIN_IN_PROGRESS);
+        // The reverse order, so "a read error always wins" cannot pass for
+        // write-once.
+        let clean = StderrTail::new(4);
+        clean.mark_drained(DrainEnd::Eof);
+        clean.mark_drained(failed);
+        assert_eq!(clean.wait_for_drain(Duration::ZERO), Some(DrainEnd::Eof), "write-once, not prefer-error");
     }
 
     #[test]

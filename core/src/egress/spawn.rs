@@ -316,7 +316,7 @@ fn stderr_note(tail: Option<&crate::worker_stderr::StderrTail>) -> String {
 ///
 /// Separated from the wait so every state can be unit-tested without a child
 /// process — the same reason `format_worker_failure_report` is pure. Matches
-/// [`TailState`] exhaustively, so a state added to the system cannot silently
+/// `TailState` exhaustively, so a state added to the system cannot silently
 /// inherit whichever arm happens to be last.
 fn render_stderr_note(tail: &crate::worker_stderr::CapturedTail) -> String {
     let ms = TAIL_DRAIN_WAIT.as_millis();
@@ -334,15 +334,16 @@ fn render_stderr_note(tail: &crate::worker_stderr::CapturedTail) -> String {
             lines.join(" | ")
         ),
         // #747: our read of the pipe failed, so the emptiness is ours.
-        TailState::DrainFailedSilent => {
-            "our read of its stderr FAILED before anything arrived, so nothing was captured \
-             — our pipe, not evidence that the proxy was silent"
-                .to_string()
-        }
-        TailState::DrainFailedWords(lines) => format!(
-            "stderr up to the point our read of the pipe FAILED (so these may be its FIRST \
-             lines rather than its most recent, and there may have been more we could never \
+        TailState::DrainFailedSilent(fault) => format!(
+            "our read of its stderr FAILED ({fault}) before anything arrived, so nothing was \
+             captured — our pipe, not evidence that the proxy was silent{}",
+            fault.suspect_clause()
+        ),
+        TailState::DrainFailedWords(fault, lines) => format!(
+            "stderr up to the point our read of the pipe FAILED ({fault}{}; so these may be its \
+             FIRST lines rather than its most recent, and there may have been more we could never \
              read): {}",
+            fault.suspect_clause(),
             lines.join(" | ")
         ),
     }

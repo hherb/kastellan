@@ -32,9 +32,10 @@ use super::tool_worker::{
 /// them identically is the contentless-line defect #730 exists to remove,
 /// wearing a confident sentence.
 ///
-/// ⚠️ **Matches [`CapturedTail::state`] exhaustively**, so a state added to
+/// ⚠️ **Matches `CapturedTail::state` exhaustively**, so a state added to
 /// the system cannot quietly inherit whichever arm happens to be last. See
-/// [`TailState`] for why that replaced an order-dependent guard chain.
+/// `TailState` for why that replaced an order-dependent guard chain.
+/// (Named, not linked: both are `pub(crate)`.)
 pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTail) -> String {
     let status_str = match status {
         Some(s) => s.to_string(),
@@ -53,10 +54,11 @@ pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTai
         ),
         // Our read of the pipe failed at byte 0 (#747). Also a fact about us,
         // but a different one: waiting longer would not have helped.
-        TailState::DrainFailedSilent => format!(
-            "worker exited ({status_str}); our read of its stderr FAILED before anything \
-             arrived, so nothing was captured — our pipe, not evidence that the worker was \
-             silent"
+        TailState::DrainFailedSilent(fault) => format!(
+            "worker exited ({status_str}); our read of its stderr FAILED ({fault}) before \
+             anything arrived, so nothing was captured — our pipe, not evidence that the \
+             worker was silent{}",
+            fault.suspect_clause()
         ),
         // The ring evicts oldest first, so an incomplete tail is the FIRST
         // lines, not the most recent ones. "recent stderr" would mislabel them.
@@ -65,10 +67,11 @@ pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTai
              these may be its FIRST lines rather than its most recent): {}",
             lines.join(" | ")
         ),
-        TailState::DrainFailedWords(lines) => format!(
+        TailState::DrainFailedWords(fault, lines) => format!(
             "worker exited ({status_str}); stderr up to the point our read of the pipe FAILED \
-             (so these may be its FIRST lines rather than its most recent, and there may \
-             have been more we could never read): {}",
+             ({fault}{}; so these may be its FIRST lines rather than its most recent, and there \
+             may have been more we could never read): {}",
+            fault.suspect_clause(),
             lines.join(" | ")
         ),
         TailState::LastWords(lines) => {
@@ -226,6 +229,7 @@ pub fn emit_persistent_down_report(label: &str, reason: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker_stderr::ReadFault;
 
     #[test]
     fn a_partial_death_capture_does_not_claim_no_stderr() {
@@ -280,7 +284,7 @@ mod tests {
         // #747 for the persistent path. A Matrix or email worker whose stderr
         // fd dies on teardown must not be reported as having written nothing —
         // that sends an operator after a kill that never happened.
-        let r = format_death_report(None, &CapturedTail::drain_failed(vec![]));
+        let r = format_death_report(None, &CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO)));
         assert!(
             !r.contains("no stderr captured"),
             "a FAILED drain must not report the worker as having written nothing: {r}"
@@ -289,6 +293,15 @@ mod tests {
             r.contains("FAILED"),
             "the line must say our read failed, or a reader cannot tell it from a genuinely \
              silent worker: {r}"
+        );
+        assert!(r.contains(&format!("os error {}", libc::EIO)), "and name which failure (#752): {r}");
+        // With lines too, and a second errno so the fault is passed through,
+        // not hard-coded — with the guess that errno earns.
+        let words =
+            format_death_report(None, &CapturedTail::drain_failed(vec!["boom".into()], ReadFault::os(libc::EBADF)));
+        assert!(
+            words.contains(&format!("os error {}", libc::EBADF)) && words.contains("fd handling"),
+            "a failed drain with lines names its errno and guess as well: {words}"
         );
         // POSITIVE CONTROL, as above: the complete case keeps its sentence.
         assert!(
@@ -315,8 +328,8 @@ mod tests {
             CapturedTail::complete(vec![]),
             CapturedTail::partial(lines.clone()),
             CapturedTail::partial(vec![]),
-            CapturedTail::drain_failed(lines),
-            CapturedTail::drain_failed(vec![]),
+            CapturedTail::drain_failed(lines, ReadFault::os(libc::EIO)),
+            CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO)),
         ]
         .iter()
         .map(|t| format_death_report(None, t))
