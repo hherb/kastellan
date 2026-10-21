@@ -41,7 +41,7 @@ fn collecting_a_death_tail_gives_up_rather_than_hanging_on_a_drainer_that_never_
     let collected = crate::worker_stderr::collect_tail_after_drain(&tail);
     let waited = started.elapsed();
 
-    assert!(collected.lines().is_empty(), "nothing was ever drained: {collected:?}");
+    assert_eq!(collected, crate::worker_stderr::CapturedTail::partial(vec![]), "nothing was ever drained, and the drain never ended");
     assert!(
         waited >= crate::worker_stderr::TAIL_DRAIN_WAIT,
         "it must actually wait the cap before giving up, or it is racing again: {waited:?}"

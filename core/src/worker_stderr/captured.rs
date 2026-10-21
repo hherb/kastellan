@@ -45,8 +45,71 @@ pub enum DrainEnd {
     Eof,
     /// `read(2)` failed with something other than `EINTR` — a vsock- or
     /// pty-backed guest fd returning `EIO` on teardown is the motivating case.
-    /// The drain stopped early and the remainder is unrecoverable.
-    ReadError,
+    /// The drain stopped early and the remainder is unrecoverable. Carries
+    /// *which* failure, so a renderer can say it rather than guess (#752).
+    ReadError(ReadFault),
+}
+
+/// Why our read of a worker's stderr failed: the error's kind **and its raw
+/// errno** ([#752](https://github.com/hherb/kastellan/issues/752)).
+///
+/// ⚠️ **The errno is the point; `kind` alone cannot answer the question.**
+/// `EIO` (a torn-down guest's vsock/pty fd — a fault in the transport) and
+/// `EBADF` (a double-close in the core's own fd handling — a fault in *us*)
+/// both map to `ErrorKind::Uncategorized`, so a renderer holding only the kind
+/// would have to print one guess for both. Same shape as `kastellan_db`'s
+/// `InsertCause::Io { kind, os }`, for the same reason.
+///
+/// `Copy` (it rides inside [`DrainEnd`]), so the error's message text is not
+/// kept — for an OS error the errno renders it back; for a synthetic one the
+/// kind is all there is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadFault {
+    kind: std::io::ErrorKind,
+    os: Option<i32>,
+}
+
+impl ReadFault {
+    /// The fault a failed `read` returned.
+    pub fn of(e: &std::io::Error) -> Self {
+        Self { kind: e.kind(), os: e.raw_os_error() }
+    }
+
+    /// The fault an OS `read` failing with `errno` would return.
+    pub fn os(errno: i32) -> Self {
+        Self::of(&std::io::Error::from_raw_os_error(errno))
+    }
+
+    /// The raw errno, when the failure came from the OS.
+    pub fn errno(&self) -> Option<i32> {
+        self.os
+    }
+
+    /// Pure: where an operator should look, **only when the errno says** —
+    /// `None` means name the error and guess nothing.
+    ///
+    /// Before #752 every read failure got the `EIO` sentence, which for
+    /// `EBADF` sent the operator to audit a guest that was fine.
+    pub fn suspect(&self) -> Option<&'static str> {
+        match self.os {
+            Some(libc::EIO) => Some("suspect the transport (a torn-down guest's vsock/pty fd), not the worker"),
+            Some(libc::EBADF) => Some(
+                "suspect the core's own fd handling (a double-close), not the worker or its transport",
+            ),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ReadFault {
+    /// The OS's own wording plus the number (`Input/output error (os error
+    /// 5)`), or the kind when there is no errno.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.os {
+            Some(errno) => write!(f, "{}", std::io::Error::from_raw_os_error(errno)),
+            None => write!(f, "{}", self.kind),
+        }
+    }
 }
 
 /// What a [`CapturedTail`] licenses its reader to *say* — the entire state
@@ -69,12 +132,20 @@ pub enum DrainEnd {
 /// what it now says. That is the forcing function the doc comment was standing
 /// in for.
 ///
-/// ⚠️ **Deliberately NOT `#[non_exhaustive]`.** A new variant breaking every
-/// renderer in the tree is the entire point; letting out-of-crate matches fall
-/// through a wildcard would hand back exactly the silent-collapse this type
-/// exists to prevent.
+/// ⚠️ **Deliberately NOT `#[non_exhaustive]`, and `pub(crate)` so that is
+/// free.** A new variant breaking every renderer in the tree is the entire
+/// point. Crate-private (#753) because every renderer is in this crate: the
+/// forcing function needs no public surface, and a `pub` enum would make
+/// each new variant a semver-major break for strangers.
+///
+/// ⚠️ **The word-bearing variants hold a NON-EMPTY slice** — `state()` never
+/// builds one from an empty ring, and every renderer joins them after a colon,
+/// so an empty one would print the contentless line #730 abolished. Rust cannot
+/// make a variant payload private; crate visibility keeps construction to
+/// reviewed code, and `every_tail_state_is_reachable_from_a_constructor`
+/// checks the converse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TailState<'a> {
+pub(crate) enum TailState<'a> {
     /// The drain reached EOF and the ring was empty: the worker really did
     /// write nothing.
     ///
@@ -101,10 +172,10 @@ pub enum TailState<'a> {
     /// [`Self::KnownSilent`]'s sentence: the worker may have explained itself
     /// perfectly well into a pipe we then failed to read
     /// ([#747](https://github.com/hherb/kastellan/issues/747)).
-    DrainFailedSilent,
+    DrainFailedSilent(ReadFault),
     /// The drain died on a read error holding these lines. Like
     /// [`Self::FirstWords`], they are not known to be the last.
-    DrainFailedWords(&'a [String]),
+    DrainFailedWords(ReadFault, &'a [String]),
 }
 
 /// A worker's retained stderr **and what is known about whether it is all of
@@ -156,14 +227,13 @@ pub enum TailState<'a> {
 /// `pub(crate)` and a link from a `pub` item makes rustdoc warn), which is
 /// shut so a *caller* cannot pre-empt the drain thread one layer down.
 ///
-/// Read access goes through [`CapturedTail::lines`] and
-/// [`CapturedTail::state`]; construction goes through the four constructors —
-/// [`Self::complete`], [`Self::partial`], [`Self::drain_failed`] and
-/// [`Self::from_drain`] — or
-/// [`collect_tail_after_drain`](super::collect_tail_after_drain). The first
-/// three state the claim in the verb; `from_drain` states it in an argument,
-/// and exists because the production path has an `Option<DrainEnd>` in hand
-/// and must not re-derive the mapping.
+/// Read access is the crate-private `state()` alone — deliberately no
+/// `lines()`: the lines without the drain outcome are exactly the #732/#747
+/// ambiguity (#753). Construction goes through the three named constructors —
+/// [`Self::complete`], [`Self::partial`], [`Self::drain_failed`] — or
+/// [`collect_tail_after_drain`](super::collect_tail_after_drain), which uses
+/// the crate-private `from_drain` because it has an `Option<DrainEnd>` in
+/// hand and must not re-derive the mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedTail {
     /// The lines that had arrived when the snapshot was taken.
@@ -196,39 +266,30 @@ impl CapturedTail {
     /// incomplete", because they point a reader at different places: `partial`
     /// says we ran out of patience and could have waited longer, this says the
     /// pipe itself failed and waiting would not have helped.
-    pub fn drain_failed(lines: Vec<String>) -> Self {
-        Self { lines, end: Some(DrainEnd::ReadError) }
+    pub fn drain_failed(lines: Vec<String>, fault: ReadFault) -> Self {
+        Self { lines, end: Some(DrainEnd::ReadError(fault)) }
     }
 
     /// Build from a drain outcome as observed by
     /// [`StderrTail::wait_for_drain`](super::StderrTail::wait_for_drain):
     /// `None` means the wait timed out.
-    pub fn from_drain(lines: Vec<String>, end: Option<DrainEnd>) -> Self {
+    pub(crate) fn from_drain(lines: Vec<String>, end: Option<DrainEnd>) -> Self {
         Self { lines, end }
-    }
-
-    /// The lines that had arrived, whether or not that is all of them.
-    ///
-    /// ⚠️ **Prefer [`Self::state`] in a renderer.** Reading the lines alone
-    /// cannot tell an empty ring that the worker was silent from an empty ring
-    /// we simply failed to fill, which is the whole of #732 and #747.
-    pub fn lines(&self) -> &[String] {
-        &self.lines
     }
 
     /// The single question a renderer should ask: what may be *said* about
     /// this tail.
     ///
-    /// Exhaustive by construction — see [`TailState`] for why this replaced
+    /// Exhaustive by construction — see `TailState` for why this replaced
     /// the `is_complete()` / `is_known_silent()` predicate pair.
-    pub fn state(&self) -> TailState<'_> {
+    pub(crate) fn state(&self) -> TailState<'_> {
         match (self.end, self.lines.is_empty()) {
             (Some(DrainEnd::Eof), true) => TailState::KnownSilent,
             (Some(DrainEnd::Eof), false) => TailState::LastWords(&self.lines),
             (None, true) => TailState::NothingCapturedYet,
             (None, false) => TailState::FirstWords(&self.lines),
-            (Some(DrainEnd::ReadError), true) => TailState::DrainFailedSilent,
-            (Some(DrainEnd::ReadError), false) => TailState::DrainFailedWords(&self.lines),
+            (Some(DrainEnd::ReadError(f)), true) => TailState::DrainFailedSilent(f),
+            (Some(DrainEnd::ReadError(f)), false) => TailState::DrainFailedWords(f, &self.lines),
         }
     }
 }
@@ -236,6 +297,47 @@ impl CapturedTail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The motivating fault: a torn-down guest fd.
+    fn eio() -> ReadFault {
+        ReadFault::os(libc::EIO)
+    }
+
+    #[test]
+    fn a_read_fault_keeps_the_errno_that_error_kind_loses() {
+        // #752's premise, corrected: the issue proposed carrying `ErrorKind`,
+        // but EIO (the transport) and EBADF (our own fd handling) are the same
+        // kind, so only the errno can tell a renderer which one it is.
+        let (eio, ebadf) = (ReadFault::os(libc::EIO), ReadFault::os(libc::EBADF));
+        assert_eq!(
+            std::io::Error::from_raw_os_error(libc::EIO).kind(),
+            std::io::Error::from_raw_os_error(libc::EBADF).kind(),
+            "POSITIVE CONTROL: if std ever splits these kinds, the errno is no longer the only \
+             thing that separates them — and this test's premise needs re-reading"
+        );
+        assert_ne!(eio, ebadf, "the fault must keep what the kind alone cannot");
+        assert_eq!(eio.errno(), Some(libc::EIO));
+        assert!(
+            eio.to_string().contains(&format!("os error {}", libc::EIO)),
+            "an OS fault renders with its errno, so the operator can look it up: {eio}"
+        );
+        assert_ne!(
+            eio.suspect(),
+            ebadf.suspect(),
+            "the two faults point at different places — that is why the errno is kept"
+        );
+        assert!(eio.suspect().is_some_and(|s| s.contains("transport")));
+        assert!(ebadf.suspect().is_some_and(|s| s.contains("fd handling") && !s.contains("vsock")));
+        assert_eq!(
+            ReadFault::os(libc::ECONNRESET).suspect(),
+            None,
+            "an errno with no known meaning here must not borrow another's guess"
+        );
+        let synthetic = ReadFault::of(&std::io::Error::other("no errno here"));
+        assert_eq!(synthetic.suspect(), None);
+        assert_eq!(synthetic.errno(), None);
+        assert_eq!(synthetic.to_string(), std::io::ErrorKind::Other.to_string());
+    }
 
     #[test]
     fn an_empty_tail_is_only_known_silent_when_the_drain_reached_eof() {
@@ -257,8 +359,8 @@ mod tests {
              for a fault that was in the guest's Python (#732)"
         );
         assert_eq!(
-            CapturedTail::drain_failed(vec![]).state(),
-            TailState::DrainFailedSilent,
+            CapturedTail::drain_failed(vec![], eio()).state(),
+            TailState::DrainFailedSilent(eio()),
             "an empty tail whose drain died on a READ ERROR is a fact about our plumbing. The \
              worker may have explained itself into a pipe we could not read (#747)"
         );
@@ -273,8 +375,8 @@ mod tests {
         assert_eq!(CapturedTail::complete(l.clone()).state(), TailState::LastWords(&l));
         assert_eq!(CapturedTail::partial(l.clone()).state(), TailState::FirstWords(&l));
         assert_eq!(
-            CapturedTail::drain_failed(l.clone()).state(),
-            TailState::DrainFailedWords(&l),
+            CapturedTail::drain_failed(l.clone(), eio()).state(),
+            TailState::DrainFailedWords(eio(), &l),
             "a read error leaves the same doubt a timeout does — there may have been more — \
              but points at a different cause, so it earns its own state"
         );
@@ -294,8 +396,8 @@ mod tests {
             TailState::LastWords(_) => "LastWords",
             TailState::NothingCapturedYet => "NothingCapturedYet",
             TailState::FirstWords(_) => "FirstWords",
-            TailState::DrainFailedSilent => "DrainFailedSilent",
-            TailState::DrainFailedWords(_) => "DrainFailedWords",
+            TailState::DrainFailedSilent(_) => "DrainFailedSilent",
+            TailState::DrainFailedWords(..) => "DrainFailedWords",
         }
     }
 
@@ -327,13 +429,20 @@ mod tests {
             CapturedTail::complete(full.clone()),
             CapturedTail::partial(empty.clone()),
             CapturedTail::partial(full.clone()),
-            CapturedTail::drain_failed(empty),
-            CapturedTail::drain_failed(full),
+            CapturedTail::drain_failed(empty, eio()),
+            CapturedTail::drain_failed(full, eio()),
         ];
         let reached: Vec<TailState<'_>> = tails.iter().map(CapturedTail::state).collect();
         // Compared by variant NAME rather than by value: two `LastWords`
         // holding different slices are different values but the same state,
         // and it is the states we are counting.
+        // The converse of `TailState`'s non-empty-slice invariant: no
+        // constructor hands a renderer an empty word list.
+        for s in &reached {
+            if let TailState::LastWords(l) | TailState::FirstWords(l) | TailState::DrainFailedWords(_, l) = s {
+                assert!(!l.is_empty(), "a word-bearing state with no words renders as a bare colon: {s:?}");
+            }
+        }
         let mut kinds: Vec<&'static str> = reached.iter().map(variant_name).collect();
         kinds.sort_unstable();
         kinds.dedup();
@@ -355,8 +464,8 @@ mod tests {
         assert_eq!(CapturedTail::from_drain(l.clone(), Some(DrainEnd::Eof)), CapturedTail::complete(l.clone()));
         assert_eq!(CapturedTail::from_drain(l.clone(), None), CapturedTail::partial(l.clone()));
         assert_eq!(
-            CapturedTail::from_drain(l.clone(), Some(DrainEnd::ReadError)),
-            CapturedTail::drain_failed(l)
+            CapturedTail::from_drain(l.clone(), Some(DrainEnd::ReadError(eio()))),
+            CapturedTail::drain_failed(l, eio())
         );
     }
 }

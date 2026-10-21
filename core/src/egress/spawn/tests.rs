@@ -9,7 +9,7 @@
 //! compiled under `#[cfg(test)]`.
 
 use super::*;
-use crate::worker_stderr::CapturedTail;
+use crate::worker_stderr::{CapturedTail, ReadFault};
 
 /// A `SidecarSpawn` with everything defaulted except the posture, so each test
 /// states only what it is about.
@@ -308,12 +308,13 @@ fn a_partial_sidecar_capture_never_claims_the_proxy_was_silent() {
     );
 
     // #747's sibling state, through this renderer too.
-    let failed = render_stderr_note(&CapturedTail::drain_failed(vec![]));
+    let failed = render_stderr_note(&CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO)));
     assert!(
         !failed.contains("no stderr captured"),
         "a FAILED drain must not state the proxy wrote nothing: {failed}"
     );
     assert!(failed.contains("FAILED"), "the note must name the read failure: {failed}");
+    assert!(failed.contains(&format!("os error {}", libc::EIO)), "and which one (#752): {failed}");
 }
 
 /// Incomplete captures must not be labelled the proxy's most recent output:
@@ -321,7 +322,7 @@ fn a_partial_sidecar_capture_never_claims_the_proxy_was_silent() {
 #[test]
 fn an_incomplete_sidecar_capture_does_not_call_its_lines_recent() {
     let lines = vec!["proxy booting".to_string()];
-    for tail in [CapturedTail::partial(lines.clone()), CapturedTail::drain_failed(lines.clone())] {
+    for tail in [CapturedTail::partial(lines.clone()), CapturedTail::drain_failed(lines.clone(), ReadFault::os(libc::EIO))] {
         let note = render_stderr_note(&tail);
         assert!(!note.contains("recent stderr"), "incomplete tail mislabelled: {note}");
         assert!(note.contains("proxy booting"), "POSITIVE CONTROL: lines must survive: {note}");
@@ -380,8 +381,8 @@ fn the_seven_sidecar_note_states_all_read_differently() {
         CapturedTail::complete(vec![]),
         CapturedTail::partial(lines.clone()),
         CapturedTail::partial(vec![]),
-        CapturedTail::drain_failed(lines),
-        CapturedTail::drain_failed(vec![]),
+        CapturedTail::drain_failed(lines, ReadFault::os(libc::EIO)),
+        CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO)),
     ]
     .iter()
     .map(render_stderr_note)

@@ -97,18 +97,20 @@ fn silent_hint(cause: WorkerRetirementCause) -> &'static str {
 ///
 /// | Value | Means | Reads |
 /// | --- | --- | --- |
-/// | [`TailState::LastWords`] | the worker explained itself | "its last words: …" |
-/// | [`TailState::KnownSilent`] | the worker ran and said nothing | "wrote NOTHING …" + a per-cause hint |
-/// | [`TailState::FirstWords`] | it was still talking when we stopped listening | "its stderr so far … may be its FIRST lines" |
-/// | [`TailState::NothingCapturedYet`] | we did not wait long enough to know | "PARTIAL capture … absence is NOT evidence" |
-/// | [`TailState::DrainFailedWords`] | our read of its pipe failed part-way | "up to the point our drain FAILED …" |
-/// | [`TailState::DrainFailedSilent`] | our read of its pipe failed at byte 0 | "the silence is in our pipe …" |
+/// | `TailState::LastWords` | the worker explained itself | "its last words: …" |
+/// | `TailState::KnownSilent` | the worker ran and said nothing | "wrote NOTHING …" + a per-cause hint |
+/// | `TailState::FirstWords` | it was still talking when we stopped listening | "its stderr so far … may be its FIRST lines" |
+/// | `TailState::NothingCapturedYet` | we did not wait long enough to know | "PARTIAL capture … absence is NOT evidence" |
+/// | `TailState::DrainFailedWords` | our read of its pipe failed part-way | "up to the point our drain FAILED …" |
+/// | `TailState::DrainFailedSilent` | our read of its pipe failed at byte 0 | "the silence is in our pipe …" |
 /// | `None` | our own spawn path piped no stderr | "its stderr was not piped …" |
+///
+/// (`TailState` is `pub(crate)`, so its variants are named, not linked.)
 ///
 /// `KnownSilent` is the only **diagnosis** here (a hard kill, a jail refused
 /// before the worker ran, a guest that never booted). It points somewhere
 /// quite different from the three empty states below it —
-/// [`TailState::NothingCapturedYet`], [`TailState::DrainFailedSilent`] and the
+/// `TailState::NothingCapturedYet`, `TailState::DrainFailedSilent` and the
 /// `None` arm — each of which renders an identical *absence* of lines but is a
 /// statement about **us**, not about the worker.
 ///
@@ -120,7 +122,7 @@ fn silent_hint(cause: WorkerRetirementCause) -> &'static str {
 /// itself 10 ms after we stopped listening. Never collapse the state back into
 /// the slice.
 ///
-/// ⚠️ **Matching [`CapturedTail::state`] is what keeps that true.** This used
+/// ⚠️ **Matching `CapturedTail::state` is what keeps that true.** This used
 /// to be a guard chain over `is_known_silent()` / `is_complete()` whose
 /// correctness rested on arm *order*, documented and unchecked; #732 and #746
 /// are both renderers that got that order wrong. A missing arm here is now a
@@ -165,10 +167,12 @@ pub fn format_worker_failure_report(
         // the pipe rather than at the worker is the whole difference: waiting
         // longer would not have helped, and auditing seccomp would find
         // nothing.
-        TailState::DrainFailedSilent => format!(
-            "{what}, and our read of its stderr FAILED before anything arrived, so NOTHING \
-             was captured — the silence is in our pipe and is NOT evidence the worker was \
-             quiet; suspect the transport (a torn-down guest's vsock/pty fd), not the worker"
+        // The guess comes from the errno, and only when it names one (#752).
+        TailState::DrainFailedSilent(fault) => format!(
+            "{what}, and our read of its stderr FAILED ({fault}) before anything arrived, so \
+             NOTHING was captured — the silence is in our pipe and is NOT evidence the worker \
+             was quiet{}",
+            fault.suspect().map(|s| format!("; {s}")).unwrap_or_default()
         ),
         // Some lines, but more may have been coming. The ring evicts OLDEST
         // first, so an incomplete tail holds the worker's FIRST words, not its
@@ -180,8 +184,8 @@ pub fn format_worker_failure_report(
         ),
         // Same doubt as above, different cause — and unlike a timeout, this
         // one will not resolve by waiting (#747).
-        TailState::DrainFailedWords(lines) => format!(
-            "{what}; its stderr up to the point our read of the pipe FAILED (so these may be \
+        TailState::DrainFailedWords(fault, lines) => format!(
+            "{what}; its stderr up to the point our read of the pipe FAILED ({fault}; so these may be \
              its FIRST lines rather than its last, and there may have been more we could \
              never read): {}",
             lines.join(" | ")
@@ -346,6 +350,7 @@ pub fn emit_worker_failure_report(report: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker_stderr::ReadFault;
 
     /// Every cause, so a test can iterate rather than name four of five.
     ///
@@ -439,7 +444,7 @@ mod tests {
         // sent the operator to audit cgroup limits and seccomp profiles for a
         // worker that spoke fine into a pipe we could not read.
         for cause in ALL_CAUSES {
-            let failed = CapturedTail::drain_failed(vec![]);
+            let failed = CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO));
             let r = format_worker_failure_report("w", "m", cause, Some(&failed));
             assert!(
                 !r.contains("wrote NOTHING"),
@@ -469,12 +474,40 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_drain_names_its_errno_and_guesses_only_where_the_errno_points() {
+        // #752. Before it every read failure got the EIO sentence — "suspect
+        // the transport (a torn-down guest's vsock/pty fd)" — so an EBADF,
+        // which is a double-close in OUR fd handling, sent the operator to
+        // audit a guest that was fine.
+        let c = WorkerRetirementCause::ExitedBeforeResponding;
+        let report = |errno| {
+            format_worker_failure_report("w", "m", c, Some(&CapturedTail::drain_failed(vec![], ReadFault::os(errno))))
+        };
+        let (eio, ebadf, reset) = (report(libc::EIO), report(libc::EBADF), report(libc::ECONNRESET));
+        assert!(eio.contains("vsock/pty"), "EIO is the torn-down-guest case: {eio}");
+        assert!(
+            ebadf.contains("fd handling") && !ebadf.contains("vsock/pty"),
+            "EBADF is our own fault and must not point at the guest's transport: {ebadf}"
+        );
+        assert!(
+            !reset.contains("suspect"),
+            "an errno with no known meaning gets named, not guessed at: {reset}"
+        );
+        for (errno, r) in [(libc::EIO, &eio), (libc::EBADF, &ebadf), (libc::ECONNRESET, &reset)] {
+            assert!(
+                r.contains(&format!("os error {errno}")),
+                "every failed-drain report names the errno, guess or no guess: {r}"
+            );
+        }
+    }
+
+    #[test]
     fn a_failed_drain_does_not_call_its_lines_the_workers_last_words() {
         // The #747 sibling of the #732 test below: a read error leaves exactly
         // the same doubt a timeout does — the ring evicts OLDEST first, so
         // these may be boot lines — and must not be labelled the last words.
         let c = WorkerRetirementCause::ExitedBeforeResponding;
-        let failed = CapturedTail::drain_failed(vec!["worker booting".into()]);
+        let failed = CapturedTail::drain_failed(vec!["worker booting".into()], ReadFault::os(libc::EIO));
         let r = format_worker_failure_report("w", "m", c, Some(&failed));
         assert!(
             !r.contains("last words"),
@@ -538,8 +571,8 @@ mod tests {
             Some(CapturedTail::complete(vec![])),
             Some(CapturedTail::partial(lines.clone())),
             Some(CapturedTail::partial(vec![])),
-            Some(CapturedTail::drain_failed(lines)),
-            Some(CapturedTail::drain_failed(vec![])),
+            Some(CapturedTail::drain_failed(lines, ReadFault::os(libc::EIO))),
+            Some(CapturedTail::drain_failed(vec![], ReadFault::os(libc::EIO))),
             None,
         ]
         .iter()
