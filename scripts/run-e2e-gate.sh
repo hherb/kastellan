@@ -45,6 +45,8 @@
 #      profile's FILTERED_OUT (#880).
 #   8. every `Running` binary printed exactly one whole `test result:` line, so
 #      no binary's counts went unread.
+#   9. every one of those summaries ran at least one test (passed + failed),
+#      so no suite hid behind the run-wide floors (#823).
 #
 # ⚠️ **The `[E2E]` floors are per TIER, not per run, and that is load-bearing.**
 # A single total is satisfied by whichever knob happens to be chattiest: the
@@ -657,10 +659,27 @@ TORN_COUNT="${TORN_COUNT:-0}"
 # targets only, so no `Doc-tests` section adds an unheaded summary.
 WHOLE_COUNT="$(grep -acE "$WHOLE_RESULT" "$LOG" || true)"
 WHOLE_COUNT="${WHOLE_COUNT:-0}"
+# ...and every binary must have RUN at least one test (#823). The floors above
+# are run-wide, so a suite that ran nothing (a whole-file `cfg`, every test
+# `#[ignore]`d or renamed away) hid behind the others. `passed + failed == 0`,
+# not `passed == 0`: a binary whose tests all failed ran them, and the red exit
+# already says so. Read from whole summaries only; a missing one is the check
+# above's. The awk exit is checked for the reason UNHOOKED's is.
+EMPTY_BINARIES="$(WHOLE_RESULT="$WHOLE_RESULT" awk '
+  /^[[:space:]]+Running / { cur = $2 }
+  $0 ~ ENVIRON["WHOLE_RESULT"] && $4 + $6 == 0 { print "     " cur }
+' "$LOG")"
+AWK_EXIT=$?
+if [ "$AWK_EXIT" -ne 0 ]; then
+  echo "run-e2e-gate.sh: awk failed ($AWK_EXIT) reading per-binary test counts — refusing a verdict." >&2
+  exit 3
+fi
+EMPTY_COUNT="$(printf '%s' "$EMPTY_BINARIES" | grep -c . || true)"
+EMPTY_COUNT="${EMPTY_COUNT:-0}"
 
 # Belt and braces: an operand that is somehow still not a number must refuse a
 # verdict rather than silently satisfy every floor.
-for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT IGNORED_COUNT FILTERED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND TORN_COUNT WHOLE_COUNT; do
+for var in TEST_EXIT E2E_TOTAL SKIP_COUNT WARN_COUNT PASSED_COUNT IGNORED_COUNT FILTERED_COUNT PANIC_COUNT BINARY_COUNT MID_LINE_FOUND TORN_COUNT WHOLE_COUNT EMPTY_COUNT; do
   case "${!var}" in
     ''|*[!0-9]*)
       echo "run-e2e-gate.sh: $var is \"${!var}\", which is not a count — refusing a verdict." >&2
@@ -738,6 +757,13 @@ if [ "$WHOLE_COUNT" -ne "$BINARY_COUNT" ]; then
     /^[[:space:]]+Running / { report(); cur = $2; seen = 0 }
     $0 ~ ENVIRON["WHOLE_RESULT"] { seen = 1 }
     END { report() }' "$LOG"
+  FAIL=1
+fi
+if [ "$EMPTY_COUNT" -ne 0 ]; then
+  echo "❌ $EMPTY_COUNT test binary(ies) ran zero tests, so the floors above were met by"
+  echo "   the other suites alone (#823). A whole-file cfg compiled it out on this host,"
+  echo "   or every test in it is #[ignore]d or filtered away. Empty suites:"
+  printf '%s\n' "$EMPTY_BINARIES"
   FAIL=1
 fi
 if [ "$TORN_COUNT" -ne 0 ]; then
