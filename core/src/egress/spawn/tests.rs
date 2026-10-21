@@ -436,6 +436,7 @@ fn dropping_a_bare_sidecar_handle_kills_the_child() {
     let handle = SidecarHandle {
         child,
         uds_path: std::path::PathBuf::from("/nonexistent/kastellan-test.sock"),
+        not_our_child: false,
     };
     drop(handle);
 
@@ -458,28 +459,41 @@ fn exit_status_reports_a_dead_sidecar_and_not_a_live_one() {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn sh");
-        SidecarHandle { child, uds_path: std::path::PathBuf::from("/nonexistent/kastellan-test.sock") }
+        SidecarHandle {
+            child,
+            uds_path: std::path::PathBuf::from("/nonexistent/kastellan-test.sock"),
+            not_our_child: false,
+        }
     };
     let mut live = spawn("sleep 300");
-    assert!(live.exit_status().is_none(), "a running sidecar has not exited");
+    assert!(live.exit_status().unwrap().is_none(), "a running sidecar has not exited");
+
+    // #890: reaped behind `Child`'s back, the pid is no longer ours — the poll
+    // fails with ECHILD, and the handle must then never signal that pid.
+    let mut stolen = spawn("exit 0");
+    let pid = stolen.child.id() as libc::pid_t;
+    // SAFETY: plain blocking waitpid on our own child's pid.
+    assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
+    let err = stolen.exit_status().expect_err("a reaped pid cannot be polled");
+    assert_eq!(err.raw_os_error(), Some(libc::ECHILD));
+    assert!(stolen.not_our_child, "terminate must skip the kill after ECHILD");
 
     let mut dead = spawn("exit 3");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let status = loop {
-        if let Some(s) = dead.exit_status() {
+        if let Some(s) = dead.exit_status().unwrap() {
             break s;
         }
         assert!(std::time::Instant::now() < deadline, "the exited child was never reported");
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
     assert_eq!(status.code(), Some(3));
-    assert_eq!(dead.exit_status(), Some(status), "asking again keeps answering");
+    assert_eq!(dead.exit_status().unwrap(), Some(status), "asking again keeps answering");
+    assert!(!dead.not_our_child, "a clean exit leaves the kill to terminate");
 }
 
-/// `kill -0 <pid>` succeeds only for a live, signalable process. Shelling out
-/// rather than calling `libc::kill` keeps this crate free of a `libc`
-/// dependency it does not otherwise need; the flag and its meaning are
-/// identical on Linux and macOS (POSIX), unlike the coreutils *output* skew
+/// `kill -0 <pid>` succeeds only for a live, signalable process. The flag and
+/// its meaning are identical on Linux and macOS (POSIX), unlike the coreutils *output* skew
 /// that has bitten shell-driven tests here before. Deliberately not
 /// `#[cfg(unix)]`-gated: kastellan is Linux + macOS only, and a cfg here
 /// would gate the helper without gating its only caller.

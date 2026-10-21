@@ -444,6 +444,9 @@ fn container_probe_output(
         bounded_command::ProbeFailure::Spawn(e) => {
             ProbeFault::Unavailable(format!("could not spawn `{command}`: {e}{spawn_suffix}"))
         }
+        bounded_command::ProbeFailure::Unread(e) => {
+            ProbeFault::Unavailable(format!("could not read `{command}`'s answer: {e}"))
+        }
     })
 }
 

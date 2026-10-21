@@ -391,7 +391,7 @@ impl Supervisor for LaunchAgents {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .map_err(|e| SupervisorError::Io(format!("spawn launchctl: {e}")))?;
+            .map_err(|e| SupervisorError::Io(format!("run launchctl: {e}")))?;
         if !out.status.success() {
             // `print` exits non-zero when the service is not loaded
             // into the GUI domain. The plist file exists (we
@@ -479,7 +479,7 @@ fn run_launchctl(args: &[&str]) -> Result<String, SupervisorError> {
     let mut cmd = Command::new("launchctl");
     cmd.args(args);
     let out = match run_capped(&mut cmd, LAUNCHCTL_TIMEOUT)
-        .map_err(|e| SupervisorError::Io(format!("spawn launchctl: {e}")))?
+        .map_err(|e| SupervisorError::Io(format!("run launchctl: {e}")))?
     {
         CappedOutcome::Completed(out) => out,
         CappedOutcome::TimedOut => {

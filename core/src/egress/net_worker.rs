@@ -108,8 +108,10 @@ impl EgressSidecar {
     /// `Some(what happened)` when the sidecar process has exited — for the
     /// persistent supervisor, which otherwise would keep a live worker that can
     /// no longer reach anything (#769, `PersistentTransport::sidecar_exited`).
+    /// Also `Some` when its status cannot be read (#890): a sidecar we cannot
+    /// see may be gone, and the same error would recur on every later call.
     pub(crate) fn exited(&mut self) -> Option<String> {
-        self.sidecar.exit_status().map(|status| format!("egress sidecar exited ({status})"))
+        sidecar_exit_reason(self.sidecar.exit_status())
     }
 
     /// Build a bundle from already-spawned parts. Used by
@@ -141,6 +143,20 @@ impl EgressSidecar {
             std::io::Error::other("sidecar uds_path has no parent dir")
         })?;
         super::leak_provision::merge_secret_hashes(dir, fps)
+    }
+}
+
+/// Pure: what the persistent supervisor is told about one sidecar exit poll.
+/// `None` only for a sidecar we can see running; a failed poll is a reason to
+/// retire the pair, worded as a fact about our `waitpid`, not the sidecar.
+fn sidecar_exit_reason(polled: std::io::Result<Option<std::process::ExitStatus>>) -> Option<String> {
+    match polled {
+        Ok(None) => None,
+        Ok(Some(status)) => Some(format!("egress sidecar exited ({status})")),
+        Err(e) => Some(format!(
+            "could not poll the egress sidecar's exit status ({e}) — our waitpid failed, \
+             so the sidecar may be gone"
+        )),
     }
 }
 

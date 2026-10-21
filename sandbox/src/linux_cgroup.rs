@@ -174,6 +174,9 @@ pub fn cgroup_probe() -> Result<(), SandboxError> {
             crate::bounded_command::ProbeFailure::Spawn(e) => {
                 format!("could not spawn systemd-run: {e}")
             }
+            crate::bounded_command::ProbeFailure::Unread(e) => {
+                format!("could not read systemd-run's answer: {e}")
+            }
         })
     })?;
 

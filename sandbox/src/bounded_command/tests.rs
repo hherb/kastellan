@@ -279,3 +279,49 @@ fn a_probe_that_never_answers_is_wedged() {
         other => panic!("expected a wedge, got {other:?}"),
     }
 }
+
+/// A reader that hands out `script` one step at a time, then EOF.
+struct Scripted(std::collections::VecDeque<std::io::Result<&'static [u8]>>);
+
+impl Read for Scripted {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.0.pop_front() {
+            None => Ok(0),
+            Some(Err(e)) => Err(e),
+            Some(Ok(bytes)) => {
+                buf[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+        }
+    }
+}
+
+fn drained(steps: Vec<std::io::Result<&'static [u8]>>) -> Pipe {
+    let pipe = drain("stdout", Scripted(steps.into()));
+    settle(&[&pipe]);
+    pipe
+}
+
+/// #892: a read error mid-capture was a `break` like EOF, so a truncated
+/// stdout came back as the child's whole answer.
+#[test]
+fn a_read_error_makes_the_capture_incomplete_not_whole() {
+    let pipe = drained(vec![Ok(b"half"), Err(std::io::Error::from_raw_os_error(libc::EIO))]);
+    let e = pipe.whole().expect_err("a cut-short capture is not the whole output");
+    assert_eq!(e.raw_os_error(), None, "the message is ours; the kind is kept");
+    assert_eq!(e.kind(), std::io::Error::from_raw_os_error(libc::EIO).kind());
+    let msg = e.to_string();
+    assert!(msg.contains("child's stdout failed after 4 bytes"), "{msg}");
+    assert_eq!(pipe.take(), b"half", "what arrived first is kept for a timeout's partial");
+}
+
+/// `EINTR` is a signal, not an end: retried, as `read_to_end` does.
+#[test]
+fn an_interrupted_read_is_retried() {
+    let pipe = drained(vec![
+        Ok(b"a"),
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+        Ok(b"b"),
+    ]);
+    assert_eq!(pipe.whole().expect("EINTR must not end the capture"), b"ab");
+}

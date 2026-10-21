@@ -41,6 +41,9 @@ pub fn inspect_image(reference: &str) -> Result<Option<ContainerImage>, CliFault
         kastellan_sandbox::bounded_command::ProbeFailure::Spawn(e) => {
             CliFault::Unavailable(format!("could not spawn `{command}`: {e}"))
         }
+        kastellan_sandbox::bounded_command::ProbeFailure::Unread(e) => {
+            CliFault::Unavailable(format!("could not read `{command}`'s answer: {e}"))
+        }
     })?;
     // The exit status is the presence signal, and ONLY exit 1 means
     // absence — see `ABSENT_IMAGE_EXIT`. The classification is a pure

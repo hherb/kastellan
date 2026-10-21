@@ -449,9 +449,10 @@ fn image_digest(image: &Path, in_image: &str) -> Result<String, Missing> {
         {
             return Err(Missing::NoImageReader)
         }
-        Err(kastellan_sandbox::bounded_command::ProbeFailure::Spawn(e)) => {
-            return Err(Missing::Unreadable { detail: format!("debugfs: {e}") })
-        }
+        Err(
+            kastellan_sandbox::bounded_command::ProbeFailure::Spawn(e)
+            | kastellan_sandbox::bounded_command::ProbeFailure::Unread(e),
+        ) => return Err(Missing::Unreadable { detail: format!("debugfs: {e}") }),
         // ⚠️ A wedge is NOT benign and must not become `NoImageReader`: a
         // reader that exists and hangs says nothing about whether the image is
         // correct, and folding it into "this host has no reader" would let a

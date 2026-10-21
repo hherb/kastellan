@@ -62,6 +62,10 @@ const SHORT_LIVED_SIDECAR_CPU_MS: u64 = 10_000;
 pub struct SidecarHandle {
     child: Child,
     pub uds_path: PathBuf,
+    /// Set once [`exit_status`](Self::exit_status) saw `ECHILD`: the pid is no
+    /// longer our unreaped child and may belong to another process, so
+    /// [`terminate`](Self::terminate) must not signal it (#890).
+    not_our_child: bool,
 }
 
 impl Drop for SidecarHandle {
@@ -87,17 +91,24 @@ impl SidecarHandle {
     /// coupled-teardown `Drop` of `egress::net_worker::EgressSidecar`, which
     /// holds the handle by value and cannot consume `self`.
     pub fn terminate(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if !self.not_our_child {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
         let _ = std::fs::remove_file(&self.uds_path);
     }
 
-    /// The sidecar's exit status if it has exited, else `None` (also when the
-    /// status cannot be read). One non-blocking `try_wait`; a later
-    /// [`terminate`](Self::terminate) still reaps cleanly, since `Child` caches
-    /// the status it collected.
-    pub fn exit_status(&mut self) -> Option<std::process::ExitStatus> {
-        self.child.try_wait().ok().flatten()
+    /// `Ok(Some(status))` once the sidecar has exited, `Ok(None)` while it runs,
+    /// and `Err` when our own `try_wait` failed — which the caller must not read
+    /// as "still running" (#890, the #754 shape). One non-blocking `try_wait`; a
+    /// later [`terminate`](Self::terminate) still reaps cleanly, since `Child`
+    /// caches the status it collected, and skips the kill after an `ECHILD`.
+    pub fn exit_status(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let polled = self.child.try_wait();
+        if let Err(e) = &polled {
+            self.not_our_child |= !may_kill_after_failed_poll(e);
+        }
+        polled
     }
 
     /// Borrow the child's stdout for the caller's decision-ingest loop.
@@ -449,7 +460,7 @@ pub fn spawn_sidecar(
             );
         }
         SidecarReady::TimedOut => {
-            let mut handle = SidecarHandle { child, uds_path: uds_path.clone() };
+            let mut handle = SidecarHandle { child, uds_path: uds_path.clone(), not_our_child: false };
             handle.child.kill().ok();
             handle.child.wait().ok();
             anyhow::bail!(
@@ -459,7 +470,7 @@ pub fn spawn_sidecar(
             );
         }
     }
-    Ok(SidecarHandle { child, uds_path })
+    Ok(SidecarHandle { child, uds_path, not_our_child: false })
 }
 
 #[cfg(test)]

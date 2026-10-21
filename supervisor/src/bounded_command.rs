@@ -48,8 +48,9 @@ pub enum CappedOutcome {
 /// dedicated threads, so a child that writes more than one pipe
 /// buffer's worth of output cannot deadlock against the wait.
 ///
-/// Returns `Err` only when the child cannot be spawned (or `try_wait`
-/// itself fails). A non-zero exit is a [`CappedOutcome::Completed`]
+/// Returns `Err` when the child cannot be spawned, `try_wait` itself
+/// fails, or a pipe read fails mid-capture — a truncated stdout must not
+/// pass as the child's whole answer (#892). A non-zero exit is a [`CappedOutcome::Completed`]
 /// (the caller inspects [`Output::status`]); exceeding `timeout` is a
 /// [`CappedOutcome::TimedOut`] — never an `Err`.
 pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutcome> {
@@ -67,20 +68,8 @@ pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutc
     // directly (no channel needed).
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
-    let o_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = stdout_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let e_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = stderr_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let o_handle = thread::spawn(move || read_whole("stdout", stdout_pipe.as_mut()));
+    let e_handle = thread::spawn(move || read_whole("stderr", stderr_pipe.as_mut()));
 
     // Poll for exit until the deadline. `try_wait` reaps the child the
     // moment it exits; the small sleep keeps the loop from busy-spinning.
@@ -112,9 +101,24 @@ pub fn run_capped(cmd: &mut Command, timeout: Duration) -> io::Result<CappedOutc
     // return promptly, handing back the captured bytes. (As with
     // `Command::output`, a still-open inherited pipe could delay this; on
     // the non-timeout path that is the same contract the std API offers.)
-    let stdout = o_handle.join().unwrap_or_default();
-    let stderr = e_handle.join().unwrap_or_default();
+    let stdout = o_handle.join().unwrap_or_else(|_| Ok(Vec::new()))?;
+    let stderr = e_handle.join().unwrap_or_else(|_| Ok(Vec::new()))?;
     Ok(CappedOutcome::Completed(Output { status, stdout, stderr }))
+}
+
+/// Read `pipe` to EOF. A read error is `Err` naming the pipe and how much
+/// arrived, never a short buffer passed off as the whole output (#892).
+fn read_whole(name: &str, pipe: Option<&mut impl Read>) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    if let Some(p) = pipe {
+        p.read_to_end(&mut buf).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("reading the child's {name} failed after {} bytes: {e}", buf.len()),
+            )
+        })?;
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -160,6 +164,24 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "timeout must return promptly (bounded), took {elapsed:?}"
         );
+    }
+
+    /// #892: a mid-capture read error is an `Err`, not a short `Completed`.
+    #[test]
+    fn read_whole_refuses_a_cut_short_capture() {
+        struct HalfThenEio(bool);
+        impl Read for HalfThenEio {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if std::mem::replace(&mut self.0, true) {
+                    return Err(io::Error::other("EIO stand-in"));
+                }
+                buf[..4].copy_from_slice(b"half");
+                Ok(4)
+            }
+        }
+        let e = read_whole("stdout", Some(&mut HalfThenEio(false))).expect_err("truncated");
+        assert!(e.to_string().contains("child's stdout failed after 4 bytes"), "{e}");
+        assert_eq!(read_whole("stdout", Some(&mut &b"all"[..])).unwrap(), b"all");
     }
 
     /// A non-zero exit is a normal `Completed` outcome carrying the
