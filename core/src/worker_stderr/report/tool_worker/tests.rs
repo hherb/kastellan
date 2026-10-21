@@ -124,29 +124,37 @@ fn a_failed_drain_never_claims_the_worker_was_silent() {
 
 #[test]
 fn a_failed_drain_names_its_errno_and_guesses_only_where_the_errno_points() {
-    // #752. Before it every read failure got the EIO sentence — "suspect
-    // the transport (a torn-down guest's vsock/pty fd)" — so an EBADF,
-    // which is a double-close in OUR fd handling, sent the operator to
-    // audit a guest that was fine.
+    // #752. Before it this report's empty failed-drain line printed the EIO
+    // sentence — "suspect the transport (a torn-down guest's vsock/pty fd)" —
+    // for every errno, so an EBADF, which is a double-close in OUR fd
+    // handling, sent the operator to audit a guest that was fine. Both
+    // failed-drain states, empty and with lines, must name and guess alike.
     let c = WorkerRetirementCause::ExitedBeforeResponding;
-    let report = |errno| {
-        format_worker_failure_report("w", "m", c, Some(&CapturedTail::drain_failed(vec![], ReadFault::os(errno))))
-    };
-    let (eio, ebadf, reset) = (report(libc::EIO), report(libc::EBADF), report(libc::ECONNRESET));
-    assert!(eio.contains("vsock/pty"), "EIO is the torn-down-guest case: {eio}");
-    assert!(
-        ebadf.contains("fd handling") && !ebadf.contains("vsock/pty"),
-        "EBADF is our own fault and must not point at the guest's transport: {ebadf}"
-    );
-    assert!(
-        !reset.contains("suspect"),
-        "an errno with no known meaning gets named, not guessed at: {reset}"
-    );
-    for (errno, r) in [(libc::EIO, &eio), (libc::EBADF, &ebadf), (libc::ECONNRESET, &reset)] {
+    for lines in [vec![], vec!["worker booting".to_string()]] {
+        let report = |errno| {
+            format_worker_failure_report(
+                "w",
+                "m",
+                c,
+                Some(&CapturedTail::drain_failed(lines.clone(), ReadFault::os(errno))),
+            )
+        };
+        let (eio, ebadf, reset) = (report(libc::EIO), report(libc::EBADF), report(libc::ECONNRESET));
+        assert!(eio.contains("vsock/pty"), "EIO is the torn-down-guest case: {eio}");
         assert!(
-            r.contains(&format!("os error {errno}")),
-            "every failed-drain report names the errno, guess or no guess: {r}"
+            ebadf.contains("fd handling") && !ebadf.contains("vsock/pty"),
+            "EBADF is our own fault and must not point at the guest's transport: {ebadf}"
         );
+        assert!(
+            !reset.contains("suspect"),
+            "an errno with no known meaning gets named, not guessed at: {reset}"
+        );
+        for (errno, r) in [(libc::EIO, &eio), (libc::EBADF, &ebadf), (libc::ECONNRESET, &reset)] {
+            assert!(
+                r.contains(&format!("os error {errno}")),
+                "every failed-drain report names the errno, guess or no guess: {r}"
+            );
+        }
     }
 }
 

@@ -336,12 +336,14 @@ fn render_stderr_note(tail: &crate::worker_stderr::CapturedTail) -> String {
         // #747: our read of the pipe failed, so the emptiness is ours.
         TailState::DrainFailedSilent(fault) => format!(
             "our read of its stderr FAILED ({fault}) before anything arrived, so nothing was \
-             captured — our pipe, not evidence that the proxy was silent"
+             captured — our pipe, not evidence that the proxy was silent{}",
+            fault.suspect_clause()
         ),
         TailState::DrainFailedWords(fault, lines) => format!(
-            "stderr up to the point our read of the pipe FAILED ({fault}; so these may be its FIRST \
-             lines rather than its most recent, and there may have been more we could never \
+            "stderr up to the point our read of the pipe FAILED ({fault}{}; so these may be its \
+             FIRST lines rather than its most recent, and there may have been more we could never \
              read): {}",
+            fault.suspect_clause(),
             lines.join(" | ")
         ),
     }

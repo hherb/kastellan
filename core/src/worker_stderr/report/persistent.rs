@@ -57,7 +57,8 @@ pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTai
         TailState::DrainFailedSilent(fault) => format!(
             "worker exited ({status_str}); our read of its stderr FAILED ({fault}) before \
              anything arrived, so nothing was captured — our pipe, not evidence that the \
-             worker was silent"
+             worker was silent{}",
+            fault.suspect_clause()
         ),
         // The ring evicts oldest first, so an incomplete tail is the FIRST
         // lines, not the most recent ones. "recent stderr" would mislabel them.
@@ -68,8 +69,9 @@ pub fn format_death_report(status: Option<ExitStatus>, stderr_tail: &CapturedTai
         ),
         TailState::DrainFailedWords(fault, lines) => format!(
             "worker exited ({status_str}); stderr up to the point our read of the pipe FAILED \
-             ({fault}; so these may be its FIRST lines rather than its most recent, and there may \
-             have been more we could never read): {}",
+             ({fault}{}; so these may be its FIRST lines rather than its most recent, and there \
+             may have been more we could never read): {}",
+            fault.suspect_clause(),
             lines.join(" | ")
         ),
         TailState::LastWords(lines) => {
@@ -293,6 +295,14 @@ mod tests {
              silent worker: {r}"
         );
         assert!(r.contains(&format!("os error {}", libc::EIO)), "and name which failure (#752): {r}");
+        // With lines too, and a second errno so the fault is passed through,
+        // not hard-coded — with the guess that errno earns.
+        let words =
+            format_death_report(None, &CapturedTail::drain_failed(vec!["boom".into()], ReadFault::os(libc::EBADF)));
+        assert!(
+            words.contains(&format!("os error {}", libc::EBADF)) && words.contains("fd handling"),
+            "a failed drain with lines names its errno and guess as well: {words}"
+        );
         // POSITIVE CONTROL, as above: the complete case keeps its sentence.
         assert!(
             format_death_report(None, &CapturedTail::complete(vec![])).contains("no stderr captured"),

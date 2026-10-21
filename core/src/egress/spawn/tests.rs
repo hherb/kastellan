@@ -328,6 +328,13 @@ fn an_incomplete_sidecar_capture_does_not_call_its_lines_recent() {
         assert!(note.contains("proxy booting"), "POSITIVE CONTROL: lines must survive: {note}");
         assert!(note.contains("FIRST"), "the note must say which end these came from: {note}");
     }
+    // #752 with lines: the note still names which failure, passed through
+    // rather than hard-coded, with the guess that errno earns.
+    let failed = render_stderr_note(&CapturedTail::drain_failed(lines.clone(), ReadFault::os(libc::EBADF)));
+    assert!(
+        failed.contains(&format!("os error {}", libc::EBADF)) && failed.contains("fd handling"),
+        "a failed drain with lines names its errno and guess: {failed}"
+    );
     assert!(
         render_stderr_note(&CapturedTail::complete(lines)).contains("recent stderr"),
         "a COMPLETE tail really is the most recent output and must still say so"

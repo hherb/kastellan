@@ -92,7 +92,8 @@ pub struct StderrTail {
     /// `OnceLock` rather than a `Mutex<Option<_>>` because the waiter polls it
     /// on a death-report path, where a second poisonable lock would add a
     /// second `.expect` that can panic; rather than a hand-rolled `AtomicU8`
-    /// because [`DrainEnd`] now carries a [`ReadFault`], which no byte holds.
+    /// because [`DrainEnd`] carries a [`ReadFault`] no byte holds, and the cell
+    /// gives write-once for free.
     ///
     /// [#747]: https://github.com/hherb/kastellan/issues/747
     drain_end: Arc<OnceLock<DrainEnd>>,
@@ -120,9 +121,21 @@ impl StderrTail {
     /// race and cannot be staged without it.
     ///
     /// **First write wins**: a later call is ignored, so a stray second mark
-    /// cannot turn an observed `ReadError` into `Eof` (or back).
+    /// cannot turn an observed `ReadError` into `Eof` (or back). A *different*
+    /// second outcome is a bug in our own drain wiring (two drainers on one
+    /// tail?) — and the kept value may be the wrong one — so it warns rather
+    /// than vanishing.
     pub(crate) fn mark_drained(&self, end: DrainEnd) {
-        let _ = self.drain_end.set(end);
+        if let Err(rejected) = self.drain_end.set(end) {
+            let kept = self.drain_end.get();
+            if kept != Some(&rejected) {
+                tracing::warn!(
+                    ?rejected,
+                    ?kept,
+                    "conflicting second drain_end mark ignored; two drainers on one stderr tail?"
+                );
+            }
+        }
     }
 
     /// Block until the drain thread finishes, or `timeout` elapses.
@@ -133,7 +146,7 @@ impl StderrTail {
     /// spending to get one. A `None` return still leaves whatever arrived so
     /// far readable — the tail is a bounded ring, not a transaction.
     ///
-    /// ⚠️ **`Some(DrainEnd::ReadError)` is not success** ([#747]). It means the
+    /// ⚠️ **`Some(DrainEnd::ReadError(_))` is not success** ([#747]). It means the
     /// wait is over, not that we read everything; see [`DrainEnd`].
     ///
     /// [#747]: https://github.com/hherb/kastellan/issues/747
@@ -457,16 +470,16 @@ mod tests {
             "a drain stopped by a read error must say so — and say WHICH (#752); reporting EOF \
              is what lets a renderer diagnose the worker for a fault in our own transport"
         );
-        // A second errno, so the fault must come from the read and not from a
-        // constant that happens to match the motivating case.
-        let ebadf = FailsAfterData { data: Cursor::new(vec![]), interrupts: 0, errno: libc::EBADF };
-        assert_eq!(drain_reader(0, ebadf, None), DrainEnd::ReadError(ReadFault::os(libc::EBADF)));
         assert_eq!(
             tail.snapshot(),
             vec!["worker booting".to_string()],
             "POSITIVE CONTROL: whatever DID arrive before the error is still retained — a \
              failed drain is not a reason to discard the lines we got"
         );
+        // A second errno, so the fault must come from the read and not from a
+        // constant that happens to match the motivating case.
+        let ebadf = FailsAfterData { data: Cursor::new(vec![]), interrupts: 0, errno: libc::EBADF };
+        assert_eq!(drain_reader(0, ebadf, None), DrainEnd::ReadError(ReadFault::os(libc::EBADF)));
     }
 
     #[test]
@@ -535,9 +548,8 @@ mod tests {
 
     #[test]
     fn a_drain_end_is_recorded_once_and_a_second_mark_cannot_overwrite_it() {
-        // #752: a drain ends once. The old `AtomicU8` was last-write-wins, so
-        // a stray second `mark_drained` could turn an observed read failure
-        // into a clean EOF — the #747 lie, through the back door.
+        // #752: a drain ends once; a second mark must not turn a read failure
+        // into EOF (the #747 lie, through the back door).
         let tail = StderrTail::new(4);
         let failed = DrainEnd::ReadError(ReadFault::os(libc::EIO));
         tail.mark_drained(failed);
@@ -547,6 +559,12 @@ mod tests {
             Some(failed),
             "the FIRST recorded outcome must stand; a later mark must not overwrite it"
         );
+        // The reverse order, so "a read error always wins" cannot pass for
+        // write-once.
+        let clean = StderrTail::new(4);
+        clean.mark_drained(DrainEnd::Eof);
+        clean.mark_drained(failed);
+        assert_eq!(clean.wait_for_drain(Duration::ZERO), Some(DrainEnd::Eof), "write-once, not prefer-error");
     }
 
     #[test]

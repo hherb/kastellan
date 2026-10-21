@@ -172,7 +172,7 @@ pub fn format_worker_failure_report(
             "{what}, and our read of its stderr FAILED ({fault}) before anything arrived, so \
              NOTHING was captured — the silence is in our pipe and is NOT evidence the worker \
              was quiet{}",
-            fault.suspect().map(|s| format!("; {s}")).unwrap_or_default()
+            fault.suspect_clause()
         ),
         // Some lines, but more may have been coming. The ring evicts OLDEST
         // first, so an incomplete tail holds the worker's FIRST words, not its
@@ -185,9 +185,10 @@ pub fn format_worker_failure_report(
         // Same doubt as above, different cause — and unlike a timeout, this
         // one will not resolve by waiting (#747).
         TailState::DrainFailedWords(fault, lines) => format!(
-            "{what}; its stderr up to the point our read of the pipe FAILED ({fault}; so these may be \
-             its FIRST lines rather than its last, and there may have been more we could \
+            "{what}; its stderr up to the point our read of the pipe FAILED ({fault}{}; so these \
+             may be its FIRST lines rather than its last, and there may have been more we could \
              never read): {}",
+            fault.suspect_clause(),
             lines.join(" | ")
         ),
         TailState::LastWords(lines) => format!("{what}; its last words: {}", lines.join(" | ")),

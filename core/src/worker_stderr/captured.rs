@@ -75,21 +75,19 @@ impl ReadFault {
         Self { kind: e.kind(), os: e.raw_os_error() }
     }
 
-    /// The fault an OS `read` failing with `errno` would return.
-    pub fn os(errno: i32) -> Self {
+    /// The fault an OS `read` failing with `errno` would return. Test-only:
+    /// real faults come from a real error via [`Self::of`].
+    #[cfg(test)]
+    pub(crate) fn os(errno: i32) -> Self {
         Self::of(&std::io::Error::from_raw_os_error(errno))
-    }
-
-    /// The raw errno, when the failure came from the OS.
-    pub fn errno(&self) -> Option<i32> {
-        self.os
     }
 
     /// Pure: where an operator should look, **only when the errno says** —
     /// `None` means name the error and guess nothing.
     ///
-    /// Before #752 every read failure got the `EIO` sentence, which for
-    /// `EBADF` sent the operator to audit a guest that was fine.
+    /// Before #752 the tool-worker report's empty failed-drain line printed
+    /// the `EIO` sentence for every errno, which for `EBADF` sent the operator
+    /// to audit a guest that was fine.
     pub fn suspect(&self) -> Option<&'static str> {
         match self.os {
             Some(libc::EIO) => Some("suspect the transport (a torn-down guest's vsock/pty fd), not the worker"),
@@ -98,6 +96,12 @@ impl ReadFault {
             ),
             _ => None,
         }
+    }
+
+    /// [`Self::suspect`] as a `"; …"` clause to append to a sentence, or `""`
+    /// — so every failed-drain renderer guesses the same way.
+    pub(crate) fn suspect_clause(&self) -> String {
+        self.suspect().map(|s| format!("; {s}")).unwrap_or_default()
     }
 }
 
@@ -316,7 +320,7 @@ mod tests {
              thing that separates them — and this test's premise needs re-reading"
         );
         assert_ne!(eio, ebadf, "the fault must keep what the kind alone cannot");
-        assert_eq!(eio.errno(), Some(libc::EIO));
+        assert_eq!(eio.os, Some(libc::EIO));
         assert!(
             eio.to_string().contains(&format!("os error {}", libc::EIO)),
             "an OS fault renders with its errno, so the operator can look it up: {eio}"
@@ -335,7 +339,13 @@ mod tests {
         );
         let synthetic = ReadFault::of(&std::io::Error::other("no errno here"));
         assert_eq!(synthetic.suspect(), None);
-        assert_eq!(synthetic.errno(), None);
+        assert_eq!(synthetic.os, None);
+        assert_eq!(synthetic.suspect_clause(), "", "no guess, so nothing appended");
+        assert_eq!(
+            eio.suspect_clause(),
+            format!("; {}", eio.suspect().unwrap()),
+            "the clause is the guess, ready to append"
+        );
         assert_eq!(synthetic.to_string(), std::io::ErrorKind::Other.to_string());
     }
 
@@ -433,9 +443,6 @@ mod tests {
             CapturedTail::drain_failed(full, eio()),
         ];
         let reached: Vec<TailState<'_>> = tails.iter().map(CapturedTail::state).collect();
-        // Compared by variant NAME rather than by value: two `LastWords`
-        // holding different slices are different values but the same state,
-        // and it is the states we are counting.
         // The converse of `TailState`'s non-empty-slice invariant: no
         // constructor hands a renderer an empty word list.
         for s in &reached {
@@ -443,6 +450,9 @@ mod tests {
                 assert!(!l.is_empty(), "a word-bearing state with no words renders as a bare colon: {s:?}");
             }
         }
+        // Compared by variant NAME rather than by value: two `LastWords`
+        // holding different slices are different values but the same state,
+        // and it is the states we are counting.
         let mut kinds: Vec<&'static str> = reached.iter().map(variant_name).collect();
         kinds.sort_unstable();
         kinds.dedup();

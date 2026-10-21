@@ -48,14 +48,21 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 - **`DrainEnd::ReadError(ReadFault)`**; `ReadFault { kind, os }` keeps the **raw errno**. ⚠️ **#752 as
   filed asked for `ErrorKind`, which cannot do the job:** `EIO` (the transport) and `EBADF` (our own
   double-close) are both `Uncategorized` — a test pins that premise. All three renderers name the
-  errno (`FAILED (Input/output error (os error 5))`); `ReadFault::suspect()` guesses only for `EIO` /
-  `EBADF`, nothing otherwise (the tool-worker report used to print the `EIO` guess for every failure).
-- `StderrTail.drain_end` is **`Arc<OnceLock<DrainEnd>>`** — `mark_drained` is first-write-wins; the
-  `AtomicU8` encoding and its two tests are gone.
+  errno (`FAILED (Input/output error (os error 5))`) and, via `ReadFault::suspect_clause()`, guess
+  only for `EIO` / `EBADF`, nothing otherwise — in **both** failed-drain states (empty and with
+  lines). Before #752 only the tool-worker report's *empty* failed-drain line guessed, and it printed
+  the `EIO` guess for every errno.
+- `StderrTail.drain_end` is **`Arc<OnceLock<DrainEnd>>`** — `mark_drained` is first-write-wins and
+  `warn!`s on a *conflicting* second mark (two drainers on one tail = our bug); the `AtomicU8`
+  encoding and its two tests are gone.
 - **#753:** `TailState`, `CapturedTail::{state, from_drain}` are **`pub(crate)`**; `CapturedTail::lines`
   is deleted. ⚠️ **Published-API break** (`drain_failed` takes a `ReadFault`): `kastellan-core`'s next
-  release is a minor bump. `tool_worker.rs` tests moved to `tool_worker/tests.rs` (proved
-  byte-identical). Seven mutants killed.
+  release is 0.2 → 0.3 (breaking under 0.x semver). `ReadFault::os` is `#[cfg(test)]`; no `errno()`
+  accessor. `tool_worker.rs` tests moved to `tool_worker/tests.rs` (proved byte-identical). Seven
+  mutants killed, plus three from the review round (errno dropped from each with-lines message).
+- **Review round** (5 reviewers): no bug; fixed the with-lines errno test gap, the silent conflicting
+  mark, the write-once reverse order, two over-claims in docs. Filed, out of scope: #888 (broker
+  stdout drain discards its `DrainEnd`).
 
 ### Earlier (2026-10-19 → 21): the gate's exact counts — #885, #823, #882, #880, #876 (PRs #886, #884, #883, #881, #879, merged) — what still binds
 
@@ -351,7 +358,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `llm-router/src/messages.rs`,
 `core/src/main.rs` **880** (+7 in #810, +3 in #829, +6 in #862, +10 in #869's review), `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
-`worker_stderr/mod.rs` 734 (tests are ~60 %), `core/src/channel/mod.rs` **569** (+10 in #849, +6 in #835, +16 in #836, +5 in #852, docs — the `actions` consts are the natural cut).
+`worker_stderr/mod.rs` 752 (tests are ~half), `core/src/channel/mod.rs` **569** (+10 in #849, +6 in #835, +16 in #836, +5 in #852, docs — the `actions` consts are the natural cut).
 Also over (grew in #818 without a split): `db/src/tasks.rs` **819** (+11 in #825: `CRASHED_DETAIL`),
 `db/src/graph.rs` **~935**, `core/src/entity_extraction/batch_upsert.rs` **~520**.
 Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
