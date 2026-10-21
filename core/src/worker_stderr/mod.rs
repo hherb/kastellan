@@ -291,11 +291,12 @@ pub fn spawn_drain(pid: u32, stderr: std::process::ChildStderr) {
 /// [`spawn_drain`] for any pipe core never reads — `pipe` names it in the
 /// warning. The brokers drain their stdout through this too (#888): before, that
 /// drain discarded its [`DrainEnd`], so a failed read never said the pipe had
-/// stopped draining.
+/// stopped draining. The warning goes out through [`emit_unread_drain_warning`],
+/// not a bare `warn!`, so it reaches a reader with no subscriber too.
 pub(crate) fn spawn_unread_drain<R: Read + Send + 'static>(pid: u32, reader: R, pipe: &'static str) {
     std::thread::spawn(move || {
         if let Some(warning) = unread_drain_warning(drain_reader(pid, reader, None), pipe) {
-            tracing::warn!(worker_pid = pid, "{warning}");
+            emit_unread_drain_warning(pid, &warning);
         }
     });
 }

@@ -47,9 +47,9 @@ pub enum DrainEnd {
     /// pty-backed guest fd returning `EIO` on teardown is the motivating case.
     /// The drain stopped early and the remainder is unrecoverable. Carries
     /// *which* failure, so a renderer can say it rather than guess (#752).
-    /// Only one test reaches this from a real kernel fd: a pty master whose
-    /// slave has closed, on Linux (macOS reads EOF there). Every other test of
-    /// it uses a fixture `Read` (#754).
+    /// A pty master whose slave has closed gives `EIO` on Linux but reads EOF
+    /// on macOS, so only a Linux run proves this arm against a real kernel fd
+    /// (#754).
     ReadError(ReadFault),
 }
 

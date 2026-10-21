@@ -312,11 +312,10 @@ fn a_message_scoped_off_directive_fools_neither_arm() {
     }
 }
 
-
 /// Every emitter that actually ships, with the module its `warn!` is
 /// written in.
 ///
-/// ⚠️ **A new emitter must join this array.** Nothing forces it — a sixth
+/// ⚠️ **A new emitter must join this array.** Nothing forces it — a new
 /// `emit_*` that called a plain function instead of `warn_and_fall_back!`
 /// would be silently un-guarded, which is the whole failure this array
 /// exists to prevent. [`every_shipping_emitter_is_covered`] is the only
@@ -364,6 +363,7 @@ fn shipping_emitters() -> Vec<(&'static str, &'static str, Box<dyn Fn() -> bool>
             AUDIT_LOST,
             Box::new(|| crate::worker_stderr::emit_audit_lost_report(crate::worker_stderr::AuditLostWriter::Shutdown, PROBE_LINE)),
         ),
+        ("emit_unread_drain_warning", "kastellan_core::worker_stderr::report::undrained", Box::new(|| crate::worker_stderr::emit_unread_drain_warning(1, PROBE_LINE))),
     ]
 }
 
@@ -399,7 +399,7 @@ fn every_refusal_severity_checks_delivery_at_its_own_callsite() {
 fn every_shipping_emitter_checks_delivery_at_its_own_callsite() {
     // The blind spot this closes: every other test in this file drives
     // `pretend_emitter`, which proves the MACRO works and nothing about the
-    // five functions that actually ship. A refactor replacing the macro in
+    // functions that actually ship. A refactor replacing the macro in
     // `persistent.rs` with a helper call would pass all of them.
     for (name, target, emit) in shipping_emitters() {
         // Enable everything EXCEPT this emitter's own module. A check at
@@ -475,6 +475,7 @@ fn marker_of(emitter: &str) -> &'static str {
         "emit_persistent_down_report" => crate::worker_stderr::WORKER_DOWN_STDERR_MARKER,
         "emit_worker_refusal_report" => crate::worker_stderr::WORKER_REFUSAL_STDERR_MARKER,
         "emit_audit_lost_report" => crate::worker_stderr::AUDIT_LOST_STDERR_MARKER,
+        "emit_unread_drain_warning" => crate::worker_stderr::WORKER_UNDRAINED_STDERR_MARKER,
         other => panic!(
             "a new shipping emitter `{other}` must name the marker it writes here, or \
              `every_shipping_emitter_is_covered` cannot tell whether it is guarded"

@@ -10,7 +10,7 @@
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-21 (#888 + #754: the broker's stdout drain warns when it stops; a failed `try_wait`/vsock read is named, not read as "still running". #887 merged. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** this session's PR (#888, #754), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Recent PRs, newest first:** [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,7 +43,7 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-21, latest): #888 + #754 — the last drain / wait conflations
+### This session (2026-10-21, latest): #888 + #754 (PR #889) — the last drain / wait conflations
 
 - **#888:** `worker_stderr::spawn_unread_drain(pid, reader, pipe)` (`pub(crate)`, any `Read + Send`);
   `spawn_drain` delegates with `"stderr"`, the broker's stdout uses `"stdout"`. The warning is the
@@ -55,9 +55,17 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   was already breaking). ⚠️ On **`ECHILD`** neither site kills — the pid is no longer ours. The
   vsock handshake returns `Result<UnixStream, String>`; the boot-failure report names the **last
   attempt's** failure. `STDERR_NOT_PIPED` is one `pub(crate)` const. Real-kernel coverage:
-  `a_torn_down_pty_is_a_read_error_on_linux_and_eof_on_macos` (⚠️ **macOS reads EOF** there —
-  verified on the DGX). Left as is: `SidecarHandle::exit_status` still reads `Err` as `None`
-  (documented). `worker_stderr/mod.rs` tests moved to `tests.rs` first (proved byte-identical).
+  `a_torn_down_pty_is_a_read_error_on_linux_and_eof_on_macos` (Linux `EIO` verified on the DGX;
+  ⚠️ **macOS reads EOF**, so only a Linux run proves the arm). `worker_stderr/mod.rs` tests moved to
+  `tests.rs` first (proved byte-identical).
+- **#889 review fix-ups:** the warning goes through `warn_and_fall_back!` as a **sixth** marker,
+  `[worker-undrained]` (`report/undrained.rs`; census + `shipping_emitters` updated) — a bare `warn!`
+  reached nobody without a subscriber. Both readiness loops are now one `sidecar_ready::
+  wait_for_sidecar_ready(timeout, ready, exited)` (the egress copy was inline and untestable), and
+  the ECHILD rule is one tested predicate, `may_kill_after_failed_poll`. `report/persistent.rs`
+  tests split to `persistent/tests.rs` (byte-identical). Filed, not in this PR: **#890**
+  (`SidecarHandle::exit_status` still reads `Err` as `None`), **#891** (vsock relays drop errors
+  after the handshake), **#892** (`bounded_command` drains report truncated captures as complete).
 
 ### Earlier (2026-10-21): #752 + #753 (PR #887, merged) — what still binds
 
@@ -353,7 +361,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its next leg** (the attachment half is the natural cut). ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **499**,
+⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).
 
@@ -388,7 +396,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **Mac** (#888/#754) | this PR | **5164 / 3 / 52** (5167), **195** suites, same flags; log `sweep-888.log`. 5167 = 5160 + 7 new tests (drain warning 1, broker 1, death report 1, bridge 3, pty 1). The 3 failures are `db` `postgres_e2e` `the database system is starting up` (#548/#676; `db` untouched) — **60/0 in isolation**. `[WARN]` 0, `[SKIP]` 5, shm 3 = 3. Review edits after the sweep (ECHILD no-kill, egress stderr note, one bridge assertion) re-ran `core --lib` 2556/0/1, `microvm-run` 27, `egress_proxy_e2e`. DGX: `worker_stderr` 78 + `microvm-run` 27 green, clippy on both crates exit 0 | see PR | **5** Mac |
+| **Mac** (#888/#754) | PR [#889](https://github.com/hherb/kastellan/pull/889) | **5164 / 3 / 52** (5167), **195** suites, same flags; log `sweep-888.log`. 5167 = 5160 + 7 new tests (drain warning 1, broker 1, death report 1, bridge 3, pty 1). The 3 failures are `db` `postgres_e2e` `the database system is starting up` (#548/#676; `db` untouched) — **60/0 in isolation**. `[WARN]` 0, `[SKIP]` 5, shm 3 = 3. Review edits after the sweep (ECHILD no-kill, egress stderr note, one bridge assertion) re-ran `core --lib` 2556/0/1, `microvm-run` 27, `egress_proxy_e2e`. DGX: `worker_stderr` 78 + `microvm-run` 27 green, clippy on both crates exit 0. Review fix-ups (#889): `core --lib` **2559/0/1**, `microvm-run` bridge 4 (+1 timeout arm), `egress_proxy_e2e` 3/0/1, `embed_broker_spawn_e2e --ignored` 1/0 (real sandboxed broker bind) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-889` (fresh), **27** | **5** Mac |
 | **Mac** (#752/#753) | PR [#887](https://github.com/hherb/kastellan/pull/887) | **5160 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 3 before = 3 after; log `sweep-752.log`. 5160 = #882's 5151 + 8 `gate_script_tests` since (#882 review +1, #823 +5, #885 +2) + this diff's net +1 (−2 encoding tests, +3) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-752` (fresh), **27** | **5** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.

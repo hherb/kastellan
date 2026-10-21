@@ -23,7 +23,7 @@
 //! installed that records nothing from these targets — and the report then
 //! needs the stderr line exactly as a test binary does.
 //!
-//! There are five such events, and they get **distinct markers** so a grep
+//! There are six such events, and they get **distinct markers** so a grep
 //! can tell them apart:
 //!
 //! | Event | Marker | Emitter |
@@ -33,8 +33,9 @@
 //! | a persistent worker is NOT coming back | [`WORKER_DOWN_STDERR_MARKER`] | [`emit_persistent_down_report`] |
 //! | a live channel worker refused a call (#783) | [`WORKER_REFUSAL_STDERR_MARKER`] | [`emit_worker_refusal_report`] |
 //! | an audit row was not written (#792) — not a worker event; see `audit_lost` | [`AUDIT_LOST_STDERR_MARKER`] | [`emit_audit_lost_report`] |
+//! | a pipe core never reads stopped draining (#888) | [`WORKER_UNDRAINED_STDERR_MARKER`] | [`emit_unread_drain_warning`] |
 //!
-//! ⚠️ **The shared half is shared on purpose.** All five emitters render
+//! ⚠️ **The shared half is shared on purpose.** All six emitters render
 //! through the same private `format_stderr_fallback` and emit through the same
 //! `warn_and_fall_back!`, so neither the neutralisation nor the delivery check
 //! exists in two copies that can drift. That drift is the shape CLAUDE.md's
@@ -55,6 +56,7 @@ mod persistent;
 mod refusal;
 pub(crate) mod shared;
 mod tool_worker;
+mod undrained;
 
 pub use audit_lost::{
     emit_audit_lost_report, format_audit_lost_line, format_audit_lost_stderr_fallback,
@@ -79,4 +81,7 @@ pub(crate) use shared::STDERR_NOT_PIPED;
 pub use tool_worker::{
     emit_worker_failure_report, format_worker_failure_report,
     format_worker_failure_stderr_fallback, WORKER_FAILED_STDERR_MARKER,
+};
+pub use undrained::{
+    emit_unread_drain_warning, format_unread_drain_line, WORKER_UNDRAINED_STDERR_MARKER,
 };

@@ -37,6 +37,7 @@ pub mod sandbox_health;
 pub mod scheduler;
 // NEW — Item 31 (HANDOVER) opaque secret refs slice 1
 pub mod secrets;
+pub(crate) mod sidecar_ready;
 pub mod tool_host;
 /// One definition of the dangerous-character class in untrusted text, shared
 /// by the prompt escaper and the daemon-log neutraliser.

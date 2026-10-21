@@ -1,7 +1,7 @@
 //! The report for an audit row the daemon could not write (#792): the
 //! `[audit-lost]` marker and the emitter behind it.
 //!
-//! Not a worker event, unlike the other four markers here. It lives with them
+//! Not a worker event, unlike the other five markers here. It lives with them
 //! because what makes a marked line trustworthy lives here: the one renderer
 //! ([`super::shared::format_stderr_fallback`]), the delivery check that has to
 //! expand in the emitter's own module ([`super::delivery::warn_and_fall_back`]),

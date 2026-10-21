@@ -148,6 +148,8 @@ mod tests {
 
     /// A one-shot fake firecracker: accepts one connection, reads the CONNECT
     /// line, then answers `reply` and holds on (or just closes, for `None`).
+    /// An empty `reply` is a VMM whose guest port has no listener: it says
+    /// nothing until the client gives up.
     fn fake_vmm(reply: Option<&'static [u8]>) -> String {
         use std::io::BufRead;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -159,8 +161,10 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let sock = path.clone();
         std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().expect("accept");
+            let _ = std::fs::remove_file(&sock);
             let mut line = String::new();
             std::io::BufReader::new(conn.try_clone().unwrap()).read_line(&mut line).unwrap();
             if let Some(reply) = reply {
@@ -196,6 +200,14 @@ mod tests {
         let path = fake_vmm(Some(&[b'x'; 70]));
         let runaway = try_handshake(&path, b"CONNECT 1024\n").expect_err("runaway");
         assert!(runaway.starts_with("reply line over 64 bytes"), "{runaway}");
+
+        // Costs the 2s read timeout. The arm matches `WouldBlock | TimedOut`
+        // because Unix reports the timeout as the former; narrowing it would
+        // render every timeout as a bare `read reply: Resource temporarily
+        // unavailable` — the confusion #754 removed.
+        let path = fake_vmm(Some(b""));
+        let silent = try_handshake(&path, b"CONNECT 1024\n").expect_err("silent");
+        assert!(silent.starts_with("no reply within 2s"), "{silent}");
 
         let absent = try_handshake("/nonexistent/kastellan-v.sock", b"CONNECT 1024\n")
             .expect_err("absent");

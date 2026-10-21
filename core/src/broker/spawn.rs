@@ -17,9 +17,9 @@
 //! [`BrokerKind`] via `spec.kind`, so a second broker kind reuses this path.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
+use std::process::Child;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 use url::Url;
@@ -27,11 +27,11 @@ use url::Url;
 use super::config::BrokerConfig;
 use super::kind::BrokerKind;
 use super::BrokerSpec;
+use crate::sidecar_ready::{may_kill_after_failed_poll, wait_for_sidecar_ready, SidecarReady};
 use crate::tool_host::{derive_lockdown_env, ToolHostError};
 
 /// How long [`spawn_broker`] waits for the broker to `bind()` its UDS.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
-const READY_POLL: Duration = Duration::from_millis(25);
 
 /// Cumulative CPU budget (ms → RLIMIT_CPU seconds) for the broker. It lives 1:1
 /// with a single web-research dispatch (SingleUse, 60s wall-clock), so it is
@@ -170,51 +170,6 @@ fn make_broker_scratch_dir(scratch_root: &Path, kind: BrokerKind) -> Result<Path
     Ok(dir)
 }
 
-/// Outcome of waiting for the broker to bind its UDS. Distinguishes a clean bind
-/// from an early process exit (so the caller can surface the real exit status
-/// instead of a misleading bind-timeout) and from a genuine timeout.
-enum BrokerReady {
-    /// The UDS appeared — the broker is (about to be) serving.
-    Bound,
-    /// The broker process exited before binding — fail fast with its status.
-    Exited(ExitStatus),
-    /// Neither happened within the deadline.
-    TimedOut,
-    /// Our own `try_wait` failed, so we cannot tell whether the broker is alive
-    /// (#754). A fact about us, not the broker — never reported as a bind timeout.
-    Unpollable(std::io::Error),
-}
-
-/// Poll for `uds` to exist, up to `timeout`, while also watching for the broker
-/// to exit early (via the injected `exited` probe). Returns as soon as either the
-/// socket appears or the broker dies, so a broker that fails at startup (bad
-/// endpoint, panic during bind) surfaces its exit status immediately rather than
-/// blocking the full `timeout` — and a probe that itself fails returns at once
-/// too, as [`BrokerReady::Unpollable`]. `exited` is a closure (not a `&mut Child`
-/// directly) so the readiness contract stays hermetically unit-testable without a
-/// real process (the live bind is DGX-gated).
-fn wait_for_broker_ready(
-    uds: &Path,
-    timeout: Duration,
-    mut exited: impl FnMut() -> std::io::Result<Option<ExitStatus>>,
-) -> BrokerReady {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if uds.exists() {
-            return BrokerReady::Bound;
-        }
-        match exited() {
-            Ok(Some(status)) => return BrokerReady::Exited(status),
-            Ok(None) => {}
-            Err(e) => return BrokerReady::Unpollable(e),
-        }
-        if Instant::now() >= deadline {
-            return BrokerReady::TimedOut;
-        }
-        std::thread::sleep(READY_POLL);
-    }
-}
-
 /// Spawn the broker sidecar for one broker-backed worker and wait (bounded) for
 /// it to bind its UDS. Fail-closed: on spawn failure or bind timeout the scratch
 /// dir is removed and the broker killed, and an `Err` is returned (no
@@ -296,21 +251,21 @@ fn spawn_broker_in(
         crate::worker_stderr::spawn_unread_drain(pid, stdout, "stdout");
     }
 
-    match wait_for_broker_ready(&uds_path, READY_TIMEOUT, || child.try_wait()) {
-        BrokerReady::Bound => Ok(BrokerSidecar {
+    match wait_for_sidecar_ready(READY_TIMEOUT, || uds_path.exists(), || child.try_wait()) {
+        SidecarReady::Ready => Ok(BrokerSidecar {
             child,
             uds_path,
             scratch: scratch.to_path_buf(),
         }),
         // Broker died before binding — reap it and surface its real exit status
         // (not a misleading bind-timeout).
-        BrokerReady::Exited(status) => {
+        SidecarReady::Exited(status) => {
             let _ = child.wait();
             Err(ToolHostError::Io(std::io::Error::other(format!(
                 "broker exited before binding {uds_path:?} (status: {status})"
             ))))
         }
-        BrokerReady::TimedOut => {
+        SidecarReady::TimedOut => {
             let _ = child.kill();
             let _ = child.wait();
             Err(ToolHostError::Io(std::io::Error::new(
@@ -321,8 +276,8 @@ fn spawn_broker_in(
         // Fail closed like the timeout: we cannot see the broker, so do not keep
         // it — unless `ECHILD` says it is no longer our child, when its pid may
         // already belong to another process and must not be signalled.
-        BrokerReady::Unpollable(e) => {
-            if e.raw_os_error() != Some(libc::ECHILD) {
+        SidecarReady::Unpollable(e) => {
+            if may_kill_after_failed_poll(&e) {
                 let _ = child.kill();
                 let _ = child.wait();
             }
