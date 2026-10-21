@@ -4,13 +4,13 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261020_880_pre-prune.md`](archive/handover_20261020_880_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (#876's full section and
-> the #875 baseline row included).
+> [`archive/handover_20261021_888_pre-prune.md`](archive/handover_20261021_888_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (#887's full section and
+> the #880 baseline row included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-21 (#752 + #753: a failed stderr drain carries its errno; the drain cell is write-once; `TailState` is crate-private. #885 merged as PR #886. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-21 (#888 + #754: the broker's stdout drain warns when it stops; a failed `try_wait`/vsock read is named, not read as "still running". #887 merged. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,26 +43,36 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-21, latest): #752 + #753 — the #750 residue in `worker_stderr`
+### This session (2026-10-21, latest): #888 + #754 (PR #889) — the last drain / wait conflations
 
-- **`DrainEnd::ReadError(ReadFault)`**; `ReadFault { kind, os }` keeps the **raw errno**. ⚠️ **#752 as
-  filed asked for `ErrorKind`, which cannot do the job:** `EIO` (the transport) and `EBADF` (our own
-  double-close) are both `Uncategorized` — a test pins that premise. All three renderers name the
-  errno (`FAILED (Input/output error (os error 5))`) and, via `ReadFault::suspect_clause()`, guess
-  only for `EIO` / `EBADF`, nothing otherwise — in **both** failed-drain states (empty and with
-  lines). Before #752 only the tool-worker report's *empty* failed-drain line guessed, and it printed
-  the `EIO` guess for every errno.
-- `StderrTail.drain_end` is **`Arc<OnceLock<DrainEnd>>`** — `mark_drained` is first-write-wins and
-  `warn!`s on a *conflicting* second mark (two drainers on one tail = our bug); the `AtomicU8`
-  encoding and its two tests are gone.
-- **#753:** `TailState`, `CapturedTail::{state, from_drain}` are **`pub(crate)`**; `CapturedTail::lines`
-  is deleted. ⚠️ **Published-API break** (`drain_failed` takes a `ReadFault`): `kastellan-core`'s next
-  release is 0.2 → 0.3 (breaking under 0.x semver). `ReadFault::os` is `#[cfg(test)]`; no `errno()`
-  accessor. `tool_worker.rs` tests moved to `tool_worker/tests.rs` (proved byte-identical). Seven
-  mutants killed, plus three from the review round (errno dropped from each with-lines message).
-- **Review round** (5 reviewers): no bug; fixed the with-lines errno test gap, the silent conflicting
-  mark, the write-once reverse order, two over-claims in docs. Filed, out of scope: #888 (broker
-  stdout drain discards its `DrainEnd`).
+- **#888:** `worker_stderr::spawn_unread_drain(pid, reader, pipe)` (`pub(crate)`, any `Read + Send`);
+  `spawn_drain` delegates with `"stderr"`, the broker's stdout uses `"stdout"`. The warning is the
+  pure `unread_drain_warning` and now carries the fault. ⚠️ `drain_reader`'s own lines still say
+  `worker stderr` for the broker's stdout (pre-existing label; changing it touches a pub signature).
+- **#754:** a failed `try_wait` is named, never read as "still running": egress readiness loop,
+  **broker readiness** (`BrokerReady::Unpollable` — same shape, not in the issue), and
+  `format_death_report(io::Result<Option<ExitStatus>>, …)` (⚠️ another pub signature change; 0.3
+  was already breaking). ⚠️ On **`ECHILD`** neither site kills — the pid is no longer ours. The
+  vsock handshake returns `Result<UnixStream, String>`; the boot-failure report names the **last
+  attempt's** failure. `STDERR_NOT_PIPED` is one `pub(crate)` const. Real-kernel coverage:
+  `a_torn_down_pty_is_a_read_error_on_linux_and_eof_on_macos` (Linux `EIO` verified on the DGX;
+  ⚠️ **macOS reads EOF**, so only a Linux run proves the arm). `worker_stderr/mod.rs` tests moved to
+  `tests.rs` first (proved byte-identical).
+- **#889 review fix-ups:** the warning goes through `warn_and_fall_back!` as a **sixth** marker,
+  `[worker-undrained]` (`report/undrained.rs`; census + `shipping_emitters` updated) — a bare `warn!`
+  reached nobody without a subscriber. Both readiness loops are now one `sidecar_ready::
+  wait_for_sidecar_ready(timeout, ready, exited)` (the egress copy was inline and untestable), and
+  the ECHILD rule is one tested predicate, `may_kill_after_failed_poll`. `report/persistent.rs`
+  tests split to `persistent/tests.rs` (byte-identical). Filed, not in this PR: **#890**
+  (`SidecarHandle::exit_status` still reads `Err` as `None`), **#891** (vsock relays drop errors
+  after the handshake), **#892** (`bounded_command` drains report truncated captures as complete).
+
+### Earlier (2026-10-21): #752 + #753 (PR #887, merged) — what still binds
+
+- `DrainEnd::ReadError(ReadFault { kind, os })` keeps the **raw errno** (`EIO` and `EBADF` are both
+  `Uncategorized`); renderers guess only for those two. The drain cell is a write-once `OnceLock`
+  (a conflicting second mark `warn!`s). `TailState` is `pub(crate)`. ⚠️ `kastellan-core`'s next
+  release is **0.3** (breaking). Filed then, fixed now: #888.
 
 ### Earlier (2026-10-19 → 21): the gate's exact counts — #885, #823, #882, #880, #876 (PRs #886, #884, #883, #881, #879, merged) — what still binds
 
@@ -84,34 +94,18 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   **operator: `docker update --restart unless-stopped kastellan-searxng`.** DGX micro-VM images
   rebuilt 2026-10-19.
 
-### Earlier (2026-10-18/19): #875, #722, #872, #870 (PRs #877, #874, #873, #871, merged) — what still binds
+### Earlier (2026-10-17 → 19): #875, #722, #872, #870, #867, #862, #860 (merged) — what still binds
 
-- **Apple-`container` tier:** `skip_if_no_container` reports through `KASTELLAN_MICROVM_REQUIRE_E2E`
-  (tier `micro-VM`, one knob for both backends); met → `[E2E] micro-VM: container preflight met for
-  <image> (image built <UTC date>)`. `container_suites()` = the exact complement of
-  `firecracker_suites()` (floor 3) — ⚠️ **not** a grep for `skip_if_no_container` (`gliner_relex_e2e`
-  has a FILE-LOCAL helper of that name). `sandbox`'s `macos_container_smoke` is named in the profile
-  (macOS-only dev-dep on `tests-common`); only the gate's per-binary `[panic-hook]` check guards it.
-- ⚠️ **Any `Cargo.lock` mtime change makes `kastellan/python-exec:dev` "stale"** (#687 closure) —
-  a plain `git pull` is enough (recurred 2026-10-19). Remedy: `bash
-  scripts/workers/python-exec/build-image.sh` (~1 min). A stopped Mac `container` service makes
-  `[SKIP]` 23 instead of 5. Same family as #691.
-- **#872:** launchd smoke suites go through `skip_if_no_supervisor` (macOS-only dev-dep — ⚠️ not on
-  Linux, its `ring` breaks cross-clippy); the `launchd` profile needs a GUI login. **#870:**
-  `stop_target` polls until each member leaves the domain — ⚠️ **never put the wait in `stop`**
-  [[mac-sysv-shm-exhaustion-from-killed-postgres]].
-
-### Previous (2026-10-17): #867, #862, #860 — the shutdown residue (PR #869, merged + deployed) — what still binds
-
-- **#867:** the daemon sinks' `Unreported` is per channel **per action** (`Vec<ActionUnsaid>`). ⚠️ **Grep
-  break:** their lines no longer say `channel audit rows had no line`; `audit rows? .*had no line` matches
-  both writers. Fixture **`garbage_pool`** → `Client(Protocol)`; ⚠️ one byte alone reads as EOF.
-- **#862:** `channel::bus::report_unsaid_lost_rows()` runs **before** the channel stops and returns a
-  `#[must_use]` `SaidLostRows`; `report_unsaid_lost_rows_since(&mut said)` after each stop says only the
-  delta. ⚠️ Call it **once**. The sinks' twin: `report_unreported_before_stop` → `SaidUnreported`, then
-  `report_drained` inside the drain's arm of the `join!`. `bootstrap_tests` pins both orders.
-- **#860:** **`PgChannelEvents::new(pool, ChannelId)`** (pub API change); a channel-less row counts under
-  `RowChannel::Unnamed(bus channel)`.
+- **Apple-`container` tier** reports through `KASTELLAN_MICROVM_REQUIRE_E2E`; `container_suites()` is
+  the exact complement of `firecracker_suites()` — ⚠️ **not** a grep for `skip_if_no_container`.
+- ⚠️ **Any `Cargo.lock` mtime change makes `kastellan/python-exec:dev` "stale"** (#687; a `git pull`
+  suffices): `bash scripts/workers/python-exec/build-image.sh`. A stopped Mac `container` service
+  makes `[SKIP]` 23 instead of 5.
+- **#870:** `stop_target` polls launchd — ⚠️ **never put the wait in `stop`**
+  [[mac-sysv-shm-exhaustion-from-killed-postgres]]. **#867:** the sinks' lines say
+  `audit rows? .*had no line`; fixture `garbage_pool` → `Client(Protocol)`. **#862:**
+  `report_unsaid_lost_rows()` before the channel stops, `…_since(&mut said)` after — ⚠️ call once.
+  **#860:** `PgChannelEvents::new(pool, ChannelId)`.
 
 ### Previous (2026-10-16/17): #829, #810, #858/#861, #837/#859/#864/#865 (PRs #856, #857, #863, #866, merged) — what still binds
 
@@ -279,7 +273,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    calibration run. The localmail changes the operator offered on 2026-09-14 have **shipped
    upstream** (slices A–E); the worker's side is #760.
 
-3. **The #750 residue, #751, #754, and #757** (the `[panic]` cap's blind spot before the first knob
+3. **The #750 residue: #751 and #757** (the `[panic]` cap's blind spot before the first knob
    read — needs a *measured* default-hook count per profile, DGX too).
 
 4. **Test-harness honesty, now that the gate itself is tested.**
@@ -358,7 +352,7 @@ control** proving the checker can fail. Over cap today, biggest first: `core/tes
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `llm-router/src/messages.rs`,
 `core/src/main.rs` **880** (+7 in #810, +3 in #829, +6 in #862, +10 in #869's review), `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
-`worker_stderr/mod.rs` 752 (tests are ~half), `core/src/channel/mod.rs` **569** (+10 in #849, +6 in #835, +16 in #836, +5 in #852, docs — the `actions` consts are the natural cut).
+`core/src/channel/mod.rs` **569** (+10 in #849, +6 in #835, +16 in #836, +5 in #852, docs — the `actions` consts are the natural cut).
 Also over (grew in #818 without a split): `db/src/tasks.rs` **819** (+11 in #825: `CRASHED_DETAIL`),
 `db/src/graph.rs` **~935**, `core/src/entity_extraction/batch_upsert.rs` **~520**.
 Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `core/src/scheduler/inner_loop.rs` 906,
@@ -367,7 +361,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its next leg** (the attachment half is the natural cut). ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **499**,
+⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).
 
@@ -402,10 +396,8 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
+| **Mac** (#888/#754) | PR [#889](https://github.com/hherb/kastellan/pull/889) | **5164 / 3 / 52** (5167), **195** suites, same flags; log `sweep-888.log`. 5167 = 5160 + 7 new tests (drain warning 1, broker 1, death report 1, bridge 3, pty 1). The 3 failures are `db` `postgres_e2e` `the database system is starting up` (#548/#676; `db` untouched) — **60/0 in isolation**. `[WARN]` 0, `[SKIP]` 5, shm 3 = 3. Review edits after the sweep (ECHILD no-kill, egress stderr note, one bridge assertion) re-ran `core --lib` 2556/0/1, `microvm-run` 27, `egress_proxy_e2e`. DGX: `worker_stderr` 78 + `microvm-run` 27 green, clippy on both crates exit 0. Review fix-ups (#889): `core --lib` **2559/0/1**, `microvm-run` bridge 4 (+1 timeout arm), `egress_proxy_e2e` 3/0/1, `embed_broker_spawn_e2e --ignored` 1/0 (real sandboxed broker bind) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-889` (fresh), **27** | **5** Mac |
 | **Mac** (#752/#753) | PR [#887](https://github.com/hherb/kastellan/pull/887) | **5160 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 3 before = 3 after; log `sweep-752.log`. 5160 = #882's 5151 + 8 `gate_script_tests` since (#882 review +1, #823 +5, #885 +2) + this diff's net +1 (−2 encoding tests, +3) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-752` (fresh), **27** | **5** Mac |
-| **Mac** (#885) | PR [#886](https://github.com/hherb/kastellan/pull/886) | **No full sweep** — the diff is the gate script + `gate_script_tests` only. `kastellan-tests-common` **493 / 0 / 11** (485 lib incl. 69 `gate_script_tests`; +2 vs #823's row, both new tests); `worker-report` gate green on real cargo. Baseline row stays #882's | `-p kastellan-tests-common --all-targets` exit 0 (warm) | — |
-| **Mac** (#882) | PR [#883](https://github.com/hherb/kastellan/pull/883) | **5143 / 8 / 52** (5151 total), **195** suites, same flags; log `sweep-882.log`. 5151 = 5149 + 2: #881's review round added 2 `gate_script_tests` (59 → 61) **after** its sweep, so #880's row is the pre-review tree; this diff adds no test (its review round then adds 1, `gate_script_tests` 61 → 62, after this sweep). Sweep exit 101 on **8** PG-contention failures (`the database system is starting up`: `cli_entities_e2e` 5, `asks_e2e` 2, `nul_non_audit_e2e` 1) — all 42 of those suites' tests pass in isolation (#548/#676). `[SKIP]` **15** = 5 + 3 (worktree has no gliner `.venv`) + 7 (`python-exec:dev` stale: a fresh checkout restamps every mtime, #691 family). `worker-report` gate green: `tests ignored: 13   (exactly 13)` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-882`, **27** | **15** (worktree) |
-| **Mac** (#880) | PR [#881](https://github.com/hherb/kastellan/pull/881) | **5149 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5 (gliner), SysV shm 4 before = 4 after; log `~/.local/state/kastellan/gate-logs/sweep-880.log`. 5149 = 5141 + 2 (#876's review tests, after its sweep) + 6 (`gate_script_tests/filtered.rs`). DGX `microvm` green (`--no-fail-fast`) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-880` (fresh dir), **27** `Checking kastellan` | **5** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -488,6 +480,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#887** (#752, #753) — merged 2026-10-21: a failed drain names its errno; write-once drain cell.
 - **#886** (#885) — merged 2026-10-21: whole summaries counted per binary (check 8).
 - **#884** (#823) — merged 2026-10-21: every test binary must run ≥ 1 test (check 9).
 - **#883** (#882) — merged 2026-10-21: exact `IGNORED`, recounted in CI.

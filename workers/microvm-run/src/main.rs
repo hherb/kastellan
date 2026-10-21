@@ -132,32 +132,37 @@ fn main() -> std::io::Result<()> {
     // Host-initiated hybrid-vsock connect: dial the base UDS and `CONNECT` to
     // the guest's listening port (DGX-verified direction). Retries while the
     // guest boots and binds its listener.
-    let Some(stream) = bridge::connect_hybrid_vsock(&vsock_uds, port, Duration::from_secs(20))
-    else {
-        // ⚠️ Explicit, NOT a panic through an RAII guard, and that is a
-        // correctness point rather than a style one: the workspace release
-        // profile sets `panic = "abort"`, and this launcher ships in release.
-        // Under abort **no destructor runs** — so a guard's `fc.kill()` would
-        // never fire (leaving firecracker holding KVM and the vsock device,
-        // unless the confined path's `--die-with-parent` + `--as-pid-1` jail
-        // happened to reap it) and the run dir would survive by accident rather
-        // than by rule. Everything this path must do, it does here, by hand.
-        //
-        // The report goes to our OWN stderr, which the sandbox backend pipes
-        // and the core daemon drains. The caller sees `Protocol(EarlyExit)`
-        // whatever happens here; this is the only channel that carries a reason.
-        let report = console::boot_failure_report(
-            "the guest vsock listener did not come up within 20s",
-            console_path.as_deref(),
-            read_console_lossy(console_path.as_deref()).as_deref(),
-        );
-        let _ = fc.kill();
-        eprint!("{report}");
-        // Keep the run dir unconditionally: its `console.log` and `fc.log` are
-        // the post-mortem. The host-side orphan sweep reclaims it once this
-        // launcher's pid is observed dead, so this is a deferred clean.
-        teardown_run_dir(run_dir.as_deref(), &vsock_uds, true);
-        std::process::exit(1);
+    let stream = match bridge::connect_hybrid_vsock(&vsock_uds, port, Duration::from_secs(20)) {
+        Ok(stream) => stream,
+        Err(last_attempt) => {
+            // ⚠️ Explicit, NOT a panic through an RAII guard, and that is a
+            // correctness point rather than a style one: the workspace release
+            // profile sets `panic = "abort"`, and this launcher ships in release.
+            // Under abort **no destructor runs** — so a guard's `fc.kill()` would
+            // never fire (leaving firecracker holding KVM and the vsock device,
+            // unless the confined path's `--die-with-parent` + `--as-pid-1` jail
+            // happened to reap it) and the run dir would survive by accident rather
+            // than by rule. Everything this path must do, it does here, by hand.
+            //
+            // The report goes to our OWN stderr, which the sandbox backend pipes
+            // and the core daemon drains. The caller sees `Protocol(EarlyExit)`
+            // whatever happens here; this is the only channel that carries a reason.
+            let report = console::boot_failure_report(
+                &format!(
+                    "the guest vsock listener did not come up within 20s (last handshake attempt: \
+                     {last_attempt})"
+                ),
+                console_path.as_deref(),
+                read_console_lossy(console_path.as_deref()).as_deref(),
+            );
+            let _ = fc.kill();
+            eprint!("{report}");
+            // Keep the run dir unconditionally: its `console.log` and `fc.log` are
+            // the post-mortem. The host-side orphan sweep reclaims it once this
+            // launcher's pid is observed dead, so this is a deferred clean.
+            teardown_run_dir(run_dir.as_deref(), &vsock_uds, true);
+            std::process::exit(1);
+        }
     };
 
     // Past the boot: the guard now covers the pump. It kills firecracker on

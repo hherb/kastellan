@@ -4,10 +4,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kastellan_sandbox::{Net, Profile, SandboxBackend, SandboxPolicy};
 
+use crate::sidecar_ready::{may_kill_after_failed_poll, wait_for_sidecar_ready, SidecarReady};
 use crate::worker_stderr::{TailState, TAIL_DRAIN_WAIT};
 
 /// Env keys the sidecar binary reads (must match `egress-proxy::main`).
@@ -35,7 +36,6 @@ pub(crate) const CA_FILE_NAME: &str = "ca.pem";
 
 /// How long `spawn_sidecar` waits for the proxy to `bind()` its UDS.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
-const READY_POLL: Duration = Duration::from_millis(25);
 
 /// Cumulative CPU budget (ms → ceil-div RLIMIT_CPU seconds) for a **short-lived**
 /// per-tool-call sidecar. Matches the web-fetch worker's own `cpu_ms` (the
@@ -298,16 +298,19 @@ fn check_upstream_extra_ca(mitm: Mitm<'_>) -> anyhow::Result<()> {
 ///    piped no stderr" and "the proxy was silent" point a reader at different
 ///    places; `tool_worker.rs` has an explicit test forbidding that collapse.
 ///
-/// Both call sites reach this after the child is **dead** — one observed its
-/// exit via `try_wait`, the other killed and reaped it — so the pipe really
-/// does close and the wait is a cap rather than a cost.
+/// Every call site but one reaches this after the child is **dead** — it
+/// exited, or we killed and reaped it — so the pipe really does close and the
+/// wait is a cap rather than a cost. The exception is a failed exit poll with
+/// `ECHILD` (#754), which neither kills nor reaps: the child is gone, but a
+/// grandchild holding the pipe can keep it open, and then the wait runs to its
+/// [`TAIL_DRAIN_WAIT`] cap.
 ///
 /// [#746]: https://github.com/hherb/kastellan/issues/746
 fn stderr_note(tail: Option<&crate::worker_stderr::StderrTail>) -> String {
     let Some(tail) = tail else {
         // NOT "no stderr captured": that is a claim about the proxy, and this
         // is a fact about our own spawn path.
-        return "its stderr was not piped, so there is nothing to report".to_string();
+        return crate::worker_stderr::STDERR_NOT_PIPED.to_string();
     };
     render_stderr_note(&crate::worker_stderr::collect_tail_after_drain(tail))
 }
@@ -420,20 +423,32 @@ pub fn spawn_sidecar(
     // UDS. Wait for BOTH so the host never binds a worker before the CA it must
     // trust exists on disk.
     let ca_path = spec.scratch.join(CA_FILE_NAME);
-    let deadline = Instant::now() + READY_TIMEOUT;
-    while !(uds_path.exists() && ca_path.exists()) {
-        // The proxy fails CLOSED on bad operator config (a malformed pin set, an
-        // unreadable/certless upstream extra CA) by aborting at startup. Catch
-        // that exit as soon as it happens: otherwise it only ever surfaces as the
-        // READY_TIMEOUT below — a five-second wait whose message blames the UDS
-        // bind rather than the config that actually failed.
-        if let Ok(Some(status)) = child.try_wait() {
+    // The proxy fails CLOSED on bad operator config (a malformed pin set, an
+    // unreadable/certless upstream extra CA) by aborting at startup. The wait
+    // catches that exit as soon as it happens: otherwise it only ever surfaces as
+    // the READY_TIMEOUT — a five-second wait whose message blames the UDS bind
+    // rather than the config that actually failed.
+    let ready = || uds_path.exists() && ca_path.exists();
+    match wait_for_sidecar_ready(READY_TIMEOUT, ready, || child.try_wait()) {
+        SidecarReady::Ready => {}
+        SidecarReady::Exited(status) => anyhow::bail!(
+            "egress-proxy sidecar exited before becoming ready ({status}); {}",
+            stderr_note(stderr_tail.as_ref())
+        ),
+        // A failed `waitpid` is a fact about us (#754). Read as "still running",
+        // it spun to the timeout, which blames the UDS bind.
+        SidecarReady::Unpollable(e) => {
+            if may_kill_after_failed_poll(&e) {
+                child.kill().ok();
+                child.wait().ok();
+            }
             anyhow::bail!(
-                "egress-proxy sidecar exited before becoming ready ({status}); {}",
+                "could not poll the egress-proxy sidecar's exit status while waiting for it \
+                 to become ready ({e}) — our waitpid failed, not the proxy's bind; {}",
                 stderr_note(stderr_tail.as_ref())
             );
         }
-        if Instant::now() >= deadline {
+        SidecarReady::TimedOut => {
             let mut handle = SidecarHandle { child, uds_path: uds_path.clone() };
             handle.child.kill().ok();
             handle.child.wait().ok();
@@ -443,7 +458,6 @@ pub fn spawn_sidecar(
                 stderr_note(stderr_tail.as_ref())
             );
         }
-        std::thread::sleep(READY_POLL);
     }
     Ok(SidecarHandle { child, uds_path })
 }

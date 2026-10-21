@@ -21,16 +21,23 @@ pub fn firecracker_vsock_connect_line(port: u32) -> String {
 ///
 /// Retries until `timeout` because the guest needs time to boot and bind its
 /// vsock listener. Returns a connected, post-handshake, blocking stream ready
-/// for JSON-RPC, or `None` if the guest never came up.
-pub fn connect_hybrid_vsock(uds_path: &str, port: u32, timeout: Duration) -> Option<UnixStream> {
+/// for JSON-RPC, or — if the guest never came up — **why the last attempt
+/// failed**. That reason is the only thing separating "the guest port had no
+/// listener yet" from a genuine vsock `EIO` (#754), so it goes in the report.
+pub fn connect_hybrid_vsock(
+    uds_path: &str,
+    port: u32,
+    timeout: Duration,
+) -> Result<UnixStream, String> {
     let deadline = Instant::now() + timeout;
     let connect_line = firecracker_vsock_connect_line(port);
     loop {
-        if let Some(stream) = try_handshake(uds_path, connect_line.as_bytes()) {
-            return Some(stream);
-        }
+        let last = match try_handshake(uds_path, connect_line.as_bytes()) {
+            Ok(stream) => return Ok(stream),
+            Err(why) => why,
+        };
         if Instant::now() >= deadline {
-            return None;
+            return Err(last);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -38,35 +45,43 @@ pub fn connect_hybrid_vsock(uds_path: &str, port: u32, timeout: Duration) -> Opt
 
 /// One handshake attempt: connect, send `CONNECT <port>\n`, read the reply line,
 /// succeed only on a leading `OK`. A 2 s read timeout bounds the wait when
-/// firecracker accepts the UDS but the guest port has no listener yet; any error
-/// or non-`OK` reply yields `None` so the caller retries. On success the read
-/// timeout is cleared so [`pump`]'s blocking copy behaves normally.
-fn try_handshake(uds_path: &str, connect_line: &[u8]) -> Option<UnixStream> {
-    let mut stream = UnixStream::connect(uds_path).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    stream.write_all(connect_line).ok()?;
+/// firecracker accepts the UDS but the guest port has no listener yet; any
+/// failure returns a description of it so the caller can retry — and, at its
+/// deadline, say which failure it kept seeing. On success the read timeout is
+/// cleared so [`pump`]'s blocking copy behaves normally.
+fn try_handshake(uds_path: &str, connect_line: &[u8]) -> Result<UnixStream, String> {
+    let mut stream = UnixStream::connect(uds_path).map_err(|e| format!("connect {uds_path}: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("set read timeout: {e}"))?;
+    stream.write_all(connect_line).map_err(|e| format!("send CONNECT: {e}"))?;
     let mut byte = [0u8; 1];
     let mut line = Vec::with_capacity(32);
     loop {
         match stream.read(&mut byte) {
-            Ok(0) => return None, // closed before a full line
+            Ok(0) => return Err("closed before a full reply line".to_string()),
             Ok(_) => {
                 if byte[0] == b'\n' {
                     break;
                 }
                 line.push(byte[0]);
                 if line.len() > 64 {
-                    return None; // runaway: not a real "OK <port>" line
+                    return Err("reply line over 64 bytes: not a real \"OK <port>\"".to_string());
                 }
             }
-            Err(_) => return None, // timeout / error → retry
+            // The read timeout surfaces as WouldBlock on Unix (TimedOut elsewhere).
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                return Err("no reply within 2s (the guest port may have no listener yet)".to_string())
+            }
+            Err(e) => return Err(format!("read reply: {e}")),
         }
     }
     if line.starts_with(b"OK") {
-        stream.set_read_timeout(None).ok()?; // back to blocking for pump
-        Some(stream)
+        stream.set_read_timeout(None).map_err(|e| format!("clear read timeout: {e}"))?; // back to blocking for pump
+        Ok(stream)
     } else {
-        None
+        // Debug-escaped: these bytes came off the socket.
+        Err(format!("refused: {:?}", String::from_utf8_lossy(&line)))
     }
 }
 
@@ -129,5 +144,80 @@ mod tests {
         // Firecracker hybrid vsock: after connecting the host UDS, the client
         // sends "CONNECT <port>\n" and waits for "OK <hostport>\n".
         assert_eq!(firecracker_vsock_connect_line(1024), "CONNECT 1024\n");
+    }
+
+    /// A one-shot fake firecracker: accepts one connection, reads the CONNECT
+    /// line, then answers `reply` and holds on (or just closes, for `None`).
+    /// An empty `reply` is a VMM whose guest port has no listener: it says
+    /// nothing until the client gives up.
+    fn fake_vmm(reply: Option<&'static [u8]>) -> String {
+        use std::io::BufRead;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "kastellan-bridge-{}-{}.sock",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let sock = path.clone();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            let _ = std::fs::remove_file(&sock);
+            let mut line = String::new();
+            std::io::BufReader::new(conn.try_clone().unwrap()).read_line(&mut line).unwrap();
+            if let Some(reply) = reply {
+                let _ = conn.write_all(reply);
+                // Hold the connection open like a real VMM: macOS refuses
+                // `setsockopt` (EINVAL) on a socket whose peer has gone.
+                let _ = std::io::copy(&mut conn, &mut std::io::sink());
+            }
+        });
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_handshake_succeeds_only_on_ok() {
+        let path = fake_vmm(Some(b"OK 52000\n"));
+        if let Err(e) = try_handshake(&path, b"CONNECT 1024\n") {
+            panic!("an OK reply must complete the handshake: {e}");
+        }
+    }
+
+    #[test]
+    fn each_handshake_failure_says_which_it_was() {
+        // #754: these all collapsed to `None`, so a genuine vsock `EIO` read the
+        // same as "no listener yet" and the boot report could only say "timeout".
+        let path = fake_vmm(None);
+        let closed = try_handshake(&path, b"CONNECT 1024\n").expect_err("closed");
+        assert!(closed.contains("closed before a full reply line"), "{closed}");
+
+        let path = fake_vmm(Some(b"FAILURE\n"));
+        let refused = try_handshake(&path, b"CONNECT 1024\n").expect_err("refused");
+        assert!(refused.contains("refused") && refused.contains("FAILURE"), "{refused}");
+
+        let path = fake_vmm(Some(&[b'x'; 70]));
+        let runaway = try_handshake(&path, b"CONNECT 1024\n").expect_err("runaway");
+        assert!(runaway.starts_with("reply line over 64 bytes"), "{runaway}");
+
+        // Costs the 2s read timeout. The arm matches `WouldBlock | TimedOut`
+        // because Unix reports the timeout as the former; narrowing it would
+        // render every timeout as a bare `read reply: Resource temporarily
+        // unavailable` — the confusion #754 removed.
+        let path = fake_vmm(Some(b""));
+        let silent = try_handshake(&path, b"CONNECT 1024\n").expect_err("silent");
+        assert!(silent.starts_with("no reply within 2s"), "{silent}");
+
+        let absent = try_handshake("/nonexistent/kastellan-v.sock", b"CONNECT 1024\n")
+            .expect_err("absent");
+        assert!(absent.starts_with("connect /nonexistent/kastellan-v.sock: "), "{absent}");
+    }
+
+    #[test]
+    fn connecting_past_the_deadline_returns_the_last_failure() {
+        let err = connect_hybrid_vsock("/nonexistent/kastellan-v.sock", 1024, Duration::ZERO)
+            .expect_err("nothing listens");
+        assert!(err.starts_with("connect /nonexistent/kastellan-v.sock: "), "{err}");
     }
 }

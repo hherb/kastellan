@@ -1,11 +1,11 @@
 //! Whether a report actually **reaches** someone, and whether writing it can
 //! kill the process.
 //!
-//! Two questions that the five emitters in `report`'s sibling modules
-//! (`tool_worker`, `persistent`, `refusal`) all have to answer the same way — none of them
-//! lives here, which is the entire point: see [`warn_and_fall_back`] for why
-//! the check must expand at *their* callsites and not in this module. They used
-//! to be answered by one line —
+//! Two questions that the emitters in `report`'s sibling modules
+//! (`tool_worker`, `persistent`, `refusal`, `audit_lost`, `undrained`) all have
+//! to answer the same way — none of them lives here, which is the entire
+//! point: see [`warn_and_fall_back`] for why the check must expand at *their*
+//! callsites and not in this module. They used to be answered by one line —
 //! `if !tracing::dispatcher::has_been_set() { eprintln!(…) }`. That line was
 //! wrong in both halves:
 //!
