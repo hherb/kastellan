@@ -9,8 +9,8 @@
 > the #880 baseline row included).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-22 (#894 + #895: launchd `uninstall` keeps the plist when bootout fails; `status` never reads an unreadable `print` as Inactive. #893 merged. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
+**Last updated:** 2026-10-23 (#898: launchd follow-ups — headless `uninstall`, measured state words, one timeout text, `start`'s stat. #897 merged. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** #898's PR (this session), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged), [#866](https://github.com/hherb/kastellan/pull/866) (#837, #859, #864, #865, merged), [#863](https://github.com/hherb/kastellan/pull/863) (#858, #861, merged), [#857](https://github.com/hherb/kastellan/pull/857) (#829, merged), [#856](https://github.com/hherb/kastellan/pull/856) (#810, merged), [#855](https://github.com/hherb/kastellan/pull/855) (#852, #853, merged), [#854](https://github.com/hherb/kastellan/pull/854) (handover: deploy), [#851](https://github.com/hherb/kastellan/pull/851) (#836, merged), [#850](https://github.com/hherb/kastellan/pull/850) (#835, merged), [#849](https://github.com/hherb/kastellan/pull/849) (#846, merged), [#847](https://github.com/hherb/kastellan/pull/847) (#832, merged), [#842](https://github.com/hherb/kastellan/pull/842) (#825, merged), [#834](https://github.com/hherb/kastellan/pull/834) (#827, #826), [#830](https://github.com/hherb/kastellan/pull/830) (#813, #828), [#824](https://github.com/hherb/kastellan/pull/824) (#815, #814), [#820](https://github.com/hherb/kastellan/pull/820) (#818), [#819](https://github.com/hherb/kastellan/pull/819) (#816), [#812](https://github.com/hherb/kastellan/pull/812) (#807, #808), [#806](https://github.com/hherb/kastellan/pull/806) (#796–#800, #802), [#804](https://github.com/hherb/kastellan/pull/804) (clippy 1.99 lockfile bump), [#803](https://github.com/hherb/kastellan/pull/803) (TencentDB survey, docs), [#801](https://github.com/hherb/kastellan/pull/801) (#796–#800), [#795](https://github.com/hherb/kastellan/pull/795) (#792, #793).
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,32 +43,35 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-22, latest): #894 + #895 (PR #897) — launchd's failed reads
+### This session (2026-10-23, latest): #898 — launchd follow-ups
 
-- **Movement first:** `launchd_agents.rs` (564) → its six `launchctl` helpers moved verbatim to
-  `launchd_agents/launchctl.rs` (`pub(super)`); proved by an empty diff against `main`'s range.
-- **#894:** `uninstall` = `self.stop(name)` (default agents dir only) → `remove_plist_after`. The verdict
-  is the pure `bootout_outcome`: success or "not loaded" only. ⚠️ **A failed bootout now fails
-  `uninstall` and KEEPS the plist** (its error says the plist was kept so `uninstall` can be retried); the
-  trait-default `uninstall_target` is fail-fast, so later members are left too.
-- **#895:** `status` = pure `status_from_print` through the **bounded** `run_launchctl`: only "could not
-  find service" → `Inactive`; a `print` without a `state = …` line is an `Err` naming the target.
-  ⚠️ Any other non-zero `print` is now an `Err` too (was `Inactive`). The `launchd` gate proves the
-  live not-loaded answer still matches.
-- **Review fixes (same PR):** `start`'s `is_loaded_in_domain` was unbounded and read every failed
-  `print` as "not loaded" — it is now `unload_wait`'s strict probe (one copy, pure `loaded_from_print`,
-  through `run_launchctl`). `status`/`remove_plist_after` use `try_exists`/`NotFound` instead of
-  `exists()`. The bootout fixture is now launchctl's **measured** wording (exit 3, "No such process";
-  `print`'s is exit 113). ⚠️ The macOS test guards (`ServiceGuard`, both launchd smoke `Drop`s) now
-  print a `[WARN]` on a failed `uninstall` instead of `let _ =` — a kept plist starts at next login, so a
-  gate must see it. `run_uninstall` warns on a failed `stop_target`/symlink removal. Supervisor lib
-  132 → **135**; full sweep **not** re-run after these (clippy 27 + `launchd` gate 7/6 `[E2E]` were).
-  Deferred, all fail-closed: [#898](https://github.com/hherb/kastellan/issues/898) (no-GUI-domain
-  bootout exit 112 refuses uninstall; unknown `state` word → `Inactive`; timeout fixtures; `start`'s
-  `exists()`).
-- The **systemd twin** (swallowed `stop`, empty `is-active` → `Inactive`, unbounded `systemctl`) is
-  [#896](https://github.com/hherb/kastellan/issues/896) — needs the DGX. ⚠️ **DGX unreachable again**
-  (ssh timeout, 2026-10-22); #893's diff also still has no native-Linux run.
+- ⚠️ **#897's squash commit auto-closed #898** via "fail closed: #898" — reopened. Never write
+  `fail closed`/`fails closed` right before an issue number [[pr-body-not-fixed-autocloses-issue]];
+  run the closing regex over the **squash message** too.
+- **Movement first:** the reader tests moved to `launchd_agents/launchctl/tests.rs` (proved: empty
+  diff vs `main`'s range, equal `fn` set); `NOT_LOADED`/`backend` are `pub(in crate::launchd_agents)`.
+- **No GUI domain** (`Could not find domain for user gui: N`, exit 112, measured): `is_not_loaded_answer`
+  = no-such-service **or** no-such-domain, used by `bootout_outcome` and `loaded_from_print`, so a
+  headless `uninstall` removes the plist without `unload_wait` warning. ⚠️ **`status` keeps it an
+  error** on purpose (install's health wait stops at once).
+- ⚠️ **State words stay lenient — measured, not assumed.** A closed list (the 8 words after
+  `service state: %s` in `/sbin/launchd` + a ~900-service census) **missed `xpcproxy`**, reported
+  mid-spawn; erroring on it failed 2 PG bring-ups in a full sweep [[guard-shares-the-census-blind-spot]].
+  Only `running` → `Active`; everything else → `Inactive`. Do not "tighten" it again.
+- `timed_out_message(args)` is the one source of the timeout text; `start` stats with `try_exists`.
+- `tests-common/src/pg.rs`'s two bring-up panics now **carry the reason** (`{e}`) — the bare
+  "should reach Active within 30s" hid that `status` had errored; that is how `xpcproxy` was found.
+
+### Earlier (2026-10-22): #894 + #895 (PR #897, merged) — what still binds
+
+- ⚠️ **A failed bootout fails `uninstall` and KEEPS the plist** (pure `bootout_outcome`, success or
+  "not loaded" only); the trait-default `uninstall_target` is fail-fast. `status` = pure
+  `status_from_print` through the **bounded** `run_launchctl`; any failed `print` other than "not
+  loaded" is an `Err`, never `Inactive`. `start`/`unload_wait` share the strict `loaded_from_print`.
+- ⚠️ The macOS test guards print a `[WARN]` on a failed `uninstall` (a kept plist starts at next
+  login, so a gate must see it).
+- The **systemd twin** is [#896](https://github.com/hherb/kastellan/issues/896) — needs the DGX.
+  ⚠️ **DGX unreachable** (ssh timeout, 2026-10-22 and 23); #893's and #897's diffs have no native-Linux run.
 
 ### Earlier (2026-10-21): #890 + #892 (PR #893, merged) — what still binds
 
@@ -302,7 +305,6 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), and #237's absent macOS CI leg.
    [#896](https://github.com/hherb/kastellan/issues/896): the systemd twin of #894/#895 (DGX-gated).
-   [#898](https://github.com/hherb/kastellan/issues/898): launchd follow-ups from #897's review (all fail closed).
    [#891](https://github.com/hherb/kastellan/issues/891): the vsock relays' error arms (`eprintln!` the errno; back off on `EMFILE`).
    [#878](https://github.com/hherb/kastellan/issues/878): the `microvm` profile's intermittent red
    test (Wikipedia heavy-page render times out in the VM; passed 2026-10-20, undiagnosed).
@@ -418,8 +420,8 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
+| **Mac** (#898) | #898's PR | **5193 / 2 / 52** (5195), **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5; log `sweep-898c.log`. 5195 = main's **5188** (the row below predates #897's 3 review tests: supervisor lib 132 → 135) + 7 supervisor lib (**142**). The 2 failures (`memory_layers_e2e`, `asks_e2e`) are `the database system is starting up` (#548/#676) — **40/0 in isolation**. `launchd` gate: evidence, 7 tests, 6 `[E2E]`, 0 `[SKIP]` (run before the `xpcproxy` revert, which touched only `status_from_print`'s non-`running` arm). DGX unreachable — not run | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-898` (fresh), **27** | **5** Mac |
 | **Mac** (#894/#895) | PR [#897](https://github.com/hherb/kastellan/pull/897) | **5182 / 3 / 52** (5185), **195** suites, `TEST_EXIT=101`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5; log `sweep-894.log`. 5185 = main's 5177 (#893's 5174 + its 3 review tests) + 8 supervisor lib (132). The 3 failures are `db` `postgres_e2e` `the database system is starting up` (#548/#676) — **60/0 in isolation**. `bash scripts/run-e2e-gate.sh launchd`: evidence, 7 tests, 6 `[E2E]`, 0 `[SKIP]`. DGX unreachable — not run | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-894` (fresh), **27** | **5** Mac |
-| **Mac** (#890/#892) | PR [#893](https://github.com/hherb/kastellan/pull/893) | **5174 / 0 / 52**, **195** suites, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0, `[SKIP]` 5, shm 3 = 3; log `sweep-890.log`. 5174 = main's 5170 (#889's 5167 + 3 `core --lib` review tests) + 4 (`core --lib` 2560, sandbox lib 126, supervisor lib 123). DGX unreachable — not run | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-890` (fresh), **27**; Linux cross-clippy sandbox + supervisor clean | **5** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -502,6 +504,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#897** (#894, #895) — merged 2026-10-22: launchd `uninstall` keeps the plist on a failed bootout; an unreadable `print` is not `Inactive`.
 - **#893** (#890, #892) — merged 2026-10-21: a failed sidecar exit poll retires the pair; a cut-short capture is `Unread`.
 - **#889** (#888, #754) — merged 2026-10-21: the broker's stdout drain warns; failed waits and vsock reads are named.
 - **#887** (#752, #753) — merged 2026-10-21: a failed drain names its errno; write-once drain cell.
