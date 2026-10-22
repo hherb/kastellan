@@ -70,7 +70,7 @@
 //! | `install`  | write unit + `daemon-reload` + `enable` | write plist (no launchctl)                      |
 //! | `start`    | `start <name>.service`             | `bootstrap gui/<uid> <plist-path>` (load + run)      |
 //! | `stop`     | `stop <name>.service`              | `bootout gui/<uid>/<label>` (unload + stop)          |
-//! | `uninstall`| best-effort stop/disable + remove  | best-effort `bootout` + remove plist                 |
+//! | `uninstall`| best-effort stop/disable + remove  | `bootout`, then remove plist (kept if bootout fails) |
 //! | `status`   | `is-active <name>.service`         | parse `print gui/<uid>/<label>` `state = ...` line   |
 //!
 //! On macOS, `bootstrap` *is* the load step — there is no separate
@@ -104,11 +104,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::atomic_write::write_atomic;
-use crate::bounded_command::{run_capped, CappedOutcome};
 use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError};
 
-/// Wall-clock cap on a single mutating `launchctl` invocation
-/// (`bootstrap` / `bootout`).
+/// Wall-clock cap on every `launchctl` call made through `run_launchctl`
+/// (`bootstrap`, `bootout`, `print`).
 ///
 /// launchctl normally returns in well under a second. The cap exists
 /// solely so a *churn-degraded* `gui/<uid>` domain — which can leave
@@ -128,6 +127,12 @@ mod builders;
 pub use builders::{build_plist, validate_service_name};
 
 mod unload_wait;
+
+/// The `launchctl` invocations and the pure readers of their answers.
+mod launchctl;
+use launchctl::{
+    bootout_outcome, is_loaded_in_domain, run_launchctl, status_from_print, user_domain_target,
+};
 
 /// `launchctl` driver for user LaunchAgents.
 ///
@@ -305,7 +310,7 @@ impl Supervisor for LaunchAgents {
         // if the agent is in the domain at all (regardless of
         // running/exited), bootstrap is a no-op for our public API.
         let target = format!("{domain}/{name}");
-        if is_loaded_in_domain(&target) {
+        if is_loaded_in_domain(&target)? {
             return Ok(());
         }
         let path_str = path.to_string_lossy().into_owned();
@@ -316,13 +321,9 @@ impl Supervisor for LaunchAgents {
     fn stop(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
         let target = format!("{}/{name}", user_domain_target()?);
-        // bootout against an already-unloaded agent errors with
-        // "no such process" (exit 113 / ESRCH). Treat as success.
-        match run_launchctl(&["bootout", &target]) {
-            Ok(_) => Ok(()),
-            Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => Ok(()),
-            Err(e) => Err(e),
-        }
+        // bootout against an agent that isn't loaded fails with exit 3,
+        // "Boot-out failed: 3: No such process" (ESRCH). Treat as success.
+        bootout_outcome(run_launchctl(&["bootout", &target]))
     }
 
     /// Stop the members in reverse order, each one **gone from the
@@ -356,23 +357,13 @@ impl Supervisor for LaunchAgents {
 
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
-        // Best-effort bootout — only attempt it when we're operating
-        // on the canonical agents dir. For custom dirs (tests) we
-        // skip the launchctl call entirely so a name collision with
-        // a real installed agent cannot bootout someone else's
-        // service.
-        if self.is_default_agents_dir() {
-            let target = format!("{}/{name}", user_domain_target()?);
-            // Errors are swallowed: the agent may already be
-            // unloaded, or never have been bootstrapped at all.
-            let _ = run_launchctl(&["bootout", &target]);
-        }
-        let path = self.plist_path(name);
-        if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|e| SupervisorError::Io(format!("remove {}: {e}", path.display())))?;
-        }
-        Ok(())
+        // Bootout only when we're operating on the canonical agents dir.
+        // For custom dirs (tests) we skip the launchctl call entirely so
+        // a name collision with a real installed agent cannot bootout
+        // someone else's service. `stop` already reads "never loaded" as
+        // success; only a bootout that may have left the agent loaded fails.
+        let bootout = if self.is_default_agents_dir() { self.stop(name) } else { Ok(()) };
+        remove_plist_after(bootout, &self.plist_path(name))
     }
 
     fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
@@ -381,35 +372,46 @@ impl Supervisor for LaunchAgents {
         // launchctl thinks; the live manager may have a stale entry
         // cached for a name we just uninstalled but on a different
         // driver instance).
-        if !self.plist_path(name).exists() {
+        // `try_exists`: an unreadable agents dir is an error, not "absent".
+        let path = self.plist_path(name);
+        if !path
+            .try_exists()
+            .map_err(|e| SupervisorError::Io(format!("stat {}: {e}", path.display())))?
+        {
             return Ok(ServiceStatus::NotInstalled);
         }
         let target = format!("{}/{name}", user_domain_target()?);
-        let out = Command::new("launchctl")
-            .args(["print", &target])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| SupervisorError::Io(format!("run launchctl: {e}")))?;
-        if !out.status.success() {
-            // `print` exits non-zero when the service is not loaded
-            // into the GUI domain. The plist file exists (we
-            // checked), so it's installed but inactive — not
-            // running, not loaded, no PID.
-            return Ok(ServiceStatus::Inactive);
+        // Bounded by `run_launchctl`, so a churn-degraded domain cannot
+        // hang a status query either.
+        status_from_print(&target, run_launchctl(&["print", &target]))
+    }
+}
+
+/// Remove the plist at `path` — but only once `bootout` (the result of
+/// [`Supervisor::stop`]) says the agent is out of the domain.
+///
+/// After a failed bootout the agent may still be loaded; deleting its
+/// plist then would leave a loaded agent with no file on disk while
+/// `uninstall` reported success (#894). So the plist is kept, a
+/// `Backend`/`Io` error says so, and the operator can simply retry
+/// `uninstall`.
+fn remove_plist_after(
+    bootout: Result<(), SupervisorError>,
+    path: &Path,
+) -> Result<(), SupervisorError> {
+    let kept = |m: String| format!("{m}; kept {} so `uninstall` can be retried", path.display());
+    match bootout {
+        Ok(()) => {}
+        Err(SupervisorError::Backend(m)) => return Err(SupervisorError::Backend(kept(m))),
+        Err(SupervisorError::Io(m)) => return Err(SupervisorError::Io(kept(m))),
+        Err(e) => return Err(e),
+    }
+    // Only "already absent" is success; any other failure leaves the plist.
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(SupervisorError::Io(format!("remove {}: {e}", path.display())))
         }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let state = parse_print_state(&stdout).unwrap_or_default();
-        Ok(match state.as_str() {
-            "running" => ServiceStatus::Active,
-            // Loaded-but-not-running variants: `not running`,
-            // `waiting`, `exited`, `spawn scheduled` (transitional).
-            // Treat all as Inactive to match the Linux backend's
-            // liberal mapping (anything that isn't clearly "active"
-            // is "inactive").
-            _ => ServiceStatus::Inactive,
-        })
+        _ => Ok(()),
     }
 }
 
@@ -445,118 +447,6 @@ pub fn probe() -> Result<(), SupervisorError> {
     Err(SupervisorError::Probe(format!(
         "launchctl print-disabled {domain} failed: {stderr}{hint}"
     )))
-}
-
-/// Build the `gui/<uid>` domain target string used by `launchctl`.
-///
-/// The UID comes from `getuid(2)`; the value is whatever the calling
-/// process happens to run as. We do not honour `$SUDO_UID` or similar
-/// because the supervisor crate is *user-level only* (running it as
-/// root would put the agent into `gui/0`, which is not a regular user
-/// session).
-fn user_domain_target() -> Result<String, SupervisorError> {
-    Ok(format!("gui/{}", current_uid()))
-}
-
-/// Current real UID via `libc::getuid()`.
-///
-/// `getuid` is async-signal-safe and infallible, so no error path is
-/// possible here. Wrapped in a function so the type stays `u32` at
-/// the call sites without forcing every caller to write a libc cast.
-#[cfg(target_os = "macos")]
-fn current_uid() -> u32 {
-    // SAFETY: `getuid` is documented as always-succeeding and
-    // async-signal-safe; it has no preconditions.
-    unsafe { libc::getuid() as u32 }
-}
-
-/// Run `launchctl <args>` with stdio captured. Maps non-zero exits to
-/// [`SupervisorError::Backend`] with the trimmed stderr.
-fn run_launchctl(args: &[&str]) -> Result<String, SupervisorError> {
-    // Bounded so a hung `bootstrap`/`bootout` against a churn-degraded
-    // GUI domain fails fast instead of wedging the thread at 0 % CPU.
-    // `run_capped` sets the stdio (stdin null, stdout/stderr piped) for us.
-    let mut cmd = Command::new("launchctl");
-    cmd.args(args);
-    let out = match run_capped(&mut cmd, LAUNCHCTL_TIMEOUT)
-        .map_err(|e| SupervisorError::Io(format!("run launchctl: {e}")))?
-    {
-        CappedOutcome::Completed(out) => out,
-        CappedOutcome::TimedOut => {
-            return Err(SupervisorError::Backend(format!(
-                "launchctl {} timed out after {}s (the gui/<uid> launchd domain may be \
-                 churn-degraded under heavy service load — see issue #130)",
-                args.join(" "),
-                LAUNCHCTL_TIMEOUT.as_secs()
-            )));
-        }
-    };
-    if !out.status.success() {
-        // `launchctl` writes most diagnostics to stdout (yes, stdout)
-        // and only some to stderr. Fold both so the error message
-        // surfaces whichever the tool happened to use.
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let combined = format!("{} {}", stderr.trim(), stdout.trim()).trim().to_string();
-        let exit = out
-            .status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "signal".to_string());
-        return Err(SupervisorError::Backend(format!(
-            "launchctl {} (exit {exit}): {combined}",
-            args.join(" ")
-        )));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// Parse the `state = <word>` line out of `launchctl print` output.
-///
-/// `launchctl print` emits a verbose nested dict; the `state` line
-/// looks like `state = running`, indented by some whitespace. This
-/// helper finds the first such line and returns the word — `running`,
-/// `not running`, `waiting`, etc. Returns `None` if no `state` line
-/// is present.
-fn parse_print_state(stdout: &str) -> Option<String> {
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if let Some(val) = trimmed.strip_prefix("state = ") {
-            return Some(val.trim().to_string());
-        }
-    }
-    None
-}
-
-/// Is the service loaded into the given launchd domain?
-///
-/// `launchctl print <target>` exits 0 when the service is bootstrapped
-/// (regardless of whether it's currently running, exited, waiting,
-/// or transitional) and non-zero when there's no such service. We
-/// use the exit code, not stdout parsing, so the check is robust to
-/// macOS version differences in the verbose `print` output format.
-///
-/// Used to make `start` idempotent without parsing version-specific
-/// `bootstrap` error strings.
-fn is_loaded_in_domain(target: &str) -> bool {
-    Command::new("launchctl")
-        .args(["print", target])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Heuristic: does `msg` look like the "no such service" error
-/// `launchctl bootout` emits when the agent isn't in the domain?
-/// Used to make `stop` idempotent.
-fn is_no_such_service_error(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    m.contains("could not find service")
-        || m.contains("no such process")
-        || m.contains("could not find specified service")
 }
 
 #[cfg(test)]

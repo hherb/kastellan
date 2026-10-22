@@ -381,7 +381,10 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     let specs = build_specs(&layout, Path::new("/usr/bin/postgres")); // path irrelevant for stop/uninstall
 
     let sup = default_supervisor();
-    let _ = sup.stop_target(&specs.target);
+    // Not fatal — `uninstall_target` stops each unit again — but not silent.
+    if let Err(e) = sup.stop_target(&specs.target) {
+        eprintln!("warning: stopping kastellan.target: {e} (uninstalling anyway)");
+    }
     sup.uninstall_target(&specs.target).map_err(|e| format!("uninstall units: {e}"))?;
     eprintln!("removed kastellan.target units");
 
@@ -390,8 +393,13 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     // so we never clobber an unrelated file the operator put at that path.
     #[cfg(unix)]
     if fs::read_link(&layout.cli_link).map(|t| t.starts_with(&layout.bin_dir)).unwrap_or(false) {
-        let _ = fs::remove_file(&layout.cli_link);
-        eprintln!("removed operator CLI symlink: {}", layout.cli_link.display());
+        match fs::remove_file(&layout.cli_link) {
+            Ok(()) => eprintln!("removed operator CLI symlink: {}", layout.cli_link.display()),
+            Err(e) => eprintln!(
+                "warning: could not remove operator CLI symlink {}: {e}",
+                layout.cli_link.display()
+            ),
+        }
     }
 
     if purge {

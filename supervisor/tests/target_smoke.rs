@@ -244,7 +244,7 @@ mod linux {
 mod macos {
     use super::*;
     use kastellan_supervisor::launchd_agents::LaunchAgents;
-    use kastellan_tests_common::skip::skip_if_no_supervisor;
+    use kastellan_tests_common::skip::{skip_if_no_supervisor, warn_line};
 
     struct Guard {
         sup: LaunchAgents,
@@ -252,7 +252,10 @@ mod macos {
     }
     impl Drop for Guard {
         fn drop(&mut self) {
-            let _ = self.sup.uninstall_target(&self.target);
+            // Not silent: since #894 a failed bootout keeps the plist.
+            if let Err(e) = self.sup.uninstall_target(&self.target) {
+                eprint!("{}", warn_line(&format!("uninstall_target in cleanup: {e}")));
+            }
         }
     }
 

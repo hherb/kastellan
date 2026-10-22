@@ -2,7 +2,8 @@
 //! service on drop; `PathGuard` recursively wipes a directory on drop.
 //!
 //! Both are intentionally best-effort: `stop` / `uninstall` /
-//! `remove_dir_all` errors are swallowed because the alternative — a
+//! `remove_dir_all` errors never panic (an `uninstall` error is printed as a
+//! `[WARN]` line) because the alternative — a
 //! panic from `Drop` while another panic is unwinding — would abort
 //! the whole test process and lose the original failure message.
 
@@ -28,7 +29,12 @@ pub struct ServiceGuard {
 impl Drop for ServiceGuard {
     fn drop(&mut self) {
         let _ = self.sup.stop(&self.name);
-        let _ = self.sup.uninstall(&self.name);
+        // Not swallowed silently: a failed uninstall may keep the unit file
+        // (launchd keeps the plist after a failed bootout, #894), which then
+        // starts at the next login — a gate's zero-`[WARN]` check sees this.
+        if let Err(e) = self.sup.uninstall(&self.name) {
+            eprint!("{}", crate::skip::warn_line(&format!("uninstall {} in cleanup: {e}", self.name)));
+        }
     }
 }
 
