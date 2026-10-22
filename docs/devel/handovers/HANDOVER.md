@@ -55,6 +55,17 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   find service" → `Inactive`; a `print` without a `state = …` line is an `Err` naming the target.
   ⚠️ Any other non-zero `print` is now an `Err` too (was `Inactive`). The `launchd` gate proves the
   live not-loaded answer still matches.
+- **Review fixes (same PR):** `start`'s `is_loaded_in_domain` was unbounded and read every failed
+  `print` as "not loaded" — it is now `unload_wait`'s strict probe (one copy, pure `loaded_from_print`,
+  through `run_launchctl`). `status`/`remove_plist_after` use `try_exists`/`NotFound` instead of
+  `exists()`. The bootout fixture is now launchctl's **measured** wording (exit 3, "No such process";
+  `print`'s is exit 113). ⚠️ The macOS test guards (`ServiceGuard`, both launchd smoke `Drop`s) now
+  print a `[WARN]` on a failed `uninstall` instead of `let _ =` — a kept plist starts at next login, so a
+  gate must see it. `run_uninstall` warns on a failed `stop_target`/symlink removal. Supervisor lib
+  132 → **135**; full sweep **not** re-run after these (clippy 27 + `launchd` gate 7/6 `[E2E]` were).
+  Deferred, all fail-closed: [#898](https://github.com/hherb/kastellan/issues/898) (no-GUI-domain
+  bootout exit 112 refuses uninstall; unknown `state` word → `Inactive`; timeout fixtures; `start`'s
+  `exists()`).
 - The **systemd twin** (swallowed `stop`, empty `is-active` → `Inactive`, unbounded `systemctl`) is
   [#896](https://github.com/hherb/kastellan/issues/896) — needs the DGX. ⚠️ **DGX unreachable again**
   (ssh timeout, 2026-10-22); #893's diff also still has no native-Linux run.
@@ -291,6 +302,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
    (a decision), and #237's absent macOS CI leg.
    [#896](https://github.com/hherb/kastellan/issues/896): the systemd twin of #894/#895 (DGX-gated).
+   [#898](https://github.com/hherb/kastellan/issues/898): launchd follow-ups from #897's review (all fail closed).
    [#891](https://github.com/hherb/kastellan/issues/891): the vsock relays' error arms (`eprintln!` the errno; back off on `EMFILE`).
    [#878](https://github.com/hherb/kastellan/issues/878): the `microvm` profile's intermittent red
    test (Wikipedia heavy-page render times out in the VM; passed 2026-10-20, undiagnosed).

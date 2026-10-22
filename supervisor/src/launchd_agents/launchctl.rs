@@ -1,10 +1,10 @@
 //! The `launchctl` invocations and the pure readers of their answers.
 //!
 //! Lifted out of `launchd_agents.rs` when that file outgrew the 500-LOC
-//! cap. Everything here is `pub(super)`: the driver in the parent module
-//! and its sibling `unload_wait` are the only callers.
+//! cap. Everything here is `pub(super)`: private to the `launchd_agents`
+//! module tree.
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use super::LAUNCHCTL_TIMEOUT;
 use crate::bounded_command::{run_capped, CappedOutcome};
@@ -33,8 +33,14 @@ pub(super) fn current_uid() -> u32 {
     unsafe { libc::getuid() as u32 }
 }
 
-/// Run `launchctl <args>` with stdio captured. Maps non-zero exits to
-/// [`SupervisorError::Backend`] with the trimmed stderr.
+/// Run `launchctl <args>` with stdio captured, bounded by
+/// [`LAUNCHCTL_TIMEOUT`].
+///
+/// A non-zero exit is [`SupervisorError::Backend`]
+/// `launchctl <args> (exit N): <stderr> <stdout>`; a timeout is also
+/// `Backend` (its message never matches [`is_no_such_service_error`]); a
+/// spawn or read failure is [`SupervisorError::Io`]. The readers below
+/// depend on that split.
 pub(super) fn run_launchctl(args: &[&str]) -> Result<String, SupervisorError> {
     // Bounded so a hung `bootstrap`/`bootout` against a churn-degraded
     // GUI domain fails fast instead of wedging the thread at 0 % CPU.
@@ -93,23 +99,26 @@ pub(super) fn parse_print_state(stdout: &str) -> Option<String> {
 
 /// Is the service loaded into the given launchd domain?
 ///
-/// `launchctl print <target>` exits 0 when the service is bootstrapped
-/// (regardless of whether it's currently running, exited, waiting,
-/// or transitional) and non-zero when there's no such service. We
-/// use the exit code, not stdout parsing, so the check is robust to
-/// macOS version differences in the verbose `print` output format.
-///
-/// Used to make `start` idempotent without parsing version-specific
-/// `bootstrap` error strings.
-pub(super) fn is_loaded_in_domain(target: &str) -> bool {
-    Command::new("launchctl")
-        .args(["print", target])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// `launchctl print <target>` succeeds when the service is bootstrapped
+/// (whether running, exited, waiting or transitional); only launchd's own
+/// "no such service" answer means not loaded. A timeout, a spawn failure or
+/// any other error is returned as `Err` — never read as "not loaded", which
+/// would send `start` into a `bootstrap` that fails with a misleading error,
+/// and `unload_wait` into calling a still-loaded agent gone.
+pub(super) fn is_loaded_in_domain(target: &str) -> Result<bool, SupervisorError> {
+    loaded_from_print(run_launchctl(&["print", target]))
+}
+
+/// Read `launchctl print`'s result as "is it loaded?" (see
+/// [`is_loaded_in_domain`]).
+pub(super) fn loaded_from_print(
+    print: Result<String, SupervisorError>,
+) -> Result<bool, SupervisorError> {
+    match print {
+        Ok(_) => Ok(true),
+        Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Heuristic: does `msg` look like the "no such service" error
@@ -141,7 +150,8 @@ pub(super) fn bootout_outcome(
 /// Read `launchctl print <target>`'s result into a status for an agent
 /// whose plist is on disk.
 ///
-/// "Could not find service" means installed but not loaded → `Inactive`.
+/// launchd's "no such service" answer ([`is_no_such_service_error`]) means
+/// installed but not loaded → `Inactive`.
 /// A successful `print` is read from its `state = …` line; one with no
 /// such line (a format change, a cut-short answer) is an error, never a
 /// confident `Inactive` — a failed read is not an answer (#895).

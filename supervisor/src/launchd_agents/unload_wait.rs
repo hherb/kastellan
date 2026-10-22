@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use super::builders::DEFAULT_EXIT_TIMEOUT_SEC;
-use super::{is_no_such_service_error, run_launchctl};
+use super::is_loaded_in_domain;
 use crate::SupervisorError;
 
 /// How long `stop_target` sleeps, in total, waiting for launchd to finish
@@ -56,7 +56,7 @@ pub(super) fn stop_each_in_reverse<E>(
 /// race this wait exists to close.
 pub(super) fn wait_until_unloaded(target: &str) -> Result<(), SupervisorError> {
     let gone = wait_until_gone(
-        || still_in_domain(target).map(|present| !present),
+        || is_loaded_in_domain(target).map(|present| !present),
         UNLOAD_TIMEOUT,
         UNLOAD_POLL,
         std::thread::sleep,
@@ -72,20 +72,6 @@ pub(super) fn wait_until_unloaded(target: &str) -> Result<(), SupervisorError> {
              `launchctl kill SIGKILL {target}`, then retry",
             UNLOAD_TIMEOUT.as_secs()
         )))
-    }
-}
-
-/// Does `launchctl print` still find `target`?
-///
-/// Only launchd's own "could not find service" answer means gone; a
-/// timeout, a spawn failure or any other error is returned as `Err`.
-/// (`is_loaded_in_domain` reads every failure as "not loaded", which is
-/// safe for `start` — its `bootstrap` then fails loudly — but not here.)
-fn still_in_domain(target: &str) -> Result<bool, SupervisorError> {
-    match run_launchctl(&["print", target]) {
-        Ok(_) => Ok(true),
-        Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => Ok(false),
-        Err(e) => Err(e),
     }
 }
 

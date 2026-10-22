@@ -2,14 +2,13 @@
 //!
 //! Lifted out of the inline `#[cfg(test)] mod tests` in
 //! `launchd_agents.rs` when that file outgrew the 500-LOC cap.
-//! `use super::*` resolves to the parent `launchd_agents` module, which
-//! gives these tests access to its private launchctl-parsing helpers
-//! (`parse_print_state`, `is_no_such_service_error`, `user_domain_target`)
-//! and the `LaunchAgents` driver. The pure-builder/validator tests live
+//! The launchctl helpers live in `launchd_agents/launchctl.rs`; they are
+//! reached through the parent's private `use` (via `use super::*`) or
+//! imported explicitly below. The pure-builder/validator tests live
 //! alongside their code in the sibling `builders.rs`.
 
 use super::*;
-use super::launchctl::parse_print_state;
+use super::launchctl::{is_no_such_service_error, loaded_from_print, parse_print_state};
 use crate::EnvFileRef;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -60,8 +59,15 @@ fn is_no_such_service_error_recognises_known_phrases() {
     assert!(!is_no_such_service_error("permission denied"));
 }
 
-/// What `launchctl bootout` said when the agent was never loaded.
-const NOT_LOADED: &str = "launchctl bootout gui/501/svc (exit 113): Could not find service";
+/// What `launchctl bootout` says when the agent is not loaded (measured on
+/// macOS: exit 3, ESRCH).
+const NOT_LOADED: &str =
+    "launchctl bootout gui/501/svc (exit 3): Boot-out failed: 3: No such process";
+
+/// What `launchctl print` says for a service not in the domain (measured on
+/// macOS: exit 113).
+const PRINT_NOT_FOUND: &str =
+    "launchctl print gui/501/svc (exit 113): Could not find service \"svc\" in domain for user gui: 501";
 
 fn backend(msg: &str) -> Result<String, SupervisorError> {
     Err(SupervisorError::Backend(msg.into()))
@@ -99,8 +105,25 @@ fn status_from_print_maps_the_state_line() {
 
 #[test]
 fn status_from_print_reads_not_loaded_as_inactive() {
-    let not_loaded = backend("launchctl print gui/501/svc (exit 113): Could not find service");
+    let not_loaded = backend(PRINT_NOT_FOUND);
     assert_eq!(status_from_print("gui/501/svc", not_loaded).unwrap(), ServiceStatus::Inactive);
+}
+
+// ---------- loaded_from_print: `start`'s and `unload_wait`'s probe ----------
+
+#[test]
+fn loaded_from_print_reads_success_and_not_found() {
+    assert!(loaded_from_print(Ok(String::new())).unwrap());
+    assert!(!loaded_from_print(backend(PRINT_NOT_FOUND)).unwrap());
+}
+
+/// A failed probe is not "not loaded" — that would let `start` skip to a
+/// misleading `bootstrap` error and `unload_wait` call a loaded agent gone.
+#[test]
+fn loaded_from_print_passes_through_a_timeout_and_an_io_error() {
+    assert!(loaded_from_print(backend("launchctl print gui/501/svc timed out after 20s")).is_err());
+    let unread = Err(SupervisorError::Io("run launchctl: Broken pipe".into()));
+    assert!(matches!(loaded_from_print(unread), Err(SupervisorError::Io(_))));
 }
 
 /// A successful `print` with no `state = …` line (a format drift, a cut-short
@@ -255,10 +278,19 @@ fn remove_plist_after_a_failed_bootout_keeps_the_plist() {
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");
     let path = sup.plist_path("svc");
-    let timed_out = Err(SupervisorError::Backend("launchctl bootout timed out".into()));
-    let err = remove_plist_after(timed_out, &path).expect_err("bootout failed");
-    assert!(path.exists(), "plist removed although the agent may still be loaded");
-    assert!(matches!(&err, SupervisorError::Backend(m) if m.contains("kept")), "{err}");
+    let failures = [
+        SupervisorError::Backend("launchctl bootout timed out".into()),
+        SupervisorError::Io("run launchctl: Broken pipe".into()),
+    ];
+    for failure in failures {
+        let err = remove_plist_after(Err(failure), &path).expect_err("bootout failed");
+        assert!(path.exists(), "plist removed although the agent may still be loaded");
+        let msg = match &err {
+            SupervisorError::Backend(m) | SupervisorError::Io(m) => m,
+            other => panic!("unexpected variant: {other}"),
+        };
+        assert!(msg.contains("kept"), "{err}");
+    }
 }
 
 #[test]
@@ -268,6 +300,19 @@ fn remove_plist_after_a_clean_bootout_removes_it() {
     sup.install(&minimal_spec("svc")).expect("install");
     let path = sup.plist_path("svc");
     remove_plist_after(Ok(()), &path).expect("removed");
+    assert!(!path.exists());
+    remove_plist_after(Ok(()), &path).expect("already absent is success");
+}
+
+/// The whole "already not loaded" chain with launchctl's real wording:
+/// uninstalling a stopped agent still removes its plist.
+#[test]
+fn remove_plist_after_a_not_loaded_bootout_removes_it() {
+    let dir = TestRoot::new("not-loaded-plist");
+    let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
+    sup.install(&minimal_spec("svc")).expect("install");
+    let path = sup.plist_path("svc");
+    remove_plist_after(bootout_outcome(backend(NOT_LOADED)), &path).expect("removed");
     assert!(!path.exists());
 }
 

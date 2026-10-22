@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use kastellan_supervisor::launchd_agents::LaunchAgents;
 use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
-use kastellan_tests_common::skip::skip_if_no_supervisor;
+use kastellan_tests_common::skip::{skip_if_no_supervisor, warn_line};
 
 /// Serialize all smoke-test bodies. The launchd GUI domain and
 /// `~/Library/LaunchAgents/` are shared global resources; running
@@ -68,9 +68,11 @@ struct TestAgentGuard {
 }
 impl Drop for TestAgentGuard {
     fn drop(&mut self) {
-        // Best-effort cleanup. Errors are ignored so a partial-state
-        // test still cleans up as much as it can.
-        let _ = self.sup.uninstall(&self.name);
+        // Best-effort cleanup, but not silent: since #894 a failed bootout
+        // keeps the plist, which would then start at the next login.
+        if let Err(e) = self.sup.uninstall(&self.name) {
+            eprint!("{}", warn_line(&format!("uninstall {} in cleanup: {e}", self.name)));
+        }
     }
 }
 

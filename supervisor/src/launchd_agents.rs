@@ -106,8 +106,8 @@ use std::time::Duration;
 use crate::atomic_write::write_atomic;
 use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError};
 
-/// Wall-clock cap on a single mutating `launchctl` invocation
-/// (`bootstrap` / `bootout`).
+/// Wall-clock cap on every `launchctl` call made through `run_launchctl`
+/// (`bootstrap`, `bootout`, `print`).
 ///
 /// launchctl normally returns in well under a second. The cap exists
 /// solely so a *churn-degraded* `gui/<uid>` domain — which can leave
@@ -131,8 +131,7 @@ mod unload_wait;
 /// The `launchctl` invocations and the pure readers of their answers.
 mod launchctl;
 use launchctl::{
-    bootout_outcome, is_loaded_in_domain, is_no_such_service_error, run_launchctl,
-    status_from_print, user_domain_target,
+    bootout_outcome, is_loaded_in_domain, run_launchctl, status_from_print, user_domain_target,
 };
 
 /// `launchctl` driver for user LaunchAgents.
@@ -311,7 +310,7 @@ impl Supervisor for LaunchAgents {
         // if the agent is in the domain at all (regardless of
         // running/exited), bootstrap is a no-op for our public API.
         let target = format!("{domain}/{name}");
-        if is_loaded_in_domain(&target) {
+        if is_loaded_in_domain(&target)? {
             return Ok(());
         }
         let path_str = path.to_string_lossy().into_owned();
@@ -322,8 +321,8 @@ impl Supervisor for LaunchAgents {
     fn stop(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
         let target = format!("{}/{name}", user_domain_target()?);
-        // bootout against an already-unloaded agent errors with
-        // "no such process" (exit 113 / ESRCH). Treat as success.
+        // bootout against an agent that isn't loaded fails with exit 3,
+        // "Boot-out failed: 3: No such process" (ESRCH). Treat as success.
         bootout_outcome(run_launchctl(&["bootout", &target]))
     }
 
@@ -373,12 +372,17 @@ impl Supervisor for LaunchAgents {
         // launchctl thinks; the live manager may have a stale entry
         // cached for a name we just uninstalled but on a different
         // driver instance).
-        if !self.plist_path(name).exists() {
+        // `try_exists`: an unreadable agents dir is an error, not "absent".
+        let path = self.plist_path(name);
+        if !path
+            .try_exists()
+            .map_err(|e| SupervisorError::Io(format!("stat {}: {e}", path.display())))?
+        {
             return Ok(ServiceStatus::NotInstalled);
         }
         let target = format!("{}/{name}", user_domain_target()?);
-        // Bounded like the mutating calls, so a churn-degraded domain
-        // cannot hang a status query either.
+        // Bounded by `run_launchctl`, so a churn-degraded domain cannot
+        // hang a status query either.
         status_from_print(&target, run_launchctl(&["print", &target]))
     }
 }
@@ -388,8 +392,9 @@ impl Supervisor for LaunchAgents {
 ///
 /// After a failed bootout the agent may still be loaded; deleting its
 /// plist then would leave a loaded agent with no file on disk while
-/// `uninstall` reported success (#894). So the plist is kept, the error
-/// says so, and the operator can simply retry `uninstall`.
+/// `uninstall` reported success (#894). So the plist is kept, a
+/// `Backend`/`Io` error says so, and the operator can simply retry
+/// `uninstall`.
 fn remove_plist_after(
     bootout: Result<(), SupervisorError>,
     path: &Path,
@@ -401,11 +406,13 @@ fn remove_plist_after(
         Err(SupervisorError::Io(m)) => return Err(SupervisorError::Io(kept(m))),
         Err(e) => return Err(e),
     }
-    if path.exists() {
-        fs::remove_file(path)
-            .map_err(|e| SupervisorError::Io(format!("remove {}: {e}", path.display())))?;
+    // Only "already absent" is success; any other failure leaves the plist.
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(SupervisorError::Io(format!("remove {}: {e}", path.display())))
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Probe whether the user GUI launchd domain is reachable.
