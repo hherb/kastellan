@@ -178,3 +178,6 @@ pub(super) fn status_from_print(
         ))),
     }
 }
+
+#[cfg(test)]
+pub(super) mod tests;
