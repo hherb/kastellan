@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 
 use super::LAUNCHCTL_TIMEOUT;
 use crate::bounded_command::{run_capped, CappedOutcome};
-use crate::SupervisorError;
+use crate::{ServiceStatus, SupervisorError};
 
 /// Build the `gui/<uid>` domain target string used by `launchctl`.
 ///
@@ -120,4 +120,51 @@ pub(super) fn is_no_such_service_error(msg: &str) -> bool {
     m.contains("could not find service")
         || m.contains("no such process")
         || m.contains("could not find specified service")
+}
+
+/// Read `launchctl bootout`'s result: `Ok` iff the agent is out of the
+/// domain — it was booted out, or launchd says it was never loaded.
+///
+/// Anything else (a timeout against a churn-degraded domain, an answer
+/// that could not be read, a refusal) leaves the agent possibly still
+/// loaded and is returned as the error it is (#894).
+pub(super) fn bootout_outcome(
+    bootout: Result<String, SupervisorError>,
+) -> Result<(), SupervisorError> {
+    match bootout {
+        Ok(_) => Ok(()),
+        Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Read `launchctl print <target>`'s result into a status for an agent
+/// whose plist is on disk.
+///
+/// "Could not find service" means installed but not loaded → `Inactive`.
+/// A successful `print` is read from its `state = …` line; one with no
+/// such line (a format change, a cut-short answer) is an error, never a
+/// confident `Inactive` — a failed read is not an answer (#895).
+pub(super) fn status_from_print(
+    target: &str,
+    print: Result<String, SupervisorError>,
+) -> Result<ServiceStatus, SupervisorError> {
+    let stdout = match print {
+        Ok(stdout) => stdout,
+        Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => {
+            return Ok(ServiceStatus::Inactive)
+        }
+        Err(e) => return Err(e),
+    };
+    match parse_print_state(&stdout).as_deref() {
+        Some("running") => Ok(ServiceStatus::Active),
+        // Loaded-but-not-running variants: `not running`, `waiting`,
+        // `exited`, `spawn scheduled` (transitional). All map to Inactive,
+        // matching the Linux backend's liberal mapping.
+        Some(_) => Ok(ServiceStatus::Inactive),
+        None => Err(SupervisorError::Backend(format!(
+            "launchctl print {target} answered without a `state = …` line, so its state \
+             is unknown (has launchctl's output format changed?)"
+        ))),
+    }
 }

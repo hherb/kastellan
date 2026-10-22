@@ -70,7 +70,7 @@
 //! | `install`  | write unit + `daemon-reload` + `enable` | write plist (no launchctl)                      |
 //! | `start`    | `start <name>.service`             | `bootstrap gui/<uid> <plist-path>` (load + run)      |
 //! | `stop`     | `stop <name>.service`              | `bootout gui/<uid>/<label>` (unload + stop)          |
-//! | `uninstall`| best-effort stop/disable + remove  | best-effort `bootout` + remove plist                 |
+//! | `uninstall`| best-effort stop/disable + remove  | `bootout`, then remove plist (kept if bootout fails) |
 //! | `status`   | `is-active <name>.service`         | parse `print gui/<uid>/<label>` `state = ...` line   |
 //!
 //! On macOS, `bootstrap` *is* the load step — there is no separate
@@ -131,8 +131,8 @@ mod unload_wait;
 /// The `launchctl` invocations and the pure readers of their answers.
 mod launchctl;
 use launchctl::{
-    is_loaded_in_domain, is_no_such_service_error, parse_print_state, run_launchctl,
-    user_domain_target,
+    bootout_outcome, is_loaded_in_domain, is_no_such_service_error, run_launchctl,
+    status_from_print, user_domain_target,
 };
 
 /// `launchctl` driver for user LaunchAgents.
@@ -324,11 +324,7 @@ impl Supervisor for LaunchAgents {
         let target = format!("{}/{name}", user_domain_target()?);
         // bootout against an already-unloaded agent errors with
         // "no such process" (exit 113 / ESRCH). Treat as success.
-        match run_launchctl(&["bootout", &target]) {
-            Ok(_) => Ok(()),
-            Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => Ok(()),
-            Err(e) => Err(e),
-        }
+        bootout_outcome(run_launchctl(&["bootout", &target]))
     }
 
     /// Stop the members in reverse order, each one **gone from the
@@ -362,23 +358,13 @@ impl Supervisor for LaunchAgents {
 
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
-        // Best-effort bootout — only attempt it when we're operating
-        // on the canonical agents dir. For custom dirs (tests) we
-        // skip the launchctl call entirely so a name collision with
-        // a real installed agent cannot bootout someone else's
-        // service.
-        if self.is_default_agents_dir() {
-            let target = format!("{}/{name}", user_domain_target()?);
-            // Errors are swallowed: the agent may already be
-            // unloaded, or never have been bootstrapped at all.
-            let _ = run_launchctl(&["bootout", &target]);
-        }
-        let path = self.plist_path(name);
-        if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|e| SupervisorError::Io(format!("remove {}: {e}", path.display())))?;
-        }
-        Ok(())
+        // Bootout only when we're operating on the canonical agents dir.
+        // For custom dirs (tests) we skip the launchctl call entirely so
+        // a name collision with a real installed agent cannot bootout
+        // someone else's service. `stop` already reads "never loaded" as
+        // success; only a bootout that may have left the agent loaded fails.
+        let bootout = if self.is_default_agents_dir() { self.stop(name) } else { Ok(()) };
+        remove_plist_after(bootout, &self.plist_path(name))
     }
 
     fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
@@ -391,32 +377,35 @@ impl Supervisor for LaunchAgents {
             return Ok(ServiceStatus::NotInstalled);
         }
         let target = format!("{}/{name}", user_domain_target()?);
-        let out = Command::new("launchctl")
-            .args(["print", &target])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| SupervisorError::Io(format!("run launchctl: {e}")))?;
-        if !out.status.success() {
-            // `print` exits non-zero when the service is not loaded
-            // into the GUI domain. The plist file exists (we
-            // checked), so it's installed but inactive — not
-            // running, not loaded, no PID.
-            return Ok(ServiceStatus::Inactive);
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let state = parse_print_state(&stdout).unwrap_or_default();
-        Ok(match state.as_str() {
-            "running" => ServiceStatus::Active,
-            // Loaded-but-not-running variants: `not running`,
-            // `waiting`, `exited`, `spawn scheduled` (transitional).
-            // Treat all as Inactive to match the Linux backend's
-            // liberal mapping (anything that isn't clearly "active"
-            // is "inactive").
-            _ => ServiceStatus::Inactive,
-        })
+        // Bounded like the mutating calls, so a churn-degraded domain
+        // cannot hang a status query either.
+        status_from_print(&target, run_launchctl(&["print", &target]))
     }
+}
+
+/// Remove the plist at `path` — but only once `bootout` (the result of
+/// [`Supervisor::stop`]) says the agent is out of the domain.
+///
+/// After a failed bootout the agent may still be loaded; deleting its
+/// plist then would leave a loaded agent with no file on disk while
+/// `uninstall` reported success (#894). So the plist is kept, the error
+/// says so, and the operator can simply retry `uninstall`.
+fn remove_plist_after(
+    bootout: Result<(), SupervisorError>,
+    path: &Path,
+) -> Result<(), SupervisorError> {
+    let kept = |m: String| format!("{m}; kept {} so `uninstall` can be retried", path.display());
+    match bootout {
+        Ok(()) => {}
+        Err(SupervisorError::Backend(m)) => return Err(SupervisorError::Backend(kept(m))),
+        Err(SupervisorError::Io(m)) => return Err(SupervisorError::Io(kept(m))),
+        Err(e) => return Err(e),
+    }
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|e| SupervisorError::Io(format!("remove {}: {e}", path.display())))?;
+    }
+    Ok(())
 }
 
 /// Probe whether the user GUI launchd domain is reachable.
