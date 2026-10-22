@@ -294,7 +294,11 @@ impl Supervisor for LaunchAgents {
     fn start(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
         let path = self.plist_path(name);
-        if !path.exists() {
+        // `try_exists`: an unreadable agents dir is an error, not "absent".
+        if !path
+            .try_exists()
+            .map_err(|e| SupervisorError::Io(format!("stat {}: {e}", path.display())))?
+        {
             return Err(SupervisorError::Io(format!(
                 "plist not found: {} (call install first)",
                 path.display()

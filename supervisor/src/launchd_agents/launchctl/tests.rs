@@ -61,7 +61,7 @@ fn bootout_outcome_accepts_success_and_not_loaded() {
 /// possibly still loaded — never read as "already gone".
 #[test]
 fn bootout_outcome_keeps_a_timeout_an_io_error_and_a_refusal() {
-    let timed_out = backend("launchctl bootout gui/501/svc timed out after 20s");
+    let timed_out = backend(&timed_out_message(&["bootout", "gui/501/svc"]));
     assert!(matches!(bootout_outcome(timed_out), Err(SupervisorError::Backend(_))));
     let unread = Err(SupervisorError::Io("run launchctl: Broken pipe".into()));
     assert!(matches!(bootout_outcome(unread), Err(SupervisorError::Io(_))));
@@ -97,7 +97,7 @@ fn loaded_from_print_reads_success_and_not_found() {
 /// misleading `bootstrap` error and `unload_wait` call a loaded agent gone.
 #[test]
 fn loaded_from_print_passes_through_a_timeout_and_an_io_error() {
-    assert!(loaded_from_print(backend("launchctl print gui/501/svc timed out after 20s")).is_err());
+    assert!(loaded_from_print(backend(&timed_out_message(&["print", "gui/501/svc"]))).is_err());
     let unread = Err(SupervisorError::Io("run launchctl: Broken pipe".into()));
     assert!(matches!(loaded_from_print(unread), Err(SupervisorError::Io(_))));
 }
@@ -113,7 +113,7 @@ fn status_from_print_refuses_an_answer_without_a_state_line() {
 
 #[test]
 fn status_from_print_passes_through_a_timeout_and_an_io_error() {
-    let timed_out = backend("launchctl print gui/501/svc timed out after 20s");
+    let timed_out = backend(&timed_out_message(&["print", "gui/501/svc"]));
     assert!(status_from_print("gui/501/svc", timed_out).is_err());
     let unread = Err(SupervisorError::Io("run launchctl: Broken pipe".into()));
     assert!(matches!(status_from_print("gui/501/svc", unread), Err(SupervisorError::Io(_))));
@@ -131,4 +131,74 @@ fn user_domain_target_starts_with_gui() {
         suffix.chars().all(|c| c.is_ascii_digit()),
         "uid suffix must be all digits, got: {t}"
     );
+}
+
+// ---------- #898: no GUI domain, every launchd state word ----------
+
+/// What `launchctl bootout` says when there is no `gui/<uid>` domain at all
+/// — no console login, e.g. over SSH (measured on macOS 27: exit 112).
+const BOOTOUT_NO_DOMAIN: &str =
+    "launchctl bootout gui/99999/svc (exit 112): Could not find domain for user gui: 99999";
+
+/// `launchctl print`'s answer for the same case (measured: exit 112).
+const PRINT_NO_DOMAIN: &str =
+    "launchctl print gui/99999/svc (exit 112): Bad request. Could not find domain for user gui: 99999";
+
+/// No domain means no agent can be loaded in it, so the bootout's job is
+/// done and `uninstall` may remove the plist.
+#[test]
+fn bootout_outcome_reads_a_missing_domain_as_not_loaded() {
+    assert!(bootout_outcome(backend(BOOTOUT_NO_DOMAIN)).is_ok());
+}
+
+/// `unload_wait`'s probe agrees, so a headless `run_uninstall` does not warn
+/// that the agent never left a domain that does not exist.
+#[test]
+fn loaded_from_print_reads_a_missing_domain_as_not_loaded() {
+    assert!(!loaded_from_print(backend(PRINT_NO_DOMAIN)).unwrap());
+}
+
+/// `status` keeps the error: install's health wait should stop at once and
+/// say there is no GUI session, not spin 90 s on `Inactive`.
+#[test]
+fn status_from_print_keeps_a_missing_domain_as_an_error() {
+    assert!(status_from_print("gui/99999/svc", backend(PRINT_NO_DOMAIN)).is_err());
+}
+
+/// The timeout's real text (built by `run_launchctl`) is never a
+/// "not loaded" answer to any reader.
+#[test]
+fn the_real_timeout_message_is_not_a_not_loaded_answer() {
+    let msg = timed_out_message(&["bootout", "gui/501/svc"]);
+    assert!(!is_not_loaded_answer(&msg), "{msg}");
+    assert!(!is_no_such_service_error(&msg), "{msg}");
+}
+
+/// Only `running` is `Active`; every other word — launchd's table and the
+/// `xpcproxy` it reports mid-spawn — is `Inactive`.
+#[test]
+fn status_from_print_maps_every_measured_state_word() {
+    let read = |word: &str| status_from_print("gui/501/svc", Ok(format!("\tstate = {word}\n")));
+    assert_eq!(read("running").unwrap(), ServiceStatus::Active);
+    for word in [
+        "not running",
+        "spawn scheduled",
+        "spawning",
+        "xpcproxy",
+        "SIGTERMed",
+        "SIGKILLed",
+        "languishing",
+        "exited",
+    ] {
+        assert_eq!(read(word).unwrap(), ServiceStatus::Inactive, "{word}");
+    }
+}
+
+/// An unlisted word is `Inactive`, NOT an error (#898, measured): no list
+/// is provably complete — the binary's own table missed `xpcproxy` — and an
+/// error makes every health wait fail on a transient state at once.
+#[test]
+fn status_from_print_reads_an_unlisted_state_word_as_inactive() {
+    let read = status_from_print("gui/501/svc", Ok("\tstate = teleporting\n".into()));
+    assert_eq!(read.unwrap(), ServiceStatus::Inactive);
 }

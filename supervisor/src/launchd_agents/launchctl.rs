@@ -38,7 +38,7 @@ pub(super) fn current_uid() -> u32 {
 ///
 /// A non-zero exit is [`SupervisorError::Backend`]
 /// `launchctl <args> (exit N): <stderr> <stdout>`; a timeout is also
-/// `Backend` (its message never matches [`is_no_such_service_error`]); a
+/// `Backend` ([`timed_out_message`], never a "not loaded" answer); a
 /// spawn or read failure is [`SupervisorError::Io`]. The readers below
 /// depend on that split.
 pub(super) fn run_launchctl(args: &[&str]) -> Result<String, SupervisorError> {
@@ -52,12 +52,7 @@ pub(super) fn run_launchctl(args: &[&str]) -> Result<String, SupervisorError> {
     {
         CappedOutcome::Completed(out) => out,
         CappedOutcome::TimedOut => {
-            return Err(SupervisorError::Backend(format!(
-                "launchctl {} timed out after {}s (the gui/<uid> launchd domain may be \
-                 churn-degraded under heavy service load — see issue #130)",
-                args.join(" "),
-                LAUNCHCTL_TIMEOUT.as_secs()
-            )));
+            return Err(SupervisorError::Backend(timed_out_message(args)));
         }
     };
     if !out.status.success() {
@@ -80,13 +75,26 @@ pub(super) fn run_launchctl(args: &[&str]) -> Result<String, SupervisorError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The error text of a `launchctl <args>` call cut off at
+/// [`LAUNCHCTL_TIMEOUT`]. One function so the tests read the real wording:
+/// if it ever gained a "not loaded" phrase, a timeout would read as "already
+/// gone" (#898).
+pub(super) fn timed_out_message(args: &[&str]) -> String {
+    format!(
+        "launchctl {} timed out after {}s (the gui/<uid> launchd domain may be \
+         churn-degraded under heavy service load — see issue #130)",
+        args.join(" "),
+        LAUNCHCTL_TIMEOUT.as_secs()
+    )
+}
+
 /// Parse the `state = <word>` line out of `launchctl print` output.
 ///
 /// `launchctl print` emits a verbose nested dict; the `state` line
 /// looks like `state = running`, indented by some whitespace. This
 /// helper finds the first such line and returns the word — `running`,
-/// `not running`, `waiting`, etc. Returns `None` if no `state` line
-/// is present.
+/// `not running`, `spawn scheduled`, etc. Returns `None` if no `state`
+/// line is present.
 pub(super) fn parse_print_state(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         let trimmed = line.trim();
@@ -100,8 +108,9 @@ pub(super) fn parse_print_state(stdout: &str) -> Option<String> {
 /// Is the service loaded into the given launchd domain?
 ///
 /// `launchctl print <target>` succeeds when the service is bootstrapped
-/// (whether running, exited, waiting or transitional); only launchd's own
-/// "no such service" answer means not loaded. A timeout, a spawn failure or
+/// (whether running, exited or transitional); only launchd's own "no such
+/// service" or "no such domain" answer ([`is_not_loaded_answer`]) means not
+/// loaded. A timeout, a spawn failure or
 /// any other error is returned as `Err` — never read as "not loaded", which
 /// would send `start` into a `bootstrap` that fails with a misleading error,
 /// and `unload_wait` into calling a still-loaded agent gone.
@@ -116,7 +125,7 @@ pub(super) fn loaded_from_print(
 ) -> Result<bool, SupervisorError> {
     match print {
         Ok(_) => Ok(true),
-        Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => Ok(false),
+        Err(SupervisorError::Backend(msg)) if is_not_loaded_answer(&msg) => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -131,8 +140,24 @@ pub(super) fn is_no_such_service_error(msg: &str) -> bool {
         || m.contains("could not find specified service")
 }
 
+/// Heuristic: does `msg` say there is no `gui/<uid>` domain at all?
+/// launchctl answers `Could not find domain for user gui: N` (exit 112) when
+/// the user has no console login — e.g. a Mac reached only over SSH.
+pub(super) fn is_no_such_domain_error(msg: &str) -> bool {
+    msg.to_ascii_lowercase().contains("could not find domain")
+}
+
+/// Does `msg` say the agent is not in the domain — because launchd has no
+/// such service there, or no such domain (no agent can be loaded in a domain
+/// that does not exist)? A churn-degraded domain (#130) hangs instead, which
+/// is a timeout, never this answer.
+pub(super) fn is_not_loaded_answer(msg: &str) -> bool {
+    is_no_such_service_error(msg) || is_no_such_domain_error(msg)
+}
+
 /// Read `launchctl bootout`'s result: `Ok` iff the agent is out of the
-/// domain — it was booted out, or launchd says it was never loaded.
+/// domain — it was booted out, or launchd says it is not loaded
+/// ([`is_not_loaded_answer`], which includes "no such domain", #898).
 ///
 /// Anything else (a timeout against a churn-degraded domain, an answer
 /// that could not be read, a refusal) leaves the agent possibly still
@@ -142,7 +167,7 @@ pub(super) fn bootout_outcome(
 ) -> Result<(), SupervisorError> {
     match bootout {
         Ok(_) => Ok(()),
-        Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => Ok(()),
+        Err(SupervisorError::Backend(msg)) if is_not_loaded_answer(&msg) => Ok(()),
         Err(e) => Err(e),
     }
 }
@@ -151,7 +176,9 @@ pub(super) fn bootout_outcome(
 /// whose plist is on disk.
 ///
 /// launchd's "no such service" answer ([`is_no_such_service_error`]) means
-/// installed but not loaded → `Inactive`.
+/// installed but not loaded → `Inactive`. "No such domain" stays an error on
+/// purpose: install's health wait should stop at once and say there is no
+/// GUI session, not spin on `Inactive`.
 /// A successful `print` is read from its `state = …` line; one with no
 /// such line (a format change, a cut-short answer) is an error, never a
 /// confident `Inactive` — a failed read is not an answer (#895).
@@ -168,9 +195,13 @@ pub(super) fn status_from_print(
     };
     match parse_print_state(&stdout).as_deref() {
         Some("running") => Ok(ServiceStatus::Active),
-        // Loaded-but-not-running variants: `not running`, `waiting`,
-        // `exited`, `spawn scheduled` (transitional). All map to Inactive,
-        // matching the Linux backend's liberal mapping.
+        // Every other word is loaded-but-not-running → Inactive, matching
+        // the Linux backend's liberal mapping. Deliberately NOT a closed list
+        // (#898): the table after `service state: %s` in `/sbin/launchd`
+        // (`not running`, `spawn scheduled`, `spawning`, `SIGTERMed`,
+        // `SIGKILLed`, `languishing`, `exited`) misses `xpcproxy`, which a
+        // full sweep caught mid-spawn — and an error there failed bring-ups
+        // that were seconds from `running`.
         Some(_) => Ok(ServiceStatus::Inactive),
         None => Err(SupervisorError::Backend(format!(
             "launchctl print {target} answered without a `state = …` line, so its state \

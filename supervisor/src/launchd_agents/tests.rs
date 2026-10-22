@@ -198,6 +198,29 @@ fn status_returns_not_installed_when_plist_absent() {
     assert_eq!(s, ServiceStatus::NotInstalled);
 }
 
+/// An agents dir that cannot be searched is an error naming the stat, not
+/// "plist not found (call install first)" from `start` or `NotInstalled`
+/// from `status` (#898). Neither reaches `launchctl`: both stop at the stat.
+#[test]
+fn start_and_status_report_an_unreadable_agents_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    if super::launchctl::current_uid() == 0 {
+        eprintln!("[SKIP] root ignores directory permissions");
+        return;
+    }
+    let root = TestRoot::new("unreadable");
+    let locked = root.path().join("locked");
+    fs::create_dir_all(locked.join("agents")).expect("mkdir");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    let sup = LaunchAgents::with_agents_dir(locked.join("agents"));
+    let start = sup.start("svc").expect_err("start must fail");
+    let status = sup.status("svc");
+    // Restore before asserting, so a failure still lets TestRoot clean up.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("chmod 700");
+    assert!(start.to_string().contains("stat "), "{start}");
+    assert!(matches!(&status, Err(e) if e.to_string().contains("stat ")), "{status:?}");
+}
+
 // ---------- environment_files folding (launchd's EnvironmentFile= counterpart) ----------
 
 #[test]
