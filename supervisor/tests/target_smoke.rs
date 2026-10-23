@@ -101,7 +101,11 @@ mod linux {
     }
     impl Drop for Guard {
         fn drop(&mut self) {
-            let _ = self.sup.uninstall_target(&self.target);
+            // Not silent: since #896 a failed stop keeps the unit files.
+            if let Err(e) = self.sup.uninstall_target(&self.target) {
+                let e = e.to_string().replace('\n', " ");
+                eprint!("\n[WARN] uninstall_target in cleanup: {e}\n");
+            }
         }
     }
 

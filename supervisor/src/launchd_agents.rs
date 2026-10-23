@@ -104,6 +104,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::atomic_write::write_atomic;
+use crate::remove_after::remove_after_stop;
 use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError};
 
 /// Wall-clock cap on every `launchctl` call made through `run_launchctl`
@@ -371,7 +372,7 @@ impl Supervisor for LaunchAgents {
         // agent loaded fails. A `$HOME` owned by another uid (sudo) is
         // refused before any of this (`ensure_home_owned_by`).
         let bootout = if self.is_default_agents_dir() { self.stop(name) } else { Ok(()) };
-        remove_plist_after(bootout, &self.plist_path(name))
+        remove_after_stop(bootout, &self.plist_path(name))
     }
 
     fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
@@ -392,34 +393,6 @@ impl Supervisor for LaunchAgents {
         // Bounded by `run_launchctl`, so a churn-degraded domain cannot
         // hang a status query either.
         status_from_print(&target, run_launchctl(&["print", &target]))
-    }
-}
-
-/// Remove the plist at `path` — but only once `bootout` (the result of
-/// [`Supervisor::stop`]) says the agent is out of the domain.
-///
-/// After a failed bootout the agent may still be loaded; deleting its
-/// plist then would leave a loaded agent with no file on disk while
-/// `uninstall` reported success (#894). So the plist is kept, a
-/// `Backend`/`Io` error says so, and the operator can simply retry
-/// `uninstall`.
-fn remove_plist_after(
-    bootout: Result<(), SupervisorError>,
-    path: &Path,
-) -> Result<(), SupervisorError> {
-    let kept = |m: String| format!("{m}; kept {} so `uninstall` can be retried", path.display());
-    match bootout {
-        Ok(()) => {}
-        Err(SupervisorError::Backend(m)) => return Err(SupervisorError::Backend(kept(m))),
-        Err(SupervisorError::Io(m)) => return Err(SupervisorError::Io(kept(m))),
-        Err(e) => return Err(e),
-    }
-    // Only "already absent" is success; any other failure leaves the plist.
-    match fs::remove_file(path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            Err(SupervisorError::Io(format!("remove {}: {e}", path.display())))
-        }
-        _ => Ok(()),
     }
 }
 

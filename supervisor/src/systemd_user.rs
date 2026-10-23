@@ -45,9 +45,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-
 use crate::atomic_write::write_atomic;
+use crate::remove_after::remove_after_stop;
 use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError, TargetSpec};
 
 mod builder;
@@ -58,7 +57,7 @@ pub use builder::{build_target_unit, build_unit_file, validate_service_name};
 /// The `systemctl --user` invocations.
 mod systemctl;
 pub use systemctl::probe;
-use systemctl::run_systemctl_user;
+use systemctl::{run_systemctl_user, run_user, status_from_is_active, stop_and_disable};
 
 /// `systemctl --user` driver.
 ///
@@ -183,17 +182,17 @@ impl Supervisor for SystemdUser {
 
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
-        let unit = format!("{name}.service");
-        // Stop is best-effort; the unit may already be inactive.
-        let _ = run_systemctl_user(&["stop", &unit]);
-        // Disable is best-effort; the unit may not be enabled.
-        let _ = run_systemctl_user(&["disable", &unit]);
-
-        let path = self.unit_path(name);
-        if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|e| SupervisorError::Io(format!("remove {}: {e}", path.display())))?;
-        }
+        // Only the canonical units dir is driven through systemctl: for a
+        // custom dir (tests) a name collision must not stop someone else's
+        // real unit — the launchd backend's rule too.
+        let stopped = if self.is_default_units_dir() {
+            stop_and_disable(&format!("{name}.service"))
+        } else {
+            Ok(())
+        };
+        // A unit that may still be running (or still linked for the next
+        // boot) keeps its file, and the error says so (#896).
+        remove_after_stop(stopped, &self.unit_path(name))?;
         if self.is_default_units_dir() {
             self.daemon_reload()?;
         }
@@ -204,31 +203,23 @@ impl Supervisor for SystemdUser {
         validate_service_name(name)?;
         // No file on disk → not installed (regardless of what
         // systemctl thinks; the live manager may have a unit cached).
-        if !self.unit_path(name).exists() {
+        // `try_exists`: an unreadable units dir is an error, not "absent".
+        let path = self.unit_path(name);
+        if !path
+            .try_exists()
+            .map_err(|e| SupervisorError::Io(format!("stat {}: {e}", path.display())))?
+        {
             return Ok(ServiceStatus::NotInstalled);
         }
-        // `systemctl is-active` exits 0 for active, 3 for inactive,
-        // and prints the canonical state on stdout in either case.
-        // We trust stdout, not the exit code.
+        // Bounded, and read by the pure `status_from_is_active`: stdout's
+        // word, not the exit code — and no word at all is an error (#896).
         let unit = format!("{name}.service");
-        let out = Command::new("systemctl")
-            .args(["--user", "is-active", &unit])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| SupervisorError::Io(format!("spawn systemctl: {e}")))?;
-        let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Ok(match state.as_str() {
-            "active" => ServiceStatus::Active,
-            "inactive" => ServiceStatus::Inactive,
-            "failed" => ServiceStatus::Failed,
-            // unknown / activating / deactivating / reloading: the
-            // unit *exists* (we checked the file) so it's not
-            // NotInstalled. Map to Inactive so callers don't have to
-            // poll a transient state forever.
-            _ => ServiceStatus::Inactive,
-        })
+        let out = run_user(&["is-active", &unit])?;
+        status_from_is_active(
+            &unit,
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        )
     }
 
     /// Install the target the systemd-native way: write each member unit,
@@ -295,30 +286,29 @@ impl Supervisor for SystemdUser {
         run_systemctl_user(&["stop", &format!("{}.target", target.name)]).map(|_| ())
     }
 
-    /// Tear down the native target: best-effort stop, uninstall members in
-    /// reverse, then remove the `.target` unit file.
+    /// Tear down the native target: stop and disable it, uninstall members
+    /// in reverse, then remove the `.target` unit file.
+    ///
+    /// Fail-fast, like the trait default (#896): a failed stop or disable,
+    /// or a member that could not be uninstalled, returns at once and keeps
+    /// the `.target` file, so a retry finds everything it needs — every
+    /// step is idempotent ("not loaded" and "no unit file" are success).
     fn uninstall_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;
-        // Stop the target (propagates to members via PartOf=), then
-        // remove every member unit and the target unit file.
-        let _ = run_systemctl_user(&["stop", &format!("{}.target", target.name)]);
-        // Undo `install_target`'s enable while the unit file is still on
-        // disk — `disable` resolves the `[Install]` section to know which
-        // links to drop, so removing the file first would strand the
-        // `default.target.wants/` symlink. Best-effort, mirroring
-        // `uninstall`: the target may never have been enabled.
-        let _ = run_systemctl_user(&["disable", &format!("{}.target", target.name)]);
-        for name in target.members.iter().rev() {
-            // Best-effort: keep tearing down remaining members even if one
-            // member's uninstall errors (e.g. its unit file is already gone).
-            let _ = self.uninstall(name);
-        }
-        let path = self.target_path(&target.name);
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| {
-                SupervisorError::Io(format!("remove {}: {e}", path.display()))
-            })?;
-        }
+        // Stop the target (propagates to members via PartOf=) and undo
+        // `install_target`'s enable while the unit file is still on disk —
+        // `disable` resolves the `[Install]` section to know which links to
+        // drop, so removing the file first would strand the
+        // `default.target.wants/` symlink.
+        let stopped = if self.is_default_units_dir() {
+            stop_and_disable(&format!("{}.target", target.name))
+        } else {
+            Ok(())
+        };
+        // Members next, so a member that fails leaves the `.target` file.
+        let torn_down =
+            stopped.and_then(|()| target.members.iter().rev().try_for_each(|m| self.uninstall(m)));
+        remove_after_stop(torn_down, &self.target_path(&target.name))?;
         if self.is_default_units_dir() {
             self.daemon_reload()?;
         }

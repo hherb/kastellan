@@ -88,9 +88,13 @@ struct TestUnitGuard {
 }
 impl Drop for TestUnitGuard {
     fn drop(&mut self) {
-        // Best-effort cleanup. We deliberately ignore errors here so
-        // a partial-state test still cleans up as much as it can.
-        let _ = self.sup.uninstall(&self.name);
+        // Best-effort cleanup, but not silent: since #896 a failed stop keeps
+        // the unit file, which would then start at the next boot. One write,
+        // own line (tests-common's `warn_line` is not a Linux dev-dep here).
+        if let Err(e) = self.sup.uninstall(&self.name) {
+            let e = e.to_string().replace('\n', " ");
+            eprint!("\n[WARN] uninstall {} in cleanup: {e}\n", self.name);
+        }
     }
 }
 

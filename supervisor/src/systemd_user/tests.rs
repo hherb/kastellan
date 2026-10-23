@@ -13,6 +13,8 @@
 //! `systemctl --user` manager. They run on any host with a writable /tmp.
 
 use super::*;
+use super::systemctl::tests::{backend, NOT_LOADED};
+use super::systemctl::{disable_outcome, stop_outcome};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Minimal spec used as a starting point in driver tests.
@@ -181,6 +183,53 @@ fn uninstall_is_idempotent_when_nothing_installed() {
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
     sup.uninstall("nonexistent")
         .expect("uninstall must be idempotent");
+}
+
+/// #896: a stop or disable that did not give one of systemd's benign answers
+/// keeps the unit file — the unit may still run, or start at the next boot —
+/// and the error says the file was kept so `uninstall` can be retried.
+#[test]
+fn a_failed_stop_or_disable_keeps_the_unit_file() {
+    let dir = TestRoot::new("kept-unit");
+    let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+    sup.install(&minimal_spec("svc")).expect("install");
+    let path = sup.unit_path("svc");
+    let no_bus = "systemctl --user stop svc.service (exit 1): Failed to connect to bus: No medium found";
+    for failed in [
+        stop_outcome(backend(no_bus)),
+        disable_outcome(backend(no_bus)),
+        stop_outcome(Err(SupervisorError::Io("run systemctl: Broken pipe".into()))),
+    ] {
+        let err = remove_after_stop(failed, &path).expect_err("the unit may still be live");
+        assert!(path.exists(), "unit file removed although the unit may still run");
+        assert!(err.to_string().contains("kept"), "{err}");
+    }
+}
+
+/// The whole "already stopped" chain with systemd's real wording: a unit the
+/// manager never loaded still has its file removed.
+#[test]
+fn a_not_loaded_stop_removes_the_unit_file() {
+    let dir = TestRoot::new("not-loaded-unit");
+    let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+    sup.install(&minimal_spec("svc")).expect("install");
+    let path = sup.unit_path("svc");
+    remove_after_stop(stop_outcome(backend(NOT_LOADED)), &path).expect("removed");
+    assert!(!path.exists());
+    remove_after_stop(Ok(()), &path).expect("already absent is success");
+}
+
+/// A custom-dir `uninstall_target` (no systemctl call) removes every member
+/// and the `.target` file — and is idempotent.
+#[test]
+fn uninstall_target_removes_members_and_target_file() {
+    let dir = TestRoot::new("uninstall-target");
+    let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+    let target = TargetSpec { name: "kastellan".into(), members: vec!["a".into(), "b".into()] };
+    sup.install_target(&target, &[minimal_spec("a"), minimal_spec("b")]).expect("install");
+    sup.uninstall_target(&target).expect("uninstall_target");
+    assert_eq!(dir_names(dir.path()), Vec::<String>::new());
+    sup.uninstall_target(&target).expect("idempotent");
 }
 
 #[test]

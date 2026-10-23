@@ -31,6 +31,11 @@ pub mod launchd_agents;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod atomic_write;
 
+/// "Remove the unit file only after a clean stop", shared by both backends
+/// (#894, #896) and gated like [`atomic_write`].
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod remove_after;
+
 /// The one service-name gate, shared by both backends (#642).
 ///
 /// Un-`cfg`'d on purpose: it is the only piece of either backend a
