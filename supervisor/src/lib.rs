@@ -45,6 +45,9 @@ pub mod service_name;
 
 pub use service_name::{validate_service_name, MAX_NAME_LEN};
 
+mod status;
+pub use status::ServiceStatus;
+
 pub mod specs;
 
 /// Cross-platform helper to run a child process under a wall-clock
@@ -195,19 +198,6 @@ pub struct TargetSpec {
     pub name: String,
     /// Member service names, in start order (dependencies first).
     pub members: Vec<String>,
-}
-
-/// Coarse runtime state of a service, normalized across backends.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ServiceStatus {
-    /// The service is currently running (`systemctl is-active` == "active").
-    Active,
-    /// The service exists but is not running (`systemctl is-active` == "inactive").
-    Inactive,
-    /// The service exists and entered the failed state.
-    Failed,
-    /// The service is not known to the supervisor (no installed unit / agent).
-    NotInstalled,
 }
 
 #[derive(Debug, Error)]
