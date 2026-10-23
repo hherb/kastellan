@@ -5,6 +5,10 @@
 //! wrong phrase fails here rather than on a live host.
 
 use super::*;
+use std::os::unix::process::ExitStatusExt;
+
+/// The unit every fixture names.
+pub(in crate::systemd_user) const UNIT: &str = "x.service";
 
 /// `systemctl --user stop x.service` for a unit the manager has not loaded
 /// (exit 5). The real error as `run_systemctl_user` renders it.
@@ -17,7 +21,7 @@ const NO_UNIT_FILE: &str = "systemctl --user disable x.service (exit 1): \
 
 /// Any `systemctl --user` call with no reachable user bus (exit 1, empty
 /// stdout) — e.g. `XDG_RUNTIME_DIR` unset in a headless shell.
-const NO_BUS: &str = "systemctl --user stop x.service (exit 1): \
+pub(in crate::systemd_user) const NO_BUS: &str = "systemctl --user stop x.service (exit 1): \
      Failed to connect to bus: No medium found";
 
 pub(in crate::systemd_user) fn backend(msg: &str) -> Result<String, SupervisorError> {
@@ -26,51 +30,105 @@ pub(in crate::systemd_user) fn backend(msg: &str) -> Result<String, SupervisorEr
 
 #[test]
 fn stop_outcome_accepts_success_and_not_loaded_only() {
-    stop_outcome(Ok(String::new())).expect("a clean stop");
-    stop_outcome(backend(NOT_LOADED)).expect("not loaded = already stopped");
+    stop_outcome(UNIT, Ok(String::new())).expect("a clean stop");
+    stop_outcome(UNIT, backend(NOT_LOADED)).expect("not loaded = already stopped");
     for failure in [
         backend(NO_BUS),
-        backend(&timed_out_message(&["stop", "x.service"])),
+        backend(&timed_out_message(&["stop", UNIT])),
         Err(SupervisorError::Io("run systemctl: Broken pipe".into())),
     ] {
-        stop_outcome(failure).expect_err("the unit may still be running");
+        stop_outcome(UNIT, failure).expect_err("the unit may still be running");
     }
 }
 
 #[test]
 fn disable_outcome_accepts_success_and_no_unit_file_only() {
-    disable_outcome(Ok(String::new())).expect("a clean disable");
-    disable_outcome(backend(NO_UNIT_FILE)).expect("no file = nothing to unlink");
-    disable_outcome(backend(NO_BUS)).expect_err("the boot link may remain");
-    disable_outcome(backend(&timed_out_message(&["disable", "x.service"])))
-        .expect_err("a timeout is no answer");
+    disable_outcome(UNIT, Ok(String::new())).expect("a clean disable");
+    disable_outcome(UNIT, backend(NO_UNIT_FILE)).expect("no file = nothing to unlink");
+    for failure in [
+        backend(NO_BUS),
+        backend(&timed_out_message(&["disable", UNIT])),
+        // Each half of the answer alone is not the answer.
+        backend("systemctl --user disable x.service (exit 1): Directory /x does not exist."),
+        backend("systemctl --user disable x.service (exit 1): Unit file x.service is masked."),
+        Err(SupervisorError::Io("run systemctl: Broken pipe".into())),
+    ] {
+        disable_outcome(UNIT, failure).expect_err("the boot link may remain");
+    }
 }
 
 /// The two benign answers are not interchangeable: a stop that says "does
 /// not exist" or a disable that says "not loaded" is not what was measured.
 #[test]
 fn the_benign_answers_do_not_cross_over() {
-    stop_outcome(backend(NO_UNIT_FILE)).expect_err("not a stop answer");
-    disable_outcome(backend(NOT_LOADED)).expect_err("not a disable answer");
+    stop_outcome(UNIT, backend(NO_UNIT_FILE)).expect_err("not a stop answer");
+    disable_outcome(UNIT, backend(NOT_LOADED)).expect_err("not a disable answer");
+}
+
+/// A benign answer about some other unit says nothing about this one.
+#[test]
+fn the_benign_answers_are_about_this_unit_only() {
+    stop_outcome("y.service", backend(NOT_LOADED)).expect_err("x was not loaded, not y");
+    disable_outcome("y.service", backend(NO_UNIT_FILE)).expect_err("x has no file, not y");
 }
 
 /// If the timeout text ever gained a benign phrase, a hung manager would read
 /// as "already stopped" and `uninstall` would delete a running unit's file.
 #[test]
 fn the_timeout_text_is_never_a_benign_answer() {
-    let msg = timed_out_message(&["stop", "x.service"]);
-    assert!(!is_not_loaded_answer(&msg) && !is_no_unit_file_answer(&msg), "{msg}");
-    assert!(msg.contains("systemctl --user stop x.service timed out after"), "{msg}");
+    let msg = timed_out_message(&["stop", UNIT]);
+    assert!(!is_not_loaded_answer(&msg, UNIT) && !is_no_unit_file_answer(&msg, UNIT), "{msg}");
+    assert!(msg.contains("systemctl --user stop x.service did not finish within"), "{msg}");
+}
+
+/// The stop-then-disable wiring, fed systemd's answers: which calls it makes
+/// and what it concludes.
+#[test]
+fn stop_and_disable_disables_only_after_a_clean_stop() {
+    let run = |stop: Result<String, SupervisorError>, disable: Result<String, SupervisorError>| {
+        let mut calls = Vec::new();
+        let (mut stop, mut disable) = (Some(stop), Some(disable));
+        let res = stop_and_disable_with(UNIT, |args: &[&str]| {
+            calls.push(args.join(" "));
+            match args[0] {
+                "stop" => stop.take().expect("one stop"),
+                _ => disable.take().expect("one disable"),
+            }
+        });
+        (res, calls)
+    };
+    let both = vec![format!("stop {UNIT}"), format!("disable {UNIT}")];
+
+    let (res, calls) = run(backend(NO_BUS), Ok(String::new()));
+    assert!(res.is_err(), "a failed stop is a failure even if disable would succeed");
+    assert_eq!(calls, vec![format!("stop {UNIT}")], "no disable after a failed stop");
+
+    let (res, calls) = run(Ok(String::new()), backend(NO_BUS));
+    assert!(res.is_err(), "a failed disable leaves the boot link");
+    assert_eq!(calls, both);
+
+    let (res, calls) = run(backend(NOT_LOADED), backend(NO_UNIT_FILE));
+    assert!(res.is_ok(), "a retry after everything was removed: {res:?}");
+    assert_eq!(calls, both);
+}
+
+/// `is-active`'s answer as `run_user` returns it.
+fn answer(stdout: &str, stderr: &str, code: i32) -> Output {
+    Output {
+        status: ExitStatus::from_raw(code << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
 }
 
 #[test]
 fn status_from_is_active_maps_the_three_settled_states() {
-    assert_eq!(status_from_is_active("x.service", "active\n", "").unwrap(), ServiceStatus::Active);
+    assert_eq!(status_from_is_active(UNIT, &answer("active\n", "", 0)).unwrap(), ServiceStatus::Active);
     assert_eq!(
-        status_from_is_active("x.service", "inactive\n", "").unwrap(),
+        status_from_is_active(UNIT, &answer("inactive\n", "", 3)).unwrap(),
         ServiceStatus::Inactive
     );
-    assert_eq!(status_from_is_active("x.service", "failed\n", "").unwrap(), ServiceStatus::Failed);
+    assert_eq!(status_from_is_active(UNIT, &answer("failed\n", "", 3)).unwrap(), ServiceStatus::Failed);
 }
 
 /// Transitional and unforeseen words stay `Inactive` — deliberately NOT a
@@ -80,7 +138,7 @@ fn status_from_is_active_maps_the_three_settled_states() {
 fn status_from_is_active_reads_any_other_word_as_inactive() {
     for word in ["activating", "deactivating", "reloading", "maintenance", "refreshing", "a-new-word"] {
         assert_eq!(
-            status_from_is_active("x.service", &format!("{word}\n"), "").unwrap(),
+            status_from_is_active(UNIT, &answer(&format!("{word}\n"), "", 3)).unwrap(),
             ServiceStatus::Inactive,
             "{word}"
         );
@@ -88,14 +146,15 @@ fn status_from_is_active_reads_any_other_word_as_inactive() {
 }
 
 /// #896: no word at all (the user bus unreachable) is a failed read, not a
-/// confident `Inactive` — and the error carries systemctl's own reason.
+/// confident `Inactive` — and the error carries systemctl's own reason and
+/// exit code, so even a silent failure says something.
 #[test]
 fn status_from_is_active_refuses_an_empty_answer() {
     for stdout in ["", "\n", "  \n"] {
-        let err = status_from_is_active("x.service", stdout, "Failed to connect to bus: No medium found\n")
-            .expect_err("no state word");
-        let msg = err.to_string();
-        assert!(msg.contains("x.service") && msg.contains("Failed to connect to bus"), "{msg}");
+        let out = answer(stdout, "Failed to connect to bus: No medium found\n", 1);
+        let msg = status_from_is_active(UNIT, &out).expect_err("no state word").to_string();
+        assert!(msg.contains(UNIT) && msg.contains("Failed to connect to bus"), "{msg}");
+        assert!(msg.contains("(exit 1)"), "{msg}");
     }
 }
 

@@ -54,7 +54,6 @@ mod builder;
 // and `::validate_service_name` keep their public paths after the split.
 pub use builder::{build_target_unit, build_unit_file, validate_service_name};
 
-/// The `systemctl --user` invocations.
 mod systemctl;
 pub use systemctl::probe;
 use systemctl::{run_systemctl_user, run_user, status_from_is_active, stop_and_disable};
@@ -182,8 +181,8 @@ impl Supervisor for SystemdUser {
 
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
-        // Only the canonical units dir is driven through systemctl: for a
-        // custom dir (tests) a name collision must not stop someone else's
+        // `uninstall` drives systemctl only for the canonical units dir: for
+        // a custom dir (tests) a name collision must not stop someone else's
         // real unit — the launchd backend's rule too.
         let stopped = if self.is_default_units_dir() {
             stop_and_disable(&format!("{name}.service"))
@@ -214,12 +213,7 @@ impl Supervisor for SystemdUser {
         // Bounded, and read by the pure `status_from_is_active`: stdout's
         // word, not the exit code — and no word at all is an error (#896).
         let unit = format!("{name}.service");
-        let out = run_user(&["is-active", &unit])?;
-        status_from_is_active(
-            &unit,
-            &String::from_utf8_lossy(&out.stdout),
-            &String::from_utf8_lossy(&out.stderr),
-        )
+        status_from_is_active(&unit, &run_user(&["is-active", &unit])?)
     }
 
     /// Install the target the systemd-native way: write each member unit,
@@ -295,7 +289,13 @@ impl Supervisor for SystemdUser {
     /// step is idempotent ("not loaded" and "no unit file" are success).
     fn uninstall_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;
-        // Stop the target (propagates to members via PartOf=) and undo
+        // Every name before any side effect, as `install_target` does: a bad
+        // member found mid-teardown would wedge every retry on it.
+        for member in &target.members {
+            validate_service_name(member)?;
+        }
+        // Stop the target (propagates via PartOf= to members whose spec sets
+        // `part_of`, as both of `kastellan_target_spec`'s do) and undo
         // `install_target`'s enable while the unit file is still on disk —
         // `disable` resolves the `[Install]` section to know which links to
         // drop, so removing the file first would strand the
@@ -412,9 +412,10 @@ impl SystemdUser {
     }
 
     /// True iff the driver writes into the canonical
-    /// `~/.config/systemd/user/` location. Used to decide whether
-    /// `daemon-reload` makes sense — for custom dirs (tests) it
-    /// doesn't, since the live manager doesn't scan them.
+    /// `~/.config/systemd/user/` location. Only then are `daemon-reload`,
+    /// `install`'s `enable` and the uninstalls' `stop` + `disable` sent to
+    /// the live manager: it does not scan a custom dir (tests), and a name
+    /// collision there must not stop or unlink someone else's real unit.
     fn is_default_units_dir(&self) -> bool {
         let home = match std::env::var_os("HOME") {
             Some(h) => PathBuf::from(h),

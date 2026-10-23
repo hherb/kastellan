@@ -9,11 +9,18 @@
 //! `builder.rs`.
 //!
 //! These exercise the file-writing half of `install`/`uninstall`/
-//! `install_target` against a custom units dir, without touching the live
-//! `systemctl --user` manager. They run on any host with a writable /tmp.
+//! `install_target`/`uninstall_target` against a custom units dir, without
+//! touching the live `systemctl --user` manager, plus the #896 composition of
+//! the stop readers with `remove_after_stop`. They run on any host with a
+//! writable /tmp.
+//!
+//! Not covered here: that `uninstall` hands its stop result to
+//! `remove_after_stop` at all — a custom dir sends no stop, so only the live
+//! smoke tests reach that line (`stop_and_disable_with` is pinned in
+//! `systemctl/tests.rs`).
 
 use super::*;
-use super::systemctl::tests::{backend, NOT_LOADED};
+use super::systemctl::tests::{backend, NOT_LOADED, NO_BUS, UNIT};
 use super::systemctl::{disable_outcome, stop_outcome};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -194,11 +201,10 @@ fn a_failed_stop_or_disable_keeps_the_unit_file() {
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");
     let path = sup.unit_path("svc");
-    let no_bus = "systemctl --user stop svc.service (exit 1): Failed to connect to bus: No medium found";
     for failed in [
-        stop_outcome(backend(no_bus)),
-        disable_outcome(backend(no_bus)),
-        stop_outcome(Err(SupervisorError::Io("run systemctl: Broken pipe".into()))),
+        stop_outcome(UNIT, backend(NO_BUS)),
+        disable_outcome(UNIT, backend(NO_BUS)),
+        stop_outcome(UNIT, Err(SupervisorError::Io("run systemctl: Broken pipe".into()))),
     ] {
         let err = remove_after_stop(failed, &path).expect_err("the unit may still be live");
         assert!(path.exists(), "unit file removed although the unit may still run");
@@ -214,7 +220,7 @@ fn a_not_loaded_stop_removes_the_unit_file() {
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");
     let path = sup.unit_path("svc");
-    remove_after_stop(stop_outcome(backend(NOT_LOADED)), &path).expect("removed");
+    remove_after_stop(stop_outcome(UNIT, backend(NOT_LOADED)), &path).expect("removed");
     assert!(!path.exists());
     remove_after_stop(Ok(()), &path).expect("already absent is success");
 }
@@ -232,12 +238,66 @@ fn uninstall_target_removes_members_and_target_file() {
     sup.uninstall_target(&target).expect("idempotent");
 }
 
+/// #896 fail-fast: a member that cannot be uninstalled stops the teardown
+/// there, keeping the `.target` file and the members not yet reached, so a
+/// retry finds everything it needs.
+#[test]
+fn uninstall_target_stops_at_a_member_it_cannot_remove() {
+    let dir = TestRoot::new("uninstall-target-fail-fast");
+    let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+    let target = TargetSpec { name: "kastellan".into(), members: vec!["a".into(), "b".into()] };
+    sup.install_target(&target, &[minimal_spec("a"), minimal_spec("b")]).expect("install");
+    // Members go in reverse, so `b` is first; a directory cannot be removed
+    // as a file.
+    fs::remove_file(sup.unit_path("b")).expect("rm b");
+    fs::create_dir(sup.unit_path("b")).expect("mkdir in b's place");
+    let err = sup.uninstall_target(&target).expect_err("b cannot be removed");
+    assert!(err.to_string().contains("b.service"), "{err}");
+    assert!(sup.target_path("kastellan").exists(), "target file removed after a failed member");
+    assert!(sup.unit_path("a").exists(), "a torn down after b failed");
+}
+
+/// Every member name is checked before anything is torn down — a bad one
+/// found mid-teardown would wedge every retry on it.
+#[test]
+fn uninstall_target_rejects_a_bad_member_before_touching_anything() {
+    let dir = TestRoot::new("uninstall-target-bad-member");
+    let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
+    let good = TargetSpec { name: "kastellan".into(), members: vec!["a".into()] };
+    sup.install_target(&good, &[minimal_spec("a")]).expect("install");
+    let bad = TargetSpec { name: "kastellan".into(), members: vec!["../x".into(), "a".into()] };
+    let err = sup.uninstall_target(&bad).expect_err("bad member name");
+    assert!(matches!(err, SupervisorError::InvalidName(_)), "{err}");
+    assert!(sup.unit_path("a").exists() && sup.target_path("kastellan").exists());
+}
+
 #[test]
 fn status_returns_not_installed_when_unit_absent() {
     let dir = TestRoot::new("status-absent");
     let sup = SystemdUser::with_units_dir(dir.path().to_path_buf());
     let s = sup.status("never-installed").expect("status");
     assert_eq!(s, ServiceStatus::NotInstalled);
+}
+
+/// A units dir that cannot be searched is an error naming the stat, not
+/// `NotInstalled` — the launchd twin's #898 test. Never reaches systemctl.
+#[test]
+fn status_reports_an_unreadable_units_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TestRoot::new("unreadable");
+    let locked = root.path().join("locked");
+    fs::create_dir_all(locked.join("units")).expect("mkdir");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    let bites = locked.join("units").try_exists().is_err();
+    let sup = SystemdUser::with_units_dir(locked.join("units"));
+    let status = sup.status("svc");
+    // Restore before asserting, so a failure still lets TestRoot clean up.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("chmod 700");
+    if !bites {
+        eprintln!("[SKIP] directory permissions do not apply to this user (root)");
+        return;
+    }
+    assert!(matches!(&status, Err(e) if e.to_string().contains("stat ")), "{status:?}");
 }
 
 // ---------- ordering-field injection rejection tests ----------

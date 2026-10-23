@@ -147,13 +147,13 @@ fn uninstall_is_idempotent_when_nothing_installed() {
 /// #894: a bootout that did not answer "not loaded" keeps the plist, so
 /// `uninstall` can be retried — and the error says the plist was kept.
 #[test]
-fn remove_plist_after_a_failed_bootout_keeps_the_plist() {
+fn remove_after_stop_a_failed_bootout_keeps_the_plist() {
     let dir = TestRoot::new("kept-plist");
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");
     let path = sup.plist_path("svc");
     let failures = [
-        SupervisorError::Backend("launchctl bootout timed out".into()),
+        SupervisorError::Backend(super::launchctl::timed_out_message(&["bootout", "gui/501/svc"])),
         SupervisorError::Io("run launchctl: Broken pipe".into()),
     ];
     for failure in failures {
@@ -168,7 +168,7 @@ fn remove_plist_after_a_failed_bootout_keeps_the_plist() {
 }
 
 #[test]
-fn remove_plist_after_a_clean_bootout_removes_it() {
+fn remove_after_stop_a_clean_bootout_removes_it() {
     let dir = TestRoot::new("removed-plist");
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");
@@ -181,7 +181,7 @@ fn remove_plist_after_a_clean_bootout_removes_it() {
 /// The whole "already not loaded" chain with launchctl's real wording:
 /// uninstalling a stopped agent still removes its plist.
 #[test]
-fn remove_plist_after_a_not_loaded_bootout_removes_it() {
+fn remove_after_stop_a_not_loaded_bootout_removes_it() {
     let dir = TestRoot::new("not-loaded-plist");
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");

@@ -52,13 +52,24 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 - Readers in `systemd_user/systemctl.rs` (movement-first, proved): `stop_outcome` / `disable_outcome`
   accept only success or their **own** benign answer (they do not cross over); `status_from_is_active`
   refuses an empty answer and keeps ⚠️ **every other word `Inactive` — not a closed list** (#898's
-  `xpcproxy` lesson). Every call, `probe` too, is `run_capped` at **30 s** (units: `TimeoutStopSec=10`).
+  `xpcproxy` lesson). Every call, `probe` too, is `run_capped` at **60 s**: `TimeoutStopSec=10` is spent before
+  *and* after SIGKILL, and `stop kastellan.target` stops its two members in sequence — 40 s healthy.
+  The timeout text says "did not finish", never "is not answering" alone.
 - `uninstall`/`uninstall_target` keep the unit file on a failed stop or disable (fail-fast; every step
   idempotent) via the shared **`remove_after::remove_after_stop`** (was launchd's `remove_plist_after`).
   Both drive `systemctl` **only for the canonical units dir** (was: always — a custom-dir test could
   stop a real unit). Smoke guards print a hand-rolled `[WARN]` (no `tests-common` on Linux here).
-- Supervisor lib on **Linux 130** (+11), Mac unchanged at 144. 5/5 verdict mutants killed on the DGX.
-  Follow-up still open: [#900](https://github.com/hherb/kastellan/issues/900) (needs a `ServiceStatus` change).
+- Review fixes (same PR): `uninstall_target` validates **every member before any side effect** (a bad
+  one mid-teardown wedged every retry); the benign answers are **anchored on the unit's name**
+  (`Unit <unit> not loaded.`); `stop_and_disable_with` takes the runner so a test proves no disable
+  after a failed stop; `remove_after_stop` says "kept" only for a file that is there; both smoke
+  tests now **assert a second live uninstall succeeds** (passed on the DGX, systemd 255, `.target`
+  too). ⚠️ Still unpinned: that `uninstall` passes its stop result on at all — a custom dir sends no
+  stop, so only the live smoke reaches that line.
+- Supervisor lib on **Linux 137** (130 + 7 review), Mac **146** (144 + 2 in `remove_after`).
+  Follow-ups open: [#900](https://github.com/hherb/kastellan/issues/900) (launchd's state word lost behind
+  `Inactive`) and [#902](https://github.com/hherb/kastellan/issues/902) (systemd `deactivating` reads
+  `Inactive`, so a stop-wait returns early) — both want a `ServiceStatus` change.
 
 ### Earlier (2026-10-22 → 23): #894, #895, #898 (PRs #897, #899, merged) — what still binds
 
