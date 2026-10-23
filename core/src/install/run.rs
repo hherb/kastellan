@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use kastellan_supervisor::{default_supervisor, ServiceStatus, Supervisor};
+use kastellan_supervisor::{default_supervisor, describe_status, ServiceStatus, Supervisor};
 
 use super::plan::{
     build_specs, cli_path_precedence_note, estimate_model_bytes, is_local_ollama, memory_suffices,
@@ -447,16 +447,22 @@ fn verify_running(sup: &dyn Supervisor, layout: &Layout) -> Result<(), String> {
         // itself cannot succeed (no launchd user domain, unspawnable
         // systemctl). Polling that for 90 s is not patience, it is a hidden
         // hard failure, so fail immediately and say which query broke.
-        let pg = sup
-            .status("kastellan-postgres")
+        let (pg, pg_word) = sup
+            .status_with_word("kastellan-postgres")
             .map_err(|e| format!("cannot query kastellan-postgres via the service manager: {e}"))?;
-        let core = sup
-            .status("kastellan-core")
+        let (core, core_word) = sup
+            .status_with_word("kastellan-core")
             .map_err(|e| format!("cannot query kastellan-core via the service manager: {e}"))?;
         if socket.exists() && pg == ServiceStatus::Active && core == ServiceStatus::Active {
             return Ok(());
         }
-        last = format!("postgres={pg:?}, core={core:?}, socket={}", socket.exists());
+        // With the manager's own words: `Inactive` alone hides a crash loop (#900).
+        last = format!(
+            "postgres={}, core={}, socket={}",
+            describe_status(pg, pg_word.as_deref()),
+            describe_status(core, core_word.as_deref()),
+            socket.exists()
+        );
         std::thread::sleep(Duration::from_secs(2));
     }
     // A cluster created by an older install (superuser != $USER) yields a role

@@ -227,13 +227,18 @@ pub(super) fn status_from_print(
     };
     match parse_print_state(&stdout).as_deref() {
         Some("running") => Ok(ServiceStatus::Active),
+        // A spawn under way, or a kill launchd has sent but not seen finish:
+        // the process may exist, so neither a start- nor a stop-wait may end
+        // here (#902).
+        Some("spawn scheduled" | "spawning" | "xpcproxy" | "SIGTERMed" | "SIGKILLed") => {
+            Ok(ServiceStatus::Transitioning)
+        }
         // Every other word is loaded-but-not-running → Inactive, matching
         // the Linux backend's liberal mapping. Deliberately NOT a closed list
-        // (#898): the other words in the table after `service state: %s` in
-        // `/sbin/launchd` (`not running`, `spawn scheduled`, `spawning`,
-        // `SIGTERMed`, `SIGKILLed`, `languishing`, `exited`) miss `xpcproxy`,
-        // which a full sweep caught mid-spawn — a closed list tried during
-        // #898 errored on it and failed two PG bring-ups seconds from `running`.
+        // (#898): the words in the table after `service state: %s` in
+        // `/sbin/launchd` miss `xpcproxy`, which a full sweep caught
+        // mid-spawn — a closed list tried during #898 errored on it and
+        // failed two PG bring-ups seconds from `running`.
         Some(_) => Ok(ServiceStatus::Inactive),
         None => Err(SupervisorError::Backend(format!(
             "launchctl print {target} answered without a `state = …` line, so its state \

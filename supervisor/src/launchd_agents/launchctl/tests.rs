@@ -174,22 +174,17 @@ fn the_real_timeout_message_is_not_a_not_loaded_answer() {
     assert!(!is_no_such_service_error(&msg), "{msg}");
 }
 
-/// Only `running` is `Active`; every other word — launchd's table and the
-/// `xpcproxy` it reports mid-spawn — is `Inactive`.
+/// Only `running` is `Active`. The words of a spawn in progress or a kill
+/// not yet finished are `Transitioning` (#902) — a wait for `Inactive` must
+/// not end on `SIGTERMed` — and the settled not-running words are `Inactive`.
 #[test]
 fn status_from_print_maps_every_measured_state_word() {
     let read = |word: &str| status_from_print("gui/501/svc", Ok(format!("\tstate = {word}\n")));
     assert_eq!(read("running").unwrap(), ServiceStatus::Active);
-    for word in [
-        "not running",
-        "spawn scheduled",
-        "spawning",
-        "xpcproxy",
-        "SIGTERMed",
-        "SIGKILLed",
-        "languishing",
-        "exited",
-    ] {
+    for word in ["spawn scheduled", "spawning", "xpcproxy", "SIGTERMed", "SIGKILLed"] {
+        assert_eq!(read(word).unwrap(), ServiceStatus::Transitioning, "{word}");
+    }
+    for word in ["not running", "languishing", "exited"] {
         assert_eq!(read(word).unwrap(), ServiceStatus::Inactive, "{word}");
     }
 }

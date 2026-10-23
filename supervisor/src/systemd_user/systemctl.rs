@@ -187,17 +187,19 @@ pub(super) fn stop_and_disable_with(
 /// Read `systemctl --user is-active <unit>`'s answer for a unit whose file is
 /// on disk. Its exit code is not read: 3 and 4 both say `inactive`.
 ///
-/// `active` → `Active`, `failed` → `Failed`, any other word → `Inactive` —
-/// deliberately not a closed list (the launchd twin's missed `xpcproxy`,
-/// #898). No word at all is a failed read (the user bus unreachable prints
-/// its reason on stderr and nothing on stdout), never a confident
-/// `Inactive` (#896).
+/// `active`/`reloading`/`refreshing` (up and serving) → `Active`,
+/// `activating`/`deactivating` (a process may still exist) → `Transitioning`
+/// (#902), `failed` → `Failed`, any other word → `Inactive` — deliberately
+/// not a closed list (the launchd twin's missed `xpcproxy`, #898). No word
+/// at all is a failed read (the user bus unreachable prints its reason on
+/// stderr and nothing on stdout), never a confident `Inactive` (#896).
 pub(super) fn status_from_is_active(
     unit: &str,
     out: &Output,
 ) -> Result<ServiceStatus, SupervisorError> {
     match String::from_utf8_lossy(&out.stdout).trim() {
-        "active" => Ok(ServiceStatus::Active),
+        "active" | "reloading" | "refreshing" => Ok(ServiceStatus::Active),
+        "activating" | "deactivating" => Ok(ServiceStatus::Transitioning),
         "failed" => Ok(ServiceStatus::Failed),
         "" => Err(SupervisorError::Backend(format!(
             "systemctl --user is-active {unit} (exit {}) answered no state, so its state \

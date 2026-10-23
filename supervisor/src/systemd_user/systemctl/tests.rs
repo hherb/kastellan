@@ -131,17 +131,29 @@ fn status_from_is_active_maps_the_three_settled_states() {
     assert_eq!(status_from_is_active(UNIT, &answer("failed\n", "", 3)).unwrap(), ServiceStatus::Failed);
 }
 
-/// Transitional and unforeseen words stay `Inactive` — deliberately NOT a
-/// closed list: the launchd twin's closed list missed `xpcproxy` and failed
-/// two PG bring-ups seconds from `running` (#898).
+fn read(word: &str) -> ServiceStatus {
+    status_from_is_active(UNIT, &answer(&format!("{word}\n"), "", 3)).unwrap()
+}
+
+/// `reloading`/`refreshing` are up and serving → `Active`; `activating`/
+/// `deactivating` may still have a process → `Transitioning`, so a wait for
+/// `Inactive` after a stop does not end inside the stop timeout (#902).
+#[test]
+fn status_from_is_active_maps_the_moving_states() {
+    assert_eq!(read("reloading"), ServiceStatus::Active);
+    assert_eq!(read("refreshing"), ServiceStatus::Active);
+    assert_eq!(read("activating"), ServiceStatus::Transitioning);
+    assert_eq!(read("deactivating"), ServiceStatus::Transitioning);
+}
+
+/// `maintenance` (no process, resources being cleaned) and unforeseen words
+/// stay `Inactive` — deliberately NOT a closed list: the launchd twin's
+/// closed list missed `xpcproxy` and failed two PG bring-ups seconds from
+/// `running` (#898).
 #[test]
 fn status_from_is_active_reads_any_other_word_as_inactive() {
-    for word in ["activating", "deactivating", "reloading", "maintenance", "refreshing", "a-new-word"] {
-        assert_eq!(
-            status_from_is_active(UNIT, &answer(&format!("{word}\n"), "", 3)).unwrap(),
-            ServiceStatus::Inactive,
-            "{word}"
-        );
+    for word in ["maintenance", "a-new-word"] {
+        assert_eq!(read(word), ServiceStatus::Inactive, "{word}");
     }
 }
 

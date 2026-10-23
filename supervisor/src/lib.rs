@@ -46,7 +46,7 @@ pub mod service_name;
 pub use service_name::{validate_service_name, MAX_NAME_LEN};
 
 mod status;
-pub use status::ServiceStatus;
+pub use status::{describe_status, ServiceStatus};
 
 pub mod specs;
 
@@ -254,6 +254,18 @@ pub trait Supervisor {
     fn stop(&self, name: &str) -> Result<(), SupervisorError>;
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError>;
     fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError>;
+
+    /// [`status`](Self::status) plus the service manager's own state word
+    /// (`systemctl is-active`'s answer, `launchctl print`'s `state = …`),
+    /// which the status folds away (`languishing` reads `Inactive`). For
+    /// diagnostics only — render it with [`describe_status`] (#900). The
+    /// default has no word to give.
+    fn status_with_word(
+        &self,
+        name: &str,
+    ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
+        self.status(name).map(|s| (s, None))
+    }
 
     /// Install every member of a [`TargetSpec`] (the generic bundle).
     ///

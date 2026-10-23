@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use kastellan_supervisor::{ServiceStatus, Supervisor};
+use kastellan_supervisor::{describe_status, ServiceStatus, Supervisor};
 
 /// Block until `predicate(status)` returns `true` or `timeout`
 /// elapses. The supervisor is polled every 50 ms via `status(name)`;
@@ -20,19 +20,22 @@ pub fn wait_for_status<F: Fn(ServiceStatus) -> bool>(
     timeout: Duration,
 ) -> Result<ServiceStatus, String> {
     let start = Instant::now();
-    let mut last = sup.status(name).map_err(|e| format!("status: {e}"))?;
+    let read = || sup.status_with_word(name).map_err(|e| format!("status: {e}"));
+    let (mut last, mut word) = read()?;
     loop {
         if predicate(last) {
             return Ok(last);
         }
         if start.elapsed() > timeout {
+            // The manager's own word names what `last` folds away (#900).
             return Err(format!(
-                "timed out after {:?} waiting for status; last={:?}",
-                timeout, last
+                "timed out after {:?} waiting for status; last={}",
+                timeout,
+                describe_status(last, word.as_deref())
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
-        last = sup.status(name).map_err(|e| format!("status: {e}"))?;
+        (last, word) = read()?;
     }
 }
 
