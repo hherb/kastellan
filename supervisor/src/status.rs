@@ -9,21 +9,26 @@ use serde::{Deserialize, Serialize};
 /// neither wait can be fooled by a service caught between the two (#902).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ServiceStatus {
-    /// The service is currently running (`systemctl is-active` == "active").
+    /// The service is up and serving: systemd's `active`/`reloading`/
+    /// `refreshing`, launchd's `running`.
     Active,
-    /// The service exists but is not running (`systemctl is-active` == "inactive").
-    ///
-    /// Also any state word a backend does not recognise: no list of the
-    /// manager's words is provably complete (#898's `xpcproxy`), and an
-    /// unknown word must not fail a health wait outright.
+    /// The service exists and is settled not running: systemd's `inactive`/
+    /// `maintenance`, launchd's `not running`/`exited`/`languishing`, or an
+    /// agent whose plist is on disk but is not loaded.
     Inactive,
     /// The service is on its way up or down and may still have a process —
     /// systemd's `activating`/`deactivating`, launchd's `spawning` or
     /// `SIGTERMed`. Neither "running" nor "stopped": a wait for `Inactive`
     /// after a stop must not end here while the process is in its stop
     /// timeout (#902).
+    ///
+    /// Also any state word a backend does not recognise: no list of the
+    /// manager's words is provably complete (#898's `xpcproxy`). An unknown
+    /// word must not fail a health wait outright, nor end a stop-wait early;
+    /// read as moving, it keeps either wait polling, and a timeout names it.
     Transitioning,
-    /// The service exists and entered the failed state.
+    /// The service exists and entered the failed state (systemd's `failed`;
+    /// launchd has no such word and never reports it).
     Failed,
     /// The service is not known to the supervisor (no installed unit / agent).
     NotInstalled,

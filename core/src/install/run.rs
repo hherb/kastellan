@@ -424,7 +424,7 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Wait for the socket to appear AND both services to reach `active`, polling
+/// Wait for the socket to appear AND both services to reach `Active`, polling
 /// over a window. `kastellan-core` is `After=` Postgres but systemd does not
 /// wait for PG *readiness*, so core typically crash-restarts a few times (with
 /// `Restart=on-failure` backoff) before the cluster accepts connections — this
@@ -456,7 +456,8 @@ fn verify_running(sup: &dyn Supervisor, layout: &Layout) -> Result<(), String> {
         if socket.exists() && pg == ServiceStatus::Active && core == ServiceStatus::Active {
             return Ok(());
         }
-        // With the manager's own words: `Inactive` alone hides a crash loop (#900).
+        // With the manager's own words: the status alone (`Inactive` or
+        // `Transitioning`) hides a crash loop (#900).
         last = format!(
             "postgres={}, core={}, socket={}",
             describe_status(pg, pg_word.as_deref()),

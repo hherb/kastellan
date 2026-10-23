@@ -185,30 +185,37 @@ pub(super) fn stop_and_disable_with(
 }
 
 /// Read `systemctl --user is-active <unit>`'s answer for a unit whose file is
-/// on disk. Its exit code is not read: 3 and 4 both say `inactive`.
+/// on disk into a status plus the word itself, for diagnostics (#900). Its
+/// exit code is not read: 3 and 4 both say `inactive`.
 ///
 /// `active`/`reloading`/`refreshing` (up and serving) → `Active`,
-/// `activating`/`deactivating` (a process may still exist) → `Transitioning`
-/// (#902), `failed` → `Failed`, any other word → `Inactive` — deliberately
-/// not a closed list (the launchd twin's missed `xpcproxy`, #898). No word
-/// at all is a failed read (the user bus unreachable prints its reason on
-/// stderr and nothing on stdout), never a confident `Inactive` (#896).
+/// `inactive`/`maintenance` (the service's process is gone) → `Inactive`,
+/// `failed` → `Failed`, `activating`/`deactivating` (a process may still
+/// exist) and any other word → `Transitioning` (#902) — deliberately not a
+/// closed list (the launchd twin's missed `xpcproxy`, #898), and an unknown
+/// word must not end a stop-wait. No word at all is a failed read (the user
+/// bus unreachable prints its reason on stderr and nothing on stdout), never
+/// a confident `Inactive` (#896).
 pub(super) fn status_from_is_active(
     unit: &str,
     out: &Output,
-) -> Result<ServiceStatus, SupervisorError> {
-    match String::from_utf8_lossy(&out.stdout).trim() {
-        "active" | "reloading" | "refreshing" => Ok(ServiceStatus::Active),
-        "activating" | "deactivating" => Ok(ServiceStatus::Transitioning),
-        "failed" => Ok(ServiceStatus::Failed),
-        "" => Err(SupervisorError::Backend(format!(
-            "systemctl --user is-active {unit} (exit {}) answered no state, so its state \
-             is unknown: {}",
-            exit_word(&out.status),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))),
-        _ => Ok(ServiceStatus::Inactive),
-    }
+) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
+    let word = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let status = match word.as_str() {
+        "active" | "reloading" | "refreshing" => ServiceStatus::Active,
+        "inactive" | "maintenance" => ServiceStatus::Inactive,
+        "failed" => ServiceStatus::Failed,
+        "" => {
+            return Err(SupervisorError::Backend(format!(
+                "systemctl --user is-active {unit} (exit {}) answered no state, so its state \
+                 is unknown: {}",
+                exit_word(&out.status),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )))
+        }
+        _ => ServiceStatus::Transitioning,
+    };
+    Ok((status, Some(word)))
 }
 
 #[cfg(test)]

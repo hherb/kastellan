@@ -132,8 +132,7 @@ mod unload_wait;
 /// The `launchctl` invocations and the pure readers of their answers.
 mod launchctl;
 use launchctl::{
-    bootout_outcome, is_loaded_in_domain, parse_print_state, run_launchctl, status_from_print,
-    user_domain_target,
+    bootout_outcome, is_loaded_in_domain, run_launchctl, status_from_print, user_domain_target,
 };
 
 /// `launchctl` driver for user LaunchAgents.
@@ -376,10 +375,6 @@ impl Supervisor for LaunchAgents {
         remove_after_stop(bootout, &self.plist_path(name))
     }
 
-    fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
-        self.status_with_word(name).map(|(status, _)| status)
-    }
-
     fn status_with_word(
         &self,
         name: &str,
@@ -400,9 +395,7 @@ impl Supervisor for LaunchAgents {
         let target = format!("{}/{name}", user_domain_target()?);
         // Bounded by `run_launchctl`, so a churn-degraded domain cannot
         // hang a status query either.
-        let print = run_launchctl(&["print", &target]);
-        let word = print.as_deref().ok().and_then(parse_print_state);
-        Ok((status_from_print(&target, print)?, word))
+        status_from_print(&target, run_launchctl(&["print", &target]))
     }
 }
 

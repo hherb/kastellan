@@ -253,18 +253,19 @@ pub trait Supervisor {
     fn start(&self, name: &str) -> Result<(), SupervisorError>;
     fn stop(&self, name: &str) -> Result<(), SupervisorError>;
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError>;
-    fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError>;
 
-    /// [`status`](Self::status) plus the service manager's own state word
+    /// The service's status plus the service manager's own state word
     /// (`systemctl is-active`'s answer, `launchctl print`'s `state = …`),
-    /// which the status folds away (`languishing` reads `Inactive`). For
-    /// diagnostics only — render it with [`describe_status`] (#900). The
-    /// default has no word to give.
+    /// which the status folds away (`languishing` reads `Inactive`). The word
+    /// is for diagnostics only — render it with [`describe_status`] (#900).
+    /// The required method, so [`status`](Self::status) cannot disagree with it.
     fn status_with_word(
         &self,
         name: &str,
-    ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
-        self.status(name).map(|s| (s, None))
+    ) -> Result<(ServiceStatus, Option<String>), SupervisorError>;
+
+    fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
+        self.status_with_word(name).map(|(status, _)| status)
     }
 
     /// Install every member of a [`TargetSpec`] (the generic bundle).
@@ -402,7 +403,10 @@ impl Supervisor for NotYetImplemented {
     fn uninstall(&self, _: &str) -> Result<(), SupervisorError> {
         Err(SupervisorError::NotImplemented("uninstall — Phase 0 work item"))
     }
-    fn status(&self, _: &str) -> Result<ServiceStatus, SupervisorError> {
+    fn status_with_word(
+        &self,
+        _: &str,
+    ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
         Err(SupervisorError::NotImplemented("status — Phase 0 work item"))
     }
 }
@@ -433,8 +437,11 @@ mod default_target_tests {
             self.calls.borrow_mut().push(format!("uninstall:{name}"));
             Ok(())
         }
-        fn status(&self, _name: &str) -> Result<ServiceStatus, SupervisorError> {
-            Ok(ServiceStatus::Active)
+        fn status_with_word(
+            &self,
+            _name: &str,
+        ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
+            Ok((ServiceStatus::Active, None))
         }
     }
 

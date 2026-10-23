@@ -204,11 +204,13 @@ pub(super) fn bootout_outcome(
     }
 }
 
-/// Read `launchctl print <target>`'s result into a status for an agent
-/// whose plist is on disk.
+/// Read `launchctl print <target>`'s result into a status, plus launchd's
+/// own state word for diagnostics (#900), for an agent whose plist is on disk.
 ///
 /// launchd's "no such service" answer ([`is_no_such_service_error`]) means
-/// installed but not loaded → `Inactive`. "No such domain" stays an error on
+/// installed but not loaded → `Inactive`, with the word `not loaded` — the
+/// one case launchd gives no word, and the likeliest cause of a stuck
+/// bring-up. "No such domain" stays an error on
 /// purpose: install's health wait should stop at once and say there is no
 /// GUI session, not spin on `Inactive`.
 /// A successful `print` is read from its `state = …` line; one with no
@@ -217,34 +219,34 @@ pub(super) fn bootout_outcome(
 pub(super) fn status_from_print(
     target: &str,
     print: Result<String, SupervisorError>,
-) -> Result<ServiceStatus, SupervisorError> {
+) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
     let stdout = match print {
         Ok(stdout) => stdout,
         Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => {
-            return Ok(ServiceStatus::Inactive)
+            return Ok((ServiceStatus::Inactive, Some("not loaded".into())))
         }
         Err(e) => return Err(e),
     };
-    match parse_print_state(&stdout).as_deref() {
-        Some("running") => Ok(ServiceStatus::Active),
-        // A spawn under way, or a kill launchd has sent but not seen finish:
-        // the process may exist, so neither a start- nor a stop-wait may end
-        // here (#902).
-        Some("spawn scheduled" | "spawning" | "xpcproxy" | "SIGTERMed" | "SIGKILLed") => {
-            Ok(ServiceStatus::Transitioning)
-        }
-        // Every other word is loaded-but-not-running → Inactive, matching
-        // the Linux backend's liberal mapping. Deliberately NOT a closed list
-        // (#898): the words in the table after `service state: %s` in
+    let Some(word) = parse_print_state(&stdout) else {
+        return Err(SupervisorError::Backend(format!(
+            "launchctl print {target} answered without a `state = …` line, so its state \
+             is unknown (has launchctl's output format changed?)"
+        )));
+    };
+    let status = match word.as_str() {
+        "running" => ServiceStatus::Active,
+        "not running" | "exited" | "languishing" => ServiceStatus::Inactive,
+        // A spawn under way (`spawn scheduled`, `spawning`, `xpcproxy`) or a
+        // kill launchd has sent but not seen finish (`SIGTERMed`,
+        // `SIGKILLed`): the process may exist, so neither a start- nor a
+        // stop-wait may end here (#902). Every unlisted word too — deliberately
+        // NOT a closed list (#898): the words in the table after `service state: %s` in
         // `/sbin/launchd` miss `xpcproxy`, which a full sweep caught
         // mid-spawn — a closed list tried during #898 errored on it and
         // failed two PG bring-ups seconds from `running`.
-        Some(_) => Ok(ServiceStatus::Inactive),
-        None => Err(SupervisorError::Backend(format!(
-            "launchctl print {target} answered without a `state = …` line, so its state \
-             is unknown (has launchctl's output format changed?)"
-        ))),
-    }
+        _ => ServiceStatus::Transitioning,
+    };
+    Ok((status, Some(word)))
 }
 
 #[cfg(test)]

@@ -74,15 +74,25 @@ fn bootout_outcome_keeps_a_timeout_an_io_error_and_a_refusal() {
 #[test]
 fn status_from_print_maps_the_state_line() {
     let running = Ok("gui/501/svc = {\n\tstate = running\n}".to_string());
-    assert_eq!(status_from_print("gui/501/svc", running).unwrap(), ServiceStatus::Active);
+    assert_eq!(
+        status_from_print("gui/501/svc", running).unwrap(),
+        (ServiceStatus::Active, Some("running".into()))
+    );
     let not_running = Ok("\tstate = not running\n".to_string());
-    assert_eq!(status_from_print("gui/501/svc", not_running).unwrap(), ServiceStatus::Inactive);
+    assert_eq!(
+        status_from_print("gui/501/svc", not_running).unwrap(),
+        (ServiceStatus::Inactive, Some("not running".into()))
+    );
 }
 
 #[test]
 fn status_from_print_reads_not_loaded_as_inactive() {
     let not_loaded = backend(PRINT_NOT_FOUND);
-    assert_eq!(status_from_print("gui/501/svc", not_loaded).unwrap(), ServiceStatus::Inactive);
+    // launchd gives no word here, so the reader names it (#900).
+    assert_eq!(
+        status_from_print("gui/501/svc", not_loaded).unwrap(),
+        (ServiceStatus::Inactive, Some("not loaded".into()))
+    );
 }
 
 // ---------- loaded_from_print: `start`'s and `unload_wait`'s probe ----------
@@ -174,28 +184,32 @@ fn the_real_timeout_message_is_not_a_not_loaded_answer() {
     assert!(!is_no_such_service_error(&msg), "{msg}");
 }
 
+fn read(word: &str) -> (ServiceStatus, Option<String>) {
+    status_from_print("gui/501/svc", Ok(format!("\tstate = {word}\n"))).unwrap()
+}
+
 /// Only `running` is `Active`. The words of a spawn in progress or a kill
 /// not yet finished are `Transitioning` (#902) — a wait for `Inactive` must
 /// not end on `SIGTERMed` — and the settled not-running words are `Inactive`.
+/// Every word comes back verbatim for the timeout text (#900).
 #[test]
 fn status_from_print_maps_every_measured_state_word() {
-    let read = |word: &str| status_from_print("gui/501/svc", Ok(format!("\tstate = {word}\n")));
-    assert_eq!(read("running").unwrap(), ServiceStatus::Active);
+    assert_eq!(read("running"), (ServiceStatus::Active, Some("running".into())));
     for word in ["spawn scheduled", "spawning", "xpcproxy", "SIGTERMed", "SIGKILLed"] {
-        assert_eq!(read(word).unwrap(), ServiceStatus::Transitioning, "{word}");
+        assert_eq!(read(word), (ServiceStatus::Transitioning, Some(word.into())), "{word}");
     }
     for word in ["not running", "languishing", "exited"] {
-        assert_eq!(read(word).unwrap(), ServiceStatus::Inactive, "{word}");
+        assert_eq!(read(word), (ServiceStatus::Inactive, Some(word.into())), "{word}");
     }
 }
 
-/// An unlisted word is `Inactive`, NOT an error (#898, measured): no list
-/// is provably complete — the binary's own table missed `xpcproxy` — and an
-/// error makes every health wait fail on a transient state at once.
+/// An unlisted word is `Transitioning`, NOT an error (#898, measured) and
+/// NOT `Inactive`: no list is provably complete — the binary's own table
+/// missed `xpcproxy` — an error fails every health wait on a transient state
+/// at once, and `Inactive` would end a stop-wait on a still-live process.
 #[test]
-fn status_from_print_reads_an_unlisted_state_word_as_inactive() {
-    let read = status_from_print("gui/501/svc", Ok("\tstate = teleporting\n".into()));
-    assert_eq!(read.unwrap(), ServiceStatus::Inactive);
+fn status_from_print_reads_an_unlisted_state_word_as_transitioning() {
+    assert_eq!(read("teleporting"), (ServiceStatus::Transitioning, Some("teleporting".into())));
 }
 
 /// `sudo -E` keeps the user's `$HOME` but runs as another uid: refused, so

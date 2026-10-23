@@ -198,10 +198,6 @@ impl Supervisor for SystemdUser {
         Ok(())
     }
 
-    fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
-        self.status_with_word(name).map(|(status, _)| status)
-    }
-
     fn status_with_word(
         &self,
         name: &str,
@@ -220,9 +216,7 @@ impl Supervisor for SystemdUser {
         // Bounded, and read by the pure `status_from_is_active`: stdout's
         // word, not the exit code — and no word at all is an error (#896).
         let unit = format!("{name}.service");
-        let out = run_user(&["is-active", &unit])?;
-        let word = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Ok((status_from_is_active(&unit, &out)?, Some(word)))
+        status_from_is_active(&unit, &run_user(&["is-active", &unit])?)
     }
 
     /// Install the target the systemd-native way: write each member unit,

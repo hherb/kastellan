@@ -48,12 +48,20 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 - `ServiceStatus` (now `supervisor/src/status.rs`, moved movement-first) has **`Transitioning`**: systemd
   `activating`/`deactivating`, launchd `spawn scheduled`/`spawning`/`xpcproxy`/`SIGTERMed`/`SIGKILLed`.
   A wait for `Inactive` after a stop no longer ends inside the stop timeout; a wait for `Active` is
-  unchanged. systemd `reloading`/`refreshing` → `Active`. ⚠️ **Unknown words still read `Inactive`** —
-  the open list stays (#898).
-- **`Supervisor::status_with_word`** (default: no word) — `status()` is its projection on both
-  backends. `verify_running` and `tests_common::wait::wait_for_status` print it on timeout via the pure
-  `describe_status`: `postgres=Inactive (state word: languishing)`. ⚠️ No test catches a *live*
-  transition; the readers are pinned on the measured words only.
+  unchanged except that systemd `reloading`/`refreshing` now satisfy it. ⚠️ **Unknown words read
+  `Transitioning`** (review fix — was `Inactive`): still an open list, never an error (#898), but an
+  unread word can no longer end a stop-wait; the settled words (`inactive`/`maintenance`, `not
+  running`/`exited`/`languishing`) have explicit arms.
+- **`Supervisor::status_with_word`** is the **required** method; `status()` is its default projection
+  (review fix — the first cut had each default calling the other, a stack overflow for a backend
+  overriding only `status`). The pure readers (`status_from_is_active`, `status_from_print`) return the
+  pair, so the word is pinned beside the mapping; a not-loaded launchd agent's word is `not loaded`.
+  `verify_running`, `tests_common::wait::wait_for_status` and the three supervisor smoke waits print it
+  on timeout via `describe_status`: `postgres=Inactive (state word: languishing)`. A scripted fake in
+  `wait.rs` pins the timeout text and that a stop-wait polls through `Transitioning`. ⚠️ Only `xpcproxy`
+  was measured live; the other words come from systemd's docs and launchd's `service state` table.
+  Follow-up [#904](https://github.com/hherb/kastellan/issues/904): name the restart count / last exit
+  code in the timeout too.
 - ⚠️ The DGX worktree `~/src/kastellan-wt-896` was reused for this PR (warm `target/`); its #901-era
   copies are in `git stash@{0}` there (all equal to `1980137a`, merged) — drop it with the worktree.
 

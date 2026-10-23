@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kastellan_supervisor::launchd_agents::LaunchAgents;
-use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
+use kastellan_supervisor::{describe_status, ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
 use kastellan_tests_common::skip::{skip_if_no_supervisor, warn_line};
 
 /// Serialize all smoke-test bodies. The launchd GUI domain and
@@ -76,11 +76,12 @@ impl Drop for TestAgentGuard {
     }
 }
 
-/// Poll `status(name)` until it equals `want`, or timeout.
+/// Poll `status_with_word(name)` until the status equals `want`, or timeout;
+/// a timeout names the manager's own word (#900).
 ///
 /// launchctl is asynchronous: `bootstrap` returns once the agent has
 /// been loaded but the program may briefly be in a "spawn scheduled"
-/// transitional state before settling at `state = running`. Polling
+/// transitional state (`Transitioning`, #902) before settling at `state = running`. Polling
 /// lets us observe a stable terminal state without flaky sleeps.
 fn wait_for_status(
     sup: &LaunchAgents,
@@ -90,16 +91,17 @@ fn wait_for_status(
 ) -> Result<(), String> {
     let start = Instant::now();
     loop {
-        let got = sup
-            .status(name)
+        let (got, word) = sup
+            .status_with_word(name)
             .map_err(|e| format!("status({name}): {e}"))?;
         if got == want {
             return Ok(());
         }
         if start.elapsed() > timeout {
             return Err(format!(
-                "timed out waiting for status={:?}, last observed={:?}",
-                want, got
+                "timed out waiting for status={:?}, last observed={}",
+                want,
+                describe_status(got, word.as_deref())
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
