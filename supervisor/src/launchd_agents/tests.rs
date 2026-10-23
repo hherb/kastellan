@@ -196,6 +196,8 @@ fn status_returns_not_installed_when_plist_absent() {
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
     let s = sup.status("never-installed").expect("status");
     assert_eq!(s, ServiceStatus::NotInstalled);
+    let with_word = sup.status_with_word("never-installed").expect("status_with_word");
+    assert_eq!(with_word, (ServiceStatus::NotInstalled, None), "no manager was asked, so no word");
 }
 
 /// An agents dir that cannot be searched is an error naming the stat, not

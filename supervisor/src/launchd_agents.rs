@@ -375,7 +375,10 @@ impl Supervisor for LaunchAgents {
         remove_after_stop(bootout, &self.plist_path(name))
     }
 
-    fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
+    fn status_with_word(
+        &self,
+        name: &str,
+    ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
         validate_service_name(name)?;
         // No file on disk → not installed (regardless of what
         // launchctl thinks; the live manager may have a stale entry
@@ -387,7 +390,7 @@ impl Supervisor for LaunchAgents {
             .try_exists()
             .map_err(|e| SupervisorError::Io(format!("stat {}: {e}", path.display())))?
         {
-            return Ok(ServiceStatus::NotInstalled);
+            return Ok((ServiceStatus::NotInstalled, None));
         }
         let target = format!("{}/{name}", user_domain_target()?);
         // Bounded by `run_launchctl`, so a churn-degraded domain cannot

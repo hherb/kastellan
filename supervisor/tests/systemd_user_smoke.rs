@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use kastellan_supervisor::systemd_user::{probe, SystemdUser};
-use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor};
+use kastellan_supervisor::{describe_status, ServiceSpec, ServiceStatus, Supervisor};
 
 /// Skip the test when there's no usable user manager to talk to.
 fn skip_if_no_user_manager() -> bool {
@@ -99,11 +99,12 @@ impl Drop for TestUnitGuard {
     }
 }
 
-/// Poll `status(name)` until it equals `want`, or timeout.
+/// Poll `status_with_word(name)` until the status equals `want`, or timeout;
+/// a timeout names the manager's own word (#900).
 ///
 /// systemctl is asynchronous: `start` returns once the service has
 /// been kicked off, but `is-active` may briefly report
-/// `activating`/`deactivating` while transitioning. Polling lets us
+/// `activating`/`deactivating` (read as `Transitioning`, #902). Polling lets us
 /// observe a stable terminal state without flaky sleeps.
 fn wait_for_status(
     sup: &SystemdUser,
@@ -113,16 +114,17 @@ fn wait_for_status(
 ) -> Result<(), String> {
     let start = Instant::now();
     loop {
-        let got = sup
-            .status(name)
+        let (got, word) = sup
+            .status_with_word(name)
             .map_err(|e| format!("status({name}): {e}"))?;
         if got == want {
             return Ok(());
         }
         if start.elapsed() > timeout {
             return Err(format!(
-                "timed out waiting for status={:?}, last observed={:?}",
-                want, got
+                "timed out waiting for status={:?}, last observed={}",
+                want,
+                describe_status(got, word.as_deref())
             ));
         }
         std::thread::sleep(Duration::from_millis(50));

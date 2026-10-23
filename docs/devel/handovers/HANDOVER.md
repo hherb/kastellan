@@ -4,13 +4,13 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261023_896_pre-prune.md`](archive/handover_20261023_896_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (#898's and #894's full
-> sections and the #894 baseline row included).
+> [`archive/handover_20261023_903_pre-prune.md`](archive/handover_20261023_903_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (#896's full section and
+> the #896 baseline rows included; #898's and #894's are in the `896` snapshot).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-23 (#896: the systemd twin of #894/#895 — PR #901, first native-Linux run since #770's deploy, green on both hosts. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#901](https://github.com/hherb/kastellan/pull/901) (#896), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged); #866 … #795 are in the 896 snapshot.
+**Last updated:** 2026-10-23 (#900/#902: `ServiceStatus::Transitioning` + the manager's state word in timeouts — PR #903, green on both hosts. The operator is still running the #773 live re-measure) ·
+**Recent PRs, newest first:** [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged); #866 … #795 are in the 896 snapshot.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,33 +43,42 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-23, latest): #896 (PR #901) — the systemd twin of #894/#895
+### This session (2026-10-23, latest): #900, #902 (PR #903) — what a status reading means
 
-- **Measured on the DGX (systemd 255)** — the fixtures are these strings: `stop` of an unloaded unit =
-  exit 5 `Unit x not loaded.`; `disable` with no unit file = exit 1 `Unit file x does not exist.`;
-  no user bus = exit 1, **empty stdout**, `Failed to connect to bus` (every verb); `is-active` on a
-  missing unit = exit **4** `inactive` (3 when the file exists).
-- Readers in `systemd_user/systemctl.rs` (movement-first, proved): `stop_outcome` / `disable_outcome`
-  accept only success or their **own** benign answer (they do not cross over); `status_from_is_active`
-  refuses an empty answer and keeps ⚠️ **every other word `Inactive` — not a closed list** (#898's
-  `xpcproxy` lesson). Every call, `probe` too, is `run_capped` at **60 s**: `TimeoutStopSec=10` is spent before
-  *and* after SIGKILL, and `stop kastellan.target` stops its two members in sequence — 40 s healthy.
-  The timeout text says "did not finish", never "is not answering" alone.
-- `uninstall`/`uninstall_target` keep the unit file on a failed stop or disable (fail-fast; every step
-  idempotent) via the shared **`remove_after::remove_after_stop`** (was launchd's `remove_plist_after`).
-  Both drive `systemctl` **only for the canonical units dir** (was: always — a custom-dir test could
-  stop a real unit). Smoke guards print a hand-rolled `[WARN]` (no `tests-common` on Linux here).
-- Review fixes (same PR): `uninstall_target` validates **every member before any side effect** (a bad
-  one mid-teardown wedged every retry); the benign answers are **anchored on the unit's name**
-  (`Unit <unit> not loaded.`); `stop_and_disable_with` takes the runner so a test proves no disable
-  after a failed stop; `remove_after_stop` says "kept" only for a file that is there; both smoke
-  tests now **assert a second live uninstall succeeds** (passed on the DGX, systemd 255, `.target`
-  too). ⚠️ Still unpinned: that `uninstall` passes its stop result on at all — a custom dir sends no
-  stop, so only the live smoke reaches that line.
-- Supervisor lib on **Linux 137** (130 + 7 review), Mac **146** (144 + 2 in `remove_after`).
-  Follow-ups open: [#900](https://github.com/hherb/kastellan/issues/900) (launchd's state word lost behind
-  `Inactive`) and [#902](https://github.com/hherb/kastellan/issues/902) (systemd `deactivating` reads
-  `Inactive`, so a stop-wait returns early) — both want a `ServiceStatus` change.
+- `ServiceStatus` (now `supervisor/src/status.rs`, moved movement-first) has **`Transitioning`**: systemd
+  `activating`/`deactivating`, launchd `spawn scheduled`/`spawning`/`xpcproxy`/`SIGTERMed`/`SIGKILLed`.
+  A wait for `Inactive` after a stop no longer ends inside the stop timeout; a wait for `Active` is
+  unchanged except that systemd `reloading`/`refreshing` now satisfy it. ⚠️ **Unknown words read
+  `Transitioning`** (review fix — was `Inactive`): still an open list, never an error (#898), but an
+  unread word can no longer end a stop-wait; the settled words (`inactive`/`maintenance`, `not
+  running`/`exited`/`languishing`) have explicit arms.
+- **`Supervisor::status_with_word`** is the **required** method; `status()` is its default projection
+  (review fix — the first cut had each default calling the other, a stack overflow for a backend
+  overriding only `status`). The pure readers (`status_from_is_active`, `status_from_print`) return the
+  pair, so the word is pinned beside the mapping; a not-loaded launchd agent's word is `not loaded`.
+  `verify_running`, `tests_common::wait::wait_for_status` and the three supervisor smoke waits print it
+  on timeout via `describe_status`: `postgres=Inactive (state word: languishing)`. A scripted fake in
+  `wait.rs` pins the timeout text and that a stop-wait polls through `Transitioning`. ⚠️ Only `xpcproxy`
+  was measured live; the other words come from systemd's docs and launchd's `service state` table.
+  Follow-up [#904](https://github.com/hherb/kastellan/issues/904): name the restart count / last exit
+  code in the timeout too.
+- The sweep rows below are the pre-review tree (`26c5e14b`). The review commit (`2b10ef50`) adds **+2**
+  tests-common lib tests on both hosts (Mac 486 → 488, DGX 484 → 486); supervisor lib unchanged (Mac
+  147, Linux 139). Verified by targeted runs only: both libs, clippy (Mac + Linux cross-clippy), and
+  the live smokes — Mac `launchd_agents_smoke` 6/6 + `target_smoke` 1/1 (`[E2E]`), DGX
+  `systemd_user_smoke` 3/3 + `target_smoke` 2/2, all under `KASTELLAN_PG_REQUIRE_E2E=1`.
+- ⚠️ The DGX worktree `~/src/kastellan-wt-896` was reused for this PR (warm `target/`); its #901-era
+  copies are in `git stash@{0}` there (all equal to `1980137a`, merged) — drop it with the worktree.
+
+### Previous (2026-10-23): #896 (PR #901, merged) — what still binds
+
+- **Measured systemd 255 answers** (the fixtures): unloaded `stop` = exit 5 `Unit x not loaded.`;
+  fileless `disable` = exit 1 `Unit file x does not exist.`; no user bus = exit 1, **empty stdout**;
+  `is-active` on a missing unit = exit 4 `inactive`. Benign answers are **anchored on the unit's name**.
+- `uninstall`/`uninstall_target` keep the unit file on a failed stop or disable (shared
+  `remove_after::remove_after_stop`), validate every member first, and drive `systemctl` **only for the
+  canonical units dir**. Every call is `run_capped` at **60 s** (a two-member target stop takes 40 s).
+  ⚠️ Still unpinned: that `uninstall` passes its stop result on — only the live smoke reaches it.
 
 ### Earlier (2026-10-22 → 23): #894, #895, #898 (PRs #897, #899, merged) — what still binds
 
@@ -397,8 +406,8 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **DGX** (#896) | PR [#901](https://github.com/hherb/kastellan/pull/901) | **5313 / 0 / 84**, **195** summaries (179 suites + doc-tests), exit 0, worktree `~/src/kastellan-wt-896`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0. First native-Linux sweep since #770's 4729/0/79 — #893/#897/#899 included, too far back to reconcile per suite. `systemd_user_smoke` 3/3 + `target_smoke` 2/2 under `KASTELLAN_PG_REQUIRE_E2E=1`; log `~/sweep-896.log` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-896` (fresh), **27** | **7** (3 = fresh worktree's missing gliner `.venv`, 4 opt-in gliner) |
-| **Mac** (#896) | PR [#901](https://github.com/hherb/kastellan/pull/901) | **5197 / 0 / 52**, **195** summaries, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `sweep-896-mac.log`. 5197 = #898's row 5195 + #899's 2 review tests (supervisor lib 142 → 144); the Mac compiles no systemd tests. `launchd` gate: evidence, 7 tests, 6 `[E2E]` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-896` (fresh), **27** | **5** Mac |
+| **DGX** (#900/#902) | PR [#903](https://github.com/hherb/kastellan/pull/903) | **5322 / 0 / 84**, **195** summaries, exit 0, worktree `~/src/kastellan-wt-896` (reused), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-900.log`. Per-suite vs `~/sweep-896.log`: only the supervisor lib moved, 130 → 139 = +7 (#901's review — the #896 row 5313 was measured before it) +2 new. `systemd_user_smoke` 3/3 + `target_smoke` 2/2 under `KASTELLAN_PG_REQUIRE_E2E=1` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-900` (fresh), **27** | **7** (3 = missing gliner `.venv`, 4 opt-in gliner) |
+| **Mac** (#900/#902) | PR [#903](https://github.com/hherb/kastellan/pull/903) | **5200 / 0 / 52**, **195** summaries, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `sweep-900-mac.log`. Only the supervisor lib moved, 144 → 147 = +2 (#901's review, also after the #896 row) +1 new | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-900` (fresh), **27** | **5** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -481,6 +490,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#901** (#896) — merged 2026-10-23: systemd `uninstall` keeps the unit file on a failed stop; an empty `is-active` is not `Inactive`; `systemctl` bounded at 60 s.
 - **#899** (#898) — merged 2026-10-23: headless launchd `uninstall`, lenient state words, one timeout text, `$HOME` uid check.
 - **#897** (#894, #895) — merged 2026-10-22: launchd `uninstall` keeps the plist on a failed bootout; an unreadable `print` is not `Inactive`.
 - **#893** (#890, #892) — merged 2026-10-21: a failed sidecar exit poll retires the pair; a cut-short capture is `Unread`.

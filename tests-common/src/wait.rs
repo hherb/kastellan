@@ -8,11 +8,13 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use kastellan_supervisor::{ServiceStatus, Supervisor};
+use kastellan_supervisor::{describe_status, ServiceStatus, Supervisor};
 
 /// Block until `predicate(status)` returns `true` or `timeout`
-/// elapses. The supervisor is polled every 50 ms via `status(name)`;
-/// a `status` error short-circuits with `Err`.
+/// elapses. The supervisor is polled every 50 ms via `status_with_word(name)`;
+/// a status error short-circuits with `Err`, and a timeout names the last
+/// status with the manager's own word (`last=Inactive (state word:
+/// languishing)`, #900).
 pub fn wait_for_status<F: Fn(ServiceStatus) -> bool>(
     sup: &dyn Supervisor,
     name: &str,
@@ -20,19 +22,22 @@ pub fn wait_for_status<F: Fn(ServiceStatus) -> bool>(
     timeout: Duration,
 ) -> Result<ServiceStatus, String> {
     let start = Instant::now();
-    let mut last = sup.status(name).map_err(|e| format!("status: {e}"))?;
+    let read = || sup.status_with_word(name).map_err(|e| format!("status: {e}"));
+    let (mut last, mut word) = read()?;
     loop {
         if predicate(last) {
             return Ok(last);
         }
         if start.elapsed() > timeout {
+            // The manager's own word names what `last` folds away (#900).
             return Err(format!(
-                "timed out after {:?} waiting for status; last={:?}",
-                timeout, last
+                "timed out after {:?} waiting for status; last={}",
+                timeout,
+                describe_status(last, word.as_deref())
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
-        last = sup.status(name).map_err(|e| format!("status: {e}"))?;
+        (last, word) = read()?;
     }
 }
 
@@ -116,7 +121,10 @@ pub fn wait_for_log_match<F: Fn(&str) -> bool>(
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_log_match;
+    use super::{wait_for_log_match, wait_for_status};
+    use kastellan_supervisor::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::time::Duration;
 
     fn temp_log(tag: &str) -> std::path::PathBuf {
@@ -157,5 +165,60 @@ mod tests {
         let got = wait_for_log_match(&path, |l| l.contains("MARKER"), Duration::from_secs(1)).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(got, "the MARKER line");
+    }
+
+    /// Answers `status_with_word` from a script, repeating its last answer.
+    struct Scripted(RefCell<VecDeque<(ServiceStatus, &'static str)>>);
+
+    impl Scripted {
+        fn new(answers: &[(ServiceStatus, &'static str)]) -> Self {
+            Scripted(RefCell::new(answers.iter().copied().collect()))
+        }
+    }
+
+    impl Supervisor for Scripted {
+        fn install(&self, _: &ServiceSpec) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn start(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn stop(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn uninstall(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn status_with_word(
+            &self,
+            _: &str,
+        ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
+            let mut q = self.0.borrow_mut();
+            let (status, word) = if q.len() > 1 { q.pop_front().unwrap() } else { q[0] };
+            Ok((status, Some(word.into())))
+        }
+    }
+
+    /// #900: a timeout names the manager's word that `Inactive` folds away.
+    #[test]
+    fn a_status_timeout_names_the_managers_word() {
+        let sup = Scripted::new(&[(ServiceStatus::Inactive, "languishing")]);
+        let err = wait_for_status(&sup, "svc", |s| s == ServiceStatus::Active, Duration::from_millis(1))
+            .unwrap_err();
+        assert!(err.contains("last=Inactive (state word: languishing)"), "got: {err}");
+    }
+
+    /// #902: a stop-wait polls through the moving states and ends only once
+    /// the service is settled.
+    #[test]
+    fn a_stop_wait_does_not_end_while_transitioning() {
+        let sup = Scripted::new(&[
+            (ServiceStatus::Transitioning, "deactivating"),
+            (ServiceStatus::Transitioning, "SIGTERMed"),
+            (ServiceStatus::Inactive, "inactive"),
+        ]);
+        let got = wait_for_status(&sup, "svc", |s| s == ServiceStatus::Inactive, Duration::from_secs(5));
+        assert_eq!(got, Ok(ServiceStatus::Inactive));
+        assert_eq!(sup.0.borrow().len(), 1, "every scripted answer was read");
     }
 }

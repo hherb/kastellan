@@ -121,28 +121,42 @@ fn answer(stdout: &str, stderr: &str, code: i32) -> Output {
     }
 }
 
-#[test]
-fn status_from_is_active_maps_the_three_settled_states() {
-    assert_eq!(status_from_is_active(UNIT, &answer("active\n", "", 0)).unwrap(), ServiceStatus::Active);
-    assert_eq!(
-        status_from_is_active(UNIT, &answer("inactive\n", "", 3)).unwrap(),
-        ServiceStatus::Inactive
-    );
-    assert_eq!(status_from_is_active(UNIT, &answer("failed\n", "", 3)).unwrap(), ServiceStatus::Failed);
+/// The word, as `status_from_is_active` reads it, with the word itself
+/// handed back verbatim for the timeout text (#900).
+fn read(word: &str, code: i32) -> ServiceStatus {
+    let (status, back) = status_from_is_active(UNIT, &answer(&format!("{word}\n"), "", code)).unwrap();
+    assert_eq!(back.as_deref(), Some(word), "the word comes back verbatim");
+    status
 }
 
-/// Transitional and unforeseen words stay `Inactive` — deliberately NOT a
-/// closed list: the launchd twin's closed list missed `xpcproxy` and failed
-/// two PG bring-ups seconds from `running` (#898).
 #[test]
-fn status_from_is_active_reads_any_other_word_as_inactive() {
-    for word in ["activating", "deactivating", "reloading", "maintenance", "refreshing", "a-new-word"] {
-        assert_eq!(
-            status_from_is_active(UNIT, &answer(&format!("{word}\n"), "", 3)).unwrap(),
-            ServiceStatus::Inactive,
-            "{word}"
-        );
-    }
+fn status_from_is_active_maps_the_three_settled_states() {
+    assert_eq!(read("active", 0), ServiceStatus::Active);
+    assert_eq!(read("inactive", 3), ServiceStatus::Inactive);
+    assert_eq!(read("failed", 3), ServiceStatus::Failed);
+}
+
+/// `reloading`/`refreshing` are up and serving → `Active`; `activating`/
+/// `deactivating` may still have a process → `Transitioning`, so a wait for
+/// `Inactive` after a stop does not end inside the stop timeout (#902).
+/// `maintenance` (the service's own process is gone; `systemctl clean` is
+/// removing its directories) → `Inactive`.
+#[test]
+fn status_from_is_active_maps_the_moving_states() {
+    assert_eq!(read("reloading", 0), ServiceStatus::Active);
+    assert_eq!(read("refreshing", 0), ServiceStatus::Active);
+    assert_eq!(read("activating", 3), ServiceStatus::Transitioning);
+    assert_eq!(read("deactivating", 3), ServiceStatus::Transitioning);
+    assert_eq!(read("maintenance", 3), ServiceStatus::Inactive);
+}
+
+/// An unforeseen word is `Transitioning` — deliberately NOT a closed list
+/// that errors (the launchd twin's missed `xpcproxy` failed two PG bring-ups
+/// seconds from `running`, #898), and NOT `Inactive`, which would end a
+/// stop-wait on a word nobody has read the meaning of.
+#[test]
+fn status_from_is_active_reads_an_unforeseen_word_as_transitioning() {
+    assert_eq!(read("a-new-word", 3), ServiceStatus::Transitioning);
 }
 
 /// #896: no word at all (the user bus unreachable) is a failed read, not a

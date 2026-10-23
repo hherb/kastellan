@@ -45,6 +45,9 @@ pub mod service_name;
 
 pub use service_name::{validate_service_name, MAX_NAME_LEN};
 
+mod status;
+pub use status::{describe_status, ServiceStatus};
+
 pub mod specs;
 
 /// Cross-platform helper to run a child process under a wall-clock
@@ -197,19 +200,6 @@ pub struct TargetSpec {
     pub members: Vec<String>,
 }
 
-/// Coarse runtime state of a service, normalized across backends.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ServiceStatus {
-    /// The service is currently running (`systemctl is-active` == "active").
-    Active,
-    /// The service exists but is not running (`systemctl is-active` == "inactive").
-    Inactive,
-    /// The service exists and entered the failed state.
-    Failed,
-    /// The service is not known to the supervisor (no installed unit / agent).
-    NotInstalled,
-}
-
 #[derive(Debug, Error)]
 pub enum SupervisorError {
     /// Backend isn't implemented on this OS yet.
@@ -263,7 +253,20 @@ pub trait Supervisor {
     fn start(&self, name: &str) -> Result<(), SupervisorError>;
     fn stop(&self, name: &str) -> Result<(), SupervisorError>;
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError>;
-    fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError>;
+
+    /// The service's status plus the service manager's own state word
+    /// (`systemctl is-active`'s answer, `launchctl print`'s `state = …`),
+    /// which the status folds away (`languishing` reads `Inactive`). The word
+    /// is for diagnostics only — render it with [`describe_status`] (#900).
+    /// The required method, so [`status`](Self::status) cannot disagree with it.
+    fn status_with_word(
+        &self,
+        name: &str,
+    ) -> Result<(ServiceStatus, Option<String>), SupervisorError>;
+
+    fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
+        self.status_with_word(name).map(|(status, _)| status)
+    }
 
     /// Install every member of a [`TargetSpec`] (the generic bundle).
     ///
@@ -400,7 +403,10 @@ impl Supervisor for NotYetImplemented {
     fn uninstall(&self, _: &str) -> Result<(), SupervisorError> {
         Err(SupervisorError::NotImplemented("uninstall — Phase 0 work item"))
     }
-    fn status(&self, _: &str) -> Result<ServiceStatus, SupervisorError> {
+    fn status_with_word(
+        &self,
+        _: &str,
+    ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
         Err(SupervisorError::NotImplemented("status — Phase 0 work item"))
     }
 }
@@ -431,8 +437,11 @@ mod default_target_tests {
             self.calls.borrow_mut().push(format!("uninstall:{name}"));
             Ok(())
         }
-        fn status(&self, _name: &str) -> Result<ServiceStatus, SupervisorError> {
-            Ok(ServiceStatus::Active)
+        fn status_with_word(
+            &self,
+            _name: &str,
+        ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
+            Ok((ServiceStatus::Active, None))
         }
     }
 

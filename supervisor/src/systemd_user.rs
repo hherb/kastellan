@@ -198,7 +198,10 @@ impl Supervisor for SystemdUser {
         Ok(())
     }
 
-    fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
+    fn status_with_word(
+        &self,
+        name: &str,
+    ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
         validate_service_name(name)?;
         // No file on disk → not installed (regardless of what
         // systemctl thinks; the live manager may have a unit cached).
@@ -208,7 +211,7 @@ impl Supervisor for SystemdUser {
             .try_exists()
             .map_err(|e| SupervisorError::Io(format!("stat {}: {e}", path.display())))?
         {
-            return Ok(ServiceStatus::NotInstalled);
+            return Ok((ServiceStatus::NotInstalled, None));
         }
         // Bounded, and read by the pure `status_from_is_active`: stdout's
         // word, not the exit code — and no word at all is an error (#896).
