@@ -61,6 +61,13 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 - `timed_out_message(args)` is the one source of the timeout text; `start` stats with `try_exists`.
 - `tests-common/src/pg.rs`'s two bring-up panics now **carry the reason** (`{e}`) — the bare
   "should reach Active within 30s" hid that `status` had errored; that is how `xpcproxy` was found.
+- **Review fix:** reading no-domain as "not loaded" made `sudo -E … uninstall` able to delete the
+  user's plists (`$HOME`) after a bootout in **another** uid's missing domain. `user_domain_target`
+  now refuses a `$HOME` owned by another uid (`ensure_home_owned_by`; unset/missing `$HOME` skipped).
+  Measured: `bootstrap` into a missing domain says the same `Could not find domain` (112), so a
+  headless `start` is not misleading. Supervisor lib **142 → 144**; the sweep row below predates it.
+  Follow-up: [#900](https://github.com/hherb/kastellan/issues/900) (keep the raw state word in the
+  health-wait timeout text).
 
 ### Earlier (2026-10-22): #894 + #895 (PR #897, merged) — what still binds
 

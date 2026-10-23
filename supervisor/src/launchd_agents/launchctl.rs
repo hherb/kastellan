@@ -4,6 +4,9 @@
 //! cap. Everything here is `pub(super)`: private to the `launchd_agents`
 //! module tree.
 
+use std::fs;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::LAUNCHCTL_TIMEOUT;
@@ -16,9 +19,35 @@ use crate::{ServiceStatus, SupervisorError};
 /// process happens to run as. We do not honour `$SUDO_UID` or similar
 /// because the supervisor crate is *user-level only* (running it as
 /// root would put the agent into `gui/0`, which is not a regular user
-/// session).
+/// session). A `$HOME` owned by another uid is refused
+/// ([`ensure_home_owned_by`]).
 pub(super) fn user_domain_target() -> Result<String, SupervisorError> {
-    Ok(format!("gui/{}", current_uid()))
+    let uid = current_uid();
+    ensure_home_owned_by(std::env::var_os("HOME").map(PathBuf::from).as_deref(), uid)?;
+    Ok(format!("gui/{uid}"))
+}
+
+/// Refuse to drive `gui/<uid>` when `$HOME` belongs to another user.
+///
+/// The plists live under `$HOME`; the domain comes from `getuid`. Under
+/// `sudo -E` they disagree: `bootout` in the caller's domain can answer "no
+/// such domain" (measured for a uid with no login; `gui/0` as root is not),
+/// which reads as "not loaded" (#898), and `uninstall` would delete
+/// the real user's plists while their agents keep running. A `$HOME` that is
+/// unset or does not exist holds no plists, so only an existing one is checked.
+pub(super) fn ensure_home_owned_by(home: Option<&Path>, uid: u32) -> Result<(), SupervisorError> {
+    let Some(home) = home else { return Ok(()) };
+    match fs::metadata(home) {
+        Ok(m) if m.uid() == uid => Ok(()),
+        Ok(m) => Err(SupervisorError::Backend(format!(
+            "$HOME {} belongs to uid {}, but this process runs as uid {uid}; the LaunchAgents \
+             supervisor is user-level only (run it as that user, not under sudo)",
+            home.display(),
+            m.uid()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(SupervisorError::Io(format!("stat {}: {e}", home.display()))),
+    }
 }
 
 /// Current real UID via `libc::getuid()`.
@@ -110,7 +139,9 @@ pub(super) fn parse_print_state(stdout: &str) -> Option<String> {
 /// `launchctl print <target>` succeeds when the service is bootstrapped
 /// (whether running, exited or transitional); only launchd's own "no such
 /// service" or "no such domain" answer ([`is_not_loaded_answer`]) means not
-/// loaded. A timeout, a spawn failure or
+/// loaded. (With no domain, `start` then reaches `bootstrap`, which fails
+/// with the same `Could not find domain for user gui: N`, exit 112 —
+/// measured.) A timeout, a spawn failure or
 /// any other error is returned as `Err` — never read as "not loaded", which
 /// would send `start` into a `bootstrap` that fails with a misleading error,
 /// and `unload_wait` into calling a still-loaded agent gone.
@@ -130,9 +161,10 @@ pub(super) fn loaded_from_print(
     }
 }
 
-/// Heuristic: does `msg` look like the "no such service" error
-/// `launchctl bootout` emits when the agent isn't in the domain?
-/// Used to make `stop` idempotent.
+/// Heuristic: does `msg` look like launchd's "no such service" answer
+/// (from `bootout` or `print`) when the agent isn't in the domain?
+/// [`status_from_print`] uses it alone; the other readers go through
+/// [`is_not_loaded_answer`].
 pub(super) fn is_no_such_service_error(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("could not find service")
@@ -197,11 +229,11 @@ pub(super) fn status_from_print(
         Some("running") => Ok(ServiceStatus::Active),
         // Every other word is loaded-but-not-running → Inactive, matching
         // the Linux backend's liberal mapping. Deliberately NOT a closed list
-        // (#898): the table after `service state: %s` in `/sbin/launchd`
-        // (`not running`, `spawn scheduled`, `spawning`, `SIGTERMed`,
-        // `SIGKILLed`, `languishing`, `exited`) misses `xpcproxy`, which a
-        // full sweep caught mid-spawn — and an error there failed bring-ups
-        // that were seconds from `running`.
+        // (#898): the other words in the table after `service state: %s` in
+        // `/sbin/launchd` (`not running`, `spawn scheduled`, `spawning`,
+        // `SIGTERMed`, `SIGKILLed`, `languishing`, `exited`) miss `xpcproxy`,
+        // which a full sweep caught mid-spawn — a closed list tried during
+        // #898 errored on it and failed two PG bring-ups seconds from `running`.
         Some(_) => Ok(ServiceStatus::Inactive),
         None => Err(SupervisorError::Backend(format!(
             "launchctl print {target} answered without a `state = …` line, so its state \

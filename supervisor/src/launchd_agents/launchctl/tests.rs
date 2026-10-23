@@ -1,8 +1,8 @@
 //! Tests for the pure readers of `launchctl`'s answers (`launchctl.rs`).
 //!
 //! Lifted out of `launchd_agents/tests.rs` when that file neared the
-//! 500-LOC cap. The measured-wording fixtures (`NOT_LOADED`, `backend`) are
-//! shared with the driver tests there, hence their `pub(in …)` visibility.
+//! 500-LOC cap. The measured fixture `NOT_LOADED` and the `backend` helper
+//! are shared with the driver tests there, hence their `pub(in …)` visibility.
 
 use super::*;
 
@@ -75,8 +75,8 @@ fn bootout_outcome_keeps_a_timeout_an_io_error_and_a_refusal() {
 fn status_from_print_maps_the_state_line() {
     let running = Ok("gui/501/svc = {\n\tstate = running\n}".to_string());
     assert_eq!(status_from_print("gui/501/svc", running).unwrap(), ServiceStatus::Active);
-    let waiting = Ok("\tstate = not running\n".to_string());
-    assert_eq!(status_from_print("gui/501/svc", waiting).unwrap(), ServiceStatus::Inactive);
+    let not_running = Ok("\tstate = not running\n".to_string());
+    assert_eq!(status_from_print("gui/501/svc", not_running).unwrap(), ServiceStatus::Inactive);
 }
 
 #[test]
@@ -201,4 +201,27 @@ fn status_from_print_maps_every_measured_state_word() {
 fn status_from_print_reads_an_unlisted_state_word_as_inactive() {
     let read = status_from_print("gui/501/svc", Ok("\tstate = teleporting\n".into()));
     assert_eq!(read.unwrap(), ServiceStatus::Inactive);
+}
+
+/// `sudo -E` keeps the user's `$HOME` but runs as another uid: refused, so
+/// `uninstall` keeps the user's plists instead of reading that uid's missing
+/// domain as "not loaded" (#899 review).
+#[test]
+fn ensure_home_owned_by_accepts_only_the_owner() {
+    let home = std::env::temp_dir().join(format!("kastellan-home-owner-{}", std::process::id()));
+    fs::create_dir_all(&home).expect("create home");
+    let uid = current_uid();
+    let own = ensure_home_owned_by(Some(&home), uid);
+    let other = ensure_home_owned_by(Some(&home), uid.wrapping_add(1));
+    let _ = fs::remove_dir(&home);
+    own.expect("own $HOME accepted");
+    let err = other.expect_err("another uid's $HOME refused");
+    assert!(matches!(&err, SupervisorError::Backend(m) if m.contains("sudo")), "{err}");
+    assert!(!is_not_loaded_answer(&err.to_string()), "{err}");
+}
+
+#[test]
+fn ensure_home_owned_by_skips_an_unset_or_missing_home() {
+    assert!(ensure_home_owned_by(None, 0).is_ok());
+    assert!(ensure_home_owned_by(Some(Path::new("/nonexistent/kastellan-no-home")), 0).is_ok());
 }
