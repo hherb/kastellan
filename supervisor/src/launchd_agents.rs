@@ -294,7 +294,11 @@ impl Supervisor for LaunchAgents {
     fn start(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
         let path = self.plist_path(name);
-        if !path.exists() {
+        // `try_exists`: an unreadable agents dir is an error, not "absent".
+        if !path
+            .try_exists()
+            .map_err(|e| SupervisorError::Io(format!("stat {}: {e}", path.display())))?
+        {
             return Err(SupervisorError::Io(format!(
                 "plist not found: {} (call install first)",
                 path.display()
@@ -322,7 +326,9 @@ impl Supervisor for LaunchAgents {
         validate_service_name(name)?;
         let target = format!("{}/{name}", user_domain_target()?);
         // bootout against an agent that isn't loaded fails with exit 3,
-        // "Boot-out failed: 3: No such process" (ESRCH). Treat as success.
+        // "Boot-out failed: 3: No such process" (ESRCH), or with exit 112
+        // "Could not find domain" when there is no GUI login. Both are
+        // success (`is_not_loaded_answer`).
         bootout_outcome(run_launchctl(&["bootout", &target]))
     }
 
@@ -360,8 +366,10 @@ impl Supervisor for LaunchAgents {
         // Bootout only when we're operating on the canonical agents dir.
         // For custom dirs (tests) we skip the launchctl call entirely so
         // a name collision with a real installed agent cannot bootout
-        // someone else's service. `stop` already reads "never loaded" as
-        // success; only a bootout that may have left the agent loaded fails.
+        // someone else's service. `stop` already reads "not loaded" (incl.
+        // no GUI domain) as success; only a bootout that may have left the
+        // agent loaded fails. A `$HOME` owned by another uid (sudo) is
+        // refused before any of this (`ensure_home_owned_by`).
         let bootout = if self.is_default_agents_dir() { self.stop(name) } else { Ok(()) };
         remove_plist_after(bootout, &self.plist_path(name))
     }

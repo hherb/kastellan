@@ -310,11 +310,13 @@ pub fn bring_up_pg_cluster_with_timeout(
         |s| s == ServiceStatus::Active,
         timeout,
     )
-    .unwrap_or_else(|_| {
-        panic!("postgres should reach Active within {timeout:?}")
+    // Carry the reason: a timeout (`last=…`) and a failed status query read
+    // differently, and the bare sentence hid which one a sweep hit.
+    .unwrap_or_else(|e| {
+        panic!("postgres should reach Active within {timeout:?}: {e}")
     });
-    wait_for_socket(&socket_dir, timeout).unwrap_or_else(|_| {
-        panic!("postgres socket should appear within {timeout:?}")
+    wait_for_socket(&socket_dir, timeout).unwrap_or_else(|e| {
+        panic!("postgres socket should appear within {timeout:?}: {e}")
     });
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
