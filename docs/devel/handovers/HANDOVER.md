@@ -10,7 +10,7 @@
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
 **Last updated:** 2026-10-23 (#896: the systemd twin of #894/#895 — PR #901, first native-Linux run since #770's deploy, green on both hosts. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#901](https://github.com/hherb/kastellan/pull/901) (#896), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged); #866 … #795 are in the 896 snapshot.
+**Recent PRs, newest first:** [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged); #866 … #795 are in the 896 snapshot.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
@@ -43,7 +43,7 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-23, latest): #896 (PR #901) — the systemd twin of #894/#895
+### Previous (2026-10-23): #896 (PR #901, merged) — the systemd twin of #894/#895
 
 - **Measured on the DGX (systemd 255)** — the fixtures are these strings: `stop` of an unloaded unit =
   exit 5 `Unit x not loaded.`; `disable` with no unit file = exit 1 `Unit file x does not exist.`;
@@ -481,6 +481,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#901** (#896) — merged 2026-10-23: systemd `uninstall` keeps the unit file on a failed stop; an empty `is-active` is not `Inactive`; `systemctl` bounded at 60 s.
 - **#899** (#898) — merged 2026-10-23: headless launchd `uninstall`, lenient state words, one timeout text, `$HOME` uid check.
 - **#897** (#894, #895) — merged 2026-10-22: launchd `uninstall` keeps the plist on a failed bootout; an unreadable `print` is not `Inactive`.
 - **#893** (#890, #892) — merged 2026-10-21: a failed sidecar exit poll retires the pair; a cut-short capture is `Unread`.
