@@ -4,19 +4,20 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261023_903_pre-prune.md`](archive/handover_20261023_903_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (#896's full section and
-> the #896 baseline rows included; #898's and #894's are in the `896` snapshot).
+> [`archive/handover_20261024_905_pre-prune.md`](archive/handover_20261024_905_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (#900's full section and
+> the #903 baseline rows included; #896's are in the `903` snapshot, #898's and #894's in `896`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-23 (#900/#902: `ServiceStatus::Transitioning` + the manager's state word in timeouts — PR #903, merged. The operator is still running the #773 live re-measure) ·
-**Recent PRs, newest first:** [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged); #866 … #795 are in the 896 snapshot.
+**Last updated:** 2026-10-24 (#904: health-wait timeouts name the crash-loop evidence — PR #905. ⚠️ **The live DGX daemon has been DOWN since 2026-10-19** — see Next TODO 1) ·
+**Recent PRs, newest first:** [#905](https://github.com/hherb/kastellan/pull/905) (#904), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged); #866 … #795 are in the 896 snapshot.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
 (exit 0), 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre869`,
 live-matrix worker digest `94c86940…` (unchanged — no worker crate changed), migrations 27/27,
-`NRestarts=0`, Matrix up in ~31 s. **Mac:** manual recipe [[mac-kastellan-install-recipe]], env + plist
+`NRestarts=0`, Matrix up in ~31 s — ⚠️ **but since the 2026-10-19 reboot `kastellan-core` refuses to
+boot (guard `llama-server` on :8081 not restarted; 1356 restarts by 2026-10-23, #609).** **Mac:** manual recipe [[mac-kastellan-install-recipe]], env + plist
 identical, migrations 27/27 — but `install` left `kastellan-postgres` **unloaded** (#870, bootstrapped by
 hand). **localmail** on both hosts: its PR #397. The DGX boot ERROR `install dir is writable …
 group-writable (mode 0775)` is **pre-existing** (since 2026-07-31) — not a deploy regression. The live
@@ -43,32 +44,24 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### Previous (2026-10-23): #900, #902 (PR #903, merged) — what a status reading means
+### This session (2026-10-24, latest): #904 (PR #905) — a timeout says how often it died
 
-- `ServiceStatus` (now `supervisor/src/status.rs`, moved movement-first) has **`Transitioning`**: systemd
-  `activating`/`deactivating`, launchd `spawn scheduled`/`spawning`/`xpcproxy`/`SIGTERMed`/`SIGKILLed`.
-  A wait for `Inactive` after a stop no longer ends inside the stop timeout; a wait for `Active` is
-  unchanged except that systemd `reloading`/`refreshing` now satisfy it. ⚠️ **Unknown words read
-  `Transitioning`** (review fix — was `Inactive`): still an open list, never an error (#898), but an
-  unread word can no longer end a stop-wait; the settled words (`inactive`/`maintenance`, `not
-  running`/`exited`/`languishing`) have explicit arms.
-- **`Supervisor::status_with_word`** is the **required** method; `status()` is its default projection
-  (review fix — the first cut had each default calling the other, a stack overflow for a backend
-  overriding only `status`). The pure readers (`status_from_is_active`, `status_from_print`) return the
-  pair, so the word is pinned beside the mapping; a not-loaded launchd agent's word is `not loaded`.
-  `verify_running`, `tests_common::wait::wait_for_status` and the three supervisor smoke waits print it
-  on timeout via `describe_status`: `postgres=Inactive (state word: languishing)`. A scripted fake in
-  `wait.rs` pins the timeout text and that a stop-wait polls through `Transitioning`. ⚠️ Only `xpcproxy`
-  was measured live; the other words come from systemd's docs and launchd's `service state` table.
-  Follow-up [#904](https://github.com/hherb/kastellan/issues/904): name the restart count / last exit
-  code in the timeout too.
-- The sweep rows below are the pre-review tree (`26c5e14b`). The review commit (`2b10ef50`) adds **+2**
-  tests-common lib tests on both hosts (Mac 486 → 488, DGX 484 → 486); supervisor lib unchanged (Mac
-  147, Linux 139). Verified by targeted runs only: both libs, clippy (Mac + Linux cross-clippy), and
-  the live smokes — Mac `launchd_agents_smoke` 6/6 + `target_smoke` 1/1 (`[E2E]`), DGX
-  `systemd_user_smoke` 3/3 + `target_smoke` 2/2, all under `KASTELLAN_PG_REQUIRE_E2E=1`.
-- ⚠️ The DGX worktree `~/src/kastellan-wt-896` was reused for this PR (warm `target/`); its #901-era
-  copies are in `git stash@{0}` there (all equal to `1980137a`, merged) — drop it with the worktree.
+- **`Supervisor::crash_evidence(name)`** (default `Ok(None)`) — launchd: the top-level `runs = N` and
+  every `last exit …`/`last terminating …` line of `launchctl print` (prefix-matched, not a list;
+  nested dicts are the env — ignored); systemd: `show -p NRestarts,Result,ExecMainStatus` (measured,
+  systemd 255). **`describe_last_status`** reads it **once, at timeout only** (polls stay one call per
+  tick); a failed read is named, `NotInstalled` is not asked. Used by `verify_running`,
+  `wait_for_status` and the three smoke waits. `describe_status` now takes `(status, word, evidence)`.
+- `supervisor/src/lib.rs` 624 → 431: its two test modules moved verbatim to
+  `default_target_tests.rs`/`spec_ordering_tests.rs` (cmp-proved, movement-only commit).
+- ⚠️ systemd's `show` answers a **missing** unit too (`NRestarts=0`, exit 0) — hence the `NotInstalled` skip.
+
+### Previous (2026-10-23): #900, #902 (PR #903, merged) — what still binds
+
+- `ServiceStatus::Transitioning` (systemd `activating`/`deactivating`, launchd `spawn scheduled`/
+  `spawning`/`xpcproxy`/`SIG*ed`); ⚠️ **unknown words read `Transitioning`**, never `Inactive` and never
+  an error. `status_with_word` is the **required** method, `status()` its projection. Only `xpcproxy`
+  was measured live.
 
 ### Previous (2026-10-23): #896 (PR #901, merged) — what still binds
 
@@ -126,11 +119,9 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ### Earlier (2026-10-17 → 19): #875, #722, #872, #870, #867, #862, #860 (merged) — what still binds
 
-- Apple-`container` tier → `KASTELLAN_MICROVM_REQUIRE_E2E`; `container_suites()` is the exact complement
-  of `firecracker_suites()`. ⚠️ **Any `Cargo.lock` mtime change makes `kastellan/python-exec:dev`
-  "stale"** — `bash scripts/workers/python-exec/build-image.sh`. A stopped `container` service: `[SKIP]` 23.
-- **#870:** `stop_target` polls launchd — ⚠️ **never put the wait in `stop`**
-  [[mac-sysv-shm-exhaustion-from-killed-postgres]]. **#862:** `report_unsaid_lost_rows()` — ⚠️ call once.
+⚠️ **Any `Cargo.lock` mtime change makes `kastellan/python-exec:dev` "stale"** — `bash
+scripts/workers/python-exec/build-image.sh`. #870: ⚠️ **never put the launchd wait in `stop`**
+[[mac-sysv-shm-exhaustion-from-killed-postgres]]. #862: `report_unsaid_lost_rows()` — ⚠️ call once.
 
 ### Previous (2026-10-08 → 17): thinning (#829, #858/#861, #837/#859/#864/#865), #810, and the Matrix inbound path (#835, #852, #853, #825, #832, #846, #827/#826) — what still binds (prose: the `867`/`825`/`815` snapshots)
 
@@ -160,32 +151,19 @@ waits **3 s**; inserts bounded (**4 connections, 1024 queued**); hooks 100 ms. �
 *stay pending* needs a **`connections: 0`** ledger; `stalled_pool` is built **inside** a runtime
 [[stalled-postgres-test-fixture]]. ⚠️ #791's `Closes #N` did not fire — check issues after merges.
 
-### Previous (2026-09-20 → 27): thinking (#773/#774), the mail worker (#760, #698, #763, #765), the worker-report arc (#725 → #750, #748, #755) — prose: the `773`/`673`/`748`/`755`/`698` snapshots
+### Previous (2026-09-20 → 27): thinking (#773/#774), the mail worker (#760, #698, #763, #765), the worker-report arc (#725 → #750, #748, #755) — prose: the `773`/`673`/`748`/`755`/`698`/`905` snapshots
 
-- **`KASTELLAN_LLM_THINKING_SWITCH`** (`llm-router/src/thinking.rs`): `chat_template_kwargs` (default)
-  or `reasoning_effort` (**the only one Ollama honours**). ⚠️ **Never send both:** vLLM **0.15.1**
-  400s on `reasoning_effort: "none"`. `for_guard` **pins** kwargs.
-- **`llm_usage` on every `plan.formulate` row** (Ollama: read `reasoning_chars`); failed planning
-  calls are audited (`agent/plan.formulate_failed`). Timeouts (`inner_loop/llm_failure.rs`): a
-  timed-out plan spends the synthesis turn; a timed-out synthesis retries once without thinking.
-- ⚠️ **Not decided, deliberately:** thinking on vs off — that is the live re-measure.
-- **Version gate:** search, attachments and header reads refuse below localmail API **1.3** — **no
-  fallback**; params parse into a typed `Request` first (#765). Wire facts live in
-  `workers/mail/src/localmail_contract.rs` — ⚠️ **`include!`d three times: `pub const`s only, no
-  `use`, no `//!`.** Attachments are fetched **by position** and **hashed against the listed sha**;
-  `next_offset` is **copied, never computed**. ⚠️ A 50-hit page is ~18 KB, over the 16 KiB step view.
-- **Live gate:** `bash scripts/mail/live-shape-gate.sh`. ⚠️ **A new `*_or_skip` helper must be
-  classified** in `microvm/guard.rs` or the roster test refuses it.
-- **Every profiled test binary must reach the panic hook, checked at RUN time** — call
-  `panic_hook::install_once()` first. `MAX_PANIC` is blind before the first knob read (#757).
-- ⚠️ **`warn_and_fall_back!` must stay a MACRO** (the check expands at the emitter's callsite, every
-  field incl. `message` named, **at the event's own level** — #788 added the INFO arm).
-  **`eprintln!` is load-bearing** [[libtest-capture-only-print-macros]]. **No marker may begin with
-  `[SKIP]`/`[WARN]`/`[E2E]`**; `WorkerRetirementCause::from_client_error` is THE census.
-- **#755:** `run-e2e-gate.sh` refuses a counted marker stranded mid-line (libtest leaves **two**
-  gaps). ⚠️ #718's unframed `[SKIP]`s would be refused the day a profile selects them. ⚠️ **The
-  scan reads bytes** — `grep -a`, exit status, `LC_ALL=C` [[gnu-grep-binary-file-prints-nothing-exit-0]].
-  ⚠️ **`grep -c` counts lines** [[grep-c-counts-lines-not-matches]].
+- **`KASTELLAN_LLM_THINKING_SWITCH`**: `chat_template_kwargs` (default) or `reasoning_effort` (**the only
+  one Ollama honours**). ⚠️ **Never send both** (vLLM 0.15.1 400s). `llm_usage` on every
+  `plan.formulate` row. ⚠️ **Thinking on vs off is not decided** — that is the live re-measure.
+- **Mail:** below localmail API **1.3** search/attachments/header reads refuse — **no fallback**. Wire
+  facts in `workers/mail/src/localmail_contract.rs` — ⚠️ **`include!`d three times: `pub const`s only,
+  no `use`, no `//!`.** Live gate: `bash scripts/mail/live-shape-gate.sh`. ⚠️ A new `*_or_skip` helper
+  must be classified in `microvm/guard.rs`.
+- **Markers:** call `panic_hook::install_once()` first in every profiled binary. ⚠️ **`warn_and_fall_back!`
+  must stay a MACRO**; **`eprintln!` is load-bearing** [[libtest-capture-only-print-macros]]; no marker
+  may begin with `[SKIP]`/`[WARN]`/`[E2E]`. The gate scan reads bytes — `grep -a`, `LC_ALL=C`
+  [[gnu-grep-binary-file-prints-nothing-exit-0]]; ⚠️ `grep -c` counts lines [[grep-c-counts-lines-not-matches]].
 
 ### Merged arcs — only what still binds
 
@@ -263,7 +241,13 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **The live re-measure — the operator is running it** (DMs, a **fresh room**; #776 is deployed,
+0. ⚠️ **Operator, first: restart the DGX guard backend** — `llama-server … Shieldstral-1.0-3B-Q8_0.gguf
+   --alias shieldstral --port 8081 -c 131072 -ngl 99` (see *Live guard-host facts* below). The daemon
+   has refused to boot since the 2026-10-19 reboot, so **no live re-measure can have run since then**.
+   The structural fix is a supervised guard unit that core is `After=` — recorded on #609. Same reboot:
+   `kastellan-searxng`'s docker restart policy is `no` (Next TODO 4).
+
+1. **The live re-measure — blocked by item 0** (DMs, a **fresh room**; #776 is deployed,
    thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
    out on the synthesis turn), then read each plan's cost in one query:
    `select action, payload->'llm_usage', payload->>'latency_ms', payload->>'error' from audit_log
@@ -369,7 +353,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 `tool_dispatch.rs` 722, `attach/tests.rs` 727, `require.rs` 661,
 `scripts/run-e2e-gate.sh` 866 (shell), `gate_script_tests/run.rs` 586, `gate_script_tests.rs` 538. ⚠️ **`core/tests/mail_live_shape_e2e.rs` 559 — split it before
 its next leg** (the attachment half is the natural cut). ⚠️ `audit/truncate/tests.rs` is 833.
-Recent splits (the pattern to keep; list in the `867` snapshot): #869 `pg_events/{test_support,
+Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
@@ -406,8 +390,8 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **DGX** (#900/#902) | PR [#903](https://github.com/hherb/kastellan/pull/903) | **5322 / 0 / 84**, **195** summaries, exit 0, worktree `~/src/kastellan-wt-896` (reused), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-900.log`. Per-suite vs `~/sweep-896.log`: only the supervisor lib moved, 130 → 139 = +7 (#901's review — the #896 row 5313 was measured before it) +2 new. `systemd_user_smoke` 3/3 + `target_smoke` 2/2 under `KASTELLAN_PG_REQUIRE_E2E=1` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-900` (fresh), **27** | **7** (3 = missing gliner `.venv`, 4 opt-in gliner) |
-| **Mac** (#900/#902) | PR [#903](https://github.com/hherb/kastellan/pull/903) | **5200 / 0 / 52**, **195** summaries, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `sweep-900-mac.log`. Only the supervisor lib moved, 144 → 147 = +2 (#901's review, also after the #896 row) +1 new | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-900` (fresh), **27** | **5** Mac |
+| **DGX** (#904) | PR [#905](https://github.com/hherb/kastellan/pull/905) | **5328 / 0 / 84**, **195** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (reused), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-904.log`. Per-suite vs `~/sweep-900.log`: supervisor lib 139 → 142 (+3), tests-common 484 → 487 (+2 #903's review, +1). `systemd_user_smoke` 3/3 + `target_smoke` 2/2 under `KASTELLAN_PG_REQUIRE_E2E=1` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-904` (fresh), **27** | **7** (3 = missing gliner `.venv`, 4 opt-in gliner) |
+| **Mac** (#904) | PR [#905](https://github.com/hherb/kastellan/pull/905) | **5209 / 0 / 52**, **195** summaries, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-904-mac.log`. Per-suite vs `sweep-900-mac.log`: supervisor lib 147 → 153 (+6), tests-common 486 → 489 (+2 review, +1). `launchd_agents_smoke` 6/6 + `target_smoke` 1/1 (`[E2E]`) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-904` (fresh), **27**; supervisor Linux cross-clippy clean | **5** Mac |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -490,17 +474,10 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#903** (#900, #902) — merged 2026-10-23: `ServiceStatus::Transitioning`; the manager's state word in timeouts.
 - **#901** (#896) — merged 2026-10-23: systemd `uninstall` keeps the unit file on a failed stop; an empty `is-active` is not `Inactive`; `systemctl` bounded at 60 s.
 - **#899** (#898) — merged 2026-10-23: headless launchd `uninstall`, lenient state words, one timeout text, `$HOME` uid check.
-- **#897** (#894, #895) — merged 2026-10-22: launchd `uninstall` keeps the plist on a failed bootout; an unreadable `print` is not `Inactive`.
-- **#893** (#890, #892) — merged 2026-10-21: a failed sidecar exit poll retires the pair; a cut-short capture is `Unread`.
-- **#889** (#888, #754) — merged 2026-10-21: the broker's stdout drain warns; failed waits and vsock reads are named.
-- **#887** (#752, #753) — merged 2026-10-21: a failed drain names its errno; write-once drain cell.
-- **#886** (#885) — merged 2026-10-21: whole summaries counted per binary (check 8).
-- **#884** (#823) — merged 2026-10-21: every test binary must run ≥ 1 test (check 9).
-- **#883** (#882) — merged 2026-10-21: exact `IGNORED`, recounted in CI.
-- **#881** (#880) — merged 2026-10-20: exact `FILTERED_OUT` + one whole summary per binary.
-- **#879** (#876) — merged 2026-10-20: `MAX_IGNORED` (exact `IGNORED` since #882) + the torn-result-line refusal.
+- **#897 … #879** (merged 2026-10-20 → 22): launchd `uninstall` keeps the plist on a failed bootout (#897); a failed sidecar exit poll retires the pair (#893); the broker's stdout drain warns, drains name their errno (#889, #887); the gate's per-binary summary/≥ 1-test/exact `IGNORED`/`FILTERED_OUT` checks (#886, #884, #883, #881, #879).
 - **#877 … #766** (merged 2026-10-08 → 19, thinning family **deployed both hosts 2026-10-18**): the Apple-`container` tier + `container` profile, launchd knob + `launchd` profile, `stop_target` waits for launchd, the audit-loss thinning family (#855–#869), undecodable poll batches (#851), Matrix held counts, reply claim at send / catch-up (0027), audit-sink close-out, `[audit-lost]`, reply queues + `[worker-refusal]`, the thinking switch, `UPSTREAM_AUTH_FAILED`, the live mail shape gate. One-liners in the `802`/`815`/`825`/`867` archive snapshots; earlier: git history.
 
 ---
