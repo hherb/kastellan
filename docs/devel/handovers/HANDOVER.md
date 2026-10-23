@@ -62,6 +62,11 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   was measured live; the other words come from systemd's docs and launchd's `service state` table.
   Follow-up [#904](https://github.com/hherb/kastellan/issues/904): name the restart count / last exit
   code in the timeout too.
+- The sweep rows below are the pre-review tree (`26c5e14b`). The review commit (`2b10ef50`) adds **+2**
+  tests-common lib tests on both hosts (Mac 486 → 488, DGX 484 → 486); supervisor lib unchanged (Mac
+  147, Linux 139). Verified by targeted runs only: both libs, clippy (Mac + Linux cross-clippy), and
+  the live smokes — Mac `launchd_agents_smoke` 6/6 + `target_smoke` 1/1 (`[E2E]`), DGX
+  `systemd_user_smoke` 3/3 + `target_smoke` 2/2, all under `KASTELLAN_PG_REQUIRE_E2E=1`.
 - ⚠️ The DGX worktree `~/src/kastellan-wt-896` was reused for this PR (warm `target/`); its #901-era
   copies are in `git stash@{0}` there (all equal to `1980137a`, merged) — drop it with the worktree.
 
