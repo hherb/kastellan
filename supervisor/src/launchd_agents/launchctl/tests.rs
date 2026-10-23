@@ -234,3 +234,52 @@ fn ensure_home_owned_by_skips_an_unset_or_missing_home() {
     assert!(ensure_home_owned_by(None, 0).is_ok());
     assert!(ensure_home_owned_by(Some(Path::new("/nonexistent/kastellan-no-home")), 0).is_ok());
 }
+
+// ---------- evidence_from_print (#904): the crash-loop evidence ----------
+
+/// `launchctl print` for an agent that has run before, as macOS 27 lays it
+/// out (measured 2026-10-23): top-level keys one tab deep, nested dicts two.
+/// The environment dict holds operator text, so an env var that *looks*
+/// like a counter must not be read as one.
+const PRINT_RAN_BEFORE: &str = "gui/501/svc = {\n\tactive count = 1\n\tstate = running\n\
+     \tenvironment = {\n\t\truns => 99\n\t}\n\n\tminimum runtime = 10\n\truns = 14\n\
+     \tpid = 87791\n\tlast exit code = 0\n\n\tresource coalition = {\n\t\truns = 7\n\t}\n}\n";
+
+#[test]
+fn evidence_from_print_names_the_runs_and_the_last_exit() {
+    assert_eq!(
+        evidence_from_print(Ok(PRINT_RAN_BEFORE.into())).unwrap().as_deref(),
+        Some("runs = 14, last exit code = 0")
+    );
+}
+
+/// Every `last exit …`/`last terminating …` line is kept, whatever launchd
+/// calls it — a jetsam'd agent says `last exit reason` (measured), a crashed
+/// one its signal. Not a closed list, for the reason #898 gave.
+#[test]
+fn evidence_from_print_keeps_every_last_exit_line() {
+    let print = "\tstate = not running\n\truns = 3\n\tlast exit reason = JETSAM_REASON_MEMORY_IDLE_EXIT\n\
+                 \tlast terminating signal = Killed: 9\n";
+    assert_eq!(
+        evidence_from_print(Ok(print.into())).unwrap().as_deref(),
+        Some("runs = 3, last exit reason = JETSAM_REASON_MEMORY_IDLE_EXIT, last terminating signal = Killed: 9")
+    );
+    let never = "\truns = 1\n\tlast exit code = (never exited)\n";
+    assert_eq!(
+        evidence_from_print(Ok(never.into())).unwrap().as_deref(),
+        Some("runs = 1, last exit code = (never exited)")
+    );
+}
+
+#[test]
+fn evidence_from_print_has_nothing_for_an_agent_that_is_not_loaded() {
+    assert_eq!(evidence_from_print(backend(PRINT_NOT_FOUND)).unwrap(), None);
+    assert_eq!(evidence_from_print(Ok("\tstate = running\n".into())).unwrap(), None);
+}
+
+/// A failed read is an error the caller names, never "no evidence".
+#[test]
+fn evidence_from_print_passes_through_a_timeout() {
+    let timed_out = backend(&timed_out_message(&["print", "gui/501/svc"]));
+    assert!(evidence_from_print(timed_out).is_err());
+}

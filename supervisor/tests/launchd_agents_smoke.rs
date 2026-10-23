@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kastellan_supervisor::launchd_agents::LaunchAgents;
-use kastellan_supervisor::{describe_status, ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
+use kastellan_supervisor::{describe_last_status, ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
 use kastellan_tests_common::skip::{skip_if_no_supervisor, warn_line};
 
 /// Serialize all smoke-test bodies. The launchd GUI domain and
@@ -77,7 +77,7 @@ impl Drop for TestAgentGuard {
 }
 
 /// Poll `status_with_word(name)` until the status equals `want`, or timeout;
-/// a timeout names the manager's own word (#900).
+/// a timeout names the manager's own word (#900) and crash evidence (#904).
 ///
 /// launchctl is asynchronous: `bootstrap` returns once the agent has
 /// been loaded but the program may briefly be in a "spawn scheduled"
@@ -101,7 +101,7 @@ fn wait_for_status(
             return Err(format!(
                 "timed out waiting for status={:?}, last observed={}",
                 want,
-                describe_status(got, word.as_deref())
+                describe_last_status(sup, name, got, word.as_deref())
             ));
         }
         std::thread::sleep(Duration::from_millis(50));

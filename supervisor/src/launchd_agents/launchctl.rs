@@ -249,5 +249,36 @@ pub(super) fn status_from_print(
     Ok((status, Some(word)))
 }
 
+/// Read `launchctl print`'s crash-loop evidence (#904): the agent's `runs`
+/// count and every `last exit …`/`last terminating …` line, verbatim, as
+/// `runs = 31, last exit code = 1`.
+///
+/// Only top-level keys (one tab deep) count: nested dicts hold operator text
+/// (the agent's environment), which must not pass for a counter. The `last …`
+/// keys are matched by prefix, not listed — launchd says `last exit code`,
+/// `last exit reason` (a jetsam'd agent, measured) or names a signal, and no
+/// list of its words has held (#898). Not loaded → `None`; a failed read is
+/// the error it is, so the caller can name it.
+pub(super) fn evidence_from_print(
+    print: Result<String, SupervisorError>,
+) -> Result<Option<String>, SupervisorError> {
+    let stdout = match print {
+        Ok(stdout) => stdout,
+        Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let evidence: Vec<&str> = stdout
+        .lines()
+        // One tab stripped: a nested line's key still starts with a tab.
+        .filter_map(|line| line.strip_prefix('\t'))
+        .filter(|line| {
+            line.split_once(" = ").is_some_and(|(key, _)| {
+                key == "runs" || key.starts_with("last exit ") || key.starts_with("last terminating ")
+            })
+        })
+        .collect();
+    Ok((!evidence.is_empty()).then(|| evidence.join(", ")))
+}
+
 #[cfg(test)]
 pub(super) mod tests;

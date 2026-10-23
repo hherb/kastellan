@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use kastellan_supervisor::{default_supervisor, describe_status, ServiceStatus, Supervisor};
+use kastellan_supervisor::{default_supervisor, describe_last_status, ServiceStatus, Supervisor};
 
 use super::plan::{
     build_specs, cli_path_precedence_note, estimate_model_bytes, is_local_ollama, memory_suffices,
@@ -441,7 +441,8 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
 fn verify_running(sup: &dyn Supervisor, layout: &Layout) -> Result<(), String> {
     let socket = layout.data_dir.join("sockets/.s.PGSQL.5432");
     let deadline = Instant::now() + Duration::from_secs(90);
-    let mut last = String::new();
+    // The last readings, rendered only once the wait gives up (#904).
+    let mut last = None;
     while Instant::now() < deadline {
         // A supervisor ERROR is not a service state — it means the query
         // itself cannot succeed (no launchd user domain, unspawnable
@@ -456,16 +457,23 @@ fn verify_running(sup: &dyn Supervisor, layout: &Layout) -> Result<(), String> {
         if socket.exists() && pg == ServiceStatus::Active && core == ServiceStatus::Active {
             return Ok(());
         }
-        // With the manager's own words: the status alone (`Inactive` or
-        // `Transitioning`) hides a crash loop (#900).
-        last = format!(
-            "postgres={}, core={}, socket={}",
-            describe_status(pg, pg_word.as_deref()),
-            describe_status(core, core_word.as_deref()),
-            socket.exists()
-        );
+        last = Some(((pg, pg_word), (core, core_word)));
         std::thread::sleep(Duration::from_secs(2));
     }
+    // With the manager's own words (#900) and, read once now, its crash-loop
+    // evidence (#904): `Transitioning` alone hides a core that has died 30 times.
+    let describe = |name, (status, word): (ServiceStatus, Option<String>)| {
+        describe_last_status(sup, name, status, word.as_deref())
+    };
+    let last = match last {
+        Some((pg, core)) => format!(
+            "postgres={}, core={}, socket={}",
+            describe("kastellan-postgres", pg),
+            describe("kastellan-core", core),
+            socket.exists()
+        ),
+        None => "never polled".to_string(),
+    };
     // A cluster created by an older install (superuser != $USER) yields a role
     // error the daemon can't recover from; db-init won't re-init an existing
     // data dir. Surface that specifically so the operator knows to purge.

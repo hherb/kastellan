@@ -46,7 +46,7 @@ pub mod service_name;
 pub use service_name::{validate_service_name, MAX_NAME_LEN};
 
 mod status;
-pub use status::{describe_status, ServiceStatus};
+pub use status::{describe_last_status, describe_status, ServiceStatus};
 
 pub mod specs;
 
@@ -266,6 +266,19 @@ pub trait Supervisor {
 
     fn status(&self, name: &str) -> Result<ServiceStatus, SupervisorError> {
         self.status_with_word(name).map(|(status, _)| status)
+    }
+
+    /// How often the service has died and how it last exited, in the
+    /// manager's own words — launchd's `runs = 31, last exit code = 1`,
+    /// systemd's `Result=exit-code, NRestarts=31, ExecMainStatus=1` — or
+    /// `None` when it has nothing to say (not loaded). Diagnostics for a wait
+    /// that has given up, rendered by [`describe_last_status`] (#904): one
+    /// more call to the manager, so never read it per poll.
+    ///
+    /// Defaults to `Ok(None)`: a backend without it still times out, just
+    /// without the evidence.
+    fn crash_evidence(&self, _name: &str) -> Result<Option<String>, SupervisorError> {
+        Ok(None)
     }
 
     /// Install every member of a [`TargetSpec`] (the generic bundle).

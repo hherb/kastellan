@@ -8,13 +8,14 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use kastellan_supervisor::{describe_status, ServiceStatus, Supervisor};
+use kastellan_supervisor::{describe_last_status, ServiceStatus, Supervisor};
 
 /// Block until `predicate(status)` returns `true` or `timeout`
 /// elapses. The supervisor is polled every 50 ms via `status_with_word(name)`;
 /// a status error short-circuits with `Err`, and a timeout names the last
-/// status with the manager's own word (`last=Inactive (state word:
-/// languishing)`, #900).
+/// status with the manager's own word (#900) and its crash-loop evidence,
+/// read once then (#904): `last=Inactive (state word: languishing; runs = 31,
+/// last exit code = 1)`.
 pub fn wait_for_status<F: Fn(ServiceStatus) -> bool>(
     sup: &dyn Supervisor,
     name: &str,
@@ -33,7 +34,7 @@ pub fn wait_for_status<F: Fn(ServiceStatus) -> bool>(
             return Err(format!(
                 "timed out after {:?} waiting for status; last={}",
                 timeout,
-                describe_status(last, word.as_deref())
+                describe_last_status(sup, name, last, word.as_deref())
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -197,15 +198,32 @@ mod tests {
             let (status, word) = if q.len() > 1 { q.pop_front().unwrap() } else { q[0] };
             Ok((status, Some(word.into())))
         }
+        fn crash_evidence(&self, _: &str) -> Result<Option<String>, SupervisorError> {
+            Ok(Some("runs = 31, last exit code = 1".into()))
+        }
     }
 
-    /// #900: a timeout names the manager's word that `Inactive` folds away.
+    /// #900: a timeout names the manager's word that `Inactive` folds away,
+    /// and #904: how often the service had already died.
     #[test]
-    fn a_status_timeout_names_the_managers_word() {
+    fn a_status_timeout_names_the_managers_word_and_the_crash_evidence() {
         let sup = Scripted::new(&[(ServiceStatus::Inactive, "languishing")]);
         let err = wait_for_status(&sup, "svc", |s| s == ServiceStatus::Active, Duration::from_millis(1))
             .unwrap_err();
-        assert!(err.contains("last=Inactive (state word: languishing)"), "got: {err}");
+        assert!(
+            err.contains("last=Inactive (state word: languishing; runs = 31, last exit code = 1)"),
+            "got: {err}"
+        );
+    }
+
+    /// A service that is not installed has no crash evidence to read, so
+    /// the timeout does not ask for any.
+    #[test]
+    fn a_not_installed_timeout_reads_no_crash_evidence() {
+        let sup = Scripted::new(&[(ServiceStatus::NotInstalled, "none")]);
+        let err = wait_for_status(&sup, "svc", |s| s == ServiceStatus::Active, Duration::from_millis(1))
+            .unwrap_err();
+        assert!(err.ends_with("last=NotInstalled (state word: none)"), "got: {err}");
     }
 
     /// #902: a stop-wait polls through the moving states and ends only once

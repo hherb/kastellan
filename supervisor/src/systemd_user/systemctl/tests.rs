@@ -180,3 +180,17 @@ fn run_bounded_reports_a_missing_binary_as_io() {
         .expect_err("no such binary");
     assert!(matches!(err, SupervisorError::Io(_)), "{err:?}");
 }
+
+/// #904: `systemctl --user show -p NRestarts,Result,ExecMainStatus` for a
+/// crash-looping unit, verbatim (DGX, systemd 255, 2026-10-23 — the live
+/// core refusing to boot without its guard backend). systemd picks the order.
+#[test]
+fn evidence_from_show_names_the_restarts_and_the_last_exit() {
+    let show = "Result=exit-code\nNRestarts=1355\nExecMainStatus=1\n";
+    assert_eq!(
+        evidence_from_show(show).as_deref(),
+        Some("Result=exit-code, NRestarts=1355, ExecMainStatus=1")
+    );
+    assert_eq!(evidence_from_show(""), None);
+    assert_eq!(evidence_from_show("\n"), None);
+}

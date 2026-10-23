@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use kastellan_supervisor::{describe_status, ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
+use kastellan_supervisor::{describe_last_status, ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
 
 /// Generate a unique, easily-greppable service name for this run.
 ///
@@ -84,7 +84,7 @@ fn wait_for(
             return Ok(());
         }
         if start.elapsed() > timeout {
-            let last = describe_status(got, word.as_deref());
+            let last = describe_last_status(sup, name, got, word.as_deref());
             return Err(format!("timeout waiting status={want:?}, last={last}"));
         }
         std::thread::sleep(Duration::from_millis(50));
