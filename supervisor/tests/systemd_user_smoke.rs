@@ -88,9 +88,14 @@ struct TestUnitGuard {
 }
 impl Drop for TestUnitGuard {
     fn drop(&mut self) {
-        // Best-effort cleanup. We deliberately ignore errors here so
-        // a partial-state test still cleans up as much as it can.
-        let _ = self.sup.uninstall(&self.name);
+        // Best-effort cleanup, but not silent: since #896 a failed stop keeps
+        // the unit file, which would then start at the next boot. One write,
+        // own line (tests-common's `warn_line` is not a Linux dev-dep here).
+        if let Err(e) = self.sup.uninstall(&self.name) {
+            let e = e.to_string().replace('\n', " ");
+            let line = format!("\n[WARN] uninstall {} in cleanup: {e}\n", self.name);
+            eprint!("{line}");
+        }
     }
 }
 
@@ -172,6 +177,9 @@ fn install_start_status_stop_uninstall_round_trip() {
         .expect("service should become Inactive within 5s");
 
     sup.uninstall(&name).expect("uninstall");
+    // Again, on the live manager: systemd's real "not loaded" / "no unit
+    // file" answers must read as already done, or a retry wedges (#896).
+    sup.uninstall(&name).expect("uninstall is idempotent on the live manager");
     // After uninstall the unit file is gone; status() must report
     // NotInstalled (and not error).
     assert_eq!(
@@ -272,8 +280,8 @@ fn install_enables_the_unit_so_it_comes_back_after_a_reboot() {
         wants_link.display()
     );
 
-    // Symmetry: uninstall must leave nothing behind. `uninstall` already
-    // ran a best-effort `disable`, so the link must be gone with the unit.
+    // Symmetry: uninstall must leave nothing behind. `uninstall` disables
+    // before it removes the file (#896), so the link must be gone with it.
     sup.uninstall(&name).expect("uninstall");
     assert_ne!(
         is_enabled_state(&unit),

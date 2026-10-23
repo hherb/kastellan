@@ -147,17 +147,17 @@ fn uninstall_is_idempotent_when_nothing_installed() {
 /// #894: a bootout that did not answer "not loaded" keeps the plist, so
 /// `uninstall` can be retried — and the error says the plist was kept.
 #[test]
-fn remove_plist_after_a_failed_bootout_keeps_the_plist() {
+fn remove_after_stop_a_failed_bootout_keeps_the_plist() {
     let dir = TestRoot::new("kept-plist");
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");
     let path = sup.plist_path("svc");
     let failures = [
-        SupervisorError::Backend("launchctl bootout timed out".into()),
+        SupervisorError::Backend(super::launchctl::timed_out_message(&["bootout", "gui/501/svc"])),
         SupervisorError::Io("run launchctl: Broken pipe".into()),
     ];
     for failure in failures {
-        let err = remove_plist_after(Err(failure), &path).expect_err("bootout failed");
+        let err = remove_after_stop(Err(failure), &path).expect_err("bootout failed");
         assert!(path.exists(), "plist removed although the agent may still be loaded");
         let msg = match &err {
             SupervisorError::Backend(m) | SupervisorError::Io(m) => m,
@@ -168,25 +168,25 @@ fn remove_plist_after_a_failed_bootout_keeps_the_plist() {
 }
 
 #[test]
-fn remove_plist_after_a_clean_bootout_removes_it() {
+fn remove_after_stop_a_clean_bootout_removes_it() {
     let dir = TestRoot::new("removed-plist");
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");
     let path = sup.plist_path("svc");
-    remove_plist_after(Ok(()), &path).expect("removed");
+    remove_after_stop(Ok(()), &path).expect("removed");
     assert!(!path.exists());
-    remove_plist_after(Ok(()), &path).expect("already absent is success");
+    remove_after_stop(Ok(()), &path).expect("already absent is success");
 }
 
 /// The whole "already not loaded" chain with launchctl's real wording:
 /// uninstalling a stopped agent still removes its plist.
 #[test]
-fn remove_plist_after_a_not_loaded_bootout_removes_it() {
+fn remove_after_stop_a_not_loaded_bootout_removes_it() {
     let dir = TestRoot::new("not-loaded-plist");
     let sup = LaunchAgents::with_agents_dir(dir.path().to_path_buf());
     sup.install(&minimal_spec("svc")).expect("install");
     let path = sup.plist_path("svc");
-    remove_plist_after(bootout_outcome(backend(NOT_LOADED)), &path).expect("removed");
+    remove_after_stop(bootout_outcome(backend(NOT_LOADED)), &path).expect("removed");
     assert!(!path.exists());
 }
 

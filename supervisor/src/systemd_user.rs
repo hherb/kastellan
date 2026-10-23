@@ -45,15 +45,18 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-
 use crate::atomic_write::write_atomic;
+use crate::remove_after::remove_after_stop;
 use crate::{ServiceSpec, ServiceStatus, Supervisor, SupervisorError, TargetSpec};
 
 mod builder;
 // Re-exported so `systemd_user::build_unit_file`, `::build_target_unit`,
 // and `::validate_service_name` keep their public paths after the split.
 pub use builder::{build_target_unit, build_unit_file, validate_service_name};
+
+mod systemctl;
+pub use systemctl::probe;
+use systemctl::{run_systemctl_user, run_user, status_from_is_active, stop_and_disable};
 
 /// `systemctl --user` driver.
 ///
@@ -178,17 +181,17 @@ impl Supervisor for SystemdUser {
 
     fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
         validate_service_name(name)?;
-        let unit = format!("{name}.service");
-        // Stop is best-effort; the unit may already be inactive.
-        let _ = run_systemctl_user(&["stop", &unit]);
-        // Disable is best-effort; the unit may not be enabled.
-        let _ = run_systemctl_user(&["disable", &unit]);
-
-        let path = self.unit_path(name);
-        if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|e| SupervisorError::Io(format!("remove {}: {e}", path.display())))?;
-        }
+        // `uninstall` drives systemctl only for the canonical units dir: for
+        // a custom dir (tests) a name collision must not stop someone else's
+        // real unit — the launchd backend's rule too.
+        let stopped = if self.is_default_units_dir() {
+            stop_and_disable(&format!("{name}.service"))
+        } else {
+            Ok(())
+        };
+        // A unit that may still be running (or still linked for the next
+        // boot) keeps its file, and the error says so (#896).
+        remove_after_stop(stopped, &self.unit_path(name))?;
         if self.is_default_units_dir() {
             self.daemon_reload()?;
         }
@@ -199,31 +202,18 @@ impl Supervisor for SystemdUser {
         validate_service_name(name)?;
         // No file on disk → not installed (regardless of what
         // systemctl thinks; the live manager may have a unit cached).
-        if !self.unit_path(name).exists() {
+        // `try_exists`: an unreadable units dir is an error, not "absent".
+        let path = self.unit_path(name);
+        if !path
+            .try_exists()
+            .map_err(|e| SupervisorError::Io(format!("stat {}: {e}", path.display())))?
+        {
             return Ok(ServiceStatus::NotInstalled);
         }
-        // `systemctl is-active` exits 0 for active, 3 for inactive,
-        // and prints the canonical state on stdout in either case.
-        // We trust stdout, not the exit code.
+        // Bounded, and read by the pure `status_from_is_active`: stdout's
+        // word, not the exit code — and no word at all is an error (#896).
         let unit = format!("{name}.service");
-        let out = Command::new("systemctl")
-            .args(["--user", "is-active", &unit])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| SupervisorError::Io(format!("spawn systemctl: {e}")))?;
-        let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Ok(match state.as_str() {
-            "active" => ServiceStatus::Active,
-            "inactive" => ServiceStatus::Inactive,
-            "failed" => ServiceStatus::Failed,
-            // unknown / activating / deactivating / reloading: the
-            // unit *exists* (we checked the file) so it's not
-            // NotInstalled. Map to Inactive so callers don't have to
-            // poll a transient state forever.
-            _ => ServiceStatus::Inactive,
-        })
+        status_from_is_active(&unit, &run_user(&["is-active", &unit])?)
     }
 
     /// Install the target the systemd-native way: write each member unit,
@@ -290,30 +280,35 @@ impl Supervisor for SystemdUser {
         run_systemctl_user(&["stop", &format!("{}.target", target.name)]).map(|_| ())
     }
 
-    /// Tear down the native target: best-effort stop, uninstall members in
-    /// reverse, then remove the `.target` unit file.
+    /// Tear down the native target: stop and disable it, uninstall members
+    /// in reverse, then remove the `.target` unit file.
+    ///
+    /// Fail-fast, like the trait default (#896): a failed stop or disable,
+    /// or a member that could not be uninstalled, returns at once and keeps
+    /// the `.target` file, so a retry finds everything it needs — every
+    /// step is idempotent ("not loaded" and "no unit file" are success).
     fn uninstall_target(&self, target: &TargetSpec) -> Result<(), SupervisorError> {
         validate_service_name(&target.name)?;
-        // Stop the target (propagates to members via PartOf=), then
-        // remove every member unit and the target unit file.
-        let _ = run_systemctl_user(&["stop", &format!("{}.target", target.name)]);
-        // Undo `install_target`'s enable while the unit file is still on
-        // disk — `disable` resolves the `[Install]` section to know which
-        // links to drop, so removing the file first would strand the
-        // `default.target.wants/` symlink. Best-effort, mirroring
-        // `uninstall`: the target may never have been enabled.
-        let _ = run_systemctl_user(&["disable", &format!("{}.target", target.name)]);
-        for name in target.members.iter().rev() {
-            // Best-effort: keep tearing down remaining members even if one
-            // member's uninstall errors (e.g. its unit file is already gone).
-            let _ = self.uninstall(name);
+        // Every name before any side effect, as `install_target` does: a bad
+        // member found mid-teardown would wedge every retry on it.
+        for member in &target.members {
+            validate_service_name(member)?;
         }
-        let path = self.target_path(&target.name);
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| {
-                SupervisorError::Io(format!("remove {}: {e}", path.display()))
-            })?;
-        }
+        // Stop the target (propagates via PartOf= to members whose spec sets
+        // `part_of`, as both of `kastellan_target_spec`'s do) and undo
+        // `install_target`'s enable while the unit file is still on disk —
+        // `disable` resolves the `[Install]` section to know which links to
+        // drop, so removing the file first would strand the
+        // `default.target.wants/` symlink.
+        let stopped = if self.is_default_units_dir() {
+            stop_and_disable(&format!("{}.target", target.name))
+        } else {
+            Ok(())
+        };
+        // Members next, so a member that fails leaves the `.target` file.
+        let torn_down =
+            stopped.and_then(|()| target.members.iter().rev().try_for_each(|m| self.uninstall(m)));
+        remove_after_stop(torn_down, &self.target_path(&target.name))?;
         if self.is_default_units_dir() {
             self.daemon_reload()?;
         }
@@ -417,9 +412,10 @@ impl SystemdUser {
     }
 
     /// True iff the driver writes into the canonical
-    /// `~/.config/systemd/user/` location. Used to decide whether
-    /// `daemon-reload` makes sense — for custom dirs (tests) it
-    /// doesn't, since the live manager doesn't scan them.
+    /// `~/.config/systemd/user/` location. Only then are `daemon-reload`,
+    /// `install`'s `enable` and the uninstalls' `stop` + `disable` sent to
+    /// the live manager: it does not scan a custom dir (tests), and a name
+    /// collision there must not stop or unlink someone else's real unit.
     fn is_default_units_dir(&self) -> bool {
         let home = match std::env::var_os("HOME") {
             Some(h) => PathBuf::from(h),
@@ -427,61 +423,6 @@ impl SystemdUser {
         };
         self.units_dir == home.join(".config").join("systemd").join("user")
     }
-}
-
-/// Probe whether `systemctl --user` can talk to a live user manager.
-///
-/// Mirrors `sandbox::linux_cgroup::cgroup_probe`: succeed silently or
-/// return a structured error with a hint pointing at the most common
-/// recovery (`loginctl enable-linger $USER` for headless sessions).
-///
-/// Used by callers that want fail-closed behaviour at startup — if
-/// the supervisor cannot reach the user manager, every lifecycle
-/// call would fail anyway, so failing once up front is friendlier.
-pub fn probe() -> Result<(), SupervisorError> {
-    let out = Command::new("systemctl")
-        .args(["--user", "show-environment"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| SupervisorError::Probe(format!("spawn systemctl: {e}")))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let hint = if stderr.contains("Failed to connect") || stderr.contains("No such file") {
-        "\n\nThe per-user systemd manager does not appear to be running. \
-         On a normal desktop session it starts automatically; on headless \
-         hosts run `loginctl enable-linger $USER` and re-login."
-    } else {
-        ""
-    };
-    Err(SupervisorError::Probe(format!(
-        "systemctl --user show-environment failed: {}{hint}",
-        stderr.trim()
-    )))
-}
-
-/// Run `systemctl --user <args>` with stdio captured. Maps non-zero
-/// exits to [`SupervisorError::Backend`] with the trimmed stderr.
-fn run_systemctl_user(args: &[&str]) -> Result<String, SupervisorError> {
-    let out = Command::new("systemctl")
-        .arg("--user")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| SupervisorError::Io(format!("spawn systemctl: {e}")))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(SupervisorError::Backend(format!(
-            "systemctl --user {}: {stderr}",
-            args.join(" ")
-        )));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]

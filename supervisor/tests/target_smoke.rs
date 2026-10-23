@@ -101,7 +101,12 @@ mod linux {
     }
     impl Drop for Guard {
         fn drop(&mut self) {
-            let _ = self.sup.uninstall_target(&self.target);
+            // Not silent: since #896 a failed stop keeps the unit files.
+            if let Err(e) = self.sup.uninstall_target(&self.target) {
+                let e = e.to_string().replace('\n', " ");
+                let line = format!("\n[WARN] uninstall_target in cleanup: {e}\n");
+                eprint!("{line}");
+            }
         }
     }
 
@@ -227,6 +232,9 @@ mod linux {
         // Symmetry: tearing the target down must not leave a dangling
         // symlink in the user's real `default.target.wants/`.
         sup.uninstall_target(&target).expect("uninstall_target");
+        // Again, on the live manager: the benign answers for a `.target`
+        // and its members must read as already done (#896).
+        sup.uninstall_target(&target).expect("uninstall_target is idempotent on the live manager");
         assert_ne!(
             is_enabled_state(&unit),
             "enabled",
