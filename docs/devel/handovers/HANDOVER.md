@@ -9,21 +9,23 @@
 > sections and the #905 baseline rows included; #896's are in the `903` snapshot, #898's and #894's in `896`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-24 (#609: the guard backend is a supervised unit, and core waits out its start — PR #908. ⚠️ **Not deployed yet** — Next TODO 0) ·
+**Last updated:** 2026-10-25 (PR #908 / #609 **deployed on both hosts** — the DGX guard is now the supervised `kastellan-guard` unit) ·
 **Recent PRs, newest first:** [#908](https://github.com/hherb/kastellan/pull/908) (#609), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged); #877 … #795 are in the 896/905 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
-(exit 0), 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre869`,
-live-matrix worker digest `94c86940…` (unchanged — no worker crate changed), migrations 27/27,
-`NRestarts=0`, Matrix up in ~31 s. ⚠️ **2026-10-24:** the DGX had been down since the 10-19 reboot
-(unsupervised guard, 1523 restarts, #609) **and on CPU** (kernel `7.0.0-1019` had no NVIDIA module —
-[[dgx-apt-upgrade-drops-nvidia-module]], recurred). The operator installed
-`linux-modules-nvidia-580-open-7.0.0-1019-nvidia` and rebooted (14:48); GPU back (GB10, 580.178.04).
-The guard is **again hand-started** (`nohup … llama-server … --port 8081`, on GPU) until #609 is
-deployed, and `kastellan-searxng` now has restart policy `unless-stopped` (set this session). **Mac:** manual recipe [[mac-kastellan-install-recipe]], env + plist
-identical, migrations 27/27 — but `install` left `kastellan-postgres` **unloaded** (#870, bootstrapped by
-hand). **localmail** on both hosts: its PR #397. The DGX boot ERROR `install dir is writable …
+**Both hosts run PR #908's tree** (`f59e6cb2`, deployed 2026-10-25). **DGX:** built first, then the
+two `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` keys appended to `.local` (backups `~/kastellan.env*.bak-pre908`),
+the hand-started guard killed, plain `scripts/upgrade_from_git.sh` (exit 0): 15 binaries, overlay
+15 keys all applied, generated env byte-identical, live-matrix digest `94c86940…` (unchanged), Matrix
+up. `kastellan-guard` is **active on GPU** (17 GiB, `/health` ok), core unit has
+`After=kastellan-guard.service`, core `NRestarts=0`. The new boot wait ran live: core met
+`HTTP 503 Loading model` and configured the guard 2.5 s later instead of refusing. ⚠️ **Not yet
+proven across a reboot** (Next TODO 0). Running kernel `7.0.0-1019` is the newest installed and has
+its NVIDIA module, so a reboot should stay on GPU [[dgx-apt-upgrade-drops-nvidia-module]].
+`kastellan-searxng` has restart policy `unless-stopped`. **Mac:** manual recipe
+[[mac-kastellan-install-recipe]], exit 0, env + plist byte-identical, overlay 3/3, both agents
+running (Postgres stayed loaded this time). No guard is configured on the Mac, so #609 adds no unit
+there. **localmail** on both hosts: its PR #397. The DGX boot ERROR `install dir is writable …
 group-writable (mode 0775)` is **pre-existing** (since 2026-07-31) — not a deploy regression. The live
 process runs thinking **ON** (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`,
 `TIMEOUT_MS=600000`). The last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**.
@@ -256,14 +258,11 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-0. **Deploy #609 on the DGX once merged** (the guard is hand-started until then — a reboot takes the
-   daemon down again). Add to `~/.config/kastellan/kastellan.env.local`:
-   `KASTELLAN_GUARD_SERVER_BIN=/home/hherb/.local/bin/llama-server` and
-   `KASTELLAN_GUARD_SERVER_MODEL=/home/hherb/models/shieldstral/Shieldstral-1.0-3B-Q8_0.gguf`;
-   **kill the hand-started guard** (`pkill -f "llama-server.*--port 8081"`, else the unit cannot bind);
-   then `scripts/upgrade_from_git.sh`. Verify `systemctl --user status kastellan-guard`, `nvidia-smi`
-   shows its process, core `NRestarts=0`; ideally one reboot to prove the point. Docs:
-   `docs/deploy/operator-env.md` § A supervised guard backend.
+0. **Prove #609 across one DGX reboot** (deployed 2026-10-25, see the header). After the reboot:
+   `systemctl --user is-active kastellan-guard kastellan-core`, `nvidia-smi` shows the guard's
+   `llama-server`, core `NRestarts=0`, Matrix answers. ⚠️ When stopping a hand-started guard, never
+   `pkill -f "llama-server.*--port 8081"` inside `ssh dgx '…'`: the pattern matches the remote shell's
+   own command line and kills it (exit 255) [[pgrep-wait-loops-match-themselves]].
 
 1. **The live re-measure** (unblocked 2026-10-24 — the daemon boots again, on GPU) (DMs, a **fresh room**; #776 is deployed,
    thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
