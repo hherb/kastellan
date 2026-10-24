@@ -9,9 +9,9 @@
 //! trivially unit-testable and means a test can synthesize a spec
 //! without filesystem side effects.
 //!
-//! Today this module ships the agent-core and Postgres daemon specs, plus the
+//! Today this module ships the agent-core and Postgres daemon specs, the
+//! optional guard-model backend (`llama-server`, #609), plus the
 //! `kastellan_target_spec` bundle that ties the canonical services together.
-//! More will land here as services are added (inference router, etc.).
 
 use std::path::Path;
 
@@ -31,6 +31,19 @@ pub const CORE_SERVICE_NAME: &str = "kastellan-core";
 /// Canonical name used for the per-user Postgres daemon's unit/agent
 /// file. Same shape rationale as [`CORE_SERVICE_NAME`].
 pub const POSTGRES_SERVICE_NAME: &str = "kastellan-postgres";
+
+/// Canonical name of the optional guard-model backend (`llama-server` serving
+/// the guard tier's model). Same shape rationale as [`CORE_SERVICE_NAME`].
+pub const GUARD_SERVICE_NAME: &str = "kastellan-guard";
+
+/// Context size the guard backend is started with, in tokens.
+///
+/// The daemon's guard tier refuses to boot below its D8 floor
+/// (`REQUIRED_GUARD_N_CTX` in `kastellan-core`, 66 048 today — a worst-case
+/// 64 KiB document plus the prompt); `kastellan-core` pins this value against
+/// that floor in a test. 131 072 is what the live DGX guard has run since its
+/// bring-up, with room to spare.
+pub const GUARD_CONTEXT_TOKENS: u32 = 131_072;
 
 /// Canonical name of the service bundle that brings up the whole agent.
 /// Becomes `kastellan.target` on systemd; on launchd it names the member
@@ -170,13 +183,88 @@ pub fn postgres_service_spec(
     }
 }
 
+/// Build a [`ServiceSpec`] for the guard-model backend: `llama-server`
+/// serving the guard tier's model on loopback (#609).
+///
+/// Why it is supervised at all: before #609 the guard ran as a hand-started
+/// process, so a reboot left it down — and because the daemon refuses to boot
+/// with a configured but unreachable guard (wiring-spec D6), the *whole agent*
+/// stayed down with it (1 500+ restarts on the DGX, 2026-10-19 → 24).
+///
+/// Arguments:
+/// - `server` — absolute path to the operator's `llama-server`.
+/// - `model` — absolute path to the guard model's GGUF file.
+/// - `alias` — the model name the API answers to. Must equal the daemon's
+///   `KASTELLAN_LLM_GUARD_MODEL`, which is what the installer passes.
+/// - `port` — the loopback port. Must equal the port in the daemon's
+///   `KASTELLAN_LLM_GUARD_URL`, likewise derived by the installer.
+/// - `log_dir` — as for [`core_service_spec`].
+///
+/// Choices baked in:
+/// - **`--host 127.0.0.1`**: the guard is a core-only dependency; nothing off
+///   the host may reach it.
+/// - **`-c` [`GUARD_CONTEXT_TOKENS`]**: must clear the daemon's D8 floor.
+/// - **`-ngl 99`**: offload every layer when there is a GPU. On a host without
+///   one `llama-server` warns and runs on the CPU — slower, but the tier still
+///   works, so the flag is safe everywhere.
+/// - **`env` empty**: `llama-server` needs none (measured on the DGX with
+///   `env -i`; its libraries resolve through the binary's rpath).
+/// - **`keep_alive` + the same backoff as core**: a crashed guard must come
+///   back, or core cannot boot.
+/// - **Not sandboxed**: like Postgres it is an operator-installed service, not
+///   a tool worker, and it runs no untrusted *code*. It does parse untrusted
+///   *input* — scoring attacker-controlled documents is what it is for — so
+///   this is a deliberate choice with a known exposure: loopback-only, but
+///   CORS `*` and no API key ([#907]).
+///
+/// [#907]: https://github.com/hherb/kastellan/issues/907
+///
+/// Pure: no I/O, no env probing.
+pub fn guard_service_spec(
+    server: &Path,
+    model: &Path,
+    alias: &str,
+    port: u16,
+    log_dir: &Path,
+) -> ServiceSpec {
+    ServiceSpec {
+        name: GUARD_SERVICE_NAME.into(),
+        program: server.to_path_buf(),
+        args: vec![
+            "-m".into(),
+            model.to_string_lossy().into_owned(),
+            "--alias".into(),
+            alias.into(),
+            "--host".into(),
+            "127.0.0.1".into(),
+            "--port".into(),
+            port.to_string(),
+            "-c".into(),
+            GUARD_CONTEXT_TOKENS.to_string(),
+            "-ngl".into(),
+            "99".into(),
+        ],
+        env: vec![],
+        working_dir: None,
+        keep_alive: true,
+        stdout_log: Some(log_dir.join(format!("{GUARD_SERVICE_NAME}.out"))),
+        stderr_log: Some(log_dir.join(format!("{GUARD_SERVICE_NAME}.err"))),
+        after: vec![],
+        part_of: Some(KASTELLAN_TARGET_NAME.to_string()),
+        restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
+        environment_files: Vec::new(),
+    }
+}
+
 /// Build the canonical [`TargetSpec`] that brings up the whole agent.
 ///
 /// Members in **start order**: Postgres first (the dependency leaf),
 /// then core (which must start after Postgres). Inference is **not** a
 /// member — it is an operator-managed external dependency that core's
-/// startup probe health-checks. Workers are **not** members either —
-/// `tool_host` spawns them on demand inside sandboxes when core runs.
+/// startup probe health-checks — except the guard backend, which the
+/// installer inserts before core when the operator configures one (#609).
+/// Workers are **not** members either — `tool_host` spawns them on demand
+/// inside sandboxes when core runs.
 ///
 /// Pure: no I/O, same call → same value.
 pub fn kastellan_target_spec() -> TargetSpec {
@@ -190,281 +278,4 @@ pub fn kastellan_target_spec() -> TargetSpec {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    /// Pin the canonical name so a typo can't silently rename the
-    /// service in a future refactor.
-    #[test]
-    fn core_service_spec_uses_canonical_name() {
-        let spec = core_service_spec(
-            Path::new("/usr/local/bin/kastellan"),
-            Path::new("/var/log/kastellan"),
-        );
-        assert_eq!(spec.name, "kastellan-core");
-        assert_eq!(spec.name, CORE_SERVICE_NAME);
-    }
-
-    /// The caller's binary path must flow through verbatim — both
-    /// backends require an absolute `program`, but it's the caller's
-    /// job to pass one (this helper is pure).
-    #[test]
-    fn core_service_spec_program_is_caller_supplied() {
-        let bin = PathBuf::from("/opt/kastellan/bin/kastellan");
-        let spec = core_service_spec(&bin, Path::new("/tmp/logs"));
-        assert_eq!(spec.program, bin);
-    }
-
-    /// Defends against accidentally injecting unintended argv.
-    #[test]
-    fn core_service_spec_args_are_empty() {
-        let spec = core_service_spec(
-            Path::new("/usr/local/bin/kastellan"),
-            Path::new("/tmp"),
-        );
-        assert!(spec.args.is_empty(), "daemon takes no flags yet");
-    }
-
-    /// The unit injects exactly one env var: the egress force-routing
-    /// opt-in (slice #2), on by default in the supervised deployment. Pin
-    /// that it is present and is the *only* injected var — so a regression
-    /// that drops the secure default (or starts leaking other host config)
-    /// trips this test.
-    #[test]
-    fn core_service_spec_enables_egress_force_routing() {
-        let spec = core_service_spec(
-            Path::new("/usr/local/bin/kastellan"),
-            Path::new("/tmp"),
-        );
-        assert_eq!(
-            spec.env,
-            vec![("KASTELLAN_EGRESS_FORCE_ROUTING".to_string(), "1".to_string())],
-            "the core unit must enable egress force-routing by default, and inject nothing else"
-        );
-    }
-
-    /// The daemon doesn't depend on cwd; not setting one keeps the
-    /// supervisor unit shape small.
-    #[test]
-    fn core_service_spec_does_not_set_working_dir() {
-        let spec = core_service_spec(
-            Path::new("/usr/local/bin/kastellan"),
-            Path::new("/tmp"),
-        );
-        assert!(spec.working_dir.is_none());
-    }
-
-    /// The core daemon now blocks on SIGTERM/SIGINT and is intended
-    /// to stay running until the supervisor stops it. Pin
-    /// `keep_alive=true` so a regression that flips it back to
-    /// `false` (which would mean a daemon crash silently goes
-    /// unrestarted) trips this test.
-    #[test]
-    fn core_service_spec_keep_alive_is_true() {
-        let spec = core_service_spec(
-            Path::new("/usr/local/bin/kastellan"),
-            Path::new("/tmp"),
-        );
-        assert!(spec.keep_alive);
-    }
-
-    /// stdout / stderr are appended to predictable filenames under
-    /// `log_dir`, so an operator can `tail -F` them without guessing.
-    #[test]
-    fn core_service_spec_emits_log_paths_under_log_dir() {
-        let spec = core_service_spec(
-            Path::new("/usr/local/bin/kastellan"),
-            Path::new("/var/log/kastellan"),
-        );
-        assert_eq!(
-            spec.stdout_log,
-            Some(PathBuf::from("/var/log/kastellan/kastellan-core.out"))
-        );
-        assert_eq!(
-            spec.stderr_log,
-            Some(PathBuf::from("/var/log/kastellan/kastellan-core.err"))
-        );
-    }
-
-    /// Distinct destinations so an operator can separate normal logs
-    /// from error spam.
-    #[test]
-    fn core_service_spec_log_paths_are_distinct() {
-        let spec = core_service_spec(
-            Path::new("/usr/local/bin/kastellan"),
-            Path::new("/tmp"),
-        );
-        assert_ne!(spec.stdout_log, spec.stderr_log);
-    }
-
-    // ----- postgres_service_spec -----
-
-    /// Pin the canonical Postgres service name.
-    #[test]
-    fn postgres_service_spec_uses_canonical_name() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/var/lib/kastellan/pg/data"),
-            Path::new("/var/log/kastellan"),
-        );
-        assert_eq!(spec.name, "kastellan-postgres");
-        assert_eq!(spec.name, POSTGRES_SERVICE_NAME);
-    }
-
-    /// Caller-supplied program path flows through verbatim.
-    #[test]
-    fn postgres_service_spec_program_is_caller_supplied() {
-        let bin = PathBuf::from("/opt/homebrew/opt/postgresql@18/bin/postgres");
-        let spec = postgres_service_spec(
-            &bin,
-            Path::new("/srv/data"),
-            Path::new("/tmp/logs"),
-        );
-        assert_eq!(spec.program, bin);
-    }
-
-    /// Postgres needs `-D <data_dir>` to know where the cluster lives.
-    /// Both the flag and the path must be present and in order.
-    #[test]
-    fn postgres_service_spec_passes_dash_d_data_dir_in_args() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/srv/kastellan/pg/data"),
-            Path::new("/tmp/logs"),
-        );
-        assert_eq!(spec.args.len(), 2, "args: {:?}", spec.args);
-        assert_eq!(spec.args[0], "-D");
-        assert_eq!(spec.args[1], "/srv/kastellan/pg/data");
-    }
-
-    /// We deliberately pass no env so the daemon inherits the clean
-    /// environment the supervisor sets up. Defends against accidentally
-    /// shipping a `PGDATA` or `PGPORT` that would override postgresql.conf.
-    #[test]
-    fn postgres_service_spec_env_is_empty() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/d"),
-            Path::new("/tmp"),
-        );
-        assert!(spec.env.is_empty());
-    }
-
-    /// Postgres reads everything it needs from `-D <data_dir>` and
-    /// writes its pidfile/logs there. Cwd is irrelevant.
-    #[test]
-    fn postgres_service_spec_does_not_set_working_dir() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/d"),
-            Path::new("/tmp"),
-        );
-        assert!(spec.working_dir.is_none());
-    }
-
-    /// Postgres is the system's spine; if it crashes we want it back.
-    /// `keep_alive=true` gives `Restart=on-failure` (systemd) /
-    /// `KeepAlive=true` (launchd). Pin so a regression flipping this
-    /// to `false` (which would leave a crashed PG offline indefinitely)
-    /// trips the test.
-    #[test]
-    fn postgres_service_spec_keep_alive_is_true() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/d"),
-            Path::new("/tmp"),
-        );
-        assert!(spec.keep_alive);
-    }
-
-    #[test]
-    fn postgres_service_spec_emits_log_paths_under_log_dir() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/d"),
-            Path::new("/var/log/kastellan"),
-        );
-        assert_eq!(
-            spec.stdout_log,
-            Some(PathBuf::from("/var/log/kastellan/kastellan-postgres.out"))
-        );
-        assert_eq!(
-            spec.stderr_log,
-            Some(PathBuf::from("/var/log/kastellan/kastellan-postgres.err"))
-        );
-    }
-
-    #[test]
-    fn postgres_service_spec_log_paths_are_distinct() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/d"),
-            Path::new("/tmp"),
-        );
-        assert_ne!(spec.stdout_log, spec.stderr_log);
-    }
-
-    /// The two canonical service names are distinct so they map to
-    /// distinct unit/agent files and never collide on disk.
-    #[test]
-    fn canonical_service_names_are_distinct() {
-        assert_ne!(CORE_SERVICE_NAME, POSTGRES_SERVICE_NAME);
-        assert_ne!(KASTELLAN_TARGET_NAME, CORE_SERVICE_NAME);
-        assert_ne!(KASTELLAN_TARGET_NAME, POSTGRES_SERVICE_NAME);
-    }
-
-    #[test]
-    fn postgres_spec_belongs_to_target_with_no_dependency() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/var/lib/kastellan/pgdata"),
-            Path::new("/tmp/logs"),
-        );
-        assert!(spec.after.is_empty(), "postgres is the dependency leaf");
-        assert_eq!(spec.part_of.as_deref(), Some(KASTELLAN_TARGET_NAME));
-    }
-
-    #[test]
-    fn core_spec_starts_after_postgres_and_belongs_to_target() {
-        let spec = core_service_spec(Path::new("/opt/kastellan/kastellan"), Path::new("/tmp/logs"));
-        assert_eq!(spec.after, vec![POSTGRES_SERVICE_NAME.to_string()]);
-        assert_eq!(spec.part_of.as_deref(), Some(KASTELLAN_TARGET_NAME));
-    }
-
-    #[test]
-    fn kastellan_target_lists_postgres_then_core_in_order() {
-        let t = kastellan_target_spec();
-        assert_eq!(t.name, KASTELLAN_TARGET_NAME);
-        assert_eq!(
-            t.members,
-            vec![POSTGRES_SERVICE_NAME.to_string(), CORE_SERVICE_NAME.to_string()],
-            "Postgres must precede core (start order)"
-        );
-    }
-
-    #[test]
-    fn core_service_spec_carries_expected_backoff_curve() {
-        let spec = core_service_spec(
-            Path::new("/usr/local/bin/kastellan"),
-            Path::new("/tmp"),
-        );
-        assert_eq!(
-            spec.restart_backoff,
-            Some(RestartBackoff { max_delay_sec: 300, steps: 8 })
-        );
-    }
-
-    #[test]
-    fn postgres_service_spec_carries_expected_backoff_curve() {
-        let spec = postgres_service_spec(
-            Path::new("/usr/lib/postgresql/18/bin/postgres"),
-            Path::new("/d"),
-            Path::new("/tmp"),
-        );
-        assert_eq!(
-            spec.restart_backoff,
-            Some(RestartBackoff { max_delay_sec: 300, steps: 8 })
-        );
-    }
-}
+mod tests;

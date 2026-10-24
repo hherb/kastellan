@@ -18,6 +18,7 @@ use super::plan::{
     Layout,
 };
 use crate::install::env_diff::EnvDiff;
+use crate::install::guard_backend;
 
 /// How an operator makes an overlay edit take effect, per platform.
 ///
@@ -316,10 +317,16 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
         None => kastellan_db::find_pg_bin_dir(&kastellan_db::default_pg_bin_dir_candidates())
             .map_err(|e| format!("could not find Postgres bin dir ({e}); install PostgreSQL 18 or pass --pg-bin-dir <dir>"))?,
     };
-    let specs = build_specs(&layout, &pg_bin_dir.join("postgres"));
+    let mut specs = build_specs(&layout, &pg_bin_dir.join("postgres"));
+    // The supervised guard backend (#609), planned from the env files just written.
+    let guard = guard_backend::resolve_from_env_files(&layout)?;
+    if let Some(g) = &guard {
+        guard_backend::add_to_specs(&mut specs, g, &layout.log_dir);
+    }
 
     let sup = default_supervisor();
     sup.install_target(&specs.target, &specs.members).map_err(|e| format!("install units: {e}"))?;
+    guard_backend::remove_stale_unit(sup.as_ref(), guard.as_ref())?;
     eprintln!("installed {UNIT_NOUN} for kastellan.target");
 
     if args.no_start {
@@ -368,7 +375,7 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
     // loaded and leave it unloaded once it exits (#870).
     sup.stop_target(&specs.target).map_err(|e| format!("stop kastellan.target before restart: {e}"))?;
     sup.start_target(&specs.target).map_err(|e| format!("start kastellan.target: {e}"))?;
-    verify_running(sup.as_ref(), &layout)?;
+    verify_running(sup.as_ref(), &layout, &specs.target.members)?;
     eprintln!("kastellan.target is up. Inspect: {INSPECT_LOGS_HINT}");
     Ok(())
 }
@@ -386,6 +393,13 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
         eprintln!("warning: stopping kastellan.target: {e} (uninstalling anyway)");
     }
     sup.uninstall_target(&specs.target).map_err(|e| format!("uninstall units: {e}"))?;
+    // Not a target member here (uninstall reads no env files), so removed by
+    // name. A failure must not strand the symlink and `--purge` below, so it
+    // is said now and returned once the rest is done.
+    let guard_removed = guard_backend::remove_stale_unit(sup.as_ref(), None);
+    if let Err(e) = &guard_removed {
+        eprintln!("error: {e} (finishing the rest of the uninstall first)");
+    }
     eprintln!("removed kastellan.target units");
 
     // Remove the operator-CLI symlink (a pointer, not data — gone on any
@@ -421,10 +435,10 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     } else {
         eprintln!("kept data dir + secrets at {} (use --purge to delete)", layout.assets_dir.display());
     }
-    Ok(())
+    guard_removed
 }
 
-/// Wait for the socket to appear AND both services to reach `Active`, polling
+/// Wait for the socket to appear AND every member to reach `Active`, polling
 /// over a window. `kastellan-core` is `After=` Postgres but systemd does not
 /// wait for PG *readiness*, so core typically crash-restarts a few times (with
 /// `Restart=on-failure` backoff) before the cluster accepts connections — this
@@ -438,40 +452,46 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
 /// `systemctl` does not exist, that made every install spin the full 90 s and
 /// then fail with `postgres=unknown, core=unknown` plus a `journalctl` hint,
 /// about services that may well have been running fine.
-fn verify_running(sup: &dyn Supervisor, layout: &Layout) -> Result<(), String> {
+///
+/// `names` are the target's members, in start order — so the supervised guard
+/// backend (#609) is waited for exactly when the install added it.
+fn verify_running(sup: &dyn Supervisor, layout: &Layout, names: &[String]) -> Result<(), String> {
     let socket = layout.data_dir.join("sockets/.s.PGSQL.5432");
     let deadline = Instant::now() + Duration::from_secs(90);
     // The last statuses, rendered only once the wait gives up (#904).
-    let mut last = None;
+    let mut last: Option<Vec<(ServiceStatus, Option<String>)>> = None;
     while Instant::now() < deadline {
         // A supervisor ERROR is not a service state — it means the query
         // itself cannot succeed (no launchd user domain, unspawnable
         // systemctl). Polling that for 90 s is not patience, it is a hidden
         // hard failure, so fail immediately and say which query broke.
-        let (pg, pg_word) = sup
-            .status_with_word("kastellan-postgres")
-            .map_err(|e| format!("cannot query kastellan-postgres via the service manager: {e}"))?;
-        let (core, core_word) = sup
-            .status_with_word("kastellan-core")
-            .map_err(|e| format!("cannot query kastellan-core via the service manager: {e}"))?;
-        if socket.exists() && pg == ServiceStatus::Active && core == ServiceStatus::Active {
+        let statuses = names
+            .iter()
+            .map(|name| {
+                sup.status_with_word(name)
+                    .map_err(|e| format!("cannot query {name} via the service manager: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if socket.exists() && statuses.iter().all(|(s, _)| *s == ServiceStatus::Active) {
             return Ok(());
         }
-        last = Some(((pg, pg_word), (core, core_word)));
+        last = Some(statuses);
         std::thread::sleep(Duration::from_secs(2));
     }
     // With the manager's own words (#900) and, read once now, its crash-loop
     // evidence (#904): `Transitioning` alone hides a core that has died 30 times.
-    let describe = |name, (status, word): (ServiceStatus, Option<String>)| {
-        describe_last_status(sup, name, status, word.as_deref())
-    };
     let last = match last {
-        Some((pg, core)) => format!(
-            "postgres={}, core={}, socket={}",
-            describe("kastellan-postgres", pg),
-            describe("kastellan-core", core),
-            socket.exists()
-        ),
+        Some(statuses) => {
+            let parts: Vec<String> = names
+                .iter()
+                .zip(statuses)
+                .map(|(name, (status, word))| {
+                    let short = name.trim_start_matches("kastellan-");
+                    format!("{short}={}", describe_last_status(sup, name, status, word.as_deref()))
+                })
+                .collect();
+            format!("{}, socket={}", parts.join(", "), socket.exists())
+        }
         None => "never polled".to_string(),
     };
     // A cluster created by an older install (superuser != $USER) yields a role
