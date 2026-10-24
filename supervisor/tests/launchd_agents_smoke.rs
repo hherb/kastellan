@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kastellan_supervisor::launchd_agents::LaunchAgents;
-use kastellan_supervisor::{describe_status, ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
+use kastellan_supervisor::{describe_last_status, ServiceSpec, ServiceStatus, Supervisor, TargetSpec};
 use kastellan_tests_common::skip::{skip_if_no_supervisor, warn_line};
 
 /// Serialize all smoke-test bodies. The launchd GUI domain and
@@ -77,7 +77,7 @@ impl Drop for TestAgentGuard {
 }
 
 /// Poll `status_with_word(name)` until the status equals `want`, or timeout;
-/// a timeout names the manager's own word (#900).
+/// a timeout names the manager's own word (#900) and crash evidence (#904).
 ///
 /// launchctl is asynchronous: `bootstrap` returns once the agent has
 /// been loaded but the program may briefly be in a "spawn scheduled"
@@ -101,7 +101,7 @@ fn wait_for_status(
             return Err(format!(
                 "timed out waiting for status={:?}, last observed={}",
                 want,
-                describe_status(got, word.as_deref())
+                describe_last_status(sup, name, got, word.as_deref())
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -151,6 +151,10 @@ fn install_start_status_stop_uninstall_round_trip() {
     sup.start(&name).expect("start");
     wait_for_status(&sup, &name, ServiceStatus::Active, Duration::from_secs(5))
         .expect("agent should become Active within 5s");
+    // The real `print`'s crash evidence (#904): a timeout path is the only
+    // other caller, so this is where its argv and reader meet launchd.
+    let evidence = sup.crash_evidence(&name).expect("crash evidence").unwrap_or_default();
+    assert!(evidence.starts_with("runs = 1, last exit code = "), "evidence: {evidence:?}");
 
     sup.stop(&name).expect("stop");
     wait_for_status(&sup, &name, ServiceStatus::Inactive, Duration::from_secs(5))

@@ -234,3 +234,64 @@ fn ensure_home_owned_by_skips_an_unset_or_missing_home() {
     assert!(ensure_home_owned_by(None, 0).is_ok());
     assert!(ensure_home_owned_by(Some(Path::new("/nonexistent/kastellan-no-home")), 0).is_ok());
 }
+
+// ---------- evidence_from_print (#904): the crash-loop evidence ----------
+
+/// `launchctl print` for an agent that has run before, as macOS 27 lays it
+/// out (measured 2026-10-23): top-level keys one tab deep, nested dicts two.
+/// `resource coalition`'s nested `runs = 7` is what pins the depth rule;
+/// environment entries use ` => `, so they never match a ` = ` key anyway.
+const PRINT_RAN_BEFORE: &str = "gui/501/svc = {\n\tactive count = 1\n\tstate = running\n\
+     \tenvironment = {\n\t\truns => 99\n\t}\n\n\tminimum runtime = 10\n\truns = 14\n\
+     \tpid = 87791\n\tlast exit code = 0\n\n\tresource coalition = {\n\t\truns = 7\n\t}\n}\n";
+
+const SVC: &str = "gui/501/svc";
+
+#[test]
+fn evidence_from_print_names_the_runs_and_the_last_exit() {
+    assert_eq!(
+        evidence_from_print(SVC, Ok(PRINT_RAN_BEFORE.into())).unwrap().as_deref(),
+        Some("runs = 14, last exit code = 0")
+    );
+}
+
+/// Every `last exit …`/`last terminating …` line is kept, whatever launchd
+/// calls it — a jetsam'd agent says `last exit reason` (measured), a crashed
+/// one its signal. Not a closed list, for the reason #898 gave.
+#[test]
+fn evidence_from_print_keeps_every_last_exit_line() {
+    let print = "\tstate = not running\n\truns = 3\n\tlast exit reason = JETSAM_REASON_MEMORY_IDLE_EXIT\n\
+                 \tlast terminating signal = Killed: 9\n";
+    assert_eq!(
+        evidence_from_print(SVC, Ok(print.into())).unwrap().as_deref(),
+        Some("runs = 3, last exit reason = JETSAM_REASON_MEMORY_IDLE_EXIT, last terminating signal = Killed: 9")
+    );
+    // A loaded agent that never ran, verbatim (measured 2026-10-24).
+    let never = "\tstate = not running\n\truns = 0\n\tlast exit code = (never exited)\n";
+    assert_eq!(
+        evidence_from_print(SVC, Ok(never.into())).unwrap().as_deref(),
+        Some("runs = 0, last exit code = (never exited)")
+    );
+}
+
+/// Only the counter's own key: `runs` exactly, not a key that starts with it.
+#[test]
+fn evidence_from_print_reads_the_runs_key_exactly() {
+    let print = "\truns = 2\n\truns total = 9\n\tlast exitcode = 4\n";
+    assert_eq!(evidence_from_print(SVC, Ok(print.into())).unwrap().as_deref(), Some("runs = 2"));
+}
+
+#[test]
+fn evidence_from_print_has_nothing_for_an_agent_that_is_not_loaded() {
+    assert_eq!(evidence_from_print(SVC, backend(PRINT_NOT_FOUND)).unwrap(), None);
+}
+
+/// A failed read is an error the caller names, never "no evidence" — and so
+/// is a `print` with no `runs` line, which every loaded agent has (#895).
+#[test]
+fn evidence_from_print_names_a_failed_or_runless_read() {
+    let timed_out = backend(&timed_out_message(&["print", SVC]));
+    assert!(evidence_from_print(SVC, timed_out).is_err());
+    let err = evidence_from_print(SVC, Ok("\tstate = running\n\tlast exit code = 0\n".into())).unwrap_err();
+    assert!(err.to_string().contains("without a `runs = …` line"), "{err}");
+}

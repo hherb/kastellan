@@ -46,7 +46,7 @@ pub mod service_name;
 pub use service_name::{validate_service_name, MAX_NAME_LEN};
 
 mod status;
-pub use status::{describe_status, ServiceStatus};
+pub use status::{describe_last_status, describe_status, ServiceStatus};
 
 pub mod specs;
 
@@ -268,6 +268,21 @@ pub trait Supervisor {
         self.status_with_word(name).map(|(status, _)| status)
     }
 
+    /// How often the service has died and how it last exited, in the
+    /// manager's own words — launchd's `runs = 31, last exit code = 1`,
+    /// systemd's `Result=exit-code, NRestarts=31, ExecMainStatus=1,
+    /// LoadState=loaded` — or `None` when launchd has nothing to say (not
+    /// loaded; systemd always answers, `LoadState` saying whether it knows the
+    /// unit). Diagnostics for a wait that has given up, rendered by
+    /// [`describe_last_status`] (#904): one more call to the manager, so never
+    /// read it per poll.
+    ///
+    /// Defaults to `NotImplemented`, which the timeout names as unreadable
+    /// evidence: a backend that forgot it must not read as "nothing to say".
+    fn crash_evidence(&self, _name: &str) -> Result<Option<String>, SupervisorError> {
+        Err(SupervisorError::NotImplemented("crash_evidence"))
+    }
+
     /// Install every member of a [`TargetSpec`] (the generic bundle).
     ///
     /// Default implementation installs each member spec in order. The
@@ -412,213 +427,7 @@ impl Supervisor for NotYetImplemented {
 }
 
 #[cfg(test)]
-mod default_target_tests {
-    use super::*;
-    use std::cell::RefCell;
-
-    #[derive(Default)]
-    struct RecordingSupervisor {
-        calls: RefCell<Vec<String>>,
-    }
-    impl Supervisor for RecordingSupervisor {
-        fn install(&self, spec: &ServiceSpec) -> Result<(), SupervisorError> {
-            self.calls.borrow_mut().push(format!("install:{}", spec.name));
-            Ok(())
-        }
-        fn start(&self, name: &str) -> Result<(), SupervisorError> {
-            self.calls.borrow_mut().push(format!("start:{name}"));
-            Ok(())
-        }
-        fn stop(&self, name: &str) -> Result<(), SupervisorError> {
-            self.calls.borrow_mut().push(format!("stop:{name}"));
-            Ok(())
-        }
-        fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
-            self.calls.borrow_mut().push(format!("uninstall:{name}"));
-            Ok(())
-        }
-        fn status_with_word(
-            &self,
-            _name: &str,
-        ) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
-            Ok((ServiceStatus::Active, None))
-        }
-    }
-
-    fn spec(name: &str) -> ServiceSpec {
-        ServiceSpec {
-            name: name.into(),
-            program: std::path::PathBuf::from("/bin/true"),
-            args: vec![],
-            env: vec![],
-            working_dir: None,
-            keep_alive: true,
-            stdout_log: None,
-            stderr_log: None,
-            after: vec![],
-            part_of: Some("kastellan".into()),
-            restart_backoff: None,
-            environment_files: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn default_bundle_installs_then_starts_in_member_order() {
-        let sup = RecordingSupervisor::default();
-        let target = TargetSpec {
-            name: "kastellan".into(),
-            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
-        };
-        let members = [spec("kastellan-postgres"), spec("kastellan-core")];
-        sup.install_target(&target, &members).unwrap();
-        sup.start_target(&target).unwrap();
-        let calls = sup.calls.borrow().clone();
-        assert_eq!(
-            calls,
-            vec![
-                "install:kastellan-postgres",
-                "install:kastellan-core",
-                "start:kastellan-postgres",
-                "start:kastellan-core",
-            ]
-        );
-    }
-
-    #[test]
-    fn default_bundle_stops_in_reverse_member_order() {
-        let sup = RecordingSupervisor::default();
-        let target = TargetSpec {
-            name: "kastellan".into(),
-            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
-        };
-        sup.stop_target(&target).unwrap();
-        assert_eq!(
-            sup.calls.borrow().clone(),
-            vec!["stop:kastellan-core", "stop:kastellan-postgres"]
-        );
-    }
-
-    #[test]
-    fn default_bundle_uninstalls_in_reverse_member_order() {
-        let sup = RecordingSupervisor::default();
-        let target = TargetSpec {
-            name: "kastellan".into(),
-            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
-        };
-        sup.uninstall_target(&target).unwrap();
-        assert_eq!(
-            sup.calls.borrow().clone(),
-            vec!["uninstall:kastellan-core", "uninstall:kastellan-postgres"]
-        );
-    }
-}
+mod default_target_tests;
 
 #[cfg(test)]
-mod spec_ordering_tests {
-    use super::*;
-
-    #[test]
-    fn target_spec_holds_name_and_ordered_members() {
-        let t = TargetSpec {
-            name: "kastellan".into(),
-            members: vec!["kastellan-postgres".into(), "kastellan-core".into()],
-        };
-        assert_eq!(t.name, "kastellan");
-        assert_eq!(t.members, vec!["kastellan-postgres", "kastellan-core"]);
-    }
-
-    #[test]
-    fn service_spec_ordering_fields_default_when_absent() {
-        // Proves #[serde(default)] supplies empty/None when the JSON omits
-        // the new ordering fields — i.e. an old serialised spec still loads.
-        let json = r#"{
-            "name": "svc",
-            "program": "/bin/true",
-            "args": [],
-            "env": [],
-            "working_dir": null,
-            "keep_alive": false,
-            "stdout_log": null,
-            "stderr_log": null
-        }"#;
-        let s: ServiceSpec = serde_json::from_str(json).expect("deserialize without ordering fields");
-        assert!(s.after.is_empty());
-        assert!(s.part_of.is_none());
-        assert!(s.restart_backoff.is_none());
-    }
-
-    #[test]
-    fn a_stale_environment_file_key_is_refused_rather_than_defaulted() {
-        // #532. #528 renamed `environment_file: Option<PathBuf>` to
-        // `environment_files: Vec<EnvFileRef>`. Without
-        // `deny_unknown_fields` a spec carrying the OLD key deserializes
-        // cleanly: the unknown field is dropped, `environment_files` defaults
-        // to empty, and the core daemon is installed with no environment file
-        // and no error — #458's failure arriving through the serde layer.
-        //
-        // Latent today (nothing persists a `ServiceSpec`; it is code-built in
-        // `supervisor::specs` and `core::install::plan`), which is exactly why
-        // the guard is worth having before something starts persisting one.
-        let json = r#"{
-            "name": "svc",
-            "program": "/bin/true",
-            "args": [],
-            "env": [],
-            "working_dir": null,
-            "keep_alive": false,
-            "stdout_log": null,
-            "stderr_log": null,
-            "environment_file": "/home/u/.config/kastellan/kastellan.env"
-        }"#;
-        let err = serde_json::from_str::<ServiceSpec>(json)
-            .expect_err("a renamed field must not silently default to empty");
-        assert!(
-            err.to_string().contains("environment_file"),
-            "the error must name the offending key: {err}"
-        );
-    }
-
-    #[test]
-    fn env_file_ref_round_trips_and_refuses_an_unknown_key() {
-        // The `optional` flag is load-bearing in both directions — it renders
-        // systemd's `-` prefix and tells the launchd backend to skip a missing
-        // overlay rather than hard-error — so pin the round trip, and pin that
-        // a misspelling of it cannot silently become `false` (which would turn
-        // the normally-absent overlay into a failed install).
-        let refs = vec![
-            EnvFileRef { path: PathBuf::from("/home/u/.config/kastellan/kastellan.env"), optional: false },
-            EnvFileRef { path: PathBuf::from("/home/u/.config/kastellan/kastellan.env.local"), optional: true },
-        ];
-        let json = serde_json::to_string(&refs).expect("serialize");
-        let back: Vec<EnvFileRef> = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, refs);
-
-        let err = serde_json::from_str::<EnvFileRef>(r#"{"path":"/a","optionl":true}"#)
-            .expect_err("a misspelled `optional` must not silently become false");
-        assert!(err.to_string().contains("optionl"), "{err}");
-    }
-
-    #[test]
-    fn service_spec_restart_backoff_round_trips() {
-        let s = ServiceSpec {
-            name: "svc".into(),
-            program: std::path::PathBuf::from("/bin/true"),
-            args: vec![],
-            env: vec![],
-            working_dir: None,
-            keep_alive: true,
-            stdout_log: None,
-            stderr_log: None,
-            after: vec![],
-            part_of: None,
-            restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
-            environment_files: Vec::new(),
-        };
-        let json = serde_json::to_string(&s).expect("serialize");
-        let back: ServiceSpec = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(
-            back.restart_backoff,
-            Some(RestartBackoff { max_delay_sec: 300, steps: 8 })
-        );
-    }
-}
+mod spec_ordering_tests;

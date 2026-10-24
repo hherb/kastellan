@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{Supervisor, SupervisorError};
+
 /// Coarse runtime state of a service, normalized across backends.
 ///
 /// A caller polls for the state it wants: `Active` after a start, `Inactive`
@@ -34,16 +36,48 @@ pub enum ServiceStatus {
     NotInstalled,
 }
 
-/// One-line text for a status plus the service manager's own state word, for
-/// timeout messages: `Inactive (state word: languishing)`.
+/// One-line text for a status plus the service manager's own state word and,
+/// when a wait has given up, its crash-loop evidence, for timeout messages:
+/// `Transitioning (state word: activating; Result=exit-code, NRestarts=31)`.
 ///
 /// The word is what `status` folds away — `languishing` and `exited` both
 /// read `Inactive` — and it is often the only clue to why a health wait gave
-/// up (#900). Without a word this is just the status's name.
-pub fn describe_status(status: ServiceStatus, word: Option<&str>) -> String {
-    match word {
-        Some(w) => format!("{status:?} (state word: {w})"),
-        None => format!("{status:?}"),
+/// up (#900). The evidence says how often the service has already died: a
+/// crash loop and a slow first start share every word (#904). Without
+/// either this is just the status's name.
+pub fn describe_status(status: ServiceStatus, word: Option<&str>, evidence: Option<&str>) -> String {
+    let word = word.map(|w| format!("state word: {w}"));
+    let details: Vec<String> = word.into_iter().chain(evidence.map(str::to_string)).collect();
+    if details.is_empty() {
+        format!("{status:?}")
+    } else {
+        format!("{status:?} ({})", details.join("; "))
+    }
+}
+
+/// [`describe_status`] for a wait that has given up: asks the manager, once,
+/// for [`Supervisor::crash_evidence`] too (#904). Call it on the timeout path
+/// only — it is one more call to the manager, and the poll loop stays one
+/// call per tick. A service that is not installed has no evidence to read.
+pub fn describe_last_status<S: Supervisor + ?Sized>(
+    sup: &S,
+    name: &str,
+    status: ServiceStatus,
+    word: Option<&str>,
+) -> String {
+    let evidence = match status {
+        ServiceStatus::NotInstalled => None,
+        _ => evidence_text(sup.crash_evidence(name)),
+    };
+    describe_status(status, word, evidence.as_deref())
+}
+
+/// The evidence as timeout text. A failed read is named, never dropped: a
+/// missing clause would read as "the manager had nothing to say".
+fn evidence_text(read: Result<Option<String>, SupervisorError>) -> Option<String> {
+    match read {
+        Ok(evidence) => evidence,
+        Err(e) => Some(format!("crash evidence unreadable: {e}")),
     }
 }
 
@@ -54,9 +88,72 @@ mod tests {
     #[test]
     fn describe_status_names_the_word_status_folds_away() {
         assert_eq!(
-            describe_status(ServiceStatus::Inactive, Some("languishing")),
+            describe_status(ServiceStatus::Inactive, Some("languishing"), None),
             "Inactive (state word: languishing)"
         );
-        assert_eq!(describe_status(ServiceStatus::NotInstalled, None), "NotInstalled");
+        assert_eq!(describe_status(ServiceStatus::NotInstalled, None, None), "NotInstalled");
+    }
+
+    /// #904: the evidence follows the word, so a crash loop no longer reads
+    /// like a slow first start.
+    #[test]
+    fn describe_status_appends_the_crash_loop_evidence() {
+        assert_eq!(
+            describe_status(
+                ServiceStatus::Transitioning,
+                Some("activating"),
+                Some("Result=exit-code, NRestarts=31")
+            ),
+            "Transitioning (state word: activating; Result=exit-code, NRestarts=31)"
+        );
+        assert_eq!(describe_status(ServiceStatus::Failed, None, Some("runs = 2")), "Failed (runs = 2)");
+    }
+
+    #[test]
+    fn evidence_text_names_a_failed_read() {
+        assert_eq!(evidence_text(Ok(None)), None);
+        assert_eq!(evidence_text(Ok(Some("runs = 3".into()))).as_deref(), Some("runs = 3"));
+        let failed = evidence_text(Err(SupervisorError::Backend("launchctl print timed out".into())));
+        assert_eq!(
+            failed.as_deref(),
+            Some("crash evidence unreadable: supervisor backend command failed: launchctl print timed out")
+        );
+    }
+
+    /// A backend with only the required methods, so `crash_evidence` is the
+    /// trait default — which must read as unreadable, never as "nothing to say".
+    struct Bare;
+
+    impl Supervisor for Bare {
+        fn install(&self, _: &crate::ServiceSpec) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn start(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn stop(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn uninstall(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn status_with_word(&self, _: &str) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
+            unreachable!()
+        }
+    }
+
+    /// Every installed status is asked for its evidence — `Transitioning` is
+    /// the live crash loop (#904) — a failed read is named, and a service
+    /// that is not installed is not asked.
+    #[test]
+    fn describe_last_status_asks_every_installed_status_and_names_a_failed_read() {
+        let unreadable = "crash evidence unreadable: not yet implemented: crash_evidence";
+        for status in [ServiceStatus::Active, ServiceStatus::Inactive, ServiceStatus::Transitioning, ServiceStatus::Failed] {
+            assert_eq!(
+                describe_last_status(&Bare, "svc", status, Some("w")),
+                format!("{status:?} (state word: w; {unreadable})")
+            );
+        }
+        assert_eq!(describe_last_status(&Bare, "svc", ServiceStatus::NotInstalled, None), "NotInstalled");
     }
 }

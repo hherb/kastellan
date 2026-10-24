@@ -56,7 +56,10 @@ pub use builder::{build_target_unit, build_unit_file, validate_service_name};
 
 mod systemctl;
 pub use systemctl::probe;
-use systemctl::{run_systemctl_user, run_user, status_from_is_active, stop_and_disable};
+use systemctl::{
+    evidence_from_show, run_systemctl_user, run_user, status_from_is_active, stop_and_disable,
+    CRASH_EVIDENCE_PROPS,
+};
 
 /// `systemctl --user` driver.
 ///
@@ -217,6 +220,13 @@ impl Supervisor for SystemdUser {
         // word, not the exit code — and no word at all is an error (#896).
         let unit = format!("{name}.service");
         status_from_is_active(&unit, &run_user(&["is-active", &unit])?)
+    }
+
+    fn crash_evidence(&self, name: &str) -> Result<Option<String>, SupervisorError> {
+        validate_service_name(name)?;
+        let unit = format!("{name}.service");
+        let show = run_systemctl_user(&["show", "-p", CRASH_EVIDENCE_PROPS, &unit])?;
+        Ok(evidence_from_show(&show))
     }
 
     /// Install the target the systemd-native way: write each member unit,

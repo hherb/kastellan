@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use kastellan_supervisor::systemd_user::{probe, SystemdUser};
-use kastellan_supervisor::{describe_status, ServiceSpec, ServiceStatus, Supervisor};
+use kastellan_supervisor::{describe_last_status, ServiceSpec, ServiceStatus, Supervisor};
 
 /// Skip the test when there's no usable user manager to talk to.
 fn skip_if_no_user_manager() -> bool {
@@ -100,7 +100,7 @@ impl Drop for TestUnitGuard {
 }
 
 /// Poll `status_with_word(name)` until the status equals `want`, or timeout;
-/// a timeout names the manager's own word (#900).
+/// a timeout names the manager's own word (#900) and crash evidence (#904).
 ///
 /// systemctl is asynchronous: `start` returns once the service has
 /// been kicked off, but `is-active` may briefly report
@@ -124,7 +124,7 @@ fn wait_for_status(
             return Err(format!(
                 "timed out waiting for status={:?}, last observed={}",
                 want,
-                describe_status(got, word.as_deref())
+                describe_last_status(sup, name, got, word.as_deref())
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -173,6 +173,13 @@ fn install_start_status_stop_uninstall_round_trip() {
     sup.start(&name).expect("start");
     wait_for_status(&sup, &name, ServiceStatus::Active, Duration::from_secs(5))
         .expect("service should become Active within 5s");
+    // The real `show`'s crash evidence (#904): a timeout path is the only
+    // other caller, so this is where its argv and property list meet systemd
+    // — `show -p` drops a misspelt property silently.
+    let evidence = sup.crash_evidence(&name).expect("crash evidence").unwrap_or_default();
+    for prop in ["LoadState=loaded", "NRestarts=0", "Result=", "ExecMainStatus="] {
+        assert!(evidence.contains(prop), "{prop} missing from {evidence:?}");
+    }
 
     sup.stop(&name).expect("stop");
     wait_for_status(&sup, &name, ServiceStatus::Inactive, Duration::from_secs(5))

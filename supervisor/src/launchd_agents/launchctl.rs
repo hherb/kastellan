@@ -249,5 +249,46 @@ pub(super) fn status_from_print(
     Ok((status, Some(word)))
 }
 
+/// Read `launchctl print`'s crash-loop evidence (#904): the agent's `runs`
+/// count and every `last exit …`/`last terminating …` line, verbatim, as
+/// `runs = 31, last exit code = 1`.
+///
+/// Only top-level keys (one tab deep) count: nested dicts such as
+/// `resource coalition = { … }` reuse ` = ` keys, which must not pass for the
+/// agent's own. The `last …`
+/// keys are matched by prefix, not listed — launchd says `last exit code`,
+/// `last exit reason` (a jetsam'd agent, measured) or names a signal, and no
+/// list of its words has held (#898). Not loaded → `None`; a failed read is
+/// the error it is, so the caller can name it — and so is a `print` with no
+/// `runs` line: every loaded agent has one, `runs = 0` included (492 of 492,
+/// measured), so its absence is a format change, not "nothing to say" (#895).
+pub(super) fn evidence_from_print(
+    target: &str,
+    print: Result<String, SupervisorError>,
+) -> Result<Option<String>, SupervisorError> {
+    let stdout = match print {
+        Ok(stdout) => stdout,
+        Err(SupervisorError::Backend(msg)) if is_no_such_service_error(&msg) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let evidence: Vec<&str> = stdout
+        .lines()
+        // One tab stripped: a nested line's key still starts with a tab.
+        .filter_map(|line| line.strip_prefix('\t'))
+        .filter(|line| {
+            line.split_once(" = ").is_some_and(|(key, _)| {
+                key == "runs" || key.starts_with("last exit ") || key.starts_with("last terminating ")
+            })
+        })
+        .collect();
+    if !evidence.iter().any(|line| line.starts_with("runs = ")) {
+        return Err(SupervisorError::Backend(format!(
+            "launchctl print {target} answered without a `runs = …` line, so its crash \
+             evidence is unknown (has launchctl's output format changed?)"
+        )));
+    }
+    Ok(Some(evidence.join(", ")))
+}
+
 #[cfg(test)]
 pub(super) mod tests;
