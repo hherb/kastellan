@@ -274,3 +274,75 @@ fn postgres_service_spec_carries_expected_backoff_curve() {
         Some(RestartBackoff { max_delay_sec: 300, steps: 8 })
     );
 }
+
+// ----- guard_service_spec (#609) -----
+
+fn guard_spec() -> ServiceSpec {
+    guard_service_spec(
+        Path::new("/home/u/.local/bin/llama-server"),
+        Path::new("/home/u/models/Shieldstral-1.0-3B-Q8_0.gguf"),
+        "shieldstral",
+        8081,
+        Path::new("/var/log/kastellan"),
+    )
+}
+
+#[test]
+fn guard_service_spec_uses_canonical_name() {
+    assert_eq!(guard_spec().name, "kastellan-guard");
+    assert_eq!(GUARD_SERVICE_NAME, "kastellan-guard");
+}
+
+/// The argv is what the daemon's guard tier will verify at boot: the alias is
+/// the model name it asks for, the port is the one in its URL, and the context
+/// must clear its D8 floor. Loopback only — the guard is never exposed.
+#[test]
+fn guard_service_spec_serves_the_model_on_loopback_with_alias_port_and_context() {
+    let spec = guard_spec();
+    assert_eq!(spec.program, PathBuf::from("/home/u/.local/bin/llama-server"));
+    assert_eq!(
+        spec.args,
+        [
+            "-m",
+            "/home/u/models/Shieldstral-1.0-3B-Q8_0.gguf",
+            "--alias",
+            "shieldstral",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8081",
+            "-c",
+            "131072",
+            "-ngl",
+            "99",
+        ]
+    );
+}
+
+#[test]
+fn guard_service_spec_is_a_kept_alive_target_member_with_backoff_and_no_env() {
+    let spec = guard_spec();
+    assert!(spec.keep_alive, "a crashed guard must come back, or core refuses to boot");
+    assert_eq!(spec.part_of.as_deref(), Some(KASTELLAN_TARGET_NAME));
+    assert!(spec.after.is_empty(), "the guard depends on nothing kastellan runs");
+    assert!(spec.env.is_empty() && spec.environment_files.is_empty());
+    assert_eq!(
+        spec.restart_backoff,
+        Some(RestartBackoff { max_delay_sec: 300, steps: 8 })
+    );
+    assert_eq!(
+        spec.stderr_log,
+        Some(PathBuf::from("/var/log/kastellan/kastellan-guard.err"))
+    );
+    assert_eq!(
+        spec.stdout_log,
+        Some(PathBuf::from("/var/log/kastellan/kastellan-guard.out"))
+    );
+}
+
+#[test]
+fn guard_service_name_is_distinct_from_the_others() {
+    for other in [CORE_SERVICE_NAME, POSTGRES_SERVICE_NAME, KASTELLAN_TARGET_NAME] {
+        assert_ne!(GUARD_SERVICE_NAME, other);
+    }
+}

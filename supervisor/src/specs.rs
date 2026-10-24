@@ -9,9 +9,9 @@
 //! trivially unit-testable and means a test can synthesize a spec
 //! without filesystem side effects.
 //!
-//! Today this module ships the agent-core and Postgres daemon specs, plus the
+//! Today this module ships the agent-core and Postgres daemon specs, the
+//! optional guard-model backend (`llama-server`, #609), plus the
 //! `kastellan_target_spec` bundle that ties the canonical services together.
-//! More will land here as services are added (inference router, etc.).
 
 use std::path::Path;
 
@@ -31,6 +31,19 @@ pub const CORE_SERVICE_NAME: &str = "kastellan-core";
 /// Canonical name used for the per-user Postgres daemon's unit/agent
 /// file. Same shape rationale as [`CORE_SERVICE_NAME`].
 pub const POSTGRES_SERVICE_NAME: &str = "kastellan-postgres";
+
+/// Canonical name of the optional guard-model backend (`llama-server` serving
+/// the guard tier's model). Same shape rationale as [`CORE_SERVICE_NAME`].
+pub const GUARD_SERVICE_NAME: &str = "kastellan-guard";
+
+/// Context size the guard backend is started with, in tokens.
+///
+/// The daemon's guard tier refuses to boot below its D8 floor
+/// (`REQUIRED_GUARD_N_CTX` in `kastellan-core`, 66 048 today — a worst-case
+/// 64 KiB document plus the prompt); `kastellan-core` pins this value against
+/// that floor in a test. 131 072 is what the live DGX guard has run since its
+/// bring-up, with room to spare.
+pub const GUARD_CONTEXT_TOKENS: u32 = 131_072;
 
 /// Canonical name of the service bundle that brings up the whole agent.
 /// Becomes `kastellan.target` on systemd; on launchd it names the member
@@ -170,12 +183,81 @@ pub fn postgres_service_spec(
     }
 }
 
+/// Build a [`ServiceSpec`] for the guard-model backend: `llama-server`
+/// serving the guard tier's model on loopback (#609).
+///
+/// Why it is supervised at all: before #609 the guard ran as a hand-started
+/// process, so a reboot left it down — and because the daemon refuses to boot
+/// with a configured but unreachable guard (wiring-spec D6), the *whole agent*
+/// stayed down with it (1 500+ restarts on the DGX, 2026-10-19 → 24).
+///
+/// Arguments:
+/// - `server` — absolute path to the operator's `llama-server`.
+/// - `model` — absolute path to the guard model's GGUF file.
+/// - `alias` — the model name the API answers to. Must equal the daemon's
+///   `KASTELLAN_LLM_GUARD_MODEL`, which is what the installer passes.
+/// - `port` — the loopback port. Must equal the port in the daemon's
+///   `KASTELLAN_LLM_GUARD_URL`, likewise derived by the installer.
+/// - `log_dir` — as for [`core_service_spec`].
+///
+/// Choices baked in:
+/// - **`--host 127.0.0.1`**: the guard is a core-only dependency; nothing off
+///   the host may reach it.
+/// - **`-c` [`GUARD_CONTEXT_TOKENS`]**: must clear the daemon's D8 floor.
+/// - **`-ngl 99`**: offload every layer when there is a GPU. On a host without
+///   one `llama-server` warns and runs on the CPU — slower, but the tier still
+///   works, so the flag is safe everywhere.
+/// - **`env` empty**: `llama-server` needs none (measured on the DGX with
+///   `env -i`; its libraries resolve through the binary's rpath).
+/// - **`keep_alive` + the same backoff as core**: a crashed guard must come
+///   back, or core cannot boot.
+/// - **Not sandboxed**: like Postgres it is an operator-installed service, not
+///   a tool worker, and it handles no untrusted *code* — only documents to score.
+///
+/// Pure: no I/O, no env probing.
+pub fn guard_service_spec(
+    server: &Path,
+    model: &Path,
+    alias: &str,
+    port: u16,
+    log_dir: &Path,
+) -> ServiceSpec {
+    ServiceSpec {
+        name: GUARD_SERVICE_NAME.into(),
+        program: server.to_path_buf(),
+        args: vec![
+            "-m".into(),
+            model.to_string_lossy().into_owned(),
+            "--alias".into(),
+            alias.into(),
+            "--host".into(),
+            "127.0.0.1".into(),
+            "--port".into(),
+            port.to_string(),
+            "-c".into(),
+            GUARD_CONTEXT_TOKENS.to_string(),
+            "-ngl".into(),
+            "99".into(),
+        ],
+        env: vec![],
+        working_dir: None,
+        keep_alive: true,
+        stdout_log: Some(log_dir.join(format!("{GUARD_SERVICE_NAME}.out"))),
+        stderr_log: Some(log_dir.join(format!("{GUARD_SERVICE_NAME}.err"))),
+        after: vec![],
+        part_of: Some(KASTELLAN_TARGET_NAME.to_string()),
+        restart_backoff: Some(RestartBackoff { max_delay_sec: 300, steps: 8 }),
+        environment_files: Vec::new(),
+    }
+}
+
 /// Build the canonical [`TargetSpec`] that brings up the whole agent.
 ///
 /// Members in **start order**: Postgres first (the dependency leaf),
 /// then core (which must start after Postgres). Inference is **not** a
 /// member — it is an operator-managed external dependency that core's
-/// startup probe health-checks. Workers are **not** members either —
+/// startup probe health-checks — except the guard backend, which the
+/// installer inserts before core when the operator configures one (#609). Workers are **not** members either —
 /// `tool_host` spawns them on demand inside sandboxes when core runs.
 ///
 /// Pure: no I/O, same call → same value.

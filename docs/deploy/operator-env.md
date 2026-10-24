@@ -91,6 +91,45 @@ and drops the whole `KASTELLAN_MATRIX_*` block (which is emitted only when both
 `--matrix-*` flags are passed). On Linux `scripts/upgrade_from_git.sh` scavenges
 the Matrix block back before installing; the macOS path has no such guard.
 
+## A supervised guard backend
+
+The guard tier's backend (`llama-server` serving Shieldstral) can run as a
+supervised unit, `kastellan-guard`, so it comes back after a reboot along with
+the rest of `kastellan.target`. Without it the guard is a hand-started process,
+and because the daemon refuses to boot when a configured guard is unreachable,
+a reboot leaves the **whole agent** down until someone restarts it by hand
+([#609]).
+
+Add the two paths beside the guard settings you already have:
+
+```sh
+KASTELLAN_LLM_GUARD_URL=http://127.0.0.1:8081/v1
+KASTELLAN_LLM_GUARD_MODEL=shieldstral
+KASTELLAN_LLM_GUARD_TAU=0.79552656
+KASTELLAN_GUARD_SERVER_BIN=/home/you/.local/bin/llama-server
+KASTELLAN_GUARD_SERVER_MODEL=/home/you/models/shieldstral/Shieldstral-1.0-3B-Q8_0.gguf
+```
+
+then re-run `kastellan-cli install`. The unit's port and model alias are taken
+from `KASTELLAN_LLM_GUARD_URL` and `KASTELLAN_LLM_GUARD_MODEL`, so they always
+match what the daemon asks for; the URL must be `http://127.0.0.1:<port>` or
+`http://localhost:<port>`. The unit runs
+`llama-server -m <model> --alias <model name> --host 127.0.0.1 --port <port> -c 131072 -ngl 99`
+and logs to `~/.local/state/kastellan/kastellan-guard.{out,err}`.
+
+- **These two keys are read at install time on both platforms** (they become
+  the unit's command line), so a change needs another `install` — not just a
+  restart.
+- **Stop a hand-started guard first**, or the unit cannot bind the port and
+  crash-loops.
+- Removing both keys and re-running `install` removes the unit. Setting one
+  without the other is refused.
+
+Core starts after the guard, and at boot it waits up to 60 s for a guard that is
+still loading its model (connection refused or HTTP 503) before it refuses.
+
+[#609]: https://github.com/hherb/kastellan/issues/609
+
 ## Confirming the overlay was actually found
 
 Two places tell you, so a typo in the path cannot pass as "no overlay wanted".

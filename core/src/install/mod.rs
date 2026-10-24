@@ -4,6 +4,7 @@
 //! is added alongside.
 
 pub mod env_diff;
+pub mod guard_backend;
 pub mod plan;
 pub mod run;
 
