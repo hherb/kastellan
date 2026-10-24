@@ -149,6 +149,12 @@ impl Drop for ScriptedLlm {
 /// has not thought about `/props` is not configuring a guard tier, and
 /// a daemon that dials it anyway should fail loudly at boot rather than
 /// receive a fabricated context window.
+///
+/// ⚠️ **Loudly, but not fast** (#609): a configured guard tier treats a
+/// 503 on `/props` as a backend still loading its model and re-asks for
+/// up to `PROPS_WAIT_BUDGET_MS` (60 s) before refusing to boot. A test
+/// that wants a prompt `PropsUnavailable` needs a backend that answers
+/// something else (a 404, or a body that is not JSON).
 pub async fn spawn_scripted_llm(
     embed_responses: Vec<String>,
     chat_responses: Vec<String>,

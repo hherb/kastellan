@@ -261,4 +261,49 @@ mod tests {
         assert!(calls.get() > 1, "the first connect was refused and retried: {}", calls.get());
         server.await.unwrap();
     }
+
+    /// The wait is wired into the boot sequence itself, not just callable:
+    /// `GuardTier::from_router_config` against a backend that answers 503
+    /// (`Loading model`) once and then a valid `/props` builds the tier. A
+    /// boot that called `/props` once would refuse here.
+    #[tokio::test]
+    async fn the_boot_sequence_waits_out_a_loading_backend() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for attempt in 0.. {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let (status, body) = if attempt == 0 {
+                    ("503 Service Unavailable", r#"{"error":{"message":"Loading model"}}"#)
+                } else {
+                    ("200 OK", r#"{"default_generation_settings":{"n_ctx":131072}}"#)
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let cfg = kastellan_llm_router::RouterConfig {
+            guard_url: Some(format!("http://127.0.0.1:{port}/v1")),
+            guard_model: Some("shieldstral-under-test".to_string()),
+            guard_tau: Some(0.8),
+            // Pinned, so the boot probe (which would need chat answers) is skipped.
+            guard_timeout_ms: Some(1_000),
+            ..kastellan_llm_router::RouterConfig::default()
+        };
+        let tier = super::super::GuardTier::from_router_config(&cfg, "props-wait-test")
+            .await
+            .expect("a backend that finishes loading inside the budget boots")
+            .expect("the tier is configured");
+        assert_eq!(tier.n_ctx(), 131_072);
+        server.abort();
+    }
 }

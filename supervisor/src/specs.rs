@@ -257,8 +257,9 @@ pub fn guard_service_spec(
 /// then core (which must start after Postgres). Inference is **not** a
 /// member — it is an operator-managed external dependency that core's
 /// startup probe health-checks — except the guard backend, which the
-/// installer inserts before core when the operator configures one (#609). Workers are **not** members either —
-/// `tool_host` spawns them on demand inside sandboxes when core runs.
+/// installer inserts before core when the operator configures one (#609).
+/// Workers are **not** members either — `tool_host` spawns them on demand
+/// inside sandboxes when core runs.
 ///
 /// Pure: no I/O, same call → same value.
 pub fn kastellan_target_spec() -> TargetSpec {

@@ -4,20 +4,24 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261024_905_pre-prune.md`](archive/handover_20261024_905_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (#900's full section and
-> the #903 baseline rows included; #896's are in the `903` snapshot, #898's and #894's in `896`).
+> [`archive/handover_20261024_609_pre-prune.md`](archive/handover_20261024_609_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (#904's and #900's
+> sections and the #905 baseline rows included; #896's are in the `903` snapshot, #898's and #894's in `896`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-24 (#904: health-wait timeouts name the crash-loop evidence — PR #905. ⚠️ **The live DGX daemon has been DOWN since 2026-10-19** — see Next TODO 1) ·
-**Recent PRs, newest first:** [#905](https://github.com/hherb/kastellan/pull/905) (#904), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged), [#877](https://github.com/hherb/kastellan/pull/877) (#875, merged), [#874](https://github.com/hherb/kastellan/pull/874) (#722, merged), [#873](https://github.com/hherb/kastellan/pull/873) (#872, merged), [#871](https://github.com/hherb/kastellan/pull/871) (#870, merged), [#869](https://github.com/hherb/kastellan/pull/869) (#867, #862, #860, merged); #866 … #795 are in the 896 snapshot.
+**Last updated:** 2026-10-24 (#609: the guard backend is a supervised unit, and core waits out its start — this session's PR. ⚠️ **Not deployed yet** — Next TODO 0) ·
+**Recent PRs, newest first:** the #609 PR (this session), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged); #877 … #795 are in the 896/905 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #869's tree** (deployed 2026-10-18). **DGX:** plain `scripts/upgrade_from_git.sh`
 (exit 0), 15 binaries, generated env **and** `.local` byte-identical to `~/kastellan.env*.bak-pre869`,
 live-matrix worker digest `94c86940…` (unchanged — no worker crate changed), migrations 27/27,
-`NRestarts=0`, Matrix up in ~31 s — ⚠️ **but since the 2026-10-19 reboot `kastellan-core` refuses to
-boot (guard `llama-server` on :8081 not restarted; 1356 restarts by 2026-10-23, #609).** **Mac:** manual recipe [[mac-kastellan-install-recipe]], env + plist
+`NRestarts=0`, Matrix up in ~31 s. ⚠️ **2026-10-24:** the DGX had been down since the 10-19 reboot
+(unsupervised guard, 1523 restarts, #609) **and on CPU** (kernel `7.0.0-1019` had no NVIDIA module —
+[[dgx-apt-upgrade-drops-nvidia-module]], recurred). The operator installed
+`linux-modules-nvidia-580-open-7.0.0-1019-nvidia` and rebooted (14:48); GPU back (GB10, 580.178.04).
+The guard is **again hand-started** (`nohup … llama-server … --port 8081`, on GPU) until #609 is
+deployed, and `kastellan-searxng` now has restart policy `unless-stopped` (set this session). **Mac:** manual recipe [[mac-kastellan-install-recipe]], env + plist
 identical, migrations 27/27 — but `install` left `kastellan-postgres` **unloaded** (#870, bootstrapped by
 hand). **localmail** on both hosts: its PR #397. The DGX boot ERROR `install dir is writable …
 group-writable (mode 0775)` is **pre-existing** (since 2026-07-31) — not a deploy regression. The live
@@ -44,45 +48,35 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-24, latest): #904 (PR #905) — a timeout says how often it died
+### This session (2026-10-24, latest): #609 — the guard backend is supervised
 
-- **`Supervisor::crash_evidence(name)`** (default `Err(NotImplemented)`, so a backend that forgot it
-  reads "crash evidence unreadable", never "nothing to say") — launchd: the top-level `runs = N` and
-  every `last exit …`/`last terminating …` line of `launchctl print` (prefix-matched, not a list;
-  nested ` = ` dicts like `resource coalition` ignored); a `print` with **no** `runs` line is an error
-  (every loaded agent has one, `runs = 0` included — 492/492 measured). systemd: `show -p
-  LoadState,NRestarts,Result,ExecMainStatus` (measured, systemd 255). **`describe_last_status`** reads
-  it **once, at timeout only** (polls stay one call per tick); a failed read is named, `NotInstalled`
-  is not asked. Used by `verify_running`, `wait_for_status` and the three smoke waits; both smoke
-  round trips also assert the real `crash_evidence` while Active. `describe_status` now takes
-  `(status, word, evidence)`.
-- `supervisor/src/lib.rs` 624 → 431: its two test modules moved verbatim to
-  `default_target_tests.rs`/`spec_ordering_tests.rs` (cmp-proved, movement-only commit).
-- ⚠️ systemd's `show` answers an **unknown** unit too, exit 0, with clean defaults (`Result=success,
-  NRestarts=0`) — `NotInstalled` (no unit file) is skipped, and `LoadState=not-found` marks a unit file
-  the manager never loaded (the review's catch).
+- **`kastellan-guard`** (`supervisor::specs::guard_service_spec`): `llama-server -m <gguf> --alias
+  <model> --host 127.0.0.1 --port <port> -c 131072 -ngl 99`, keep-alive, core's backoff, no env
+  (`env -i` measured fine on the DGX — rpath). Installed only when **`KASTELLAN_GUARD_SERVER_BIN`** and
+  **`KASTELLAN_GUARD_SERVER_MODEL`** are set in the env files; ⚠️ **port and alias are derived from
+  `KASTELLAN_LLM_GUARD_URL`/`_MODEL`** (loopback `http`, explicit port — anything else refused), so
+  they cannot disagree. Pure planning + IO half in `core/src/install/guard_backend.rs`; target order
+  postgres → guard → core, core `After=` guard; a stale unit is uninstalled when the keys go (and on
+  `uninstall`). ⚠️ The keys are read **at install time on both OSes** — a change needs `install`.
+- **`tier/props_wait.rs`**: boot re-asks `/props` for up to **60 s** (2 s apart) only while the backend
+  is *not up yet* — `Connect`/`ConnectTimeout`/**HTTP 503** (measured: ~0.3 s refused, ~5 s `503
+  Loading model`, then 200; on GPU it loads in 1.9 s). 404, decode, request timeout refuse at once;
+  D6 unchanged. ⚠️ `tests_common::scripted_llm`'s default **503s `/props`**, so a guard-configured
+  daemon e2e on it now waits 60 s before refusing (documented on both helpers).
+- Follow-ups filed: **#906** (a boot refusal is still not an `audit_log` row — #609's second half),
+  **#907** (llama-server runs CORS `*`, no API key, on loopback).
 
-### Previous (2026-10-23): #900, #902 (PR #903, merged) — what still binds
+### Previous (2026-10-23 → 24): the supervisor arc — #904, #900/#902, #896 (PRs #905, #903, #901, merged) — what still binds
 
-- `ServiceStatus::Transitioning` (systemd `activating`/`deactivating`, launchd `spawn scheduled`/
-  `spawning`/`xpcproxy`/`SIG*ed`); ⚠️ **unknown words read `Transitioning`**, never `Inactive` and never
-  an error. `status_with_word` is the **required** method, `status()` its projection. Only `xpcproxy`
-  was measured live.
-
-### Previous (2026-10-23): #896 (PR #901, merged) — what still binds
-
-- **Measured systemd 255 answers** (the fixtures): unloaded `stop` = exit 5 `Unit x not loaded.`;
-  fileless `disable` = exit 1 `Unit file x does not exist.`; no user bus = exit 1, **empty stdout**;
-  `is-active` on a missing unit = exit 4 `inactive`. Benign answers are **anchored on the unit's name**.
-- `uninstall`/`uninstall_target` keep the unit file on a failed stop or disable (shared
-  `remove_after::remove_after_stop`), validate every member first, and drive `systemctl` **only for the
-  canonical units dir**. Every call is `run_capped` at **60 s** (a two-member target stop takes 40 s).
-  ⚠️ Still unpinned: that `uninstall` passes its stop result on — only the live smoke reaches it.
-
-### Earlier (2026-10-22 → 23): #894, #895, #898 (PRs #897, #899, merged) — what still binds
-
-- ⚠️ **A squash commit auto-closed #898** via "fail closed: #898" — run the closing regex over the
-  **squash message** too [[pr-body-not-fixed-autocloses-issue]].
+- `Supervisor::crash_evidence` (default `Err(NotImplemented)`); read **once, at timeout only** by
+  `describe_last_status`. ⚠️ systemd `show` answers an unknown unit too, clean defaults —
+  `LoadState=not-found` is the tell.
+- `ServiceStatus::Transitioning`; ⚠️ **unknown words read `Transitioning`**, never `Inactive`.
+  `status_with_word` is the required method.
+- systemd 255's measured answers are the fixtures; benign answers **anchored on the unit's name**.
+  `uninstall` keeps the unit file on a failed stop/disable; every `systemctl` is `run_capped` at 60 s.
+- **#894/#895/#898 (PRs #897, #899):** ⚠️ **a squash commit auto-closed #898** via "fail closed:
+  #898" — run the closing regex over the **squash message** too [[pr-body-not-fixed-autocloses-issue]].
 - launchd: a failed bootout fails `uninstall` and **keeps the plist**; `status` = pure
   `status_from_print` through the bounded `run_launchctl`; no-GUI-domain (exit 112) reads as "not
   loaded" for `bootout`/`unload_wait` but ⚠️ **stays an error in `status`** (install's health wait
@@ -119,9 +113,8 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   when measuring. ⚠️ A 0-byte gate script exits 0 — check `wc -c` after copying one to the DGX
   [[ssh-stdin-copy-can-write-zero-bytes]].
 - `browser_driver_firecracker_e2e` asserts example.org's reported `title` (IANA dropped the heading).
-  ⚠️ **DGX SearxNG (`kastellan-searxng`, docker) has restart policy `no`** — down after every reboot;
-  **operator: `docker update --restart unless-stopped kastellan-searxng`.** DGX micro-VM images
-  rebuilt 2026-10-19.
+  DGX SearxNG (`kastellan-searxng`, docker) restart policy set to `unless-stopped` on 2026-10-24 (it
+  was `no`, down after every reboot). DGX micro-VM images rebuilt 2026-10-19.
 
 ### Earlier (2026-10-17 → 19): #875, #722, #872, #870, #867, #862, #860 (merged) — what still binds
 
@@ -247,13 +240,16 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-0. ⚠️ **Operator, first: restart the DGX guard backend** — `llama-server … Shieldstral-1.0-3B-Q8_0.gguf
-   --alias shieldstral --port 8081 -c 131072 -ngl 99` (see *Live guard-host facts* below). The daemon
-   has refused to boot since the 2026-10-19 reboot, so **no live re-measure can have run since then**.
-   The structural fix is a supervised guard unit that core is `After=` — recorded on #609. Same reboot:
-   `kastellan-searxng`'s docker restart policy is `no` (Next TODO 4).
+0. **Deploy #609 on the DGX once merged** (the guard is hand-started until then — a reboot takes the
+   daemon down again). Add to `~/.config/kastellan/kastellan.env.local`:
+   `KASTELLAN_GUARD_SERVER_BIN=/home/hherb/.local/bin/llama-server` and
+   `KASTELLAN_GUARD_SERVER_MODEL=/home/hherb/models/shieldstral/Shieldstral-1.0-3B-Q8_0.gguf`;
+   **kill the hand-started guard** (`pkill -f "llama-server.*--port 8081"`, else the unit cannot bind);
+   then `scripts/upgrade_from_git.sh`. Verify `systemctl --user status kastellan-guard`, `nvidia-smi`
+   shows its process, core `NRestarts=0`; ideally one reboot to prove the point. Docs:
+   `docs/deploy/operator-env.md` § A supervised guard backend.
 
-1. **The live re-measure — blocked by item 0** (DMs, a **fresh room**; #776 is deployed,
+1. **The live re-measure** (unblocked 2026-10-24 — the daemon boots again, on GPU) (DMs, a **fresh room**; #776 is deployed,
    thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
    out on the synthesis turn), then read each plan's cost in one query:
    `select action, payload->'llm_usage', payload->>'latency_ms', payload->>'error' from audit_log
@@ -280,7 +276,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    (92 hand-rolled `[SKIP]`s — adding the `sandbox` profile is its acceptance test),
    [#721](https://github.com/hherb/kastellan/issues/721), [#723](https://github.com/hherb/kastellan/issues/723),
    [#724](https://github.com/hherb/kastellan/issues/724), [#691](https://github.com/hherb/kastellan/issues/691)
-   (a decision), and #237's absent macOS CI leg.
+   (a decision), and #237's absent macOS CI leg. ⚠️ **A fresh worktree's checkout mtimes make
+   `kastellan/python-exec:dev` read stale** — 7 extra Mac `[SKIP]`s in #609's sweep, not a regression.
    [#891](https://github.com/hherb/kastellan/issues/891): the vsock relays' error arms (`eprintln!` the errno; back off on `EMFILE`).
    [#878](https://github.com/hherb/kastellan/issues/878): the `microvm` profile's intermittent red
    test (Wikipedia heavy-page render times out in the VM; passed 2026-10-20, undiagnosed).
@@ -332,10 +329,8 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
   Slice 2 = SMTP outbound (`lettre`, MIT) + round trip; slice 3 = DGX deploy + live tier —
   **restart `localmail-serve` (+ `localmail-daemon`) on the DGX first**.
 - **Also open, no gotcha beyond the issue text:** #551, #519, #554 (needs a live DGX gate), #534.
-- **Live guard-host facts:** DGX `llama-server … Shieldstral-1.0-3B-Q8_0.gguf --alias shieldstral
-  --port 8081 -c 131072 -ngl 99`; `/props` reports `default_generation_settings.n_ctx` (no top-level
-  `n_ctx`). Restart with **at least `-c 66048`** or the daemon refuses to boot. Guard keys live in
-  `~/.config/kastellan/kastellan.env.local`, which `install` never rewrites.
+- **Live guard-host facts:** `/props` reports `default_generation_settings.n_ctx` (no top-level
+  `n_ctx`); the D8 floor is `-c 66048`. Guard keys live in `kastellan.env.local`. Launch line: #609's unit.
 - **A Mac daemon deployment is a deliberate decision, not a task** (#612 means the guard fails open
   on large documents there). ⚠️ **Host-mode gliner on macOS now works** (#726).
 - **Deferred with a reason:** macOS Seatbelt-loopback verification of mail tier 1a; Telegram inbound;
@@ -396,8 +391,8 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **DGX** (#904) | PR [#905](https://github.com/hherb/kastellan/pull/905) | **5328 / 0 / 84**, **195** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (reused), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-904.log`. Per-suite vs `~/sweep-900.log`: supervisor lib 139 → 142 (+3), tests-common 484 → 487 (+2 #903's review, +1). `systemd_user_smoke` 3/3 + `target_smoke` 2/2 under `KASTELLAN_PG_REQUIRE_E2E=1` | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-904` (fresh), **27** | **7** (3 = missing gliner `.venv`, 4 opt-in gliner) |
-| **Mac** (#904) | PR [#905](https://github.com/hherb/kastellan/pull/905) | **5209 / 0 / 52**, **195** summaries, `TEST_EXIT=0`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-904-mac.log`. Per-suite vs `sweep-900-mac.log`: supervisor lib 147 → 153 (+6), tests-common 486 → 489 (+2 review, +1). `launchd_agents_smoke` 6/6 + `target_smoke` 1/1 (`[E2E]`) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-904` (fresh), **27**; supervisor Linux cross-clippy clean | **5** Mac |
+| **DGX** (#609) | this session's PR | **5350 / 0 / 84**, **195** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (reused; its leftovers stashed), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-609.log`. Per-suite vs `~/sweep-904.log`: core lib 2559 → 2576 (+11 `guard_backend`, +6 `props_wait`), supervisor lib 142 → 147 (+4 guard spec, +1 from #905's post-sweep review). Swept before the review round (+3 tests, text) — that round re-ran core/supervisor/tests-common lib on the Mac only | not re-run (Mac cold clippy covers the change; supervisor Linux cross-clippy clean) | **7** (as before) |
+| **Mac** (#609) | this session's PR | **5232 / 0 / 52**, **195** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-609`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-609-mac.log`. Per-suite vs `sweep-904-mac.log`: core lib 2560 → 2577 (+17), supervisor lib 153 → 159 (+4; main measured 155). Post-review: core/supervisor/tests-common lib re-run (`~/post-review-609.log`) | exit 0 post-review, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-609` (fresh), **27**; supervisor Linux cross-clippy clean | **12** (+7: worktree mtimes vs the python-exec image) |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -480,6 +475,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#905** (#904) — merged 2026-10-24: health-wait timeouts name the crash-loop evidence.
 - **#903** (#900, #902) — merged 2026-10-23: `ServiceStatus::Transitioning`; the manager's state word in timeouts.
 - **#901** (#896) — merged 2026-10-23: systemd `uninstall` keeps the unit file on a failed stop; an empty `is-active` is not `Inactive`; `systemctl` bounded at 60 s.
 - **#899** (#898) — merged 2026-10-23: headless launchd `uninstall`, lenient state words, one timeout text, `$HOME` uid check.

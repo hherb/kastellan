@@ -191,10 +191,10 @@ pub fn resolve_from_env_files(layout: &Layout) -> Result<Option<GuardBackend>, S
 
 /// Uninstall a `kastellan-guard` unit an earlier install left behind.
 ///
-/// Needed because the unit is `WantedBy=kastellan.target` (and enabled into
-/// it), so dropping it from the target's member list alone would not stop
-/// systemd from starting it. A no-op when no unit is installed, which is the
-/// common case.
+/// The rewritten target no longer `Wants=` the unit, so nothing would start it
+/// again — but the old process would keep running, and its unit file would sit
+/// in the units dir looking live. `uninstall` stops it and removes the file. A
+/// no-op when no unit is installed, which is the common case.
 pub fn remove_stale_unit(sup: &dyn Supervisor) -> Result<(), String> {
     let status = sup
         .status(GUARD_SERVICE_NAME)
@@ -204,9 +204,7 @@ pub fn remove_stale_unit(sup: &dyn Supervisor) -> Result<(), String> {
     }
     sup.uninstall(GUARD_SERVICE_NAME)
         .map_err(|e| format!("uninstall the stale {GUARD_SERVICE_NAME} unit: {e}"))?;
-    eprintln!(
-        "removed {GUARD_SERVICE_NAME}: {GUARD_SERVER_BIN_KEY}/{GUARD_SERVER_MODEL_KEY} are no          longer set, so the guard backend is no longer supervised"
-    );
+    eprintln!("removed the {GUARD_SERVICE_NAME} unit (the guard backend is no longer supervised)");
     Ok(())
 }
 
@@ -332,5 +330,54 @@ mod tests {
         assert!(
             u64::from(kastellan_supervisor::specs::GUARD_CONTEXT_TOKENS) >= REQUIRED_GUARD_N_CTX
         );
+    }
+
+    /// A fake service manager: answers `status` with a fixed value and
+    /// records every `uninstall`.
+    struct FakeSupervisor {
+        status: ServiceStatus,
+        uninstalled: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Supervisor for FakeSupervisor {
+        fn install(&self, _: &kastellan_supervisor::ServiceSpec) -> Result<(), kastellan_supervisor::SupervisorError> {
+            unreachable!("remove_stale_unit never installs")
+        }
+        fn start(&self, _: &str) -> Result<(), kastellan_supervisor::SupervisorError> {
+            unreachable!("remove_stale_unit never starts")
+        }
+        fn stop(&self, _: &str) -> Result<(), kastellan_supervisor::SupervisorError> {
+            unreachable!("uninstall stops the unit itself")
+        }
+        fn uninstall(&self, name: &str) -> Result<(), kastellan_supervisor::SupervisorError> {
+            self.uninstalled.borrow_mut().push(name.to_string());
+            Ok(())
+        }
+        fn status_with_word(
+            &self,
+            _: &str,
+        ) -> Result<(ServiceStatus, Option<String>), kastellan_supervisor::SupervisorError> {
+            Ok((self.status, None))
+        }
+    }
+
+    fn fake(status: ServiceStatus) -> FakeSupervisor {
+        FakeSupervisor { status, uninstalled: Default::default() }
+    }
+
+    #[test]
+    fn remove_stale_unit_is_a_no_op_when_no_unit_is_installed() {
+        let sup = fake(ServiceStatus::NotInstalled);
+        remove_stale_unit(&sup).unwrap();
+        assert!(sup.uninstalled.borrow().is_empty());
+    }
+
+    #[test]
+    fn remove_stale_unit_uninstalls_a_left_over_unit_whatever_its_state() {
+        for status in [ServiceStatus::Active, ServiceStatus::Inactive, ServiceStatus::Transitioning] {
+            let sup = fake(status);
+            remove_stale_unit(&sup).unwrap();
+            assert_eq!(*sup.uninstalled.borrow(), ["kastellan-guard"], "{status:?}");
+        }
     }
 }

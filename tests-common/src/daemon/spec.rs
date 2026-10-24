@@ -77,7 +77,10 @@ pub const DEFAULT_LLM_TIMEOUT_MS: &str = "5000";
 /// ⚠️ **10 s holds only for a caller that does not configure the guard
 /// tier.** `scheduler spawned` is logged *after*
 /// `GuardTier::from_router_config`, which on a configured tier spends
-/// up to `PROBE_BUDGET_MS` (20 s) on the fatal `/props` call plus
+/// up to `PROBE_BUDGET_MS` (20 s) per attempt on the fatal `/props` call
+/// — and since #609 keeps re-asking for up to `PROPS_WAIT_BUDGET_MS`
+/// (60 s) while it answers connection-refused or **HTTP 503**, which is
+/// what [`crate::scripted_llm::spawn_scripted_llm`] serves — plus
 /// `PROBE_TOTAL_BUDGET_MS + PROBE_BUDGET_MS` (60 s) on the boot probe:
 /// ~80 s in total, where the same two legs cost ~60 s before #626
 /// doubled `PROBE_TOTAL_BUDGET_MS`.
