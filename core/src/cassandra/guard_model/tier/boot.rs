@@ -15,7 +15,7 @@ use super::super::context_pin::{self, GuardContextError};
 use super::super::timeout::{self, GuardTimeout};
 use super::super::GuardClient;
 use super::{
-    error_kind, outcome_and_score, probe, resolve, validate_tau, GuardErrorKind, GuardOutcome,
+    error_kind, outcome_and_score, probe, props_wait, resolve, validate_tau, GuardErrorKind, GuardOutcome,
     GuardReading, TauError,
 };
 
@@ -65,10 +65,18 @@ impl std::fmt::Display for GuardTierError {
             Self::PropsUnavailable(e) => write!(
                 f,
                 "the guard tier is configured but its backend's /props is unreachable: \
-                 {e}\nThe tier cannot be verified, and starting without it would turn a \
-                 security control off behind a correct-looking log line. Start the guard \
-                 backend, or unset KASTELLAN_LLM_GUARD_URL and KASTELLAN_LLM_GUARD_MODEL \
-                 to run without the tier deliberately."
+                 {e}\nConnection refused and HTTP 503 (a backend still starting) are \
+                 retried for up to {wait} s before this refusal; any other error refuses at \
+                 once. The tier cannot be verified, and starting without it would turn a \
+                 security control off behind a correct-looking log line. If \
+                 `kastellan-cli install` supervises the guard backend \
+                 (KASTELLAN_GUARD_SERVER_BIN and KASTELLAN_GUARD_SERVER_MODEL set), its \
+                 kastellan-guard unit is not answering: read kastellan-guard.err in the log \
+                 dir (~/.local/state/kastellan). Otherwise start the guard backend, or set \
+                 those two keys in kastellan.env.local and re-run install to supervise it, \
+                 or unset KASTELLAN_LLM_GUARD_URL and KASTELLAN_LLM_GUARD_MODEL to run \
+                 without the tier deliberately.",
+                wait = props_wait::PROPS_WAIT_BUDGET_MS / 1000
             ),
             Self::Context(e) => write!(f, "{e}"),
             Self::Timeout(e) => write!(f, "{e}"),
@@ -213,7 +221,9 @@ impl GuardTier {
     ///    deliberately no default (D1).
     /// 3. **`/props`, then the D8 context check — fatal.** Cheap,
     ///    deterministic, and it is what makes the runtime fail-open on
-    ///    HTTP 400 defensible.
+    ///    HTTP 400 defensible. A backend that is still *starting*
+    ///    (connection refused, HTTP 503) is waited for, for up to
+    ///    [`props_wait::PROPS_WAIT_BUDGET_MS`], before the refusal (#609).
     /// 4. **The D9 throughput probe — never fatal.** It picks a number;
     ///    it does not verify a control, so it must not undo a boot that
     ///    step 3 already allowed. Skipped entirely when the operator
@@ -253,8 +263,15 @@ impl GuardTier {
             Some(t) => validate_tau(t).map_err(GuardTierError::Tau)?,
         };
 
-        // Step 3 — fatal.
-        let props = probe_client.props().await.map_err(GuardTierError::PropsUnavailable)?;
+        // Step 3 — fatal, once a backend that is still starting has had
+        // its bounded wait (#609).
+        let props = props_wait::wait_for_props(
+            || probe_client.props(),
+            Duration::from_millis(props_wait::PROPS_WAIT_BUDGET_MS),
+            Duration::from_millis(props_wait::PROPS_RETRY_INTERVAL_MS),
+        )
+        .await
+        .map_err(GuardTierError::PropsUnavailable)?;
         let n_ctx = context_pin::verify_guard_context(context_pin::n_ctx_from_props(&props))
             .map_err(GuardTierError::Context)?;
 

@@ -59,6 +59,7 @@ pub mod error_kind;
 // Internal: the only item is `pub(super)`, so a `pub mod` here would
 // publish an empty module and document its private links.
 pub(crate) mod probe;
+pub mod props_wait;
 
 pub use boot::{GuardReport, GuardTier, GuardTierError, SharedGuardTier};
 pub use error_kind::GuardErrorKind;
