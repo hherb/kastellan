@@ -441,7 +441,7 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
 fn verify_running(sup: &dyn Supervisor, layout: &Layout) -> Result<(), String> {
     let socket = layout.data_dir.join("sockets/.s.PGSQL.5432");
     let deadline = Instant::now() + Duration::from_secs(90);
-    // The last readings, rendered only once the wait gives up (#904).
+    // The last statuses, rendered only once the wait gives up (#904).
     let mut last = None;
     while Instant::now() < deadline {
         // A supervisor ERROR is not a service state — it means the query

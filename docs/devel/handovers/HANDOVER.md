@@ -46,15 +46,21 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ### This session (2026-10-24, latest): #904 (PR #905) — a timeout says how often it died
 
-- **`Supervisor::crash_evidence(name)`** (default `Ok(None)`) — launchd: the top-level `runs = N` and
+- **`Supervisor::crash_evidence(name)`** (default `Err(NotImplemented)`, so a backend that forgot it
+  reads "crash evidence unreadable", never "nothing to say") — launchd: the top-level `runs = N` and
   every `last exit …`/`last terminating …` line of `launchctl print` (prefix-matched, not a list;
-  nested dicts are the env — ignored); systemd: `show -p NRestarts,Result,ExecMainStatus` (measured,
-  systemd 255). **`describe_last_status`** reads it **once, at timeout only** (polls stay one call per
-  tick); a failed read is named, `NotInstalled` is not asked. Used by `verify_running`,
-  `wait_for_status` and the three smoke waits. `describe_status` now takes `(status, word, evidence)`.
+  nested ` = ` dicts like `resource coalition` ignored); a `print` with **no** `runs` line is an error
+  (every loaded agent has one, `runs = 0` included — 492/492 measured). systemd: `show -p
+  LoadState,NRestarts,Result,ExecMainStatus` (measured, systemd 255). **`describe_last_status`** reads
+  it **once, at timeout only** (polls stay one call per tick); a failed read is named, `NotInstalled`
+  is not asked. Used by `verify_running`, `wait_for_status` and the three smoke waits; both smoke
+  round trips also assert the real `crash_evidence` while Active. `describe_status` now takes
+  `(status, word, evidence)`.
 - `supervisor/src/lib.rs` 624 → 431: its two test modules moved verbatim to
   `default_target_tests.rs`/`spec_ordering_tests.rs` (cmp-proved, movement-only commit).
-- ⚠️ systemd's `show` answers a **missing** unit too (`NRestarts=0`, exit 0) — hence the `NotInstalled` skip.
+- ⚠️ systemd's `show` answers an **unknown** unit too, exit 0, with clean defaults (`Result=success,
+  NRestarts=0`) — `NotInstalled` (no unit file) is skipped, and `LoadState=not-found` marks a unit file
+  the manager never loaded (the review's catch).
 
 ### Previous (2026-10-23): #900, #902 (PR #903, merged) — what still binds
 

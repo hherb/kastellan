@@ -270,15 +270,17 @@ pub trait Supervisor {
 
     /// How often the service has died and how it last exited, in the
     /// manager's own words — launchd's `runs = 31, last exit code = 1`,
-    /// systemd's `Result=exit-code, NRestarts=31, ExecMainStatus=1` — or
-    /// `None` when it has nothing to say (not loaded). Diagnostics for a wait
-    /// that has given up, rendered by [`describe_last_status`] (#904): one
-    /// more call to the manager, so never read it per poll.
+    /// systemd's `Result=exit-code, NRestarts=31, ExecMainStatus=1,
+    /// LoadState=loaded` — or `None` when launchd has nothing to say (not
+    /// loaded; systemd always answers, `LoadState` saying whether it knows the
+    /// unit). Diagnostics for a wait that has given up, rendered by
+    /// [`describe_last_status`] (#904): one more call to the manager, so never
+    /// read it per poll.
     ///
-    /// Defaults to `Ok(None)`: a backend without it still times out, just
-    /// without the evidence.
+    /// Defaults to `NotImplemented`, which the timeout names as unreadable
+    /// evidence: a backend that forgot it must not read as "nothing to say".
     fn crash_evidence(&self, _name: &str) -> Result<Option<String>, SupervisorError> {
-        Ok(None)
+        Err(SupervisorError::NotImplemented("crash_evidence"))
     }
 
     /// Install every member of a [`TargetSpec`] (the generic bundle).

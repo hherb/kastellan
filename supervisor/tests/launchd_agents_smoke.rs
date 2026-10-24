@@ -151,6 +151,10 @@ fn install_start_status_stop_uninstall_round_trip() {
     sup.start(&name).expect("start");
     wait_for_status(&sup, &name, ServiceStatus::Active, Duration::from_secs(5))
         .expect("agent should become Active within 5s");
+    // The real `print`'s crash evidence (#904): a timeout path is the only
+    // other caller, so this is where its argv and reader meet launchd.
+    let evidence = sup.crash_evidence(&name).expect("crash evidence").unwrap_or_default();
+    assert!(evidence.starts_with("runs = 1, last exit code = "), "evidence: {evidence:?}");
 
     sup.stop(&name).expect("stop");
     wait_for_status(&sup, &name, ServiceStatus::Inactive, Duration::from_secs(5))

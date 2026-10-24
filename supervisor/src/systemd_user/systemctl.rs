@@ -219,12 +219,15 @@ pub(super) fn status_from_is_active(
 }
 
 /// The unit properties [`evidence_from_show`] reads: the restart count, how
-/// the last run ended and its exit status (or signal number) (#904).
-pub(super) const CRASH_EVIDENCE_PROPS: &str = "NRestarts,Result,ExecMainStatus";
+/// the last run ended and its exit status (or signal number) (#904) — and
+/// `LoadState`, because `show` answers for a unit the manager never loaded
+/// too, exit 0, with clean defaults (`Result=success, NRestarts=0`, measured):
+/// without `LoadState=not-found` beside them that reads as "never crashed".
+pub(super) const CRASH_EVIDENCE_PROPS: &str = "LoadState,NRestarts,Result,ExecMainStatus";
 
 /// `systemctl --user show -p` [`CRASH_EVIDENCE_PROPS`]'s answer as one line,
 /// verbatim and in systemd's order: `Result=exit-code, NRestarts=31,
-/// ExecMainStatus=1`. No properties → `None`.
+/// ExecMainStatus=1, LoadState=loaded`. No properties → `None`.
 pub(super) fn evidence_from_show(stdout: &str) -> Option<String> {
     let props: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     (!props.is_empty()).then(|| props.join(", "))

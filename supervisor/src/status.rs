@@ -119,4 +119,41 @@ mod tests {
             Some("crash evidence unreadable: supervisor backend command failed: launchctl print timed out")
         );
     }
+
+    /// A backend with only the required methods, so `crash_evidence` is the
+    /// trait default — which must read as unreadable, never as "nothing to say".
+    struct Bare;
+
+    impl Supervisor for Bare {
+        fn install(&self, _: &crate::ServiceSpec) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn start(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn stop(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn uninstall(&self, _: &str) -> Result<(), SupervisorError> {
+            unreachable!()
+        }
+        fn status_with_word(&self, _: &str) -> Result<(ServiceStatus, Option<String>), SupervisorError> {
+            unreachable!()
+        }
+    }
+
+    /// Every installed status is asked for its evidence — `Transitioning` is
+    /// the live crash loop (#904) — a failed read is named, and a service
+    /// that is not installed is not asked.
+    #[test]
+    fn describe_last_status_asks_every_installed_status_and_names_a_failed_read() {
+        let unreadable = "crash evidence unreadable: not yet implemented: crash_evidence";
+        for status in [ServiceStatus::Active, ServiceStatus::Inactive, ServiceStatus::Transitioning, ServiceStatus::Failed] {
+            assert_eq!(
+                describe_last_status(&Bare, "svc", status, Some("w")),
+                format!("{status:?} (state word: w; {unreadable})")
+            );
+        }
+        assert_eq!(describe_last_status(&Bare, "svc", ServiceStatus::NotInstalled, None), "NotInstalled");
+    }
 }

@@ -402,7 +402,7 @@ impl Supervisor for LaunchAgents {
     fn crash_evidence(&self, name: &str) -> Result<Option<String>, SupervisorError> {
         validate_service_name(name)?;
         let target = format!("{}/{name}", user_domain_target()?);
-        evidence_from_print(run_launchctl(&["print", &target]))
+        evidence_from_print(&target, run_launchctl(&["print", &target]))
     }
 }
 

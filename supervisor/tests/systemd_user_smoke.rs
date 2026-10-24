@@ -173,6 +173,13 @@ fn install_start_status_stop_uninstall_round_trip() {
     sup.start(&name).expect("start");
     wait_for_status(&sup, &name, ServiceStatus::Active, Duration::from_secs(5))
         .expect("service should become Active within 5s");
+    // The real `show`'s crash evidence (#904): a timeout path is the only
+    // other caller, so this is where its argv and property list meet systemd
+    // — `show -p` drops a misspelt property silently.
+    let evidence = sup.crash_evidence(&name).expect("crash evidence").unwrap_or_default();
+    for prop in ["LoadState=loaded", "NRestarts=0", "Result=", "ExecMainStatus="] {
+        assert!(evidence.contains(prop), "{prop} missing from {evidence:?}");
+    }
 
     sup.stop(&name).expect("stop");
     wait_for_status(&sup, &name, ServiceStatus::Inactive, Duration::from_secs(5))

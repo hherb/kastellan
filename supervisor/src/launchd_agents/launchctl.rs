@@ -253,13 +253,17 @@ pub(super) fn status_from_print(
 /// count and every `last exit …`/`last terminating …` line, verbatim, as
 /// `runs = 31, last exit code = 1`.
 ///
-/// Only top-level keys (one tab deep) count: nested dicts hold operator text
-/// (the agent's environment), which must not pass for a counter. The `last …`
+/// Only top-level keys (one tab deep) count: nested dicts such as
+/// `resource coalition = { … }` reuse ` = ` keys, which must not pass for the
+/// agent's own. The `last …`
 /// keys are matched by prefix, not listed — launchd says `last exit code`,
 /// `last exit reason` (a jetsam'd agent, measured) or names a signal, and no
 /// list of its words has held (#898). Not loaded → `None`; a failed read is
-/// the error it is, so the caller can name it.
+/// the error it is, so the caller can name it — and so is a `print` with no
+/// `runs` line: every loaded agent has one, `runs = 0` included (492 of 492,
+/// measured), so its absence is a format change, not "nothing to say" (#895).
 pub(super) fn evidence_from_print(
+    target: &str,
     print: Result<String, SupervisorError>,
 ) -> Result<Option<String>, SupervisorError> {
     let stdout = match print {
@@ -277,7 +281,13 @@ pub(super) fn evidence_from_print(
             })
         })
         .collect();
-    Ok((!evidence.is_empty()).then(|| evidence.join(", ")))
+    if !evidence.iter().any(|line| line.starts_with("runs = ")) {
+        return Err(SupervisorError::Backend(format!(
+            "launchctl print {target} answered without a `runs = …` line, so its crash \
+             evidence is unknown (has launchctl's output format changed?)"
+        )));
+    }
+    Ok(Some(evidence.join(", ")))
 }
 
 #[cfg(test)]
