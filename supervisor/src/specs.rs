@@ -212,7 +212,12 @@ pub fn postgres_service_spec(
 /// - **`keep_alive` + the same backoff as core**: a crashed guard must come
 ///   back, or core cannot boot.
 /// - **Not sandboxed**: like Postgres it is an operator-installed service, not
-///   a tool worker, and it handles no untrusted *code* — only documents to score.
+///   a tool worker, and it runs no untrusted *code*. It does parse untrusted
+///   *input* — scoring attacker-controlled documents is what it is for — so
+///   this is a deliberate choice with a known exposure: loopback-only, but
+///   CORS `*` and no API key ([#907]).
+///
+/// [#907]: https://github.com/hherb/kastellan/issues/907
 ///
 /// Pure: no I/O, no env probing.
 pub fn guard_service_spec(

@@ -65,13 +65,17 @@ impl std::fmt::Display for GuardTierError {
             Self::PropsUnavailable(e) => write!(
                 f,
                 "the guard tier is configured but its backend's /props is unreachable: \
-                 {e}\n(A backend still starting — connection refused, HTTP 503 — is waited \
-                 for up to {wait} s first.) The tier cannot be verified, and starting \
-                 without it would turn a security control off behind a correct-looking log \
-                 line. Start the guard backend — or have `kastellan-cli install` supervise \
-                 it by setting KASTELLAN_GUARD_SERVER_BIN and KASTELLAN_GUARD_SERVER_MODEL \
-                 in kastellan.env.local — or unset KASTELLAN_LLM_GUARD_URL and \
-                 KASTELLAN_LLM_GUARD_MODEL to run without the tier deliberately.",
+                 {e}\nConnection refused and HTTP 503 (a backend still starting) are \
+                 retried for up to {wait} s before this refusal; any other error refuses at \
+                 once. The tier cannot be verified, and starting without it would turn a \
+                 security control off behind a correct-looking log line. If \
+                 `kastellan-cli install` supervises the guard backend \
+                 (KASTELLAN_GUARD_SERVER_BIN and KASTELLAN_GUARD_SERVER_MODEL set), its \
+                 kastellan-guard unit is not answering: read kastellan-guard.err in the log \
+                 dir (~/.local/state/kastellan). Otherwise start the guard backend, or set \
+                 those two keys in kastellan.env.local and re-run install to supervise it, \
+                 or unset KASTELLAN_LLM_GUARD_URL and KASTELLAN_LLM_GUARD_MODEL to run \
+                 without the tier deliberately.",
                 wait = props_wait::PROPS_WAIT_BUDGET_MS / 1000
             ),
             Self::Context(e) => write!(f, "{e}"),

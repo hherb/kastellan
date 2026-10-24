@@ -125,8 +125,15 @@ and logs to `~/.local/state/kastellan/kastellan-guard.{out,err}`.
 - Removing both keys and re-running `install` removes the unit. Setting one
   without the other is refused.
 
-Core starts after the guard, and at boot it waits up to 60 s for a guard that is
-still loading its model (connection refused or HTTP 503) before it refuses.
+On systemd, core starts after the guard; launchd has no start ordering. On both,
+core waits about 60 s at boot for a guard that is still loading its model
+(connection refused or HTTP 503) before it refuses. Any other error refuses at
+once. If core still refuses with the unit installed, the unit itself is failing:
+read `~/.local/state/kastellan/kastellan-guard.err`.
+
+`install` refuses a port of 0 or 80 in the URL, and `%` or `$` in either path or
+the model name. systemd would expand those characters inside the unit's
+command line.
 
 [#609]: https://github.com/hherb/kastellan/issues/609
 

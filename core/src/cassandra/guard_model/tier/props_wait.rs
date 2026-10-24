@@ -7,18 +7,25 @@
 //! That refusal used to be **immediate**, which made a guard backend starting
 //! a few seconds after the daemon indistinguishable from one that is not
 //! there — and both crash-looped the whole agent onto the supervisor's
-//! restart ramp, which tops out at 300 s. Since #609 the guard backend is a
-//! supervised unit that core is `After=`, but `After=` orders the *start*,
-//! not readiness, and launchd has no ordering at all.
+//! restart ramp, which tops out at 300 s. Since #609 the guard backend, when
+//! the operator configures it, is a supervised unit that core is `After=` —
+//! but `After=` orders the *start*, not readiness, and launchd has no
+//! ordering at all.
 //!
 //! # What is waited for, and what is not
 //!
 //! Measured on the DGX against `llama-server` loading Shieldstral 3B Q8
 //! (2026-10-24): ~0.3 s of **connection refused** while the process starts,
 //! then ~5 s of **HTTP 503 `Loading model`**, then 200. Those two answers —
-//! [`GuardErrorKind::Connect`] / [`GuardErrorKind::ConnectTimeout`] and a
-//! 503 — are the "not up *yet*" ones and are retried for up to
-//! [`PROPS_WAIT_BUDGET_MS`].
+//! [`GuardErrorKind::Connect`] and a 503 — are the "not up *yet*" ones and
+//! are retried for up to [`PROPS_WAIT_BUDGET_MS`]. A
+//! [`GuardErrorKind::ConnectTimeout`] is retried too, defensively rather than
+//! because it was measured: on loopback it takes a full listen backlog or a
+//! struggling host, and each such attempt costs up to the router's 5 s
+//! connect cap.
+//!
+//! The budget bounds when a new attempt may *start*; the last one can still
+//! overrun it by its own timeout.
 //!
 //! Everything else refuses at once, as before: a 404 or a body that is not
 //! JSON means the URL points at something that is not a llama.cpp server, and
@@ -93,9 +100,18 @@ where
             RouterError::HttpStatus { status, .. } => Some(*status),
             _ => None,
         };
-        if !not_up_yet(error_kind::classify(&err), status)
-            || started.elapsed() + interval >= budget
-        {
+        if !not_up_yet(error_kind::classify(&err), status) {
+            return Err(err);
+        }
+        if started.elapsed() + interval >= budget {
+            // The refusal that follows names only the last error; this line
+            // is what says it was waited for, and for how long.
+            tracing::warn!(
+                attempts = attempt,
+                waited_ms = started.elapsed().as_millis() as u64,
+                error = %err,
+                "guard backend /props never became ready inside the wait budget; refusing to boot"
+            );
             return Err(err);
         }
         tracing::warn!(
@@ -176,22 +192,40 @@ mod tests {
         assert_eq!(calls.get(), 1, "a 404 will not become a llama.cpp server by waiting");
     }
 
+    /// Each attempt's body names its number, so "the last error" is proven
+    /// rather than any 503 passing. The fake yields like I/O, and the whole
+    /// wait sits under a timeout, so a mutant that drops the budget check is
+    /// a red test rather than a hung binary.
     #[tokio::test]
     async fn a_backend_that_never_comes_up_is_refused_once_the_budget_is_spent() {
         let calls = Cell::new(0);
         let started = Instant::now();
-        let err = wait_for_props(
-            || {
-                calls.set(calls.get() + 1);
-                async { Err(http(503)) }
-            },
-            Duration::from_millis(200),
-            Duration::from_millis(20),
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_props(
+                || {
+                    calls.set(calls.get() + 1);
+                    let n = calls.get();
+                    async move {
+                        tokio::task::yield_now().await;
+                        Err(RouterError::HttpStatus { status: 503, body: format!("attempt {n}") })
+                    }
+                },
+                Duration::from_millis(200),
+                Duration::from_millis(20),
+            ),
         )
         .await
+        .expect("the budget ends the wait")
         .unwrap_err();
-        assert!(matches!(err, RouterError::HttpStatus { status: 503, .. }), "the last error");
-        assert!(calls.get() >= 2, "it retried: {}", calls.get());
+        let n = calls.get();
+        assert!(
+            matches!(&err, RouterError::HttpStatus { status: 503, body } if *body == format!("attempt {n}")),
+            "the last error, not the first: {err:?}"
+        );
+        assert!(n >= 2, "it retried: {n}");
+        // 200 ms / 20 ms paced = ~10; without the pause it would be thousands.
+        assert!(n <= 11, "the interval paces the retries: {n}");
         assert!(started.elapsed() < Duration::from_secs(2), "and stopped near the budget");
     }
 

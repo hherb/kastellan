@@ -47,22 +47,26 @@ const GUARD_MODEL_KEY: &str = "KASTELLAN_LLM_GUARD_MODEL";
 
 /// Everything the guard unit needs, validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Fields are private so [`plan_guard_backend`] — absolute paths, a non-zero
+/// loopback port, no systemd-expanded characters — is the only way to get one.
 pub struct GuardBackend {
-    pub server: PathBuf,
-    pub model: PathBuf,
+    server: PathBuf,
+    model: PathBuf,
     /// The API model name; equals `KASTELLAN_LLM_GUARD_MODEL`.
-    pub alias: String,
+    alias: String,
     /// The loopback port; the port of `KASTELLAN_LLM_GUARD_URL`.
-    pub port: u16,
+    port: u16,
 }
 
 /// Look up `key` in folded env pairs. An empty value counts as unset, the
-/// same rule the router applies to its own keys.
+/// same rule the router's `read_env` applies to its own keys (no trim, so the
+/// alias is byte-for-byte what the daemon sends).
 fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
     env.iter()
         .rev() // a repeated key resolves to its last occurrence
         .find(|(k, _)| k == key)
-        .map(|(_, v)| v.trim())
+        .map(|(_, v)| v.as_str())
         .filter(|v| !v.is_empty())
 }
 
@@ -74,11 +78,13 @@ fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
 ///   operator still runs the guard by hand.
 /// - Exactly one set → `Err`: half a configuration is a typo, not an opt-out.
 /// - Both set → both must be absolute paths, and the daemon's guard URL and
-///   model must be set, with the URL on loopback and an explicit port.
+///   model must be set, with the URL on loopback and an explicit port. None of
+///   the three values reaching the command line may hold `%` or `$`, which
+///   systemd would expand inside `ExecStart=`.
 pub fn plan_guard_backend(env: &[(String, String)]) -> Result<Option<GuardBackend>, String> {
     let (server, model) = match (lookup(env, GUARD_SERVER_BIN_KEY), lookup(env, GUARD_SERVER_MODEL_KEY)) {
         (None, None) => return Ok(None),
-        (Some(s), Some(m)) => (PathBuf::from(s), PathBuf::from(m)),
+        (Some(s), Some(m)) => (s, m),
         (Some(_), None) | (None, Some(_)) => {
             return Err(format!(
                 "{GUARD_SERVER_BIN_KEY} and {GUARD_SERVER_MODEL_KEY} must be set together \
@@ -87,11 +93,11 @@ pub fn plan_guard_backend(env: &[(String, String)]) -> Result<Option<GuardBacken
             ))
         }
     };
-    for (key, path) in [(GUARD_SERVER_BIN_KEY, &server), (GUARD_SERVER_MODEL_KEY, &model)] {
-        if !path.is_absolute() {
+    for (key, path) in [(GUARD_SERVER_BIN_KEY, server), (GUARD_SERVER_MODEL_KEY, model)] {
+        if !Path::new(path).is_absolute() {
             return Err(format!(
                 "{key} must be an absolute path (the unit runs with no PATH and no cwd), got {}",
-                path.display()
+                path
             ));
         }
     }
@@ -103,16 +109,31 @@ pub fn plan_guard_backend(env: &[(String, String)]) -> Result<Option<GuardBacken
              kastellan.env.local"
         ));
     };
+    for (key, value) in [(GUARD_SERVER_BIN_KEY, server), (GUARD_SERVER_MODEL_KEY, model), (GUARD_MODEL_KEY, alias)] {
+        if value.contains(['%', '$']) {
+            return Err(format!(
+                "{key}={value}: `%` and `$` are not allowed — systemd expands them inside the \
+                 unit's ExecStart=, so the guard would run with a different argument"
+            ));
+        }
+    }
     let port = loopback_port(url)?;
-    Ok(Some(GuardBackend { server, model, alias: alias.to_string(), port }))
+    Ok(Some(GuardBackend {
+        server: PathBuf::from(server),
+        model: PathBuf::from(model),
+        alias: alias.to_string(),
+        port,
+    }))
 }
 
 /// The port of a loopback `http://` guard URL.
 ///
 /// The unit binds `127.0.0.1` only, so a URL naming any other host (or
 /// `[::1]`, which `127.0.0.1` does not answer) would have the daemon knocking
-/// on a door the unit never opens. An implicit port is refused too: it would
-/// mean 80, which an unprivileged user cannot bind.
+/// on a door the unit never opens. A guard URL with no port is almost certainly
+/// an omission, so it is refused rather than read as 80 — and so is an
+/// explicit `:80`, which the URL parser drops as http's default. Port 0 is
+/// refused: the unit would bind a random port the daemon cannot know.
 fn loopback_port(raw: &str) -> Result<u16, String> {
     let url = Url::parse(raw).map_err(|e| format!("{GUARD_URL_KEY}={raw} does not parse: {e}"))?;
     if url.scheme() != "http" {
@@ -130,9 +151,17 @@ fn loopback_port(raw: &str) -> Result<u16, String> {
             ))
         }
     }
-    url.port().ok_or_else(|| {
-        format!("{GUARD_URL_KEY}={raw}: name the port explicitly (e.g. http://127.0.0.1:8081/v1)")
-    })
+    match url.port() {
+        Some(0) => Err(format!(
+            "{GUARD_URL_KEY}={raw}: port 0 would have the guard bind a random port the daemon \
+             cannot know; name a fixed one (e.g. http://127.0.0.1:8081/v1)"
+        )),
+        Some(port) => Ok(port),
+        None => Err(format!(
+            "{GUARD_URL_KEY}={raw}: name the port explicitly, other than 80 (http's default, \
+             which parses as no port at all) — e.g. http://127.0.0.1:8081/v1"
+        )),
+    }
 }
 
 /// Add the guard unit to an install: a target member started **before** core,
@@ -180,7 +209,19 @@ pub fn resolve_from_env_files(layout: &Layout) -> Result<Option<GuardBackend>, S
         ],
     )
     .map_err(|e| format!("reading the env files for the guard backend: {e}"))?;
-    let Some(guard) = plan_guard_backend(&env)? else { return Ok(None) };
+    let Some(guard) = plan_guard_backend(&env)? else {
+        // Not an error — the operator may run the guard by hand — but a reboot
+        // then leaves the whole agent down until they do (#609), so say so.
+        if let Some(url) = lookup(&env, GUARD_URL_KEY) {
+            eprintln!(
+                "note: the guard tier is configured ({GUARD_URL_KEY}={url}) but its backend is \
+                 not supervised, so it will not come back after a reboot; set \
+                 {GUARD_SERVER_BIN_KEY} and {GUARD_SERVER_MODEL_KEY} in kastellan.env.local to \
+                 have install supervise it"
+            );
+        }
+        return Ok(None);
+    };
     for (key, path) in [(GUARD_SERVER_BIN_KEY, &guard.server), (GUARD_SERVER_MODEL_KEY, &guard.model)] {
         if !path.is_file() {
             return Err(format!("{key}={}: no such file", path.display()));
@@ -189,13 +230,18 @@ pub fn resolve_from_env_files(layout: &Layout) -> Result<Option<GuardBackend>, S
     Ok(Some(guard))
 }
 
-/// Uninstall a `kastellan-guard` unit an earlier install left behind.
+/// Uninstall a `kastellan-guard` unit an earlier install left behind, unless
+/// this install `planned` one (then it was just installed and is not stale).
+/// `uninstall` passes `None`: it removes the unit whatever the env files say.
 ///
 /// The rewritten target no longer `Wants=` the unit, so nothing would start it
 /// again — but the old process would keep running, and its unit file would sit
 /// in the units dir looking live. `uninstall` stops it and removes the file. A
 /// no-op when no unit is installed, which is the common case.
-pub fn remove_stale_unit(sup: &dyn Supervisor) -> Result<(), String> {
+pub fn remove_stale_unit(sup: &dyn Supervisor, planned: Option<&GuardBackend>) -> Result<(), String> {
+    if planned.is_some() {
+        return Ok(());
+    }
     let status = sup
         .status(GUARD_SERVICE_NAME)
         .map_err(|e| format!("cannot query {GUARD_SERVICE_NAME} via the service manager: {e}"))?;
@@ -230,8 +276,28 @@ mod tests {
 
     #[test]
     fn empty_values_count_as_unset() {
-        let e = env(&[(GUARD_SERVER_BIN_KEY, ""), (GUARD_SERVER_MODEL_KEY, " "), URL, ALIAS]);
+        let e = env(&[(GUARD_SERVER_BIN_KEY, ""), (GUARD_SERVER_MODEL_KEY, ""), URL, ALIAS]);
         assert_eq!(plan_guard_backend(&e), Ok(None));
+    }
+
+    /// No trim, like the router: the unit's `--alias` is exactly what the
+    /// daemon sends, padding included.
+    #[test]
+    fn the_alias_is_taken_verbatim() {
+        let e = env(&[BIN, MODEL, URL, (GUARD_MODEL_KEY, " shieldstral")]);
+        assert_eq!(plan_guard_backend(&e).unwrap().unwrap().alias, " shieldstral");
+    }
+
+    #[test]
+    fn systemd_specifier_and_variable_characters_are_refused() {
+        for e in [
+            env(&[(GUARD_SERVER_BIN_KEY, "/opt/llama%h/llama-server"), MODEL, URL, ALIAS]),
+            env(&[BIN, (GUARD_SERVER_MODEL_KEY, "/models/$HOME.gguf"), URL, ALIAS]),
+            env(&[BIN, MODEL, URL, (GUARD_MODEL_KEY, "shield%n")]),
+        ] {
+            let err = plan_guard_backend(&e).unwrap_err();
+            assert!(err.contains("not allowed"), "{err}");
+        }
     }
 
     #[test]
@@ -287,6 +353,8 @@ mod tests {
             ("http://[::1]:8081/v1", "127.0.0.1 only"),
             ("https://127.0.0.1:8081/v1", "plain http"),
             ("http://127.0.0.1/v1", "port explicitly"),
+            ("http://127.0.0.1:80/v1", "other than 80"),
+            ("http://127.0.0.1:0/v1", "random port"),
             ("not a url", "does not parse"),
         ] {
             let e = env(&[BIN, MODEL, (GUARD_URL_KEY, url), ALIAS]);
@@ -368,7 +436,7 @@ mod tests {
     #[test]
     fn remove_stale_unit_is_a_no_op_when_no_unit_is_installed() {
         let sup = fake(ServiceStatus::NotInstalled);
-        remove_stale_unit(&sup).unwrap();
+        remove_stale_unit(&sup, None).unwrap();
         assert!(sup.uninstalled.borrow().is_empty());
     }
 
@@ -376,8 +444,70 @@ mod tests {
     fn remove_stale_unit_uninstalls_a_left_over_unit_whatever_its_state() {
         for status in [ServiceStatus::Active, ServiceStatus::Inactive, ServiceStatus::Transitioning] {
             let sup = fake(status);
-            remove_stale_unit(&sup).unwrap();
+            remove_stale_unit(&sup, None).unwrap();
             assert_eq!(*sup.uninstalled.borrow(), ["kastellan-guard"], "{status:?}");
         }
+    }
+
+    /// The unit this install just planned (and installed) is not stale.
+    #[test]
+    fn remove_stale_unit_keeps_a_planned_unit() {
+        let guard = plan_guard_backend(&env(&[BIN, MODEL, URL, ALIAS])).unwrap().unwrap();
+        let sup = fake(ServiceStatus::Active);
+        remove_stale_unit(&sup, Some(&guard)).unwrap();
+        assert!(sup.uninstalled.borrow().is_empty());
+    }
+
+    /// A tempdir home with `kastellan.env` (and optionally the `.local`
+    /// overlay) written, plus real files for the binary and the model.
+    fn home_with(env_body: &str, local_body: Option<&str>) -> (tempfile::TempDir, Layout) {
+        let home = tempfile::tempdir().unwrap();
+        let layout = resolve_layout(home.path(), "u");
+        std::fs::create_dir_all(layout.env_file.parent().unwrap()).unwrap();
+        std::fs::write(&layout.env_file, env_body).unwrap();
+        if let Some(body) = local_body {
+            std::fs::create_dir_all(layout.env_local_file.parent().unwrap()).unwrap();
+            std::fs::write(&layout.env_local_file, body).unwrap();
+        }
+        (home, layout)
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, b"").unwrap();
+        p
+    }
+
+    #[test]
+    fn resolve_reads_the_overlay_after_kastellan_env_and_may_be_without_it() {
+        let files = tempfile::tempdir().unwrap();
+        let (bin, model) = (touch(files.path(), "llama-server"), touch(files.path(), "g.gguf"));
+        let base = format!(
+            "{GUARD_SERVER_BIN_KEY}={}\n{GUARD_SERVER_MODEL_KEY}={}\n{GUARD_URL_KEY}=http://127.0.0.1:8081/v1\n{GUARD_MODEL_KEY}=shieldstral\n",
+            bin.display(),
+            model.display()
+        );
+
+        let (_home, layout) = home_with(&base, None);
+        assert_eq!(resolve_from_env_files(&layout).unwrap().unwrap().port, 8081, "no overlay");
+
+        let (_home, layout) = home_with(&base, Some(&format!("{GUARD_URL_KEY}=http://127.0.0.1:9090/v1\n")));
+        assert_eq!(resolve_from_env_files(&layout).unwrap().unwrap().port, 9090, "the overlay wins");
+    }
+
+    /// A typo'd model path must fail the install, not install a unit that
+    /// crash-loops on a file that is not there.
+    #[test]
+    fn resolve_refuses_a_missing_model_file() {
+        let files = tempfile::tempdir().unwrap();
+        let bin = touch(files.path(), "llama-server");
+        let body = format!(
+            "{GUARD_SERVER_BIN_KEY}={}\n{GUARD_SERVER_MODEL_KEY}={}\n{GUARD_URL_KEY}=http://127.0.0.1:8081/v1\n{GUARD_MODEL_KEY}=shieldstral\n",
+            bin.display(),
+            files.path().join("typo.gguf").display()
+        );
+        let (_home, layout) = home_with(&body, None);
+        let err = resolve_from_env_files(&layout).unwrap_err();
+        assert!(err.contains(GUARD_SERVER_MODEL_KEY) && err.contains("no such file"), "{err}");
     }
 }

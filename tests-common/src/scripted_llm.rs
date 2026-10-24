@@ -119,17 +119,20 @@ pub struct ScriptedLlm {
     /// out because it is invisible at the call site: the counter is
     /// incremented before the stored-body-or-503 decision, so a mock
     /// spawned by [`spawn_scripted_llm`] (which 503s every `/props`)
-    /// reports the same 1 as one that served a context window. **A
+    /// counts its requests exactly as one that served a context window. **A
     /// `props_requests` assertion is therefore evidence that the dial
     /// happened, never that the guard tier booted** — pair it with an
     /// assertion on the resulting row, as `guard_boot_row_e2e` does.
     ///
     /// A **count**, not a body list like its two neighbours, because a
     /// `GET` carries no body — there is nothing to capture but the fact
-    /// that it happened. That fact is worth an assertion: one daemon
-    /// boot verifies the guard context exactly once, so a value other
-    /// than 1 means a retry loop or a second tier construction, neither
-    /// of which any other signal in a test would show.
+    /// that it happened. That fact is worth an assertion against a mock
+    /// that **answers** `/props` (`spawn_scripted_llm_with_props`): one
+    /// daemon boot then verifies the guard context exactly once, so a
+    /// value other than 1 means a retry or a second tier construction,
+    /// neither of which any other signal in a test would show. Against
+    /// the 503 default the count is **not** 1: since #609 boot re-asks a
+    /// 503 every `PROPS_RETRY_INTERVAL_MS` (2 s) for up to 60 s, ~30 in all.
     pub props_requests: Arc<Mutex<usize>>,
     join: Option<tokio::task::JoinHandle<()>>,
 }

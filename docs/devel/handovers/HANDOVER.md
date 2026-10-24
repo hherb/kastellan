@@ -63,6 +63,22 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
   Loading model`, then 200; on GPU it loads in 1.9 s). 404, decode, request timeout refuse at once;
   D6 unchanged. ⚠️ `tests_common::scripted_llm`'s default **503s `/props`**, so a guard-configured
   daemon e2e on it now waits 60 s before refusing (documented on both helpers).
+- **Second review round** (4-reviewer pass, all fixed in-PR, +5 core lib tests):
+  - `uninstall` no longer stops halfway when removing the guard unit fails. It finishes the symlink
+    and `--purge` steps, then exits non-zero.
+  - The planner refuses port 0, an explicit `:80` (the URL parser drops it as the default port), and
+    `%`/`$` in either path or the alias, which systemd would expand in `ExecStart=`. The alias is no
+    longer trimmed, so it matches the router's `read_env` byte for byte.
+  - The installer prints a `note:` when a guard tier is configured but its backend is not supervised,
+    which is the DGX's state today.
+  - The boot refusal text no longer claims a wait happened when it didn't, and points a supervised host
+    at `kastellan-guard.err`. A final `warn!` records the attempt count and the time waited.
+  - The health wait polls `specs.target.members`, which removes the `guard: bool` parameter.
+  - The never-comes-up test now:
+    - pins the pacing (≤ 11 calls), so deleting the sleep fails it;
+    - checks that the error returned is the *last* one;
+    - yields in its fake and runs under a timeout.
+  - Mutation checks: removing the sleep fails 1 test; inverting the planned-unit check fails 2.
 - Follow-ups filed: **#906** (a boot refusal is still not an `audit_log` row — #609's second half),
   **#907** (llama-server runs CORS `*`, no API key, on loopback).
 

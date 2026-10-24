@@ -326,9 +326,7 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
 
     let sup = default_supervisor();
     sup.install_target(&specs.target, &specs.members).map_err(|e| format!("install units: {e}"))?;
-    if guard.is_none() {
-        guard_backend::remove_stale_unit(sup.as_ref())?;
-    }
+    guard_backend::remove_stale_unit(sup.as_ref(), guard.as_ref())?;
     eprintln!("installed {UNIT_NOUN} for kastellan.target");
 
     if args.no_start {
@@ -377,7 +375,7 @@ pub fn run_install(args: InstallArgs) -> Result<(), String> {
     // loaded and leave it unloaded once it exits (#870).
     sup.stop_target(&specs.target).map_err(|e| format!("stop kastellan.target before restart: {e}"))?;
     sup.start_target(&specs.target).map_err(|e| format!("start kastellan.target: {e}"))?;
-    verify_running(sup.as_ref(), &layout, guard.is_some())?;
+    verify_running(sup.as_ref(), &layout, &specs.target.members)?;
     eprintln!("kastellan.target is up. Inspect: {INSPECT_LOGS_HINT}");
     Ok(())
 }
@@ -395,8 +393,13 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
         eprintln!("warning: stopping kastellan.target: {e} (uninstalling anyway)");
     }
     sup.uninstall_target(&specs.target).map_err(|e| format!("uninstall units: {e}"))?;
-    // Not a target member here (uninstall reads no env files), so removed by name.
-    guard_backend::remove_stale_unit(sup.as_ref())?;
+    // Not a target member here (uninstall reads no env files), so removed by
+    // name. A failure must not strand the symlink and `--purge` below, so it
+    // is said now and returned once the rest is done.
+    let guard_removed = guard_backend::remove_stale_unit(sup.as_ref(), None);
+    if let Err(e) = &guard_removed {
+        eprintln!("error: {e} (finishing the rest of the uninstall first)");
+    }
     eprintln!("removed kastellan.target units");
 
     // Remove the operator-CLI symlink (a pointer, not data — gone on any
@@ -432,7 +435,7 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
     } else {
         eprintln!("kept data dir + secrets at {} (use --purge to delete)", layout.assets_dir.display());
     }
-    Ok(())
+    guard_removed
 }
 
 /// Wait for the socket to appear AND every member to reach `Active`, polling
@@ -449,14 +452,11 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
 /// `systemctl` does not exist, that made every install spin the full 90 s and
 /// then fail with `postgres=unknown, core=unknown` plus a `journalctl` hint,
 /// about services that may well have been running fine.
-fn verify_running(sup: &dyn Supervisor, layout: &Layout, guard: bool) -> Result<(), String> {
+///
+/// `names` are the target's members, in start order — so the supervised guard
+/// backend (#609) is waited for exactly when the install added it.
+fn verify_running(sup: &dyn Supervisor, layout: &Layout, names: &[String]) -> Result<(), String> {
     let socket = layout.data_dir.join("sockets/.s.PGSQL.5432");
-    // Start order; the supervised guard backend (#609) only when installed.
-    let mut names = vec!["kastellan-postgres"];
-    if guard {
-        names.push(kastellan_supervisor::specs::GUARD_SERVICE_NAME);
-    }
-    names.push("kastellan-core");
     let deadline = Instant::now() + Duration::from_secs(90);
     // The last statuses, rendered only once the wait gives up (#904).
     let mut last: Option<Vec<(ServiceStatus, Option<String>)>> = None;

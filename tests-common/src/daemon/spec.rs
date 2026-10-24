@@ -82,7 +82,9 @@ pub const DEFAULT_LLM_TIMEOUT_MS: &str = "5000";
 /// (60 s) while it answers connection-refused or **HTTP 503**, which is
 /// what [`crate::scripted_llm::spawn_scripted_llm`] serves — plus
 /// `PROBE_TOTAL_BUDGET_MS + PROBE_BUDGET_MS` (60 s) on the boot probe:
-/// ~80 s in total, where the same two legs cost ~60 s before #626
+/// ~80 s against a backend that answers `/props`, and ~120 s against one
+/// that keeps 503ing (the 60 s wait, then the probe) — up to 20 s more if
+/// its last attempt hangs instead. The same two legs cost ~60 s before #626
 /// doubled `PROBE_TOTAL_BUDGET_MS`.
 ///
 /// A caller that *does* configure a guard must do **both**, not either:
@@ -92,7 +94,8 @@ pub const DEFAULT_LLM_TIMEOUT_MS: &str = "5000";
 ///   `from_router_config` and runs unconditionally, before the pin is
 ///   ever consulted; and
 /// * raise this to at least 20 s, because that surviving `/props` leg
-///   is itself capped at `PROBE_BUDGET_MS` — twice this default.
+///   is itself capped at `PROBE_BUDGET_MS` — twice this default — when
+///   the mock answers `/props`. One that 503s adds the 60 s wait on top.
 ///
 /// `guard_boot_row_e2e` does exactly that pair. Getting it wrong is a
 /// nasty failure to read: the daemon is alive and probing, so
