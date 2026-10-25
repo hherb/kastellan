@@ -19,9 +19,13 @@ the hand-started guard killed, plain `scripts/upgrade_from_git.sh` (exit 0): 15 
 15 keys all applied, generated env byte-identical, live-matrix digest `94c86940…` (unchanged), Matrix
 up. `kastellan-guard` is **active on GPU** (17 GiB, `/health` ok), core unit has
 `After=kastellan-guard.service`, core `NRestarts=0`. The new boot wait ran live: core met
-`HTTP 503 Loading model` and configured the guard 2.5 s later instead of refusing. ⚠️ **Not yet
-proven across a reboot** (Next TODO 0). Running kernel `7.0.0-1019` is the newest installed and has
-its NVIDIA module, so a reboot should stay on GPU [[dgx-apt-upgrade-drops-nvidia-module]].
+`HTTP 503 Loading model` and configured the guard 2.5 s later instead of refusing. **Reboot-proven
+2026-10-25 12:08:** everything came back unattended — guard on GPU (kernel `7.0.0-1019`), core waited
+two 503s, guard configured at +10 s, Matrix up at +10 s, SearxNG + Ollama up. Core shows
+`NRestarts=1`, **not** from the guard: its first start lost a race with Postgres (`Connection
+refused` — `kastellan-postgres` is `Type=simple`, so `After=` orders only the exec, not readiness)
+and `Restart=on-failure` recovered it 5 s later. `systemctl --user is-enabled kastellan-guard` says
+`disabled` (no `.wants/` symlink, unlike core/postgres) — harmless, the target's own `Wants=` names it.
 `kastellan-searxng` has restart policy `unless-stopped`. **Mac:** manual recipe
 [[mac-kastellan-install-recipe]], exit 0, env + plist byte-identical, overlay 3/3, both agents
 running (Postgres stayed loaded this time). No guard is configured on the Mac, so #609 adds no unit
@@ -258,11 +262,12 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-0. **Prove #609 across one DGX reboot** (deployed 2026-10-25, see the header). After the reboot:
-   `systemctl --user is-active kastellan-guard kastellan-core`, `nvidia-smi` shows the guard's
-   `llama-server`, core `NRestarts=0`, Matrix answers. ⚠️ When stopping a hand-started guard, never
-   `pkill -f "llama-server.*--port 8081"` inside `ssh dgx '…'`: the pattern matches the remote shell's
-   own command line and kills it (exit 255) [[pgrep-wait-loops-match-themselves]].
+0. **Boot race: core starts before Postgres accepts connections** (seen on the 2026-10-25 reboot,
+   self-heals via `Restart=on-failure` in 5 s, one restart). `kastellan-postgres` is `Type=simple`;
+   a readiness wait in core's DB probe or `Type=notify` for Postgres would remove it. Not yet filed.
+   ⚠️ When stopping a hand-started guard, never `pkill -f "llama-server.*--port 8081"` inside
+   `ssh dgx '…'`: the pattern matches the remote shell's own command line and kills it (exit 255)
+   [[pgrep-wait-loops-match-themselves]].
 
 1. **The live re-measure** (unblocked 2026-10-24 — the daemon boots again, on GPU) (DMs, a **fresh room**; #776 is deployed,
    thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
