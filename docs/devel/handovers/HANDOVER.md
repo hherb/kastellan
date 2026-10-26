@@ -4,36 +4,24 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261024_609_pre-prune.md`](archive/handover_20261024_609_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (#904's and #900's
-> sections and the #905 baseline rows included; #896's are in the `903` snapshot, #898's and #894's in `896`).
+> [`archive/handover_20261026_909_pre-prune.md`](archive/handover_20261026_909_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (#609's deploy notes and
+> the #908 baseline rows included; #904's/#900's are in the `609` snapshot, #896's in `903`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-25 (PR #908 / #609 **deployed on both hosts** — the DGX guard is now the supervised `kastellan-guard` unit) ·
-**Recent PRs, newest first:** [#908](https://github.com/hherb/kastellan/pull/908) (#609), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged); #877 … #795 are in the 896/905 snapshots.
+**Last updated:** 2026-10-26 (#909 — core waits for Postgres at boot; PR #908 / #609 deployed on both hosts) ·
+**Recent PRs, newest first:** #909's PR (see `gh pr list`), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged), [#881](https://github.com/hherb/kastellan/pull/881) (#880, merged), [#879](https://github.com/hherb/kastellan/pull/879) (#876, merged); #877 … #795 are in the 896/905 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**Both hosts run PR #908's tree** (`f59e6cb2`, deployed 2026-10-25). **DGX:** built first, then the
-two `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` keys appended to `.local` (backups `~/kastellan.env*.bak-pre908`),
-the hand-started guard killed, plain `scripts/upgrade_from_git.sh` (exit 0): 15 binaries, overlay
-15 keys all applied, generated env byte-identical, live-matrix digest `94c86940…` (unchanged), Matrix
-up. `kastellan-guard` is **active on GPU** (17 GiB, `/health` ok), core unit has
-`After=kastellan-guard.service`, core `NRestarts=0`. The new boot wait ran live: core met
-`HTTP 503 Loading model` and configured the guard 2.5 s later instead of refusing. **Reboot-proven
-2026-10-25 12:08:** everything came back unattended — guard on GPU (kernel `7.0.0-1019`), core waited
-two 503s, guard configured at +10 s, Matrix up at +10 s, SearxNG + Ollama up. Core shows
-`NRestarts=1`, **not** from the guard: its first start lost a race with Postgres (`Connection
-refused` — `kastellan-postgres` is `Type=simple`, so `After=` orders only the exec, not readiness)
-and `Restart=on-failure` recovered it 5 s later. `systemctl --user is-enabled kastellan-guard` says
-`disabled` (no `.wants/` symlink, unlike core/postgres) — harmless, the target's own `Wants=` names it.
-`kastellan-searxng` has restart policy `unless-stopped`. **Mac:** manual recipe
-[[mac-kastellan-install-recipe]], exit 0, env + plist byte-identical, overlay 3/3, both agents
-running (Postgres stayed loaded this time). No guard is configured on the Mac, so #609 adds no unit
-there. **localmail** on both hosts: its PR #397. The DGX boot ERROR `install dir is writable …
-group-writable (mode 0775)` is **pre-existing** (since 2026-07-31) — not a deploy regression. The live
-process runs thinking **ON** (`KASTELLAN_LLM_DISABLE_THINKING=0`, `THINKING_SWITCH=reasoning_effort`,
-`TIMEOUT_MS=600000`). The last DGX full sweep (#770's deploy): **187/187 suites, 4729 / 0 / 79**.
-DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree — not a deploy).
+**Both hosts run PR #908's tree** (deployed 2026-10-25; #909 is **not deployed**). **DGX:**
+`kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** (guard configured at
++10 s after two 503s, Matrix, SearxNG, Ollama all back unattended). The one restart that reboot cost
+was the Postgres race #909 fixes. `kastellan-guard` reads `disabled` in `is-enabled` — harmless, the
+target's `Wants=` names it. Guard keys `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` are in `.local`
+(backups `~/kastellan.env*.bak-pre908`). **Mac:** [[mac-kastellan-install-recipe]], no guard configured.
+The DGX boot ERROR `install dir is writable … (mode 0775)` is **pre-existing** (since 2026-07-31).
+Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs images last rebuilt
+2026-10-19. Deploy detail: the `909` snapshot.
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -54,39 +42,28 @@ DGX rootfs images last rebuilt **2026-10-19** (#876's session, from this tree �
 
 ## Current state
 
-### This session (2026-10-24, latest): #609 — the guard backend is supervised
+### This session (2026-10-26, latest): #909 — core waits for Postgres at boot
 
-- **`kastellan-guard`** (`supervisor::specs::guard_service_spec`): `llama-server -m <gguf> --alias
-  <model> --host 127.0.0.1 --port <port> -c 131072 -ngl 99`, keep-alive, core's backoff, no env
-  (`env -i` measured fine on the DGX — rpath). Installed only when **`KASTELLAN_GUARD_SERVER_BIN`** and
-  **`KASTELLAN_GUARD_SERVER_MODEL`** are set in the env files; ⚠️ **port and alias are derived from
-  `KASTELLAN_LLM_GUARD_URL`/`_MODEL`** (loopback `http`, explicit port — anything else refused), so
-  they cannot disagree. Pure planning + IO half in `core/src/install/guard_backend.rs`; target order
-  postgres → guard → core, core `After=` guard; a stale unit is uninstalled when the keys go (and on
-  `uninstall`). ⚠️ The keys are read **at install time on both OSes** — a change needs `install`.
-- **`tier/props_wait.rs`**: boot re-asks `/props` for up to **60 s** (2 s apart) only while the backend
-  is *not up yet* — `Connect`/`ConnectTimeout`/**HTTP 503** (measured: ~0.3 s refused, ~5 s `503
-  Loading model`, then 200; on GPU it loads in 1.9 s). 404, decode, request timeout refuse at once;
-  D6 unchanged. ⚠️ `tests_common::scripted_llm`'s default **503s `/props`**, so a guard-configured
-  daemon e2e on it now waits 60 s before refusing (documented on both helpers).
-- **Second review round** (4-reviewer pass, all fixed in-PR, +5 core lib tests):
-  - `uninstall` no longer stops halfway when removing the guard unit fails. It finishes the symlink
-    and `--purge` steps, then exits non-zero.
-  - The planner refuses port 0, an explicit `:80` (the URL parser drops it as the default port), and
-    `%`/`$` in either path or the alias, which systemd would expand in `ExecStart=`. The alias is no
-    longer trimmed, so it matches the router's `read_env` byte for byte.
-  - The installer prints a `note:` when a guard tier is configured but its backend is not supervised,
-    which is the DGX's state today.
-  - The boot refusal text no longer claims a wait happened when it didn't, and points a supervised host
-    at `kastellan-guard.err`. A final `warn!` records the attempt count and the time waited.
-  - The health wait polls `specs.target.members`, which removes the `guard: bool` parameter.
-  - The never-comes-up test now:
-    - pins the pacing (≤ 11 calls), so deleting the sleep fails it;
-    - checks that the error returned is the *last* one;
-    - yields in its fake and runs under a timeout.
-  - Mutation checks: removing the sleep fails 1 test; inverting the planned-unit check fails 2.
-- Follow-ups filed: **#906** (a boot refusal is still not an `audit_log` row — #609's second half),
-  **#907** (llama-server runs CORS `*`, no API key, on loopback).
+- `db/src/boot_wait.rs`: before `probe::run`, boot dials the maintenance DB for up to **60 s**
+  (1 s apart), only while Postgres is *not up yet* — `ECONNREFUSED` (the measured DGX race),
+  `ENOENT` (no socket file yet) or SQLSTATE `57P03`. Anything else refuses at once (a socket path
+  longer than `SUN_LEN` was refused at once, measured). Same shape as `tier/props_wait.rs`.
+- Tests: 7 `boot_wait` unit tests (3 drive real `sqlx`: refused TCP port, empty socket dir, a fake
+  postmaster answering `FATAL 57P03`) and `core/tests/boot_waits_for_postgres_e2e.rs` (the real
+  daemon, `CARGO_BIN_EXE_kastellan`, no Postgres needed — must log the wait twice and stay up).
+  Mutations: dropping `NotFound`, `57P03`, the sleep, the budget, or the boot call each fail a test.
+- ⚠️ The daemon's JSON log goes to **stderr**, not stdout.
+- ⚠️ A daemon e2e pointed at a cluster that never starts now takes 60 s to refuse instead of
+  failing at once (none exists today).
+
+### Previous (2026-10-24 → 25): #609 — the guard backend is supervised (PR #908, merged) — what still binds
+
+- `kastellan-guard` installs only when `KASTELLAN_GUARD_SERVER_BIN`/`_MODEL` are set; ⚠️ port and
+  alias are **derived** from `KASTELLAN_LLM_GUARD_URL`/`_MODEL` (loopback `http`, explicit port);
+  ⚠️ the keys are read **at install time** — a change needs `install`.
+- Boot waits up to 60 s on `/props` for `Connect`/`ConnectTimeout`/HTTP 503 only. ⚠️
+  `tests_common::scripted_llm`'s default **503s `/props`**, so a guard-configured daemon e2e on it
+  waits 60 s before refusing. Open: **#906** (boot refusal not an `audit_log` row), **#907** (CORS `*`).
 
 ### Previous (2026-10-23 → 24): the supervisor arc — #904, #900/#902, #896 (PRs #905, #903, #901, merged) — what still binds
 
@@ -262,12 +239,10 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-0. **Boot race: core starts before Postgres accepts connections** (seen on the 2026-10-25 reboot,
-   self-heals via `Restart=on-failure` in 5 s, one restart). `kastellan-postgres` is `Type=simple`;
-   a readiness wait in core's DB probe or `Type=notify` for Postgres would remove it. Not yet filed.
-   ⚠️ When stopping a hand-started guard, never `pkill -f "llama-server.*--port 8081"` inside
-   `ssh dgx '…'`: the pattern matches the remote shell's own command line and kills it (exit 255)
-   [[pgrep-wait-loops-match-themselves]].
+0. ⚠️ When stopping a hand-started guard, never `pkill -f "llama-server.*--port 8081"` inside
+   `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
+   **Deploy #909** with the next deploy; on the next DGX reboot expect core `NRestarts=0` and the
+   `postgres is accepting connections` line (or none, if Postgres won the race).
 
 1. **The live re-measure** (unblocked 2026-10-24 — the daemon boots again, on GPU) (DMs, a **fresh room**; #776 is deployed,
    thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
@@ -411,8 +386,8 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
-| **DGX** (#609) | PR [#908](https://github.com/hherb/kastellan/pull/908) | **5350 / 0 / 84**, **195** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (reused; its leftovers stashed), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-609.log`. Per-suite vs `~/sweep-904.log`: core lib 2559 → 2576 (+11 `guard_backend`, +6 `props_wait`), supervisor lib 142 → 147 (+4 guard spec, +1 from #905's post-sweep review). Swept before the review round (+3 tests, text) — that round re-ran core/supervisor/tests-common lib on the Mac only | not re-run (Mac cold clippy covers the change; supervisor Linux cross-clippy clean) | **7** (as before) |
-| **Mac** (#609) | PR [#908](https://github.com/hherb/kastellan/pull/908) | **5232 / 0 / 52**, **195** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-609`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-609-mac.log`. Per-suite vs `sweep-904-mac.log`: core lib 2560 → 2577 (+17), supervisor lib 153 → 159 (+4; main measured 155). Post-review: core/supervisor/tests-common lib re-run (`~/post-review-609.log`) | exit 0 post-review, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-609` (fresh), **27**; supervisor Linux cross-clippy clean | **12** (+7: worktree mtimes vs the python-exec image) |
+| **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
+| **Mac** (#909) | #909's PR on `f59e6cb2` | **5248 / 0 / 52**, **196** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909-mac.log`. Per-suite vs `sweep-609-mac.log`: db lib +7, new e2e +1, core lib 2577 → 2585 (+8, as on the DGX) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-909` (fresh), **27** | **5** (container up; #609's 12 was worktree mtimes) |
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -495,6 +470,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#908** (#609) — merged 2026-10-24, deployed both hosts 2026-10-25: the supervised `kastellan-guard` unit and the `/props` boot wait.
 - **#905** (#904) — merged 2026-10-24: health-wait timeouts name the crash-loop evidence.
 - **#903** (#900, #902) — merged 2026-10-23: `ServiceStatus::Transitioning`; the manager's state word in timeouts.
 - **#901** (#896) — merged 2026-10-23: systemd `uninstall` keeps the unit file on a failed stop; an empty `is-active` is not `Inactive`; `systemctl` bounded at 60 s.
