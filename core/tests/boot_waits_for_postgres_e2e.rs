@@ -1,8 +1,8 @@
 //! The daemon waits for Postgres at boot instead of exiting (issue #909).
 //!
 //! `kastellan_db::boot_wait` has its own unit tests. This file proves the
-//! daemon actually calls it: started against a data dir whose socket does not
-//! exist yet (a Postgres that has not started), `kastellan` must log the wait
+//! daemon actually calls it: started against a socket directory with no socket
+//! in it yet (a Postgres that has not started), `kastellan` must log the wait
 //! more than once and still be running, instead of exiting on the first
 //! refused dial as it did before #909.
 //!
@@ -23,7 +23,9 @@ const WAIT_LINE: &str = "postgres not accepting connections yet; waiting";
 fn daemon_waits_for_a_postgres_that_has_not_started() {
     let root = unique_temp_root("boot-wait");
     let data_dir = root.join("d");
-    std::fs::create_dir_all(&data_dir).expect("create empty data dir");
+    // The socket directory exists (as `kastellan-db-init` leaves it) but holds
+    // no socket yet: a missing directory is refused at once, not waited for.
+    std::fs::create_dir_all(data_dir.join("sockets")).expect("create socket dir");
     let _guard = PathGuard { path: root.clone() };
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_kastellan"))

@@ -48,10 +48,18 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   (1 s apart), only while Postgres is *not up yet* — `ECONNREFUSED` (the measured DGX race),
   `ENOENT` (no socket file yet) or SQLSTATE `57P03`. Anything else refuses at once (a socket path
   longer than `SUN_LEN` was refused at once, measured). Same shape as `tier/props_wait.rs`.
-- Tests: 7 `boot_wait` unit tests (3 drive real `sqlx`: refused TCP port, empty socket dir, a fake
-  postmaster answering `FATAL 57P03`) and `core/tests/boot_waits_for_postgres_e2e.rs` (the real
-  daemon, `CARGO_BIN_EXE_kastellan`, no Postgres needed — must log the wait twice and stay up).
-  Mutations: dropping `NotFound`, `57P03`, the sleep, the budget, or the boot call each fail a test.
+- Review round (PR #910): a **missing socket directory** refuses at once, naming it (Postgres never
+  creates it — `kastellan-db-init` does — so it is a wrong data dir, not a race); each dial is
+  capped at **5 s** (`BOOT_DIAL_TIMEOUT`; a silent postmaster was an unbounded boot hang, already
+  true of `probe::run`'s single dial, which is still uncapped); the refusal names the socket dir.
+- Tests: 11 `boot_wait` unit tests (6 drive real `sqlx`: refused TCP port, empty socket dir, a
+  stale **Unix** socket — the measured race — a fake postmaster answering `FATAL 57P03`, a fake
+  Unix-socket postmaster that pins the maintenance-DB dial, a silent one that pins the timeout) and
+  `core/tests/boot_waits_for_postgres_e2e.rs` (the real daemon, `CARGO_BIN_EXE_kastellan`, no
+  Postgres needed — must log the wait twice and stay up). Mutations: dropping `NotFound`, `57P03`,
+  the sleep, the budget, the boot call, the dir check, the dial timeout, or the maintenance DB each
+  fail a test. Open: [#911](https://github.com/hherb/kastellan/issues/911) — the PG-gated e2e
+  for the *recovery* path (needs `bring_up_pg_cluster` split into init + start).
 - ⚠️ The daemon's JSON log goes to **stderr**, not stdout.
 - ⚠️ A daemon e2e pointed at a cluster that never starts now takes 60 s to refuse instead of
   failing at once (none exists today).
@@ -388,6 +396,10 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
 | **Mac** (#909) | #909's PR on `f59e6cb2` | **5248 / 0 / 52**, **196** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909-mac.log`. Per-suite vs `sweep-609-mac.log`: db lib +7, new e2e +1, core lib 2577 → 2585 (+8, as on the DGX) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-909` (fresh), **27** | **5** (container up; #609's 12 was worktree mtimes) |
+
+Both rows predate PR #910's review round, which adds 4 `kastellan_db` lib tests (258 → 262) and
+touches only `boot_wait.rs`, the e2e and two doc comments; it was not re-swept (targeted tests +
+clippy on db/core/supervisor only).
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 

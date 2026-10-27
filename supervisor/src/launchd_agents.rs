@@ -93,8 +93,9 @@
 //! launchd has no inter-agent ordering and no target/aggregation
 //! concept. The [`crate::Supervisor`] default `*_target` methods install
 //! and start members in declared order, but launchd may still race their
-//! startup. kastellan tolerates this because core fail-closed-restarts
-//! until Postgres is reachable (`KeepAlive=true`), so the bundle
+//! startup. kastellan tolerates this because core waits for Postgres at
+//! boot (up to a minute, #909) and fail-closed-restarts after that until it
+//! is reachable (`KeepAlive=true`), so the bundle
 //! converges regardless of launchd start order. `ServiceSpec.after` and
 //! `ServiceSpec.part_of` are therefore **ignored** by `build_plist`.
 
