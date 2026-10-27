@@ -57,6 +57,13 @@ pub(crate) async fn bring_up_database() -> Result<ConnectSpec> {
         "running database probe"
     );
 
+    // On a reboot the supervisor starts us as soon as `postgres` has been
+    // exec'd, which can be before it accepts connections (#909). Wait that
+    // out (bounded) so a start race is not mistaken for a broken cluster.
+    kastellan_db::boot_wait::wait_for_postgres(&spec)
+        .await
+        .context("waiting for Postgres to accept connections")?;
+
     kastellan_db::probe::run(
         &spec,
         "core",

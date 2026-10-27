@@ -440,10 +440,10 @@ pub fn run_uninstall(purge: bool) -> Result<(), String> {
 
 /// Wait for the socket to appear AND every member to reach `Active`, polling
 /// over a window. `kastellan-core` is `After=` Postgres but systemd does not
-/// wait for PG *readiness*, so core typically crash-restarts a few times (with
-/// `Restart=on-failure` backoff) before the cluster accepts connections — this
-/// poll gives the target time to converge rather than failing on the first
-/// not-yet-active read.
+/// wait for PG *readiness*; core waits for it in-process (up to a minute,
+/// #909) and only crash-restarts (with `Restart=on-failure` backoff) if it is
+/// still not accepting connections — this poll gives the target time to
+/// converge rather than failing on the first not-yet-active read.
 ///
 /// Queries through the [`Supervisor`] trait rather than shelling to
 /// `systemctl` directly. The old direct call was Linux-only and mapped *"I
