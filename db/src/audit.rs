@@ -382,6 +382,37 @@ where
     rows.iter().map(decode_audit_row).collect()
 }
 
+/// Is there an `actor`/`action` row written within the last `window` whose
+/// payload contains `payload` (JSONB `@>`)?
+///
+/// For a writer that thins its own rows across process restarts, where no
+/// in-memory state survives: the guard tier's boot refusal (#906) writes one
+/// row per refusal kind per window, however often a crash loop restarts it.
+/// The clock is Postgres's `now()`, the same clock that stamped `ts`.
+pub async fn exists_within<'e, E>(
+    executor: E,
+    actor: &str,
+    action: &str,
+    payload: &serde_json::Value,
+    window: std::time::Duration,
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM audit_log \
+         WHERE actor = $1 AND action = $2 AND payload @> $3 \
+         AND ts > now() - make_interval(secs => $4))",
+    )
+    .bind(actor)
+    .bind(action)
+    .bind(payload)
+    .bind(window.as_secs_f64())
+    .fetch_one(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("audit_log exists_within({action}): {e}")))
+}
+
 fn decode_audit_row(row: &sqlx::postgres::PgRow) -> Result<AuditRow, DbError> {
     Ok(AuditRow {
         id: row

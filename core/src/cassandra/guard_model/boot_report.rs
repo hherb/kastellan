@@ -36,8 +36,10 @@
 
 use serde_json::{json, Value};
 
+pub mod refusal;
 pub mod reported;
 
+pub use refusal::{refusal_kind, refusal_payload, REFUSAL_ROW_INTERVAL, REFUSED_ACTION};
 pub use reported::ReportedRates;
 
 use super::policy::policy_digest;
