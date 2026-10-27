@@ -36,8 +36,9 @@ pub const REFUSED_ACTION: &str = "guard_tier.boot_refused";
 ///
 /// A crash-looping daemon refuses once per restart; without thinning that
 /// is one row per restart for as long as the misconfiguration lasts. One
-/// row per kind per hour still shows when the loop started and that it
-/// went on, and a *different* refusal kind is written at once.
+/// row per distinct payload (`refusal` + `error_kind`) per hour still shows
+/// when the loop started and that it went on; a *different* payload, or the
+/// same one after a successful boot, is written at once.
 pub const REFUSAL_ROW_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// The closed token naming which refusal stopped the boot.
@@ -57,9 +58,11 @@ pub fn refusal_kind(e: &GuardTierError) -> &'static str {
 
 /// The `policy / guard_tier.boot_refused` payload.
 ///
-/// `error_kind` says *why* `/props` could not be read (a refused connection
-/// is a backend that is not running; an HTTP status or a decode failure is
-/// the wrong endpoint), and is `null` on every other refusal. Present on
+/// `error_kind` says *why* `/props` could not be read (see
+/// [`GuardErrorKind`]: a refused connection is a backend that is not
+/// running; an HTTP status is usually the wrong endpoint, though a 503 that
+/// outlasted the wait is a backend still starting), and is `null` on every
+/// other refusal. Present on
 /// every row, `null` when it does not apply, for the reason
 /// [`super::super::GuardReport::audit_value`] gives: a key that appears only
 /// sometimes cannot tell "not applicable" from "predates the field".

@@ -3,7 +3,7 @@
 //!
 //! Before #906 every refusal (D6) reached only stderr: the DGX refused 1500+
 //! times over five days with nothing in `audit_log`. This boots the real
-//! daemon against a real cluster three times:
+//! daemon against a real cluster four times:
 //!
 //! 1. τ = 2 — refused before any backend is dialled, so no guard mock is
 //!    needed. One `tau` row.
@@ -11,6 +11,12 @@
 //!    within `REFUSAL_ROW_INTERVAL` of the first.
 //! 3. `KASTELLAN_REQUIRE_GUARD=1` with no guard keys — a *different* refusal
 //!    is written at once. Two rows.
+//! 4. A non-numeric τ — rejected while the router config is read, before
+//!    the guard tier is built, and still a refusal row (`config`). Three.
+//!
+//! "A boot since ends the thinning" is pinned in `db`'s
+//! `audit_exists_within_e2e`; a successful boot here would need the whole
+//! daemon up.
 //!
 //! The daemon is spawned directly (not under the supervisor, which would
 //! restart it): the binary is cargo's own build of this package's
@@ -90,7 +96,7 @@ async fn refusal_rows(pool: &sqlx::PgPool) -> Vec<Value> {
 }
 
 #[test]
-fn a_refused_boot_is_a_row_thinned_per_refusal_kind() {
+fn a_refused_boot_is_a_row_thinned_per_payload() {
     if skip_if_no_supervisor() {
         return;
     }
@@ -136,8 +142,14 @@ fn a_refused_boot_is_a_row_thinned_per_refusal_kind() {
 
     // A different refusal is its own row, written at once.
     run_refusing_daemon(&cluster.data_dir, &scratch, "required", &[("KASTELLAN_REQUIRE_GUARD", "1")]);
+    let required_row = json!({"refusal": "required", "error_kind": null});
+    assert_eq!(rt.block_on(refusal_rows(&pool)), vec![tau_row.clone(), required_row.clone()]);
+
+    // A malformed guard key fails in `RouterConfig::from_env`, before the
+    // tier is built; it is a refusal row all the same.
+    run_refusing_daemon(&cluster.data_dir, &scratch, "tau-text", &[("KASTELLAN_LLM_GUARD_TAU", "abc")]);
     assert_eq!(
         rt.block_on(refusal_rows(&pool)),
-        vec![tau_row, json!({"refusal": "required", "error_kind": null})]
+        vec![tau_row, required_row, json!({"refusal": "config", "error_kind": null})]
     );
 }

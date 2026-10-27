@@ -44,20 +44,28 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### This session (2026-10-28, latest): #906 — a guard boot refusal is an audit row
 
-- Every `GuardTierError` (and `Required`) now writes `policy / guard_tier.boot_refused` before
-  `main` returns it: `{"refusal": <token>, "error_kind": <GuardErrorKind for props_unavailable,
-  else null>}` — closed tokens only, never the error text (#616's rule). Pure builder:
-  `boot_report::refusal` (`refusal_kind`, `refusal_payload`); writer: `core/src/main/guard_refusal.rs`.
+- Every `GuardTierError` (including the opt-in `Required`), **and** a malformed guard key that
+  `RouterConfig::from_env` rejects (non-numeric τ/timeout → `config`), now writes `policy /
+  guard_tier.boot_refused` before `main` returns it: `{"refusal": <token>, "error_kind":
+  <GuardErrorKind for props_unavailable, else null>}` — closed tokens only, never the error text
+  (#616's rule). Pure builder: `boot_report::refusal` (`refusal_kind`, `refusal_payload`); writer:
+  `core/src/main/guard_refusal.rs`. ⚠️ The `from_env` path is picked out by the error text naming a
+  `KASTELLAN_LLM_GUARD_` key — a new guard key must name itself in its error (the e2e pins τ).
 - **Its own action**, not a third `guard_tier.boot` shape — `guard_tier_boot_payload` asserts one
   `guard_tier.boot` row per boot, and operator queries read its configured/unconfigured payloads.
 - **Thinned across restarts by the table**: `kastellan_db::audit::exists_within` (JSONB `@>` on
-  the whole payload, Postgres `now()`); one row per kind per `REFUSAL_ROW_INTERVAL` (1 h). A failed
-  lookup writes anyway; lookup + insert are bounded at **5 s** so a wedged Postgres cannot turn the
-  D6 stop into a hang.
-- Tests: 4 unit tests; `db/tests/audit_exists_within_e2e.rs` (old row, other payload/action/actor);
-  `core/tests/guard_boot_refusal_e2e.rs` — the real daemon run **three times** against one cluster
-  (τ = 2 → 1 row; again → still 1; `KASTELLAN_REQUIRE_GUARD=1` → 2). Both added to the `pg` profile.
-  Mutants killed: thinning `return` removed; window widened ×1000.
+  the whole payload, Postgres `now()`); one row per distinct payload (`refusal` + `error_kind`) per
+  `REFUSAL_ROW_INTERVAL` (1 h) — **unless a `guard_tier.boot` row came after it** (a boot in
+  between makes the next refusal a new outage, written at once). A failed lookup writes anyway; the
+  insert is `insert_without_id` and its failure is worded from `InsertOutcome` (#829); lookup +
+  insert are bounded at **5 s** so a wedged Postgres cannot turn the D6 stop into a hang.
+- Tests: 4 unit tests; `db/tests/audit_exists_within_e2e.rs` (old row, window parameter, other
+  payload/`error_kind`/action/actor, null vs non-null, reset by a later boot row);
+  `core/tests/guard_boot_refusal_e2e.rs` — the real daemon run **four times** against one cluster
+  (τ = 2 → 1 row; again → still 1; `KASTELLAN_REQUIRE_GUARD=1` → 2; τ = `abc` → 3). Both in the
+  `pg` profile. Mutants killed: thinning `return` removed; window widened ×1000.
+  Open: [#913](https://github.com/hherb/kastellan/issues/913) — the 5 s budget and the
+  failed-lookup fallback are untested (the writer is binary-only).
 
 ### Previous (2026-10-26): #909 — core waits for Postgres at boot (PR #910, merged) — what still binds
 

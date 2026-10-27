@@ -2,7 +2,8 @@
 //!
 //! The guard tier's boot refusal is thinned across daemon restarts by this
 //! lookup alone, so each way it can say "no" is pinned here against real
-//! Postgres: an old row, another payload, another action, another actor.
+//! Postgres: an old row, another payload (including another `error_kind`),
+//! another action, another actor, and a reset row (a boot) after the match.
 //! An old row is written with an explicit `ts` (the runtime role may INSERT
 //! any column; it is UPDATE/DELETE that are revoked).
 //!
@@ -18,6 +19,8 @@ use kastellan_tests_common::{
 use serde_json::json;
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
+/// The reset action: a row of it after a match voids that match.
+const BOOTED: &str = "t.booted";
 
 #[test]
 fn exists_within_sees_only_a_recent_matching_row() {
@@ -57,7 +60,7 @@ fn exists_within_sees_only_a_recent_matching_row() {
         let context = json!({"refusal": "context", "error_kind": null});
 
         // Nothing written yet.
-        assert!(!audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR).await.unwrap());
+        assert!(!audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR, BOOTED).await.unwrap());
 
         // A row two hours old does not count against a one-hour window.
         sqlx::query(
@@ -69,20 +72,86 @@ fn exists_within_sees_only_a_recent_matching_row() {
         .await
         .expect("insert old row");
         assert!(
-            !audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR).await.unwrap(),
+            !audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR, BOOTED).await.unwrap(),
             "a row older than the window must not count"
         );
 
         // A fresh row does.
         audit::insert(&pool, "policy", "t.refused", tau.clone()).await.expect("insert");
-        assert!(audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR).await.unwrap());
+        assert!(audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR, BOOTED).await.unwrap());
 
         // ...but only for its own payload, action and actor.
         assert!(
-            !audit::exists_within(&pool, "policy", "t.refused", &context, HOUR).await.unwrap(),
+            !audit::exists_within(&pool, "policy", "t.refused", &context, HOUR, BOOTED).await.unwrap(),
             "another refusal kind is another row"
         );
-        assert!(!audit::exists_within(&pool, "policy", "t.other", &tau, HOUR).await.unwrap());
-        assert!(!audit::exists_within(&pool, "core", "t.refused", &tau, HOUR).await.unwrap());
+        assert!(!audit::exists_within(&pool, "policy", "t.other", &tau, HOUR, BOOTED).await.unwrap());
+        assert!(!audit::exists_within(&pool, "core", "t.refused", &tau, HOUR, BOOTED).await.unwrap());
+
+        // The window is the caller's, not a constant: three hours reach a
+        // two-hour-old row.
+        sqlx::query(
+            "INSERT INTO audit_log (ts, actor, action, payload) \
+             VALUES (now() - interval '2 hours', 'policy', 't.windowed', $1)",
+        )
+        .bind(&tau)
+        .execute(&pool)
+        .await
+        .expect("insert old row");
+        assert!(
+            audit::exists_within(&pool, "policy", "t.windowed", &tau, Duration::from_secs(3 * 3600), BOOTED)
+                .await
+                .unwrap(),
+            "a three-hour window must see a two-hour-old row"
+        );
+
+        // `error_kind` is part of the key: the same refusal for another
+        // reason is another row, and a null query does not match a stored
+        // non-null value.
+        let connect = json!({"refusal": "props_unavailable", "error_kind": "connect"});
+        audit::insert(&pool, "policy", "t.props", connect.clone()).await.expect("insert");
+        assert!(audit::exists_within(&pool, "policy", "t.props", &connect, HOUR, BOOTED).await.unwrap());
+        assert!(
+            !audit::exists_within(
+                &pool,
+                "policy",
+                "t.props",
+                &json!({"refusal": "props_unavailable", "error_kind": "http_status"}),
+                HOUR,
+                BOOTED
+            )
+            .await
+            .unwrap(),
+            "another error_kind is another row"
+        );
+        assert!(
+            !audit::exists_within(
+                &pool,
+                "policy",
+                "t.props",
+                &json!({"refusal": "props_unavailable", "error_kind": null}),
+                HOUR,
+                BOOTED
+            )
+            .await
+            .unwrap(),
+            "a null error_kind must not match a stored non-null one"
+        );
+
+        // A reset row after the match ends the episode: the next refusal is
+        // a new outage. Only the same actor's reset counts.
+        audit::insert(&pool, "core", BOOTED, json!({})).await.expect("insert other-actor boot");
+        assert!(
+            audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR, BOOTED).await.unwrap(),
+            "another actor's reset row must not end the episode"
+        );
+        audit::insert(&pool, "policy", BOOTED, json!({})).await.expect("insert boot");
+        assert!(
+            !audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR, BOOTED).await.unwrap(),
+            "a boot after the refusal row must end its thinning"
+        );
+        // ...and the refusal written after that boot thins again.
+        audit::insert(&pool, "policy", "t.refused", tau.clone()).await.expect("insert");
+        assert!(audit::exists_within(&pool, "policy", "t.refused", &tau, HOUR, BOOTED).await.unwrap());
     });
 }
