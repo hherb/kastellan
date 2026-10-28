@@ -12,6 +12,8 @@ mod audit_sink;
 mod bootstrap;
 #[path = "main/email_boot.rs"]
 mod email_boot;
+#[path = "main/guard_refusal.rs"]
+mod guard_refusal;
 #[path = "main/inbound_dropped_sink.rs"]
 mod inbound_dropped_sink;
 #[path = "main/matrix_boot.rs"]
@@ -112,7 +114,8 @@ async fn report_guard_tier(
         // was lost. One `configured` flag distinguishes the two arms; the
         // full payload makes the loss recoverable by hand.
         let echo = payload.clone();
-        if let Err(e) = kastellan_db::audit::insert(pool, "policy", "guard_tier.boot", payload).await
+        if let Err(e) =
+            kastellan_db::audit::insert(pool, "policy", guard_refusal::BOOT_ACTION, payload).await
         {
             tracing::error!(
                 error = %e,
@@ -303,8 +306,18 @@ async fn main() -> Result<()> {
     }
 
     // LLM router (existing skeleton).
-    let router_cfg = kastellan_llm_router::RouterConfig::from_env()
-        .map_err(|e| anyhow!("RouterConfig::from_env: {e}"))?;
+    let router_cfg = match kastellan_llm_router::RouterConfig::from_env() {
+        Ok(cfg) => cfg,
+        // A malformed guard key (a non-numeric τ or timeout) is a guard-tier
+        // refusal too, so it gets the same row (#906). Every guard-key error
+        // `from_env` raises names its key.
+        Err(e) if e.to_string().contains("KASTELLAN_LLM_GUARD_") => {
+            let e = kastellan_core::cassandra::guard_model::GuardTierError::Config(e);
+            guard_refusal::record_guard_refusal(&pool, &e).await;
+            return Err(anyhow!("guard tier: {e}"));
+        }
+        Err(e) => return Err(anyhow!("RouterConfig::from_env: {e}")),
+    };
     // Log what was actually resolved, once. A misconfigured endpoint surfaces
     // much later as a bare `Transport("error sending request")` at the first
     // plan, and the single most useful fact then is what the daemon was
@@ -369,20 +382,31 @@ async fn main() -> Result<()> {
         }
     };
     let guard_probe_cache_buster = format!("kastellan-guard-probe-{probe_nanos}");
-    let guard_tier = kastellan_core::cassandra::guard_model::GuardTier::from_router_config(
-        &router_cfg,
-        &guard_probe_cache_buster,
-    )
-    .await
-    .map_err(|e| anyhow!("guard tier: {e}"))?
-    .map(std::sync::Arc::new);
-    kastellan_core::cassandra::guard_model::tier::boot::require_tier(
-        guard_tier.as_deref(),
-        kastellan_core::worker_lifecycle::force_route::env_flag_enabled(
-            std::env::var("KASTELLAN_REQUIRE_GUARD").ok(),
-        ),
-    )
-    .map_err(|e| anyhow!("guard tier: {e}"))?;
+    let guard_tier = async {
+        let tier = kastellan_core::cassandra::guard_model::GuardTier::from_router_config(
+            &router_cfg,
+            &guard_probe_cache_buster,
+        )
+        .await?
+        .map(std::sync::Arc::new);
+        kastellan_core::cassandra::guard_model::tier::boot::require_tier(
+            tier.as_deref(),
+            kastellan_core::worker_lifecycle::force_route::env_flag_enabled(
+                std::env::var("KASTELLAN_REQUIRE_GUARD").ok(),
+            ),
+        )?;
+        Ok::<_, kastellan_core::cassandra::guard_model::GuardTierError>(tier)
+    }
+    .await;
+    // Every refusal stops the daemon (D6); first it is recorded as a
+    // (thinned, best-effort) audit row (#906).
+    let guard_tier = match guard_tier {
+        Ok(tier) => tier,
+        Err(e) => {
+            guard_refusal::record_guard_refusal(&pool, &e).await;
+            return Err(anyhow!("guard tier: {e}"));
+        }
+    };
     report_guard_tier(guard_tier.as_deref(), &router_cfg, &pool).await;
 
     let router = Arc::new(

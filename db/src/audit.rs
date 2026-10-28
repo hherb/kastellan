@@ -382,6 +382,44 @@ where
     rows.iter().map(decode_audit_row).collect()
 }
 
+/// Is there an `actor`/`action` row written within the last `window` whose
+/// payload contains `payload` (JSONB `@>`), with no `actor`/`reset_action`
+/// row written after it?
+///
+/// For a writer that thins its own rows across process restarts, where no
+/// in-memory state survives: the guard tier's boot refusal (#906) writes one
+/// row per distinct payload per window, however often a crash loop restarts
+/// it. `reset_action` ends an episode early — a successful boot in between
+/// means the next refusal is a new outage, which gets its own row at once.
+/// The clock is Postgres's `now()`, the same clock that stamped `ts`.
+pub async fn exists_within<'e, E>(
+    executor: E,
+    actor: &str,
+    action: &str,
+    payload: &serde_json::Value,
+    window: std::time::Duration,
+    reset_action: &str,
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM audit_log r \
+         WHERE r.actor = $1 AND r.action = $2 AND r.payload @> $3 \
+         AND r.ts > now() - make_interval(secs => $4) \
+         AND NOT EXISTS (SELECT 1 FROM audit_log b \
+             WHERE b.actor = $1 AND b.action = $5 AND b.ts > r.ts))",
+    )
+    .bind(actor)
+    .bind(action)
+    .bind(payload)
+    .bind(window.as_secs_f64())
+    .bind(reset_action)
+    .fetch_one(executor)
+    .await
+    .map_err(|e| DbError::Query(format!("audit_log exists_within({action}): {e}")))
+}
+
 fn decode_audit_row(row: &sqlx::postgres::PgRow) -> Result<AuditRow, DbError> {
     Ok(AuditRow {
         id: row
