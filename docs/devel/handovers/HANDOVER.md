@@ -50,8 +50,11 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   case where `>=` vs `>` shows); 250 ms dials = 3 dials, ends at 950 ms (dial time counts).
   `kastellan-db` dev-deps gain tokio `test-util` (core's already had it, so `--workspace` test
   builds are unchanged). Mutants killed: `>`, no `+ interval`, std `Instant`, no budget check,
-  counting only the sleeps. ⚠️ A paused-clock test of a loop needs an outer `timeout`, or a
-  no-exit mutant hangs the binary instead of failing [[async-fakes-must-yield-like-io]].
+  counting only the sleeps, no pacing sleep. ⚠️ A paused-clock test of a loop needs an outer
+  `timeout` **and** a call cap in the fake: the clock only auto-advances when the runtime is idle,
+  so a mutant that drops the loop's only sleep keeps a `yield_now` fake runnable forever and the
+  timeout never fires — measured, it hung until killed; the cap (`n <= 50`) fails it in 0.00 s
+  [[async-fakes-must-yield-like-io]].
 
 ### Previous (2026-10-28): #913 + #911 — test debt from #912/#910 (PR #914, merged) — what still binds
 

@@ -262,13 +262,15 @@ mod tests {
     /// On a paused clock the arithmetic is exact. Dials start at 0, 100, …,
     /// 1100 ms; one at 1200 ms would not start *inside* a 1200 ms budget, so
     /// the wait ends after the 12th, at 1100 ms. The budget is a multiple of
-    /// the interval on purpose: that is the one case where `>=` and `>` (or a
-    /// check without `+ interval`) differ — both make 13 dials and end at 1200.
+    /// the interval on purpose: only then do `>=` and `>` differ. Both `>` and
+    /// a check without `+ interval` make 13 dials and end at 1200.
     ///
     /// Each attempt's error names its number, so "the last error" is proven
     /// rather than any refusal passing. The fake yields like I/O, and the whole
     /// wait sits under a timeout, so a mutant that drops the budget check is a
-    /// red test rather than a hung binary.
+    /// red test rather than a hung binary. The timeout alone does not cover a
+    /// mutant that drops the pause: the fake never sleeps, so the paused clock
+    /// never advances and the timeout never fires. The dial cap catches that.
     #[tokio::test(start_paused = true)]
     async fn a_postgres_that_never_comes_up_is_refused_once_the_budget_is_spent() {
         let calls = Cell::new(0);
@@ -279,6 +281,7 @@ mod tests {
                 || {
                     calls.set(calls.get() + 1);
                     let n = calls.get();
+                    assert!(n <= 50, "runaway dial loop: the interval no longer paces it");
                     async move {
                         tokio::task::yield_now().await;
                         Err(refused(n))
