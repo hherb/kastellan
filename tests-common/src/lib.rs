@@ -143,7 +143,8 @@ pub use gliner_weights::{
 };
 pub use guards::{PathGuard, ServiceGuard};
 pub use pg::{
-    bring_up_pg_cluster, bring_up_pg_cluster_with_timeout, PgCluster, PG_BRING_UP_TIMEOUT_SECS,
+    bring_up_pg_cluster, bring_up_pg_cluster_with_timeout, init_pg_cluster, PgCluster, PgInit,
+    PG_BRING_UP_TIMEOUT_SECS,
 };
 pub use sandbox::{
     backend, policy_for_shell_exec, sandbox_unavailable_reason, skip_if_sandbox_unavailable,

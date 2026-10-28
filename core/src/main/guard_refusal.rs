@@ -21,10 +21,9 @@
 use std::time::Duration;
 
 use kastellan_core::cassandra::guard_model::boot_report::{
-    refusal_payload, REFUSAL_ROW_INTERVAL, REFUSED_ACTION,
+    record_refusal, refusal_payload, REFUSAL_ROW_INTERVAL, REFUSED_ACTION,
 };
 use kastellan_core::cassandra::guard_model::GuardTierError;
-use kastellan_db::audit::InsertOutcome;
 
 /// How long the refusal row may hold up the daemon's exit.
 const RECORD_BUDGET: Duration = Duration::from_secs(5);
@@ -34,59 +33,22 @@ const RECORD_BUDGET: Duration = Duration::from_secs(5);
 pub(crate) const BOOT_ACTION: &str = "guard_tier.boot";
 
 /// Write the refusal row (thinned, bounded); never fails — the caller is
-/// already returning the refusal itself.
+/// already returning the refusal itself. The rules live in the lib's
+/// `record_refusal`, where they are tested (#913); this binds them to the
+/// real table.
 pub(crate) async fn record_guard_refusal(pool: &sqlx::PgPool, e: &GuardTierError) {
     let payload = refusal_payload(e);
-    let write = async {
-        match kastellan_db::audit::exists_within(
-            pool,
-            "policy",
-            REFUSED_ACTION,
-            &payload,
-            REFUSAL_ROW_INTERVAL,
-            BOOT_ACTION,
-        )
-        .await
-        {
-            Ok(true) => {
-                tracing::info!(
-                    payload = %payload,
-                    window_s = REFUSAL_ROW_INTERVAL.as_secs(),
-                    "guard_tier.boot_refused already recorded within the window, with no boot \
-                     since; not writing another"
-                );
-                return;
-            }
-            Ok(false) => {}
-            Err(err) => tracing::warn!(
-                error = %err,
-                "guard_tier.boot_refused thinning lookup failed; writing the row anyway"
-            ),
-        }
-        // No `RETURNING id` (#829): the id is unused, and its decode could
-        // fail after the row is written.
-        if let Err(err) =
-            kastellan_db::audit::insert_without_id(pool, "policy", REFUSED_ACTION, payload.clone())
-                .await
-        {
-            let fate = match err.outcome() {
-                InsertOutcome::NotWritten => "not written",
-                InsertOutcome::Unknown => "may not have been written",
-            };
-            tracing::error!(
-                error = %err,
-                payload = %payload,
-                "guard_tier.boot_refused audit row {fate}; this refusal is in this log"
-            );
-        }
-    };
-    if tokio::time::timeout(RECORD_BUDGET, write).await.is_err() {
-        // The insert may have been sent and committed before the cut-off.
-        tracing::error!(
-            budget_ms = RECORD_BUDGET.as_millis() as u64,
-            payload = %payload,
-            "guard_tier.boot_refused row may not have been recorded in time; this refusal is \
-             in this log"
-        );
-    }
+    let lookup = kastellan_db::audit::exists_within(
+        pool,
+        "policy",
+        REFUSED_ACTION,
+        &payload,
+        REFUSAL_ROW_INTERVAL,
+        BOOT_ACTION,
+    );
+    // No `RETURNING id` (#829): the id is unused, and its decode could fail
+    // after the row is written.
+    let insert =
+        kastellan_db::audit::insert_without_id(pool, "policy", REFUSED_ACTION, payload.clone());
+    record_refusal(&payload, lookup, insert, RECORD_BUDGET).await;
 }

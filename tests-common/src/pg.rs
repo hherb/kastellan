@@ -203,12 +203,32 @@ pub fn bring_up_pg_cluster_with_timeout(
     service_name: &str,
     timeout: Duration,
 ) -> PgCluster {
-    assert!(
-        service_name.len() <= 200,
-        "service_name too long ({} bytes)",
-        service_name.len()
-    );
+    init_pg_cluster(bin_dir, data_label, log_label).start(service_name, timeout)
+}
 
+/// A cluster that is `initdb`'d and configured but **not started** —
+/// steps 1–3 of [`bring_up_pg_cluster_with_timeout`]. [`PgInit::start`]
+/// does the rest.
+///
+/// For a test that needs something to happen *before* Postgres comes up,
+/// such as the daemon's boot wait (#909, #911): point the daemon at
+/// `data_dir`, wait for it to start waiting, then `start`. Dropping it
+/// unstarted wipes the data and log directories.
+//
+// IMPORTANT: `_guards` stays last, for the reason `PgCluster`'s does.
+pub struct PgInit {
+    pub data_dir: PathBuf,
+    pub socket_dir: PathBuf,
+    postgres: PathBuf,
+    log_dir: PathBuf,
+    user: String,
+    _guards: (PathGuard, PathGuard),
+}
+
+/// Steps 1–3 of [`bring_up_pg_cluster_with_timeout`]: `initdb`, the
+/// socket dir, `postgresql.auto.conf`. Starts nothing. Parameters and
+/// panics as there.
+pub fn init_pg_cluster(bin_dir: &Path, data_label: &str, log_label: &str) -> PgInit {
     let postgres = bin_dir.join("postgres");
     let initdb = bin_dir.join("initdb");
     assert!(postgres.exists(), "postgres at {}", postgres.display());
@@ -273,72 +293,102 @@ pub fn bring_up_pg_cluster_with_timeout(
     std::fs::write(data_dir.join("postgresql.auto.conf"), conf)
         .expect("write postgresql.auto.conf");
 
-    // Supervisor spec. We use a fresh default_supervisor() for the
-    // guard so the test's `sup` handle stays usable for the test body
-    // without aliasing the guard's drop path.
-    let mut spec = postgres_service_spec(&postgres, &data_dir, &log_dir);
-    spec.name = service_name.to_string();
-    spec.stdout_log = Some(log_dir.join(format!("{}.out", spec.name)));
-    spec.stderr_log = Some(log_dir.join(format!("{}.err", spec.name)));
-
-    let sup = default_supervisor();
-    let service_guard = ServiceGuard {
-        sup: default_supervisor(),
-        name: spec.name.clone(),
-    };
-
-    // Serialize the launchd gui/<uid> registration window against every
-    // other daemon-spawning test in this process (issue #130). When the
-    // full workspace runs under `KASTELLAN_PG_BIN_DIR`, parallel `#[test]`
-    // threads racing to `bootstrap` distinct service labels can exceed even
-    // the 30 s cap once the domain is churn-degraded; holding the shared
-    // serial lock from `install` through the readiness waits caps peak
-    // concurrent registration at one. The lock is reentrant, so callers
-    // that already hold it (`supervisor_e2e`, `observation_capture`) do not
-    // self-deadlock here. cfg-gated to macOS so Linux binds no unit value
-    // (clippy-clean under `-D warnings`) and pulls in no import; released as
-    // the handle returns, leaving `initdb` and the test body free to overlap.
-    #[cfg(target_os = "macos")]
-    let _serial = crate::serial::serial_lock();
-
-    sup.install(&spec).expect("install postgres service");
-    sup.start(&spec.name).expect("start postgres service");
-
-    wait_for_status(
-        sup.as_ref(),
-        &spec.name,
-        |s| s == ServiceStatus::Active,
-        timeout,
-    )
-    // Carry the reason: a timeout (`last=…`) and a failed status query read
-    // differently, and the bare sentence hid which one a sweep hit.
-    .unwrap_or_else(|e| {
-        panic!("postgres should reach Active within {timeout:?}: {e}")
-    });
-    wait_for_socket(&socket_dir, timeout).unwrap_or_else(|e| {
-        panic!("postgres socket should appear within {timeout:?}: {e}")
-    });
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(
-        sup.status(&spec.name).expect("pg stable-active recheck"),
-        ServiceStatus::Active,
-        "postgres flapped within 500ms of start; check {}.err for the postmaster log",
-        spec.name,
-    );
-
-    let conn_spec = kastellan_db::conn::ConnectSpec {
-        socket_dir: socket_dir.clone(),
-        user: user.clone(),
-        database: kastellan_db::conn::DEFAULT_APPLICATION_DB.to_string(),
-    };
-
-    PgCluster {
-        conn_spec,
+    PgInit {
         data_dir,
         socket_dir,
-        sup,
-        service_name: spec.name,
-        _guards: (service_guard, data_guard, log_guard),
+        postgres,
+        log_dir,
+        user,
+        _guards: (data_guard, log_guard),
+    }
+}
+
+impl PgInit {
+    /// Steps 4–6 of [`bring_up_pg_cluster_with_timeout`]: install + start
+    /// the service as `service_name`, then wait for it. Parameters and
+    /// panics as there.
+    pub fn start(self, service_name: &str, timeout: Duration) -> PgCluster {
+        assert!(
+            service_name.len() <= 200,
+            "service_name too long ({} bytes)",
+            service_name.len()
+        );
+        let PgInit {
+            data_dir,
+            socket_dir,
+            postgres,
+            log_dir,
+            user,
+            _guards: (data_guard, log_guard),
+        } = self;
+
+        // Supervisor spec. We use a fresh default_supervisor() for the
+        // guard so the test's `sup` handle stays usable for the test body
+        // without aliasing the guard's drop path.
+        let mut spec = postgres_service_spec(&postgres, &data_dir, &log_dir);
+        spec.name = service_name.to_string();
+        spec.stdout_log = Some(log_dir.join(format!("{}.out", spec.name)));
+        spec.stderr_log = Some(log_dir.join(format!("{}.err", spec.name)));
+
+        let sup = default_supervisor();
+        let service_guard = ServiceGuard {
+            sup: default_supervisor(),
+            name: spec.name.clone(),
+        };
+
+        // Serialize the launchd gui/<uid> registration window against every
+        // other daemon-spawning test in this process (issue #130). When the
+        // full workspace runs under `KASTELLAN_PG_BIN_DIR`, parallel `#[test]`
+        // threads racing to `bootstrap` distinct service labels can exceed even
+        // the 30 s cap once the domain is churn-degraded; holding the shared
+        // serial lock from `install` through the readiness waits caps peak
+        // concurrent registration at one. The lock is reentrant, so callers
+        // that already hold it (`supervisor_e2e`, `observation_capture`) do not
+        // self-deadlock here. cfg-gated to macOS so Linux binds no unit value
+        // (clippy-clean under `-D warnings`) and pulls in no import; released as
+        // the handle returns, leaving `initdb` and the test body free to overlap.
+        #[cfg(target_os = "macos")]
+        let _serial = crate::serial::serial_lock();
+
+        sup.install(&spec).expect("install postgres service");
+        sup.start(&spec.name).expect("start postgres service");
+
+        wait_for_status(
+            sup.as_ref(),
+            &spec.name,
+            |s| s == ServiceStatus::Active,
+            timeout,
+        )
+        // Carry the reason: a timeout (`last=…`) and a failed status query read
+        // differently, and the bare sentence hid which one a sweep hit.
+        .unwrap_or_else(|e| {
+            panic!("postgres should reach Active within {timeout:?}: {e}")
+        });
+        wait_for_socket(&socket_dir, timeout).unwrap_or_else(|e| {
+            panic!("postgres socket should appear within {timeout:?}: {e}")
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            sup.status(&spec.name).expect("pg stable-active recheck"),
+            ServiceStatus::Active,
+            "postgres flapped within 500ms of start; check {}.err for the postmaster log",
+            spec.name,
+        );
+
+        let conn_spec = kastellan_db::conn::ConnectSpec {
+            socket_dir: socket_dir.clone(),
+            user,
+            database: kastellan_db::conn::DEFAULT_APPLICATION_DB.to_string(),
+        };
+
+        PgCluster {
+            conn_spec,
+            data_dir,
+            socket_dir,
+            sup,
+            service_name: spec.name,
+            _guards: (service_guard, data_guard, log_guard),
+        }
     }
 }
 
