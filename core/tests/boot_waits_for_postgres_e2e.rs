@@ -36,9 +36,9 @@ const WAIT_LINE: &str = "postgres not accepting connections yet; waiting";
 /// The daemon's line when a wait ends in a connection (`kastellan_db::boot_wait`).
 const ACCEPTING_LINE: &str = "postgres is accepting connections";
 
-/// Spawn `kastellan` against `data_dir` with `home` as its scratch HOME and
-/// state dir, and return it with a channel carrying every line of its stdout
-/// and stderr.
+/// Spawn `kastellan` against `data_dir` with `home` as its scratch HOME
+/// (`home/state` its state dir), and return it with a channel carrying every
+/// line of its stdout and stderr.
 ///
 /// Both streams are read on threads so a wait on the channel has a deadline.
 /// The JSON log is on stdout; a boot refusal (`Error: ...`) is on stderr, and
@@ -64,8 +64,14 @@ fn spawn_daemon(data_dir: &Path, home: &Path) -> (Child, mpsc::Receiver<String>)
     ];
     for stream in streams {
         let tx = tx.clone();
+        // Lossy, so one non-UTF-8 line cannot end the reader and leave the
+        // daemon blocked on a full pipe.
         std::thread::spawn(move || {
-            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            let mut reader = BufReader::new(stream);
+            let mut buf = Vec::new();
+            while matches!(reader.read_until(b'\n', &mut buf), Ok(n) if n > 0) {
+                let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
+                buf.clear();
                 if tx.send(line).is_err() {
                     break;
                 }
@@ -151,7 +157,7 @@ fn daemon_boots_once_a_late_postgres_starts() {
             let _ = self.0.wait();
         }
     }
-    let child = KillOnDrop(child);
+    let mut child = KillOnDrop(child);
     let mut seen = Vec::new();
     let log = |seen: &[String]| seen.join("\n");
 
@@ -159,8 +165,11 @@ fn daemon_boots_once_a_late_postgres_starts() {
     let waiting = read_until(&rx, &mut seen, WAIT_LINE, Instant::now() + Duration::from_secs(15));
     assert!(waiting, "the daemon should log {WAIT_LINE:?}; its log:\n{}", log(&seen));
 
-    // ...until it starts. The boot wait's budget is 60 s from the first dial;
-    // the bring-up is bounded by `PG_BRING_UP_TIMEOUT_SECS` (30 s).
+    // ...until it starts. The boot wait's budget is 60 s from the first dial.
+    // `start` waits up to `PG_BRING_UP_TIMEOUT_SECS` (30 s) for Active and
+    // again for the socket, so a launchd slow enough to use both would
+    // outlast the daemon — a red run naming the budget, never a false pass.
+    // A healthy cluster comes up in about a second.
     let _cluster = init.start(
         &format!("kastellan-supervisor-test-pg-bwr-{}", unique_suffix()),
         Duration::from_secs(PG_BRING_UP_TIMEOUT_SECS),
@@ -168,8 +177,20 @@ fn daemon_boots_once_a_late_postgres_starts() {
     // Migrations run before the ready line; generous for a loaded sweep.
     let deadline = Instant::now() + Duration::from_secs(60);
     let ready = read_until(&rx, &mut seen, STARTUP_READY_MSG, deadline);
+    let exited = child.0.try_wait().expect("poll kastellan");
     drop(child);
-    assert!(ready, "the daemon should log {STARTUP_READY_MSG:?} once Postgres is up; its log:\n{}", log(&seen));
+    if !ready {
+        // What the daemon said between the deadline and the kill.
+        while let Ok(line) = rx.recv_timeout(Duration::from_secs(1)) {
+            seen.push(line);
+        }
+    }
+    assert!(
+        ready,
+        "the daemon should log {STARTUP_READY_MSG:?} once Postgres is up (exited: {exited:?}); \
+         its log:\n{}",
+        log(&seen)
+    );
 
     // The wait ended in a connection, after more than one attempt, and
     // said so.

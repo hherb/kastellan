@@ -11,12 +11,10 @@
 //! table: a refusal whose payload is already in a row within
 //! `REFUSAL_ROW_INTERVAL` writes nothing — unless a `guard_tier.boot` row
 //! (a boot that got past the guard tier) came after that row, which makes
-//! this refusal a new outage. A failed lookup writes the row anyway — a
-//! duplicate costs one row, a skipped row costs the evidence.
+//! this refusal a new outage.
 //!
-//! **Bounded.** The daemon is about to exit with the refusal; a wedged
-//! Postgres must not turn that loud stop into a silent hang, so the lookup
-//! and the insert together get [`RECORD_BUDGET`].
+//! The failed-lookup and time-budget rules are `boot_report::record_refusal`'s;
+//! this file supplies [`RECORD_BUDGET`].
 
 use std::time::Duration;
 
@@ -33,9 +31,9 @@ const RECORD_BUDGET: Duration = Duration::from_secs(5);
 pub(crate) const BOOT_ACTION: &str = "guard_tier.boot";
 
 /// Write the refusal row (thinned, bounded); never fails — the caller is
-/// already returning the refusal itself. The rules live in the lib's
-/// `record_refusal`, where they are tested (#913); this binds them to the
-/// real table.
+/// already returning the refusal itself. The failed-lookup and budget rules
+/// live in the lib's `record_refusal`, where they are tested (#913); the
+/// window and boot-reset rule is `exists_within`'s, bound here.
 pub(crate) async fn record_guard_refusal(pool: &sqlx::PgPool, e: &GuardTierError) {
     let payload = refusal_payload(e);
     let lookup = kastellan_db::audit::exists_within(

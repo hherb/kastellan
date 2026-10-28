@@ -214,8 +214,6 @@ pub fn bring_up_pg_cluster_with_timeout(
 /// such as the daemon's boot wait (#909, #911): point the daemon at
 /// `data_dir`, wait for it to start waiting, then `start`. Dropping it
 /// unstarted wipes the data and log directories.
-//
-// IMPORTANT: `_guards` stays last, for the reason `PgCluster`'s does.
 pub struct PgInit {
     pub data_dir: PathBuf,
     pub socket_dir: PathBuf,
