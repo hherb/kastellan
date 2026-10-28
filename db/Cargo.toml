@@ -88,3 +88,5 @@ kastellan-supervisor   = { path = "../supervisor", version = "0.2.0" }
 kastellan-tests-common = { path = "../tests-common" }
 # `join_all` for the reply claim's concurrent-claimers e2e (#825).
 futures = { workspace = true }
+# `test-util`: a paused clock pins the boot wait's budget arithmetic (#915).
+tokio = { workspace = true, features = ["test-util"] }

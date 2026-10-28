@@ -45,9 +45,12 @@
 
 use std::future::Future;
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sqlx::{Connection, PgConnection};
+// tokio's clock, not std's: a paused test runtime then moves it, so the
+// budget arithmetic can be pinned to the millisecond (#915).
+use tokio::time::Instant;
 
 use crate::conn::ConnectSpec;
 use crate::DbError;
@@ -256,16 +259,22 @@ mod tests {
         assert_eq!(calls.get(), 1, "waiting will not turn this into Postgres");
     }
 
+    /// On a paused clock the arithmetic is exact. Dials start at 0, 100, …,
+    /// 1100 ms; one at 1200 ms would not start *inside* a 1200 ms budget, so
+    /// the wait ends after the 12th, at 1100 ms. The budget is a multiple of
+    /// the interval on purpose: that is the one case where `>=` and `>` (or a
+    /// check without `+ interval`) differ — both make 13 dials and end at 1200.
+    ///
     /// Each attempt's error names its number, so "the last error" is proven
     /// rather than any refusal passing. The fake yields like I/O, and the whole
     /// wait sits under a timeout, so a mutant that drops the budget check is a
     /// red test rather than a hung binary.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_postgres_that_never_comes_up_is_refused_once_the_budget_is_spent() {
         let calls = Cell::new(0);
         let started = Instant::now();
         let err = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(60),
             wait_until_accepting(
                 || {
                     calls.set(calls.get() + 1);
@@ -275,8 +284,8 @@ mod tests {
                         Err(refused(n))
                     }
                 },
-                Duration::from_millis(200),
-                Duration::from_millis(20),
+                Duration::from_millis(1200),
+                Duration::from_millis(100),
             ),
         )
         .await
@@ -284,10 +293,38 @@ mod tests {
         .unwrap_err();
         let n = calls.get();
         assert_eq!(err.to_string(), refused(n).to_string(), "the last error, not the first");
-        assert!(n >= 2, "it retried: {n}");
-        // 200 ms / 20 ms paced = ~10; without the pause it would be thousands.
-        assert!(n <= 11, "the interval paces the retries: {n}");
-        assert!(started.elapsed() < Duration::from_secs(2), "and stopped near the budget");
+        assert_eq!(n, 12, "one dial per interval, none past the budget");
+        assert_eq!(started.elapsed(), Duration::from_millis(1100), "ends at the last dial");
+    }
+
+    /// The budget counts the dials' own time, not just the pauses: 250 ms
+    /// dials paced 100 ms apart start at 0, 350 and 700 ms; one at 1050 ms
+    /// would not start inside a 1000 ms budget. A loop that summed only its
+    /// sleeps would make 10 dials. Under a timeout for the same reason as above.
+    #[tokio::test(start_paused = true)]
+    async fn slow_dials_spend_the_budget_too() {
+        let calls = Cell::new(0);
+        let started = Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            wait_until_accepting(
+                || {
+                    calls.set(calls.get() + 1);
+                    let n = calls.get();
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        Err(refused(n))
+                    }
+                },
+                Duration::from_millis(1000),
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("the budget ends the wait")
+        .unwrap_err();
+        assert_eq!(calls.get(), 3);
+        assert_eq!(started.elapsed(), Duration::from_millis(950), "the third dial's end");
     }
 
     // The tests below drive the real `sqlx` client, because the hand-built
