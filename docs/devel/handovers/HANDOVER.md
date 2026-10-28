@@ -9,8 +9,8 @@
 > baseline rows included; #609's deploy notes are in the `909` snapshot, #904's/#900's in `609`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-28 (#913 + #911 — test debt from #912/#910) ·
-**Recent PRs, newest first:** [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
+**Last updated:** 2026-10-29 (#915 — the boot wait on a paused clock) ·
+**Recent PRs, newest first:** [#916](https://github.com/hherb/kastellan/pull/916) (#915), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **Both hosts run PR #908's tree** (deployed 2026-10-25; #909 and #906 are **not deployed**). **DGX:**
@@ -42,24 +42,26 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-10-28, latest): #913 + #911 — test debt from #912/#910
+### This session (2026-10-29, latest): #915 — the boot wait's budget on a paused clock
 
-- **#913:** the refusal writer's rules moved into the lib as `boot_report::record_refusal(payload,
-  lookup, insert, budget)` — the lookup and insert are passed in as (lazy) futures;
-  `main/guard_refusal.rs` only binds them to `exists_within`/`insert_without_id`. **Review fix:**
-  the lookup now gets half the budget and a slow one writes the row anyway — before, a slow
-  `audit_log` scan used up the shared budget and the insert was never sent (no row, #906's own
-  failure). It returns a `RefusalRecord` so every branch is testable. 6 unit tests (2 on a paused
-  clock, budget 1234 ms ≠ the daemon's 5 s): failed lookup writes; standing row writes nothing; no
-  row writes one; a failed insert reports its outcome; a never-answering lookup writes at half the
-  budget; a never-answering insert returns at exactly the budget. Mutants killed: no timeout, `Err`
-  → `return`, lookup on the whole budget, hard-coded 5 s, slow lookup → no write.
-- **#911:** `tests_common::init_pg_cluster` → `PgInit` (initdb + socket dir + `auto.conf`, **not
-  started**) and `PgInit::start(name, timeout) -> PgCluster`; `bring_up_pg_cluster*` = the two in
-  a row, unchanged for its callers. `boot_waits_for_postgres_e2e::daemon_boots_once_a_late_postgres_starts`
-  starts Postgres under a waiting daemon and pins `STARTUP_READY_MSG` + the `postgres is accepting
-  connections` line with `attempts > 1` (measured: 2, `waited_ms` 1032). The suite joins the `pg`
-  profile (91 tests, 12 binaries). #911's optional `tokio::time::Instant` switch → [#915](https://github.com/hherb/kastellan/issues/915).
+- `kastellan_db::boot_wait::wait_until_accepting` measures its budget with **`tokio::time::Instant`**
+  (was std's), so `#[tokio::test(start_paused = true)]` pins it exactly: 1200 ms budget / 100 ms
+  interval = **12 dials, ends at 1100 ms** (a budget that is a multiple of the interval is the one
+  case where `>=` vs `>` shows); 250 ms dials = 3 dials, ends at 950 ms (dial time counts).
+  `kastellan-db` dev-deps gain tokio `test-util` (core's already had it, so `--workspace` test
+  builds are unchanged). Mutants killed: `>`, no `+ interval`, std `Instant`, no budget check,
+  counting only the sleeps, no pacing sleep. ⚠️ A paused-clock test of a loop needs an outer
+  `timeout` **and** a call cap in the fake: the clock only auto-advances when the runtime is idle,
+  so a mutant that drops the loop's only sleep keeps a `yield_now` fake runnable forever and the
+  timeout never fires — measured, it hung until killed; the cap (`n <= 50`) fails it in 0.00 s
+  [[async-fakes-must-yield-like-io]].
+
+### Previous (2026-10-28): #913 + #911 — test debt from #912/#910 (PR #914, merged) — what still binds
+
+- `boot_report::record_refusal(payload, lookup, insert, budget) -> RefusalRecord`: the lookup gets
+  **half** the budget and a slow one writes the row anyway; `main/guard_refusal.rs` only binds it.
+- `tests_common::init_pg_cluster` → `PgInit` (not started) + `PgInit::start`; `bring_up_pg_cluster*`
+  unchanged. `boot_waits_for_postgres_e2e` is in the `pg` profile (91 tests, 12 binaries).
 
 ### Previous (2026-10-28): #906 — a guard boot refusal is an audit row (PR #912, merged) — what still binds
 
@@ -74,7 +76,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 - Boot dials the maintenance DB for up to **60 s** only on `ECONNREFUSED`/`ENOENT`/`57P03`; a
   missing socket **dir** refuses at once; each dial capped at 5 s (`probe::run`'s own dial is still
-  uncapped). Recovery path e2e'd since #911.
+  uncapped). Recovery path e2e'd since #911; budget pinned on a paused clock since #915.
 - ⚠️ The daemon's JSON log goes to **stdout**; a boot refusal (`Error: …`) to **stderr**.
 - ⚠️ A daemon e2e pointed at a cluster that never starts takes 60 s to refuse.
 
@@ -388,10 +390,10 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#913/#911) | #913/#911's PR on `628161af` | **5262 / 1 / 52**, **198** summaries, `TEST_EXIT=101`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-913-mac.log`. The 1 is `cli_memory_l3_run_e2e::d_unknown_tool…`, `the database system is starting up` (#548/#676); **5/5 in isolation** (`~/sweep-913-l3.log`). Delta vs the #906 row (5258 = 5253 + 5): +4 core lib (`record_refusal`), +1 `boot_waits_for_postgres_e2e` = 5263 = 5262 + 1. `pg` profile green as evidence after the last edit. **Review round** (not re-swept): +2 core lib (6 `record_refusal` tests) → expect 5265 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-913` (fresh), **27** | **5** |
+| **Mac** (#915) | PR #916 on `f1bbf849` | **5266 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-915-mac.log`. Delta vs #913/#911's 5262 (+1 failed, a #548/#676 flake): +2 core lib (#914's review round) +1 db lib (`slow_dials_spend_the_budget_too`) = 5266 exactly, predicted. `pg` profile green as evidence (91 tests, 12 binaries) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-915` (fresh), **27** | **5** |
 
-The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries) and
-#913/#911 (+4 core lib, +1 e2e); all three are platform-neutral and were not swept on the DGX.
+The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
+#913/#911 (+6 core lib, +1 e2e) and #915 (+1 db lib); all four are platform-neutral and were not swept on the DGX.
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -474,6 +476,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#914** (#913, #911) — merged 2026-10-28: `boot_report::record_refusal` in the lib, unit-tested; `PgInit` + the late-Postgres boot e2e.
 - **#912** (#906) — merged 2026-10-28, **not deployed**: a guard boot refusal is a thinned `guard_tier.boot_refused` row.
 - **#910** (#909) — merged 2026-10-27, **not deployed**: core waits up to 60 s for Postgres at boot.
 - **#908** (#609) — merged 2026-10-24, deployed both hosts 2026-10-25: the supervised `kastellan-guard` unit and the `/props` boot wait.
