@@ -13,7 +13,7 @@
 **Recent PRs, newest first:** [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs PR #920's tree** (deployed 2026-10-30, env diff IDENTICAL, `NRestarts=0`); **the Mac runs #917's**. **DGX:**
+**The DGX runs PR #924's branch tree** (unmerged; deployed 2026-10-30, env diff IDENTICAL, `NRestarts=0`; a plain `upgrade_from_git.sh` returns it to `main`); **the Mac runs #917's**. **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -58,6 +58,17 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   re-fetches it and the answer says so wrongly), [#922](https://github.com/hherb/kastellan/issues/922) (3/4 hit the
   fast lane's 5-plan cap; the Qantas table has Price/GST "Unknown"). #698 (filter-only search) and #760 (paged PDF)
   work live.
+- **"Most recent" was answered wrong because of the query dialect, not the archive.** localmail's plain search is
+  `plainto_tsquery('simple', …)`: **every word must match, and `OR` is just another word**. The planner's
+  `flight booking OR … OR reservation` matched two 2025 emails. #924's `mail.search` `query` doc now says so;
+  live re-ask (task 217): `query: "flight"` → the 28 Oct Learmonth → Perth e-ticket, 119 s. Task 218 ("most recent
+  invoice") hit the plan cap again (#922).
+- **localmail on the DGX had stalled** (IDLE stuck `reconnecting` since 02:58, poll stale since 21:33 the evening
+  before; the unit read `active` the whole time). Restarted 2026-10-30 08:50; heartbeats fresh. Check with
+  `~/src/localmail/.venv/bin/localmail daemon status` — ⚠️ **`systemctl is-active` cannot see it.** Filed
+  hherb/localmail#414 (pool connections unbounded; most likely cause), #415 (search-hit dates are INTERNALDATE
+  in host local time labelled UTC, +11 h), #416 (Gmail's 29-min IDLE drop logged as a crash); kastellan
+  [#925](https://github.com/hherb/kastellan/issues/925) (archive freshness is invisible to the bot).
 - **Code (PR #924):** `AgentError::Decode` carries the completion's `usage` + `latency_ms`, so the
   `plan.formulate_failed` row has `llm_usage`/`latency_ms` (the `plan.formulate` keys). Both wiring points are
   mutation-checked. ⚠️ **A new `AgentError::Decode` field breaks 7 fakes in `core/tests/`**, not just the lib's
@@ -77,21 +88,13 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### Previous (2026-10-26 → 29): the boot arc — #909, #906, #913/#911, #915 (PRs #910, #912, #914, #916, merged) — what still binds
 
-- **#909:** boot dials the maintenance DB for up to **60 s** only on `ECONNREFUSED`/`ENOENT`/`57P03`;
-  a missing socket **dir** refuses at once; each dial capped at 5 s (`probe::run`'s own dial is still
-  uncapped). Budget measured with `tokio::time::Instant`, pinned on a paused clock (#915). ⚠️ A
-  paused-clock test of a loop needs an outer `timeout` **and** a call cap in the fake — the clock
-  only advances when the runtime is idle [[async-fakes-must-yield-like-io]].
-- **#906:** every `GuardTierError` and a malformed guard key (`from_env` → `config`) writes `policy /
-  guard_tier.boot_refused` = `{"refusal", "error_kind"}` (closed tokens, #616's rule). ⚠️ The
-  `from_env` path is picked out by the error text naming a `KASTELLAN_LLM_GUARD_` key — a new guard
-  key must name itself in its error. Thinned by the table (`audit::exists_within`): one row per
-  payload per hour, reset by a later `guard_tier.boot` row. `boot_report::record_refusal` gives the
-  lookup **half** the 5 s budget and writes the row anyway on a slow one (#913).
-- `tests_common::init_pg_cluster` → `PgInit` (not started) + `PgInit::start`;
-  `boot_waits_for_postgres_e2e` is in the `pg` profile (91 tests, 12 binaries).
-- ⚠️ The daemon's JSON log goes to **stdout**; a boot refusal (`Error: …`) to **stderr**. ⚠️ A daemon
-  e2e pointed at a cluster that never starts takes 60 s to refuse.
+- **#909:** boot waits ≤ **60 s** for Postgres only on `ECONNREFUSED`/`ENOENT`/`57P03` (missing socket dir refuses
+  at once; `probe::run`'s own dial is uncapped). ⚠️ A paused-clock loop test needs an outer `timeout` **and** a call
+  cap in the fake [[async-fakes-must-yield-like-io]]. A daemon e2e on a cluster that never starts takes 60 s to refuse.
+- **#906:** a guard boot refusal writes a thinned `policy / guard_tier.boot_refused` row (`{"refusal","error_kind"}`).
+  ⚠️ A new guard key must name itself (`KASTELLAN_LLM_GUARD_…`) in its error, or `from_env` is misclassified.
+- `tests_common::init_pg_cluster` → `PgInit` + `PgInit::start`. ⚠️ The daemon's JSON log is **stdout**, a boot
+  refusal **stderr**.
 
 ### Previous (2026-10-24 → 25): #609 — the guard backend is supervised (PR #908, merged) — what still binds
 
@@ -248,7 +251,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
    #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
-1. **The planner's answer quality, from the re-measure (2026-10-30).** [#921](https://github.com/hherb/kastellan/issues/921)
+1. **The planner's answer quality, from the re-measure (2026-10-30).** Before any live mail measurement run
+   `localmail daemon status` on the DGX (a stale archive voids it; #925). [#921](https://github.com/hherb/kastellan/issues/921)
    first (cheapest; a wrong statement to the user), then [#922](https://github.com/hherb/kastellan/issues/922)'s
    option 3 (stop spending plans on `list_accounts` and re-fetches), then [#923](https://github.com/hherb/kastellan/issues/923).
    Re-run the same four questions afterwards (tasks 207–210 are the baseline). **Still owed from the
@@ -385,7 +389,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#923 decode row) | PR #924 on `dc1a8279` | **5283 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-decode-mac.log`. Per-suite vs `~/sweep-704-mac.log`: **only core lib**, 2607 → 2612 = +4 (#920's last review commit, after that row's sweep) +1 (the new payload test) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-decode` (fresh), **27** | **12** (7 = `python-exec:dev` stale since #918's `Cargo.lock` — rebuild the image) |
+| **Mac** (#923 decode row) | PR #924 on `dc1a8279` (re-swept at `426dc68c`: 5283 + 1 / 52, core lib **2613** = +1 doc test; the 1 = `asks_e2e` `the database system is starting up`, 35/35 alone — #548/#676) | **5283 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-decode-mac.log`. Per-suite vs `~/sweep-704-mac.log`: **only core lib**, 2607 → 2612 = +4 (#920's last review commit, after that row's sweep) +1 (the new payload test) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-decode` (fresh), **27** | **12** (7 = `python-exec:dev` stale since #918's `Cargo.lock` — rebuild the image) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib) and this PR (+1 core lib); all are platform-neutral and were not swept on the DGX. The #915 Mac row is in the `909deploy` snapshot.
