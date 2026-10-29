@@ -86,15 +86,15 @@ impl HandoffRef {
 /// Build the placeholder the planner sees in place of a stashed oversized
 /// result. `summary_head` is the start of the result as JSON, keys, numbers
 /// and booleans included ([`screened_head`] at [`SUMMARY_HEAD_BYTES`], #705),
-/// so the planner often needs no fetch at all. Until #705 it was the keyless
-/// flattening the injection guard reads, which lost every key and boolean.
+/// so the planner often needs no fetch at all.
 ///
 /// The head is deliberately **not** rendered here. The planner summary renders
 /// every step result, this placeholder included, and a second render would
 /// garble the first one's omission markers. Its text is a prefix of the text the
-/// output screen read, because the summary's render trims strings evenly across
-/// its input and, given the whole result, would show text past the
-/// [`SCAN_BYTE_CAP`] window. The placeholder's `truncated: true` means the
+/// output screen read ([`screened_head`] builds it so). Handing the summary the
+/// whole result instead would not be safe: its render trims strings evenly
+/// across its input and would show text past the [`SCAN_BYTE_CAP`] window. The
+/// placeholder's `truncated: true` means the
 /// *body* was stashed (always true on this path), not that the head was cut.
 pub fn build_handoff_placeholder(
     value: &serde_json::Value,

@@ -746,7 +746,7 @@ fn a_handoff_head_is_pruned_once_so_its_omission_counts_are_true() {
     // Found by review of #705's first version, which rendered the head when the
     // result was stashed: the summary prunes every result again, and that
     // second pass dropped the core's own `…omitted_keys` (not an identifier)
-    // and re-counted it as one dropped key. The head is rendered once, here.
+    // and re-counted it as one dropped key. The head is rendered once, by the summary.
     let big = serde_json::json!({"a b": "x", "c d": "y", "ok": 1});
     let placeholder = crate::handoff::build_handoff_placeholder(&big, &crate::handoff::HandoffRef::of(b"x"), 200000);
     let mut c = ctx();

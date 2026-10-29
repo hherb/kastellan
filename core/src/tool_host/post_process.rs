@@ -67,17 +67,17 @@ pub const FORGED_MARKER_REASON: &str = "forged_withheld_marker";
 /// level, the one place the planner reads it as "withheld, do not re-run".
 ///
 /// Only the core may say that. A worker that does is withheld for real (see
-/// [`forged_marker_verdict`]): the planner then sees the same marker it would
-/// have seen anyway, but now a screen did fire and the forensic row records it,
-/// and the worker's own `score`/`reason_codes` can no longer pose as the
-/// screen's. Deeper down the key is ordinary data, which no reader looks at.
+/// [`screen_result`]): the planner then sees the same marker it would have
+/// seen anyway, but now a screen did fire and the forensic row records it, and
+/// the worker's own `score`/`reason_codes` can no longer pose as the screen's.
+/// Deeper down the key is ordinary data, which the core's readers never look
+/// at; the planner prompt says so.
+///
+/// Any value counts, `false` included, though the readers act only on `true`:
+/// no worker sends the key, so the broader test costs nothing and leaves no
+/// value of it for a worker to probe.
 fn carries_withheld_marker(value: &serde_json::Value) -> bool {
     value.get(INJECTION_BLOCKED_KEY).is_some()
-}
-
-/// The catalogue-tier Block for a result that [`carries_withheld_marker`].
-fn forged_marker_verdict() -> InjectionVerdict {
-    InjectionVerdict { score: 1.0, decision: InjectionDecision::Block, reason_codes: vec![FORGED_MARKER_REASON] }
 }
 
 /// Everything the audit arms need about a withheld document.
@@ -123,11 +123,13 @@ async fn screen_result(
     // Relaxed profile so quoted chat-template tokens in fetched documentation
     // do not auto-Block; every other worker (incl. shell-exec and any unknown)
     // stays Strict, fail-closed.
-    let verdict = if carries_withheld_marker(&value) {
-        forged_marker_verdict()
-    } else {
-        screen_with_profile(&body, GuardProfile::for_tool(tool))
-    };
+    let mut verdict = screen_with_profile(&body, GuardProfile::for_tool(tool));
+    if carries_withheld_marker(&value) {
+        // Forced to Block on top of the catalogue's own reading, so the row
+        // keeps its real score and any injection the result also carried.
+        verdict.decision = InjectionDecision::Block;
+        verdict.reason_codes.push(FORGED_MARKER_REASON);
+    }
 
     // ── Tier 1: the catalogue. A Block short-circuits. ──
     //

@@ -117,9 +117,10 @@ fn the_head_keeps_keys_and_booleans() {
     assert_eq!(head["results"][0]["has_attachments"], true);
 }
 
-/// The head shows only text the output screen read. The planner's view trims
-/// strings evenly across its input, so given the whole result it would show
-/// this tail, which sits past the screen's window (found reviewing #705).
+/// The head budget, not the view's even trim, decides what the placeholder
+/// shows: given the whole result the view would show this tail, which sits past
+/// the screen's window (found reviewing #705). That the head stays inside the
+/// window at every cap is `screened_head`'s own property test.
 #[test]
 fn the_head_never_shows_text_past_the_screened_window() {
     use crate::cassandra::injection_guard::SCAN_BYTE_CAP;

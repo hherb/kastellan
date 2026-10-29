@@ -127,6 +127,9 @@ fn the_view_markers_cannot_be_spelled_by_a_worker() {
     // because they fall outside the identifier alphabet every shown key obeys.
     for marker in [OMITTED_KEYS_KEY, VIEW_UNAVAILABLE_KEY] {
         assert!(!is_identifier_key(marker), "{marker} is spellable by a worker");
+        // Nor its ASCII lookalike, which the planner reads as the same marker.
+        let lookalike = marker.replace('…', "...");
+        assert!(!is_identifier_key(&lookalike), "{lookalike} is shown to the planner");
     }
     let own = json!({"_omitted_keys": "a worker's field", "_view_unavailable": true});
     assert_eq!(prune(&own, PruneLimits::DEFAULT), own);

@@ -207,9 +207,13 @@ pub(crate) fn omitted_items_marker(dropped: usize) -> String {
 /// key to the sink catalogue as words. Workers must not emit third-party text
 /// as object keys at all; `workers/mail` returns message headers as a list for
 /// that reason, and #703 tracks giving keys to the guard model.
+///
+/// A key may not start with `.`: `...omitted_keys` is ASCII, but it reads to the
+/// planner as the core's `…omitted_keys` (#704 review).
 fn is_identifier_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= KEY_MAX_BYTES
+        && !key.starts_with('.')
         && key.chars().all(|c| c.is_ascii_alphanumeric() || KEY_SEPARATORS.contains(&c))
 }
 
@@ -221,7 +225,7 @@ fn is_identifier_key(key: &str) -> bool {
 /// belongs to an identifier, and each one serialises to six bytes. A raw-Unicode
 /// URL is kept on the byte limit because SearxNG passes them through and a cut
 /// one is the trap this rule exists for.
-fn is_atomic(s: &str) -> bool {
+pub(crate) fn is_atomic(s: &str) -> bool {
     if s.len() > ATOMIC_MAX || s.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return false;
     }

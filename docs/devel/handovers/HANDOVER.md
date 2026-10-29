@@ -45,17 +45,24 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### This session (2026-10-29, latest): #704 + #705 — the planner's core markers and the handoff head (PR #920)
 
-- **#704:** the view's markers are `…omitted_keys` / `…view_unavailable` — outside the identifier
-  alphabet, so no worker can put them in a view. ⚠️ **Never prune a rendered view a second time**: the
+- **#704:** the view's **key** markers are `…omitted_keys` / `…view_unavailable` — outside the identifier
+  alphabet, and a key may not start with `.` (`...omitted_keys` reads the same to the planner), so no
+  worker can put them in a view. The **string** markers (`…N more items omitted`) stay spellable — the
+  issue's option 3, deliberately left. ⚠️ **Never prune a rendered view a second time**: the
   second pass drops the core's own `…` markers as non-identifier keys and re-counts them as 1. A top-level
-  `injection_blocked` in a **worker** result is now a catalogue Block (`post_process::FORGED_MARKER_REASON`).
+  `injection_blocked` (any value) in a **worker** result is now a catalogue Block: the catalogue still runs,
+  so the row keeps its real score and classes, plus `post_process::FORGED_MARKER_REASON`.
 - **#705:** `summary_head` is a **raw** JSON head (`injection_guard::screened_head`, keys + one byte per
   text-free node charged), rendered **once**, by the summary. ⚠️ The issue's option 1 as filed (render the
   whole result) would have shown text past `SCAN_BYTE_CAP` [[issue-as-filed-can-carry-a-regression]].
-  A crossing string ends in `…`, or is dropped if space-free (no half identifiers). Head lists/objects stop
-  unmarked; the handoff block says counts inside the head cover only the head.
+  A crossing string ends in `…`, or is dropped if the view would show it whole (`result_view::is_atomic`):
+  the head never shows part of a string the view shows whole. Head lists/objects stop unmarked; the
+  handoff block says a missing field may lie past the head and counts inside it cover only the head.
 - Two review rounds (one read-only reviewer in its own worktree) found the double render and the half
-  identifier. ⚠️ **`git mv` stages the rename** — a later "add specific files" commit still carries it.
+  identifier; a third (4 agents) found the `...` lookalike, the `null` head of a long space-free string,
+  a trailing `\n` defeating the old space-free rule, and three over-long-key mutants no test killed —
+  all fixed, core lib **2611**. Not fixed: turn records stored before #920 still carry `_omitted_keys`
+  (a mislabelled count; ages out). ⚠️ **`git mv` stages the rename** — a later "add specific files" commit still carries it.
 - Deploy (2026-10-29 morning): #909 + #906 live on both hosts, #909 reboot-proven on the DGX; ⚠️ the
   `probe::run … Connection refused` tail of the DGX `kastellan-core.err` is the 10-25 race — check mtime.
 

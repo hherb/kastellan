@@ -5,7 +5,7 @@
 //!
 //! `tool_host`'s output screen reads [`extract_scannable_text`] at
 //! [`SCAN_BYTE_CAP`](super::SCAN_BYTE_CAP): the string leaves, in walk order,
-//! up to 64 KiB. A result bigger than that is stashed behind a handoff
+//! up to that cap. A result bigger than that is stashed behind a handoff
 //! placeholder, and the planner reads a head of it (#705). The planner's view
 //! trims strings evenly across whatever it is given, so given the whole result
 //! it would show text from past that window, which neither the catalogue nor
@@ -27,18 +27,20 @@
 use serde_json::{Map, Value};
 
 use super::MAX_WALK_DEPTH;
+use crate::scheduler::inner_loop::result_view::is_atomic;
+#[cfg(doc)]
+use super::extract_scannable_text;
 
 /// Appended to the one string a head cuts. Written by the core, so it is the
 /// only text in a head the screen did not read.
 const CUT_MARK: &str = "…";
-#[cfg(doc)]
-use super::extract_scannable_text;
 
 /// A head of `value` in walk order whose total charge (see the module docs) is
 /// at most `byte_cap`. The string that crosses the cap is cut on a character
-/// boundary and ends in [`CUT_MARK`], or is dropped if it holds no whitespace;
-/// nothing after it is kept. A subtree at [`MAX_WALK_DEPTH`], which the screen
-/// skips, becomes `null`. Pure and deterministic.
+/// boundary and ends in [`CUT_MARK`], or is dropped if the planner's view would
+/// show it whole ([`is_atomic`]) or the cut keeps nothing; nothing after it is
+/// kept. A subtree at [`MAX_WALK_DEPTH`], which the screen skips, becomes
+/// `null`. Pure and deterministic.
 ///
 /// The head's text, as [`extract_scannable_text`] reads it and less the final
 /// [`CUT_MARK`], is a prefix of `extract_scannable_text(value, cap)` for any
@@ -72,11 +74,10 @@ fn head_at(value: &Value, cap: usize, depth: usize, used: &mut usize) -> (Option
                 take -= 1;
             }
             *used = cap;
-            // The summary will not cut a string this short again, so it must
-            // not look whole. A space-free string is an id, a URL or a path the
-            // planner copies verbatim, and half of one is a trap: drop it. Cut
-            // prose ends in `…`, as a cut string does in every view (review).
-            if take == 0 || !s.contains(char::is_whitespace) {
+            // The view never shows part of an atomic string (an id, URL or path
+            // the planner copies verbatim), so the head does not either: drop
+            // it. Anything else the view would cut too, ending it in `…`.
+            if take == 0 || is_atomic(s) {
                 return (None, true);
             }
             (Some(Value::String(format!("{}{CUT_MARK}", &s[..take]))), true)
@@ -162,6 +163,10 @@ mod tests {
             json!(["a b", "é é"]),
             json!(["no-spaces-here", "https://example.com/a/b"]),
             json!({"a": nested(MAX_WALK_DEPTH + 2, json!("too deep")), "b": "after the deep one"}),
+            // A key past the budget ends the walk, at every level (review).
+            json!({"a": { "k".repeat(200): "x" }, "b": "after"}),
+            json!([{ "k".repeat(200): "x" }, "after"]),
+            json!({ format!("0{}", "k".repeat(200)): "x", "z": "after" }),
         ];
         for v in &values {
             let full = serde_json::to_string(v).unwrap().len();
@@ -179,11 +184,26 @@ mod tests {
     }
 
     #[test]
-    fn half_an_identifier_is_never_shown() {
-        // A cut URL would read as a whole one: nothing marks it, and the
-        // planner's view does not cut a string this short again (review).
+    fn a_string_the_view_shows_whole_is_never_shown_in_part() {
+        // The view shows a URL whole or not at all, and so does the head.
         let v = json!({"title": "a hit", "url": "https://example.com/a/long/path"});
         assert_eq!(screened_head(&v, 20), json!({"title": "a hit"}));
+    }
+
+    #[test]
+    fn a_string_the_view_would_cut_is_cut_not_dropped() {
+        // Past `ATOMIC_MAX`, or with whitespace, the view cuts a string too, so
+        // the head keeps its start rather than showing `null` (review).
+        let blob = "x".repeat(2000);
+        assert_eq!(screened_head(&json!(blob), 4), json!("xxxx…"));
+        let line = format!("{}\n", "y".repeat(20));
+        // Charge: 1 (array) + 1 (separator) + 4.
+        assert_eq!(screened_head(&json!([line]), 6), json!(["yyyy…"]));
+    }
+
+    #[test]
+    fn a_cut_that_keeps_nothing_shows_nothing() {
+        assert_eq!(screened_head(&json!(["a b"]), 2), json!([]));
     }
 
     #[test]
@@ -194,7 +214,8 @@ mod tests {
 
     #[test]
     fn a_skipped_deep_subtree_becomes_null() {
-        let deep = nested(MAX_WALK_DEPTH + 1, json!("never screened"));
+        // Exactly the depth the screen starts skipping at.
+        let deep = nested(MAX_WALK_DEPTH, json!("never screened"));
         assert!(!screened_head(&deep, usize::MAX).to_string().contains("never screened"));
     }
 
