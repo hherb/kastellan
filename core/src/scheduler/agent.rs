@@ -23,8 +23,17 @@ use super::prompts::PromptCache;
 pub enum AgentError {
     #[error("router: {0}")]
     Router(#[from] RouterError),
+    /// The model answered, but not with a plan. `usage` and `latency_ms`
+    /// are that answer's cost, kept so the `plan.formulate_failed` row can
+    /// say whether the tokens went to reasoning (an empty `raw` with
+    /// `reasoning_chars > 0`) or nowhere.
     #[error("plan decode failed: {detail}")]
-    Decode { detail: String, raw: String },
+    Decode {
+        detail: String,
+        raw: String,
+        usage: kastellan_llm_router::CompletionStats,
+        latency_ms: u64,
+    },
     #[error("agent prompt 'agent_planner' not found in cache")]
     PromptMissing,
     /// L0/L1 load failed under the [`SystemPromptBuilder`]; the scheduler's
@@ -40,6 +49,15 @@ impl AgentError {
     /// [`RouterError::is_request_timeout`].
     pub fn is_request_timeout(&self) -> bool {
         matches!(self, AgentError::Router(e) if e.is_request_timeout())
+    }
+
+    /// The cost of the completion behind this error, when one came back
+    /// (only a decode failure has one). Read by the failed-call audit row.
+    pub fn completion(&self) -> Option<(&kastellan_llm_router::CompletionStats, u64)> {
+        match self {
+            AgentError::Decode { usage, latency_ms, .. } => Some((usage, *latency_ms)),
+            _ => None,
+        }
     }
 }
 
@@ -326,9 +344,10 @@ impl RouterAgent {
                 detail = %e,
                 raw_len = raw.len(),
                 has_brace = raw.contains('{'),
-                finish_reason = ?resp.choices.first().and_then(|c| c.finish_reason.as_deref()),
-                prompt_tokens = ?resp.usage.as_ref().and_then(|u| u.prompt_tokens),
-                completion_tokens = ?resp.usage.as_ref().and_then(|u| u.completion_tokens),
+                finish_reason = ?usage.finish_reason,
+                prompt_tokens = ?usage.prompt_tokens,
+                completion_tokens = ?usage.completion_tokens,
+                reasoning_chars = usage.reasoning_chars,
                 "plan decode failed"
             );
             // The model's own words are held at `debug!` on purpose. A
@@ -347,7 +366,12 @@ impl RouterAgent {
                 raw_head = %raw.chars().take(RAW_HEAD_CHARS).collect::<String>(),
                 "head of the raw model output that failed to decode"
             );
-            AgentError::Decode { detail: e.to_string(), raw: raw.clone() }
+            AgentError::Decode {
+                detail: e.to_string(),
+                raw: raw.clone(),
+                usage: usage.clone(),
+                latency_ms,
+            }
         })?;
 
         // recall_count is `usize` → `u32` via `as`; the cap_and_split

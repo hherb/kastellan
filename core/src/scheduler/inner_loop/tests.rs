@@ -561,6 +561,8 @@ pub(super) mod inner_loop_test_stubs {
                 .ok_or(AgentError::Decode {
                     detail: "scripted formulator out of plans".into(),
                     raw: "".into(),
+                    usage: Default::default(),
+                    latency_ms: 0,
                 })?;
             Ok((
                 plan,
