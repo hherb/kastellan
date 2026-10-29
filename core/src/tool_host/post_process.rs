@@ -15,7 +15,8 @@
 //!    deterministic catalogue, then (when a tier is configured and the
 //!    catalogue allowed) the Shieldstral guard model. A placeholder is
 //!    substituted on a Block so the planner gets an intelligible "withheld"
-//!    signal.
+//!    signal. A worker result that itself carries the placeholder's key is
+//!    withheld too (#704).
 //! 3. **Audit-emission arms** — the tool row (carrying the placeholder on a
 //!    Block, and the `guard` sub-object whenever the tier ran), one
 //!    `policy / secret.redeemed` row per substitution, and the forensic
@@ -32,7 +33,7 @@ use sha2::{Digest, Sha256};
 
 use kastellan_protocol::client::ClientError;
 
-use super::{injection_blocked_placeholder, secret_scrub, AuditSink, ToolHostError};
+use super::{injection_blocked_placeholder, secret_scrub, AuditSink, ToolHostError, INJECTION_BLOCKED_KEY};
 use crate::cassandra::guard_model::tier::{consults_model, GuardReport};
 use crate::cassandra::guard_model::SharedGuardTier;
 use crate::cassandra::injection_guard::{
@@ -57,6 +58,27 @@ use crate::secrets::RedemptionEvent;
 pub const TIER_CATALOGUE: &str = "catalogue";
 /// See [`TIER_CATALOGUE`].
 pub const TIER_GUARD_MODEL: &str = "guard_model";
+
+/// The reason code on the `policy / injection.blocked` row when a worker's own
+/// result carried the placeholder's [`INJECTION_BLOCKED_KEY`] (#704).
+pub const FORGED_MARKER_REASON: &str = "forged_withheld_marker";
+
+/// Whether `value` is an object with the placeholder's own key at its top
+/// level, the one place the planner reads it as "withheld, do not re-run".
+///
+/// Only the core may say that. A worker that does is withheld for real (see
+/// [`screen_result`]): the planner then sees the same marker it would have
+/// seen anyway, but now a screen did fire and the forensic row records it, and
+/// the worker's own `score`/`reason_codes` can no longer pose as the screen's.
+/// Deeper down the key is ordinary data, which the core's readers never look
+/// at; the planner prompt says so.
+///
+/// Any value counts, `false` included, though the readers act only on `true`:
+/// no worker sends the key, so the broader test costs nothing and leaves no
+/// value of it for a worker to probe.
+fn carries_withheld_marker(value: &serde_json::Value) -> bool {
+    value.get(INJECTION_BLOCKED_KEY).is_some()
+}
 
 /// Everything the audit arms need about a withheld document.
 struct BlockedMeta {
@@ -101,7 +123,13 @@ async fn screen_result(
     // Relaxed profile so quoted chat-template tokens in fetched documentation
     // do not auto-Block; every other worker (incl. shell-exec and any unknown)
     // stays Strict, fail-closed.
-    let verdict = screen_with_profile(&body, GuardProfile::for_tool(tool));
+    let mut verdict = screen_with_profile(&body, GuardProfile::for_tool(tool));
+    if carries_withheld_marker(&value) {
+        // Forced to Block on top of the catalogue's own reading, so the row
+        // keeps its real score and any injection the result also carried.
+        verdict.decision = InjectionDecision::Block;
+        verdict.reason_codes.push(FORGED_MARKER_REASON);
+    }
 
     // ── Tier 1: the catalogue. A Block short-circuits. ──
     //

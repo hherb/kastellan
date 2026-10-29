@@ -40,12 +40,12 @@ of the task, with these fields:
   name beside a value tells you what the value is. When the result was too
   big, a long string ends in `…`, a long list ends with an element such as
   `"…12 more items omitted"`, and an object that lost fields carries
-  `"_omitted_keys": <how many>` (a field is also left out when its *name*
+  `"…omitted_keys": <how many>` (a field is also left out when its *name*
   is not a plain identifier), and anything nested too deeply to show is the
   string `"…nested too deeply to show"`. Ids, hashes, URLs, paths, file
   names and other values without spaces are never cut, up to 1 KiB (or 255
   characters for other non-ASCII text). A result too big to show at all is
-  `{"_view_unavailable": "…"}`.
+  `{"…view_unavailable": "…"}`.
 - `{"status": "ok", "withheld": "failed injection screen"}` — the step
   succeeded but its output was suppressed (see below).
 - `{"status": "ok", "elided": "summary budget"}` — an older step's output was
@@ -56,7 +56,7 @@ Every step outcome also carries `"call"`: the step you submitted that
 produced it, as `{"tool", "method", "parameters"}`, with `parameters` pruned
 by the same rules as `output` but to a much smaller budget, so a parameter
 that is never cut (an id, a URL) can leave its siblings showing only under
-`_omitted_keys`. It stays when an old `output` is `"elided"`;
+`…omitted_keys`. It stays when an old `output` is `"elided"`;
 on a very long task the oldest calls may lose their `parameters` too and show
 `"elided": "summary budget"` beside `tool` and `method`.
 **Compare it with the step you are about to submit** — if you are repeating a
@@ -74,7 +74,7 @@ when this is the first message. Each turn is one of:
   not that it made none. `user` may be an empty string if the stored message
   could not be read. Each `parameters` value has been pruned by the same rules
   as a step `output` above: strings may be cut and end with `…`, keys may be
-  dropped with an `_omitted_keys` count, and a deeply nested value may be
+  dropped with an `…omitted_keys` count, and a deeply nested value may be
   replaced by a note. **Identifiers are never cut in half**, so a
   `message_id` or a file name you find there is safe to pass back verbatim.
 - `{"at": "…", "status": "withheld"}` — that turn failed an injection screen.
@@ -322,7 +322,8 @@ rules:
     expecting more.
   - **A step whose output is withheld** reports back
     `{"status": "ok", "withheld": "failed injection screen"}`, or an
-    `output` carrying `"injection_blocked": true` — the worker
+    `output` carrying `"injection_blocked": true` as its own top-level
+    field (anywhere deeper it is just data) — the worker
     ran successfully,
     but its output tripped the injection screen and was suppressed for
     safety. Do NOT re-run the step expecting different output (it will

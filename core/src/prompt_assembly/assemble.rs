@@ -132,8 +132,12 @@ fn render_handoff_block() -> String {
          Some tool results are too large for the context window. When a tool \
          result is the placeholder object {{handoff_ref, byte_len, summary_head, \
          truncated: true}}, the full output was stashed and only summary_head — \
-         the readable first ~{head_kib} KiB — is shown inline. That head is often \
-         enough to proceed without fetching anything more.\n\
+         the start of the result, about {head_kib} KiB of its text, as JSON with \
+         its field names — is shown inline. Its lists and objects stop wherever \
+         the head ends, so a field or item missing from it may simply lie past \
+         that point, and a count of omitted items inside it counts only what \
+         the head held, not the whole result. That head is often enough to proceed \
+         without fetching anything more.\n\
          To read more of the body, emit a step with tool=\"{tool}\" \
          method=\"{method}\" and parameters={{handoff_ref, offset?, len?}} \
          (offset defaults to 0; len defaults to {max_fetch_kib} KiB and is clamped \

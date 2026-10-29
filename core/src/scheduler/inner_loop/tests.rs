@@ -725,22 +725,35 @@ fn plans_so_far_summary_truncates_long_ok_output() {
 fn plans_so_far_summary_ok_handoff_placeholder_surfaces_ref() {
     // An oversized result is stashed upstream and replaced with a small
     // handoff placeholder; rendering its head surfaces the summary_head +
-    // handoff_ref so the planner can decide to fetch_handoff.
+    // handoff_ref so the planner can decide to fetch_handoff. Since #705 the
+    // head keeps its labels all the way into the planner's summary.
+    let r = crate::handoff::HandoffRef::of(b"the big result");
+    let big = serde_json::json!({"message_id": "3327", "has_attachments": true});
     let mut c = ctx();
     c.plans.push(PlanRecord::new(
         plan_with_decision("act"),
-        vec![StepOutcome::Ok(serde_json::json!({
-            "handoff_ref": "h:abc123",
-            "byte_len": 200000,
-            "summary_head": "the first kilobyte of the big result",
-            "truncated": true,
-        }))],
+        vec![StepOutcome::Ok(crate::handoff::build_handoff_placeholder(&big, &r, 200000))],
     ));
     let s = c.plans_so_far_summary();
     let output = &s[0]["step_outcomes"][0]["output"];
-    assert_eq!(output["handoff_ref"], "h:abc123", "handoff_ref not surfaced: {output}");
-    assert_eq!(output["summary_head"], "the first kilobyte of the big result", "summary_head not surfaced: {output}");
+    assert_eq!(output["handoff_ref"], r.as_str(), "handoff_ref not surfaced: {output}");
+    assert_eq!(output["summary_head"], big, "summary_head not surfaced with its labels: {output}");
     assert_eq!(output["byte_len"], 200000, "byte_len lost: {output}");
+}
+
+#[test]
+fn a_handoff_head_is_pruned_once_so_its_omission_counts_are_true() {
+    // Found by review of #705's first version, which rendered the head when the
+    // result was stashed: the summary prunes every result again, and that
+    // second pass dropped the core's own `…omitted_keys` (not an identifier)
+    // and re-counted it as one dropped key. The head is rendered once, by the summary.
+    let big = serde_json::json!({"a b": "x", "c d": "y", "ok": 1});
+    let placeholder = crate::handoff::build_handoff_placeholder(&big, &crate::handoff::HandoffRef::of(b"x"), 200000);
+    let mut c = ctx();
+    c.plans.push(PlanRecord::new(plan_with_decision("act"), vec![StepOutcome::Ok(placeholder)]));
+    let s = c.plans_so_far_summary();
+    let head = &s[0]["step_outcomes"][0]["output"]["summary_head"];
+    assert_eq!(head, &serde_json::json!({"ok": 1, result_view::OMITTED_KEYS_KEY: 2}), "{head}");
 }
 
 #[test]

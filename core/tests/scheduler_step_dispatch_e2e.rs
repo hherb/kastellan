@@ -473,8 +473,8 @@ fn dispatcher_stashes_oversized_ok_result_only_for_positive_task_id() {
             "stashed body must exceed the cap"
         );
         assert!(
-            value["summary_head"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
-            "placeholder carries a non-empty readable head"
+            value["summary_head"]["stdout"].as_str().is_some_and(|s| !s.is_empty()),
+            "placeholder carries a labelled head with the worker's stdout (#705): {value:#}"
         );
 
         // The advertised ref resolves in the cache, under this task only.

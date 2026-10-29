@@ -22,6 +22,10 @@ pub const WITHHELD_NOTE: &str = "[tool output withheld: failed injection screen]
 /// spelling for both placeholder builders (this one and
 /// `scheduler::tool_dispatch::fetch_screen`) and every reader: the
 /// planner-summary render and `kastellan-cli`'s guard corpus capture.
+///
+/// Reserved to the core at the top level of a result: a worker result that
+/// carries it there is withheld by `post_process` with the reason code
+/// `post_process::FORGED_MARKER_REASON` (#704).
 pub const INJECTION_BLOCKED_KEY: &str = "injection_blocked";
 
 /// Key of the blocking screen's score. Audit-only (see [`AUDIT_ONLY_KEYS`]).

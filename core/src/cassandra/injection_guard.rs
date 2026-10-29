@@ -81,6 +81,9 @@
 use std::collections::BTreeSet;
 use serde_json::Value;
 
+mod screened_head;
+pub use screened_head::screened_head;
+
 /// Verdict returned by [`screen`].
 ///
 /// `score` is the sum of per-rule weights that fired (cap 1.0).
