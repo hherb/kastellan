@@ -15,7 +15,8 @@ Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state 
 answer** and the only one worth trusting. ·
 **Both hosts run PR #917's tree** (deployed 2026-10-29 — #909 + #906 are live). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
-one restart it cost was the Postgres race #909 fixes — **#909's own reboot proof is still owed**).
+one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
+core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
 `kastellan-guard` reads `disabled` in `is-enabled` — harmless, the target's `Wants=` names it. Guard
 keys `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` are in `.local` (backups `~/kastellan.env*.bak-pre909`).
 **Mac:** [[mac-kastellan-install-recipe]], no guard configured (backups `~/.config/kastellan/*.bak-pre909`).
@@ -53,6 +54,11 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - **Mac:** `build-release.sh` + the recipe's install line; env and core plist byte-identical; installed
   `kastellan` sha256 = `target/release`'s; `guard_tier.boot` `not_configured`. **#870 confirmed live:**
   the install brought `kastellan.target` up with **no hand `bootstrap`** (Postgres `runs = 1`).
+- **#909 reboot-proven (DGX, same day):** `postgres not accepting connections yet` (attempt 1) →
+  `postgres is accepting connections` (attempts 2, `waited_ms` 1017); core `NRestarts=0`, stderr
+  untouched, guard configured at +10 s after four `/props` waits (one connect-refused, three 503s),
+  Matrix logged in at attempt 1, no WARN/ERROR after boot, still zero `boot_refused` rows. The
+  pre-reboot `matrix is down … transient scope unit` WARN is the shutdown, not a fault.
 - Neither the full sweep nor clippy was re-run: docs-only PR, binaries built from `main` as merged.
 
 ### Previous (2026-10-26 → 29): the boot arc — #909, #906, #913/#911, #915 (PRs #910, #912, #914, #916, merged) — what still binds
@@ -237,9 +243,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 0. ⚠️ When stopping a hand-started guard, never `pkill -f "llama-server.*--port 8081"` inside
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
-   #909 + #906 are deployed (2026-10-29). **Owed: #909's reboot proof** — on the next DGX reboot
-   expect core `NRestarts=0` and the `postgres is accepting connections` line (or none, if Postgres
-   won the race), and still zero `guard_tier.boot_refused` rows.
+   #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
 1. **The live re-measure** (unblocked 2026-10-24 — the daemon boots again, on GPU) (DMs, a **fresh room**; #776 is deployed,
    thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
