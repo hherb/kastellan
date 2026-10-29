@@ -119,8 +119,13 @@ impl WorkerManifest for MailManifest {
                 params: &[
                     ToolParam {
                         name: "query",
-                        description: "free-text search query. For a filter-only search (e.g. every \
-                                      message with an attachment) omit query and pass filters.",
+                        description: "search words. EVERY word must appear in a hit: there is no \
+                                      OR, AND, NOT or quoting — 'OR' is just one more word to \
+                                      match, so 'flight OR airline' finds almost nothing. Use 1-3 \
+                                      distinctive words (e.g. 'e-ticket itinerary'); for \
+                                      alternatives, run separate searches. For a filter-only search \
+                                      (e.g. every message with an attachment) omit query and pass \
+                                      filters.",
                         required: false,
                     },
                     ToolParam {

@@ -116,6 +116,35 @@ fn search_advertises_query_as_optional_and_says_how_to_filter_only() {
     );
 }
 
+/// localmail's plain search is `plainto_tsquery('simple', …)`: EVERY word
+/// must appear in a hit, and `OR` is not an operator but one more word to
+/// match. DGX task 211 (2026-10-29) asked for the most recent flight booking
+/// with `flight booking OR flight confirmation OR airline OR reservation`,
+/// matched only two 2025 emails, and answered with a 17-month-old booking
+/// while `e-ticket itinerary` would have found the one from 28 Oct. The
+/// description is the only place the planner can learn the dialect.
+#[test]
+fn search_query_says_every_word_must_match_and_or_is_not_an_operator() {
+    let docs = MailManifest.tool_docs();
+    let d = docs.iter().find(|d| d.method == "mail.search").expect("mail.search");
+    let query = d.params.iter().find(|p| p.name == "query").expect("query");
+    assert!(
+        query.description.contains("EVERY word"),
+        "must say all words are required: {:?}",
+        query.description
+    );
+    assert!(
+        query.description.contains("no OR"),
+        "must say OR is not an operator: {:?}",
+        query.description
+    );
+    assert!(
+        query.description.contains("separate searches"),
+        "must say how to search for alternatives: {:?}",
+        query.description
+    );
+}
+
 /// The live defect this parameter set exists to end (task 160, 2026-08-17):
 /// the tool took exactly one parameter — a 64-char sha256 — and the planner,
 /// which had the right hash in its prompt head, supplied a different one.
