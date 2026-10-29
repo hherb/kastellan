@@ -61,7 +61,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - **"Most recent" was answered wrong because of the query dialect, not the archive.** localmail's plain search is
   `plainto_tsquery('simple', …)`: **every word must match, and `OR` is just another word**. The planner's
   `flight booking OR … OR reservation` matched two 2025 emails. #924's `mail.search` `query` doc now says so;
-  live re-ask (task 217): `query: "flight"` → the 28 Oct Learmonth → Perth e-ticket, 119 s. Task 218 ("most recent
+  live re-ask (task 217): `query: "flight"` → the newest e-ticket (28 Oct), 119 s. Task 218 ("most recent
   invoice") hit the plan cap again (#922).
 - **localmail on the DGX had stalled** (IDLE stuck `reconnecting` since 02:58, poll stale since 21:33 the evening
   before; the unit read `active` the whole time). Restarted 2026-10-30 08:50; heartbeats fresh. Check with
