@@ -27,16 +27,24 @@
 use serde_json::{Map, Value};
 
 use super::MAX_WALK_DEPTH;
+
+/// Appended to the one string a head cuts. Written by the core, so it is the
+/// only text in a head the screen did not read.
+const CUT_MARK: &str = "…";
 #[cfg(doc)]
 use super::extract_scannable_text;
 
 /// A head of `value` in walk order whose total charge (see the module docs) is
 /// at most `byte_cap`. The string that crosses the cap is cut on a character
-/// boundary and nothing after it is kept. A subtree at [`MAX_WALK_DEPTH`],
-/// which the screen skips, becomes `null`. Pure and deterministic.
+/// boundary and ends in [`CUT_MARK`], or is dropped if it holds no whitespace;
+/// nothing after it is kept. A subtree at [`MAX_WALK_DEPTH`], which the screen
+/// skips, becomes `null`. Pure and deterministic.
 ///
-/// The head's text, as [`extract_scannable_text`] reads it, is a prefix of
-/// `extract_scannable_text(value, cap)` for any `cap >= byte_cap`.
+/// The head's text, as [`extract_scannable_text`] reads it and less the final
+/// [`CUT_MARK`], is a prefix of `extract_scannable_text(value, cap)` for any
+/// `cap >= byte_cap`. Lists and objects simply stop where the head stops, with
+/// no omission marker: the summary renders the head once more, and a marker
+/// written here would be garbled by that render.
 pub fn screened_head(value: &Value, byte_cap: usize) -> Value {
     let mut used = 0;
     head_at(value, byte_cap, 0, &mut used).0.unwrap_or(Value::Null)
@@ -64,7 +72,14 @@ fn head_at(value: &Value, cap: usize, depth: usize, used: &mut usize) -> (Option
                 take -= 1;
             }
             *used = cap;
-            ((take > 0).then(|| Value::String(s[..take].to_string())), true)
+            // The summary will not cut a string this short again, so it must
+            // not look whole. A space-free string is an id, a URL or a path the
+            // planner copies verbatim, and half of one is a trap: drop it. Cut
+            // prose ends in `…`, as a cut string does in every view (review).
+            if take == 0 || !s.contains(char::is_whitespace) {
+                return (None, true);
+            }
+            (Some(Value::String(format!("{}{CUT_MARK}", &s[..take]))), true)
         }
         Value::Array(items) => {
             if let (None, stop) = charge_node(Value::Null, cap, used) {
@@ -123,11 +138,13 @@ mod tests {
     use serde_json::json;
 
     /// The property the module rests on: the screen, run uncapped over the
-    /// head, reads a prefix of what it read from the original at the cap.
+    /// head, reads a prefix of what it read from the original at the cap, but
+    /// for the [`CUT_MARK`] the core adds to the last string it shows.
     fn assert_inside_the_screened_text(v: &Value, cap: usize) {
         let (screened, _) = extract_scannable_text(v, cap);
         let (shown, _) = extract_scannable_text(&screened_head(v, cap), usize::MAX);
-        assert!(screened.starts_with(&shown), "cap {cap}: showed {shown:?}, screened {screened:?}");
+        let shown = shown.strip_suffix(CUT_MARK).unwrap_or(&shown);
+        assert!(screened.starts_with(shown), "cap {cap}: showed {shown:?}, screened {screened:?}");
     }
 
     /// A value deep enough that `walk` skips its innermost string.
@@ -140,9 +157,10 @@ mod tests {
         let values = [
             json!("plain"),
             json!({"a": "first", "b": ["second", "", 3, true, null, {"c": "third"}], "d": "fourth"}),
-            json!(["aé€😀", "tail"]),
+            json!(["a é € 😀", "tail end"]),
             // A cut after a separator, before a multi-byte character (review).
-            json!(["ab", "é"]),
+            json!(["a b", "é é"]),
+            json!(["no-spaces-here", "https://example.com/a/b"]),
             json!({"a": nested(MAX_WALK_DEPTH + 2, json!("too deep")), "b": "after the deep one"}),
         ];
         for v in &values {
@@ -155,15 +173,23 @@ mod tests {
 
     #[test]
     fn nothing_after_the_cap_survives() {
-        // Charge: 1 (object) + 1 ("a") + 1 (separator) + 4 ("xxxx") = 7.
-        let v = json!({"a": "x".repeat(10), "b": "never screened", "c": 7});
-        assert_eq!(screened_head(&v, 7), json!({"a": "xxxx"}));
+        // Charge: 1 (object) + 1 ("a") + 1 (separator) + 4 ("x xx") = 7.
+        let v = json!({"a": "x xx".repeat(10), "b": "never screened", "c": 7});
+        assert_eq!(screened_head(&v, 7), json!({"a": "x xx…"}));
+    }
+
+    #[test]
+    fn half_an_identifier_is_never_shown() {
+        // A cut URL would read as a whole one: nothing marks it, and the
+        // planner's view does not cut a string this short again (review).
+        let v = json!({"title": "a hit", "url": "https://example.com/a/long/path"});
+        assert_eq!(screened_head(&v, 20), json!({"title": "a hit"}));
     }
 
     #[test]
     fn a_cut_never_splits_a_character() {
-        // Charge: 1 (array) + 1 ("a") leaves 1 byte, and "é" is two.
-        assert_eq!(screened_head(&json!(["aé"]), 3), json!(["a"]));
+        // Charge: 1 (array) + 1 (separator) leaves 3 bytes, which end inside "é".
+        assert_eq!(screened_head(&json!(["a é"]), 5), json!(["a …"]));
     }
 
     #[test]
