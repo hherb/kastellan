@@ -4,16 +4,16 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261029_909deploy_pre-prune.md`](archive/handover_20261029_909deploy_pre-prune.md),
+> [`archive/handover_20261030_773remeasure_pre-prune.md`](archive/handover_20261030_773remeasure_pre-prune.md),
 > which holds the verbose pre-prune version of everything summarised here (#915's mutants and #913's
 > detail included; #909's review round is in the `906` snapshot, #609's deploy notes in `909`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-29 (#704 + #705, PR #920) ·
-**Recent PRs, newest first:** [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
+**Last updated:** 2026-10-30 (the #773 live re-measure; #923's decode-row fix, this session's PR) ·
+**Recent PRs, newest first:** [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**Both hosts run PR #917's tree** (deployed 2026-10-29 — #909 + #906 are live; #920 is not deployed). **DGX:**
+**The DGX runs PR #920's tree** (deployed 2026-10-30, env diff IDENTICAL, `NRestarts=0`); **the Mac runs #917's**. **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -43,28 +43,37 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-10-29, latest): #704 + #705 — the planner's core markers and the handoff head (PR #920)
+### This session (2026-10-30, latest): the #773 live re-measure — thinking stays ON
 
-- **#704:** the view's **key** markers are `…omitted_keys` / `…view_unavailable` — outside the identifier
-  alphabet, and a key may not start with `.` (`...omitted_keys` reads the same to the planner), so no
-  worker can put them in a view. The **string** markers (`…N more items omitted`) stay spellable — the
-  issue's option 3, deliberately left. ⚠️ **Never prune a rendered view a second time**: the
-  second pass drops the core's own `…` markers as non-identifier keys and re-counts them as 1. A top-level
-  `injection_blocked` (any value) in a **worker** result is now a catalogue Block: the catalogue still runs,
-  so the row keeps its real score and classes, plus `post_process::FORGED_MARKER_REASON`.
-- **#705:** `summary_head` is a **raw** JSON head (`injection_guard::screened_head`, keys + one byte per
-  text-free node charged), rendered **once**, by the summary. ⚠️ The issue's option 1 as filed (render the
-  whole result) would have shown text past `SCAN_BYTE_CAP` [[issue-as-filed-can-carry-a-regression]].
-  A crossing string ends in `…`, or is dropped if the view would show it whole (`result_view::is_atomic`):
-  the head never shows part of a string the view shows whole. Head lists/objects stop unmarked; the
-  handoff block says a missing field may lie past the head and counts inside it cover only the head.
-- Two review rounds (one read-only reviewer in its own worktree) found the double render and the half
-  identifier; a third (4 agents) found the `...` lookalike, the `null` head of a long space-free string,
-  a trailing `\n` defeating the old space-free rule, and three over-long-key mutants no test killed —
-  all fixed, core lib **2611**. Not fixed: turn records stored before #920 still carry `_omitted_keys`
-  (a mislabelled count; ages out). ⚠️ **`git mv` stages the rename** — a later "add specific files" commit still carries it.
-- Deploy (2026-10-29 morning): #909 + #906 live on both hosts, #909 reboot-proven on the DGX; ⚠️ the
-  `probe::run … Connection refused` tail of the DGX `kastellan-core.err` is the 10-25 race — check mtime.
+- #920 deployed to the DGX first. The set ran through **`kastellan-cli ask --classification-floor Public "<q>"`**,
+  not Matrix: it is the same fast lane and floor as a DM, and is stateless by construction, so no fresh room is needed.
+  ⚠️ Run the questions **one at a time**. Readout: `scratchpad`-style `measure.sh <task_id>` (task state, then each
+  plan's `latency_ms`/tokens/decision, steps, answer). Tasks **207–210 = ON, 212–215 = OFF**; 211 is an
+  operator DM that overlapped 209.
+- **ON 4/4 completed** (277–548 s, 10–18k generated tokens); **OFF 2/4 failed** on an empty completion
+  (`raw_len 0`, `finish_reason stop`, 48 tokens) → [#923](https://github.com/hherb/kastellan/issues/923). OFF
+  also sent `{{message_id}}`/`<message_id>` placeholders as params and dropped `has_attachment` between
+  searches. **Decision: `KASTELLAN_LLM_DISABLE_THINKING=0` stays** (restored; overlay byte-identical to the backup).
+- Filed: [#921](https://github.com/hherb/kastellan/issues/921) (an elided output reads as "not retrieved": the planner
+  re-fetches it and the answer says so wrongly), [#922](https://github.com/hherb/kastellan/issues/922) (3/4 hit the
+  fast lane's 5-plan cap; the Qantas table has Price/GST "Unknown"). #698 (filter-only search) and #760 (paged PDF)
+  work live.
+- **Code (this PR):** `AgentError::Decode` carries the completion's `usage` + `latency_ms`, so the
+  `plan.formulate_failed` row has `llm_usage`/`latency_ms` (the `plan.formulate` keys). Both wiring points are
+  mutation-checked. ⚠️ **A new `AgentError::Decode` field breaks 7 fakes in `core/tests/`**, not just the lib's
+  two, and zsh's `grep --include=*.rs` silently matches nothing: quote the glob.
+
+### Previous (2026-10-29): #704 + #705 — core markers and the handoff head (PR #920, merged) — what still binds (prose: the `773remeasure` snapshot)
+
+- View **key** markers `…omitted_keys`/`…view_unavailable` cannot be spelled by a worker (no key may start
+  with `.`); the **string** markers stay spellable (by design). ⚠️ **Never prune a rendered view twice** — the
+  second pass drops the core's own `…` markers. A worker's top-level `injection_blocked` is a catalogue Block
+  (`post_process::FORGED_MARKER_REASON`).
+- `summary_head` = raw JSON head (`injection_guard::screened_head`), rendered **once**; it never shows part of
+  a string the view shows whole (`result_view::is_atomic`). ⚠️ #705's option 1 as filed would have shown text
+  past `SCAN_BYTE_CAP` [[issue-as-filed-can-carry-a-regression]]. Pre-#920 turn records carry `_omitted_keys` (ages out).
+  ⚠️ **`git mv` stages the rename** — a later "add specific files" commit still carries it.
+- ⚠️ The `probe::run … Connection refused` tail of the DGX `kastellan-core.err` is the 10-25 race — check mtime.
 
 ### Previous (2026-10-26 → 29): the boot arc — #909, #906, #913/#911, #915 (PRs #910, #912, #914, #916, merged) — what still binds
 
@@ -86,30 +95,19 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### Previous (2026-10-24 → 25): #609 — the guard backend is supervised (PR #908, merged) — what still binds
 
-- `kastellan-guard` installs only when `KASTELLAN_GUARD_SERVER_BIN`/`_MODEL` are set; ⚠️ port and
-  alias are **derived** from `KASTELLAN_LLM_GUARD_URL`/`_MODEL` (loopback `http`, explicit port);
-  ⚠️ the keys are read **at install time** — a change needs `install`.
-- Boot waits up to 60 s on `/props` for `Connect`/`ConnectTimeout`/HTTP 503 only. ⚠️
-  `tests_common::scripted_llm`'s default **503s `/props`**, so a guard-configured daemon e2e on it
-  waits 60 s before refusing. Open: **#907** (CORS `*`).
+- `kastellan-guard` installs only when `KASTELLAN_GUARD_SERVER_BIN`/`_MODEL` are set; ⚠️ port/alias are
+  **derived** from `KASTELLAN_LLM_GUARD_URL`/`_MODEL`, read **at install time**. Boot waits ≤ 60 s on `/props`;
+  ⚠️ `tests_common::scripted_llm`'s default **503s `/props`** (a guard-configured e2e waits 60 s). Open: #907.
 
-### Previous (2026-10-23 → 24): the supervisor arc — #904, #900/#902, #896 (PRs #905, #903, #901, merged) — what still binds
+### Previous (2026-10-23 → 24): the supervisor arc — #904, #900/#902, #896, #898 (PRs #905, #903, #901, #899, merged) — what still binds
 
-- `Supervisor::crash_evidence` (default `Err(NotImplemented)`); read **once, at timeout only** by
-  `describe_last_status`. ⚠️ systemd `show` answers an unknown unit too, clean defaults —
-  `LoadState=not-found` is the tell.
-- `ServiceStatus::Transitioning`; ⚠️ **unknown words read `Transitioning`**, never `Inactive`.
-  `status_with_word` is the required method.
-- systemd 255's measured answers are the fixtures; benign answers **anchored on the unit's name**.
-  `uninstall` keeps the unit file on a failed stop/disable; every `systemctl` is `run_capped` at 60 s.
-- **#894/#895/#898 (PRs #897, #899):** ⚠️ **a squash commit auto-closed #898** via "fail closed:
-  #898" — run the closing regex over the **squash message** too [[pr-body-not-fixed-autocloses-issue]].
-- launchd: a failed bootout fails `uninstall` and **keeps the plist**; `status` = pure
-  `status_from_print` through the bounded `run_launchctl`; no-GUI-domain (exit 112) reads as "not
-  loaded" for `bootout`/`unload_wait` but ⚠️ **stays an error in `status`** (install's health wait
-  stops at once). ⚠️ **State words stay lenient** — only `running` → `Active`
-  [[guard-shares-the-census-blind-spot]]. A `$HOME` owned by another uid is refused
-  (`ensure_home_owned_by`). `tests-common/src/pg.rs`'s bring-up panics carry the reason.
+- `Supervisor::crash_evidence` is read **once, at timeout only**. ⚠️ systemd `show` answers an unknown unit
+  with clean defaults — `LoadState=not-found` is the tell. ⚠️ **Unknown state words read `Transitioning`**,
+  never `Inactive`; on launchd only `running` → `Active` [[guard-shares-the-census-blind-spot]].
+- `uninstall` keeps the unit file / plist on a failed stop/bootout; `systemctl` is `run_capped` at 60 s. launchd
+  no-GUI-domain (exit 112) is "not loaded" for `bootout`/`unload_wait` but ⚠️ **an error in `status`**.
+- ⚠️ **A squash commit auto-closed #898** ("fail closed: #898") — run the closing regex over the squash
+  message too [[pr-body-not-fixed-autocloses-issue]].
 
 ### Earlier (2026-10-19 → 21): sidecar/drain fixes (PRs #893, #889, #887) and the gate's exact counts (PRs #886 … #879) — what still binds (prose: the `906` snapshot)
 
@@ -250,19 +248,14 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
    #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
-1. **The live re-measure** (unblocked 2026-10-24 — the daemon boots again, on GPU) (DMs, a **fresh room**; #776 is deployed,
-   thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
-   out on the synthesis turn), then read each plan's cost in one query:
-   `select action, payload->'llm_usage', payload->>'latency_ms', payload->>'error' from audit_log
-   where action in ('plan.formulate','plan.formulate_failed') and payload->>'task_id'='<id>' order by id`. Then #728's multi-search question, a filter-only one (#698), a
-   long PDF read across pages (#760), and a revoked mail key once (the planner's reaction to
-   `UPSTREAM_AUTH_FAILED`). **The thinking decision (#773) is made from these rows:** repeat the
-   set with `KASTELLAN_LLM_DISABLE_THINKING=1` (now real on Ollama) and compare answer quality
-   against latency — the #773 probe's non-thinking answer was *wrong*.
-   Then #771 (carry localmail's own 401 reason to the operator — the channel's line is now in
-   `polled_driver/refusal.rs`, and goes through `emit_worker_refusal_report`) and #538
-   (the mail worker's second, hand-rolled localmail mock). The `mail-live` profile ran
-   green on **both** hosts on 2026-10-19.
+1. **The planner's answer quality, from the re-measure (2026-10-30).** [#921](https://github.com/hherb/kastellan/issues/921)
+   first (cheapest; a wrong statement to the user), then [#922](https://github.com/hherb/kastellan/issues/922)'s
+   option 3 (stop spending plans on `list_accounts` and re-fetches), then [#923](https://github.com/hherb/kastellan/issues/923).
+   Re-run the same four questions afterwards (tasks 207–210 are the baseline). **Still owed from the
+   re-measure:** a revoked mail key once (the planner's reaction to `UPSTREAM_AUTH_FAILED`; it touches the
+   operator's localmail token, so ask first); the operator's verdict on 207/208's answers. Then #771 (carry
+   localmail's own 401 reason to the operator — `polled_driver/refusal.rs`, via `emit_worker_refusal_report`)
+   and #538 (the mail worker's second, hand-rolled localmail mock).
 
 2. **#702 follow-up #703** (#704/#705 done in PR #920). ⚠️ **The guard model never sees object keys** — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
@@ -392,10 +385,10 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#704/#705) | PR #920 at `09fc8147` | **5278 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-704-mac.log`. Delta vs #915: +12 core lib, the new tests exactly (1 result_view, 2 post_process, 2 handoff, 6 screened_head, 1 inner_loop). PR's 4th commit: core lib 2608 + the handoff/guard e2es re-run green | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-704` (fresh), **27** | **12** (+7: `python-exec:dev` stale after #918's `Cargo.lock` change — rebuild the image) |
+| **Mac** (#923 decode row) | `fix/decode-failed-row-usage` on `dc1a8279` | **5283 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-decode-mac.log`. Per-suite vs `~/sweep-704-mac.log`: **only core lib**, 2607 → 2612 = +4 (#920's last review commit, after that row's sweep) +1 (the new payload test) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-decode` (fresh), **27** | **12** (7 = `python-exec:dev` stale since #918's `Cargo.lock` — rebuild the image) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
-#913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib) and #920 (+13 core lib); all are platform-neutral and were not swept on the DGX. The #915 Mac row is in the `909deploy` snapshot.
+#913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib) and this PR (+1 core lib); all are platform-neutral and were not swept on the DGX. The #915 Mac row is in the `909deploy` snapshot.
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -478,9 +471,8 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#919** — deploy docs (#909 + #906 live both hosts), merged 2026-10-29. **#918** — dependabot rustls 0.23.46, merged 2026-10-29 (⚠️ makes `python-exec:dev` stale).
-- **#917** — dependabot uv group bump (gliner-relex `uv.lock`), merged 2026-10-29, deployed with the rest.
-- **#916** (#915) — merged 2026-10-29: the boot wait's budget pinned on a paused clock.
+- **#920** (#704, #705) — merged 2026-10-29, **deployed DGX 2026-10-30**: worker-unforgeable view markers; a labelled, screened handoff head.
+- **#919 / #918 / #917 / #916** (merged 2026-10-29): deploy docs; dependabot rustls (⚠️ makes `python-exec:dev` stale) and uv; #915's paused-clock pin.
 - **#914** (#913, #911) — merged 2026-10-28: `boot_report::record_refusal` in the lib, unit-tested; `PgInit` + the late-Postgres boot e2e.
 - **#912** (#906) — merged 2026-10-28, deployed both hosts 2026-10-29: a guard boot refusal is a thinned `guard_tier.boot_refused` row.
 - **#910** (#909) — merged 2026-10-27, deployed both hosts 2026-10-29: core waits up to 60 s for Postgres at boot.
