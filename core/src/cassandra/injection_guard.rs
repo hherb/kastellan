@@ -81,6 +81,9 @@
 use std::collections::BTreeSet;
 use serde_json::Value;
 
+mod scanned_prefix;
+pub use scanned_prefix::scanned_prefix;
+
 /// Verdict returned by [`screen`].
 ///
 /// `score` is the sum of per-rule weights that fired (cap 1.0).

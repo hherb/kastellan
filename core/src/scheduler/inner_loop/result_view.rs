@@ -76,7 +76,11 @@ pub(crate) const DEFAULT_ITEMS: usize = 20;
 pub(crate) const DEFAULT_KEYS: usize = 64;
 
 /// Key added to an object that lost fields; its value is how many it lost.
-pub(crate) const OMITTED_KEYS_KEY: &str = "_omitted_keys";
+///
+/// It starts with `…`, which [`is_identifier_key`] refuses, so no worker can
+/// produce it in a view: a worker's own `…omitted_keys` is dropped like any
+/// other non-identifier key, and its own `_omitted_keys` is plain data (#704).
+pub(crate) const OMITTED_KEYS_KEY: &str = "…omitted_keys";
 
 /// Replaces anything nested [`MAX_WALK_DEPTH`] levels deep, for the same
 /// reason the injection guard stops there (#143): a pathologically deep value
@@ -109,14 +113,15 @@ pub(crate) const KEY_MAX_BYTES: usize = 64;
 /// the screen would let a phrase spelled with it past the catalogue.
 const KEY_SEPARATORS: [char; 6] = ['_', '.', ':', '-', '@', '/'];
 
-/// Key of the object [`render`] returns when nothing fits.
-pub(crate) const VIEW_UNAVAILABLE_KEY: &str = "_view_unavailable";
+/// Key of the object [`render`] returns when nothing fits. Outside the
+/// identifier alphabet for the same reason as [`OMITTED_KEYS_KEY`] (#704).
+pub(crate) const VIEW_UNAVAILABLE_KEY: &str = "…view_unavailable";
 
 /// Value of [`VIEW_UNAVAILABLE_KEY`].
 const VIEW_UNAVAILABLE_TEXT: &str = "result too large to summarise within budget";
 
 /// The smallest `total` for which [`render`] guarantees its size bound. The
-/// fallback serialises to 67 bytes. `summary.rs` pins its budgets above this
+/// fallback serialises to 69 bytes. `summary.rs` pins its budgets above this
 /// with a module-level `const` assertion.
 pub(crate) const MIN_VIEW_TOTAL: usize = 128;
 
@@ -178,9 +183,8 @@ fn prune_at(value: &Value, limits: PruneLimits, depth: usize) -> Value {
                 out.insert(key.clone(), prune_at(item, limits, depth + 1));
             }
             if dropped > 0 {
-                // A worker's own `_omitted_keys` field, if it sent one, is
-                // overwritten. That can only mislabel a count, never reveal
-                // anything, so it does not justify a renaming scheme.
+                // Cannot collide with a kept key: kept keys are identifiers,
+                // and this one is not.
                 out.insert(OMITTED_KEYS_KEY.to_string(), Value::from(dropped));
             }
             Value::Object(out)

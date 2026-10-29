@@ -16,16 +16,20 @@ use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
-use crate::cassandra::injection_guard::extract_scannable_text;
+use crate::cassandra::injection_guard::{scanned_prefix, SCAN_BYTE_CAP};
+use crate::scheduler::inner_loop::result_view;
 
 /// Result larger than this (bytes of its serialized JSON) is stashed and
 /// replaced with a placeholder. 64 KiB ≈ 16k tokens — generous for one
 /// document, below web-fetch's 100 KiB `MAX_TEXT_BYTES`.
 pub const DEFAULT_RESULT_BYTE_CAP: usize = 64 * 1024;
 
-/// Bytes of human-readable head carried inline in the placeholder so the
-/// planner often needs no fetch at all.
+/// Bytes of head carried inline in the placeholder (its serialised JSON) so
+/// the planner often needs no fetch at all.
 pub const SUMMARY_HEAD_BYTES: usize = 1024;
+
+// `result_view::render` guarantees its size bound only from MIN_VIEW_TOTAL up.
+const _: () = assert!(SUMMARY_HEAD_BYTES >= result_view::MIN_VIEW_TOTAL);
 
 /// Per-`fetch_handoff` slice ceiling, so one fetch can't blow the context.
 pub const MAX_FETCH_BYTES: usize = 256 * 1024;
@@ -79,18 +83,22 @@ impl HandoffRef {
 }
 
 /// Build the placeholder the planner sees in place of a stashed oversized
-/// result. `summary_head` is the readable head of the result (char-boundary
-/// safe, via the injection-guard text extractor), so the planner often needs
-/// no fetch at all.
+/// result. `summary_head` is the planner's ordinary labelled view of the
+/// result ([`result_view::render`], #705) at [`SUMMARY_HEAD_BYTES`], so the
+/// planner often needs no fetch at all. Until #705 it was the keyless
+/// flattening the injection guard reads, which lost every key and boolean.
+///
+/// The view is rendered from [`scanned_prefix`], not the whole result: the
+/// view trims strings evenly across its input, and from the whole result it
+/// would show text past the [`SCAN_BYTE_CAP`] window the output screen read.
+/// The placeholder's `truncated: true` means the *body* was stashed (always
+/// true on this path), not that the head was cut.
 pub fn build_handoff_placeholder(
     value: &serde_json::Value,
     r: &HandoffRef,
     byte_len: usize,
 ) -> serde_json::Value {
-    // `_truncated` reports whether the *head* hit SUMMARY_HEAD_BYTES; we don't
-    // surface it. The placeholder's `truncated: true` means the *body* was
-    // stashed (always true on this path), a different fact.
-    let (head, _truncated) = extract_scannable_text(value, SUMMARY_HEAD_BYTES);
+    let head = result_view::render(&scanned_prefix(value, SCAN_BYTE_CAP), SUMMARY_HEAD_BYTES);
     serde_json::json!({
         "handoff_ref": r.as_str(),
         "byte_len": byte_len,
@@ -394,7 +402,35 @@ mod tests {
         assert_eq!(p["handoff_ref"], r.as_str());
         assert_eq!(p["byte_len"], 123_456);
         assert_eq!(p["truncated"], true);
-        assert!(p["summary_head"].as_str().unwrap().contains("quick brown fox"));
+        assert_eq!(p["summary_head"]["text"], "the quick brown fox jumps over the lazy dog");
+    }
+
+    /// #705: the head is labelled JSON, like an ordinary step's output, so a
+    /// big search result still says which hit is which and which has the PDF.
+    #[test]
+    fn the_head_keeps_keys_and_booleans() {
+        let hit = |i: usize| serde_json::json!({"message_id": format!("m{i}"), "has_attachments": i == 0, "snippet": "word ".repeat(300)});
+        let value = serde_json::json!({"results": (0..60).map(hit).collect::<Vec<_>>()});
+        let p = build_handoff_placeholder(&value, &HandoffRef::of(b"x"), 99_999);
+        let head = &p["summary_head"];
+        assert_eq!(head["results"][0]["message_id"], "m0");
+        assert_eq!(head["results"][0]["has_attachments"], true);
+        assert!(serde_json::to_string(head).unwrap().len() <= SUMMARY_HEAD_BYTES, "{head}");
+    }
+
+    /// The head shows only text the output screen read. The view trims strings
+    /// evenly across its input, so built from the whole result it would show
+    /// this tail, which sits past the screen's window (#705 review of the issue).
+    #[test]
+    fn the_head_never_shows_text_past_the_screened_window() {
+        use crate::cassandra::injection_guard::SCAN_BYTE_CAP;
+        let value = serde_json::json!({"a": "filler ".repeat(SCAN_BYTE_CAP / 7 + 1), "z": "unscreened tail"});
+        let p = build_handoff_placeholder(&value, &HandoffRef::of(b"x"), 99_999);
+        assert!(p["summary_head"]["a"].is_string(), "{p}");
+        assert!(!p.to_string().contains("unscreened tail"), "{p}");
+        // Control: the view of the whole value does show the tail.
+        let whole = crate::scheduler::inner_loop::result_view::render(&value, SUMMARY_HEAD_BYTES);
+        assert!(whole.to_string().contains("unscreened tail"), "{whole}");
     }
 
     #[test]
