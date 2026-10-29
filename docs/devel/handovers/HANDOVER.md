@@ -4,24 +4,25 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261028_906_pre-prune.md`](archive/handover_20261028_906_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (#909's review round and
-> baseline rows included; #609's deploy notes are in the `909` snapshot, #904's/#900's in `609`).
+> [`archive/handover_20261029_909deploy_pre-prune.md`](archive/handover_20261029_909deploy_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (#915's mutants and #913's
+> detail included; #909's review round is in the `906` snapshot, #609's deploy notes in `909`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-29 (#915 — the boot wait on a paused clock) ·
-**Recent PRs, newest first:** [#916](https://github.com/hherb/kastellan/pull/916) (#915), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
+**Last updated:** 2026-10-29 (#909 + #906 deployed on both hosts) ·
+**Recent PRs, newest first:** [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**Both hosts run PR #908's tree** (deployed 2026-10-25; #909 and #906 are **not deployed**). **DGX:**
-`kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** (guard configured at
-+10 s after two 503s, Matrix, SearxNG, Ollama all back unattended). The one restart that reboot cost
-was the Postgres race #909 fixes. `kastellan-guard` reads `disabled` in `is-enabled` — harmless, the
-target's `Wants=` names it. Guard keys `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` are in `.local`
-(backups `~/kastellan.env*.bak-pre908`). **Mac:** [[mac-kastellan-install-recipe]], no guard configured.
+**Both hosts run PR #917's tree** (deployed 2026-10-29 — #909 + #906 are live). **DGX:**
+`kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
+one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
+core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
+`kastellan-guard` reads `disabled` in `is-enabled` — harmless, the target's `Wants=` names it. Guard
+keys `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` are in `.local` (backups `~/kastellan.env*.bak-pre909`).
+**Mac:** [[mac-kastellan-install-recipe]], no guard configured (backups `~/.config/kastellan/*.bak-pre909`).
 The DGX boot ERROR `install dir is writable … (mode 0775)` is **pre-existing** (since 2026-07-31).
 Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs images last rebuilt
-2026-10-19. Deploy detail: the `909` snapshot.
+2026-10-19. Deploy detail: this session's section and the `909` snapshot (#609).
 
 > **Header convention (since 2026-09-11, after three recurrences).** This header names **PRs and
 > issues only — never a branch name, a HEAD sha, or the word OPEN.** A merge falsifies those with no
@@ -42,43 +43,41 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-10-29, latest): #915 — the boot wait's budget on a paused clock
+### This session (2026-10-29, latest): deployed #909 + #906 on both hosts (no code change)
 
-- `kastellan_db::boot_wait::wait_until_accepting` measures its budget with **`tokio::time::Instant`**
-  (was std's), so `#[tokio::test(start_paused = true)]` pins it exactly: 1200 ms budget / 100 ms
-  interval = **12 dials, ends at 1100 ms** (a budget that is a multiple of the interval is the one
-  case where `>=` vs `>` shows); 250 ms dials = 3 dials, ends at 950 ms (dial time counts).
-  `kastellan-db` dev-deps gain tokio `test-util` (core's already had it, so `--workspace` test
-  builds are unchanged). Mutants killed: `>`, no `+ interval`, std `Instant`, no budget check,
-  counting only the sleeps, no pacing sleep. ⚠️ A paused-clock test of a loop needs an outer
-  `timeout` **and** a call cap in the fake: the clock only auto-advances when the runtime is idle,
-  so a mutant that drops the loop's only sleep keeps a `yield_now` fake runnable forever and the
-  timeout never fires — measured, it hung until killed; the cap (`n <= 50`) fails it in 0.00 s
-  [[async-fakes-must-yield-like-io]].
+- **DGX:** plain `scripts/upgrade_from_git.sh` (exit 0; 15 binaries; overlay 15 keys; generated and
+  `.local` env byte-identical; live-matrix digest `94c86940…` unchanged; Matrix up). Core
+  `NRestarts=0`, `guard_tier.boot` row 6157 `configured: true`, **zero** `guard_tier.boot_refused`
+  rows. ⚠️ The `probe::run … Connection refused` at the tail of `kastellan-core.err` is the
+  **2026-10-25 reboot race** (file mtime 10-25 12:08) — a clean boot writes no stderr; check the mtime
+  before reading that tail as current.
+- **Mac:** `build-release.sh` + the recipe's install line; env and core plist byte-identical; installed
+  `kastellan` sha256 = `target/release`'s; `guard_tier.boot` `not_configured`. **#870 confirmed live:**
+  the install brought `kastellan.target` up with **no hand `bootstrap`** (Postgres `runs = 1`).
+- **#909 reboot-proven (DGX, same day):** `postgres not accepting connections yet` (attempt 1) →
+  `postgres is accepting connections` (attempts 2, `waited_ms` 1017); core `NRestarts=0`, stderr
+  untouched, guard configured at +10 s after four `/props` waits (one connect-refused, three 503s),
+  Matrix logged in at attempt 1, no WARN/ERROR after boot, still zero `boot_refused` rows. The
+  pre-reboot `matrix is down … transient scope unit` WARN is the shutdown, not a fault.
+- Neither the full sweep nor clippy was re-run: docs-only PR, binaries built from `main` as merged.
 
-### Previous (2026-10-28): #913 + #911 — test debt from #912/#910 (PR #914, merged) — what still binds
+### Previous (2026-10-26 → 29): the boot arc — #909, #906, #913/#911, #915 (PRs #910, #912, #914, #916, merged) — what still binds
 
-- `boot_report::record_refusal(payload, lookup, insert, budget) -> RefusalRecord`: the lookup gets
-  **half** the budget and a slow one writes the row anyway; `main/guard_refusal.rs` only binds it.
-- `tests_common::init_pg_cluster` → `PgInit` (not started) + `PgInit::start`; `bring_up_pg_cluster*`
-  unchanged. `boot_waits_for_postgres_e2e` is in the `pg` profile (91 tests, 12 binaries).
-
-### Previous (2026-10-28): #906 — a guard boot refusal is an audit row (PR #912, merged) — what still binds
-
-- Every `GuardTierError` and a malformed guard key (`from_env` → `config`) writes `policy /
+- **#909:** boot dials the maintenance DB for up to **60 s** only on `ECONNREFUSED`/`ENOENT`/`57P03`;
+  a missing socket **dir** refuses at once; each dial capped at 5 s (`probe::run`'s own dial is still
+  uncapped). Budget measured with `tokio::time::Instant`, pinned on a paused clock (#915). ⚠️ A
+  paused-clock test of a loop needs an outer `timeout` **and** a call cap in the fake — the clock
+  only advances when the runtime is idle [[async-fakes-must-yield-like-io]].
+- **#906:** every `GuardTierError` and a malformed guard key (`from_env` → `config`) writes `policy /
   guard_tier.boot_refused` = `{"refusal", "error_kind"}` (closed tokens, #616's rule). ⚠️ The
   `from_env` path is picked out by the error text naming a `KASTELLAN_LLM_GUARD_` key — a new guard
-  key must name itself in its error. Its own action, not a third `guard_tier.boot` shape.
-- Thinned by the table (`audit::exists_within`): one row per payload per hour, reset by a later
-  `guard_tier.boot` row; lookup + insert bounded at 5 s.
-
-### Previous (2026-10-26): #909 — core waits for Postgres at boot (PR #910, merged) — what still binds
-
-- Boot dials the maintenance DB for up to **60 s** only on `ECONNREFUSED`/`ENOENT`/`57P03`; a
-  missing socket **dir** refuses at once; each dial capped at 5 s (`probe::run`'s own dial is still
-  uncapped). Recovery path e2e'd since #911; budget pinned on a paused clock since #915.
-- ⚠️ The daemon's JSON log goes to **stdout**; a boot refusal (`Error: …`) to **stderr**.
-- ⚠️ A daemon e2e pointed at a cluster that never starts takes 60 s to refuse.
+  key must name itself in its error. Thinned by the table (`audit::exists_within`): one row per
+  payload per hour, reset by a later `guard_tier.boot` row. `boot_report::record_refusal` gives the
+  lookup **half** the 5 s budget and writes the row anyway on a slow one (#913).
+- `tests_common::init_pg_cluster` → `PgInit` (not started) + `PgInit::start`;
+  `boot_waits_for_postgres_e2e` is in the `pg` profile (91 tests, 12 binaries).
+- ⚠️ The daemon's JSON log goes to **stdout**; a boot refusal (`Error: …`) to **stderr**. ⚠️ A daemon
+  e2e pointed at a cluster that never starts takes 60 s to refuse.
 
 ### Previous (2026-10-24 → 25): #609 — the guard backend is supervised (PR #908, merged) — what still binds
 
@@ -244,8 +243,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 0. ⚠️ When stopping a hand-started guard, never `pkill -f "llama-server.*--port 8081"` inside
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
-   **Deploy #909 + #906** with the next deploy (after it, `select payload from audit_log where action = 'guard_tier.boot_refused'` should be empty on a healthy host); on the next DGX reboot expect core `NRestarts=0` and the
-   `postgres is accepting connections` line (or none, if Postgres won the race).
+   #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
 1. **The live re-measure** (unblocked 2026-10-24 — the daemon boots again, on GPU) (DMs, a **fresh room**; #776 is deployed,
    thinking ON, `reasoning_effort` dialect, 600 s timeout). First measurement: re-ask the **Qantas question** (tasks 193/194 timed
@@ -291,8 +289,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    script). Open: [#805](https://github.com/hherb/kastellan/issues/805), #809–#811, #868
    (compiler-checked bounds), #817 (a crash loses the thinned tail, both writers). Security items:
    #833 (stderr panic in a `Drop`; a design call, now also `bus_guards` and `InboundReceiver`), #831.
-   **#870** (PR #871, merged): ⚠️ **unverified live** — the next Mac install should need no hand
-   `bootstrap`; check `launchctl print gui/$(id -u)/kastellan-postgres` after it.
+   **#870** (PR #871): verified live 2026-10-29 — the Mac install needed no hand `bootstrap`.
 
 **On the micro-VM path — one issue left, and it needs a kernel build.**
 [#668](https://github.com/hherb/kastellan/issues/668) — repin a guest kernel with
@@ -476,9 +473,11 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#917** — dependabot uv group bump (gliner-relex `uv.lock`), merged 2026-10-29, deployed with the rest.
+- **#916** (#915) — merged 2026-10-29: the boot wait's budget pinned on a paused clock.
 - **#914** (#913, #911) — merged 2026-10-28: `boot_report::record_refusal` in the lib, unit-tested; `PgInit` + the late-Postgres boot e2e.
-- **#912** (#906) — merged 2026-10-28, **not deployed**: a guard boot refusal is a thinned `guard_tier.boot_refused` row.
-- **#910** (#909) — merged 2026-10-27, **not deployed**: core waits up to 60 s for Postgres at boot.
+- **#912** (#906) — merged 2026-10-28, deployed both hosts 2026-10-29: a guard boot refusal is a thinned `guard_tier.boot_refused` row.
+- **#910** (#909) — merged 2026-10-27, deployed both hosts 2026-10-29: core waits up to 60 s for Postgres at boot.
 - **#908** (#609) — merged 2026-10-24, deployed both hosts 2026-10-25: the supervised `kastellan-guard` unit and the `/props` boot wait.
 - **#905** (#904) — merged 2026-10-24: health-wait timeouts name the crash-loop evidence.
 - **#903** (#900, #902) — merged 2026-10-23: `ServiceStatus::Transitioning`; the manager's state word in timeouts.
