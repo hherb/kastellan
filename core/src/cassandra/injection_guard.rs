@@ -81,8 +81,8 @@
 use std::collections::BTreeSet;
 use serde_json::Value;
 
-mod scanned_prefix;
-pub use scanned_prefix::scanned_prefix;
+mod screened_head;
+pub use screened_head::screened_head;
 
 /// Verdict returned by [`screen`].
 ///

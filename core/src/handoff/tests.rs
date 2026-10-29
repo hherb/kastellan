@@ -115,12 +115,11 @@ fn the_head_keeps_keys_and_booleans() {
     let head = &p["summary_head"];
     assert_eq!(head["results"][0]["message_id"], "m0");
     assert_eq!(head["results"][0]["has_attachments"], true);
-    assert!(serde_json::to_string(head).unwrap().len() <= SUMMARY_HEAD_BYTES, "{head}");
 }
 
-/// The head shows only text the output screen read. The view trims strings
-/// evenly across its input, so built from the whole result it would show
-/// this tail, which sits past the screen's window (#705 review of the issue).
+/// The head shows only text the output screen read. The planner's view trims
+/// strings evenly across its input, so given the whole result it would show
+/// this tail, which sits past the screen's window (found reviewing #705).
 #[test]
 fn the_head_never_shows_text_past_the_screened_window() {
     use crate::cassandra::injection_guard::SCAN_BYTE_CAP;

@@ -16,20 +16,21 @@ use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
-use crate::cassandra::injection_guard::{scanned_prefix, SCAN_BYTE_CAP};
-use crate::scheduler::inner_loop::result_view;
+use crate::cassandra::injection_guard::{screened_head, SCAN_BYTE_CAP};
 
 /// Result larger than this (bytes of its serialized JSON) is stashed and
 /// replaced with a placeholder. 64 KiB ≈ 16k tokens — generous for one
 /// document, below web-fetch's 100 KiB `MAX_TEXT_BYTES`.
 pub const DEFAULT_RESULT_BYTE_CAP: usize = 64 * 1024;
 
-/// Bytes of head carried inline in the placeholder (its serialised JSON) so
-/// the planner often needs no fetch at all.
+/// Budget of the head carried inline in the placeholder (see
+/// [`screened_head`] for what it charges) so the planner often needs no fetch
+/// at all.
 pub const SUMMARY_HEAD_BYTES: usize = 1024;
 
-// `result_view::render` guarantees its size bound only from MIN_VIEW_TOTAL up.
-const _: () = assert!(SUMMARY_HEAD_BYTES >= result_view::MIN_VIEW_TOTAL);
+// The head's text lies inside the text the output screen read only while the
+// head's budget is within the screen's window.
+const _: () = assert!(SUMMARY_HEAD_BYTES <= SCAN_BYTE_CAP);
 
 /// Per-`fetch_handoff` slice ceiling, so one fetch can't blow the context.
 pub const MAX_FETCH_BYTES: usize = 256 * 1024;
@@ -83,22 +84,24 @@ impl HandoffRef {
 }
 
 /// Build the placeholder the planner sees in place of a stashed oversized
-/// result. `summary_head` is the planner's ordinary labelled view of the
-/// result ([`result_view::render`], #705) at [`SUMMARY_HEAD_BYTES`], so the
-/// planner often needs no fetch at all. Until #705 it was the keyless
+/// result. `summary_head` is the start of the result as JSON, keys, numbers
+/// and booleans included ([`screened_head`] at [`SUMMARY_HEAD_BYTES`], #705),
+/// so the planner often needs no fetch at all. Until #705 it was the keyless
 /// flattening the injection guard reads, which lost every key and boolean.
 ///
-/// The view is rendered from [`scanned_prefix`], not the whole result: the
-/// view trims strings evenly across its input, and from the whole result it
-/// would show text past the [`SCAN_BYTE_CAP`] window the output screen read.
-/// The placeholder's `truncated: true` means the *body* was stashed (always
-/// true on this path), not that the head was cut.
+/// The head is deliberately **not** rendered here. The planner summary renders
+/// every step result, this placeholder included, and a second render would
+/// garble the first one's omission markers. Its text is a prefix of the text the
+/// output screen read, because the summary's render trims strings evenly across
+/// its input and, given the whole result, would show text past the
+/// [`SCAN_BYTE_CAP`] window. The placeholder's `truncated: true` means the
+/// *body* was stashed (always true on this path), not that the head was cut.
 pub fn build_handoff_placeholder(
     value: &serde_json::Value,
     r: &HandoffRef,
     byte_len: usize,
 ) -> serde_json::Value {
-    let head = result_view::render(&scanned_prefix(value, SCAN_BYTE_CAP), SUMMARY_HEAD_BYTES);
+    let head = screened_head(value, SUMMARY_HEAD_BYTES);
     serde_json::json!({
         "handoff_ref": r.as_str(),
         "byte_len": byte_len,

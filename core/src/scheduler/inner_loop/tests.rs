@@ -742,6 +742,21 @@ fn plans_so_far_summary_ok_handoff_placeholder_surfaces_ref() {
 }
 
 #[test]
+fn a_handoff_head_is_pruned_once_so_its_omission_counts_are_true() {
+    // Found by review of #705's first version, which rendered the head when the
+    // result was stashed: the summary prunes every result again, and that
+    // second pass dropped the core's own `…omitted_keys` (not an identifier)
+    // and re-counted it as one dropped key. The head is rendered once, here.
+    let big = serde_json::json!({"a b": "x", "c d": "y", "ok": 1});
+    let placeholder = crate::handoff::build_handoff_placeholder(&big, &crate::handoff::HandoffRef::of(b"x"), 200000);
+    let mut c = ctx();
+    c.plans.push(PlanRecord::new(plan_with_decision("act"), vec![StepOutcome::Ok(placeholder)]));
+    let s = c.plans_so_far_summary();
+    let head = &s[0]["step_outcomes"][0]["output"]["summary_head"];
+    assert_eq!(head, &serde_json::json!({"ok": 1, result_view::OMITTED_KEYS_KEY: 2}), "{head}");
+}
+
+#[test]
 fn plans_so_far_summary_ok_injection_blocked_placeholder_surfaces_marker() {
     // Blocked content is replaced upstream (tool_host) with a tiny placeholder;
     // rendering must surface the marker and never raw blocked text. Built with
