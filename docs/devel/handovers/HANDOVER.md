@@ -9,11 +9,11 @@
 > detail included; #909's review round is in the `906` snapshot, #609's deploy notes in `909`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-29 (#909 + #906 deployed on both hosts) ·
-**Recent PRs, newest first:** [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
+**Last updated:** 2026-10-29 (#704 + #705, PR #920) ·
+**Recent PRs, newest first:** [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**Both hosts run PR #917's tree** (deployed 2026-10-29 — #909 + #906 are live). **DGX:**
+**Both hosts run PR #917's tree** (deployed 2026-10-29 — #909 + #906 are live; #920 is not deployed). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -43,23 +43,21 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-10-29, latest): deployed #909 + #906 on both hosts (no code change)
+### This session (2026-10-29, latest): #704 + #705 — the planner's core markers and the handoff head (PR #920)
 
-- **DGX:** plain `scripts/upgrade_from_git.sh` (exit 0; 15 binaries; overlay 15 keys; generated and
-  `.local` env byte-identical; live-matrix digest `94c86940…` unchanged; Matrix up). Core
-  `NRestarts=0`, `guard_tier.boot` row 6157 `configured: true`, **zero** `guard_tier.boot_refused`
-  rows. ⚠️ The `probe::run … Connection refused` at the tail of `kastellan-core.err` is the
-  **2026-10-25 reboot race** (file mtime 10-25 12:08) — a clean boot writes no stderr; check the mtime
-  before reading that tail as current.
-- **Mac:** `build-release.sh` + the recipe's install line; env and core plist byte-identical; installed
-  `kastellan` sha256 = `target/release`'s; `guard_tier.boot` `not_configured`. **#870 confirmed live:**
-  the install brought `kastellan.target` up with **no hand `bootstrap`** (Postgres `runs = 1`).
-- **#909 reboot-proven (DGX, same day):** `postgres not accepting connections yet` (attempt 1) →
-  `postgres is accepting connections` (attempts 2, `waited_ms` 1017); core `NRestarts=0`, stderr
-  untouched, guard configured at +10 s after four `/props` waits (one connect-refused, three 503s),
-  Matrix logged in at attempt 1, no WARN/ERROR after boot, still zero `boot_refused` rows. The
-  pre-reboot `matrix is down … transient scope unit` WARN is the shutdown, not a fault.
-- Neither the full sweep nor clippy was re-run: docs-only PR, binaries built from `main` as merged.
+- **#704:** the view's markers are `…omitted_keys` / `…view_unavailable` — outside the identifier
+  alphabet, so no worker can put them in a view. ⚠️ **Never prune a rendered view a second time**: the
+  second pass drops the core's own `…` markers as non-identifier keys and re-counts them as 1. A top-level
+  `injection_blocked` in a **worker** result is now a catalogue Block (`post_process::FORGED_MARKER_REASON`).
+- **#705:** `summary_head` is a **raw** JSON head (`injection_guard::screened_head`, keys + one byte per
+  text-free node charged), rendered **once**, by the summary. ⚠️ The issue's option 1 as filed (render the
+  whole result) would have shown text past `SCAN_BYTE_CAP` [[issue-as-filed-can-carry-a-regression]].
+  A crossing string ends in `…`, or is dropped if space-free (no half identifiers). Head lists/objects stop
+  unmarked; the handoff block says counts inside the head cover only the head.
+- Two review rounds (one read-only reviewer in its own worktree) found the double render and the half
+  identifier. ⚠️ **`git mv` stages the rename** — a later "add specific files" commit still carries it.
+- Deploy (2026-10-29 morning): #909 + #906 live on both hosts, #909 reboot-proven on the DGX; ⚠️ the
+  `probe::run … Connection refused` tail of the DGX `kastellan-core.err` is the 10-25 race — check mtime.
 
 ### Previous (2026-10-26 → 29): the boot arc — #909, #906, #913/#911, #915 (PRs #910, #912, #914, #916, merged) — what still binds
 
@@ -259,7 +257,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    (the mail worker's second, hand-rolled localmail mock). The `mail-live` profile ran
    green on **both** hosts on 2026-10-19.
 
-2. **#702 follow-ups: #703, #704, #705.** ⚠️ **The guard model never sees object keys** (#703) — any
+2. **#702 follow-up #703** (#704/#705 done in PR #920). ⚠️ **The guard model never sees object keys** — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
    calibration run. The localmail changes the operator offered on 2026-09-14 have **shipped
    upstream** (slices A–E); the worker's side is #760.
@@ -387,10 +385,10 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#915) | PR #916 on `f1bbf849` | **5266 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-915-mac.log`. Delta vs #913/#911's 5262 (+1 failed, a #548/#676 flake): +2 core lib (#914's review round) +1 db lib (`slow_dials_spend_the_budget_too`) = 5266 exactly, predicted. `pg` profile green as evidence (91 tests, 12 binaries) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-915` (fresh), **27** | **5** |
+| **Mac** (#704/#705) | PR #920 at `09fc8147` | **5278 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-704-mac.log`. Delta vs #915: +12 core lib, the new tests exactly (1 result_view, 2 post_process, 2 handoff, 6 screened_head, 1 inner_loop). PR's 4th commit: core lib 2608 + the handoff/guard e2es re-run green | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-704` (fresh), **27** | **12** (+7: `python-exec:dev` stale after #918's `Cargo.lock` change — rebuild the image) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
-#913/#911 (+6 core lib, +1 e2e) and #915 (+1 db lib); all four are platform-neutral and were not swept on the DGX.
+#913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib) and #920 (+13 core lib); all are platform-neutral and were not swept on the DGX. The #915 Mac row is in the `909deploy` snapshot.
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -473,6 +471,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#919** — deploy docs (#909 + #906 live both hosts), merged 2026-10-29. **#918** — dependabot rustls 0.23.46, merged 2026-10-29 (⚠️ makes `python-exec:dev` stale).
 - **#917** — dependabot uv group bump (gliner-relex `uv.lock`), merged 2026-10-29, deployed with the rest.
 - **#916** (#915) — merged 2026-10-29: the boot wait's budget pinned on a paused clock.
 - **#914** (#913, #911) — merged 2026-10-28: `boot_report::record_refusal` in the lib, unit-tested; `PgInit` + the late-Postgres boot e2e.
