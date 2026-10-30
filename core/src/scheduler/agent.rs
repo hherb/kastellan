@@ -26,7 +26,7 @@ pub enum AgentError {
     /// The model answered, but not with a plan. `usage` and `latency_ms`
     /// are that answer's cost, kept so the `plan.formulate_failed` row can
     /// say whether the tokens went to reasoning (an empty `raw` with
-    /// `reasoning_chars > 0`) or nowhere.
+    /// `reasoning_chars > 0`) or to no reasoning the backend returned.
     #[error("plan decode failed: {detail}")]
     Decode {
         detail: String,
@@ -51,8 +51,10 @@ impl AgentError {
         matches!(self, AgentError::Router(e) if e.is_request_timeout())
     }
 
-    /// The cost of the completion behind this error, when one came back
-    /// (only a decode failure has one). Read by the failed-call audit row.
+    /// The cost of the completion behind this error, when one came back.
+    /// Only [`AgentError::Decode`] has one: a router error (a timeout, an HTTP
+    /// status, a body that is not a `ChatResponse`) carries none, not even its
+    /// latency. Read by the failed-call audit row.
     pub fn completion(&self) -> Option<(&kastellan_llm_router::CompletionStats, u64)> {
         match self {
             AgentError::Decode { usage, latency_ms, .. } => Some((usage, *latency_ms)),

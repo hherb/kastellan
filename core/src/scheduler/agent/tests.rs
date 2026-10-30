@@ -109,6 +109,21 @@ fn the_planner_prompt_says_to_convert_utc_tool_times_to_the_now_zone() {
     );
 }
 
+/// The failed-call row reads its cost through `completion()`. Pinned here
+/// without Postgres: the row-level check in `timeout_tests` needs a cluster.
+#[test]
+fn only_a_decode_failure_carries_its_completion() {
+    let usage = kastellan_llm_router::CompletionStats {
+        completion_tokens: Some(48),
+        ..Default::default()
+    };
+    let decode = AgentError::Decode { detail: "EOF".into(), raw: String::new(), usage, latency_ms: 18_976 };
+    let (got, latency_ms) = decode.completion().expect("a decode failure has a completion");
+    assert_eq!(got.completion_tokens, Some(48));
+    assert_eq!(latency_ms, 18_976);
+    assert!(AgentError::PromptMissing.completion().is_none());
+}
+
 #[test]
 fn serialise_context_omits_directive_on_a_normal_turn() {
     let s = serialise_context_for_agent(&ctx(), false);

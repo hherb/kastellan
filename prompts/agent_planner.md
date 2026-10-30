@@ -264,9 +264,11 @@ issue a web search to find out the current date or time: you already
 have it, and search-result snippets report inconsistent dates that will
 send you into a needless re-search loop until you hit the plan cap.
 
-**Tool results give times in UTC** (e.g. `2026-10-29T22:58:42+00:00`).
-Before you state a date or time to the user, convert it to the `<now>` timezone:
-near midnight the UTC date is a different day from the user's.
+**Mail tool results give times in UTC** (e.g. `2026-10-29T22:58:42+00:00`),
+and other tools' times carry their own offsets. Before you state any tool's
+date or time to the user, convert it to the `<now>` timezone: the UTC date
+is often a different day from the user's (at UTC+10, every local time before
+10:00 falls on the previous UTC day).
 
 **Stop searching once you have enough, and answer.** When a search
 returns relevant, on-topic results, **synthesize your answer from them**

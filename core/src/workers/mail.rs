@@ -112,7 +112,8 @@ impl WorkerManifest for MailManifest {
             ToolDoc {
                 name: TOOL_NAME,
                 method: "mail.search",
-                summary: "Search the mail archive (hybrid semantic + full-text). Filter by \
+                summary: "Search the mail archive (hybrid semantic + full-text under the \
+                          default rank sort; keyword-only with sort 'date'). Filter by \
                           date range, from/to, subject, has_attachment, account/folder. Each \
                           hit: message_id, account, subject, from, date, has_attachments, a \
                           short snippet. Page forward with next_cursor.",
@@ -123,12 +124,12 @@ impl WorkerManifest for MailManifest {
                                       also semantic: describe the mail in a few plain words (e.g. \
                                       'fee payable to council', 'bill asking me to pay') and it \
                                       finds mail by meaning, not only by those words. With \
-                                      sort 'date' EVERY word must appear in a hit. Either way \
-                                      there is no OR, AND, NOT or quoting — 'OR' is just one more \
-                                      word, so 'flight OR airline' finds almost nothing; for \
-                                      alternatives, run separate searches. For a filter-only \
-                                      search (e.g. every message with an attachment) omit query \
-                                      and pass filters.",
+                                      sort 'date' EVERY word must appear in a hit, and 'OR' is \
+                                      just one more required word, so 'flight OR airline' finds \
+                                      almost nothing. Either way there is no OR, AND, NOT or \
+                                      quoting; for alternatives, run separate searches. For a \
+                                      filter-only search (e.g. every message with an attachment) \
+                                      omit query and pass filters.",
                         required: false,
                     },
                     ToolParam {

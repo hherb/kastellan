@@ -166,6 +166,11 @@ pub fn plan_sort<'a>(requested: Option<&'a str>, has_cursor: bool, query: &str) 
 /// default, so it is the arm that fires on the query that has already gone wrong
 /// twice, and it names both the parameter and the value to pass.
 ///
+/// The `rank` arm no longer sends recency questions to `sort: "date"` (#924):
+/// that sort is a keyword-only walk, so a planner told to rerun with it never
+/// searched by meaning and missed mail without the word it guessed (DGX tasks
+/// 211 and 218). It must say what `core`'s `mail.search` `sort` doc says.
+///
 /// The [`SortPlan::DeferToCursor`] arm is the honest one: this worker is
 /// stateless per call, so on a paging request it genuinely does not know which
 /// ordering the cursor was issued with, and says so rather than guessing. That
@@ -186,13 +191,16 @@ pub fn ordering_note(plan: SortPlan<'_>) -> String {
         "date" => "These results are in date order, newest first.".to_string(),
         "rank" => "These results are in rank order (best match first), NOT date order: \
                    hits may be from any year and the first hit is not the most recent. \
-                   To answer a 'most recent' or 'latest' question, call mail.search \
-                   again with sort: \"date\"."
+                   To answer a 'most recent' or 'latest' question, bound the search with \
+                   filters.date_from (about 14 days back, widened only if nothing relevant \
+                   is in it) and pick the newest relevant hit by its date. sort: \"date\" \
+                   is newest first but keyword-only: use it only when you know a word the \
+                   mail must contain."
             .to_string(),
         other => format!(
             "These results use the requested sort {other:?}, whose ordering this worker \
              cannot describe. If the question is about recency, call mail.search again \
-             with sort: \"date\"."
+             with the default sort and a narrow filters.date_from."
         ),
     }
 }
@@ -290,6 +298,10 @@ mod tests {
         assert!(note.contains("sort"), "note must name the parameter: {note}");
         assert!(note.contains("\"date\""), "note must name the value: {note}");
         assert!(note.contains("NOT date order"), "note must state the consequence: {note}");
+        // #924: recency goes to a date-bounded rank search, not the keyword walk.
+        assert!(note.contains("filters.date_from"), "note must say how to bound by date: {note}");
+        assert!(note.contains("keyword-only"), "note must say what sort \"date\" costs: {note}");
+        assert!(!note.contains("again with sort"), "must not send recency to sort \"date\": {note}");
     }
 
     #[test]

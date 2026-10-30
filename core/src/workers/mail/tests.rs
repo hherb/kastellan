@@ -116,15 +116,16 @@ fn search_advertises_query_as_optional_and_says_how_to_filter_only() {
     );
 }
 
-/// localmail's plain search is `plainto_tsquery('simple', …)`: EVERY word
-/// must appear in a hit, and `OR` is not an operator but one more word to
-/// match. DGX task 211 (2026-10-29) asked for the most recent flight booking
-/// with `flight booking OR flight confirmation OR airline OR reservation`,
+/// localmail's keyword search (all of `sort: "date"`, half of `rank`) is
+/// `plainto_tsquery('simple', …)`: EVERY word must appear in a hit, and `OR`
+/// is not an operator but one more word to match. DGX task 211 (2026-10-29)
+/// asked for the most recent flight booking with
+/// `flight booking OR flight confirmation OR airline OR reservation`,
 /// matched only two 2025 emails, and answered with a 17-month-old booking
 /// while `e-ticket itinerary` would have found the one from 28 Oct. The
 /// description is the only place the planner can learn the dialect.
 #[test]
-fn search_query_says_every_word_must_match_and_or_is_not_an_operator() {
+fn search_query_says_date_sort_needs_every_word_and_or_is_not_an_operator() {
     let docs = MailManifest.tool_docs();
     let d = docs.iter().find(|d| d.method == "mail.search").expect("mail.search");
     let query = d.params.iter().find(|p| p.name == "query").expect("query");
@@ -159,7 +160,12 @@ fn search_says_date_sort_is_keyword_only_and_rank_is_semantic() {
     let d = docs.iter().find(|d| d.method == "mail.search").expect("mail.search");
     let sort = d.params.iter().find(|p| p.name == "sort").expect("sort");
     assert!(sort.description.contains("keyword-only"), "{:?}", sort.description);
-    assert!(sort.description.contains("semantic"), "{:?}", sort.description);
+    assert!(sort.description.contains("'rank' is semantic"), "{:?}", sort.description);
+    assert!(
+        d.summary.contains("keyword-only with sort 'date'"),
+        "the summary must not say every search is hybrid: {:?}",
+        d.summary
+    );
     assert!(
         sort.description.contains("date_from"),
         "must say how to bound a ranked search to recent mail: {:?}",
@@ -183,7 +189,7 @@ fn search_says_date_sort_is_keyword_only_and_rank_is_semantic() {
     );
     let query = d.params.iter().find(|p| p.name == "query").expect("query");
     assert!(
-        query.description.contains("describe"),
+        query.description.contains("describe the mail"),
         "must say a ranked query should describe the mail: {:?}",
         query.description
     );

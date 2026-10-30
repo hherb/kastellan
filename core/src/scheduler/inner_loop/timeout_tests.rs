@@ -88,7 +88,7 @@ async fn resolve(next: Option<Next>) -> Result<(Plan, FormulationMeta), AgentErr
             detail: "scripted decode failure".into(),
             raw: String::new(),
             usage: Default::default(),
-            // Non-zero so case 6 can tell the row's value from an absent key.
+            // Non-zero so case 6 proves the row carries the error's own latency, not a default 0.
             latency_ms: 4321,
         }),
     }
@@ -231,9 +231,10 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     )
     .await
     .ok();
-    let Ok(pool) = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec).await else {
-        return;
-    };
+    // The cluster is up, so a failed connect is a failure, not a skip.
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("connect runtime pool");
 
     // ── 1. A normal turn times out after a gather → synthesis turn, answered.
     let f = TimeoutScript::new(

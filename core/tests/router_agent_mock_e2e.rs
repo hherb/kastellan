@@ -13,7 +13,7 @@
 //! 2. **Decode error** — backend returns a `choices[0].message.content`
 //!    that is *not* valid JSON; `formulate_plan` returns
 //!    `Err(AgentError::Decode { detail, raw, usage, .. })`, `usage` being
-//!    the failed completion's own token counts. A silent default or
+//!    the failed completion's own `CompletionStats`. A silent default or
 //!    panic here would corrupt the audit trail and let bad plans
 //!    propagate.
 //! 3. **Missing prompt** — the in-memory `PromptCache` does not have

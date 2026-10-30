@@ -72,7 +72,11 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   keyword and sends recency questions to a **ranked search in a narrow `date_from` window (~14 days), widened
   only when nothing is relevant**. A narrow window is also **exact** (EXPLAIN: date index + sort by distance, no
   HNSW). Live (tasks 222–224): the planner used semantic search for "payments due" but **never set a window** —
-  it follows parameters, not prose. Next step if wanted: a `within_days` param the worker turns into `date_from`.
+  it follows parameters, not prose. ⚠️ **Review finding, not yet re-measured:** on those runs every rank result
+  still carried the mail worker's `ordering_note` saying "call mail.search again with sort: \"date\"" for recency
+  (`workers/mail/src/sort.rs`), contradicting the doc. The review round rewrote it to the windowed-rank advice.
+  Re-ask 222–224 on a redeployed tree before concluding prose fails. Next step if it still does: a `within_days`
+  param the worker turns into `date_from`.
 - **localmail on the DGX had stalled** (IDLE stuck `reconnecting` since 02:58, poll stale since 21:33 the evening
   before; the unit read `active` the whole time). Restarted 2026-10-30 08:50; heartbeats fresh. Check with
   `~/src/localmail/.venv/bin/localmail daemon status` — ⚠️ **`systemctl is-active` cannot see it.** Filed
@@ -83,6 +87,12 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   `plan.formulate_failed` row has `llm_usage`/`latency_ms` (the `plan.formulate` keys). Both wiring points are
   mutation-checked. ⚠️ **A new `AgentError::Decode` field breaks 7 fakes in `core/tests/`**, not just the lib's
   two, and zsh's `grep --include=*.rs` silently matches nothing: quote the glob.
+- **Review round (PR #924):** also fixed the `query` doc's OR claim (the "finds almost nothing" collapse is
+  `date`-sort only), the `mail.search` summary (hybrid under rank only), the UTC prompt note (not just "near
+  midnight"; mail tools only), a Postgres-free `completion()` test, and the 3 inner-loop lib tests that silently
+  `return`ed on a failed pool connect after their cluster came up (now `expect`). Deferred to
+  [#926](https://github.com/hherb/kastellan/issues/926): router failures (timeouts included) record no latency on
+  the failed row; empty `choices` reads as an empty completion; no gate profile runs core's PG-backed lib tests.
 
 ### Previous (2026-10-29): #704 + #705 — core markers and the handoff head (PR #920, merged) — what still binds (prose: the `773remeasure` snapshot)
 
@@ -256,7 +266,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 1. **The planner's answer quality, from the re-measure (2026-10-30).** Before any live mail measurement run
    `localmail daemon status` on the DGX (a stale archive voids it; #925). [#921](https://github.com/hherb/kastellan/issues/921)
    first (cheapest; a wrong statement to the user), then [#922](https://github.com/hherb/kastellan/issues/922)'s
-   option 3 (stop spending plans on `list_accounts` and re-fetches), then [#923](https://github.com/hherb/kastellan/issues/923).
+   option 3 (stop spending plans on `list_accounts` and re-fetches), then [#923](https://github.com/hherb/kastellan/issues/923),
+   then [#926](https://github.com/hherb/kastellan/issues/926). Redeploy #924's final tree to the DGX first: its live
+   runs predate the `ordering_note` fix.
    Re-run the same four questions afterwards (tasks 207–210 are the baseline). **Still owed from the
    re-measure:** a revoked mail key once (the planner's reaction to `UPSTREAM_AUTH_FAILED`; it touches the
    operator's localmail token, so ask first); the operator's verdict on 207/208's answers. Then #771 (carry

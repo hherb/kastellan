@@ -167,7 +167,9 @@ const FAILED_ROW_ERROR_CHARS: usize = 512;
 /// `completion` is the cost of the answer that failed to decode, when one
 /// came back ([`AgentError::completion`](crate::scheduler::agent::AgentError::completion)).
 /// It is written under the `plan.formulate` row's own keys (`llm_usage`,
-/// `latency_ms`), so one query reads the cost of every planning call.
+/// `latency_ms`), so one query reads the cost of every planning call that got
+/// a completion back. Unlike that row, the keys are absent (not null) when
+/// none did: a router failure, timeouts included, records no latency.
 pub(super) fn formulate_failed_payload(
     task_id: i64,
     plan_count: u32,

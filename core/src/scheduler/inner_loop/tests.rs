@@ -815,10 +815,10 @@ async fn terminal_python_skill_captured_under_grounding_gate() {
     )
     .await
     .ok();
-    let pool = match kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec).await {
-        Ok(p) => p,
-        Err(_) => return,
-    };
+    // The cluster is up, so a failed connect is a failure, not a skip.
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("connect runtime pool");
 
     // Insert + claim a task so the inner loop can observe its state.
     let id = kastellan_db::tasks::insert_pending(
@@ -925,10 +925,10 @@ async fn forced_synthesis_at_cap_answers_from_gathered_observations() {
     )
     .await
     .ok();
-    let pool = match kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec).await {
-        Ok(p) => p,
-        Err(_) => return,
-    };
+    // The cluster is up, so a failed connect is a failure, not a skip.
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("connect runtime pool");
 
     let review = std::sync::Arc::new(crate::cassandra::review::ChainReviewStage::new(vec![
         std::sync::Arc::new(crate::cassandra::review::NoopReviewStage),
