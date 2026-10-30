@@ -120,9 +120,9 @@ fn without_parameters(call: &Value) -> Option<Value> {
 /// serialised size, calls included — is within `budget`. Returns how many
 /// calls lost their parameters.
 ///
-/// The second pass of the summary budget, run only once the step outputs have
-/// been elided: calls are what stop the planner repeating itself, so they go
-/// last, and even then `tool` and `method` stay. Oldest first (`calls[0]` is
+/// The second pass of the summary budget, run after the step outputs have
+/// been shrunk or elided to fit: calls are what stop the planner repeating
+/// itself, so they go last, and even then `tool` and `method` stay. Oldest first (`calls[0]` is
 /// the first plan), stopping the moment the total fits, and only where
 /// dropping actually shrinks the call, so it is idempotent.
 pub(super) fn apply_call_budget(calls: &mut [Vec<Option<Value>>], mut total: usize, budget: usize) -> usize {

@@ -72,9 +72,17 @@ impl Client {
             .stdin
             .as_mut()
             .ok_or(ClientError::EarlyExit)?;
-        serde_json::to_writer(&mut *stdin, &req)?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()?;
+        let mut line = serde_json::to_vec(&req)?;
+        line.push(b'\n');
+        // A worker that exited before reading breaks the pipe; its stdout then
+        // reads EOF below, so that is reported as `EarlyExit` like any other
+        // early death (and whatever it did answer is still read). A worker that
+        // closed stdin but holds stdout open is waited on instead; callers
+        // without a per-call deadline are #929.
+        match stdin.write_all(&line).and_then(|()| stdin.flush()) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            r => r?,
+        }
 
         // Bounded read (shared with the server): a worker that never emits `\n`
         // must not be able to drive the core to OOM (audit finding #2).
@@ -264,5 +272,48 @@ mod drop_tests {
         let status = client.close().expect("close waits for cat to exit on EOF");
         assert!(status.success(), "cat should exit 0 on EOF");
         assert!(!is_zombie(pid), "child {pid} zombied after close()");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod early_exit_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// A worker that dies before reading its request breaks the pipe. That is
+    /// an early exit like any other, and only `EarlyExit` reaches the core's
+    /// last-words report; the write's `EPIPE` once surfaced as `Decode` because
+    /// `serde_json::to_writer` wraps io errors (seen as a sweep-load flake of
+    /// `worker_early_exit_stderr_fallback_e2e`).
+    #[test]
+    fn a_worker_gone_before_the_request_is_written_is_an_early_exit() {
+        let mut client = Client::from_child(exited("exit 0")).expect("from_child");
+        let err = client.call("m", serde_json::json!({})).unwrap_err();
+        assert!(matches!(err, ClientError::EarlyExit), "{err:?}");
+    }
+
+    /// The broken pipe is not the answer: a reply the worker wrote before it
+    /// died is still read.
+    #[test]
+    fn a_reply_written_before_the_worker_died_is_still_read() {
+        let reply = r#"printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":7}'"#;
+        let mut client = Client::from_child(exited(reply)).expect("from_child");
+        assert_eq!(client.call("m", serde_json::json!({})).expect("the reply"), 7);
+    }
+
+    /// `sh -c script` with piped stdio, returned once it has exited without
+    /// reading its stdin.
+    fn exited(script: &str) -> std::process::Child {
+        let mut child = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        // `try_wait`, not `wait`: `wait` would close the stdin under test.
+        while child.try_wait().expect("try_wait").is_none() {
+            std::thread::yield_now();
+        }
+        child
     }
 }

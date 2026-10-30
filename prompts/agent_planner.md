@@ -48,8 +48,13 @@ of the task, with these fields:
   `{"…view_unavailable": "…"}`.
 - `{"status": "ok", "withheld": "failed injection screen"}` — the step
   succeeded but its output was suppressed (see below).
-- `{"status": "ok", "elided": "summary budget"}` — an older step's output was
-  dropped to keep this summary bounded.
+- `{"status": "ok", "elided": "output retrieved, dropped from this summary for space"}`
+  — the step **succeeded and its output was retrieved**; only this summary
+  left it out, to stay bounded. Never tell the user such an item could not
+  be retrieved. Call the step again only if your answer needs what it
+  returned. When the outputs together are too big, the larger ones are first
+  cut to an even share (with the markers above, sooner than usual), and only
+  when there are too many to share are the oldest left out like this.
 - `{"status": "err", "code": "<CODE>", "detail": "…"}` — the step failed.
 
 Every step outcome also carries `"call"`: the step you submitted that
