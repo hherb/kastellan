@@ -4,16 +4,16 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
-> [`archive/handover_20261030_773remeasure_pre-prune.md`](archive/handover_20261030_773remeasure_pre-prune.md),
-> which holds the verbose pre-prune version of everything summarised here (#915's mutants and #913's
-> detail included; #909's review round is in the `906` snapshot, #609's deploy notes in `909`).
+> [`archive/handover_20261030_921_pre-prune.md`](archive/handover_20261030_921_pre-prune.md),
+> which holds the verbose pre-prune version of everything summarised here (the #773 re-measure in full;
+> #915's mutants and #913's detail are in the `773remeasure` snapshot; #909's review round is in the `906` snapshot, #609's deploy notes in `909`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-10-30 (the #773 live re-measure; #923's decode-row fix, PR #924) ·
-**Recent PRs, newest first:** [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
+**Last updated:** 2026-10-30 (#921: the summary budget shrinks evenly; a broken pipe is an early exit — PR #927) ·
+**Recent PRs, newest first:** [#927](https://github.com/hherb/kastellan/pull/927) (#921), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs PR #924's branch tree** (unmerged; deployed 2026-10-30, env diff IDENTICAL, `NRestarts=0`; a plain `upgrade_from_git.sh` returns it to `main`); **the Mac runs #917's**. **DGX:**
+**The DGX runs #924's merged tree** (plain `upgrade_from_git.sh` 2026-10-30: exit 0, 15 binaries, both env files IDENTICAL to `~/kastellan.env*.bak-pre926`, `NRestarts=0`, Matrix up); **the Mac runs #917's**. **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -43,56 +43,36 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-10-30, latest): the #773 live re-measure — thinking stays ON
+### This session (2026-10-30, latest): #921 — the plan summary shrinks evenly (PR #927)
 
-- #920 deployed to the DGX first. The set ran through **`kastellan-cli ask --classification-floor Public "<q>"`**,
-  not Matrix: it is the same fast lane and floor as a DM, and is stateless by construction, so no fresh room is needed.
-  ⚠️ Run the questions **one at a time**. Readout: `scratchpad`-style `measure.sh <task_id>` (task state, then each
-  plan's `latency_ms`/tokens/decision, steps, answer). Tasks **207–210 = ON, 212–215 = OFF**; 211 is an
-  operator DM that overlapped 209.
-- **ON 4/4 completed** (277–548 s, 10–18k generated tokens); **OFF 2/4 failed** on an empty completion
-  (`raw_len 0`, `finish_reason stop`, 48 tokens) → [#923](https://github.com/hherb/kastellan/issues/923). OFF
-  also sent `{{message_id}}`/`<message_id>` placeholders as params and dropped `has_attachment` between
-  searches. **Decision: `KASTELLAN_LLM_DISABLE_THINKING=0` stays** (restored; overlay byte-identical to the backup).
-- Filed: [#921](https://github.com/hherb/kastellan/issues/921) (an elided output reads as "not retrieved": the planner
-  re-fetches it and the answer says so wrongly), [#922](https://github.com/hherb/kastellan/issues/922) (3/4 hit the
-  fast lane's 5-plan cap; the Qantas table has Price/GST "Unknown"). #698 (filter-only search) and #760 (paged PDF)
-  work live.
-- **"Most recent" was answered wrong because of the query dialect, not the archive.** localmail's plain search is
-  `plainto_tsquery('simple', …)`: **every word must match, and `OR` is just another word**. The planner's
-  `flight booking OR … OR reservation` matched two 2025 emails. #924's `mail.search` `query` doc now says so;
-  live re-ask (task 217): `query: "flight"` → the newest e-ticket (28 Oct), 119 s. Task 218 ("most recent
-  invoice") read only the body of a council email whose amount was in its PDF and moved on, and hit the plan
-  cap (#922): `mail.get_message`'s summary now says to read an attachment the body points to. Task 219 quoted an
-  invoice's **UTC** date to the user: the planner prompt now says tool times are UTC and to convert them to
-  the `<now>` zone. ⚠️ A single-word search finds only mail containing that word ("Payment overdue" is not
-  "invoice") — recall needs several searches, which #922's cap makes expensive.
-- **Semantic search was never used:** localmail's `sort: "date"` is a **keyword-only** walk (it bypasses the
-  hybrid pool), and the doc forced every "most recent" question onto it. The doc now says rank = semantic +
-  keyword and sends recency questions to a **ranked search in a narrow `date_from` window (~14 days), widened
-  only when nothing is relevant**. A narrow window is also **exact** (EXPLAIN: date index + sort by distance, no
-  HNSW). Live (tasks 222–224): the planner used semantic search for "payments due" but **never set a window** —
-  it follows parameters, not prose. ⚠️ **Review finding, not yet re-measured:** on those runs every rank result
-  still carried the mail worker's `ordering_note` saying "call mail.search again with sort: \"date\"" for recency
-  (`workers/mail/src/sort.rs`), contradicting the doc. The review round rewrote it to the windowed-rank advice.
-  Re-ask 222–224 on a redeployed tree before concluding prose fails. Next step if it still does: a `within_days`
-  param the worker turns into `date_from`.
-- **localmail on the DGX had stalled** (IDLE stuck `reconnecting` since 02:58, poll stale since 21:33 the evening
-  before; the unit read `active` the whole time). Restarted 2026-10-30 08:50; heartbeats fresh. Check with
-  `~/src/localmail/.venv/bin/localmail daemon status` — ⚠️ **`systemctl is-active` cannot see it.** Filed
-  hherb/localmail#414 (pool connections unbounded; most likely cause), #415 (search-hit dates are INTERNALDATE
-  in host local time labelled UTC, +11 h), #416 (Gmail's 29-min IDLE drop logged as a crash); kastellan
-  [#925](https://github.com/hherb/kastellan/issues/925) (archive freshness is invisible to the bot).
-- **Code (PR #924):** `AgentError::Decode` carries the completion's `usage` + `latency_ms`, so the
-  `plan.formulate_failed` row has `llm_usage`/`latency_ms` (the `plan.formulate` keys). Both wiring points are
-  mutation-checked. ⚠️ **A new `AgentError::Decode` field breaks 7 fakes in `core/tests/`**, not just the lib's
-  two, and zsh's `grep --include=*.rs` silently matches nothing: quote the glob.
-- **Review round (PR #924):** also fixed the `query` doc's OR claim (the "finds almost nothing" collapse is
-  `date`-sort only), the `mail.search` summary (hybrid under rank only), the UTC prompt note (not just "near
-  midnight"; mail tools only), a Postgres-free `completion()` test, and the 3 inner-loop lib tests that silently
-  `return`ed on a failed pool connect after their cluster came up (now `expect`). Deferred to
-  [#926](https://github.com/hherb/kastellan/issues/926): router failures (timeouts included) record no latency on
-  the failed row; empty `choices` reads as an empty completion; no gate profile runs core's PG-backed lib tests.
+- **#921:** over the 96 KiB `PLANS_SUMMARY_BUDGET`, outputs are now **water-filled to an even share** and
+  re-rendered from the record's raw outcome (re-screened; a shrunk view that blocks, or overshoots, becomes
+  the elided marker). The oldest are dropped whole only once a share would fall below
+  `budget::MIN_SHRUNK_OUTPUT_BYTES` (2 KiB; also caps re-renders at 48/turn). Ten fetched messages keep id,
+  sender, subject, attachment names. Marker reason is now `"output retrieved, dropped from this summary for
+  space"` (the call-parameter marker keeps `"summary budget"`); the prompt says never call it unretrieved.
+  Code: `core/src/scheduler/inner_loop/summary/budget.rs` (pure `plan_fit` + apply; movement-only split
+  first). 7/7 mutants killed. ⚠️ A long task's newest output is now cut to its share too — **not yet
+  measured live**: re-ask tasks 207–210 (209 is #921's case) after deploying.
+- **Found by the sweep, fixed:** `protocol::Client::call` wrote the request with `serde_json::to_writer`, so a
+  worker that died before reading surfaced as `Decode(Broken pipe)`, not `EarlyExit`, and skipped the
+  last-words report. Now a `BrokenPipe` write falls through to the read (EOF → `EarlyExit`). It showed as a
+  load-only flake of `worker_early_exit_stderr_fallback_e2e` (3/3 alone); the new protocol test is
+  deterministic (waits for the child with `try_wait` — ⚠️ `wait` closes stdin).
+- DGX redeployed to `main` (#924) first; localmail heartbeats fresh.
+
+### Previous (2026-10-30): the #773 live re-measure (PR #924, merged) — what still binds (prose: the `921` snapshot)
+
+- **Thinking stays ON** (`KASTELLAN_LLM_DISABLE_THINKING=0`): ON 4/4 completed (tasks 207–210), OFF 2/4 failed on
+  an empty completion (#923). Measure with `kastellan-cli ask --classification-floor Public "<q>"`, **one
+  question at a time** (stateless, same fast lane as a DM). Filed #921 (fixed in PR #927), #922, #925, #926.
+- ⚠️ localmail's plain search is `plainto_tsquery`: **every word must match, `OR` is a word**; `sort: "date"` is
+  keyword-only. The `mail.search` doc now sends recency to a ranked search in a narrow `date_from` window —
+  the planner **never set the window** live (it follows parameters, not prose); if 222–224 still fail on the
+  deployed tree, add a `within_days` param.
+- ⚠️ The DGX's localmail sync can stall with the unit `active`: check `~/src/localmail/.venv/bin/localmail daemon
+  status` (hherb/localmail#414–#416). ⚠️ A new `AgentError::Decode` field breaks 7 fakes in `core/tests/`; quote
+  `--include='*.rs'` under zsh.
 
 ### Previous (2026-10-29): #704 + #705 — core markers and the handoff head (PR #920, merged) — what still binds (prose: the `773remeasure` snapshot)
 
@@ -264,11 +244,10 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
 1. **The planner's answer quality, from the re-measure (2026-10-30).** Before any live mail measurement run
-   `localmail daemon status` on the DGX (a stale archive voids it; #925). [#921](https://github.com/hherb/kastellan/issues/921)
-   first (cheapest; a wrong statement to the user), then [#922](https://github.com/hherb/kastellan/issues/922)'s
-   option 3 (stop spending plans on `list_accounts` and re-fetches), then [#923](https://github.com/hherb/kastellan/issues/923),
-   then [#926](https://github.com/hherb/kastellan/issues/926). Redeploy #924's final tree to the DGX first: its live
-   runs predate the `ordering_note` fix.
+   `localmail daemon status` on the DGX (a stale archive voids it; #925). #921 is fixed in PR #927 —
+   **deploy it, then re-ask 207–210 and 222–224** (the latter for the `ordering_note` fix, now on the DGX). Then
+   [#922](https://github.com/hherb/kastellan/issues/922)'s option 3 (stop spending plans on `list_accounts` and
+   re-fetches), [#923](https://github.com/hherb/kastellan/issues/923), [#926](https://github.com/hherb/kastellan/issues/926).
    Re-run the same four questions afterwards (tasks 207–210 are the baseline). **Still owed from the
    re-measure:** a revoked mail key once (the planner's reaction to `UPSTREAM_AUTH_FAILED`; it touches the
    operator's localmail token, so ask first); the operator's verdict on 207/208's answers. Then #771 (carry
@@ -403,6 +382,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
+| **Mac** (#921) | PR #927 on `8ec5f544` | **5299 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-921b-mac.log`. vs the row below: core lib 2613 → 2627 (+10 #921, +4 from #924's last commits after that row's sweep), protocol lib 20 → 21 | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-921` (fresh), **27** | **23** (Apple `container` stopped after a reboot — the documented count) |
 | **Mac** (#923 decode row) | PR #924 on `dc1a8279` (re-swept at `426dc68c`: 5283 + 1 / 52, core lib **2613** = +1 doc test; the 1 = `asks_e2e` `the database system is starting up`, 35/35 alone — #548/#676) | **5283 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-decode-mac.log`. Per-suite vs `~/sweep-704-mac.log`: **only core lib**, 2607 → 2612 = +4 (#920's last review commit, after that row's sweep) +1 (the new payload test) | exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-decode` (fresh), **27** | **12** (7 = `python-exec:dev` stale since #918's `Cargo.lock` — rebuild the image) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
@@ -489,6 +469,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#924** (#773 re-measure, #923) — merged 2026-10-30, **deployed DGX 2026-10-30**: a failed decode's row carries its cost; `mail.search`'s dialect doc.
 - **#920** (#704, #705) — merged 2026-10-29, **deployed DGX 2026-10-30**: worker-unforgeable view markers; a labelled, screened handoff head.
 - **#919 / #918 / #917 / #916** (merged 2026-10-29): deploy docs; dependabot rustls (⚠️ makes `python-exec:dev` stale) and uv; #915's paused-clock pin.
 - **#914** (#913, #911) — merged 2026-10-28: `boot_report::record_refusal` in the lib, unit-tested; `PgInit` + the late-Postgres boot e2e.
