@@ -62,7 +62,11 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   `plainto_tsquery('simple', …)`: **every word must match, and `OR` is just another word**. The planner's
   `flight booking OR … OR reservation` matched two 2025 emails. #924's `mail.search` `query` doc now says so;
   live re-ask (task 217): `query: "flight"` → the newest e-ticket (28 Oct), 119 s. Task 218 ("most recent
-  invoice") hit the plan cap again (#922).
+  invoice") read only the body of a council email whose amount was in its PDF and moved on, and hit the plan
+  cap (#922): `mail.get_message`'s summary now says to read an attachment the body points to. Task 219 quoted an
+  invoice's **UTC** date to the user: the planner prompt now says tool times are UTC and to convert them to
+  the `<now>` zone. ⚠️ A single-word search finds only mail containing that word ("Payment overdue" is not
+  "invoice") — recall needs several searches, which #922's cap makes expensive.
 - **localmail on the DGX had stalled** (IDLE stuck `reconnecting` since 02:58, poll stale since 21:33 the evening
   before; the unit read `active` the whole time). Restarted 2026-10-30 08:50; heartbeats fresh. Check with
   `~/src/localmail/.venv/bin/localmail daemon status` — ⚠️ **`systemctl is-active` cannot see it.** Filed
