@@ -161,7 +161,10 @@ impl WorkerManifest for MailManifest {
                 name: TOOL_NAME,
                 method: "mail.get_message",
                 summary: "Fetch one message: headers, plaintext body, and attachment list \
-                          [{index, filename, sha256, content_type, size}].",
+                          [{index, filename, sha256, content_type, size}]. When the body only \
+                          points to an attachment (\"please find attached\"), the facts — \
+                          amounts, dates, items — are in it: read it with \
+                          mail.get_attachment_text before ruling the message out.",
                 params: &[
                     ToolParam {
                         name: "message_id",

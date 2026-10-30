@@ -274,6 +274,27 @@ fn attachment_tools_advertise_index_and_get_message_lists_it() {
     assert!(get.summary.contains("index"), "{:?}", get.summary);
 }
 
+/// DGX task 218 (2026-10-30): asked for the most recent invoice, the planner
+/// fetched a council email whose whole body was "please find attached … the
+/// amount payable", judged it "not an invoice" from the body alone, and went
+/// on to older mail. The facts were in the PDF. The summary must say that a
+/// body pointing at an attachment is not the content.
+#[test]
+fn get_message_says_to_read_an_attachment_the_body_points_to() {
+    let docs = MailManifest.tool_docs();
+    let get = docs.iter().find(|d| d.method == "mail.get_message").expect("get_message");
+    assert!(
+        get.summary.contains("attached") && get.summary.contains("mail.get_attachment_text"),
+        "must say to read the attachment the body refers to: {:?}",
+        get.summary
+    );
+    assert!(
+        get.summary.contains("before ruling"),
+        "must say not to rule the message out from its body alone: {:?}",
+        get.summary
+    );
+}
+
 /// Text is paged since #760, so the planner must learn that a page may not
 /// be the whole document and how to get the next one.
 #[test]
