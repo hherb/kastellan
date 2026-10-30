@@ -51,6 +51,13 @@ impl AgentError {
         matches!(self, AgentError::Router(e) if e.is_request_timeout())
     }
 
+    /// The model answered `stop` with no content at all (#923, seen with
+    /// thinking off). Unlike a non-JSON answer, nothing in the request made
+    /// this happen, so asking again once is the plain retry worth trying.
+    pub fn is_empty_completion(&self) -> bool {
+        matches!(self, AgentError::Decode { raw, .. } if raw.trim().is_empty())
+    }
+
     /// The cost of the completion behind this error, when one came back.
     /// Only [`AgentError::Decode`] has one: a router error (a timeout, an HTTP
     /// status, a body that is not a `ChatResponse`) carries none, not even its

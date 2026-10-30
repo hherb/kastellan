@@ -24,14 +24,17 @@
 //!    for the operator and so the existing `detail like '%timed out%'` query
 //!    keeps finding these rows.
 //!
-//! Every other formulator error (a decode failure, an HTTP 4xx, a refused
-//! connection) is unchanged: a cheaper request cannot fix it.
+//! An **empty completion** (#923: the model answered `stop` with no
+//! content) is asked again once, through the same door, and a decode
+//! failure that still ends the task says so in words
+//! ([`decode_failure_detail`]). Every other formulator error (an HTTP 4xx,
+//! a refused connection) is unchanged, `llm: <error>`: a retry cannot fix it.
 
 use std::collections::BTreeMap;
 
 use super::{PlanRecord, StepOutcome, TaskContext};
 use crate::cassandra::types::Plan;
-use crate::scheduler::agent::{FormulationMeta, PlanFormulator};
+use crate::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
 
 /// Should a failed planning call be answered by spending the
 /// forced-synthesis turn now, rather than failing the task?
@@ -129,6 +132,22 @@ pub(super) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) ->
     )
 }
 
+/// The task's failure detail when the model's answer could not be read as a
+/// plan (#923). Pure.
+///
+/// `empty` is [`AgentError::is_empty_completion`]
+/// — by the time this is used, an empty answer has already been asked again
+/// once. Like [`timeout_failure_detail`], plain words first and the decode
+/// error last, in brackets, for the operator.
+pub(super) fn decode_failure_detail(empty: bool, decode_error: &str) -> String {
+    let what = if empty {
+        "The language model returned an empty answer, so this task produced none."
+    } else {
+        "The language model answered with something that is not a plan, so this task produced none."
+    };
+    format!("{what} Asking again usually works. [llm: {decode_error}]")
+}
+
 /// The task's failure detail when a synthesis turn that a **timeout**
 /// forced (not the plan cap) still returned tool steps instead of an answer.
 /// Pure.
@@ -217,9 +236,10 @@ pub(super) struct TurnState {
     pub synth_attempted: bool,
 }
 
-/// Run one planning turn, with #774's timeout recovery around it.
+/// Run one planning turn, with #774's timeout recovery and #923's
+/// empty-answer retry around it.
 ///
-/// Every failed formulator call — the first attempt, and a synthesis retry
+/// Every failed formulator call — the first attempt, and any retry
 /// — adds one to `failed_llm_calls` and writes exactly one
 /// `plan.formulate_failed` row; `failure_recorded` is what stops the final
 /// match from writing a second row for the one error already recorded on
@@ -232,17 +252,22 @@ pub(super) async fn formulate_turn(
     failed_llm_calls: &mut u32,
 ) -> Turn {
     let TurnState { synth_turn, gathered, synth_attempted } = state;
-    let first = if synth_turn {
-        formulator.formulate_synthesis(ctx).await
-    } else {
-        formulator.formulate_plan(ctx).await
+    let call = || async {
+        if synth_turn {
+            formulator.formulate_synthesis(ctx).await
+        } else {
+            formulator.formulate_plan(ctx).await
+        }
     };
+    let first = call().await;
     // A synthesis turn that ran out of time gets one more attempt with
-    // thinking suppressed, when the formulator has such an attempt. Every
-    // failed call is counted and gets an audit row exactly once:
+    // thinking suppressed, when the formulator has such an attempt; an empty
+    // answer gets the same call once more (#923). At most one retry per turn.
+    // Every failed call is counted and gets an audit row exactly once:
     // `failure_recorded` stops the row below from repeating one already
     // written here.
     let mut retried = false;
+    let mut thinking_suppressed = false;
     let mut failure_recorded = false;
     let formulation = match first {
         Err(e) if synth_turn && e.is_request_timeout() => {
@@ -259,6 +284,7 @@ pub(super) async fn formulate_turn(
                         "forced-synthesis call timed out; retried once with thinking suppressed"
                     );
                     retried = true;
+                    thinking_suppressed = true;
                     retry
                 }
                 None => {
@@ -273,6 +299,20 @@ pub(super) async fn formulate_turn(
                 }
             }
         }
+        Err(e) if e.is_empty_completion() => {
+            *failed_llm_calls = failed_llm_calls.saturating_add(1);
+            record_failed_formulation(
+                pool, ctx.task_id, ctx.plan_count, synth_turn, false, &e,
+            ).await;
+            tracing::warn!(
+                task_id = ctx.task_id,
+                plan_count = ctx.plan_count,
+                synth_turn,
+                "planning call returned an empty completion; asking again once"
+            );
+            retried = true;
+            call().await
+        }
         other => other,
     };
     let (plan, mut meta) = match formulation {
@@ -281,7 +321,7 @@ pub(super) async fn formulate_turn(
             if !failure_recorded {
                 *failed_llm_calls = failed_llm_calls.saturating_add(1);
                 record_failed_formulation(
-                    pool, ctx.task_id, ctx.plan_count, synth_turn, retried, &e,
+                    pool, ctx.task_id, ctx.plan_count, synth_turn, thinking_suppressed, &e,
                 ).await;
             }
             let timed_out = e.is_request_timeout();
@@ -300,13 +340,15 @@ pub(super) async fn formulate_turn(
                     &GatheredWork::from_plans(&ctx.plans),
                     &e.to_string(),
                 )
+            } else if matches!(e, AgentError::Decode { .. }) {
+                decode_failure_detail(e.is_empty_completion(), &e.to_string())
             } else {
                 format!("llm: {e}")
             };
             return Turn::Failed(detail);
         }
     };
-    // The retry's `plan.formulate` row says it was one: the existing
+    // A retry's `plan.formulate` row says it was one: the existing
     // `retry_count` column, which the formulator itself leaves at 0.
     if retried {
         meta.retry_count = meta.retry_count.saturating_add(1);

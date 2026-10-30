@@ -1,5 +1,6 @@
-//! Inner-loop tests for a planning call that times out (#774): the loop
-//! must not throw away gathered work when a cheaper request can still
+//! Inner-loop tests for a planning call that times out (#774) or comes
+//! back empty (#923): the loop must not throw away gathered work when a
+//! cheaper request (or, for an empty answer, the same one) can still
 //! produce an answer, and must say what happened when it cannot.
 //!
 //! The decisions are unit-tested in `llm_failure/tests.rs`; these run the
@@ -54,8 +55,10 @@ enum Next {
     /// (`clippy::large_enum_variant`).
     Plan(Box<Plan>),
     Timeout,
-    /// A non-timeout failure — must keep the old `llm: …` behaviour.
+    /// An answer that is not a plan — fails the task, never retried.
     Decode,
+    /// An answer with no content at all (#923) — retried once.
+    Empty,
 }
 
 /// Returns scripted results by call order, and records which door each
@@ -84,9 +87,15 @@ async fn resolve(next: Option<Next>) -> Result<(Plan, FormulationMeta), AgentErr
     match next {
         Some(Next::Plan(p)) => Ok((*p, meta())),
         Some(Next::Timeout) => Err(real_request_timeout().await),
+        Some(Next::Empty) => Err(AgentError::Decode {
+            detail: "EOF while parsing a value at line 1 column 0".into(),
+            raw: String::new(),
+            usage: Default::default(),
+            latency_ms: 4321,
+        }),
         Some(Next::Decode) | None => Err(AgentError::Decode {
             detail: "scripted decode failure".into(),
-            raw: String::new(),
+            raw: "Sure! Here is what I would do.".into(),
             usage: Default::default(),
             // Non-zero so case 6 proves the row carries the error's own latency, not a default 0.
             latency_ms: 4321,
@@ -310,10 +319,19 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     assert_eq!(f.retry_calls.load(Ordering::SeqCst), 0, "the retry is for synthesis turns only");
     assert_eq!(r.failed_llm_calls, 1);
 
-    // ── 6. A NON-timeout failure after a gather is unchanged: `llm: …`, no synthesis.
-    let f = TimeoutScript::new(vec![Next::Plan(Box::new(one_step_plan())), Next::Decode], None);
+    // ── 6. A non-plan answer after a gather fails at once, in words: no retry, no synthesis.
+    let f = TimeoutScript::new(
+        vec![
+            Next::Plan(Box::new(one_step_plan())),
+            Next::Decode,
+            Next::Plan(Box::new(terminal_plan("never reached"))),
+        ],
+        None,
+    );
     let (task_id, r) = run(&pool, f.clone()).await;
-    assert!(failed_detail(&r).starts_with("llm: plan decode failed"), "{}", failed_detail(&r));
+    let d = failed_detail(&r);
+    assert!(d.starts_with("The language model answered with something that is not a plan"), "{d}");
+    assert!(d.ends_with("[llm: plan decode failed: scripted decode failure]"), "{d}");
     assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 0);
     assert_eq!(r.failed_llm_calls, 1, "a final non-timeout failure is a model call too");
     let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
@@ -334,4 +352,49 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     assert!(d.starts_with("A planning call ran out of time"), "{d}");
     assert!(!d.contains("plan_iteration_cap_exceeded"), "{d}");
     assert_eq!(r.dispatch_count, 1, "the synthesis turn's steps must not run");
+
+    // ── 8. An empty answer is asked again once; the retry's plan is used (#923).
+    let f = TimeoutScript::new(
+        vec![Next::Empty, Next::Plan(Box::new(terminal_plan("after an empty answer")))],
+        None,
+    );
+    let (task_id, r) = run(&pool, f.clone()).await;
+    assert_eq!(completed_body(&r), "after an empty answer");
+    assert_eq!(r.failed_llm_calls, 1, "the empty answer is a model call");
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["thinking_suppressed_retry"], false, "{}", failed[0]);
+    let plans = agent_rows(&pool, task_id, "plan.formulate").await;
+    assert_eq!(plans.last().unwrap()["retry_count"], 1, "the retry's row says it was one");
+
+    // ── 9. Empty twice → a worded failure after exactly one retry; the
+    //       third scripted answer is never asked for.
+    let f = TimeoutScript::new(
+        vec![Next::Empty, Next::Empty, Next::Plan(Box::new(terminal_plan("never reached")))],
+        None,
+    );
+    let (task_id, r) = run(&pool, f.clone()).await;
+    let d = failed_detail(&r);
+    assert!(d.starts_with("The language model returned an empty answer"), "{d}");
+    assert!(d.ends_with("[llm: plan decode failed: EOF while parsing a value at line 1 column 0]"), "{d}");
+    assert_eq!(r.failed_llm_calls, 2);
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 2, "one row per failed call: {failed:?}");
+    assert_eq!(failed[1]["thinking_suppressed_retry"], false, "a plain retry: {}", failed[1]);
+    assert_eq!(r.plan_count, 0);
+
+    // ── 10. An empty synthesis answer is retried through the SYNTHESIS door.
+    let f = TimeoutScript::new(
+        vec![
+            Next::Plan(Box::new(one_step_plan())),
+            Next::Timeout,
+            Next::Empty,
+            Next::Plan(Box::new(terminal_plan("synthesis retry"))),
+        ],
+        None,
+    );
+    let (_, r) = run(&pool, f.clone()).await;
+    assert_eq!(completed_body(&r), "synthesis retry");
+    assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 2, "both synthesis attempts used the synthesis door");
+    assert_eq!(f.retry_calls.load(Ordering::SeqCst), 0, "an empty answer is not a timeout: thinking stays as configured");
 }
