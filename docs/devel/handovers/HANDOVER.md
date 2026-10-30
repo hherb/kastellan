@@ -67,6 +67,12 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   invoice's **UTC** date to the user: the planner prompt now says tool times are UTC and to convert them to
   the `<now>` zone. ⚠️ A single-word search finds only mail containing that word ("Payment overdue" is not
   "invoice") — recall needs several searches, which #922's cap makes expensive.
+- **Semantic search was never used:** localmail's `sort: "date"` is a **keyword-only** walk (it bypasses the
+  hybrid pool), and the doc forced every "most recent" question onto it. The doc now says rank = semantic +
+  keyword and sends recency questions to a **ranked search in a narrow `date_from` window (~14 days), widened
+  only when nothing is relevant**. A narrow window is also **exact** (EXPLAIN: date index + sort by distance, no
+  HNSW). Live (tasks 222–224): the planner used semantic search for "payments due" but **never set a window** —
+  it follows parameters, not prose. Next step if wanted: a `within_days` param the worker turns into `date_from`.
 - **localmail on the DGX had stalled** (IDLE stuck `reconnecting` since 02:58, poll stale since 21:33 the evening
   before; the unit read `active` the whole time). Restarted 2026-10-30 08:50; heartbeats fresh. Check with
   `~/src/localmail/.venv/bin/localmail daemon status` — ⚠️ **`systemctl is-active` cannot see it.** Filed
@@ -100,11 +106,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - `tests_common::init_pg_cluster` → `PgInit` + `PgInit::start`. ⚠️ The daemon's JSON log is **stdout**, a boot
   refusal **stderr**.
 
-### Previous (2026-10-24 → 25): #609 — the guard backend is supervised (PR #908, merged) — what still binds
-
-- `kastellan-guard` installs only when `KASTELLAN_GUARD_SERVER_BIN`/`_MODEL` are set; ⚠️ port/alias are
-  **derived** from `KASTELLAN_LLM_GUARD_URL`/`_MODEL`, read **at install time**. Boot waits ≤ 60 s on `/props`;
-  ⚠️ `tests_common::scripted_llm`'s default **503s `/props`** (a guard-configured e2e waits 60 s). Open: #907.
+### Previous (2026-10-24 → 25): #609 (PR #908) — ⚠️ guard port/alias are **derived** from `KASTELLAN_LLM_GUARD_URL`/`_MODEL` and read **at install time**; `scripted_llm`'s default **503s `/props`** (a guard e2e waits 60 s). Open: #907.
 
 ### Previous (2026-10-23 → 24): the supervisor arc — #904, #900/#902, #896, #898 (PRs #905, #903, #901, #899, merged) — what still binds
 
@@ -127,11 +129,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   pass `--no-fail-fast` after the profile name when measuring. ⚠️ A 0-byte gate script exits 0
   [[ssh-stdin-copy-can-write-zero-bytes]]. DGX SearxNG restart policy is `unless-stopped` (2026-10-24).
 
-### Earlier (2026-10-17 → 19): #875, #722, #872, #870, #867, #862, #860 (merged) — what still binds
-
-⚠️ **Any `Cargo.lock` mtime change makes `kastellan/python-exec:dev` "stale"** — `bash
-scripts/workers/python-exec/build-image.sh`. #870: ⚠️ **never put the launchd wait in `stop`**
-[[mac-sysv-shm-exhaustion-from-killed-postgres]]. #862: `report_unsaid_lost_rows()` — ⚠️ call once.
+### Earlier (2026-10-17 → 19): #875 … #860 — ⚠️ any `Cargo.lock` mtime change makes `python-exec:dev` stale (`scripts/workers/python-exec/build-image.sh`); never put the launchd wait in `stop` [[mac-sysv-shm-exhaustion-from-killed-postgres]]; `report_unsaid_lost_rows()` — call once.
 
 ### Previous (2026-10-08 → 17): thinning (#829, #858/#861, #837/#859/#864/#865), #810, and the Matrix inbound path (#835, #852, #853, #825, #832, #846, #827/#826) — what still binds (prose: the `867`/`825`/`815` snapshots)
 
