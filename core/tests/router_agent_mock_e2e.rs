@@ -12,7 +12,8 @@
 //!    name + sha256 the inner-loop audit row needs.
 //! 2. **Decode error** — backend returns a `choices[0].message.content`
 //!    that is *not* valid JSON; `formulate_plan` returns
-//!    `Err(AgentError::Decode { detail, raw })`. A silent default or
+//!    `Err(AgentError::Decode { detail, raw, usage, .. })`, `usage` being
+//!    the failed completion's own `CompletionStats`. A silent default or
 //!    panic here would corrupt the audit trail and let bad plans
 //!    propagate.
 //! 3. **Missing prompt** — the in-memory `PromptCache` does not have
@@ -496,7 +497,7 @@ async fn decode_error_when_assistant_content_is_not_a_plan() {
         .await
         .expect_err("malformed plan must surface as Decode");
     match err {
-        AgentError::Decode { detail, raw } => {
+        AgentError::Decode { detail, raw, usage, .. } => {
             assert!(
                 raw.contains("not a plan"),
                 "raw body must be preserved for triage: {raw:?}"
@@ -505,6 +506,10 @@ async fn decode_error_when_assistant_content_is_not_a_plan() {
                 !detail.is_empty(),
                 "detail must carry the underlying serde_json error: {detail:?}"
             );
+            // The failed completion's own cost rides on the error, for the
+            // `plan.formulate_failed` row — not a default (DGX task 212).
+            assert_eq!(usage.completion_tokens, Some(2), "{usage:?}");
+            assert_eq!(usage.finish_reason.as_deref(), Some("stop"), "{usage:?}");
         }
         other => panic!("expected AgentError::Decode, got {other:?}"),
     }

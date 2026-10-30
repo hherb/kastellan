@@ -163,6 +163,13 @@ const FAILED_ROW_ERROR_CHARS: usize = 512;
 /// and #774's point is that "why was this task slow?" is a query.
 /// `plan_count` is the count *before* the call (a failed call adds no
 /// plan); `thinking_suppressed_retry` marks the synthesis retry.
+///
+/// `completion` is the cost of the answer that failed to decode, when one
+/// came back ([`AgentError::completion`](crate::scheduler::agent::AgentError::completion)).
+/// It is written under the `plan.formulate` row's own keys (`llm_usage`,
+/// `latency_ms`), so one query reads the cost of every planning call that got
+/// a completion back. Unlike that row, the keys are absent (not null) when
+/// none did: a router failure, timeouts included, records no latency.
 pub(super) fn formulate_failed_payload(
     task_id: i64,
     plan_count: u32,
@@ -170,15 +177,22 @@ pub(super) fn formulate_failed_payload(
     thinking_suppressed_retry: bool,
     request_timeout: bool,
     error: &str,
+    completion: Option<(&kastellan_llm_router::CompletionStats, u64)>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "task_id": task_id,
         "plan_count": plan_count,
         "synth_turn": synth_turn,
         "thinking_suppressed_retry": thinking_suppressed_retry,
         "request_timeout": request_timeout,
         "error": error.chars().take(FAILED_ROW_ERROR_CHARS).collect::<String>(),
-    })
+    });
+    if let Some((usage, latency_ms)) = completion {
+        v["llm_usage"] = serde_json::to_value(usage)
+            .expect("CompletionStats serialisation cannot fail (integers, a string, no maps)");
+        v["latency_ms"] = serde_json::json!(latency_ms);
+    }
+    v
 }
 
 /// What one planning turn produced.
@@ -318,6 +332,7 @@ pub(super) async fn record_failed_formulation(
         thinking_suppressed_retry,
         error.is_request_timeout(),
         &error.to_string(),
+        error.completion(),
     );
     if let Err(e) = kastellan_db::audit::insert(pool, "agent", ACTION_FORMULATE_FAILED, payload).await {
         tracing::error!(task_id, error = %e, "plan.formulate_failed audit insert failed");

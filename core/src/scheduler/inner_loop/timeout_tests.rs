@@ -87,6 +87,9 @@ async fn resolve(next: Option<Next>) -> Result<(Plan, FormulationMeta), AgentErr
         Some(Next::Decode) | None => Err(AgentError::Decode {
             detail: "scripted decode failure".into(),
             raw: String::new(),
+            usage: Default::default(),
+            // Non-zero so case 6 proves the row carries the error's own latency, not a default 0.
+            latency_ms: 4321,
         }),
     }
 }
@@ -228,9 +231,10 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     )
     .await
     .ok();
-    let Ok(pool) = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec).await else {
-        return;
-    };
+    // The cluster is up, so a failed connect is a failure, not a skip.
+    let pool = kastellan_db::pool::connect_runtime_pool(&cluster.conn_spec)
+        .await
+        .expect("connect runtime pool");
 
     // ── 1. A normal turn times out after a gather → synthesis turn, answered.
     let f = TimeoutScript::new(
@@ -251,6 +255,7 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0]["request_timeout"], true);
     assert_eq!(failed[0]["synth_turn"], false);
+    assert!(failed[0].get("llm_usage").is_none(), "a timeout got no completion to cost: {}", failed[0]);
 
     // ── 2. The synthesis turn itself times out → one retry, which answers.
     let f = TimeoutScript::new(
@@ -313,6 +318,10 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     assert_eq!(r.failed_llm_calls, 1, "a final non-timeout failure is a model call too");
     let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
     assert_eq!(failed[0]["request_timeout"], false);
+    // The completion that failed to decode is costed on its row (#923); a
+    // timeout's row (case 1) has no completion, so no such keys.
+    assert_eq!(failed[0]["latency_ms"], 4321, "{}", failed[0]);
+    assert!(failed[0]["llm_usage"].is_object(), "{}", failed[0]);
 
     // ── 7. A timeout-forced synthesis that asks for more tools must not claim
     //       the plan cap, which was never reached (#774 review).

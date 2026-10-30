@@ -116,6 +116,85 @@ fn search_advertises_query_as_optional_and_says_how_to_filter_only() {
     );
 }
 
+/// localmail's keyword search (all of `sort: "date"`, half of `rank`) is
+/// `plainto_tsquery('simple', …)`: EVERY word must appear in a hit, and `OR`
+/// is not an operator but one more word to match. DGX task 211 (2026-10-29)
+/// asked for the most recent flight booking with
+/// `flight booking OR flight confirmation OR airline OR reservation`,
+/// matched only two 2025 emails, and answered with a 17-month-old booking
+/// while `e-ticket itinerary` would have found the one from 28 Oct. The
+/// description is the only place the planner can learn the dialect.
+#[test]
+fn search_query_says_date_sort_needs_every_word_and_or_is_not_an_operator() {
+    let docs = MailManifest.tool_docs();
+    let d = docs.iter().find(|d| d.method == "mail.search").expect("mail.search");
+    let query = d.params.iter().find(|p| p.name == "query").expect("query");
+    assert!(
+        query.description.contains("EVERY word"),
+        "must say all words are required: {:?}",
+        query.description
+    );
+    assert!(
+        query.description.contains("no OR"),
+        "must say OR is not an operator: {:?}",
+        query.description
+    );
+    assert!(
+        query.description.contains("separate searches"),
+        "must say how to search for alternatives: {:?}",
+        query.description
+    );
+}
+
+/// localmail's `sort: "date"` bypasses the hybrid pool: it is a keyword-only
+/// walk, so the semantic arms never run. The old doc said every "most recent"
+/// question MUST use it, so the planner never once searched by meaning. On the
+/// DGX (2026-10-30) the ranked query "fee payable to council", bounded to
+/// October, returned the council fee email and a "Payment overdue" notice in
+/// its top three. Neither contains "invoice", which was the planner's
+/// date-sorted query. The doc must say what each sort does and how to get
+/// "the most recent X" out of the semantic one.
+#[test]
+fn search_says_date_sort_is_keyword_only_and_rank_is_semantic() {
+    let docs = MailManifest.tool_docs();
+    let d = docs.iter().find(|d| d.method == "mail.search").expect("mail.search");
+    let sort = d.params.iter().find(|p| p.name == "sort").expect("sort");
+    assert!(sort.description.contains("keyword-only"), "{:?}", sort.description);
+    assert!(sort.description.contains("'rank' is semantic"), "{:?}", sort.description);
+    assert!(
+        d.summary.contains("keyword-only with sort 'date'"),
+        "the summary must not say every search is hybrid: {:?}",
+        d.summary
+    );
+    assert!(
+        sort.description.contains("date_from"),
+        "must say how to bound a ranked search to recent mail: {:?}",
+        sort.description
+    );
+    // Unbounded, semantic rank puts the BEST match first, from any year, so
+    // the newest relevant mail can be outranked. The window has to start
+    // narrow and widen only when it finds nothing. (A narrow window is also
+    // exact on localmail: Postgres sorts the window's chunks by distance
+    // instead of taking the approximate HNSW top-K, EXPLAIN on the DGX
+    // 2026-10-30.)
+    assert!(
+        sort.description.contains("narrow") && sort.description.contains("widen"),
+        "must say to start with a narrow window and widen it: {:?}",
+        sort.description
+    );
+    assert!(
+        !sort.description.contains("must pass sort"),
+        "must no longer force every recency question onto the keyword walk: {:?}",
+        sort.description
+    );
+    let query = d.params.iter().find(|p| p.name == "query").expect("query");
+    assert!(
+        query.description.contains("describe the mail"),
+        "must say a ranked query should describe the mail: {:?}",
+        query.description
+    );
+}
+
 /// The live defect this parameter set exists to end (task 160, 2026-08-17):
 /// the tool took exactly one parameter — a 64-char sha256 — and the planner,
 /// which had the right hash in its prompt head, supplied a different one.
@@ -243,6 +322,27 @@ fn attachment_tools_advertise_index_and_get_message_lists_it() {
     }
     let get = docs.iter().find(|d| d.method == "mail.get_message").expect("get_message");
     assert!(get.summary.contains("index"), "{:?}", get.summary);
+}
+
+/// DGX task 218 (2026-10-30): asked for the most recent invoice, the planner
+/// fetched a council email whose whole body was "please find attached … the
+/// amount payable", judged it "not an invoice" from the body alone, and went
+/// on to older mail. The facts were in the PDF. The summary must say that a
+/// body pointing at an attachment is not the content.
+#[test]
+fn get_message_says_to_read_an_attachment_the_body_points_to() {
+    let docs = MailManifest.tool_docs();
+    let get = docs.iter().find(|d| d.method == "mail.get_message").expect("get_message");
+    assert!(
+        get.summary.contains("attached") && get.summary.contains("mail.get_attachment_text"),
+        "must say to read the attachment the body refers to: {:?}",
+        get.summary
+    );
+    assert!(
+        get.summary.contains("before ruling"),
+        "must say not to rule the message out from its body alone: {:?}",
+        get.summary
+    );
 }
 
 /// Text is paged since #760, so the planner must learn that a page may not

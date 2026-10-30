@@ -112,15 +112,24 @@ impl WorkerManifest for MailManifest {
             ToolDoc {
                 name: TOOL_NAME,
                 method: "mail.search",
-                summary: "Search the mail archive (hybrid semantic + full-text). Filter by \
+                summary: "Search the mail archive (hybrid semantic + full-text under the \
+                          default rank sort; keyword-only with sort 'date'). Filter by \
                           date range, from/to, subject, has_attachment, account/folder. Each \
                           hit: message_id, account, subject, from, date, has_attachments, a \
                           short snippet. Page forward with next_cursor.",
                 params: &[
                     ToolParam {
                         name: "query",
-                        description: "free-text search query. For a filter-only search (e.g. every \
-                                      message with an attachment) omit query and pass filters.",
+                        description: "what to look for. With the default rank sort the search is \
+                                      also semantic: describe the mail in a few plain words (e.g. \
+                                      'fee payable to council', 'bill asking me to pay') and it \
+                                      finds mail by meaning, not only by those words. With \
+                                      sort 'date' EVERY word must appear in a hit, and 'OR' is \
+                                      just one more required word, so 'flight OR airline' finds \
+                                      almost nothing. Either way there is no OR, AND, NOT or \
+                                      quoting; for alternatives, run separate searches. For a \
+                                      filter-only search (e.g. every message with an attachment) \
+                                      omit query and pass filters.",
                         required: false,
                     },
                     ToolParam {
@@ -141,11 +150,17 @@ impl WorkerManifest for MailManifest {
                     },
                     ToolParam {
                         name: "sort",
-                        description: "'rank' (default, best match first) or 'date' (newest \
-                                      first). Rank order is NOT date order: the top hits are \
-                                      whatever matched best, from any year. A 'most recent' / \
-                                      'latest' question must pass sort: \"date\". With no query \
-                                      there is nothing to rank: results are date-ordered.",
+                        description: "'rank' (default) or 'date'. 'rank' is semantic + keyword, \
+                                      best match first — NOT date order: the top hits can be \
+                                      from any year. 'date' is newest first but keyword-only \
+                                      (no semantic matching), so it finds only mail containing \
+                                      every query word. For 'the most recent <kind of mail>' \
+                                      (invoice, bill, booking) use 'rank' inside a narrow window: \
+                                      filters.date_from about 14 days back, and pick the newest \
+                                      relevant hit by its date. Only if none is relevant, widen \
+                                      the window (60 days, then a year). Use 'date' when you know \
+                                      a word the mail must contain. With no query there is \
+                                      nothing to rank: results are date-ordered.",
                         required: false,
                     },
                     ToolParam { name: "limit", description: "max hits (default 50)", required: false },
@@ -156,7 +171,10 @@ impl WorkerManifest for MailManifest {
                 name: TOOL_NAME,
                 method: "mail.get_message",
                 summary: "Fetch one message: headers, plaintext body, and attachment list \
-                          [{index, filename, sha256, content_type, size}].",
+                          [{index, filename, sha256, content_type, size}]. When the body only \
+                          points to an attachment (\"please find attached\"), the facts — \
+                          amounts, dates, items — are in it: read it with \
+                          mail.get_attachment_text before ruling the message out.",
                 params: &[
                     ToolParam {
                         name: "message_id",

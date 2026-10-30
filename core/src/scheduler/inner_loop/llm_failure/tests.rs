@@ -139,12 +139,34 @@ fn a_timeout_forced_synthesis_without_an_answer_does_not_claim_the_cap() {
 #[test]
 fn the_failed_call_row_carries_its_facts_and_a_clamped_error() {
     let long = "x".repeat(FAILED_ROW_ERROR_CHARS + 100);
-    let v = formulate_failed_payload(7, 3, true, true, true, &long);
+    let v = formulate_failed_payload(7, 3, true, true, true, &long, None);
     assert_eq!(v["task_id"], 7);
     assert_eq!(v["plan_count"], 3);
     assert_eq!(v["synth_turn"], true);
     assert_eq!(v["thinking_suppressed_retry"], true);
     assert_eq!(v["request_timeout"], true);
     assert_eq!(v["error"].as_str().unwrap().chars().count(), FAILED_ROW_ERROR_CHARS);
+    // No completion came back (a timeout, a refused connection): no usage keys.
     assert_eq!(v.as_object().unwrap().len(), 6, "{v}");
+}
+
+/// A decode failure DID get a completion back. Its cost and whether the
+/// tokens went to reasoning are what tell "the model thought and said
+/// nothing" from "the model emitted nothing" — the DGX's task 212 (2026-10-29,
+/// thinking off, `raw_len: 0` on 48 completion tokens) could not say which.
+#[test]
+fn a_decode_failure_row_carries_the_completion_cost_under_the_plan_rows_keys() {
+    let stats = kastellan_llm_router::CompletionStats {
+        prompt_tokens: Some(25_803),
+        completion_tokens: Some(48),
+        reasoning_chars: 170,
+        finish_reason: Some("stop".into()),
+        ..Default::default()
+    };
+    let v = formulate_failed_payload(212, 2, false, false, false, "plan decode failed: EOF", Some((&stats, 18_976)));
+    assert_eq!(v["latency_ms"], 18_976);
+    assert_eq!(v["llm_usage"]["completion_tokens"], 48);
+    assert_eq!(v["llm_usage"]["reasoning_chars"], 170);
+    assert_eq!(v["llm_usage"]["finish_reason"], "stop");
+    assert_eq!(v.as_object().unwrap().len(), 8, "{v}");
 }

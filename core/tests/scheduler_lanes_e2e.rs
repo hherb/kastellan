@@ -97,10 +97,14 @@ impl PlanFormulator for ScriptedFormulator {
         let queue = map.get_mut(&ctx.task_id).ok_or(AgentError::Decode {
             detail: format!("no script for task_id {}", ctx.task_id),
             raw: "".into(),
+            usage: Default::default(),
+            latency_ms: 0,
         })?;
         let plan = queue.pop_front().ok_or(AgentError::Decode {
             detail: format!("script exhausted for task_id {}", ctx.task_id),
             raw: "".into(),
+            usage: Default::default(),
+            latency_ms: 0,
         })?;
         Ok((
             plan,
