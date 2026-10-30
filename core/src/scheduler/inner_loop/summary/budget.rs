@@ -13,8 +13,9 @@
 //! Now the budget first gives every output an even share (water-filling:
 //! an output smaller than the share stays whole, and what it does not use is
 //! split among the larger ones), and re-renders each larger output at that
-//! share — the same pruned view, its strings trimmed further, so its labels
-//! and identifiers survive. Only when a share would fall below
+//! share — the same pruned view, trimmed further as [`render`](super::result_view::render)
+//! trims (strings first, then list elements and fields), so its short labels
+//! and identifiers outlast its long text. Only when a share would fall below
 //! [`MIN_SHRUNK_OUTPUT_BYTES`] does it drop the oldest outputs whole, as many
 //! as it takes for the rest to keep at least that much.
 
@@ -22,7 +23,8 @@ use super::RenderedStep;
 
 /// The smallest share, in serialised bytes of the step outcome, that an output
 /// is shrunk to before the budget drops the oldest outputs whole instead. 2 KiB
-/// keeps a message's headers or a page of search hits' ids and titles.
+/// is meant to keep a message's headers (pinned at the floor by
+/// `a_message_shrunk_to_the_floor_keeps_its_headers`).
 ///
 /// It also bounds the cost: a shrunk output is re-rendered and re-screened on
 /// every planner turn (the memoized render of #344 is the full-size one), and
@@ -47,6 +49,9 @@ pub(super) struct Fitted {
     pub(super) elided: usize,
     /// Outputs re-rendered at a smaller share.
     pub(super) shrunk: usize,
+    /// Of the `elided`, those whose smaller view the sink screen blocked
+    /// though the full one passed. Not audited (#928), so the caller warns.
+    pub(super) blocked: usize,
 }
 
 /// Fit outputs of `sizes` bytes (oldest first) into `room` bytes. Pure.
@@ -100,8 +105,9 @@ fn water_level(sizes: &[usize], mut room: usize) -> usize {
 /// `plans[p][i]` with its view at most `cap` bytes; a result that is not an
 /// output (the sink screen blocked the smaller view) or that does not fit the
 /// share becomes the elided marker, because the full view passed and only
-/// this summary could not show it. No-op when already within budget, and
-/// idempotent: a fitted summary is within budget.
+/// this summary could not show it; a block is counted in [`Fitted::blocked`].
+/// No-op when already within budget, and idempotent: a second pass finds the
+/// summary within budget or nothing left to touch.
 pub(super) fn apply_summary_budget(
     plans: &mut [Vec<RenderedStep>],
     budget: usize,
@@ -139,6 +145,7 @@ pub(super) fn apply_summary_budget(
                     *step = shrunk;
                     fitted.shrunk += 1;
                 } else {
+                    fitted.blocked += usize::from(shrunk.sink_block.is_some());
                     *step = marker.clone();
                     fitted.elided += 1;
                 }

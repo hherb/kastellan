@@ -76,7 +76,9 @@ impl Client {
         line.push(b'\n');
         // A worker that exited before reading breaks the pipe; its stdout then
         // reads EOF below, so that is reported as `EarlyExit` like any other
-        // early death (and whatever it did answer is still read).
+        // early death (and whatever it did answer is still read). A worker that
+        // closed stdin but holds stdout open is waited on instead; callers
+        // without a per-call deadline are #929.
         match stdin.write_all(&line).and_then(|()| stdin.flush()) {
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
             r => r?,
@@ -285,8 +287,25 @@ mod early_exit_tests {
     /// `worker_early_exit_stderr_fallback_e2e`).
     #[test]
     fn a_worker_gone_before_the_request_is_written_is_an_early_exit() {
+        let mut client = Client::from_child(exited("exit 0")).expect("from_child");
+        let err = client.call("m", serde_json::json!({})).unwrap_err();
+        assert!(matches!(err, ClientError::EarlyExit), "{err:?}");
+    }
+
+    /// The broken pipe is not the answer: a reply the worker wrote before it
+    /// died is still read.
+    #[test]
+    fn a_reply_written_before_the_worker_died_is_still_read() {
+        let reply = r#"printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":7}'"#;
+        let mut client = Client::from_child(exited(reply)).expect("from_child");
+        assert_eq!(client.call("m", serde_json::json!({})).expect("the reply"), 7);
+    }
+
+    /// `sh -c script` with piped stdio, returned once it has exited without
+    /// reading its stdin.
+    fn exited(script: &str) -> std::process::Child {
         let mut child = Command::new("sh")
-            .args(["-c", "exit 0"])
+            .args(["-c", script])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -295,8 +314,6 @@ mod early_exit_tests {
         while child.try_wait().expect("try_wait").is_none() {
             std::thread::yield_now();
         }
-        let mut client = Client::from_child(child).expect("from_child");
-        let err = client.call("m", serde_json::json!({})).unwrap_err();
-        assert!(matches!(err, ClientError::EarlyExit), "{err:?}");
+        child
     }
 }

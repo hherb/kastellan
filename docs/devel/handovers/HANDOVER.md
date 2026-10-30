@@ -60,6 +60,15 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   load-only flake of `worker_early_exit_stderr_fallback_e2e` (3/3 alone); the new protocol test is
   deterministic (waits for the child with `try_wait` — ⚠️ `wait` closes stdin).
 - DGX redeployed to `main` (#924) first; localmail heartbeats fresh.
+- **Review round (4 reviewers):** the longer marker (80 B) made the withheld/error "never elided" tests
+  vacuous (both shapes now smaller than it) — re-armed; three mutants survived (unsorted water level,
+  wrong-index drop loop, unscreened re-render) — now killed, with the re-render a named
+  `PlanRecord::shrunk_output`; a shrink that falls back to `…view_unavailable` now elides (that wording is
+  #921's misreading again); a sink block on a shrunk view is counted (`Fitted::blocked`) and `warn!`ed but
+  **not audited — [#928](https://github.com/hherb/kastellan/issues/928)**; the swallowed EPIPE waits on a
+  worker that closed stdin yet holds stdout — no producer in tree, unbounded only where no per-call deadline
+  exists (gliner, persistent transport) — **[#929](https://github.com/hherb/kastellan/issues/929)**.
+  +6 core lib, +1 protocol tests; no full sweep re-run for this round.
 
 ### Previous (2026-10-30): the #773 live re-measure (PR #924, merged) — what still binds (prose: the `921` snapshot)
 

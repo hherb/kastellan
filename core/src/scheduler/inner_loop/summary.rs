@@ -95,9 +95,10 @@ const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
 /// ceiling alone — marginally, not never, because each outcome's `{"status",
 /// "output"}` wrapper and its call (up to ~1 KiB, since #699) are counted on
 /// top of the 16 KiB view. Plans with several steps, `web.search_batch` steps
-/// (up to 24 KiB each) or a long-lane task exceed it: every output is then
-/// shrunk to an even share, and only once a share would fall below
-/// `budget::MIN_SHRUNK_OUTPUT_BYTES` are the oldest dropped whole (#921);
+/// (up to 24 KiB each) or a long-lane task exceed it: every output larger than
+/// an even share is then shrunk to it, and only once a share would fall below
+/// `budget::MIN_SHRUNK_OUTPUT_BYTES` are the oldest dropped whole (#921; a
+/// shrunk view that fails the sink screen or overshoots is dropped too);
 /// if the calls alone overrun it, the oldest calls then lose their
 /// `parameters` (see `call::apply_call_budget`). In that case every elidable
 /// output is already gone, the newest included: the second pass frees room but
@@ -186,7 +187,8 @@ fn elided_outcome() -> serde_json::Value {
 }
 
 /// One rendered step outcome, its serialised size, whether the budget may
-/// replace it with [`elided_outcome`], and what the sink screen blocked in it.
+/// shrink it or replace it with [`elided_outcome`], and what the sink screen
+/// blocked in it.
 ///
 /// Built only through the four named constructors, each of which owns its
 /// shape and its flag, so a withheld or failed step cannot be marked elidable
@@ -210,7 +212,7 @@ impl RenderedStep {
         Self { value, bytes, elidable, sink_block }
     }
 
-    /// A successful step's view: the one shape the budget may elide.
+    /// A successful step's view: the one shape the budget may shrink or elide.
     fn output(view: serde_json::Value) -> Self {
         Self::measured(json!({STATUS_KEY: STATUS_OK, OUTPUT_KEY: view}), true, None)
     }
@@ -244,6 +246,10 @@ impl RenderedStep {
 /// every accumulated outcome on every loop was latent-quadratic in
 /// `max_plans` (which is operator-overridable and unbounded); memoizing at the
 /// push is observationally identical and drops it to linear. Issue #344.
+///
+/// One bounded exception: an output over the summary budget's even share is
+/// re-rendered and re-screened from `outcomes` on every turn (#921), at most
+/// `budget / MIN_SHRUNK_OUTPUT_BYTES` of them; see [`PlanRecord::shrunk_output`].
 #[derive(Debug)]
 pub struct PlanRecord {
     /// The completed plan; its `decision` labels the summary object.
@@ -262,9 +268,9 @@ pub struct PlanRecord {
     outcomes: Vec<StepOutcome>,
     /// Screened renders of `plan`'s step outcomes, one per outcome. Private:
     /// the only consumers are [`render_plans_summary`] and
-    /// [`PlanRecord::sink_block_audit_payloads`], and the screened-once
-    /// invariant depends on nothing else being able to inject an unscreened
-    /// `RenderedStep`.
+    /// [`PlanRecord::sink_block_audit_payloads`], and the screened invariant
+    /// depends on nothing else being able to inject an unscreened
+    /// `RenderedStep` (the budget's re-render goes through [`render_ok`]).
     rendered: Vec<RenderedStep>,
     /// The screened call that produced each outcome, index-aligned with
     /// `rendered` (#699). `None` only when outcomes outnumber steps (not
@@ -359,6 +365,33 @@ impl PlanRecord {
         decision.into_iter().chain(steps).collect()
     }
 
+    /// Step `i`'s output re-rendered with its view at most `cap` bytes, for the
+    /// summary budget (#921). From the raw outcome, never from the stored view,
+    /// which a second prune would strip of the core's own markers; through
+    /// [`render_ok`], so it is screened as the full one was. A view with
+    /// nothing left to show at `cap` ([`result_view::fallback_view`]) becomes
+    /// the elided marker: "view unavailable" for a retrieved item is the
+    /// misreading #921 fixed.
+    fn shrunk_output(&self, i: usize, cap: usize) -> RenderedStep {
+        let (tool, _) = step_tool_and_method(&self.plan, i);
+        match &self.outcomes[i] {
+            StepOutcome::Ok(v) => {
+                let step = render_ok(tool, v, |_| cap);
+                if step.value.get(OUTPUT_KEY) == Some(&result_view::fallback_view()) {
+                    RenderedStep::elided()
+                } else {
+                    step
+                }
+            }
+            // Unreachable: the budget shrinks only an `output`, and only `Ok`
+            // renders one. Not a panic: release is `panic = "abort"`.
+            StepOutcome::Err { .. } => {
+                tracing::error!(step = i, "plan summary budget asked to shrink a failed step; shown as elided");
+                RenderedStep::elided()
+            }
+        }
+    }
+
     /// The raw outcomes this record was built from, in step order.
     ///
     /// Callers read these to reconstruct or to classify, never to render. The
@@ -428,12 +461,13 @@ fn render_ok(tool: &str, v: &serde_json::Value, cap: impl FnOnce(&serde_json::Va
 /// `{ "decision", "step_outcomes": [..] }` object per completed plan, each
 /// outcome in one of the shapes described in the module docs.
 ///
-/// The step outcomes, calls and decisions were **already screened once** when
-/// each [`PlanRecord`] was constructed at push time (issue #344), so this
-/// function performs *zero* injection screening — it clones the memoized
-/// renders and calls, and runs the two size-budget passes over them (outputs
-/// first, then `parameters`). The clone is required because both passes elide
-/// in place and must not mutate the stored, immutable record.
+/// The step outcomes, calls and decisions were **already screened** when each
+/// [`PlanRecord`] was constructed at push time (issue #344), so this function
+/// clones the memoized renders and calls and runs the two size-budget passes
+/// over them (outputs first, then `parameters`). The only screening here is of
+/// the outputs the first pass shrinks, re-rendered from the raw outcome by
+/// [`PlanRecord::shrunk_output`] (#921). The clone is required because both
+/// passes rewrite in place and must not mutate the stored, immutable record.
 pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Value> {
     let mut rendered: Vec<Vec<RenderedStep>> =
         plans.iter().map(|r| r.rendered.clone()).collect();
@@ -447,21 +481,20 @@ pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Valu
     // two passes. The calls are what stop the planner repeating itself (#699),
     // so their bytes come off the budget first and the successful-step OUTPUTS
     // are shrunk (or, past a floor, the oldest dropped) to fit what is left.
-    // The shrink re-renders from the record's raw outcome — never from the
-    // stored view, which a second prune would strip of the core's own markers.
     // Only if the calls alone still overrun it do the oldest calls lose their
     // `parameters` (a task of several 64-step plans with near-cap parameters;
     // found by review).
     let call_bytes = calls.iter().flatten().flatten().fold(0usize, |t, c| t.saturating_add(call_cost(c)));
     let fitted = apply_summary_budget(&mut rendered, PLANS_SUMMARY_BUDGET.saturating_sub(call_bytes), |p, i, cap| {
-        let (tool, _) = step_tool_and_method(&plans[p].plan, i);
-        match &plans[p].outcomes[i] {
-            StepOutcome::Ok(v) => render_ok(tool, v, |_| cap),
-            // Unreachable: only an `output` is shrunk, and only `Ok` renders one.
-            // The budget turns anything but an output into the elided marker.
-            StepOutcome::Err { .. } => RenderedStep::elided(),
-        }
+        plans[p].shrunk_output(i, cap)
     });
+    if fitted.blocked > 0 {
+        // Warn: a screen hit, not routine trimming, and not yet audited (#928).
+        tracing::warn!(
+            blocked = fitted.blocked,
+            "plan summary: the sink screen blocked a shrunk step output whose full view passed; shown as elided"
+        );
+    }
     let outcome_bytes = rendered.iter().flatten().fold(0usize, |t, s| t.saturating_add(s.bytes));
     let elided_calls = apply_call_budget(&mut calls, outcome_bytes.saturating_add(call_bytes), PLANS_SUMMARY_BUDGET);
     if fitted.elided + fitted.shrunk + elided_calls > 0 {

@@ -52,9 +52,9 @@ of the task, with these fields:
   — the step **succeeded and its output was retrieved**; only this summary
   left it out, to stay bounded. Never tell the user such an item could not
   be retrieved. Call the step again only if your answer needs what it
-  returned. When the outputs together are too big, each is first cut to an
-  even share (its long strings end in `…` sooner than usual), and only on a
-  very long task are the oldest left out like this.
+  returned. When the outputs together are too big, the larger ones are first
+  cut to an even share (with the markers above, sooner than usual), and only
+  when there are too many to share are the oldest left out like this.
 - `{"status": "err", "code": "<CODE>", "detail": "…"}` — the step failed.
 
 Every step outcome also carries `"call"`: the step you submitted that
