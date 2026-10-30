@@ -95,6 +95,20 @@ fn the_planner_prompt_documents_the_conversation_block() {
     }
 }
 
+/// Tool results carry UTC timestamps (`…+00:00`, localmail's wire form) while
+/// the user lives in the `<now>` zone. DGX task 219 (2026-10-30) reported an
+/// invoice that arrived at 09:58 Sydney time as "October 29" — the UTC date.
+/// The prompt must tell the planner to convert before it states a date.
+#[test]
+fn the_planner_prompt_says_to_convert_utc_tool_times_to_the_now_zone() {
+    let prompt = include_str!("../../../../prompts/agent_planner.md");
+    assert!(prompt.contains("+00:00"), "must name the UTC form tool results use");
+    assert!(
+        prompt.contains("convert it to the `<now>` timezone"),
+        "must say to convert tool times before stating a date"
+    );
+}
+
 #[test]
 fn serialise_context_omits_directive_on_a_normal_turn() {
     let s = serialise_context_for_agent(&ctx(), false);
