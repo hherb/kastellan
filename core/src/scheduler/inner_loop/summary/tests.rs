@@ -228,6 +228,7 @@ fn the_planner_prompt_documents_every_outcome_shape() {
         WITHHELD_REASON,
         WITHHELD_MARKER,
         ELIDED_REASON,
+        ELIDED_OUTPUT_REASON,
         result_view::OMITTED_KEYS_KEY,
         result_view::VIEW_UNAVAILABLE_KEY,
         result_view::DEPTH_MARKER,
@@ -366,8 +367,48 @@ fn the_planner_summary_is_held_to_its_accumulated_budget() {
         .map(|o| o.to_string().len())
         .sum();
     assert!(outcome_bytes <= PLANS_SUMMARY_BUDGET, "{outcome_bytes} over {PLANS_SUMMARY_BUDGET}");
-    assert_eq!(summary[0]["step_outcomes"][0][ELIDED_KEY], ELIDED_REASON, "the oldest output was kept");
-    assert!(summary[9]["step_outcomes"][0].get(OUTPUT_KEY).is_some(), "the newest output was elided");
+    // Ten full-size outputs are over budget, so each is shrunk, none dropped (#921).
+    for (i, plan) in summary.iter().enumerate() {
+        let text = plan["step_outcomes"][0][OUTPUT_KEY]["text"].as_str().unwrap_or_else(|| panic!("output {i} was dropped"));
+        assert!(text.len() < PLANS_SUMMARY_BUDGET / 10 && text.ends_with('…'), "output {i} was not shrunk: {} bytes", text.len());
+    }
+}
+
+/// #921, task 209: one plan fetched ten messages, the budget dropped the oldest
+/// outputs whole, and the planner fetched them again and told the user two
+/// "could not be retrieved". Every message must keep the fields an answer
+/// quotes; only its body is trimmed.
+#[test]
+fn ten_fetched_messages_all_keep_their_headers_within_budget() {
+    let body = "Dear customer, your booking is confirmed. ".repeat(600);
+    let mut plan = plan_calling("mail", "mail.get_message");
+    plan.steps = vec![plan.steps[0].clone(); 10];
+    let outcomes = (0..10)
+        .map(|i| {
+            StepOutcome::Ok(json!({
+                "message_id": format!("{}", 39000 + i),
+                "from": format!("sender{i}@example.com"),
+                "subject": format!("Your e-ticket number {i}"),
+                "date": "2026-10-28T09:15:00+00:00",
+                "attachments": [{"filename": format!("ticket-{i}.pdf"), "size": 81234}],
+                "body": body,
+            }))
+        })
+        .collect();
+    let summary = render_plans_summary(&[PlanRecord::new(plan, outcomes)]);
+    let steps = summary[0]["step_outcomes"].as_array().unwrap();
+    let bytes: usize = steps.iter().map(|o| o.to_string().len()).sum();
+    assert!(bytes <= PLANS_SUMMARY_BUDGET, "{bytes} over {PLANS_SUMMARY_BUDGET}");
+    assert!(bytes > PLANS_SUMMARY_BUDGET / 2, "control: the budget must have room to spend ({bytes})");
+    for (i, step) in steps.iter().enumerate() {
+        let out = &step[OUTPUT_KEY];
+        assert_eq!(out["message_id"], format!("{}", 39000 + i), "message {i} lost its id: {step}");
+        assert_eq!(out["subject"], format!("Your e-ticket number {i}"));
+        assert_eq!(out["from"], format!("sender{i}@example.com"));
+        assert_eq!(out["attachments"][0]["filename"], format!("ticket-{i}.pdf"));
+        let shown = out["body"].as_str().unwrap();
+        assert!(shown.len() < body.len() && shown.ends_with('…'), "message {i}'s body was not trimmed");
+    }
 }
 
 #[test]

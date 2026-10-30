@@ -41,15 +41,16 @@ fn every_step_outcome_carries_the_call_that_produced_it() {
 }
 
 /// The budget drops an old output, never the call: what the planner asked for
-/// is what stops it asking again.
+/// is what stops it asking again. Sixty plans, because outputs are first shrunk
+/// evenly (#921) and dropped only once a share would fall below the floor.
 #[test]
 fn an_elided_output_keeps_its_call() {
     let prose = "lorem ipsum dolor sit amet ".repeat(1_200);
-    let plans: Vec<PlanRecord> = (0..10)
+    let plans: Vec<PlanRecord> = (0..60)
         .map(|i| PlanRecord::new(search_plan("d", json!({"query": format!("q{i}")})), vec![StepOutcome::Ok(json!({"text": prose}))]))
         .collect();
     let first = &render_plans_summary(&plans)[0]["step_outcomes"][0];
-    assert_eq!(first[ELIDED_KEY], ELIDED_REASON, "control: the oldest output must be elided: {first}");
+    assert_eq!(first[ELIDED_KEY], ELIDED_OUTPUT_REASON, "control: the oldest output must be elided: {first}");
     assert_eq!(first[CALL_KEY]["parameters"]["query"], "q0");
 }
 
