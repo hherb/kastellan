@@ -351,7 +351,8 @@ async fn a_refused_reply_audits_reply_undelivered_alongside_replied() {
             assert_eq!(payload["reason"], "send_failed");
             assert!(payload["observed_at"].is_string(), "every writer stamps the event: {payload}");
             let rendered = payload.to_string();
-            assert!(!rendered.contains("714"), "must never persist the reply body: {rendered}");
+            // Not "714": `observed_at`'s milliseconds can be .714 (seen 2026-10-30).
+            assert!(!rendered.contains("42 * 17"), "must never persist the reply body: {rendered}");
             break;
         }
         assert!(
