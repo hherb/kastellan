@@ -119,13 +119,16 @@ impl WorkerManifest for MailManifest {
                 params: &[
                     ToolParam {
                         name: "query",
-                        description: "search words. EVERY word must appear in a hit: there is no \
-                                      OR, AND, NOT or quoting — 'OR' is just one more word to \
-                                      match, so 'flight OR airline' finds almost nothing. Use 1-3 \
-                                      distinctive words (e.g. 'e-ticket itinerary'); for \
-                                      alternatives, run separate searches. For a filter-only search \
-                                      (e.g. every message with an attachment) omit query and pass \
-                                      filters.",
+                        description: "what to look for. With the default rank sort the search is \
+                                      also semantic: describe the mail in a few plain words (e.g. \
+                                      'fee payable to council', 'bill asking me to pay') and it \
+                                      finds mail by meaning, not only by those words. With \
+                                      sort 'date' EVERY word must appear in a hit. Either way \
+                                      there is no OR, AND, NOT or quoting — 'OR' is just one more \
+                                      word, so 'flight OR airline' finds almost nothing; for \
+                                      alternatives, run separate searches. For a filter-only \
+                                      search (e.g. every message with an attachment) omit query \
+                                      and pass filters.",
                         required: false,
                     },
                     ToolParam {
@@ -146,11 +149,17 @@ impl WorkerManifest for MailManifest {
                     },
                     ToolParam {
                         name: "sort",
-                        description: "'rank' (default, best match first) or 'date' (newest \
-                                      first). Rank order is NOT date order: the top hits are \
-                                      whatever matched best, from any year. A 'most recent' / \
-                                      'latest' question must pass sort: \"date\". With no query \
-                                      there is nothing to rank: results are date-ordered.",
+                        description: "'rank' (default) or 'date'. 'rank' is semantic + keyword, \
+                                      best match first — NOT date order: the top hits can be \
+                                      from any year. 'date' is newest first but keyword-only \
+                                      (no semantic matching), so it finds only mail containing \
+                                      every query word. For 'the most recent <kind of mail>' \
+                                      (invoice, bill, booking) use 'rank' inside a narrow window: \
+                                      filters.date_from about 14 days back, and pick the newest \
+                                      relevant hit by its date. Only if none is relevant, widen \
+                                      the window (60 days, then a year). Use 'date' when you know \
+                                      a word the mail must contain. With no query there is \
+                                      nothing to rank: results are date-ordered.",
                         required: false,
                     },
                     ToolParam { name: "limit", description: "max hits (default 50)", required: false },

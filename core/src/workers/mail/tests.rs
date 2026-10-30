@@ -145,6 +145,50 @@ fn search_query_says_every_word_must_match_and_or_is_not_an_operator() {
     );
 }
 
+/// localmail's `sort: "date"` bypasses the hybrid pool: it is a keyword-only
+/// walk, so the semantic arms never run. The old doc said every "most recent"
+/// question MUST use it, so the planner never once searched by meaning. On the
+/// DGX (2026-10-30) the ranked query "fee payable to council", bounded to
+/// October, returned the council fee email and a "Payment overdue" notice in
+/// its top three. Neither contains "invoice", which was the planner's
+/// date-sorted query. The doc must say what each sort does and how to get
+/// "the most recent X" out of the semantic one.
+#[test]
+fn search_says_date_sort_is_keyword_only_and_rank_is_semantic() {
+    let docs = MailManifest.tool_docs();
+    let d = docs.iter().find(|d| d.method == "mail.search").expect("mail.search");
+    let sort = d.params.iter().find(|p| p.name == "sort").expect("sort");
+    assert!(sort.description.contains("keyword-only"), "{:?}", sort.description);
+    assert!(sort.description.contains("semantic"), "{:?}", sort.description);
+    assert!(
+        sort.description.contains("date_from"),
+        "must say how to bound a ranked search to recent mail: {:?}",
+        sort.description
+    );
+    // Unbounded, semantic rank puts the BEST match first, from any year, so
+    // the newest relevant mail can be outranked. The window has to start
+    // narrow and widen only when it finds nothing. (A narrow window is also
+    // exact on localmail: Postgres sorts the window's chunks by distance
+    // instead of taking the approximate HNSW top-K, EXPLAIN on the DGX
+    // 2026-10-30.)
+    assert!(
+        sort.description.contains("narrow") && sort.description.contains("widen"),
+        "must say to start with a narrow window and widen it: {:?}",
+        sort.description
+    );
+    assert!(
+        !sort.description.contains("must pass sort"),
+        "must no longer force every recency question onto the keyword walk: {:?}",
+        sort.description
+    );
+    let query = d.params.iter().find(|p| p.name == "query").expect("query");
+    assert!(
+        query.description.contains("describe"),
+        "must say a ranked query should describe the mail: {:?}",
+        query.description
+    );
+}
+
 /// The live defect this parameter set exists to end (task 160, 2026-08-17):
 /// the tool took exactly one parameter — a 64-char sha256 — and the planner,
 /// which had the right hash in its prompt head, supplied a different one.
