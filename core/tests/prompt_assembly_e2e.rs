@@ -87,8 +87,8 @@ fn pg_builder_build_against_seeded_db() {
         assert_eq!(result.recalled_count, 0,
                    "build() with no recall context defaults to recalled_count = 0; got: {result:?}");
         let s = &result.system_prompt;
-        assert!(s.starts_with("<l0_meta_rules>\n"),
-                "L0 section first; got:\n{s}");
+        assert!(s.starts_with("<base>\nBASE BODY\n</base>\n"),
+                "base section first (the most stable block leads, for the prompt cache); got:\n{s}");
         assert!(s.contains("- L0 RULE ONE\n"), "L0 rule one missing in:\n{s}");
         assert!(s.contains("- L0 RULE TWO\n"), "L0 rule two missing in:\n{s}");
         assert!(s.contains("<l1_insights>\n- L1 INSIGHT ONE\n</l1_insights>"),
@@ -96,7 +96,7 @@ fn pg_builder_build_against_seeded_db() {
         assert!(s.contains("<base>\nBASE BODY\n</base>\n"),
                 "base section missing; got:\n{s}");
 
-        // Positional ordering: L0 before L1 before base. The pure
+        // Positional ordering: base before L0 before L1. The pure
         // assembler's unit tests cover this, but the e2e test pins
         // the same contract end-to-end so a future PgSystemPromptBuilder
         // regression can't silently reorder sections.
@@ -104,7 +104,7 @@ fn pg_builder_build_against_seeded_db() {
         let l1_start = s.find("<l1_insights>").expect("L1 open tag");
         let base_start = s.find("<base>").expect("base open tag");
         assert!(l0_end < l1_start, "L0 must precede L1; offsets {l0_end}/{l1_start}");
-        assert!(l1_start < base_start, "L1 must precede base; offsets {l1_start}/{base_start}");
+        assert!(base_start < l0_end, "base must precede L0; offsets {base_start}/{l0_end}");
 
         pool.close().await;
     });
@@ -150,18 +150,18 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
                    "build() with no recall context defaults to recalled_count = 0; got: {result:?}");
         // The `<handoff>` block is always present (PR #200 — planner
         // fetch_handoff surfacing), so "empty DB" no longer means a bare
-        // `<base>`; it means no *memory-derived* blocks precede `<base>`.
+        // `<base>`; it means no *memory-derived* blocks follow `<handoff>`.
         // Assert that structurally rather than byte-pinning the handoff text:
         // the unit tests in `assemble/tests.rs` already byte-pin it against the
         // source-of-truth `render_handoff_block()` helper, which is crate-private
         // and so not reachable from this integration test.
         assert!(
-            result.system_prompt.starts_with("<handoff>\n"),
-            "the always-present <handoff> block must lead the prompt; got: {result:?}"
+            result.system_prompt.starts_with("<base>\nBASE BODY\n</base>\n\n<handoff>\n"),
+            "the <base> block leads, the always-present <handoff> follows; got: {result:?}"
         );
         assert!(
-            result.system_prompt.ends_with("<base>\nBASE BODY\n</base>\n"),
-            "the <base> block must be terminal; got: {result:?}"
+            result.system_prompt.ends_with("</handoff>\n"),
+            "with no memory layers and no tools registered, <handoff> is terminal; got: {result:?}"
         );
         for absent in ["<l0_meta_rules>", "<l1_insights>", "<skills>", "<recalled>"] {
             assert!(

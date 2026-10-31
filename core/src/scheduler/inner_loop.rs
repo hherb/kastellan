@@ -905,7 +905,8 @@ pub async fn run_to_terminal(
     }
 }
 
+// `pub(crate)` so other scheduler tests can reuse `inner_loop_test_stubs`.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 mod timeout_tests;
