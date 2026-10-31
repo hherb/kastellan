@@ -10,6 +10,8 @@
 > #915's mutants and #913's detail are in the `773remeasure` snapshot; #909's review round is in the `906` snapshot, #609's deploy notes in `909`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
+**Last updated:** 2026-10-31 (the NVIDIA OpenShell survey: follow-ups filed as #931–#936, docs-only) ·
+**Recent PRs, newest first:** [#937](https://github.com/hherb/kastellan/pull/937) (OpenShell survey, draft), [#927](https://github.com/hherb/kastellan/pull/927) (#921), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 **Last updated:** 2026-10-31 (#923: an empty planner completion is asked again once; a decode failure is told in words — PR #930) ·
 **Recent PRs, newest first:** [#938](https://github.com/hherb/kastellan/pull/938) (#922 option 3 + prompt), [#930](https://github.com/hherb/kastellan/pull/930) (#923), [#927](https://github.com/hherb/kastellan/pull/927) (#921, merged), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
@@ -44,6 +46,54 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
+### This session (2026-10-31, latest): the NVIDIA OpenShell survey (docs only, no code; PR #937)
+
+- **Note:** [`docs/devel/notes/2026-10-31-openshell-survey.md`](../notes/2026-10-31-openshell-survey.md) (OpenShell
+  `42671c2`, Apache-2.0). Six follow-ups are filed and added to ROADMAP Phase 5 in dependency order. Independent:
+  [#936](https://github.com/hherb/kastellan/issues/936) (one conformance table across all four backends) and
+  [#935](https://github.com/hherb/kastellan/issues/935) (install-time worker-binary digests). Then
+  [#931](https://github.com/hherb/kastellan/issues/931) (HTTP framing plus L7 rules) →
+  [#932](https://github.com/hherb/kastellan/issues/932) (credential injection at the sidecar), and
+  [#933](https://github.com/hherb/kastellan/issues/933) (delta classifier) →
+  [#934](https://github.com/hherb/kastellan/issues/934) (Inbox grant proposals). They are **not** ranked above
+  Next TODO's items.
+- ⚠️ **Found while filing, and each binds the issue it is in:**
+  - `mitm.rs::intercept` is a **byte relay**: the proxy never frames HTTP requests. So #931 and #932 start with a new
+    attacker-facing parser, not a config field.
+  - `tool_allowlists` is read **once**, at registry build (`core/src/registry_build.rs`). An allowlist `add`,
+    from the CLI or from a future #934 approval, is dead until a daemon restart.
+  - The live credential holder on the net path is `mail` (`KASTELLAN_MAIL_TOKEN_FILE`, outside the vault).
+- **Not imported, on purpose:** OpenShell's fail-open defaults (L7 `audit` mode, Landlock `best_effort`, auto-approval
+  of new public hosts) and its trust-on-first-use binary pinning.
+- ⚠️ This file is already over the ~500-line target. It was not pruned this session; snapshot it at the next code
+  session.
+
+### Previous (2026-10-30): #921 — the plan summary shrinks evenly (PR #927)
+
+- **#921:** over the 96 KiB `PLANS_SUMMARY_BUDGET`, outputs are now **water-filled to an even share** and
+  re-rendered from the record's raw outcome (re-screened; a shrunk view that blocks, or overshoots, becomes
+  the elided marker). The oldest are dropped whole only once a share would fall below
+  `budget::MIN_SHRUNK_OUTPUT_BYTES` (2 KiB; also caps re-renders at 48/turn). Ten fetched messages keep id,
+  sender, subject, attachment names. Marker reason is now `"output retrieved, dropped from this summary for
+  space"` (the call-parameter marker keeps `"summary budget"`); the prompt says never call it unretrieved.
+  Code: `core/src/scheduler/inner_loop/summary/budget.rs` (pure `plan_fit` + apply; movement-only split
+  first). 7/7 mutants killed. ⚠️ A long task's newest output is now cut to its share too — **not yet
+  measured live**: re-ask tasks 207–210 (209 is #921's case) after deploying.
+- **Found by the sweep, fixed:** `protocol::Client::call` wrote the request with `serde_json::to_writer`, so a
+  worker that died before reading surfaced as `Decode(Broken pipe)`, not `EarlyExit`, and skipped the
+  last-words report. Now a `BrokenPipe` write falls through to the read (EOF → `EarlyExit`). It showed as a
+  load-only flake of `worker_early_exit_stderr_fallback_e2e` (3/3 alone); the new protocol test is
+  deterministic (waits for the child with `try_wait` — ⚠️ `wait` closes stdin).
+- DGX redeployed to `main` (#924) first; localmail heartbeats fresh.
+- **Review round (4 reviewers):** the longer marker (80 B) made the withheld/error "never elided" tests
+  vacuous (both shapes now smaller than it) — re-armed; three mutants survived (unsorted water level,
+  wrong-index drop loop, unscreened re-render) — now killed, with the re-render a named
+  `PlanRecord::shrunk_output`; a shrink that falls back to `…view_unavailable` now elides (that wording is
+  #921's misreading again); a sink block on a shrunk view is counted (`Fitted::blocked`) and `warn!`ed but
+  **not audited — [#928](https://github.com/hherb/kastellan/issues/928)**; the swallowed EPIPE waits on a
+  worker that closed stdin yet holds stdout — no producer in tree, unbounded only where no per-call deadline
+  exists (gliner, persistent transport) — **[#929](https://github.com/hherb/kastellan/issues/929)**.
+  +6 core lib, +1 protocol tests; no full sweep re-run for this round.
 ### This session (2026-10-31, latest): #923 — an empty completion is asked again once (PR #930)
 
 - `AgentError::is_empty_completion` (a `Decode` with a blank `raw`, **not** `finish_reason: length` — out of room
