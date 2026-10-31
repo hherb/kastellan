@@ -122,6 +122,26 @@ fn the_message_before_any_call_says_nothing_ran() {
     assert!(d.ends_with("[llm: e]"), "{d}");
 }
 
+// ── decode_failure_detail (#923) ──────────────────────────────────────────
+
+#[test]
+fn an_empty_answer_is_said_in_words_with_the_decode_error_last() {
+    let raw = "plan decode failed: EOF while parsing a value at line 1 column 0";
+    let d = decode_failure_detail(true, raw);
+    assert!(d.starts_with("The language model returned an empty answer"), "{d}");
+    assert!(!d.contains("not a plan"), "{d}");
+    assert!(d.ends_with(&format!("[llm: {raw}]")), "{d}");
+}
+
+#[test]
+fn a_non_plan_answer_is_said_in_words_with_the_decode_error_last() {
+    let raw = "plan decode failed: expected value at line 1 column 1";
+    let d = decode_failure_detail(false, raw);
+    assert!(d.starts_with("The language model answered with something that is not a plan"), "{d}");
+    assert!(!d.contains("empty"), "{d}");
+    assert!(d.ends_with(&format!("[llm: {raw}]")), "{d}");
+}
+
 // ── forced_synthesis_no_answer_detail / formulate_failed_payload ─────────
 
 #[test]

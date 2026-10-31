@@ -368,7 +368,7 @@ fn accounts_return_id_as_a_string() {
     );
 }
 
-/// #760: the mail worker refuses a localmail older than API 1.3, so the
+/// #760/#922: the mail worker refuses a localmail older than API 1.4, so the
 /// mock must claim one it accepts — and in localmail's own field types.
 #[test]
 fn version_reports_an_api_the_mail_worker_accepts() {

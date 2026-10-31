@@ -34,6 +34,28 @@ fn serialise_context_includes_instruction() {
     assert_eq!(v["instruction"], "what happened in Russia today?");
 }
 
+/// #922: the planner was never told its budget, so it spent one plan per
+/// fetched message and learned of the cap only at forced synthesis.
+#[test]
+fn a_normal_turn_says_which_plan_this_is_and_how_many_there_are() {
+    let mut c = ctx();
+    c.plan_count = 2;
+    let s = serialise_context_for_agent(&c, false);
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["plan_budget"]["this_plan"], 3, "{s}");
+    assert_eq!(v["plan_budget"]["max_plans"], 5, "{s}");
+}
+
+/// The prompt must tell the planner to spend that budget well (#922).
+#[test]
+fn the_planner_prompt_asks_for_batched_steps_attachments_and_coverage() {
+    let prompt = include_str!("../../../../prompts/agent_planner.md");
+    assert!(prompt.contains("`plan_budget`"), "must explain the budget key");
+    assert!(prompt.contains("in ONE plan"), "must ask to batch independent steps");
+    assert!(prompt.contains("mail.get_attachment_text"), "must say where figures are");
+    assert!(prompt.contains("second search"), "must ask to check coverage before answering");
+}
+
 // ── #701: the conversation block ───────────────────────────
 
 #[test]
@@ -122,6 +144,35 @@ fn only_a_decode_failure_carries_its_completion() {
     assert_eq!(got.completion_tokens, Some(48));
     assert_eq!(latency_ms, 18_976);
     assert!(AgentError::PromptMissing.completion().is_none());
+}
+
+/// #923: only an answer with nothing in it is worth a plain retry; a
+/// non-JSON answer would most likely come back non-JSON again.
+#[test]
+fn only_a_blank_decode_failure_is_an_empty_completion() {
+    let decode = |raw: &str| AgentError::Decode {
+        detail: "d".into(),
+        raw: raw.into(),
+        usage: Default::default(),
+        latency_ms: 0,
+    };
+    assert!(decode("").is_empty_completion());
+    assert!(decode(" \n\t").is_empty_completion());
+    assert!(!decode("Sure! Here is the plan").is_empty_completion());
+    assert!(!decode("{").is_empty_completion());
+    assert!(!AgentError::PromptMissing.is_empty_completion());
+    // Out of room is not transient: the same request runs out again.
+    let out_of_room = |finish_reason: Option<&str>| AgentError::Decode {
+        detail: "d".into(),
+        raw: String::new(),
+        usage: kastellan_llm_router::CompletionStats {
+            finish_reason: finish_reason.map(Into::into),
+            ..Default::default()
+        },
+        latency_ms: 0,
+    };
+    assert!(!out_of_room(Some("length")).is_empty_completion());
+    assert!(out_of_room(Some("stop")).is_empty_completion());
 }
 
 #[test]

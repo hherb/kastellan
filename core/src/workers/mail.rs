@@ -120,22 +120,25 @@ impl WorkerManifest for MailManifest {
                 params: &[
                     ToolParam {
                         name: "query",
-                        description: "what to look for. With the default rank sort the search is \
-                                      also semantic: describe the mail in a few plain words (e.g. \
-                                      'fee payable to council', 'bill asking me to pay') and it \
-                                      finds mail by meaning, not only by those words. With \
-                                      sort 'date' EVERY word must appear in a hit, and 'OR' is \
-                                      just one more required word, so 'flight OR airline' finds \
-                                      almost nothing. Either way there is no OR, AND, NOT or \
-                                      quoting; for alternatives, run separate searches. For a \
-                                      filter-only search (e.g. every message with an attachment) \
-                                      omit query and pass filters.",
+                        description: "what to look for: a short phrase, not a sentence. \
+                                      Web-search syntax works: 'invoice OR bill' matches either \
+                                      word, '\"payment overdue\"' (in double quotes) the exact \
+                                      phrase, '-anthropic' excludes a word; lowercase 'or' is an \
+                                      operator too. Otherwise EVERY word must appear in a hit for \
+                                      the keyword match, so put alternatives behind OR \
+                                      ('invoice OR bill OR statement'), never side by side. With \
+                                      the default rank sort the search is also semantic: describe \
+                                      the mail in a few plain words (e.g. 'fee payable to \
+                                      council') and it finds mail by meaning, not only by them. For a filter-only search \
+                                      (e.g. every message with an attachment) omit query and pass \
+                                      filters.",
                         required: false,
                     },
                     ToolParam {
                         name: "account_ids",
                         description: "restrict to these account ids, e.g. [1] — same place as on \
-                                      mail.list_messages. May also go inside filters, but not both.",
+                                      mail.list_messages. May also go inside filters, but not both. \
+                                      Usually omit it: no account_ids searches every account.",
                         required: false,
                     },
                     ToolParam {
@@ -154,7 +157,7 @@ impl WorkerManifest for MailManifest {
                                       best match first — NOT date order: the top hits can be \
                                       from any year. 'date' is newest first but keyword-only \
                                       (no semantic matching), so it finds only mail containing \
-                                      every query word. For 'the most recent <kind of mail>' \
+                                      the query's words (one of each OR group). For 'the most recent <kind of mail>' \
                                       (invoice, bill, booking) use 'rank' inside a narrow window: \
                                       filters.date_from about 14 days back, and pick the newest \
                                       relevant hit by its date. Only if none is relevant, widen \
@@ -201,7 +204,10 @@ impl WorkerManifest for MailManifest {
             ToolDoc {
                 name: TOOL_NAME,
                 method: "mail.list_accounts",
-                summary: "List the mail accounts this agent may read.",
+                summary: "List the mail accounts this agent may read. Not needed before a \
+                          search: mail.search and mail.list_messages without account_ids \
+                          already cover every account. Call it only when the user names a \
+                          particular mailbox.",
                 params: &[],
             },
             ToolDoc {

@@ -23,10 +23,14 @@
 /// The `api_major` this worker speaks. A different major is a different API.
 pub const API_MAJOR: u64 = 1;
 
-/// The oldest `api_minor` this worker works against — slice E's `fields` /
-/// `snippet_chars`, which is also the newest thing it uses. Compared with `>=`,
-/// the way localmail's own clients pin it, so a later additive bump is fine.
-pub const MIN_API_MINOR: u64 = 3;
+/// The oldest `api_minor` this worker works against — 4, localmail's
+/// web-search query syntax (`OR`, `"phrase"`, `-word`; hherb/localmail#420),
+/// which the `mail.search` tool doc promises the planner (#922). Below it `OR`
+/// is one more required word and those queries match almost nothing, so an
+/// older server is refused rather than silently answering them. (3 was slice
+/// E's `fields` / `snippet_chars`.) Compared with `>=`, the way localmail's own
+/// clients pin it, so a later additive bump is fine.
+pub const MIN_API_MINOR: u64 = 4;
 
 /// The keys each `mail.search` hit is projected to — localmail's `fields`
 /// (slice E, `api_minor` 3), sent on every search (#760).

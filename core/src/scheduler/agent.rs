@@ -3,7 +3,8 @@
 //! the way out: a model that emits a malformed plan is treated as a
 //! decode-error, surfaced as `RouterError::DecodeResponse`, and the
 //! scheduler's retry policy applies (transient → backoff; decode →
-//! permanent fail).
+//! permanent fail). The one exception is an empty completion, which the
+//! inner loop asks again once within the turn (#923).
 //!
 //! The trait `PlanFormulator` lets the inner-loop integration tests
 //! swap in a scripted stub without spinning up an LLM.
@@ -49,6 +50,16 @@ impl AgentError {
     /// [`RouterError::is_request_timeout`].
     pub fn is_request_timeout(&self) -> bool {
         matches!(self, AgentError::Router(e) if e.is_request_timeout())
+    }
+
+    /// The model returned no content, and not because it ran out of room
+    /// (#923 saw `stop` with thinking off). Unlike a non-JSON answer this
+    /// may be transient, so it is worth one plain retry. A blank `length`
+    /// answer is excluded: the same request at temperature 0 runs out the
+    /// same way.
+    pub fn is_empty_completion(&self) -> bool {
+        matches!(self, AgentError::Decode { raw, usage, .. }
+            if raw.trim().is_empty() && usage.finish_reason.as_deref() != Some("length"))
     }
 
     /// The cost of the completion behind this error, when one came back.
@@ -424,6 +435,20 @@ fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool) -> String {
         "advisories": ctx.advisories,
         "blocks":     ctx.blocks,
     });
+    // #922: without this the planner learns of the cap only at forced
+    // synthesis, and spends one plan per fetched message on the way there.
+    // The synthesis turn has its own directive instead.
+    if !synthesize {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "plan_budget".to_string(),
+                serde_json::json!({
+                    "this_plan": ctx.plan_count.saturating_add(1),
+                    "max_plans": ctx.max_plans,
+                }),
+            );
+        }
+    }
     // #701: the earlier turns of this conversation, oldest first — already
     // rendered, screened and budgeted by `scheduler::conversation::view` when
     // the task was claimed. Added only when non-empty, so a CLI task's
