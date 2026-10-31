@@ -34,6 +34,28 @@ fn serialise_context_includes_instruction() {
     assert_eq!(v["instruction"], "what happened in Russia today?");
 }
 
+/// #922: the planner was never told its budget, so it spent one plan per
+/// fetched message and learned of the cap only at forced synthesis.
+#[test]
+fn a_normal_turn_says_which_plan_this_is_and_how_many_there_are() {
+    let mut c = ctx();
+    c.plan_count = 2;
+    let s = serialise_context_for_agent(&c, false);
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["plan_budget"]["this_plan"], 3, "{s}");
+    assert_eq!(v["plan_budget"]["max_plans"], 5, "{s}");
+}
+
+/// The prompt must tell the planner to spend that budget well (#922).
+#[test]
+fn the_planner_prompt_asks_for_batched_steps_attachments_and_coverage() {
+    let prompt = include_str!("../../../../prompts/agent_planner.md");
+    assert!(prompt.contains("`plan_budget`"), "must explain the budget key");
+    assert!(prompt.contains("in ONE plan"), "must ask to batch independent steps");
+    assert!(prompt.contains("mail.get_attachment_text"), "must say where figures are");
+    assert!(prompt.contains("second search"), "must ask to check coverage before answering");
+}
+
 // ── #701: the conversation block ───────────────────────────
 
 #[test]

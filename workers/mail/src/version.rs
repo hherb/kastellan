@@ -90,8 +90,17 @@ mod tests {
     #[test]
     fn refuses_an_older_minor_and_names_both_versions_and_the_repair() {
         let e = version_error(&v(json!(1), json!(2))).expect("1.2 is too old");
-        assert!(e.contains("1.2") && e.contains("1.3"), "{e}");
+        assert!(e.contains("1.2") && e.contains("1.4"), "{e}");
         assert!(e.contains("upgrade"), "must name the repair: {e}");
+    }
+
+    /// #922: 1.3 has the search projection but not the web-search query
+    /// syntax the tool doc promises, so `invoice OR bill` would quietly need
+    /// the word "or" — refused, not answered wrongly.
+    #[test]
+    fn refuses_a_1_3_server_without_the_query_syntax() {
+        let e = version_error(&v(json!(1), json!(3))).expect("1.3 is too old");
+        assert!(e.contains("1.3") && e.contains("1.4"), "{e}");
     }
 
     #[test]

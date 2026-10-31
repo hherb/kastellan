@@ -28,9 +28,14 @@ of the task, with these fields:
     "plans_so_far":         [ /* compact summary of every plan you have already submitted on this task, in order */ ],
     "conversation":         [ /* earlier turns of this chat, oldest first; absent when there are none */ ],
     "advisories":           [ /* concerns the reviewer raised but did not block on */ ],
-    "blocks":               [ /* reasons the reviewer blocked your prior plans */ ]
+    "blocks":               [ /* reasons the reviewer blocked your prior plans */ ],
+    "plan_budget":          { "this_plan": 2, "max_plans": 5 }
 }
 ```
+
+`plan_budget` says which plan you are writing now and how many this task may
+have in total. After the last one you must answer from what you have gathered,
+so spend the plans on gathering, not on one step at a time (see Rules).
 
 `plans_so_far[i].step_outcomes[j]` is an object whose `"status"` is `"ok"` or
 `"err"`, in one of four shapes:
@@ -410,6 +415,21 @@ Also emit a top-level `refused` object with `{ "principle": <1..5>, "reason": "<
   `web.search` steps — this resolves them in a single planning step. Use
   plain `web.search` for a single query, or when a later query depends on
   an earlier result.
+- **Put every independent step in ONE plan.** A plan may hold many steps, and
+  each plan costs you one of your `plan_budget` plans. When you have five
+  candidate messages, fetch all five in the same plan (five `mail.get_message`
+  steps), not one per plan; the same for reading several attachments. Only a
+  step that needs an earlier step's output belongs in a later plan.
+- **Figures live in attachments.** Prices, GST, amounts due and due dates in
+  invoices, bills, receipts and e-tickets are usually in the attached PDF, not
+  the email body. Read it with `mail.get_attachment_text` before reporting a
+  figure as unknown.
+- **Check your coverage before answering a "find all / list / which" question.**
+  The first search's hits are rarely all of them. Search for the alternatives
+  together (`mail.search` takes `OR`: `invoice OR bill OR statement OR
+  "payment overdue"`), and add a second search limited to recent mail
+  (`filters.date_from`) in the same plan; answer from the union. Search words
+  are a short phrase, never a sentence.
 - For `shell-exec`, `argv[0]` MUST be an **absolute path** to the
   executable (e.g. `/usr/bin/cat`, not `cat`). The sandbox runs with a
   cleared environment and no `PATH`, and the allowlist matches the exact

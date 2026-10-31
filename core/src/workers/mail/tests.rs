@@ -116,16 +116,16 @@ fn search_advertises_query_as_optional_and_says_how_to_filter_only() {
     );
 }
 
-/// localmail's keyword search (all of `sort: "date"`, half of `rank`) is
-/// `plainto_tsquery('simple', …)`: EVERY word must appear in a hit, and `OR`
-/// is not an operator but one more word to match. DGX task 211 (2026-10-29)
-/// asked for the most recent flight booking with
-/// `flight booking OR flight confirmation OR airline OR reservation`,
-/// matched only two 2025 emails, and answered with a 17-month-old booking
-/// while `e-ticket itinerary` would have found the one from 28 Oct. The
-/// description is the only place the planner can learn the dialect.
+/// localmail's keyword search (all of `sort: "date"`, half of `rank`) was
+/// `plainto_tsquery('simple', …)` until API 1.4: `OR` was one more required
+/// word, so DGX task 211's `flight booking OR flight confirmation OR airline`
+/// matched two 2025 emails, and task 231's `invoice OR bill` found nothing.
+/// Since hherb/localmail#420 (API 1.4, the worker's minimum) it is
+/// `websearch_to_tsquery`: OR, "phrase" and -word work, and plain words are
+/// still ALL required. The description is the only place the planner can
+/// learn the dialect, so it must say both halves (#922).
 #[test]
-fn search_query_says_date_sort_needs_every_word_and_or_is_not_an_operator() {
+fn search_query_teaches_or_phrase_and_exclusion_and_that_plain_words_are_all_required() {
     let docs = MailManifest.tool_docs();
     let d = docs.iter().find(|d| d.method == "mail.search").expect("mail.search");
     let query = d.params.iter().find(|p| p.name == "query").expect("query");
@@ -134,13 +134,11 @@ fn search_query_says_date_sort_needs_every_word_and_or_is_not_an_operator() {
         "must say all words are required: {:?}",
         query.description
     );
+    for syntax in ["'invoice OR bill'", "payment overdue", "'-anthropic'", "lowercase 'or'"] {
+        assert!(query.description.contains(syntax), "must teach {syntax}: {:?}", query.description);
+    }
     assert!(
-        query.description.contains("no OR"),
-        "must say OR is not an operator: {:?}",
-        query.description
-    );
-    assert!(
-        query.description.contains("separate searches"),
+        query.description.contains("put alternatives behind OR"),
         "must say how to search for alternatives: {:?}",
         query.description
     );
@@ -354,4 +352,31 @@ fn get_attachment_text_says_how_to_read_the_next_page() {
     assert!(d.summary.contains("next_offset") && d.summary.contains("offset"), "{:?}", d.summary);
     let offset = d.params.iter().find(|p| p.name == "offset").expect("offset");
     assert!(offset.description.contains("next_offset"), "{:?}", offset.description);
+}
+
+/// #922: every live mail task opened with `mail.list_accounts` although there
+/// is one account — a fifth of the fast lane's plans, spent on nothing. The
+/// docs must say that omitting `account_ids` already searches every account.
+#[test]
+fn list_accounts_says_it_is_not_needed_before_a_search() {
+    let docs = MailManifest.tool_docs();
+    let list = docs.iter().find(|d| d.method == "mail.list_accounts").expect("list_accounts");
+    assert!(
+        list.summary.to_lowercase().contains("not needed") && list.summary.contains("every account"),
+        "must say a search needs no account lookup first: {:?}",
+        list.summary
+    );
+    let search = docs.iter().find(|d| d.method == "mail.search").expect("search");
+    let ids = search.params.iter().find(|p| p.name == "account_ids").expect("account_ids");
+    assert!(ids.description.contains("omit") && ids.description.contains("every account"), "{:?}", ids.description);
+}
+
+/// #922: live queries were whole sentences ("due or overdue payments, bills,
+/// or invoices"), which a keyword match cannot satisfy. Ask for keywords.
+#[test]
+fn search_query_asks_for_short_keywords_not_a_sentence() {
+    let docs = MailManifest.tool_docs();
+    let search = docs.iter().find(|d| d.method == "mail.search").expect("search");
+    let q = search.params.iter().find(|p| p.name == "query").expect("query");
+    assert!(q.description.contains("not a sentence"), "{:?}", q.description);
 }
