@@ -16,8 +16,14 @@
         }
     }
 
+    /// The whole output when every optional layer is empty: `<base>`, then the
+    /// always-present `<handoff>`, ending in exactly one newline.
+    fn bare(base_body: &str) -> String {
+        format!("<base>\n{base_body}\n</base>\n\n{}\n", render_handoff_block().trim_end_matches('\n'))
+    }
+
     #[test]
-    fn empty_l0_l1_recalled_emits_handoff_then_base() {
+    fn empty_l0_l1_recalled_emits_base_then_handoff() {
         let out = assemble_system_prompt(
             &[],
             &[],
@@ -27,11 +33,7 @@
             &[],
             None,
         );
-        assert_eq!(
-            out,
-            format!("{}<base>\nBASE BODY\n</base>\n", render_handoff_block()),
-            "no L0/L1/recalled → handoff block then base; got:\n{out}"
-        );
+        assert_eq!(out, bare("BASE BODY"), "no L0/L1/recalled → base then handoff; got:\n{out}");
     }
 
     #[test]
@@ -57,7 +59,7 @@
     }
 
     #[test]
-    fn renders_recalled_block_between_l1_and_base() {
+    fn renders_recalled_block_after_l1_and_after_base() {
         let l0 = vec![mem(1, "L0 RULE", MemoryLayer::Meta)];
         let l1 = vec![mem(2, "L1 INSIGHT", MemoryLayer::Index)];
         let recalled = RecalledContext::new(
@@ -77,7 +79,7 @@
 
         assert!(l0_end < l1_start, "L0 must come before L1; out:\n{out}");
         assert!(l1_end < recalled_start, "L1 must come before recalled; out:\n{out}");
-        assert!(recalled_end < base_start, "recalled must come before base; out:\n{out}");
+        assert!(base_start < l0_end && recalled_end > base_start, "base comes first; out:\n{out}");
 
         // Body rendering pin: one bullet per row.
         assert!(out.contains("<recalled>\n- RECALL ONE\n- RECALL TWO\n</recalled>"),
@@ -241,7 +243,8 @@
     fn l0_only_skips_l1_section() {
         let l0 = vec![mem(1, "rule one", MemoryLayer::Meta)];
         let out = assemble_system_prompt(&l0, &[], &[], &RecalledContext::empty(), "BASE", &[], None);
-        assert!(out.starts_with("<l0_meta_rules>\n"), "L0 section first; got:\n{out}");
+        assert!(out.starts_with("<base>\n"), "base first; got:\n{out}");
+        assert!(out.ends_with("<l0_meta_rules>\n- rule one\n</l0_meta_rules>\n"), "L0 last when alone; got:\n{out}");
         assert!(!out.contains("<l1_insights>"), "L1 must be skipped when empty; got:\n{out}");
         assert!(out.contains("<base>\nBASE\n</base>\n"), "base must be present; got:\n{out}");
     }
@@ -262,6 +265,11 @@
         let out = assemble_system_prompt(&l0, &l1, &[], &RecalledContext::empty(), "BASE", &[], None);
         let expected = format!(
             concat!(
+                "<base>\n",
+                "BASE\n",
+                "</base>\n",
+                "\n",
+                "{handoff}",
                 "<l0_meta_rules>\n",
                 "- rule one\n",
                 "</l0_meta_rules>\n",
@@ -269,11 +277,6 @@
                 "<l1_insights>\n",
                 "- insight one\n",
                 "</l1_insights>\n",
-                "\n",
-                "{handoff}",
-                "<base>\n",
-                "BASE\n",
-                "</base>\n",
             ),
             handoff = render_handoff_block(),
         );
@@ -356,22 +359,22 @@
         let out_many_nl = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "many trailing nls\n\n\n\n", &[], None);
         assert_eq!(
             out_no_nl,
-            format!("{}<base>\nno trailing nl\n</base>\n", render_handoff_block()),
+            bare("no trailing nl"),
             "no-trailing-newline input must be normalized; got {out_no_nl:?}"
         );
         assert_eq!(
             out_one_nl,
-            format!("{}<base>\nwith trailing nl\n</base>\n", render_handoff_block()),
+            bare("with trailing nl"),
             "single-trailing-newline input passes through; got {out_one_nl:?}"
         );
         assert_eq!(
             out_two_nl,
-            format!("{}<base>\nwith two trailing nl\n</base>\n", render_handoff_block()),
+            bare("with two trailing nl"),
             "two trailing newlines must collapse to one (no blank line before close tag); got {out_two_nl:?}"
         );
         assert_eq!(
             out_many_nl,
-            format!("{}<base>\nmany trailing nls\n</base>\n", render_handoff_block()),
+            bare("many trailing nls"),
             "many trailing newlines must collapse to one; got {out_many_nl:?}"
         );
     }
@@ -385,7 +388,7 @@
         let skills = vec![surfaced("foo", "does foo.")];
         let out = assemble_system_prompt(&[], &[], &skills, &RecalledContext::empty(), "BASE", &[], None);
         assert!(
-            out.contains("<skills>\n- foo: does foo.\n</skills>\n\n"),
+            out.contains("<skills>\n- foo: does foo.\n</skills>\n"),
             "skills block rendered; got:\n{out}"
         );
     }
@@ -394,11 +397,7 @@
     fn skills_block_absent_when_empty() {
         let out = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE", &[], None);
         assert!(!out.contains("<skills>"), "no skills → no <skills> tag; got:\n{out}");
-        assert_eq!(
-            out,
-            format!("{}<base>\nBASE\n</base>\n", render_handoff_block()),
-            "empty everything → handoff block then base; got:\n{out}"
-        );
+        assert_eq!(out, bare("BASE"), "empty everything → base then handoff; got:\n{out}");
     }
 
     #[test]
@@ -422,13 +421,13 @@
     fn handoff_block_present_even_when_all_layers_empty() {
         let out = assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE", &[], None);
         assert!(
-            out.contains("<handoff>\n") && out.contains("</handoff>\n\n"),
+            out.contains("<handoff>\n") && out.ends_with("</handoff>\n"),
             "handoff block must always be present; got:\n{out}"
         );
     }
 
     #[test]
-    fn handoff_block_sits_after_recalled_and_before_base() {
+    fn handoff_block_sits_after_base_and_before_recalled() {
         let recalled = RecalledContext::new(
             vec![100],
             vec!["RECALL ONE".into()],
@@ -439,8 +438,8 @@
         let handoff_start = out.find("<handoff>").expect("handoff start tag");
         let handoff_end = out.find("</handoff>").expect("handoff end tag");
         let base_start = out.find("<base>").expect("base start tag");
-        assert!(recalled_end < handoff_start, "handoff must follow recalled; got:\n{out}");
-        assert!(handoff_end < base_start, "handoff must precede base; got:\n{out}");
+        assert!(base_start < handoff_start, "handoff must follow base; got:\n{out}");
+        assert!(handoff_end < recalled_end, "handoff must precede recalled; got:\n{out}");
     }
 
     #[test]
@@ -526,7 +525,7 @@
     }
 
     #[test]
-    fn tools_block_renders_between_recalled_and_handoff() {
+    fn tools_block_renders_after_handoff() {
         use crate::prompt_assembly::AdvertisedTool;
         use crate::worker_manifest::{ToolDoc, ToolParam};
         let tools = [AdvertisedTool::without_allowlist(ToolDoc {
@@ -545,10 +544,10 @@
             out.contains("  params: query (the query) [required], count (max results) [optional]\n"),
             "{out}"
         );
-        // Ordering: <tools> after the recalled region and before <handoff>.
+        // Ordering: <tools> after <handoff>, ahead of every memory layer.
         let tools_at = out.find("<tools>").expect("tools present");
         let handoff_at = out.find("<handoff>").expect("handoff present");
-        assert!(tools_at < handoff_at, "tools must precede handoff: {out}");
+        assert!(handoff_at < tools_at, "tools must follow handoff: {out}");
     }
 
     #[test]
@@ -589,15 +588,15 @@
     }
 
     #[test]
-    fn now_block_is_emitted_first_when_some() {
+    fn now_block_is_emitted_last_when_some() {
         let out = assemble_system_prompt(
             &[], &[], &[], &RecalledContext::empty(), "BASE", &[],
             Some("<now>\nCurrent date and time: Sunday, 12 July 2026, 14:05 (AEST, UTC+10:00).\n</now>\n"),
         );
-        assert!(out.starts_with("<now>\n"), "now block must be first; got: {out}");
+        assert!(out.starts_with("<base>\n"), "base must be first; got: {out}");
         assert!(out.contains("12 July 2026"));
-        // <base> stays the terminal block.
-        assert!(out.trim_end().ends_with("</base>"));
+        // The clock changes every minute, so it is the terminal block.
+        assert!(out.ends_with("</now>\n"), "now must be last; got: {out}");
     }
 
     #[test]
@@ -605,16 +604,11 @@
         let with_none =
             assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE", &[], None);
         assert!(!with_none.contains("<now>"), "None must emit no now block; got: {with_none}");
-        // Byte-identical to the pre-<now> assembler (handoff then base, no L0/L1).
-        assert_eq!(
-            with_none,
-            format!("{}<base>\nBASE\n</base>\n", render_handoff_block()),
-            "None output must match the pre-<now> shape",
-        );
+        assert_eq!(with_none, bare("BASE"), "None output is base then handoff and nothing else");
     }
 
     #[test]
-    fn now_precedes_l0_when_both_present() {
+    fn now_follows_l0_when_both_present() {
         let l0 = vec![mem(1, "L0 rule", MemoryLayer::Meta)];
         let out = assemble_system_prompt(
             &l0, &[], &[], &RecalledContext::empty(), "BASE", &[],
@@ -622,7 +616,7 @@
         );
         let now_at = out.find("<now>").expect("now present");
         let l0_at = out.find("<l0_meta_rules>").expect("l0 present");
-        assert!(now_at < l0_at, "now must precede l0; got: {out}");
+        assert!(l0_at < now_at, "now must follow l0; got: {out}");
     }
 
     #[test]

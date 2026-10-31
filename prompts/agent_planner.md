@@ -25,8 +25,8 @@ of the task, with these fields:
 {
     "instruction":          "<the user's original instruction>",
     "classification_floor": "<Public | Personal | ClinicalConfidential | Secret>",
-    "plans_so_far":         [ /* compact summary of every plan you have already submitted on this task, in order */ ],
     "conversation":         [ /* earlier turns of this chat, oldest first; absent when there are none */ ],
+    "plans_so_far":         [ /* compact summary of every plan you have already submitted on this task, in order */ ],
     "advisories":           [ /* concerns the reviewer raised but did not block on */ ],
     "blocks":               [ /* reasons the reviewer blocked your prior plans */ ],
     "plan_budget":          { "this_plan": 2, "max_plans": 20, "seconds_left": 610 }

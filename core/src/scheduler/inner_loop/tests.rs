@@ -532,7 +532,7 @@ fn inner_loop_result_terminal_l1_insight_default_is_none() {
 /// `scheduler_inner_loop_e2e.rs` but lives here so `inner_loop/tests.rs`
 /// can import it without crossing the integration-test boundary.
 #[cfg(test)]
-pub(super) mod inner_loop_test_stubs {
+pub(crate) mod inner_loop_test_stubs {
     use super::*;
     use crate::cassandra::types::{DataClass, Plan, PlannedStep};
     use crate::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};

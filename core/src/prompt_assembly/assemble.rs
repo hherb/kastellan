@@ -1,11 +1,30 @@
 //! Pure prompt assembler. No I/O, no async, no errors.
 //!
-//! Output framing (now [only when present] → L0 → L1 → skills → recalled → tools → handoff → base in this order):
+//! Output framing (base → handoff → tools → L0 → L1 → skills → recalled → now [only when present], in this order):
+//!
+//! **Most stable first, so consecutive prompts share the longest possible byte
+//! prefix** and a backend's prompt cache (Ollama/llama.cpp's in-memory prefix,
+//! oMLX's SSD cache) skips their prefill. `<base>` and `<handoff>` are compiled
+//! in; `<tools>` changes with the registry; L0/L1/skills between tasks;
+//! `<recalled>` between turns; `<now>` every minute, so it comes last. Measured
+//! on the Mac (oMLX, Gemma 4 26B, 2026-10-31): a ~39k-token prompt took 69 s
+//! with its first bytes changed and 4.2 s with only its tail changed.
 //!
 //! ```text
-//! <now>
-//! Current date and time: {weekday, date, minute, tz abbrev + offset}
-//! </now>
+//! <base>
+//! {agent_planner.md verbatim}
+//! </base>
+//!
+//! <handoff>
+//! {protocol for expanding a stashed oversized tool result via the
+//!  reserved `handoff`/`fetch` built-in — always present}
+//! </handoff>
+//!
+//! <tools>
+//! - {name} (method: {method}): {summary}
+//!   params: {p0.name} ({p0.description}) [required|optional], ...
+//!   allowed: {escaped operator allowlist}   [only when the worker declares one]
+//! </tools>
 //!
 //! <l0_meta_rules>
 //! - {body of newest L0 row per l0_rule_id}
@@ -26,20 +45,9 @@
 //! - {body of recall row #2}
 //! </recalled>
 //!
-//! <tools>
-//! - {name} (method: {method}): {summary}
-//!   params: {p0.name} ({p0.description}) [required|optional], ...
-//!   allowed: {escaped operator allowlist}   [only when the worker declares one]
-//! </tools>
-//!
-//! <handoff>
-//! {protocol for expanding a stashed oversized tool result via the
-//!  reserved `handoff`/`fetch` built-in — always present}
-//! </handoff>
-//!
-//! <base>
-//! {agent_planner.md verbatim}
-//! </base>
+//! <now>
+//! Current date and time: {weekday, date, minute, tz abbrev + offset}
+//! </now>
 //! ```
 //!
 //! Rules:
@@ -253,14 +261,13 @@ fn render_tools_block(tools: &[AdvertisedTool]) -> String {
 /// operator-approved (high-trust) so the `<skills>` block sits after L1 and
 /// before the unverified `recalled` output; an empty `skills` slice omits
 /// the block entirely, as does an empty [`RecalledContext`] for `<recalled>`.
-/// The `<handoff>` and `<base>` blocks are always emitted, so even with every
-/// memory slice empty the output is `<handoff>…</handoff>` followed by
-/// `<base>…</base>` (not the bare `<base>` block of the pre-handoff assembler).
+/// The `<base>` and `<handoff>` blocks are always emitted, so even with every
+/// memory slice empty the output is `<base>…</base>` followed by
+/// `<handoff>…</handoff>`.
 ///
-/// `tools` and `now` are appended LAST in the parameter list so existing call
-/// sites update with a pure append; render position is decoupled from param
-/// order — the `<tools>` block is emitted between `<recalled>` and `<handoff>`,
-/// and the trusted `<now>` block (when `Some`) is emitted FIRST, before `<l0>`.
+/// Render position is decoupled from parameter order: the blocks are emitted
+/// most-stable first (see the module doc), so the trusted `<now>` block (when
+/// `Some`) is LAST and everything before it can be served from a prompt cache.
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
@@ -272,15 +279,26 @@ pub fn assemble_system_prompt(
 ) -> String {
     let mut out = String::new();
 
-    // Trusted, system-generated grounding fact (the current date/time) — emitted
-    // FIRST, verbatim (NOT escaped: not adversary-influenced). Omitted entirely
-    // when `None`, so the output is byte-identical to the pre-`<now>` assembler.
-    // `now` carries its own `<now>…</now>` framing (see `now::render_now_block`).
-    if let Some(block) = now {
-        if !block.is_empty() {
-            out.push_str(block);
-            out.push('\n');
-        }
+    out.push_str("<base>\n");
+    // Collapse 0..N trailing newlines on `base` to exactly one. The
+    // closing `</base>\n` then always sits flush against the body —
+    // no blank line in front of it — regardless of how the prompt
+    // file (or caller) chose to terminate.
+    out.push_str(base.trim_end_matches('\n'));
+    out.push('\n');
+    out.push_str("</base>\n\n");
+
+    // Always-present capability instruction for the reserved `handoff` built-in.
+    // Compiled-in trusted text, so it belongs to the never-changing prefix.
+    out.push_str(&render_handoff_block());
+
+    // Advertised tools: compiled-in trusted docs, plus — for a worker that
+    // declares an operator allowlist — one `allowed:` line of DB-sourced text
+    // already escaped at construction (see `allowed_values`). Grouped with
+    // <handoff> as the two capability-describing blocks; omitted entirely when
+    // nothing is registered.
+    if !tools.is_empty() {
+        out.push_str(&render_tools_block(tools));
     }
 
     if !l0.is_empty() {
@@ -323,31 +341,27 @@ pub fn assemble_system_prompt(
         out.push_str("</recalled>\n\n");
     }
 
-    // Advertised tools: compiled-in trusted docs, plus — for a worker that
-    // declares an operator allowlist — one `allowed:` line of DB-sourced text
-    // already escaped at construction (see `allowed_values`). Grouped with
-    // <handoff> as the two capability-describing blocks; omitted entirely when
-    // nothing is registered.
-    if !tools.is_empty() {
-        out.push_str(&render_tools_block(tools));
+    // Trusted, system-generated grounding fact (the current date/time) — emitted
+    // LAST, verbatim (NOT escaped: not adversary-influenced), because it changes
+    // every minute and anything after it would miss the prompt cache. Omitted
+    // entirely when `None`. `now` carries its own `<now>…</now>` framing (see
+    // `now::render_now_block`).
+    if let Some(block) = now {
+        if !block.is_empty() {
+            out.push_str(block);
+            out.push('\n');
+        }
     }
 
-    // Always-present capability instruction for the reserved `handoff` built-in.
-    // Compiled-in trusted text; sits flush before the base operating prompt so
-    // `<base>` stays the terminal block.
-    out.push_str(&render_handoff_block());
-
-    out.push_str("<base>\n");
-    // Collapse 0..N trailing newlines on `base` to exactly one. The
-    // closing `</base>\n` then always sits flush against the body —
-    // no blank line in front of it — regardless of how the prompt
-    // file (or caller) chose to terminate.
-    out.push_str(base.trim_end_matches('\n'));
-    out.push('\n');
-    out.push_str("</base>\n");
-
+    // Every block ends in a blank line; the prompt ends in exactly one newline,
+    // whichever block happens to be last.
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
     out
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod cache_prefix_tests;

@@ -211,3 +211,40 @@ fn serialise_context_appends_synthesis_directive_when_flagged() {
     // The instruction + gathered context still ride alongside the directive.
     assert_eq!(v["instruction"], "what happened in Russia today?");
 }
+
+// ── The prompt cache: key order and the shared prefix between turns ──
+
+/// The keys appear in the order the prompt cache needs: fixed-for-the-task
+/// first, the append-only history next, the per-turn budget last. A
+/// `serde_json::Map` would sort them, putting `plan_budget` before
+/// `plans_so_far`.
+#[test]
+fn the_context_keys_run_from_fixed_to_per_turn() {
+    let mut c = ctx();
+    c.conversation = vec![serde_json::json!({"role": "user", "text": "earlier"})];
+    let s = serialise_context_for_agent(&c, false);
+    let at = |k: &str| s.find(&format!("\"{k}\":")).unwrap_or_else(|| panic!("{k} missing: {s}"));
+    let order = ["instruction", "classification_floor", "conversation", "plans_so_far", "advisories", "blocks", "plan_budget"];
+    for pair in order.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "{} must precede {}: {s}", pair[0], pair[1]);
+    }
+    serde_json::from_str::<serde_json::Value>(&s).expect("still one valid JSON object");
+}
+
+/// Two consecutive turns share everything up to the end of the older turn's
+/// last plan: the next turn only appends. This is what lets a backend serve
+/// the whole history from its cache.
+#[test]
+fn the_next_turn_extends_the_previous_one() {
+    use crate::scheduler::inner_loop::tests::inner_loop_test_stubs::one_step_plan;
+    let ok = || vec![crate::scheduler::inner_loop::StepOutcome::Ok(serde_json::json!({"text": "found it"}))];
+    let mut c = ctx();
+    c.plans.push(crate::scheduler::inner_loop::PlanRecord::new(one_step_plan(), ok()));
+    c.plan_count = 1;
+    let before = serialise_context_for_agent(&c, false);
+    c.plans.push(crate::scheduler::inner_loop::PlanRecord::new(one_step_plan(), ok()));
+    c.plan_count = 2;
+    let after = serialise_context_for_agent(&c, false);
+    let history_end = before.find("],\"advisories\"").expect("plans_so_far closes before advisories");
+    assert_eq!(&before[..history_end], &after[..history_end], "turn 2 must start with turn 1's history");
+}
