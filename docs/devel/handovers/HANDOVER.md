@@ -10,11 +10,11 @@
 > #915's mutants and #913's detail are in the `773remeasure` snapshot; #909's review round is in the `906` snapshot, #609's deploy notes in `909`).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-01 (the prompt-cache reorder — PR #943; the task-notebook direction agreed; #922 part A merged as #942) ·
-**Recent PRs, newest first:** [#943](https://github.com/hherb/kastellan/pull/943) (prompt-cache reorder), [#942](https://github.com/hherb/kastellan/pull/942) (#922 part A, merged), [#938](https://github.com/hherb/kastellan/pull/938) (#922 part C, merged), [#937](https://github.com/hherb/kastellan/pull/937) (OpenShell survey, merged), [#930](https://github.com/hherb/kastellan/pull/930) (#923, merged), [#927](https://github.com/hherb/kastellan/pull/927) (#921, merged), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
+**Last updated:** 2026-11-01 (#942 + #943 deployed on the DGX and re-measured; #945 filed; the task notebook is next) ·
+**Recent PRs, newest first:** [#943](https://github.com/hherb/kastellan/pull/943) (prompt-cache reorder, merged), [#942](https://github.com/hherb/kastellan/pull/942) (#922 part A, merged), [#938](https://github.com/hherb/kastellan/pull/938) (#922 part C, merged), [#937](https://github.com/hherb/kastellan/pull/937) (OpenShell survey, merged), [#930](https://github.com/hherb/kastellan/pull/930) (#923, merged), [#927](https://github.com/hherb/kastellan/pull/927) (#921, merged), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs #938's merged tree, with #930 and #937** (plain `upgrade_from_git.sh` 2026-10-31 ~22:15 AEDT: exit 0, 15 binaries, both env files IDENTICAL to `~/kastellan.env*.bak-pre938`, `NRestarts=0`, Matrix up; localmail `cf002e8`, `api_minor` 4) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's**. **DGX:**
+**The DGX runs #943's merged tree (`fba942ec`, with #942)** (plain `upgrade_from_git.sh` 2026-11-01: exit 0, both env files IDENTICAL to `~/kastellan.env*.bak-pre943`, `NRestarts=0`, Matrix up; localmail `cf002e8`, `api_minor` 4) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's**. **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -56,7 +56,13 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   (`the_next_request_starts_with_the_previous_ones_whole_history`, negative control: `now` before the history fails
   it). `AssembledPrompt::now` carries the time beside the prompt; the planner prompt calls it the `now` field.
   Trust-order question (untrusted `<recalled>` now after `<base>`) → [#944](https://github.com/hherb/kastellan/issues/944).
-  ⚠️ **Not deployed, not measured live**; watch answer quality, since the base instructions moved from last to first.
+  **Deployed + re-measured (tasks 239–245, the new baseline;** [table](https://github.com/hherb/kastellan/issues/922#issuecomment-6545799674)**):**
+  the cache works (DGX Ollama, 39k prompt: 23 s cold vs **0.07 s** tail-only) but barely shows in real tasks: once
+  `plans_so_far` is full, #921's shrink rewrites the history every turn (~1.0 s per 1k prompt tokens in both runs;
+  under-budget turns 0.44 → 0.16). On the DGX prefill is ~23 s of a ~100 s big turn; thinking tokens are the rest.
+  Answers: 10-attachments 10/10 in 275 s; invoices far fuller (verdict owed: some look *sent*); fee-PDF still never
+  read; payments **failed on a non-JSON plan, 2nd time in 14** → [#945](https://github.com/hherb/kastellan/issues/945)
+  (the reply isn't recorded anywhere). 3 tasks ran 8–9 plans / 16–20 min (#941). Runner `~/requery7.sh`.
   The sweep row below predates the review round, which re-ran core lib (2651 / 0 / 1), `prompt_assembly_e2e` with
   Postgres, and clippy `-D warnings` (warm, 5 crates).
 - **Measured on the Mac** ([note](../notes/2026-10-31-prefill-cache-benchmark.md), script `scripts/bench/prefill_bench.py`):
@@ -265,13 +271,11 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
    #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
-1. **The planner's answer quality ([#922](https://github.com/hherb/kastellan/issues/922)).** Merge PR #943 → deploy
-   on the DGX (plain `upgrade_from_git.sh`; back up both env files first; this also deploys #942) → re-ask the seven
-   with `~/requery6.sh` (232–238 are the baseline), comparing per-plan latency and the answers. Then **write the
-   task-notebook design doc** (`docs/superpowers/specs/`, from the agreed direction above; the brainstorm is mid-way,
-   so finish it with the operator first) → plan → build. #940 (token budget) and #941 (`max_tokens`; a per-call
-   deadline under the ceiling) may be folded into the notebook design rather than fixed separately; decide in the doc.
-   **Still owed:** a revoked mail key once (ask first); the operator's verdict on the answers; #926, #939, #771, #538.
+1. **The planner's answer quality ([#922](https://github.com/hherb/kastellan/issues/922)): the task notebook.** Finish the
+   brainstorm with the operator (direction above), write the design doc (`docs/superpowers/specs/`), plan, build. Decide
+   in the doc whether #940 (token budget), #941 (per-call deadline, `max_tokens`) and #945 (non-JSON replies: record the
+   reply's head first) fold into it or ship ahead. Measure with the seven (239–245 are the baseline; `~/requery7.sh`).
+   **Still owed:** the operator's verdict on the answers; a revoked mail key once (ask first); #926, #939, #771, #538.
 
 2. **#702 follow-up #703** (#704/#705 done in PR #920). ⚠️ **The guard model never sees object keys** — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
