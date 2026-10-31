@@ -20,6 +20,7 @@ fn ctx() -> TaskContext {
         blocks: vec![],
         plan_count: 0,
         max_plans: 5,
+        deadline: None,
         resolved_asks: Vec::new(),
         origin: None,
         conversation: Vec::new(),
@@ -44,6 +45,21 @@ fn a_normal_turn_says_which_plan_this_is_and_how_many_there_are() {
     let v: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v["plan_budget"]["this_plan"], 3, "{s}");
     assert_eq!(v["plan_budget"]["max_plans"], 5, "{s}");
+    assert!(v["plan_budget"].get("seconds_left").is_none(), "no ceiling, no clock: {s}");
+}
+
+/// #922 part A: on the fast lane the planner also sees the time it has left.
+#[test]
+fn a_turn_with_a_deadline_says_how_many_seconds_are_left() {
+    let mut c = ctx();
+    c.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(600));
+    let s = serialise_context_for_agent(&c, false);
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let left = v["plan_budget"]["seconds_left"].as_u64().expect(&s);
+    assert!((598..=600).contains(&left), "{s}");
+    // The synthesis turn has its own directive and no budget at all.
+    let s = serialise_context_for_agent(&c, true);
+    assert!(!s.contains("plan_budget"), "{s}");
 }
 
 /// The prompt must tell the planner to spend that budget well (#922).

@@ -44,6 +44,7 @@ use super::inner_loop_audit::{
     write_audit_plan_formulate, write_audit_plan_outcome, write_audit_verdict,
 };
 
+pub(crate) mod ceiling;
 mod floor;
 mod invoke_expand;
 mod llm_failure;
@@ -74,6 +75,11 @@ pub struct TaskContext {
     pub blocks: Vec<String>,
     pub plan_count: u32,
     pub max_plans: u32,
+    /// When this run stops gathering, whatever `max_plans` says (#922): the
+    /// fast lane's 15-minute ceiling, set from the claim instant by
+    /// `runner::task_exec::run_one`. `None` = no wall-clock limit (the long
+    /// lane). Checked between plans — see [`ceiling`].
+    pub deadline: Option<std::time::Instant>,
     /// Every operator ask this task has already had answered, newest first.
     /// Empty for a task nobody has been asked about.
     ///
@@ -467,13 +473,14 @@ pub async fn run_to_terminal(
         // of a bare `plan_iteration_cap_exceeded` error. With nothing
         // gathered (every step denied / errored / blocked-before-execution)
         // there is nothing to synthesize, so the cap fails hard as before —
-        // which is why the existing cap tests are unaffected.
-        let over_cap = ctx.plan_count >= ctx.max_plans;
-        let synth_turn = (over_cap || force_synth) && gathered && !synth_attempted;
-        if over_cap && !synth_turn {
-            return finish!(Outcome::Failed(format!(
-                "plan_iteration_cap_exceeded ({}>={})", ctx.plan_count, ctx.max_plans
-            )));
+        // which is why the existing cap tests are unaffected. The fast lane's
+        // wall-clock ceiling (#922) is handled exactly like the cap.
+        let exhausted = ceiling::exhausted(
+            ctx.plan_count, ctx.max_plans, ctx.deadline, std::time::Instant::now(),
+        );
+        let synth_turn = (exhausted.is_some() || force_synth) && gathered && !synth_attempted;
+        if let (Some(which), false) = (exhausted, synth_turn) {
+            return finish!(Outcome::Failed(ceiling::exhausted_detail(which, ctx.max_plans, false)));
         }
         if synth_turn {
             synth_attempted = true;
@@ -820,19 +827,15 @@ pub async fn run_to_terminal(
         if synth_turn {
             // A synthesis turn that a TIMEOUT forced (#774) never reached the
             // cap, so it must not say it did — operators count cap rows.
-            if !over_cap {
+            let Some(which) = exhausted else {
                 return finish!(Outcome::Failed(llm_failure::forced_synthesis_no_answer_detail(
                     &llm_failure::GatheredWork::from_plans(&ctx.plans),
                 )));
-            }
-            // Report the cap the same way as the primary cap message above
-            // (`max_plans>=max_plans`). `ctx.plan_count` is now `max_plans + 1`
-            // — the synthesis turn spent one extra formulation — so printing it
-            // here read as an off-by-one (`6>=5`) against the cap of 5.
-            return finish!(Outcome::Failed(format!(
-                "plan_iteration_cap_exceeded ({}>={}); forced synthesis did not produce a final answer",
-                ctx.max_plans, ctx.max_plans
-            )));
+            };
+            // `ctx.plan_count` is now `max_plans + 1` (the synthesis turn spent
+            // one extra formulation), so the detail prints `max_plans` twice
+            // rather than read as an off-by-one (`6>=5`).
+            return finish!(Outcome::Failed(ceiling::exhausted_detail(which, ctx.max_plans, true)));
         }
 
         // 4. Execute steps

@@ -447,6 +447,11 @@ fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool) -> String {
                     "max_plans": ctx.max_plans,
                 }),
             );
+            // The fast lane's ceiling (#922 part A); the long lane has none.
+            let left = super::inner_loop::ceiling::seconds_left(ctx.deadline, std::time::Instant::now());
+            if let (Some(s), Some(b)) = (left, map.get_mut("plan_budget")) {
+                b["seconds_left"] = serde_json::json!(s);
+            }
         }
     }
     // #701: the earlier turns of this conversation, oldest first — already

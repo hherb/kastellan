@@ -86,6 +86,20 @@ pub(crate) fn resume_budget(db_plan_count: i32, max_plans: u32) -> (u32, u32) {
     (carried, carried.saturating_add(max_plans))
 }
 
+/// The wall-clock ceiling on one run of a task on `lane` (#922 part A): the
+/// fast lane gets [`kastellan_db::tasks::DEFAULT_TIME_CEILING_FAST_S`], the
+/// long lane none (its plan cap is its bound). Each run — a resumed one too —
+/// gets the whole ceiling, the time analogue of [`resume_budget`]'s fresh
+/// allowance.
+pub(crate) fn lane_time_ceiling(lane: kastellan_db::tasks::Lane) -> Option<std::time::Duration> {
+    match lane {
+        kastellan_db::tasks::Lane::Fast => Some(std::time::Duration::from_secs(
+            kastellan_db::tasks::DEFAULT_TIME_CEILING_FAST_S,
+        )),
+        kastellan_db::tasks::Lane::Long => None,
+    }
+}
+
 pub(super) async fn run_one(
     pool: &PgPool,
     formulator: Arc<dyn PlanFormulator>,
@@ -281,6 +295,10 @@ pub(super) async fn run_one(
         blocks: restored.blocks,
         plan_count: start_plan_count,
         max_plans: max_plans_for_run,
+        deadline: crate::scheduler::inner_loop::ceiling::deadline_from(
+            std::time::Instant::now(),
+            lane_time_ceiling(task.lane),
+        ),
         resolved_asks,
         origin,
         conversation: loaded.turns,
@@ -640,6 +658,13 @@ mod tests {
         // keeps its 4 (so `increment_plan_count`'s absolute write no longer
         // rewinds it to 1) and the approved plan gets a full 5 more.
         assert_eq!(resume_budget(4, 5), (4, 9));
+    }
+
+    #[test]
+    fn only_the_fast_lane_has_a_time_ceiling() {
+        use kastellan_db::tasks::Lane;
+        assert_eq!(lane_time_ceiling(Lane::Fast), Some(std::time::Duration::from_secs(15 * 60)));
+        assert_eq!(lane_time_ceiling(Lane::Long), None);
     }
 
     #[test]

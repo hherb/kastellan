@@ -2,7 +2,8 @@
 //! back empty (#923): the loop must retry when a cheaper request (after a
 //! timeout) or the same request (after an empty answer) can still produce
 //! an answer, must not throw away gathered work, and must say what happened
-//! when it cannot.
+//! when it cannot. Cases 12–14 are the fast lane's wall-clock ceiling
+//! (#922), which a run reaches between plans and answers like the plan cap.
 //!
 //! The decisions are unit-tested in `llm_failure/tests.rs`; these run the
 //! real `run_to_terminal` against a real Postgres and a formulator whose
@@ -61,6 +62,9 @@ enum Next {
     /// An answer with no content at all (#923) — retried once, unless it is
     /// itself the turn's retry.
     Empty,
+    /// A plan that takes this long to formulate — runs a task past its
+    /// deadline with a real clock.
+    SlowPlan(Box<Plan>, Duration),
 }
 
 /// Returns scripted results by call order, and records which door each
@@ -88,6 +92,10 @@ impl TimeoutScript {
 async fn resolve(next: Option<Next>) -> Result<(Plan, FormulationMeta), AgentError> {
     match next {
         Some(Next::Plan(p)) => Ok((*p, meta())),
+        Some(Next::SlowPlan(p, d)) => {
+            tokio::time::sleep(d).await;
+            Ok((*p, meta()))
+        }
         Some(Next::Timeout) => Err(real_request_timeout().await),
         Some(Next::Empty) => Err(AgentError::Decode {
             detail: "EOF while parsing a value at line 1 column 0".into(),
@@ -174,6 +182,7 @@ async fn claim_ctx(pool: &sqlx::PgPool) -> TaskContext {
         blocks: vec![],
         plan_count: 0,
         max_plans: 10,
+        deadline: None,
         resolved_asks: Vec::new(),
         origin: None,
         conversation: Vec::new(),
@@ -182,10 +191,20 @@ async fn claim_ctx(pool: &sqlx::PgPool) -> TaskContext {
 }
 
 async fn run(pool: &sqlx::PgPool, f: Arc<TimeoutScript>) -> (i64, InnerLoopResult) {
+    run_until(pool, f, None).await
+}
+
+/// [`run`] with a wall-clock deadline on the task.
+async fn run_until(
+    pool: &sqlx::PgPool,
+    f: Arc<TimeoutScript>,
+    deadline: Option<std::time::Instant>,
+) -> (i64, InnerLoopResult) {
     let review = Arc::new(crate::cassandra::review::ChainReviewStage::new(vec![Arc::new(
         crate::cassandra::review::NoopReviewStage,
     )]));
-    let ctx = claim_ctx(pool).await;
+    let mut ctx = claim_ctx(pool).await;
+    ctx.deadline = deadline;
     let task_id = ctx.task_id;
     let r = super::run_to_terminal(pool, f, review, Arc::new(OkDispatcher), ctx, None)
         .await
@@ -430,4 +449,32 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
     assert_eq!(failed.len(), 3, "{failed:?}");
     assert_eq!(failed[2]["thinking_suppressed_retry"], true, "{}", failed[2]);
+
+    // ── 12. The deadline passes during a gathering plan: the next turn is the
+    //        forced synthesis, exactly as at the plan cap (#922).
+    let slow = || Next::SlowPlan(Box::new(one_step_plan()), Duration::from_millis(300));
+    let soon = || Some(std::time::Instant::now() + Duration::from_millis(100));
+    let f = TimeoutScript::new(vec![slow(), Next::Plan(Box::new(terminal_plan("out of time")))], None);
+    let (_, r) = run_until(&pool, f.clone(), soon()).await;
+    assert_eq!(completed_body(&r), "out of time");
+    assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 1, "the answer came through the synthesis door");
+    assert_eq!(r.dispatch_count, 1);
+    assert_eq!(r.plan_count, 2, "gather turn + synthesis turn, far below max_plans");
+
+    // ── 13. Nothing gathered when the deadline passes: fails like the cap,
+    //        naming the ceiling, and asks the planner nothing.
+    let f = TimeoutScript::new(vec![Next::Plan(Box::new(terminal_plan("never reached")))], None);
+    let (_, r) = run_until(&pool, f.clone(), Some(std::time::Instant::now())).await;
+    assert_eq!(failed_detail(&r), "plan_time_ceiling_exceeded");
+    assert_eq!(r.plan_count, 0);
+    assert_eq!(f.script.lock().unwrap().len(), 1, "no formulation after the deadline");
+
+    // ── 14. The synthesis turn after the deadline still plans a step.
+    let f = TimeoutScript::new(vec![slow(), Next::Plan(Box::new(one_step_plan()))], None);
+    let (_, r) = run_until(&pool, f.clone(), soon()).await;
+    assert_eq!(
+        failed_detail(&r),
+        "plan_time_ceiling_exceeded; forced synthesis did not produce a final answer"
+    );
+    assert_eq!(r.dispatch_count, 1, "the synthesis turn's step never ran");
 }

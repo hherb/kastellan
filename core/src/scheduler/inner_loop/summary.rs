@@ -89,13 +89,12 @@ const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
 
 /// Total byte budget for the whole rendered `plans_so_far_summary`, counted in
 /// serialised step-outcome and step-call (#699) bytes. 96 KiB since #677: six
-/// times the flat per-step budget, chosen so a fast-lane task
-/// (`DEFAULT_MAX_PLANS_FAST` = 5, plus the forced-synthesis turn) of one
-/// flat-budget step per plan is at most marginally pushed into elision by the
-/// ceiling alone — marginally, not never, because each outcome's `{"status",
-/// "output"}` wrapper and its call (up to ~1 KiB, since #699) are counted on
-/// top of the 16 KiB view. Plans with several steps, `web.search_batch` steps
-/// (up to 24 KiB each) or a long-lane task exceed it: every output larger than
+/// times the flat per-step budget, so five plans of one flat-budget step each
+/// are at most marginally pushed into elision by the ceiling alone —
+/// marginally, not never, because each outcome's `{"status", "output"}`
+/// wrapper and its call (up to ~1 KiB, since #699) are counted on top of the
+/// 16 KiB view. Plans with several steps, `web.search_batch` steps (up to
+/// 24 KiB each) or a long-lane task exceed it: every output larger than
 /// an even share is then shrunk to it, and only once a share would fall below
 /// `budget::MIN_SHRUNK_OUTPUT_BYTES` are the oldest dropped whole (#921; a
 /// shrunk view that fails the sink screen or overshoots is dropped too);
@@ -109,6 +108,14 @@ const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
 /// budget on a pathological task. The planner's own `decision` strings are
 /// neither clamped nor counted (#729), so the serialised prompt is modestly
 /// larger than this value.
+///
+/// ⚠️ **Not raised with #922's longer fast lane, on measurement.** Live on the
+/// DGX (2026-10-31, task 233) a full 96 KiB summary already made a 57,885-token
+/// prompt — about 2 bytes a token — in a 65,536-token context that must also
+/// hold 4–7k tokens of thinking and answer. A bigger byte budget overflows the
+/// context, and the backend then cuts the prompt silently. A token-denominated
+/// budget against the model's real context is the fix (#940), not a
+/// bigger number.
 const PLANS_SUMMARY_BUDGET: usize = 96 * 1024;
 
 const _: () = {
