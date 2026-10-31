@@ -46,12 +46,16 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### This session (2026-10-31, latest): #923 — an empty completion is asked again once (PR #930)
 
-- `AgentError::is_empty_completion` (a `Decode` with a blank `raw`); `formulate_turn` (`inner_loop/llm_failure.rs`)
+- `AgentError::is_empty_completion` (a `Decode` with a blank `raw`, **not** `finish_reason: length` — out of room
+  repeats at temperature 0); `formulate_turn` (`inner_loop/llm_failure.rs`)
   re-asks **the same door** (plan or synthesis) once — its own `plan.formulate_failed` row
   (`thinking_suppressed_retry: false`), the retry's `plan.formulate` row `retry_count: 1`. **One retry per turn**:
   an empty answer from the #774 thinking-off synthesis retry is not retried again. A non-JSON answer is never
   retried. A decode failure that ends the task reads `decode_failure_detail` (plain words, `[llm: plan decode
-  failed: …]` last); other router errors stay `llm: …`. Loop cases 8–10 in `timeout_tests.rs`; 2 mutants killed.
+  failed: …]` last); every other non-timeout error stays `llm: …`. Loop cases 8–11 in `timeout_tests.rs`; 2
+  mutants killed. Review round: scripted fakes' "out of script" `Decode` now has a non-blank `raw` (a blank one
+  is retried); follow-ups filed as [#939](https://github.com/hherb/kastellan/issues/939) (`"content": null`
+  skips the retry; a failed retry's row is unmarked).
 - ⚠️ **Not seen live** — empties occurred only with thinking OFF (the live setting is ON).
 - **DGX outage, 2026-10-31:** kernel **7.0.0-1024** (apt, 11:37 AEDT) hard-reset ~20 s into every boot — **~59
   boots**, no journal trace; it looked like a flaky network (1–2 s SSH sessions). Booted 6.17 via `grub-reboot`

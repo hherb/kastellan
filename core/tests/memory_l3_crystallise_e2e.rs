@@ -110,13 +110,15 @@ impl PlanFormulator for ScriptedFormulator {
         let mut map = self.per_task.lock().unwrap();
         let queue = map.get_mut(&ctx.task_id).ok_or_else(|| AgentError::Decode {
             detail: format!("no script for task_id {}", ctx.task_id),
-            raw: String::new(),
+            // Not blank: a blank raw is an empty completion, which is retried (#923).
+            raw: "<script exhausted>".into(),
             usage: Default::default(),
             latency_ms: 0,
         })?;
         let plan = queue.pop_front().ok_or_else(|| AgentError::Decode {
             detail: format!("script exhausted for task_id {}", ctx.task_id),
-            raw: String::new(),
+            // Not blank: a blank raw is an empty completion, which is retried (#923).
+            raw: "<script exhausted>".into(),
             usage: Default::default(),
             latency_ms: 0,
         })?;

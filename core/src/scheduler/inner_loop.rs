@@ -174,8 +174,9 @@ pub struct InnerLoopResult {
     pub outcome: Outcome,
     pub plan_count: u32,
     pub dispatch_count: u32,
-    /// Formulator calls in this run that produced no plan — a timed-out
-    /// attempt the loop recovered from, or the final failure (#774).
+    /// Formulator calls in this run that produced no plan — a failed
+    /// attempt the loop retried or recovered from, or the final failure
+    /// (#774, #923).
     pub failed_llm_calls: u32,
     /// `l1_insight` from the terminal plan, captured only when the
     /// inner loop reaches `Outcome::Completed`. The lane runner reads
@@ -386,8 +387,8 @@ pub async fn run_to_terminal(
     // spec §7 `task.finalize` summary row.
     let mut dispatch_count: u32 = 0;
 
-    // Formulator calls that produced NO plan (#774): a timed-out attempt the
-    // loop recovered from, or the final failure. `plan_count` counts only
+    // Formulator calls that produced NO plan (#774, #923): a failed attempt
+    // the loop retried or recovered from, or the final failure. `plan_count` counts only
     // the calls that produced a plan, so `task.finalize`'s `total_llm_calls`
     // is `plan_count + failed_llm_calls`.
     let mut failed_llm_calls: u32 = 0;
@@ -482,9 +483,10 @@ pub async fn run_to_terminal(
         //
         // No general loop-level retry: replanning IS the retry shape (the
         // agent sees the prior failure on the next iteration, bounded by
-        // `max_plans`). The one exception is a REQUEST TIMEOUT (#774), the
-        // failure a cheaper request can beat — `llm_failure::formulate_turn`
-        // owns that recovery, and the counting/audit of every failed call.
+        // `max_plans`). The two exceptions are a REQUEST TIMEOUT (#774), the
+        // failure a cheaper request can beat, and an EMPTY completion
+        // (#923), asked again once — `llm_failure::formulate_turn` owns that
+        // recovery, and the counting/audit of every failed call.
         let turn = llm_failure::TurnState { synth_turn, gathered, synth_attempted };
         let (mut plan, meta) = match llm_failure::formulate_turn(
             pool, formulator.as_ref(), &ctx, turn, &mut failed_llm_calls,

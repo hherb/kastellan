@@ -1,7 +1,8 @@
 //! Inner-loop tests for a planning call that times out (#774) or comes
-//! back empty (#923): the loop must not throw away gathered work when a
-//! cheaper request (or, for an empty answer, the same one) can still
-//! produce an answer, and must say what happened when it cannot.
+//! back empty (#923): the loop must retry when a cheaper request (after a
+//! timeout) or the same request (after an empty answer) can still produce
+//! an answer, must not throw away gathered work, and must say what happened
+//! when it cannot.
 //!
 //! The decisions are unit-tested in `llm_failure/tests.rs`; these run the
 //! real `run_to_terminal` against a real Postgres and a formulator whose
@@ -57,7 +58,8 @@ enum Next {
     Timeout,
     /// An answer that is not a plan — fails the task, never retried.
     Decode,
-    /// An answer with no content at all (#923) — retried once.
+    /// An answer with no content at all (#923) — retried once, unless it is
+    /// itself the turn's retry.
     Empty,
 }
 
@@ -360,6 +362,7 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     );
     let (task_id, r) = run(&pool, f.clone()).await;
     assert_eq!(completed_body(&r), "after an empty answer");
+    assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 0, "a planning turn retries through the PLAN door");
     assert_eq!(r.failed_llm_calls, 1, "the empty answer is a model call");
     let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
     assert_eq!(failed.len(), 1, "{failed:?}");
@@ -382,6 +385,8 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     assert_eq!(failed.len(), 2, "one row per failed call: {failed:?}");
     assert_eq!(failed[1]["thinking_suppressed_retry"], false, "a plain retry: {}", failed[1]);
     assert_eq!(r.plan_count, 0);
+    assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(f.script.lock().unwrap().len(), 1, "the third answer is never asked for");
 
     // ── 10. An empty synthesis answer is retried through the SYNTHESIS door.
     let f = TimeoutScript::new(
@@ -393,8 +398,36 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
         ],
         None,
     );
-    let (_, r) = run(&pool, f.clone()).await;
+    let (task_id, r) = run(&pool, f.clone()).await;
     assert_eq!(completed_body(&r), "synthesis retry");
     assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 2, "both synthesis attempts used the synthesis door");
     assert_eq!(f.retry_calls.load(Ordering::SeqCst), 0, "an empty answer is not a timeout: thinking stays as configured");
+    assert_eq!(r.failed_llm_calls, 2, "the planning timeout and the empty synthesis answer");
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert_eq!(failed[1]["synth_turn"], true, "{}", failed[1]);
+    let plans = agent_rows(&pool, task_id, "plan.formulate").await;
+    assert_eq!(plans.last().unwrap()["retry_count"], 1, "the retry's row says it was one");
+
+    // ── 11. The thinking-suppressed synthesis retry comes back empty: the
+    //        turn's one retry is spent, so it is not asked again.
+    let f = TimeoutScript::new(
+        vec![
+            Next::Plan(Box::new(one_step_plan())),
+            Next::Timeout,
+            Next::Timeout,
+            Next::Plan(Box::new(terminal_plan("never reached"))),
+        ],
+        Some(Next::Empty),
+    );
+    let (task_id, r) = run(&pool, f.clone()).await;
+    let d = failed_detail(&r);
+    assert!(d.starts_with("The language model returned an empty answer"), "{d}");
+    assert_eq!(f.retry_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.script.lock().unwrap().len(), 1, "no plain retry after the thinking-off one");
+    assert_eq!(r.failed_llm_calls, 3);
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 3, "{failed:?}");
+    assert_eq!(failed[2]["thinking_suppressed_retry"], true, "{}", failed[2]);
 }

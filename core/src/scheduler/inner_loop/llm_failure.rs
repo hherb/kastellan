@@ -24,11 +24,12 @@
 //!    for the operator and so the existing `detail like '%timed out%'` query
 //!    keeps finding these rows.
 //!
-//! An **empty completion** (#923: the model answered `stop` with no
-//! content) is asked again once, through the same door, and a decode
-//! failure that still ends the task says so in words
-//! ([`decode_failure_detail`]). Every other formulator error (an HTTP 4xx,
-//! a refused connection) is unchanged, `llm: <error>`: a retry cannot fix it.
+//! An **empty completion** (#923: no content, and not cut off at `length`)
+//! is asked again once, through the same door, unless it is itself the
+//! turn's retry; a decode failure that still ends the task says so in words
+//! ([`decode_failure_detail`]). Every other formulator error (an HTTP
+//! status, a refused connection, a missing prompt) is unchanged,
+//! `llm: <error>`: this loop does not retry it.
 
 use std::collections::BTreeMap;
 
@@ -135,17 +136,17 @@ pub(super) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) ->
 /// The task's failure detail when the model's answer could not be read as a
 /// plan (#923). Pure.
 ///
-/// `empty` is [`AgentError::is_empty_completion`]
-/// — by the time this is used, an empty answer has already been asked again
-/// once. Like [`timeout_failure_detail`], plain words first and the decode
-/// error last, in brackets, for the operator.
+/// `empty`: the answer had no content — retried once if it was
+/// [`AgentError::is_empty_completion`], not if it was cut off at `length`. Like
+/// [`timeout_failure_detail`], plain words first and the decode error last,
+/// in brackets, for the operator.
 pub(super) fn decode_failure_detail(empty: bool, decode_error: &str) -> String {
     let what = if empty {
         "The language model returned an empty answer, so this task produced none."
     } else {
         "The language model answered with something that is not a plan, so this task produced none."
     };
-    format!("{what} Asking again usually works. [llm: {decode_error}]")
+    format!("{what} You can ask again. [llm: {decode_error}]")
 }
 
 /// The task's failure detail when a synthesis turn that a **timeout**
@@ -340,8 +341,8 @@ pub(super) async fn formulate_turn(
                     &GatheredWork::from_plans(&ctx.plans),
                     &e.to_string(),
                 )
-            } else if matches!(e, AgentError::Decode { .. }) {
-                decode_failure_detail(e.is_empty_completion(), &e.to_string())
+            } else if let AgentError::Decode { raw, .. } = &e {
+                decode_failure_detail(raw.trim().is_empty(), &e.to_string())
             } else {
                 format!("llm: {e}")
             };
