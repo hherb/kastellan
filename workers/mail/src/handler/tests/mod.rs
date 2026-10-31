@@ -68,13 +68,13 @@ impl HttpGet for VersionFake {
     }
 }
 
-const CURRENT: &str = r#"{"api_major":1,"api_minor":3,"server_version":"0.3.0"}"#;
+const CURRENT: &str = r#"{"api_major":1,"api_minor":4,"server_version":"0.4.0"}"#;
 const SLICE_D_ONLY: &str = r#"{"api_major":1,"api_minor":2,"server_version":"0.2.9"}"#;
 
 #[test]
 fn a_current_localmail_passes_the_gate() {
     let mut h = MailHandler::with_client_unverified(client_with(Box::new(VersionFake(Some(CURRENT)))));
-    h.call("mail.search", serde_json::json!({"query": "q"})).expect("1.3 is current");
+    h.call("mail.search", serde_json::json!({"query": "q"})).expect("1.4 is current");
 }
 
 /// Every gated tool — the slice D/E routes, and `get_message` asking for
@@ -86,7 +86,7 @@ fn every_gated_tool_is_refused_against_an_older_localmail() {
         ("mail.search", serde_json::json!({"query": "q"})),
         ("mail.get_attachment_text", serde_json::json!({"sha256": "a".repeat(64)})),
         ("mail.get_attachment", serde_json::json!({"sha256": "a".repeat(64)})),
-        // Gated with the rest, by the one minimum (1.3). `?headers=list`
+        // Gated with the rest, by the one minimum (1.4). `?headers=list`
         // itself is api_minor 1, which an older server answers with a
         // header-less 200 rather than an error.
         ("mail.get_message", serde_json::json!({"message_id": 5, "full_headers": true})),
@@ -214,7 +214,7 @@ fn a_refusal_is_asked_again_and_a_pass_is_remembered() {
     let mut h = MailHandler::with_client_unverified(client_with(Box::new(fake)));
     let q = serde_json::json!({"query": "q"});
     assert!(h.call("mail.search", q.clone()).is_err(), "1.2 refused");
-    h.call("mail.search", q.clone()).expect("upgraded to 1.3");
+    h.call("mail.search", q.clone()).expect("upgraded to 1.4");
     h.call("mail.search", q).expect("remembered; the fake panics on a third ask");
 }
 

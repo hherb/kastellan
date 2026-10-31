@@ -313,7 +313,7 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
         // which every client of this mock sends). The mail worker's version
         // gate (#760) asks before every tool that uses a slice D/E feature.
         json(serde_json::json!({
-            "api_major": 1, "api_minor": 3, "server_version": "0.3.0",
+            "api_major": 1, "api_minor": 4, "server_version": "0.4.0",
             "build_hash": null, "build_source": "wheel", "version_source": "installed"
         }).to_string())
     } else if let Some(rest) = by_index_rest {

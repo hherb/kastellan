@@ -435,6 +435,20 @@ fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool) -> String {
         "advisories": ctx.advisories,
         "blocks":     ctx.blocks,
     });
+    // #922: without this the planner learns of the cap only at forced
+    // synthesis, and spends one plan per fetched message on the way there.
+    // The synthesis turn has its own directive instead.
+    if !synthesize {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "plan_budget".to_string(),
+                serde_json::json!({
+                    "this_plan": ctx.plan_count.saturating_add(1),
+                    "max_plans": ctx.max_plans,
+                }),
+            );
+        }
+    }
     // #701: the earlier turns of this conversation, oldest first — already
     // rendered, screened and budgeted by `scheduler::conversation::view` when
     // the task was claimed. Added only when non-empty, so a CLI task's
