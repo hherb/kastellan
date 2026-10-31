@@ -416,7 +416,7 @@ pub fn render_env_file(args: &InstallArgs, layout: &Layout) -> String {
     s.push_str(&format!("KASTELLAN_PROMPTS_DIR={}\n", layout.prompts_dir.display()));
     s.push_str(&format!("KASTELLAN_L0_RULES_FILE={}\n", layout.l0_rules_file.display()));
     s.push_str(&format!("KASTELLAN_DATA_DIR={}\n", layout.data_dir.display()));
-    // Planner "now" timezone (IANA name) for the trusted <now> block that stops
+    // Planner "now" timezone (IANA name) for the trusted `now` field that stops
     // date-relative questions from web-searching for the current date. Unset →
     // host system tz; invalid → UTC. Commented by default so the host tz is used.
     s.push_str("# KASTELLAN_TIMEZONE=Australia/Sydney\n");

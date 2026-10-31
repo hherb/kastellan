@@ -47,11 +47,18 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 ### This session (2026-11-01, latest): the prompt cache (PR #943) and the task-notebook direction
 
 - **PR #943:** the system prompt now runs most-stable-first (`<base>` → `<handoff>` → `<tools>` → L0 → L1 → skills →
-  `<recalled>` → `<now>`), and the user message is written in an explicit key order with `plan_budget` last. Before,
-  the minute-stamped `<now>` led the prompt, and a `serde_json::Map` sorted `plan_budget` in front of `plans_so_far`
-  (⚠️ **`preserve_order` is off: any `json!` object's keys come out alphabetical**). So no turn ever reused a cached
-  prefix. Pinned by `assemble/cache_prefix_tests.rs` + two agent tests, each with a negative control.
+  `<recalled>`), and the user message is written in an explicit key order ending `plan_budget` (or `directive`) →
+  **`now`**. Before, the minute-stamped `<now>` led the prompt, and a `serde_json::Map` sorted `plan_budget` in front
+  of `plans_so_far` (⚠️ **`preserve_order` is off: any `json!` object's keys come out alphabetical**). So no turn ever
+  reused a cached prefix. ⚠️ **The clock had to leave the system prompt altogether** (review round): at its end it
+  still sat in front of the whole user message, so every turn that crossed a minute re-read the history. Each half
+  passed its own test; the pin that caught it joins system + user across a new minute
+  (`the_next_request_starts_with_the_previous_ones_whole_history`, negative control: `now` before the history fails
+  it). `AssembledPrompt::now` carries the time beside the prompt; the planner prompt calls it the `now` field.
+  Trust-order question (untrusted `<recalled>` now after `<base>`) → [#944](https://github.com/hherb/kastellan/issues/944).
   ⚠️ **Not deployed, not measured live**; watch answer quality, since the base instructions moved from last to first.
+  The sweep row below predates the review round, which re-ran core lib (2651 / 0 / 1), `prompt_assembly_e2e` with
+  Postgres, and clippy `-D warnings` (warm, 5 crates).
 - **Measured on the Mac** ([note](../notes/2026-10-31-prefill-cache-benchmark.md), script `scripts/bench/prefill_bench.py`):
   a ~39k-token prompt prefills in 69–77 s (oMLX) / 126 s (Ollama) cold, against **4.2 s / 0.2 s** with only the tail
   changed. oMLX is ~2.3× faster cold at 56k and keeps its cache on SSD across tasks; Ollama's in-memory reuse holds

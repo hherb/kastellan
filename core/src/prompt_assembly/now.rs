@@ -1,4 +1,5 @@
-//! Trusted current-date/time (`<now>`) block for the planner system prompt.
+//! Trusted current date/time for the planner: the `now` field of its task
+//! context (the last key of the user message, see `scheduler::agent`).
 //!
 //! The planner is otherwise date-blind: for any date-relative question
 //! ("yesterday", "latest") it web-searches to *guess* the date and loops to the
@@ -9,25 +10,24 @@
 use jiff::tz::TimeZone;
 use jiff::Zoned;
 
-/// Render the trusted `<now>` grounding block. Pure — the caller supplies the
-/// instant. Minute resolution (no seconds) keeps the assembled system prompt —
-/// and its `system_prompt_sha256` — stable within a plan iteration so the local
-/// model's KV-cache prefix is not churned each second. Verbatim, NOT escaped:
-/// system-generated, not adversary-influenced.
-pub(crate) fn render_now_block(now: &Zoned) -> String {
+/// Render the trusted current date and time. Pure — the caller supplies the
+/// instant. Minute resolution (no seconds). It changes every minute, so it
+/// rides LAST in the user message: anywhere earlier, a new minute would make
+/// the backend's prompt cache re-read everything after it. System-generated,
+/// not adversary-influenced.
+pub(crate) fn render_now(now: &Zoned) -> String {
     // %A weekday, %-d no-pad day, %B month, %Y year, %H:%M 24h minute,
     // %Z tz abbreviation (e.g. AEST), %:z offset with colon (e.g. +10:00).
-    let stamp = now.strftime("%A, %-d %B %Y, %H:%M (%Z, UTC%:z)").to_string();
-    format!("<now>\nCurrent date and time: {stamp}.\n</now>\n")
+    now.strftime("%A, %-d %B %Y, %H:%M (%Z, UTC%:z)").to_string()
 }
 
-/// Capture the current instant in `tz` and render the `<now>` block. The one
-/// impure hop (`Timestamp::now()`); the formatting it delegates to is the pure,
-/// tested [`render_now_block`]. Called per plan formulation by the builder so
-/// the block is always current.
-pub(crate) fn current_now_block(tz: &TimeZone) -> String {
+/// Capture the current instant in `tz` and render it. The one impure hop
+/// (`Timestamp::now()`); the formatting it delegates to is the pure, tested
+/// [`render_now`]. Called per plan formulation by the builder so it is always
+/// current.
+pub(crate) fn current_now(tz: &TimeZone) -> String {
     let now = jiff::Timestamp::now().to_zoned(tz.clone());
-    render_now_block(&now)
+    render_now(&now)
 }
 
 /// Where the planner's timezone came from — logged once at startup so a
@@ -38,7 +38,7 @@ pub enum TzSource {
     Configured,
     /// Unset/blank → the host system timezone.
     System,
-    /// A set-but-unresolvable name → UTC (fail-safe: the block still renders).
+    /// A set-but-unresolvable name → UTC (fail-safe: the time still renders).
     UtcFallback,
 }
 
@@ -72,8 +72,8 @@ mod tests {
             .in_tz("Australia/Sydney")
             .expect("valid Sydney datetime");
         assert_eq!(
-            render_now_block(&z),
-            "<now>\nCurrent date and time: Sunday, 12 July 2026, 14:05 (AEST, UTC+10:00).\n</now>\n"
+            render_now(&z),
+            "Sunday, 12 July 2026, 14:05 (AEST, UTC+10:00)"
         );
     }
 
@@ -81,15 +81,15 @@ mod tests {
     fn utc_instant_renders_utc_label() {
         let z = date(2026, 7, 12).at(4, 5, 0, 0).in_tz("UTC").expect("utc");
         assert_eq!(
-            render_now_block(&z),
-            "<now>\nCurrent date and time: Sunday, 12 July 2026, 04:05 (UTC, UTC+00:00).\n</now>\n"
+            render_now(&z),
+            "Sunday, 12 July 2026, 04:05 (UTC, UTC+00:00)"
         );
     }
 
     #[test]
     fn seconds_are_not_rendered() {
         let with_secs = date(2026, 7, 12).at(14, 5, 59, 0).in_tz("Australia/Sydney").unwrap();
-        let block = render_now_block(&with_secs);
+        let block = render_now(&with_secs);
         assert!(block.contains("14:05"), "minute resolution only");
         assert!(!block.contains(":59"), "seconds must not appear");
     }
@@ -116,8 +116,8 @@ mod tests {
     fn invalid_name_falls_back_to_utc() {
         let (tz, src) = resolve_timezone(Some("Not/AZone"));
         assert_eq!(src, TzSource::UtcFallback);
-        // The UTC fallback must still render a valid block, not panic.
+        // The UTC fallback must still render, not panic.
         let z = date(2026, 1, 1).at(0, 0, 0, 0).to_zoned(tz).unwrap();
-        assert!(render_now_block(&z).contains("UTC+00:00"));
+        assert!(render_now(&z).contains("UTC+00:00"));
     }
 }

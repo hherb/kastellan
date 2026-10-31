@@ -29,7 +29,8 @@ of the task, with these fields:
     "plans_so_far":         [ /* compact summary of every plan you have already submitted on this task, in order */ ],
     "advisories":           [ /* concerns the reviewer raised but did not block on */ ],
     "blocks":               [ /* reasons the reviewer blocked your prior plans */ ],
-    "plan_budget":          { "this_plan": 2, "max_plans": 20, "seconds_left": 610 }
+    "plan_budget":          { "this_plan": 2, "max_plans": 20, "seconds_left": 610 },
+    "now":                  "Sunday, 1 November 2026, 14:05 (AEDT, UTC+11:00)"
 }
 ```
 
@@ -112,7 +113,7 @@ respond with the next plan as a JSON object in the schema below.
 
 ## The `<skills>` block
 
-A `<skills>` block may precede these instructions. It lists skills you
+A `<skills>` block may follow these instructions. It lists skills you
 previously crystallised that an operator has reviewed, each with its
 name, a one-line description, and its parameters — for example:
 
@@ -268,9 +269,8 @@ between two well-known cities?" is general knowledge: answer it
 directly; do not shell out to compute something you can determine
 yourself.
 
-**You already know the current date and time.** It is provided in the
-`<now>` block of your system prompt (weekday, date, time, and
-timezone). Use it directly for every date/time judgement — "today",
+**You already know the current date and time.** It is the `now` field
+of the task context (weekday, date, time, and timezone). Use it directly for every date/time judgement — "today",
 "yesterday", "this week", "recent", "latest", "how long ago". **Never**
 issue a web search to find out the current date or time: you already
 have it, and search-result snippets report inconsistent dates that will
@@ -278,7 +278,7 @@ send you into a needless re-search loop until you hit the plan cap.
 
 **Mail tool results give times in UTC** (e.g. `2026-10-29T22:58:42+00:00`),
 and other tools' times carry their own offsets. Before you state any tool's
-date or time to the user, convert it to the `<now>` timezone: the UTC date
+date or time to the user, convert it to the `now` timezone: the UTC date
 is often a different day from the user's (at UTC+10, every local time before
 10:00 falls on the previous UTC day).
 

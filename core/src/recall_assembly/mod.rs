@@ -11,7 +11,7 @@
 //!    returns the ranked rows plus a SHA-256 of the query text.
 //! 2. [`crate::prompt_assembly::SystemPromptBuilder::build_with_recalled`]
 //!    consumes the [`RecalledContext`] and threads it into the
-//!    assembled `<l0>/<l1>/<recalled>/<base>` system message.
+//!    assembled `<base>/…/<l0>/<l1>/<recalled>` system message.
 //!
 //! Recall is **enrichment, not policy**: failure here degrades to an
 //! empty context with a `tracing::warn!`, and the agent still plans

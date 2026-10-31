@@ -38,15 +38,15 @@ pub struct PgSystemPromptBuilder {
     /// via [`with_tool_docs`](Self::with_tool_docs); the daemon builds it once
     /// from the live registry at startup.
     tool_docs: Arc<[AdvertisedTool]>,
-    /// Configured planner timezone. `None` (the `new()` default) → no `<now>`
-    /// block, keeping output byte-identical to the pre-`<now>` builder. Set by
-    /// the daemon via [`with_timezone`](Self::with_timezone).
+    /// Configured planner timezone. `None` (the `new()` default) →
+    /// [`AssembledPrompt::now`] is `None`. Set by the daemon via
+    /// [`with_timezone`](Self::with_timezone).
     timezone: Option<jiff::tz::TimeZone>,
 }
 
 impl PgSystemPromptBuilder {
     /// Construct a builder pinned to the supplied pool, advertising no tools
-    /// and injecting no `<now>` block.
+    /// and reporting no current time.
     pub fn new(pool: PgPool) -> Self {
         Self { pool, tool_docs: Arc::from(Vec::new()), timezone: None }
     }
@@ -58,7 +58,7 @@ impl PgSystemPromptBuilder {
         self
     }
 
-    /// Attach the planner timezone (enables the `<now>` block). Threaded from
+    /// Attach the planner timezone (enables [`AssembledPrompt::now`]). Threaded from
     /// `resolve_timezone(KASTELLAN_TIMEZONE)` at daemon startup; the instant is
     /// captured fresh on every [`build_with_recalled`](Self::build_with_recalled).
     pub fn with_timezone(mut self, tz: jiff::tz::TimeZone) -> Self {
@@ -99,7 +99,6 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
             load_l1_default(&self.pool).await?,
         );
         let skills = crate::memory::l3_surface::load_l3_skills_default(&self.pool).await?;
-        let now_block = self.timezone.as_ref().map(super::now::current_now_block);
         let system_prompt = assemble_system_prompt(
             &l0,
             &l1,
@@ -107,7 +106,6 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
             recalled,
             base,
             &self.tool_docs,
-            now_block.as_deref(),
         );
         Ok(AssembledPrompt {
             system_prompt,
@@ -119,6 +117,7 @@ impl SystemPromptBuilder for PgSystemPromptBuilder {
             // so any future divergence fails towards the rendered truth.
             // The new() constructor invariant makes the two equal today.
             recalled_count: recalled.len(),
+            now: self.timezone.as_ref().map(super::now::current_now),
         })
     }
 }
@@ -161,6 +160,7 @@ impl SystemPromptBuilder for StaticSystemPromptBuilder {
             l1_count: 0,
             skill_count: 0,
             recalled_count: recalled.len(),
+            now: None,
         })
     }
 }
@@ -192,7 +192,7 @@ mod tests {
     async fn builder_defaults_to_no_timezone() {
         let pool = PgPool::connect_lazy("postgres://unused").expect("lazy pool");
         let b = PgSystemPromptBuilder::new(pool);
-        assert!(b.timezone_for_test().is_none(), "new() must not inject <now>");
+        assert!(b.timezone_for_test().is_none(), "new() must report no current time");
     }
 
     #[tokio::test]
@@ -200,10 +200,10 @@ mod tests {
         let pool = PgPool::connect_lazy("postgres://unused").expect("lazy pool");
         let (tz, _src) = crate::prompt_assembly::resolve_timezone(Some("Australia/Sydney"));
         let b = PgSystemPromptBuilder::new(pool).with_timezone(tz);
-        // The block the builder would inject is well-formed and current-year.
-        let block = super::super::now::current_now_block(b.timezone_for_test().unwrap());
-        assert!(block.starts_with("<now>\n") && block.trim_end().ends_with("</now>"), "got: {block}");
-        assert!(block.contains("202"), "renders a plausible year; got: {block}");
+        // The time the builder would report names the zone and a plausible year.
+        let now = super::super::now::current_now(b.timezone_for_test().unwrap());
+        assert!(now.contains("(AE") && now.contains("UTC+1"), "Sydney zone; got: {now}");
+        assert!(now.contains("202"), "renders a plausible year; got: {now}");
     }
 
     #[tokio::test]

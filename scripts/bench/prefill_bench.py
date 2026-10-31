@@ -5,9 +5,14 @@ Dev-only measurement script (stdlib only), not part of the product. Run:
   python3 -I scripts/bench/prefill_bench.py prompts/agent_planner.md ollama gemma4:26b-a4b-it-qat 20,40,60
 Results and method: docs/devel/notes/2026-10-31-prefill-cache-benchmark.md.
 
-cold: the prompt differs at its first bytes (today's minute-stamped <now> block).
-warm: a long identical prefix, a different short tail (a stable-first layout's next turn).
-Prints one JSON line per measurement.
+Prints one JSON line per measurement, five kinds per size:
+  cold                    a fresh prompt whose first line is a unique <now> stamp
+  identical-again         the same request again: the best any cache can give
+  front-changed           a new <now> stamp at the front (the pre-#943 layout's next minute)
+  stable-prefix-first     no clock in the system prompt; <now> after the history, at the tail
+  stable-prefix-new-tail  the same with a different tail (the #943 layout's next turn)
+The note's "cold" column is cold and front-changed (both got no reuse); "tail changed"
+is stable-prefix-new-tail.
 """
 import json, sys, time, urllib.request
 

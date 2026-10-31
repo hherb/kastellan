@@ -1,14 +1,17 @@
 //! Pure prompt assembler. No I/O, no async, no errors.
 //!
-//! Output framing (base → handoff → tools → L0 → L1 → skills → recalled → now [only when present], in this order):
+//! Output framing (base → handoff → tools → L0 → L1 → skills → recalled, in this order):
 //!
 //! **Most stable first, so consecutive prompts share the longest possible byte
 //! prefix** and a backend's prompt cache (Ollama/llama.cpp's in-memory prefix,
 //! oMLX's SSD cache) skips their prefill. `<base>` and `<handoff>` are compiled
 //! in; `<tools>` changes with the registry; L0/L1/skills between tasks;
-//! `<recalled>` between turns; `<now>` every minute, so it comes last. Measured
-//! on the Mac (oMLX, Gemma 4 26B, 2026-10-31): a ~39k-token prompt took 69 s
-//! with its first bytes changed and 4.2 s with only its tail changed.
+//! `<recalled>` is queried from the instruction, so it changes between tasks or
+//! as memory grows. The current time changes every minute, so it is not here at
+//! all: it is the last key of the user message (`scheduler::agent`), which
+//! follows this one, so a new minute costs only the tail. Measured on the Mac
+//! (oMLX, Gemma 4 26B, 2026-10-31): a ~39k-token prompt took 69 s with its
+//! first bytes changed and 4.2 s with only its tail changed.
 //!
 //! ```text
 //! <base>
@@ -44,10 +47,6 @@
 //! - {body of recall row #1 (RRF-ranked-first)}
 //! - {body of recall row #2}
 //! </recalled>
-//!
-//! <now>
-//! Current date and time: {weekday, date, minute, tz abbrev + offset}
-//! </now>
 //! ```
 //!
 //! Rules:
@@ -266,8 +265,7 @@ fn render_tools_block(tools: &[AdvertisedTool]) -> String {
 /// `<handoff>…</handoff>`.
 ///
 /// Render position is decoupled from parameter order: the blocks are emitted
-/// most-stable first (see the module doc), so the trusted `<now>` block (when
-/// `Some`) is LAST and everything before it can be served from a prompt cache.
+/// most-stable first (see the module doc).
 pub fn assemble_system_prompt(
     l0: &[Memory],
     l1: &[Memory],
@@ -275,7 +273,6 @@ pub fn assemble_system_prompt(
     recalled: &RecalledContext,
     base: &str,
     tools: &[AdvertisedTool],
-    now: Option<&str>,
 ) -> String {
     let mut out = String::new();
 
@@ -339,18 +336,6 @@ pub fn assemble_system_prompt(
             out.push('\n');
         }
         out.push_str("</recalled>\n\n");
-    }
-
-    // Trusted, system-generated grounding fact (the current date/time) — emitted
-    // LAST, verbatim (NOT escaped: not adversary-influenced), because it changes
-    // every minute and anything after it would miss the prompt cache. Omitted
-    // entirely when `None`. `now` carries its own `<now>…</now>` framing (see
-    // `now::render_now_block`).
-    if let Some(block) = now {
-        if !block.is_empty() {
-            out.push_str(block);
-            out.push('\n');
-        }
     }
 
     // Every block ends in a blank line; the prompt ends in exactly one newline,

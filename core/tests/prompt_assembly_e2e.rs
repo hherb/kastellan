@@ -161,7 +161,7 @@ fn pg_builder_build_with_empty_db_returns_base_only() {
         );
         assert!(
             result.system_prompt.ends_with("</handoff>\n"),
-            "with no memory layers <handoff> is terminal; got: {result:?}"
+            "with no memory layers and no tools registered, <handoff> is terminal; got: {result:?}"
         );
         for absent in ["<l0_meta_rules>", "<l1_insights>", "<skills>", "<recalled>"] {
             assert!(

@@ -306,7 +306,7 @@ impl RouterAgent {
             format!("{:x}", h.finalize())
         };
 
-        let user_msg = serialise_context_for_agent(ctx, synthesize);
+        let user_msg = serialise_context_for_agent(ctx, synthesize, assembled.now.as_deref());
         let local_model = self.router.config().local_model.clone();
 
         let req = ChatRequest {
@@ -425,14 +425,16 @@ impl RouterAgent {
     }
 }
 
-fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool) -> String {
+fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool, now: Option<&str>) -> String {
     // Compact, deterministic shape. The agent reads this each iteration and
     // must produce the next Plan.
     //
     // **Key order is the prompt cache's order** (it follows the system prompt,
     // see `prompt_assembly::assemble`): what is fixed for the whole task first,
-    // then the append-only history, then the small parts that change, and the
-    // per-turn budget last. A `serde_json::Map` would sort the keys
+    // then the append-only history, then the small parts that change, the
+    // per-turn budget, and the minute-precise `now` last — anywhere earlier, a
+    // new minute would make the backend re-read the history after it. A
+    // `serde_json::Map` would sort the keys
     // alphabetically (the workspace does not enable `preserve_order`), which put
     // the per-turn `plan_budget` in front of `plans_so_far` and made every turn
     // re-read the whole history.
@@ -467,6 +469,9 @@ fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool) -> String {
             budget["seconds_left"] = serde_json::json!(s);
         }
         fields.push(("plan_budget", budget));
+    }
+    if let Some(now) = now {
+        fields.push(("now", serde_json::json!(now)));
     }
     ordered_json_object(&fields)
 }
