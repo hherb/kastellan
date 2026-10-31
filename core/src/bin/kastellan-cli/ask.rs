@@ -278,10 +278,41 @@ async fn ask_async(
             println!("{}", serde_json::to_string_pretty(&r).unwrap());
             ExitCode::from(0)
         }
-        (state, _) => {
-            eprintln!("ask: task ended in state '{state}'");
+        (state, result) => {
+            eprintln!("{}", ended_line(state, result.as_ref()));
             ExitCode::from(1)
         }
+    }
+}
+
+/// What `ask` prints for a task that did not complete: the state, then the
+/// task's own `detail` when it left one, which is the plain-words reason the
+/// scheduler wrote (#923) and the only part a user can act on.
+fn ended_line(state: &str, result: Option<&serde_json::Value>) -> String {
+    match result.and_then(|r| r.get("detail")).and_then(|d| d.as_str()) {
+        Some(detail) => format!("ask: task ended in state '{state}': {detail}"),
+        None => format!("ask: task ended in state '{state}'"),
+    }
+}
+
+#[cfg(test)]
+mod ended_line_tests {
+    use super::ended_line;
+
+    #[test]
+    fn a_failed_task_says_why_in_its_own_words() {
+        let r = serde_json::json!({"kind": "error", "detail": "The language model answered with something that is not a plan."});
+        assert_eq!(
+            ended_line("failed", Some(&r)),
+            "ask: task ended in state 'failed': The language model answered with something that is not a plan."
+        );
+    }
+
+    #[test]
+    fn a_task_without_a_detail_says_only_its_state() {
+        assert_eq!(ended_line("cancelled", None), "ask: task ended in state 'cancelled'");
+        let r = serde_json::json!({"kind": "error"});
+        assert_eq!(ended_line("failed", Some(&r)), "ask: task ended in state 'failed'");
     }
 }
 
