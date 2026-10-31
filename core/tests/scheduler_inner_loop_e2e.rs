@@ -208,6 +208,7 @@ fn make_ctx(task_id: i64, max_plans: u32) -> TaskContext {
         blocks: vec![],
         plan_count: 0,
         max_plans,
+        deadline: None,
         resolved_asks: Vec::new(),
         origin: None,
         conversation: Vec::new(),

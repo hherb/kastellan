@@ -49,12 +49,23 @@ pub const DEFAULT_DEADLINE_LONG_S: i64 = 30 * 60;
 
 /// Default plan-iteration caps per lane. Mirror values in
 /// `core::scheduler` so a producer omitting the cap gets the same
-/// behaviour as the runner enforces. Fast is 5 (not 3): with step
-/// error `code`/`detail` now fed back into the planner prompt the
-/// agent can actually recover across replans, so a couple of extra
-/// attempts buy real convergence rather than blind flailing.
-pub const DEFAULT_MAX_PLANS_FAST: u32 = 5;
-pub const DEFAULT_MAX_PLANS_LONG: u32 = 12;
+/// behaviour as the runner enforces.
+///
+/// Since #922 the fast lane's binding limit is time, not plans
+/// ([`DEFAULT_TIME_CEILING_FAST_S`]): 5 plans ended 4 of 7 ordinary mail
+/// questions in forced synthesis with figures unread. Its 20 is a backstop
+/// against a planner that loops on cheap plans (an injected one can), not
+/// the expected stopping point. The long lane has no time ceiling, so its
+/// cap (25) is still its only bound.
+pub const DEFAULT_MAX_PLANS_FAST: u32 = 20;
+pub const DEFAULT_MAX_PLANS_LONG: u32 = 25;
+
+/// The fast lane's wall-clock ceiling on gathering, in seconds (#922 part A,
+/// operator decision 2026-10-31). Measured from the start of each run, and
+/// checked between plans, so a run can overrun it by about one plan plus the
+/// forced-synthesis turn. At 60–100 s per plan with thinking on, 15 minutes
+/// is roughly 9–15 plans.
+pub const DEFAULT_TIME_CEILING_FAST_S: u64 = 15 * 60;
 
 #[cfg(test)]
 mod tests {

@@ -46,7 +46,10 @@ fn every_step_outcome_carries_the_call_that_produced_it() {
 #[test]
 fn an_elided_output_keeps_its_call() {
     let prose = "lorem ipsum dolor sit amet ".repeat(1_200);
-    let plans: Vec<PlanRecord> = (0..60)
+    // More outputs than the budget has floor-sized shares for, so the oldest
+    // must be dropped whole rather than shrunk.
+    let n = PLANS_SUMMARY_BUDGET / budget::MIN_SHRUNK_OUTPUT_BYTES + 12;
+    let plans: Vec<PlanRecord> = (0..n)
         .map(|i| PlanRecord::new(search_plan("d", json!({"query": format!("q{i}")})), vec![StepOutcome::Ok(json!({"text": prose}))]))
         .collect();
     let first = &render_plans_summary(&plans)[0]["step_outcomes"][0];

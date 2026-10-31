@@ -29,13 +29,15 @@ of the task, with these fields:
     "conversation":         [ /* earlier turns of this chat, oldest first; absent when there are none */ ],
     "advisories":           [ /* concerns the reviewer raised but did not block on */ ],
     "blocks":               [ /* reasons the reviewer blocked your prior plans */ ],
-    "plan_budget":          { "this_plan": 2, "max_plans": 5 }
+    "plan_budget":          { "this_plan": 2, "max_plans": 20, "seconds_left": 610 }
 }
 ```
 
 `plan_budget` says which plan you are writing now and how many this task may
-have in total. After the last one you must answer from what you have gathered,
-so spend the plans on gathering, not on one step at a time (see Rules).
+have in total, and, when present, `seconds_left` is the time left before you
+must stop gathering — usually the tighter limit, since one plan takes a minute
+or more. Once either runs out you must answer from what you have gathered, so
+spend the plans on gathering, not on one step at a time (see Rules).
 
 `plans_so_far[i].step_outcomes[j]` is an object whose `"status"` is `"ok"` or
 `"err"`, in one of four shapes:

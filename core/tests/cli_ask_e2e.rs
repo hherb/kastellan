@@ -28,6 +28,9 @@ use kastellan_tests_common::{
 #[cfg(target_os = "macos")]
 use kastellan_tests_common::serial_lock;
 
+/// The fast lane's plan cap, which the failure-path test runs into.
+const CAP: usize = kastellan_db::tasks::DEFAULT_MAX_PLANS_FAST as usize;
+
 use kastellan_tests_common::scripted_llm::{
     embedding_envelope, envelope_for, plan_json, spawn_scripted_llm,
 };
@@ -498,31 +501,20 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         .build()
         .expect("build multi-threaded tokio runtime");
 
-    // Same non-terminal plan five times — every iteration the agent
+    // Same non-terminal plan `CAP` times — every iteration the agent
     // tries to cat /etc/passwd, every iteration the worker denies it,
-    // every iteration the inner-loop replans. On the sixth would-be
-    // iteration the plan-iter cap kicks in (DEFAULT_MAX_PLANS_FAST=5)
-    // and we return Outcome::Failed.
+    // every iteration the inner-loop replans. On the next would-be
+    // iteration the plan-iter cap kicks in (DEFAULT_MAX_PLANS_FAST) and
+    // we return Outcome::Failed — nothing was gathered, so there is no
+    // forced-synthesis turn, and the fast lane's 15-minute ceiling is
+    // never near.
     //
     // Each plan iteration: (1) embed request for recall, (2) chat
-    // completion for plan generation. 5 iterations → 5 embed responses
-    // and 5 chat responses (the same denied plan repeated).
+    // completion for plan generation, so `CAP` of each.
     let denied_plan = envelope_for(&plan_json("act", cat_passwd_step(), None));
     let mock = rt.block_on(spawn_scripted_llm(
-        vec![
-            embedding_envelope(),
-            embedding_envelope(),
-            embedding_envelope(),
-            embedding_envelope(),
-            embedding_envelope(),
-        ],
-        vec![
-            denied_plan.clone(),
-            denied_plan.clone(),
-            denied_plan.clone(),
-            denied_plan.clone(),
-            denied_plan,
-        ],
+        vec![embedding_envelope(); CAP],
+        vec![denied_plan; CAP],
     ));
 
     // Apply migrations before the daemon boots so build_tool_registry
@@ -589,10 +581,10 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         assert_eq!(rows.len(), 1, "expected exactly one task row, got {rows:?}");
         let (_, state, plan_count, _) = &rows[0];
         assert_eq!(state, "failed", "task state must be 'failed'; got {state}");
-        assert_eq!(*plan_count, 5, "plan_count must equal cap (5); got {plan_count}");
+        assert_eq!(*plan_count, CAP as i32, "plan_count must equal the cap ({CAP}); got {plan_count}");
 
-        // Each of the five iterations dispatched the denied step, so
-        // we expect 5 tool:shell-exec rows whose payload carries an
+        // Each iteration dispatched the denied step, so
+        // we expect `CAP` tool:shell-exec rows whose payload carries an
         // `err` string mentioning the JSON-RPC POLICY_DENIED code
         // (`-32001`).
         let denied_rows: Vec<(serde_json::Value,)> = sqlx::query_as(
@@ -605,8 +597,8 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         .expect("select shell-exec audit rows");
         assert_eq!(
             denied_rows.len(),
-            5,
-            "expected 5 tool:shell-exec rows (one per iter); got {}",
+            CAP,
+            "expected {CAP} tool:shell-exec rows (one per iter); got {}",
             denied_rows.len()
         );
         for (i, (payload,)) in denied_rows.iter().enumerate() {
@@ -638,18 +630,18 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
                    "expected 1× policy/guard_tier.boot per daemon start; multiset = {m:?}");
         assert_eq!(m.get(&("cli".into(), "task.submitted".into())), Some(&1),
                    "expected 1× cli/task.submitted (producer-side row from kastellan-cli ask); multiset = {m:?}");
-        assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&5),
-                   "expected 5× agent/plan.formulate (one per LLM call before cap); multiset = {m:?}");
+        assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&CAP),
+                   "expected {CAP}× agent/plan.formulate (one per LLM call before cap); multiset = {m:?}");
         // PgRecallBuilder calls embed_query once per plan iteration before
-        // the chat-completion: 5 plan iterations → 5 embed audit rows.
-        assert_eq!(m.get(&("llm:router".into(), "embed".into())), Some(&5),
-                   "expected 5× llm:router/embed (one per recall+plan iteration); multiset = {m:?}");
-        assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&5),
-                   "expected 5× cassandra:chain/verdict (one per plan); multiset = {m:?}");
-        assert_eq!(m.get(&("tool:shell-exec".into(), "shell.exec".into())), Some(&5),
-                   "expected 5× tool:shell-exec/shell.exec (one per denied dispatch); multiset = {m:?}");
-        assert_eq!(m.get(&("scheduler".into(), "plan.outcome".into())), Some(&5),
-                   "expected 5× scheduler/plan.outcome (one per non-terminal plan); multiset = {m:?}");
+        // the chat-completion: one embed audit row per plan iteration.
+        assert_eq!(m.get(&("llm:router".into(), "embed".into())), Some(&CAP),
+                   "expected {CAP}× llm:router/embed (one per recall+plan iteration); multiset = {m:?}");
+        assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&CAP),
+                   "expected {CAP}× cassandra:chain/verdict (one per plan); multiset = {m:?}");
+        assert_eq!(m.get(&("tool:shell-exec".into(), "shell.exec".into())), Some(&CAP),
+                   "expected {CAP}× tool:shell-exec/shell.exec (one per denied dispatch); multiset = {m:?}");
+        assert_eq!(m.get(&("scheduler".into(), "plan.outcome".into())), Some(&CAP),
+                   "expected {CAP}× scheduler/plan.outcome (one per non-terminal plan); multiset = {m:?}");
         assert_eq!(m.get(&("scheduler".into(), "task.running".into())), Some(&1),
                    "expected 1× scheduler/task.running (claim_one transition); multiset = {m:?}");
         assert_eq!(m.get(&("scheduler".into(), "task.failed".into())), Some(&1),
@@ -663,11 +655,11 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
             .expect("count audit_log");
         // +1 test/setup (pre-seed probe), +1 core/startup, +1 core/registry.loaded,
         // +1 policy/guard_tier.boot (once per daemon start, configured or not),
-        // +1 cli/task.submitted, +5 agent/plan.formulate, +5 llm:router/embed (recall),
-        // +5 cassandra:chain/verdict, +5 tool:shell-exec/shell.exec,
-        // +5 scheduler/plan.outcome, +1 scheduler/task.running,
+        // +1 cli/task.submitted, +CAP agent/plan.formulate, +CAP llm:router/embed (recall),
+        // +CAP cassandra:chain/verdict, +CAP tool:shell-exec/shell.exec,
+        // +CAP scheduler/plan.outcome, +1 scheduler/task.running,
         // +1 scheduler/task.failed, +1 scheduler/task.finalize
-        let expected_total: i64 = 1 + 1 + 1 + 1 + 1 + 5 + 5 + 5 + 5 + 5 + 1 + 1 + 1; // = 33
+        let expected_total: i64 = 8 + 5 * CAP as i64;
         assert_eq!(
             total.0, expected_total,
             "audit_log row count mismatch (expected {expected_total}, got {}); multiset = {m:?}",
@@ -684,12 +676,12 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         let fp = &finalize_payload.0.0;
         assert_eq!(fp["state"], "failed",
                    "task.finalize.state should be 'failed'; got {fp:?}");
-        assert_eq!(fp["plan_count"], 5,
-                   "task.finalize.plan_count should equal cap (5); got {fp:?}");
-        assert_eq!(fp["total_llm_calls"], 5,
-                   "task.finalize.total_llm_calls should be 5; got {fp:?}");
-        assert_eq!(fp["total_dispatch_calls"], 5,
-                   "task.finalize.total_dispatch_calls should be 5 (one per denied iter); got {fp:?}");
+        assert_eq!(fp["plan_count"], CAP,
+                   "task.finalize.plan_count should equal the cap ({CAP}); got {fp:?}");
+        assert_eq!(fp["total_llm_calls"], CAP,
+                   "task.finalize.total_llm_calls should be {CAP}; got {fp:?}");
+        assert_eq!(fp["total_dispatch_calls"], CAP,
+                   "task.finalize.total_dispatch_calls should be {CAP} (one per denied iter); got {fp:?}");
 
         // Slice D (recall lane, 2026-05-17): every plan.formulate row
         // must carry the three recall keys produced by PgRecallBuilder.
@@ -707,7 +699,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         .fetch_all(&pool)
         .await
         .expect("select plan.formulate rows (cap-exhaustion path)");
-        assert_eq!(plan_rows.len(), 5, "expected 5 plan.formulate rows (cap-exhaustion path)");
+        assert_eq!(plan_rows.len(), CAP, "expected {CAP} plan.formulate rows (cap-exhaustion path)");
         for (i, row) in plan_rows.iter().enumerate() {
             let p = &row.0.0;
             assert!(p.get("recall_count").and_then(|v| v.as_u64()).is_some(),
@@ -723,17 +715,17 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         pool.close().await;
     });
 
-    // Mock dial count: 5 embeds + 5 chat-completions, one of each per
+    // Mock dial count: `CAP` embeds + `CAP` chat-completions, one of each per
     // plan iteration before the cap fires. Per-endpoint assertions
     // catch a stray extra dial to either side directly.
     let embed_dialed = mock.embed_requests.lock().unwrap().len();
     let chat_dialed = mock.chat_requests.lock().unwrap().len();
     assert_eq!(
-        embed_dialed, 5,
-        "expected daemon to dial mock embed endpoint exactly 5× before cap; got {embed_dialed}",
+        embed_dialed, CAP,
+        "expected daemon to dial mock embed endpoint exactly {CAP}× before cap; got {embed_dialed}",
     );
     assert_eq!(
-        chat_dialed, 5,
-        "expected daemon to dial mock chat endpoint exactly 5× before cap; got {chat_dialed}",
+        chat_dialed, CAP,
+        "expected daemon to dial mock chat endpoint exactly {CAP}× before cap; got {chat_dialed}",
     );
 }
