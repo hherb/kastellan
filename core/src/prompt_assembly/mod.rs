@@ -91,6 +91,11 @@ pub struct AssembledPrompt {
     /// `build_with_recalled`). RouterAgent writes this into the
     /// `recall_count` audit-row key.
     pub recalled_count: usize,
+    /// The current date and time at minute precision (`now::render_now`), when
+    /// a planner timezone is configured. Deliberately NOT in `system_prompt`:
+    /// it changes every minute, so `RouterAgent` writes it as the last key of
+    /// the user message, behind the history a prompt cache can reuse.
+    pub now: Option<String>,
 }
 
 /// Async seam between `RouterAgent` and the L0/L1 loaders.

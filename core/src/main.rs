@@ -425,7 +425,7 @@ async fn main() -> Result<()> {
 
     // System-prompt builder: loads L0 (meta-rules) + L1 (insight index)
     // from the runtime pool on every plan iteration and frames them as
-    // <l0_meta_rules>/<l1_insights>/<base> before each LLM call. Holds
+    // <base>/<l0_meta_rules>/<l1_insights> before each LLM call. Holds
     // PgPool by value (sqlx wraps connections in an internal Arc so
     // pool.clone() is cheap).
     // Sandbox-backend bundle (Slice 2). On darwin holds both Seatbelt
@@ -688,7 +688,7 @@ async fn main() -> Result<()> {
         info!(path = ?l0_path, "no L0 rules file found, skipping seed");
     }
 
-    // Planner "now" timezone — feeds the trusted <now> block so date-relative
+    // Planner "now" timezone — feeds the trusted `now` field so date-relative
     // questions stop web-searching for the current date (the root cause of the
     // plan_iteration_cap loop). KASTELLAN_TIMEZONE = IANA name; unset → host
     // system tz; invalid → UTC (fail-safe).
@@ -702,7 +702,7 @@ async fn main() -> Result<()> {
     info!(
         ?tz_source,
         zone = planner_tz.iana_name().unwrap_or("<fixed-offset>"),
-        "planner <now> timezone resolved"
+        "planner now timezone resolved"
     );
 
     // PlanFormulator — takes the extractor as 5th arg (Task 14 widened
