@@ -124,6 +124,35 @@ fn only_a_decode_failure_carries_its_completion() {
     assert!(AgentError::PromptMissing.completion().is_none());
 }
 
+/// #923: only an answer with nothing in it is worth a plain retry; a
+/// non-JSON answer would most likely come back non-JSON again.
+#[test]
+fn only_a_blank_decode_failure_is_an_empty_completion() {
+    let decode = |raw: &str| AgentError::Decode {
+        detail: "d".into(),
+        raw: raw.into(),
+        usage: Default::default(),
+        latency_ms: 0,
+    };
+    assert!(decode("").is_empty_completion());
+    assert!(decode(" \n\t").is_empty_completion());
+    assert!(!decode("Sure! Here is the plan").is_empty_completion());
+    assert!(!decode("{").is_empty_completion());
+    assert!(!AgentError::PromptMissing.is_empty_completion());
+    // Out of room is not transient: the same request runs out again.
+    let out_of_room = |finish_reason: Option<&str>| AgentError::Decode {
+        detail: "d".into(),
+        raw: String::new(),
+        usage: kastellan_llm_router::CompletionStats {
+            finish_reason: finish_reason.map(Into::into),
+            ..Default::default()
+        },
+        latency_ms: 0,
+    };
+    assert!(!out_of_room(Some("length")).is_empty_completion());
+    assert!(out_of_room(Some("stop")).is_empty_completion());
+}
+
 #[test]
 fn serialise_context_omits_directive_on_a_normal_turn() {
     let s = serialise_context_for_agent(&ctx(), false);

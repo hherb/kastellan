@@ -96,7 +96,8 @@ impl PlanFormulator for ScriptedFormulator {
             .pop_front()
             .ok_or(AgentError::Decode {
                 detail: "scripted formulator out of plans".into(),
-                raw: "".into(),
+                // Not blank: a blank raw is an empty completion, which is retried (#923).
+                raw: "<script exhausted>".into(),
                 usage: Default::default(),
                 latency_ms: 0,
             })?;
