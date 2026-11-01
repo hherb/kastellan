@@ -1,8 +1,30 @@
-//! The user message of a planning turn: the task's state as one compact JSON
-//! object. Pure; moved verbatim out of `agent.rs` (over the 500-line cap).
+//! The messages of a planning turn: the user message carrying the task's
+//! state as one compact JSON object (moved verbatim out of `agent.rs`, over
+//! the 500-line cap), and the two the #945 re-ask appends. Pure.
+
+use kastellan_llm_router::messages::ChatMessage;
 
 use super::SYNTHESIS_DIRECTIVE;
 use crate::scheduler::inner_loop::TaskContext;
+
+/// Sent after a reply that was not a plan (#945). On the DGX the planner's
+/// last turn was, two times in three on one question, a correct final answer
+/// written as markdown instead of the JSON plan carrying it; this asks for
+/// that answer again in the shape the loop can use.
+pub(super) const REFORMAT_DIRECTIVE: &str = "Your previous reply was not a JSON \
+plan, so it could not be used. Reply again with ONLY the JSON plan object in the \
+schema from the system prompt: no prose, no markdown, no code fence. If that reply \
+was your final answer, put it in a terminal plan: `decision` exactly \
+\"task_complete\", `steps` [], and `result.body` = that answer. Otherwise emit the \
+plan for your next step.";
+
+/// What the re-ask appends to the failed turn's messages: the model's own
+/// reply, then [`REFORMAT_DIRECTIVE`]. Appending (never rewriting) keeps the
+/// request before them identical to the failed turn's, so a backend's prompt
+/// cache serves it.
+pub(super) fn reformat_messages(reply: &str) -> [ChatMessage; 2] {
+    [ChatMessage::assistant(reply), ChatMessage::user(REFORMAT_DIRECTIVE)]
+}
 
 pub(super) fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool, now: Option<&str>) -> String {
     // Compact, deterministic shape. The agent reads this each iteration and

@@ -247,8 +247,8 @@ pub(super) struct TurnState {
     pub synth_attempted: bool,
 }
 
-/// Run one planning turn, with #774's timeout recovery and #923's
-/// empty-answer retry around it.
+/// Run one planning turn, with #774's timeout recovery, #923's empty-answer
+/// retry and #945's non-plan re-ask around it.
 ///
 /// Every failed formulator call — the first attempt, and any retry
 /// — adds one to `failed_llm_calls` and writes exactly one
@@ -273,7 +273,9 @@ pub(super) async fn formulate_turn(
     let first = call().await;
     // A synthesis turn that ran out of time gets one more attempt with
     // thinking suppressed, when the formulator has such an attempt; an empty
-    // answer gets the same call once more (#923). At most one retry per turn.
+    // answer gets the same call once more (#923); a reply that is not a plan
+    // is shown back to the model with a request for the plan, when the
+    // formulator can (#945). At most one retry per turn.
     // Every failed call is counted and gets an audit row exactly once:
     // `failure_recorded` stops the row below from repeating one already
     // written here.
@@ -323,6 +325,32 @@ pub(super) async fn formulate_turn(
             );
             retried = true;
             call().await
+        }
+        Err(e) if e.non_plan_answer().is_some() => {
+            *failed_llm_calls = failed_llm_calls.saturating_add(1);
+            record_failed_formulation(
+                pool, ctx.task_id, ctx.plan_count, synth_turn, false, &e,
+            ).await;
+            let reply = e.non_plan_answer().unwrap_or_default();
+            match formulator.formulate_reformat(ctx, synth_turn, reply).await {
+                Some(retry) => {
+                    tracing::warn!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        synth_turn,
+                        retry_ok = retry.is_ok(),
+                        "planning call answered with something that is not a plan; \
+                         re-asked once with its reply and thinking suppressed"
+                    );
+                    retried = true;
+                    thinking_suppressed = true;
+                    retry
+                }
+                None => {
+                    failure_recorded = true;
+                    Err(e)
+                }
+            }
         }
         other => other,
     };

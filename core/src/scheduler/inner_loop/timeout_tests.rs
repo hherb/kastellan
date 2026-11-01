@@ -57,7 +57,8 @@ enum Next {
     /// (`clippy::large_enum_variant`).
     Plan(Box<Plan>),
     Timeout,
-    /// An answer that is not a plan — fails the task, never retried.
+    /// An answer that is not a plan — re-asked once through the reformat
+    /// door when the script has a `reformat` answer (#945), else fails.
     Decode,
     /// An answer with no content at all (#923) — retried once, unless it is
     /// itself the turn's retry.
@@ -74,6 +75,11 @@ struct TimeoutScript {
     /// The answer for `formulate_synthesis_without_thinking`; `None` models
     /// a formulator with no cheaper attempt (thinking already off).
     retry: Mutex<Option<Next>>,
+    /// The answer for `formulate_reformat` (#945); `None` models a
+    /// formulator with no re-ask, the trait's default.
+    reformat: Mutex<Option<Next>>,
+    /// The replies each re-ask was shown, in order.
+    reformat_replies: Mutex<Vec<String>>,
     synthesis_calls: AtomicUsize,
     retry_calls: AtomicUsize,
 }
@@ -83,6 +89,8 @@ impl TimeoutScript {
         Arc::new(Self {
             script: Mutex::new(script.into()),
             retry: Mutex::new(retry),
+            reformat: Mutex::new(None),
+            reformat_replies: Mutex::new(Vec::new()),
             synthesis_calls: AtomicUsize::new(0),
             retry_calls: AtomicUsize::new(0),
         })
@@ -134,6 +142,17 @@ impl PlanFormulator for TimeoutScript {
     ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
         let next = self.retry.lock().unwrap().take()?;
         self.retry_calls.fetch_add(1, Ordering::SeqCst);
+        Some(resolve(Some(next)).await)
+    }
+
+    async fn formulate_reformat(
+        &self,
+        _ctx: &TaskContext,
+        _synth_turn: bool,
+        reply: &str,
+    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
+        let next = self.reformat.lock().unwrap().take()?;
+        self.reformat_replies.lock().unwrap().push(reply.to_owned());
         Some(resolve(Some(next)).await)
     }
 }
@@ -479,4 +498,34 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
         "plan_time_ceiling_exceeded; forced synthesis did not produce a final answer"
     );
     assert_eq!(r.dispatch_count, 1, "the synthesis turn's step never ran");
+
+    // ── 15. A non-plan answer is re-asked once with the model's own reply,
+    //        and the re-ask's plan answers the task (#945).
+    let f = TimeoutScript::new(vec![Next::Plan(Box::new(one_step_plan())), Next::Decode], None);
+    *f.reformat.lock().unwrap() = Some(Next::Plan(Box::new(terminal_plan("reformatted"))));
+    let (task_id, r) = run(&pool, f.clone()).await;
+    assert_eq!(completed_body(&r), "reformatted");
+    assert_eq!(*f.reformat_replies.lock().unwrap(), ["Sure! Here is what I would do."], "shown its own reply");
+    assert_eq!(r.failed_llm_calls, 1);
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 1, "one row for the non-plan answer: {failed:?}");
+    let plans = agent_rows(&pool, task_id, "plan.formulate").await;
+    assert_eq!(plans.last().unwrap()["retry_count"], 1, "the re-ask's row says it was one");
+
+    // ── 16. The re-ask is not a plan either: the turn's one retry is spent,
+    //        and the task fails in the same words as before #945.
+    let f = TimeoutScript::new(
+        vec![Next::Plan(Box::new(one_step_plan())), Next::Decode, Next::Plan(Box::new(terminal_plan("never reached")))],
+        None,
+    );
+    *f.reformat.lock().unwrap() = Some(Next::Decode);
+    let (task_id, r) = run(&pool, f.clone()).await;
+    let d = failed_detail(&r);
+    assert!(d.starts_with("The language model answered with something that is not a plan"), "{d}");
+    assert_eq!(f.reformat_replies.lock().unwrap().len(), 1, "re-asked once, never twice");
+    assert_eq!(f.script.lock().unwrap().len(), 1, "no plain retry after the re-ask");
+    assert_eq!(r.failed_llm_calls, 2);
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 2, "one row per failed call: {failed:?}");
+    assert_eq!(failed[1]["thinking_suppressed_retry"], true, "the re-ask runs with thinking off: {}", failed[1]);
 }

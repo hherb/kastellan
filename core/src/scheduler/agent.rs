@@ -3,8 +3,9 @@
 //! the way out: a model that emits a malformed plan is treated as a
 //! decode-error, surfaced as `RouterError::DecodeResponse`, and the
 //! scheduler's retry policy applies (transient → backoff; decode →
-//! permanent fail). The one exception is an empty completion, which the
-//! inner loop asks again once within the turn (#923).
+//! permanent fail). Two exceptions, each asked again once within the turn:
+//! an empty completion (#923), and a reply that is not a plan, which is shown
+//! back to the model with a request for the plan (#945).
 //!
 //! The trait `PlanFormulator` lets the inner-loop integration tests
 //! swap in a scripted stub without spinning up an LLM.
@@ -62,6 +63,20 @@ impl AgentError {
             if raw.trim().is_empty() && usage.finish_reason.as_deref() != Some("length"))
     }
 
+    /// The model's reply, when it is one the #945 re-ask can use: something
+    /// was said (a blank answer is [`Self::is_empty_completion`]'s), and it
+    /// was not cut off by `length` (asked again, it is cut off again).
+    pub fn non_plan_answer(&self) -> Option<&str> {
+        match self {
+            AgentError::Decode { raw, usage, .. }
+                if !raw.trim().is_empty() && usage.finish_reason.as_deref() != Some("length") =>
+            {
+                Some(raw)
+            }
+            _ => None,
+        }
+    }
+
     /// The cost and text of the completion behind this error, when one came
     /// back. Only [`AgentError::Decode`] has one: a router error (a timeout, an
     /// HTTP status, a body that is not a `ChatResponse`) carries none, not even
@@ -111,6 +126,19 @@ pub trait PlanFormulator: Send + Sync {
     async fn formulate_synthesis_without_thinking(
         &self,
         _ctx: &TaskContext,
+    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
+        None
+    }
+
+    /// The #945 re-ask: the same turn (`synth_turn` picks which), with the
+    /// model's non-plan `reply` and a request for the plan appended. `None`
+    /// means "no re-ask exists" — the default, so scripted test doubles need
+    /// nothing, and the loop then fails the task as before.
+    async fn formulate_reformat(
+        &self,
+        _ctx: &TaskContext,
+        _synth_turn: bool,
+        _reply: &str,
     ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
         None
     }
@@ -217,14 +245,14 @@ impl PlanFormulator for RouterAgent {
         &self,
         ctx: &TaskContext,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
-        self.formulate_inner(ctx, false, ThinkingPolicy::RouterDefault).await
+        self.formulate_inner(ctx, false, ThinkingPolicy::RouterDefault, None).await
     }
 
     async fn formulate_synthesis(
         &self,
         ctx: &TaskContext,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
-        self.formulate_inner(ctx, true, ThinkingPolicy::RouterDefault).await
+        self.formulate_inner(ctx, true, ThinkingPolicy::RouterDefault, None).await
     }
 
     async fn formulate_synthesis_without_thinking(
@@ -239,7 +267,18 @@ impl PlanFormulator for RouterAgent {
         if self.router.config().disable_thinking {
             return None;
         }
-        Some(self.formulate_inner(ctx, true, ThinkingPolicy::Suppress).await)
+        Some(self.formulate_inner(ctx, true, ThinkingPolicy::Suppress, None).await)
+    }
+
+    async fn formulate_reformat(
+        &self,
+        ctx: &TaskContext,
+        synth_turn: bool,
+        reply: &str,
+    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
+        // Thinking off: the answer is already written and only needs its
+        // shape; on the DGX a thinking turn here costs ~80 s.
+        Some(self.formulate_inner(ctx, synth_turn, ThinkingPolicy::Suppress, Some(reply)).await)
     }
 }
 
@@ -250,12 +289,15 @@ impl RouterAgent {
     /// difference between a normal planning turn and the forced-synthesis
     /// turn (identical system prompt, recall, entity seeds, and audit meta).
     /// `thinking` is passed through to the router unchanged; only the
-    /// timed-out synthesis retry sets it to anything but the default.
+    /// timed-out synthesis retry and the re-ask set it to anything but the
+    /// default. `prior_reply` is the re-ask's: the reply that was not a plan,
+    /// appended with [`context::reformat_messages`].
     async fn formulate_inner(
         &self,
         ctx: &TaskContext,
         synthesize: bool,
         thinking: ThinkingPolicy,
+        prior_reply: Option<&str>,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
         let entry = self.prompts.get("agent_planner")
             .ok_or(AgentError::PromptMissing)?;
@@ -309,12 +351,13 @@ impl RouterAgent {
         let user_msg = serialise_context_for_agent(ctx, synthesize, assembled.now.as_deref());
         let local_model = self.router.config().local_model.clone();
 
+        let mut messages = vec![ChatMessage::system(assembled.system_prompt), ChatMessage::user(user_msg)];
+        if let Some(reply) = prior_reply {
+            messages.extend(context::reformat_messages(reply));
+        }
         let req = ChatRequest {
             model: local_model.clone(),
-            messages: vec![
-                ChatMessage::system(assembled.system_prompt),
-                ChatMessage::user(user_msg),
-            ],
+            messages,
             max_tokens: None,
             temperature: Some(0.0),
             // Left None so the router writes the thinking switch in its
@@ -427,6 +470,8 @@ impl RouterAgent {
 
 mod context;
 use context::serialise_context_for_agent;
+#[cfg(test)]
+use context::{reformat_messages, REFORMAT_DIRECTIVE};
 
 #[cfg(test)]
 mod tests;
