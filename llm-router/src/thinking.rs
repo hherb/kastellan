@@ -104,12 +104,13 @@ impl ThinkingSwitch {
 /// dialect [`ThinkingSwitch`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThinkingPolicy {
-    /// Do whatever the router's config says. Every caller but one uses this.
+    /// Do whatever the router's config says. Every caller but two uses this.
     #[default]
     RouterDefault,
     /// Suppress thinking on this request even if the config lets the
     /// model think. The forced-synthesis retry after a timeout (#774) is
-    /// the motivating case: a cheaper second attempt beats no answer.
+    /// the motivating case: a cheaper second attempt beats no answer. The
+    /// planner's re-ask after a non-plan reply (#945) is the other.
     Suppress,
     /// Let the model think on this request even if the config suppresses it.
     Allow,

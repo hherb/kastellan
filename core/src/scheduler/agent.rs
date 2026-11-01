@@ -3,8 +3,9 @@
 //! the way out: a model that emits a malformed plan is treated as a
 //! decode-error, surfaced as `RouterError::DecodeResponse`, and the
 //! scheduler's retry policy applies (transient → backoff; decode →
-//! permanent fail). The one exception is an empty completion, which the
-//! inner loop asks again once within the turn (#923).
+//! permanent fail). Two exceptions, each asked again once within the turn:
+//! an empty completion (#923), and a reply that is not a plan, which is shown
+//! back to the model with a request for the plan (#945).
 //!
 //! The trait `PlanFormulator` lets the inner-loop integration tests
 //! swap in a scripted stub without spinning up an LLM.
@@ -62,13 +63,27 @@ impl AgentError {
             if raw.trim().is_empty() && usage.finish_reason.as_deref() != Some("length"))
     }
 
-    /// The cost of the completion behind this error, when one came back.
-    /// Only [`AgentError::Decode`] has one: a router error (a timeout, an HTTP
-    /// status, a body that is not a `ChatResponse`) carries none, not even its
-    /// latency. Read by the failed-call audit row.
-    pub fn completion(&self) -> Option<(&kastellan_llm_router::CompletionStats, u64)> {
+    /// The model's reply, when it is one the #945 re-ask can use: something
+    /// was said (a blank answer is [`Self::is_empty_completion`]'s), and it
+    /// was not cut off by `length` (asked again, it is cut off again).
+    pub fn non_plan_answer(&self) -> Option<&str> {
         match self {
-            AgentError::Decode { usage, latency_ms, .. } => Some((usage, *latency_ms)),
+            AgentError::Decode { raw, usage, .. }
+                if !raw.trim().is_empty() && usage.finish_reason.as_deref() != Some("length") =>
+            {
+                Some(raw)
+            }
+            _ => None,
+        }
+    }
+
+    /// The cost and text of the completion behind this error, when one came
+    /// back. Only [`AgentError::Decode`] has one: a router error (a timeout, an
+    /// HTTP status, a body that is not a `ChatResponse`) carries none, not even
+    /// its latency. Read by the failed-call audit row.
+    pub fn completion(&self) -> Option<(&kastellan_llm_router::CompletionStats, u64, &str)> {
+        match self {
+            AgentError::Decode { usage, latency_ms, raw, .. } => Some((usage, *latency_ms, raw.as_str())),
             _ => None,
         }
     }
@@ -111,6 +126,19 @@ pub trait PlanFormulator: Send + Sync {
     async fn formulate_synthesis_without_thinking(
         &self,
         _ctx: &TaskContext,
+    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
+        None
+    }
+
+    /// The #945 re-ask: the same turn (`synth_turn` picks which), with the
+    /// model's non-plan `reply` and a request for the plan appended. `None`
+    /// means "no re-ask exists" — the default, so scripted test doubles need
+    /// nothing, and the loop then fails the task as before.
+    async fn formulate_reformat(
+        &self,
+        _ctx: &TaskContext,
+        _synth_turn: bool,
+        _reply: &str,
     ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
         None
     }
@@ -217,14 +245,14 @@ impl PlanFormulator for RouterAgent {
         &self,
         ctx: &TaskContext,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
-        self.formulate_inner(ctx, false, ThinkingPolicy::RouterDefault).await
+        self.formulate_inner(ctx, false, ThinkingPolicy::RouterDefault, None).await
     }
 
     async fn formulate_synthesis(
         &self,
         ctx: &TaskContext,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
-        self.formulate_inner(ctx, true, ThinkingPolicy::RouterDefault).await
+        self.formulate_inner(ctx, true, ThinkingPolicy::RouterDefault, None).await
     }
 
     async fn formulate_synthesis_without_thinking(
@@ -239,23 +267,39 @@ impl PlanFormulator for RouterAgent {
         if self.router.config().disable_thinking {
             return None;
         }
-        Some(self.formulate_inner(ctx, true, ThinkingPolicy::Suppress).await)
+        Some(self.formulate_inner(ctx, true, ThinkingPolicy::Suppress, None).await)
+    }
+
+    async fn formulate_reformat(
+        &self,
+        ctx: &TaskContext,
+        synth_turn: bool,
+        reply: &str,
+    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
+        // Thinking off: the answer is already written and only needs its
+        // shape (a thinking planner turn measured 222 s against 51 s without
+        // on the DGX, 2026-08).
+        Some(self.formulate_inner(ctx, synth_turn, ThinkingPolicy::Suppress, Some(reply)).await)
     }
 }
 
 impl RouterAgent {
-    /// Shared assembly for both [`PlanFormulator::formulate_plan`] and
-    /// [`PlanFormulator::formulate_synthesis`]. `synthesize` selects whether
-    /// the [`SYNTHESIS_DIRECTIVE`] is appended to the user message — the only
-    /// difference between a normal planning turn and the forced-synthesis
+    /// Shared assembly for every [`PlanFormulator`] door: a planning turn,
+    /// the synthesis turn, the timed-out synthesis retry and the re-ask.
+    /// `synthesize` selects whether the [`SYNTHESIS_DIRECTIVE`] is appended
+    /// to the user message — the only difference between a normal planning
+    /// turn and the forced-synthesis
     /// turn (identical system prompt, recall, entity seeds, and audit meta).
     /// `thinking` is passed through to the router unchanged; only the
-    /// timed-out synthesis retry sets it to anything but the default.
+    /// timed-out synthesis retry and the re-ask set it to anything but the
+    /// default. `prior_reply` is the re-ask's: the reply that was not a plan,
+    /// appended with [`context::reformat_messages`].
     async fn formulate_inner(
         &self,
         ctx: &TaskContext,
         synthesize: bool,
         thinking: ThinkingPolicy,
+        prior_reply: Option<&str>,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
         let entry = self.prompts.get("agent_planner")
             .ok_or(AgentError::PromptMissing)?;
@@ -309,18 +353,19 @@ impl RouterAgent {
         let user_msg = serialise_context_for_agent(ctx, synthesize, assembled.now.as_deref());
         let local_model = self.router.config().local_model.clone();
 
+        let mut messages = vec![ChatMessage::system(assembled.system_prompt), ChatMessage::user(user_msg)];
+        if let Some(reply) = prior_reply {
+            messages.extend(context::reformat_messages(reply));
+        }
         let req = ChatRequest {
             model: local_model.clone(),
-            messages: vec![
-                ChatMessage::system(assembled.system_prompt),
-                ChatMessage::user(user_msg),
-            ],
+            messages,
             max_tokens: None,
             temperature: Some(0.0),
             // Left None so the router writes the thinking switch in its
             // configured dialect (#773). Whether to suppress is `thinking`:
             // the router's `disable_thinking` default on every turn except
-            // the timed-out synthesis retry (#774).
+            // the timed-out synthesis retry (#774) and the re-ask (#945).
             chat_template_kwargs: None,
             reasoning_effort: None,
             thinking,
@@ -425,65 +470,10 @@ impl RouterAgent {
     }
 }
 
-fn serialise_context_for_agent(ctx: &TaskContext, synthesize: bool, now: Option<&str>) -> String {
-    // Compact, deterministic shape. The agent reads this each iteration and
-    // must produce the next Plan.
-    //
-    // **Key order is the prompt cache's order** (it follows the system prompt,
-    // see `prompt_assembly::assemble`): what is fixed for the whole task first,
-    // then the append-only history, then the small parts that change, the
-    // per-turn budget, and the minute-precise `now` last — anywhere earlier, a
-    // new minute would make the backend re-read the history after it. A
-    // `serde_json::Map` would sort the keys
-    // alphabetically (the workspace does not enable `preserve_order`), which put
-    // the per-turn `plan_budget` in front of `plans_so_far` and made every turn
-    // re-read the whole history.
-    let mut fields: Vec<(&str, serde_json::Value)> = vec![
-        ("instruction", serde_json::json!(ctx.instruction)),
-        ("classification_floor", serde_json::json!(ctx.classification_floor)),
-    ];
-    // #701: the earlier turns of this conversation, oldest first — already
-    // rendered, screened and budgeted by `scheduler::conversation::view` when
-    // the task was claimed. Added only when non-empty, so a CLI task carries no
-    // `conversation` key at all.
-    if !ctx.conversation.is_empty() {
-        fields.push(("conversation", serde_json::Value::Array(ctx.conversation.clone())));
-    }
-    fields.push(("plans_so_far", serde_json::json!(ctx.plans_so_far_summary())));
-    fields.push(("advisories", serde_json::json!(ctx.advisories)));
-    fields.push(("blocks", serde_json::json!(ctx.blocks)));
-    if synthesize {
-        // Forced-synthesis turn: the directive telling the agent to stop
-        // gathering and answer from what it already has. Only ever set on the
-        // single fallback turn the inner loop spends at the plan cap.
-        fields.push(("directive", serde_json::Value::String(SYNTHESIS_DIRECTIVE.to_string())));
-    } else {
-        // #922: without this the planner learns of the cap only at forced
-        // synthesis, and spends one plan per fetched message on the way there.
-        let mut budget = serde_json::json!({
-            "this_plan": ctx.plan_count.saturating_add(1),
-            "max_plans": ctx.max_plans,
-        });
-        // The fast lane's ceiling (#922 part A); the long lane has none.
-        if let Some(s) = super::inner_loop::ceiling::seconds_left(ctx.deadline, std::time::Instant::now()) {
-            budget["seconds_left"] = serde_json::json!(s);
-        }
-        fields.push(("plan_budget", budget));
-    }
-    if let Some(now) = now {
-        fields.push(("now", serde_json::json!(now)));
-    }
-    ordered_json_object(&fields)
-}
-
-/// A compact JSON object whose keys appear exactly in `fields`' order.
-fn ordered_json_object(fields: &[(&str, serde_json::Value)]) -> String {
-    let body: Vec<String> = fields
-        .iter()
-        .map(|(k, v)| format!("{}:{}", serde_json::Value::from(*k), v))
-        .collect();
-    format!("{{{}}}", body.join(","))
-}
+mod context;
+use context::serialise_context_for_agent;
+#[cfg(test)]
+use context::{reformat_messages, REFORMAT_DIRECTIVE};
 
 #[cfg(test)]
 mod tests;

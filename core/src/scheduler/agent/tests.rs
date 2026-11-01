@@ -155,10 +155,11 @@ fn only_a_decode_failure_carries_its_completion() {
         completion_tokens: Some(48),
         ..Default::default()
     };
-    let decode = AgentError::Decode { detail: "EOF".into(), raw: String::new(), usage, latency_ms: 18_976 };
-    let (got, latency_ms) = decode.completion().expect("a decode failure has a completion");
+    let decode = AgentError::Decode { detail: "EOF".into(), raw: "prose".into(), usage, latency_ms: 18_976 };
+    let (got, latency_ms, raw) = decode.completion().expect("a decode failure has a completion");
     assert_eq!(got.completion_tokens, Some(48));
     assert_eq!(latency_ms, 18_976);
+    assert_eq!(raw, "prose");
     assert!(AgentError::PromptMissing.completion().is_none());
 }
 
@@ -290,4 +291,42 @@ fn user_text_cannot_forge_a_key() {
         ["advisories", "blocks", "classification_floor", "conversation", "instruction", "now", "plan_budget", "plans_so_far"]
     );
     assert_eq!(s.matches("\"plan_budget\":").count(), 1, "exactly one real plan_budget key: {s}");
+}
+
+/// #945: what qualifies for the re-ask. The live failures were prose with no
+/// `{` at all; malformed JSON qualifies too. A blank answer is #923's (a plain
+/// retry), and `length` means the reply was cut off, which re-asking repeats.
+#[test]
+fn only_a_complete_non_blank_decode_failure_is_a_non_plan_answer() {
+    let decode = |raw: &str, finish_reason: Option<&str>| AgentError::Decode {
+        detail: "d".into(),
+        raw: raw.into(),
+        usage: kastellan_llm_router::CompletionStats {
+            finish_reason: finish_reason.map(Into::into),
+            ..Default::default()
+        },
+        latency_ms: 0,
+    };
+    let prose = "Based on your emails, the following payments are overdue:";
+    assert_eq!(decode(prose, Some("stop")).non_plan_answer(), Some(prose));
+    assert_eq!(decode("{\"steps\": [}", None).non_plan_answer(), Some("{\"steps\": [}"));
+    assert_eq!(decode(" \n", Some("stop")).non_plan_answer(), None);
+    assert_eq!(decode(prose, Some("length")).non_plan_answer(), None);
+    assert_eq!(AgentError::PromptMissing.non_plan_answer(), None);
+}
+
+/// The re-ask appends the model's own reply and then the reminder, so the
+/// model sees exactly what it said after the turn it said it to. (The
+/// request it sends is pinned in `router_agent_mock_e2e.rs`.)
+#[test]
+fn the_re_ask_shows_the_model_its_reply_then_asks_for_the_plan() {
+    use kastellan_llm_router::messages::ChatRole;
+    let [said, ask] = reformat_messages("Here are the payments due: …");
+    assert_eq!(said.role, ChatRole::Assistant);
+    assert_eq!(said.content, "Here are the payments due: …");
+    assert_eq!(ask.role, ChatRole::User);
+    assert_eq!(ask.content, REFORMAT_DIRECTIVE);
+    for must in ["not a JSON plan", "task_complete", "result.body", "next step"] {
+        assert!(REFORMAT_DIRECTIVE.contains(must), "directive must say {must:?}");
+    }
 }
