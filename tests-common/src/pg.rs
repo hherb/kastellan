@@ -379,6 +379,25 @@ impl PgInit {
             database: kastellan_db::conn::DEFAULT_APPLICATION_DB.to_string(),
         };
 
+        // The socket appears before the postmaster accepts logins: until then
+        // it answers 57P03 "the database system is starting up". On a loaded
+        // host that outlasts the 500 ms above, and a full Mac sweep
+        // (2026-11-01) failed 54 tests across 4 suites on exactly that, all
+        // green when re-run alone. So wait the way the daemon's boot does
+        // (#909). On its own thread with its own runtime, because a caller may
+        // already be inside one, where `block_on` would panic.
+        let spec_for_wait = conn_spec.clone();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime for the readiness wait")
+                .block_on(kastellan_db::boot_wait::wait_for_postgres(&spec_for_wait))
+        })
+        .join()
+        .expect("readiness-wait thread panicked")
+        .unwrap_or_else(|e| panic!("postgres should accept connections: {e}"));
+
         PgCluster {
             conn_spec,
             data_dir,

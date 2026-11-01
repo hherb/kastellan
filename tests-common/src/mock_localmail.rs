@@ -313,7 +313,7 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
         // which every client of this mock sends). The mail worker's version
         // gate (#760) asks before every tool that uses a slice D/E feature.
         json(serde_json::json!({
-            "api_major": 1, "api_minor": 4, "server_version": "0.4.0",
+            "api_major": 1, "api_minor": 6, "server_version": "0.3.0",
             "build_hash": null, "build_source": "wheel", "version_source": "installed"
         }).to_string())
     } else if let Some(rest) = by_index_rest {
@@ -380,7 +380,17 @@ fn route(head: &str) -> (&'static str, &'static str, Vec<u8>) {
                 "subject": "invoice",
                 "from": {"address": CANNED_FROM_ADDRESS, "name": "Billing"},
                 "date": "2026-07-28T00:00:00+00:00",
+                // On the sender's clock (`api_minor` 6): same instant as `date`.
+                "date_local": "2026-07-28T10:00:00+10:00",
                 "has_attachments": true,
+                // Raw localmail shape (`api_minor` 5); the worker cuts it to
+                // the names. Same entry the message route below serves.
+                "attachments": [{
+                    "filename": "invoice.pdf",
+                    "sha256": CANNED_SHA256,
+                    "content_type": "application/pdf",
+                    "size": CANNED_ATTACHMENT_BYTES.len()
+                }],
                 "snippet": "…"
             }],
             "next_cursor": CANNED_NEXT_CURSOR

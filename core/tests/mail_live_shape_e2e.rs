@@ -15,6 +15,9 @@ use kastellan_tests_common::live_localmail;
 /// crate is bin-only, so this test cannot import them; a hand-copied list here
 /// once meant a change to `HIT_FIELDS` would leave this gate checking the old
 /// one, and passing. The file's own header says what it may contain.
+#[path = "mail_live_shape_e2e/hit_fields.rs"]
+mod hit_fields;
+
 mod contract {
     include!("../../workers/mail/src/localmail_contract.rs");
 }
@@ -205,6 +208,10 @@ fn mock_localmail_shapes_match_real_localmail() {
             s.chars().count()
         );
     }
+
+    // 1c. #947: the hit fields `hits::shape` rewrites, and the filter the tool
+    //     doc promises — in their own file (this one is over the size cap).
+    hit_fields::check(&curl, &ok_json, &fields);
 
     // 2. accounts → JSON array.
     let accounts = ok_json("/v1/accounts", curl("GET", "/v1/accounts", None));

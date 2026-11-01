@@ -23,14 +23,17 @@
 /// The `api_major` this worker speaks. A different major is a different API.
 pub const API_MAJOR: u64 = 1;
 
-/// The oldest `api_minor` this worker works against — 4, localmail's
-/// web-search query syntax (`OR`, `"phrase"`, `-word`; hherb/localmail#420),
-/// which the `mail.search` tool doc promises the planner (#922). Below it `OR`
-/// is one more required word and those queries match almost nothing, so an
-/// older server is refused rather than silently answering them. (3 was slice
-/// E's `fields` / `snippet_chars`.) Compared with `>=`, the way localmail's own
-/// clients pin it, so a later additive bump is fine.
-pub const MIN_API_MINOR: u64 = 4;
+/// The oldest `api_minor` this worker works against — 6, localmail's
+/// `date_local` hit field and `filters.attachment_name` (hherb/localmail#428),
+/// on top of 5's `attachments` hit field and searchable attachment names
+/// (hherb/localmail#427). [`HIT_FIELDS`] names `attachments` and `date_local`,
+/// and localmail refuses an unknown `fields` name with a 400, so an older
+/// server would fail every search; it is refused up front instead (#947).
+/// 4 was the web-search query syntax (`OR`, `"phrase"`, `-word`;
+/// hherb/localmail#420, #922); 3 was slice E's `fields` / `snippet_chars`.
+/// Compared with `>=`, the way localmail's own clients pin it, so a later
+/// additive bump is fine.
+pub const MIN_API_MINOR: u64 = 6;
 
 /// The keys each `mail.search` hit is projected to — localmail's `fields`
 /// (slice E, `api_minor` 3), sent on every search (#760).
@@ -49,8 +52,19 @@ pub const MIN_API_MINOR: u64 = 4;
 /// what a reader needs to pick a message — subject, sender, date, whether it
 /// has attachments, and a snippet. localmail refuses an unknown name with a
 /// 400, so a typo here fails every search loudly rather than dropping a key.
-pub const HIT_FIELDS: [&str; 7] =
-    ["message_id", "account", "subject", "from", "date", "has_attachments", "snippet"];
+///
+/// Added for #947 (`api_minor` 5 and 6), both reshaped by the worker's `hits`
+/// module before the planner sees them:
+///
+/// * `attachments` — every attachment's `{filename, sha256, content_type,
+///   size}`, cut to the file names. Without it, finding which of 50 hits holds
+///   a named file took one `mail.get_message` per hit, and task 242 gave up;
+/// * `date_local` — the `Date:` header on the sender's clock, shown in place
+///   of the UTC `date` when present (`null` without a usable header).
+pub const HIT_FIELDS: [&str; 9] = [
+    "message_id", "account", "subject", "from", "date", "date_local", "has_attachments",
+    "attachments", "snippet",
+];
 
 /// Snippet window, in characters, sent as `snippet_chars`. localmail's default
 /// is 200 and it may add a `…` at each end. 120 keeps enough of a sentence to

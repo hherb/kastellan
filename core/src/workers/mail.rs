@@ -115,7 +115,8 @@ impl WorkerManifest for MailManifest {
                 summary: "Search the mail archive (hybrid semantic + full-text under the \
                           default rank sort; keyword-only with sort 'date'). Filter by \
                           date range, from/to, subject, has_attachment, account/folder. Each \
-                          hit: message_id, account, subject, from, date, has_attachments, a \
+                          hit: message_id, account, subject, from, date (on the sender's \
+                          clock when known), has_attachments, attachments (the file names), a \
                           short snippet. Page forward with next_cursor.",
                 params: &[
                     ToolParam {
@@ -148,7 +149,12 @@ impl WorkerManifest for MailManifest {
                     },
                     ToolParam {
                         name: "filters",
-                        description: "object: date_from, date_to, from, to, subject, has_attachment, account_ids, folder_ids, lang",
+                        description: "object: date_from, date_to, from, to, subject, has_attachment, \
+                                      attachment_name, account_ids, folder_ids, lang. To find the \
+                                      mail that carries a named file, use attachment_name: any part \
+                                      of the file name ('Quote 0712' finds 'Builder Quote \
+                                      230712.pdf'). It matches exactly, where a query ranks other \
+                                      mail above it.",
                         required: false,
                     },
                     ToolParam {

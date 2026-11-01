@@ -251,6 +251,33 @@ fn every_search_asks_for_compact_hits() {
     }
 }
 
+/// Serves one hit in the shape real localmail gives for `attachments` and
+/// `date_local` (measured on the DGX, 2026-11-01).
+struct AttachmentHitFake;
+impl HttpGet for AttachmentHitFake {
+    fn get(&self, _: &Url) -> Result<RawResponse, String> { unreachable!() }
+    fn transport_kind(&self) -> &'static str { "fake" }
+    fn post_authed(&self, _: &Url, _: &str, _: &str, _: &[u8], _m: usize) -> Result<RawResponse, String> {
+        Ok(json_resp(br#"{"results":[{"message_id":"4242","date":"2023-07-11T23:58:24+00:00",
+            "date_local":"2023-07-12T09:58:24+10:00","has_attachments":true,
+            "attachments":[{"filename":"Fee Proposal 230712.pdf","sha256":"209afeee","content_type":"application/pdf","size":247579}]}],
+            "next_cursor":null}"#))
+    }
+}
+
+/// #947: the planner sees each hit's attachment names and the sender's local
+/// date, not the raw objects — the handler runs `hits::shape` on every search.
+#[test]
+fn search_hits_reach_the_planner_with_attachment_names_and_local_date() {
+    let mut h = MailHandler::with_client(client_with(Box::new(AttachmentHitFake)));
+    let out = h.call("mail.search", serde_json::json!({"query": "230712"})).unwrap();
+    let hit = &out["results"][0];
+    assert_eq!(hit["attachments"], serde_json::json!(["Fee Proposal 230712.pdf"]));
+    assert_eq!(hit["date"], serde_json::json!("2023-07-12T09:58:24+10:00"));
+    assert!(hit.get("date_local").is_none(), "{hit}");
+    assert!(out[sort::ORDERING_KEY].is_string(), "the ordering note still rides along");
+}
+
 /// #768: a blank `sort` is no sort, decided while the params are read — the
 /// way a blank `query` is — rather than surviving as `Some("")` for
 /// `sort::plan_sort` to reinterpret. Whitespace is blank too: `" "` used to

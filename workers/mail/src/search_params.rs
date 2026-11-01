@@ -114,9 +114,10 @@ mod tests {
 
     /// localmail's permitted names (`api/search_projection.py::HIT_FIELDS`,
     /// slice E spec). An entry outside this set is a 400 on every search.
-    const LOCALMAIL_HIT_FIELDS: [&str; 12] = [
+    const LOCALMAIL_HIT_FIELDS: [&str; 15] = [
         "message_id", "account", "folder", "subject", "from", "to", "date", "snippet_html",
-        "has_attachments", "score", "matched_arms", "snippet",
+        "has_attachments", "score", "matched_arms", "snippet", "attachment_filename",
+        "attachments", "date_local",
     ];
 
     #[test]

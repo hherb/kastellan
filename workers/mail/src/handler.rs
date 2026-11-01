@@ -12,6 +12,7 @@ use kastellan_protocol::{codes, server::Handler, RpcError};
 
 use crate::attach;
 use crate::client::{MailClient, MailError};
+use crate::hits;
 use crate::ids::LocalmailId;
 use crate::problem;
 use crate::search_params;
@@ -111,6 +112,7 @@ impl MailHandler {
         // `smart` (LLM query rewrite) deliberately never set — workers do not
         // call the LLM. The planner already decomposes/rewrites queries.
         let mut out = self.client.post_json("/v1/search", &body).map_err(mail_err_to_rpc)?;
+        hits::shape(&mut out);
         sort::annotate(&mut out, plan);
         Ok(out)
     }
