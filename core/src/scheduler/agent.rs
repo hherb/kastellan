@@ -277,16 +277,18 @@ impl PlanFormulator for RouterAgent {
         reply: &str,
     ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
         // Thinking off: the answer is already written and only needs its
-        // shape; on the DGX a thinking turn here costs ~80 s.
+        // shape (a thinking planner turn measured 222 s against 51 s without
+        // on the DGX, 2026-08).
         Some(self.formulate_inner(ctx, synth_turn, ThinkingPolicy::Suppress, Some(reply)).await)
     }
 }
 
 impl RouterAgent {
-    /// Shared assembly for both [`PlanFormulator::formulate_plan`] and
-    /// [`PlanFormulator::formulate_synthesis`]. `synthesize` selects whether
-    /// the [`SYNTHESIS_DIRECTIVE`] is appended to the user message — the only
-    /// difference between a normal planning turn and the forced-synthesis
+    /// Shared assembly for every [`PlanFormulator`] door: a planning turn,
+    /// the synthesis turn, the timed-out synthesis retry and the re-ask.
+    /// `synthesize` selects whether the [`SYNTHESIS_DIRECTIVE`] is appended
+    /// to the user message — the only difference between a normal planning
+    /// turn and the forced-synthesis
     /// turn (identical system prompt, recall, entity seeds, and audit meta).
     /// `thinking` is passed through to the router unchanged; only the
     /// timed-out synthesis retry and the re-ask set it to anything but the
@@ -363,7 +365,7 @@ impl RouterAgent {
             // Left None so the router writes the thinking switch in its
             // configured dialect (#773). Whether to suppress is `thinking`:
             // the router's `disable_thinking` default on every turn except
-            // the timed-out synthesis retry (#774).
+            // the timed-out synthesis retry (#774) and the re-ask (#945).
             chat_template_kwargs: None,
             reasoning_effort: None,
             thinking,

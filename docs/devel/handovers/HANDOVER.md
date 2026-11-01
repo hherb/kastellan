@@ -18,7 +18,7 @@
 **Recent PRs, newest first:** [#950](https://github.com/hherb/kastellan/pull/950) (#945), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged), [#946](https://github.com/hherb/kastellan/pull/946) (docs, merged), [#943](https://github.com/hherb/kastellan/pull/943) (prompt-cache reorder, merged), [#942](https://github.com/hherb/kastellan/pull/942) (#922 part A, merged), [#938](https://github.com/hherb/kastellan/pull/938) (#922 part C, merged), [#937](https://github.com/hherb/kastellan/pull/937) (OpenShell survey, merged), [#930](https://github.com/hherb/kastellan/pull/930) (#923, merged), [#927](https://github.com/hherb/kastellan/pull/927) (#921, merged), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs #950's tree (#945), pre-merge** (branch deploy 2026-11-01 on top of #949, which was deployed plainly first; exit 0, both env files IDENTICAL to `~/kastellan.env*.bak-pre945`, Matrix up; **after merging, run a plain `upgrade_from_git.sh` to return it to `main`**; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
+**The DGX runs #950's branch tree (#945)** (branch deploy 2026-11-01 on top of #949, which was deployed plainly first; exit 0, both env files IDENTICAL to `~/kastellan.env*.bak-pre945`, Matrix up; **after merging, run a plain `upgrade_from_git.sh` to return it to `main`**; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -55,14 +55,15 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   operator accepts the answer). Payments failed again. Not posted on #922: the table carries personal details and the
   repo is public; post question/plans/seconds/verdict only.
 - **#945, the cause:** the `plan.formulate_failed` row now keeps `raw_head` (512 chars) + `raw_chars`. The payments
-  failures (234, 245, 252, 253, 254: 461–2196 bytes, **no `{`**) are a correct final answer written as **markdown
+  failures (234, 245, 252: 461–2196 bytes, **no `{`**; also 253, 254) are a correct final answer written as **markdown
   instead of the JSON plan**. ⚠️ The daemon's `warn!` already logged `raw_len`/`has_brace` — read it before guessing.
 - **#945, the fix (operator's choice over code wrapping the prose):** `formulate_turn` re-asks a non-blank, non-`length`
-  decode failure once through `PlanFormulator::formulate_reformat` (default `None`): the failed request + the model's
-  reply as an assistant message + `REFORMAT_DIRECTIVE`, thinking suppressed. The plan is reviewed like any other.
+  decode failure once through `PlanFormulator::formulate_reformat` (default `None`): the turn rebuilt (same stable
+  prefix) + the reply as an assistant message + `REFORMAT_DIRECTIVE`, thinking off; reviewed like any plan.
+  ⚠️ `raw_head` (can restate mail) also reaches the plaintext audit JSONL mirror (0600): accepted, the daemon log's.
   DGX 256–258: **3/3 completed** (258 re-asked at plan 8: 36 s, 403 tokens); 256 hit the **600 s request timeout**
-  (#941) and was rescued by forced synthesis (911 s). Two movement-only splits: `agent/context.rs`,
-  `timeout_tests/script.rs`.
+  (#941) and was rescued by forced synthesis (911 s). **#950 review:** the real re-ask is now tested
+  (`router_agent_mock_e2e.rs`) + timeout cases 17–20; the notebook plan's `touched` was weaker than C1 (fixed).
 - **The task notebook, designed and planned:** [spec](../../superpowers/specs/2026-11-01-task-notebook-design.md)
   (operator decisions D1–D11, my calls C1–C7, all approved) and
   [plan, slices 0–1](../../superpowers/plans/2026-11-01-task-notebook-slices-0-1.md). Key decisions: findings carry the
@@ -91,7 +92,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 ### Previous (2026-10-31): #923 (PR #930), the DGX outage, the OpenShell survey (PR #937) — what still binds (prose: the `922a` snapshot)
 
 - An empty completion (`Decode`, blank `raw`, not `length`) is re-asked once through the same door; a non-JSON one
-  never. Follow-ups [#939](https://github.com/hherb/kastellan/issues/939). ⚠️ Scripted fakes' "out of script"
+  is re-asked through `formulate_reformat` (#945). Never both in one turn. Follow-ups [#939](https://github.com/hherb/kastellan/issues/939). ⚠️ Scripted fakes' "out of script"
   `Decode` must have a non-blank `raw`, or it is retried.
 - ⚠️ **DGX kernel 7.0.0-1024 boot-loops**; 7.0.0-1019 is pinned in `GRUB_DEFAULT` + `apt-mark manual`. ⚠️ **Never
   install `linux-modules-nvidia-580-open-6.17.0-1029-nvidia`.** [[dgx-kernel-7-0-1024-boot-loop]]. DGX time is

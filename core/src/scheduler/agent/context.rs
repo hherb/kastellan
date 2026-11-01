@@ -1,6 +1,6 @@
 //! The messages of a planning turn: the user message carrying the task's
 //! state as one compact JSON object (moved verbatim out of `agent.rs`, over
-//! the 500-line cap), and the two the #945 re-ask appends. Pure.
+//! the 500-line cap), and the two the #945 re-ask appends.
 
 use kastellan_llm_router::messages::ChatMessage;
 
@@ -19,9 +19,11 @@ was your final answer, put it in a terminal plan: `decision` exactly \
 plan for your next step.";
 
 /// What the re-ask appends to the failed turn's messages: the model's own
-/// reply, then [`REFORMAT_DIRECTIVE`]. Appending (never rewriting) keeps the
-/// request before them identical to the failed turn's, so a backend's prompt
-/// cache serves it.
+/// reply, then [`REFORMAT_DIRECTIVE`]. Pure. The re-ask rebuilds the turn
+/// (recall, prompt assembly, the user message), so only its stable prefix —
+/// the system prompt and the history — is the failed turn's and served from
+/// a backend's prompt cache; the per-turn tail (`plan_budget`, `now`) is
+/// recomputed. Appending, never rewriting, keeps that prefix.
 pub(super) fn reformat_messages(reply: &str) -> [ChatMessage; 2] {
     [ChatMessage::assistant(reply), ChatMessage::user(REFORMAT_DIRECTIVE)]
 }

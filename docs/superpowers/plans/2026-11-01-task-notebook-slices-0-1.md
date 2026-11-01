@@ -62,7 +62,9 @@ decision ids). Slices 2 (`kastellan-cli session`) and 3 (bottie) get their own p
 **Files:**
 - Modify: `llm-router/src/messages.rs` (`ChatRequest`, ~l.110; `ChatRequest::new`)
 - Modify: `llm-router/src/lib.rs` (`dispatch_local`, ~l.386-406)
-- Modify: every other `ChatRequest { … }` literal (8 in the tree: `git grep -n "ChatRequest {" -- '*.rs'`) — add `timeout: None`
+- Modify: every other `ChatRequest { … }` literal (4 in the tree — `core/src/scheduler/agent.rs`,
+  `llm-router/src/messages/tests.rs` ×2, `llm-router/src/policy.rs`; `git grep -n "ChatRequest {" -- '*.rs'` also
+  lists the struct, its `impl` and return types) — add `timeout: None`
 - Test: the router's existing test module that builds a `Router` against a local listener (pattern:
   `real_request_timeout` in `core/src/scheduler/inner_loop/timeout_tests/script.rs`)
 
@@ -143,8 +145,8 @@ unique violation (`23505`); two writers exist (the loop and a correction).
 
 - [ ] **Step 1: Write the failing tests**: `append_numbers_entries_from_one_without_gaps` (three appends →
   seqs 1, 2, 3; `entries(…, 0)` returns them in order, `entries(…, 2)` returns only seq 3);
-  `concurrent_appends_never_share_a_seq` (two tasks of 20 appends each via `tokio::join!` → 40 distinct seqs per
-  task, 1..=20 each); `the_runtime_role_cannot_rewrite_an_entry` (`UPDATE` and `DELETE` as the runtime pool →
+  `concurrent_appends_never_share_a_seq` (two writers on the **same** task, 20 appends each via `tokio::join!` —
+  the loop-plus-correction race the retry exists for → 40 distinct seqs, exactly 1..=40); `the_runtime_role_cannot_rewrite_an_entry` (`UPDATE` and `DELETE` as the runtime pool →
   `permission denied`); `an_append_notifies_task_id_and_seq` (a `PgListener` on `NOTIFY_CHANNEL` receives
   `"<id>:1"`).
 - [ ] **Step 2: Run** `cargo test -p kastellan-db --lib notebook -- --nocapture` → FAIL; confirm no `[SKIP]`.
@@ -181,13 +183,15 @@ unique violation (`23505`); two writers exist (the loop and a correction).
 
 Fold rules: a `steps` entry **replaces the Pending steps** and keeps Done/Failed ones (D4); a `tick` marks its
 step Done, sets its note, appends findings, replaces the summary, pushes `classification` onto `touched`; a
-`failed_step` marks the step Failed; `answer`/`infeasible`/`cancelled` set `terminal`. A malformed payload is a
+`failed_step` marks the step Failed and pushes its `classification` too (C1: every dispatched step's data
+counts, including a failed one, a further call for the same step, and a step later replanned away — so the loop
+writes `classification` on every dispatch's entry, not only on a tick); `answer`/`infeasible`/`cancelled` set `terminal`. A malformed payload is a
 `FoldError` (the loop fails the task in words; never guess).
 
 - [ ] **Step 1: Write the failing tests** (pure, no PG; build `Entry` values by hand):
   `a_tick_marks_the_step_done_and_carries_its_findings`; `a_replan_keeps_done_steps_and_replaces_pending_ones`;
   `the_current_step_is_the_first_pending_one`; `a_correction_is_unseen_until_its_seq_is_passed`;
-  `touched_collects_every_ticked_steps_classification`; `a_malformed_payload_is_an_error_not_a_guess`.
+  `touched_collects_every_dispatched_steps_classification` (ticked, failed, and a step replanned away); `a_malformed_payload_is_an_error_not_a_guess`.
 - [ ] **Step 2: Run** `cargo test -p kastellan-core --lib notebook::state` → FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** → pass.
@@ -197,9 +201,11 @@ step Done, sets its note, appends findings, replaces the summary, pushes `classi
 
 **Files:**
 - Create: `core/src/scheduler/notebook/render.rs` (+ `render/tests.rs`)
-- Modify: `core/src/scheduler/inner_loop/summary.rs` / `summary/sink.rs`: re-export
-  `pub(crate) fn screen_model_text(text: &str) -> Result<(), SinkBlock>` (wraps
-  `sink_screen_with(MODEL_AUTHORED_PROFILE, text)`) and `pub(crate) const WITHHELD_MARKER`.
+- Modify: `core/src/scheduler/inner_loop/summary.rs` / `summary/sink.rs` / `summary/call.rs`: add
+  `pub(crate) fn screen_model_text(text: &str) -> Option<SinkBlock>` (wraps the `pub(super)`
+  `sink_screen_with(MODEL_AUTHORED_PROFILE, text)`, which returns `Option`, not `Result`); widen
+  `MODEL_AUTHORED_PROFILE` (private in `summary/call.rs:44`) and `WITHHELD_MARKER` (private in `summary.rs:187`)
+  to `pub(crate)`.
 - Modify: `core/src/prompt_assembly/assemble.rs`: factor `pub(crate) fn render_tool_doc(t: &AdvertisedTool) -> String`
   out of `render_tools_block` (byte-identical output for the classic block; its existing tests prove it), and add
   `pub(crate) fn render_tool_catalogue(tools: &[AdvertisedTool]) -> String` (`<tools>` with one
@@ -234,7 +240,7 @@ tokens (`bytes / BYTES_PER_TOKEN`) exceed `FINDINGS_TOKEN_BUDGET`, all are still
   (findings totalling > 16,000 bytes → every one present, `findings_full: true`);
   `the_turn_before_the_current_step_is_a_prefix` (rendering state after tick k is a byte prefix of state after
   tick k+1 up to the end of `notebook.steps` — the prompt-cache property; follow
-  `the_history_is_a_prefix…` in `agent/tests.rs`); `render_tool_doc_matches_the_classic_block` (the classic block
+  `the_next_request_starts_with_the_previous_ones_whole_history` in `agent/tests.rs`); `render_tool_doc_matches_the_classic_block` (the classic block
   equals `<tools>\n` + concatenated `render_tool_doc` + closing tag for the same tools).
 - [ ] **Step 2: Run** `cargo test -p kastellan-core --lib notebook::render prompt_assembly` → FAIL.
 - [ ] **Step 3: Implement.**
@@ -272,7 +278,7 @@ like a decode failure (the #945 re-ask once, then fail).
   `a_reply_with_no_call_answer_or_infeasible_is_rejected`; `ticking_a_step_that_is_not_current_is_rejected`;
   `a_call_for_an_unknown_step_is_rejected`; `the_first_turn_must_list_steps`; `a_fenced_reply_parses`
   (```` ```json … ``` ````); `the_answer_ceiling_is_the_highest_of_floor_touched_and_declared`
-  (`Public` floor, touched `[Personal, Confidential]`, declared `Some(Public)` → `Confidential`);
+  (`Public` floor, touched `[Personal, ClinicalConfidential]`, declared `Some(Public)` → `ClinicalConfidential`);
   `the_answer_plan_is_terminal` (`answer_plan(..).is_terminal()`).
 - [ ] **Step 2: Run** `cargo test -p kastellan-core --lib notebook::reply` → FAIL.
 - [ ] **Step 3: Implement.**
@@ -355,7 +361,7 @@ Per turn: cancel check → `ceiling::exhausted` (turn count) → `fold(entries(t
 tool doc of the current step's tool; the last `PlanRecord`'s call and outcome) → `notebook_turn` with the
 recoveries of `llm_failure::formulate_turn` (empty → same call once; not-a-plan or `validate` error → re-ask once
 with `prior_reply`; timeout after gathering → the next turn is the forced answer with the synthesis directive)
-→ append `steps` / `tick` entries (tick `classification` = the last dispatched step's) → `call_plan` or
+→ append `steps` / `tick` entries (every dispatched step's `classification` reaches `touched`, C1 — not only the ticked one's) → `call_plan` or
 `answer_plan(answer_ceiling(..))` → `write_audit_plan_formulate` → `review_and_dispatch` → on `Dispatched` push
 the `PlanRecord` (so `resume_state_from` works unchanged, C3) and, on an `Err` outcome, append `failed_step`.
 `infeasible` → `Outcome::Completed` with the reason as the body (the user gets an answer, not a failure).

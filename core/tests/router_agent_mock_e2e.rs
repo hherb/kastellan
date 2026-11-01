@@ -577,3 +577,69 @@ async fn prompt_missing_short_circuits_before_dialing_backend() {
     // explicit abort is needed there.)
     mock_join.abort();
 }
+
+/// Pins the request the #945 re-ask actually sends. The loop tests drive
+/// the re-ask through a scripted double, so without this a `RouterAgent`
+/// that lost `formulate_reformat` (the trait default turns the feature
+/// off), dropped the reply, or left thinking on would keep every test green.
+///
+/// The turn's two messages come first, then the model's own reply as the
+/// assistant's, then the request for the plan; thinking is suppressed even
+/// though this router's config lets the model think; and a synthesis turn's
+/// re-ask still carries the synthesis directive.
+#[tokio::test]
+async fn formulate_reformat_shows_the_reply_and_asks_for_the_plan_with_thinking_off() {
+    let plan_json = serde_json::json!({
+        "context":    "payments",
+        "decision":   "task_complete",
+        "rationale":  "reformatted",
+        "steps":      [],
+        "result":     {"kind": "text", "body": "two payments are due"},
+        "data_ceiling": "Public",
+    })
+    .to_string();
+    let (base_url, served_rx, _mock_join) =
+        spawn_one_shot_mock(CannedResponse::ok_json(envelope_for(&plan_json))).await;
+    let router = Arc::new(
+        Router::new(RouterConfig {
+            local_url: base_url,
+            local_model: "test-local-model".into(),
+            timeout: Duration::from_secs(2),
+            disable_thinking: false,
+            ..Default::default()
+        })
+        .expect("build router"),
+    );
+    let agent = RouterAgent::new(
+        router,
+        prompts_with_agent_planner(),
+        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
+        Arc::new(StaticRecallBuilder::empty()),
+        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
+    );
+
+    let reply = "Here are the payments due: …";
+    let (plan, _meta) = agent
+        .formulate_reformat(&ctx(), true, reply)
+        .await
+        .expect("RouterAgent has a re-ask")
+        .expect("the re-ask's plan decodes");
+    assert_eq!(plan.decision, "task_complete");
+
+    let served = served_rx.await.expect("mock served the request");
+    let body: serde_json::Value = serde_json::from_str(&served.body).expect("request is JSON");
+    let messages = body["messages"].as_array().expect("messages array");
+    let roles: Vec<&str> = messages.iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"], "{}", served.body);
+    assert_eq!(messages[2]["content"], reply, "shown its own reply verbatim");
+    let ask = messages[3]["content"].as_str().unwrap();
+    assert!(ask.starts_with("Your previous reply was not a JSON plan"), "{ask}");
+    let turn: serde_json::Value =
+        serde_json::from_str(messages[1]["content"].as_str().unwrap()).expect("turn context is JSON");
+    assert!(turn.get("directive").is_some(), "a synthesis turn's re-ask keeps the directive: {turn}");
+    assert_eq!(
+        body["chat_template_kwargs"]["enable_thinking"], false,
+        "the re-ask suppresses thinking whatever the config: {}",
+        served.body
+    );
+}

@@ -63,14 +63,14 @@ progress summary. Each turn it reads only what that turn needs.
 | D7 | The operator can **watch** live, **stop**, and **correct** a running task. |
 | D8 | The link is a **long-lived JSON-RPC session over stdio** (`kastellan-cli session`, run locally or over ssh), not an HTTP API. The current `ask`-over-ssh in bottie was a proof of concept and may be replaced. |
 | D9 | Kept **in Postgres**, persistent until a maintenance trim, as the performance record. |
-| D10 | A reply that is not a plan is shown back to the model once (#945, shipped ahead of this design in PR #950). |
+| D10 | A reply that is not a plan is shown back to the model once (#945, shipped ahead of this design, PR #950). |
 | D11 | **A correction adds to the instruction.** A correction from the CLI session (bottie or a terminal, the operator's OS user) is appended to the instruction the review chain sees (`ReviewStageContext.instruction`), so it can widen the task like a new instruction would. **Matrix corrections are not part of this version.** |
 
 ### Calls made in writing this up (not the operator's; check these)
 
 | # | Call |
 | --- | --- |
-| C1 | **The answer's data ceiling is the highest classification of all step data the task touched**, not only of the findings the model says it used. A reply that leaves a Confidential finding out must not lower the ceiling. No weaker than today's rule. |
+| C1 | **The answer's data ceiling is the highest classification of all step data the task touched**, not only of the findings the model says it used. A reply that leaves a `ClinicalConfidential` finding out must not lower the ceiling. No weaker than today's rule. |
 | C2 | **The live view is an operator surface.** `task.follow` is served only by the CLI session (operator's OS user). No channel (Matrix) gets a live notebook in this design; if one is added later, each entry passes the same classification gate as a reply on that channel. |
 | C3 | **Escalation:** a notebook task that hits `Verdict::Escalate` parks in `awaiting_operator` as today. The notebook fold sits **alongside** `asks.resume_state` (0024) in this design and does not replace it; crash recovery resumes from the fold plus the existing resume rules, never re-dispatching a ticked step. The session adds `inbox.list` and `inbox.answer` so a bottie user is never stuck on an escalated task. |
 | C4 | **Scope:** the planner-mode switch is **per daemon** (`KASTELLAN_PLANNER_MODE`, default `classic` until the seven pass). When on, it applies to every lane and to channel tasks; a channel task's `turn_record` (#701) is still written from the final answer as today. |
@@ -107,8 +107,10 @@ The current state of a notebook (the live step list, done steps, findings, summa
 (channel e.g. `task_notebook`, payload `task_id:seq`) lets watchers follow without polling.
 
 **Findings** carry `{text, step, source}`, where `source` names where the fact came from (e.g. a mail message
-id, an attachment, a URL). Each finding also carries the classification of the step data it came from; the
-answer's data ceiling is computed from the findings it uses with the existing ceiling rules.
+id, an attachment, a URL). Each finding also carries the classification of the step data it came from. The
+answer's data ceiling is **not** computed from the findings (C1): it is the highest classification of every
+step dispatched in the task — ticked, failed, replanned away, or a further call for the same step — combined
+with the floor and the declared ceiling by the existing ceiling rules.
 
 ### 6.2 The turn
 

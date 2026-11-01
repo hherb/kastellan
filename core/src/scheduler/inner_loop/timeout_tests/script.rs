@@ -1,6 +1,6 @@
 //! The scripted formulator and the run/read helpers the timeout tests share,
 //! moved out of `timeout_tests.rs` (over the 500-line cap). Items and the
-//! `TimeoutScript` fields gain `pub(super)`; nothing else changed.
+//! `TimeoutScript` fields gain `pub(super)`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -66,8 +66,10 @@ pub(super) struct TimeoutScript {
     /// The answer for `formulate_reformat` (#945); `None` models a
     /// formulator with no re-ask, the trait's default.
     pub(super) reformat: Mutex<Option<Next>>,
-    /// The replies each re-ask was shown, in order.
-    pub(super) reformat_replies: Mutex<Vec<String>>,
+    /// Every `formulate_reformat` call, `(synth_turn, reply)`, in order —
+    /// recorded before the scripted answer is taken, so a second call is
+    /// counted even though it finds no answer left.
+    pub(super) reformat_replies: Mutex<Vec<(bool, String)>>,
     pub(super) synthesis_calls: AtomicUsize,
     pub(super) retry_calls: AtomicUsize,
 }
@@ -136,11 +138,11 @@ impl PlanFormulator for TimeoutScript {
     async fn formulate_reformat(
         &self,
         _ctx: &TaskContext,
-        _synth_turn: bool,
+        synth_turn: bool,
         reply: &str,
     ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
+        self.reformat_replies.lock().unwrap().push((synth_turn, reply.to_owned()));
         let next = self.reformat.lock().unwrap().take()?;
-        self.reformat_replies.lock().unwrap().push(reply.to_owned());
         Some(resolve(Some(next)).await)
     }
 }

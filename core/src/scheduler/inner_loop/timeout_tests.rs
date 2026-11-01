@@ -1,9 +1,11 @@
-//! Inner-loop tests for a planning call that times out (#774) or comes
-//! back empty (#923): the loop must retry when a cheaper request (after a
-//! timeout) or the same request (after an empty answer) can still produce
-//! an answer, must not throw away gathered work, and must say what happened
-//! when it cannot. Cases 12–14 are the fast lane's wall-clock ceiling
-//! (#922), which a run reaches between plans and answers like the plan cap.
+//! Inner-loop tests for a planning call that times out (#774), comes back
+//! empty (#923) or answers with something that is not a plan (#945): the
+//! loop must retry when a cheaper request (after a timeout), the same
+//! request (after an empty answer) or a re-ask showing the model its reply
+//! can still produce an answer, must not throw away gathered work, and must
+//! say what happened when it cannot. Cases 12–14 are the fast lane's
+//! wall-clock ceiling (#922), which a run reaches between plans and answers
+//! like the plan cap; cases 15–20 are the #945 re-ask.
 //!
 //! The decisions are unit-tested in `llm_failure/tests.rs`; these run the
 //! real `run_to_terminal` against a real Postgres and a formulator whose
@@ -124,7 +126,9 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     assert_eq!(f.retry_calls.load(Ordering::SeqCst), 0, "the retry is for synthesis turns only");
     assert_eq!(r.failed_llm_calls, 1);
 
-    // ── 6. A non-plan answer after a gather fails at once, in words: no retry, no synthesis.
+    // ── 6. A non-plan answer after a gather, from a formulator with no re-ask
+    //       (the trait default; `RouterAgent` has one, cases 15–20), fails at
+    //       once, in words: no retry, no synthesis.
     let f = TimeoutScript::new(
         vec![
             Next::Plan(Box::new(one_step_plan())),
@@ -270,7 +274,11 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     *f.reformat.lock().unwrap() = Some(Next::Plan(Box::new(terminal_plan("reformatted"))));
     let (task_id, r) = run(&pool, f.clone()).await;
     assert_eq!(completed_body(&r), "reformatted");
-    assert_eq!(*f.reformat_replies.lock().unwrap(), ["Sure! Here is what I would do."], "shown its own reply");
+    assert_eq!(
+        *f.reformat_replies.lock().unwrap(),
+        [(false, "Sure! Here is what I would do.".to_owned())],
+        "shown its own reply, on a planning turn"
+    );
     assert_eq!(r.failed_llm_calls, 1);
     let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
     assert_eq!(failed.len(), 1, "one row for the non-plan answer: {failed:?}");
@@ -293,4 +301,52 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
     assert_eq!(failed.len(), 2, "one row per failed call: {failed:?}");
     assert_eq!(failed[1]["thinking_suppressed_retry"], true, "the re-ask runs with thinking off: {}", failed[1]);
+
+    // ── 17. The forced-synthesis turn answers in prose: its re-ask is a
+    //        synthesis re-ask, and its plan answers the task.
+    let f = TimeoutScript::new(vec![Next::Plan(Box::new(one_step_plan())), Next::Timeout, Next::Decode], None);
+    *f.reformat.lock().unwrap() = Some(Next::Plan(Box::new(terminal_plan("synth reformatted"))));
+    let (task_id, r) = run(&pool, f.clone()).await;
+    assert_eq!(completed_body(&r), "synth reformatted");
+    assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 1);
+    let calls = f.reformat_replies.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].0, "re-asked as the synthesis turn: {calls:?}");
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 2, "the timeout and the prose answer: {failed:?}");
+    assert_eq!(failed[1]["synth_turn"], true, "{}", failed[1]);
+
+    // ── 18. Retries do not chain: an empty answer's retry that comes back
+    //        as prose is not re-asked — the turn's one retry is spent.
+    let f = TimeoutScript::new(vec![Next::Empty, Next::Decode], None);
+    *f.reformat.lock().unwrap() = Some(Next::Plan(Box::new(terminal_plan("never reached"))));
+    let (_, r) = run(&pool, f.clone()).await;
+    let d = failed_detail(&r);
+    assert!(d.starts_with("The language model answered with something that is not a plan"), "{d}");
+    assert!(f.reformat_replies.lock().unwrap().is_empty(), "no re-ask after the empty retry");
+    assert_eq!(r.failed_llm_calls, 2);
+
+    // ── 19. The re-ask times out after a gather: like any planning
+    //        timeout, the forced-synthesis turn answers from what was gathered.
+    let f = TimeoutScript::new(
+        vec![Next::Plan(Box::new(one_step_plan())), Next::Decode, Next::Plan(Box::new(terminal_plan("synth")))],
+        None,
+    );
+    *f.reformat.lock().unwrap() = Some(Next::Timeout);
+    let (task_id, r) = run(&pool, f.clone()).await;
+    assert_eq!(completed_body(&r), "synth");
+    assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(r.failed_llm_calls, 2);
+    let failed = agent_rows(&pool, task_id, "plan.formulate_failed").await;
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert_eq!(failed[1]["request_timeout"], true, "{}", failed[1]);
+
+    // ── 20. The re-ask times out with nothing gathered: the task fails in
+    //        the timeout's words, and says the first answer was prose.
+    let f = TimeoutScript::new(vec![Next::Decode], None);
+    *f.reformat.lock().unwrap() = Some(Next::Timeout);
+    let (_, r) = run(&pool, f.clone()).await;
+    let d = failed_detail(&r);
+    assert!(d.starts_with("The language model's first answer was not a plan, so it was asked again. "), "{d}");
+    assert!(d.contains("timed out"), "the timeout query still finds it: {d}");
 }

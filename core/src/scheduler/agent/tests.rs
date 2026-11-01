@@ -316,8 +316,8 @@ fn only_a_complete_non_blank_decode_failure_is_a_non_plan_answer() {
 }
 
 /// The re-ask appends the model's own reply and then the reminder, so the
-/// request before them is the failed turn's, byte for byte (the backend's
-/// prompt cache serves it), and the model sees exactly what it said.
+/// model sees exactly what it said after the turn it said it to. (The
+/// request it sends is pinned in `router_agent_mock_e2e.rs`.)
 #[test]
 fn the_re_ask_shows_the_model_its_reply_then_asks_for_the_plan() {
     use kastellan_llm_router::messages::ChatRole;

@@ -27,7 +27,11 @@
 //! An **empty completion** (#923: no content, and not cut off at `length`)
 //! is asked again once, through the same door, unless it is itself the
 //! turn's retry; a decode failure that still ends the task says so in words
-//! ([`decode_failure_detail`]). Every other formulator error (an HTTP
+//! ([`decode_failure_detail`]). A **reply that is not a plan** (#945:
+//! complete, non-blank, not JSON in the plan's shape) is shown back to the
+//! model once with a request for the plan, thinking suppressed
+//! (`PlanFormulator::formulate_reformat`). At most one retry of any kind per
+//! turn: a retry's own failure is never retried. Every other formulator error (an HTTP
 //! status, a refused connection, a missing prompt) is unchanged,
 //! `llm: <error>`: this loop does not retry it.
 
@@ -178,8 +182,12 @@ const FAILED_ROW_ERROR_CHARS: usize = 512;
 
 /// Longest head of the model's own reply an `agent/plan.formulate_failed`
 /// row carries (#945). Enough to tell a prose answer from a refusal or a
-/// preamble; the row is in `audit_log` (access-controlled), unlike the daemon
-/// log, which is why the reply goes here and not to a `warn!`.
+/// preamble. It is model output and can restate tool data (on a mail task,
+/// the user's mail): accepted, with eyes open, as the agent's own data at the
+/// agent user's boundary. The row lands in `audit_log` **and** its plaintext
+/// JSONL mirror (`audit_mirror`, mode 0600) — the same OS-user protection as
+/// the daemon log, no stronger. It goes to the row rather than a `warn!` so
+/// "what did the model say?" is a query against the task, not a log grep.
 const FAILED_ROW_RAW_HEAD_CHARS: usize = 512;
 
 /// Payload for one `agent/plan.formulate_failed` row. Pure.
@@ -188,7 +196,9 @@ const FAILED_ROW_RAW_HEAD_CHARS: usize = 512;
 /// without this the minutes it cost are visible only in the daemon log —
 /// and #774's point is that "why was this task slow?" is a query.
 /// `plan_count` is the count *before* the call (a failed call adds no
-/// plan); `thinking_suppressed_retry` marks the synthesis retry.
+/// plan); `thinking_suppressed_retry` marks a call made with thinking
+/// suppressed — the synthesis retry (#774) or the re-ask (#945); a
+/// `synth_turn: false` row with it set is the re-ask.
 ///
 /// `completion` is the cost of the answer that failed to decode, when one
 /// came back ([`AgentError::completion`](crate::scheduler::agent::AgentError::completion)).
@@ -282,6 +292,7 @@ pub(super) async fn formulate_turn(
     let mut retried = false;
     let mut thinking_suppressed = false;
     let mut failure_recorded = false;
+    let mut reasked = false;
     let formulation = match first {
         Err(e) if synth_turn && e.is_request_timeout() => {
             *failed_llm_calls = failed_llm_calls.saturating_add(1);
@@ -331,7 +342,7 @@ pub(super) async fn formulate_turn(
             record_failed_formulation(
                 pool, ctx.task_id, ctx.plan_count, synth_turn, false, &e,
             ).await;
-            let reply = e.non_plan_answer().unwrap_or_default();
+            let reply = e.non_plan_answer().expect("the arm's guard");
             match formulator.formulate_reformat(ctx, synth_turn, reply).await {
                 Some(retry) => {
                     tracing::warn!(
@@ -344,6 +355,7 @@ pub(super) async fn formulate_turn(
                     );
                     retried = true;
                     thinking_suppressed = true;
+                    reasked = true;
                     retry
                 }
                 None => {
@@ -383,6 +395,13 @@ pub(super) async fn formulate_turn(
                 decode_failure_detail(raw.trim().is_empty(), &e.to_string())
             } else {
                 format!("llm: {e}")
+            };
+            // A re-ask that failed some other way would otherwise hide that
+            // the model had answered — in prose — the first time.
+            let detail = if reasked && e.non_plan_answer().is_none() {
+                format!("The language model's first answer was not a plan, so it was asked again. {detail}")
+            } else {
+                detail
             };
             return Turn::Failed(detail);
         }
