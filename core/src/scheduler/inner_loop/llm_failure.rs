@@ -176,6 +176,12 @@ pub(super) const ACTION_FORMULATE_FAILED: &str = "plan.formulate_failed";
 /// by the router); the row needs the kind of failure, not the body.
 const FAILED_ROW_ERROR_CHARS: usize = 512;
 
+/// Longest head of the model's own reply an `agent/plan.formulate_failed`
+/// row carries (#945). Enough to tell a prose answer from a refusal or a
+/// preamble; the row is in `audit_log` (access-controlled), unlike the daemon
+/// log, which is why the reply goes here and not to a `warn!`.
+const FAILED_ROW_RAW_HEAD_CHARS: usize = 512;
+
 /// Payload for one `agent/plan.formulate_failed` row. Pure.
 ///
 /// A timed-out call writes no `plan.formulate` row (there is no plan), so
@@ -190,6 +196,8 @@ const FAILED_ROW_ERROR_CHARS: usize = 512;
 /// `latency_ms`), so one query reads the cost of every planning call that got
 /// a completion back. Unlike that row, the keys are absent (not null) when
 /// none did: a router failure, timeouts included, records no latency.
+/// With it go `raw_head`, the first [`FAILED_ROW_RAW_HEAD_CHARS`] chars of
+/// what the model said, and `raw_chars`, the reply's whole length (#945).
 pub(super) fn formulate_failed_payload(
     task_id: i64,
     plan_count: u32,
@@ -197,7 +205,7 @@ pub(super) fn formulate_failed_payload(
     thinking_suppressed_retry: bool,
     request_timeout: bool,
     error: &str,
-    completion: Option<(&kastellan_llm_router::CompletionStats, u64)>,
+    completion: Option<(&kastellan_llm_router::CompletionStats, u64, &str)>,
 ) -> serde_json::Value {
     let mut v = serde_json::json!({
         "task_id": task_id,
@@ -207,10 +215,12 @@ pub(super) fn formulate_failed_payload(
         "request_timeout": request_timeout,
         "error": error.chars().take(FAILED_ROW_ERROR_CHARS).collect::<String>(),
     });
-    if let Some((usage, latency_ms)) = completion {
+    if let Some((usage, latency_ms, raw)) = completion {
         v["llm_usage"] = serde_json::to_value(usage)
             .expect("CompletionStats serialisation cannot fail (integers, a string, no maps)");
         v["latency_ms"] = serde_json::json!(latency_ms);
+        v["raw_head"] = serde_json::json!(raw.chars().take(FAILED_ROW_RAW_HEAD_CHARS).collect::<String>());
+        v["raw_chars"] = serde_json::json!(raw.chars().count());
     }
     v
 }

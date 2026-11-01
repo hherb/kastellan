@@ -62,13 +62,13 @@ impl AgentError {
             if raw.trim().is_empty() && usage.finish_reason.as_deref() != Some("length"))
     }
 
-    /// The cost of the completion behind this error, when one came back.
-    /// Only [`AgentError::Decode`] has one: a router error (a timeout, an HTTP
-    /// status, a body that is not a `ChatResponse`) carries none, not even its
-    /// latency. Read by the failed-call audit row.
-    pub fn completion(&self) -> Option<(&kastellan_llm_router::CompletionStats, u64)> {
+    /// The cost and text of the completion behind this error, when one came
+    /// back. Only [`AgentError::Decode`] has one: a router error (a timeout, an
+    /// HTTP status, a body that is not a `ChatResponse`) carries none, not even
+    /// its latency. Read by the failed-call audit row.
+    pub fn completion(&self) -> Option<(&kastellan_llm_router::CompletionStats, u64, &str)> {
         match self {
-            AgentError::Decode { usage, latency_ms, .. } => Some((usage, *latency_ms)),
+            AgentError::Decode { usage, latency_ms, raw, .. } => Some((usage, *latency_ms, raw.as_str())),
             _ => None,
         }
     }

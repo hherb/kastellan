@@ -155,10 +155,11 @@ fn only_a_decode_failure_carries_its_completion() {
         completion_tokens: Some(48),
         ..Default::default()
     };
-    let decode = AgentError::Decode { detail: "EOF".into(), raw: String::new(), usage, latency_ms: 18_976 };
-    let (got, latency_ms) = decode.completion().expect("a decode failure has a completion");
+    let decode = AgentError::Decode { detail: "EOF".into(), raw: "prose".into(), usage, latency_ms: 18_976 };
+    let (got, latency_ms, raw) = decode.completion().expect("a decode failure has a completion");
     assert_eq!(got.completion_tokens, Some(48));
     assert_eq!(latency_ms, 18_976);
+    assert_eq!(raw, "prose");
     assert!(AgentError::PromptMissing.completion().is_none());
 }
 

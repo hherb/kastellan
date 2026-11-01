@@ -361,6 +361,8 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     // timeout's row (case 1) has no completion, so no such keys.
     assert_eq!(failed[0]["latency_ms"], 4321, "{}", failed[0]);
     assert!(failed[0]["llm_usage"].is_object(), "{}", failed[0]);
+    // ...and so is what the model said instead of a plan, as stored (#945).
+    assert_eq!(failed[0]["raw_head"], "Sure! Here is what I would do.", "{}", failed[0]);
 
     // ── 7. A timeout-forced synthesis that asks for more tools must not claim
     //       the plan cap, which was never reached (#774 review).
