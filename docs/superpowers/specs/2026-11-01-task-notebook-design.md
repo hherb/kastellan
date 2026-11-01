@@ -63,7 +63,7 @@ progress summary. Each turn it reads only what that turn needs.
 | D7 | The operator can **watch** live, **stop**, and **correct** a running task. |
 | D8 | The link is a **long-lived JSON-RPC session over stdio** (`kastellan-cli session`, run locally or over ssh), not an HTTP API. The current `ask`-over-ssh in bottie was a proof of concept and may be replaced. |
 | D9 | Kept **in Postgres**, persistent until a maintenance trim, as the performance record. |
-| D10 | A reply that is not a plan is shown back to the model once (#945, shipped ahead of this design in PR for #945). |
+| D10 | A reply that is not a plan is shown back to the model once (#945, shipped ahead of this design in PR #950). |
 | D11 | **A correction adds to the instruction.** A correction from the CLI session (bottie or a terminal, the operator's OS user) is appended to the instruction the review chain sees (`ReviewStageContext.instruction`), so it can widen the task like a new instruction would. **Matrix corrections are not part of this version.** |
 
 ### Calls made in writing this up (not the operator's; check these)
