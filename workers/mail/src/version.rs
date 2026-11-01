@@ -1,16 +1,19 @@
 //! Which localmail this worker can talk to.
 //!
 //! localmail numbers its `/v1` additions with `api_minor` (served by the
-//! unauthenticated `GET /v1/version`), and three of them are ones this worker
-//! now depends on (#760):
+//! unauthenticated `GET /v1/version`), and this worker depends on these
+//! (#760, #922, #947):
 //!
 //! | `api_minor` | what it added | what uses it here |
 //! | --- | --- | --- |
 //! | 1 | `?headers=list` on `/v1/messages/{id}` — one `{name, value}` per occurrence, in wire order | `mail.get_message` with `full_headers: true` |
 //! | 2 | `/v1/messages/{id}/attachments/{index}[/text]`, and `offset`/`limit` paging on both text routes | both attachment tools |
 //! | 3 | `fields` + `snippet_chars` on `POST /v1/search` | `mail.search` |
+//! | 4 | web-search query syntax: `OR`, `"phrase"`, `-word` | `mail.search` |
+//! | 5 | the `attachments` hit field; attachment names keyword-searchable | `mail.search` |
+//! | 6 | the `date_local` hit field; `filters.attachment_name` | `mail.search` |
 //!
-//! One minimum covers all three (a later minor includes every earlier one).
+//! One minimum covers them all (a later minor includes every earlier one).
 //!
 //! Why ask rather than just try: an older server answers the index route with
 //! the same 404 it gives a missing message, and **ignores** `offset`/`limit`,
@@ -21,7 +24,8 @@
 //! signal localmail itself designed for this (`serve/routes/version.py`).
 //!
 //! There is deliberately **no fallback** to the pre-slice routes: one code path
-//! per tool, and both deployed hosts serve `api_minor` 3 (measured 2026-09-26).
+//! per tool. The DGX serves `api_minor` 6 (measured 2026-11-01); the Mac's
+//! localmail must be upgraded before this worker can search there.
 //! A server that is too old gets a refusal naming the upgrade.
 //!
 //! This module is the pure half — [`version_error`] reads a `/v1/version` body
@@ -90,7 +94,7 @@ mod tests {
     #[test]
     fn refuses_an_older_minor_and_names_both_versions_and_the_repair() {
         let e = version_error(&v(json!(1), json!(2))).expect("1.2 is too old");
-        assert!(e.contains("1.2") && e.contains("1.4"), "{e}");
+        assert!(e.contains("1.2") && e.contains("1.6"), "{e}");
         assert!(e.contains("upgrade"), "must name the repair: {e}");
     }
 
@@ -100,7 +104,18 @@ mod tests {
     #[test]
     fn refuses_a_1_3_server_without_the_query_syntax() {
         let e = version_error(&v(json!(1), json!(3))).expect("1.3 is too old");
-        assert!(e.contains("1.3") && e.contains("1.4"), "{e}");
+        assert!(e.contains("1.3") && e.contains("1.6"), "{e}");
+    }
+
+    /// #947: 1.5 can return attachment names on hits but has neither
+    /// `date_local` nor `filters.attachment_name`, which the projection and the
+    /// tool doc both rely on. localmail refuses an unknown `fields` name with a
+    /// 400, so 1.5 would fail every search; it is refused up front instead,
+    /// with the repair named.
+    #[test]
+    fn refuses_a_1_5_server_without_date_local() {
+        let e = version_error(&v(json!(1), json!(5))).expect("1.5 is too old");
+        assert!(e.contains("1.5") && e.contains("1.6"), "{e}");
     }
 
     #[test]

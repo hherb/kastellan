@@ -8,6 +8,7 @@ mod client;
 mod detail;
 mod handler;
 mod headers;
+mod hits;
 mod ids;
 mod localmail_contract;
 mod problem;

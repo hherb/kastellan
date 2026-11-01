@@ -210,9 +210,10 @@ pub fn ordering_note(plan: SortPlan<'_>) -> String {
 /// A no-op unless `response` is a JSON object, and it never overwrites a key
 /// localmail already serves: if the service one day describes its own ordering,
 /// that answer is authoritative and this worker's inference is not. Everything
-/// else in the response is passed through untouched — the worker reshapes no
-/// part of `results`, which is what keeps a fabricated id attributable to the
-/// planner rather than to us.
+/// else in the response is passed through untouched here. `results` is
+/// reshaped only by [`crate::hits::shape`] (attachment names, the sender's
+/// date), which never touches an id — that is what keeps a fabricated id
+/// attributable to the planner rather than to us.
 pub fn annotate(response: &mut Value, plan: SortPlan<'_>) {
     let Some(map) = response.as_object_mut() else { return };
     if map.contains_key(ORDERING_KEY) {

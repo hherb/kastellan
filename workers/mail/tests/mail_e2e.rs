@@ -102,7 +102,7 @@ fn spawn_mock() -> (String, std::thread::JoinHandle<()>) {
                 ("GET", "/v1/version") => (
                     "200 OK",
                     "application/json",
-                    br#"{"api_major":1,"api_minor":4,"server_version":"0.4.0"}"#.to_vec(),
+                    br#"{"api_major":1,"api_minor":6,"server_version":"0.3.0"}"#.to_vec(),
                 ),
                 // Live localmail serves ids as STRINGS on every route.
                 ("GET", "/v1/accounts") => (
