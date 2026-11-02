@@ -11,6 +11,7 @@
 //! * [`render`] — the user message of one turn, screened and stable-first.
 //! * [`reply`] — parse and check a turn's reply; turn it into a `Plan`.
 //! * [`formulator`] — send one turn to the model.
+//! * [`repeat`] — a call this task already made is not made again.
 //! * [`thinking`] — which turns think (planning, replanning, writing the answer).
 //! * [`run`] — the loop: one step per turn, every call reviewed and dispatched
 //!   by the classic loop's own code.
@@ -19,6 +20,7 @@
 
 pub mod formulator;
 pub(crate) mod render;
+pub(crate) mod repeat;
 pub(crate) mod reply;
 pub(crate) mod run;
 pub(crate) mod state;

@@ -33,6 +33,7 @@ use super::formulator::NotebookFormulator;
 use super::render::{render_turn, CurrentStep, TurnBudget};
 use super::reply::{answer_ceiling, answer_plan, call_plan, parse_reply, require_answer, validate, NotebookReply, TickSpec};
 use super::state::{fold, Correction, NotebookState};
+use super::repeat;
 use super::thinking::{self, TurnKind};
 use crate::cassandra::review::ChainReviewStage;
 use crate::cassandra::types::DataClass;
@@ -200,7 +201,18 @@ pub(crate) async fn run_notebook_to_terminal(
         }
 
         let plan = match (&reply.call, &reply.answer, &reply.infeasible) {
-            (Some(call), _, _) => call_plan(&reply, call, ctx.classification_floor),
+            (Some(call), _, _) => {
+                let plan = call_plan(&reply, call, ctx.classification_floor);
+                // The same call again returns the same result: not run, and
+                // the next turn replans, thinking (DGX task 291).
+                if plan.steps.first().is_some_and(|s| repeat::already_made(&ctx.plans, s)) {
+                    tracing::info!(task_id = ctx.task_id, method = %call.method, "notebook: repeated call not dispatched");
+                    ctx.blocks.push(repeat::repeated_call_reason(&call.method));
+                    replan_due = true;
+                    continue;
+                }
+                plan
+            }
             (None, Some(a), _) => {
                 let ceiling = answer_ceiling(ctx.classification_floor, &touched(&after, &ctx.plans), a.data_ceiling);
                 answer_plan(&a.body, ceiling, a.refused.clone())

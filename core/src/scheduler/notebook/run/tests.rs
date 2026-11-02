@@ -272,6 +272,7 @@ async fn the_notebook_loop() {
     a_runaway_reply_after_gathering_spends_the_answer_turn(&pool).await;
     a_call_on_the_answer_turn_is_re_asked(&pool).await;
     selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(&pool).await;
+    a_repeated_call_is_not_dispatched_and_the_next_turn_replans(&pool).await;
     the_turn_cap_is_twice_max_plans(&pool).await;
 }
 
@@ -531,4 +532,23 @@ async fn selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(po
     let r = run(pool, &script, new_task(pool, 5).await).await;
     assert_eq!(body(&r.result), "first");
     assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault]);
+}
+
+/// DGX task 291: a non-thinking turn made the same call over and over. The
+/// repeat is not run; the next turn sees why in `blocks`, and thinks.
+async fn a_repeated_call_is_not_dispatched_and_the_next_turn_replans(pool: &sqlx::PgPool) {
+    let mut script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f"), "call": call(2, "b")}),
+        json!({"call": call(2, "b")}),
+        json!({"tick": tick(2, "g"), "answer": {"body": "done"}}),
+    ]);
+    script.thinks = false;
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "the repeat never ran");
+    let v: Value = serde_json::from_str(&script.messages()[3]).unwrap();
+    assert!(v["blocks"][0].as_str().unwrap().starts_with("repeated call: `b`"), "{v}");
+    assert_eq!(script.thinking.lock().unwrap()[3], ThinkingPolicy::Allow, "the turn after a repeat thinks");
+    // That turn thought, so its answer is used as it is.
+    assert_eq!(body(&r.result), "done");
 }
