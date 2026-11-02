@@ -163,6 +163,13 @@ pub struct ChatRequest {
     /// at 20). Only meaningful with `logprobs: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u8>,
+
+    /// This request's own timeout. **Never on the wire** (`serde(skip)`).
+    /// `None` = the client-wide `RouterConfig.timeout`; `Some(d)` bounds
+    /// this one call to `d`, so a caller with a deadline (the planner's
+    /// fast-lane ceiling, #941) can stop a call that would outlive it.
+    #[serde(skip)]
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl ChatRequest {
@@ -177,6 +184,7 @@ impl ChatRequest {
             thinking: ThinkingPolicy::RouterDefault,
             logprobs: None,
             top_logprobs: None,
+            timeout: None,
         }
     }
 

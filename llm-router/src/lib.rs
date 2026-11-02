@@ -403,7 +403,11 @@ impl Router {
         let request =
             thinking::apply_thinking_switch(request, suppress, self.config.thinking_switch);
 
-        let resp = self.http.post(&url).json(request.as_ref()).send().await?;
+        let mut post = self.http.post(&url).json(request.as_ref());
+        if let Some(t) = request.timeout {
+            post = post.timeout(t);
+        }
+        let resp = post.send().await?;
         let status = resp.status();
 
         if !status.is_success() {

@@ -350,3 +350,28 @@ async fn router_send_routes_to_pick_backend_choice() {
         "router dialed the local URL despite frontier policy"
     );
 }
+
+#[tokio::test]
+async fn a_request_timeout_overrides_the_client_timeout() {
+    // A backend that accepts the connection and never answers: only a
+    // timeout ends the call. The client-wide timeout is 30 s, so the call
+    // ending within 2 s proves the request's own 150 ms bound applied (#941).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let _hold = tokio::spawn(async move {
+        let (_sock, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    let mut router_cfg_base = router_pointing_at(&base_url).config().clone();
+    router_cfg_base.timeout = Duration::from_secs(30);
+    let router = Router::new(router_cfg_base).unwrap();
+
+    let mut req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+    req.timeout = Some(Duration::from_millis(150));
+    let err = tokio::time::timeout(Duration::from_secs(2), router.send(&req))
+        .await
+        .expect("the request's own timeout must end the call, not the 30 s client one")
+        .expect_err("a backend that never answers cannot succeed");
+    assert!(err.is_request_timeout(), "expected a request timeout, got {err:?}");
+}

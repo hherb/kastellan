@@ -376,6 +376,7 @@ impl RouterAgent {
             // enlarge every planner response for nothing.
             logprobs: None,
             top_logprobs: None,
+            timeout: None,
         };
 
         let start = std::time::Instant::now();

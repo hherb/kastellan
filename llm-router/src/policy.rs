@@ -105,6 +105,7 @@ mod tests {
             // shape — is the stronger version of the same assertion.
             logprobs: Some(true),
             top_logprobs: Some(20),
+            timeout: None,
         };
         assert_eq!(p.pick(&req2), Backend::Local);
     }
