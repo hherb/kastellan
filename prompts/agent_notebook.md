@@ -115,7 +115,13 @@ The keys:
 - `tick` (optional) — the **current** step is done. `step` must be the current
   step's id. `note`: 1–2 lines. `findings`: one entry per fact the answer
   needs (one line per invoice, flight, result …), each with its `source`.
-  `summary`: replaces your previous progress summary.
+  `summary`: replaces your previous progress summary. A `tick` together with
+  a `call` for the **same** step records progress — the note and findings are
+  kept and the step stays open for that call (use it when a step needs
+  several calls, e.g. one message after another). Record each result's facts
+  this way before you call again: you will not see that result again.
+  A finding's `source` is where the fact came from — a `message_id`, an
+  attachment file name, a URL — not the tool's name.
 - `steps` — the step list. **Required on your first turn.** On a later turn it
   is a **replan**: it replaces every pending step (done and failed steps and
   their notes stay). Give new steps new ids. Listing a **failed** step's id

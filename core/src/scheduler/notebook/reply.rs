@@ -4,7 +4,8 @@
 //! A reply is one JSON object with up to five keys:
 //!
 //! * `tick` — the current step is done: a 1–2 line note, the facts found
-//!   (each naming its source), and the new progress summary;
+//!   (each naming its source), and the new progress summary; with a `call`
+//!   for the same step it is progress and the step stays open;
 //! * `steps` — a step list: required on the first turn, a replan after;
 //! * exactly one of `call` (the next tool call), `answer` (the final answer,
 //!   written from the findings) or `infeasible` (why the task cannot be
@@ -83,16 +84,20 @@ pub(crate) struct InfeasibleSpec {
     pub reason: String,
 }
 
-impl TickSpec {
-    /// The `tick` entry's payload, with the classification the loop knows.
-    pub(crate) fn payload(&self, classification: DataClass) -> TickPayload {
-        TickPayload {
-            step: self.step,
-            note: self.note.clone(),
-            findings: self.findings.clone(),
-            summary: self.summary.clone(),
+impl NotebookReply {
+    /// The `tick` entry this reply writes, with the classification the loop
+    /// knows. A tick for the step the reply also calls is progress
+    /// (`partial`): the step stays open for that call.
+    pub(crate) fn tick_payload(&self, classification: DataClass) -> Option<TickPayload> {
+        let t = self.tick.as_ref()?;
+        Some(TickPayload {
+            step: t.step,
+            note: t.note.clone(),
+            findings: t.findings.clone(),
+            summary: t.summary.clone(),
             classification,
-        }
+            partial: self.call.as_ref().is_some_and(|c| c.step == t.step),
+        })
     }
 }
 
@@ -121,7 +126,9 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
             Some(cur) => return Err(format!("`tick.step` {} is not the current step {}", tick.step, cur.id)),
             None => return Err(format!("`tick.step` {}: there is no current step to tick", tick.step)),
         }
-        after.apply_tick(tick.payload(DataClass::Public))?;
+        if let Some(payload) = reply.tick_payload(DataClass::Public) {
+            after.apply_tick(payload)?;
+        }
     }
     if let Some(steps) = &reply.steps {
         after.apply_steps(steps.clone())?;

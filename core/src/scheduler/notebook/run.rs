@@ -158,10 +158,11 @@ pub(crate) async fn run_notebook_to_terminal(
 
         // The reply's own entries, in the order `validate` checked them.
         let mut after = state.clone();
-        if let Some(tick) = &reply.tick {
-            let class = last_call.filter(|l| l.step == tick.step).map_or(ctx.classification_floor, |l| l.classification);
+        let tick_class = |step: u32| last_call.filter(|l| l.step == step).map_or(ctx.classification_floor, |l| l.classification);
+        if let Some((tick, payload)) =
+            reply.tick.as_ref().and_then(|t| Some((t, reply.tick_payload(tick_class(t.step))?)))
+        {
             audit_screened_tick(pool, ctx.task_id, tick).await;
-            let payload = tick.payload(class);
             let value = serde_json::to_value(&payload).expect("a TickPayload is plain JSON (strings, numbers, an enum)");
             db::append(pool, ctx.task_id, EntryKind::Tick, value).await?;
             // `validate` applied the same tick to a copy, so this cannot fail;

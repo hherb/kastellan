@@ -54,9 +54,6 @@ fn ticking_a_step_that_is_not_current_is_rejected() {
 #[test]
 fn a_call_for_an_unknown_or_finished_step_is_rejected() {
     assert!(check(json!({"call": call(9)}), &two_steps()).unwrap_err().contains("not a pending step"));
-    // Step 1 is ticked in this very reply, so calling it again is refused.
-    let err = check(json!({"tick": tick(1), "call": call(1)}), &two_steps()).unwrap_err();
-    assert!(err.contains("not a pending step"), "{err}");
 }
 
 #[test]
@@ -74,9 +71,11 @@ fn a_tick_and_a_call_for_the_next_step_is_accepted() {
 
 #[test]
 fn a_replan_cannot_reopen_a_done_step() {
-    // Step 1 is ticked in this reply; re-listing it keeps it done, so a call
-    // for it is refused.
-    let err = check(json!({"tick": tick(1), "steps": [step(1), step(2)], "call": call(1)}), &two_steps()).unwrap_err();
+    // Step 1 was done before this reply; re-listing it keeps it done, so a
+    // call for it is refused.
+    let mut state = two_steps();
+    state.apply_tick(check(json!({"tick": tick(1), "call": call(2)}), &two_steps()).unwrap().tick_payload(DataClass::Public).unwrap()).unwrap();
+    let err = check(json!({"steps": [step(1), step(2)], "call": call(1)}), &state).unwrap_err();
     assert!(err.contains("not a pending step"), "{err}");
 }
 
@@ -139,4 +138,19 @@ fn a_refusal_rides_on_the_answer() {
     let a = r.answer.unwrap();
     let p = answer_plan(&a.body, DataClass::Public, a.refused);
     assert!(p.is_refused() && p.is_terminal());
+}
+
+/// DGX task 264: a tick and a call for the same step is progress — the
+/// findings are kept and the step stays open for the call.
+#[test]
+fn a_tick_with_a_call_for_the_same_step_is_progress() {
+    let r = check(json!({"tick": tick(1), "call": call(1)}), &two_steps()).expect("progress on step 1");
+    let p = r.tick_payload(DataClass::Personal).unwrap();
+    assert!(p.partial);
+    let mut s = two_steps();
+    s.apply_tick(p).unwrap();
+    assert_eq!(s.current_step().map(|c| c.id), Some(1), "still open");
+    assert_eq!(s.findings.len(), 1, "the finding is kept");
+    let done = check(json!({"tick": tick(1), "call": call(2)}), &two_steps()).unwrap();
+    assert!(!done.tick_payload(DataClass::Public).unwrap().partial, "a call for the next step closes it");
 }

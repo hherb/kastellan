@@ -136,3 +136,12 @@ fn only_a_correction_may_follow_the_end() {
     let err = fold(&[steps(1, &[1, 2]), answer, tick(4, 2, "Public")]).unwrap_err();
     assert!(err.detail.contains("after the task ended"), "{err}");
 }
+
+#[test]
+fn a_partial_tick_keeps_the_step_pending() {
+    let mut t = tick(2, 1, "Personal");
+    t.payload["partial"] = json!(true);
+    let s = fold(&[steps(1, &[1, 2]), t, tick(3, 1, "Personal")]).unwrap();
+    assert_eq!(s.findings.len(), 2, "both ticks' findings are kept");
+    assert_eq!(ids_with(&s, StepStatus::Done), vec![1], "the full tick closes it");
+}

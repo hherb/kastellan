@@ -46,6 +46,10 @@ pub(crate) struct StepsPayload {
 
 /// `tick`: a step done. `classification` is set **by the loop** from the
 /// step's dispatched call, never by the model.
+///
+/// `partial` marks a progress tick: the reply also calls the **same** step
+/// again (the next message of several, the next page), so the note, findings
+/// and summary are kept but the step stays pending (DGX task 264).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TickPayload {
@@ -54,6 +58,8 @@ pub(crate) struct TickPayload {
     pub findings: Vec<FindingSpec>,
     pub summary: String,
     pub classification: DataClass,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 /// `failed_step`: the step's call was refused or failed. Its data still
@@ -175,11 +181,14 @@ impl NotebookState {
         Ok(())
     }
 
-    /// A step done: its note, findings, the new summary, and its data's
-    /// classification. The step must be listed and still pending.
+    /// A step done (or, `partial`, progress on it): its note, findings, the
+    /// new summary, and its data's classification. The step must be listed
+    /// and still pending; a partial tick leaves it pending.
     pub(crate) fn apply_tick(&mut self, p: TickPayload) -> Result<(), String> {
         let step = step_mut(self, p.step)?;
-        step.status = StepStatus::Done;
+        if !p.partial {
+            step.status = StepStatus::Done;
+        }
         step.note = Some(p.note);
         self.findings.extend(p.findings.into_iter().map(|f| Finding {
             text: f.text,
