@@ -30,6 +30,9 @@ struct Script {
     messages: Mutex<Vec<String>>,
     reasks: Mutex<Vec<String>>,
     thinking: Mutex<Vec<ThinkingPolicy>>,
+    /// What `thinks_by_default` answers: `false` is a backend configured
+    /// not to think (`KASTELLAN_LLM_DISABLE_THINKING=1`).
+    thinks: bool,
     correction_during_first_turn: Option<(sqlx::PgPool, i64, &'static str)>,
 }
 
@@ -44,6 +47,7 @@ impl Script {
             messages: Mutex::new(Vec::new()),
             reasks: Mutex::new(Vec::new()),
             thinking: Mutex::new(Vec::new()),
+            thinks: true,
             correction_during_first_turn: None,
         }
     }
@@ -86,6 +90,10 @@ impl NotebookFormulator for Script {
 
     fn tool_doc(&self, tool: &str) -> Option<String> {
         Some(format!("- {tool} (method: {tool}.call): a scripted tool\n"))
+    }
+
+    fn thinks_by_default(&self) -> bool {
+        self.thinks
     }
 }
 
@@ -263,6 +271,7 @@ async fn the_notebook_loop() {
     tasks_correct_adds_to_a_running_task_only(&pool).await;
     a_runaway_reply_after_gathering_spends_the_answer_turn(&pool).await;
     a_call_on_the_answer_turn_is_re_asked(&pool).await;
+    selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(&pool).await;
     the_turn_cap_is_twice_max_plans(&pool).await;
 }
 
@@ -484,4 +493,42 @@ async fn a_call_on_the_answer_turn_is_re_asked(pool: &sqlx::PgPool) {
     assert_eq!(body(&r.result), "f and g");
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "the answer turn's call never ran");
     assert!(script.reasks.lock().unwrap()[0].contains("must end the task"), "{:?}", script.reasks.lock().unwrap());
+}
+
+/// With thinking off in the config, only the plan, the replan after a failed
+/// call and the answer think; the answer a routine (non-thinking) turn wrote
+/// is replaced by one a thinking turn writes, and its tick is kept.
+async fn selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(pool: &sqlx::PgPool) {
+    use crate::scheduler::notebook::thinking::WRITE_ANSWER_DIRECTIVE;
+    use ThinkingPolicy::*;
+    let mut script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f1"), "call": call(2, "fail")}),
+        json!({"steps": steps(&[3]), "call": call(3, "c")}),
+        json!({"tick": tick(3, "f3"), "answer": {"body": "a quick draft"}}),
+        json!({"tick": tick(3, "again"), "answer": {"body": "the considered answer"}}),
+    ]);
+    script.thinks = false;
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(body(&r.result), "the considered answer");
+    assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault, Allow, RouterDefault, Allow]);
+    let last: Value = serde_json::from_str(script.messages().last().unwrap()).unwrap();
+    assert_eq!(last["turn_budget"], json!({"directive": WRITE_ANSWER_DIRECTIVE}));
+    use EntryKind::*;
+    assert_eq!(
+        kinds(pool, r.task_id).await,
+        vec![Steps, Tick, FailedStep, Steps, Tick, Answer],
+        "the draft's tick is kept; the rewrite's repeated tick is dropped"
+    );
+    let answer = db::entries(pool, r.task_id, 0).await.unwrap().pop().unwrap();
+    assert_eq!(answer.payload["body"], "the considered answer");
+
+    // A backend that thinks anyway: no rewrite, the first answer stands.
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f"), "answer": {"body": "first"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(body(&r.result), "first");
+    assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault]);
 }

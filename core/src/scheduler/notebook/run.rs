@@ -33,6 +33,7 @@ use super::formulator::NotebookFormulator;
 use super::render::{render_turn, CurrentStep, TurnBudget};
 use super::reply::{answer_ceiling, answer_plan, call_plan, parse_reply, require_answer, validate, NotebookReply, TickSpec};
 use super::state::{fold, Correction, NotebookState};
+use super::thinking::{self, TurnKind};
 use crate::cassandra::review::ChainReviewStage;
 use crate::cassandra::types::DataClass;
 use crate::scheduler::agent::{AgentError, FormulationMeta};
@@ -83,6 +84,10 @@ pub(crate) async fn run_notebook_to_terminal(
     let mut answer_attempted = false;
     let mut seen_corrections: i64 = 0;
     let mut last_call: Option<LastCall> = None;
+    // A failed or blocked call: the next turn replans, and thinks.
+    let mut replan_due = false;
+    // A non-thinking turn chose to answer: the next turn rewrites it, thinking.
+    let mut write_answer = false;
     let base_instruction = ctx.instruction.clone();
 
     macro_rules! finish {
@@ -123,6 +128,7 @@ pub(crate) async fn run_notebook_to_terminal(
         };
         ctx.instruction = with_corrections(&base_instruction, &state.corrections);
 
+        let kind = thinking::turn_kind(answer_turn, write_answer, state.steps.is_empty(), replan_due);
         let turn = {
             let current = state.current_step();
             let record = ctx.plans.last();
@@ -132,16 +138,24 @@ pub(crate) async fn run_notebook_to_terminal(
             let budget = TurnBudget {
                 this_turn: ctx.plan_count.saturating_add(1),
                 max_turns: ctx.max_plans,
-                directive: answer_turn.then_some(ANSWER_DIRECTIVE),
+                directive: match kind {
+                    TurnKind::ForcedAnswer => Some(ANSWER_DIRECTIVE),
+                    TurnKind::WriteAnswer => Some(thinking::WRITE_ANSWER_DIRECTIVE),
+                    _ => None,
+                },
             };
             let msg = |now: Option<&str>| {
                 let cur = current.map(|step| CurrentStep { step, tool_doc: tool_doc.clone(), last });
                 render_turn(&ctx, &state, seen_corrections, last_failure, cur, budget, now)
             };
-            let guard = TurnGuard { gathered: st.gathered, answer_attempted, answer_turn };
+            let guard = TurnGuard { gathered: st.gathered, answer_attempted, answer_turn, kind };
             ask(pool, nb, &ctx, &state, &msg, guard, &mut failed_llm_calls).await
         };
         seen_corrections = state.corrections.last().map_or(seen_corrections, |c| c.seq);
+        write_answer = false;
+        if kind == TurnKind::Replan {
+            replan_due = false;
+        }
         let (reply, meta) = match turn {
             Asked::Reply(b) => *b,
             Asked::ForceAnswer => {
@@ -178,6 +192,13 @@ pub(crate) async fn run_notebook_to_terminal(
             }
         }
 
+        // The answer of a turn that did not think is not used: the findings it
+        // ticked are kept, and the next turn writes the answer, thinking.
+        if reply.answer.is_some() && thinking::rewrite_answer(kind, nb.thinks_by_default()) {
+            write_answer = true;
+            continue;
+        }
+
         let plan = match (&reply.call, &reply.answer, &reply.infeasible) {
             (Some(call), _, _) => call_plan(&reply, call, ctx.classification_floor),
             (None, Some(a), _) => {
@@ -211,6 +232,7 @@ pub(crate) async fn run_notebook_to_terminal(
                                          "classification": ctx.classification_floor});
                     db::append(pool, ctx.task_id, EntryKind::FailedStep, payload).await?;
                     last_call = None;
+                    replan_due = true;
                 }
             }
             Executed::Dispatched => {
@@ -222,6 +244,7 @@ pub(crate) async fn run_notebook_to_terminal(
                         let payload = json!({"step": call.step, "code": code, "detail": clamp(detail),
                                              "classification": classification});
                         db::append(pool, ctx.task_id, EntryKind::FailedStep, payload).await?;
+                        replan_due = true;
                         true
                     }
                     _ => false,
@@ -245,6 +268,7 @@ struct TurnGuard {
     gathered: bool,
     answer_attempted: bool,
     answer_turn: bool,
+    kind: TurnKind,
 }
 
 /// Ask the model for one turn and check the reply, with the classic loop's
@@ -262,18 +286,27 @@ async fn ask(
 ) -> Asked {
     let check = |sent: Result<(String, FormulationMeta), AgentError>| {
         let (raw, meta) = sent?;
+        let answer_only = matches!(guard.kind, TurnKind::ForcedAnswer | TurnKind::WriteAnswer);
         let checked = parse_reply(&raw)
+            .map(|mut r| {
+                // The rewrite turn only writes: its findings were ticked on the
+                // turn before, so a repeated tick or step list is dropped.
+                if guard.kind == TurnKind::WriteAnswer {
+                    r.tick = None;
+                    r.steps = None;
+                }
+                r
+            })
             .and_then(|r| validate(&r, state).map(|()| r))
-            .and_then(|r| if guard.answer_turn { require_answer(&r).map(|()| r) } else { Ok(r) });
+            .and_then(|r| if answer_only { require_answer(&r).map(|()| r) } else { Ok(r) });
         match checked {
             Ok(reply) => Ok((reply, meta)),
             Err(detail) => Err(AgentError::Decode { detail, raw, usage: meta.usage, latency_ms: meta.latency_ms }),
         }
     };
-    // The forced-answer turn writes from findings already extracted, and it
-    // is the last chance: thinking off, so it cannot spend its whole budget
-    // reasoning (DGX task 269 lost 408 s and its answer that way).
-    let thinking = if guard.answer_turn { ThinkingPolicy::Suppress } else { ThinkingPolicy::RouterDefault };
+    // Which turns think: `thinking::turn_thinking`. The forced-answer turn
+    // never does (DGX task 269 lost 408 s and its answer that way).
+    let thinking = thinking::turn_thinking(guard.kind);
     let first = check(nb.notebook_turn(ctx, msg, None, thinking).await);
     let mut retried = false;
     let mut reasked = false;

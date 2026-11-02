@@ -174,7 +174,7 @@ const RAW_HEAD_CHARS: usize = 600;
 
 /// Production adapter: calls the real `Router::send`.
 pub struct RouterAgent {
-    router: std::sync::Arc<Router>,
+    pub(crate) router: std::sync::Arc<Router>,
     prompts: std::sync::Arc<PromptCache>,
     prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
     recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,

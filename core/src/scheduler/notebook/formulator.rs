@@ -71,6 +71,13 @@ pub trait NotebookFormulator: Send + Sync {
     fn tool_doc(&self, _tool: &str) -> Option<String> {
         None
     }
+
+    /// Does a turn that asks nothing of thinking (`RouterDefault`) think?
+    /// When it does not, an answer such a turn writes is rewritten by a
+    /// thinking turn (`thinking::rewrite_answer`).
+    fn thinks_by_default(&self) -> bool {
+        true
+    }
 }
 
 impl RouterAgent {
@@ -105,6 +112,10 @@ impl NotebookFormulator for RouterAgent {
 
     fn tool_doc(&self, tool: &str) -> Option<String> {
         self.notebook_tool_doc(tool)
+    }
+
+    fn thinks_by_default(&self) -> bool {
+        !self.router.config().disable_thinking
     }
 }
 
