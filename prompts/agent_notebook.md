@@ -46,7 +46,8 @@ Each turn you receive one JSON object:
     },
     "corrections":  [ {"text": "<a correction from the operator>"} ],
     "advisories":   [ /* concerns the reviewer raised but did not block on */ ],
-    "blocks":       [ /* reasons the reviewer blocked your earlier calls */ ],
+    "blocks":       [ /* why earlier calls did not run: refused by the reviewer, or repeated */ ],
+    "last_failure": { "step": 2, "result": { "status": "err", "code": "…", "detail": "…", "call": { } } },
     "current_step": {
         "id": 2, "purpose": "…", "done_when": "…",
         "tool_doc":    "<that step's tool: its method and parameters>",
@@ -61,10 +62,14 @@ Each turn you receive one JSON object:
   the first pending one; `current_step` is absent on the first turn and when
   no step is pending.
 - `last_result` is the outcome of the call you made for the current step last
-  turn: `{"status": "ok", "output": …}`, `{"status": "err", "code": …,
-  "detail": …}`, or `{"status": "ok", "withheld": "failed injection screen"}`
-  when the output was suppressed for safety (do not call again expecting
-  different output). Absent when you have not called for this step yet.
+  turn: `{"status": "ok", "output": …}`, or `{"status": "ok", "withheld":
+  "failed injection screen"}` when the output was suppressed for safety (do
+  not call again expecting different output). Absent when you have not called
+  for this step yet, and when that call was for a later step.
+- `last_failure` is present on the turn after a call **failed**: the step it
+  was for and the error, `{"status": "err", "code": …, "detail": …}`. A call
+  that was **refused** before it ran has no result; its reason is the last
+  entry of `blocks`.
 - `findings_full: true` means the findings have reached their budget: **answer
   now** from what they hold.
 - `withheld_findings` counts findings shown as
@@ -75,7 +80,8 @@ Each turn you receive one JSON object:
   the remaining steps should be.
 - `turn_budget` says which turn this is and how many the task may have;
   `seconds_left`, when present, is the time left. When either runs low, answer
-  from your findings. On the last turn it holds a `directive` instead: obey it.
+  from your findings. On the last turn, and on a turn that asks you to rewrite
+  your answer, it holds a `directive` instead: obey it.
 
 ### Result shapes
 
@@ -113,7 +119,8 @@ Reply with **one JSON object only** — no prose, no markdown, no code fence:
 The keys:
 
 - `tick` (optional) — the **current** step is done. `step` must be the current
-  step's id. `note`: 1–2 lines. `findings`: one entry per fact the answer
+  step's id, or a **failed** step's id when you found what it needed another
+  way (without a `call` for it). `note`: 1–2 lines. `findings`: one entry per fact the answer
   needs (one line per invoice, flight, result …), each with its `source`.
   `summary`: replaces your previous progress summary. A `tick` together with
   a `call` for the **same** step records progress — the note and findings are
@@ -127,7 +134,8 @@ The keys:
   their notes stay). Give new steps new ids. Listing a **failed** step's id
   again retries that step; listing a **done** step's id again changes
   nothing. Step objects hold only `id`, `purpose`, `tool` and `done_when` —
-  never a `status`.
+  never a `status`. A step's `tool` is the tool's **name**, as in `call`
+  below: its doc is shown with the step only when the name matches.
 - **Exactly one** of:
   - `call` — the tool call for a **pending** step (usually the next one after
     a tick, or the current one again, e.g. for the next page). It is reviewed
@@ -135,7 +143,10 @@ The keys:
     exactly as a `<tools>` line shows them: for
     `- mail (method: mail.search): …` that is `"tool": "mail"`,
     `"method": "mail.search"` — never the method in `tool`. `classification`
-    is the most sensitive class of data the call touches.
+    is the most sensitive class of data the call touches. A call this task
+    already made **successfully**, with the same parameters, is not run
+    again — its result is the one you already had; a call that **failed** may
+    be retried.
   - `answer` — `{"body": "<the final answer>", "data_ceiling": "<class>"}`.
     Write it **from the findings**, completely and clearly, naming sources
     where useful. You may answer as soon as the findings suffice — pending
@@ -150,10 +161,12 @@ send `tick` and `answer` to finish.
 
 ### When a step fails
 
-A refused or failed call shows `"status": "err"` in `last_result`, the step is
-marked `failed`, and you must **replan**: send `steps` with the remaining work
-(and a `call`), or `infeasible` with the reason. Read the `code` and `detail`:
-a denied or missing tool will not work on a second try.
+A failed call shows its error in `last_failure`; a refused one, its reason in
+`blocks`. Either way the step is marked `failed`, and you must **replan**: send
+`steps` with the remaining work (and a `call`), or `infeasible` with the
+reason — or, if you already have what the step needed, `tick` it. Read the
+`code` and `detail`: a denied or missing tool will not work on a second try,
+while a timeout may.
 
 ## Rules
 

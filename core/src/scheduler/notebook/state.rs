@@ -8,9 +8,9 @@
 //! operator's corrections, and the classification of every step's data.
 //!
 //! The fold is strict. A payload that does not decode, a tick for a step
-//! that is not listed or not pending, or a step list naming one id twice is a
-//! [`FoldError`] — the loop then fails the task in words rather than guess
-//! what the notebook meant.
+//! that is not listed or not pending (a full tick may close a failed one), or
+//! a step list naming one id twice is a [`FoldError`] — the loop then fails
+//! the task in words rather than guess what the notebook meant.
 
 use kastellan_db::notebook::{Entry, EntryKind};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -46,6 +46,12 @@ pub(crate) struct FindingSpec {
     pub source: String,
     #[serde(default, rename = "step", skip_serializing)]
     pub echoed_step: Option<serde_json::Value>,
+}
+
+/// A payload as the row it is written as. Writers build entries through
+/// these types, so a field name the fold would refuse does not compile.
+pub(crate) fn entry<T: Serialize>(payload: T) -> serde_json::Value {
+    serde_json::to_value(payload).expect("a notebook payload is plain JSON (strings, numbers, enums)")
 }
 
 /// `steps`: the first step list, or a replan replacing the pending steps.

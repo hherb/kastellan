@@ -11,9 +11,10 @@
 //! it runs to completion (its steps are bounded by their own timeouts), and the
 //! synthesis turn comes after that. Since #941 the planner call itself is also
 //! bounded by the time left ([`call_timeout`], never below
-//! [`CALL_TIMEOUT_FLOOR`]) and its reply by [`PLANNER_MAX_TOKENS`], so the
-//! overrun is at most about one floor-length call plus one synthesis, rather
-//! than a full `KASTELLAN_LLM_TIMEOUT_MS` per call.
+//! [`CALL_TIMEOUT_FLOOR`] unless the configured timeout is shorter) and its
+//! reply by [`PLANNER_MAX_TOKENS`], so the overrun is at most about one turn
+//! of floor-length calls (a turn may retry or re-ask once) plus one
+//! synthesis, rather than a full `KASTELLAN_LLM_TIMEOUT_MS` per call.
 
 use std::time::{Duration, Instant};
 
@@ -22,16 +23,16 @@ use std::time::{Duration, Instant};
 /// generation could use up the whole fast-lane ceiling.
 pub(crate) const PLANNER_MAX_TOKENS: u32 = 16_384;
 
-/// The shortest timeout a planner call gets, even past the deadline: the
-/// forced-synthesis turn runs *after* the ceiling, and must still have time
-/// to answer.
+/// The shortest timeout a planner call gets, even past the deadline (unless
+/// the configured timeout is shorter still): the forced-synthesis turn runs
+/// *after* the ceiling, and must still have time to answer.
 pub(crate) const CALL_TIMEOUT_FLOOR: Duration = Duration::from_secs(120);
 
 /// The timeout for one planner call starting `now`. Pure.
 ///
 /// No deadline: the configured (`KASTELLAN_LLM_TIMEOUT_MS`) timeout. With a
 /// deadline: the time left, but never below [`CALL_TIMEOUT_FLOOR`] and never
-/// above the configured timeout.
+/// above the configured timeout — which wins when it is below the floor.
 pub(crate) fn call_timeout(configured: Duration, deadline: Option<Instant>, now: Instant) -> Duration {
     match deadline {
         None => configured,

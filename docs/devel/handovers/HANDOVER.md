@@ -75,6 +75,18 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   notebook mode — correctness over speed**; the DGX runs exactly that. Misses = stopped-searching-too-early →
   the sift design. Two more fixes from selective runs stay: the repeat-call guard (`notebook/repeat.rs`) and
   "a replan keeps the called step".
+- **Review round (2026-11-03):** a resumed run's turn cap multiplies only the fresh allowance (`run::turn_cap`;
+  it had re-doubled the carried turns on each escalation); only a **successful** call counts as already made, so
+  a failed one may be retried; the repeat check compares the namespace-qualified method; a set-aside turn
+  (rewritten answer, repeated call) writes **`agent / plan.discarded`**, never `plan.formulate` (the observation
+  capture pairs each of those with the next verdict); step `purpose`/`tool`/`done_when` are screened in the render
+  and audited once when new; the classic loop also forces synthesis on a `length`-cut reply
+  (`AgentError::ran_out_of_tokens`, a token-cap message when nothing was gathered); payloads serialise through the
+  `state` structs (`state::entry`); `tasks correct` warns on an empty notebook or a failed audit row. Follow-ups
+  filed: [#952](https://github.com/hherb/kastellan/issues/952) (a draft answer lost when its rewrite turn fails),
+  [#953](https://github.com/hherb/kastellan/issues/953) (untested loop paths and wiring),
+  [#954](https://github.com/hherb/kastellan/issues/954) (type hardening, timeout observability, 0028 comment rot —
+  **0028 is applied on the DGX: never edit it**).
 - ⚠️ `ssh dgx 'pkill -f "[r]equery7"; …; bash ~/requery7.sh'` killed its own shell (exit 255): the bracket trick
   protects only the pattern, not other words of the same command line. Kill in a separate ssh call
   [[pgrep-wait-loops-match-themselves]].
@@ -384,7 +396,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#922 nb) | PR #951 at `46549d3a` (on `8a88781d`) | **5385 / 0 / 52**, **199** summaries, `TEST_EXIT=0`, primary checkout, same flags; `[WARN]` 0; log `~/kastellan-remeasure/sweep-notebook.log`. vs the #945 row: core lib 2654 → 2692 (+38 notebook), db lib 263 → 265, new `notebook_e2e` 5, `local_backend_e2e` 7 → 8, `router_agent_mock_e2e` 4 → 5 (#950's review round, merged after the #945 row). The 5 later fix commits: core lib 2697 (+5), re-run alone | cold exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-notebook` (26 + 5 after a fix, = 27), re-run on the final tree | **23** |
+| **Mac** (#922 nb) | PR #951 at `46549d3a` (on `8a88781d`) | **5385 / 0 / 52**, **199** summaries, `TEST_EXIT=0`, primary checkout, same flags; `[WARN]` 0; log `~/kastellan-remeasure/sweep-notebook.log`. vs the #945 row: core lib 2654 → 2692 (+38 notebook), db lib 263 → 265, new `notebook_e2e` 5, `local_backend_e2e` 7 → 8, `router_agent_mock_e2e` 4 → 5 (#950's review round, merged after the #945 row). The 5 later fix commits: core lib 2697 (+5), re-run alone. The review round: +4 core lib (2701), the PG-backed `the_notebook_loop` +5 scenarios; re-run filtered only (`notebook timeout_tests llm_failure ceiling`, 96 / 0, `[E2E]` 4, `[SKIP]` 0), five mutants each killed — no full sweep | cold exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-notebook` (26 + 5 after a fix, = 27), re-run on the final tree | **23** |
 | **Mac** (#945) | PR #950 on `cb5e77bc` (`70843a80`) | **5338 / 0 / 52**, **198** summaries, `TEST_EXIT=0`, primary checkout, same flags; `[WARN]` 0; log `~/kastellan-remeasure/sweep-945.log`. vs the #947 row: core lib 2651 → 2654 (+3: `raw_head`, `non_plan_answer`, the re-ask messages; the two new loop cases sit in an existing test), and #676's flake passed (+1, −1 failed) | cold exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-945`, **27** | **23** |
 | **Mac** (#947) | PR #949 on `306da891` | **5334 / 1 / 52**, **198** summaries, primary checkout, same flags; `[WARN]` 0, `starting up` **0** (54 before #949's harness wait); log `~/kastellan-remeasure/sweep-947c.log`. The 1 is #676 (`scheduler_ask_expiry_e2e`, vanished socket), 1/0 alone. vs the cache row: worker-mail 214 → 222 (+8), core lib 2653 → 2651 (#943's review round). DGX: `mail-live` profile green on the final code | cold exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-947`, **27**; core + tests-common re-run warm after the last edit | **23** (primary checkout has the gliner `.venv`) |
 

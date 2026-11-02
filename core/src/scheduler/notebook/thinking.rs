@@ -10,9 +10,9 @@
 //! thinks (it is the last chance, and a thinking turn there ran out of
 //! budget, task 269).
 //!
-//! With thinking left on in the config, every turn but the forced one
-//! thinks, exactly as before; the selection only changes anything when the
-//! config turns thinking off.
+//! With thinking left on in the config, every turn thinks but the forced
+//! answer and the #945 re-ask (`run::ask` always suppresses it there); the
+//! selection only changes anything when the config turns thinking off.
 
 use kastellan_llm_router::ThinkingPolicy;
 
@@ -28,7 +28,7 @@ with ONLY `answer` — no `tick`, no `steps`, no `call`.";
 pub(crate) enum TurnKind {
     /// The first turn: the step list is written.
     Plan,
-    /// The turn after a failed or blocked call: the remaining steps are rethought.
+    /// The turn after a failed, blocked or repeated call: the remaining steps are rethought.
     Replan,
     /// Read the last result, tick, call the next step.
     Routine,

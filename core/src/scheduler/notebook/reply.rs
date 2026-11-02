@@ -3,9 +3,10 @@
 //!
 //! A reply is one JSON object with up to five keys:
 //!
-//! * `tick` — the current step is done: a 1–2 line note, the facts found
-//!   (each naming its source), and the new progress summary; with a `call`
-//!   for the same step it is progress and the step stays open;
+//! * `tick` — the current step (or a failed one, found another way) is
+//!   done: a 1–2 line note, the facts found (each naming its source), and
+//!   the new progress summary; with a `call` for the same step it is
+//!   progress and the step stays open;
 //! * `steps` — a step list: required on the first turn, a replan after;
 //! * exactly one of `call` (the next tool call), `answer` (the final answer,
 //!   written from the findings) or `infeasible` (why the task cannot be

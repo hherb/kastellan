@@ -706,10 +706,13 @@ async fn main() -> Result<()> {
     );
 
     // #922: which loop plans; an unknown value refuses to start.
-    let planner_mode = kastellan_core::scheduler::notebook::formulator::planner_mode(
-        std::env::var("KASTELLAN_PLANNER_MODE").ok().as_deref(),
-    )
-    .map_err(anyhow::Error::msg)?;
+    let planner_mode_var = match std::env::var("KASTELLAN_PLANNER_MODE") {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(e) => anyhow::bail!("KASTELLAN_PLANNER_MODE: {e}"),
+    };
+    let planner_mode = kastellan_core::scheduler::notebook::formulator::planner_mode(planner_mode_var.as_deref())
+        .map_err(anyhow::Error::msg)?;
     info!(?planner_mode, "planner mode");
 
     // PlanFormulator — takes the extractor as 5th arg (Task 14 widened

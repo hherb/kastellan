@@ -205,8 +205,8 @@ impl Router {
         })
     }
 
-    /// The configured timeout. Exposed so tests and integration
-    /// harnesses can confirm the construction-time wire-through.
+    /// The configured timeout: the planner bounds each call by it and the
+    /// task's deadline (#941), and tests confirm the wire-through.
     pub fn timeout(&self) -> std::time::Duration {
         self.config.timeout
     }

@@ -1,17 +1,22 @@
-//! The user message of one notebook turn (#922): the goal, the notebook so
-//! far, any new operator corrections, the current step, and the turn budget.
+//! The user message of one notebook turn (#922): the goal (and the
+//! conversation), the notebook so far, any new operator corrections, the
+//! reviewer's advisories and blocks, the last failed call, the current step,
+//! the turn budget, and `now`.
 //!
 //! **Its size does not grow with the number of tool results.** Only the
-//! current step's last result is shown, never the earlier ones; what earlier
-//! steps found survives as the model's own notes and findings.
+//! current step's last result (or the last failed call's) is shown, never the
+//! earlier ones; what earlier steps found survives as the model's own notes
+//! and findings. (`blocks` and `advisories` do grow, one line per block.)
 //!
 //! **Key order is the prompt cache's order** (#943), as in the classic
-//! `agent::context`: what is fixed for the task, then the append-only
-//! notebook, then what changes every turn, the turn budget, and `now` last.
+//! `agent::context`: what is fixed for the task, then the notebook (which
+//! changes in place as steps finish), then what changes every turn, the turn
+//! budget, and `now` last.
 //! A `serde_json::Map` would sort the keys, so every level is built as
 //! ordered JSON text (`obj`).
 //!
-//! **Trust.** Notes, findings and the summary are written by the model from
+//! **Trust.** Notes, findings, the summary and the step list (a replan is
+//! written after the model read tool output) are written by the model from
 //! tool output, so they carry tool-output trust: each goes through the
 //! planner-text screen ([`screen_model_text`]) on every render, and a blocked
 //! one is shown as [`WITHHELD_MARKER`]. A withheld finding is still counted
@@ -44,7 +49,7 @@ pub(crate) struct CurrentStep<'a> {
 }
 
 /// Where this turn sits in the task's budget. `directive` replaces the
-/// counts on a forced-answer turn.
+/// counts on the forced-answer turn and on the turn that rewrites an answer.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnBudget {
     pub this_turn: u32,
@@ -133,9 +138,9 @@ fn notebook_view(state: &NotebookState) -> String {
             };
             let mut fields: Vec<(&str, String)> = vec![
                 ("id", s.spec.id.to_string()),
-                ("purpose", json!(s.spec.purpose).to_string()),
-                ("tool", json!(s.spec.tool).to_string()),
-                ("done_when", json!(s.spec.done_when).to_string()),
+                ("purpose", screened(&s.spec.purpose)),
+                ("tool", screened(&s.spec.tool)),
+                ("done_when", screened(&s.spec.done_when)),
                 ("status", json!(status).to_string()),
             ];
             if let Some(note) = &s.note {
@@ -182,8 +187,8 @@ fn notebook_view(state: &NotebookState) -> String {
 fn current_step_view(cur: &CurrentStep<'_>) -> String {
     let mut fields: Vec<(&str, String)> = vec![
         ("id", cur.step.id.to_string()),
-        ("purpose", json!(cur.step.purpose).to_string()),
-        ("done_when", json!(cur.step.done_when).to_string()),
+        ("purpose", screened(&cur.step.purpose)),
+        ("done_when", screened(&cur.step.done_when)),
     ];
     if let Some(doc) = &cur.tool_doc {
         fields.push(("tool_doc", json!(doc).to_string()));

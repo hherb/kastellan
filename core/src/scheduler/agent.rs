@@ -63,6 +63,13 @@ impl AgentError {
             if raw.trim().is_empty() && usage.finish_reason.as_deref() != Some("length"))
     }
 
+    /// The backend cut the reply off at `max_tokens` (`finish_reason:
+    /// length`, #941), blank or mid-reply: it ran out of room the way a
+    /// timeout runs out of time, and the same request runs out the same way.
+    pub fn ran_out_of_tokens(&self) -> bool {
+        matches!(self, AgentError::Decode { usage, .. } if usage.finish_reason.as_deref() == Some("length"))
+    }
+
     /// The model's reply, when it is one the #945 re-ask can use: something
     /// was said (a blank answer is [`Self::is_empty_completion`]'s), and it
     /// was not cut off by `length` (asked again, it is cut off again).
@@ -410,6 +417,13 @@ impl RouterAgent {
             top_logprobs: None,
             timeout: Some(ceiling::call_timeout(self.router.timeout(), ctx.deadline, std::time::Instant::now())),
         };
+        if req.timeout.is_some_and(|t| t < self.router.timeout()) {
+            tracing::info!(
+                task_id = ctx.task_id,
+                timeout_ms = req.timeout.map_or(0, |t| t.as_millis() as u64),
+                "planner call bounded by the task's time ceiling, not KASTELLAN_LLM_TIMEOUT_MS"
+            );
+        }
 
         let start = std::time::Instant::now();
         let resp = self.router.send(&req).await?;

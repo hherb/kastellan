@@ -143,6 +143,23 @@ fn an_injected_note_or_summary_is_withheld() {
     assert_eq!(v["notebook"]["summary"], WITHHELD_MARKER);
 }
 
+/// A replan is written after the model read tool output, so its step text
+/// is screened like a note — in the step list and the current step.
+#[test]
+fn an_injected_step_purpose_is_withheld() {
+    let s = entry(1, EntryKind::Steps, json!({"steps": [
+        {"id": 1, "purpose": INJECTION, "tool": "mail", "done_when": INJECTION}]}));
+    let state = fold(&[s]).unwrap();
+    let cur = CurrentStep { step: &state.steps[0].spec, tool_doc: None, last: None };
+    let out = render_turn(&ctx(), &state, 0, None, Some(cur), BUDGET, None);
+    assert!(!out.contains("ignore all previous"), "the injection must not reach the prompt: {out}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["notebook"]["steps"][0]["purpose"], WITHHELD_MARKER);
+    assert_eq!(v["notebook"]["steps"][0]["done_when"], WITHHELD_MARKER);
+    assert_eq!(v["notebook"]["steps"][0]["tool"], "mail");
+    assert_eq!(v["current_step"]["purpose"], WITHHELD_MARKER);
+}
+
 #[test]
 fn findings_are_never_dropped_when_full() {
     // 20 findings of ~1 KiB each: past the token budget.

@@ -15,6 +15,8 @@
 //! 1. **A timed-out planning call after tools have gathered results jumps
 //!    straight to the forced-synthesis turn** ([`should_force_synthesis`])
 //!    instead of failing: the work is in hand, so ask for an answer from it.
+//!    A reply cut off at `max_tokens` (#941) gets the same recovery, and
+//!    with nothing gathered fails in its own words ([`token_cap_failure_detail`]).
 //! 2. **A timed-out synthesis turn is retried once with thinking
 //!    suppressed** — only the formulator knows whether a cheaper attempt
 //!    exists (`PlanFormulator::formulate_synthesis_without_thinking`).
@@ -133,7 +135,8 @@ pub(crate) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) ->
     };
     format!(
         "{what} Asking for less at once (fewer items, a narrower question) usually fits; the \
-         operator can also raise KASTELLAN_LLM_TIMEOUT_MS. [llm: {router_error}]"
+         operator can also raise KASTELLAN_LLM_TIMEOUT_MS (a fast-lane task's time ceiling bounds \
+         each call too). [llm: {router_error}]"
     )
 }
 
@@ -153,6 +156,18 @@ pub(crate) fn decode_failure_detail(empty: bool, decode_error: &str) -> String {
     format!("{what} You can ask again. [llm: {decode_error}]")
 }
 
+/// The task's failure detail when the model's reply was cut off at
+/// [`super::ceiling::PLANNER_MAX_TOKENS`] (#941) with nothing gathered to
+/// answer from. Pure.
+pub(crate) fn token_cap_failure_detail(decode_error: &str) -> String {
+    format!(
+        "The language model used its whole reply budget ({} tokens) without finishing, so this task \
+         produced none. Asking for less at once (fewer items, a narrower question) usually fits. \
+         [llm: {decode_error}]",
+        super::ceiling::PLANNER_MAX_TOKENS,
+    )
+}
+
 /// The task's failure detail when a synthesis turn that a **timeout**
 /// forced (not the plan cap) still returned tool steps instead of an answer.
 /// Pure.
@@ -165,7 +180,8 @@ pub(super) fn forced_synthesis_no_answer_detail(work: &GatheredWork) -> String {
         "A planning call ran out of time, so the task asked the language model to answer from \
          the {} tool result{} already gathered — and it asked for more tools instead of \
          answering. No answer was produced. Asking for less at once usually fits; the operator \
-         can also raise KASTELLAN_LLM_TIMEOUT_MS. [llm: forced synthesis after a timeout did not \
+         can also raise KASTELLAN_LLM_TIMEOUT_MS (a fast-lane task's time ceiling bounds each \
+         call too). [llm: forced synthesis after a timeout did not \
          produce a final answer]",
         work.succeeded,
         if work.succeeded == 1 { "" } else { "s" },
@@ -240,8 +256,9 @@ pub(super) enum Turn {
     /// A plan to act on. Boxed: a `Plan` + `FormulationMeta` is far larger
     /// than the other variants (`clippy::large_enum_variant`).
     Planned(Box<(Plan, FormulationMeta)>),
-    /// The call timed out after tools had gathered results: spend the
-    /// forced-synthesis turn next instead of failing ([`should_force_synthesis`]).
+    /// The call timed out, or was cut off at `max_tokens` (#941), after tools
+    /// had gathered results: spend the forced-synthesis turn next instead of
+    /// failing ([`should_force_synthesis`]).
     ForceSynthesis,
     /// The task fails with this user-facing detail.
     Failed(String),
@@ -376,12 +393,14 @@ pub(super) async fn formulate_turn(
                 ).await;
             }
             let timed_out = e.is_request_timeout();
-            if should_force_synthesis(timed_out, gathered, synth_attempted) {
+            // A reply cut off by `max_tokens` (#941) ran out of room the way
+            // a timeout runs out of time: it gets the same recovery.
+            if should_force_synthesis(timed_out || e.ran_out_of_tokens(), gathered, synth_attempted) {
                 tracing::warn!(
                     task_id = ctx.task_id,
                     plan_count = ctx.plan_count,
                     error = %e,
-                    "planning call timed out after tools had gathered results; \
+                    "planning call ran out of time or tokens after tools had gathered results; \
                      spending the forced-synthesis turn now instead of failing the task"
                 );
                 return Turn::ForceSynthesis;
@@ -391,6 +410,8 @@ pub(super) async fn formulate_turn(
                     &GatheredWork::from_plans(&ctx.plans),
                     &e.to_string(),
                 )
+            } else if e.ran_out_of_tokens() {
+                token_cap_failure_detail(&e.to_string())
             } else if let AgentError::Decode { raw, .. } = &e {
                 decode_failure_detail(raw.trim().is_empty(), &e.to_string())
             } else {

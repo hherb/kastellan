@@ -82,10 +82,13 @@ supported; a value needing either is out of contract on both platforms.
   and keeps its notes and findings in the `task_notebook` table. Each turn's
   prompt stays bounded however many tool results the task gathers.
 
-Any other value stops the daemon at boot, naming the key. While a notebook task
-runs, `kastellan-cli tasks correct <id> "<text>"` adds an operator correction:
-the next turn shows it to the planner, and it joins the instruction the reviewer
-checks every later call against.
+Any other value (the match is exact and lower-case: `Notebook` is refused) stops
+the daemon at boot, naming the key. While a notebook task runs,
+`kastellan-cli tasks correct <id> "<text>"` adds an operator correction: the next
+turn shows it to the planner, and it joins the instruction the reviewer checks
+every later call against. The CLI accepts a correction for any running task, but
+a classic-mode daemon never reads it; when the task has no notebook entries yet
+the CLI warns that this may be the case.
 
 ## When it takes effect
 

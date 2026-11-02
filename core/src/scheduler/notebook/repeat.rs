@@ -4,17 +4,19 @@
 //! not think can lose track and make the same call again and again: DGX task
 //! 291 (thinking off on routine turns) alternated between two
 //! `mail.get_message` calls for 20 turns. A call identical to one this task
-//! already made returns the same result, so it is not dispatched; the next
-//! turn is told why and replans, thinking.
+//! already made **successfully** returns the same result, so it is not
+//! dispatched; the next turn is told why and replans, thinking. A call that
+//! failed may be made again: the failure may be transient, and it gave no
+//! facts to continue from.
 //!
-//! "Identical" is the same method and the same parameters with every scalar
+//! "Identical" is the same tool, method and parameters with every scalar
 //! read as text, because the model writes a message id as `"38996"` one turn
 //! and `38996` the next. A new page (`offset`) is a different call.
 
 use serde_json::Value;
 
 use crate::cassandra::types::PlannedStep;
-use crate::scheduler::inner_loop::PlanRecord;
+use crate::scheduler::inner_loop::{PlanRecord, StepOutcome};
 
 /// The block reason shown to the model for a repeated call.
 pub(crate) fn repeated_call_reason(method: &str) -> String {
@@ -24,13 +26,13 @@ pub(crate) fn repeated_call_reason(method: &str) -> String {
     )
 }
 
-/// Was `step` already dispatched in this task? Pure.
+/// Was `step` already dispatched in this task, and did it succeed? Pure.
 pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep) -> bool {
     let key = call_key(step);
     plans
         .iter()
-        .flat_map(|r| r.plan.steps.iter().take(r.outcomes().len()))
-        .any(|s| call_key(s) == key)
+        .flat_map(|r| r.plan.steps.iter().zip(r.outcomes()))
+        .any(|(s, o)| matches!(o, StepOutcome::Ok(_)) && call_key(s) == key)
 }
 
 fn call_key(step: &PlannedStep) -> (String, String, Value) {
@@ -53,7 +55,6 @@ fn textual(v: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::cassandra::types::{DataClass, Plan};
-    use crate::scheduler::inner_loop::StepOutcome;
     use serde_json::json;
 
     fn step(method: &str, params: Value) -> PlannedStep {
@@ -68,6 +69,10 @@ mod tests {
     }
 
     fn record(s: PlannedStep, ran: bool) -> PlanRecord {
+        record_with(s, if ran { vec![StepOutcome::Ok(json!({}))] } else { vec![] })
+    }
+
+    fn record_with(s: PlannedStep, outcomes: Vec<StepOutcome>) -> PlanRecord {
         let plan = Plan {
             context: String::new(),
             decision: "d".into(),
@@ -82,7 +87,7 @@ mod tests {
             invoke_skill: None,
             python_skill: None,
         };
-        PlanRecord::new(plan, if ran { vec![StepOutcome::Ok(json!({}))] } else { vec![] })
+        PlanRecord::new(plan, outcomes)
     }
 
     #[test]
@@ -106,6 +111,13 @@ mod tests {
     #[test]
     fn a_call_that_never_ran_does_not_count() {
         let plans = vec![record(step("mail.get_message", json!({"message_id": 1})), false)];
+        assert!(!already_made(&plans, &step("mail.get_message", json!({"message_id": 1}))));
+    }
+
+    #[test]
+    fn a_call_that_failed_may_be_retried() {
+        let failed = StepOutcome::Err { code: "TIMEOUT".into(), detail: "worker timed out".into() };
+        let plans = vec![record_with(step("mail.get_message", json!({"message_id": 1})), vec![failed])];
         assert!(!already_made(&plans, &step("mail.get_message", json!({"message_id": 1}))));
     }
 }

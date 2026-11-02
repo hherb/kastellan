@@ -12,7 +12,7 @@ fn the_notebook_prompt_documents_every_reply_key() {
     for key in [
         "tick", "steps", "call", "answer", "infeasible", "note", "findings", "summary", "source", "done_when",
         "classification", "data_ceiling", "reason", "refused", "findings_full", "withheld_findings", "corrections",
-        "current_step", "last_result", "turn_budget", "directive", "blocks", "advisories",
+        "current_step", "last_result", "last_failure", "turn_budget", "directive", "blocks", "advisories",
     ] {
         assert!(prompt.contains(&format!("`{key}`")) || prompt.contains(&format!("\"{key}\"")), "missing `{key}`");
     }

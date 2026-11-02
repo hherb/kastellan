@@ -11,16 +11,20 @@
 //!    instruction the reviewer sees (D11);
 //! 3. render the turn ([`render_turn`]) and ask the model, with the classic
 //!    recoveries: an empty answer is asked again once, a reply that is not a
-//!    usable notebook reply is shown back once (#945), a timeout after
-//!    gathering spends the forced-answer turn;
+//!    usable notebook reply is shown back once (#945), a timeout or a reply
+//!    cut off at `max_tokens` after gathering spends the forced-answer turn;
 //! 4. write the reply's `tick` and `steps` entries;
-//! 5. turn the reply into a one-step plan (a `call`) or a terminal one (an
-//!    `answer` or `infeasible`), and review and dispatch it;
-//! 6. record a failed or blocked call as a `failed_step`, so the next turn
+//! 5. set aside, unreviewed, an answer a non-thinking turn wrote (the next
+//!    turn rewrites it, thinking) and a call this task already made
+//!    successfully ([`repeat`]) — each with a `plan.discarded` row;
+//! 6. otherwise turn the reply into a one-step plan (a `call`) or a terminal
+//!    one (an `answer` or `infeasible`), and review and dispatch it;
+//! 7. record a failed or blocked call as a `failed_step`, so the next turn
 //!    replans (D4), and the end of the task as its terminal entry.
 //!
 //! Every turn counts against one cap, `max_plans × NOTEBOOK_TURNS_PER_PLAN`
-//! (C5): the injection-bounding role of the classic plan cap is kept.
+//! (C5; a resumed run: the turns it carries plus that many more): the
+//! injection-bounding role of the classic plan cap is kept.
 
 use std::sync::Arc;
 
@@ -34,7 +38,9 @@ use super::render::{render_turn, CurrentStep, TurnBudget};
 use super::reply::{
     answer_ceiling, answer_plan, call_plan, keep_called_step, parse_reply, require_answer, validate, NotebookReply, TickSpec,
 };
-use super::state::{fold, Correction, NotebookState};
+use super::state::{
+    entry, fold, AnswerPayload, Correction, FailedStepPayload, InfeasiblePayload, NotebookState, StepSpec, StepsPayload,
+};
 use super::repeat;
 use super::thinking::{self, TurnKind};
 use crate::cassandra::review::ChainReviewStage;
@@ -49,6 +55,11 @@ use crate::scheduler::inner_loop::{
 /// Turns per classic plan in the cap (C5): a notebook step costs about one
 /// turn, a classic plan often batched several.
 pub(crate) const NOTEBOOK_TURNS_PER_PLAN: u32 = 2;
+
+/// Audit action for a turn whose reply the loop set aside unreviewed. Not a
+/// `plan.formulate`: the observation capture pairs each of those with the
+/// next verdict, and this reply has none.
+pub(crate) const ACTION_PLAN_DISCARDED: &str = "plan.discarded";
 
 /// Replaces the turn counts on the single forced-answer turn.
 pub(crate) const ANSWER_DIRECTIVE: &str = "Your turn budget is spent. Do NOT call another tool. \
@@ -76,7 +87,7 @@ pub(crate) async fn run_notebook_to_terminal(
 ) -> Result<InnerLoopResult, InnerLoopError> {
     use kastellan_db::tasks;
 
-    ctx.max_plans = ctx.max_plans.saturating_mul(NOTEBOOK_TURNS_PER_PLAN);
+    ctx.max_plans = turn_cap(ctx.plan_count, ctx.max_plans);
     // A resumed run brings its plans back (C3); what they gathered counts.
     let mut st = ExecState {
         gathered: ctx.plans.iter().any(|r| r.outcomes().iter().any(|o| matches!(o, StepOutcome::Ok(_)))),
@@ -87,7 +98,7 @@ pub(crate) async fn run_notebook_to_terminal(
     let mut answer_attempted = false;
     let mut seen_corrections: i64 = 0;
     let mut last_call: Option<LastCall> = None;
-    // A failed or blocked call: the next turn replans, and thinks.
+    // A failed, blocked or repeated call: the next turn replans, and thinks.
     let mut replan_due = false;
     // A non-thinking turn chose to answer: the next turn rewrites it, thinking.
     let mut write_answer = false;
@@ -180,8 +191,7 @@ pub(crate) async fn run_notebook_to_terminal(
             reply.tick.as_ref().and_then(|t| Some((t, reply.tick_payload(tick_class(t.step))?)))
         {
             audit_screened_tick(pool, ctx.task_id, tick).await;
-            let value = serde_json::to_value(&payload).expect("a TickPayload is plain JSON (strings, numbers, an enum)");
-            db::append(pool, ctx.task_id, EntryKind::Tick, value).await?;
+            db::append(pool, ctx.task_id, EntryKind::Tick, entry(&payload)).await?;
             // `validate` applied the same tick to a copy, so this cannot fail;
             // if it did, the notebook and the task would disagree.
             if let Err(e) = after.apply_tick(payload) {
@@ -189,7 +199,8 @@ pub(crate) async fn run_notebook_to_terminal(
             }
         }
         if let Some(steps) = &reply.steps {
-            db::append(pool, ctx.task_id, EntryKind::Steps, json!({"steps": steps})).await?;
+            audit_screened_steps(pool, ctx.task_id, &state, steps).await;
+            db::append(pool, ctx.task_id, EntryKind::Steps, entry(StepsPayload { steps: steps.clone() })).await?;
             if let Err(e) = after.apply_steps(steps.clone()) {
                 return finish!(Outcome::Failed(format!("the task notebook rejected its own steps: {e}")));
             }
@@ -198,6 +209,7 @@ pub(crate) async fn run_notebook_to_terminal(
         // The answer of a turn that did not think is not used: the findings it
         // ticked are kept, and the next turn writes the answer, thinking.
         if reply.answer.is_some() && thinking::rewrite_answer(kind, nb.thinks_by_default()) {
+            audit_discarded_turn(pool, &ctx, "answer_rewritten", None, &meta).await;
             write_answer = true;
             continue;
         }
@@ -206,10 +218,20 @@ pub(crate) async fn run_notebook_to_terminal(
             (Some(call), _, _) => {
                 let plan = call_plan(&reply, call, ctx.classification_floor);
                 // The same call again returns the same result: not run, and
-                // the next turn replans, thinking (DGX task 291).
-                if plan.steps.first().is_some_and(|s| repeat::already_made(&ctx.plans, s)) {
-                    tracing::info!(task_id = ctx.task_id, method = %call.method, "notebook: repeated call not dispatched");
-                    ctx.blocks.push(repeat::repeated_call_reason(&call.method));
+                // the next turn replans, thinking (DGX task 291). Compared as
+                // it would be dispatched, so a namespace the model left out
+                // does not hide a repeat; the qualified name it then shows is
+                // an advertised method, never the model's own text.
+                let repeated = plan.steps.first().cloned().map(|mut s| {
+                    if let Some(m) = dispatcher.qualify_method(&s.tool, &s.method) {
+                        s.method = m;
+                    }
+                    s
+                });
+                if let Some(s) = repeated.filter(|s| repeat::already_made(&ctx.plans, s)) {
+                    tracing::info!(task_id = ctx.task_id, method = %s.method, "notebook: repeated call not dispatched");
+                    audit_discarded_turn(pool, &ctx, "repeated_call", Some(&s.method), &meta).await;
+                    ctx.blocks.push(repeat::repeated_call_reason(&s.method));
                     replan_due = true;
                     continue;
                 }
@@ -242,9 +264,13 @@ pub(crate) async fn run_notebook_to_terminal(
             Executed::Again => {
                 if let Some(call) = &reply.call {
                     let detail = ctx.blocks.last().cloned().unwrap_or_default();
-                    let payload = json!({"step": call.step, "code": "BLOCKED", "detail": clamp(&detail),
-                                         "classification": ctx.classification_floor});
-                    db::append(pool, ctx.task_id, EntryKind::FailedStep, payload).await?;
+                    let payload = FailedStepPayload {
+                        step: call.step,
+                        code: "BLOCKED".into(),
+                        detail: clamp(&detail),
+                        classification: ctx.classification_floor,
+                    };
+                    db::append(pool, ctx.task_id, EntryKind::FailedStep, entry(payload)).await?;
                     last_call = None;
                     replan_due = true;
                 }
@@ -255,9 +281,9 @@ pub(crate) async fn run_notebook_to_terminal(
                 let classification = prev.map_or(call.classification, |p| p.max(call.classification));
                 let failed = match ctx.plans.last().and_then(|r| r.outcomes().first()) {
                     Some(StepOutcome::Err { code, detail }) => {
-                        let payload = json!({"step": call.step, "code": code, "detail": clamp(detail),
-                                             "classification": classification});
-                        db::append(pool, ctx.task_id, EntryKind::FailedStep, payload).await?;
+                        let payload =
+                            FailedStepPayload { step: call.step, code: code.clone(), detail: clamp(detail), classification };
+                        db::append(pool, ctx.task_id, EntryKind::FailedStep, entry(payload)).await?;
                         replan_due = true;
                         true
                     }
@@ -272,7 +298,8 @@ pub(crate) async fn run_notebook_to_terminal(
 /// What a notebook turn produced.
 enum Asked {
     Reply(Box<(NotebookReply, FormulationMeta)>),
-    /// The call timed out after gathering: spend the forced-answer turn next.
+    /// The call timed out, or was cut off at `max_tokens`, after gathering:
+    /// spend the forced-answer turn next.
     ForceAnswer,
     Failed(String),
 }
@@ -320,7 +347,8 @@ async fn ask(
         }
     };
     // Which turns think: `thinking::turn_thinking`. The forced-answer turn
-    // never does (DGX task 269 lost 408 s and its answer that way).
+    // never does (DGX task 269 lost 408 s and its answer that way), nor does
+    // the #945 re-ask below.
     let thinking = thinking::turn_thinking(guard.kind);
     let first = check(nb.notebook_turn(ctx, msg, None, thinking).await);
     let mut retried = false;
@@ -356,15 +384,17 @@ async fn ask(
         Err(e) => {
             record(pool, ctx, guard, failed_llm_calls, &e, reasked).await;
             let timed_out = e.is_request_timeout();
-            // A blank reply cut off by `max_tokens` (#941) ran out of room the
-            // way a timeout runs out of time: the same request fails the same
-            // way, so after gathering it spends the forced-answer turn too.
-            let out_of_room = timed_out || ran_out_of_tokens(&e);
+            // A reply cut off by `max_tokens` (#941) ran out of room the way a
+            // timeout runs out of time: the same request fails the same way,
+            // so after gathering it spends the forced-answer turn too.
+            let out_of_room = timed_out || e.ran_out_of_tokens();
             if llm_failure::should_force_synthesis(out_of_room, guard.gathered, guard.answer_attempted) {
                 return Asked::ForceAnswer;
             }
             let detail = if timed_out {
                 llm_failure::timeout_failure_detail(&llm_failure::GatheredWork::from_plans(&ctx.plans), &e.to_string())
+            } else if e.ran_out_of_tokens() {
+                llm_failure::token_cap_failure_detail(&e.to_string())
             } else if let AgentError::Decode { raw, .. } = &e {
                 llm_failure::decode_failure_detail(raw.trim().is_empty(), &e.to_string())
             } else {
@@ -379,11 +409,12 @@ async fn ask(
     }
 }
 
-/// A blank reply the backend cut off at `max_tokens` (`finish_reason:
-/// length`): the model spent the whole budget thinking.
-fn ran_out_of_tokens(e: &AgentError) -> bool {
-    matches!(e, AgentError::Decode { raw, usage, .. }
-        if raw.trim().is_empty() && usage.finish_reason.as_deref() == Some("length"))
+/// The turn cap (C5). A resumed run's `max_plans` is already the turns it
+/// carries plus a fresh allowance in plans (`runner::task_exec::resume_budget`):
+/// only the allowance is multiplied, or each approved escalation would grow
+/// the cap by the turns already spent. Pure.
+pub(crate) fn turn_cap(spent: u32, max_plans: u32) -> u32 {
+    spent.saturating_add(max_plans.saturating_sub(spent).saturating_mul(NOTEBOOK_TURNS_PER_PLAN))
 }
 
 /// Count one failed model call and write its `plan.formulate_failed` row.
@@ -413,8 +444,8 @@ fn touched(state: &NotebookState, plans: &[PlanRecord]) -> Vec<DataClass> {
 fn terminal_entry(outcome: &Outcome, reply: &NotebookReply) -> Option<(EntryKind, serde_json::Value)> {
     match outcome {
         Outcome::Completed(_) | Outcome::Refused { .. } => match (&reply.answer, &reply.infeasible) {
-            (Some(a), _) => Some((EntryKind::Answer, json!({"body": a.body}))),
-            (None, Some(i)) => Some((EntryKind::Infeasible, json!({"reason": i.reason}))),
+            (Some(a), _) => Some((EntryKind::Answer, entry(AnswerPayload { body: a.body.clone() }))),
+            (None, Some(i)) => Some((EntryKind::Infeasible, entry(InfeasiblePayload { reason: i.reason.clone() }))),
             (None, None) => None,
         },
         Outcome::Cancelled => Some((EntryKind::Cancelled, json!({}))),
@@ -439,12 +470,61 @@ async fn audit_screened_tick(pool: &PgPool, task_id: i64, tick: &TickSpec) {
         .into_iter()
         .chain(tick.findings.iter().flat_map(|f| [("finding", f.text.as_str()), ("finding", f.source.as_str())]));
     for (part, text) in parts {
-        if let Some(block) = screen_model_text(text) {
-            let payload = notebook_block_audit_payload(task_id, tick.step, part, &block);
-            if let Err(e) = kastellan_db::audit::insert(pool, "policy", "injection.blocked", payload).await {
-                tracing::error!(task_id, error = %e, "notebook injection.blocked audit insert failed");
-            }
+        audit_if_blocked(pool, task_id, tick.step, part, text).await;
+    }
+}
+
+/// [`audit_screened_tick`] for a `steps` list. A replan re-sends steps it
+/// did not change; those were audited when first written, so only a step
+/// whose text is new is screened here.
+async fn audit_screened_steps(pool: &PgPool, task_id: i64, before: &NotebookState, steps: &[StepSpec]) {
+    for s in steps {
+        let unchanged = before.steps.iter().any(|b| {
+            b.spec.id == s.id && b.spec.purpose == s.purpose && b.spec.tool == s.tool && b.spec.done_when == s.done_when
+        });
+        if unchanged {
+            continue;
         }
+        for (part, text) in [("purpose", &s.purpose), ("tool", &s.tool), ("done_when", &s.done_when)] {
+            audit_if_blocked(pool, task_id, s.id, part, text).await;
+        }
+    }
+}
+
+async fn audit_if_blocked(pool: &PgPool, task_id: i64, step: u32, part: &str, text: &str) {
+    if let Some(block) = screen_model_text(text) {
+        let payload = notebook_block_audit_payload(task_id, step, part, &block);
+        if let Err(e) = kastellan_db::audit::insert(pool, "policy", "injection.blocked", payload).await {
+            tracing::error!(task_id, error = %e, "notebook injection.blocked audit insert failed");
+        }
+    }
+}
+
+/// Write the `agent / plan.discarded` row for a turn whose reply was set
+/// aside unreviewed (`reason`: `repeated_call`, `answer_rewritten`): the
+/// model call is accounted for as a `plan.formulate` row accounts for one.
+/// Best-effort, like the `plan.formulate_failed` rows.
+async fn audit_discarded_turn(
+    pool: &PgPool,
+    ctx: &TaskContext,
+    reason: &str,
+    method: Option<&str>,
+    meta: &FormulationMeta,
+) {
+    let payload = json!({
+        "task_id": ctx.task_id,
+        "plan_count": ctx.plan_count,
+        "reason": reason,
+        "method": method,
+        "prompt_name": meta.prompt_name,
+        "llm_model": meta.llm_model,
+        "latency_ms": meta.latency_ms,
+        "retry_count": meta.retry_count,
+        "llm_usage": serde_json::to_value(&meta.usage)
+            .expect("CompletionStats serialisation cannot fail (integers, a string, no maps)"),
+    });
+    if let Err(e) = kastellan_db::audit::insert(pool, "agent", ACTION_PLAN_DISCARDED, payload).await {
+        tracing::error!(task_id = ctx.task_id, error = %e, "plan.discarded audit insert failed");
     }
 }
 
