@@ -62,7 +62,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - **Deviations from the plan (keep):** full `<tools>` block in the system prompt (turn 1 needs params; it is the
   cached prefix); `last_result` is the summary's stored screened view (16 KiB), not a new render; `blocks`/
   `advisories`, `last_failure` and `answer.refused` added.
-- **Six live fixes from DGX tasks 259–273** (each with a test that fails without it): method in `tool`
+- **Seven live fixes from DGX tasks 259–290** (each with a test that fails without it; the 7th: a full tick may close a failed step): method in `tool`
   (UNKNOWN_TOOL) → prompt example; a replan re-sends the whole list → done steps stay done, failed ones are retried;
   tick + call for the same step → `partial` progress tick; echoed render keys (`status`, `note`, a finding's
   `step`) → read and dropped; a blank `length` reply (one turn thought 16384 tokens / 408 s) → spends the
@@ -75,7 +75,11 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   5 / 196 [3 / 122]; latest flight 3 / 122 [6 / 903]; **payments completed** 21 / 936, on the thinking-off answer turn
   (18.5 s) [failed in every baseline]. Re-asked on d847354c, invoices **completed** 22 / 958 (task 279; it says which
   candidates it did not verify). **7/7 completed; not yet judged by the operator; 4 of 7 over ~5 minutes.**
-  Prompts 5.5k–14k tokens (classic: up to ~49k).
+  Prompts 5.5k–14k tokens (classic: up to ~49k). **Bonsai-2 27B (Q2_0)** stopped after 2 (decode ~25 tok/s vs
+  gemma's ~42; invoices without amounts). **Gemma, thinking OFF** (283–290, Ollama 0.40, `.local`
+  `KASTELLAN_LLM_DISABLE_THINKING=1` — **the DGX is left this way**): 7/7 completed after 06113d26, every one ≤ 230 s,
+  4–6× faster, but the Qantas table regressed (4 rows, wrong order) and flight/payments answers differ: **speed
+  vs answer quality is the open decision** — next experiment: thinking on only for planning/replan/answer turns.
 - ⚠️ `ssh dgx 'pkill -f "[r]equery7"; …; bash ~/requery7.sh'` killed its own shell (exit 255): the bracket trick
   protects only the pattern, not other words of the same command line. Kill in a separate ssh call
   [[pgrep-wait-loops-match-themselves]].
