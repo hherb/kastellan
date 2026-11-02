@@ -150,6 +150,40 @@ impl NotebookState {
     }
 }
 
+impl NotebookState {
+    /// A step list: the first, or a replan. It keeps what is finished and
+    /// replaces what is not (D4); an id already in the list is refused.
+    /// Shared by [`fold`] and the reply check, so a reply is accepted only if
+    /// the entry it becomes will fold.
+    pub(crate) fn apply_steps(&mut self, specs: Vec<StepSpec>) -> Result<(), String> {
+        self.steps.retain(|s| s.status != StepStatus::Pending);
+        for spec in specs {
+            if self.steps.iter().any(|s| s.spec.id == spec.id) {
+                return Err(format!("step id {} is already listed", spec.id));
+            }
+            self.steps.push(Step { spec, status: StepStatus::Pending, note: None });
+        }
+        Ok(())
+    }
+
+    /// A step done: its note, findings, the new summary, and its data's
+    /// classification. The step must be listed and still pending.
+    pub(crate) fn apply_tick(&mut self, p: TickPayload) -> Result<(), String> {
+        let step = step_mut(self, p.step)?;
+        step.status = StepStatus::Done;
+        step.note = Some(p.note);
+        self.findings.extend(p.findings.into_iter().map(|f| Finding {
+            text: f.text,
+            source: f.source,
+            step: p.step,
+            classification: p.classification,
+        }));
+        self.summary = Some(p.summary);
+        self.touched.push(p.classification);
+        Ok(())
+    }
+}
+
 /// Why a notebook could not be read. The loop fails the task with it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("task notebook entry {seq} ({kind}): {detail}")]
@@ -172,28 +206,11 @@ pub(crate) fn fold(entries: &[Entry]) -> Result<NotebookState, FoldError> {
         match entry.kind {
             EntryKind::Steps => {
                 let p: StepsPayload = decode(entry).map_err(fail)?;
-                // A replan keeps what is finished and replaces what is not (D4).
-                state.steps.retain(|s| s.status != StepStatus::Pending);
-                for spec in p.steps {
-                    if state.steps.iter().any(|s| s.spec.id == spec.id) {
-                        return Err(fail(format!("step id {} is already listed", spec.id)));
-                    }
-                    state.steps.push(Step { spec, status: StepStatus::Pending, note: None });
-                }
+                state.apply_steps(p.steps).map_err(fail)?;
             }
             EntryKind::Tick => {
                 let p: TickPayload = decode(entry).map_err(fail)?;
-                let step = step_mut(&mut state, p.step).map_err(fail)?;
-                step.status = StepStatus::Done;
-                step.note = Some(p.note);
-                state.findings.extend(p.findings.into_iter().map(|f| Finding {
-                    text: f.text,
-                    source: f.source,
-                    step: p.step,
-                    classification: p.classification,
-                }));
-                state.summary = Some(p.summary);
-                state.touched.push(p.classification);
+                state.apply_tick(p).map_err(fail)?;
             }
             EntryKind::FailedStep => {
                 let p: FailedStepPayload = decode(entry).map_err(fail)?;
