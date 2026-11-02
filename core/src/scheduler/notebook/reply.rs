@@ -135,10 +135,12 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
     Ok(())
 }
 
-/// The one-step plan for `call`, reviewed and dispatched like any plan.
-/// `data_ceiling` is left for the loop to resolve against the floor, as a
-/// classic plan's is.
-pub(crate) fn call_plan(reply: &NotebookReply, call: &CallSpec) -> Plan {
+/// The one-step plan for `call`, reviewed and dispatched like any plan. Its
+/// `data_ceiling` is the call's classification, raised to the task's
+/// `floor`: left unset, it would resolve to the floor alone, and a call that
+/// touches more than the floor would then be refused as touching more than
+/// its own plan declared.
+pub(crate) fn call_plan(reply: &NotebookReply, call: &CallSpec, floor: DataClass) -> Plan {
     Plan {
         context: reply.tick.as_ref().map(|t| t.summary.clone()).unwrap_or_default(),
         decision: call.returns.clone(),
@@ -152,7 +154,7 @@ pub(crate) fn call_plan(reply: &NotebookReply, call: &CallSpec) -> Plan {
             classification: call.classification,
         }],
         result: None,
-        data_ceiling: None,
+        data_ceiling: Some(call.classification.max(floor)),
         refused: None,
         floor_request: None,
         l1_insight: None,

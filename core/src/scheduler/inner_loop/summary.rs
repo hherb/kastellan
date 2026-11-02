@@ -41,7 +41,7 @@ mod budget;
 mod call;
 mod notebook_view;
 mod sink;
-pub(crate) use notebook_view::screen_model_text;
+pub(crate) use notebook_view::{notebook_block_audit_payload, screen_model_text};
 use budget::apply_summary_budget;
 use call::{apply_call_budget, call_cost, render_call, render_decision, Screened, CALL_KEY};
 pub(crate) use sink::TIER_SINK;

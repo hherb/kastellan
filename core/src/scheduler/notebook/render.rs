@@ -54,10 +54,14 @@ pub(crate) struct TurnBudget {
 
 /// The user message for one notebook turn. `seen_corrections` is the seq of
 /// the last correction already shown; only later ones are rendered.
+/// `last_failure` is the step whose call failed last turn and that call's
+/// record: the step is no longer current, so without it the replan turn
+/// would not see why it failed.
 pub(crate) fn render_turn(
     ctx: &TaskContext,
     state: &NotebookState,
     seen_corrections: i64,
+    last_failure: Option<(u32, &PlanRecord)>,
     current: Option<CurrentStep<'_>>,
     turn: TurnBudget,
     now: Option<&str>,
@@ -83,6 +87,9 @@ pub(crate) fn render_turn(
     }
     if !ctx.blocks.is_empty() {
         fields.push(("blocks", json!(ctx.blocks).to_string()));
+    }
+    if let Some(view) = last_failure.and_then(|(step, r)| Some((step, r.last_step_view()?))) {
+        fields.push(("last_failure", obj(&[("step", view.0.to_string()), ("result", view.1.to_string())])));
     }
     if let Some(cur) = current {
         fields.push(("current_step", current_step_view(&cur)));

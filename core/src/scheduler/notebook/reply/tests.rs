@@ -109,13 +109,15 @@ fn the_answer_plan_is_terminal() {
 #[test]
 fn the_call_plan_is_one_reviewable_step() {
     let r = check(json!({"tick": tick(1), "call": call(2)}), &two_steps()).unwrap();
-    let p = call_plan(&r, r.call.as_ref().unwrap());
+    let p = call_plan(&r, r.call.as_ref().unwrap(), DataClass::Public);
     assert!(!p.is_terminal());
     assert_eq!(p.steps.len(), 1);
     assert_eq!((p.steps[0].tool.as_str(), p.steps[0].method.as_str()), ("mail", "mail.search"));
     assert_eq!(p.steps[0].classification, DataClass::Personal);
     assert_eq!(p.context, "s", "the tick's summary is the plan's context");
-    assert_eq!(p.data_ceiling, None, "resolved by the loop against the floor");
+    assert_eq!(p.data_ceiling, Some(DataClass::Personal), "the call's own class");
+    let p = call_plan(&r, r.call.as_ref().unwrap(), DataClass::Secret);
+    assert_eq!(p.data_ceiling, Some(DataClass::Secret), "never below the floor");
 }
 
 #[test]

@@ -49,7 +49,7 @@ use crate::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
 /// something to synthesize from (`gathered`: at least one successful tool
 /// observation), and only if the synthesis turn has not been spent — the
 /// synthesis turn's own timeout has its retry and then fails. Pure.
-pub(super) fn should_force_synthesis(timed_out: bool, gathered: bool, synth_attempted: bool) -> bool {
+pub(crate) fn should_force_synthesis(timed_out: bool, gathered: bool, synth_attempted: bool) -> bool {
     timed_out && gathered && !synth_attempted
 }
 
@@ -67,7 +67,7 @@ const OTHER_METHOD: &str = "other";
 /// The tool calls a task made before it failed, for telling the user what
 /// the timeout threw away.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct GatheredWork {
+pub(crate) struct GatheredWork {
     /// Tool calls actually dispatched (steps after a failing one never are).
     pub calls: usize,
     /// How many of them returned a result.
@@ -81,7 +81,7 @@ impl GatheredWork {
     ///
     /// A record's outcomes are index-aligned with its plan's steps and never
     /// outnumber them; a step with no outcome was never dispatched.
-    pub(super) fn from_plans(plans: &[PlanRecord]) -> Self {
+    pub(crate) fn from_plans(plans: &[PlanRecord]) -> Self {
         let mut work = GatheredWork::default();
         for record in plans {
             for (step, outcome) in record.plan.steps.iter().zip(record.outcomes()) {
@@ -111,7 +111,7 @@ fn displayable_method(method: &str) -> String {
 /// This text reaches the user (a Matrix or email reply), so it leads with
 /// what happened in plain words; `router_error` goes last, in brackets,
 /// for the operator.
-pub(super) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) -> String {
+pub(crate) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) -> String {
     let what = if work.calls == 0 {
         "The language model ran out of time before it finished planning, so no tool was \
          called and no answer was produced."
@@ -144,7 +144,7 @@ pub(super) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) ->
 /// [`AgentError::is_empty_completion`], not if it was cut off at `length`. Like
 /// [`timeout_failure_detail`], plain words first and the decode error last,
 /// in brackets, for the operator.
-pub(super) fn decode_failure_detail(empty: bool, decode_error: &str) -> String {
+pub(crate) fn decode_failure_detail(empty: bool, decode_error: &str) -> String {
     let what = if empty {
         "The language model returned an empty answer, so this task produced none."
     } else {
@@ -417,7 +417,7 @@ pub(super) async fn formulate_turn(
 /// Write the `agent/plan.formulate_failed` row for one failed formulator
 /// call. **Best-effort**: a lost forensic row must not fail a task the
 /// loop may still rescue — logged at ERROR instead, like the sink-block rows.
-pub(super) async fn record_failed_formulation(
+pub(crate) async fn record_failed_formulation(
     pool: &sqlx::PgPool,
     task_id: i64,
     plan_count: u32,

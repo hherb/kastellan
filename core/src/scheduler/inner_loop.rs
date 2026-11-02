@@ -31,10 +31,10 @@ pub use self::summary::PlanRecord;
 // `summary`-owned bounds via `use super::*`; no non-test code in this module
 // references them, hence the `cfg(test)` gate (else they read as unused).
 #[cfg(test)]
-pub(crate) use self::summary::{STEP_ERR_DETAIL_MAX, STEP_OK_SUMMARY_MAX};
+pub(crate) use self::summary::STEP_OK_SUMMARY_MAX;
 // The notebook loop (#922) renders model text and step results through the
 // summary's own screens.
-pub(crate) use self::summary::{screen_model_text, WITHHELD_MARKER};
+pub(crate) use self::summary::{notebook_block_audit_payload, screen_model_text, STEP_ERR_DETAIL_MAX, WITHHELD_MARKER};
 use super::agent::{AgentError, PlanFormulator};
 use super::asks;
 
@@ -51,7 +51,9 @@ pub(crate) mod ceiling;
 pub(crate) mod execute;
 mod floor;
 mod invoke_expand;
-mod llm_failure;
+// `pub(crate)` so the notebook loop (#922) recovers from a failed model
+// call with the same decisions and the same audit row.
+pub(crate) mod llm_failure;
 // `pub(crate)` so `scheduler::conversation` can reuse the same pruning,
 // clamping and screen-text extraction for the conversation block (#701).
 // A second copy of that logic is exactly the drift #669 warns about.

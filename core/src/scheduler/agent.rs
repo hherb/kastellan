@@ -142,6 +142,13 @@ pub trait PlanFormulator: Send + Sync {
     ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
         None
     }
+
+    /// The notebook loop's door (#922), when this formulator runs in
+    /// notebook mode (`KASTELLAN_PLANNER_MODE=notebook`). `None`, the
+    /// default, runs the task on the classic loop.
+    fn notebook(&self) -> Option<&dyn super::notebook::formulator::NotebookFormulator> {
+        None
+    }
 }
 
 /// Appended to the agent's user message on the forced-synthesis turn. Tells
@@ -225,6 +232,9 @@ pub struct RouterAgent {
     prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
     recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
     entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
+    /// Set in notebook mode (#922): the advertised tools, for the current
+    /// step's tool doc. `None` = the classic loop.
+    notebook_tools: Option<std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>>,
 }
 
 impl RouterAgent {
@@ -235,7 +245,20 @@ impl RouterAgent {
         recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
         entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
     ) -> Self {
-        Self { router, prompts, prompt_builder, recall_builder, entity_extractor }
+        Self { router, prompts, prompt_builder, recall_builder, entity_extractor, notebook_tools: None }
+    }
+
+    /// Run every task on the notebook loop (#922), showing each step the doc
+    /// of its tool from `tools`.
+    pub fn with_notebook(mut self, tools: std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>) -> Self {
+        self.notebook_tools = Some(tools);
+        self
+    }
+
+    /// The doc of the advertised tool named `tool`, in notebook mode.
+    pub(crate) fn notebook_tool_doc(&self, tool: &str) -> Option<String> {
+        let tools = self.notebook_tools.as_ref()?;
+        tools.iter().find(|t| t.doc.name == tool).map(crate::prompt_assembly::assemble::render_tool_doc)
     }
 }
 
@@ -280,6 +303,10 @@ impl PlanFormulator for RouterAgent {
         // shape (a thinking planner turn measured 222 s against 51 s without
         // on the DGX, 2026-08).
         Some(self.formulate_inner(ctx, synth_turn, ThinkingPolicy::Suppress, Some(reply)).await)
+    }
+
+    fn notebook(&self) -> Option<&dyn super::notebook::formulator::NotebookFormulator> {
+        self.notebook_tools.as_ref().map(|_| self as &dyn super::notebook::formulator::NotebookFormulator)
     }
 }
 

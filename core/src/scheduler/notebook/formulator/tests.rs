@@ -23,3 +23,13 @@ fn the_notebook_prompt_documents_every_reply_key() {
 fn the_reformat_directive_names_the_reason() {
     assert!(reformat_directive("`tick.step` 2 is not the current step 1").contains("not the current step 1"));
 }
+
+#[test]
+fn planner_mode_rejects_an_unknown_value() {
+    assert_eq!(planner_mode(None), Ok(PlannerMode::Classic));
+    assert_eq!(planner_mode(Some("")), Ok(PlannerMode::Classic));
+    assert_eq!(planner_mode(Some("classic")), Ok(PlannerMode::Classic));
+    assert_eq!(planner_mode(Some(" notebook ")), Ok(PlannerMode::Notebook));
+    let err = planner_mode(Some("Notebook")).unwrap_err();
+    assert!(err.contains("KASTELLAN_PLANNER_MODE") && err.contains("\"Notebook\""), "{err}");
+}
