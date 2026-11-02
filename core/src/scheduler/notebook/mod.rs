@@ -1,0 +1,14 @@
+//! The task notebook (#922): the planner's external working memory.
+//!
+//! Instead of re-reading a growing history every turn, the model writes its
+//! own step list, works one step per turn, ticks each step off with a short
+//! note and the facts it found, and keeps a short progress summary. Those
+//! events are rows in `task_notebook` (`kastellan_db::notebook`); this module
+//! turns them into the next turn's prompt.
+//!
+//! * [`state`] — the entry payloads and the pure fold of a task's entries
+//!   into its current notebook.
+//!
+//! Design: `docs/superpowers/specs/2026-11-01-task-notebook-design.md`.
+
+pub(crate) mod state;
