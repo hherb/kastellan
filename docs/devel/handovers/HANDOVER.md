@@ -14,7 +14,7 @@
 > (#923's session, the 225–231 re-measure and #937's OpenShell notes in full; older detail is named in that snapshot's header).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-02 (#941 + #922 slice 1: the task notebook behind `KASTELLAN_PLANNER_MODE`, measured on the DGX) ·
+**Last updated:** 2026-11-02 (#941 + #922 slice 1: the task notebook, measured on the DGX; the `sift` + scrapbook design) ·
 **Recent PRs, newest first:** [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged), [#946](https://github.com/hherb/kastellan/pull/946) (docs, merged), [#943](https://github.com/hherb/kastellan/pull/943) (prompt-cache reorder, merged), [#942](https://github.com/hherb/kastellan/pull/942) (#922 part A, merged), [#938](https://github.com/hherb/kastellan/pull/938) (#922 part C, merged), [#937](https://github.com/hherb/kastellan/pull/937) (OpenShell survey, merged), [#930](https://github.com/hherb/kastellan/pull/930) (#923, merged), [#927](https://github.com/hherb/kastellan/pull/927) (#921, merged), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
@@ -48,7 +48,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-02, latest): #941 + the task notebook, slice 1 (PR #951), measured on the DGX
+### This session (2026-11-02, latest): #941 + the task notebook, slice 1 (PR #951), measured on the DGX; the sift design
 
 - **#941:** `ChatRequest.timeout` (`serde(skip)`) bounds one request; every planner call sends `max_tokens` 16384 and a
   timeout = min(`KASTELLAN_LLM_TIMEOUT_MS`, max(time left, 120 s)) (`inner_loop/ceiling.rs::call_timeout`).
@@ -62,27 +62,19 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - **Deviations from the plan (keep):** full `<tools>` block in the system prompt (turn 1 needs params; it is the
   cached prefix); `last_result` is the summary's stored screened view (16 KiB), not a new render; `blocks`/
   `advisories`, `last_failure` and `answer.refused` added.
-- **Nine live fixes from DGX tasks 259–300** (each with a test; 7–9: a failed step closed by a full tick, the repeat guard, a replan keeps the called step): method in `tool`
+- **Live fixes from DGX tasks 259–300** (each with a test), the first six: method in `tool`
   (UNKNOWN_TOOL) → prompt example; a replan re-sends the whole list → done steps stay done, failed ones are retried;
   tick + call for the same step → `partial` progress tick; echoed render keys (`status`, `note`, a finding's
   `step`) → read and dropped; a blank `length` reply (one turn thought 16384 tokens / 408 s) → spends the
   forced-answer turn, which runs thinking-**off**; a `call` on the forced-answer turn → re-asked.
   ⚠️ **The model mirrors whatever shape it is shown** — any key added to the render must be accepted (and ignored)
   in the reply, or it becomes a refusal.
-- **Measured (round 5, f47c3167, tasks 272–278; baseline 246–252 in brackets): 6/7 completed.** Qantas table 13 turns /
-  718 s, all five rows with price + GST [6 / 570]; invoices **failed** at the ceiling, 17 turns / 922 s (a `call` on
-  the answer turn: d847354c) [7 / 1053]; 10 attachments 2 / 225 [2 / 297]; fee PDF 5 / 195 [4 / ~120]; latest invoice
-  5 / 196 [3 / 122]; latest flight 3 / 122 [6 / 903]; **payments completed** 21 / 936, on the thinking-off answer turn
-  (18.5 s) [failed in every baseline]. Re-asked on d847354c, invoices **completed** 22 / 958 (task 279; it says which
-  candidates it did not verify). **7/7 completed; not yet judged by the operator; 4 of 7 over ~5 minutes.**
-  Prompts 5.5k–14k tokens (classic: up to ~49k). **Bonsai-2 27B (Q2_0)** stopped after 2 (decode ~25 tok/s vs
-  gemma's ~42; invoices without amounts). **Three thinking settings, all seven, Ollama 0.40** (on 272–279 / off
-  283–290 / **selective** 294–300 = plan, replan and answer turns think, cb1f59d0): total **3350 / 735 / 2097 s**.
-  Off is 4–6× faster but its Qantas table regressed; selective is no clear win (Qantas 923 s and still 3 bookings
-  short; latest invoice wrong). Both quality misses are **stopped-searching-too-early**, which answer-time thinking
-  cannot fix → next: coverage, not thinking. Selective also needed a repeat-call guard (task 291 made one call 20×)
-  and "a replan keeps the called step" (292). **Operator decision (2026-11-02): gemma MoE, thinking ON, notebook
-  mode — a correct answer matters more than speed.** The DGX runs exactly that (`.local` = the pre-bonsai backup).
+- **Measured** (full tables: [`notes/notebook-experiments.md`](../notes/notebook-experiments.md), #922 comments):
+  thinking ON 7/7 completed, 3350 s total (payments for the first time); thinking OFF 735 s but Q1 regressed;
+  selective 2097 s, no clear win; bonsai-2 27B Q2_0 too slow. **Operator decision: gemma MoE, thinking ON,
+  notebook mode — correctness over speed**; the DGX runs exactly that. Misses = stopped-searching-too-early →
+  the sift design. Two more fixes from selective runs stay: the repeat-call guard (`notebook/repeat.rs`) and
+  "a replan keeps the called step".
 - ⚠️ `ssh dgx 'pkill -f "[r]equery7"; …; bash ~/requery7.sh'` killed its own shell (exit 255): the bracket trick
   protects only the pattern, not other words of the same command line. Kill in a separate ssh call
   [[pgrep-wait-loops-match-themselves]].
@@ -256,13 +248,14 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
    #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
-1. **The task notebook ([#922](https://github.com/hherb/kastellan/issues/922)): the operator judges 272–279, then merge #951.**
-   Review #951 with one fresh whole-branch reviewer (own worktree). After merging, a plain `upgrade_from_git.sh`;
-   decide whether `.local` keeps `KASTELLAN_PLANNER_MODE=notebook`. The speed goal (~5 min) is not met: a turn is
-   ~45–55 s, mostly thinking, so a 15-item question runs into the 15-minute ceiling — measure a cheaper turn (thinking
-   off for tick-only turns?) before slice 4. Then slice 2 (`kastellan-cli session`, spec §6.5) and slice 3 (bottie)
-   get their own plans. Gaps: no `floor_request`/`l1_insight`/`l3_skill` in notebook replies. **Still owed:** a
-   revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to `api_minor` 6.
+1. **#922 next: plan and build `sift` + the scrapbook** — [design](../../superpowers/specs/2026-11-02-sift-and-scrapbook-design.md)
+   (operator decisions S1–S8, my calls K1–K12 incl. K3a–c; builder check folded in). Next session: **invoke
+   `superpowers:writing-plans` on that design**, then build. Log every experiment in
+   [`notes/notebook-experiments.md`](../notes/notebook-experiments.md) (append-only; it back-fills 246–300).
+   Operator eyeballed 272–279 as correct; failures are context/plan exhaustion. **Merge #951** first (one fresh
+   whole-branch reviewer in its own worktree), then a plain `upgrade_from_git.sh`; `.local` keeps
+   `KASTELLAN_PLANNER_MODE=notebook`, thinking ON. **Still owed:** a revoked mail key once (ask first); #926,
+   #939, #771, #538; the Mac's localmail upgrade to `api_minor` 6.
 
 2. **#702 follow-up #703** (#704/#705 done in PR #920). ⚠️ **The guard model never sees object keys** — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
