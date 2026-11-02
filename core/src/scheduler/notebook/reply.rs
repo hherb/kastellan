@@ -106,6 +106,20 @@ pub(crate) fn parse_reply(raw: &str) -> Result<NotebookReply, String> {
     parse_json_lenient::<NotebookReply>(raw).map_err(|e| format!("not a notebook reply: {e}"))
 }
 
+/// A replan that leaves out the pending step the same reply calls keeps it,
+/// first: the model meant "these come after the one I am on" (DGX task 292
+/// listed only the new steps while calling the current one). Applied before
+/// [`validate`], so the step list written is the one checked.
+pub(crate) fn keep_called_step(reply: &mut NotebookReply, state: &NotebookState) {
+    let (Some(call), Some(steps)) = (&reply.call, &mut reply.steps) else { return };
+    if steps.iter().any(|s| s.id == call.step) {
+        return;
+    }
+    if let Some(kept) = state.steps.iter().find(|s| s.spec.id == call.step && s.status == StepStatus::Pending) {
+        steps.insert(0, kept.spec.clone());
+    }
+}
+
 /// Check `reply` against the notebook it answers. `Ok` means every entry it
 /// becomes will fold, and its call (if any) names a step that is pending.
 pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(), String> {

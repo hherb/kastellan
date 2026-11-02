@@ -194,3 +194,17 @@ fn a_full_tick_may_close_a_failed_step() {
     // A tick for step 1 that also calls step 1 is progress, which a failed step cannot take.
     assert!(check(json!({"tick": tick(1), "call": call(1)}), &failed).is_err());
 }
+
+/// DGX task 292: a progress tick on step 1, a replan listing only the new
+/// step 3, and a call for step 1. The replan keeps step 1, first.
+#[test]
+fn a_replan_keeps_the_step_the_same_reply_calls() {
+    let mut r = parse_reply(&json!({"tick": tick(1), "steps": [step(3)], "call": call(1)}).to_string()).unwrap();
+    keep_called_step(&mut r, &two_steps());
+    assert_eq!(r.steps.as_ref().unwrap().iter().map(|s| s.id).collect::<Vec<_>>(), vec![1, 3]);
+    validate(&r, &two_steps()).expect("step 1 stays pending for its call");
+    // A call for a step that was never pending is not invented into the list.
+    let mut r = parse_reply(&json!({"steps": [step(3)], "call": call(9)}).to_string()).unwrap();
+    keep_called_step(&mut r, &two_steps());
+    assert_eq!(r.steps.as_ref().unwrap().len(), 1);
+}

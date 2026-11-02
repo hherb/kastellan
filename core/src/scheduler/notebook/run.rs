@@ -31,7 +31,9 @@ use sqlx::PgPool;
 
 use super::formulator::NotebookFormulator;
 use super::render::{render_turn, CurrentStep, TurnBudget};
-use super::reply::{answer_ceiling, answer_plan, call_plan, parse_reply, require_answer, validate, NotebookReply, TickSpec};
+use super::reply::{
+    answer_ceiling, answer_plan, call_plan, keep_called_step, parse_reply, require_answer, validate, NotebookReply, TickSpec,
+};
 use super::state::{fold, Correction, NotebookState};
 use super::repeat;
 use super::thinking::{self, TurnKind};
@@ -307,6 +309,7 @@ async fn ask(
                     r.tick = None;
                     r.steps = None;
                 }
+                keep_called_step(&mut r, state);
                 r
             })
             .and_then(|r| validate(&r, state).map(|()| r))
