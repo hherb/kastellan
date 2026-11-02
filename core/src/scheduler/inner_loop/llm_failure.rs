@@ -27,7 +27,11 @@
 //! An **empty completion** (#923: no content, and not cut off at `length`)
 //! is asked again once, through the same door, unless it is itself the
 //! turn's retry; a decode failure that still ends the task says so in words
-//! ([`decode_failure_detail`]). Every other formulator error (an HTTP
+//! ([`decode_failure_detail`]). A **reply that is not a plan** (#945:
+//! complete, non-blank, not JSON in the plan's shape) is shown back to the
+//! model once with a request for the plan, thinking suppressed
+//! (`PlanFormulator::formulate_reformat`). At most one retry of any kind per
+//! turn: a retry's own failure is never retried. Every other formulator error (an HTTP
 //! status, a refused connection, a missing prompt) is unchanged,
 //! `llm: <error>`: this loop does not retry it.
 
@@ -176,13 +180,25 @@ pub(super) const ACTION_FORMULATE_FAILED: &str = "plan.formulate_failed";
 /// by the router); the row needs the kind of failure, not the body.
 const FAILED_ROW_ERROR_CHARS: usize = 512;
 
+/// Longest head of the model's own reply an `agent/plan.formulate_failed`
+/// row carries (#945). Enough to tell a prose answer from a refusal or a
+/// preamble. It is model output and can restate tool data (on a mail task,
+/// the user's mail): accepted, with eyes open, as the agent's own data at the
+/// agent user's boundary. The row lands in `audit_log` **and** its plaintext
+/// JSONL mirror (`audit_mirror`, mode 0600) — the same OS-user protection as
+/// the daemon log, no stronger. It goes to the row rather than a `warn!` so
+/// "what did the model say?" is a query against the task, not a log grep.
+const FAILED_ROW_RAW_HEAD_CHARS: usize = 512;
+
 /// Payload for one `agent/plan.formulate_failed` row. Pure.
 ///
 /// A timed-out call writes no `plan.formulate` row (there is no plan), so
 /// without this the minutes it cost are visible only in the daemon log —
 /// and #774's point is that "why was this task slow?" is a query.
 /// `plan_count` is the count *before* the call (a failed call adds no
-/// plan); `thinking_suppressed_retry` marks the synthesis retry.
+/// plan); `thinking_suppressed_retry` marks a call made with thinking
+/// suppressed — the synthesis retry (#774) or the re-ask (#945); a
+/// `synth_turn: false` row with it set is the re-ask.
 ///
 /// `completion` is the cost of the answer that failed to decode, when one
 /// came back ([`AgentError::completion`](crate::scheduler::agent::AgentError::completion)).
@@ -190,6 +206,8 @@ const FAILED_ROW_ERROR_CHARS: usize = 512;
 /// `latency_ms`), so one query reads the cost of every planning call that got
 /// a completion back. Unlike that row, the keys are absent (not null) when
 /// none did: a router failure, timeouts included, records no latency.
+/// With it go `raw_head`, the first [`FAILED_ROW_RAW_HEAD_CHARS`] chars of
+/// what the model said, and `raw_chars`, the reply's whole length (#945).
 pub(super) fn formulate_failed_payload(
     task_id: i64,
     plan_count: u32,
@@ -197,7 +215,7 @@ pub(super) fn formulate_failed_payload(
     thinking_suppressed_retry: bool,
     request_timeout: bool,
     error: &str,
-    completion: Option<(&kastellan_llm_router::CompletionStats, u64)>,
+    completion: Option<(&kastellan_llm_router::CompletionStats, u64, &str)>,
 ) -> serde_json::Value {
     let mut v = serde_json::json!({
         "task_id": task_id,
@@ -207,10 +225,12 @@ pub(super) fn formulate_failed_payload(
         "request_timeout": request_timeout,
         "error": error.chars().take(FAILED_ROW_ERROR_CHARS).collect::<String>(),
     });
-    if let Some((usage, latency_ms)) = completion {
+    if let Some((usage, latency_ms, raw)) = completion {
         v["llm_usage"] = serde_json::to_value(usage)
             .expect("CompletionStats serialisation cannot fail (integers, a string, no maps)");
         v["latency_ms"] = serde_json::json!(latency_ms);
+        v["raw_head"] = serde_json::json!(raw.chars().take(FAILED_ROW_RAW_HEAD_CHARS).collect::<String>());
+        v["raw_chars"] = serde_json::json!(raw.chars().count());
     }
     v
 }
@@ -237,8 +257,8 @@ pub(super) struct TurnState {
     pub synth_attempted: bool,
 }
 
-/// Run one planning turn, with #774's timeout recovery and #923's
-/// empty-answer retry around it.
+/// Run one planning turn, with #774's timeout recovery, #923's empty-answer
+/// retry and #945's non-plan re-ask around it.
 ///
 /// Every failed formulator call — the first attempt, and any retry
 /// — adds one to `failed_llm_calls` and writes exactly one
@@ -263,13 +283,16 @@ pub(super) async fn formulate_turn(
     let first = call().await;
     // A synthesis turn that ran out of time gets one more attempt with
     // thinking suppressed, when the formulator has such an attempt; an empty
-    // answer gets the same call once more (#923). At most one retry per turn.
+    // answer gets the same call once more (#923); a reply that is not a plan
+    // is shown back to the model with a request for the plan, when the
+    // formulator can (#945). At most one retry per turn.
     // Every failed call is counted and gets an audit row exactly once:
     // `failure_recorded` stops the row below from repeating one already
     // written here.
     let mut retried = false;
     let mut thinking_suppressed = false;
     let mut failure_recorded = false;
+    let mut reasked = false;
     let formulation = match first {
         Err(e) if synth_turn && e.is_request_timeout() => {
             *failed_llm_calls = failed_llm_calls.saturating_add(1);
@@ -314,6 +337,33 @@ pub(super) async fn formulate_turn(
             retried = true;
             call().await
         }
+        Err(e) if e.non_plan_answer().is_some() => {
+            *failed_llm_calls = failed_llm_calls.saturating_add(1);
+            record_failed_formulation(
+                pool, ctx.task_id, ctx.plan_count, synth_turn, false, &e,
+            ).await;
+            let reply = e.non_plan_answer().expect("the arm's guard");
+            match formulator.formulate_reformat(ctx, synth_turn, reply).await {
+                Some(retry) => {
+                    tracing::warn!(
+                        task_id = ctx.task_id,
+                        plan_count = ctx.plan_count,
+                        synth_turn,
+                        retry_ok = retry.is_ok(),
+                        "planning call answered with something that is not a plan; \
+                         re-asked once with its reply and thinking suppressed"
+                    );
+                    retried = true;
+                    thinking_suppressed = true;
+                    reasked = true;
+                    retry
+                }
+                None => {
+                    failure_recorded = true;
+                    Err(e)
+                }
+            }
+        }
         other => other,
     };
     let (plan, mut meta) = match formulation {
@@ -345,6 +395,13 @@ pub(super) async fn formulate_turn(
                 decode_failure_detail(raw.trim().is_empty(), &e.to_string())
             } else {
                 format!("llm: {e}")
+            };
+            // A re-ask that failed some other way would otherwise hide that
+            // the model had answered — in prose — the first time.
+            let detail = if reasked && e.non_plan_answer().is_none() {
+                format!("The language model's first answer was not a plan, so it was asked again. {detail}")
+            } else {
+                detail
             };
             return Turn::Failed(detail);
         }

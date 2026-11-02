@@ -183,10 +183,28 @@ fn a_decode_failure_row_carries_the_completion_cost_under_the_plan_rows_keys() {
         finish_reason: Some("stop".into()),
         ..Default::default()
     };
-    let v = formulate_failed_payload(212, 2, false, false, false, "plan decode failed: EOF", Some((&stats, 18_976)));
+    let v = formulate_failed_payload(212, 2, false, false, false, "plan decode failed: EOF", Some((&stats, 18_976, "")));
     assert_eq!(v["latency_ms"], 18_976);
     assert_eq!(v["llm_usage"]["completion_tokens"], 48);
     assert_eq!(v["llm_usage"]["reasoning_chars"], 170);
     assert_eq!(v["llm_usage"]["finish_reason"], "stop");
-    assert_eq!(v.as_object().unwrap().len(), 8, "{v}");
+    assert_eq!(v["raw_head"], "");
+    assert_eq!(v["raw_chars"], 0);
+    assert_eq!(v.as_object().unwrap().len(), 10, "{v}");
+}
+
+/// #945: three live failures (tasks 234, 245, 252) answered 461–2196 bytes
+/// with no `{` at all, and nothing kept what they said. The row now keeps a
+/// bounded head (counted in chars, so a multi-byte reply is never cut
+/// mid-character) and the whole reply's length, which says whether the head
+/// is all of it.
+#[test]
+fn a_non_json_answer_row_keeps_a_bounded_head_of_what_the_model_said() {
+    let stats = kastellan_llm_router::CompletionStats::default();
+    let reply = format!("Here are the payments due: {}", "é".repeat(FAILED_ROW_RAW_HEAD_CHARS));
+    let v = formulate_failed_payload(252, 5, false, false, false, "plan decode failed", Some((&stats, 1, &reply)));
+    let head = v["raw_head"].as_str().unwrap();
+    assert!(head.starts_with("Here are the payments due: é"), "{head}");
+    assert_eq!(head.chars().count(), FAILED_ROW_RAW_HEAD_CHARS);
+    assert_eq!(v["raw_chars"], reply.chars().count());
 }
