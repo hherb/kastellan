@@ -23,7 +23,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::state::{FindingSpec, NotebookState, StepSpec, StepStatus, TickPayload};
-use crate::cassandra::types::{DataClass, Plan, PlannedStep, DECISION_TERMINAL};
+use crate::cassandra::types::{DataClass, Plan, PlannedStep, RefusedReason, DECISION_TERMINAL};
 use crate::scheduler::plan_parser::parse_json_lenient;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +71,10 @@ pub(crate) struct AnswerSpec {
     pub body: String,
     #[serde(default)]
     pub data_ceiling: Option<DataClass>,
+    /// A constitutional refusal, as on a classic plan: the answer then
+    /// explains it, and the task ends `Refused`.
+    #[serde(default)]
+    pub refused: Option<RefusedReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,8 +162,8 @@ pub(crate) fn call_plan(reply: &NotebookReply, call: &CallSpec) -> Plan {
     }
 }
 
-/// The terminal plan carrying the final answer.
-pub(crate) fn answer_plan(body: &str, ceiling: DataClass) -> Plan {
+/// The terminal plan carrying the final answer (and a refusal, if any).
+pub(crate) fn answer_plan(body: &str, ceiling: DataClass, refused: Option<RefusedReason>) -> Plan {
     Plan {
         context: String::new(),
         decision: DECISION_TERMINAL.into(),
@@ -167,7 +171,7 @@ pub(crate) fn answer_plan(body: &str, ceiling: DataClass) -> Plan {
         steps: vec![],
         result: Some(serde_json::json!({"kind": "text", "body": body})),
         data_ceiling: Some(ceiling),
-        refused: None,
+        refused,
         floor_request: None,
         l1_insight: None,
         l3_skill: None,

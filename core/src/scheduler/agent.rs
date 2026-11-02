@@ -36,7 +36,7 @@ pub enum AgentError {
         usage: kastellan_llm_router::CompletionStats,
         latency_ms: u64,
     },
-    #[error("agent prompt 'agent_planner' not found in cache")]
+    #[error("agent prompt (agent_planner or agent_notebook) not found in cache")]
     PromptMissing,
     /// L0/L1 load failed under the [`SystemPromptBuilder`]; the scheduler's
     /// retry policy decides whether to retry or fail permanently.
@@ -301,7 +301,75 @@ impl RouterAgent {
         thinking: ThinkingPolicy,
         prior_reply: Option<&str>,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
-        let entry = self.prompts.get("agent_planner")
+        let prior = prior_reply.map(context::reformat_messages);
+        let (raw, meta) = self
+            .send_turn("agent_planner", ctx, |now| serialise_context_for_agent(ctx, synthesize, now), prior, thinking)
+            .await?;
+        let (usage, latency_ms) = (meta.usage.clone(), meta.latency_ms);
+
+        // Tolerant of markdown-fenced JSON (```json … ```) and short
+        // model preambles before the JSON body. See
+        // `super::plan_parser::parse_plan_lenient` for the contract.
+        let plan: Plan = parse_plan_lenient(&raw).map_err(|e| {
+            // `AgentError::Decode` carries `raw`, but its `#[error(...)]`
+            // Display renders only `detail` — so without this the model
+            // output that actually failed to decode reaches nobody, and
+            // the operator cannot tell an EMPTY completion (a reasoning
+            // model that spent its whole budget thinking) from a merely
+            // non-JSON one. Both render as the same
+            // `expected value at line 1 column 1`.
+            tracing::warn!(
+                detail = %e,
+                raw_len = raw.len(),
+                has_brace = raw.contains('{'),
+                finish_reason = ?usage.finish_reason,
+                prompt_tokens = ?usage.prompt_tokens,
+                completion_tokens = ?usage.completion_tokens,
+                reasoning_chars = usage.reasoning_chars,
+                "plan decode failed"
+            );
+            // The model's own words are held at `debug!` on purpose. A
+            // planner completion restates recalled memories and prior
+            // step output verbatim — on the mail tasks this arc exists
+            // for, that is the user's correspondence — and the daemon
+            // log (`~/.local/state/kastellan/*.out`) is a plaintext file
+            // with none of the access control the `audit_log` table has.
+            // The `warn!` above already carries what actually broke the
+            // case open: `detail` now names the real error (the parser
+            // no longer masks it), and `raw_len`/`has_brace`/
+            // `finish_reason` separate an EMPTY completion from a merely
+            // non-JSON one. Raise the level only when those are not
+            // enough. Full fidelity stays on `AgentError::Decode.raw`.
+            tracing::debug!(
+                raw_head = %raw.chars().take(RAW_HEAD_CHARS).collect::<String>(),
+                "head of the raw model output that failed to decode"
+            );
+            AgentError::Decode {
+                detail: e.to_string(),
+                raw: raw.clone(),
+                usage: usage.clone(),
+                latency_ms,
+            }
+        })?;
+
+        Ok((plan, meta))
+    }
+
+    /// One planner request, for either loop: entity seeds, recall, the
+    /// assembled system prompt for `prompt_name`, the user message
+    /// `user_msg(now)` builds, then `prior` (a re-ask's two messages), sent
+    /// with both #941 bounds. Returns the raw reply and its cost; the caller
+    /// parses it. The classic loop's request bytes are unchanged by the split
+    /// (the notebook loop, #922, is the second caller).
+    pub(crate) async fn send_turn(
+        &self,
+        prompt_name: &str,
+        ctx: &TaskContext,
+        user_msg: impl FnOnce(Option<&str>) -> String + Send,
+        prior: Option<[ChatMessage; 2]>,
+        thinking: ThinkingPolicy,
+    ) -> Result<(String, FormulationMeta), AgentError> {
+        let entry = self.prompts.get(prompt_name)
             .ok_or(AgentError::PromptMissing)?;
 
         let base = entry.content.clone();
@@ -350,12 +418,12 @@ impl RouterAgent {
             format!("{:x}", h.finalize())
         };
 
-        let user_msg = serialise_context_for_agent(ctx, synthesize, assembled.now.as_deref());
+        let user_msg = user_msg(assembled.now.as_deref());
         let local_model = self.router.config().local_model.clone();
 
         let mut messages = vec![ChatMessage::system(assembled.system_prompt), ChatMessage::user(user_msg)];
-        if let Some(reply) = prior_reply {
-            messages.extend(context::reformat_messages(reply));
+        if let Some(prior) = prior {
+            messages.extend(prior);
         }
         let req = ChatRequest {
             model: local_model.clone(),
@@ -391,51 +459,6 @@ impl RouterAgent {
             .unwrap_or_default();
         let usage = kastellan_llm_router::CompletionStats::from_response(&resp);
 
-        // Tolerant of markdown-fenced JSON (```json … ```) and short
-        // model preambles before the JSON body. See
-        // `super::plan_parser::parse_plan_lenient` for the contract.
-        let plan: Plan = parse_plan_lenient(&raw).map_err(|e| {
-            // `AgentError::Decode` carries `raw`, but its `#[error(...)]`
-            // Display renders only `detail` — so without this the model
-            // output that actually failed to decode reaches nobody, and
-            // the operator cannot tell an EMPTY completion (a reasoning
-            // model that spent its whole budget thinking) from a merely
-            // non-JSON one. Both render as the same
-            // `expected value at line 1 column 1`.
-            tracing::warn!(
-                detail = %e,
-                raw_len = raw.len(),
-                has_brace = raw.contains('{'),
-                finish_reason = ?usage.finish_reason,
-                prompt_tokens = ?usage.prompt_tokens,
-                completion_tokens = ?usage.completion_tokens,
-                reasoning_chars = usage.reasoning_chars,
-                "plan decode failed"
-            );
-            // The model's own words are held at `debug!` on purpose. A
-            // planner completion restates recalled memories and prior
-            // step output verbatim — on the mail tasks this arc exists
-            // for, that is the user's correspondence — and the daemon
-            // log (`~/.local/state/kastellan/*.out`) is a plaintext file
-            // with none of the access control the `audit_log` table has.
-            // The `warn!` above already carries what actually broke the
-            // case open: `detail` now names the real error (the parser
-            // no longer masks it), and `raw_len`/`has_brace`/
-            // `finish_reason` separate an EMPTY completion from a merely
-            // non-JSON one. Raise the level only when those are not
-            // enough. Full fidelity stays on `AgentError::Decode.raw`.
-            tracing::debug!(
-                raw_head = %raw.chars().take(RAW_HEAD_CHARS).collect::<String>(),
-                "head of the raw model output that failed to decode"
-            );
-            AgentError::Decode {
-                detail: e.to_string(),
-                raw: raw.clone(),
-                usage: usage.clone(),
-                latency_ms,
-            }
-        })?;
-
         // recall_count is `usize` → `u32` via `as`; the cap_and_split
         // helper bounds the row count to L_RECALL_CAP_BYTES/min-body
         // size = at most ~4096 rows in the pathological 1-byte case,
@@ -452,7 +475,7 @@ impl RouterAgent {
         let graph_seed_source = seeds.source;
 
         let meta = FormulationMeta {
-            prompt_name: "agent_planner".into(),
+            prompt_name: prompt_name.into(),
             prompt_sha256: entry.sha256.clone(),
             llm_model: local_model,
             llm_backend: "local".to_string(),
@@ -470,7 +493,7 @@ impl RouterAgent {
             graph_seed_source,
             usage,
         };
-        Ok((plan, meta))
+        Ok((raw, meta))
     }
 }
 

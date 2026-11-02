@@ -75,6 +75,15 @@ pub(crate) fn render_turn(
         let items: Vec<Value> = unseen.iter().map(|c| json!({"text": c.text})).collect();
         fields.push(("corrections", Value::Array(items).to_string()));
     }
+    // The reviewer's word on earlier calls, as the classic loop shows it:
+    // without `blocks` a blocked call would be tried again blind. Both only
+    // grow, so they sit before the parts that change every turn.
+    if !ctx.advisories.is_empty() {
+        fields.push(("advisories", json!(ctx.advisories).to_string()));
+    }
+    if !ctx.blocks.is_empty() {
+        fields.push(("blocks", json!(ctx.blocks).to_string()));
+    }
     if let Some(cur) = current {
         fields.push(("current_step", current_step_view(&cur)));
     }

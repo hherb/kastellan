@@ -10,9 +10,11 @@
 //!   into its current notebook.
 //! * [`render`] — the user message of one turn, screened and stable-first.
 //! * [`reply`] — parse and check a turn's reply; turn it into a `Plan`.
+//! * [`formulator`] — send one turn to the model.
 //!
 //! Design: `docs/superpowers/specs/2026-11-01-task-notebook-design.md`.
 
+pub(crate) mod formulator;
 pub(crate) mod render;
 pub(crate) mod reply;
 pub(crate) mod state;

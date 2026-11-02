@@ -256,18 +256,6 @@ pub(crate) fn render_tool_doc(t: &AdvertisedTool) -> String {
     out
 }
 
-/// The `<tools>` block as a catalogue: one name line per tool, no params
-/// (#922). The notebook's planning turn needs only to know what exists; a
-/// step turn gets its own tool's full [`render_tool_doc`].
-pub(crate) fn render_tool_catalogue(tools: &[AdvertisedTool]) -> String {
-    let mut out = String::from("<tools>\n");
-    for t in tools {
-        out.push_str(&tool_name_line(t));
-    }
-    out.push_str("</tools>\n\n");
-    out
-}
-
 fn tool_name_line(t: &AdvertisedTool) -> String {
     format!("- {} (method: {}): {}\n", t.doc.name, t.doc.method, t.doc.summary)
 }

@@ -1,4 +1,4 @@
-//! The per-tool doc and the catalogue the notebook loop uses (#922).
+//! The per-tool doc the notebook loop shows for the current step (#922).
 
 use super::*;
 use crate::prompt_assembly::AdvertisedTool;
@@ -32,14 +32,4 @@ fn render_tool_doc_matches_the_classic_block() {
     let joined: String = tools.iter().map(render_tool_doc).collect();
     assert_eq!(render_tools_block(&tools), format!("<tools>\n{joined}</tools>\n\n"));
     assert!(joined.contains("  allowed: "), "the allowlist line is part of the doc: {joined}");
-}
-
-#[test]
-fn the_catalogue_lists_every_tool_without_params() {
-    let out = render_tool_catalogue(&tools());
-    assert_eq!(
-        out,
-        "<tools>\n- shell-exec (method: shell.exec): Run one allowlisted command.\n\
-         - web-search (method: web.search): Search the web.\n</tools>\n\n"
-    );
 }

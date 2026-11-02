@@ -100,7 +100,7 @@ fn the_answer_ceiling_is_the_highest_of_floor_touched_and_declared() {
 
 #[test]
 fn the_answer_plan_is_terminal() {
-    let p = answer_plan("the answer", DataClass::Personal);
+    let p = answer_plan("the answer", DataClass::Personal, None);
     assert!(p.is_terminal());
     assert_eq!(p.data_ceiling, Some(DataClass::Personal));
     assert_eq!(p.result.unwrap()["body"], "the answer");
@@ -116,4 +116,13 @@ fn the_call_plan_is_one_reviewable_step() {
     assert_eq!(p.steps[0].classification, DataClass::Personal);
     assert_eq!(p.context, "s", "the tick's summary is the plan's context");
     assert_eq!(p.data_ceiling, None, "resolved by the loop against the floor");
+}
+
+#[test]
+fn a_refusal_rides_on_the_answer() {
+    let r = check(json!({"answer": {"body": "no", "refused": {"principle": 2, "reason": "impersonation"}}}), &two_steps())
+        .unwrap();
+    let a = r.answer.unwrap();
+    let p = answer_plan(&a.body, DataClass::Public, a.refused);
+    assert!(p.is_refused() && p.is_terminal());
 }

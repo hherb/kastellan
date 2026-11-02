@@ -90,6 +90,8 @@ fn top_level_keys(s: &str) -> Vec<String> {
 fn keys_follow_the_stable_first_order() {
     let mut c = ctx();
     c.conversation = vec![json!({"user": "earlier"})];
+    c.advisories = vec!["careful".into()];
+    c.blocks = vec!["denied".into()];
     let state = fold(&[
         steps(2),
         entry(2, EntryKind::Correction, json!({"text": "the other account"})),
@@ -101,7 +103,10 @@ fn keys_follow_the_stable_first_order() {
     let s = render_turn(&c, &state, 0, Some(cur), BUDGET, Some("2026-11-02T10:00"));
     assert_eq!(
         top_level_keys(&s),
-        ["instruction", "classification_floor", "conversation", "notebook", "corrections", "current_step", "turn_budget", "now"],
+        [
+            "instruction", "classification_floor", "conversation", "notebook", "corrections", "advisories", "blocks",
+            "current_step", "turn_budget", "now"
+        ],
         "{s}"
     );
     // And inside the notebook: steps, then summary, then findings — the
