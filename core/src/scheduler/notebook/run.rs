@@ -267,7 +267,11 @@ async fn ask(
             Err(detail) => Err(AgentError::Decode { detail, raw, usage: meta.usage, latency_ms: meta.latency_ms }),
         }
     };
-    let first = check(nb.notebook_turn(ctx, msg, None, ThinkingPolicy::RouterDefault).await);
+    // The forced-answer turn writes from findings already extracted, and it
+    // is the last chance: thinking off, so it cannot spend its whole budget
+    // reasoning (DGX task 269 lost 408 s and its answer that way).
+    let thinking = if guard.answer_turn { ThinkingPolicy::Suppress } else { ThinkingPolicy::RouterDefault };
+    let first = check(nb.notebook_turn(ctx, msg, None, thinking).await);
     let mut retried = false;
     let mut reasked = false;
     let result = match first {
@@ -275,7 +279,7 @@ async fn ask(
             record(pool, ctx, guard, failed_llm_calls, &e, false).await;
             tracing::warn!(task_id = ctx.task_id, "notebook turn returned an empty completion; asking again once");
             retried = true;
-            check(nb.notebook_turn(ctx, msg, None, ThinkingPolicy::RouterDefault).await)
+            check(nb.notebook_turn(ctx, msg, None, thinking).await)
         }
         Err(e) if e.non_plan_answer().is_some() => {
             record(pool, ctx, guard, failed_llm_calls, &e, false).await;
@@ -301,7 +305,11 @@ async fn ask(
         Err(e) => {
             record(pool, ctx, guard, failed_llm_calls, &e, reasked).await;
             let timed_out = e.is_request_timeout();
-            if llm_failure::should_force_synthesis(timed_out, guard.gathered, guard.answer_attempted) {
+            // A blank reply cut off by `max_tokens` (#941) ran out of room the
+            // way a timeout runs out of time: the same request fails the same
+            // way, so after gathering it spends the forced-answer turn too.
+            let out_of_room = timed_out || ran_out_of_tokens(&e);
+            if llm_failure::should_force_synthesis(out_of_room, guard.gathered, guard.answer_attempted) {
                 return Asked::ForceAnswer;
             }
             let detail = if timed_out {
@@ -318,6 +326,13 @@ async fn ask(
             })
         }
     }
+}
+
+/// A blank reply the backend cut off at `max_tokens` (`finish_reason:
+/// length`): the model spent the whole budget thinking.
+fn ran_out_of_tokens(e: &AgentError) -> bool {
+    matches!(e, AgentError::Decode { raw, usage, .. }
+        if raw.trim().is_empty() && usage.finish_reason.as_deref() == Some("length"))
 }
 
 /// Count one failed model call and write its `plan.formulate_failed` row.

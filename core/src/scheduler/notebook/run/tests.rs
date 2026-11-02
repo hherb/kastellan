@@ -18,6 +18,8 @@ use crate::scheduler::agent::{AgentError, FormulationMeta};
 use crate::scheduler::inner_loop::ClassificationFloorSource;
 use crate::scheduler::notebook::formulator::UserMessage;
 
+const RUNAWAY: &str = "<runaway>";
+
 // ── scripted model ──────────────────────────────────────────────────────
 
 /// Returns `replies` in order, and records each turn's rendered message and
@@ -27,6 +29,7 @@ struct Script {
     replies: Mutex<VecDeque<String>>,
     messages: Mutex<Vec<String>>,
     reasks: Mutex<Vec<String>>,
+    thinking: Mutex<Vec<ThinkingPolicy>>,
     correction_during_first_turn: Option<(sqlx::PgPool, i64, &'static str)>,
 }
 
@@ -40,6 +43,7 @@ impl Script {
             replies: Mutex::new(replies.iter().cloned().collect()),
             messages: Mutex::new(Vec::new()),
             reasks: Mutex::new(Vec::new()),
+            thinking: Mutex::new(Vec::new()),
             correction_during_first_turn: None,
         }
     }
@@ -56,7 +60,7 @@ impl NotebookFormulator for Script {
         _ctx: &TaskContext,
         user_msg: &UserMessage<'_>,
         prior: Option<(&str, &str)>,
-        _thinking: ThinkingPolicy,
+        thinking: ThinkingPolicy,
     ) -> Result<(String, FormulationMeta), AgentError> {
         let first = self.messages.lock().unwrap().is_empty();
         self.messages.lock().unwrap().push(user_msg(None));
@@ -70,6 +74,13 @@ impl NotebookFormulator for Script {
         // is re-asked once and then fails — never an empty one, which would be
         // retried as a blank completion.
         let reply = self.replies.lock().unwrap().pop_front().unwrap_or_else(|| "out of script".into());
+        self.thinking.lock().unwrap().push(thinking);
+        // `RUNAWAY` stands for a reply cut off at `max_tokens` with nothing said.
+        if reply == RUNAWAY {
+            let mut m = meta();
+            m.usage.finish_reason = Some("length".into());
+            return Ok((String::new(), m));
+        }
         Ok((reply, meta()))
     }
 
@@ -250,6 +261,7 @@ async fn the_notebook_loop() {
     infeasible_completes_with_the_reason(&pool).await;
     a_step_replanned_away_still_counts_toward_the_ceiling(&pool).await;
     tasks_correct_adds_to_a_running_task_only(&pool).await;
+    a_runaway_reply_after_gathering_spends_the_answer_turn(&pool).await;
     the_turn_cap_is_twice_max_plans(&pool).await;
 }
 
@@ -433,4 +445,26 @@ async fn tasks_correct_adds_to_a_running_task_only(pool: &sqlx::PgPool) {
     assert_eq!(correct_and_audit(pool, pending, "x").await.unwrap(), CorrectOutcome::NotRunning);
     assert_eq!(correct_and_audit(pool, i64::MAX, "x").await.unwrap(), CorrectOutcome::NotRunning);
     assert!(db::entries(pool, pending, 0).await.unwrap().is_empty());
+}
+
+/// DGX task 269: a turn spent its whole `max_tokens` thinking and said
+/// nothing. With findings in hand that is the forced-answer turn, written
+/// with thinking off — not a failure that throws the findings away.
+async fn a_runaway_reply_after_gathering_spends_the_answer_turn(pool: &sqlx::PgPool) {
+    let script = Script::raw(&[
+        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}).to_string(),
+        RUNAWAY.into(),
+        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A"}}).to_string(),
+    ]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(r.result.failed_llm_calls, 1);
+    let last: Value = serde_json::from_str(script.messages().last().unwrap()).unwrap();
+    assert_eq!(last["turn_budget"], json!({"directive": ANSWER_DIRECTIVE}));
+    assert_eq!(script.thinking.lock().unwrap().last(), Some(&ThinkingPolicy::Suppress));
+
+    // Before anything was gathered there is nothing to answer from: it fails.
+    let script = Script::raw(&[RUNAWAY.into()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert!(matches!(r.result.outcome, Outcome::Failed(_)), "{:?}", r.result.outcome);
 }
