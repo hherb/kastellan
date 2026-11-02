@@ -85,6 +85,10 @@ async fn the_sift_loop() {
     the_deadline_stops_sorting_and_keeps_the_partial_scrapbook(&pool).await;
     an_answer_table_renders_every_kept_row_after_the_body(&pool).await;
     an_answer_table_naming_another_conversations_scrapbook_is_not_included(&pool).await;
+    a_follow_up_sifts_an_earlier_scrapbook_without_searching(&pool).await;
+    an_answer_table_of_an_earlier_turns_scrapbook_carries_its_class(&pool).await;
+    a_scrapbook_ref_outside_the_conversation_is_refused(&pool).await;
+    may_read_only_this_task_and_its_conversation(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {
@@ -279,4 +283,80 @@ async fn an_answer_table_naming_another_conversations_scrapbook_is_not_included(
     let b = body(&r.result);
     assert!(!b.contains("secret-1") && !b.contains("99"), "{b}");
     assert!(b.contains("could not be included"), "{b}");
+}
+
+/// An earlier turn's task with one sift (sift 2) of `n` kept rows of `class`.
+async fn earlier_turn(pool: &sqlx::PgPool, n: usize, class: &str) -> i64 {
+    let earlier = new_task(pool, 5).await.task_id;
+    let rows: Vec<scrapbook::NewRow> = (0..n)
+        .map(|i| scrapbook::NewRow {
+            kind: RowKind::Kept,
+            source: json!({"id": format!("e{i}")}),
+            fields: json!({"amount": i * 10}),
+            classification: class.into(),
+        })
+        .collect();
+    scrapbook::append_rows(pool, earlier, 2, &rows).await.unwrap();
+    earlier
+}
+
+fn over_scrapbook(step: u32, r: &str) -> Value {
+    json!({"step": step, "tool": "sift", "method": "sift.run",
+           "parameters": {"over": {"scrapbook": r}, "keep_if": "over 5", "fields": ["amount"]},
+           "returns": "kept", "done_when": "sorted", "classification": "Personal"})
+}
+
+async fn a_follow_up_sifts_an_earlier_scrapbook_without_searching(pool: &sqlx::PgPool) {
+    let earlier = earlier_turn(pool, 3, "Personal").await;
+    let mut ctx = new_task(pool, 5).await;
+    ctx.conversation_task_ids = Some(vec![earlier]);
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": over_scrapbook(1, &format!("sb:{earlier}:2"))}),
+        json!({"tick": tick(1, "sorted"), "answer": {"body": "done"}}),
+    ])
+    .sorting(&[no(), keep(10), keep(20)]);
+    let r = run(pool, &script, ctx).await;
+    assert!(r.tools.dispatched.lock().unwrap().is_empty(), "nothing was searched or read again");
+    let sorted = script.sorted.lock().unwrap().clone();
+    assert_eq!(sorted.len(), 3);
+    assert!(sorted[1].contains("\"amount\":10") && sorted[1].contains("e1"), "each row's fields and source: {}", sorted[1]);
+    assert_eq!(rows(pool, r.task_id, 1).await.len(), 2, "the follow-up's own scrapbook");
+}
+
+async fn an_answer_table_of_an_earlier_turns_scrapbook_carries_its_class(pool: &sqlx::PgPool) {
+    let earlier = earlier_turn(pool, 2, "Secret").await;
+    let mut ctx = new_task(pool, 5).await;
+    ctx.conversation_task_ids = Some(vec![earlier]);
+    let script = Script::new(&[json!({"steps": steps(&[1]),
+        "answer": {"body": "As before:", "table": {"scrapbook": format!("sb:{earlier}:2")}}})]);
+    let r = run(pool, &script, ctx).await;
+    let b = body(&r.result);
+    assert!(b.contains("| amount | source |") && b.contains("| 10 | e1 |"), "{b}");
+    assert_eq!(last_ceiling(pool, r.task_id).await, json!("Secret"), "the rows' class is the answer's ceiling");
+}
+
+async fn a_scrapbook_ref_outside_the_conversation_is_refused(pool: &sqlx::PgPool) {
+    let elsewhere = earlier_turn(pool, 1, "Personal").await;
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": over_scrapbook(1, &format!("sb:{elsewhere}:2"))}),
+        json!({"infeasible": {"reason": "refused"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert!(script.sorted.lock().unwrap().is_empty(), "no row of another conversation reached the sorter");
+    assert!(kinds(pool, r.task_id).await.contains(&EntryKind::FailedStep));
+    let v: Value = serde_json::from_str(&script.messages()[1]).unwrap();
+    assert!(v["blocks"].to_string().contains("sift_refused"), "{}", v["blocks"]);
+}
+
+async fn may_read_only_this_task_and_its_conversation(pool: &sqlx::PgPool) {
+    use crate::scheduler::notebook::sift::{may_read, params::ScrapRef};
+    let mut ctx = new_task(pool, 5).await;
+    let own = ScrapRef { task_id: ctx.task_id, sift: 1 };
+    let loaded = ScrapRef { task_id: ctx.task_id + 1000, sift: 1 };
+    ctx.conversation_task_ids = Some(vec![loaded.task_id]);
+    assert!(may_read(&ctx, own) && may_read(&ctx, loaded));
+    assert!(!may_read(&ctx, ScrapRef { task_id: ctx.task_id + 2000, sift: 1 }));
+    ctx.conversation_task_ids = None;
+    assert!(may_read(&ctx, own), "a failed conversation read still allows the task's own");
+    assert!(!may_read(&ctx, loaded), "and nothing else");
 }

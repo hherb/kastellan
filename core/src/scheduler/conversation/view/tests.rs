@@ -22,6 +22,7 @@ fn turn(task_id: i64, user: &str, answer: &str) -> Turn {
             }],
             omitted_calls: 0,
             data_class: DataClass::Personal,
+            scrapbooks: vec![],
         }),
     }
 }
@@ -331,4 +332,23 @@ fn a_conversation_that_fits_exactly_keeps_every_turn() {
         out.turns.iter().all(|t| t.get(OMITTED_TURNS_KEY).is_none()),
         "nothing was dropped, so nothing is marked omitted",
     );
+}
+
+/// A follow-up can only sift an earlier scrapbook it can name: the view lists
+/// each turn's (#922, K11).
+#[test]
+fn a_turn_with_a_scrapbook_shows_it() {
+    let mut t = turn(1, "list my invoices", "here they are");
+    t.record.as_mut().unwrap().scrapbooks = vec![crate::scheduler::conversation::record::TurnScrapbook {
+        scrapbook: "sb:1:2".into(),
+        criterion: "an invoice".into(),
+        fields: vec!["amount".into()],
+        rows: 18,
+    }];
+    let out = render(&[t, turn(2, "q", "a")], CONVERSATION_BUDGET);
+    assert_eq!(
+        out.turns[0]["scrapbooks"],
+        serde_json::json!([{"scrapbook": "sb:1:2", "criterion": "an invoice", "fields": ["amount"], "rows": 18}])
+    );
+    assert!(out.turns[1].get("scrapbooks").is_none(), "a turn with none shows no key");
 }

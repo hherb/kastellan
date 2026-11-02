@@ -26,6 +26,11 @@ pub(crate) const CALLS_PER_TURN: usize = 16;
 /// Most serialised bytes one turn's record may occupy in `tasks.turn_record`.
 pub(crate) const TURN_RECORD_CAP: usize = 8 * 1024;
 
+/// Most scrapbooks one turn records, oldest dropped first, and most
+/// characters of one field name in them (#922): a few hundred bytes a turn.
+pub(crate) const SCRAPBOOKS_PER_TURN: usize = 8;
+pub(crate) const FIELD_NAME_MAX_CHARS: usize = 64;
+
 /// One tool call a turn made successfully.
 ///
 /// `parameters` is the planner's own input to the call, pruned by
@@ -55,6 +60,39 @@ pub(crate) struct TurnRecord {
     /// floor and every dispatched step's declared classification. The next
     /// turn inherits it (see [`super::floor`]).
     pub(crate) data_class: DataClass,
+    /// The scrapbooks this turn's sifts left (#922, S6): a follow-up may sift
+    /// one or show it as a table instead of searching again. Absent in a
+    /// record stored before them, and when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) scrapbooks: Vec<TurnScrapbook>,
+}
+
+/// One scrapbook a turn left: its ref, the criterion and fields it was made
+/// with, and how many rows it kept. The rows stay in the database.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct TurnScrapbook {
+    pub(crate) scrapbook: String,
+    pub(crate) criterion: String,
+    pub(crate) fields: Vec<String>,
+    pub(crate) rows: usize,
+}
+
+/// The scrapbook a sift's recorded result names, if `record` is a sift.
+fn scrapbook_of(record: &PlanRecord) -> Option<TurnScrapbook> {
+    use crate::scheduler::notebook::sift::SIFT_TOOL;
+    let (Some(step), Some(StepOutcome::Ok(v))) = (record.plan.steps.first(), record.outcomes().first()) else {
+        return None;
+    };
+    if step.tool != SIFT_TOOL {
+        return None;
+    }
+    let fields: Vec<String> = serde_json::from_value(v["fields"].clone()).unwrap_or_default();
+    Some(TurnScrapbook {
+        scrapbook: v["scrapbook"].as_str()?.to_string(),
+        criterion: clamp_chars(v["criterion"].as_str().unwrap_or_default(), RETURNS_MAX_CHARS),
+        fields: fields.iter().map(|f| clamp_chars(f, FIELD_NAME_MAX_CHARS)).collect(),
+        rows: v["kept"].as_u64().unwrap_or(0) as usize,
+    })
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -84,8 +122,13 @@ fn clamp_chars(s: &str, max_chars: usize) -> String {
 pub(crate) fn from_plans(plans: &[PlanRecord], final_floor: DataClass) -> TurnRecord {
     let mut calls: Vec<TurnCall> = Vec::new();
     let mut data_class = final_floor;
+    let mut scrapbooks: Vec<TurnScrapbook> = plans.iter().filter_map(scrapbook_of).collect();
+    scrapbooks.drain(0..scrapbooks.len().saturating_sub(SCRAPBOOKS_PER_TURN));
 
     for record in plans {
+        // A sift's reads were never the planner's calls: they raise the
+        // class but are no referent (the sift's own call is).
+        let sift_reads = record.plan.decision.starts_with(crate::scheduler::notebook::sift::SIFT_READS_DECISION);
         // `outcomes` is index-aligned with `plan.steps`; zip stops at the
         // shorter one, so a plan whose steps were not all dispatched (an early
         // terminal, a cap) contributes only what actually ran.
@@ -93,7 +136,7 @@ pub(crate) fn from_plans(plans: &[PlanRecord], final_floor: DataClass) -> TurnRe
             if step.classification.rank() > data_class.rank() {
                 data_class = step.classification;
             }
-            if matches!(outcome, StepOutcome::Err { .. }) {
+            if sift_reads || matches!(outcome, StepOutcome::Err { .. }) {
                 continue;
             }
             calls.push(TurnCall {
@@ -116,7 +159,7 @@ pub(crate) fn from_plans(plans: &[PlanRecord], final_floor: DataClass) -> TurnRe
     // Then the byte cap, measured rather than estimated: drop the oldest call
     // until the serialised record fits. Terminates because an empty `calls`
     // serialises well under the cap.
-    let mut record = TurnRecord { calls, omitted_calls: over, data_class };
+    let mut record = TurnRecord { calls, omitted_calls: over, data_class, scrapbooks };
     while !record.calls.is_empty() && serialised_len(&record) > TURN_RECORD_CAP {
         record.calls.remove(0);
         record.omitted_calls += 1;

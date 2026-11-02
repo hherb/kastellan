@@ -99,6 +99,6 @@ fn add_counts(c: &mut Counts, rows: &[Row], summary: Option<&serde_json::Value>)
 
 /// A row's class; one that does not parse counts as the highest (fail
 /// closed: the ceiling must never be too low).
-fn row_class(r: &Row) -> DataClass {
+pub(crate) fn row_class(r: &Row) -> DataClass {
     serde_json::from_value(serde_json::Value::String(r.classification.clone())).unwrap_or(DataClass::Secret)
 }

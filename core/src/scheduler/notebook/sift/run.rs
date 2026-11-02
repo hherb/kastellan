@@ -26,7 +26,8 @@ use super::params::{check_read, parse_params, Over, ReadTemplate, ScrapRef, Sift
 use super::sorter::{parse_sort_reply, sorter_message, SortReply, SORTER_ITEM_CAP};
 use super::table::Counts;
 use super::template::{expand_reads, items_at};
-use super::{is_sift_plan, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
+use super::answer::row_class;
+use super::{is_sift_plan, may_read, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
 use crate::cassandra::review::ChainReviewStage;
 use crate::cassandra::types::{DataClass, Plan, PlannedStep};
 use crate::scheduler::agent::FormulationMeta;
@@ -185,14 +186,16 @@ async fn check<'a>(
     if let Some(t) = &p.read {
         check_read(t, cfg)?;
     }
-    let over = resolve_over(ctx, &p)?;
+    let over = resolve_over(r.pool, ctx, &p).await?;
     Ok((p, sorter, over))
 }
 
 /// The list `p.over` names. A step's list is the raw result of its last
 /// successful call that was not itself a sift (so a second sift over the
-/// same step, `from` further on, still finds the search).
-fn resolve_over(ctx: &TaskContext, p: &SiftParams) -> Result<OverList, String> {
+/// same step, `from` further on, still finds the search). A scrapbook's is
+/// its kept rows, each `{fields, source}`, if this task may read it (K11);
+/// their class is the highest of theirs.
+async fn resolve_over(pool: &PgPool, ctx: &TaskContext, p: &SiftParams) -> Result<OverList, String> {
     match &p.over {
         Over::Step(n) => {
             let record = ctx
@@ -207,7 +210,19 @@ fn resolve_over(ctx: &TaskContext, p: &SiftParams) -> Result<OverList, String> {
             };
             Ok(OverList { items: items_at(result, p.items.as_deref())?, tool: step.tool.clone(), class: step.classification })
         }
-        Over::Scrapbook(_) => Err("sifting an earlier scrapbook is not available yet".into()),
+        Over::Scrapbook(r) => {
+            if !may_read(ctx, *r) {
+                return Err(format!("scrapbook {r} is not from this conversation"));
+            }
+            let rows = scrapbook::rows(pool, r.task_id, r.sift).await.map_err(|e| {
+                tracing::warn!(task_id = ctx.task_id, scrapbook = %r, error = %e, "sift: scrapbook rows not read");
+                format!("scrapbook {r} could not be read")
+            })?;
+            let kept: Vec<&scrapbook::Row> = rows.iter().filter(|row| row.kind == RowKind::Kept).collect();
+            let class = kept.iter().map(|row| row_class(row)).fold(ctx.classification_floor, DataClass::max);
+            let items = kept.iter().map(|row| json!({"fields": row.fields, "source": row.source})).collect();
+            Ok(OverList { items, tool: SIFT_TOOL.into(), class })
+        }
     }
 }
 
