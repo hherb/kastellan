@@ -22,6 +22,7 @@ pub mod conversation;
 pub mod crash_recovery;
 pub mod inner_loop;
 pub mod inner_loop_audit;
+pub mod notebook;
 pub mod l3_run;
 pub mod plan_parser;
 pub mod prompts;

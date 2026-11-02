@@ -92,22 +92,28 @@ use crate::cassandra::types::Plan;
 /// let plan = parse_plan_lenient(raw)?;
 /// ```
 pub fn parse_plan_lenient(raw: &str) -> Result<Plan, serde_json::Error> {
+    parse_json_lenient::<Plan>(raw)
+}
+
+/// [`parse_plan_lenient`]'s strict-then-first-`{` contract for any reply
+/// shape — the notebook loop's replies (#922) use it too, so both loops
+/// tolerate the same fences and preambles.
+pub(crate) fn parse_json_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     // Strict path: cheap, exact, no fallback artefacts.
-    if let Ok(plan) = serde_json::from_str::<Plan>(raw) {
-        return Ok(plan);
+    if let Ok(v) = serde_json::from_str::<T>(raw) {
+        return Ok(v);
     }
 
     // Lenient path: find first `{` and stream-parse from there. If
     // there is no `{` at all the input cannot be JSON; fall back to
     // the strict error so the caller sees the original diagnostic.
     let Some(start) = raw.find('{') else {
-        return serde_json::from_str::<Plan>(raw);
+        return serde_json::from_str::<T>(raw);
     };
 
-    let mut it =
-        serde_json::Deserializer::from_str(&raw[start..]).into_iter::<Plan>();
+    let mut it = serde_json::Deserializer::from_str(&raw[start..]).into_iter::<T>();
     match it.next() {
-        Some(Ok(plan)) => Ok(plan),
+        Some(Ok(v)) => Ok(v),
         // The input DID contain a `{`, so "expected value at line 1
         // column 1" (what the strict path says about the fence) is not
         // the failure worth reporting — the lenient path's error is.
@@ -115,7 +121,7 @@ pub fn parse_plan_lenient(raw: &str) -> Result<Plan, serde_json::Error> {
         Some(Err(e)) => Err(e),
         // Nothing at all after the `{` — no value to describe. The
         // strict error is as good as anything here.
-        None => serde_json::from_str::<Plan>(raw),
+        None => serde_json::from_str::<T>(raw),
     }
 }
 

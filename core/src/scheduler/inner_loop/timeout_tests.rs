@@ -5,7 +5,8 @@
 //! can still produce an answer, must not throw away gathered work, and must
 //! say what happened when it cannot. Cases 12–14 are the fast lane's
 //! wall-clock ceiling (#922), which a run reaches between plans and answers
-//! like the plan cap; cases 15–20 are the #945 re-ask.
+//! like the plan cap; cases 15–20 are the #945 re-ask; 21–22 a reply cut
+//! off by `max_tokens` (#941).
 //!
 //! The decisions are unit-tested in `llm_failure/tests.rs`; these run the
 //! real `run_to_terminal` against a real Postgres and a formulator whose
@@ -349,4 +350,27 @@ async fn a_planning_timeout_after_gathering_answers_from_what_was_gathered() {
     let d = failed_detail(&r);
     assert!(d.starts_with("The language model's first answer was not a plan, so it was asked again. "), "{d}");
     assert!(d.contains("timed out"), "the timeout query still finds it: {d}");
+
+    // ── 21. A reply cut off by `max_tokens` after gathering spends the
+    //        synthesis turn, like a timeout (#941: the cap is new on every
+    //        classic call, and a long think used to run on instead).
+    let f = TimeoutScript::new(
+        vec![
+            Next::Plan(Box::new(one_step_plan())),
+            Next::Length,
+            Next::Plan(Box::new(terminal_plan("from the synthesis turn"))),
+        ],
+        None,
+    );
+    let (_, r) = run(&pool, f.clone()).await;
+    assert_eq!(completed_body(&r), "from the synthesis turn");
+    assert_eq!(f.synthesis_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(r.failed_llm_calls, 1);
+
+    // ── 22. …and with nothing gathered it fails saying the budget ran out.
+    let f = TimeoutScript::new(vec![Next::Length, Next::Plan(Box::new(terminal_plan("never reached")))], None);
+    let (_, r) = run(&pool, f.clone()).await;
+    let d = failed_detail(&r);
+    assert!(d.starts_with("The language model used its whole reply budget (16384 tokens)"), "{d}");
+    assert_eq!(f.script.lock().unwrap().len(), 1, "a cut-off reply is not asked again");
 }

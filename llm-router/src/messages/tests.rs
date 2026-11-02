@@ -58,6 +58,7 @@ fn chat_request_includes_optional_fields_when_set() {
         thinking: Default::default(),
         logprobs: None,
         top_logprobs: None,
+        timeout: None,
     };
     let s = serde_json::to_string(&req).unwrap();
     assert!(s.contains("\"max_tokens\":42"), "max_tokens missing: {s}");
@@ -106,6 +107,7 @@ fn without_thinking_preserves_the_other_fields() {
         thinking: Default::default(),
         logprobs: None,
         top_logprobs: None,
+        timeout: None,
     }
     .without_thinking();
     assert_eq!(req.model, "m");

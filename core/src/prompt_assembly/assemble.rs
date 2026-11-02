@@ -215,42 +215,49 @@ pub(super) fn escape_untrusted_body(body: &str) -> String {
 fn render_tools_block(tools: &[AdvertisedTool]) -> String {
     let mut out = String::from("<tools>\n");
     for t in tools {
-        out.push_str("- ");
-        out.push_str(t.doc.name);
-        out.push_str(" (method: ");
-        out.push_str(t.doc.method);
-        out.push_str("): ");
-        out.push_str(t.doc.summary);
-        out.push('\n');
-        if !t.doc.params.is_empty() {
-            out.push_str("  params: ");
-            let rendered: Vec<String> = t
-                .doc
-                .params
-                .iter()
-                .map(|p| {
-                    format!(
-                        "{} ({}) [{}]",
-                        p.name,
-                        p.description,
-                        if p.required { "required" } else { "optional" }
-                    )
-                })
-                .collect();
-            out.push_str(&rendered.join(", "));
-            out.push('\n');
-        }
-        // Operator-sourced and already escaped at construction — see
-        // `allowed_values`. The doc fields above are compiled-in and are
-        // deliberately NOT escaped; this line is the only untrusted text here.
-        if let Some(allowed) = t.allowed() {
-            out.push_str("  allowed: ");
-            out.push_str(allowed);
-            out.push('\n');
-        }
+        out.push_str(&render_tool_doc(t));
     }
     out.push_str("</tools>\n\n");
     out
+}
+
+/// One tool's entry in the `<tools>` block: its name line, params and the
+/// operator allowlist. The notebook loop shows this for the current step's
+/// tool only (#922).
+pub(crate) fn render_tool_doc(t: &AdvertisedTool) -> String {
+    let mut out = String::new();
+    out.push_str(&tool_name_line(t));
+    if !t.doc.params.is_empty() {
+        out.push_str("  params: ");
+        let rendered: Vec<String> = t
+            .doc
+            .params
+            .iter()
+            .map(|p| {
+                format!(
+                    "{} ({}) [{}]",
+                    p.name,
+                    p.description,
+                    if p.required { "required" } else { "optional" }
+                )
+            })
+            .collect();
+        out.push_str(&rendered.join(", "));
+        out.push('\n');
+    }
+    // Operator-sourced and already escaped at construction — see
+    // `allowed_values`. The doc fields above are compiled-in and are
+    // deliberately NOT escaped; this line is the only untrusted text here.
+    if let Some(allowed) = t.allowed() {
+        out.push_str("  allowed: ");
+        out.push_str(allowed);
+        out.push('\n');
+    }
+    out
+}
+
+fn tool_name_line(t: &AdvertisedTool) -> String {
+    format!("- {} (method: {}): {}\n", t.doc.name, t.doc.method, t.doc.summary)
 }
 
 /// Render the supplied memory slices, surfaced skills, recall context, and
@@ -350,3 +357,5 @@ pub fn assemble_system_prompt(
 mod tests;
 #[cfg(test)]
 mod cache_prefix_tests;
+#[cfg(test)]
+mod tool_doc_tests;

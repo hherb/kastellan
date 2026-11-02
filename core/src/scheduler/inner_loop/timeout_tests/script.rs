@@ -51,6 +51,9 @@ pub(super) enum Next {
     /// An answer with no content at all (#923) — retried once, unless it is
     /// itself the turn's retry.
     Empty,
+    /// A blank answer cut off at `max_tokens` (`finish_reason: length`,
+    /// #941) — out of room, recovered like a timeout.
+    Length,
     /// A plan that takes this long to formulate — runs a task past its
     /// deadline with a real clock.
     SlowPlan(Box<Plan>, Duration),
@@ -99,6 +102,12 @@ pub(super) async fn resolve(next: Option<Next>) -> Result<(Plan, FormulationMeta
             detail: "EOF while parsing a value at line 1 column 0".into(),
             raw: String::new(),
             usage: Default::default(),
+            latency_ms: 4321,
+        }),
+        Some(Next::Length) => Err(AgentError::Decode {
+            detail: "EOF while parsing a value at line 1 column 0".into(),
+            raw: String::new(),
+            usage: kastellan_llm_router::CompletionStats { finish_reason: Some("length".into()), ..Default::default() },
             latency_ms: 4321,
         }),
         Some(Next::Decode) | None => Err(AgentError::Decode {

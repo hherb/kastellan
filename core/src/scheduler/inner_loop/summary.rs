@@ -39,7 +39,9 @@ use crate::cassandra::types::Plan;
 
 mod budget;
 mod call;
+mod notebook_view;
 mod sink;
+pub(crate) use notebook_view::{notebook_block_audit_payload, screen_model_text};
 use budget::apply_summary_budget;
 use call::{apply_call_budget, call_cost, render_call, render_decision, Screened, CALL_KEY};
 pub(crate) use sink::TIER_SINK;
@@ -184,7 +186,7 @@ const ELIDED_OUTPUT_REASON: &str = "output retrieved, dropped from this summary 
 /// Replaces a failed step's `detail` when the sink screen blocks it. The
 /// `code` is an internal constant and is always kept, so the planner still
 /// learns why the step failed.
-const WITHHELD_MARKER: &str = "[withheld: failed injection screen]";
+pub(crate) const WITHHELD_MARKER: &str = "[withheld: failed injection screen]";
 
 /// The outcome that replaces a successful step dropped by
 /// [`apply_summary_budget`] (#339). A clear signal to the planner that output

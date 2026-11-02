@@ -100,6 +100,7 @@
 
 mod entities;
 mod memory;
+mod correct;
 mod registry;
 mod task;
 
@@ -115,6 +116,7 @@ pub use registry::{
     relation_kinds_remove_and_audit, tools_allowlist_add_and_audit,
     tools_allowlist_remove_and_audit,
 };
+pub use correct::{correct_and_audit, CorrectOutcome, ACTION_TASK_CORRECTED};
 pub use task::{cancel_and_audit, cancel_if_pending_and_audit, submit_and_audit, CancelOutcome};
 
 /// Logical `actor` string written into every CLI-emitted audit row.

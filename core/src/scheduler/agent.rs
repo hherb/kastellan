@@ -17,7 +17,7 @@ use crate::cassandra::types::Plan;
 use kastellan_llm_router::messages::{ChatMessage, ChatRequest};
 use kastellan_llm_router::{Router, RouterError, ThinkingPolicy};
 
-use super::inner_loop::TaskContext;
+use super::inner_loop::{ceiling, TaskContext};
 use super::plan_parser::parse_plan_lenient;
 use super::prompts::PromptCache;
 
@@ -36,7 +36,7 @@ pub enum AgentError {
         usage: kastellan_llm_router::CompletionStats,
         latency_ms: u64,
     },
-    #[error("agent prompt 'agent_planner' not found in cache")]
+    #[error("agent prompt (agent_planner or agent_notebook) not found in cache")]
     PromptMissing,
     /// L0/L1 load failed under the [`SystemPromptBuilder`]; the scheduler's
     /// retry policy decides whether to retry or fail permanently.
@@ -61,6 +61,13 @@ impl AgentError {
     pub fn is_empty_completion(&self) -> bool {
         matches!(self, AgentError::Decode { raw, usage, .. }
             if raw.trim().is_empty() && usage.finish_reason.as_deref() != Some("length"))
+    }
+
+    /// The backend cut the reply off at `max_tokens` (`finish_reason:
+    /// length`, #941), blank or mid-reply: it ran out of room the way a
+    /// timeout runs out of time, and the same request runs out the same way.
+    pub fn ran_out_of_tokens(&self) -> bool {
+        matches!(self, AgentError::Decode { usage, .. } if usage.finish_reason.as_deref() == Some("length"))
     }
 
     /// The model's reply, when it is one the #945 re-ask can use: something
@@ -142,6 +149,13 @@ pub trait PlanFormulator: Send + Sync {
     ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
         None
     }
+
+    /// The notebook loop's door (#922), when this formulator runs in
+    /// notebook mode (`KASTELLAN_PLANNER_MODE=notebook`). `None`, the
+    /// default, runs the task on the classic loop.
+    fn notebook(&self) -> Option<&dyn super::notebook::formulator::NotebookFormulator> {
+        None
+    }
 }
 
 /// Appended to the agent's user message on the forced-synthesis turn. Tells
@@ -165,66 +179,16 @@ or tool call.";
 /// `AgentError::Decode`.
 const RAW_HEAD_CHARS: usize = 600;
 
-/// Returned alongside the decoded `Plan`. The inner loop writes
-/// these fields into the `plan.formulate` audit-log row payload.
-#[derive(Clone, Debug)]
-pub struct FormulationMeta {
-    pub prompt_name: String,
-    pub prompt_sha256: String,
-    pub llm_model: String,
-    pub llm_backend: String,
-    pub latency_ms: u64,
-    pub retry_count: u32,
-    /// SHA-256 (hex) of the *assembled* system prompt the model
-    /// actually saw — distinct from `prompt_sha256`, which is the
-    /// base agent_planner.md hash only.
-    pub assembled_prompt_sha256: String,
-    /// Number of L0 rows the assembler folded in. Operator triage:
-    /// 0 here on a clinical task means the L0 seeder didn't run.
-    pub l0_count: usize,
-    /// Number of L1 rows the assembler folded in. Stays 0 in
-    /// production until an L1 promotion writer lands.
-    pub l1_count: usize,
-    /// Number of L3 skill rows surfaced into the `<skills>` block. Stays
-    /// 0 in production until an operator approves a crystallised skill.
-    pub skill_count: usize,
-    /// Memory ids the recall lane surfaced for this iteration's
-    /// instruction (RRF-fused order, capped at `L_RECALL_CAP_BYTES`).
-    /// Empty when recall returned nothing or degraded due to error.
-    /// Written verbatim to the `recalled_memory_ids` audit-row key.
-    pub recalled_memory_ids: Vec<i64>,
-    /// `recalled_memory_ids.len() as u32`. Redundant but cheap to
-    /// query — observation-phase SQL avoids `jsonb_array_length` for
-    /// the common "did recall fire at all?" question.
-    pub recall_count: u32,
-    /// Hex SHA-256 of the query text (the task instruction). Lets
-    /// observation phase detect when paraphrased prompts produce the
-    /// same recalled-id set vs. genuine drift.
-    pub recall_query_sha256: String,
-    /// Slice F (entity-extraction v2, 2026-05-19): the entity ids the
-    /// gliner-relex extractor (or NoOp) resolved for this query.
-    /// Empty when extraction degraded or no entities matched.
-    pub graph_seed_entity_ids: Vec<i64>,
-    /// `graph_seed_entity_ids.len() as u32`. Cheap-to-query duplicate
-    /// for observation-phase SQL.
-    pub graph_seed_count: u32,
-    /// Which extraction path produced the seeds. v2 production is
-    /// always `SeedSource::GlinerRelex` or `SeedSource::None`.
-    pub graph_seed_source: crate::entity_extraction::SeedSource,
-    /// #774: what the completion cost — prompt, generated and reasoning
-    /// tokens, reasoning length, finish reason — as the backend reported it.
-    /// Written to the audit row's `llm_usage` key, so "why did planning get
-    /// slow?" is a query rather than a benchmark on the live host.
-    pub usage: kastellan_llm_router::CompletionStats,
-}
-
 /// Production adapter: calls the real `Router::send`.
 pub struct RouterAgent {
-    router: std::sync::Arc<Router>,
+    pub(crate) router: std::sync::Arc<Router>,
     prompts: std::sync::Arc<PromptCache>,
     prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
     recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
     entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
+    /// Set in notebook mode (#922): the advertised tools, for the current
+    /// step's tool doc. `None` = the classic loop.
+    pub(crate) notebook_tools: Option<std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>>,
 }
 
 impl RouterAgent {
@@ -235,7 +199,7 @@ impl RouterAgent {
         recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
         entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
     ) -> Self {
-        Self { router, prompts, prompt_builder, recall_builder, entity_extractor }
+        Self { router, prompts, prompt_builder, recall_builder, entity_extractor, notebook_tools: None }
     }
 }
 
@@ -281,6 +245,10 @@ impl PlanFormulator for RouterAgent {
         // on the DGX, 2026-08).
         Some(self.formulate_inner(ctx, synth_turn, ThinkingPolicy::Suppress, Some(reply)).await)
     }
+
+    fn notebook(&self) -> Option<&dyn super::notebook::formulator::NotebookFormulator> {
+        self.notebook_tools.as_ref().map(|_| self as &dyn super::notebook::formulator::NotebookFormulator)
+    }
 }
 
 impl RouterAgent {
@@ -301,7 +269,75 @@ impl RouterAgent {
         thinking: ThinkingPolicy,
         prior_reply: Option<&str>,
     ) -> Result<(Plan, FormulationMeta), AgentError> {
-        let entry = self.prompts.get("agent_planner")
+        let prior = prior_reply.map(context::reformat_messages);
+        let (raw, meta) = self
+            .send_turn("agent_planner", ctx, |now| serialise_context_for_agent(ctx, synthesize, now), prior, thinking)
+            .await?;
+        let (usage, latency_ms) = (meta.usage.clone(), meta.latency_ms);
+
+        // Tolerant of markdown-fenced JSON (```json … ```) and short
+        // model preambles before the JSON body. See
+        // `super::plan_parser::parse_plan_lenient` for the contract.
+        let plan: Plan = parse_plan_lenient(&raw).map_err(|e| {
+            // `AgentError::Decode` carries `raw`, but its `#[error(...)]`
+            // Display renders only `detail` — so without this the model
+            // output that actually failed to decode reaches nobody, and
+            // the operator cannot tell an EMPTY completion (a reasoning
+            // model that spent its whole budget thinking) from a merely
+            // non-JSON one. Both render as the same
+            // `expected value at line 1 column 1`.
+            tracing::warn!(
+                detail = %e,
+                raw_len = raw.len(),
+                has_brace = raw.contains('{'),
+                finish_reason = ?usage.finish_reason,
+                prompt_tokens = ?usage.prompt_tokens,
+                completion_tokens = ?usage.completion_tokens,
+                reasoning_chars = usage.reasoning_chars,
+                "plan decode failed"
+            );
+            // The model's own words are held at `debug!` on purpose. A
+            // planner completion restates recalled memories and prior
+            // step output verbatim — on the mail tasks this arc exists
+            // for, that is the user's correspondence — and the daemon
+            // log (`~/.local/state/kastellan/*.out`) is a plaintext file
+            // with none of the access control the `audit_log` table has.
+            // The `warn!` above already carries what actually broke the
+            // case open: `detail` now names the real error (the parser
+            // no longer masks it), and `raw_len`/`has_brace`/
+            // `finish_reason` separate an EMPTY completion from a merely
+            // non-JSON one. Raise the level only when those are not
+            // enough. Full fidelity stays on `AgentError::Decode.raw`.
+            tracing::debug!(
+                raw_head = %raw.chars().take(RAW_HEAD_CHARS).collect::<String>(),
+                "head of the raw model output that failed to decode"
+            );
+            AgentError::Decode {
+                detail: e.to_string(),
+                raw: raw.clone(),
+                usage: usage.clone(),
+                latency_ms,
+            }
+        })?;
+
+        Ok((plan, meta))
+    }
+
+    /// One planner request, for either loop: entity seeds, recall, the
+    /// assembled system prompt for `prompt_name`, the user message
+    /// `user_msg(now)` builds, then `prior` (a re-ask's two messages), sent
+    /// with both #941 bounds. Returns the raw reply and its cost; the caller
+    /// parses it. The classic loop's request bytes are unchanged by the split
+    /// (the notebook loop, #922, is the second caller).
+    pub(crate) async fn send_turn(
+        &self,
+        prompt_name: &str,
+        ctx: &TaskContext,
+        user_msg: impl FnOnce(Option<&str>) -> String + Send,
+        prior: Option<[ChatMessage; 2]>,
+        thinking: ThinkingPolicy,
+    ) -> Result<(String, FormulationMeta), AgentError> {
+        let entry = self.prompts.get(prompt_name)
             .ok_or(AgentError::PromptMissing)?;
 
         let base = entry.content.clone();
@@ -350,17 +386,20 @@ impl RouterAgent {
             format!("{:x}", h.finalize())
         };
 
-        let user_msg = serialise_context_for_agent(ctx, synthesize, assembled.now.as_deref());
+        let user_msg = user_msg(assembled.now.as_deref());
         let local_model = self.router.config().local_model.clone();
 
         let mut messages = vec![ChatMessage::system(assembled.system_prompt), ChatMessage::user(user_msg)];
-        if let Some(reply) = prior_reply {
-            messages.extend(context::reformat_messages(reply));
+        if let Some(prior) = prior {
+            messages.extend(prior);
         }
         let req = ChatRequest {
             model: local_model.clone(),
             messages,
-            max_tokens: None,
+            // Both bounds are #941: one reply cannot generate without end,
+            // and one call cannot outlive the fast lane's ceiling by more
+            // than the floor.
+            max_tokens: Some(ceiling::PLANNER_MAX_TOKENS),
             temperature: Some(0.0),
             // Left None so the router writes the thinking switch in its
             // configured dialect (#773). Whether to suppress is `thinking`:
@@ -376,7 +415,15 @@ impl RouterAgent {
             // enlarge every planner response for nothing.
             logprobs: None,
             top_logprobs: None,
+            timeout: Some(ceiling::call_timeout(self.router.timeout(), ctx.deadline, std::time::Instant::now())),
         };
+        if req.timeout.is_some_and(|t| t < self.router.timeout()) {
+            tracing::info!(
+                task_id = ctx.task_id,
+                timeout_ms = req.timeout.map_or(0, |t| t.as_millis() as u64),
+                "planner call bounded by the task's time ceiling, not KASTELLAN_LLM_TIMEOUT_MS"
+            );
+        }
 
         let start = std::time::Instant::now();
         let resp = self.router.send(&req).await?;
@@ -386,51 +433,6 @@ impl RouterAgent {
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
         let usage = kastellan_llm_router::CompletionStats::from_response(&resp);
-
-        // Tolerant of markdown-fenced JSON (```json … ```) and short
-        // model preambles before the JSON body. See
-        // `super::plan_parser::parse_plan_lenient` for the contract.
-        let plan: Plan = parse_plan_lenient(&raw).map_err(|e| {
-            // `AgentError::Decode` carries `raw`, but its `#[error(...)]`
-            // Display renders only `detail` — so without this the model
-            // output that actually failed to decode reaches nobody, and
-            // the operator cannot tell an EMPTY completion (a reasoning
-            // model that spent its whole budget thinking) from a merely
-            // non-JSON one. Both render as the same
-            // `expected value at line 1 column 1`.
-            tracing::warn!(
-                detail = %e,
-                raw_len = raw.len(),
-                has_brace = raw.contains('{'),
-                finish_reason = ?usage.finish_reason,
-                prompt_tokens = ?usage.prompt_tokens,
-                completion_tokens = ?usage.completion_tokens,
-                reasoning_chars = usage.reasoning_chars,
-                "plan decode failed"
-            );
-            // The model's own words are held at `debug!` on purpose. A
-            // planner completion restates recalled memories and prior
-            // step output verbatim — on the mail tasks this arc exists
-            // for, that is the user's correspondence — and the daemon
-            // log (`~/.local/state/kastellan/*.out`) is a plaintext file
-            // with none of the access control the `audit_log` table has.
-            // The `warn!` above already carries what actually broke the
-            // case open: `detail` now names the real error (the parser
-            // no longer masks it), and `raw_len`/`has_brace`/
-            // `finish_reason` separate an EMPTY completion from a merely
-            // non-JSON one. Raise the level only when those are not
-            // enough. Full fidelity stays on `AgentError::Decode.raw`.
-            tracing::debug!(
-                raw_head = %raw.chars().take(RAW_HEAD_CHARS).collect::<String>(),
-                "head of the raw model output that failed to decode"
-            );
-            AgentError::Decode {
-                detail: e.to_string(),
-                raw: raw.clone(),
-                usage: usage.clone(),
-                latency_ms,
-            }
-        })?;
 
         // recall_count is `usize` → `u32` via `as`; the cap_and_split
         // helper bounds the row count to L_RECALL_CAP_BYTES/min-body
@@ -448,7 +450,7 @@ impl RouterAgent {
         let graph_seed_source = seeds.source;
 
         let meta = FormulationMeta {
-            prompt_name: "agent_planner".into(),
+            prompt_name: prompt_name.into(),
             prompt_sha256: entry.sha256.clone(),
             llm_model: local_model,
             llm_backend: "local".to_string(),
@@ -466,11 +468,13 @@ impl RouterAgent {
             graph_seed_source,
             usage,
         };
-        Ok((plan, meta))
+        Ok((raw, meta))
     }
 }
 
 mod context;
+mod meta;
+pub use meta::FormulationMeta;
 use context::serialise_context_for_agent;
 #[cfg(test)]
 use context::{reformat_messages, REFORMAT_DIRECTIVE};

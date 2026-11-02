@@ -307,7 +307,15 @@ pub(super) async fn run_one(
 
     let task_id = ctx.task_id;
     let dispatcher_for_purge = std::sync::Arc::clone(&dispatcher);
-    let result = match run_to_terminal(pool, formulator, review, dispatcher, ctx, outbox).await {
+    // The planner mode is the formulator's (`KASTELLAN_PLANNER_MODE`, #922):
+    // a notebook-mode formulator runs every task on the notebook loop.
+    let run = match formulator.notebook() {
+        Some(nb) => {
+            crate::scheduler::notebook::run::run_notebook_to_terminal(pool, nb, review, dispatcher, ctx, outbox).await
+        }
+        None => run_to_terminal(pool, formulator.clone(), review, dispatcher, ctx, outbox).await,
+    };
+    let result = match run {
         Ok(r) => r,
         Err(e) => failed_result(format!("inner_loop: {e}")),
     };

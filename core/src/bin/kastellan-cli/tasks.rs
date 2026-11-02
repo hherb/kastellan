@@ -1,4 +1,4 @@
-//! `tasks {list,status,cancel,fail,tail}` — inspect and manage tasks
+//! `tasks {list,status,cancel,correct,fail,tail}` — inspect and manage tasks
 //! in the scheduler DB.
 
 use std::process::ExitCode;
@@ -9,7 +9,7 @@ use crate::common::{resolve_connect_spec, with_runtime};
 
 pub(crate) fn run_tasks(args: &[String]) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: kastellan-cli tasks <list|status|cancel|fail|tail> ...");
+        eprintln!("usage: kastellan-cli tasks <list|status|cancel|correct|fail|tail> ...");
         return ExitCode::from(2);
     }
     // Per-action dispatch. `with_runtime` is called only from the known
@@ -19,6 +19,7 @@ pub(crate) fn run_tasks(args: &[String]) -> ExitCode {
         "list"   => with_runtime("tasks", tasks_list(&args[1..])),
         "status" => with_runtime("tasks", tasks_status(&args[1..])),
         "cancel" => with_runtime("tasks", tasks_cancel(&args[1..])),
+        "correct" => with_runtime("tasks", tasks_correct(&args[1..])),
         "fail"   => with_runtime("tasks", tasks_fail(&args[1..])),
         "tail"   => tasks_tail(&args[1..]),
         other    => { eprintln!("tasks: unknown subcommand {other}"); ExitCode::from(2) }
@@ -147,6 +148,46 @@ async fn tasks_cancel(args: &[String]) -> ExitCode {
         Ok(CancelOutcome::Cancelled(_))   => { println!("cancelled task {id}"); ExitCode::from(0) }
         Ok(CancelOutcome::NotCancellable) => { eprintln!("task {id} not in cancellable state"); ExitCode::from(1) }
         Err(e)                            => { eprintln!("{e}"); ExitCode::from(1) }
+    }
+}
+
+/// `tasks correct <id> <text>`: add an operator correction to a running
+/// notebook-mode task (#922). The text is every argument after the id.
+async fn tasks_correct(args: &[String]) -> ExitCode {
+    use kastellan_core::cli_audit::{correct_and_audit, CorrectOutcome};
+    use kastellan_db::pool::connect_runtime_pool;
+
+    let (id, text) = match (args.first().and_then(|s| s.parse::<i64>().ok()), args.get(1..)) {
+        (Some(id), Some(rest)) if !rest.join(" ").trim().is_empty() => (id, rest.join(" ")),
+        _ => { eprintln!("usage: tasks correct <id> <text>"); return ExitCode::from(2); }
+    };
+    let spec = match resolve_connect_spec() {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    let pool = match connect_runtime_pool(&spec).await {
+        Ok(p) => p,
+        Err(e) => { eprintln!("{e}"); return ExitCode::from(1); }
+    };
+    match correct_and_audit(&pool, id, &text).await {
+        Ok(CorrectOutcome::Added { seq, audited }) => {
+            println!("correction added to task {id} (notebook entry {seq})");
+            // Only a notebook-mode daemon reads it, and the CLI cannot see the
+            // mode: a notebook task writes its steps on its first turn, so an
+            // empty notebook is a classic task (or one still on that turn).
+            if seq == 1 {
+                eprintln!(
+                    "warning: task {id} had no notebook entries yet — a daemon in classic mode \
+                     (KASTELLAN_PLANNER_MODE unset or classic) never reads this correction"
+                );
+            }
+            if !audited {
+                eprintln!("warning: the task.corrected audit row could not be written; the correction stands");
+            }
+            ExitCode::from(0)
+        }
+        Ok(CorrectOutcome::NotRunning) => { eprintln!("task {id} is not running"); ExitCode::from(1) }
+        Err(e) => { eprintln!("{e}"); ExitCode::from(1) }
     }
 }
 

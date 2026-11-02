@@ -205,8 +205,8 @@ impl Router {
         })
     }
 
-    /// The configured timeout. Exposed so tests and integration
-    /// harnesses can confirm the construction-time wire-through.
+    /// The configured timeout: the planner bounds each call by it and the
+    /// task's deadline (#941), and tests confirm the wire-through.
     pub fn timeout(&self) -> std::time::Duration {
         self.config.timeout
     }
@@ -403,7 +403,11 @@ impl Router {
         let request =
             thinking::apply_thinking_switch(request, suppress, self.config.thinking_switch);
 
-        let resp = self.http.post(&url).json(request.as_ref()).send().await?;
+        let mut post = self.http.post(&url).json(request.as_ref());
+        if let Some(t) = request.timeout {
+            post = post.timeout(t);
+        }
+        let resp = post.send().await?;
         let status = resp.status();
 
         if !status.is_success() {

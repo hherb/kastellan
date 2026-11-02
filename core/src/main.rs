@@ -705,23 +705,38 @@ async fn main() -> Result<()> {
         "planner now timezone resolved"
     );
 
+    // #922: which loop plans; an unknown value refuses to start.
+    let planner_mode_var = match std::env::var("KASTELLAN_PLANNER_MODE") {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(e) => anyhow::bail!("KASTELLAN_PLANNER_MODE: {e}"),
+    };
+    let planner_mode = kastellan_core::scheduler::notebook::formulator::planner_mode(planner_mode_var.as_deref())
+        .map_err(anyhow::Error::msg)?;
+    info!(?planner_mode, "planner mode");
+
     // PlanFormulator — takes the extractor as 5th arg (Task 14 widened
     // the signature; Task 15 supplies the constructed extractor).
-    let formulator: Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> =
-        Arc::new(kastellan_core::scheduler::agent::RouterAgent::new(
+    let agent = kastellan_core::scheduler::agent::RouterAgent::new(
+        router.clone(),
+        prompts.clone(),
+        Arc::new(
+            kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())
+                .with_tool_docs(tool_docs.clone())
+                .with_timezone(planner_tz),
+        ),
+        Arc::new(kastellan_core::recall_assembly::PgRecallBuilder::new(
+            pool.clone(),
             router.clone(),
-            prompts.clone(),
-            Arc::new(
-                kastellan_core::prompt_assembly::PgSystemPromptBuilder::new(pool.clone())
-                    .with_tool_docs(tool_docs.clone())
-                    .with_timezone(planner_tz),
-            ),
-            Arc::new(kastellan_core::recall_assembly::PgRecallBuilder::new(
-                pool.clone(),
-                router.clone(),
-            )),
-            entity_extractor.clone(),
-        ));
+        )),
+        entity_extractor.clone(),
+    );
+    let formulator: Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> = match planner_mode {
+        kastellan_core::scheduler::notebook::formulator::PlannerMode::Notebook => {
+            Arc::new(agent.with_notebook(tool_docs.clone()))
+        }
+        kastellan_core::scheduler::notebook::formulator::PlannerMode::Classic => Arc::new(agent),
+    };
 
     // ── Bootstrap secret materialization vault (Item 31, slice 1). ──
     //

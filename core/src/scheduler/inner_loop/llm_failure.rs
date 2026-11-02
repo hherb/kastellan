@@ -15,6 +15,8 @@
 //! 1. **A timed-out planning call after tools have gathered results jumps
 //!    straight to the forced-synthesis turn** ([`should_force_synthesis`])
 //!    instead of failing: the work is in hand, so ask for an answer from it.
+//!    A reply cut off at `max_tokens` (#941) gets the same recovery, and
+//!    with nothing gathered fails in its own words ([`token_cap_failure_detail`]).
 //! 2. **A timed-out synthesis turn is retried once with thinking
 //!    suppressed** — only the formulator knows whether a cheaper attempt
 //!    exists (`PlanFormulator::formulate_synthesis_without_thinking`).
@@ -49,7 +51,7 @@ use crate::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
 /// something to synthesize from (`gathered`: at least one successful tool
 /// observation), and only if the synthesis turn has not been spent — the
 /// synthesis turn's own timeout has its retry and then fails. Pure.
-pub(super) fn should_force_synthesis(timed_out: bool, gathered: bool, synth_attempted: bool) -> bool {
+pub(crate) fn should_force_synthesis(timed_out: bool, gathered: bool, synth_attempted: bool) -> bool {
     timed_out && gathered && !synth_attempted
 }
 
@@ -67,7 +69,7 @@ const OTHER_METHOD: &str = "other";
 /// The tool calls a task made before it failed, for telling the user what
 /// the timeout threw away.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct GatheredWork {
+pub(crate) struct GatheredWork {
     /// Tool calls actually dispatched (steps after a failing one never are).
     pub calls: usize,
     /// How many of them returned a result.
@@ -81,7 +83,7 @@ impl GatheredWork {
     ///
     /// A record's outcomes are index-aligned with its plan's steps and never
     /// outnumber them; a step with no outcome was never dispatched.
-    pub(super) fn from_plans(plans: &[PlanRecord]) -> Self {
+    pub(crate) fn from_plans(plans: &[PlanRecord]) -> Self {
         let mut work = GatheredWork::default();
         for record in plans {
             for (step, outcome) in record.plan.steps.iter().zip(record.outcomes()) {
@@ -111,7 +113,7 @@ fn displayable_method(method: &str) -> String {
 /// This text reaches the user (a Matrix or email reply), so it leads with
 /// what happened in plain words; `router_error` goes last, in brackets,
 /// for the operator.
-pub(super) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) -> String {
+pub(crate) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) -> String {
     let what = if work.calls == 0 {
         "The language model ran out of time before it finished planning, so no tool was \
          called and no answer was produced."
@@ -133,7 +135,8 @@ pub(super) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) ->
     };
     format!(
         "{what} Asking for less at once (fewer items, a narrower question) usually fits; the \
-         operator can also raise KASTELLAN_LLM_TIMEOUT_MS. [llm: {router_error}]"
+         operator can also raise KASTELLAN_LLM_TIMEOUT_MS (a fast-lane task's time ceiling bounds \
+         each call too). [llm: {router_error}]"
     )
 }
 
@@ -144,13 +147,25 @@ pub(super) fn timeout_failure_detail(work: &GatheredWork, router_error: &str) ->
 /// [`AgentError::is_empty_completion`], not if it was cut off at `length`. Like
 /// [`timeout_failure_detail`], plain words first and the decode error last,
 /// in brackets, for the operator.
-pub(super) fn decode_failure_detail(empty: bool, decode_error: &str) -> String {
+pub(crate) fn decode_failure_detail(empty: bool, decode_error: &str) -> String {
     let what = if empty {
         "The language model returned an empty answer, so this task produced none."
     } else {
         "The language model answered with something that is not a plan, so this task produced none."
     };
     format!("{what} You can ask again. [llm: {decode_error}]")
+}
+
+/// The task's failure detail when the model's reply was cut off at
+/// [`super::ceiling::PLANNER_MAX_TOKENS`] (#941) with nothing gathered to
+/// answer from. Pure.
+pub(crate) fn token_cap_failure_detail(decode_error: &str) -> String {
+    format!(
+        "The language model used its whole reply budget ({} tokens) without finishing, so this task \
+         produced none. Asking for less at once (fewer items, a narrower question) usually fits. \
+         [llm: {decode_error}]",
+        super::ceiling::PLANNER_MAX_TOKENS,
+    )
 }
 
 /// The task's failure detail when a synthesis turn that a **timeout**
@@ -165,7 +180,8 @@ pub(super) fn forced_synthesis_no_answer_detail(work: &GatheredWork) -> String {
         "A planning call ran out of time, so the task asked the language model to answer from \
          the {} tool result{} already gathered — and it asked for more tools instead of \
          answering. No answer was produced. Asking for less at once usually fits; the operator \
-         can also raise KASTELLAN_LLM_TIMEOUT_MS. [llm: forced synthesis after a timeout did not \
+         can also raise KASTELLAN_LLM_TIMEOUT_MS (a fast-lane task's time ceiling bounds each \
+         call too). [llm: forced synthesis after a timeout did not \
          produce a final answer]",
         work.succeeded,
         if work.succeeded == 1 { "" } else { "s" },
@@ -240,8 +256,9 @@ pub(super) enum Turn {
     /// A plan to act on. Boxed: a `Plan` + `FormulationMeta` is far larger
     /// than the other variants (`clippy::large_enum_variant`).
     Planned(Box<(Plan, FormulationMeta)>),
-    /// The call timed out after tools had gathered results: spend the
-    /// forced-synthesis turn next instead of failing ([`should_force_synthesis`]).
+    /// The call timed out, or was cut off at `max_tokens` (#941), after tools
+    /// had gathered results: spend the forced-synthesis turn next instead of
+    /// failing ([`should_force_synthesis`]).
     ForceSynthesis,
     /// The task fails with this user-facing detail.
     Failed(String),
@@ -376,12 +393,14 @@ pub(super) async fn formulate_turn(
                 ).await;
             }
             let timed_out = e.is_request_timeout();
-            if should_force_synthesis(timed_out, gathered, synth_attempted) {
+            // A reply cut off by `max_tokens` (#941) ran out of room the way
+            // a timeout runs out of time: it gets the same recovery.
+            if should_force_synthesis(timed_out || e.ran_out_of_tokens(), gathered, synth_attempted) {
                 tracing::warn!(
                     task_id = ctx.task_id,
                     plan_count = ctx.plan_count,
                     error = %e,
-                    "planning call timed out after tools had gathered results; \
+                    "planning call ran out of time or tokens after tools had gathered results; \
                      spending the forced-synthesis turn now instead of failing the task"
                 );
                 return Turn::ForceSynthesis;
@@ -391,6 +410,8 @@ pub(super) async fn formulate_turn(
                     &GatheredWork::from_plans(&ctx.plans),
                     &e.to_string(),
                 )
+            } else if e.ran_out_of_tokens() {
+                token_cap_failure_detail(&e.to_string())
             } else if let AgentError::Decode { raw, .. } = &e {
                 decode_failure_detail(raw.trim().is_empty(), &e.to_string())
             } else {
@@ -417,7 +438,7 @@ pub(super) async fn formulate_turn(
 /// Write the `agent/plan.formulate_failed` row for one failed formulator
 /// call. **Best-effort**: a lost forensic row must not fail a task the
 /// loop may still rescue — logged at ERROR instead, like the sink-block rows.
-pub(super) async fn record_failed_formulation(
+pub(crate) async fn record_failed_formulation(
     pool: &sqlx::PgPool,
     task_id: i64,
     plan_count: u32,

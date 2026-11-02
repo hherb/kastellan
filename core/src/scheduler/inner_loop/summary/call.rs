@@ -41,7 +41,7 @@ const CALL_FRAMING_BYTES: usize = r#","call":"#.len();
 
 /// The profile both screens here use: planner-authored text is held to the
 /// fail-closed default whatever tool it names.
-const MODEL_AUTHORED_PROFILE: GuardProfile = GuardProfile::Strict;
+pub(super) const MODEL_AUTHORED_PROFILE: GuardProfile = GuardProfile::Strict;
 
 /// A planner-bound value that has been through the sink screen, plus what the
 /// screen blocked in it (for the forensic row). `value` is already the
