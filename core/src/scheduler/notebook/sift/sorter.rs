@@ -17,8 +17,11 @@ pub(crate) enum SortReply {
     Undecided,
 }
 
+/// The per-item decision (S3): today the local LLM; a test double or, later,
+/// a dedicated fast decision model may stand in. Returns the raw reply;
+/// [`parse_sort_reply`] reads it.
 #[async_trait]
-pub(crate) trait Sorter: Send + Sync {
+pub trait Sorter: Send + Sync {
     async fn sort(&self, ctx: &TaskContext, user_msg: String) -> Result<String, AgentError>;
 }
 

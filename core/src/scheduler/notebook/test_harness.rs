@@ -22,6 +22,8 @@ use crate::cassandra::types::{Plan, PlannedStep, Verdict};
 use crate::scheduler::agent::{AgentError, FormulationMeta};
 use crate::scheduler::inner_loop::ClassificationFloorSource;
 use crate::scheduler::notebook::formulator::UserMessage;
+pub(crate) use crate::scheduler::notebook::sift::config::SiftConfig;
+use crate::scheduler::notebook::sift::sorter::Sorter;
 
 pub(crate) const RUNAWAY: &str = "<runaway>";
 
@@ -39,6 +41,13 @@ pub(crate) struct Script {
     /// not to think (`KASTELLAN_LLM_DISABLE_THINKING=1`).
     pub(crate) thinks: bool,
     pub(crate) correction_during_first_turn: Option<(sqlx::PgPool, i64, &'static str)>,
+    /// The sorter's replies, in order (`sift`, #922); out of script it errs.
+    pub(crate) sorter_replies: Mutex<VecDeque<String>>,
+    /// Each message the sorter was sent.
+    pub(crate) sorted: Mutex<Vec<String>>,
+    pub(crate) sift_cfg: SiftConfig,
+    /// How long each sorter call takes (a deadline test).
+    pub(crate) sort_delay: std::time::Duration,
 }
 
 impl Script {
@@ -54,7 +63,17 @@ impl Script {
             thinking: Mutex::new(Vec::new()),
             thinks: true,
             correction_during_first_turn: None,
+            sorter_replies: Mutex::new(VecDeque::new()),
+            sorted: Mutex::new(Vec::new()),
+            sift_cfg: SiftConfig { max_reads: 64, read_methods: vec!["mail.read".into(), "esc.read".into()] },
+            sort_delay: std::time::Duration::ZERO,
         }
+    }
+
+    /// The sorter answers `replies`, in order.
+    pub(crate) fn sorting(self, replies: &[Value]) -> Self {
+        *self.sorter_replies.lock().unwrap() = replies.iter().map(Value::to_string).collect();
+        self
     }
 
     pub(crate) fn messages(&self) -> Vec<String> {
@@ -100,6 +119,23 @@ impl NotebookFormulator for Script {
     fn thinks_by_default(&self) -> bool {
         self.thinks
     }
+
+    fn sorter(&self) -> Option<&dyn Sorter> {
+        Some(self)
+    }
+
+    fn sift_config(&self) -> SiftConfig {
+        self.sift_cfg.clone()
+    }
+}
+
+#[async_trait]
+impl Sorter for Script {
+    async fn sort(&self, _ctx: &TaskContext, user_msg: String) -> Result<String, AgentError> {
+        tokio::time::sleep(self.sort_delay).await;
+        self.sorted.lock().unwrap().push(user_msg);
+        self.sorter_replies.lock().unwrap().pop_front().ok_or_else(|| AgentError::PromptMissing)
+    }
 }
 
 pub(crate) fn meta() -> FormulationMeta {
@@ -126,11 +162,13 @@ pub(crate) fn meta() -> FormulationMeta {
 
 // ── scripted review and tools ───────────────────────────────────────────
 
-/// Approves everything except a step whose tool is `forbidden`, and records
-/// the instruction it was shown for each plan.
+/// Approves everything except a step whose tool is `forbidden` (blocked) or
+/// `esc` (escalated), and records the instruction it was shown and the
+/// steps' methods for each plan.
 #[derive(Default)]
 pub(crate) struct RecordingReview {
     pub(crate) instructions: Mutex<Vec<String>>,
+    pub(crate) plans: Mutex<Vec<Vec<String>>>,
 }
 
 #[async_trait]
@@ -141,15 +179,20 @@ impl ReviewStage for RecordingReview {
 
     async fn review(&self, plan: &Plan, ctx: &ReviewStageContext<'_>) -> Verdict {
         self.instructions.lock().unwrap().push(ctx.instruction.to_string());
+        self.plans.lock().unwrap().push(plan.steps.iter().map(|s| s.method.clone()).collect());
         if plan.steps.iter().any(|s| s.tool == "forbidden") {
             Verdict::Block("forbidden tool".into())
+        } else if plan.steps.iter().any(|s| s.tool == "esc") {
+            Verdict::Escalate("needs a human".into(), crate::cassandra::types::Severity::Medium)
         } else {
             Verdict::Approve
         }
     }
 }
 
-/// A step whose method is `fail` fails; every other returns its own name.
+/// A step whose method is `fail` fails; a call with a `hits` parameter
+/// returns them as `{"results": hits}` (a search, for `sift`); a read of
+/// `{"id": "bad"}` fails; every other returns its own name.
 #[derive(Default)]
 pub(crate) struct Tools {
     pub(crate) dispatched: Mutex<Vec<String>>,
@@ -165,8 +208,12 @@ impl StepDispatcher for Tools {
 
     async fn dispatch_step(&self, _task_id: i64, step: &PlannedStep) -> StepOutcome {
         self.dispatched.lock().unwrap().push(step.method.clone());
-        if step.method == "fail" {
+        if step.method == "fail" || step.parameters.get("id") == Some(&json!("bad")) {
             StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "not allowed".into() }
+        } else if let Some(hits) = step.parameters.get("hits") {
+            StepOutcome::Ok(json!({"results": hits}))
+        } else if let Some(id) = step.parameters.get("id") {
+            StepOutcome::Ok(json!({"text": format!("text of {}", id.as_str().unwrap_or_default())}))
         } else {
             StepOutcome::Ok(json!({"result": format!("output of {}", step.method)}))
         }

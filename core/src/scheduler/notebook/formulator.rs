@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use kastellan_llm_router::messages::ChatMessage;
 use kastellan_llm_router::ThinkingPolicy;
 
+use super::sift::config::SiftConfig;
+use super::sift::sorter::Sorter;
 use crate::scheduler::agent::{AgentError, FormulationMeta, RouterAgent};
 use crate::scheduler::inner_loop::TaskContext;
 
@@ -77,6 +79,17 @@ pub trait NotebookFormulator: Send + Sync {
     /// thinking turn (`thinking::rewrite_answer`).
     fn thinks_by_default(&self) -> bool {
         true
+    }
+
+    /// The per-item decision a `sift` uses (#922); `None`: this formulator
+    /// cannot sift, and a `sift` call is refused.
+    fn sorter(&self) -> Option<&dyn Sorter> {
+        None
+    }
+
+    /// The operator's sift knobs (`KASTELLAN_SIFT_*`), as read at boot.
+    fn sift_config(&self) -> SiftConfig {
+        SiftConfig::default()
     }
 }
 

@@ -9,12 +9,15 @@
 //! * [`config`] — the two operator knobs, checked at boot.
 //! * [`sorter`] — the per-item decision, and what it is shown.
 //! * [`table`] — the answer's table, rendered by code.
+//! * [`run`] — a sift in the notebook loop: one reviewed plan of reads, a
+//!   sorter call per item, the scrapbook rows, the summary the planner sees.
 //!
 //! Design: `docs/superpowers/specs/2026-11-02-sift-and-scrapbook-design.md`.
 
 pub mod config;
 pub(crate) mod params;
-pub(crate) mod sorter;
+pub(crate) mod run;
+pub mod sorter;
 pub(crate) mod table;
 pub(crate) mod template;
 
@@ -22,3 +25,17 @@ pub(crate) mod template;
 pub const SIFT_TOOL: &str = "sift";
 /// The one method on [`SIFT_TOOL`].
 pub const SIFT_METHOD: &str = "sift.run";
+
+/// How a sift's plan of reads begins its `decision`, before the criterion:
+/// what tells it apart from a plan the planner wrote.
+pub(crate) const SIFT_READS_DECISION: &str = "sift reads: ";
+
+/// Is `plan` a sift's reads ([`SIFT_READS_DECISION`]) or the record of a
+/// sift itself (its one step is [`SIFT_TOOL`])? Neither is a result the
+/// planner saw: a sift over a step skips them, and so does the repeat guard.
+pub(crate) fn is_sift_plan(plan: &crate::cassandra::types::Plan) -> bool {
+    plan.decision.starts_with(SIFT_READS_DECISION) || plan.steps.first().is_some_and(|s| s.tool == SIFT_TOOL)
+}
+
+#[cfg(test)]
+mod tests;

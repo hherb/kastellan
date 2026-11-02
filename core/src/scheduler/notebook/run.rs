@@ -43,6 +43,7 @@ use super::state::{
     entry, fold, AnswerPayload, Correction, FailedStepPayload, InfeasiblePayload, NotebookState, StepsPayload,
 };
 use super::repeat;
+use super::sift::{self, run::SiftRun, SIFT_TOOL};
 use super::thinking::{self, TurnKind};
 use crate::cassandra::review::ChainReviewStage;
 use crate::cassandra::types::DataClass;
@@ -244,12 +245,22 @@ pub(crate) async fn run_notebook_to_terminal(
             (None, None, None) => return finish!(Outcome::Failed("notebook reply had no call or answer".into())),
         };
 
-        match execute::review_and_dispatch(
-            pool, review.as_ref(), dispatcher.as_ref(), &mut ctx, plan, &meta, answer_turn, exhausted, &mut st, outbox,
-            execute::StepPolicy::Plan,
-        )
-        .await?
-        {
+        let executed = match reply.call.as_ref().filter(|c| c.tool == SIFT_TOOL) {
+            // A sift is run here, not dispatched: its reads are one reviewed
+            // plan, and its sorter needs the router (K2).
+            Some(call) => {
+                let r = SiftRun { pool, review: review.as_ref(), dispatcher: dispatcher.as_ref(), nb, outbox };
+                sift::run::run_sift(r, &mut ctx, call, &meta, &mut st, &mut failed_llm_calls).await?
+            }
+            None => {
+                execute::review_and_dispatch(
+                    pool, review.as_ref(), dispatcher.as_ref(), &mut ctx, plan, &meta, answer_turn, exhausted, &mut st,
+                    outbox, execute::StepPolicy::Plan,
+                )
+                .await?
+            }
+        };
+        match executed {
             Executed::Finished(f) => {
                 if let Some((kind, payload)) = terminal_entry(&f.outcome, &reply) {
                     append_terminal(pool, ctx.task_id, kind, payload).await;
