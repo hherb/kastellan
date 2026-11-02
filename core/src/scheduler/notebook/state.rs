@@ -194,9 +194,12 @@ impl NotebookState {
 
     /// A step done (or, `partial`, progress on it): its note, findings, the
     /// new summary, and its data's classification. The step must be listed
-    /// and still pending; a partial tick leaves it pending.
+    /// and pending; a partial tick leaves it pending. A full tick may also
+    /// close a **failed** step — its call failed but the model found what it
+    /// was for another way (DGX task 283: a message with no attachment whose
+    /// body already held the facts).
     pub(crate) fn apply_tick(&mut self, p: TickPayload) -> Result<(), String> {
-        let step = step_mut(self, p.step)?;
+        let step = step_mut(self, p.step, !p.partial)?;
         if !p.partial {
             step.status = StepStatus::Done;
         }
@@ -243,7 +246,7 @@ pub(crate) fn fold(entries: &[Entry]) -> Result<NotebookState, FoldError> {
             }
             EntryKind::FailedStep => {
                 let p: FailedStepPayload = decode(entry).map_err(fail)?;
-                step_mut(&mut state, p.step).map_err(fail)?.status = StepStatus::Failed;
+                step_mut(&mut state, p.step, false).map_err(fail)?.status = StepStatus::Failed;
                 state.touched.push(p.classification);
             }
             EntryKind::Correction => {
@@ -270,13 +273,15 @@ fn decode<T: DeserializeOwned>(entry: &Entry) -> Result<T, String> {
 }
 
 /// The pending step `id` — a tick or a failure for a step already finished
-/// is as wrong as one for a step never listed.
-fn step_mut(state: &mut NotebookState, id: u32) -> Result<&mut Step, String> {
+/// is as wrong as one for a step never listed. `or_failed` also accepts a
+/// failed step: a full tick for one says it was done another way.
+fn step_mut(state: &mut NotebookState, id: u32, or_failed: bool) -> Result<&mut Step, String> {
     let step = state.steps.iter_mut().find(|s| s.spec.id == id).ok_or_else(|| format!("no step {id} is listed"))?;
-    if step.status != StepStatus::Pending {
-        return Err(format!("step {id} is already {:?}", step.status));
+    match step.status {
+        StepStatus::Pending => Ok(step),
+        StepStatus::Failed if or_failed => Ok(step),
+        done => Err(format!("step {id} is already {done:?}")),
     }
-    Ok(step)
 }
 
 #[cfg(test)]

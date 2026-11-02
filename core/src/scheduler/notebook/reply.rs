@@ -121,9 +121,15 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
     // checks the same rules.
     let mut after = state.clone();
     if let Some(tick) = &reply.tick {
+        let failed = state.steps.iter().any(|s| s.spec.id == tick.step && s.status == StepStatus::Failed);
+        let progress = reply.call.as_ref().is_some_and(|c| c.step == tick.step);
         match state.current_step() {
             Some(cur) if cur.id == tick.step => {}
-            Some(cur) => return Err(format!("`tick.step` {} is not the current step {}", tick.step, cur.id)),
+            // A full tick may close a failed step it found another way.
+            _ if failed && !progress => {}
+            Some(cur) => {
+                return Err(format!("`tick.step` {} is not the current step {} (nor a failed one)", tick.step, cur.id))
+            }
             None => return Err(format!("`tick.step` {}: there is no current step to tick", tick.step)),
         }
         if let Some(payload) = reply.tick_payload(DataClass::Public) {

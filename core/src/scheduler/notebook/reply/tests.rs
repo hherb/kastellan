@@ -175,3 +175,22 @@ fn keys_echoed_from_the_render_are_ignored_and_not_stored() {
     bad["findings"][0]["amount"] = json!("$5");
     assert!(check(json!({"tick": bad, "call": call(2)}), &two_steps()).unwrap_err().contains("unknown field `amount`"));
 }
+
+/// DGX task 283 (thinking off): step 1's call failed, the facts were in a
+/// message already read, and the model ticked step 1 while step 2 was
+/// current. A full tick for a failed step closes it; progress on one cannot.
+#[test]
+fn a_full_tick_may_close_a_failed_step() {
+    let failed = fold(&[
+        entry(1, EntryKind::Steps, json!({"steps": [step(1), step(2)]})),
+        entry(2, EntryKind::FailedStep, json!({"step": 1, "code": "E", "detail": "d", "classification": "Public"})),
+    ])
+    .unwrap();
+    let r = check(json!({"tick": tick(1), "call": call(2)}), &failed).expect("close step 1, go on with 2");
+    let mut s = failed.clone();
+    s.apply_tick(r.tick_payload(DataClass::Public).unwrap()).unwrap();
+    assert_eq!(s.steps[0].status, StepStatus::Done);
+    assert_eq!(s.findings.len(), 1);
+    // A tick for step 1 that also calls step 1 is progress, which a failed step cannot take.
+    assert!(check(json!({"tick": tick(1), "call": call(1)}), &failed).is_err());
+}
