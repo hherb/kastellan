@@ -221,3 +221,22 @@ fn a_call_plan_names_its_notebook_step() {
     other.rationale = "notebook step x".into();
     assert_eq!(notebook_step_of(&other), None);
 }
+
+/// An answer may name the scrapbook(s) to include as a table — one ref or a
+/// list — with optional columns and order (#922, K10).
+#[test]
+fn an_answer_may_name_a_table() {
+    let one = parse_reply(r#"{"answer": {"body": "b", "table": {"scrapbook": "sb:1:2"}}}"#).unwrap();
+    let t = one.answer.unwrap().table.unwrap();
+    assert_eq!(t.scrapbook.refs(), ["sb:1:2"]);
+    assert_eq!((t.columns, t.order_by), (None, None));
+    let many = parse_reply(
+        r#"{"answer": {"body": "b", "table": {"scrapbook": ["sb:1:2", "sb:1:4"], "columns": ["date"],
+            "order_by": {"column": "date", "desc": true}}}}"#,
+    )
+    .unwrap();
+    let t = many.answer.unwrap().table.unwrap();
+    assert_eq!(t.scrapbook.refs(), ["sb:1:2", "sb:1:4"]);
+    assert_eq!(t.order_by.unwrap().desc, true);
+    assert!(parse_reply(r#"{"answer": {"body": "b", "table": {"scrapbook": "sb:1:2", "rows": []}}}"#).is_err());
+}

@@ -95,9 +95,11 @@ pub trait NotebookFormulator: Send + Sync {
 
 impl RouterAgent {
     /// Run every task on the notebook loop (#922), showing each step the doc
-    /// of its tool from `tools`.
-    pub fn with_notebook(mut self, tools: std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>) -> Self {
+    /// of its tool from `tools`, and sifting with `sift` (the operator's
+    /// `KASTELLAN_SIFT_*` knobs, [`super::sift::config::sift_config`]).
+    pub fn with_notebook(mut self, tools: std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>, sift: SiftConfig) -> Self {
         self.notebook_tools = Some(tools);
+        self.sift_cfg = sift;
         self
     }
 
@@ -129,6 +131,14 @@ impl NotebookFormulator for RouterAgent {
 
     fn thinks_by_default(&self) -> bool {
         !self.router.config().disable_thinking
+    }
+
+    fn sorter(&self) -> Option<&dyn Sorter> {
+        Some(self)
+    }
+
+    fn sift_config(&self) -> SiftConfig {
+        self.sift_cfg.clone()
     }
 }
 

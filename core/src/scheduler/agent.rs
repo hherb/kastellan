@@ -182,13 +182,15 @@ const RAW_HEAD_CHARS: usize = 600;
 /// Production adapter: calls the real `Router::send`.
 pub struct RouterAgent {
     pub(crate) router: std::sync::Arc<Router>,
-    prompts: std::sync::Arc<PromptCache>,
+    pub(crate) prompts: std::sync::Arc<PromptCache>,
     prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
     recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
     entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
     /// Set in notebook mode (#922): the advertised tools, for the current
     /// step's tool doc. `None` = the classic loop.
     pub(crate) notebook_tools: Option<std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>>,
+    /// The operator's sift knobs (#922), set with the notebook mode.
+    pub(crate) sift_cfg: super::notebook::sift::config::SiftConfig,
 }
 
 impl RouterAgent {
@@ -199,7 +201,15 @@ impl RouterAgent {
         recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
         entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
     ) -> Self {
-        Self { router, prompts, prompt_builder, recall_builder, entity_extractor, notebook_tools: None }
+        Self {
+            router,
+            prompts,
+            prompt_builder,
+            recall_builder,
+            entity_extractor,
+            notebook_tools: None,
+            sift_cfg: Default::default(),
+        }
     }
 }
 

@@ -77,6 +77,40 @@ pub(crate) struct AnswerSpec {
     /// explains it, and the task ends `Refused`.
     #[serde(default)]
     pub refused: Option<RefusedReason>,
+    /// A scrapbook to show after `body` as a table rendered by code (#922,
+    /// K10): the model never retypes the rows.
+    #[serde(default)]
+    pub table: Option<TableSpec>,
+}
+
+/// `answer.table`: one scrapbook ref or a list of them (one per sift of the
+/// same criterion; their rows are joined), the columns (default: the sift's
+/// fields, then `source`) and an optional order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TableSpec {
+    pub scrapbook: Refs,
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub order_by: Option<super::sift::table::OrderBy>,
+}
+
+/// One ref or a list: models write both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum Refs {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Refs {
+    pub(crate) fn refs(&self) -> &[String] {
+        match self {
+            Refs::One(r) => std::slice::from_ref(r),
+            Refs::Many(rs) => rs,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

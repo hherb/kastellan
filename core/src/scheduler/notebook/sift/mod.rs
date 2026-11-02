@@ -9,6 +9,8 @@
 //! * [`config`] — the two operator knobs, checked at boot.
 //! * [`sorter`] — the per-item decision, and what it is shown.
 //! * [`table`] — the answer's table, rendered by code.
+//! * [`router_sorter`] — the sorter on the local LLM.
+//! * [`answer`] — an answer's `table`: the scrapbook rows it names, rendered.
 //! * [`run`] — a sift in the notebook loop: one reviewed plan of reads, a
 //!   sorter call per item, the scrapbook rows, the summary the planner sees.
 //!
@@ -16,8 +18,10 @@
 
 pub mod config;
 pub(crate) mod params;
+pub mod router_sorter;
 pub(crate) mod run;
 pub mod sorter;
+pub(crate) mod answer;
 pub(crate) mod table;
 pub(crate) mod template;
 
@@ -35,6 +39,13 @@ pub(crate) const SIFT_READS_DECISION: &str = "sift reads: ";
 /// planner saw: a sift over a step skips them, and so does the repeat guard.
 pub(crate) fn is_sift_plan(plan: &crate::cassandra::types::Plan) -> bool {
     plan.decision.starts_with(SIFT_READS_DECISION) || plan.steps.first().is_some_and(|s| s.tool == SIFT_TOOL)
+}
+
+/// May `ctx`'s task read scrapbook `r` (K11)? Its own, or one from a turn
+/// this task loaded as its conversation — same channel, peer and
+/// conversation, inside the window. Never any other task's.
+pub(crate) fn may_read(ctx: &crate::scheduler::inner_loop::TaskContext, r: params::ScrapRef) -> bool {
+    r.task_id == ctx.task_id || ctx.conversation_task_ids.as_ref().is_some_and(|ids| ids.contains(&r.task_id))
 }
 
 #[cfg(test)]

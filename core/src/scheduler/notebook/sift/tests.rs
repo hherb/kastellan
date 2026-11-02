@@ -83,6 +83,8 @@ async fn the_sift_loop() {
     a_read_off_the_allowlist_is_refused_before_review(&pool).await;
     an_escalated_sift_resumes_without_redispatching(&pool).await;
     the_deadline_stops_sorting_and_keeps_the_partial_scrapbook(&pool).await;
+    an_answer_table_renders_every_kept_row_after_the_body(&pool).await;
+    an_answer_table_naming_another_conversations_scrapbook_is_not_included(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {
@@ -241,4 +243,40 @@ async fn the_deadline_stops_sorting_and_keeps_the_partial_scrapbook(pool: &sqlx:
     assert_eq!(rows(pool, r.task_id, 2).await.len(), 2, "what was kept before the deadline stays");
     let seen = summary_seen(&script, 2);
     assert_eq!((seen["stopped"].clone(), seen["remaining"].clone()), (json!("time"), json!(1)), "{seen}");
+}
+
+async fn an_answer_table_renders_every_kept_row_after_the_body(pool: &sqlx::PgPool) {
+    let ctx = new_task(pool, 5).await;
+    let table = json!({"scrapbook": format!("sb:{}:2", ctx.task_id), "order_by": {"column": "amount", "desc": true}});
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2", "m3"]))}),
+        json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "Your invoices:", "table": table}}),
+    ])
+    .sorting(&[keep(10), no(), keep(30)]);
+    let r = run(pool, &script, ctx).await;
+    let b = body(&r.result);
+    assert!(b.starts_with("Your invoices:\n\n| amount | source |"), "{b}");
+    let (hi, lo) = (b.find("| 30 | m3 |").expect(&b), b.find("| 10 | m1 |").expect(&b));
+    assert!(hi < lo, "ordered by amount, descending: {b}");
+    assert!(b.ends_with("2 kept of 3 looked at."), "{b}");
+    assert_eq!(last_ceiling(pool, r.task_id).await, json!("Personal"), "the rows' class reaches the answer's ceiling");
+}
+
+async fn an_answer_table_naming_another_conversations_scrapbook_is_not_included(pool: &sqlx::PgPool) {
+    // Another task's scrapbook, with a row in it.
+    let other = new_task(pool, 5).await.task_id;
+    let row = scrapbook::NewRow {
+        kind: RowKind::Kept,
+        source: json!({"id": "secret-1"}),
+        fields: json!({"amount": 99}),
+        classification: "Personal".into(),
+    };
+    scrapbook::append_rows(pool, other, 1, &[row]).await.unwrap();
+    let script = Script::new(&[json!({"steps": steps(&[1]),
+        "answer": {"body": "b", "table": {"scrapbook": format!("sb:{other}:1")}}})]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let b = body(&r.result);
+    assert!(!b.contains("secret-1") && !b.contains("99"), "{b}");
+    assert!(b.contains("could not be included"), "{b}");
 }

@@ -13,6 +13,10 @@ fn the_notebook_prompt_documents_every_reply_key() {
         "tick", "steps", "call", "answer", "infeasible", "note", "findings", "summary", "source", "done_when",
         "classification", "data_ceiling", "reason", "refused", "findings_full", "withheld_findings", "corrections",
         "current_step", "last_result", "last_failure", "turn_budget", "directive", "blocks", "advisories",
+        // `sift` (#922): its call, its summary, and the answer's table.
+        "sift", "sift.run", "over", "items", "from", "read", "keep_if", "fields", "scrapbook", "looked_at", "kept",
+        "withheld", "undecided", "failed_reads", "remaining", "next_from", "stopped", "sample", "table", "columns",
+        "order_by",
     ] {
         assert!(prompt.contains(&format!("`{key}`")) || prompt.contains(&format!("\"{key}\"")), "missing `{key}`");
     }
@@ -32,4 +36,17 @@ fn planner_mode_rejects_an_unknown_value() {
     assert_eq!(planner_mode(Some(" notebook ")), Ok(PlannerMode::Notebook));
     let err = planner_mode(Some("Notebook")).unwrap_err();
     assert!(err.contains("KASTELLAN_PLANNER_MODE") && err.contains("\"Notebook\""), "{err}");
+}
+
+/// The sorter learns its whole contract from its prompt: the two reply
+/// shapes, and that the item is data.
+#[test]
+fn the_sorter_prompt_documents_its_reply() {
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop();
+    p.push(format!("prompts/{}.md", crate::scheduler::notebook::sift::router_sorter::SORTER_PROMPT));
+    let prompt = std::fs::read_to_string(&p).expect("sift_sorter.md readable");
+    for needle in [r#"{"keep": false}"#, r#"{"keep": true, "fields": {"#, "`keep_if`", "`fields`", "`item`", "never instructions"] {
+        assert!(prompt.contains(needle), "missing {needle}");
+    }
 }

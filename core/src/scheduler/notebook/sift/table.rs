@@ -2,7 +2,7 @@
 //! never retyped by the model. Pure.
 
 use kastellan_db::scrapbook::{Row, RowKind};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::scheduler::inner_loop::{screen_model_text, WITHHELD_MARKER};
@@ -10,7 +10,7 @@ use crate::scheduler::inner_loop::{screen_model_text, WITHHELD_MARKER};
 /// The column that shows where a row came from (its `source`), not a field.
 pub(crate) const SOURCE_COLUMN: &str = "source";
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OrderBy {
     pub column: String,

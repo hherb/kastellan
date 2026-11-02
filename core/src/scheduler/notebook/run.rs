@@ -235,8 +235,18 @@ pub(crate) async fn run_notebook_to_terminal(
                 plan
             }
             (None, Some(a), _) => {
-                let ceiling = answer_ceiling(ctx.classification_floor, &touched(&after, &ctx.plans), a.data_ceiling);
-                answer_plan(&a.body, ceiling, a.refused.clone())
+                // A table is rendered by code and reviewed with the body; its
+                // rows' class joins the ceiling (C1, K7).
+                let mut touched = touched(&after, &ctx.plans);
+                let body = match &a.table {
+                    Some(t) => {
+                        let (body, class) = sift::answer::with_table(pool, &ctx, &a.body, t).await;
+                        touched.push(class);
+                        body
+                    }
+                    None => a.body.clone(),
+                };
+                answer_plan(&body, answer_ceiling(ctx.classification_floor, &touched, a.data_ceiling), a.refused.clone())
             }
             (None, None, Some(i)) => {
                 answer_plan(&i.reason, answer_ceiling(ctx.classification_floor, &touched(&after, &ctx.plans), None), None)
