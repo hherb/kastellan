@@ -17,7 +17,7 @@ use crate::cassandra::types::Plan;
 use kastellan_llm_router::messages::{ChatMessage, ChatRequest};
 use kastellan_llm_router::{Router, RouterError, ThinkingPolicy};
 
-use super::inner_loop::TaskContext;
+use super::inner_loop::{ceiling, TaskContext};
 use super::plan_parser::parse_plan_lenient;
 use super::prompts::PromptCache;
 
@@ -360,7 +360,10 @@ impl RouterAgent {
         let req = ChatRequest {
             model: local_model.clone(),
             messages,
-            max_tokens: None,
+            // Both bounds are #941: one reply cannot generate without end,
+            // and one call cannot outlive the fast lane's ceiling by more
+            // than the floor.
+            max_tokens: Some(ceiling::PLANNER_MAX_TOKENS),
             temperature: Some(0.0),
             // Left None so the router writes the thinking switch in its
             // configured dialect (#773). Whether to suppress is `thinking`:
@@ -376,7 +379,7 @@ impl RouterAgent {
             // enlarge every planner response for nothing.
             logprobs: None,
             top_logprobs: None,
-            timeout: None,
+            timeout: Some(ceiling::call_timeout(self.router.timeout(), ctx.deadline, std::time::Instant::now())),
         };
 
         let start = std::time::Instant::now();

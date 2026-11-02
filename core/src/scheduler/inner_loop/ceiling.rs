@@ -8,11 +8,36 @@
 //! out of plans.
 //!
 //! The ceiling is checked only *between* plans. A plan that starts just before
-//! it runs to completion (its LLM call is bounded by `KASTELLAN_LLM_TIMEOUT_MS`,
-//! its steps by their own timeouts), and the synthesis turn comes after that,
-//! so a task can overrun the ceiling by roughly one plan plus one synthesis.
+//! it runs to completion (its steps are bounded by their own timeouts), and the
+//! synthesis turn comes after that. Since #941 the planner call itself is also
+//! bounded by the time left ([`call_timeout`], never below
+//! [`CALL_TIMEOUT_FLOOR`]) and its reply by [`PLANNER_MAX_TOKENS`], so the
+//! overrun is at most about one floor-length call plus one synthesis, rather
+//! than a full `KASTELLAN_LLM_TIMEOUT_MS` per call.
 
 use std::time::{Duration, Instant};
+
+/// The most tokens one planner reply may generate (#941). A plan is a few
+/// hundred tokens; thinking can run to thousands. Without a cap one runaway
+/// generation could use up the whole fast-lane ceiling.
+pub(crate) const PLANNER_MAX_TOKENS: u32 = 16_384;
+
+/// The shortest timeout a planner call gets, even past the deadline: the
+/// forced-synthesis turn runs *after* the ceiling, and must still have time
+/// to answer.
+pub(crate) const CALL_TIMEOUT_FLOOR: Duration = Duration::from_secs(120);
+
+/// The timeout for one planner call starting `now`. Pure.
+///
+/// No deadline: the configured (`KASTELLAN_LLM_TIMEOUT_MS`) timeout. With a
+/// deadline: the time left, but never below [`CALL_TIMEOUT_FLOOR`] and never
+/// above the configured timeout.
+pub(crate) fn call_timeout(configured: Duration, deadline: Option<Instant>, now: Instant) -> Duration {
+    match deadline {
+        None => configured,
+        Some(d) => configured.min(d.saturating_duration_since(now).max(CALL_TIMEOUT_FLOOR)),
+    }
+}
 
 /// Which limit a task has reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,5 +152,33 @@ mod tests {
         );
         assert_eq!(exhausted_detail(Exhausted::Time, 5, false), "plan_time_ceiling_exceeded");
         assert!(exhausted_detail(Exhausted::Time, 5, true).ends_with("did not produce a final answer"));
+    }
+
+    #[test]
+    fn no_deadline_keeps_the_configured_timeout() {
+        assert_eq!(call_timeout(Duration::from_secs(600), None, Instant::now()), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn the_time_left_clamps_the_call() {
+        let now = Instant::now();
+        let t = call_timeout(Duration::from_secs(600), Some(now + Duration::from_secs(300)), now);
+        assert_eq!(t, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn the_floor_holds_past_the_deadline() {
+        let now = Instant::now();
+        let past = now.checked_sub(Duration::from_secs(10)).unwrap_or(now);
+        assert_eq!(call_timeout(Duration::from_secs(600), Some(past), now), CALL_TIMEOUT_FLOOR);
+        let soon = now + Duration::from_secs(30);
+        assert_eq!(call_timeout(Duration::from_secs(600), Some(soon), now), CALL_TIMEOUT_FLOOR);
+    }
+
+    #[test]
+    fn a_short_configured_timeout_wins() {
+        let now = Instant::now();
+        let t = call_timeout(Duration::from_secs(60), Some(now + Duration::from_secs(300)), now);
+        assert_eq!(t, Duration::from_secs(60));
     }
 }

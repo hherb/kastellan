@@ -376,6 +376,8 @@ async fn happy_path_decodes_plan_and_populates_meta() {
         "system prompt missing from wire: {}",
         served.body
     );
+    // #941: every planner call caps its reply.
+    assert!(served.body.contains("\"max_tokens\":16384"), "max_tokens missing from wire: {}", served.body);
 }
 
 /// Pins the graph-lane production wiring: the entity extractor's seed
