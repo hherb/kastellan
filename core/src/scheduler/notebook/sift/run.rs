@@ -34,7 +34,8 @@ use crate::scheduler::agent::FormulationMeta;
 use crate::scheduler::audit::SCHEDULER_AUDIT_ACTOR;
 use crate::scheduler::inner_loop::execute::{self, ExecState, Executed, StepPolicy};
 use crate::scheduler::inner_loop::{
-    sorter_view, InnerLoopError, PlanRecord, StepDispatcher, StepOutcome, TaskContext,
+    screen_model_text, sorter_view, InnerLoopError, Outcome, PlanRecord, StepDispatcher, StepOutcome, TaskContext,
+    WITHHELD_MARKER,
 };
 use crate::scheduler::notebook::formulator::NotebookFormulator;
 use crate::scheduler::notebook::reply::{notebook_step_of, CallSpec, NOTEBOOK_STEP_RATIONALE};
@@ -106,12 +107,23 @@ pub(crate) async fn run_sift(
 
     // The sorter, one item at a time.
     let (mut counts, mut rows, mut stopped, mut sorter_calls) = (Counts::default(), Vec::new(), None, 0u32);
+    let mut unread = 0usize;
     for (item, reads) in items.iter().zip(&batch.per_item) {
         if ctx.deadline.is_some_and(|d| Instant::now() >= d) {
             stopped = Some("time");
             break;
         }
+        // An operator's cancel is seen between items, as between steps.
+        if kastellan_db::tasks::observe_state(r.pool, ctx.task_id).await? == "cancelled" {
+            stopped = Some("cancelled");
+            break;
+        }
         counts.looked_at += 1;
+        // A read was asked for but its placeholders named no field of this
+        // item: say so, or the planner takes the item as read.
+        if p.read.is_some() && reads.is_empty() {
+            unread += 1;
+        }
         let cap = SORTER_ITEM_CAP / (1 + reads.len());
         let mut views = Vec::new();
         let mut blocked = sorter_view(&over.tool, item, cap).map(|v| views.push(v)).is_err();
@@ -153,14 +165,24 @@ pub(crate) async fn run_sift(
     }
 
     let remaining = items.len() - counts.looked_at;
-    let summary = summary(&scrap, &p, &counts, &rows, remaining, stopped);
+    let reads = Reads { made: batch.reads.len(), unread };
+    let summary = summary(&scrap, &p, &counts, reads, &rows, remaining, stopped);
     let finished = json!({
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "looked_at": counts.looked_at, "kept": counts.kept, "withheld": counts.withheld,
-        "undecided": counts.undecided, "failed_reads": counts.failed_reads, "remaining": remaining,
-        "stopped": stopped, "sorter_calls": sorter_calls, "ms": started.elapsed().as_millis() as u64,
+        "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
+        "unread": reads.unread, "remaining": remaining, "stopped": stopped, "sorter_calls": sorter_calls,
+        "ms": started.elapsed().as_millis() as u64,
     });
     audit(r.pool, ACTION_SIFT_FINISHED, finished).await;
+    if stopped == Some("cancelled") {
+        return Ok(Executed::Finished(Box::new(execute::Finished {
+            outcome: Outcome::Cancelled,
+            insight: None,
+            skill: None,
+            python_skill: None,
+        })));
+    }
     push_summary(r.pool, ctx, call, class, summary).await;
     st.gathered |= counts.kept > 0;
     Ok(Executed::Dispatched)
@@ -302,10 +324,25 @@ fn source_of(item: &Value) -> Value {
 
 /// What the planner is shown (K9): the ref, the criterion, the counts, and a
 /// sample of what was kept. Screened when it is recorded, like any result.
+/// How many reads the sift made, and how many items it looked at whose read
+/// could not be made (a placeholder named no field of the item).
+#[derive(Clone, Copy)]
+struct Reads {
+    made: usize,
+    unread: usize,
+}
+
+/// What the planner is shown (K9): the ref, the criterion, the counts, and a
+/// sample of what was kept. The sample's values are model-written from tool
+/// output, so each is screened (shown as [`WITHHELD_MARKER`] if blocked), and
+/// if the whole summary would still fail the record's screen, the
+/// model-written parts go: the ref and the counts must always get through,
+/// or the planner can neither show the sift nor run it again.
 fn summary(
     scrap: &ScrapRef,
     p: &SiftParams,
     c: &Counts,
+    reads: Reads,
     rows: &[NewRow],
     remaining: usize,
     stopped: Option<&str>,
@@ -314,12 +351,13 @@ fn summary(
         .iter()
         .filter(|r| r.kind == RowKind::Kept)
         .take(SAMPLE_ROWS)
-        .map(|r| json!({"fields": r.fields, "source": r.source}))
+        .map(|r| json!({"fields": screened(&r.fields), "source": screened(&r.source)}))
         .collect();
     let mut s = json!({
         "scrapbook": scrap.to_string(), "criterion": p.keep_if, "fields": p.fields,
         "looked_at": c.looked_at, "kept": c.kept, "withheld": c.withheld, "undecided": c.undecided,
-        "failed_reads": c.failed_reads, "remaining": remaining, "sample": sample,
+        "failed_reads": c.failed_reads, "reads": reads.made, "unread": reads.unread,
+        "remaining": remaining, "sample": sample,
     });
     if remaining > 0 {
         s["next_from"] = json!(p.from + c.looked_at);
@@ -327,7 +365,29 @@ fn summary(
     if let Some(why) = stopped {
         s["stopped"] = json!(why);
     }
+    if sorter_view(SIFT_TOOL, &s, SUMMARY_SCREEN_CAP).is_err() {
+        if let Some(o) = s.as_object_mut() {
+            for k in ["sample", "criterion", "fields"] {
+                o.remove(k);
+            }
+        }
+        s["sample_withheld"] = json!(true);
+    }
     s
+}
+
+/// The cap the summary is screened at before it is recorded: above its size.
+const SUMMARY_SCREEN_CAP: usize = 64 * 1024;
+
+/// `v` with every string in it shown as [`WITHHELD_MARKER`] when the
+/// planner-text screen blocks it.
+fn screened(v: &Value) -> Value {
+    match v {
+        Value::String(t) if screen_model_text(t).is_some() => json!(WITHHELD_MARKER),
+        Value::Array(a) => Value::Array(a.iter().map(screened).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), screened(x))).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Record the sift as the step's one call, with the summary as its result,

@@ -81,3 +81,22 @@ fn the_note_names_only_what_happened() {
         "{t}"
     );
 }
+
+/// Review finding: amounts sort as numbers (100 after 30, not before), with
+/// a currency and thousands separators; ISO dates still sort as text.
+#[test]
+fn numbers_sort_as_numbers() {
+    let rows = [
+        row(1, RowKind::Kept, json!({"amount": "30"})),
+        row(2, RowKind::Kept, json!({"amount": "$1,200.00"})),
+        row(3, RowKind::Kept, json!({"amount": "100"})),
+    ];
+    let order = OrderBy { column: "amount".into(), desc: true };
+    let t = render_table(&rows, &cols(&["amount"]), Some(&order), &counts(3, 3));
+    let cells: Vec<&str> = t.lines().skip(2).take(3).collect();
+    assert_eq!(cells, ["| $1,200.00 |", "| 100 |", "| 30 |"], "{t}");
+    let dates = [row(1, RowKind::Kept, json!({"d": "2026-01-02"})), row(2, RowKind::Kept, json!({"d": "2025-12-30"}))];
+    let asc = OrderBy { column: "d".into(), desc: false };
+    let t = render_table(&dates, &cols(&["d"]), Some(&asc), &counts(2, 2));
+    assert!(t.find("2025-12-30").unwrap() < t.find("2026-01-02").unwrap(), "{t}");
+}

@@ -36,7 +36,11 @@ pub(crate) fn render_table(rows: &[Row], columns: &[String], order_by: Option<&O
     if let Some(o) = order_by {
         ordered.sort_by(|a, b| {
             let (a, b) = (cell_text(a, &o.column), cell_text(b, &o.column));
-            if o.desc { b.cmp(&a) } else { a.cmp(&b) }
+            let order = match (as_number(&a), as_number(&b)) {
+                (Some(x), Some(y)) => x.total_cmp(&y),
+                _ => a.cmp(&b),
+            };
+            if o.desc { order.reverse() } else { order }
         });
     }
     let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
@@ -69,6 +73,18 @@ fn cell_text(row: &Row, column: &str) -> String {
         };
     }
     row.fields.get(column).map(scalar).unwrap_or_default()
+}
+
+/// A cell read as a number, so `order_by` puts 100 after 30: its digits,
+/// point and sign, ignoring a currency and thousands separators
+/// (`$1,200.00` is 1200). `None` for anything else — an ISO date included —
+/// which then sorts as text.
+fn as_number(s: &str) -> Option<f64> {
+    let kept: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+    if !kept.bytes().any(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    kept.parse().ok()
 }
 
 fn scalar(v: &Value) -> String {

@@ -48,6 +48,8 @@ pub(crate) struct Script {
     pub(crate) sift_cfg: SiftConfig,
     /// How long each sorter call takes (a deadline test).
     pub(crate) sort_delay: std::time::Duration,
+    /// Cancel this task during the first sorter call (an operator's cancel).
+    pub(crate) cancel_during_sort: Option<(sqlx::PgPool, i64)>,
 }
 
 impl Script {
@@ -67,6 +69,7 @@ impl Script {
             sorted: Mutex::new(Vec::new()),
             sift_cfg: SiftConfig { max_reads: 64, read_methods: vec!["mail.read".into(), "esc.read".into()] },
             sort_delay: std::time::Duration::ZERO,
+            cancel_during_sort: None,
         }
     }
 
@@ -133,6 +136,10 @@ impl NotebookFormulator for Script {
 impl Sorter for Script {
     async fn sort(&self, _ctx: &TaskContext, user_msg: String) -> Result<String, AgentError> {
         tokio::time::sleep(self.sort_delay).await;
+        let first = self.sorted.lock().unwrap().is_empty();
+        if let (true, Some((pool, task))) = (first, &self.cancel_during_sort) {
+            kastellan_db::tasks::mark_cancelled(pool, *task).await.unwrap();
+        }
         self.sorted.lock().unwrap().push(user_msg);
         self.sorter_replies.lock().unwrap().pop_front().ok_or_else(|| AgentError::PromptMissing)
     }

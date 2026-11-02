@@ -206,8 +206,10 @@ the items that match, with the facts you name, in the task's **scrapbook**:
   extract from each kept item (1–16 names).
 
 Its result tells you `scrapbook` (its name), `criterion`, `fields`,
-`looked_at`, `kept`, `withheld`, `undecided`, `failed_reads`, `remaining` and a
-`sample` of up to 3 kept items. When `remaining` is above 0, `sift` again with `from` set to
+`looked_at`, `kept`, `withheld`, `undecided`, `failed_reads`, `reads`,
+`unread`, `remaining` and a `sample` of up to 3 kept items. `unread` counts
+items that were decided without their read because a `"{name}"` named no field
+of the item: fix the placeholder and sift again. When `remaining` is above 0, `sift` again with `from` set to
 `next_from`. `stopped` says why it ended early (`time`). If the
 sample shows the criterion did not work, sift again with a better `keep_if`.
 Then `answer` with `"table": {"scrapbook": "<name>"}` — or a list of names,
