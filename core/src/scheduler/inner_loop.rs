@@ -34,7 +34,9 @@ pub use self::summary::PlanRecord;
 pub(crate) use self::summary::STEP_OK_SUMMARY_MAX;
 // The notebook loop (#922) renders model text and step results through the
 // summary's own screens.
-pub(crate) use self::summary::{notebook_block_audit_payload, screen_model_text, STEP_ERR_DETAIL_MAX, WITHHELD_MARKER};
+pub(crate) use self::summary::{
+    notebook_block_audit_payload, screen_model_text, sorter_view, STEP_ERR_DETAIL_MAX, WITHHELD_MARKER,
+};
 use super::agent::{AgentError, PlanFormulator};
 use super::asks;
 

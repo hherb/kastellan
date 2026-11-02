@@ -13,6 +13,8 @@
 //! * [`formulator`] — send one turn to the model.
 //! * [`repeat`] — a call this task already made is not made again.
 //! * [`thinking`] — which turns think (planning, replanning, writing the answer).
+//! * [`sift`] — one step over every item of a list, keeping the matches in
+//!   the task's scrapbook.
 //! * [`run`] — the loop: one step per turn, every call reviewed and dispatched
 //!   by the classic loop's own code.
 //!
@@ -24,6 +26,7 @@ pub(crate) mod render;
 pub(crate) mod repeat;
 pub(crate) mod reply;
 pub(crate) mod run;
+pub mod sift;
 pub(crate) mod state;
 #[cfg(test)]
 pub(crate) mod test_harness;
