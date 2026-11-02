@@ -81,7 +81,8 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   Off is 4–6× faster but its Qantas table regressed; selective is no clear win (Qantas 923 s and still 3 bookings
   short; latest invoice wrong). Both quality misses are **stopped-searching-too-early**, which answer-time thinking
   cannot fix → next: coverage, not thinking. Selective also needed a repeat-call guard (task 291 made one call 20×)
-  and "a replan keeps the called step" (292). **The DGX is left on selective** (`DISABLE_THINKING=1`; set `0` for on).
+  and "a replan keeps the called step" (292). **Operator decision (2026-11-02): gemma MoE, thinking ON, notebook
+  mode — a correct answer matters more than speed.** The DGX runs exactly that (`.local` = the pre-bonsai backup).
 - ⚠️ `ssh dgx 'pkill -f "[r]equery7"; …; bash ~/requery7.sh'` killed its own shell (exit 255): the bracket trick
   protects only the pattern, not other words of the same command line. Kill in a separate ssh call
   [[pgrep-wait-loops-match-themselves]].
