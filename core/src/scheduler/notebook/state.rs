@@ -19,6 +19,10 @@ use crate::cassandra::types::DataClass;
 
 /// One step of the model's plan: what it is for, which tool it expects to
 /// use, and what "done" means.
+///
+/// Models echo back the shape they are shown, so the keys only the render
+/// adds (`status`, `note`) are read and ignored — the notebook owns them —
+/// while any other unknown key is still refused (DGX tasks 259, 267).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StepSpec {
@@ -26,15 +30,22 @@ pub(crate) struct StepSpec {
     pub purpose: String,
     pub tool: String,
     pub done_when: String,
+    #[serde(default, rename = "status", skip_serializing)]
+    pub echoed_status: Option<serde_json::Value>,
+    #[serde(default, rename = "note", skip_serializing)]
+    pub echoed_note: Option<serde_json::Value>,
 }
 
 /// A fact the answer needs, as the model wrote it, and where it came from
-/// (a message id, an attachment, a URL).
+/// (a message id, an attachment, a URL). A `step` echoed from the render is
+/// ignored: the tick's own step is the one recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FindingSpec {
     pub text: String,
     pub source: String,
+    #[serde(default, rename = "step", skip_serializing)]
+    pub echoed_step: Option<serde_json::Value>,
 }
 
 /// `steps`: the first step list, or a replan replacing the pending steps.

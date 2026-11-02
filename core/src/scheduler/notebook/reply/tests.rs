@@ -154,3 +154,24 @@ fn a_tick_with_a_call_for_the_same_step_is_progress() {
     let done = check(json!({"tick": tick(1), "call": call(2)}), &two_steps()).unwrap();
     assert!(!done.tick_payload(DataClass::Public).unwrap().partial, "a call for the next step closes it");
 }
+
+/// DGX tasks 259/267: the model echoes the rendered shapes back — a step's
+/// `status`/`note`, a finding's `step`. Those are read and dropped; any other
+/// unknown key is still refused, so no fact is silently lost.
+#[test]
+fn keys_echoed_from_the_render_are_ignored_and_not_stored() {
+    let mut s = step(2);
+    s["status"] = json!("pending");
+    s["note"] = json!("old");
+    let mut t = tick(1);
+    t["findings"][0]["step"] = json!(1);
+    let r = check(json!({"tick": t, "steps": [s], "call": call(2)}), &two_steps()).unwrap();
+    let stored = serde_json::to_value(r.steps.as_ref().unwrap()).unwrap();
+    assert_eq!(stored, json!([step(2)]), "nothing echoed reaches the notebook");
+    let stored = serde_json::to_value(&r.tick.as_ref().unwrap().findings).unwrap();
+    assert_eq!(stored, json!([{"text": "f", "source": "m1"}]));
+
+    let mut bad = tick(1);
+    bad["findings"][0]["amount"] = json!("$5");
+    assert!(check(json!({"tick": bad, "call": call(2)}), &two_steps()).unwrap_err().contains("unknown field `amount`"));
+}
