@@ -262,6 +262,7 @@ async fn the_notebook_loop() {
     a_step_replanned_away_still_counts_toward_the_ceiling(&pool).await;
     tasks_correct_adds_to_a_running_task_only(&pool).await;
     a_runaway_reply_after_gathering_spends_the_answer_turn(&pool).await;
+    a_call_on_the_answer_turn_is_re_asked(&pool).await;
     the_turn_cap_is_twice_max_plans(&pool).await;
 }
 
@@ -467,4 +468,20 @@ async fn a_runaway_reply_after_gathering_spends_the_answer_turn(pool: &sqlx::PgP
     let script = Script::raw(&[RUNAWAY.into()]);
     let r = run(pool, &script, new_task(pool, 5).await).await;
     assert!(matches!(r.result.outcome, Outcome::Failed(_)), "{:?}", r.result.outcome);
+}
+
+/// DGX task 273: on the forced-answer turn the model called again. That is
+/// re-asked with the reason, and the answer it then gives is used.
+async fn a_call_on_the_answer_turn_is_re_asked(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f"), "call": call(2, "b")}),
+        json!({"tick": tick(2, "g"), "call": call(3, "c")}),
+        json!({"tick": tick(2, "g"), "answer": {"body": "f and g"}}),
+    ]);
+    // max_plans 1 → 2 turns; turn 3 is the forced answer.
+    let r = run(pool, &script, new_task(pool, 1).await).await;
+    assert_eq!(body(&r.result), "f and g");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "the answer turn's call never ran");
+    assert!(script.reasks.lock().unwrap()[0].contains("must end the task"), "{:?}", script.reasks.lock().unwrap());
 }

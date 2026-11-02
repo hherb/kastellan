@@ -31,7 +31,7 @@ use sqlx::PgPool;
 
 use super::formulator::NotebookFormulator;
 use super::render::{render_turn, CurrentStep, TurnBudget};
-use super::reply::{answer_ceiling, answer_plan, call_plan, parse_reply, validate, NotebookReply, TickSpec};
+use super::reply::{answer_ceiling, answer_plan, call_plan, parse_reply, require_answer, validate, NotebookReply, TickSpec};
 use super::state::{fold, Correction, NotebookState};
 use crate::cassandra::review::ChainReviewStage;
 use crate::cassandra::types::DataClass;
@@ -262,7 +262,10 @@ async fn ask(
 ) -> Asked {
     let check = |sent: Result<(String, FormulationMeta), AgentError>| {
         let (raw, meta) = sent?;
-        match parse_reply(&raw).and_then(|r| validate(&r, state).map(|()| r)) {
+        let checked = parse_reply(&raw)
+            .and_then(|r| validate(&r, state).map(|()| r))
+            .and_then(|r| if guard.answer_turn { require_answer(&r).map(|()| r) } else { Ok(r) });
+        match checked {
             Ok(reply) => Ok((reply, meta)),
             Err(detail) => Err(AgentError::Decode { detail, raw, usage: meta.usage, latency_ms: meta.latency_ms }),
         }

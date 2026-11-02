@@ -142,6 +142,17 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
     Ok(())
 }
 
+/// On the forced-answer turn a `call` is not a usable reply: the turn
+/// budget is spent. Refusing it here sends it through the same re-ask as any
+/// unusable reply, with the reason, instead of failing the task outright (DGX
+/// task 273 called again on that turn, with 17 turns of findings in hand).
+pub(crate) fn require_answer(reply: &NotebookReply) -> Result<(), String> {
+    match reply.call {
+        Some(_) => Err("this turn must end the task: reply with `answer` (or `infeasible`), not `call`".into()),
+        None => Ok(()),
+    }
+}
+
 /// The one-step plan for `call`, reviewed and dispatched like any plan. Its
 /// `data_ceiling` is the call's classification, raised to the task's
 /// `floor`: left unset, it would resolve to the floor alone, and a call that
