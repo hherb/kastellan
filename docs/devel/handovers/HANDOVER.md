@@ -62,7 +62,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - **Deviations from the plan (keep):** full `<tools>` block in the system prompt (turn 1 needs params; it is the
   cached prefix); `last_result` is the summary's stored screened view (16 KiB), not a new render; `blocks`/
   `advisories`, `last_failure` and `answer.refused` added.
-- **Seven live fixes from DGX tasks 259–290** (each with a test that fails without it; the 7th: a full tick may close a failed step): method in `tool`
+- **Nine live fixes from DGX tasks 259–300** (each with a test; 7–9: a failed step closed by a full tick, the repeat guard, a replan keeps the called step): method in `tool`
   (UNKNOWN_TOOL) → prompt example; a replan re-sends the whole list → done steps stay done, failed ones are retried;
   tick + call for the same step → `partial` progress tick; echoed render keys (`status`, `note`, a finding's
   `step`) → read and dropped; a blank `length` reply (one turn thought 16384 tokens / 408 s) → spends the
@@ -76,10 +76,12 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   (18.5 s) [failed in every baseline]. Re-asked on d847354c, invoices **completed** 22 / 958 (task 279; it says which
   candidates it did not verify). **7/7 completed; not yet judged by the operator; 4 of 7 over ~5 minutes.**
   Prompts 5.5k–14k tokens (classic: up to ~49k). **Bonsai-2 27B (Q2_0)** stopped after 2 (decode ~25 tok/s vs
-  gemma's ~42; invoices without amounts). **Gemma, thinking OFF** (283–290, Ollama 0.40, `.local`
-  `KASTELLAN_LLM_DISABLE_THINKING=1` — **the DGX is left this way**): 7/7 completed after 06113d26, every one ≤ 230 s,
-  4–6× faster, but the Qantas table regressed (4 rows, wrong order) and flight/payments answers differ: **speed
-  vs answer quality is the open decision** — next experiment: thinking on only for planning/replan/answer turns.
+  gemma's ~42; invoices without amounts). **Three thinking settings, all seven, Ollama 0.40** (on 272–279 / off
+  283–290 / **selective** 294–300 = plan, replan and answer turns think, cb1f59d0): total **3350 / 735 / 2097 s**.
+  Off is 4–6× faster but its Qantas table regressed; selective is no clear win (Qantas 923 s and still 3 bookings
+  short; latest invoice wrong). Both quality misses are **stopped-searching-too-early**, which answer-time thinking
+  cannot fix → next: coverage, not thinking. Selective also needed a repeat-call guard (task 291 made one call 20×)
+  and "a replan keeps the called step" (292). **The DGX is left on selective** (`DISABLE_THINKING=1`; set `0` for on).
 - ⚠️ `ssh dgx 'pkill -f "[r]equery7"; …; bash ~/requery7.sh'` killed its own shell (exit 255): the bracket trick
   protects only the pattern, not other words of the same command line. Kill in a separate ssh call
   [[pgrep-wait-loops-match-themselves]].
