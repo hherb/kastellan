@@ -8,7 +8,7 @@
 //! operator's corrections, and the classification of every step's data.
 //!
 //! The fold is strict. A payload that does not decode, a tick for a step
-//! that is not listed, or a step list that reuses a finished step's id is a
+//! that is not listed or not pending, or a step list naming one id twice is a
 //! [`FoldError`] — the loop then fails the task in words rather than guess
 //! what the notebook meant.
 
@@ -151,17 +151,26 @@ impl NotebookState {
 }
 
 impl NotebookState {
-    /// A step list: the first, or a replan. It keeps what is finished and
-    /// replaces what is not (D4); an id already in the list is refused.
+    /// A step list: the first, or a replan. It replaces every pending step
+    /// and keeps what is finished (D4). Models re-send the whole list when
+    /// they replan (DGX task 259), so a listed id that is already finished is
+    /// read, not refused: a **done** step stays done (re-listing it changes
+    /// nothing), and a **failed** step listed again is retried — pending once
+    /// more, in its place. One id listed twice in the same list is refused.
     /// Shared by [`fold`] and the reply check, so a reply is accepted only if
     /// the entry it becomes will fold.
     pub(crate) fn apply_steps(&mut self, specs: Vec<StepSpec>) -> Result<(), String> {
+        let mut ids = std::collections::HashSet::new();
+        if let Some(dup) = specs.iter().find(|s| !ids.insert(s.id)) {
+            return Err(format!("step id {} is listed twice", dup.id));
+        }
         self.steps.retain(|s| s.status != StepStatus::Pending);
         for spec in specs {
-            if self.steps.iter().any(|s| s.spec.id == spec.id) {
-                return Err(format!("step id {} is already listed", spec.id));
+            match self.steps.iter_mut().find(|s| s.spec.id == spec.id) {
+                Some(done) if done.status == StepStatus::Done => {}
+                Some(failed) => *failed = Step { spec, status: StepStatus::Pending, note: None },
+                None => self.steps.push(Step { spec, status: StepStatus::Pending, note: None }),
             }
-            self.steps.push(Step { spec, status: StepStatus::Pending, note: None });
         }
         Ok(())
     }

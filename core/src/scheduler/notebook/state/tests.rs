@@ -54,11 +54,22 @@ fn a_replan_keeps_done_steps_and_replaces_pending_ones() {
     assert_eq!(s.findings.len(), 1, "a replan keeps the findings");
 }
 
+/// DGX task 259: the model re-sent the whole list, failed step included.
 #[test]
-fn a_replan_cannot_reuse_a_finished_steps_id() {
-    let err = fold(&[steps(1, &[1, 2]), tick(2, 1, "Public"), steps(3, &[1])]).unwrap_err();
-    assert_eq!(err.seq, 3);
-    assert!(err.detail.contains("already listed"), "{err}");
+fn a_replan_relisting_finished_steps_keeps_done_ones_and_retries_failed_ones() {
+    let s = fold(&[steps(1, &[1, 2, 3]), tick(2, 1, "Public"), failed(3, 2, "Public"), steps(4, &[1, 2, 4])]).unwrap();
+    assert_eq!(s.steps.iter().map(|s| s.spec.id).collect::<Vec<_>>(), vec![1, 2, 4], "step 3 replanned away");
+    assert_eq!(ids_with(&s, StepStatus::Done), vec![1]);
+    assert_eq!(s.steps[0].note.as_deref(), Some("n1"), "a done step keeps its note");
+    assert_eq!(ids_with(&s, StepStatus::Pending), vec![2, 4]);
+    assert_eq!(s.current_step().map(|c| c.id), Some(2), "the retried step is current, in its place");
+    assert_eq!(s.touched.len(), 2, "the failed attempt's data still counts");
+}
+
+#[test]
+fn a_step_list_naming_one_id_twice_is_an_error() {
+    let err = fold(&[steps(1, &[1, 1])]).unwrap_err();
+    assert!(err.detail.contains("listed twice"), "{err}");
 }
 
 #[test]

@@ -73,9 +73,21 @@ fn a_tick_and_a_call_for_the_next_step_is_accepted() {
 }
 
 #[test]
-fn a_replan_reusing_a_finished_id_is_rejected_like_the_fold_would() {
-    let err = check(json!({"tick": tick(1), "steps": [step(1)], "call": call(1)}), &two_steps()).unwrap_err();
-    assert!(err.contains("already listed"), "{err}");
+fn a_replan_cannot_reopen_a_done_step() {
+    // Step 1 is ticked in this reply; re-listing it keeps it done, so a call
+    // for it is refused.
+    let err = check(json!({"tick": tick(1), "steps": [step(1), step(2)], "call": call(1)}), &two_steps()).unwrap_err();
+    assert!(err.contains("not a pending step"), "{err}");
+}
+
+#[test]
+fn a_replan_may_retry_a_failed_step() {
+    let failed = fold(&[
+        entry(1, EntryKind::Steps, json!({"steps": [step(1), step(2)]})),
+        entry(2, EntryKind::FailedStep, json!({"step": 1, "code": "E", "detail": "d", "classification": "Public"})),
+    ])
+    .unwrap();
+    check(json!({"steps": [step(1), step(2)], "call": call(1)}), &failed).expect("retry step 1");
 }
 
 #[test]

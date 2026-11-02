@@ -118,12 +118,18 @@ The keys:
   `summary`: replaces your previous progress summary.
 - `steps` — the step list. **Required on your first turn.** On a later turn it
   is a **replan**: it replaces every pending step (done and failed steps and
-  their notes stay). Give new steps new ids; never reuse a listed id.
+  their notes stay). Give new steps new ids. Listing a **failed** step's id
+  again retries that step; listing a **done** step's id again changes
+  nothing. Step objects hold only `id`, `purpose`, `tool` and `done_when` —
+  never a `status`.
 - **Exactly one** of:
   - `call` — the tool call for a **pending** step (usually the next one after
     a tick, or the current one again, e.g. for the next page). It is reviewed
-    before it runs. `classification` is the most sensitive class of data the
-    call touches.
+    before it runs. `tool` is the tool's **name** and `method` its method,
+    exactly as a `<tools>` line shows them: for
+    `- mail (method: mail.search): …` that is `"tool": "mail"`,
+    `"method": "mail.search"` — never the method in `tool`. `classification`
+    is the most sensitive class of data the call touches.
   - `answer` — `{"body": "<the final answer>", "data_ceiling": "<class>"}`.
     Write it **from the findings**, completely and clearly, naming sources
     where useful. You may answer as soon as the findings suffice — pending
