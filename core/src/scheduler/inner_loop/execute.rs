@@ -34,8 +34,9 @@ pub(crate) struct ExecState {
 
 /// How one plan ended.
 pub(crate) enum Executed {
-    /// The task ends with this outcome.
-    Finished(Finished),
+    /// The task ends with this outcome. Boxed: a `Finished` is far larger
+    /// than the other variants (`clippy::large_enum_variant`).
+    Finished(Box<Finished>),
     /// The plan was blocked or its invoke refused; formulate again.
     Again,
     /// The plan's steps ran; their record is the last of `ctx.plans`.
@@ -52,7 +53,7 @@ pub(crate) struct Finished {
 
 impl Executed {
     fn finished(outcome: Outcome) -> Self {
-        Executed::Finished(Finished { outcome, insight: None, skill: None, python_skill: None })
+        Executed::Finished(Box::new(Finished { outcome, insight: None, skill: None, python_skill: None }))
     }
 }
 
@@ -367,12 +368,12 @@ pub(crate) async fn review_and_dispatch(
             } else {
                 None
             };
-        return Ok(Executed::Finished(Finished {
+        return Ok(Executed::Finished(Box::new(Finished {
             outcome: Outcome::Completed(result),
             insight: captured_l1_insight,
             skill: captured_l3_skill,
             python_skill: captured_python_skill,
-            }));
+        })));
     }
 
     // Forced-synthesis turn: the model was told to answer now. A

@@ -73,6 +73,21 @@ pub trait NotebookFormulator: Send + Sync {
     }
 }
 
+impl RouterAgent {
+    /// Run every task on the notebook loop (#922), showing each step the doc
+    /// of its tool from `tools`.
+    pub fn with_notebook(mut self, tools: std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>) -> Self {
+        self.notebook_tools = Some(tools);
+        self
+    }
+
+    /// The doc of the advertised tool named `tool`, in notebook mode.
+    fn notebook_tool_doc(&self, tool: &str) -> Option<String> {
+        let tools = self.notebook_tools.as_ref()?;
+        tools.iter().find(|t| t.doc.name == tool).map(crate::prompt_assembly::assemble::render_tool_doc)
+    }
+}
+
 #[async_trait]
 impl NotebookFormulator for RouterAgent {
     async fn notebook_turn(
@@ -85,7 +100,7 @@ impl NotebookFormulator for RouterAgent {
         let prior = prior.map(|(reply, reason)| {
             [ChatMessage::assistant(reply), ChatMessage::user(reformat_directive(reason))]
         });
-        self.send_turn(NOTEBOOK_PROMPT, ctx, |now| user_msg(now), prior, thinking).await
+        self.send_turn(NOTEBOOK_PROMPT, ctx, user_msg, prior, thinking).await
     }
 
     fn tool_doc(&self, tool: &str) -> Option<String> {
