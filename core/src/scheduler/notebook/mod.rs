@@ -18,10 +18,13 @@
 //!
 //! Design: `docs/superpowers/specs/2026-11-01-task-notebook-design.md`.
 
+pub(crate) mod audit;
 pub mod formulator;
 pub(crate) mod render;
 pub(crate) mod repeat;
 pub(crate) mod reply;
 pub(crate) mod run;
 pub(crate) mod state;
+#[cfg(test)]
+pub(crate) mod test_harness;
 pub(crate) mod thinking;
