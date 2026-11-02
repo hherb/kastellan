@@ -32,6 +32,9 @@ pub use self::summary::PlanRecord;
 // references them, hence the `cfg(test)` gate (else they read as unused).
 #[cfg(test)]
 pub(crate) use self::summary::{STEP_ERR_DETAIL_MAX, STEP_OK_SUMMARY_MAX};
+// The notebook loop (#922) renders model text and step results through the
+// summary's own screens.
+pub(crate) use self::summary::{screen_model_text, WITHHELD_MARKER};
 use super::agent::{AgentError, PlanFormulator};
 use super::asks;
 

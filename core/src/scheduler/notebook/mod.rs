@@ -8,7 +8,9 @@
 //!
 //! * [`state`] — the entry payloads and the pure fold of a task's entries
 //!   into its current notebook.
+//! * [`render`] — the user message of one turn, screened and stable-first.
 //!
 //! Design: `docs/superpowers/specs/2026-11-01-task-notebook-design.md`.
 
+pub(crate) mod render;
 pub(crate) mod state;

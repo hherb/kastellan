@@ -23,7 +23,7 @@ pub(crate) const TIER_SINK: &str = "sink";
 /// `decision`, a step's call, or a step outcome (#699, #700): enough for the
 /// forensic `policy / injection.blocked` row, and never the screened text.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct SinkBlock {
+pub(crate) struct SinkBlock {
     pub(super) score: f32,
     pub(super) reason_codes: Vec<&'static str>,
     pub(super) body_sha256: String,
