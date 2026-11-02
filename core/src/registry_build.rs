@@ -309,7 +309,7 @@ pub fn assemble_registry(
     // advertised, so the planner is never told of a tool it can't dispatch.
     let mut docs: Vec<AdvertisedTool> = Vec::new();
     for m in manifests {
-        if m.name() == HANDOFF_TOOL {
+        if m.name() == HANDOFF_TOOL || m.name() == crate::scheduler::notebook::sift::SIFT_TOOL {
             tracing::warn!(
                 tool = m.name(),
                 "worker manifest claims the reserved built-in name; skipping"

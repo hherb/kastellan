@@ -174,6 +174,18 @@ pub(crate) fn require_answer(reply: &NotebookReply) -> Result<(), String> {
     }
 }
 
+/// What a notebook call's plan says in `rationale`, before its step id. The
+/// plan digest leaves `rationale` out (`plan_digest`), so this changes no
+/// approval; the reviewer reads it as what it is.
+pub(crate) const NOTEBOOK_STEP_RATIONALE: &str = "notebook step ";
+
+/// The notebook step a call's plan was made for (`call_plan`'s stamp), so a
+/// `sift` over `{"step": n}` can find that step's result. `None` for any
+/// other plan.
+pub(crate) fn notebook_step_of(plan: &Plan) -> Option<u32> {
+    plan.rationale.strip_prefix(NOTEBOOK_STEP_RATIONALE)?.parse().ok()
+}
+
 /// The one-step plan for `call`, reviewed and dispatched like any plan. Its
 /// `data_ceiling` is the call's classification, raised to the task's
 /// `floor`: left unset, it would resolve to the floor alone, and a call that
@@ -183,7 +195,7 @@ pub(crate) fn call_plan(reply: &NotebookReply, call: &CallSpec, floor: DataClass
     Plan {
         context: reply.tick.as_ref().map(|t| t.summary.clone()).unwrap_or_default(),
         decision: call.returns.clone(),
-        rationale: String::new(),
+        rationale: format!("{NOTEBOOK_STEP_RATIONALE}{}", call.step),
         steps: vec![PlannedStep {
             tool: call.tool.clone(),
             method: call.method.clone(),

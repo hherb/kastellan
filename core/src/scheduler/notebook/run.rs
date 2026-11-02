@@ -246,6 +246,7 @@ pub(crate) async fn run_notebook_to_terminal(
 
         match execute::review_and_dispatch(
             pool, review.as_ref(), dispatcher.as_ref(), &mut ctx, plan, &meta, answer_turn, exhausted, &mut st, outbox,
+            execute::StepPolicy::Plan,
         )
         .await?
         {

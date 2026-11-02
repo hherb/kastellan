@@ -363,6 +363,22 @@ fn build_registry_loaded_payload_wraps_tools_array() {
 }
 
 #[test]
+fn manifest_claiming_reserved_sift_name_is_skipped() {
+    let allow = |_t: &str| Vec::new();
+    let ctx = test_ctx(&allow);
+    let reserved = FakeManifest {
+        name: "sift",
+        outcome: FakeOutcome::Register,
+        allowlist: None,
+        advertise_doc: true,
+    };
+    let (reg, loaded, docs) = assemble_registry(&[&reserved], &ctx);
+    assert!(reg.lookup("sift").is_none(), "reserved name must not register");
+    assert!(loaded.is_empty(), "reserved name must not appear in loaded records");
+    assert!(docs.is_empty(), "reserved name must not be advertised");
+}
+
+#[test]
 fn manifest_claiming_reserved_handoff_name_is_skipped() {
     let allow = |_t: &str| Vec::new();
     let ctx = test_ctx(&allow);

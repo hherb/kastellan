@@ -517,6 +517,7 @@ pub async fn run_to_terminal(
 
         match execute::review_and_dispatch(
             pool, review.as_ref(), dispatcher.as_ref(), &mut ctx, plan, &meta, synth_turn, exhausted, &mut st, outbox,
+            execute::StepPolicy::Plan,
         )
         .await?
         {

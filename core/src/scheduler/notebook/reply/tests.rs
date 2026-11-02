@@ -208,3 +208,16 @@ fn a_replan_keeps_the_step_the_same_reply_calls() {
     keep_called_step(&mut r, &two_steps());
     assert_eq!(r.steps.as_ref().unwrap().len(), 1);
 }
+
+/// A notebook call's plan names its notebook step, so a later `sift` can
+/// find that step's result among the task's plans (`over: {"step": n}`).
+#[test]
+fn a_call_plan_names_its_notebook_step() {
+    let reply: NotebookReply = serde_json::from_value(json!({"call": call(7)})).unwrap();
+    let plan = call_plan(&reply, reply.call.as_ref().unwrap(), DataClass::Public);
+    assert_eq!(notebook_step_of(&plan), Some(7));
+    assert_eq!(notebook_step_of(&answer_plan("b", DataClass::Public, None)), None);
+    let mut other = plan.clone();
+    other.rationale = "notebook step x".into();
+    assert_eq!(notebook_step_of(&other), None);
+}
