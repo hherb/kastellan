@@ -203,6 +203,7 @@ pub(crate) async fn run_sift(
     let (mut summary, blocks) = summary(&scrap, &p, &counts, reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.
     if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {
+        summary["chain"] = super::chain::totals(&ctx.plans, &prev, counts.looked_at, counts.kept);
         summary["continues"] = json!(prev);
     }
     audit_blocks(r.pool, ctx.task_id, call.step, "sift_summary", &blocks).await;

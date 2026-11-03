@@ -8,7 +8,7 @@
 //! about 86 rows, and 16 of 52) although the prompt asked for every name.
 //! Pure.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::params::{parse_params, SiftParams};
 use super::SIFT_TOOL;
@@ -57,6 +57,20 @@ pub(crate) fn expand(plans: &[PlanRecord], name: &str) -> Vec<String> {
     chain
 }
 
+/// The totals of the chain that ends with a sift continuing `prev`, which
+/// looked at `looked_at` items and kept `kept`: every link's counts plus
+/// its own, so the planner can quote the whole chain. DGX tasks 308 and 309
+/// quoted the last link (25 and 15) above a table of the chain (59 and 39).
+pub(crate) fn totals(plans: &[PlanRecord], prev: &str, looked_at: usize, kept: usize) -> Value {
+    let links: Vec<&Value> = expand(plans, prev).iter().filter_map(|n| summary_of(plans, n)).collect();
+    let sum = |k: &str| links.iter().filter_map(|s| s[k].as_u64()).sum::<u64>();
+    json!({
+        "sifts": links.len() + 1,
+        "looked_at": sum("looked_at") + looked_at as u64,
+        "kept": sum("kept") + kept as u64,
+    })
+}
+
 /// `params` parsed, with `from` cleared (a copied-back `continues` is
 /// ignored by the parse, [`super::params`]); `None` if they do not parse.
 fn but_from(params: &Value) -> Option<SiftParams> {
@@ -67,7 +81,6 @@ fn but_from(params: &Value) -> Option<SiftParams> {
 pub(crate) mod tests {
     use super::*;
     use crate::cassandra::types::{DataClass, Plan, PlannedStep};
-    use serde_json::json;
 
     pub(crate) fn sift_record(params: Value, summary: Value) -> PlanRecord {
         let step = PlannedStep {
@@ -147,6 +160,22 @@ pub(crate) mod tests {
         assert_eq!(expand(&plans, "sb:9:4"), ["sb:9:2", "sb:9:3", "sb:9:4"]);
         assert_eq!(expand(&plans, "sb:9:2"), ["sb:9:2"], "the first link continues nothing");
         assert_eq!(expand(&plans, "sb:7:1"), ["sb:7:1"], "a ref this run did not write stands alone");
+    }
+
+    /// DGX tasks 308/309: the answer quoted the last link's `kept` (25, 15)
+    /// above a table of the whole chain (59, 39). The chain's totals are
+    /// every link's counts plus this sift's own.
+    #[test]
+    fn totals_add_every_link_and_this_sift() {
+        let mut plans = chain_of_three();
+        plans[0] = sift_record(params(0, "an invoice"), json!({"scrapbook": "sb:9:2", "next_from": 30, "looked_at": 30, "kept": 4}));
+        plans[1] = sift_record(
+            params(30, "an invoice"),
+            json!({"scrapbook": "sb:9:3", "next_from": 60, "continues": "sb:9:2", "looked_at": 30, "kept": 5}),
+        );
+        let plans = &plans[..2];
+        assert_eq!(totals(plans, "sb:9:3", 12, 3), json!({"sifts": 3, "looked_at": 72, "kept": 12}));
+        assert_eq!(totals(plans, "sb:9:2", 30, 5), json!({"sifts": 2, "looked_at": 60, "kept": 9}), "a two-link chain");
     }
 
     #[test]

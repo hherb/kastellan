@@ -23,14 +23,17 @@ pub(super) async fn a_table_naming_the_last_of_a_chain_shows_every_link(pool: &s
         json!({"call": sift1(2)}),
         json!({"tick": tick(1, "sorted"), "answer": {"body": "Your invoices:", "table": table}}),
     ])
-    .sorting(&[keep(10), no(), keep(30)]);
+    // The last link looks at 1 and keeps 0, so swapped counts would show.
+    .sorting(&[keep(10), keep(20), no()]);
     script.sift_cfg.max_reads = 2;
     let r = run(pool, &script, ctx).await;
     let second = summary_seen(&script, 3);
     assert_eq!(second["continues"], json!(format!("sb:{}:2", r.task_id)), "{second}");
-    assert!(summary_seen(&script, 2).get("continues").is_none(), "the first sift continues nothing");
+    assert_eq!(second["chain"], json!({"sifts": 2, "looked_at": 3, "kept": 2}), "the planner sees the chain's counts: {second}");
+    let first = summary_seen(&script, 2);
+    assert!(first.get("continues").is_none() && first.get("chain").is_none(), "the first sift is no chain: {first}");
     let b = body(&r.result);
-    let (hi, lo) = (b.find("| 30 | m3 |").expect(&b), b.find("| 10 | m1 |").expect(&b));
+    let (hi, lo) = (b.find("| 20 | m2 |").expect(&b), b.find("| 10 | m1 |").expect(&b));
     assert!(hi < lo, "both links' rows, ordered: {b}");
     assert!(b.ends_with("2 kept of 3 looked at."), "the chain's counts, nothing left over: {b}");
 }

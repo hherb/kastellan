@@ -106,11 +106,12 @@ fn an_overlong_criterion_or_field_name_is_refused() {
 }
 
 /// The model writes back keys it is shown (memory: the planner mirrors the
-/// rendered shape): a summary's `continues`, copied into the next sift's
-/// parameters, must not refuse it.
+/// rendered shape): a summary's `continues` or `chain`, copied into the
+/// next sift's parameters, must not refuse it.
 #[test]
-fn a_copied_continues_is_ignored() {
+fn a_copied_continues_or_chain_is_ignored() {
     let mut v = spec_example();
     v["continues"] = json!("sb:9:2");
+    v["chain"] = json!({"sifts": 2, "looked_at": 60, "kept": 9});
     assert!(parse_params(&v).is_ok());
 }
