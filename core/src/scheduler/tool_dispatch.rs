@@ -293,6 +293,14 @@ const ACTION_STEP_SPAWN_FAILED: &str = "step.spawn_failed";
 pub const HANDOFF_TOOL: &str = "handoff";
 /// Method on [`HANDOFF_TOOL`] that returns a slice of a stashed body.
 pub const HANDOFF_METHOD_FETCH: &str = "fetch";
+
+/// Is `(tool, method)` the handoff fetch? The method may also be written
+/// namespaced, `handoff.fetch`, the way every worker method is spelled
+/// (`mail.get_message`) and the way the notebook prompt and the sift
+/// allowlist name it; the model sends that spelling (DGX task 306).
+fn is_handoff_fetch(tool: &str, method: &str) -> bool {
+    tool == HANDOFF_TOOL && method.strip_prefix("handoff.").unwrap_or(method) == HANDOFF_METHOD_FETCH
+}
 /// `action` for the audit row written when an oversized result is stashed.
 const ACTION_HANDOFF_STASHED: &str = "handoff.stashed";
 /// `action` for the audit row written on a `fetch_handoff` call.
@@ -481,7 +489,7 @@ impl StepDispatcher for ToolHostStepDispatcher {
         // safe: nothing is ever stashed under a non-positive task id, so a
         // fetch there simply finds nothing and returns `HANDOFF_NOT_FOUND`.
         // Gating it would only trade one not-found arm for another.
-        if step.tool == HANDOFF_TOOL && step.method == HANDOFF_METHOD_FETCH {
+        if is_handoff_fetch(&step.tool, &step.method) {
             let fetched = self.handoff.fetch(task_id, &step.parameters);
             let elapsed_ms = started.elapsed().as_millis() as u64;
             let (outcome_label, step_outcome) = match fetched {

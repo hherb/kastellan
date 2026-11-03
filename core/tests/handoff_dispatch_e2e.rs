@@ -92,6 +92,26 @@ async fn fetch_handoff_intercept_returns_stashed_slice() {
     }
 }
 
+/// The namespaced spelling `handoff.fetch` is served too. Every worker method
+/// is written `tool.method` (`mail.get_message`), and the notebook prompt and
+/// the sift allowlist name this one `handoff.fetch`, so that is what the model
+/// sends: DGX task 306 got `tool 'handoff' not registered` for it, then lost
+/// 35 turns re-making the call whose stashed body it could not read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetch_handoff_intercept_accepts_the_namespaced_method() {
+    let cache = Arc::new(HandoffCache::new());
+    let big = serde_json::json!({"text": "needle ".repeat(20_000)});
+    let stash = cache.stash_if_oversized(7, &big, DEFAULT_RESULT_BYTE_CAP).expect("stashed");
+    let dispatcher = dispatcher_with(cache);
+
+    let mut step = fetch_step(serde_json::json!({"handoff_ref": stash.handoff_ref.as_str(), "len": 100}));
+    step.method = "handoff.fetch".into();
+    match dispatcher.dispatch_step(7, &step).await {
+        StepOutcome::Ok(v) => assert!(v["data"].as_str().unwrap().contains("needle")),
+        other => panic!("expected Ok slice, got {other:?}"),
+    }
+}
+
 /// **The injection screen is wired into the intercept, and a Block
 /// actually reaches the planner as a placeholder.**
 ///
