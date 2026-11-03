@@ -29,8 +29,11 @@ pub(crate) fn repeated_call_reason(method: &str) -> String {
 /// Was `step` already dispatched in this task, and did it succeed? Pure.
 pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep) -> bool {
     let key = call_key(step);
+    // A sift's reads reached the planner only as the sift's counts, so they
+    // do not count: reading one of those items is a first read.
     plans
         .iter()
+        .filter(|r| !r.plan.decision.starts_with(crate::scheduler::notebook::sift::SIFT_READS_DECISION))
         .flat_map(|r| r.plan.steps.iter().zip(r.outcomes()))
         .any(|(s, o)| matches!(o, StepOutcome::Ok(_)) && call_key(s) == key)
 }
@@ -119,5 +122,15 @@ mod tests {
         let failed = StepOutcome::Err { code: "TIMEOUT".into(), detail: "worker timed out".into() };
         let plans = vec![record_with(step("mail.get_message", json!({"message_id": 1})), vec![failed])];
         assert!(!already_made(&plans, &step("mail.get_message", json!({"message_id": 1}))));
+    }
+
+    /// A sift's reads were never shown to the planner (it saw only the
+    /// sift's counts), so reading one of those items again is not a repeat.
+    #[test]
+    fn a_read_a_sift_made_is_not_a_repeat() {
+        let read = step("mail.get_message", json!({"message_id": 1}));
+        let mut r = record(read.clone(), true);
+        r.plan.decision = format!("{}an invoice", crate::scheduler::notebook::sift::SIFT_READS_DECISION);
+        assert!(!already_made(&[r], &read));
     }
 }

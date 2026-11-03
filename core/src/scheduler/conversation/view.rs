@@ -2,7 +2,7 @@
 //!
 //! Pure and deterministic in `(turns, budget)`. Three jobs, in this order:
 //!
-//! 1. **Render** each turn as `{at, user, calls?, answer}`.
+//! 1. **Render** each turn as `{at, user, calls?, scrapbooks?, answer}`.
 //! 2. **Screen** every rendered turn — keys and string leaves, through the
 //!    same [`result_view::screen_text`] the #702 step views use — with the
 //!    `Strict` profile `channel::ingest` applies to an inbound body. A blocked
@@ -293,6 +293,16 @@ fn render_turn(turn: &Turn, user_cap: usize, answer_cap: usize, with_calls: bool
             // without it a turn that made 40 calls shows 16 with no sign the
             // rest happened — `_omitted_turns`' failure mode, one level down.
             omitted_calls += record.omitted_calls;
+            // Screened with the rest of the turn (`screen`): the criterion and
+            // the field names are planner text.
+            if !record.scrapbooks.is_empty() {
+                if let Ok(v) = serde_json::to_value(&record.scrapbooks) {
+                    obj.insert("scrapbooks".into(), v);
+                }
+            }
+            if record.omitted_scrapbooks > 0 {
+                obj.insert("_omitted_scrapbooks".into(), Value::from(record.omitted_scrapbooks));
+            }
         }
     }
     if omitted_calls > 0 {

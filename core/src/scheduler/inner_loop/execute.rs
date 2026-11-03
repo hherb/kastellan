@@ -32,6 +32,36 @@ pub(crate) struct ExecState {
     pub gathered: bool,
 }
 
+/// How a plan's steps are dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepPolicy {
+    /// Any plan: at most [`MAX_STEPS_PER_PLAN`] steps, and the first failed
+    /// step ends the plan (the next one may depend on it).
+    Plan,
+    /// A sift's reads (#922, K3): independent reads of one item each, so a
+    /// failed read is counted and the rest still run; capped by the
+    /// operator's `KASTELLAN_SIFT_MAX_READS` instead (K3c).
+    SiftReads { cap: usize },
+}
+
+impl StepPolicy {
+    /// The most steps one plan may carry under this policy.
+    pub(crate) fn cap(self) -> usize {
+        match self {
+            StepPolicy::Plan => MAX_STEPS_PER_PLAN,
+            StepPolicy::SiftReads { cap } => cap,
+        }
+    }
+
+    /// Does a failed step end the plan?
+    pub(crate) fn stops_on_error(self) -> bool {
+        match self {
+            StepPolicy::Plan => true,
+            StepPolicy::SiftReads { .. } => false,
+        }
+    }
+}
+
 /// How one plan ended.
 pub(crate) enum Executed {
     /// The task ends with this outcome. Boxed: a `Finished` is far larger
@@ -58,8 +88,8 @@ impl Executed {
 }
 
 /// Review `plan` and, when it is approved and not terminal, dispatch its
-/// steps. `synth_turn` and `exhausted` are the loop's: on a forced-synthesis
-/// turn a non-terminal plan fails instead of running.
+/// steps under `policy`. `synth_turn` and `exhausted` are the loop's: on a
+/// forced-synthesis turn a non-terminal plan fails instead of running.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn review_and_dispatch(
     pool: &PgPool,
@@ -72,6 +102,7 @@ pub(crate) async fn review_and_dispatch(
     exhausted: Option<ceiling::Exhausted>,
     st: &mut ExecState,
     outbox: Option<&crate::channel::outbox::ChannelOutbox>,
+    policy: StepPolicy,
 ) -> Result<Executed, InnerLoopError> {
     use kastellan_db::tasks;
 
@@ -403,13 +434,12 @@ pub(crate) async fn review_and_dispatch(
     // each retained in the plan record. A plan over the cap is refused
     // whole, like an iteration-cap overrun, rather than truncated (a
     // truncated plan would execute a prefix the planner never reviewed).
-    if plan.steps.len() > MAX_STEPS_PER_PLAN {
+    let cap = policy.cap();
+    if plan.steps.len() > cap {
         return Ok(Executed::finished(Outcome::Failed(format!(
-            "plan_step_cap_exceeded ({} > {}); refusing to execute a plan with more than \
-             {} steps in one iteration",
+            "plan_step_cap_exceeded ({} > {cap}); refusing to execute a plan with more than \
+             {cap} steps in one iteration",
             plan.steps.len(),
-            MAX_STEPS_PER_PLAN,
-            MAX_STEPS_PER_PLAN
         ))));
     }
 
@@ -422,7 +452,7 @@ pub(crate) async fn review_and_dispatch(
         st.dispatch_count = st.dispatch_count.saturating_add(1);
         let is_err = outcome.is_err();
         outcomes.push(outcome);
-        if is_err { break; }
+        if is_err && policy.stops_on_error() { break; }
     }
 
     let steps_total = plan.steps.len();
@@ -459,4 +489,21 @@ pub(crate) async fn review_and_dispatch(
     }
     ctx.plans.push(record);
     Ok(Executed::Dispatched)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plan_is_capped_by_the_per_plan_cap_and_stops_at_a_failure() {
+        assert_eq!(StepPolicy::Plan.cap(), MAX_STEPS_PER_PLAN);
+        assert!(StepPolicy::Plan.stops_on_error());
+    }
+
+    #[test]
+    fn a_sifts_reads_take_their_own_cap_and_run_past_a_failure() {
+        assert_eq!(StepPolicy::SiftReads { cap: 200 }.cap(), 200);
+        assert!(!StepPolicy::SiftReads { cap: 200 }.stops_on_error());
+    }
 }

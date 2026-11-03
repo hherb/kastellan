@@ -208,3 +208,50 @@ fn a_replan_keeps_the_step_the_same_reply_calls() {
     keep_called_step(&mut r, &two_steps());
     assert_eq!(r.steps.as_ref().unwrap().len(), 1);
 }
+
+/// A notebook call's plan names its notebook step, so a later `sift` can
+/// find that step's result among the task's plans (`over: {"step": n}`).
+#[test]
+fn a_call_plan_names_its_notebook_step() {
+    let reply: NotebookReply = serde_json::from_value(json!({"call": call(7)})).unwrap();
+    let plan = call_plan(&reply, reply.call.as_ref().unwrap(), DataClass::Public);
+    assert_eq!(notebook_step_of(&plan), Some(7));
+    assert_eq!(notebook_step_of(&answer_plan("b", DataClass::Public, None)), None);
+    let mut other = plan.clone();
+    other.rationale = "notebook step x".into();
+    assert_eq!(notebook_step_of(&other), None);
+}
+
+/// An answer may name the scrapbook(s) to include as a table — one ref or a
+/// list — with optional columns and order (#922, K10).
+#[test]
+fn an_answer_may_name_a_table() {
+    let one = parse_reply(r#"{"answer": {"body": "b", "table": {"scrapbook": "sb:1:2"}}}"#).unwrap();
+    let t = one.answer.unwrap().table.unwrap();
+    assert_eq!(t.scrapbook.refs(), ["sb:1:2"]);
+    assert_eq!((t.columns, t.order_by), (None, None));
+    let many = parse_reply(
+        r#"{"answer": {"body": "b", "table": {"scrapbook": ["sb:1:2", "sb:1:4"], "columns": ["date"],
+            "order_by": {"column": "date", "desc": true}}}}"#,
+    )
+    .unwrap();
+    let t = many.answer.unwrap().table.unwrap();
+    assert_eq!(t.scrapbook.refs(), ["sb:1:2", "sb:1:4"]);
+    assert!(t.order_by.unwrap().desc);
+    assert!(parse_reply(r#"{"answer": {"body": "b", "table": {"scrapbook": "sb:1:2", "rows": []}}}"#).is_err());
+}
+
+/// Review finding: `returns` becomes the plan's `decision`, and the sift's
+/// reads are marked by a `decision` prefix — a call that wrote it would skip
+/// the repeat guard and vanish from the turn record.
+#[test]
+fn a_call_whose_returns_forges_the_sift_reads_marker_is_rejected() {
+    for forged in ["sift reads: an invoice", "  sift reads:x"] {
+        let mut c = call(1);
+        c["returns"] = json!(forged);
+        assert!(check(json!({"call": c}), &two_steps()).unwrap_err().contains("may not begin"), "{forged}");
+    }
+    let mut c = call(1);
+    c["returns"] = json!("the sift reads list");
+    assert!(check(json!({"call": c}), &two_steps()).is_ok(), "the words elsewhere are fine");
+}

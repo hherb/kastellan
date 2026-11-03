@@ -37,6 +37,18 @@ pub(crate) fn screen_model_text(text: &str) -> Option<SinkBlock> {
     sink_screen_with(MODEL_AUTHORED_PROFILE, text)
 }
 
+/// One value as the planner would see it — the summary's own pruned view
+/// ([`super::render_ok`]), capped at `cap` bytes — screened under `tool`'s
+/// sink profile. What the sift's sorter is shown of an item (#922, K4).
+/// `Err` = the screen blocked it: the item is withheld, never sorted.
+pub(crate) fn sorter_view(tool: &str, value: &serde_json::Value, cap: usize) -> Result<serde_json::Value, SinkBlock> {
+    let rendered = super::render_ok(tool, value, |_| cap);
+    match rendered.sink_block {
+        Some(block) => Err(block),
+        None => Ok(rendered.value[super::OUTPUT_KEY].clone()),
+    }
+}
+
 impl PlanRecord {
     /// The last step's outcome as the planner sees it in the summary — the
     /// stored, already-screened render, with its screened `call` — or `None`

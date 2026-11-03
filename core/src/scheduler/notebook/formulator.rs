@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use kastellan_llm_router::messages::ChatMessage;
 use kastellan_llm_router::ThinkingPolicy;
 
+use super::sift::config::SiftConfig;
+use super::sift::sorter::Sorter;
 use crate::scheduler::agent::{AgentError, FormulationMeta, RouterAgent};
 use crate::scheduler::inner_loop::TaskContext;
 
@@ -78,13 +80,26 @@ pub trait NotebookFormulator: Send + Sync {
     fn thinks_by_default(&self) -> bool {
         true
     }
+
+    /// The per-item decision a `sift` uses (#922); `None`: this formulator
+    /// cannot sift, and a `sift` call is refused.
+    fn sorter(&self) -> Option<&dyn Sorter> {
+        None
+    }
+
+    /// The operator's sift knobs (`KASTELLAN_SIFT_*`), as read at boot.
+    fn sift_config(&self) -> SiftConfig {
+        SiftConfig::default()
+    }
 }
 
 impl RouterAgent {
     /// Run every task on the notebook loop (#922), showing each step the doc
-    /// of its tool from `tools`.
-    pub fn with_notebook(mut self, tools: std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>) -> Self {
+    /// of its tool from `tools`, and sifting with `sift` (the operator's
+    /// `KASTELLAN_SIFT_*` knobs, [`super::sift::config::sift_config`]).
+    pub fn with_notebook(mut self, tools: std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>, sift: SiftConfig) -> Self {
         self.notebook_tools = Some(tools);
+        self.sift_cfg = sift;
         self
     }
 
@@ -116,6 +131,14 @@ impl NotebookFormulator for RouterAgent {
 
     fn thinks_by_default(&self) -> bool {
         !self.router.config().disable_thinking
+    }
+
+    fn sorter(&self) -> Option<&dyn Sorter> {
+        Some(self)
+    }
+
+    fn sift_config(&self) -> SiftConfig {
+        self.sift_cfg.clone()
     }
 }
 

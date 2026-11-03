@@ -424,6 +424,11 @@ pub fn render_env_file(args: &InstallArgs, layout: &Layout) -> String {
     // planner keeps its working memory in a per-task notebook and works one
     // step per turn. Anything else stops the daemon at boot.
     s.push_str("# KASTELLAN_PLANNER_MODE=classic\n");
+    // `sift` (notebook mode, #922): how many reads one sift may make, and the
+    // read-only methods it may read with. Commented → the defaults; a bad
+    // value (an unadvertised method, a sift or a skill) stops the daemon.
+    s.push_str("# KASTELLAN_SIFT_MAX_READS=64\n");
+    s.push_str("# KASTELLAN_SIFT_READ_METHODS=mail.get_message,mail.get_attachment_text,handoff.fetch\n");
     // web.search_batch size cap (queries per batch). Commented → the worker
     // default (8) applies; raise/lower to tune how many independent searches the
     // planner may issue in one dispatch. Clamped by the worker to [1, 32]. The
@@ -835,6 +840,12 @@ mod tests {
         assert!(s.contains("# KASTELLAN_TIMEZONE=Australia/Sydney\n"), "{s}");
         // Planner mode documented (commented — the classic loop).
         assert!(s.contains("# KASTELLAN_PLANNER_MODE=classic\n"), "{s}");
+        // The sift's two knobs documented (commented — the defaults).
+        assert!(s.contains("# KASTELLAN_SIFT_MAX_READS=64\n"), "{s}");
+        assert!(
+            s.contains("# KASTELLAN_SIFT_READ_METHODS=mail.get_message,mail.get_attachment_text,handoff.fetch\n"),
+            "{s}"
+        );
         // web.search_batch size cap documented (commented — worker default 8).
         assert!(
             s.contains("# KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES=8\n"),

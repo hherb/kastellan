@@ -90,6 +90,28 @@ every later call against. The CLI accepts a correction for any running task, but
 a classic-mode daemon never reads it; when the task has no notebook entries yet
 the CLI warns that this may be the case.
 
+In notebook mode the planner can also `sift` a list (#922): one step that reads
+every candidate (each read reviewed, as one plan), keeps the ones a short
+per-item model call says match, with the fields it extracts, in the task's
+scrapbook, and lets the answer show them as a table built by code. Two knobs:
+
+- `KASTELLAN_SIFT_MAX_READS` (default `64`, the per-plan cap) — the most reads
+  one sift may make, and the most items it looks at, read or not (each item is
+  one model call); more candidates take several sifts. A value above 64 raises
+  the cap for a sift's plan only; there is no upper bound, so keep it near the
+  default (every read's result is held in memory for the turn).
+- `KASTELLAN_SIFT_READ_METHODS` (default
+  `mail.get_message,mail.get_attachment_text,handoff.fetch`) — the methods a
+  sift may read with, comma-separated `tool.method`. Each must be an advertised
+  method, except the built-in `handoff.fetch`; `sift` itself and skills are
+  never allowed. The default list is not checked against what is advertised.
+  The planner's prompt names the default list; a refused read tells it the
+  configured one.
+
+A bad value of either stops the daemon at boot, naming the key. A key set to
+the empty string (`KASTELLAN_SIFT_MAX_READS=`) is a bad value, not unset.
+Classic mode never reads these keys.
+
 ## When it takes effect
 
 | platform | mechanism | an edit takes effect |

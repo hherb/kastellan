@@ -733,7 +733,23 @@ async fn main() -> Result<()> {
     );
     let formulator: Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> = match planner_mode {
         kastellan_core::scheduler::notebook::formulator::PlannerMode::Notebook => {
-            Arc::new(agent.with_notebook(tool_docs.clone()))
+            // #922 `sift`: its two knobs, checked against what is advertised;
+            // a bad value stops the daemon, naming the key.
+            let knob = |key: &str| match std::env::var(key) {
+                Ok(v) => Ok(Some(v)),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(e) => Err(anyhow::anyhow!("{key}: {e}")),
+            };
+            let advertised: Vec<(String, String)> =
+                tool_docs.iter().map(|t| (t.doc.name.to_string(), t.doc.method.to_string())).collect();
+            let sift = kastellan_core::scheduler::notebook::sift::config::sift_config(
+                knob("KASTELLAN_SIFT_MAX_READS")?.as_deref(),
+                knob("KASTELLAN_SIFT_READ_METHODS")?.as_deref(),
+                &advertised,
+            )
+            .map_err(anyhow::Error::msg)?;
+            info!(max_reads = sift.max_reads, read_methods = ?sift.read_methods, "sift");
+            Arc::new(agent.with_notebook(tool_docs.clone(), sift))
         }
         kastellan_core::scheduler::notebook::formulator::PlannerMode::Classic => Arc::new(agent),
     };

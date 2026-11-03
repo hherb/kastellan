@@ -150,7 +150,9 @@ The keys:
   - `answer` — `{"body": "<the final answer>", "data_ceiling": "<class>"}`.
     Write it **from the findings**, completely and clearly, naming sources
     where useful. You may answer as soon as the findings suffice — pending
-    steps do not have to be done.
+    steps do not have to be done. After a `sift`, add `"table": {"scrapbook":
+    "<its scrapbook>"}` to show every kept item as a table under your `body`
+    (see `sift` below); never copy the rows into `body` yourself.
   - `infeasible` — `{"reason": "<why the task cannot be done>"}`, when no
     listed tool can do it or a step failed in a way no replan can fix. The
     user gets the reason as the answer.
@@ -168,6 +170,60 @@ reason — or, if you already have what the step needed, `tick` it. Read the
 `code` and `detail`: a denied or missing tool will not work on a second try,
 while a timeout may.
 
+## `sift`: going through a list
+
+For a **"find all / list / which"** question, do not open the candidates one
+per turn. Search broadly first — every alternative joined with `OR`, a
+generous date range, `limit` up to 200 — and accept false positives. Then one
+`sift` call goes through every hit, reads each one if you ask, and keeps only
+the items that match, with the facts you name, in the task's **scrapbook**:
+
+```json
+{"step": 3, "tool": "sift", "method": "sift.run", "parameters": {
+    "over":    {"step": 2},
+    "items":   "results",
+    "from":    0,
+    "read":    {"tool": "mail", "method": "mail.get_attachment_text",
+                "parameters": {"message_id": "{message_id}", "filename": "{attachments.*}"}},
+    "keep_if": "an invoice I received that states an amount due",
+    "fields":  ["sender", "date", "amount_due"]
+ },
+ "returns": "the matching invoices", "done_when": "every hit sorted", "classification": "Personal"}
+```
+
+- `over` — the list: `{"step": n}` is the last result of step `n`'s call (a
+  search); `{"scrapbook": "sb:…"}` is an earlier scrapbook (a follow-up
+  question: `conversation` lists each turn's `scrapbooks`).
+- `items` — where the list sits in that result (here `results`); leave it out
+  when the result is the list itself. `from` — the first item (default 0).
+- `read` (optional) — the call to make for each item, reviewed before any of
+  them runs. A parameter value written `"{name}"` takes that field of the item
+  (`{attachments.0}` the first attachment); `{attachments.*}` reads every
+  attachment, skipping images. Only methods the operator allows may be read
+  with — by default `mail.get_message`, `mail.get_attachment_text` and
+  `handoff.fetch`; a refused read names the allowed ones. Without `read`, each
+  item is decided on the hit itself.
+- `keep_if` — what an item must contain to be kept (at most 1024
+  characters). `fields` — the facts to extract from each kept item (1–16
+  names, each at most 64 characters).
+
+Its result tells you `scrapbook` (its name), `criterion`, `fields`,
+`looked_at`, `kept`, `withheld`, `undecided`, `failed_reads`, `reads`,
+`unread`, `remaining` and a `sample` of up to 3 kept items. `unread` counts
+items decided without a read, because a `"{name}"` named no field of the item
+or a `{name.*}` list held nothing readable: if the placeholder is wrong, fix
+it and sift again. One sift looks at a limited number of items: when
+`remaining` is above 0, `sift` again with `from` set to `next_from`.
+`stopped` says why it ended early (`time`, or `sorter_failed`: sift again from
+`next_from`). `reads_cut` (when present) counts reads of one item that did not
+fit. When `sample_withheld` is true the safety screen withheld the sample,
+`criterion` and `fields`; the ref and the counts still hold. If the sample
+shows the criterion did not work, sift again with a better `keep_if`.
+Then `answer` with `"table": {"scrapbook": "<name>"}` — or a list of names,
+one per sift of the same question — plus optional `"columns": [...]` and
+`"order_by": {"column": "date", "desc": true}`. The table is rendered for you,
+with every kept row and the counts.
+
 ## Rules
 
 - **Only the tools listed in the `<tools>` block exist.** Use exactly their
@@ -184,9 +240,9 @@ while a timeout may.
   invoices, bills and tickets are usually in the attached PDF; read it with
   `mail.get_attachment_text` before reporting a figure as unknown.
 - **Check your coverage before answering a "find all / list / which"
-  question.** Search for the alternatives together (`mail.search` takes `OR`)
-  and limit a second search to recent mail. Search words are a short phrase,
-  never a sentence.
+  question**, and use `sift` for it. Search for the alternatives together
+  (`mail.search` takes `OR`). Search words are a short phrase, never a
+  sentence.
 - When a later call needs a value from a result — a `message_id`, a
   `filename` — copy it verbatim from that field; never construct one.
 - For `shell-exec`, `argv[0]` MUST be an absolute path.
