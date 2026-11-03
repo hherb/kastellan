@@ -92,3 +92,15 @@ fn a_placeholder_in_the_tool_or_method_is_refused() {
     assert!(check_read(&template("{tool}", "{method}"), &cfg).is_err());
     assert!(check_read(&template("mail", "mail.{m}"), &cfg).is_err());
 }
+
+/// Review finding: a long field name was stored whole but shown to the next
+/// turn cut, so a follow-up naming it found no such field; a long `keep_if`
+/// rode in every sorter message unbounded.
+#[test]
+fn an_overlong_criterion_or_field_name_is_refused() {
+    let with = |keep_if: String, field: String| json!({"over": {"step": 2}, "keep_if": keep_if, "fields": [field]});
+    assert!(parse_params(&with("é".repeat(KEEP_IF_MAX_CHARS), "a".into())).is_ok(), "the bound counts characters");
+    assert!(parse_params(&with("x".repeat(KEEP_IF_MAX_CHARS + 1), "a".into())).is_err());
+    assert!(parse_params(&with("x".into(), "f".repeat(FIELD_NAME_MAX_CHARS))).is_ok());
+    assert!(parse_params(&with("x".into(), "f".repeat(FIELD_NAME_MAX_CHARS + 1))).is_err());
+}

@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 
 use crate::scheduler::notebook::test_harness::*;
 
+mod review_findings;
+use review_findings::*;
+
 fn search(step: u32, hits: Value) -> Value {
     json!({"step": step, "tool": "mail", "method": "mail.search", "parameters": {"hits": hits},
            "returns": "hits", "done_when": "listed", "classification": "Personal"})
@@ -92,6 +95,10 @@ async fn the_sift_loop() {
     an_injected_kept_field_leaves_the_summary_readable(&pool).await;
     a_read_template_that_names_no_field_says_so(&pool).await;
     a_cancel_during_sorting_ends_the_task_and_keeps_the_rows(&pool).await;
+    a_sorter_failure_stops_the_sift_and_its_item_is_next(&pool).await;
+    a_second_sift_over_the_same_step_walks_on_from_next_from(&pool).await;
+    a_criterion_the_screen_blocks_leaves_the_ref_and_the_counts(&pool).await;
+    an_ordinary_plan_stops_at_its_first_failed_step(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {
@@ -149,6 +156,8 @@ async fn an_injected_item_is_withheld_and_never_sorted(pool: &sqlx::PgPool) {
     let got = rows(pool, r.task_id, 2).await;
     assert_eq!(got.iter().map(|g| g.kind).collect::<Vec<_>>(), [RowKind::Withheld, RowKind::Kept]);
     assert_eq!(summary_seen(&script, 2)["withheld"], json!(1));
+    let parts: Vec<Value> = blocked_parts(pool, r.task_id).await;
+    assert!(parts.contains(&json!("sift_item")), "the sift's own block has its audit row: {parts:?}");
 }
 
 async fn a_blocked_sift_is_a_failed_step_and_writes_no_rows(pool: &sqlx::PgPool) {

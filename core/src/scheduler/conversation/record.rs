@@ -27,7 +27,8 @@ pub(crate) const CALLS_PER_TURN: usize = 16;
 pub(crate) const TURN_RECORD_CAP: usize = 8 * 1024;
 
 /// Most scrapbooks one turn records, oldest dropped first, and most
-/// characters of one field name in them (#922): a few hundred bytes a turn.
+/// characters of one field name in them (#922). A sift refuses a longer
+/// name (`sift::params`), so the clamp below never cuts one in practice.
 pub(crate) const SCRAPBOOKS_PER_TURN: usize = 8;
 pub(crate) const FIELD_NAME_MAX_CHARS: usize = 64;
 
@@ -65,6 +66,10 @@ pub(crate) struct TurnRecord {
     /// record stored before them, and when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) scrapbooks: Vec<TurnScrapbook>,
+    /// How many scrapbooks were dropped to fit the caps, as
+    /// `_omitted_scrapbooks`, absent when zero (as `_omitted_calls`).
+    #[serde(rename = "_omitted_scrapbooks", default, skip_serializing_if = "is_zero")]
+    pub(crate) omitted_scrapbooks: usize,
 }
 
 /// One scrapbook a turn left: its ref, the criterion and fields it was made
@@ -123,7 +128,8 @@ pub(crate) fn from_plans(plans: &[PlanRecord], final_floor: DataClass) -> TurnRe
     let mut calls: Vec<TurnCall> = Vec::new();
     let mut data_class = final_floor;
     let mut scrapbooks: Vec<TurnScrapbook> = plans.iter().filter_map(scrapbook_of).collect();
-    scrapbooks.drain(0..scrapbooks.len().saturating_sub(SCRAPBOOKS_PER_TURN));
+    let omitted_scrapbooks = scrapbooks.len().saturating_sub(SCRAPBOOKS_PER_TURN);
+    scrapbooks.drain(0..omitted_scrapbooks);
 
     for record in plans {
         // A sift's reads were never the planner's calls: they raise the
@@ -157,12 +163,19 @@ pub(crate) fn from_plans(plans: &[PlanRecord], final_floor: DataClass) -> TurnRe
     }
 
     // Then the byte cap, measured rather than estimated: drop the oldest call
-    // until the serialised record fits. Terminates because an empty `calls`
-    // serialises well under the cap.
-    let mut record = TurnRecord { calls, omitted_calls: over, data_class, scrapbooks };
-    while !record.calls.is_empty() && serialised_len(&record) > TURN_RECORD_CAP {
-        record.calls.remove(0);
-        record.omitted_calls += 1;
+    // until the serialised record fits, then the oldest scrapbook. Terminates
+    // because a record with neither serialises well under the cap.
+    let mut record = TurnRecord { calls, omitted_calls: over, data_class, scrapbooks, omitted_scrapbooks };
+    while serialised_len(&record) > TURN_RECORD_CAP {
+        if !record.calls.is_empty() {
+            record.calls.remove(0);
+            record.omitted_calls += 1;
+        } else if !record.scrapbooks.is_empty() {
+            record.scrapbooks.remove(0);
+            record.omitted_scrapbooks += 1;
+        } else {
+            break;
+        }
     }
     record
 }

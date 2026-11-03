@@ -18,7 +18,10 @@
 //!    turn rewrites it, thinking) and a call this task already made
 //!    successfully ([`repeat`]) — each with a `plan.discarded` row;
 //! 6. otherwise turn the reply into a one-step plan (a `call`) or a terminal
-//!    one (an `answer` or `infeasible`), and review and dispatch it;
+//!    one (an `answer` or `infeasible`), and review and dispatch it — except
+//!    a `sift` call, which is run here ([`sift::run`]: its reads are the one
+//!    reviewed plan), and an answer's `table`, rendered into the body before
+//!    review;
 //! 7. record a failed or blocked call as a `failed_step`, so the next turn
 //!    replans (D4), and the end of the task as its terminal entry.
 //!
@@ -277,8 +280,9 @@ pub(crate) async fn run_notebook_to_terminal(
                 }
                 return finish!(f.outcome, f.insight, f.skill, f.python_skill);
             }
-            // The reviewer blocked the call (its reason is in `ctx.blocks`):
-            // the step failed, and the next turn replans.
+            // The reviewer blocked the call, or a sift was refused (the
+            // reason is in `ctx.blocks`): the step failed, and the next turn
+            // replans.
             Executed::Again => {
                 if let Some(call) = &reply.call {
                     let detail = ctx.blocks.last().cloned().unwrap_or_default();

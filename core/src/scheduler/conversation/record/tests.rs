@@ -340,3 +340,31 @@ fn a_record_stored_before_scrapbooks_still_parses() {
     let back = serde_json::to_value(&r).unwrap();
     assert!(back.get("scrapbooks").is_none(), "an empty list is not stored");
 }
+
+/// Review finding: eight scrapbooks at their widest exceed the byte cap on
+/// their own, and the loop used to drop only calls — every referent gone and
+/// the record still over. Calls go first, then the oldest scrapbooks, and
+/// the record says how many of each it dropped.
+#[test]
+fn scrapbooks_too_shrink_to_fit_the_byte_cap() {
+    use crate::scheduler::notebook::sift::{SIFT_METHOD, SIFT_TOOL};
+    let fields: Vec<String> = (0..16).map(|i| format!("{i:0>2}{}", "é".repeat(FIELD_NAME_MAX_CHARS - 2))).collect();
+    let mut plans = vec![PlanRecord::new(
+        plan_with(vec![step("mail", "mail.search", serde_json::json!({"q": "x"}), DataClass::Public)]),
+        vec![StepOutcome::Ok(serde_json::json!({}))],
+    )];
+    for n in 1..=SCRAPBOOKS_PER_TURN {
+        let summary = serde_json::json!({"scrapbook": format!("sb:7:{n}"), "criterion": "ü".repeat(RETURNS_MAX_CHARS),
+                                         "fields": fields, "kept": 1});
+        let sift = plan_with(vec![step(SIFT_TOOL, SIFT_METHOD, serde_json::json!({}), DataClass::Public)]);
+        plans.push(PlanRecord::new(sift, vec![StepOutcome::Ok(summary)]));
+    }
+    let record = from_plans(&plans, DataClass::Public);
+    let len = result_view::serialised_len(&serde_json::to_value(&record).unwrap());
+    assert!(len <= TURN_RECORD_CAP, "{len} bytes");
+    assert!(record.calls.is_empty(), "the calls went first");
+    assert_eq!(record.omitted_calls, 1 + SCRAPBOOKS_PER_TURN, "the search and each sift's own call");
+    assert!(record.omitted_scrapbooks > 0 && !record.scrapbooks.is_empty());
+    assert_eq!(record.scrapbooks.len() + record.omitted_scrapbooks, SCRAPBOOKS_PER_TURN);
+    assert_eq!(record.scrapbooks.last().unwrap().scrapbook, format!("sb:7:{SCRAPBOOKS_PER_TURN}"), "the newest stay");
+}

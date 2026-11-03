@@ -44,7 +44,10 @@ pub struct NewRow {
     pub kind: RowKind,
     pub source: serde_json::Value,
     pub fields: serde_json::Value,
-    /// The class of the call that read the item, in `DataClass`'s spelling.
+    /// The sift's class — its call's, raised to the task's floor and to the
+    /// class of the list it went through; the same for every row of one
+    /// sift — in `DataClass`'s spelling. (Migration 0029's comment says "the
+    /// call that read the item"; this is the precise meaning.)
     pub classification: String,
 }
 

@@ -40,7 +40,9 @@ pub(crate) fn sorter_message(criterion: &str, fields: &[String], item: &[Value])
 
 /// Read a sorter reply. `{"keep": false}` is no; `{"keep": true, "fields":
 /// {…}}` is yes, with exactly the named fields (a missing one is `null`, an
-/// extra one dropped). Anything else is `Undecided` — never a guess (K5).
+/// extra one dropped), and so is `{"keep": true}` with `fields` absent or
+/// `null` (every field `null`). Anything else — `fields` of another type
+/// included — is `Undecided`, never a guess (K5).
 pub(crate) fn parse_sort_reply(raw: &str, fields: &[String]) -> SortReply {
     let Ok(Value::Object(reply)) = crate::scheduler::plan_parser::parse_json_lenient::<Value>(raw) else {
         return SortReply::Undecided;
@@ -48,7 +50,7 @@ pub(crate) fn parse_sort_reply(raw: &str, fields: &[String]) -> SortReply {
     match (reply.get("keep"), reply.get("fields")) {
         (Some(Value::Bool(false)), _) => SortReply::No,
         (Some(Value::Bool(true)), Some(Value::Object(got))) => SortReply::Yes(pick(fields, Some(got))),
-        (Some(Value::Bool(true)), None) => SortReply::Yes(pick(fields, None)),
+        (Some(Value::Bool(true)), None | Some(Value::Null)) => SortReply::Yes(pick(fields, None)),
         _ => SortReply::Undecided,
     }
 }

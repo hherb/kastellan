@@ -199,19 +199,26 @@ the items that match, with the facts you name, in the task's **scrapbook**:
 - `read` (optional) — the call to make for each item, reviewed before any of
   them runs. A parameter value written `"{name}"` takes that field of the item
   (`{attachments.0}` the first attachment); `{attachments.*}` reads every
-  attachment, skipping images. Only `mail.get_message`,
-  `mail.get_attachment_text` and `handoff.fetch` may be read with. Without
-  `read`, each item is decided on the hit itself.
-- `keep_if` — what an item must contain to be kept. `fields` — the facts to
-  extract from each kept item (1–16 names).
+  attachment, skipping images. Only methods the operator allows may be read
+  with — by default `mail.get_message`, `mail.get_attachment_text` and
+  `handoff.fetch`; a refused read names the allowed ones. Without `read`, each
+  item is decided on the hit itself.
+- `keep_if` — what an item must contain to be kept (at most 1024
+  characters). `fields` — the facts to extract from each kept item (1–16
+  names, each at most 64 characters).
 
 Its result tells you `scrapbook` (its name), `criterion`, `fields`,
 `looked_at`, `kept`, `withheld`, `undecided`, `failed_reads`, `reads`,
 `unread`, `remaining` and a `sample` of up to 3 kept items. `unread` counts
-items that were decided without their read because a `"{name}"` named no field
-of the item: fix the placeholder and sift again. When `remaining` is above 0, `sift` again with `from` set to
-`next_from`. `stopped` says why it ended early (`time`). If the
-sample shows the criterion did not work, sift again with a better `keep_if`.
+items decided without a read, because a `"{name}"` named no field of the item
+or a `{name.*}` list held nothing readable: if the placeholder is wrong, fix
+it and sift again. One sift looks at a limited number of items: when
+`remaining` is above 0, `sift` again with `from` set to `next_from`.
+`stopped` says why it ended early (`time`, or `sorter_failed`: sift again from
+`next_from`). `reads_cut` (when present) counts reads of one item that did not
+fit. When `sample_withheld` is true the safety screen withheld the sample,
+`criterion` and `fields`; the ref and the counts still hold. If the sample
+shows the criterion did not work, sift again with a better `keep_if`.
 Then `answer` with `"table": {"scrapbook": "<name>"}` — or a list of names,
 one per sift of the same question — plus optional `"columns": [...]` and
 `"order_by": {"column": "date", "desc": true}`. The table is rendered for you,

@@ -10,6 +10,13 @@ use super::SIFT_TOOL;
 /// and a key in every sorter reply, so a long list costs on every item.
 pub(crate) const MAX_FIELDS: usize = 16;
 
+/// The most characters of `keep_if`: it is repeated in every sorter message.
+pub(crate) const KEEP_IF_MAX_CHARS: usize = 1024;
+
+/// The most characters of one field name: the turn record keeps names
+/// whole (`conversation::record`), so a longer one is refused here, not cut.
+pub(crate) const FIELD_NAME_MAX_CHARS: usize = crate::scheduler::conversation::record::FIELD_NAME_MAX_CHARS;
+
 /// What a sift goes through: the last result of a notebook step, or an
 /// earlier scrapbook (a follow-up).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,14 +102,18 @@ struct RawParams {
     fields: Vec<String>,
 }
 
-/// Parse and check a `sift.run` call's `parameters`: a non-blank criterion,
-/// 1 to [`MAX_FIELDS`] distinct, non-blank field names, and a well-formed
+/// Parse and check a `sift.run` call's `parameters`: a non-blank criterion
+/// of at most [`KEEP_IF_MAX_CHARS`], 1 to [`MAX_FIELDS`] distinct, non-blank
+/// field names of at most [`FIELD_NAME_MAX_CHARS`], and a well-formed
 /// `over`. The read is checked separately ([`check_read`]).
 pub(crate) fn parse_params(v: &serde_json::Value) -> Result<SiftParams, String> {
     let raw: RawParams =
         serde_json::from_value(v.clone()).map_err(|e| format!("the sift's parameters are not usable: {e}"))?;
     if raw.keep_if.trim().is_empty() {
         return Err("`keep_if` is blank: say what an item must contain to be kept".into());
+    }
+    if raw.keep_if.chars().count() > KEEP_IF_MAX_CHARS {
+        return Err(format!("`keep_if` is longer than {KEEP_IF_MAX_CHARS} characters: say it shorter"));
     }
     if raw.fields.is_empty() || raw.fields.len() > MAX_FIELDS {
         return Err(format!("`fields` must name 1 to {MAX_FIELDS} fields, not {}", raw.fields.len()));
@@ -111,6 +122,9 @@ pub(crate) fn parse_params(v: &serde_json::Value) -> Result<SiftParams, String> 
     for f in &raw.fields {
         if f.trim().is_empty() {
             return Err("a field name in `fields` is blank".into());
+        }
+        if f.chars().count() > FIELD_NAME_MAX_CHARS {
+            return Err(format!("the field name `{f}` is longer than {FIELD_NAME_MAX_CHARS} characters"));
         }
         if !seen.insert(f.as_str()) {
             return Err(format!("`fields` names `{f}` twice"));

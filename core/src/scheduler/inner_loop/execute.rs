@@ -55,7 +55,10 @@ impl StepPolicy {
 
     /// Does a failed step end the plan?
     pub(crate) fn stops_on_error(self) -> bool {
-        self == StepPolicy::Plan
+        match self {
+            StepPolicy::Plan => true,
+            StepPolicy::SiftReads { .. } => false,
+        }
     }
 }
 

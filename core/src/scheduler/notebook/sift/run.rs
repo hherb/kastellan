@@ -4,13 +4,16 @@
 //!    and that `over` names a list. A refusal is a block (`sift_refused: …`):
 //!    the loop records the step as failed and the next turn replans.
 //! 2. Expand each item's reads (K3b), as many items as fit in
-//!    `KASTELLAN_SIFT_MAX_READS` reads, and review and dispatch them as
+//!    `KASTELLAN_SIFT_MAX_READS` reads — and never more items than that, read
+//!    or not — and review and dispatch them as
 //!    **one plan** through the classic loop's own code (K3) — a Block or an
 //!    Escalate there behaves exactly as for any plan. A failed read does not
 //!    stop the others ([`StepPolicy::SiftReads`]).
 //! 3. Show each item (its hit, then its reads, each through the summary's own
 //!    screen) to the sorter. An item the screen blocks is withheld and never
-//!    sorted (K4). Stop early at the fast lane's deadline.
+//!    sorted (K4). Stop early at the fast lane's deadline, at an operator's
+//!    cancel, or when the sorter fails; the item it failed on is not counted,
+//!    so `next_from` starts there.
 //! 4. Write the kept and withheld items to the scrapbook (K6), and record the
 //!    sift as one step whose result is a summary of counts and a sample (K9):
 //!    that summary is all the planner sees.
@@ -24,6 +27,7 @@ use sqlx::PgPool;
 
 use super::params::{check_read, parse_params, Over, ReadTemplate, ScrapRef, SiftParams};
 use super::sorter::{parse_sort_reply, sorter_message, SortReply, SORTER_ITEM_CAP};
+use super::summary::{summary, Reads, Stop};
 use super::table::Counts;
 use super::template::{expand_reads, items_at};
 use super::answer::row_class;
@@ -34,8 +38,8 @@ use crate::scheduler::agent::FormulationMeta;
 use crate::scheduler::audit::SCHEDULER_AUDIT_ACTOR;
 use crate::scheduler::inner_loop::execute::{self, ExecState, Executed, StepPolicy};
 use crate::scheduler::inner_loop::{
-    screen_model_text, sorter_view, InnerLoopError, Outcome, PlanRecord, StepDispatcher, StepOutcome, TaskContext,
-    WITHHELD_MARKER,
+    notebook_block_audit_payload, sorter_view, InnerLoopError, Outcome, PlanRecord, SinkBlock, StepDispatcher,
+    StepOutcome, TaskContext,
 };
 use crate::scheduler::notebook::formulator::NotebookFormulator;
 use crate::scheduler::notebook::reply::{notebook_step_of, CallSpec, NOTEBOOK_STEP_RATIONALE};
@@ -43,10 +47,10 @@ use crate::scheduler::notebook::reply::{notebook_step_of, CallSpec, NOTEBOOK_STE
 /// Audit actions (K12), actor `scheduler`.
 pub(crate) const ACTION_SIFT_STARTED: &str = "sift.started";
 pub(crate) const ACTION_SIFT_FINISHED: &str = "sift.finished";
+pub(crate) const ACTION_SIFT_REFUSED: &str = "sift.refused";
 
-/// How many kept rows the planner is shown, so it can judge whether the
-/// criterion worked (K9).
-pub(crate) const SAMPLE_ROWS: usize = 3;
+/// Most characters of a refusal's reason in its audit row.
+const REFUSED_REASON_MAX_CHARS: usize = 512;
 
 /// The keys of an item that say where it came from, in the order looked for.
 pub(crate) const SOURCE_KEYS: [&str; 5] = ["message_id", "id", "url", "path", "handoff_ref"];
@@ -77,6 +81,8 @@ pub(crate) async fn run_sift(
     let (p, sorter, over) = match checked {
         Ok(c) => c,
         Err(why) => {
+            let reason: String = why.chars().take(REFUSED_REASON_MAX_CHARS).collect();
+            audit(r.pool, ACTION_SIFT_REFUSED, json!({"task_id": ctx.task_id, "plan_count": ctx.plan_count, "reason": reason})).await;
             ctx.blocks.push(format!("sift_refused: {why}"));
             return Ok(Executed::Again);
         }
@@ -98,7 +104,12 @@ pub(crate) async fn run_sift(
         .await?
         {
             Executed::Dispatched => {}
-            other => return Ok(other),
+            other => {
+                let stopped = Stop::ReadsNotRun.as_str();
+                audit(r.pool, ACTION_SIFT_FINISHED, json!({"task_id": ctx.task_id, "plan_count": ctx.plan_count,
+                    "scrapbook": scrap.to_string(), "stopped": stopped, "ms": started.elapsed().as_millis() as u64})).await;
+                return Ok(other);
+            }
         }
         let record = ctx.plans.last().expect("review_and_dispatch pushed the reads' record");
         outcomes = record.outcomes().to_vec();
@@ -110,53 +121,69 @@ pub(crate) async fn run_sift(
     let mut unread = 0usize;
     for (item, reads) in items.iter().zip(&batch.per_item) {
         if ctx.deadline.is_some_and(|d| Instant::now() >= d) {
-            stopped = Some("time");
+            stopped = Some(Stop::Time);
             break;
         }
         // An operator's cancel is seen between items, as between steps.
         if kastellan_db::tasks::observe_state(r.pool, ctx.task_id).await? == "cancelled" {
-            stopped = Some("cancelled");
+            stopped = Some(Stop::Cancelled);
             break;
         }
-        counts.looked_at += 1;
-        // A read was asked for but its placeholders named no field of this
-        // item: say so, or the planner takes the item as read.
-        if p.read.is_some() && reads.is_empty() {
-            unread += 1;
-        }
+        // A read was asked for but none was made for this item (its
+        // placeholders named no field of it, or a `*` list was empty): say
+        // so, or the planner takes the item as read.
+        let unread_item = usize::from(p.read.is_some() && reads.is_empty());
         let cap = SORTER_ITEM_CAP / (1 + reads.len());
-        let mut views = Vec::new();
-        let mut blocked = sorter_view(&over.tool, item, cap).map(|v| views.push(v)).is_err();
+        let (mut views, mut blocks, mut failed_reads) = (Vec::new(), Vec::new(), 0usize);
+        let mut view = |tool: &str, v: &Value| match sorter_view(tool, v, cap) {
+            Ok(v) => views.push(v),
+            Err(b) => blocks.push(b),
+        };
+        view(&over.tool, item);
         for outcome in outcomes.get(reads.clone()).unwrap_or_default() {
             match outcome {
-                StepOutcome::Ok(v) => blocked |= sorter_view(&read_tool, v, cap).map(|v| views.push(v)).is_err(),
-                StepOutcome::Err { .. } => counts.failed_reads += 1,
+                StepOutcome::Ok(v) => view(&read_tool, v),
+                StepOutcome::Err { .. } => failed_reads += 1,
             }
         }
         let row = |kind, fields| NewRow { kind, source: source_of(item), fields, classification: class.as_pascal_str().into() };
-        if blocked {
+        if !blocks.is_empty() {
+            // Screened at the sorter's own cap, which can block where the
+            // planner's view of the same result did not: audit it here.
+            audit_blocks(r.pool, ctx.task_id, call.step, "sift_item", &blocks).await;
+            counts.looked_at += 1;
+            counts.failed_reads += failed_reads;
+            unread += unread_item;
             counts.withheld += 1;
             rows.push(row(RowKind::Withheld, json!({})));
             continue;
         }
         sorter_calls += 1;
-        match sorter.sort(ctx, sorter_message(&p.keep_if, &p.fields, &views)).await {
-            Ok(raw) => match parse_sort_reply(&raw, &p.fields) {
-                SortReply::Yes(fields) => {
-                    counts.kept += 1;
-                    rows.push(row(RowKind::Kept, Value::Object(fields)));
-                }
-                SortReply::No => {}
-                SortReply::Undecided => counts.undecided += 1,
-            },
+        let raw = match sorter.sort(ctx, sorter_message(&p.keep_if, &p.fields, &views)).await {
+            Ok(raw) => raw,
             // A sorter that cannot be reached will not be reached for the
             // next item either: stop, rather than spend the deadline on it.
+            // This item is not counted, so `next_from` is where it is.
             Err(e) => {
                 *failed_llm_calls = failed_llm_calls.saturating_add(1);
-                counts.undecided += 1;
                 tracing::warn!(task_id = ctx.task_id, error = %e, "sift: the sorter failed; stopping the sift");
-                stopped = Some("sorter_failed");
+                stopped = Some(Stop::SorterFailed);
                 break;
+            }
+        };
+        counts.looked_at += 1;
+        counts.failed_reads += failed_reads;
+        unread += unread_item;
+        match parse_sort_reply(&raw, &p.fields) {
+            SortReply::Yes(fields) => {
+                counts.kept += 1;
+                rows.push(row(RowKind::Kept, Value::Object(fields)));
+            }
+            SortReply::No => {}
+            SortReply::Undecided => {
+                // The reply's words stay out of the log: they restate the item.
+                tracing::warn!(task_id = ctx.task_id, raw_len = raw.len(), "sift: a sorter reply did not parse; undecided");
+                counts.undecided += 1;
             }
         }
     }
@@ -165,17 +192,19 @@ pub(crate) async fn run_sift(
     }
 
     let remaining = items.len() - counts.looked_at;
-    let reads = Reads { made: batch.reads.len(), unread };
-    let summary = summary(&scrap, &p, &counts, reads, &rows, remaining, stopped);
+    let reads = Reads { made: batch.reads.len(), unread, cut: batch.cut };
+    let (summary, blocks) = summary(&scrap, &p, &counts, reads, &rows, remaining, stopped);
+    audit_blocks(r.pool, ctx.task_id, call.step, "sift_summary", &blocks).await;
     let finished = json!({
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "looked_at": counts.looked_at, "kept": counts.kept, "withheld": counts.withheld,
         "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
-        "unread": reads.unread, "remaining": remaining, "stopped": stopped, "sorter_calls": sorter_calls,
+        "unread": reads.unread, "reads_cut": reads.cut, "remaining": remaining,
+        "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls,
         "ms": started.elapsed().as_millis() as u64,
     });
     audit(r.pool, ACTION_SIFT_FINISHED, finished).await;
-    if stopped == Some("cancelled") {
+    if stopped == Some(Stop::Cancelled) {
         return Ok(Executed::Finished(Box::new(execute::Finished {
             outcome: Outcome::Cancelled,
             insight: None,
@@ -184,6 +213,8 @@ pub(crate) async fn run_sift(
         })));
     }
     push_summary(r.pool, ctx, call, class, summary).await;
+    // A sift with reads armed this in `review_and_dispatch`; one without
+    // has gathered something only if it kept a row.
     st.gathered |= counts.kept > 0;
     Ok(Executed::Dispatched)
 }
@@ -203,6 +234,9 @@ async fn check<'a>(
     call: &CallSpec,
     cfg: &super::config::SiftConfig,
 ) -> Result<(SiftParams, &'a dyn super::sorter::Sorter, OverList), String> {
+    if call.method != SIFT_METHOD {
+        return Err(format!("`{}` is not a method of `{SIFT_TOOL}`: its one method is `{SIFT_METHOD}`", call.method));
+    }
     let sorter = r.nb.sorter().ok_or("this planner has no sorter, so it cannot sift")?;
     let p = parse_params(&call.parameters)?;
     if let Some(t) = &p.read {
@@ -249,23 +283,32 @@ async fn resolve_over(pool: &PgPool, ctx: &TaskContext, p: &SiftParams) -> Resul
 }
 
 /// The reads to make, and which of them belong to each item taken.
+#[derive(Debug, PartialEq)]
 struct Batch {
     reads: Vec<Value>,
     /// Item `i`'s reads are `reads[per_item[i]]`. One entry per item taken.
     per_item: Vec<std::ops::Range<usize>>,
+    /// Reads of the first item dropped to fit `cap` (see [`plan_reads`]).
+    cut: usize,
 }
 
-/// Take items in list order while their reads fit in `cap`; an item's reads
-/// stay together. A first item with more reads than `cap` alone keeps its
-/// first `cap`, so a sift always makes progress. Pure.
+/// Take items in list order while their reads fit in `cap`, and never more
+/// than `cap` items: an item with no read still costs a sorter call. An
+/// item's reads stay together. A first item with more reads than `cap` alone
+/// keeps its first `cap` (the rest counted in `cut`), so a sift always makes
+/// progress. Pure.
 fn plan_reads(read: Option<&ReadTemplate>, items: &[Value], cap: usize) -> Batch {
-    let mut batch = Batch { reads: Vec::new(), per_item: Vec::new() };
+    let mut batch = Batch { reads: Vec::new(), per_item: Vec::new(), cut: 0 };
     for item in items {
+        if batch.per_item.len() >= cap.max(1) {
+            break;
+        }
         let mut reads = read.map(|t| expand_reads(t, item)).unwrap_or_default();
         if batch.reads.len() + reads.len() > cap {
             if !batch.per_item.is_empty() {
                 break;
             }
+            batch.cut = reads.len() - cap;
             reads.truncate(cap);
         }
         let start = batch.reads.len();
@@ -322,71 +365,14 @@ fn source_of(item: &Value) -> Value {
     Value::Object(picked)
 }
 
-/// What the planner is shown (K9): the ref, the criterion, the counts, and a
-/// sample of what was kept. Screened when it is recorded, like any result.
-/// How many reads the sift made, and how many items it looked at whose read
-/// could not be made (a placeholder named no field of the item).
-#[derive(Clone, Copy)]
-struct Reads {
-    made: usize,
-    unread: usize,
-}
-
-/// What the planner is shown (K9): the ref, the criterion, the counts, and a
-/// sample of what was kept. The sample's values are model-written from tool
-/// output, so each is screened (shown as [`WITHHELD_MARKER`] if blocked), and
-/// if the whole summary would still fail the record's screen, the
-/// model-written parts go: the ref and the counts must always get through,
-/// or the planner can neither show the sift nor run it again.
-fn summary(
-    scrap: &ScrapRef,
-    p: &SiftParams,
-    c: &Counts,
-    reads: Reads,
-    rows: &[NewRow],
-    remaining: usize,
-    stopped: Option<&str>,
-) -> Value {
-    let sample: Vec<Value> = rows
-        .iter()
-        .filter(|r| r.kind == RowKind::Kept)
-        .take(SAMPLE_ROWS)
-        .map(|r| json!({"fields": screened(&r.fields), "source": screened(&r.source)}))
-        .collect();
-    let mut s = json!({
-        "scrapbook": scrap.to_string(), "criterion": p.keep_if, "fields": p.fields,
-        "looked_at": c.looked_at, "kept": c.kept, "withheld": c.withheld, "undecided": c.undecided,
-        "failed_reads": c.failed_reads, "reads": reads.made, "unread": reads.unread,
-        "remaining": remaining, "sample": sample,
-    });
-    if remaining > 0 {
-        s["next_from"] = json!(p.from + c.looked_at);
-    }
-    if let Some(why) = stopped {
-        s["stopped"] = json!(why);
-    }
-    if sorter_view(SIFT_TOOL, &s, SUMMARY_SCREEN_CAP).is_err() {
-        if let Some(o) = s.as_object_mut() {
-            for k in ["sample", "criterion", "fields"] {
-                o.remove(k);
-            }
+/// A `policy / injection.blocked` row per block a sift's own screen made:
+/// no other screen saw that text at that cap. Best-effort.
+async fn audit_blocks(pool: &PgPool, task_id: i64, step: u32, part: &str, blocks: &[SinkBlock]) {
+    for block in blocks {
+        let payload = notebook_block_audit_payload(task_id, step, part, block);
+        if let Err(e) = kastellan_db::audit::insert(pool, "policy", "injection.blocked", payload).await {
+            tracing::error!(task_id, error = %e, "sift injection.blocked audit insert failed");
         }
-        s["sample_withheld"] = json!(true);
-    }
-    s
-}
-
-/// The cap the summary is screened at before it is recorded: above its size.
-const SUMMARY_SCREEN_CAP: usize = 64 * 1024;
-
-/// `v` with every string in it shown as [`WITHHELD_MARKER`] when the
-/// planner-text screen blocks it.
-fn screened(v: &Value) -> Value {
-    match v {
-        Value::String(t) if screen_model_text(t).is_some() => json!(WITHHELD_MARKER),
-        Value::Array(a) => Value::Array(a.iter().map(screened).collect()),
-        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), screened(x))).collect()),
-        other => other.clone(),
     }
 }
 
@@ -424,7 +410,7 @@ fn started_payload(ctx: &TaskContext, scrap: &ScrapRef, p: &SiftParams, items: u
     });
     if reads == 0 {
         v["latency_ms"] = json!(meta.latency_ms);
-        v["llm_usage"] = serde_json::to_value(&meta.usage).unwrap_or(Value::Null);
+        v["llm_usage"] = serde_json::to_value(&meta.usage).expect("CompletionStats serialises");
     }
     v
 }
@@ -435,3 +421,6 @@ async fn audit(pool: &PgPool, action: &str, payload: Value) {
         tracing::error!(error = %e, action, "sift audit insert failed");
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -193,6 +193,12 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
         if !pending {
             return Err(format!("`call.step` {} is not a pending step", call.step));
         }
+        // `returns` becomes the call plan's `decision`, and that prefix is
+        // what marks a sift's own reads: the repeat guard and the turn
+        // record skip such a plan.
+        if call.returns.trim_start().starts_with(super::sift::SIFT_READS_DECISION.trim_end()) {
+            return Err(format!("`call.returns` may not begin `{}`", super::sift::SIFT_READS_DECISION.trim_end()));
+        }
     }
     Ok(())
 }

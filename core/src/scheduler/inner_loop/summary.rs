@@ -45,7 +45,8 @@ pub(crate) use notebook_view::{notebook_block_audit_payload, screen_model_text, 
 use budget::apply_summary_budget;
 use call::{apply_call_budget, call_cost, render_call, render_decision, Screened, CALL_KEY};
 pub(crate) use sink::TIER_SINK;
-use sink::{clamp_audit_label, sink_screen, without_screen_audit_fields, SinkBlock};
+pub(crate) use sink::SinkBlock;
+use sink::{clamp_audit_label, sink_screen, without_screen_audit_fields};
 #[cfg(test)]
 use sink::AUDIT_LABEL_MAX_CHARS;
 

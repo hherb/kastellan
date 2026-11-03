@@ -23,6 +23,7 @@ fn turn(task_id: i64, user: &str, answer: &str) -> Turn {
             omitted_calls: 0,
             data_class: DataClass::Personal,
             scrapbooks: vec![],
+            omitted_scrapbooks: 0,
         }),
     }
 }

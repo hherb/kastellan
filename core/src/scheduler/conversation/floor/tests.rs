@@ -10,7 +10,7 @@ fn turn_with_class(task_id: i64, data_class: DataClass) -> Turn {
         user: "q".into(),
         answer: "a".into(),
         data_class: Some(data_class),
-        record: Some(TurnRecord { calls: vec![], omitted_calls: 0, data_class, scrapbooks: vec![] }),
+        record: Some(TurnRecord { calls: vec![], omitted_calls: 0, data_class, scrapbooks: vec![], omitted_scrapbooks: 0 }),
     }
 }
 

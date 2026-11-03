@@ -1,7 +1,6 @@
 //! The notebook loop's audit rows (#922): a model text the planner-text
 //! screen blocks (`policy / injection.blocked`, once, when it lands) and a
 //! turn whose reply the loop set aside unreviewed (`agent / plan.discarded`).
-//! Moved out of [`super::run`] (over the 500-line cap), unchanged.
 
 use serde_json::json;
 use sqlx::PgPool;

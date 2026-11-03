@@ -14,8 +14,10 @@ use crate::scheduler::inner_loop::{ceiling, TaskContext};
 /// The sorter's prompt file (`prompts/sift_sorter.md`).
 pub const SORTER_PROMPT: &str = "sift_sorter";
 
-/// A reply is `{"keep": false}` or a handful of short fields.
-pub(crate) const SORTER_MAX_TOKENS: u32 = 256;
+/// A reply is `{"keep": false}` or up to [`super::params::MAX_FIELDS`]
+/// short fields: room for all of them, since a reply cut off mid-object
+/// does not parse and its item is lost as undecided.
+pub(crate) const SORTER_MAX_TOKENS: u32 = 1024;
 
 #[async_trait]
 impl Sorter for RouterAgent {
@@ -35,6 +37,14 @@ impl Sorter for RouterAgent {
             timeout: Some(ceiling::call_timeout(self.router.timeout(), ctx.deadline, std::time::Instant::now())),
         };
         let resp = self.router.send(&req).await?;
-        Ok(resp.choices.first().map(|c| c.message.content.clone()).unwrap_or_default())
+        let Some(choice) = resp.choices.first() else {
+            tracing::warn!(task_id = ctx.task_id, "sift: the sorter returned no choice; undecided");
+            return Ok(String::new());
+        };
+        // A cut-off reply does not parse and becomes undecided: say why.
+        if choice.finish_reason.as_deref() == Some("length") {
+            tracing::warn!(task_id = ctx.task_id, max_tokens = SORTER_MAX_TOKENS, "sift: a sorter reply hit max_tokens");
+        }
+        Ok(choice.message.content.clone())
     }
 }

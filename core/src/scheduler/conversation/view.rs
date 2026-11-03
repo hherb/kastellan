@@ -300,6 +300,9 @@ fn render_turn(turn: &Turn, user_cap: usize, answer_cap: usize, with_calls: bool
                     obj.insert("scrapbooks".into(), v);
                 }
             }
+            if record.omitted_scrapbooks > 0 {
+                obj.insert("_omitted_scrapbooks".into(), Value::from(record.omitted_scrapbooks));
+            }
         }
     }
     if omitted_calls > 0 {

@@ -5,7 +5,7 @@ use kastellan_db::scrapbook::{Row, RowKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::scheduler::inner_loop::{screen_model_text, WITHHELD_MARKER};
+use crate::scheduler::inner_loop::{screen_model_text, SinkBlock, WITHHELD_MARKER};
 
 /// The column that shows where a row came from (its `source`), not a field.
 pub(crate) const SOURCE_COLUMN: &str = "source";
@@ -25,41 +25,65 @@ pub(crate) struct Counts {
     pub withheld: usize,
     pub undecided: usize,
     pub failed_reads: usize,
+    /// Items the sift never reached (a cap, the deadline, a sorter failure).
+    pub remaining: usize,
 }
 
-/// A markdown table of `rows` under `columns`, every row (S5), ordered by
-/// one column as text (stable), then a note with the counts. Every cell is
+/// A markdown table of `rows` under `columns`, every row (S5), optionally
+/// ordered by one column, then a note with the counts. Every cell is
 /// model-written from tool output, so each is screened (K8): a blocked one —
-/// and every cell of a withheld row — shows [`WITHHELD_MARKER`].
-pub(crate) fn render_table(rows: &[Row], columns: &[String], order_by: Option<&OrderBy>, counts: &Counts) -> String {
+/// and every cell of a withheld row — shows [`WITHHELD_MARKER`], and its
+/// block is returned for the audit row.
+pub(crate) fn render_table(
+    rows: &[Row],
+    columns: &[String],
+    order_by: Option<&OrderBy>,
+    counts: &Counts,
+) -> (String, Vec<SinkBlock>) {
     let mut ordered: Vec<&Row> = rows.iter().collect();
     if let Some(o) = order_by {
-        ordered.sort_by(|a, b| {
-            let (a, b) = (cell_text(a, &o.column), cell_text(b, &o.column));
-            let order = match (as_number(&a), as_number(&b)) {
-                (Some(x), Some(y)) => x.total_cmp(&y),
-                _ => a.cmp(&b),
-            };
-            if o.desc { order.reverse() } else { order }
-        });
+        ordered.sort_by(|a, b| cell_order(&cell_text(a, &o.column), &cell_text(b, &o.column), o.desc));
     }
     let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
-    let mut out = vec![line(columns.to_vec()), line(columns.iter().map(|_| "---".into()).collect())];
+    let mut blocks = Vec::new();
+    let mut out = vec![
+        line(columns.iter().map(|c| escaped(c)).collect()),
+        line(columns.iter().map(|_| "---".into()).collect()),
+    ];
     for row in ordered {
-        out.push(line(columns.iter().map(|c| shown(row, c)).collect()));
+        out.push(line(columns.iter().map(|c| shown(row, c, &mut blocks)).collect()));
     }
-    format!("{}\n\n{}", out.join("\n"), note(counts))
+    (format!("{}\n\n{}", out.join("\n"), note(counts)), blocks)
+}
+
+/// The order of two cells: every cell that reads as a number before every
+/// one that does not — numbers by value, the rest as text — and `desc`
+/// reverses each group, never the groups. A total order: mixing the two
+/// comparisons pairwise is not one, and `sort_by` may panic on that.
+fn cell_order(a: &str, b: &str, desc: bool) -> std::cmp::Ordering {
+    let (x, y) = (as_number(a), as_number(b));
+    let within = match (x, y) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        _ => a.cmp(b),
+    };
+    x.is_none().cmp(&y.is_none()).then(if desc { within.reverse() } else { within })
 }
 
 /// A cell as shown: screened, then escaped so it cannot end the cell or row.
-fn shown(row: &Row, column: &str) -> String {
+fn shown(row: &Row, column: &str, blocks: &mut Vec<SinkBlock>) -> String {
     if row.kind == RowKind::Withheld {
         return WITHHELD_MARKER.into();
     }
     let text = cell_text(row, column);
-    if screen_model_text(&text).is_some() {
+    if let Some(block) = screen_model_text(&text) {
+        blocks.push(block);
         return WITHHELD_MARKER.into();
     }
+    escaped(&text)
+}
+
+/// `text` that cannot end a markdown cell or row.
+fn escaped(text: &str) -> String {
     text.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
@@ -75,16 +99,16 @@ fn cell_text(row: &Row, column: &str) -> String {
     row.fields.get(column).map(scalar).unwrap_or_default()
 }
 
-/// A cell read as a number, so `order_by` puts 100 after 30: its digits,
-/// point and sign, ignoring a currency and thousands separators
-/// (`$1,200.00` is 1200). `None` for anything else — an ISO date included —
-/// which then sorts as text.
+/// A cell read as a number, so `order_by` puts 100 after 30: the cell
+/// with any currency or unit around it trimmed off and thousands separators
+/// dropped (`$1,200.00` is 1200, `30 EUR` is 30). `None` when what is left is
+/// not one number — `3 of 10`, a range, an ISO date — which then sorts as text.
 fn as_number(s: &str) -> Option<f64> {
-    let kept: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
-    if !kept.bytes().any(|b| b.is_ascii_digit()) {
+    let core = s.trim_matches(|c: char| !(c.is_ascii_digit() || c == '-' || c == '.'));
+    if !core.bytes().any(|b| b.is_ascii_digit()) {
         return None;
     }
-    kept.parse().ok()
+    core.replace(',', "").parse().ok()
 }
 
 fn scalar(v: &Value) -> String {
@@ -105,6 +129,9 @@ fn note(c: &Counts) -> String {
     }
     if c.undecided > 0 {
         parts.push(format!("{} undecided", c.undecided));
+    }
+    if c.remaining > 0 {
+        parts.push(format!("{} not yet looked at", c.remaining));
     }
     format!("{}.", parts.join("; "))
 }

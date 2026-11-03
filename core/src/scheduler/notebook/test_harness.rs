@@ -1,7 +1,7 @@
 //! The notebook loop's test harness (#922): a scripted model, a recording
 //! reviewer, scripted tools, reply builders and a task on a real Postgres.
-//! Moved out of `run/tests.rs` (over the 500-line cap) so the sift tests
-//! share it; unchanged but for visibility.
+//! Shared by the loop's tests and the sift tests; the sorter script, its
+//! delay and the cancel hook serve the latter.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

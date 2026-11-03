@@ -57,21 +57,27 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   `review_and_dispatch`. Code in `core/src/scheduler/notebook/sift/` (`params`, `template`, `config`, `sorter`,
   `router_sorter`, `table`, `answer`, `run`). The reads are **one reviewed plan** (`StepPolicy::SiftReads`: its own cap,
   dispatches past a failed read); each item goes through `sorter_view` (the summary's own `render_ok` + sink screen) to
-  the sorter (local LLM, thinking off, 256 tokens, `prompts/sift_sorter.md`); kept/withheld rows land in
+  the sorter (local LLM, thinking off, 1024 tokens, `prompts/sift_sorter.md`); kept/withheld rows land in
   **`task_scrapbook` (migration 0029, append-only)**; the planner sees a stub record `sift`/`sift.run` → `Ok(summary)`.
   `answer.table` renders rows by code and joins their class to the ceiling; follow-ups see `scrapbooks` per turn and
   may `over: {"scrapbook": "sb:<task>:<turn>"}` only for `ctx.conversation_task_ids` (`sift::may_read`).
-- **Knobs:** `KASTELLAN_SIFT_MAX_READS` (64), `KASTELLAN_SIFT_READ_METHODS`
+- **Knobs:** `KASTELLAN_SIFT_MAX_READS` (64; also the most **items** one sift looks at, read or not), `KASTELLAN_SIFT_READ_METHODS`
   (`mail.get_message,mail.get_attachment_text,handoff.fetch`); bad values stop the daemon. Env template + `operator-env.md`.
 - ⚠️ **The sift number is the turn (`plan_count`)**; `call_plan` now stamps `rationale = "notebook step N"`
   (`reply::notebook_step_of`) — `plan_digest` excludes `rationale`, so no approval changes.
-- ⚠️ **Sift reads are marked by `decision` prefix `SIFT_READS_DECISION`** — planner-writable text (deferred minor:
-  move to a code-only marker). The repeat guard and the turn record skip them.
+- ⚠️ **Sift reads are marked by `decision` prefix `SIFT_READS_DECISION`**; a call's `returns` becomes its plan's
+  `decision`, so `reply::validate` refuses a `returns` beginning `sift reads:`. The repeat guard and the turn record
+  skip such plans.
 - Review (fresh opus reviewer): no Critical; fixed: a blocked sample field hid the whole summary, unread items were
   silent, a cancel was unseen between sorter calls, `order_by` sorted amounts as text. **Deferred minors** are listed
-  in the PR body (spoofable marker, turn-record cap with scrapbooks, earlier-turn column order, header escaping,
-  sift-number reuse on a failed `plan_count` mirror, hard-coded allowlist in the prompt, K12 audit gaps, deadline
-  before reads, scrapbooks hidden when calls are clamped, `execute.rs` 506 lines).
+  in the PR body. **Second review (five agents, `/fixall`)** fixed: `order_by`'s comparator was not a total order
+  (`sort_by` can panic → daemon abort under `panic = "abort"`); a read-less sift had no item bound; the item the
+  sorter failed on was skipped by `next_from`; the turn record could exceed its byte cap with scrapbooks; the
+  spoofable marker; truncated sorter replies (cap 256 → 1024, `length` logged); sift-screen blocks, refusals and
+  reads-not-run now have audit rows; the table note says what was not looked at; refs de-duplicated and capped,
+  header escaped; `keep_if`/field-name length bounds. Everything else is [#956](https://github.com/hherb/kastellan/issues/956)
+  (failed-read reasons, sorter-failure audit, mid-sift DB error, default allowlist vs advertised, silent
+  narrowing, `execute.rs` now 509 lines). Migration 0029's two inaccurate comments were left alone (checksum).
 - ⚠️ **The IDE's `cargo check --workspace` respawns on every save and holds `target/`'s lock** — this session iterated
   in `CARGO_TARGET_DIR=$HOME/.cargo-target-sift` and kept `target/` for the sweep only.
 
