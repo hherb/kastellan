@@ -104,3 +104,13 @@ fn an_overlong_criterion_or_field_name_is_refused() {
     assert!(parse_params(&with("x".into(), "f".repeat(FIELD_NAME_MAX_CHARS))).is_ok());
     assert!(parse_params(&with("x".into(), "f".repeat(FIELD_NAME_MAX_CHARS + 1))).is_err());
 }
+
+/// The model writes back keys it is shown (memory: the planner mirrors the
+/// rendered shape): a summary's `continues`, copied into the next sift's
+/// parameters, must not refuse it.
+#[test]
+fn a_copied_continues_is_ignored() {
+    let mut v = spec_example();
+    v["continues"] = json!("sb:9:2");
+    assert!(parse_params(&v).is_ok());
+}

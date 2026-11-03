@@ -35,7 +35,7 @@ fn anything_else_is_undecided_never_guessed() {
 
 #[test]
 fn the_sorter_message_puts_the_criterion_first() {
-    let msg = sorter_message("an invoice", &fields(), &[json!({"subject": "x"})]);
+    let msg = sorter_message("an invoice", &fields(), None, &[json!({"subject": "x"})]);
     let (k, f, i) = (msg.find("\"keep_if\"").unwrap(), msg.find("\"fields\"").unwrap(), msg.find("\"item\"").unwrap());
     assert!(k < f && f < i, "{msg}");
     let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
@@ -61,4 +61,17 @@ fn keep_with_fields_absent_or_null_is_yes_with_every_field_null() {
     for raw in [r#"{"keep": true}"#, r#"{"keep": true, "fields": null}"#] {
         assert_eq!(parse_sort_reply(raw, &fields()), SortReply::Yes(all_null.clone()), "{raw}");
     }
+}
+
+/// DGX task 307 kept bills from 2017 as "currently due": the sorter is told
+/// `now`, after the parts every item shares and before the item.
+#[test]
+fn the_sorter_message_carries_now_before_the_item() {
+    let msg = sorter_message("due now", &fields(), Some("Tuesday, 3 November 2026, 14:00 (AEDT, UTC+11:00)"), &[json!({"s": "x"})]);
+    let v: serde_json::Value = serde_json::from_str(&msg).expect("valid JSON");
+    assert_eq!(v["now"], "Tuesday, 3 November 2026, 14:00 (AEDT, UTC+11:00)");
+    assert!(msg.find("\"fields\"").unwrap() < msg.find("\"now\"").unwrap() && msg.find("\"now\"").unwrap() < msg.find("\"item\"").unwrap(), "{msg}");
+    let without = sorter_message("due now", &fields(), None, &[json!({"s": "x"})]);
+    assert!(!without.contains("\"now\""), "{without}");
+    serde_json::from_str::<serde_json::Value>(&without).expect("valid JSON");
 }

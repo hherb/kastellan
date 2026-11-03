@@ -143,6 +143,8 @@ pub(crate) async fn run_notebook_to_terminal(
         ctx.instruction = with_corrections(&base_instruction, &state.corrections);
 
         let kind = thinking::turn_kind(answer_turn, write_answer, state.steps.is_empty(), replan_due);
+        // The turn's `now`, kept for a sift's sorter ("currently due").
+        let turn_now = std::sync::Mutex::new(None::<String>);
         let turn = {
             let current = state.current_step();
             let record = ctx.plans.last();
@@ -159,6 +161,7 @@ pub(crate) async fn run_notebook_to_terminal(
                 },
             };
             let msg = |now: Option<&str>| {
+                *turn_now.lock().expect("never poisoned: nothing panics holding it") = now.map(String::from);
                 let cur = current.map(|step| CurrentStep { step, tool_doc: tool_doc.clone(), last });
                 render_turn(&ctx, &state, seen_corrections, last_failure, cur, budget, now)
             };
@@ -262,7 +265,8 @@ pub(crate) async fn run_notebook_to_terminal(
             // A sift is run here, not dispatched: its reads are one reviewed
             // plan, and its sorter needs the router (K2).
             Some(call) => {
-                let r = SiftRun { pool, review: review.as_ref(), dispatcher: dispatcher.as_ref(), nb, outbox };
+                let now = turn_now.lock().expect("never poisoned").clone();
+                let r = SiftRun { pool, review: review.as_ref(), dispatcher: dispatcher.as_ref(), nb, outbox, now: now.as_deref() };
                 sift::run::run_sift(r, &mut ctx, call, &meta, &mut st, &mut failed_llm_calls).await?
             }
             None => {

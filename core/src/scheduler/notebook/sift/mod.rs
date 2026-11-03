@@ -14,6 +14,8 @@
 //! * [`run`] — a sift in the notebook loop: one reviewed plan of reads, a
 //!   sorter call per item, the scrapbook rows.
 //! * [`summary`] — the summary the planner sees, and why a sift stopped.
+//! * [`chain`] — a sift that goes on where an earlier one stopped, and the
+//!   whole chain an answer's table shows.
 //!
 //! Design: `docs/superpowers/specs/2026-11-02-sift-and-scrapbook-design.md`.
 
@@ -24,6 +26,7 @@ pub(crate) mod run;
 pub mod sorter;
 pub(crate) mod summary;
 pub(crate) mod answer;
+pub(crate) mod chain;
 pub(crate) mod table;
 pub(crate) mod template;
 

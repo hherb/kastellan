@@ -109,3 +109,44 @@ Cell format: `turns / seconds`, then the outcome.
 - **Operator decision:** gemma MoE, thinking ON, notebook mode: "a correct answer is more important than speed".
   The DGX was set back to `KASTELLAN_LLM_DISABLE_THINKING=0`.
 - **Next:** the sift-and-scrapbook design (one broad query, one sift step, a code-rendered table).
+
+## 2026-11-03 #6 — notebook + `sift` (tasks 301–307)
+
+- **Build:** `main` at 3c6f7a0f (PR #955, `sift` + the scrapbook), deployed with a plain `upgrade_from_git.sh`
+  (migration 0029 applied at boot). Ollama 0.40.13, `gemma4:26b-a4b-it-q8_0-ctx64k`, thinking ON
+  (`KASTELLAN_LLM_DISABLE_THINKING=0`, `reasoning_effort`), `KASTELLAN_PLANNER_MODE=notebook`,
+  `KASTELLAN_LLM_TIMEOUT_MS=600000`, sift knobs unset (64 reads; mail get_message / get_attachment_text,
+  handoff.fetch).
+- **Hypothesis:** with one broad search and one `sift`, the find-all questions finish in a few turns, and their
+  tables are at least as complete as #2's.
+- **Results:**
+  - Q1 3 / 291. One sift (50 items, 18 reads, 56 s) kept 18. The table had all 18 rows, not 5. The date column
+    was sorted as text (`DD Mon YY`). The same booking appeared once per email about it (up to 3 times), and one
+    international fare was kept.
+  - Q2 8 / 830. Five sifts: one over a first 50-item search, then a chain of four over a 100-item search
+    (`from` = `next_from`), keeping 25 + 28 + 24 + 9. **The answer tabled only the last link**, 9 rows ("9 kept of
+    14 looked at"), where about 86 were kept. The 64-read cap and about 2 reads per item gave about 30 items per
+    sift.
+  - Q3 2 / 123, no sift, looks right.
+  - Q4 4 / 201, no sift. The PDF was read in two pages. The stated total did not equal the lump sums: the operator
+    should check it.
+  - Q5 4 / 101, no sift. The answer is the newest invoice (it matches Q3's list).
+  - Q6 40 / 928, **"cannot determine"**: a regression against #2's 3 / 122.
+    - A `mail.get_message` result was stashed.
+    - The model fetched it as tool `handoff`, method `handoff.fetch`. The dispatcher matched only `fetch`, so the
+      call failed with `UNKNOWN_TOOL`.
+    - 35 turns then followed with the get_message call discarded as `repeated_call`, plus 2 decode failures.
+  - Q7 5 / 427. A chain of three sifts kept 13 + 23 + 16. **The answer tabled only the last link** (16 rows). Kept
+    rows went back to 2017: the sorter has no "now" to judge "currently due" against.
+  - Total 2901 s, against #2's 3350 s.
+- **Learned:**
+  - `sift` makes find-all questions short in turns.
+  - The answer does not join a continuation chain: the prompt's "a list of names, one per sift" is not followed.
+  - The table has no notion of dates, duplicates, a row limit, or "now".
+  - The handoff fetch spelling was a latent bug: the prompt and the sift allowlist say `handoff.fetch`, but the
+    dispatcher wanted `fetch`.
+- **Changed** (branch `fix/922-sift-measure-fixes`, not yet re-measured): the dispatcher accepts `handoff.fetch` as
+  well as `fetch`; a sift from the last one's `next_from` is linked to it (`continues`) and a table naming the last
+  link shows the whole chain; rows alike but for their source are shown once; `answer.table` takes `limit`; the
+  sorter is told `now` and writes dates `YYYY-MM-DD`.
+- **Reproduce:** as above. Same build, then `bash ~/requery7.sh`.

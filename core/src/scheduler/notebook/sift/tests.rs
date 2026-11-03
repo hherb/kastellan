@@ -13,6 +13,8 @@ use crate::scheduler::notebook::test_harness::*;
 
 mod review_findings;
 use review_findings::*;
+mod measure_findings;
+use measure_findings::*;
 
 fn search(step: u32, hits: Value) -> Value {
     json!({"step": step, "tool": "mail", "method": "mail.search", "parameters": {"hits": hits},
@@ -99,6 +101,7 @@ async fn the_sift_loop() {
     a_second_sift_over_the_same_step_walks_on_from_next_from(&pool).await;
     a_criterion_the_screen_blocks_leaves_the_ref_and_the_counts(&pool).await;
     an_ordinary_plan_stops_at_its_first_failed_step(&pool).await;
+    a_table_naming_the_last_of_a_chain_shows_every_link(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {
