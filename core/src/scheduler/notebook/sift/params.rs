@@ -145,7 +145,7 @@ pub(crate) fn check_read(t: &ReadTemplate, cfg: &SiftConfig) -> Result<(), Strin
     if t.tool == SIFT_TOOL || super::config::never_a_read(&key) {
         return Err(format!("`{key}` can never be a sift's read"));
     }
-    if !cfg.read_methods.iter().any(|m| *m == key) {
+    if !cfg.read_methods.contains(&key) {
         return Err(format!("`{key}` is not a method a sift may read with (allowed: {})", cfg.read_methods.join(", ")));
     }
     Ok(())

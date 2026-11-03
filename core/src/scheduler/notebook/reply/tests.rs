@@ -237,6 +237,6 @@ fn an_answer_may_name_a_table() {
     .unwrap();
     let t = many.answer.unwrap().table.unwrap();
     assert_eq!(t.scrapbook.refs(), ["sb:1:2", "sb:1:4"]);
-    assert_eq!(t.order_by.unwrap().desc, true);
+    assert!(t.order_by.unwrap().desc);
     assert!(parse_reply(r#"{"answer": {"body": "b", "table": {"scrapbook": "sb:1:2", "rows": []}}}"#).is_err());
 }
