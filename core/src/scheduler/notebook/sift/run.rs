@@ -89,6 +89,11 @@ pub(crate) async fn run_sift(
             return Ok(Executed::Again);
         }
     };
+    if r.now.is_none() {
+        // No planner timezone: a criterion like "currently due" is judged
+        // without today's date (DGX task 307 kept 2017 bills).
+        tracing::warn!(task_id = ctx.task_id, "sift: the sorter is not told today's date (no planner timezone configured)");
+    }
     let items: Vec<Value> = over.items.into_iter().skip(p.from).collect();
     let batch = plan_reads(p.read.as_ref(), &items, cfg.max_reads);
     let scrap = ScrapRef { task_id: ctx.task_id, sift: ctx.plan_count as i32 };

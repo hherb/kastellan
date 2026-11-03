@@ -2,13 +2,15 @@
 //! a long list takes several, each `from` the last one's `next_from`, and
 //! each writes its own scrapbook. A sift that goes on where an earlier one
 //! stopped **continues** it: its summary says `continues: <that ref>`, and
-//! an answer's table that names the last one shows the whole chain. DGX
+//! an answer's table in the same task that names the last one shows the
+//! whole chain (a later turn's table sees only the sift it names). DGX
 //! tasks 302 and 307 tabled only the last of four and three sifts (9 of
 //! about 86 rows, and 16 of 52) although the prompt asked for every name.
 //! Pure.
 
 use serde_json::Value;
 
+use super::params::{parse_params, SiftParams};
 use super::SIFT_TOOL;
 use crate::scheduler::inner_loop::{PlanRecord, StepOutcome};
 
@@ -26,16 +28,17 @@ pub(crate) fn summary_of<'a>(plans: &'a [PlanRecord], name: &str) -> Option<&'a 
 }
 
 /// The scrapbook a sift with `params`, starting at `from`, continues: the
-/// newest earlier sift of this run whose parameters are the same but for
-/// `from` and whose `next_from` is this one's `from`. Anything else — a
-/// new criterion, another list, a sift back over items already seen — is a
-/// sift of its own.
+/// newest earlier sift of this run whose parameters, as parsed, are the
+/// same but for `from` (so `"items": null` and no `items` are one) and
+/// whose `next_from` is this one's `from`. Anything else — a new criterion,
+/// another list, a sift back over items already seen — is a sift of its own.
 pub(crate) fn continued(plans: &[PlanRecord], params: &Value, from: usize) -> Option<String> {
     if from == 0 {
         return None;
     }
+    let mine = but_from(params)?;
     let (_, prev) = sifts(plans)
-        .find(|(p, s)| s["next_from"].as_u64() == Some(from as u64) && but_from(p) == but_from(params))?;
+        .find(|(p, s)| s["next_from"].as_u64() == Some(from as u64) && but_from(p).as_ref() == Some(&mine))?;
     prev["scrapbook"].as_str().map(String::from)
 }
 
@@ -54,24 +57,19 @@ pub(crate) fn expand(plans: &[PlanRecord], name: &str) -> Vec<String> {
     chain
 }
 
-/// `params` without `from`, and without a `continues` the model copied
-/// back from a summary (ignored, [`super::params`]).
-fn but_from(params: &Value) -> Value {
-    let mut p = params.clone();
-    if let Some(o) = p.as_object_mut() {
-        o.remove("from");
-        o.remove("continues");
-    }
-    p
+/// `params` parsed, with `from` cleared (a copied-back `continues` is
+/// ignored by the parse, [`super::params`]); `None` if they do not parse.
+fn but_from(params: &Value) -> Option<SiftParams> {
+    parse_params(params).ok().map(|p| SiftParams { from: 0, ..p })
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cassandra::types::{DataClass, Plan, PlannedStep};
     use serde_json::json;
 
-    fn sift_record(params: Value, summary: Value) -> PlanRecord {
+    pub(crate) fn sift_record(params: Value, summary: Value) -> PlanRecord {
         let step = PlannedStep {
             tool: SIFT_TOOL.into(),
             method: "sift.run".into(),
@@ -97,7 +95,7 @@ mod tests {
         PlanRecord::new(plan, vec![StepOutcome::Ok(summary)])
     }
 
-    fn params(from: usize, keep_if: &str) -> Value {
+    pub(crate) fn params(from: usize, keep_if: &str) -> Value {
         json!({"over": {"step": 1}, "keep_if": keep_if, "fields": ["amount"], "from": from})
     }
 
@@ -117,6 +115,9 @@ mod tests {
         let mut copied = params(30, "an invoice");
         copied["continues"] = json!("sb:9:1");
         assert_eq!(continued(plans, &copied, 30).as_deref(), Some("sb:9:2"), "a copied `continues` is ignored");
+        let mut spelled = params(30, "an invoice");
+        spelled["items"] = Value::Null;
+        assert_eq!(continued(plans, &spelled, 30).as_deref(), Some("sb:9:2"), "review finding: `items: null` is no `items`");
     }
 
     #[test]

@@ -30,9 +30,9 @@ pub(crate) struct Counts {
 }
 
 /// A markdown table of `rows` under `columns`, optionally ordered by one
-/// column, then a note with the counts. Rows alike in every shown column but
-/// `source` are shown once, their sources joined (one booking emailed three
-/// times, DGX task 301); then `limit` keeps the first rows. Every row is
+/// column, then a note with the counts. Rows alike in every field are shown
+/// once, their sources joined (one booking emailed three times, DGX task
+/// 301); then `limit` keeps the first rows. Every row is
 /// shown unless a limit says otherwise, and the note says so (S5). Every
 /// cell is model-written from tool output, so each shown one is screened
 /// (K8): a blocked one — and every cell of a withheld row — shows
@@ -48,9 +48,9 @@ pub(crate) fn render_table(
     if let Some(o) = order_by {
         ordered.sort_by(|a, b| cell_order(&cell_text(a, &o.column), &cell_text(b, &o.column), o.desc));
     }
-    let groups = alike(&ordered, columns);
-    let merged = ordered.len() - groups.len();
+    let groups = alike(&ordered);
     let shown_rows = limit.filter(|n| *n > 0).map_or(groups.len(), |n| n.min(groups.len()));
+    let merged = groups[..shown_rows].iter().map(|g| g.len() - 1).sum();
     let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
     let mut blocks = Vec::new();
     let mut out = vec![
@@ -65,18 +65,18 @@ pub(crate) fn render_table(
 }
 
 /// `rows` in groups, in order of first appearance: a kept row joins the
-/// first earlier group whose shown cells, `source` aside, are the same as its
-/// own and not all empty. A withheld row is always a group of its own: its fields are not
-/// shown, so nothing says it is the same as another.
-fn alike<'a>(rows: &[&'a Row], columns: &[String]) -> Vec<Vec<&'a Row>> {
-    let key = |r: &Row| -> Vec<String> { columns.iter().filter(|c| *c != SOURCE_COLUMN).map(|c| cell_text(r, c)).collect() };
+/// first earlier group whose fields — every one, shown or not — are the
+/// same as its own and not all empty. Only the shown columns would merge
+/// twelve monthly invoices shown by vendor and amount (review finding). A
+/// withheld row is always a group of its own: its fields are not shown, so
+/// nothing says it is the same as another.
+fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
     let mut groups: Vec<Vec<&Row>> = Vec::new();
     for &r in rows {
-        // A key with nothing in it (no field among the columns, or a name
-        // that is no field) says nothing about sameness: never merged.
-        let k = key(r);
-        let same = (r.kind == RowKind::Kept && k.iter().any(|c| !c.is_empty()))
-            .then(|| groups.iter_mut().find(|g| g[0].kind == RowKind::Kept && key(g[0]) == k))
+        // Fields with nothing in them say nothing about sameness: never merged.
+        let something = r.fields.as_object().is_some_and(|o| o.values().any(|v| !scalar(v).is_empty()));
+        let same = (r.kind == RowKind::Kept && something)
+            .then(|| groups.iter_mut().find(|g| g[0].kind == RowKind::Kept && g[0].fields == r.fields))
             .flatten();
         match same {
             Some(g) => g.push(r),
@@ -100,21 +100,24 @@ fn cell_order(a: &str, b: &str, desc: bool) -> std::cmp::Ordering {
 }
 
 /// A group's cell as shown: screened, then escaped so it cannot end the
-/// cell or row. Its `source` lists every row's, the rest are the first's.
+/// cell or row. Its `source` lists every row's, each screened alone so one
+/// blocked source does not hide the rest; the other cells are the first's.
 fn shown(group: &[&Row], column: &str, blocks: &mut Vec<SinkBlock>) -> String {
     if group[0].kind == RowKind::Withheld {
         return WITHHELD_MARKER.into();
     }
-    let text = if column == SOURCE_COLUMN {
-        group.iter().map(|r| cell_text(r, column)).collect::<Vec<_>>().join(", ")
-    } else {
-        cell_text(group[0], column)
-    };
-    if let Some(block) = screen_model_text(&text) {
+    if column == SOURCE_COLUMN {
+        return group.iter().map(|r| screened(&cell_text(r, column), blocks)).collect::<Vec<_>>().join(", ");
+    }
+    screened(&cell_text(group[0], column), blocks)
+}
+
+fn screened(text: &str, blocks: &mut Vec<SinkBlock>) -> String {
+    if let Some(block) = screen_model_text(text) {
         blocks.push(block);
         return WITHHELD_MARKER.into();
     }
-    escaped(&text)
+    escaped(text)
 }
 
 /// `text` that cannot end a markdown cell or row.

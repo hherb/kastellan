@@ -564,3 +564,14 @@ fn an_oversized_step_failure_row_still_records_the_request() {
         .expect("an oversized row with a request must carry its summary");
     assert!(head.starts_with(r#"{"argv":["/bin/bash","-c","#), "got: {head}");
 }
+
+/// Review finding: only `fetch` and `handoff.fetch` on the `handoff` tool
+/// are the intercept; any other spelling falls through to "not registered".
+#[test]
+fn only_the_two_fetch_spellings_on_handoff_are_intercepted() {
+    assert!(is_handoff_fetch(HANDOFF_TOOL, HANDOFF_METHOD_FETCH));
+    assert!(is_handoff_fetch(HANDOFF_TOOL, &format!("handoff.{HANDOFF_METHOD_FETCH}")));
+    for (tool, method) in [("handoff", "handoff.handoff.fetch"), ("handoff", "handoff.stash"), ("handoff", "get"), ("mail", "fetch"), ("mail", "handoff.fetch")] {
+        assert!(!is_handoff_fetch(tool, method), "{tool}/{method}");
+    }
+}

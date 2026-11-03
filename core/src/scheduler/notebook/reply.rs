@@ -86,7 +86,8 @@ pub(crate) struct AnswerSpec {
 /// `answer.table`: one scrapbook ref or a list of them (one per sift of the
 /// same criterion; their rows are joined), the columns (default: the sift's
 /// fields, then `source`), an optional order, and an optional `limit` on
-/// the rows shown (the first, after the order; 0 is no limit).
+/// the rows shown (the first, after the order and the merge; 0 is no
+/// limit).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TableSpec {

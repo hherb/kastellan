@@ -8,36 +8,25 @@ use super::params::ScrapRef;
 use super::table::{render_table, Counts, SOURCE_COLUMN};
 use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
-use crate::scheduler::inner_loop::{notebook_block_audit_payload, TaskContext};
+use crate::scheduler::inner_loop::{notebook_block_audit_payload, PlanRecord, TaskContext};
 use crate::scheduler::notebook::reply::TableSpec;
 
-/// The most scrapbooks one table joins: as many as a turn records.
+/// The most scrapbooks one table names: as many as a turn records. Each
+/// brings its whole chain, which this does not cap.
 pub(crate) const TABLE_REFS_MAX: usize = crate::scheduler::conversation::record::SCRAPBOOKS_PER_TURN;
 
 /// `body`, then the table `t` names, and the highest class of its rows. A
-/// ref names its whole chain ([`chain::expand`]): the last sift of a chain
-/// shows every one. A ref that is malformed, unreadable here (K11),
-/// unreadable from the database or empty is not shown: a line says so
-/// instead, and the rest still render. A ref named twice is joined once;
-/// past [`TABLE_REFS_MAX`] the rest are left out, in words.
+/// ref names its whole chain ([`table_refs`]). A ref that is malformed,
+/// unreadable here (K11), unreadable from the database or empty is not
+/// shown: a line says so instead, and the rest still render.
 pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: &TableSpec) -> (String, DataClass) {
     let mut rows: Vec<Row> = Vec::new();
     let mut counts = Counts::default();
     let mut fields: Option<Vec<String>> = None;
-    let mut refused = Vec::new();
-    let mut seen: Vec<&str> = Vec::new();
     let mut included = false;
-    let named: Vec<String> = t.scrapbook.refs().iter().flat_map(|r| chain::expand(&ctx.plans, r)).collect();
+    let (named, mut refused) = table_refs(&ctx.plans, t.scrapbook.refs());
     let mut links = Vec::new();
     for raw in &named {
-        if seen.contains(&raw.as_str()) {
-            continue;
-        }
-        if seen.len() == TABLE_REFS_MAX {
-            refused.push(format!("(table {raw} could not be included: a table joins at most {TABLE_REFS_MAX})"));
-            continue;
-        }
-        seen.push(raw);
         let r = match ScrapRef::parse(raw) {
             Ok(r) if may_read(ctx, r) => r,
             Ok(_) => {
@@ -95,6 +84,32 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
         out.push_str(&line);
     }
     (out, class)
+}
+
+/// The scrapbooks a table named `named` joins, each once, and a line for
+/// each named past [`TABLE_REFS_MAX`]. The cap is on the refs named, before
+/// each is expanded into its chain ([`chain::expand`], oldest first): the
+/// last sift of a chain of nine shows every link, not the first eight
+/// without the one named (review finding). A ref is written canonically
+/// (`sb:9:04` is `sb:9:4`), so its chain is found; a malformed one is kept
+/// as written for its refusal. Pure.
+fn table_refs(plans: &[PlanRecord], named: &[String]) -> (Vec<String>, Vec<String>) {
+    let canonical = |raw: &String| ScrapRef::parse(raw).map_or_else(|_| raw.clone(), |r| r.to_string());
+    let mut distinct: Vec<String> = Vec::new();
+    for r in named.iter().map(canonical) {
+        if !distinct.contains(&r) {
+            distinct.push(r);
+        }
+    }
+    let past = distinct.split_off(distinct.len().min(TABLE_REFS_MAX));
+    let refused = past.iter().map(|r| format!("(table {r} could not be included: a table names at most {TABLE_REFS_MAX})")).collect();
+    let mut refs: Vec<String> = Vec::new();
+    for r in distinct.iter().flat_map(|r| chain::expand(plans, r)) {
+        if !refs.contains(&r) {
+            refs.push(r);
+        }
+    }
+    (refs, refused)
 }
 
 /// The summary this task's own sift recorded for `r`, if it ran in this run.
@@ -183,6 +198,28 @@ mod tests {
         assert_eq!(remaining(&whole[..2]), 40, "c left out: b's remaining stands");
         assert_eq!(remaining(&[link("a", 70, None), link("x", 5, None)]), 75, "two separate sifts");
         assert_eq!(remaining(&[]), 0);
+    }
+
+    /// Review finding: the cap is on the refs named, so the last of a chain
+    /// of nine shows all nine; a ref past it is the one refused, and a ref
+    /// written `sb:9:04` finds its chain.
+    #[test]
+    fn the_cap_is_on_refs_named_and_a_chain_brings_every_link() {
+        use super::super::chain::tests::{params, sift_record};
+        let plans: Vec<PlanRecord> = (1..=9)
+            .map(|n| {
+                let continues = (n > 1).then(|| format!("sb:9:{}", n - 1));
+                sift_record(params(30 * (n - 1), "x"), serde_json::json!({"scrapbook": format!("sb:9:{n}"), "continues": continues}))
+            })
+            .collect();
+        let all: Vec<String> = (1..=9).map(|n| format!("sb:9:{n}")).collect();
+        assert_eq!(table_refs(&plans, &["sb:9:9".into()]), (all.clone(), vec![]));
+        assert_eq!(table_refs(&plans, &["sb:9:09".into(), "sb:9:9".into()]).0, all, "canonical, and once");
+        let named: Vec<String> = (1..=9).map(|n| format!("sb:7:{n}")).collect();
+        let (refs, refused) = table_refs(&plans, &named);
+        assert_eq!(refs, named[..TABLE_REFS_MAX]);
+        assert_eq!(refused, ["(table sb:7:9 could not be included: a table names at most 8)"]);
+        assert_eq!(table_refs(&plans, &["bad".into()]).0, ["bad"], "kept as written for its refusal");
     }
 
     #[test]

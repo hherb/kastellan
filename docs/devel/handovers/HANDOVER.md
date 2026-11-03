@@ -61,8 +61,15 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   - **Q2/Q7 tabled only the last of a sift chain** (9 of ~86, 16 of 52): code now joins the chain — a sift from the
     last one's `next_from` with the same parameters gets `continues: <ref>` (`sift/chain.rs`, pure), and a table
     naming the last link expands to the whole chain; `remaining` counts only links nothing included continues.
-  - Table: rows alike but for their source are shown once; `answer.table` takes `limit` (after order + merge; rows
-    past it are not screened); the sorter is told the turn's `now` and writes dates `YYYY-MM-DD`.
+  - Table: rows alike in **every field** are shown once, sources joined; `answer.table` takes `limit` (after order +
+    merge; rows past it are not screened); the sorter is told the turn's `now` and writes dates `YYYY-MM-DD`.
+  - **Review fix pass** (5 tests, targeted runs only — not in the sweep row below): `TABLE_REFS_MAX` caps the refs
+    **named**, before chain expansion (it had cut the newest links, the named one included — `answer::table_refs`,
+    pure; refs canonicalised so `sb:9:04` finds its chain); merging keys on all fields, not the shown columns (twelve
+    monthly invoices were one row); the duplicate count covers only rows shown; a merged `source` cell is screened
+    per source; chain links compare **parsed** params (`items: null` ≡ absent); a sift with no `now` warns.
+    Deferred: [#958](https://github.com/hherb/kastellan/issues/958) (non-ISO dates order wrongly under `limit`),
+    [#959](https://github.com/hherb/kastellan/issues/959) (a step re-run can link a chain across two lists).
 - ⚠️ **Not covered:** a table naming a chain from an **earlier turn's task** is not expanded (its summaries are not in
   `ctx.plans`) — it degrades to the old one-link table. The repeat guard says "facts belong in findings" even when
   the earlier result was stashed and unreadable (Q6's 35 lost turns). Both are on [#956](https://github.com/hherb/kastellan/issues/956).

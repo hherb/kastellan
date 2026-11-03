@@ -239,6 +239,9 @@ fn an_answer_may_name_a_table() {
     assert_eq!(t.scrapbook.refs(), ["sb:1:2", "sb:1:4"]);
     assert!(t.order_by.unwrap().desc);
     assert!(parse_reply(r#"{"answer": {"body": "b", "table": {"scrapbook": "sb:1:2", "rows": []}}}"#).is_err());
+    // Review finding: the prompt teaches `limit`; a rename would refuse every answer using it.
+    let limited = parse_reply(r#"{"answer": {"body": "b", "table": {"scrapbook": "sb:1:2", "limit": 5}}}"#).unwrap();
+    assert_eq!(limited.answer.unwrap().table.unwrap().limit, Some(5));
 }
 
 /// Review finding: `returns` becomes the plan's `decision`, and the sift's

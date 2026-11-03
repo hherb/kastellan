@@ -220,13 +220,14 @@ fit. When `sample_withheld` is true the safety screen withheld the sample,
 `criterion` and `fields`; the ref and the counts still hold. If the sample
 shows the criterion did not work, sift again with a better `keep_if`.
 A sift `from` the last one's `next_from`, with the same parameters
-otherwise, goes on with it: its result says `continues`, and naming the last
-sift's scrapbook shows the whole chain. Then `answer` with `"table":
-{"scrapbook": "<name>"}` — or a list of names, one per sift of the same
-question — plus optional `"columns": [...]`, `"order_by": {"column": "date",
-"desc": true}` and `"limit": 5` (show only the first 5 rows, after the order:
-for "the 5 most recent"). The table is rendered for you, with every kept row
-(rows alike in every column shown once) and the counts.
+otherwise, goes on with it: its result says `continues`, and in this task
+naming the last sift's scrapbook shows the whole chain. Then `answer` with
+`"table": {"scrapbook": "<name>"}` — or a list of names, one per sift of the
+same question — plus optional `"columns": [...]`, `"order_by": {"column":
+"date", "desc": true}` and `"limit": 5` (show only the first 5 rows, after
+the order and the merge: for "the 5 most recent"). The table is rendered for
+you, with every kept row unless `limit` says otherwise (rows alike in every
+field shown once, their sources joined) and the counts.
 
 ## Rules
 
