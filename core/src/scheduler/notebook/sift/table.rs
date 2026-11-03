@@ -29,31 +29,61 @@ pub(crate) struct Counts {
     pub remaining: usize,
 }
 
-/// A markdown table of `rows` under `columns`, every row (S5), optionally
-/// ordered by one column, then a note with the counts. Every cell is
-/// model-written from tool output, so each is screened (K8): a blocked one —
-/// and every cell of a withheld row — shows [`WITHHELD_MARKER`], and its
-/// block is returned for the audit row.
+/// A markdown table of `rows` under `columns`, optionally ordered by one
+/// column, then a note with the counts. Rows alike in every shown column but
+/// `source` are shown once, their sources joined (one booking emailed three
+/// times, DGX task 301); then `limit` keeps the first rows. Every row is
+/// shown unless a limit says otherwise, and the note says so (S5). Every
+/// cell is model-written from tool output, so each shown one is screened
+/// (K8): a blocked one — and every cell of a withheld row — shows
+/// [`WITHHELD_MARKER`], and its block is returned for the audit row.
 pub(crate) fn render_table(
     rows: &[Row],
     columns: &[String],
     order_by: Option<&OrderBy>,
+    limit: Option<usize>,
     counts: &Counts,
 ) -> (String, Vec<SinkBlock>) {
     let mut ordered: Vec<&Row> = rows.iter().collect();
     if let Some(o) = order_by {
         ordered.sort_by(|a, b| cell_order(&cell_text(a, &o.column), &cell_text(b, &o.column), o.desc));
     }
+    let groups = alike(&ordered, columns);
+    let merged = ordered.len() - groups.len();
+    let shown_rows = limit.filter(|n| *n > 0).map_or(groups.len(), |n| n.min(groups.len()));
     let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
     let mut blocks = Vec::new();
     let mut out = vec![
         line(columns.iter().map(|c| escaped(c)).collect()),
         line(columns.iter().map(|_| "---".into()).collect()),
     ];
-    for row in ordered {
-        out.push(line(columns.iter().map(|c| shown(row, c, &mut blocks)).collect()));
+    for group in &groups[..shown_rows] {
+        out.push(line(columns.iter().map(|c| shown(group, c, &mut blocks)).collect()));
     }
-    (format!("{}\n\n{}", out.join("\n"), note(counts)), blocks)
+    let cut = (shown_rows < groups.len()).then_some((shown_rows, groups.len()));
+    (format!("{}\n\n{}", out.join("\n"), note(counts, merged, cut)), blocks)
+}
+
+/// `rows` in groups, in order of first appearance: a kept row joins the
+/// first earlier group whose shown cells, `source` aside, are the same as its
+/// own and not all empty. A withheld row is always a group of its own: its fields are not
+/// shown, so nothing says it is the same as another.
+fn alike<'a>(rows: &[&'a Row], columns: &[String]) -> Vec<Vec<&'a Row>> {
+    let key = |r: &Row| -> Vec<String> { columns.iter().filter(|c| *c != SOURCE_COLUMN).map(|c| cell_text(r, c)).collect() };
+    let mut groups: Vec<Vec<&Row>> = Vec::new();
+    for &r in rows {
+        // A key with nothing in it (no field among the columns, or a name
+        // that is no field) says nothing about sameness: never merged.
+        let k = key(r);
+        let same = (r.kind == RowKind::Kept && k.iter().any(|c| !c.is_empty()))
+            .then(|| groups.iter_mut().find(|g| g[0].kind == RowKind::Kept && key(g[0]) == k))
+            .flatten();
+        match same {
+            Some(g) => g.push(r),
+            None => groups.push(vec![r]),
+        }
+    }
+    groups
 }
 
 /// The order of two cells: every cell that reads as a number before every
@@ -69,12 +99,17 @@ fn cell_order(a: &str, b: &str, desc: bool) -> std::cmp::Ordering {
     x.is_none().cmp(&y.is_none()).then(if desc { within.reverse() } else { within })
 }
 
-/// A cell as shown: screened, then escaped so it cannot end the cell or row.
-fn shown(row: &Row, column: &str, blocks: &mut Vec<SinkBlock>) -> String {
-    if row.kind == RowKind::Withheld {
+/// A group's cell as shown: screened, then escaped so it cannot end the
+/// cell or row. Its `source` lists every row's, the rest are the first's.
+fn shown(group: &[&Row], column: &str, blocks: &mut Vec<SinkBlock>) -> String {
+    if group[0].kind == RowKind::Withheld {
         return WITHHELD_MARKER.into();
     }
-    let text = cell_text(row, column);
+    let text = if column == SOURCE_COLUMN {
+        group.iter().map(|r| cell_text(r, column)).collect::<Vec<_>>().join(", ")
+    } else {
+        cell_text(group[0], column)
+    };
     if let Some(block) = screen_model_text(&text) {
         blocks.push(block);
         return WITHHELD_MARKER.into();
@@ -119,7 +154,9 @@ fn scalar(v: &Value) -> String {
     }
 }
 
-fn note(c: &Counts) -> String {
+/// The counts, then what the table did to the rows: `merged` duplicates
+/// shown once, and `cut` = (shown, of) when a limit left rows out.
+fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>) -> String {
     let mut parts = vec![format!("{} kept of {} looked at", c.kept, c.looked_at)];
     if c.withheld > 0 {
         parts.push(format!("{} withheld by the safety screen", c.withheld));
@@ -132,6 +169,12 @@ fn note(c: &Counts) -> String {
     }
     if c.remaining > 0 {
         parts.push(format!("{} not yet looked at", c.remaining));
+    }
+    if merged > 0 {
+        parts.push(format!("{merged} duplicate{} shown once", if merged == 1 { "" } else { "s" }));
+    }
+    if let Some((shown, of)) = cut {
+        parts.push(format!("showing the first {shown} of {of} rows"));
     }
     format!("{}.", parts.join("; "))
 }

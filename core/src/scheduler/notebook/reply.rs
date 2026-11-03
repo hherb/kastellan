@@ -85,7 +85,8 @@ pub(crate) struct AnswerSpec {
 
 /// `answer.table`: one scrapbook ref or a list of them (one per sift of the
 /// same criterion; their rows are joined), the columns (default: the sift's
-/// fields, then `source`) and an optional order.
+/// fields, then `source`), an optional order, and an optional `limit` on
+/// the rows shown (the first, after the order; 0 is no limit).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TableSpec {
@@ -94,6 +95,8 @@ pub(crate) struct TableSpec {
     pub columns: Option<Vec<String>>,
     #[serde(default)]
     pub order_by: Option<super::sift::table::OrderBy>,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// One ref or a list: models write both.

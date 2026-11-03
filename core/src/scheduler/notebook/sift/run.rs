@@ -56,13 +56,15 @@ const REFUSED_REASON_MAX_CHARS: usize = 512;
 pub(crate) const SOURCE_KEYS: [&str; 5] = ["message_id", "id", "url", "path", "handoff_ref"];
 
 /// What a sift needs from the loop: the review chain and the dispatcher for
-/// its reads, and the formulator for its sorter and the operator's knobs.
+/// its reads, the formulator for its sorter and the operator's knobs, and
+/// the turn's `now` for the sorter.
 pub(crate) struct SiftRun<'a> {
     pub pool: &'a PgPool,
     pub review: &'a ChainReviewStage,
     pub dispatcher: &'a dyn StepDispatcher,
     pub nb: &'a dyn NotebookFormulator,
     pub outbox: Option<&'a crate::channel::outbox::ChannelOutbox>,
+    pub now: Option<&'a str>,
 }
 
 /// Run the sift `call` asked for. `Dispatched` means its summary is now the
@@ -159,7 +161,7 @@ pub(crate) async fn run_sift(
             continue;
         }
         sorter_calls += 1;
-        let raw = match sorter.sort(ctx, sorter_message(&p.keep_if, &p.fields, &views)).await {
+        let raw = match sorter.sort(ctx, sorter_message(&p.keep_if, &p.fields, r.now, &views)).await {
             Ok(raw) => raw,
             // A sorter that cannot be reached will not be reached for the
             // next item either: stop, rather than spend the deadline on it.
@@ -193,7 +195,11 @@ pub(crate) async fn run_sift(
 
     let remaining = items.len() - counts.looked_at;
     let reads = Reads { made: batch.reads.len(), unread, cut: batch.cut };
-    let (summary, blocks) = summary(&scrap, &p, &counts, reads, &rows, remaining, stopped);
+    let (mut summary, blocks) = summary(&scrap, &p, &counts, reads, &rows, remaining, stopped);
+    // Code-written, so it is never screened away with the sample.
+    if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {
+        summary["continues"] = json!(prev);
+    }
     audit_blocks(r.pool, ctx.task_id, call.step, "sift_summary", &blocks).await;
     let finished = json!({
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),

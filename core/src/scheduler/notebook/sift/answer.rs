@@ -6,19 +6,20 @@ use sqlx::PgPool;
 
 use super::params::ScrapRef;
 use super::table::{render_table, Counts, SOURCE_COLUMN};
-use super::{may_read, SIFT_TOOL};
+use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
-use crate::scheduler::inner_loop::{notebook_block_audit_payload, StepOutcome, TaskContext};
+use crate::scheduler::inner_loop::{notebook_block_audit_payload, TaskContext};
 use crate::scheduler::notebook::reply::TableSpec;
 
 /// The most scrapbooks one table joins: as many as a turn records.
 pub(crate) const TABLE_REFS_MAX: usize = crate::scheduler::conversation::record::SCRAPBOOKS_PER_TURN;
 
 /// `body`, then the table `t` names, and the highest class of its rows. A
-/// ref that is malformed, unreadable here (K11), unreadable from the
-/// database or empty is not shown: a line says so instead, and the rest
-/// still render. A ref named twice is joined once; past [`TABLE_REFS_MAX`]
-/// the rest are left out, in words.
+/// ref names its whole chain ([`chain::expand`]): the last sift of a chain
+/// shows every one. A ref that is malformed, unreadable here (K11),
+/// unreadable from the database or empty is not shown: a line says so
+/// instead, and the rest still render. A ref named twice is joined once;
+/// past [`TABLE_REFS_MAX`] the rest are left out, in words.
 pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: &TableSpec) -> (String, DataClass) {
     let mut rows: Vec<Row> = Vec::new();
     let mut counts = Counts::default();
@@ -26,7 +27,9 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     let mut refused = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     let mut included = false;
-    for raw in t.scrapbook.refs() {
+    let named: Vec<String> = t.scrapbook.refs().iter().flat_map(|r| chain::expand(&ctx.plans, r)).collect();
+    let mut links = Vec::new();
+    for raw in &named {
         if seen.contains(&raw.as_str()) {
             continue;
         }
@@ -54,6 +57,7 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
                 included = true;
                 let summary = own_summary(ctx, &r);
                 add_counts(&mut counts, &got, summary.as_ref());
+                links.push(Link::of(raw, summary.as_ref()));
                 if fields.is_none() {
                     fields = summary.as_ref().and_then(summary_fields).or_else(|| first_row_fields(&got));
                 }
@@ -65,6 +69,7 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
             }
         }
     }
+    counts.remaining = remaining(&links);
     let class = rows.iter().map(row_class).fold(ctx.classification_floor, DataClass::max);
     let columns = t.columns.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| {
         let mut c = fields.unwrap_or_default();
@@ -74,7 +79,7 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     let mut out = body.to_string();
     if included {
         out.push_str("\n\n");
-        let (table, blocks) = render_table(&rows, &columns, t.order_by.as_ref(), &counts);
+        let (table, blocks) = render_table(&rows, &columns, t.order_by.as_ref(), t.limit, &counts);
         out.push_str(&table);
         // As for any screened model text: the withheld cell is otherwise
         // invisible. An answer has no notebook step: `step` 0.
@@ -94,11 +99,7 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
 
 /// The summary this task's own sift recorded for `r`, if it ran in this run.
 fn own_summary(ctx: &TaskContext, r: &ScrapRef) -> Option<serde_json::Value> {
-    let name = r.to_string();
-    ctx.plans.iter().rev().find_map(|rec| match (rec.plan.steps.first(), rec.outcomes().first()) {
-        (Some(s), Some(StepOutcome::Ok(v))) if s.tool == SIFT_TOOL && v["scrapbook"] == name.as_str() => Some(v.clone()),
-        _ => None,
-    })
+    chain::summary_of(&ctx.plans, &r.to_string()).cloned()
 }
 
 fn summary_fields(v: &serde_json::Value) -> Option<Vec<String>> {
@@ -114,7 +115,7 @@ fn first_row_fields(rows: &[Row]) -> Option<Vec<String>> {
 
 /// The note's counts: the sift's own when its summary is at hand, else what
 /// the rows themselves say — kept plus withheld, so an earlier turn's
-/// "looked at" is a lower bound.
+/// "looked at" is a lower bound. `remaining` is the chain's ([`remaining`]).
 fn add_counts(c: &mut Counts, rows: &[Row], summary: Option<&serde_json::Value>) {
     let n = |k: &str| summary.and_then(|s| s[k].as_u64()).map(|v| v as usize);
     let kept = rows.iter().filter(|r| r.kind == RowKind::Kept).count();
@@ -124,7 +125,34 @@ fn add_counts(c: &mut Counts, rows: &[Row], summary: Option<&serde_json::Value>)
     c.looked_at += n("looked_at").unwrap_or(rows.len());
     c.undecided += n("undecided").unwrap_or(0);
     c.failed_reads += n("failed_reads").unwrap_or(0);
-    c.remaining += n("remaining").unwrap_or(0);
+}
+
+/// An included scrapbook: its name, its `remaining`, and the one it
+/// continues.
+struct Link {
+    name: String,
+    remaining: usize,
+    continues: Option<String>,
+}
+
+impl Link {
+    fn of(name: &str, summary: Option<&serde_json::Value>) -> Self {
+        let get = |k: &str| summary.map(|s| s[k].clone()).unwrap_or_default();
+        Link {
+            name: name.into(),
+            remaining: get("remaining").as_u64().unwrap_or(0) as usize,
+            continues: get("continues").as_str().map(String::from),
+        }
+    }
+}
+
+/// The items the table's scrapbooks did not look at: each link's
+/// `remaining`, except a link another included one continues — that one
+/// went on through them. A continuer left out (the table's cap, an
+/// unreadable link) leaves its link's `remaining` counted. Pure.
+fn remaining(links: &[Link]) -> usize {
+    let continued: Vec<&str> = links.iter().filter_map(|l| l.continues.as_deref()).collect();
+    links.iter().filter(|l| !continued.contains(&l.name.as_str())).map(|l| l.remaining).sum()
 }
 
 /// A row's class; one that does not parse counts as the highest (fail
@@ -139,6 +167,23 @@ pub(crate) fn row_class(r: &Row) -> DataClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review finding: only an included continuer takes over a link's
+    /// `remaining`; a chain cut short (the cap, an unreadable link) says
+    /// what was not looked at.
+    #[test]
+    fn remaining_counts_only_the_links_nothing_included_continues() {
+        let link = |name: &str, remaining, continues: Option<&str>| Link {
+            name: name.into(),
+            remaining,
+            continues: continues.map(String::from),
+        };
+        let whole = [link("a", 70, None), link("b", 40, Some("a")), link("c", 0, Some("b"))];
+        assert_eq!(remaining(&whole), 0);
+        assert_eq!(remaining(&whole[..2]), 40, "c left out: b's remaining stands");
+        assert_eq!(remaining(&[link("a", 70, None), link("x", 5, None)]), 75, "two separate sifts");
+        assert_eq!(remaining(&[]), 0);
+    }
 
     #[test]
     fn a_row_class_that_does_not_parse_counts_as_secret() {

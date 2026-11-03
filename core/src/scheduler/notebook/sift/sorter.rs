@@ -25,13 +25,15 @@ pub trait Sorter: Send + Sync {
     async fn sort(&self, ctx: &TaskContext, user_msg: String) -> Result<String, AgentError>;
 }
 
-/// The sorter's user message: the criterion, the field names, then the item
-/// (its search hit, then each read's result, each already screened and
-/// capped). Keys in that order — a `serde_json::Map` would sort them — so
-/// the parts that are the same for every item lead (#943).
-pub(crate) fn sorter_message(criterion: &str, fields: &[String], item: &[Value]) -> String {
+/// The sorter's user message: the criterion, the field names, `now` (the
+/// operator's clock, when known: "currently due" needs it, DGX task 307),
+/// then the item (its search hit, then each read's result, each already
+/// screened and capped). Keys in that order — a `serde_json::Map` would sort
+/// them — so the parts that are the same for every item lead (#943).
+pub(crate) fn sorter_message(criterion: &str, fields: &[String], now: Option<&str>, item: &[Value]) -> String {
+    let now = now.map(|n| format!("\"now\":{},", serde_json::json!(n))).unwrap_or_default();
     format!(
-        "{{\"keep_if\":{},\"fields\":{},\"item\":{}}}",
+        "{{\"keep_if\":{},\"fields\":{},{now}\"item\":{}}}",
         serde_json::json!(criterion),
         serde_json::json!(fields),
         Value::Array(item.to_vec())
