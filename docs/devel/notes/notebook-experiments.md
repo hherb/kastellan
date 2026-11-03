@@ -150,3 +150,30 @@ Cell format: `turns / seconds`, then the outcome.
   link shows the whole chain; rows alike but for their source are shown once; `answer.table` takes `limit`; the
   sorter is told `now` and writes dates `YYYY-MM-DD`.
 - **Reproduce:** as above. Same build, then `bash ~/requery7.sh`.
+
+## 2026-11-04 #7 — the sift fixes (#957) (tasks 308–314)
+
+- **Build:** `main` at cc9574ed (PR #957), plain `upgrade_from_git.sh` (no migration; `kastellan.env` identical
+  after install). Knobs as #6 (verified in `/proc/<MainPID>/environ`).
+- **Hypothesis:** with the chain joined and `handoff.fetch` served, Q6 is short again and Q2/Q7 table every link.
+- **Results:**
+  - Q1 7 / 908. Three sifts: one over a 50-hit search (18 kept), then a chain of two over a 100-hit search
+    (34 + 25). **The table joined the chain** ("59 kept of 100 looked at; 22 duplicates shown once", 37 rows,
+    dates `YYYY-MM-DD`), but had **no `order_by` and no `limit`** for "the 5 most recent". The body said
+    "25 bookings" (the last link) and called the table partial: 37 of 50 items were `unread` (the read was the
+    attachment text; confirmations without one were decided on the hit, leaving price/GST empty).
+  - Q2 7 / 592. A first sift (28 of 29, abandoned), then a chain of two with a new criterion (24 + 15). **The
+    table joined the chain** ("39 kept of 50 looked at; 1 duplicate"), unordered; **the body said "15"**. A few
+    rows predate the asked range (the search filters the email date, not the invoice's).
+  - Q3 2 / 138, Q4 5 / 163, Q5 3 / 76 — as before.
+  - Q6 **3 / 60**: fixed (#6: 40 / 928, "cannot determine").
+  - Q7 4 / 1026. A sift over the search (50 read, 25 kept, 438 s), then a sift over that scrapbook (21 kept,
+    no reads). **Answered in prose with no table** ("21 payments … would need a further step").
+  - Total 2963 s (#6: 2901 s).
+- **Learned:** chains and the handoff spelling work live. The body's counts come from the last sift's
+  summary, which carried only its own counts. Using the table's `order_by`/`limit`, and naming a table at all,
+  is still left to the model, and it does not always do it.
+- **Changed** (branch `fix/922-sift-chain-totals`): a sift that continues a chain carries `chain: {sifts,
+  looked_at, kept}` for the whole chain, and the prompt says to quote it. Filed #960 for the rest (no
+  order/limit, no table, unread items with no attachment).
+- **Reproduce:** as above, then `bash ~/requery7.sh`.

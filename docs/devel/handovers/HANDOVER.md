@@ -18,11 +18,11 @@
 > (#923's session, the 225–231 re-measure and #937's OpenShell notes in full; older detail is named in that snapshot's header).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-03 (#955 deployed and measured on the DGX, tasks 301–307; its fixes — chain tables, handoff spelling, table dates/duplicates/limit/now — in the #922 sift-fix PR, **not yet deployed**) ·
-**Recent PRs, newest first:** [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged), [#946](https://github.com/hherb/kastellan/pull/946) (docs, merged), [#943](https://github.com/hherb/kastellan/pull/943) (prompt-cache reorder, merged), [#942](https://github.com/hherb/kastellan/pull/942) (#922 part A, merged), [#938](https://github.com/hherb/kastellan/pull/938) (#922 part C, merged), [#937](https://github.com/hherb/kastellan/pull/937) (OpenShell survey, merged), [#930](https://github.com/hherb/kastellan/pull/930) (#923, merged), [#927](https://github.com/hherb/kastellan/pull/927) (#921, merged), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
+**Last updated:** 2026-11-04 (#957 deployed and re-measured on the DGX, tasks 308–314; a chain's totals in the sift summary in the #922 chain-totals PR, **not yet deployed**; model-side findings on #960) ·
+**Recent PRs, newest first:** [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged), [#946](https://github.com/hherb/kastellan/pull/946) (docs, merged), [#943](https://github.com/hherb/kastellan/pull/943) (prompt-cache reorder, merged), [#942](https://github.com/hherb/kastellan/pull/942) (#922 part A, merged), [#938](https://github.com/hherb/kastellan/pull/938) (#922 part C, merged), [#937](https://github.com/hherb/kastellan/pull/937) (OpenShell survey, merged), [#930](https://github.com/hherb/kastellan/pull/930) (#923, merged), [#927](https://github.com/hherb/kastellan/pull/927) (#921, merged), [#924](https://github.com/hherb/kastellan/pull/924) (#773 re-measure, #923 decode row, merged), [#920](https://github.com/hherb/kastellan/pull/920) (#704, #705, merged), [#919](https://github.com/hherb/kastellan/pull/919) (deploy docs, merged), [#918](https://github.com/hherb/kastellan/pull/918) (dependabot rustls, merged), [#917](https://github.com/hherb/kastellan/pull/917) (dependabot uv, merged), [#916](https://github.com/hherb/kastellan/pull/916) (#915, merged), [#914](https://github.com/hherb/kastellan/pull/914) (#913, #911, merged), [#912](https://github.com/hherb/kastellan/pull/912) (#906, merged), [#910](https://github.com/hherb/kastellan/pull/910) (#909, merged), [#908](https://github.com/hherb/kastellan/pull/908) (#609, merged), [#905](https://github.com/hherb/kastellan/pull/905) (#904, merged), [#903](https://github.com/hherb/kastellan/pull/903) (#900, #902, merged), [#901](https://github.com/hherb/kastellan/pull/901) (#896, merged), [#899](https://github.com/hherb/kastellan/pull/899) (#898, merged), [#897](https://github.com/hherb/kastellan/pull/897) (#894, #895, merged), [#893](https://github.com/hherb/kastellan/pull/893) (#890, #892, merged), [#889](https://github.com/hherb/kastellan/pull/889) (#888, #754, merged), [#887](https://github.com/hherb/kastellan/pull/887) (#752, #753, merged), [#886](https://github.com/hherb/kastellan/pull/886) (#885, merged), [#884](https://github.com/hherb/kastellan/pull/884) (#823, merged), [#883](https://github.com/hherb/kastellan/pull/883) (#882, merged); #881 … #795 are in the 896/905/906 snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs `main` with #955 (#922 `sift`) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (plain `upgrade_from_git.sh` 2026-11-03 after #955 merged, migration 0029 applied at boot; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
+**The DGX runs `main` with #957 (#922 sift fixes) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (plain `upgrade_from_git.sh` 2026-11-04, `kastellan.env` identical after install; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -52,28 +52,24 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-03, latest): #955 deployed + measured (tasks 301–307), and its fixes (the #922 sift-fix PR, **not yet deployed**)
+### This session (2026-11-04, latest): #957 deployed + re-measured (tasks 308–314), and the chain totals (the #922 chain-totals PR, **not yet deployed**)
 
-- **Measured** ([log entry #6](../notes/notebook-experiments.md)): `sift` makes the find-all questions short (Q1 3 turns,
-  18/18 rows; Q2 8, Q7 5), total 2901 s vs #2's 3350 s. Defects found, all fixed in this PR with tests:
-  - **Q6 regressed to "cannot determine" (40 turns):** the model fetched a stashed result as method `handoff.fetch`;
-    the dispatcher matched only `fetch` (`tool_dispatch::is_handoff_fetch` now takes both; `handoff_dispatch_e2e`).
-  - **Q2/Q7 tabled only the last of a sift chain** (9 of ~86, 16 of 52): code now joins the chain — a sift from the
-    last one's `next_from` with the same parameters gets `continues: <ref>` (`sift/chain.rs`, pure), and a table
-    naming the last link expands to the whole chain; `remaining` counts only links nothing included continues.
-  - Table: rows alike in **every field** are shown once, sources joined; `answer.table` takes `limit` (after order +
-    merge; rows past it are not screened); the sorter is told the turn's `now` and writes dates `YYYY-MM-DD`.
-  - **Review fix pass** (5 tests, targeted runs only — not in the sweep row below): `TABLE_REFS_MAX` caps the refs
-    **named**, before chain expansion (it had cut the newest links, the named one included — `answer::table_refs`,
-    pure; refs canonicalised so `sb:9:04` finds its chain); merging keys on all fields, not the shown columns (twelve
-    monthly invoices were one row); the duplicate count covers only rows shown; a merged `source` cell is screened
-    per source; chain links compare **parsed** params (`items: null` ≡ absent); a sift with no `now` warns.
-    Deferred: [#958](https://github.com/hherb/kastellan/issues/958) (non-ISO dates order wrongly under `limit`),
-    [#959](https://github.com/hherb/kastellan/issues/959) (a step re-run can link a chain across two lists).
-- ⚠️ **Not covered:** a table naming a chain from an **earlier turn's task** is not expanded (its summaries are not in
-  `ctx.plans`) — it degrades to the old one-link table. The repeat guard says "facts belong in findings" even when
-  the earlier result was stashed and unreadable (Q6's 35 lost turns). Both are on [#956](https://github.com/hherb/kastellan/issues/956).
-- **Operator to check:** Q4's stated total did not equal the lump sums.
+- **Measured** ([log entry #7](../notes/notebook-experiments.md)): #957's fixes hold — **Q6 3 turns / 60 s** (was 40 / 928),
+  **chains join** (Q1's table 59 kept of 100 looked at, Q2's 39 of 50). Total 2963 s.
+- **Fixed here:** the body quoted the **last link's** count (Q1 "25", Q2 "15") above the chain's table — a continuing
+  sift's summary now carries `chain: {sifts, looked_at, kept}` (`sift/chain.rs::totals`, pure); a copied-back `chain`
+  is ignored by `parse_params`; the prompt says to quote it.
+- **Open, model-side — [#960](https://github.com/hherb/kastellan/issues/960):** Q1 passed no `order_by`/`limit` for
+  "the 5 most recent" (37 rows); Q7 answered in prose with **no table**; Q1 left 37 of 50 items `unread` (attachment
+  read, confirmations without one). Each needs a measured prompt or design change.
+
+### Previous (2026-11-03): #955 measured (301–307) and its fixes (PR #957, merged, deployed 2026-11-04) — what still binds
+
+- `tool_dispatch::is_handoff_fetch` takes `fetch` **and** `handoff.fetch`; a sift from the last one's `next_from`
+  with the same **parsed** params gets `continues` and a table naming the last link expands to the chain;
+  `TABLE_REFS_MAX` caps refs **named**; rows merge on **all** fields; `answer.table` takes `limit`; the sorter gets
+  `now`. ⚠️ A table naming an **earlier turn's** chain is not expanded (#956). Deferred: #958, #959.
+  **Operator to check:** Q4's stated total did not equal the lump sums.
 
 ### Previous (2026-11-03): `sift` + the scrapbook (#922, PR #955, merged, deployed) — what still binds
 
@@ -247,13 +243,13 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
    #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
-1. **#922 next: deploy the sift-fix PR, re-measure.** After merge: plain `upgrade_from_git.sh` on the DGX (no
-   migration), then `bash ~/requery7.sh` (seven questions, `kastellan-cli ask --classification-floor Public`) and
-   append entry #7 to [`notes/notebook-experiments.md`](../notes/notebook-experiments.md). Watch **Q6** (the handoff
-   fetch must now serve; expect ~3 turns), **Q2/Q7** (the table must carry every link: ~86 and ~52 rows, or a stated
-   `limit`), **Q1** (dates sort, duplicates shown once), **Q7** (no rows from 2017). `~/q955.sh <task>` dumps a task's
-   notebook + sift audit rows. Then slice 2 (`kastellan-cli session`). **Still owed:** a revoked mail key once (ask
-   first); #926, #939, #771, #538; the Mac's localmail upgrade to `api_minor` 6.
+1. **#922 next: deploy the chain-totals PR, re-measure, then #960.** After merge: plain `upgrade_from_git.sh` on the
+   DGX (no migration; the prompt changed), `bash ~/requery7.sh` (move `~/requery7.log` aside first), append entry #8
+   to [`notes/notebook-experiments.md`](../notes/notebook-experiments.md). Watch the body's counts on **Q1/Q2** (must
+   match the table note). Then #960's prompt items (order/limit in the `answer` example; a sift answered without its
+   table), **one change per measured run**. `~/q955.sh <task>` dumps a task's notebook + sift audit rows. Then slice 2
+   (`kastellan-cli session`). **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's
+   localmail upgrade to `api_minor` 6.
 
 2. **#702 follow-up #703** (#704/#705 done in PR #920). ⚠️ **The guard model never sees object keys** — any
    new worker passing a third-party JSON object through reopens it silently; needs a DGX guard
@@ -382,12 +378,12 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
+| **Mac** (#922 chain totals) | `fix/922-sift-chain-totals` (on `cc9574ed`) | **5488 / 0 / 52**, **200** summaries, `TEST_EXIT=0`, primary checkout, same flags; `[WARN]` 0; log `~/kastellan-remeasure/sweep-chaintotals.log`. vs the sift-fix row: core lib 2785 → 2790 (+4 net from #957's review pass, merged after that row; +1 `totals_add_every_link_and_this_sift`); no other suite moved | cold exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-chaintotals`, **27** | **23** |
 | **Mac** (#922 sift-fix) | `fix/922-sift-measure-fixes` at `bfe2aa37` (on `3c6f7a0f`) | **5483 / 0 / 52**, **200** summaries, `TEST_EXIT=0`, primary checkout, same flags; `[WARN]` 0; log `~/kastellan-remeasure/sweep-siftfix.log`. vs the sift row: core lib 2758 → 2785 (+13 this PR: chain 5, table 6, remaining, sorter `now`, params `continues`; +14 from #955's review rounds, merged after that row), `handoff_dispatch_e2e` 4 → 5 | cold exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-siftfix`, **27** | **23** |
 | **Mac** (#922 sift) | `feat/922-sift` at `c86e1ffb` (on `1cec1449`) | **5455 / 0 / 52**, **200** summaries, `TEST_EXIT=0`, primary checkout, same flags; `[WARN]` 0; log `~/kastellan-remeasure/sweep-sift.log`. vs the #922 nb row's sweep: core lib 2692 → 2758 (+66: sift, its plumbing and #951's review round), db lib 265 → 266, new `scrapbook_e2e` 3 (+1 summary) = +70. The review fix pass after it: core lib 2759 (+1), re-run alone (`--lib`, 0 `[SKIP]`) | cold exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-sift`, **27**, on the fixed tree | **23** |
-| **Mac** (#922 nb) | PR #951 at `46549d3a` (on `8a88781d`) | **5385 / 0 / 52**, **199** summaries, `TEST_EXIT=0`, primary checkout, same flags; `[WARN]` 0; log `~/kastellan-remeasure/sweep-notebook.log`. vs the #945 row: core lib 2654 → 2692 (+38 notebook), db lib 263 → 265, new `notebook_e2e` 5, `local_backend_e2e` 7 → 8, `router_agent_mock_e2e` 4 → 5 (#950's review round, merged after the #945 row). The 5 later fix commits: core lib 2697 (+5), re-run alone. The review round: +4 core lib (2701), the PG-backed `the_notebook_loop` +5 scenarios; re-run filtered only (`notebook timeout_tests llm_failure ceiling`, 96 / 0, `[E2E]` 4, `[SKIP]` 0), five mutants each killed — no full sweep | cold exit 0, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-notebook` (26 + 5 after a fix, = 27), re-run on the final tree | **23** |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
-#913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955 and the sift-fix PR; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift` snapshots.
+#913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957 and the chain-totals PR; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift` snapshots.
 
 Older rows (incl. #755, #726/#728 and the last DGX figures) are in the [`archive/`](archive/) snapshots.
 
@@ -471,6 +467,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#957** (#922 sift fixes) — merged, deployed DGX 2026-11-04, re-measured 308–314: chain tables, `handoff.fetch`, table dates/duplicates/limit/`now`.
 - **#955** (#922 `sift`) — merged, deployed DGX 2026-11-03, measured 301–307: `sift` + the scrapbook (migration 0029), a code-rendered `answer.table`.
 - **#951** (#941, #922 slice 1) — merged, deployed DGX from `main` 2026-11-03: the task notebook behind `KASTELLAN_PLANNER_MODE`, bounded planner calls.
 - **#950** (#945) — merged 2026-11-02, deployed DGX 2026-11-02: a non-plan reply is re-asked once; the notebook design + plan.

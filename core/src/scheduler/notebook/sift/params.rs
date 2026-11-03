@@ -100,10 +100,12 @@ struct RawParams {
     read: Option<ReadTemplate>,
     keep_if: String,
     fields: Vec<String>,
-    /// A summary's `continues`, copied back by the model: ignored (the
-    /// chain is code's to say, [`super::chain`]).
+    /// A summary's `continues` and `chain`, copied back by the model:
+    /// ignored (the chain is code's to say, [`super::chain`]).
     #[serde(default, rename = "continues")]
     _continues: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "chain")]
+    _chain: Option<serde::de::IgnoredAny>,
 }
 
 /// Parse and check a `sift.run` call's `parameters`: a non-blank criterion

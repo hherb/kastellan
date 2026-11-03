@@ -221,7 +221,9 @@ fit. When `sample_withheld` is true the safety screen withheld the sample,
 shows the criterion did not work, sift again with a better `keep_if`.
 A sift `from` the last one's `next_from`, with the same parameters
 otherwise, goes on with it: its result says `continues`, and in this task
-naming the last sift's scrapbook shows the whole chain. Then `answer` with
+naming the last sift's scrapbook shows the whole chain. Its `chain` counts
+the whole chain (`sifts`, `looked_at`, `kept`): when your `body` gives a
+count, give the chain's, not the last sift's. Then `answer` with
 `"table": {"scrapbook": "<name>"}` — or a list of names, one per sift of the
 same question — plus optional `"columns": [...]`, `"order_by": {"column":
 "date", "desc": true}` and `"limit": 5` (show only the first 5 rows, after
