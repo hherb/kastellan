@@ -28,7 +28,9 @@ pub(super) async fn a_sorter_failure_stops_the_sift_and_its_item_is_next(pool: &
     assert_eq!((seen["looked_at"].clone(), seen["undecided"].clone()), (json!(1), json!(0)), "{seen}");
     assert_eq!((seen["remaining"].clone(), seen["next_from"].clone()), (json!(2), json!(1)), "m2 is next: {seen}");
     assert_eq!(rows(pool, r.task_id, 2).await.len(), 1, "what was kept before the failure stays");
-    assert_eq!(r.result.failed_llm_calls, 1, "the failed sorter call is counted");
+    // The answer named no table after a sift that kept a row, so it was shown
+    // back once (#960): that reply is a model call that made no plan too.
+    assert_eq!(r.result.failed_llm_calls, 2, "the failed sorter call is counted, and the shown-back answer");
 }
 
 /// Review finding: a sift's own records are stamped with its step, so a
@@ -45,6 +47,7 @@ pub(super) async fn a_second_sift_over_the_same_step_walks_on_from_next_from(poo
         json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2", "m3"]))}),
         json!({"call": sift1(0)}),
         json!({"call": sift1(2)}),
+        json!({"tick": tick(1, "sorted"), "answer": {"body": "done"}}),
         json!({"tick": tick(1, "sorted"), "answer": {"body": "done"}}),
     ])
     .sorting(&[no(), no(), keep(3)]);
@@ -68,6 +71,7 @@ pub(super) async fn a_criterion_the_screen_blocks_leaves_the_ref_and_the_counts(
     let script = Script::new(&[
         json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}),
         json!({"tick": tick(1, "listed"), "call": s2}),
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "done"}}),
         json!({"tick": tick(2, "sorted"), "answer": {"body": "done"}}),
     ])
     .sorting(&[keep(1), no()]);

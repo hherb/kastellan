@@ -183,8 +183,10 @@ the items that match, with the facts you name, in the task's **scrapbook**:
     "over":    {"step": 2},
     "items":   "results",
     "from":    0,
-    "read":    {"tool": "mail", "method": "mail.get_attachment_text",
-                "parameters": {"message_id": "{message_id}", "filename": "{attachments.*}"}},
+    "read":    [{"tool": "mail", "method": "mail.get_attachment_text",
+                 "parameters": {"message_id": "{message_id}", "filename": "{attachments.*}"}},
+                {"tool": "mail", "method": "mail.get_message",
+                 "parameters": {"message_id": "{message_id}"}}],
     "keep_if": "an invoice I received that states an amount due",
     "fields":  ["sender", "date", "amount_due"]
  },
@@ -201,15 +203,18 @@ the items that match, with the facts you name, in the task's **scrapbook**:
   (`{attachments.0}` the first attachment); `{attachments.*}` reads every
   attachment, skipping images. Only methods the operator allows may be read
   with — by default `mail.get_message`, `mail.get_attachment_text` and
-  `handoff.fetch`; a refused read names the allowed ones. Without `read`, each
-  item is decided on the hit itself.
+  `handoff.fetch`; a refused read names the allowed ones. `read` may be one
+  read or a list of up to 3: each item takes the **first that applies** to
+  it — above, its attachments, or the message itself when it has none to
+  read. Without `read`, each item is decided on the hit itself.
 - `keep_if` — what an item must contain to be kept (at most 1024
   characters). `fields` — the facts to extract from each kept item (1–16
   names, each at most 64 characters).
 
 Its result tells you `scrapbook` (its name), `criterion`, `fields`,
-`looked_at`, `kept`, `withheld`, `undecided`, `failed_reads`, `reads`,
-`unread`, `remaining` and a `sample` of up to 3 kept items. `unread` counts
+`looked_at`, `kept`, `distinct` (the kept items once each, as the table will
+show them), `withheld`, `undecided`, `failed_reads`, `reads`, `unread`,
+`remaining` and a `sample` of up to 3 kept items. `unread` counts
 items decided without a read, because a `"{name}"` named no field of the item
 or a `{name.*}` list held nothing readable: if the placeholder is wrong, fix
 it and sift again. One sift looks at a limited number of items: when
@@ -222,12 +227,13 @@ shows the criterion did not work, sift again with a better `keep_if`.
 A sift `from` the last one's `next_from`, with the same parameters
 otherwise, goes on with it: its result says `continues`, and in this task
 naming the last sift's scrapbook shows the whole chain. Its `chain` counts
-the whole chain (`sifts`, `looked_at`, `kept`): when your `body` gives a
-count, give the chain's, not the last sift's. Then `answer` with
+the whole chain (`sifts`, `looked_at`, `kept`, `distinct`). When your `body`
+gives a count, give `distinct` — the chain's when there is one. Then `answer` with
 `"table": {"scrapbook": "<name>"}` — or a list of names, one per sift of the
 same question — plus optional `"columns": [...]`, `"order_by": {"column":
 "date", "desc": true}` and `"limit": 5` (show only the first 5 rows, after
-the order and the merge: for "the 5 most recent"). The table is rendered for
+the order and the merge: for "the 5 most recent"). Without `order_by`, a
+table with a date column is shown newest first. The table is rendered for
 you, with every kept row unless `limit` says otherwise (rows alike in every
 field shown once, their sources joined) and the counts.
 

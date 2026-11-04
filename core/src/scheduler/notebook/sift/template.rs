@@ -58,6 +58,19 @@ pub(crate) fn expand_reads(t: &ReadTemplate, item: &Value) -> Vec<Value> {
     }
 }
 
+/// An item's reads from the first of `reads` that gives it any
+/// ([`expand_reads`]), each with that read's index: an attachment read
+/// yields nothing for a mail with no readable attachment, so the next read
+/// (the message itself) applies. Empty when none does.
+pub(crate) fn first_reads(reads: &[ReadTemplate], item: &Value) -> Vec<(usize, Value)> {
+    reads
+        .iter()
+        .enumerate()
+        .map(|(i, t)| expand_reads(t, item).into_iter().map(|v| (i, v)).collect::<Vec<_>>())
+        .find(|r| !r.is_empty())
+        .unwrap_or_default()
+}
+
 /// Is `name` an image, by its extension (case-insensitive)?
 pub(crate) fn is_image(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();

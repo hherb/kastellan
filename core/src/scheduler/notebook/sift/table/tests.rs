@@ -239,3 +239,43 @@ fn one_blocked_source_does_not_hide_the_others() {
     assert!(t.contains(&format!("| x | m1, {WITHHELD_MARKER} |")), "{t}");
     assert_eq!(blocks.len(), 1);
 }
+
+/// #960 item 1 (DGX tasks 309, 315): a table named with no `order_by` came
+/// out in the order the emails were found. With a date column it is now
+/// newest first: the sorter writes dates `YYYY-MM-DD`, so text order is
+/// date order.
+#[test]
+fn with_no_order_named_a_date_column_orders_newest_first() {
+    let date_desc = |c: &str| Some(OrderBy { column: c.into(), desc: true });
+    assert_eq!(default_order(&cols(&["sender", "date", "amount"])), date_desc("date"));
+    assert_eq!(default_order(&cols(&["sender", "Due_Date", "invoice_date"])), date_desc("Due_Date"), "the first, any case");
+    assert_eq!(default_order(&cols(&["invoice_date", "date"])), date_desc("date"), "`date` itself first");
+    assert_eq!(default_order(&cols(&["sender", "amount", "source"])), None, "no date: the order found");
+    assert_eq!(default_order(&cols(&["dueDate", "x"])), date_desc("dueDate"), "camel case");
+    assert_eq!(default_order(&cols(&["due date"])), date_desc("due date"));
+    for not_a_date in ["updated", "update", "candidate", "mandate", "Mandate", "MANDATE"] {
+        assert_eq!(default_order(&cols(&[not_a_date])), None, "review finding: `{not_a_date}` is no date");
+    }
+}
+
+/// #960 item 4 (DGX tasks 316, 321): the body quoted `kept` (45, 8) above a
+/// table of 30 and 6 rows, because the table shows rows alike in every
+/// field once. `distinct_kept` counts the table's rows by the same rule.
+#[test]
+fn distinct_kept_counts_rows_as_the_table_merges_them() {
+    let a = json!({"vendor": "A", "amount": "10"});
+    let b = json!({"vendor": "B", "amount": "10"});
+    let empty = json!({"vendor": null, "amount": ""});
+    assert_eq!(distinct_kept([&a, &a, &b, &a]), 2);
+    assert_eq!(distinct_kept([&empty, &empty]), 2, "fields with nothing in them never merge");
+    assert_eq!(distinct_kept([]), 0);
+    let rows = [
+        row(1, RowKind::Kept, a.clone()),
+        row(2, RowKind::Kept, a.clone()),
+        row(3, RowKind::Kept, b.clone()),
+        row(4, RowKind::Kept, empty.clone()),
+        row(5, RowKind::Kept, empty.clone()),
+    ];
+    let t = render(&rows, &cols(&["vendor", "amount"]), None, &counts(5, 5));
+    assert_eq!(t.lines().filter(|l| l.starts_with("| ") && !l.contains("---")).count() - 1, 4, "the table agrees: {t}");
+}

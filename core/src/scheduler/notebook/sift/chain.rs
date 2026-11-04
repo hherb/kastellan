@@ -22,6 +22,11 @@ fn sifts(plans: &[PlanRecord]) -> impl Iterator<Item = (&Value, &Value)> {
     })
 }
 
+/// The summary this run's newest sift left, if one ran in this run.
+pub(crate) fn last_sift(plans: &[PlanRecord]) -> Option<&Value> {
+    sifts(plans).next().map(|(_, s)| s)
+}
+
 /// The summary this run's sift `name` left, if it ran in this run.
 pub(crate) fn summary_of<'a>(plans: &'a [PlanRecord], name: &str) -> Option<&'a Value> {
     sifts(plans).find(|(_, s)| s["scrapbook"] == name).map(|(_, s)| s)
@@ -61,14 +66,21 @@ pub(crate) fn expand(plans: &[PlanRecord], name: &str) -> Vec<String> {
 /// looked at `looked_at` items and kept `kept`: every link's counts plus
 /// its own, so the planner can quote the whole chain. DGX tasks 308 and 309
 /// quoted the last link (25 and 15) above a table of the chain (59 and 39).
-pub(crate) fn totals(plans: &[PlanRecord], prev: &str, looked_at: usize, kept: usize) -> Value {
+/// `distinct` is the chain's table rows, counted by the caller over every
+/// link's rows (a duplicate can sit in two links); `None` when they could not
+/// all be read, and then it is left out.
+pub(crate) fn totals(plans: &[PlanRecord], prev: &str, looked_at: usize, kept: usize, distinct: Option<usize>) -> Value {
     let links: Vec<&Value> = expand(plans, prev).iter().filter_map(|n| summary_of(plans, n)).collect();
     let sum = |k: &str| links.iter().filter_map(|s| s[k].as_u64()).sum::<u64>();
-    json!({
+    let mut t = json!({
         "sifts": links.len() + 1,
         "looked_at": sum("looked_at") + looked_at as u64,
         "kept": sum("kept") + kept as u64,
-    })
+    });
+    if let Some(d) = distinct {
+        t["distinct"] = json!(d);
+    }
+    t
 }
 
 /// `params` parsed, with `from` cleared (a copied-back `continues` is
@@ -174,8 +186,8 @@ pub(crate) mod tests {
             json!({"scrapbook": "sb:9:3", "next_from": 60, "continues": "sb:9:2", "looked_at": 30, "kept": 5}),
         );
         let plans = &plans[..2];
-        assert_eq!(totals(plans, "sb:9:3", 12, 3), json!({"sifts": 3, "looked_at": 72, "kept": 12}));
-        assert_eq!(totals(plans, "sb:9:2", 30, 5), json!({"sifts": 2, "looked_at": 60, "kept": 9}), "a two-link chain");
+        assert_eq!(totals(plans, "sb:9:3", 12, 3, Some(10)), json!({"sifts": 3, "looked_at": 72, "kept": 12, "distinct": 10}));
+        assert_eq!(totals(plans, "sb:9:2", 30, 5, None), json!({"sifts": 2, "looked_at": 60, "kept": 9}), "a two-link chain, rows unread");
     }
 
     #[test]

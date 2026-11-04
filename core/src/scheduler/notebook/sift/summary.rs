@@ -5,7 +5,7 @@ use kastellan_db::scrapbook::{NewRow, RowKind};
 use serde_json::{json, Value};
 
 use super::params::{ScrapRef, SiftParams};
-use super::table::Counts;
+use super::table::{distinct_kept, Counts};
 use super::SIFT_TOOL;
 use crate::scheduler::inner_loop::{screen_model_text, sorter_view, SinkBlock, WITHHELD_MARKER};
 
@@ -49,7 +49,8 @@ pub(crate) struct Reads {
     pub cut: usize,
 }
 
-/// What the planner is shown (K9): the ref, the criterion, the counts, and a
+/// What the planner is shown (K9): the ref, the criterion, the counts — with
+/// `distinct`, the kept rows a table shows ([`distinct_kept`]) — and a
 /// sample of what was kept. The sample's values are model-written from tool
 /// output, so each is screened (shown as [`WITHHELD_MARKER`] if blocked), and
 /// if the whole summary would still fail the record's screen, the
@@ -76,6 +77,7 @@ pub(crate) fn summary(
         "scrapbook": scrap.to_string(), "criterion": p.keep_if, "fields": p.fields,
         "looked_at": c.looked_at, "kept": c.kept, "withheld": c.withheld, "undecided": c.undecided,
         "failed_reads": c.failed_reads, "reads": reads.made, "unread": reads.unread,
+        "distinct": distinct_kept(rows.iter().filter(|r| r.kind == RowKind::Kept).map(|r| &r.fields)),
         "remaining": remaining, "sample": sample,
     });
     if remaining > 0 {

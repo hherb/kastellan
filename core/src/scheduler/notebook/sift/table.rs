@@ -73,9 +73,7 @@ pub(crate) fn render_table(
 fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
     let mut groups: Vec<Vec<&Row>> = Vec::new();
     for &r in rows {
-        // Fields with nothing in them say nothing about sameness: never merged.
-        let something = r.fields.as_object().is_some_and(|o| o.values().any(|v| !scalar(v).is_empty()));
-        let same = (r.kind == RowKind::Kept && something)
+        let same = (r.kind == RowKind::Kept && mergeable(&r.fields))
             .then(|| groups.iter_mut().find(|g| g[0].kind == RowKind::Kept && g[0].fields == r.fields))
             .flatten();
         match same {
@@ -84,6 +82,46 @@ fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
         }
     }
     groups
+}
+
+/// Fields with nothing in them say nothing about sameness: such a row is
+/// never merged with another.
+fn mergeable(fields: &Value) -> bool {
+    fields.as_object().is_some_and(|o| o.values().any(|v| !scalar(v).is_empty()))
+}
+
+/// How many rows a table of kept rows with these `fields` shows before any
+/// `limit`: the rule [`alike`] merges by. The summary gives it as `distinct`
+/// (#960: the body quoted `kept`, 45, above a table of 30 rows).
+pub(crate) fn distinct_kept<'a>(fields: impl IntoIterator<Item = &'a Value>) -> usize {
+    let mut seen: Vec<&Value> = Vec::new();
+    let mut alone = 0;
+    for f in fields {
+        if !mergeable(f) {
+            alone += 1;
+        } else if !seen.contains(&f) {
+            seen.push(f);
+        }
+    }
+    seen.len() + alone
+}
+
+/// The order of a table that names none (#960): newest first by its date
+/// column — one named `date`, else the first whose last word is `date`
+/// (`due_date`, `due date`, `dueDate`; never `update` or `mandate`), in any
+/// case. The sorter writes dates `YYYY-MM-DD`, so text order is date order.
+/// `None` without one: the rows keep the order they were found in.
+pub(crate) fn default_order(columns: &[String]) -> Option<OrderBy> {
+    let column = columns.iter().find(|c| c.eq_ignore_ascii_case("date")).or_else(|| columns.iter().find(|c| ends_in_date_word(c)))?;
+    Some(OrderBy { column: column.clone(), desc: true })
+}
+
+/// Is `date` the last word of `name`: after a non-letter, or a camel-case
+/// `Date`?
+fn ends_in_date_word(name: &str) -> bool {
+    let Some((before, word)) = name.len().checked_sub(4).and_then(|i| name.get(..i).zip(name.get(i..))) else { return false };
+    let Some(last) = before.chars().last() else { return false };
+    word.eq_ignore_ascii_case("date") && (!last.is_ascii_alphabetic() || (word.starts_with('D') && last.is_ascii_lowercase()))
 }
 
 /// The order of two cells: every cell that reads as a number before every

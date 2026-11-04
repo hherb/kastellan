@@ -4,12 +4,14 @@
 use serde_json::Value;
 
 use super::params::ReadTemplate;
-use super::template::expand_reads;
+use super::template::first_reads;
 
 /// The reads to make, and which of them belong to each item taken.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Batch {
-    pub reads: Vec<Value>,
+    /// Each read: the index of the sift's read it is made with, and its
+    /// parameters.
+    pub reads: Vec<(usize, Value)>,
     /// Item `i`'s reads are `reads[per_item[i]]`. One entry per item taken.
     pub per_item: Vec<std::ops::Range<usize>>,
     /// Reads of the first item dropped to fit `cap` (see [`plan_reads`]).
@@ -20,14 +22,15 @@ pub(crate) struct Batch {
 /// than `cap` items: an item with no read still costs a sorter call. An
 /// item's reads stay together. A first item with more reads than `cap` alone
 /// keeps its first `cap` (the rest counted in `cut`), so a sift always makes
-/// progress. Pure.
-pub(crate) fn plan_reads(read: Option<&ReadTemplate>, items: &[Value], cap: usize) -> Batch {
+/// progress. Each item's reads come from the first of `read` that applies
+/// to it. Pure.
+pub(crate) fn plan_reads(read: &[ReadTemplate], items: &[Value], cap: usize) -> Batch {
     let mut batch = Batch { reads: Vec::new(), per_item: Vec::new(), cut: 0 };
     for item in items {
         if batch.per_item.len() >= cap.max(1) {
             break;
         }
-        let mut reads = read.map(|t| expand_reads(t, item)).unwrap_or_default();
+        let mut reads = first_reads(read, item);
         if batch.reads.len() + reads.len() > cap {
             if !batch.per_item.is_empty() {
                 break;

@@ -11,7 +11,8 @@
 //!    instruction the reviewer sees (D11);
 //! 3. render the turn ([`render_turn`]) and ask the model, with the classic
 //!    recoveries: an empty answer is asked again once, a reply that is not a
-//!    usable notebook reply is shown back once (#945), a timeout or a reply
+//!    usable notebook reply — or an answer with no table after a sift that
+//!    kept rows (#960) — is shown back once (#945), a timeout or a reply
 //!    cut off at `max_tokens` after gathering spends the forced-answer turn;
 //! 4. write the reply's `tick` and `steps` entries;
 //! 5. set aside, unreviewed, an answer a non-thinking turn wrote (the next
@@ -351,7 +352,9 @@ async fn ask(
     guard: TurnGuard,
     failed_llm_calls: &mut u32,
 ) -> Asked {
-    let check = |sent: Result<(String, FormulationMeta), AgentError>| {
+    // A missing table is shown back for a turn's `first` reply only (#960).
+    let wants_table = thinking::shows_back_a_missing_table(guard.kind, nb.thinks_by_default());
+    let check = |sent: Result<(String, FormulationMeta), AgentError>, first: bool| {
         let (raw, meta) = sent?;
         let answer_only = matches!(guard.kind, TurnKind::ForcedAnswer | TurnKind::WriteAnswer);
         let checked = parse_reply(&raw)
@@ -366,7 +369,8 @@ async fn ask(
                 r
             })
             .and_then(|r| validate(&r, state).map(|()| r))
-            .and_then(|r| if answer_only { require_answer(&r).map(|()| r) } else { Ok(r) });
+            .and_then(|r| if answer_only { require_answer(&r).map(|()| r) } else { Ok(r) })
+            .and_then(|r| if first && wants_table { sift::answer::table_left_out(&r, &ctx.plans).map(|()| r) } else { Ok(r) });
         match checked {
             Ok(reply) => Ok((reply, meta)),
             Err(detail) => Err(AgentError::Decode { detail, raw, usage: meta.usage, latency_ms: meta.latency_ms }),
@@ -376,7 +380,7 @@ async fn ask(
     // never does (DGX task 269 lost 408 s and its answer that way), nor does
     // the #945 re-ask below.
     let thinking = thinking::turn_thinking(guard.kind);
-    let first = check(nb.notebook_turn(ctx, msg, None, thinking).await);
+    let first = check(nb.notebook_turn(ctx, msg, None, thinking).await, true);
     let mut retried = false;
     let mut reasked = false;
     let result = match first {
@@ -384,7 +388,7 @@ async fn ask(
             record(pool, ctx, guard, failed_llm_calls, &e, false).await;
             tracing::warn!(task_id = ctx.task_id, "notebook turn returned an empty completion; asking again once");
             retried = true;
-            check(nb.notebook_turn(ctx, msg, None, thinking).await)
+            check(nb.notebook_turn(ctx, msg, None, thinking).await, false)
         }
         Err(e) if e.non_plan_answer().is_some() => {
             record(pool, ctx, guard, failed_llm_calls, &e, false).await;
@@ -396,7 +400,7 @@ async fn ask(
             tracing::warn!(task_id = ctx.task_id, %reason, "notebook reply could not be used; re-asked once");
             retried = true;
             reasked = true;
-            check(nb.notebook_turn(ctx, msg, Some((&reply, &reason)), ThinkingPolicy::Suppress).await)
+            check(nb.notebook_turn(ctx, msg, Some((&reply, &reason)), ThinkingPolicy::Suppress).await, false)
         }
         other => other,
     };
