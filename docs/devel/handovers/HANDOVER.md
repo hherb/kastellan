@@ -22,8 +22,8 @@
 > (#923's session, the 225–231 re-measure and #937's OpenShell notes in full; older detail is named in that snapshot's header).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-05 (#966 merged + deployed from `main`; PR #PRNUM: #967, a body's own table taken out under a code table, #965 item 2) ·
-**Recent PRs, newest first:** [#PRNUM](https://github.com/hherb/kastellan/pull/PRNUM) (#967, own table, #965 item 2), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-05 (#966 merged + deployed from `main`; PR #969: #967, a body's own table taken out under a code table, #965 item 2) ·
+**Recent PRs, newest first:** [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs `main` with #966 (`upgrade_from_git.sh`, 2026-11-05) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
@@ -56,9 +56,9 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-05, latest): #966 deployed from `main`; PR #PRNUM (#967, a body's own table, #965 item 2), not deployed
+### This session (2026-11-05, latest): #966 deployed from `main`; PR #969 (#967, a body's own table, #965 item 2), not deployed
 
-- **PR #PRNUM** (not merged at session end; code only, no migration, no prompt change):
+- **PR #969** (not merged at session end; code only, no migration, no prompt change):
   - **#967:** `task_id` and `plan_count` join `db::audit::PRESERVED_KEYS` (after `_nul_escaped`), so an over-cap row (a notebook answer turn's `plan.formulate` with a rendered table) still answers `payload->>'task_id'`. `DROP_MARKER_RESERVE` 64 → 96 (worst case now 84). Rows written **before** the deploy stay bare envelopes.
   - **The double table (log #13, task 351):** when a code-rendered table is included, any markdown table the model wrote into `body` is taken out (`sift::answer::without_own_tables`: a run of `|` lines whose second is a delimiter row) and `OWN_TABLE_NOTE` says so under the table. Any answer with a table, forced or not (the prompt already forbids copying rows). Loop test mutation-checked.
   - **#965 item 2:** a table cut by `limit` says the order "the first" follows: `showing the first 5 of 20 rows, by \`date\` descending` (also the default order nobody named).
@@ -242,7 +242,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
    #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
-1. **#922 next: merge PR #PRNUM, then a plain `upgrade_from_git.sh`** (with the HTTPS override in the header; no
+1. **#922 next: merge PR #969, then a plain `upgrade_from_git.sh`** (with the HTTPS override in the header; no
    migration) and the #967 check in this session's section. Then [#968](https://github.com/hherb/kastellan/issues/968)
    (a sift read over 64 KiB reaches the sorter as its placeholder head — **needs a decision**: whole, a bounded
    head, or the item marked undecided), #965's items 3, 4, 6–8, then slice 2 (`kastellan-cli session`). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
@@ -377,7 +377,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#PRNUM) | PR #PRNUM's code on `4a1e8631` (before its review-fix commit) | **5501 / 0 / 52**, **200** summaries, exit 0, worktree `kastellan-wt-967` (own `target/`), `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-967-0724.log`. vs #966's row: core lib 2799 → 2801 (+1 own-table unit test; +1 from #966's commits after its 2799 count, not separately reconciled), db lib +1 (#967). Review-fix commit after it: db lib 267/0/0, `notebook` 133/0/0 | exit 0, 27 crates, `CARGO_TARGET_DIR=$HOME/.cargo-wt-967` | **26** (+3: fresh worktree has no gliner venv shim [[worktree-has-no-gliner-venv]]) |
+| **Mac** (#969) | PR #969's code on `4a1e8631` (before its review-fix commit) | **5501 / 0 / 52**, **200** summaries, exit 0, worktree `kastellan-wt-967` (own `target/`), `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-967-0724.log`. vs #966's row: core lib 2799 → 2801 (+1 own-table unit test; +1 from #966's commits after its 2799 count, not separately reconciled), db lib +1 (#967). Review-fix commit after it: db lib 267/0/0, `notebook` 133/0/0 | exit 0, 27 crates, `CARGO_TARGET_DIR=$HOME/.cargo-wt-967` | **26** (+3: fresh worktree has no gliner venv shim [[worktree-has-no-gliner-venv]]) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
