@@ -1,8 +1,9 @@
 //! A sift in the notebook loop (#922, §6.2).
 //!
 //! 1. Check the call: its parameters, its read (K3a), that a sorter exists,
-//!    and that `over` names a list. A refusal is a block (`sift_refused: …`):
-//!    the loop records the step as failed and the next turn replans.
+//!    that `over` names a list and that `from` falls inside it. A refusal is
+//!    a block (`sift_refused: …`): the loop records the step as failed and
+//!    the next turn replans.
 //! 2. Expand each item's reads (K3b), as many items as fit in
 //!    `KASTELLAN_SIFT_MAX_READS` reads — and never more items than that, read
 //!    or not — and review and dispatch them as
@@ -255,7 +256,21 @@ async fn check<'a>(
         check_read(t, cfg)?;
     }
     let over = resolve_over(r.pool, ctx, &p).await?;
+    check_from(p.from, over.items.len())?;
     Ok((p, sorter, over))
+}
+
+/// A `from` at or past the end of the list would take no items and report
+/// an empty sift as a success (DGX task 322: a scrapbook of 27 rows sifted
+/// `from` the search's `next_from`, 64). Refuse it, naming the length; an
+/// empty list from 0 is a real empty sift and runs.
+fn check_from(from: usize, len: usize) -> Result<(), String> {
+    if from > 0 && from >= len {
+        return Err(format!(
+            "`from` {from} is at or past the end of this list ({len} items): `next_from` counts items of the list it came from"
+        ));
+    }
+    Ok(())
 }
 
 /// The list `p.over` names. A step's list is the raw result of its last

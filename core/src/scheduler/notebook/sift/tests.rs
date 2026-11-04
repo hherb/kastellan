@@ -102,6 +102,7 @@ async fn the_sift_loop() {
     a_criterion_the_screen_blocks_leaves_the_ref_and_the_counts(&pool).await;
     an_ordinary_plan_stops_at_its_first_failed_step(&pool).await;
     a_table_naming_the_last_of_a_chain_shows_every_link(&pool).await;
+    a_sift_from_past_the_end_is_refused_before_sorting(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {
