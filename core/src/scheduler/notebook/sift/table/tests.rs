@@ -287,3 +287,21 @@ fn distinct_kept_counts_rows_as_the_table_merges_them() {
     let t = render(&rows, &cols(&["vendor", "amount"]), None, &counts(5, 5));
     assert_eq!(t.lines().filter(|l| l.starts_with("| ") && !l.contains("---")).count() - 1, 4, "the table agrees: {t}");
 }
+
+/// #965 item 1: `Date` for the field `date` — as a column or an order —
+/// finds its cells; an order naming no field orders nothing, so the caller
+/// falls back to the default.
+#[test]
+fn a_column_differing_only_in_case_finds_its_field() {
+    let rows = [
+        row(1, RowKind::Kept, json!({"date": "2026-01-02"})),
+        row(2, RowKind::Kept, json!({"date": "2026-03-01"})),
+    ];
+    let order = OrderBy { column: "Date".into(), desc: true };
+    let t = render(&rows, &cols(&["Date"]), Some(&order), &counts(2, 2));
+    let lines: Vec<&str> = t.lines().collect();
+    assert_eq!((lines[2], lines[3]), ("| 2026-03-01 |", "| 2026-01-02 |"), "{t}");
+    assert!(orders_anything(&order, &rows));
+    assert!(!orders_anything(&OrderBy { column: "Datum".into(), desc: true }, &rows), "a typo orders nothing");
+    assert!(!orders_anything(&order, &[]), "no rows");
+}

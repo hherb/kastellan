@@ -162,16 +162,16 @@ pub(super) async fn a_sift_over_a_stashed_search_reads_the_stash(pool: &sqlx::Pg
 /// #960 item 1 (DGX tasks 308, 309, 316): a table named with no
 /// `order_by` came out in the order the items were found. With a `date`
 /// field it is newest first — and an `order_by` named still wins (review
-/// finding).
+/// finding), unless it names no field (#965: a typo is the default order).
 pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgPool) {
-    for named in [false, true] {
+    for named in [None, Some("date"), Some("Datum")] {
         let ctx = new_task(pool, 5).await;
         let mut call = sift(2, None);
         call["parameters"]["fields"] = json!(["date"]);
         let dated = |d: &str| json!({"keep": true, "fields": {"date": d}});
         let mut table = json!({"scrapbook": format!("sb:{}:2", ctx.task_id)});
-        if named {
-            table["order_by"] = json!({"column": "date", "desc": false});
+        if let Some(column) = named {
+            table["order_by"] = json!({"column": column, "desc": false});
         }
         let script = Script::new(&[
             json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2", "m3"]))}),
@@ -183,8 +183,8 @@ pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgP
         let at = |d: &str| b.find(d).expect(&b);
         let (new, mid, old) = (at("2026-03-01"), at("2026-01-05"), at("2025-12-24"));
         match named {
-            false => assert!(new < mid && mid < old, "newest first: {b}"),
-            true => assert!(old < mid && mid < new, "the order named: {b}"),
+            Some("date") => assert!(old < mid && mid < new, "the order named: {b}"),
+            _ => assert!(new < mid && mid < old, "{named:?}: newest first: {b}"),
         }
     }
 }

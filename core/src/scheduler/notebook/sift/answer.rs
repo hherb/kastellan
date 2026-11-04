@@ -5,7 +5,7 @@ use kastellan_db::scrapbook::{self, Row, RowKind};
 use sqlx::PgPool;
 
 use super::params::ScrapRef;
-use super::table::{default_order, render_table, Counts, SOURCE_COLUMN};
+use super::table::{default_order, orders_anything, render_table, Counts, SOURCE_COLUMN};
 use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
 use crate::scheduler::inner_loop::{notebook_block_audit_payload, PlanRecord, TaskContext};
@@ -68,8 +68,9 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     let mut out = body.to_string();
     if included {
         out.push_str("\n\n");
-        // The model names an order only sometimes (#960): default to newest first.
-        let order = t.order_by.clone().or_else(|| default_order(&columns, &rows));
+        // The model names an order only sometimes (#960), and sometimes one
+        // that names no field (#965): default to newest first.
+        let order = t.order_by.clone().filter(|o| orders_anything(o, &rows)).or_else(|| default_order(&columns, &rows));
         let (table, blocks) = render_table(&rows, &columns, order.as_ref(), t.limit, &counts);
         out.push_str(&table);
         // As for any screened model text: the withheld cell is otherwise
