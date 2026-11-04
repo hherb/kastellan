@@ -286,3 +286,52 @@ Cell format: `turns / seconds`, then the outcome.
   forced turn (Q7 in both runs), which it skips. Next for #960: attach the newest sift's table to a **forced**
   answer by code. A broad search large enough to be stashed breaks the sift over it (#964).
 - **Reproduce:** as #10; `bash ~/q960.sh 336 342`.
+
+## 2026-11-04 #12 — a forced answer gets its table by code; a sift reads a stashed search (PR #966) (tasks 343–349)
+
+- **Build:** PR #966 at 6aeb89bf (on `main` b84f86f5, #963), branch-deployed with `~/deploy-branch.sh`
+  (`kastellan.env` identical after install). The #965 commit a2b59dbc came after this measure and is **not** deployed.
+  Knobs as #6. Prompt `agent_notebook`: system sha256 `946fc6d4…`, unchanged by #966.
+- **Hypothesis:** a forced answer after a sift that kept rows gets the newest sift's table by code; a sift over a
+  stashed search reads the stash back instead of being refused; a replan told "it is done … list it under a new id"
+  stops re-calling a done step (#964).
+- **Results:**
+  - Q1 3 / 370, table, `limit` 5, newest first, 4 of 5 rows with price and GST. 17 kept, 2 duplicates merged.
+  - Q2 4 / 389, a chain of two (25 + 25 looked at). Body "32 invoices" = the table's 32 rows (`distinct`). One
+    invoice dated before the asked range again (#960 item 4). **The search was not stashed this time**, so the
+    #964 stash path was not exercised.
+  - Q3 2 / 288, Q4 4 / 159 (total 9943, as before), Q6 3 / 87 (FJGPFY), all as before.
+  - Q5 4 / 600, right (Anthropic A$219.52). **A forced answer** (0 reasoning chars), and it **has a table**:
+    5 rows, "5 kept of 20 looked at".
+  - Q7 4 / 543, a written answer (not forced), table of 14 rows, chain 50 → 42 → 14.
+  - Total 2436 s (#10: 2299, #11: 2929). No reply re-called a done step.
+- **Learned:** the one forced answer in this run kept its table. Neither #964 path came up live; both are covered
+  only by the loop tests in `sift/tests/measure_findings.rs`.
+- **Reproduce:** `~/deploy-branch.sh fix/960-forced-table-964` (6aeb89bf), then `bash ~/requery7.sh`;
+  `bash ~/q960.sh 343 349`. A forced turn shows as `llm_usage.reasoning_chars` 0 on its `plan.formulate` row.
+
+## 2026-11-04 #13 — PR #966, second run (tasks 350–356)
+
+- **Build:** as #12, run straight after it.
+- **Hypothesis:** as #12.
+- **Results:**
+  - Q1 6 / 717. The same sift ran twice (turns 2 and 5, 50 items each, 15 kept each time); one re-ask (`unknown
+    field step`). Table newest first, but the dates differ from run A for the same bookings (2026-10-20 three
+    times): the sorter read the booking mail's date, not the flight's, in this run.
+  - Q2 8 / 865, **forced**. Two sifts were refused for a `from` past their list's end (`next_from` 57 on a list of
+    21; 30 on 27): #962 working, though the model still miscounts. **The table was attached by code** (24 rows,
+    "27 kept of 30 looked at; 20 not yet looked at"), **but the model also wrote its own 6-row table** in the body
+    above it. Two tables, the first partial.
+  - Q3 2 / 226 (a numbered list, not a table), Q4 4 / 283 (9943) — right.
+  - Q5 3 / 173, right, **forced**, with a 3-row table.
+  - Q6 6 / 321: a different booking again (5NQ5P9, Coffs Harbour → Learmonth, from a change notification), as in
+    #11.
+  - Q7 4 / 701, written answer: body "43 items" = the table's 43 rows (45 kept, 2 duplicates). The sorter
+    kept about 30 Qantas Hotels booking confirmations as "due or overdue", a criterion judgement.
+    ⚠️ This answer turn's `plan.formulate` row was over 4 KiB and was stored as the bare `_truncated` envelope,
+    which has **no `task_id`**: filed as #967.
+  - Total 3286 s. No reply re-called a done step.
+- **Learned:** across the two runs, all 3 forced answers had a table (#10/#11: 0 of 2). Next for #960: a
+  forced answer whose body holds its own markdown table above the attached one shows two tables. Q1's sift
+  being repeated and Q6's moving answer are model variance, already seen in #11.
+- **Reproduce:** as #12; `bash ~/q960.sh 350 356`.
