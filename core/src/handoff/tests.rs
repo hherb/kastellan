@@ -238,3 +238,22 @@ fn global_backstop_evicts_oldest_task_past_cap() {
     let r_new = HandoffRef::of(format!("body-{last}").as_bytes());
     assert!(cache.get_slice(last, &r_new, 0, 1).is_some(), "newest task retained");
 }
+
+/// #964: a sift over a stashed step finds the stash from its placeholder and
+/// reads the result back whole; anything else, or another task, finds none.
+#[test]
+fn a_placeholder_names_its_stash_and_the_stash_reads_back_whole() {
+    let cache = HandoffCache::new();
+    let result = serde_json::json!({"results": [{"id": "m1"}, {"id": "m2"}]});
+    let stash = cache.stash_if_oversized(7, &result, 0).expect("cap 0 stashes");
+    let r = placeholder_ref(&stash.placeholder).expect("a placeholder");
+    assert_eq!(r, stash.handoff_ref);
+    assert_eq!(cache.whole(7, &r), Some(result.clone()));
+    assert_eq!(cache.whole(8, &r), None, "another task's stash");
+    assert_eq!(placeholder_ref(&result), None, "an ordinary result");
+    let mut not_cut = stash.placeholder.clone();
+    not_cut["truncated"] = serde_json::json!(false);
+    assert_eq!(placeholder_ref(&not_cut), None, "`truncated` must be true");
+    cache.purge_task(7);
+    assert_eq!(cache.whole(7, &r), None, "purged");
+}

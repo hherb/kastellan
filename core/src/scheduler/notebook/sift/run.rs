@@ -35,6 +35,7 @@ use super::template::items_at;
 use super::answer::row_class;
 use super::{is_sift_plan, may_read, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
 use crate::cassandra::review::ChainReviewStage;
+use crate::handoff;
 use crate::cassandra::types::{DataClass, Plan, PlannedStep};
 use crate::scheduler::agent::FormulationMeta;
 use crate::scheduler::audit::SCHEDULER_AUDIT_ACTOR;
@@ -285,7 +286,7 @@ async fn check<'a>(
     for t in &p.read {
         check_read(t, cfg)?;
     }
-    let over = resolve_over(r.pool, ctx, &p).await?;
+    let over = resolve_over(r.pool, r.dispatcher, ctx, &p).await?;
     check_from(p.from, over.items.len())?;
     Ok((p, sorter, over))
 }
@@ -305,10 +306,16 @@ fn check_from(from: usize, len: usize) -> Result<(), String> {
 
 /// The list `p.over` names. A step's list is the raw result of its last
 /// successful call that was not itself a sift (so a second sift over the
-/// same step, `from` further on, still finds the search). A scrapbook's is
+/// same step, `from` further on, still finds the search) — read back whole
+/// from the handoff cache when it was stashed. A scrapbook's is
 /// its kept rows, each `{fields, source}`, if this task may read it (K11);
 /// their class is the highest of theirs.
-async fn resolve_over(pool: &PgPool, ctx: &TaskContext, p: &SiftParams) -> Result<OverList, String> {
+async fn resolve_over(
+    pool: &PgPool,
+    dispatcher: &dyn StepDispatcher,
+    ctx: &TaskContext,
+    p: &SiftParams,
+) -> Result<OverList, String> {
     match &p.over {
         Over::Step(n) => {
             let record = ctx
@@ -321,6 +328,23 @@ async fn resolve_over(pool: &PgPool, ctx: &TaskContext, p: &SiftParams) -> Resul
             let (Some(StepOutcome::Ok(result)), Some(step)) = (record.outcomes().first(), record.plan.steps.first()) else {
                 unreachable!("the record was found by its first outcome being Ok, and outcomes follow steps")
             };
+            // A result too big for the planner was stashed whole (DGX task
+            // 337, a 68 KB search): the sift reads it back. The stash was not
+            // screened past the dispatch screen's window, so each item is
+            // screened on its own before the sorter sees it (K4); rows and read
+            // parameters taken from items are screened where they are shown
+            // (table cells) or reviewed (the reads plan). The list carries the
+            // step's class, as the result itself would (K7).
+            let stashed = match handoff::placeholder_ref(result) {
+                Some(h) => Some(dispatcher.stashed(ctx.task_id, &h).ok_or_else(|| {
+                    format!(
+                        "step {n}'s result was too big to show and is no longer held: list the same call in `steps` \
+under a new id, call it, and sift `over` that id"
+                    )
+                })?),
+                None => None,
+            };
+            let result = stashed.as_ref().unwrap_or(result);
             Ok(OverList { items: items_at(result, p.items.as_deref())?, tool: step.tool.clone(), class: step.classification })
         }
         Over::Scrapbook(r) => {

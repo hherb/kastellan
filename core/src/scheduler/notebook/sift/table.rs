@@ -170,7 +170,9 @@ fn escaped(text: &str) -> String {
 }
 
 /// A cell's raw text: the field's value, or for [`SOURCE_COLUMN`] the
-/// row's source (an object's values, comma-separated).
+/// row's source (an object's values, comma-separated). A column with no
+/// field of its exact name takes one that differs only in case: `Date` for
+/// `date` left every cell empty, so the table's order did nothing (#965).
 fn cell_text(row: &Row, column: &str) -> String {
     if column == SOURCE_COLUMN {
         return match &row.source {
@@ -178,7 +180,15 @@ fn cell_text(row: &Row, column: &str) -> String {
             other => scalar(other),
         };
     }
-    row.fields.get(column).map(scalar).unwrap_or_default()
+    let any_case = || row.fields.as_object()?.iter().find(|(k, _)| k.eq_ignore_ascii_case(column)).map(|(_, v)| v);
+    row.fields.get(column).or_else(any_case).map(scalar).unwrap_or_default()
+}
+
+/// Does `o` order anything: has any of `rows` a cell in its column? One
+/// that names no field (a typo) would leave the rows as found, and the
+/// default order unused (#965). Pure.
+pub(crate) fn orders_anything(o: &OrderBy, rows: &[Row]) -> bool {
+    rows.iter().any(|r| !cell_text(r, &o.column).is_empty())
 }
 
 /// A cell read as a number, so `order_by` puts 100 after 30: the cell

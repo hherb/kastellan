@@ -347,6 +347,13 @@ pub trait StepDispatcher: Send + Sync {
     /// runner after [`run_to_terminal`].
     fn purge_task(&self, _task_id: i64) {}
 
+    /// The whole result stashed under `r` for `task_id` in this dispatcher's
+    /// handoff cache, for a sift over a step whose result was stashed (#964).
+    /// Default `None`, for a dispatcher without a handoff cache.
+    fn stashed(&self, _task_id: i64, _r: &crate::handoff::HandoffRef) -> Option<serde_json::Value> {
+        None
+    }
+
     /// Register a per-task workspace `out/` dir so `dispatch_step` can bind it
     /// into opt-in workers (durable file output). Called once per task by the
     /// lane runner before dispatching, when a `Workspace` was constructed.

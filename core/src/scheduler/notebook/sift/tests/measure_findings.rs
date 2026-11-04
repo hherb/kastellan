@@ -120,19 +120,93 @@ pub(super) async fn an_answer_without_the_table_is_shown_back_once(pool: &sqlx::
     }
 }
 
+/// #960 (DGX tasks 335, 342): the forced-answer turn is never shown back,
+/// and twice it answered with no table after a sift that kept rows. On that
+/// turn code attaches the newest sift's table: no re-ask, no extra model call.
+pub(super) async fn a_forced_answer_without_the_table_gets_it_by_code(pool: &sqlx::PgPool) {
+    // max_plans 1 → a cap of 2 turns (search, sift): the third is forced.
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}),
+        json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices."}}),
+    ])
+    .sorting(&[keep(10), keep(20)]);
+    let r = run(pool, &script, new_task(pool, 1).await).await;
+    assert!(script.reasks.lock().unwrap().is_empty(), "the forced turn is not shown back");
+    let b = body(&r.result);
+    assert!(b.starts_with("Two invoices.\n\n| amount | source |") && b.contains("| 20 | m2 |"), "{b}");
+    // The steps are Personal too, so this pins the ceiling, not the rows' share
+    // in it (the `Secret` table case in sift/tests.rs pins that).
+    assert_eq!(last_ceiling(pool, r.task_id).await, json!("Personal"), "the answer's ceiling");
+}
+
+/// #964 (DGX task 337): a 68 KB search was handoff-stashed, so its step's
+/// result was the placeholder and the sift over it was refused ("the result
+/// has no results"). The sift reads the stash back whole.
+pub(super) async fn a_sift_over_a_stashed_search_reads_the_stash(pool: &sqlx::PgPool) {
+    let mut first = search(1, hits(&["m1", "m2"]));
+    first["parameters"]["stash"] = json!(true);
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": first}),
+        json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
+        json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "seen"}}),
+    ])
+    .sorting(&[keep(10), no()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let planner_saw: Value = serde_json::from_str(&script.messages()[1]).unwrap();
+    let shown = planner_saw["current_step"]["last_result"]["output"].to_string();
+    assert!(shown.contains("handoff_ref"), "the planner saw the placeholder: {shown}");
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["looked_at"].clone(), seen["kept"].clone()), (json!(2), json!(1)), "{seen}");
+    assert_eq!(rows(pool, r.task_id, 2).await.len(), 1);
+}
+
+/// #964 review: a stash is purged whenever the loop returns, a suspend too,
+/// so a resumed sift over a stashed step finds it gone. The sift says how
+/// to get it back — the same call under a new id — and the repeat guard
+/// lets that call through, its result no longer to hand.
+pub(super) async fn a_sift_over_a_purged_stash_says_how_and_the_call_is_made_again(pool: &sqlx::PgPool) {
+    let stashed = |step: u32| {
+        let mut c = search(step, hits(&["m1", "m2"]));
+        c["parameters"]["stash"] = json!(true);
+        c
+    };
+    let purge = json!({"step": 2, "tool": "mail", "method": "mail.purge", "parameters": {"purge": true},
+                       "returns": "r", "done_when": "d", "classification": "Personal"});
+    let mut again = sift(5, None);
+    again["parameters"]["over"] = json!({"step": 4});
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": stashed(1)}),
+        json!({"tick": tick(1, "listed"), "call": purge}),
+        json!({"tick": tick(2, "purged"), "call": sift(3, None)}),
+        json!({"steps": steps(&[1, 2, 4, 5]), "call": stashed(4)}),
+        json!({"tick": tick(4, "listed"), "call": again}),
+        json!({"tick": tick(5, "sorted"), "infeasible": {"reason": "seen"}}),
+    ])
+    .sorting(&[keep(10), no()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let v: Value = serde_json::from_str(&script.messages()[3]).unwrap();
+    let blocks = v["blocks"].to_string();
+    assert!(blocks.contains("no longer held") && blocks.contains("under a new id"), "{blocks}");
+    let searches = r.tools.dispatched.lock().unwrap().iter().filter(|m| *m == "mail.search").count();
+    assert_eq!(searches, 2, "the same search, made again: not a repeat");
+    // The sift over the new step read the stash made again: one of two kept.
+    assert_eq!(rows(pool, r.task_id, 5).await.len(), 1);
+}
+
 /// #960 item 1 (DGX tasks 308, 309, 316): a table named with no
 /// `order_by` came out in the order the items were found. With a `date`
 /// field it is newest first — and an `order_by` named still wins (review
-/// finding).
+/// finding), unless it names no field (#965: a typo is the default order).
 pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgPool) {
-    for named in [false, true] {
+    for named in [None, Some("date"), Some("Datum")] {
         let ctx = new_task(pool, 5).await;
         let mut call = sift(2, None);
         call["parameters"]["fields"] = json!(["date"]);
         let dated = |d: &str| json!({"keep": true, "fields": {"date": d}});
         let mut table = json!({"scrapbook": format!("sb:{}:2", ctx.task_id)});
-        if named {
-            table["order_by"] = json!({"column": "date", "desc": false});
+        if let Some(column) = named {
+            table["order_by"] = json!({"column": column, "desc": false});
         }
         let script = Script::new(&[
             json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2", "m3"]))}),
@@ -144,9 +218,11 @@ pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgP
         let at = |d: &str| b.find(d).expect(&b);
         let (new, mid, old) = (at("2026-03-01"), at("2026-01-05"), at("2025-12-24"));
         match named {
-            false => assert!(new < mid && mid < old, "newest first: {b}"),
-            true => assert!(old < mid && mid < new, "the order named: {b}"),
+            Some("date") => assert!(old < mid && mid < new, "the order named: {b}"),
+            _ => assert!(new < mid && mid < old, "{named:?}: newest first: {b}"),
         }
+        let said = b.contains("the order named matches no column");
+        assert_eq!(said, named == Some("Datum"), "a dropped order is said: {b}");
     }
 }
 
