@@ -109,6 +109,8 @@ async fn the_sift_loop() {
     a_sift_from_past_the_end_is_refused_before_sorting(&pool).await;
     a_row_kept_in_two_links_counts_once_in_distinct(&pool).await;
     an_answer_without_the_table_is_shown_back_once(&pool).await;
+    a_forced_answer_without_the_table_gets_it_by_code(&pool).await;
+    a_sift_over_a_stashed_search_reads_the_stash(&pool).await;
     a_table_with_no_order_named_is_newest_first(&pool).await;
     an_item_with_no_attachment_takes_the_next_read(&pool).await;
 }

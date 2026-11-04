@@ -9,7 +9,7 @@ use super::table::{default_order, render_table, Counts, SOURCE_COLUMN};
 use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
 use crate::scheduler::inner_loop::{notebook_block_audit_payload, PlanRecord, TaskContext};
-use crate::scheduler::notebook::reply::{NotebookReply, TableSpec};
+use crate::scheduler::notebook::reply::{NotebookReply, Refs, TableSpec};
 
 /// The most scrapbooks one table names: as many as a turn records. Each
 /// brings its whole chain, which this does not cap.
@@ -93,22 +93,41 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
 /// the rows never reached the operator. `Err` — the reason shown back with
 /// the #945 re-ask — when `reply` answers with no `table` (and no
 /// refusal) although this run's newest sift, or the chain it ends, kept
-/// something. The loop applies it to a turn's first reply only: the reply
-/// re-asked is used either way, so the model can still answer without one.
-/// Pure.
+/// something ([`missing_table`]). The loop applies it to a turn's first
+/// reply only: the reply re-asked is used either way, so the model can
+/// still answer without one. Pure.
 pub(crate) fn table_left_out(reply: &NotebookReply, plans: &[PlanRecord]) -> Result<(), String> {
-    if !reply.answer.as_ref().is_some_and(|a| a.table.is_none() && a.refused.is_none()) {
-        return Ok(());
-    }
-    let Some(s) = chain::last_sift(plans) else { return Ok(()) };
-    // The table's rows (`distinct`), as the prompt has the body quote them.
-    let count = |v: &serde_json::Value| v["distinct"].as_u64().or_else(|| v["kept"].as_u64());
-    let kept = count(&s["chain"]).or_else(|| count(s)).unwrap_or(0);
-    let Some(name) = s["scrapbook"].as_str().filter(|_| kept > 0) else { return Ok(()) };
+    let Some((name, kept)) = missing_table(reply, plans) else { return Ok(()) };
     Err(format!(
         "the `answer` shows no `table`, but sift {name} kept {kept} items. To show them, add \
 `\"table\": {{\"scrapbook\": \"{name}\"}}` to the `answer`; to answer without them, send the same answer again"
     ))
+}
+
+/// #960 (DGX tasks 335, 342): the forced-answer turn (a planner timeout, the
+/// turn cap, the fast lane's ceiling) is never shown back — its deadline is
+/// spent — and twice it answered with no table after a sift that kept rows.
+/// On that turn the table is attached by code instead: the newest sift's
+/// scrapbook, with the default columns and order. `None` when the answer
+/// has a table, is a refusal, or no sift kept anything. Pure.
+pub(crate) fn forced_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<TableSpec> {
+    let (name, _) = missing_table(reply, plans)?;
+    Some(TableSpec { scrapbook: Refs::One(name), columns: None, order_by: None, limit: None })
+}
+
+/// The newest sift's scrapbook and how many rows its table would show
+/// (`distinct`, the chain's when it continues one), when `reply` answers
+/// with no `table` and no refusal and that sift kept something. Pure.
+fn missing_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<(String, u64)> {
+    if !reply.answer.as_ref().is_some_and(|a| a.table.is_none() && a.refused.is_none()) {
+        return None;
+    }
+    let s = chain::last_sift(plans)?;
+    // The table's rows (`distinct`), as the prompt has the body quote them.
+    let count = |v: &serde_json::Value| v["distinct"].as_u64().or_else(|| v["kept"].as_u64());
+    let kept = count(&s["chain"]).or_else(|| count(s)).unwrap_or(0);
+    let name = s["scrapbook"].as_str().filter(|_| kept > 0)?;
+    Some((name.to_string(), kept))
 }
 
 /// The scrapbooks a table named `named` joins, each once, and a line for
@@ -275,6 +294,11 @@ mod tests {
         assert_eq!(table_left_out(&answer(serde_json::json!({"refused": {"principle": 1, "reason": "harm"}})), &[kept(21)]), Ok(()), "a refusal");
         let call: NotebookReply = serde_json::from_value(serde_json::json!({"infeasible": {"reason": "no"}})).unwrap();
         assert_eq!(table_left_out(&call, &[kept(21)]), Ok(()), "not an answer");
+        // The forced-answer turn: the same rule, the table attached by code.
+        let spec = forced_table(&plain, &[kept(21)]).expect("attached");
+        assert_eq!((spec.scrapbook.refs(), spec.columns, spec.order_by, spec.limit), (&["sb:9:3".to_string()][..], None, None, None));
+        assert_eq!(forced_table(&plain, &[kept(0)]), None, "nothing kept");
+        assert_eq!(forced_table(&answer(serde_json::json!({"table": {"scrapbook": "sb:9:1"}})), &[kept(21)]), None, "its own table");
     }
 
     #[test]

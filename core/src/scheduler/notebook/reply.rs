@@ -195,7 +195,7 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
     if let Some(call) = &reply.call {
         let pending = after.steps.iter().any(|s| s.spec.id == call.step && s.status == StepStatus::Pending);
         if !pending {
-            return Err(format!("`call.step` {} is not a pending step", call.step));
+            return Err(not_pending(call.step, &after));
         }
         // `returns` becomes the call plan's `decision`, and that prefix is
         // what marks a sift's own reads: the repeat guard and the turn
@@ -205,6 +205,23 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Why `step` cannot be called, and how to replan it. DGX task 337 called a
+/// done search again; told only "is not a pending step", the re-ask sent the
+/// same reply and the task failed (#964). A done step is never reopened:
+/// a later `{"step": n}` would then name two results. Pure.
+fn not_pending(step: u32, after: &NotebookState) -> String {
+    let next = after.steps.iter().map(|s| s.spec.id).max().unwrap_or(0) + 1;
+    let how = match after.steps.iter().find(|s| s.spec.id == step).map(|s| &s.status) {
+        Some(StepStatus::Done) => format!(
+            "it is done, and a done step is never run again. To repeat it, list it in `steps` under a new id \
+(e.g. {next}) and call that id"
+        ),
+        Some(StepStatus::Failed) => "it failed. To retry it, list it in `steps` again".into(),
+        _ => "it is not listed. List it in `steps` first".into(),
+    };
+    format!("`call.step` {step} is not a pending step: {how}")
 }
 
 /// On the forced-answer turn a `call` is not a usable reply: the turn

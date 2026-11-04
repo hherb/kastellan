@@ -120,6 +120,45 @@ pub(super) async fn an_answer_without_the_table_is_shown_back_once(pool: &sqlx::
     }
 }
 
+/// #960 (DGX tasks 335, 342): the forced-answer turn is never shown back,
+/// and twice it answered with no table after a sift that kept rows. On that
+/// turn code attaches the newest sift's table: no re-ask, no model call.
+pub(super) async fn a_forced_answer_without_the_table_gets_it_by_code(pool: &sqlx::PgPool) {
+    // max_plans 1 → a cap of 2 turns (search, sift): the third is forced.
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}),
+        json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices."}}),
+    ])
+    .sorting(&[keep(10), keep(20)]);
+    let r = run(pool, &script, new_task(pool, 1).await).await;
+    assert!(script.reasks.lock().unwrap().is_empty(), "the forced turn is not shown back");
+    let b = body(&r.result);
+    assert!(b.starts_with("Two invoices.\n\n| amount | source |") && b.contains("| 20 | m2 |"), "{b}");
+    assert_eq!(last_ceiling(pool, r.task_id).await, json!("Personal"), "the attached rows' class reaches the ceiling");
+}
+
+/// #964 (DGX task 337): a 68 KB search was handoff-stashed, so its step's
+/// result was the placeholder and the sift over it was refused ("the result
+/// has no results"). The sift reads the stash back whole.
+pub(super) async fn a_sift_over_a_stashed_search_reads_the_stash(pool: &sqlx::PgPool) {
+    let mut first = search(1, hits(&["m1", "m2"]));
+    first["parameters"]["stash"] = json!(true);
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": first}),
+        json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
+        json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "seen"}}),
+    ])
+    .sorting(&[keep(10), no()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let planner_saw: Value = serde_json::from_str(&script.messages()[1]).unwrap();
+    let shown = planner_saw["current_step"]["last_result"]["output"].to_string();
+    assert!(shown.contains("handoff_ref"), "the planner saw the placeholder: {shown}");
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["looked_at"].clone(), seen["kept"].clone()), (json!(2), json!(1)), "{seen}");
+    assert_eq!(rows(pool, r.task_id, 2).await.len(), 1);
+}
+
 /// #960 item 1 (DGX tasks 308, 309, 316): a table named with no
 /// `order_by` came out in the order the items were found. With a `date`
 /// field it is newest first — and an `order_by` named still wins (review

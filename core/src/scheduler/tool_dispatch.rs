@@ -457,6 +457,10 @@ impl StepDispatcher for ToolHostStepDispatcher {
         qualified_method(method, self.registry.methods_for(tool))
     }
 
+    fn stashed(&self, task_id: i64, r: &crate::handoff::HandoffRef) -> Option<serde_json::Value> {
+        self.handoff.whole(task_id, r)
+    }
+
     fn purge_task(&self, task_id: i64) {
         self.handoff.purge_task(task_id);
         self.task_out_dirs

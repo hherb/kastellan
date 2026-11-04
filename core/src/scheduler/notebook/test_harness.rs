@@ -198,11 +198,14 @@ impl ReviewStage for RecordingReview {
 }
 
 /// A step whose method is `fail` fails; a call with a `hits` parameter
-/// returns them as `{"results": hits}` (a search, for `sift`); a read of
+/// returns them as `{"results": hits}` (a search, for `sift`) — stashed in
+/// a real handoff cache, the planner seeing its placeholder, when the call
+/// also says `"stash": true`; a read of
 /// `{"id": "bad"}` fails; every other returns its own name.
 #[derive(Default)]
 pub(crate) struct Tools {
     pub(crate) dispatched: Mutex<Vec<String>>,
+    pub(crate) handoff: crate::handoff::HandoffCache,
 }
 
 #[async_trait]
@@ -213,12 +216,20 @@ impl StepDispatcher for Tools {
         method.strip_suffix("-bare").map(str::to_string)
     }
 
-    async fn dispatch_step(&self, _task_id: i64, step: &PlannedStep) -> StepOutcome {
+    fn stashed(&self, task_id: i64, r: &crate::handoff::HandoffRef) -> Option<Value> {
+        self.handoff.whole(task_id, r)
+    }
+
+    async fn dispatch_step(&self, task_id: i64, step: &PlannedStep) -> StepOutcome {
         self.dispatched.lock().unwrap().push(step.method.clone());
         if step.method == "fail" || step.parameters.get("id") == Some(&json!("bad")) {
             StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "not allowed".into() }
         } else if let Some(hits) = step.parameters.get("hits") {
-            StepOutcome::Ok(json!({"results": hits}))
+            let result = json!({"results": hits});
+            match step.parameters.get("stash") == Some(&json!(true)) {
+                true => StepOutcome::Ok(self.handoff.stash_if_oversized(task_id, &result, 0).expect("cap 0").placeholder),
+                false => StepOutcome::Ok(result),
+            }
         } else if let Some(id) = step.parameters.get("id") {
             StepOutcome::Ok(json!({"text": format!("text of {}", id.as_str().unwrap_or_default())}))
         } else {

@@ -110,6 +110,16 @@ pub fn build_handoff_placeholder(
     })
 }
 
+/// The ref a stash placeholder ([`build_handoff_placeholder`]) names: `Some`
+/// only for an object with `truncated: true` and a well-formed `handoff_ref`.
+/// Pure.
+pub fn placeholder_ref(value: &serde_json::Value) -> Option<HandoffRef> {
+    if value.get("truncated") != Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    HandoffRef::parse(value.get("handoff_ref")?.as_str()?)
+}
+
 /// A byte slice plus whether it reached the end of the stashed body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slice {
@@ -229,6 +239,16 @@ impl HandoffCache {
         let bytes = body[start..end].to_vec();
         let eof = end >= body.len();
         Some(Slice { bytes, eof })
+    }
+
+    /// The whole body stashed under `r` for `task_id`, parsed back into the
+    /// result it was: `None` if unknown or evicted. For a consumer that needs
+    /// the result itself, not slices of its text — a sift over a step whose
+    /// result was stashed (#964).
+    pub fn whole(&self, task_id: i64, r: &HandoffRef) -> Option<serde_json::Value> {
+        let slice = self.get_slice(task_id, r, 0, usize::MAX)?;
+        // Always JSON: `stash_if_oversized` stores the serialized result.
+        serde_json::from_slice(&slice.bytes).ok()
     }
 
     /// Drop every entry for `task_id`. Called at task terminal.
