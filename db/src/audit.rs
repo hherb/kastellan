@@ -64,7 +64,9 @@
 //! 85 KB `web.fetch` rows took the guard tier's score down with them.
 //! A preserved key that still cannot be afforded is named by
 //! [`DROPPED_PRESERVED_KEY`] rather than vanishing, because an
-//! unrecorded loss is the shape of the defect above.
+//! unrecorded loss is the shape of the defect above. The row's address,
+//! `task_id` and `plan_count`, rides through too (issue #967), so an
+//! oversized row is still found by the task it belongs to.
 //!
 //! [`truncate_payload`] is pure: it returns a new `serde_json::Value` and
 //! performs no I/O. Its tests — deterministic-fingerprint regression pins

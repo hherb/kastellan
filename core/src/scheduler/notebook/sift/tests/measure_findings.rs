@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::scheduler::notebook::sift::answer::OWN_TABLE_NOTE;
 
 /// DGX tasks 302 and 307: a find-all took a chain of sifts, each `from` the
 /// last one's `next_from`, and the answer tabled only the last. A sift that
@@ -128,13 +129,16 @@ pub(super) async fn a_forced_answer_without_the_table_gets_it_by_code(pool: &sql
     let script = Script::new(&[
         json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}),
         json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
-        json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices."}}),
+        // DGX task 351: the body also held the model's own partial table.
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices.\n\n| amount |\n|---|\n| 20 |"}}),
     ])
     .sorting(&[keep(10), keep(20)]);
     let r = run(pool, &script, new_task(pool, 1).await).await;
     assert!(script.reasks.lock().unwrap().is_empty(), "the forced turn is not shown back");
     let b = body(&r.result);
     assert!(b.starts_with("Two invoices.\n\n| amount | source |") && b.contains("| 20 | m2 |"), "{b}");
+    assert_eq!(b.matches("| amount").count(), 1, "one table, the code's: {b}");
+    assert!(b.contains(OWN_TABLE_NOTE), "{b}");
     // The steps are Personal too, so this pins the ceiling, not the rows' share
     // in it (the `Secret` table case in sift/tests.rs pins that).
     assert_eq!(last_ceiling(pool, r.task_id).await, json!("Personal"), "the answer's ceiling");

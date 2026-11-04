@@ -380,12 +380,12 @@ fn every_envelope_fits_the_budget() {
 
 // ── The multi-key half of `preserve_onto`. ────────────────────────
 //
-// `PRESERVED_KEYS` has had two members since issue #617 and three since
-// #816, so every property below is structurally reachable through
+// `PRESERVED_KEYS` has had two members since issue #617, three since
+// #816 and five since #967, so every property below is structurally reachable through
 // `truncate_payload` — what keeps the starvation arm from occurring in
 // production is now sizing,
 // not cardinality (a real envelope peaks near 1.4 KiB against a
-// 4032-byte budget). They are the properties its doc comment claims,
+// 4000-byte budget). They are the properties its doc comment claims,
 // and the mutation that breaks them -- measuring each candidate against
 // a FIXED envelope instead of the running one -- was invisible at N=1
 // and produces an over-budget row at N=2. Tested through the
@@ -547,7 +547,24 @@ fn wire_key_literals_are_pinned() {
     // Order is priority order, and `the_guard_record_is_admitted_before_the_
     // req_summary` proves what that costs the loser. Pinned here so a
     // re-ordering is a deliberate edit rather than a silent one.
-    assert_eq!(PRESERVED_KEYS, ["guard", "req_summary", "_nul_escaped"].as_slice());
+    assert_eq!(PRESERVED_KEYS, ["guard", "req_summary", "_nul_escaped", "task_id", "plan_count"].as_slice());
+}
+
+/// #967: a notebook answer turn's `plan.formulate` row carries a rendered
+/// table and goes over the cap; its envelope must still answer
+/// `payload->>'task_id'` (and the turn), or the turn reads as never planned.
+#[test]
+fn an_oversized_plan_row_keeps_its_task_id_and_turn() {
+    let payload = serde_json::json!({
+        "task_id": 356, "plan_count": 4, "decision_kind": "answer",
+        "plan": {"body": "x".repeat(PAYLOAD_MAX_BYTES)},
+    });
+    let out = truncate_payload(payload);
+    assert!(is_truncation_envelope(&out), "over the cap: {out}");
+    assert_eq!(out["task_id"], 356);
+    assert_eq!(out["plan_count"], 4);
+    assert!(out.get("plan").is_none(), "the body itself is not kept");
+    assert!(out.get(DROPPED_PRESERVED_KEY).is_none(), "nothing was starved: {out}");
 }
 
 /// `str_eq` is the sole enforcer of the compile-time shadow guard.
@@ -575,7 +592,7 @@ fn str_eq_matches_partial_eq() {
 ///
 /// The const block checks it against [`DROP_MARKER_RESERVE`], not
 /// against reality -- so shrinking the estimate keeps compiling
-/// (30 <= 64) while quietly ceasing to be a worst case. This measures
+/// (30 <= 96) while quietly ceasing to be a worst case. This measures
 /// the real cost of the largest marker `PRESERVED_KEYS` can produce:
 /// every member dropped at once.
 #[test]

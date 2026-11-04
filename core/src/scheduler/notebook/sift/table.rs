@@ -61,7 +61,7 @@ pub(crate) fn render_table(
         out.push(line(columns.iter().map(|c| shown(group, c, &mut blocks)).collect()));
     }
     let cut = (shown_rows < groups.len()).then_some((shown_rows, groups.len()));
-    (format!("{}\n\n{}", out.join("\n"), note(counts, merged, cut)), blocks)
+    (format!("{}\n\n{}", out.join("\n"), note(counts, merged, cut, order_by)), blocks)
 }
 
 /// `rows` in groups, in order of first appearance: a kept row joins the
@@ -212,8 +212,10 @@ fn scalar(v: &Value) -> String {
 }
 
 /// The counts, then what the table did to the rows: `merged` duplicates
-/// shown once, and `cut` = (shown, of) when a limit left rows out.
-fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>) -> String {
+/// shown once, and `cut` = (shown, of) when a limit left rows out — with
+/// the `order` "the first" follows, which may be the default one nobody
+/// named (#965 item 2).
+fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>, order: Option<&OrderBy>) -> String {
     let mut parts = vec![format!("{} kept of {} looked at", c.kept, c.looked_at)];
     if c.withheld > 0 {
         parts.push(format!("{} withheld by the safety screen", c.withheld));
@@ -231,7 +233,8 @@ fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>) -> String {
         parts.push(format!("{merged} duplicate{} shown once", if merged == 1 { "" } else { "s" }));
     }
     if let Some((shown, of)) = cut {
-        parts.push(format!("showing the first {shown} of {of} rows"));
+        let by = order.map_or(String::new(), |o| format!(", by `{}` {}", o.column, if o.desc { "descending" } else { "ascending" }));
+        parts.push(format!("showing the first {shown} of {of} rows{by}"));
     }
     format!("{}.", parts.join("; "))
 }

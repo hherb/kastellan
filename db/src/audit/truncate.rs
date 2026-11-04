@@ -67,7 +67,7 @@ pub const PAYLOAD_MAX_BYTES: usize = 4096;
 /// still name it.
 ///
 /// Contention is not reachable in production today — a real envelope peaks
-/// near 1.4 KiB against a 4032-byte working budget — so the order is a
+/// near 1.4 KiB against a 4000-byte working budget — so the order is a
 /// standing decision for the member after next rather than a live
 /// tie-break. A re-ordering of the first two members is caught **twice**:
 /// by `wire_key_literals_are_pinned`, which pins the array itself, and
@@ -77,7 +77,21 @@ pub const PAYLOAD_MAX_BYTES: usize = 4096;
 /// fixture could not fit in either slot, so it passed with the array
 /// reversed while claiming to assert the order. [`NUL_ESCAPED_KEY`]'s
 /// position is pinned by `wire_key_literals_are_pinned` alone.
-pub const PRESERVED_KEYS: &[&str] = &[GUARD_KEY, REQ_SUMMARY_KEY, NUL_ESCAPED_KEY];
+///
+/// **[`TASK_ID_KEY`] and [`PLAN_COUNT_KEY`] come after it (issue #967).** They
+/// meet criterion 2 as *correlation* keys rather than decision records: not
+/// data, but the row's address. A notebook answer turn's `plan.formulate`
+/// row carries a rendered table and goes over the cap; without them the
+/// envelope no longer answers `payload->>'task_id'` and the turn reads as
+/// never planned. Both are integers wherever this workspace writes them, and
+/// a larger value is still budgeted and named like any other member.
+pub const PRESERVED_KEYS: &[&str] = &[GUARD_KEY, REQ_SUMMARY_KEY, NUL_ESCAPED_KEY, TASK_ID_KEY, PLAN_COUNT_KEY];
+
+/// The task a row belongs to; a [`PRESERVED_KEYS`] member (#967).
+pub const TASK_ID_KEY: &str = "task_id";
+
+/// The planner turn a row belongs to; a [`PRESERVED_KEYS`] member (#967).
+pub const PLAN_COUNT_KEY: &str = "plan_count";
 
 /// The payload key under which `core::tool_host::post_process` records the
 /// guard tier's per-dispatch verdict — and the first member of
@@ -118,10 +132,10 @@ pub const DROPPED_PRESERVED_KEY: &str = "_dropped_preserved";
 /// in terms of it: a caller reasoning about what will survive the cap
 /// cannot do so without this number.
 ///
-/// ⚠️ Headroom is thin: with three [`PRESERVED_KEYS`] the worst case is 61
-/// of these 64 bytes, so a fourth member will need this raised. The
+/// With five [`PRESERVED_KEYS`] the worst case is 84 of these 96 bytes
+/// (#967 raised it from 64); a further member may need it raised again. The
 /// compile-time assertion refuses the build if it is not.
-pub const DROP_MARKER_RESERVE: usize = 64;
+pub const DROP_MARKER_RESERVE: usize = 96;
 
 /// The envelope's fingerprint keys. Private — [`is_truncation_envelope`] is
 /// the supported way to read an envelope — but named once so the producer
@@ -332,8 +346,9 @@ pub fn is_truncation_envelope(payload: &serde_json::Value) -> bool {
 /// copy does not have: one oversized key cannot take a bounded sibling
 /// down with it, and anything refused can still be *named*, under
 /// [`DROPPED_PRESERVED_KEY`]. Nothing in this workspace can produce an
-/// oversized preserved key. One is written by a caller and two by **this
-/// function itself**, all bounded: `guard` by `core::tool_host::post_process`
+/// oversized preserved key. Three are written by callers and two by **this
+/// function itself**, all bounded: `task_id` and `plan_count` (integers)
+/// by the scheduler's rows, `guard` by `core::tool_host::post_process`
 /// via `GuardReport::audit_value` (a fixed handful of small scalars),
 /// `req_summary` by `req_summary::summarize_req` ([`HEAD_MAX_BYTES`] plus a
 /// digest and a length), and [`NUL_ESCAPED_KEY`] by
@@ -432,7 +447,7 @@ pub fn truncate_payload(payload: serde_json::Value) -> serde_json::Value {
 /// keeps the starvation arm from occurring in production is **sizing, not
 /// cardinality**: a real envelope peaks near 1.4 KiB (fingerprint ~110 B,
 /// guard ~110 B, summary ~1.1 KiB worst case, NUL count ~20 B) against a
-/// 4032-byte working budget, and the compile-time block above pins
+/// 4000-byte working budget, and the compile-time block above pins
 /// [`HEAD_MAX_BYTES`] so a later bump cannot quietly change that.
 ///
 /// This paragraph used to say the multi-key half was unreachable, which

@@ -186,7 +186,13 @@ fn a_limit_shows_the_first_rows_after_order_and_merge() {
     let t = render_table(&rows, &cols(&["d"]), Some(&order), Some(2), &counts(4, 4)).0;
     let shown: Vec<&str> = t.lines().skip(2).take_while(|l| l.starts_with('|')).collect();
     assert_eq!(shown, ["| 2026-03-01 |", "| 2026-02-01 |"], "{t}");
-    assert!(t.ends_with("4 kept of 4 looked at; 1 duplicate shown once; showing the first 2 of 3 rows."), "{t}");
+    assert!(t.ends_with("4 kept of 4 looked at; 1 duplicate shown once; showing the first 2 of 3 rows, by `d` descending."), "{t}");
+    // #965 item 2: "the first" is in the order said; with none, none is said.
+    let up = OrderBy { column: "d".into(), desc: false };
+    let t = render_table(&rows, &cols(&["d"]), Some(&up), Some(2), &counts(4, 4)).0;
+    assert!(t.ends_with("showing the first 2 of 3 rows, by `d` ascending."), "{t}");
+    let t = render_table(&rows, &cols(&["d"]), None, Some(2), &counts(4, 4)).0;
+    assert!(t.ends_with("1 duplicate shown once; showing the first 2 of 3 rows."), "{t}");
     let all = render_table(&rows, &cols(&["d"]), Some(&order), Some(9), &counts(4, 4)).0;
     assert!(!all.contains("showing"), "a limit above the rows says nothing: {all}");
 }
@@ -224,7 +230,7 @@ fn the_note_counts_only_the_duplicates_shown_and_0_is_no_limit() {
     ];
     let order = OrderBy { column: "d".into(), desc: true };
     let one = render_table(&rows, &cols(&["d"]), Some(&order), Some(1), &counts(3, 3)).0;
-    assert!(one.ends_with("3 kept of 3 looked at; showing the first 1 of 2 rows."), "{one}");
+    assert!(one.ends_with("3 kept of 3 looked at; showing the first 1 of 2 rows, by `d` descending."), "{one}");
     let all = render_table(&rows, &cols(&["d"]), Some(&order), Some(0), &counts(3, 3)).0;
     assert!(all.ends_with("3 kept of 3 looked at; 1 duplicate shown once."), "{all}");
 }
