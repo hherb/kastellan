@@ -6,6 +6,7 @@
 //!
 //! * [`params`] — the call's parameters, scrapbook refs, the read allowlist.
 //! * [`template`] — the candidate list, and each item's reads.
+//! * [`reads`] — which items a sift takes, and which reads belong to each.
 //! * [`config`] — the two operator knobs, checked at boot.
 //! * [`sorter`] — the per-item decision, and what it is shown.
 //! * [`table`] — the answer's table, rendered by code.
@@ -22,6 +23,7 @@
 pub mod config;
 pub(crate) mod params;
 pub mod router_sorter;
+pub(crate) mod reads;
 pub(crate) mod run;
 pub mod sorter;
 pub(crate) mod summary;

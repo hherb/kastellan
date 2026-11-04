@@ -30,7 +30,8 @@ use super::params::{check_read, parse_params, Over, ReadTemplate, ScrapRef, Sift
 use super::sorter::{parse_sort_reply, sorter_message, SortReply, SORTER_ITEM_CAP};
 use super::summary::{summary, Reads, Stop};
 use super::table::Counts;
-use super::template::{expand_reads, items_at};
+use super::reads::plan_reads;
+use super::template::items_at;
 use super::answer::row_class;
 use super::{is_sift_plan, may_read, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
 use crate::cassandra::review::ChainReviewStage;
@@ -307,42 +308,6 @@ async fn resolve_over(pool: &PgPool, ctx: &TaskContext, p: &SiftParams) -> Resul
             Ok(OverList { items, tool: SIFT_TOOL.into(), class })
         }
     }
-}
-
-/// The reads to make, and which of them belong to each item taken.
-#[derive(Debug, PartialEq)]
-struct Batch {
-    reads: Vec<Value>,
-    /// Item `i`'s reads are `reads[per_item[i]]`. One entry per item taken.
-    per_item: Vec<std::ops::Range<usize>>,
-    /// Reads of the first item dropped to fit `cap` (see [`plan_reads`]).
-    cut: usize,
-}
-
-/// Take items in list order while their reads fit in `cap`, and never more
-/// than `cap` items: an item with no read still costs a sorter call. An
-/// item's reads stay together. A first item with more reads than `cap` alone
-/// keeps its first `cap` (the rest counted in `cut`), so a sift always makes
-/// progress. Pure.
-fn plan_reads(read: Option<&ReadTemplate>, items: &[Value], cap: usize) -> Batch {
-    let mut batch = Batch { reads: Vec::new(), per_item: Vec::new(), cut: 0 };
-    for item in items {
-        if batch.per_item.len() >= cap.max(1) {
-            break;
-        }
-        let mut reads = read.map(|t| expand_reads(t, item)).unwrap_or_default();
-        if batch.reads.len() + reads.len() > cap {
-            if !batch.per_item.is_empty() {
-                break;
-            }
-            batch.cut = reads.len() - cap;
-            reads.truncate(cap);
-        }
-        let start = batch.reads.len();
-        batch.reads.extend(reads);
-        batch.per_item.push(start..batch.reads.len());
-    }
-    batch
 }
 
 /// The reads as one plan. Each step carries the sift's class, so the
