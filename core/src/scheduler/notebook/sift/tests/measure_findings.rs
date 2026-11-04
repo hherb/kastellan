@@ -1,7 +1,7 @@
-//! The sift loop's cases added for the DGX measure of tasks 301–307, run by
+//! The sift loop's cases added for the DGX measures (tasks 301–307, 322), run by
 //! [`super::the_sift_loop`] on its cluster.
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::*;
 
@@ -36,4 +36,23 @@ pub(super) async fn a_table_naming_the_last_of_a_chain_shows_every_link(pool: &s
     let (hi, lo) = (b.find("| 20 | m2 |").expect(&b), b.find("| 10 | m1 |").expect(&b));
     assert!(hi < lo, "both links' rows, ordered: {b}");
     assert!(b.ends_with("2 kept of 3 looked at."), "the chain's counts, nothing left over: {b}");
+}
+
+/// DGX task 322: a sift over a 27-row scrapbook `from` 64 (a search's
+/// `next_from`) ran as an empty success. A `from` past the end is refused,
+/// naming the list's length, before anything is sorted.
+pub(super) async fn a_sift_from_past_the_end_is_refused_before_sorting(pool: &sqlx::PgPool) {
+    let mut late = sift(2, None);
+    late["parameters"]["from"] = json!(5);
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}),
+        json!({"tick": tick(1, "listed"), "call": late}),
+        json!({"infeasible": {"reason": "nothing left"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert!(kinds(pool, r.task_id).await.contains(&EntryKind::FailedStep));
+    let v: Value = serde_json::from_str(&script.messages()[2]).unwrap();
+    let blocks = v["blocks"].to_string();
+    assert!(blocks.contains("sift_refused") && blocks.contains("(2 items)"), "{blocks}");
+    assert!(script.sorted.lock().unwrap().is_empty(), "nothing was sorted");
 }

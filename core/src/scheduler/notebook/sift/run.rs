@@ -1,8 +1,9 @@
 //! A sift in the notebook loop (#922, §6.2).
 //!
 //! 1. Check the call: its parameters, its read (K3a), that a sorter exists,
-//!    and that `over` names a list. A refusal is a block (`sift_refused: …`):
-//!    the loop records the step as failed and the next turn replans.
+//!    that `over` names a list and that `from` falls inside it. A refusal is
+//!    a block (`sift_refused: …`): the loop records the step as failed and
+//!    the next turn replans.
 //! 2. Expand each item's reads (K3b), as many items as fit in
 //!    `KASTELLAN_SIFT_MAX_READS` reads — and never more items than that, read
 //!    or not — and review and dispatch them as
@@ -266,7 +267,7 @@ async fn check<'a>(
 fn check_from(from: usize, len: usize) -> Result<(), String> {
     if from > 0 && from >= len {
         return Err(format!(
-            "`from` {from} is past the end of this list ({len} items): `next_from` counts items of the list it came from"
+            "`from` {from} is at or past the end of this list ({len} items): `next_from` counts items of the list it came from"
         ));
     }
     Ok(())

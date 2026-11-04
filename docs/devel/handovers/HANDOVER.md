@@ -64,7 +64,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   DGX prompt restored (sha `025fc4ba…`, backups `~/agent_notebook.md.{main961,960}`). ⚠️ A prompt-only change can be
   measured **without a rebuild**: copy to `~/.local/share/kastellan/prompts/`, restart core, check `agent_prompts`.
 - **Fixed here:** a sift `from` at/past its list's end (task 322: a 27-row scrapbook `from` 64) ran as an empty
-  success; now refused with the length (`sift/run.rs::check_from`, pure).
+  success; now refused with the length (`sift/run.rs::check_from`, pure; wired e2e in the sift loop, mutation-checked).
 
 ### Previous (2026-11-04): #961 (chain totals: `sift/chain.rs::totals`; a copied-back `chain` is ignored). Previous (2026-11-03): #955 measured (301–307) and its fixes (PR #957, merged, deployed 2026-11-04) — what still binds
 
