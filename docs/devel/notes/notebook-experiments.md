@@ -177,3 +177,58 @@ Cell format: `turns / seconds`, then the outcome.
   looked_at, kept}` for the whole chain, and the prompt says to quote it. Filed #960 for the rest (no
   order/limit, no table, unread items with no attachment).
 - **Reproduce:** as above, then `bash ~/requery7.sh`.
+
+## 2026-11-04 #8 — the chain totals (#961) (tasks 315–321)
+
+- **Build:** `main` at 5f9bd7a7 (PR #961), plain `upgrade_from_git.sh` (no migration; `kastellan.env` identical
+  after install). Knobs as #6 (verified in `/proc/<MainPID>/environ`). Prompt `agent_notebook` sha256 `025fc4ba…`.
+- **Hypothesis:** a body that gives a count after a chain gives the chain's, matching the table note.
+- **Results:**
+  - Q1 4 / 276. A sift over a 50-hit search (13 reads, **37 unread**, 18 kept), then a sift over that scrapbook
+    (17 of 18). **This time the table had `order_by` date desc and `limit` 5** ("showing the first 5 of 10 rows").
+    3 of the 5 rows have no from/price/GST (unread items, #960 item 3).
+  - Q2 4 / 382. **A chain of two** (40 + 10 looked at, 38 + 7 kept). Table note "45 kept of 50 looked at; 15
+    duplicates shown once", **body "45 invoices": the chain's count, as intended** — but the table has 30 rows.
+    No `order_by` (rows in email order). Only 50 hits searched (#7: 100).
+  - Q3 2 / 228, Q4 4 / 188, Q5 3 / 136 (Anthropic, 2026-11-02), Q6 3 / 135 — as before.
+  - Q7 4 / 538. A sift over the search (50 read with `mail.get_message`, 45 kept), then a sift over that scrapbook
+    (8 kept). **A table this time** (#7: prose only). Body "8 payments", table 6 rows (2 duplicates). Kept rows
+    from 2021 and 2024 as "currently due".
+  - Total 1883 s (#7: 2963 s).
+- **Learned:** the chain count works live (Q2). The body's count is the sorter's `kept`, which still counts
+  duplicates that the table later shows once (Q2 45 vs 30 rows, Q7 8 vs 6). Using `order_by`/`limit` and
+  naming a table are **not deterministic**: Q1 used them in #6 and #8, not in #7; Q7 tabled in #8, not in #7.
+  One run per change cannot tell a prompt fix from luck.
+- **Next:** #960 item 1 as a prompt change, measured in #9.
+- **Reproduce:** as above, then `bash ~/requery7.sh`.
+
+## 2026-11-04 #9 — an `answer` example with `order_by`/`limit` (tasks 322–328) — **worse, reverted**
+
+- **Build:** as #8 (5f9bd7a7), with only `prompts/agent_notebook.md` replaced (sha256 `2dcc2a6e…`, in
+  `agent_prompts`) and core restarted. The change: the sift section showed a whole `answer` reply (`tick` +
+  `answer` with `table: {scrapbook, order_by: {date, desc}, limit: 5}`, body "Your 5 most recent bookings (12
+  found):") and bullets on when to use `order_by` and `limit`. Knobs as #6.
+- **Hypothesis:** shown the shape, the model orders and limits "the N most recent" tables every time (#960 item 1).
+- **Results:**
+  - Q1 9 / 940, **no table**: "the filtering process failed". Six sifts. Twice the model sifted the 27-row
+    scrapbook `from` 64 (the search's `next_from`): 0 items, reported as a success (`looked_at: 0`,
+    `remaining: 0`), which it misread. Then a sift over step 2 (only sifts) was refused.
+  - Q2 4 / 265, table, unordered (as #8).
+  - Q3 2 / 132, **body "Here are your 10 most recent emails with attachments:" and nothing else**: no sift, no
+    table, the list not written. The example's body is a lead-in to a rendered table; copied here, it drops the
+    answer.
+  - Q4 5 / 166, as before.
+  - Q5 3 / 408, right, plus a 1-row table (`limit` 1) it did not need.
+  - Q6 3 / 256, **the body ("Hong Kong to Sydney") contradicts its own 1-row table (Tokyo Haneda → Kumamoto)**.
+  - Q7 4 / 911, **"cannot determine"** (#8 had a table).
+  - Total 3078 s (#8: 1883 s).
+- **Learned:** a worked example is copied **whole**: its lead-in body and its `limit` landed on questions with
+  no sift (Q3) and on single answers (Q5, Q6). This is the #951 lesson again: what the model is shown, it
+  mirrors. A prompt fix for item 1 needs an example that cannot be mistaken for a general answer shape, or a
+  code-side default. The Q1 failure exposed a loop defect.
+- **Changed:** prompt reverted on the DGX (sha `025fc4ba…`, core restarted) and on the branch. Fixed in code
+  (branch `fix/960-sift-from-past-end`): a sift whose `from` is at or past the end of its list is refused
+  with the list's length (`sift/run.rs::check_from`), not run as an empty success.
+- **Reproduce:** the tried prompt is kept on the DGX as `~/agent_notebook.md.960` (sha256 `2dcc2a6e…`); copy it over
+  `~/.local/share/kastellan/prompts/agent_notebook.md`, restart `kastellan-core`, `bash ~/requery7.sh`; restore
+  `~/agent_notebook.md.main961` after.

@@ -255,7 +255,21 @@ async fn check<'a>(
         check_read(t, cfg)?;
     }
     let over = resolve_over(r.pool, ctx, &p).await?;
+    check_from(p.from, over.items.len())?;
     Ok((p, sorter, over))
+}
+
+/// A `from` at or past the end of the list would take no items and report
+/// an empty sift as a success (DGX task 322: a scrapbook of 27 rows sifted
+/// `from` the search's `next_from`, 64). Refuse it, naming the length; an
+/// empty list from 0 is a real empty sift and runs.
+fn check_from(from: usize, len: usize) -> Result<(), String> {
+    if from > 0 && from >= len {
+        return Err(format!(
+            "`from` {from} is past the end of this list ({len} items): `next_from` counts items of the list it came from"
+        ));
+    }
+    Ok(())
 }
 
 /// The list `p.over` names. A step's list is the raw result of its last
