@@ -16,7 +16,7 @@ fn the_notebook_prompt_documents_every_reply_key() {
         // `sift` (#922): its call, its summary, and the answer's table.
         "sift", "sift.run", "over", "items", "from", "read", "keep_if", "fields", "scrapbook", "looked_at", "kept",
         "withheld", "undecided", "failed_reads", "reads", "unread", "remaining", "next_from", "stopped", "sample", "table", "columns",
-        "order_by",
+        "order_by", "distinct", "chain", "items_per_read",
     ] {
         assert!(prompt.contains(&format!("`{key}`")) || prompt.contains(&format!("\"{key}\"")), "missing `{key}`");
     }

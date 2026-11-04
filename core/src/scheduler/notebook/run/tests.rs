@@ -4,6 +4,7 @@
 //! unavailable (run with `KASTELLAN_PG_BIN_DIR` set on the Mac). The
 //! harness is [`crate::scheduler::notebook::test_harness`].
 
+use kastellan_llm_router::ThinkingPolicy;
 use serde_json::{json, Value};
 
 use super::*;

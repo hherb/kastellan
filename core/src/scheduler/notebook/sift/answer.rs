@@ -5,11 +5,11 @@ use kastellan_db::scrapbook::{self, Row, RowKind};
 use sqlx::PgPool;
 
 use super::params::ScrapRef;
-use super::table::{render_table, Counts, SOURCE_COLUMN};
+use super::table::{default_order, render_table, Counts, SOURCE_COLUMN};
 use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
 use crate::scheduler::inner_loop::{notebook_block_audit_payload, PlanRecord, TaskContext};
-use crate::scheduler::notebook::reply::TableSpec;
+use crate::scheduler::notebook::reply::{NotebookReply, TableSpec};
 
 /// The most scrapbooks one table names: as many as a turn records. Each
 /// brings its whole chain, which this does not cap.
@@ -68,7 +68,9 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     let mut out = body.to_string();
     if included {
         out.push_str("\n\n");
-        let (table, blocks) = render_table(&rows, &columns, t.order_by.as_ref(), t.limit, &counts);
+        // The model names an order only sometimes (#960): default to newest first.
+        let order = t.order_by.clone().or_else(|| default_order(&columns, &rows));
+        let (table, blocks) = render_table(&rows, &columns, order.as_ref(), t.limit, &counts);
         out.push_str(&table);
         // As for any screened model text: the withheld cell is otherwise
         // invisible. An answer has no notebook step: `step` 0.
@@ -84,6 +86,29 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
         out.push_str(&line);
     }
     (out, class)
+}
+
+/// #960 item 2 (DGX task 314): after a sift that kept 21 items the model
+/// answered in prose ("I would need a further step") and named no table, so
+/// the rows never reached the operator. `Err` — the reason shown back with
+/// the #945 re-ask — when `reply` answers with no `table` (and no
+/// refusal) although this run's newest sift, or the chain it ends, kept
+/// something. The loop applies it to a turn's first reply only: the reply
+/// re-asked is used either way, so the model can still answer without one.
+/// Pure.
+pub(crate) fn table_left_out(reply: &NotebookReply, plans: &[PlanRecord]) -> Result<(), String> {
+    if !reply.answer.as_ref().is_some_and(|a| a.table.is_none() && a.refused.is_none()) {
+        return Ok(());
+    }
+    let Some(s) = chain::last_sift(plans) else { return Ok(()) };
+    // The table's rows (`distinct`), as the prompt has the body quote them.
+    let count = |v: &serde_json::Value| v["distinct"].as_u64().or_else(|| v["kept"].as_u64());
+    let kept = count(&s["chain"]).or_else(|| count(s)).unwrap_or(0);
+    let Some(name) = s["scrapbook"].as_str().filter(|_| kept > 0) else { return Ok(()) };
+    Err(format!(
+        "the `answer` shows no `table`, but sift {name} kept {kept} items. To show them, add \
+`\"table\": {{\"scrapbook\": \"{name}\"}}` to the `answer`; to answer without them, send the same answer again"
+    ))
 }
 
 /// The scrapbooks a table named `named` joins, each once, and a line for
@@ -220,6 +245,36 @@ mod tests {
         assert_eq!(refs, named[..TABLE_REFS_MAX]);
         assert_eq!(refused, ["(table sb:7:9 could not be included: a table names at most 8)"]);
         assert_eq!(table_refs(&plans, &["bad".into()]).0, ["bad"], "kept as written for its refusal");
+    }
+
+    /// #960 item 2: an answer with no table after a sift that kept rows is
+    /// refused once, naming the scrapbook; a chain's `kept` counts, the
+    /// newest sift decides, and a table, a refusal or nothing kept passes.
+    #[test]
+    fn an_answer_without_the_table_of_a_sift_that_kept_rows_is_refused() {
+        use super::super::chain::tests::{params, sift_record};
+        let answer = |extra: serde_json::Value| {
+            let mut a = serde_json::json!({"body": "21 payments"});
+            a.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<NotebookReply>(serde_json::json!({"answer": a})).unwrap()
+        };
+        let plain = answer(serde_json::json!({}));
+        let kept = |n: u64| sift_record(params(0, "x"), serde_json::json!({"scrapbook": "sb:9:3", "kept": n}));
+        let why = table_left_out(&plain, &[kept(21)]).unwrap_err();
+        assert!(why.contains("sb:9:3") && why.contains("kept 21") && why.contains("\"table\""), "{why}");
+        assert_eq!(table_left_out(&plain, &[kept(0)]), Ok(()), "nothing kept: no table to show");
+        assert_eq!(table_left_out(&plain, &[]), Ok(()), "no sift");
+        assert_eq!(table_left_out(&plain, &[kept(21), kept(0)]), Ok(()), "the newest sift decides");
+        let link = sift_record(params(2, "x"), serde_json::json!({"scrapbook": "sb:9:4", "kept": 0, "chain": {"kept": 5}}));
+        assert!(table_left_out(&plain, &[link]).unwrap_err().contains("kept 5"), "a chain's kept");
+        let link = sift_record(params(2, "x"), serde_json::json!({"scrapbook": "sb:9:4", "kept": 4, "distinct": 4, "chain": {"kept": 5, "distinct": 3}}));
+        assert!(table_left_out(&plain, &[link]).unwrap_err().contains("kept 3"), "the chain's distinct: the table's rows");
+        let own = sift_record(params(0, "x"), serde_json::json!({"scrapbook": "sb:9:3", "kept": 8, "distinct": 6}));
+        assert!(table_left_out(&plain, &[own]).unwrap_err().contains("kept 6"), "its own distinct");
+        assert_eq!(table_left_out(&answer(serde_json::json!({"table": {"scrapbook": "sb:9:3"}})), &[kept(21)]), Ok(()));
+        assert_eq!(table_left_out(&answer(serde_json::json!({"refused": {"principle": 1, "reason": "harm"}})), &[kept(21)]), Ok(()), "a refusal");
+        let call: NotebookReply = serde_json::from_value(serde_json::json!({"infeasible": {"reason": "no"}})).unwrap();
+        assert_eq!(table_left_out(&call, &[kept(21)]), Ok(()), "not an answer");
     }
 
     #[test]

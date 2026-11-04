@@ -35,7 +35,8 @@ pub(crate) fn value_at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
 /// (a `"x {id}"` inside other text is left as written). One placeholder may
 /// fan out with a `*` segment (`{attachments.*}`): one read per element of
 /// that list, skipping image names. Any placeholder that does not resolve —
-/// or a second `*` — gives no reads: the item is then decided on itself.
+/// or a second `*` — gives no reads from this template ([`first_reads`] then
+/// tries the next).
 pub(crate) fn expand_reads(t: &ReadTemplate, item: &Value) -> Vec<Value> {
     let mut stars = Vec::new();
     collect_star_paths(&t.parameters, &mut stars);
@@ -56,6 +57,19 @@ pub(crate) fn expand_reads(t: &ReadTemplate, item: &Value) -> Vec<Value> {
         }
         _ => Vec::new(),
     }
+}
+
+/// An item's reads from the first of `reads` that gives it any
+/// ([`expand_reads`]), each with that read's index: an attachment read
+/// yields nothing for a mail with no readable attachment, so the next read
+/// (the message itself) applies. Empty when none does.
+pub(crate) fn first_reads(reads: &[ReadTemplate], item: &Value) -> Vec<(usize, Value)> {
+    reads
+        .iter()
+        .enumerate()
+        .map(|(i, t)| expand_reads(t, item).into_iter().map(|v| (i, v)).collect::<Vec<_>>())
+        .find(|r| !r.is_empty())
+        .unwrap_or_default()
 }
 
 /// Is `name` an image, by its extension (case-insensitive)?

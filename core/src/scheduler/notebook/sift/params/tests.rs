@@ -20,7 +20,7 @@ fn the_specs_example_parses() {
     assert_eq!(p.over, Over::Step(2));
     assert_eq!(p.items.as_deref(), Some("results"));
     assert_eq!(p.from, 0);
-    assert_eq!(p.read.as_ref().unwrap().method, "mail.get_attachment_text");
+    assert_eq!(p.read[0].method, "mail.get_attachment_text");
     assert_eq!(p.fields, vec!["sender", "date", "amount_due"]);
 }
 
@@ -28,7 +28,7 @@ fn the_specs_example_parses() {
 fn over_a_scrapbook_parses_its_ref() {
     let p = parse_params(&json!({"over": {"scrapbook": "sb:301:1"}, "keep_if": "x", "fields": ["a"]})).unwrap();
     assert_eq!(p.over, Over::Scrapbook(ScrapRef { task_id: 301, sift: 1 }));
-    assert!(p.read.is_none());
+    assert!(p.read.is_empty());
     assert_eq!(p.from, 0, "from defaults to the first item");
 }
 
@@ -114,4 +114,21 @@ fn a_copied_continues_or_chain_is_ignored() {
     v["continues"] = json!("sb:9:2");
     v["chain"] = json!({"sifts": 2, "looked_at": 60, "kept": 9});
     assert!(parse_params(&v).is_ok());
+}
+
+/// #960 item 3 (DGX task 315): 37 of 50 items were `unread` — booking
+/// confirmations with no readable attachment. `read` may list up to
+/// `MAX_READS_NAMED` reads, in order; one read or `null` still parses.
+#[test]
+fn read_takes_one_read_or_a_list_of_them() {
+    let with = |read: serde_json::Value| parse_params(&json!({"over": {"step": 2}, "keep_if": "x", "fields": ["a"], "read": read}));
+    let t = |m: &str| json!({"tool": "mail", "method": m, "parameters": {"message_id": "{message_id}"}});
+    let p = with(json!([t("mail.get_attachment_text"), t("mail.get_message")])).unwrap();
+    assert_eq!(p.read.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["mail.get_attachment_text", "mail.get_message"]);
+    assert_eq!(with(t("mail.get_message")).unwrap().read.len(), 1);
+    assert!(with(serde_json::Value::Null).unwrap().read.is_empty());
+    assert!(with(json!([])).unwrap_err().contains("1 to 3 reads, not 0"));
+    assert!(with(json!([t("a"), t("b"), t("c"), t("d")])).unwrap_err().contains("not 4"));
+    let bad = with(json!([t("a"), {"tool": "mail"}])).unwrap_err();
+    assert!(bad.contains("`read` is not usable"), "{bad}");
 }

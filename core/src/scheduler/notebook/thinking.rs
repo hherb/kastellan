@@ -71,9 +71,26 @@ pub(crate) fn rewrite_answer(kind: TurnKind, thinks_by_default: bool) -> bool {
     kind == TurnKind::Routine && !thinks_by_default
 }
 
+/// Is a missing answer table shown back on a turn of `kind` (#960,
+/// `sift::answer::table_left_out`)? Not on the forced-answer turn — the
+/// budget is spent — nor for an answer about to be rewritten anyway. Pure.
+pub(crate) fn shows_back_a_missing_table(kind: TurnKind, thinks_by_default: bool) -> bool {
+    kind != TurnKind::ForcedAnswer && !rewrite_answer(kind, thinks_by_default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_table_is_shown_back_except_on_the_forced_turn_and_before_a_rewrite() {
+        for k in [TurnKind::Plan, TurnKind::Replan, TurnKind::Routine, TurnKind::WriteAnswer] {
+            assert!(shows_back_a_missing_table(k, true), "{k:?}");
+        }
+        assert!(!shows_back_a_missing_table(TurnKind::ForcedAnswer, true));
+        assert!(!shows_back_a_missing_table(TurnKind::Routine, false), "that answer is rewritten");
+        assert!(shows_back_a_missing_table(TurnKind::WriteAnswer, false), "the rewrite itself is checked");
+    }
 
     #[test]
     fn the_forced_answer_wins_then_the_rewrite_then_the_plan_then_a_replan() {

@@ -1,6 +1,6 @@
 //! A sift in the notebook loop (#922, §6.2).
 //!
-//! 1. Check the call: its parameters, its read (K3a), that a sorter exists,
+//! 1. Check the call: its parameters, its reads (K3a), that a sorter exists,
 //!    that `over` names a list and that `from` falls inside it. A refusal is
 //!    a block (`sift_refused: …`): the loop records the step as failed and
 //!    the next turn replans.
@@ -26,11 +26,12 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-use super::params::{check_read, parse_params, Over, ReadTemplate, ScrapRef, SiftParams};
+use super::params::{check_read, parse_params, read_key, Over, ScrapRef, SiftParams};
 use super::sorter::{parse_sort_reply, sorter_message, SortReply, SORTER_ITEM_CAP};
 use super::summary::{summary, Reads, Stop};
-use super::table::Counts;
-use super::template::{expand_reads, items_at};
+use super::table::{distinct_kept, Counts};
+use super::reads::plan_reads;
+use super::template::items_at;
 use super::answer::row_class;
 use super::{is_sift_plan, may_read, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
 use crate::cassandra::review::ChainReviewStage;
@@ -96,15 +97,15 @@ pub(crate) async fn run_sift(
         tracing::warn!(task_id = ctx.task_id, "sift: the sorter is not told today's date (no planner timezone configured)");
     }
     let items: Vec<Value> = over.items.into_iter().skip(p.from).collect();
-    let batch = plan_reads(p.read.as_ref(), &items, cfg.max_reads);
+    let batch = plan_reads(&p.read, &items, cfg.max_reads);
     let scrap = ScrapRef { task_id: ctx.task_id, sift: ctx.plan_count as i32 };
     let class = call.classification.max(ctx.classification_floor).max(over.class);
     audit(r.pool, ACTION_SIFT_STARTED, started_payload(ctx, &scrap, &p, items.len(), batch.reads.len(), meta)).await;
 
     // The reads: one reviewed plan, dispatched past any failed read.
-    let (mut outcomes, mut read_tool) = (Vec::new(), String::new());
-    if let (Some(t), false) = (&p.read, batch.reads.is_empty()) {
-        let plan = reads_plan(call, &p, t, &batch.reads, class);
+    let (mut outcomes, mut read_tools) = (Vec::new(), Vec::new());
+    if !batch.reads.is_empty() {
+        let plan = reads_plan(call, &p, &batch.reads, class);
         let policy = StepPolicy::SiftReads { cap: cfg.max_reads };
         match execute::review_and_dispatch(
             r.pool, r.review, r.dispatcher, ctx, plan, meta, false, None, st, r.outbox, policy,
@@ -121,7 +122,8 @@ pub(crate) async fn run_sift(
         }
         let record = ctx.plans.last().expect("review_and_dispatch pushed the reads' record");
         outcomes = record.outcomes().to_vec();
-        read_tool = record.plan.steps.first().map(|s| s.tool.clone()).unwrap_or_default();
+        // Each read's tool selects its screen's profile: reads may differ.
+        read_tools = record.plan.steps.iter().map(|s| s.tool.clone()).collect();
     }
 
     // The sorter, one item at a time.
@@ -137,10 +139,9 @@ pub(crate) async fn run_sift(
             stopped = Some(Stop::Cancelled);
             break;
         }
-        // A read was asked for but none was made for this item (its
-        // placeholders named no field of it, or a `*` list was empty): say
-        // so, or the planner takes the item as read.
-        let unread_item = usize::from(p.read.is_some() && reads.is_empty());
+        // A read was asked for but none was made for this item (no read in
+        // the list applied to it): say so, or the planner takes it as read.
+        let unread_item = usize::from(!p.read.is_empty() && reads.is_empty());
         let cap = SORTER_ITEM_CAP / (1 + reads.len());
         let (mut views, mut blocks, mut failed_reads) = (Vec::new(), Vec::new(), 0usize);
         let mut view = |tool: &str, v: &Value| match sorter_view(tool, v, cap) {
@@ -148,10 +149,11 @@ pub(crate) async fn run_sift(
             Err(b) => blocks.push(b),
         };
         view(&over.tool, item);
-        for outcome in outcomes.get(reads.clone()).unwrap_or_default() {
-            match outcome {
-                StepOutcome::Ok(v) => view(&read_tool, v),
-                StepOutcome::Err { .. } => failed_reads += 1,
+        for i in reads.clone() {
+            match (outcomes.get(i), read_tools.get(i)) {
+                (Some(StepOutcome::Ok(v)), Some(tool)) => view(tool, v),
+                (Some(StepOutcome::Err { .. }), _) => failed_reads += 1,
+                _ => {}
             }
         }
         let row = |kind, fields| NewRow { kind, source: source_of(item), fields, classification: class.as_pascal_str().into() };
@@ -200,11 +202,17 @@ pub(crate) async fn run_sift(
     }
 
     let remaining = items.len() - counts.looked_at;
-    let reads = Reads { made: batch.reads.len(), unread, cut: batch.cut };
-    let (mut summary, blocks) = summary(&scrap, &p, &counts, reads, &rows, remaining, stopped);
+    // The items looked at are the batch's first `looked_at`.
+    let mut per_read = vec![0usize; p.read.len()];
+    for range in batch.per_item.iter().take(counts.looked_at).filter(|r| !r.is_empty()) {
+        per_read[batch.reads[range.start].0] += 1;
+    }
+    let reads = Reads { made: batch.reads.len(), unread, cut: batch.cut, per_read };
+    let (mut summary, blocks) = summary(&scrap, &p, &counts, &reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.
     if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {
-        summary["chain"] = super::chain::totals(&ctx.plans, &prev, counts.looked_at, counts.kept);
+        let distinct = chain_distinct(r.pool, ctx, &prev, &rows).await;
+        summary["chain"] = super::chain::totals(&ctx.plans, &prev, counts.looked_at, counts.kept, distinct);
         summary["continues"] = json!(prev);
     }
     audit_blocks(r.pool, ctx.task_id, call.step, "sift_summary", &blocks).await;
@@ -212,7 +220,7 @@ pub(crate) async fn run_sift(
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "looked_at": counts.looked_at, "kept": counts.kept, "withheld": counts.withheld,
         "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
-        "unread": reads.unread, "reads_cut": reads.cut, "remaining": remaining,
+        "unread": reads.unread, "reads_cut": reads.cut, "items_per_read": reads.per_read, "remaining": remaining,
         "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls,
         "ms": started.elapsed().as_millis() as u64,
     });
@@ -230,6 +238,28 @@ pub(crate) async fn run_sift(
     // has gathered something only if it kept a row.
     st.gathered |= counts.kept > 0;
     Ok(Executed::Dispatched)
+}
+
+/// The chain's table rows ([`distinct_kept`]): every earlier link's kept rows
+/// — read back, since one booking emailed twice can sit in two links — and
+/// this sift's own. `None` if a link's rows cannot be read.
+async fn chain_distinct(pool: &PgPool, ctx: &TaskContext, prev: &str, own: &[NewRow]) -> Option<usize> {
+    let mut fields: Vec<Value> = Vec::new();
+    for name in super::chain::expand(&ctx.plans, prev) {
+        let Ok(r) = ScrapRef::parse(&name) else {
+            tracing::warn!(task_id = ctx.task_id, scrapbook = %name, "sift: a chain link's name does not parse; no `distinct`");
+            return None;
+        };
+        match scrapbook::rows(pool, r.task_id, r.sift).await {
+            Ok(rows) => fields.extend(rows.into_iter().filter(|row| row.kind == RowKind::Kept).map(|row| row.fields)),
+            Err(e) => {
+                tracing::warn!(task_id = ctx.task_id, scrapbook = %r, error = %e, "sift: a chain link's rows not read; no `distinct`");
+                return None;
+            }
+        }
+    }
+    let own = own.iter().filter(|row| row.kind == RowKind::Kept).map(|row| &row.fields);
+    Some(distinct_kept(fields.iter().chain(own)))
 }
 
 /// The list a sift goes through: the items, the tool whose output they are
@@ -252,7 +282,7 @@ async fn check<'a>(
     }
     let sorter = r.nb.sorter().ok_or("this planner has no sorter, so it cannot sift")?;
     let p = parse_params(&call.parameters)?;
-    if let Some(t) = &p.read {
+    for t in &p.read {
         check_read(t, cfg)?;
     }
     let over = resolve_over(r.pool, ctx, &p).await?;
@@ -309,50 +339,15 @@ async fn resolve_over(pool: &PgPool, ctx: &TaskContext, p: &SiftParams) -> Resul
     }
 }
 
-/// The reads to make, and which of them belong to each item taken.
-#[derive(Debug, PartialEq)]
-struct Batch {
-    reads: Vec<Value>,
-    /// Item `i`'s reads are `reads[per_item[i]]`. One entry per item taken.
-    per_item: Vec<std::ops::Range<usize>>,
-    /// Reads of the first item dropped to fit `cap` (see [`plan_reads`]).
-    cut: usize,
-}
-
-/// Take items in list order while their reads fit in `cap`, and never more
-/// than `cap` items: an item with no read still costs a sorter call. An
-/// item's reads stay together. A first item with more reads than `cap` alone
-/// keeps its first `cap` (the rest counted in `cut`), so a sift always makes
-/// progress. Pure.
-fn plan_reads(read: Option<&ReadTemplate>, items: &[Value], cap: usize) -> Batch {
-    let mut batch = Batch { reads: Vec::new(), per_item: Vec::new(), cut: 0 };
-    for item in items {
-        if batch.per_item.len() >= cap.max(1) {
-            break;
-        }
-        let mut reads = read.map(|t| expand_reads(t, item)).unwrap_or_default();
-        if batch.reads.len() + reads.len() > cap {
-            if !batch.per_item.is_empty() {
-                break;
-            }
-            batch.cut = reads.len() - cap;
-            reads.truncate(cap);
-        }
-        let start = batch.reads.len();
-        batch.reads.extend(reads);
-        batch.per_item.push(start..batch.reads.len());
-    }
-    batch
-}
-
-/// The reads as one plan. Each step carries the sift's class, so the
-/// answer's ceiling covers what they read (C1, K7).
-fn reads_plan(call: &CallSpec, p: &SiftParams, t: &ReadTemplate, reads: &[Value], class: DataClass) -> Plan {
+/// The reads as one plan, each made with the sift's read it names. Each
+/// step carries the sift's class, so the answer's ceiling covers what they
+/// read (C1, K7).
+fn reads_plan(call: &CallSpec, p: &SiftParams, reads: &[(usize, Value)], class: DataClass) -> Plan {
     let steps = reads
         .iter()
-        .map(|parameters| PlannedStep {
-            tool: t.tool.clone(),
-            method: t.method.clone(),
+        .map(|(t, parameters)| PlannedStep {
+            tool: p.read[*t].tool.clone(),
+            method: p.read[*t].method.clone(),
             parameters: parameters.clone(),
             returns: "one candidate's text, for the sift's decision".into(),
             done_when: "read".into(),
@@ -433,7 +428,7 @@ fn started_payload(ctx: &TaskContext, scrap: &ScrapRef, p: &SiftParams, items: u
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "criterion_sha256": format!("{:x}", Sha256::digest(p.keep_if.as_bytes())),
         "items": items, "reads": reads,
-        "read_tool": p.read.as_ref().map(|t| &t.tool), "read_method": p.read.as_ref().map(|t| &t.method),
+        "read_methods": p.read.iter().map(|t| read_key(&t.tool, &t.method)).collect::<Vec<_>>(),
     });
     if reads == 0 {
         v["latency_ms"] = json!(meta.latency_ms);

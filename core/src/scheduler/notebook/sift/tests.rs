@@ -44,12 +44,16 @@ fn no() -> Value {
     json!({"keep": false})
 }
 
-/// The three turns of a simple sift: search, sift, answer.
+/// The three turns of a simple sift: search, sift, answer — and the same
+/// answer again, for when the sift kept rows and the answer is shown back
+/// for naming no table (#960).
 fn three_turns(hit_ids: &[&str], read: Option<(&str, &str)>) -> Vec<Value> {
+    let answer = json!({"tick": tick(2, "sorted"), "answer": {"body": "done"}});
     vec![
         json!({"steps": steps(&[1, 2]), "call": search(1, hits(hit_ids))}),
         json!({"tick": tick(1, "listed"), "call": sift(2, read)}),
-        json!({"tick": tick(2, "sorted"), "answer": {"body": "done"}}),
+        answer.clone(),
+        answer,
     ]
 }
 
@@ -103,6 +107,10 @@ async fn the_sift_loop() {
     an_ordinary_plan_stops_at_its_first_failed_step(&pool).await;
     a_table_naming_the_last_of_a_chain_shows_every_link(&pool).await;
     a_sift_from_past_the_end_is_refused_before_sorting(&pool).await;
+    a_row_kept_in_two_links_counts_once_in_distinct(&pool).await;
+    an_answer_without_the_table_is_shown_back_once(&pool).await;
+    a_table_with_no_order_named_is_newest_first(&pool).await;
+    an_item_with_no_attachment_takes_the_next_read(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {
@@ -153,13 +161,15 @@ async fn an_injected_item_is_withheld_and_never_sorted(pool: &sqlx::PgPool) {
         json!({"steps": steps(&[1, 2]), "call": search(1, injected)}),
         json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
         json!({"tick": tick(2, "sorted"), "answer": {"body": "done"}}),
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "done"}}),
     ])
     .sorting(&[keep(2)]);
     let r = run(pool, &script, new_task(pool, 5).await).await;
     assert_eq!(script.sorted.lock().unwrap().len(), 1, "the injected item never reached the sorter");
     let got = rows(pool, r.task_id, 2).await;
     assert_eq!(got.iter().map(|g| g.kind).collect::<Vec<_>>(), [RowKind::Withheld, RowKind::Kept]);
-    assert_eq!(summary_seen(&script, 2)["withheld"], json!(1));
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["withheld"].clone(), seen["distinct"].clone()), (json!(1), json!(1)), "a withheld row is no table row: {seen}");
     let parts: Vec<Value> = blocked_parts(pool, r.task_id).await;
     assert!(parts.contains(&json!("sift_item")), "the sift's own block has its audit row: {parts:?}");
 }
@@ -211,15 +221,23 @@ async fn a_sift_over_a_non_list_is_refused_in_words(pool: &sqlx::PgPool) {
 }
 
 async fn a_read_off_the_allowlist_is_refused_before_review(pool: &sqlx::PgPool) {
-    let script = Script::new(&[
-        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1"]))}),
-        json!({"tick": tick(1, "listed"), "call": sift(2, Some(("mail", "mail.delete")))}),
-        json!({"infeasible": {"reason": "refused"}}),
+    // Alone, or second in a list after an allowed read (review finding).
+    let mut second = sift(2, None);
+    second["parameters"]["read"] = json!([
+        {"tool": "mail", "method": "mail.read", "parameters": {"id": "{id}"}},
+        {"tool": "mail", "method": "mail.delete", "parameters": {"id": "{id}"}},
     ]);
-    let r = run(pool, &script, new_task(pool, 5).await).await;
-    let reviewed = r.review.plans.lock().unwrap().clone();
-    assert!(!reviewed.iter().flatten().any(|m| m == "mail.delete"), "the reviewer never saw the read: {reviewed:?}");
-    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search"]);
+    for call in [sift(2, Some(("mail", "mail.delete"))), second] {
+        let script = Script::new(&[
+            json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1"]))}),
+            json!({"tick": tick(1, "listed"), "call": call}),
+            json!({"infeasible": {"reason": "refused"}}),
+        ]);
+        let r = run(pool, &script, new_task(pool, 5).await).await;
+        let reviewed = r.review.plans.lock().unwrap().clone();
+        assert!(!reviewed.iter().flatten().any(|m| m == "mail.delete"), "the reviewer never saw the read: {reviewed:?}");
+        assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search"]);
+    }
 }
 
 async fn an_escalated_sift_resumes_without_redispatching(pool: &sqlx::PgPool) {
@@ -244,6 +262,8 @@ async fn an_escalated_sift_resumes_without_redispatching(pool: &sqlx::PgPool) {
 
     let again = Script::new(&[
         json!({"call": sift(2, Some(("esc", "esc.read")))}),
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "done"}}),
+        // Shown back once for naming no table (#960): the same answer again.
         json!({"tick": tick(2, "sorted"), "answer": {"body": "done"}}),
     ])
     .sorting(&[keep(1), no()]);
@@ -328,6 +348,7 @@ async fn a_follow_up_sifts_an_earlier_scrapbook_without_searching(pool: &sqlx::P
     ctx.conversation_task_ids = Some(vec![earlier]);
     let script = Script::new(&[
         json!({"steps": steps(&[1]), "call": over_scrapbook(1, &format!("sb:{earlier}:2"))}),
+        json!({"tick": tick(1, "sorted"), "answer": {"body": "done"}}),
         json!({"tick": tick(1, "sorted"), "answer": {"body": "done"}}),
     ])
     .sorting(&[no(), keep(10), keep(20)]);

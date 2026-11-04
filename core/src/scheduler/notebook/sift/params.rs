@@ -13,6 +13,10 @@ pub(crate) const MAX_FIELDS: usize = 16;
 /// The most characters of `keep_if`: it is repeated in every sorter message.
 pub(crate) const KEEP_IF_MAX_CHARS: usize = 1024;
 
+/// The most reads one sift may name: each item takes the first that applies
+/// to it (an attachment, else the message itself, DGX task 315).
+pub(crate) const MAX_READS_NAMED: usize = 3;
+
 /// The most characters of one field name: the turn record keeps names
 /// whole (`conversation::record`), so a longer one is refused here, not cut.
 pub(crate) const FIELD_NAME_MAX_CHARS: usize = crate::scheduler::conversation::record::FIELD_NAME_MAX_CHARS;
@@ -40,7 +44,9 @@ pub(crate) struct SiftParams {
     pub over: Over,
     pub items: Option<String>,
     pub from: usize,
-    pub read: Option<ReadTemplate>,
+    /// The reads, in order: each item takes the first that gives it any
+    /// read ([`super::template::first_reads`]). Empty: decided on the hit.
+    pub read: Vec<ReadTemplate>,
     pub keep_if: String,
     pub fields: Vec<String>,
 }
@@ -96,8 +102,9 @@ struct RawParams {
     items: Option<String>,
     #[serde(default)]
     from: usize,
+    /// One read, or a list of them ([`parse_read`]).
     #[serde(default)]
-    read: Option<ReadTemplate>,
+    read: Option<serde_json::Value>,
     keep_if: String,
     fields: Vec<String>,
     /// A summary's `continues` and `chain`, copied back by the model:
@@ -140,7 +147,26 @@ pub(crate) fn parse_params(v: &serde_json::Value) -> Result<SiftParams, String> 
         RawOver::Step(n) => Over::Step(n),
         RawOver::Scrapbook(r) => Over::Scrapbook(ScrapRef::parse(&r)?),
     };
-    Ok(SiftParams { over, items: raw.items, from: raw.from, read: raw.read, keep_if: raw.keep_if, fields: raw.fields })
+    let read = parse_read(raw.read)?;
+    Ok(SiftParams { over, items: raw.items, from: raw.from, read, keep_if: raw.keep_if, fields: raw.fields })
+}
+
+/// `read` as written: absent (or `null`), one read, or a list of 1 to
+/// [`MAX_READS_NAMED`] (models write both, as for an answer's refs).
+fn parse_read(v: Option<serde_json::Value>) -> Result<Vec<ReadTemplate>, String> {
+    let one = |v: serde_json::Value| {
+        serde_json::from_value::<ReadTemplate>(v).map_err(|e| format!("the sift's `read` is not usable: {e}"))
+    };
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(serde_json::Value::Array(list)) => {
+            if list.is_empty() || list.len() > MAX_READS_NAMED {
+                return Err(format!("`read` must list 1 to {MAX_READS_NAMED} reads, not {}", list.len()));
+            }
+            list.into_iter().map(one).collect()
+        }
+        Some(v) => Ok(vec![one(v)?]),
+    }
 }
 
 /// A read's name as the allowlist spells it, `tool.method`: a worker's

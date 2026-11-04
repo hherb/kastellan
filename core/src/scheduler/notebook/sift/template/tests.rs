@@ -88,3 +88,19 @@ fn image_names_are_recognised_case_insensitively() {
         assert!(!is_image(name), "{name}");
     }
 }
+
+/// #960 item 3: a mail with no readable attachment (none, or images only)
+/// takes the next read, the message itself; one with a PDF takes the first.
+#[test]
+fn an_item_takes_the_first_read_that_applies_to_it() {
+    let attachments = read(json!({"message_id": "{message_id}", "filename": "{attachments.*}"}));
+    let message = ReadTemplate { tool: "mail".into(), method: "mail.get_message".into(), parameters: json!({"message_id": "{message_id}"}) };
+    let both = [attachments, message];
+    let pdf = json!({"message_id": "m1", "attachments": ["a.pdf", "b.png"]});
+    assert_eq!(first_reads(&both, &pdf), [(0, json!({"message_id": "m1", "filename": "a.pdf"}))]);
+    let photo = json!({"message_id": "m2", "attachments": ["b.png"]});
+    assert_eq!(first_reads(&both, &photo), [(1, json!({"message_id": "m2"}))]);
+    assert_eq!(first_reads(&both, &json!({"message_id": "m3", "attachments": []})), [(1, json!({"message_id": "m3"}))]);
+    assert!(first_reads(&both, &json!({"id": "x"})).is_empty(), "no read applies");
+    assert!(first_reads(&[], &pdf).is_empty());
+}

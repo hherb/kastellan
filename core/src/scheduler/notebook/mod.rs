@@ -20,6 +20,7 @@
 //!
 //! Design: `docs/superpowers/specs/2026-11-01-task-notebook-design.md`.
 
+pub(crate) mod ask;
 pub(crate) mod audit;
 pub mod formulator;
 pub(crate) mod render;
