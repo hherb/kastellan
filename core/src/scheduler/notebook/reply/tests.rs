@@ -86,6 +86,14 @@ fn a_replan_cannot_reopen_a_done_step() {
     let err = check(json!({"steps": [step(1), step(2)], "call": call(1)}), &state).unwrap_err();
     // #964: the reason says how to repeat it — a new id, past every listed one.
     assert!(err.contains("not a pending step: it is done") && err.contains("under a new id (e.g. 3)"), "{err}");
+    // The id offered is past every listed one, not the count of steps.
+    let gapped = fold(&[
+        entry(1, EntryKind::Steps, json!({"steps": [step(1), step(5)]})),
+        entry(2, EntryKind::Tick, json!({"step": 1, "note": "n", "summary": "s", "findings": [], "classification": "Public"})),
+    ])
+    .unwrap();
+    let err = check(json!({"call": call(1)}), &gapped).unwrap_err();
+    assert!(err.contains("(e.g. 6)"), "{err}");
 }
 
 #[test]

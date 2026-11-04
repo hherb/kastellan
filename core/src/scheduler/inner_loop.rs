@@ -349,7 +349,7 @@ pub trait StepDispatcher: Send + Sync {
 
     /// The whole result stashed under `r` for `task_id` in this dispatcher's
     /// handoff cache, for a sift over a step whose result was stashed (#964).
-    /// Default `None`; only the production dispatcher stashes.
+    /// Default `None`, for a dispatcher without a handoff cache.
     fn stashed(&self, _task_id: i64, _r: &crate::handoff::HandoffRef) -> Option<serde_json::Value> {
         None
     }

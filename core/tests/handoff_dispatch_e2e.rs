@@ -112,6 +112,19 @@ async fn fetch_handoff_intercept_accepts_the_namespaced_method() {
     }
 }
 
+/// #964: a sift over a stashed step reads the whole result back through
+/// `StepDispatcher::stashed`. Without this override the trait default
+/// (`None`) would leave every real stashed sift "no longer held".
+#[tokio::test]
+async fn stashed_reads_the_whole_result_back_for_its_task_only() {
+    let cache = Arc::new(HandoffCache::new());
+    let big = serde_json::json!({"results": ["needle ".repeat(20_000)]});
+    let stash = cache.stash_if_oversized(7, &big, DEFAULT_RESULT_BYTE_CAP).expect("stashed");
+    let dispatcher = dispatcher_with(cache);
+    assert_eq!(dispatcher.stashed(7, &stash.handoff_ref), Some(big));
+    assert_eq!(dispatcher.stashed(8, &stash.handoff_ref), None, "another task");
+}
+
 /// **The injection screen is wired into the intercept, and a Block
 /// actually reaches the planner as a placeholder.**
 ///

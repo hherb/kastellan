@@ -122,7 +122,7 @@ pub(super) async fn an_answer_without_the_table_is_shown_back_once(pool: &sqlx::
 
 /// #960 (DGX tasks 335, 342): the forced-answer turn is never shown back,
 /// and twice it answered with no table after a sift that kept rows. On that
-/// turn code attaches the newest sift's table: no re-ask, no model call.
+/// turn code attaches the newest sift's table: no re-ask, no extra model call.
 pub(super) async fn a_forced_answer_without_the_table_gets_it_by_code(pool: &sqlx::PgPool) {
     // max_plans 1 → a cap of 2 turns (search, sift): the third is forced.
     let script = Script::new(&[
@@ -135,7 +135,9 @@ pub(super) async fn a_forced_answer_without_the_table_gets_it_by_code(pool: &sql
     assert!(script.reasks.lock().unwrap().is_empty(), "the forced turn is not shown back");
     let b = body(&r.result);
     assert!(b.starts_with("Two invoices.\n\n| amount | source |") && b.contains("| 20 | m2 |"), "{b}");
-    assert_eq!(last_ceiling(pool, r.task_id).await, json!("Personal"), "the attached rows' class reaches the ceiling");
+    // The steps are Personal too, so this pins the ceiling, not the rows' share
+    // in it (the `Secret` table case in sift/tests.rs pins that).
+    assert_eq!(last_ceiling(pool, r.task_id).await, json!("Personal"), "the answer's ceiling");
 }
 
 /// #964 (DGX task 337): a 68 KB search was handoff-stashed, so its step's
@@ -157,6 +159,39 @@ pub(super) async fn a_sift_over_a_stashed_search_reads_the_stash(pool: &sqlx::Pg
     let seen = summary_seen(&script, 2);
     assert_eq!((seen["looked_at"].clone(), seen["kept"].clone()), (json!(2), json!(1)), "{seen}");
     assert_eq!(rows(pool, r.task_id, 2).await.len(), 1);
+}
+
+/// #964 review: a stash is purged whenever the loop returns, a suspend too,
+/// so a resumed sift over a stashed step finds it gone. The sift says how
+/// to get it back — the same call under a new id — and the repeat guard
+/// lets that call through, its result no longer to hand.
+pub(super) async fn a_sift_over_a_purged_stash_says_how_and_the_call_is_made_again(pool: &sqlx::PgPool) {
+    let stashed = |step: u32| {
+        let mut c = search(step, hits(&["m1", "m2"]));
+        c["parameters"]["stash"] = json!(true);
+        c
+    };
+    let purge = json!({"step": 2, "tool": "mail", "method": "mail.purge", "parameters": {"purge": true},
+                       "returns": "r", "done_when": "d", "classification": "Personal"});
+    let mut again = sift(5, None);
+    again["parameters"]["over"] = json!({"step": 4});
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": stashed(1)}),
+        json!({"tick": tick(1, "listed"), "call": purge}),
+        json!({"tick": tick(2, "purged"), "call": sift(3, None)}),
+        json!({"steps": steps(&[1, 2, 4, 5]), "call": stashed(4)}),
+        json!({"tick": tick(4, "listed"), "call": again}),
+        json!({"tick": tick(5, "sorted"), "infeasible": {"reason": "seen"}}),
+    ])
+    .sorting(&[keep(10), no()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let v: Value = serde_json::from_str(&script.messages()[3]).unwrap();
+    let blocks = v["blocks"].to_string();
+    assert!(blocks.contains("no longer held") && blocks.contains("under a new id"), "{blocks}");
+    let searches = r.tools.dispatched.lock().unwrap().iter().filter(|m| *m == "mail.search").count();
+    assert_eq!(searches, 2, "the same search, made again: not a repeat");
+    // The sift over the new step read the stash made again: one of two kept.
+    assert_eq!(rows(pool, r.task_id, 5).await.len(), 1);
 }
 
 /// #960 item 1 (DGX tasks 308, 309, 316): a table named with no
@@ -186,6 +221,8 @@ pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgP
             Some("date") => assert!(old < mid && mid < new, "the order named: {b}"),
             _ => assert!(new < mid && mid < old, "{named:?}: newest first: {b}"),
         }
+        let said = b.contains("the order named matches no column");
+        assert_eq!(said, named == Some("Datum"), "a dropped order is said: {b}");
     }
 }
 

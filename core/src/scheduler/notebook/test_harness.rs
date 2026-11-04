@@ -200,8 +200,9 @@ impl ReviewStage for RecordingReview {
 /// A step whose method is `fail` fails; a call with a `hits` parameter
 /// returns them as `{"results": hits}` (a search, for `sift`) — stashed in
 /// a real handoff cache, the planner seeing its placeholder, when the call
-/// also says `"stash": true`; a read of
-/// `{"id": "bad"}` fails; every other returns its own name.
+/// also says `"stash": true`; a call with `"purge": true` drops the task's
+/// stash, as a suspend does; a read of `{"id": "bad"}` fails; every other
+/// returns its own name.
 #[derive(Default)]
 pub(crate) struct Tools {
     pub(crate) dispatched: Mutex<Vec<String>>,
@@ -224,6 +225,9 @@ impl StepDispatcher for Tools {
         self.dispatched.lock().unwrap().push(step.method.clone());
         if step.method == "fail" || step.parameters.get("id") == Some(&json!("bad")) {
             StepOutcome::Err { code: "POLICY_DENIED".into(), detail: "not allowed".into() }
+        } else if step.parameters.get("purge") == Some(&json!(true)) {
+            self.handoff.purge_task(task_id);
+            StepOutcome::Ok(json!({"result": "purged"}))
         } else if let Some(hits) = step.parameters.get("hits") {
             let result = json!({"results": hits});
             match step.parameters.get("stash") == Some(&json!(true)) {

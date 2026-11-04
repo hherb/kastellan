@@ -69,8 +69,14 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     if included {
         out.push_str("\n\n");
         // The model names an order only sometimes (#960), and sometimes one
-        // that names no field (#965): default to newest first.
-        let order = t.order_by.clone().filter(|o| orders_anything(o, &rows)).or_else(|| default_order(&columns, &rows));
+        // that names no field (#965): the default order (newest first, when
+        // dated) — said under the table, as a `limit` then cuts other rows.
+        let asked = t.order_by.clone().filter(|o| orders_anything(o, &rows));
+        if t.order_by.is_some() && asked.is_none() && !rows.is_empty() {
+            tracing::info!(task_id = ctx.task_id, "answer table: order_by names no column; default order used");
+            refused.push("(the order named matches no column: the table is in its default order)".into());
+        }
+        let order = asked.or_else(|| default_order(&columns, &rows));
         let (table, blocks) = render_table(&rows, &columns, order.as_ref(), t.limit, &counts);
         out.push_str(&table);
         // As for any screened model text: the withheld cell is otherwise
@@ -106,11 +112,12 @@ pub(crate) fn table_left_out(reply: &NotebookReply, plans: &[PlanRecord]) -> Res
 }
 
 /// #960 (DGX tasks 335, 342): the forced-answer turn (a planner timeout, the
-/// turn cap, the fast lane's ceiling) is never shown back — its deadline is
+/// turn cap, the fast lane's ceiling) is never shown back — its budget is
 /// spent — and twice it answered with no table after a sift that kept rows.
 /// On that turn the table is attached by code instead: the newest sift's
-/// scrapbook, with the default columns and order. `None` when the answer
-/// has a table, is a refusal, or no sift kept anything. Pure.
+/// scrapbook (and the chain it ends), with the default columns and order.
+/// `None` when the answer has a table, is a refusal, or the newest sift kept
+/// nothing. Pure.
 pub(crate) fn forced_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<TableSpec> {
     let (name, _) = missing_table(reply, plans)?;
     Some(TableSpec { scrapbook: Refs::One(name), columns: None, order_by: None, limit: None })
@@ -300,6 +307,7 @@ mod tests {
         assert_eq!((spec.scrapbook.refs(), spec.columns, spec.order_by, spec.limit), (&["sb:9:3".to_string()][..], None, None, None));
         assert_eq!(forced_table(&plain, &[kept(0)]), None, "nothing kept");
         assert_eq!(forced_table(&answer(serde_json::json!({"table": {"scrapbook": "sb:9:1"}})), &[kept(21)]), None, "its own table");
+        assert_eq!(forced_table(&answer(serde_json::json!({"refused": {"principle": 1, "reason": "harm"}})), &[kept(21)]), None, "a refusal");
     }
 
     #[test]

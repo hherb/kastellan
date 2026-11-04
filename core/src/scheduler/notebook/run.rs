@@ -14,8 +14,8 @@
 //!    usable notebook reply is shown back once (#945), a timeout or a reply
 //!    cut off at `max_tokens` after gathering spends the forced-answer turn;
 //!    and an answer with no table after a sift that kept rows is shown back
-//!    once too (#960) — not on the forced-answer turn, where code attaches
-//!    the newest sift's table instead, and kept if that re-ask fails;
+//!    once too (#960), and kept if that re-ask fails — except on the
+//!    forced-answer turn, where code attaches the newest sift's table instead;
 //! 4. write the reply's `tick` and `steps` entries;
 //! 5. set aside, unreviewed, an answer a non-thinking turn wrote (the next
 //!    turn rewrites it, thinking) and a call this task already made
@@ -233,7 +233,8 @@ pub(crate) async fn run_notebook_to_terminal(
                     }
                     s
                 });
-                if let Some(s) = repeated.filter(|s| repeat::already_made(&ctx.plans, s)) {
+                let held = |h: &crate::handoff::HandoffRef| dispatcher.stashed(ctx.task_id, h).is_some();
+                if let Some(s) = repeated.filter(|s| repeat::already_made(&ctx.plans, s, held)) {
                     tracing::info!(task_id = ctx.task_id, method = %s.method, "notebook: repeated call not dispatched");
                     audit_discarded_turn(pool, &ctx, "repeated_call", Some(&s.method), &meta).await;
                     ctx.blocks.push(repeat::repeated_call_reason(&s.method));
@@ -247,8 +248,11 @@ pub(crate) async fn run_notebook_to_terminal(
                 // rows' class joins the ceiling (C1, K7).
                 let mut touched = touched(&after, &ctx.plans);
                 // The forced answer is never shown back for a missing table
-                // (its deadline is spent): code attaches it (#960).
+                // (its budget is spent): code attaches it (#960).
                 let forced = (kind == TurnKind::ForcedAnswer).then(|| sift::answer::forced_table(&reply, &ctx.plans)).flatten();
+                if let Some(t) = &forced {
+                    tracing::info!(task_id = ctx.task_id, scrapbook = ?t.scrapbook.refs(), "notebook: forced answer names no table; attached by code");
+                }
                 let body = match a.table.as_ref().or(forced.as_ref()) {
                     Some(t) => {
                         let (body, class) = sift::answer::with_table(pool, &ctx, &a.body, t).await;

@@ -59,11 +59,12 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 ### This session (2026-11-04, latest): #963 merged + deployed; PR #966 (#960's forced-answer table, #964, #965 items 1/5), branch-deployed, measured 343–349 and 350–356
 
 - **PR #966** (not merged at session end):
-  - A **forced answer** with no table after a sift that kept rows gets the newest sift's table by code (`sift::answer::forced_table`, in `run.rs`'s answer branch). There is no model call.
+  - A **forced answer** with no table after a sift that kept rows gets the newest sift's table by code (`sift::answer::forced_table`, in `run.rs`'s answer branch, logged `forced answer names no table; attached by code`). No extra model call.
   - A sift over a **handoff-stashed** step result reads the stash back whole (`handoff::placeholder_ref` + `HandoffCache::whole`, `StepDispatcher::stashed`). Each item is still screened (K4) and carries the step's class.
   - `validate` refuses a call on a **done** step with the fix spelled out: list it under a new id (`reply::not_pending`).
-  - #965 item 1: a column or `order_by` differing from its field only in case finds the field, and an `order_by` naming no field falls back to newest first (`table::orders_anything`).
+  - #965 item 1: a column or `order_by` differing from its field only in case finds the field (an exact name still wins), and an `order_by` naming no field falls back to the default order (newest first when dated), **said under the table** since a `limit` then cuts other rows (`table::orders_anything`).
   - #965 item 5: the forced-answer loop test.
+  - **Review fixes:** the stash is purged whenever the loop returns — a **suspend** too — so a resumed sift over a stashed step found it gone and was told to "run the step again", which the repeat guard then refused. Now `repeat::already_made` does not count a placeholder whose stash is no longer held (`StepDispatcher::stashed`), and the sift's refusal says "list the same call under a new id, call it, and sift `over` that id" (loop test `a_sift_over_a_purged_stash_says_how_and_the_call_is_made_again`; mutation-checked). The production `stashed` override is pinned in `core/tests/handoff_dispatch_e2e.rs`. Filed from the review: a sift's own **read** over 64 KiB reaches the sorter as its placeholder head ([#968](https://github.com/hherb/kastellan/issues/968)).
 - **Measured** ([log #12/#13](../notes/notebook-experiments.md)):
   - **All 3 forced answers had their table** (#10/#11: 0 of 2).
   - Neither #964 path came up live: no search was stashed, and no reply re-called a done step.
@@ -247,7 +248,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 1. **#922 next: merge #966, then a plain `upgrade_from_git.sh`** (with the HTTPS override in the header; no
    migration). Then the forced answer's own markdown table shown above the attached one (log #13), #965's other
-   items, #967, then slice 2 (`kastellan-cli session`). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
+   items, #967, #968, then slice 2 (`kastellan-cli session`). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
    **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to
    `api_minor` 6.

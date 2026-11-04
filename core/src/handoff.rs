@@ -112,7 +112,8 @@ pub fn build_handoff_placeholder(
 
 /// The ref a stash placeholder ([`build_handoff_placeholder`]) names: `Some`
 /// only for an object with `truncated: true` and a well-formed `handoff_ref`.
-/// Pure.
+/// It goes by shape, not provenance: the ref is only ever looked up in the
+/// same task's stash. Pure.
 pub fn placeholder_ref(value: &serde_json::Value) -> Option<HandoffRef> {
     if value.get("truncated") != Some(&serde_json::Value::Bool(true)) {
         return None;
@@ -248,7 +249,9 @@ impl HandoffCache {
     pub fn whole(&self, task_id: i64, r: &HandoffRef) -> Option<serde_json::Value> {
         let slice = self.get_slice(task_id, r, 0, usize::MAX)?;
         // Always JSON: `stash_if_oversized` stores the serialized result.
-        serde_json::from_slice(&slice.bytes).ok()
+        serde_json::from_slice(&slice.bytes)
+            .inspect_err(|e| tracing::error!(task_id, handoff_ref = r.as_str(), error = %e, "handoff stash is not JSON"))
+            .ok()
     }
 
     /// Drop every entry for `task_id`. Called at task terminal.

@@ -305,8 +305,9 @@ Cell format: `turns / seconds`, then the outcome.
     5 rows, "5 kept of 20 looked at".
   - Q7 4 / 543, a written answer (not forced), table of 14 rows, chain 50 → 42 → 14.
   - Total 2436 s (#10: 2299, #11: 2929). No reply re-called a done step.
-- **Learned:** the one forced answer in this run kept its table. Neither #964 path came up live; both are covered
-  only by the loop tests in `sift/tests/measure_findings.rs`.
+- **Learned:** the one forced answer in this run kept its table. Neither #964 path came up live: the stash path is
+  covered by loop tests in `sift/tests/measure_findings.rs`, the done-step refusal by unit tests in
+  `notebook/reply/tests.rs`.
 - **Reproduce:** `~/deploy-branch.sh fix/960-forced-table-964` (6aeb89bf), then `bash ~/requery7.sh`;
   `bash ~/q960.sh 343 349`. A forced turn shows as `llm_usage.reasoning_chars` 0 on its `plan.formulate` row.
 

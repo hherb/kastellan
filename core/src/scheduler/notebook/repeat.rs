@@ -12,10 +12,15 @@
 //! "Identical" is the same tool, method and parameters with every scalar
 //! read as text, because the model writes a message id as `"38996"` one turn
 //! and `38996` the next. A new page (`offset`) is a different call.
+//!
+//! A call whose result was handoff-stashed and is no longer held (purged at
+//! a suspend, or evicted) is not a repeat: its result is gone, so making it
+//! again is the only way back to it (#964).
 
 use serde_json::Value;
 
 use crate::cassandra::types::PlannedStep;
+use crate::handoff::{self, HandoffRef};
 use crate::scheduler::inner_loop::{PlanRecord, StepOutcome};
 
 /// The block reason shown to the model for a repeated call.
@@ -26,8 +31,9 @@ pub(crate) fn repeated_call_reason(method: &str) -> String {
     )
 }
 
-/// Was `step` already dispatched in this task, and did it succeed? Pure.
-pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep) -> bool {
+/// Was `step` already dispatched in this task, and did it succeed with a
+/// result still to hand? `held` says whether a stash is still held. Pure.
+pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep, held: impl Fn(&HandoffRef) -> bool) -> bool {
     let key = call_key(step);
     // A sift's reads reached the planner only as the sift's counts, so they
     // do not count: reading one of those items is a first read.
@@ -35,7 +41,10 @@ pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep) -> bool {
         .iter()
         .filter(|r| !r.plan.decision.starts_with(crate::scheduler::notebook::sift::SIFT_READS_DECISION))
         .flat_map(|r| r.plan.steps.iter().zip(r.outcomes()))
-        .any(|(s, o)| matches!(o, StepOutcome::Ok(_)) && call_key(s) == key)
+        .any(|(s, o)| match o {
+            StepOutcome::Ok(v) => call_key(s) == key && handoff::placeholder_ref(v).map_or(true, |h| held(&h)),
+            _ => false,
+        })
 }
 
 fn call_key(step: &PlannedStep) -> (String, String, Value) {
@@ -59,6 +68,10 @@ mod tests {
     use super::*;
     use crate::cassandra::types::{DataClass, Plan};
     use serde_json::json;
+
+    fn made(plans: &[PlanRecord], step: &PlannedStep) -> bool {
+        already_made(plans, step, |_| true)
+    }
 
     fn step(method: &str, params: Value) -> PlannedStep {
         PlannedStep {
@@ -96,8 +109,8 @@ mod tests {
     #[test]
     fn the_same_call_is_caught_whatever_the_ids_spelling() {
         let plans = vec![record(step("mail.get_message", json!({"message_id": "38996"})), true)];
-        assert!(already_made(&plans, &step("mail.get_message", json!({"message_id": 38996}))));
-        assert!(already_made(&plans, &step("mail.get_message", json!({"message_id": "38996"}))));
+        assert!(made(&plans, &step("mail.get_message", json!({"message_id": 38996}))));
+        assert!(made(&plans, &step("mail.get_message", json!({"message_id": "38996"}))));
     }
 
     #[test]
@@ -106,22 +119,22 @@ mod tests {
         let plans = vec![record(step("mail.get_attachment_text", first.clone()), true)];
         let mut next_page = first.clone();
         next_page["offset"] = json!(8000);
-        assert!(!already_made(&plans, &step("mail.get_attachment_text", next_page)));
-        assert!(!already_made(&plans, &step("mail.get_attachment_text", json!({"message_id": 38983, "filename": "a.pdf"}))));
-        assert!(!already_made(&plans, &step("mail.get_message", first)));
+        assert!(!made(&plans, &step("mail.get_attachment_text", next_page)));
+        assert!(!made(&plans, &step("mail.get_attachment_text", json!({"message_id": 38983, "filename": "a.pdf"}))));
+        assert!(!made(&plans, &step("mail.get_message", first)));
     }
 
     #[test]
     fn a_call_that_never_ran_does_not_count() {
         let plans = vec![record(step("mail.get_message", json!({"message_id": 1})), false)];
-        assert!(!already_made(&plans, &step("mail.get_message", json!({"message_id": 1}))));
+        assert!(!made(&plans, &step("mail.get_message", json!({"message_id": 1}))));
     }
 
     #[test]
     fn a_call_that_failed_may_be_retried() {
         let failed = StepOutcome::Err { code: "TIMEOUT".into(), detail: "worker timed out".into() };
         let plans = vec![record_with(step("mail.get_message", json!({"message_id": 1})), vec![failed])];
-        assert!(!already_made(&plans, &step("mail.get_message", json!({"message_id": 1}))));
+        assert!(!made(&plans, &step("mail.get_message", json!({"message_id": 1}))));
     }
 
     /// A sift's reads were never shown to the planner (it saw only the
@@ -131,6 +144,19 @@ mod tests {
         let read = step("mail.get_message", json!({"message_id": 1}));
         let mut r = record(read.clone(), true);
         r.plan.decision = format!("{}an invoice", crate::scheduler::notebook::sift::SIFT_READS_DECISION);
-        assert!(!already_made(&[r], &read));
+        assert!(!made(&[r], &read));
+    }
+
+    /// #964: a stashed result the planner saw only as its placeholder is a
+    /// repeat while the stash is held (a sift can read it), and not once it
+    /// is gone (purged at a suspend): then the call is the way back to it.
+    #[test]
+    fn a_stashed_call_is_a_repeat_only_while_its_stash_is_held() {
+        let cache = crate::handoff::HandoffCache::new();
+        let search = step("mail.search", json!({"query": "invoice"}));
+        let placeholder = cache.stash_if_oversized(1, &json!({"results": []}), 0).expect("cap 0").placeholder;
+        let plans = vec![record_with(search.clone(), vec![StepOutcome::Ok(placeholder)])];
+        assert!(already_made(&plans, &search, |_| true), "held");
+        assert!(!already_made(&plans, &search, |_| false), "gone");
     }
 }

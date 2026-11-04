@@ -304,4 +304,8 @@ fn a_column_differing_only_in_case_finds_its_field() {
     assert!(orders_anything(&order, &rows));
     assert!(!orders_anything(&OrderBy { column: "Datum".into(), desc: true }, &rows), "a typo orders nothing");
     assert!(!orders_anything(&order, &[]), "no rows");
+    // A field of the exact name wins over one differing only in case.
+    let both = [row(1, RowKind::Kept, json!({"Date": "upper", "date": "lower"}))];
+    let t = render(&both, &cols(&["date"]), None, &counts(1, 1));
+    assert!(t.contains("| lower |") && !t.contains("upper"), "{t}");
 }

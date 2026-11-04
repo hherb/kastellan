@@ -329,12 +329,18 @@ async fn resolve_over(
                 unreachable!("the record was found by its first outcome being Ok, and outcomes follow steps")
             };
             // A result too big for the planner was stashed whole (DGX task
-            // 337, a 68 KB search): the sift reads it back. Each item is still
-            // screened on its own before the sorter sees it (K4), and it
-            // carries the step's class, as the result itself would (K7).
+            // 337, a 68 KB search): the sift reads it back. The stash was not
+            // screened past the dispatch screen's window, so each item is
+            // screened on its own before the sorter sees it (K4); rows and read
+            // parameters taken from items are screened where they are shown
+            // (table cells) or reviewed (the reads plan). The list carries the
+            // step's class, as the result itself would (K7).
             let stashed = match handoff::placeholder_ref(result) {
                 Some(h) => Some(dispatcher.stashed(ctx.task_id, &h).ok_or_else(|| {
-                    format!("step {n}'s result was too big to show and is no longer held: run the step again")
+                    format!(
+                        "step {n}'s result was too big to show and is no longer held: list the same call in `steps` \
+under a new id, call it, and sift `over` that id"
+                    )
                 })?),
                 None => None,
             };

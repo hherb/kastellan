@@ -215,8 +215,8 @@ fn not_pending(step: u32, after: &NotebookState) -> String {
     let next = after.steps.iter().map(|s| s.spec.id).max().unwrap_or(0) + 1;
     let how = match after.steps.iter().find(|s| s.spec.id == step).map(|s| &s.status) {
         Some(StepStatus::Done) => format!(
-            "it is done, and a done step is never run again. To repeat it, list it in `steps` under a new id \
-(e.g. {next}) and call that id"
+            "it is done, and a done step is never run again: use its result (a `sift` can go `over` it), or \
+to make the call again with other parameters, list it in `steps` under a new id (e.g. {next}) and call that id"
         ),
         Some(StepStatus::Failed) => "it failed. To retry it, list it in `steps` again".into(),
         _ => "it is not listed. List it in `steps` first".into(),
