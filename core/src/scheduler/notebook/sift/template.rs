@@ -35,7 +35,8 @@ pub(crate) fn value_at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
 /// (a `"x {id}"` inside other text is left as written). One placeholder may
 /// fan out with a `*` segment (`{attachments.*}`): one read per element of
 /// that list, skipping image names. Any placeholder that does not resolve —
-/// or a second `*` — gives no reads: the item is then decided on itself.
+/// or a second `*` — gives no reads from this template ([`first_reads`] then
+/// tries the next).
 pub(crate) fn expand_reads(t: &ReadTemplate, item: &Value) -> Vec<Value> {
     let mut stars = Vec::new();
     collect_star_paths(&t.parameters, &mut stars);

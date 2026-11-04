@@ -1,6 +1,6 @@
 //! A sift in the notebook loop (#922, §6.2).
 //!
-//! 1. Check the call: its parameters, its read (K3a), that a sorter exists,
+//! 1. Check the call: its parameters, its reads (K3a), that a sorter exists,
 //!    that `over` names a list and that `from` falls inside it. A refusal is
 //!    a block (`sift_refused: …`): the loop records the step as failed and
 //!    the next turn replans.
@@ -139,9 +139,8 @@ pub(crate) async fn run_sift(
             stopped = Some(Stop::Cancelled);
             break;
         }
-        // A read was asked for but none was made for this item (its
-        // placeholders named no field of it, or a `*` list was empty): say
-        // so, or the planner takes the item as read.
+        // A read was asked for but none was made for this item (no read in
+        // the list applied to it): say so, or the planner takes it as read.
         let unread_item = usize::from(!p.read.is_empty() && reads.is_empty());
         let cap = SORTER_ITEM_CAP / (1 + reads.len());
         let (mut views, mut blocks, mut failed_reads) = (Vec::new(), Vec::new(), 0usize);
@@ -203,8 +202,13 @@ pub(crate) async fn run_sift(
     }
 
     let remaining = items.len() - counts.looked_at;
-    let reads = Reads { made: batch.reads.len(), unread, cut: batch.cut };
-    let (mut summary, blocks) = summary(&scrap, &p, &counts, reads, &rows, remaining, stopped);
+    // The items looked at are the batch's first `looked_at`.
+    let mut per_read = vec![0usize; p.read.len()];
+    for range in batch.per_item.iter().take(counts.looked_at).filter(|r| !r.is_empty()) {
+        per_read[batch.reads[range.start].0] += 1;
+    }
+    let reads = Reads { made: batch.reads.len(), unread, cut: batch.cut, per_read };
+    let (mut summary, blocks) = summary(&scrap, &p, &counts, &reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.
     if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {
         let distinct = chain_distinct(r.pool, ctx, &prev, &rows).await;
@@ -216,7 +220,7 @@ pub(crate) async fn run_sift(
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "looked_at": counts.looked_at, "kept": counts.kept, "withheld": counts.withheld,
         "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
-        "unread": reads.unread, "reads_cut": reads.cut, "remaining": remaining,
+        "unread": reads.unread, "reads_cut": reads.cut, "items_per_read": reads.per_read, "remaining": remaining,
         "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls,
         "ms": started.elapsed().as_millis() as u64,
     });
@@ -242,7 +246,10 @@ pub(crate) async fn run_sift(
 async fn chain_distinct(pool: &PgPool, ctx: &TaskContext, prev: &str, own: &[NewRow]) -> Option<usize> {
     let mut fields: Vec<Value> = Vec::new();
     for name in super::chain::expand(&ctx.plans, prev) {
-        let r = ScrapRef::parse(&name).ok()?;
+        let Ok(r) = ScrapRef::parse(&name) else {
+            tracing::warn!(task_id = ctx.task_id, scrapbook = %name, "sift: a chain link's name does not parse; no `distinct`");
+            return None;
+        };
         match scrapbook::rows(pool, r.task_id, r.sift).await {
             Ok(rows) => fields.extend(rows.into_iter().filter(|row| row.kind == RowKind::Kept).map(|row| row.fields)),
             Err(e) => {

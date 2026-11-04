@@ -69,7 +69,7 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     if included {
         out.push_str("\n\n");
         // The model names an order only sometimes (#960): default to newest first.
-        let order = t.order_by.clone().or_else(|| default_order(&columns));
+        let order = t.order_by.clone().or_else(|| default_order(&columns, &rows));
         let (table, blocks) = render_table(&rows, &columns, order.as_ref(), t.limit, &counts);
         out.push_str(&table);
         // As for any screened model text: the withheld cell is otherwise
@@ -101,7 +101,9 @@ pub(crate) fn table_left_out(reply: &NotebookReply, plans: &[PlanRecord]) -> Res
         return Ok(());
     }
     let Some(s) = chain::last_sift(plans) else { return Ok(()) };
-    let kept = s["chain"]["kept"].as_u64().or_else(|| s["kept"].as_u64()).unwrap_or(0);
+    // The table's rows (`distinct`), as the prompt has the body quote them.
+    let count = |v: &serde_json::Value| v["distinct"].as_u64().or_else(|| v["kept"].as_u64());
+    let kept = count(&s["chain"]).or_else(|| count(s)).unwrap_or(0);
     let Some(name) = s["scrapbook"].as_str().filter(|_| kept > 0) else { return Ok(()) };
     Err(format!(
         "the `answer` shows no `table`, but sift {name} kept {kept} items. To show them, add \
@@ -265,6 +267,10 @@ mod tests {
         assert_eq!(table_left_out(&plain, &[kept(21), kept(0)]), Ok(()), "the newest sift decides");
         let link = sift_record(params(2, "x"), serde_json::json!({"scrapbook": "sb:9:4", "kept": 0, "chain": {"kept": 5}}));
         assert!(table_left_out(&plain, &[link]).unwrap_err().contains("kept 5"), "a chain's kept");
+        let link = sift_record(params(2, "x"), serde_json::json!({"scrapbook": "sb:9:4", "kept": 4, "distinct": 4, "chain": {"kept": 5, "distinct": 3}}));
+        assert!(table_left_out(&plain, &[link]).unwrap_err().contains("kept 3"), "the chain's distinct: the table's rows");
+        let own = sift_record(params(0, "x"), serde_json::json!({"scrapbook": "sb:9:3", "kept": 8, "distinct": 6}));
+        assert!(table_left_out(&plain, &[own]).unwrap_err().contains("kept 6"), "its own distinct");
         assert_eq!(table_left_out(&answer(serde_json::json!({"table": {"scrapbook": "sb:9:3"}})), &[kept(21)]), Ok(()));
         assert_eq!(table_left_out(&answer(serde_json::json!({"refused": {"principle": 1, "reason": "harm"}})), &[kept(21)]), Ok(()), "a refusal");
         let call: NotebookReply = serde_json::from_value(serde_json::json!({"infeasible": {"reason": "no"}})).unwrap();

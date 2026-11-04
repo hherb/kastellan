@@ -29,8 +29,8 @@ pub(super) async fn a_sorter_failure_stops_the_sift_and_its_item_is_next(pool: &
     assert_eq!((seen["remaining"].clone(), seen["next_from"].clone()), (json!(2), json!(1)), "m2 is next: {seen}");
     assert_eq!(rows(pool, r.task_id, 2).await.len(), 1, "what was kept before the failure stays");
     // The answer named no table after a sift that kept a row, so it was shown
-    // back once (#960): that reply is a model call that made no plan too.
-    assert_eq!(r.result.failed_llm_calls, 2, "the failed sorter call is counted, and the shown-back answer");
+    // back once (#960); that answer was usable, so it is no failed call.
+    assert_eq!(r.result.failed_llm_calls, 1, "the failed sorter call is counted, the shown-back answer not");
 }
 
 /// Review finding: a sift's own records are stamped with its step, so a

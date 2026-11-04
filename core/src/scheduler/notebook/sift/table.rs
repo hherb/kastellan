@@ -109,11 +109,17 @@ pub(crate) fn distinct_kept<'a>(fields: impl IntoIterator<Item = &'a Value>) -> 
 /// The order of a table that names none (#960): newest first by its date
 /// column — one named `date`, else the first whose last word is `date`
 /// (`due_date`, `due date`, `dueDate`; never `update` or `mandate`), in any
-/// case. The sorter writes dates `YYYY-MM-DD`, so text order is date order.
-/// `None` without one: the rows keep the order they were found in.
-pub(crate) fn default_order(columns: &[String]) -> Option<OrderBy> {
+/// case. Text order is date order only for `YYYY-MM-DD`, which the sorter is
+/// asked to write but may not: a cell of `rows` in that column written any
+/// other way (`03/11/2026`, or `2025`, which sorts as a number) keeps the
+/// order found (review finding), as does a table with no such column.
+pub(crate) fn default_order(columns: &[String], rows: &[Row]) -> Option<OrderBy> {
     let column = columns.iter().find(|c| c.eq_ignore_ascii_case("date")).or_else(|| columns.iter().find(|c| ends_in_date_word(c)))?;
-    Some(OrderBy { column: column.clone(), desc: true })
+    let iso = |c: &str| {
+        c.get(..10).is_some_and(|d| d.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }))
+    };
+    let all_iso = rows.iter().map(|r| cell_text(r, column)).filter(|c| !c.is_empty()).all(|c| iso(&c));
+    all_iso.then(|| OrderBy { column: column.clone(), desc: true })
 }
 
 /// Is `date` the last word of `name`: after a non-letter, or a camel-case

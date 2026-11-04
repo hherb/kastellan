@@ -151,7 +151,7 @@ pub(crate) fn parse_params(v: &serde_json::Value) -> Result<SiftParams, String> 
     Ok(SiftParams { over, items: raw.items, from: raw.from, read, keep_if: raw.keep_if, fields: raw.fields })
 }
 
-/// `read` as written: absent, one read, or a list of 1 to
+/// `read` as written: absent (or `null`), one read, or a list of 1 to
 /// [`MAX_READS_NAMED`] (models write both, as for an answer's refs).
 fn parse_read(v: Option<serde_json::Value>) -> Result<Vec<ReadTemplate>, String> {
     let one = |v: serde_json::Value| {

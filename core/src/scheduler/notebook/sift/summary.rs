@@ -41,12 +41,14 @@ impl Stop {
 /// How many reads the sift made, how many items it looked at for which no
 /// read was made (a placeholder named no field of the item, or a `*` list
 /// held nothing readable), and how many of the first item's reads were cut
-/// to fit the cap.
-#[derive(Clone, Copy)]
+/// to fit the cap. `per_read[i]`: the items looked at whose reads came from
+/// the sift's read `i` — a read before the one applied fell through, so a
+/// misspelled placeholder shows as a read used for no item (review finding).
 pub(crate) struct Reads {
     pub made: usize,
     pub unread: usize,
     pub cut: usize,
+    pub per_read: Vec<usize>,
 }
 
 /// What the planner is shown (K9): the ref, the criterion, the counts — with
@@ -61,7 +63,7 @@ pub(crate) fn summary(
     scrap: &ScrapRef,
     p: &SiftParams,
     c: &Counts,
-    reads: Reads,
+    reads: &Reads,
     rows: &[NewRow],
     remaining: usize,
     stopped: Option<Stop>,
@@ -82,6 +84,9 @@ pub(crate) fn summary(
     });
     if remaining > 0 {
         s["next_from"] = json!(p.from + c.looked_at);
+    }
+    if reads.per_read.len() > 1 {
+        s["items_per_read"] = json!(reads.per_read);
     }
     if reads.cut > 0 {
         s["reads_cut"] = json!(reads.cut);

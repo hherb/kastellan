@@ -215,9 +215,11 @@ Its result tells you `scrapbook` (its name), `criterion`, `fields`,
 `looked_at`, `kept`, `distinct` (the kept items once each, as the table will
 show them), `withheld`, `undecided`, `failed_reads`, `reads`, `unread`,
 `remaining` and a `sample` of up to 3 kept items. `unread` counts
-items decided without a read, because a `"{name}"` named no field of the item
-or a `{name.*}` list held nothing readable: if the placeholder is wrong, fix
-it and sift again. One sift looks at a limited number of items: when
+items decided without a read, because no read applied: a `"{name}"` named no
+field of the item or a `{name.*}` list held nothing readable. With a list of
+reads, `items_per_read` counts the items each read was used for: a read used
+for none may have a wrong placeholder. If a placeholder is wrong, fix it and
+sift again. One sift looks at a limited number of items: when
 `remaining` is above 0, `sift` again with `from` set to `next_from`.
 `stopped` says why it ended early (`time`, or `sorter_failed`: sift again from
 `next_from`). `reads_cut` (when present) counts reads of one item that did not
@@ -228,7 +230,8 @@ A sift `from` the last one's `next_from`, with the same parameters
 otherwise, goes on with it: its result says `continues`, and in this task
 naming the last sift's scrapbook shows the whole chain. Its `chain` counts
 the whole chain (`sifts`, `looked_at`, `kept`, `distinct`). When your `body`
-gives a count, give `distinct` — the chain's when there is one. Then `answer` with
+gives a count, give `distinct` — the chain's when there is a `chain` (its
+`kept` if it has no `distinct`). Then `answer` with
 `"table": {"scrapbook": "<name>"}` — or a list of names, one per sift of the
 same question — plus optional `"columns": [...]`, `"order_by": {"column":
 "date", "desc": true}` and `"limit": 5` (show only the first 5 rows, after

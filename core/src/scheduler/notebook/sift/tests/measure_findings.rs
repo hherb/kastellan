@@ -57,9 +57,10 @@ pub(super) async fn a_sift_from_past_the_end_is_refused_before_sorting(pool: &sq
     assert!(script.sorted.lock().unwrap().is_empty(), "nothing was sorted");
 }
 
-/// #960 item 4 (DGX tasks 316, 321): the body quoted `kept` above a table
-/// that showed duplicates once. One row kept in both links of a chain is one
-/// table row, and the chain's `distinct` says so; each link's own too.
+/// #960, found in log #8 after it was filed (DGX tasks 316, 321): the
+/// body quoted `kept` above a table that showed duplicates once. One row
+/// kept in both links of a chain is one table row, and the chain's
+/// `distinct` says so; each link's own too.
 pub(super) async fn a_row_kept_in_two_links_counts_once_in_distinct(pool: &sqlx::PgPool) {
     let sift1 = |from: usize| {
         let mut c = sift(1, None);
@@ -88,49 +89,65 @@ pub(super) async fn a_row_kept_in_two_links_counts_once_in_distinct(pool: &sqlx:
 /// that kept rows is shown back once, naming the scrapbook. The re-asked
 /// reply is used as it is: with the table, or the same answer again.
 pub(super) async fn an_answer_without_the_table_is_shown_back_once(pool: &sqlx::PgPool) {
-    for with_table in [true, false] {
+    // The re-ask's reply: with the table, the same answer again, or none
+    // usable (out of script) — which keeps the first answer, not fails the
+    // task (review finding), and only that failed re-ask is a failed call.
+    for again in ["table", "same", "unusable"] {
         let ctx = new_task(pool, 5).await;
         let name = format!("sb:{}:2", ctx.task_id);
-        let again = match with_table {
-            true => json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices:", "table": {"scrapbook": name}}}),
-            false => json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices."}}),
-        };
-        let script = Script::new(&[
+        let mut turns = vec![
             json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}),
             json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
             json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices."}}),
-            again,
-        ])
-        .sorting(&[keep(10), keep(20)]);
+        ];
+        match again {
+            "table" => turns.push(json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices:", "table": {"scrapbook": name}}})),
+            "same" => turns.push(json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices."}})),
+            _ => {}
+        }
+        let script = Script::new(&turns).sorting(&[keep(10), keep(20)]);
         let r = run(pool, &script, ctx).await;
         let reasks = script.reasks.lock().unwrap().clone();
         assert_eq!(reasks.len(), 1, "{reasks:?}");
         assert!(reasks[0].contains(&name) && reasks[0].contains("kept 2"), "{reasks:?}");
         let b = body(&r.result);
-        match with_table {
-            true => assert!(b.starts_with("Two invoices:") && b.contains("| 20 | m2 |"), "{b}"),
-            false => assert_eq!(b, "Two invoices.", "the same answer again is used"),
+        match again {
+            "table" => assert!(b.starts_with("Two invoices:") && b.contains("| 20 | m2 |"), "{b}"),
+            _ => assert_eq!(b, "Two invoices.", "{again}: the answer is used"),
         }
+        let failed = u32::from(again == "unusable");
+        assert_eq!(r.result.failed_llm_calls, failed, "{again}");
     }
 }
 
-/// #960 item 1 (DGX tasks 309, 315): a table named with no `order_by` came
-/// out in the order the items were found. With a `date` field it is
-/// newest first.
+/// #960 item 1 (DGX tasks 308, 309, 316): a table named with no
+/// `order_by` came out in the order the items were found. With a `date`
+/// field it is newest first — and an `order_by` named still wins (review
+/// finding).
 pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgPool) {
-    let ctx = new_task(pool, 5).await;
-    let mut call = sift(2, None);
-    call["parameters"]["fields"] = json!(["date"]);
-    let dated = |d: &str| json!({"keep": true, "fields": {"date": d}});
-    let script = Script::new(&[
-        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2", "m3"]))}),
-        json!({"tick": tick(1, "listed"), "call": call}),
-        json!({"tick": tick(2, "sorted"), "answer": {"body": "Dated:", "table": {"scrapbook": format!("sb:{}:2", ctx.task_id)}}}),
-    ])
-    .sorting(&[dated("2026-01-05"), dated("2026-03-01"), dated("2025-12-24")]);
-    let b = body(&run(pool, &script, ctx).await.result);
-    let at = |d: &str| b.find(d).expect(&b);
-    assert!(at("2026-03-01") < at("2026-01-05") && at("2026-01-05") < at("2025-12-24"), "{b}");
+    for named in [false, true] {
+        let ctx = new_task(pool, 5).await;
+        let mut call = sift(2, None);
+        call["parameters"]["fields"] = json!(["date"]);
+        let dated = |d: &str| json!({"keep": true, "fields": {"date": d}});
+        let mut table = json!({"scrapbook": format!("sb:{}:2", ctx.task_id)});
+        if named {
+            table["order_by"] = json!({"column": "date", "desc": false});
+        }
+        let script = Script::new(&[
+            json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2", "m3"]))}),
+            json!({"tick": tick(1, "listed"), "call": call}),
+            json!({"tick": tick(2, "sorted"), "answer": {"body": "Dated:", "table": table}}),
+        ])
+        .sorting(&[dated("2026-01-05"), dated("2026-03-01"), dated("2025-12-24")]);
+        let b = body(&run(pool, &script, ctx).await.result);
+        let at = |d: &str| b.find(d).expect(&b);
+        let (new, mid, old) = (at("2026-03-01"), at("2026-01-05"), at("2025-12-24"));
+        match named {
+            false => assert!(new < mid && mid < old, "newest first: {b}"),
+            true => assert!(old < mid && mid < new, "the order named: {b}"),
+        }
+    }
 }
 
 /// #960 item 3 (DGX task 315): 37 of 50 booking mails were `unread` — the
@@ -155,5 +172,6 @@ pub(super) async fn an_item_with_no_attachment_takes_the_next_read(pool: &sqlx::
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search", "mail.read", "mail.get_message"]);
     let seen = summary_seen(&script, 2);
     assert_eq!((seen["reads"].clone(), seen["unread"].clone()), (json!(2), json!(0)), "{seen}");
+    assert_eq!(seen["items_per_read"], json!([1, 1]), "a fall-through is visible: {seen}");
     assert!(script.sorted.lock().unwrap()[1].contains("text of m2"), "m2 was read with the message read");
 }

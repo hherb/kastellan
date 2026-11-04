@@ -58,14 +58,20 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 - **PR #963** (not merged at session end): a table with no `order_by` is newest first by its date column
   (`table::default_order`); an answer with no table after a sift that kept rows is **shown back once** through the
-  #945 re-ask (`answer::table_left_out`; first reply only, never the forced turn, the re-ask is used either way; it
-  counts in `failed_llm_calls`); summaries and chain totals carry **`distinct`** (`table::distinct_kept`, the
+  #945 re-ask (`answer::table_left_out`; first reply only, never the forced turn); summaries and chain totals carry **`distinct`** (`table::distinct_kept`, the
   table's merge rule; a chain's over every link's rows); a sift's **`read` may be a list of up to 3**, each item
   taking the first that applies (`template::first_reads`). `sift.started` now says `read_methods: [...]`.
+- **Its review round** (four agents): the table show-back could turn a valid answer into a **failed task** when
+  the re-ask came back unusable — now its own step in `notebook/ask.rs` (split out of `run.rs`, was 520 lines):
+  a valid first answer is no failed call, and a failed re-ask keeps it. Also: `items_per_read` in the summary and
+  `sift.finished` (a misspelled placeholder in the preferred read used to fall through invisibly); the show-back
+  quotes `distinct`; the default order applies only when every date cell is `YYYY-MM-DD`; tests for a second read
+  off the allowlist, an `order_by` beating the default, and `distinct` with a withheld row. Follow-ups
+  [#965](https://github.com/hherb/kastellan/issues/965).
 - **Measured** ([log #10/#11](../notes/notebook-experiments.md)): Q1 0 unread in both runs (#8: 37); price + GST on
   every row in run A (run B: 4 of 5 newest rows were mails the sorter kept with only a date); Q2's body quotes `distinct` = the table's rows. Run A 7/7 (2299 s); run B 6/7 (2929 s): Q2 failed on #964 (a 68 KB search was handoff-stashed, so the sift over it was refused; then a replan re-called a done step). The show-back fired **0** times in 14 tasks. ⚠️ **A forced answer (a planner timeout) after a
   sift still loses the scrapbook table** (Q7, both runs) — the show-back skips that turn by design: the next #960 fix is to attach the newest sift's table to a **forced** answer by code (commented on #960).
-- ⚠️ **`notebook/run.rs` is at 500 lines** — split before the next change grows it. `~/q960.sh <from> <to>` on the
+- `notebook/run.rs` is at 378 lines since `ask()` moved to `notebook/ask.rs`. `~/q960.sh <from> <to>` on the
   DGX dumps each task's body, sift rows and re-asks.
 
 ### Previous (2026-11-04): #961 measured (315–321), a #960 answer-example try measured **worse** and reverted (322–328), #962 (a sift `from` past its list's end refused) — what still binds
