@@ -232,3 +232,57 @@ Cell format: `turns / seconds`, then the outcome.
 - **Reproduce:** the tried prompt is kept on the DGX as `~/agent_notebook.md.960` (sha256 `2dcc2a6e…`); copy it over
   `~/.local/share/kastellan/prompts/agent_notebook.md`, restart `kastellan-core`, `bash ~/requery7.sh`; restore
   `~/agent_notebook.md.main961` after.
+
+## 2026-11-04 #10 — #960 by code (PR #963) (tasks 329–335)
+
+- **Build:** PR #963 at 42c91057 (on `main` cbb89143, #962), branch-deployed by hand (`git switch`,
+  `scripts/build-release.sh`, `./target/release/kastellan-cli install` with the Matrix flags; `kastellan.env`
+  identical after install). Knobs as #6 (`KASTELLAN_PLANNER_MODE=notebook` checked in `/proc/<MainPID>/environ`).
+  Prompt `agent_notebook` sha256 `6d42008e…` (the sift example's `read` is a two-read list; `distinct`; the
+  default order).
+- **Hypothesis:** four deterministic fixes close #960's gaps without a worked answer example: a table with no
+  `order_by` is newest first; an answer without a table after a sift that kept rows is shown back once; the body
+  can quote `distinct`; an item with no readable attachment takes the next read.
+- **Results:**
+  - Q1 3 / 348, table, 5 rows. The model used the read list (attachment, then message): **0 unread** of 50
+    (#8: 37), and **all 5 rows have price and GST** (#8: 3 empty). 18 kept, 6 duplicates merged, `limit` 5,
+    newest first. One re-ask (a top-level `data_ceiling` key, #945 path).
+  - Q2 4 / 291, a chain of two (27 + 23 looked at, 21 + 15 kept). **Body "33 invoices" = the table's 33 rows**
+    (`distinct`; #8: body 45, table 30). Ordered by date (no `order_by` named). The sorter still kept one
+    invoice dated before the asked range (#960 item 4, not addressed). Single read, 5 unread.
+  - Q3 2 / 233, the 10 emails in a model-written table, as before. One re-ask (an invalid JSON escape).
+  - Q4 7 / 330 (#8: 4 / 188), right items; its stated total still needs the operator's check (as #957).
+  - Q5 3 / 65, Q6 4 / 121 — right, as before.
+  - Q7 4 / 911. Read list used (message, then attachment), 0 unread; 30 kept, `distinct` 28. **A planner call
+    timed out, so the answer came on the forced-answer turn**, where the show-back does not apply: the model
+    wrote its own 4-row prose table and a note "28 distinct items … only a subset shown". Kept a 2021 bill as
+    "currently due" (sorter judgement, as #8).
+  - Total 2299 s (#8: 1883, #9: 3078). The show-back fired **0** times.
+- **Learned:** the read list and `distinct` work on first use. The default order is visible in Q1 and Q2. The
+  show-back cannot help an answer forced by a timeout: a forced answer after a sift that kept rows still loses
+  the scrapbook's table (Q7).
+- **Reproduce:** deploy 42c91057 as above, then `bash ~/requery7.sh`; `bash ~/q960.sh 329 335` dumps the
+  results, sift rows and re-asks.
+
+## 2026-11-04 #11 — #960 by code, second run (tasks 336–342)
+
+- **Build:** as #10 (42c91057), same knobs and prompt. Run straight after #10.
+- **Hypothesis:** #10's gains hold on a second run (model behaviour varies between runs, #8).
+- **Results:**
+  - Q1 3 / 290, table, `limit` 5, newest first. Read list used again: **0 unread** of 50. But 4 of the 5
+    newest rows are mails the sorter kept with only a date and a destination (no from, price or GST): sorter
+    judgement on the criterion, not unread items. 21 kept, 12 rows.
+  - Q2 3 / 292, **failed**. The search returned 68 KB, which was handoff-stashed, so the sift over the step
+    found no `results` and was refused. The replan then called the done step 1 again; `validate` refused it
+    ("not a pending step") and the re-ask repeated it. Two older defects, filed as #964.
+  - Q3 2 / 305, Q4 5 / 251 — as before.
+  - Q5 4 / 248, right (same as #10), plus a 5-row table it did not need (it sifted).
+  - Q6 5 / 496, **a different booking from #10's** (one re-ask, an empty-at-EOF reply).
+  - Q7 6 / 1047: three sifts and one refused; the third stopped at the deadline with 36 left. **Forced answer**,
+    prose, 2 items, no table. The show-back fired 0 times again.
+  - Total 2929 s (#10: 2299).
+- **Learned:** over two runs the read list (Q1 0 unread both times) and the default order hold. `distinct` was
+  quoted where the answer gave a count. The show-back never fired: every table-less sift answer came on the
+  forced turn (Q7 in both runs), which it skips. Next for #960: attach the newest sift's table to a **forced**
+  answer by code. A broad search large enough to be stashed breaks the sift over it (#964).
+- **Reproduce:** as #10; `bash ~/q960.sh 336 342`.
