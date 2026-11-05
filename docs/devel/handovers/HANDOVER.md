@@ -58,7 +58,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### This session (2026-11-06, latest): #971 measured twice (357–370); PR #974 — #973 + three #970 items
 
-- **Measured** ([log #14/#15](../notes/notebook-experiments.md)): 14/14 completed, every sift table's count = its body's, the one forced answer had its table. Wrong by **judgement**, not code: Q7 "currently due" (2016–2025 rows, both runs), Q4's total once, Q6's booking moves. Run A's Q3 named a table `sb:emails_with_attachments` with no sift → **#973**.
+- **Measured** ([log #14/#15](../notes/notebook-experiments.md); #974's first run is #16, 6/7, Q1 = #980): 14/14 completed, every sift table's count = its body's, the one forced answer had its table. Wrong by **judgement**, not code: Q7 "currently due" (2016–2025 rows, both runs), Q4's total once, Q6's booking moves. Run A's Q3 named a table `sb:emails_with_attachments` with no sift → **#973**.
 - **PR #974:** `sift::answer::table_left_out` shows back once an answer whose `table` names no `sb:<task>:<sift>` ref (names the newest sift that kept rows, else "write the items in `body`"); never on the forced turn. #970: fenced tables are not stripped, blank lines close up, the cut note spells the header's column. Still open on #970: the empty-rows gate test, the known limits.
 - ⚠️ **`Option::is_none_or` is Rust 1.82 > MSRV 1.78** — use `map_or(true, …)` (both uses fixed). ⚠️ The DGX daemon log has **no notebook/sift INFO lines** — whether a read went through the stash (#968) is not visible; the audit rows are the only record.
 
@@ -242,7 +242,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **#922 next: measure PR #974 (deployed on the DGX from its branch, run C started 2026-11-06 00:53 AEDT, tasks from 371: log it as #16 from `~/requery7.log`, then a run D), ≥ 2 runs; merge it.**
+1. **#922 next: measure PR #974 (deployed on the DGX from its branch, run C = log #16, 6/7: Q1 failed on [#980](https://github.com/hherb/kastellan/issues/980), an unwrapped `call` the re-ask could not rescue). Run D owed (≥ 2 runs), then merge. #980 needs a decision: accept the bare call, or name the wrapper in the re-ask.**
    Then #965's items 4, 6, 7 (test gaps; need harness work), #970, then slice 2 (`kastellan-cli session`). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
    **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to

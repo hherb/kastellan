@@ -386,3 +386,30 @@ Cell format: `turns / seconds`, then the outcome.
   table. What is still wrong is judgement, not code: Q7's "currently due" (both runs), Q4's total (once), Q6's
   booking. #973 (#14's Q3) is fixed in PR #974; to be measured.
 - **Reproduce:** as #14; `bash ~/q960.sh 364 370`. Log `~/requery7.log.971b`.
+
+## 2026-11-06 #16 — an answer table naming no scrapbook ref is shown back (PR #974) (tasks 371–377)
+
+- **Build:** PR #974 at b707f8e4 (on `main` 9ea85fc4, so #972's prompt wording is in too), branch-deployed with
+  `~/deploy-branch.sh` (`kastellan.env` identical after install, `NRestarts` 0, Matrix up on the first try).
+  `agent_notebook` `1658ca9a…` (new: #972). Knobs as #6.
+- **Hypothesis:** #973's shape (a table named with no sift behind it) is shown back and answered with a list; #972's
+  wording changes nothing measurable.
+- **Results:**
+  - Q1 **failed**, 1 / 90. The first reply wrote its call without the `call` wrapper (`{"step": 2, "tool": "sift",
+    …}`: `unknown field step`, as in #13). The #945 re-ask (thinking off) then wrote invalid JSON: it copied the
+    prompt's `"filename": "{attachments.*}"` as a key with no value. Filed as #980.
+  - Q2 10 / 980: six sifts and one refused (`from` 27 past a list of 23, #962). Body "64 distinct invoices" = the
+    table's 64 rows (75 kept of 100, 11 duplicates); some rows are dated before the asked range (#960 item 4).
+  - Q3 2 / 143, a numbered list of 10, right. #973's shape did not recur, so its show-back was not exercised.
+  - Q4 4 / 221: fee items and conditions right, **no total** again (as #15).
+  - Q5 5 / 135, prose with no sift: a different invoice from #14/#15's (the same day, another sender).
+  - Q6 5 / 347: Coffs Harbour → Learmonth (5NQ5P9), the booking from #11/#13.
+  - Q7 4 / 699: 37 rows, about 20 of them Qantas Hotels booking confirmations (as #13): "currently due" judged
+    loosely again.
+  - Total 2615 s.
+- **Learned:** 6/7. The one failure is a pre-existing reply shape the re-ask could not rescue (#980), not #974. Q4's
+  "no total" is now 2 of the last 3 runs (9943 in every run before #15). That came with the #972 wording only in
+  this run, so it is model variance until shown otherwise. #973's path still needs a live hit; its loop wiring
+  is the #960 show-back's.
+- **Reproduce:** `~/deploy-branch.sh` on `fix/973-table-names-no-scrapbook` (b707f8e4), then `bash ~/requery7.sh`;
+  `bash ~/q960.sh 371 377`. Log `~/requery7.log.974a`.
