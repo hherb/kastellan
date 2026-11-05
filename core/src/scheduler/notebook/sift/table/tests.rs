@@ -327,3 +327,13 @@ fn the_note_names_the_order_s_column_as_the_header_does() {
     let t = render_table(&rows, &cols(&["source"]), Some(&typed), Some(1), &counts(2, 2)).0;
     assert!(t.ends_with("by `Date` descending."), "not a shown column: as typed: {t}");
 }
+
+/// The note names the header the sort used: with `date` and `Date` both
+/// shown, an order by `Date` is by `Date`, as `cell_text` sorts it.
+#[test]
+fn an_exact_header_wins_the_note_over_one_differing_in_case() {
+    let rows = [row(1, RowKind::Kept, json!({"date": "a", "Date": "2026-01-02"})), row(2, RowKind::Kept, json!({"date": "b", "Date": "2026-03-01"}))];
+    let typed = OrderBy { column: "Date".into(), desc: true };
+    let t = render_table(&rows, &cols(&["date", "Date"]), Some(&typed), Some(1), &counts(2, 2)).0;
+    assert!(t.ends_with("by `Date` descending."), "{t}");
+}

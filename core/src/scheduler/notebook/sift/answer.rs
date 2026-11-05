@@ -9,7 +9,7 @@ use super::table::{default_order, orders_anything, render_table, Counts, SOURCE_
 use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
 use crate::scheduler::inner_loop::{notebook_block_audit_payload, PlanRecord, TaskContext};
-use crate::scheduler::notebook::reply::{NotebookReply, Refs, TableSpec};
+use crate::scheduler::notebook::reply::{AnswerSpec, NotebookReply, Refs, TableSpec};
 
 /// The most scrapbooks one table names: as many as a turn records. Each
 /// brings its whole chain, which this does not cap.
@@ -113,9 +113,10 @@ pub(crate) const OWN_TABLE_NOTE: &str = "(a table written in the answer is left 
 /// `body` without the markdown tables the model wrote into it, or `None`
 /// when it has none. A table is a run of lines starting with `|` whose
 /// second line is a delimiter row (`|---|:--:|`). A table inside a fenced
-/// code block stays, and the blank lines around a cut table close up to one
-/// (#970). Only called when code renders the scrapbook's table, which is
-/// the faithful one. Pure.
+/// code block stays, and the blank lines right after a cut table go when a
+/// blank line (or the start of the body) is right before it (#970). Only
+/// called when code renders the scrapbook's table, which is the faithful
+/// one. Pure.
 pub(crate) fn without_own_tables(body: &str) -> Option<String> {
     let lines: Vec<&str> = body.lines().collect();
     let piped = |l: &str| l.trim_start().starts_with('|');
@@ -124,8 +125,13 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
         t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
     };
     // shortcut: any ``` or ~~~ line opens or closes a fence, whatever its
-    // length or character; track the opener if a model nests fences.
-    let fence = |l: &str| l.trim_start().starts_with("```") || l.trim_start().starts_with("~~~");
+    // length or character, and an unclosed one keeps every table after it;
+    // track the opener if a model nests fences. A backtick line with a
+    // backtick after the opener is an inline span, not a fence (CommonMark).
+    let fence = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("~~~") || t.strip_prefix("```").is_some_and(|r| !r.trim_start_matches('`').contains('`'))
+    };
     let (mut kept, mut cut, mut fenced, mut i) = (Vec::<&str>::with_capacity(lines.len()), false, false, 0);
     while i < lines.len() {
         if fence(lines[i]) {
@@ -135,7 +141,8 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
             while i < lines.len() && piped(lines[i]) {
                 i += 1;
             }
-            // The blank line before the table already separates what follows.
+            // A blank line before the table (or the start of the body)
+            // already separates what follows.
             while kept.last().map_or(true, |l| l.trim().is_empty()) && lines.get(i).is_some_and(|l| l.trim().is_empty()) {
                 i += 1;
             }
@@ -156,14 +163,15 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
 /// reply only: the reply re-asked is used either way, so the model can
 /// still answer without one. Pure.
 ///
-/// #973 (DGX task 359): an answer whose `table` names no ref that is a
-/// scrapbook ref at all (`sb:emails_with_attachments`, with no sift run)
-/// shows nothing but a refusal line, so it is shown back the same way.
+/// #973 (DGX task 359): an answer (not a refusal) whose `table` names no
+/// ref that is a scrapbook ref at all (`sb:emails_with_attachments`, with no
+/// sift run) shows its body and a refusal line but no rows, so it is shown
+/// back the same way. A table naming no refs at all (`[]`) is no table.
 pub(crate) fn table_left_out(reply: &NotebookReply, plans: &[PlanRecord]) -> Result<(), String> {
     if let Some(named) = table_of_no_scrapbook(reply) {
         let fix = match newest_kept(plans) {
             Some((name, kept)) => format!("sift {name} kept {kept} items; to show them, name `\"scrapbook\": \"{name}\"`"),
-            None => "no sift here has rows to show, so write the items in `body` and leave `table` out".into(),
+            None => "this run's newest sift, if any, has no rows, so write the items in `body` and leave `table` out".into(),
         };
         return Err(format!(
             "the `answer`'s `table` names {}, but a table shows a `sift`'s rows, named `sb:<task>:<sift>`: {fix}",
@@ -178,11 +186,17 @@ pub(crate) fn table_left_out(reply: &NotebookReply, plans: &[PlanRecord]) -> Res
 }
 
 /// The refs `reply`'s answer table names, when none of them parses as a
-/// scrapbook ref. A well-formed ref is left to [`with_table`]. Pure.
+/// scrapbook ref. A well-formed ref is left to [`with_table`]; a refusal
+/// is never shown back, nor told to list items instead. Pure.
 fn table_of_no_scrapbook(reply: &NotebookReply) -> Option<&[String]> {
-    let refs = reply.answer.as_ref()?.table.as_ref()?.scrapbook.refs();
-    // An empty list shows the body alone, with no refusal line: nothing to show back.
+    let refs = reply.answer.as_ref().filter(|a| a.refused.is_none())?.table.as_ref()?.scrapbook.refs();
+    // An empty list is no table: [`missing_table`]'s.
     (!refs.is_empty() && refs.iter().all(|r| ScrapRef::parse(r).is_err())).then_some(refs)
+}
+
+/// No table, or one naming no refs (`[]`): either shows the body alone.
+fn names_no_table(a: &AnswerSpec) -> bool {
+    a.table.as_ref().map_or(true, |t| t.scrapbook.refs().is_empty())
 }
 
 /// #960 (DGX tasks 335, 342): the forced-answer turn (a planner timeout, the
@@ -190,7 +204,7 @@ fn table_of_no_scrapbook(reply: &NotebookReply) -> Option<&[String]> {
 /// spent — and twice it answered with no table after a sift that kept rows.
 /// On that turn the table is attached by code instead: the newest sift's
 /// scrapbook (and the chain it ends), with the default columns and order.
-/// `None` when the answer has a table, is a refusal, or the newest sift kept
+/// `None` when the answer names a table, is a refusal, or the newest sift kept
 /// nothing. Pure.
 pub(crate) fn forced_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<TableSpec> {
     let (name, _) = missing_table(reply, plans)?;
@@ -199,9 +213,10 @@ pub(crate) fn forced_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Optio
 
 /// The newest sift's scrapbook and how many rows its table would show
 /// (`distinct`, the chain's when it continues one), when `reply` answers
-/// with no `table` and no refusal and that sift kept something. Pure.
+/// with no `table` (or one naming no refs) and no refusal and that sift kept
+/// something. Pure.
 fn missing_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<(String, u64)> {
-    if !reply.answer.as_ref().is_some_and(|a| a.table.is_none() && a.refused.is_none()) {
+    if !reply.answer.as_ref().is_some_and(|a| names_no_table(a) && a.refused.is_none()) {
         return None;
     }
     newest_kept(plans)
@@ -393,25 +408,34 @@ mod tests {
     /// #973 (DGX task 359): no sift ran, and the answer's table named
     /// `sb:emails_with_attachments`, so the operator got one refusal line and
     /// no list. A table none of whose refs is a scrapbook ref is shown back
-    /// once, naming the newest sift that kept rows when there is one.
+    /// once, naming the newest sift when it kept rows. A refusal is not.
     #[test]
     fn an_answer_whose_table_names_no_scrapbook_ref_is_refused() {
         use super::super::chain::tests::{params, sift_record};
-        let with_table = |refs: serde_json::Value| {
+        let tabled = |refs: serde_json::Value| {
             serde_json::from_value::<NotebookReply>(serde_json::json!({"answer": {"body": "Here they are:", "table": {"scrapbook": refs}}})).unwrap()
         };
-        let made_up = with_table(serde_json::json!("sb:emails_with_attachments"));
+        let made_up = tabled(serde_json::json!("sb:emails_with_attachments"));
         let why = table_left_out(&made_up, &[]).unwrap_err();
-        assert!(why.contains("sb:emails_with_attachments") && why.contains("`body`") && !why.contains("kept"), "{why}");
+        assert!(why.contains("sb:emails_with_attachments") && why.contains("`body`") && !why.contains("to show them"), "{why}");
         let kept = sift_record(params(0, "x"), serde_json::json!({"scrapbook": "sb:9:3", "kept": 4}));
         let why = table_left_out(&made_up, std::slice::from_ref(&kept)).unwrap_err();
         assert!(why.contains("sb:9:3") && why.contains("kept 4"), "names the sift that kept rows: {why}");
-        assert!(table_left_out(&with_table(serde_json::json!(["bad", "worse"])), &[]).is_err(), "every ref malformed");
-        assert_eq!(table_left_out(&with_table(serde_json::json!(["bad", "sb:9:3"])), &[kept]), Ok(()), "one ref shows rows");
-        assert_eq!(table_left_out(&with_table(serde_json::json!("sb:9:3")), &[]), Ok(()), "a well-formed ref is with_table's to judge");
-        assert_eq!(table_left_out(&with_table(serde_json::json!([])), &[]), Ok(()), "no refs: the body alone");
+        assert!(table_left_out(&tabled(serde_json::json!(["bad", "worse"])), &[]).is_err(), "every ref malformed");
+        assert_eq!(table_left_out(&tabled(serde_json::json!(["bad", "sb:9:3"])), std::slice::from_ref(&kept)), Ok(()), "one ref shows rows");
+        assert_eq!(table_left_out(&tabled(serde_json::json!("sb:9:3")), &[]), Ok(()), "a well-formed ref is with_table's to judge");
+        assert_eq!(table_left_out(&tabled(serde_json::json!([])), &[]), Ok(()), "no refs and no sift: the body alone");
+        // A refusal that names a made-up table is never told to list items instead.
+        let refusal = serde_json::from_value::<NotebookReply>(serde_json::json!({"answer": {
+            "body": "No.", "refused": {"principle": 1, "reason": "harm"}, "table": {"scrapbook": "sb:x"}}}))
+        .unwrap();
+        assert_eq!(table_left_out(&refusal, &[]), Ok(()), "a refusal");
         // The forced turn is never shown back; code attaches no table to an answer that names one.
-        assert_eq!(forced_table(&made_up, &[]), None);
+        assert_eq!(forced_table(&made_up, std::slice::from_ref(&kept)), None, "its own table, though a sift kept rows");
+        // `[]` names no table: after a sift that kept rows it is #960's case on both turns.
+        let empty = tabled(serde_json::json!([]));
+        assert!(table_left_out(&empty, std::slice::from_ref(&kept)).unwrap_err().contains("shows no `table`"), "[] after a sift that kept rows");
+        assert_eq!(forced_table(&empty, &[kept]).map(|t| t.scrapbook.refs().to_vec()), Some(vec!["sb:9:3".to_string()]), "attached by code");
     }
 
     #[test]
@@ -430,6 +454,12 @@ mod tests {
         assert_eq!(without_own_tables("| x |\n| y |"), None, "a second row is not a delimiter");
         assert_eq!(without_own_tables("|---|"), None, "a delimiter alone");
         assert_eq!(without_own_tables("plain prose"), None);
+        // The blank lines after a cut table close up only when one is before it.
+        assert_eq!(without_own_tables("a\n| x |\n|---|\n\nb"), Some("a\n\nb".into()), "no blank before: the one after stays");
+        assert_eq!(without_own_tables("x\n\n| t |\n|---|\n\n\ny"), Some("x\n\ny".into()), "every blank after, not only one");
+        // A line opening with an inline code span is no fence.
+        assert_eq!(without_own_tables("```sb:9:3``` is the list\n\n| a |\n|---|"), Some("```sb:9:3``` is the list".into()), "inline span");
+        assert_eq!(without_own_tables("````\n| a |\n|---|\n````"), None, "a longer fence");
     }
 
     #[test]

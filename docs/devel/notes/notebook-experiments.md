@@ -350,7 +350,8 @@ Cell format: `turns / seconds`, then the outcome.
   - Q2 4 / 329, a chain of two (42 + 8 looked at). Body "29 invoices" = the table's 29 rows (40 kept, 11
     duplicates). One finding withheld by the guard.
   - Q3 2 / 170, **no list at all**: no sift ran, and the answer's table named `sb:emails_with_attachments`, so
-    the body was one line plus the refusal line. The #960 show-back did not fire (it needs a sift that kept rows).
+    the body was one line plus the refusal line. The #960 show-back could not fire (it needs an answer with no
+    `table` after a sift that kept rows; this one named a table, and no sift ran).
     Filed as #973.
   - Q4 7 / 307, right (total 9943, conditions).
   - Q5 3 / 376: a table of 12 with a forwarded payment chase first (criterion judgement).
@@ -361,7 +362,7 @@ Cell format: `turns / seconds`, then the outcome.
     `plan.formulate_failed` row.
 - **Learned:** whether the #968 path came up is not known: the daemon's log holds no `notebook`/`sift` lines at its
   level, and the sift rows do not say which reads were stashed. A table
-  can be named with no sift behind it: fixed in #973 by showing such an answer back once.
+  can be named with no sift behind it: filed as #973, fixed in PR #974 by showing such an answer back once.
 - **Reproduce:** as #12, on `main` acb187f4; `bash ~/q960.sh 357 363`. Log `~/requery7.log.971a`.
 
 ## 2026-11-05 #15 — PR #971, second run (tasks 364–370)

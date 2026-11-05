@@ -61,8 +61,12 @@ pub(crate) fn render_table(
         out.push(line(columns.iter().map(|c| shown(group, c, &mut blocks)).collect()));
     }
     let cut = (shown_rows < groups.len()).then_some((shown_rows, groups.len()));
-    // Named as the header spells it: the model may type `Date` for `date` (#970).
-    let by = order_by.map(|o| (columns.iter().find(|c| c.eq_ignore_ascii_case(&o.column)).unwrap_or(&o.column).as_str(), o.desc));
+    // Named as the header spells it: the model may type `Date` for `date`
+    // (#970). An exact header wins, as it does in `cell_text`'s sort.
+    let by = order_by.map(|o| {
+        let exact = columns.iter().find(|c| **c == o.column);
+        (exact.or_else(|| columns.iter().find(|c| c.eq_ignore_ascii_case(&o.column))).unwrap_or(&o.column).as_str(), o.desc)
+    });
     (format!("{}\n\n{}", out.join("\n"), note(counts, merged, cut, by)), blocks)
 }
 
