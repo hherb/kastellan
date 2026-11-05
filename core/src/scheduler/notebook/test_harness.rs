@@ -201,8 +201,9 @@ impl ReviewStage for RecordingReview {
 /// returns them as `{"results": hits}` (a search, for `sift`) — stashed in
 /// a real handoff cache, the planner seeing its placeholder, when the call
 /// also says `"stash": true`; a call with `"purge": true` drops the task's
-/// stash, as a suspend does; a read of `{"id": "bad"}` fails; every other
-/// returns its own name.
+/// stash, as a suspend does; a read of `{"id": "bad"}` fails, a read of any
+/// other `id` returns `text of <id>` (stashed, past 2 KiB of filler, when it
+/// also says `"stash": true`); every other call returns its own name.
 #[derive(Default)]
 pub(crate) struct Tools {
     pub(crate) dispatched: Mutex<Vec<String>>,
@@ -235,7 +236,15 @@ impl StepDispatcher for Tools {
                 false => StepOutcome::Ok(result),
             }
         } else if let Some(id) = step.parameters.get("id") {
-            StepOutcome::Ok(json!({"text": format!("text of {}", id.as_str().unwrap_or_default())}))
+            let text = format!("text of {}", id.as_str().unwrap_or_default());
+            match step.parameters.get("stash") == Some(&json!(true)) {
+                // A long read, stashed: its text sits past the placeholder's 1 KiB head.
+                true => {
+                    let long = json!({"text": format!("{} {text}", "filler ".repeat(300))});
+                    StepOutcome::Ok(self.handoff.stash_if_oversized(task_id, &long, 0).expect("cap 0").placeholder)
+                }
+                false => StepOutcome::Ok(json!({"text": text})),
+            }
         } else {
             StepOutcome::Ok(json!({"result": format!("output of {}", step.method)}))
         }

@@ -130,6 +130,7 @@ pub(crate) async fn run_sift(
     // The sorter, one item at a time.
     let (mut counts, mut rows, mut stopped, mut sorter_calls) = (Counts::default(), Vec::new(), None, 0u32);
     let mut unread = 0usize;
+    let task_id = ctx.task_id;
     for (item, reads) in items.iter().zip(&batch.per_item) {
         if ctx.deadline.is_some_and(|d| Instant::now() >= d) {
             stopped = Some(Stop::Time);
@@ -152,7 +153,13 @@ pub(crate) async fn run_sift(
         view(&over.tool, item);
         for i in reads.clone() {
             match (outcomes.get(i), read_tools.get(i)) {
-                (Some(StepOutcome::Ok(v)), Some(tool)) => view(tool, v),
+                // A read over the dispatch cap came back as its handoff
+                // placeholder (#968): read it back whole, so the sorter sees
+                // the read's own head at its cap, as for any long read.
+                (Some(StepOutcome::Ok(v)), Some(tool)) => {
+                    let whole = handoff::placeholder_ref(v).and_then(|h| r.dispatcher.stashed(task_id, &h));
+                    view(tool, whole.as_ref().unwrap_or(v))
+                }
                 (Some(StepOutcome::Err { .. }), _) => failed_reads += 1,
                 _ => {}
             }

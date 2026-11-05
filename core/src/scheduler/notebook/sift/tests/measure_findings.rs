@@ -165,6 +165,26 @@ pub(super) async fn a_sift_over_a_stashed_search_reads_the_stash(pool: &sqlx::Pg
     assert_eq!(rows(pool, r.task_id, 2).await.len(), 1);
 }
 
+/// #968: a read over the dispatch cap (a long mail) was handoff-stashed, so
+/// the sorter was shown the placeholder's 1 KiB head, not the mail. The
+/// sift reads it back whole and shows the sorter the read's own head, at
+/// the sorter's cap, as for any long read.
+pub(super) async fn a_stashed_read_reaches_the_sorter_as_its_text(pool: &sqlx::PgPool) {
+    let mut call = sift(2, Some(("mail", "mail.read")));
+    call["parameters"]["read"]["parameters"]["stash"] = json!(true);
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1"]))}),
+        json!({"tick": tick(1, "listed"), "call": call}),
+        json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "seen"}}),
+    ])
+    .sorting(&[keep(10)]);
+    run(pool, &script, new_task(pool, 5).await).await;
+    let sorted = script.sorted.lock().unwrap().clone();
+    assert_eq!(sorted.len(), 1);
+    assert!(sorted[0].contains("text of m1"), "the read's text, past the placeholder's head: {}", sorted[0]);
+    assert!(!sorted[0].contains("handoff_ref"), "not the placeholder: {}", sorted[0]);
+}
+
 /// #964 review: a stash is purged whenever the loop returns, a suspend too,
 /// so a resumed sift over a stashed step finds it gone. The sift says how
 /// to get it back — the same call under a new id — and the repeat guard
