@@ -112,8 +112,10 @@ pub(crate) const OWN_TABLE_NOTE: &str = "(a table written in the answer is left 
 
 /// `body` without the markdown tables the model wrote into it, or `None`
 /// when it has none. A table is a run of lines starting with `|` whose
-/// second line is a delimiter row (`|---|:--:|`). Only called when code
-/// renders the scrapbook's table, which is the faithful one. Pure.
+/// second line is a delimiter row (`|---|:--:|`). A table inside a fenced
+/// code block stays, and the blank lines around a cut table close up to one
+/// (#970). Only called when code renders the scrapbook's table, which is
+/// the faithful one. Pure.
 pub(crate) fn without_own_tables(body: &str) -> Option<String> {
     let lines: Vec<&str> = body.lines().collect();
     let piped = |l: &str| l.trim_start().starts_with('|');
@@ -121,11 +123,20 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
         let t = l.trim();
         t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
     };
-    let (mut kept, mut cut, mut i) = (Vec::with_capacity(lines.len()), false, 0);
+    // shortcut: any ``` or ~~~ line opens or closes a fence, whatever its
+    // length or character; track the opener if a model nests fences.
+    let fence = |l: &str| l.trim_start().starts_with("```") || l.trim_start().starts_with("~~~");
+    let (mut kept, mut cut, mut fenced, mut i) = (Vec::<&str>::with_capacity(lines.len()), false, false, 0);
     while i < lines.len() {
-        if piped(lines[i]) && lines.get(i + 1).is_some_and(|l| piped(l) && delimiter(l)) {
+        if fence(lines[i]) {
+            fenced = !fenced;
+        } else if !fenced && piped(lines[i]) && lines.get(i + 1).is_some_and(|l| piped(l) && delimiter(l)) {
             cut = true;
             while i < lines.len() && piped(lines[i]) {
+                i += 1;
+            }
+            // The blank line before the table already separates what follows.
+            while kept.last().map_or(true, |l| l.trim().is_empty()) && lines.get(i).is_some_and(|l| l.trim().is_empty()) {
                 i += 1;
             }
             continue;
@@ -406,11 +417,15 @@ mod tests {
     #[test]
     fn a_body_s_own_markdown_table_is_taken_out() {
         let body = "Six of them:\n\n| date | amount |\n|---|---:|\n| 1 May | 20 |\n\nSee below.";
-        assert_eq!(without_own_tables(body), Some("Six of them:\n\n\nSee below.".into()));
+        assert_eq!(without_own_tables(body), Some("Six of them:\n\nSee below.".into()), "one blank line where the table was (#970)");
         let indented = "a\n  | x |\n  | :-- |\n  | 1 |";
         assert_eq!(without_own_tables(indented), Some("a".into()), "indented, and at the end");
         assert_eq!(without_own_tables("| a |\n|---|\n| 1 |\nAfter."), Some("After.".into()), "prose right after the table stays");
-        assert_eq!(without_own_tables("| a |\n|---|\n\nmid\n\n| b |\n|---|\nend"), Some("\nmid\n\nend".into()), "every table, not only the first");
+        assert_eq!(without_own_tables("| a |\n|---|\n\nmid\n\n| b |\n|---|\nend"), Some("mid\n\nend".into()), "every table, not only the first");
+        // #970: a table inside a fenced code block is the model's example, not a copy of the rows.
+        let fenced = "Like this:\n\n```\n| a |\n|---|\n```\n\n| b |\n|---|\n| 1 |";
+        assert_eq!(without_own_tables(fenced), Some("Like this:\n\n```\n| a |\n|---|\n```".into()), "only the table outside the fence");
+        assert_eq!(without_own_tables("~~~md\n| a |\n|---|\n~~~"), None, "a tilde fence too");
         assert_eq!(without_own_tables("a | b\n| not | a table |\nc"), None, "no delimiter row");
         assert_eq!(without_own_tables("| x |\n| y |"), None, "a second row is not a delimiter");
         assert_eq!(without_own_tables("|---|"), None, "a delimiter alone");
