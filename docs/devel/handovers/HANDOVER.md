@@ -59,7 +59,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 ### This session (2026-11-05, latest): #971 deployed from `main`; #967 checked; #965 items 3/8 (prompt wording)
 
 - **#971 deployed** (`kastellan.env` identical, `NRestarts=0`, Matrix up). **#967 check passed:** over-cap `plan.formulate` rows of tasks 357/358 carry `task_id`; pre-deploy rows stay bare.
-- **#965 item 3 kept as is, documented:** which read applies is decided from the item's fields before any read runs; a read that fails is not replaced. Live: **15 of 2302 reads failed** (2 of 61 sifts), so a second reviewed plan per sift isn't worth it. Item 8: `distinct` is per sift. Prompt + `reads.rs` doc only; the DGX still runs the old prompt (copy it to `~/.local/share/kastellan/prompts/` + restart core, or deploy).
+- **#965 item 3 kept as is, documented:** which read applies is decided from the item's fields before any read runs; a read that fails is not replaced. Live: **15 of 2302 reads failed** (2 of 61 sifts), so a second reviewed plan per sift isn't worth it. Item 8: `distinct` is per sift (a table naming a continuing sift shows the chain; review round: and a failed read's item is still decided on its hit). Prompt + `reads.rs` doc only; the DGX still runs the old prompt (copy it to `~/.local/share/kastellan/prompts/` + restart core, or deploy).
 - **Re-measure of #971 in flight:** `requery7.sh` started 22:44 AEDT, tasks from 357 (Q1: a table, 15 kept of 50). ⚠️ **Log it** in `notebook-experiments.md` (`~/q960.sh 357 363`); a second run is owed.
 
 ### Previous (2026-11-05): PRs #971 (#968) and #969 (#967, #965 item 2), merged, deployed — what still binds
