@@ -18,7 +18,8 @@ fi
 for stem in index 01-what-is-kastellan 02-dev-env-linux 03-dev-env-macos \
             04-repo-tour 05-build-test-run 06-architecture 07-sandboxing \
             08-hard-constraints 09-rust-patterns 10-first-contribution \
-            11-cassandra-pipeline 12-memory-and-recall 13-llm-router; do
+            11-cassandra-pipeline 12-memory-and-recall 13-llm-router \
+            14-test-lift-refactors 15-planner 16-channels; do
   [ -f "$OUT/$stem.html" ] || { echo "FAIL: missing $stem.html"; fail=1; }
 done
 

@@ -39,29 +39,59 @@ When fully set up, Kastellan can:
 
 - **Talk to you over secure chat.** Day-to-day you message it over
   [Matrix](https://matrix.org) — a self-hosted, end-to-end-encrypted chat
-  system that only you and the agent share. Email can act as a lower-trust
-  backup way to *reach* it: instructions you send by email are accepted
-  only through a strict authenticity gate, and the channel stays off until
-  you switch it on. (Replies back out by email aren't built yet.)
-- **Search and read the web.** It can run web searches and fetch and read
-  pages, extracting the readable text for you.
+  system that only you and the agent share. You can also hand it a task
+  straight from the command line on the machine it runs on.
+- **Follow a conversation.** When you send a follow-up in the same chat
+  ("and the one before that?"), it sees the last few exchanges of that
+  conversation — up to three, from the past five hours — so you don't have
+  to repeat yourself. Whatever was sensitive in those earlier exchanges
+  stays treated as sensitive in the follow-up.
+- **Ask you before it acts, when a human must decide.** If its reviewer
+  judges that a plan needs your say-so, the task pauses and a short
+  question arrives in your Matrix room. You answer with `/approve` or
+  `/deny` and the one-time code the question shows you (or from the
+  command line). An unanswered question expires and the task is refused,
+  never quietly carried out. (The machinery is in place; today's built-in
+  rules refuse outright rather than ask, so questions become routine only
+  once the planned AI-assisted review stages arrive — see below.)
+- **Take instructions by email, as a backup.** Email can act as a
+  lower-trust second way to *reach* it: instructions you send by email are
+  accepted only through a strict authenticity gate, and the channel stays
+  off until you switch it on. (Replies back out by email aren't built
+  yet.)
+- **Search and read the web.** It can run web searches, fetch and read
+  pages, and do a whole research pass in one go — search, read the most
+  promising pages, and pull out the passages that answer your question.
 - **Drive a web browser.** For pages that only work with a real browser,
-  it can render them headlessly and read the result.
+  it can render them headlessly and read the result (an optional extra
+  you switch on).
 - **Search and read your own email archive.** If you keep a local archive
   of your mail, Kastellan can search it, read messages, and save copies of
   attachments into a task's own folder — strictly read-only: it cannot
   alter, send, or delete anything in the archive.
 - **Run Python.** It can write and execute small Python programs to compute
-  or transform things — inside the strictest cell of all.
-- **Remember.** It keeps a long-term memory in a local database — facts,
-  past results, and useful "skills" it has learned — and pulls the relevant
-  pieces back into mind when a new task resembles an old one.
-- **Run continuously.** It maintains a task list and works through it,
-  resetting its short-term attention from memory as needed, so it can stay
-  useful over long stretches without you babysitting it.
+  or transform things — inside the strictest cell of all, with no network
+  and only a throw-away scratch folder.
+- **Remember, and learn skills.** It keeps a long-term memory in a local
+  database — facts, past results, and the people, places and things it
+  has come across — and pulls the relevant pieces back into mind when a
+  new task resembles an old one. When a task goes well it can save the way
+  it solved it as a reusable **skill** — including a small Python program
+  it wrote. A skill does nothing until *you* approve it, and the agent may
+  only use one on its own once you have also "pinned" it.
+- **Work through long, list-heavy questions.** In an optional working
+  style called **notebook mode**, it writes its own step list, works one
+  step at a time, and keeps notes and findings as it goes, so a long task
+  doesn't lose track of what it has already found. For "find all the…"
+  questions it can sweep a whole list of candidates in one step and hand
+  you the matches as a table.
+- **Run continuously.** It keeps a durable task list and works through it,
+  picking tasks up again after a restart, so it can stay useful over long
+  stretches without you babysitting it.
 
-Not all of this is finished — see *Current status* below — but it is all
-built to the same security model, described in Chapter 3.
+Not all of this is finished, and some of it is opt-in — see *Current
+status* below — but it is all built to the same security model, described
+in Chapter 3.
 
 ---
 
@@ -136,35 +166,63 @@ will happen and is built to contain it.
 
 ## Current status (honest snapshot)
 
-Kastellan is under active development. As of late July 2026 (current
-release: **v0.2.0**):
+Kastellan is under active development. As of early November 2026 (latest
+published release: **v0.2.0**; everything below describes the current
+development line):
 
-- The full sandboxing stack works on **both Linux and macOS**. On Linux there
-  is now also an optional, stronger **micro-VM** cell (a lightweight virtual
-  machine) for workers that need the tightest possible isolation — matching the
-  micro-VM option macOS already had.
+**Working today**
+
+- The full sandboxing stack works on **both Linux and macOS**, with an
+  optional, stronger **micro-VM** cell (a lightweight virtual machine) on
+  each platform for the workers that need the tightest isolation.
 - The planning loop, the CASSANDRA reviewer, the long-term memory, the
   audit log, and the AI-model router are all functional.
-- Several real tools work end to end: running allow-listed commands,
-  fetching and reading web pages, web search, running Python, and headless
-  browsing.
-- Two newer tools joined them: the **mail tool**, which searches and reads
-  your own local mail archive (read-only), and a **web-research** tool
-  that does a whole research pass in one call — search, fetch the most
-  promising pages, and pull out the most relevant passages.
+- The tools work end to end: running allow-listed commands, fetching and
+  reading web pages, web search, one-call web research, reading your local
+  mail archive (read-only), running Python, and headless browsing (opt-in).
 - The **egress proxy** — the guarded internet doorway — is built through
   all its stages (allowlist, forced routing, secret-leak scanning, and
   certificate pinning) and is on by default in the supervised deployment.
-- The **Matrix chat channel** now works end to end: you can message the agent
-  over encrypted, self-hosted chat and get a reply, with a running deployment
-  driven by the system service supervisor.
-- Email can now reach the agent as a strictly **gated backup channel**: an
+- The **Matrix chat channel** works end to end, follow-up messages carry
+  the recent conversation, and the reviewer's **"ask the operator"** path
+  is wired through: a question reaches you in your Matrix room and is
+  answered there.
+- An optional **guard model** — a small, local safety-checking AI that
+  gives a second opinion on whether something the agent read is trying to
+  hijack it — can run as its own supervised service next to the agent.
+  It is an extra layer, not a gate: nothing else is loosened because it
+  is there, and it is off unless you set it up.
+- **Learned skills**, including agent-written Python skills, work under
+  your approval: the agent proposes, you approve (and optionally pin)
+  from the command line.
+- Email can reach the agent as a strictly **gated backup channel**: an
   emailed instruction is accepted only when your own mail server's
   anti-spoofing verdict and a secret pairing token both check out. It is
-  off by default, and replies by email are not built yet.
+  off by default.
 - A **one-command install** (`kastellan-cli install`) takes a freshly-built
   copy to a running, supervised agent — database and daemon included — without
   needing root.
+
+**Experimental or opt-in**
+
+- **Notebook mode** (and its "sweep a whole list" step, called `sift`) is
+  new and still being tuned on real questions. The classic planner remains
+  the default; notebook mode is one setting away.
+
+**Not built yet**
+
+- **Replies by email.** Kastellan can receive email instructions but cannot
+  yet send email back.
+- **AI-assisted review of plans.** CASSANDRA's checks on a plan today are
+  fixed, predictable rules (the five principles and the data-sensitivity
+  rules). The planned extra review stages that use an AI model to weigh
+  ambiguous plans are not built yet — so in practice the reviewer approves
+  or refuses today, and the "ask you" path waits for those stages.
+- **Using a big cloud AI model.** Kastellan runs on a local model today;
+  the controlled route out to a "frontier" model is still to come.
+- **Automatic memory-refresh over very long runs** (summarising its
+  working context into memory and starting fresh) is designed but not
+  built.
 
 Where a feature is still being finished, this manual says so. For the exact
 engineering ledger, see `docs/devel/ROADMAP.md`.

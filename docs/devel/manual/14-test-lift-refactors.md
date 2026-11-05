@@ -1,6 +1,7 @@
 # Test-lift refactors — proving "zero behaviour change"
 
-When a source file grows past the ~500-LOC soft cap, we often **lift** its
+When a source file grows past the ~500-LOC soft cap (see
+[chapter 9](./09-rust-patterns.md)), we often **lift** its
 inline `#[cfg(test)] mod tests { … }` block out to a sibling `tests.rs`
 (the Rust 2018 sibling-directory module pattern: `mod tests;` in the parent
 resolves to `<parent>/tests.rs`). Examples in-tree: `db/src/tests.rs`,
@@ -65,8 +66,17 @@ Any over-cap test-lift. Keep the lift PR single-purpose (just the move) so the
 two diffs above are the *entire* review burden — no logic changes hiding in the
 churn.
 
+The same idea covers the other common split, moving a block of *production*
+code into a child module (as `tool_host/post_process.rs` was lifted out of
+`tool_host.rs`): diff the moved region against `main` with only the
+mechanical changes (visibility, `use` paths) allowed to differ, and say in the
+PR exactly which lines those are. Either way, finish with the workspace clippy
+run from [chapter 5](./05-build-test-run.md) — a lift that orphans an import
+shows up there first.
+
 ## Provenance
 
-Recipe distilled during the review of PR #183 (the `l0_seed` lift); recorded
-here per issue #184 so future item-9b lifts (`capture`, `recall`,
-`macos_seatbelt`, …) reuse it instead of re-deriving the proof.
+Recipe distilled during the review of
+[PR #183](https://github.com/hherb/kastellan/pull/183) (the `l0_seed` lift)
+and recorded here per [issue #184](https://github.com/hherb/kastellan/issues/184),
+so later lifts reuse it instead of re-deriving the proof.

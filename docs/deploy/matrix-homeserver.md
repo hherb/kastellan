@@ -188,9 +188,12 @@ builds (verified on the DGX, aarch64).
 ## Wiring kastellan (slice #2 Phase D)
 
 Once the homeserver is up and the bot account + access token exist (stored as a
-kastellan secret), the daemon is wired by setting `KASTELLAN_MATRIX_HOMESERVER` /
-`KASTELLAN_MATRIX_USER` / `KASTELLAN_MATRIX_PEERS` and building with the
-`live-matrix` feature — see
+kastellan secret), the daemon is wired by setting `KASTELLAN_MATRIX_HOMESERVER_URL` /
+`KASTELLAN_MATRIX_USER` / `KASTELLAN_MATRIX_PEERS` (`kastellan-cli install` writes the first
+two from `--matrix-homeserver-url` / `--matrix-user`) and building with the
+`live-matrix` feature (`scripts/build-release.sh` does this). `KASTELLAN_MATRIX_PEERS` is only
+the worker's room-edge filter; the core authorizes a sender against its pairing table
+(`kastellan-cli pair`) — see
 [`docs/superpowers/plans/2026-06-12-matrix-inbound-sandboxed-worker.md`](../superpowers/plans/2026-06-12-matrix-inbound-sandboxed-worker.md)
 (Phase D) and the live runbook
 [`docs/devel/runbooks/2026-06-12-matrix-live-and-email-dgx.md`](../devel/runbooks/2026-06-12-matrix-live-and-email-dgx.md).

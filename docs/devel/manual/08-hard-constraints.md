@@ -6,6 +6,12 @@ be rejected regardless of how good the code is otherwise.
 
 Read this chapter before writing your first line of code.
 
+Rules 1–5 are the hard constraints listed in the repository's `CLAUDE.md`.
+Rules 6–8 are architecture invariants that reviewers hold to the same
+standard. The long-form versions live in
+[`docs/architecture.md`](../../architecture.md) and
+[`docs/threat-model.md`](../../threat-model.md).
+
 ---
 
 ## 1. AGPL-3.0 — AGPL-compatible dependencies only
@@ -21,9 +27,12 @@ Before adding a new `[dependencies]` entry, check its license in
 `Cargo.toml` or on crates.io. If in doubt, open an issue and ask before adding
 the crate.
 
-Why this matters: a permissive dep can re-enter the process under a corporate
-fork that the user cannot audit. License hygiene is part of the security
-boundary.
+Why this matters: an incompatible license would make the combined work
+impossible to distribute under the AGPL, and "source-available" terms can be
+changed by their owner at any time. Every dependency is also code running with
+the core's privileges, so license hygiene and supply-chain review go together.
+`Cargo.lock` is committed and CI builds with `--locked`, so a new dependency
+always shows up in the diff.
 
 ---
 
@@ -41,18 +50,24 @@ from Python.
 
 ## 3. Cross-platform: Linux + macOS, both first-class
 
-A feature that works on Linux must have a functionally equivalent counterpart
-on macOS, and vice versa. The sandbox layer is the canonical example: every
-`SandboxPolicy` field has an implementation in both `linux_bwrap.rs` and
-`macos_seatbelt.rs`.
+No Linux-only or macOS-only code without a counterpart of equivalent
+guarantee on the other OS. The sandbox layer is the canonical example: both
+`sandbox/src/linux_bwrap.rs` and `sandbox/src/macos_seatbelt.rs` implement the
+`SandboxBackend` trait from the same `SandboxPolicy` struct, and the opt-in
+micro-VM tier exists on both (Firecracker on Linux, Apple `container` on
+macOS).
 
-"Linux-only" and "macOS-only" code is acceptable only if:
-- It is hidden behind `#[cfg(target_os = "linux")]` / `#[cfg(target_os = "macos")]`.
-- There is a stub or equivalent path on the other platform.
-- The asymmetry is documented in `docs/threat-model.md`.
+Platform-specific code is acceptable only if:
+- It is behind `#[cfg(target_os = "linux")]` / `#[cfg(target_os = "macos")]`.
+- The other platform has a counterpart giving an equivalent guarantee.
+- Where the guarantees genuinely differ, the gap is stated openly in
+  `docs/threat-model.md` (its "Asymmetric platform note" is the model) rather
+  than implied away.
 
-Do not introduce platform-specific code paths without a corresponding guard
-and a companion on the other OS.
+A practical trap: each host compiles only its own `cfg` arm, so a Mac build
+never type-checks Linux-only code and vice versa. CI type-checks and lints the
+whole workspace on Linux on every pull request; macOS-only code is checked only
+by building on a Mac.
 
 ---
 
@@ -62,53 +77,79 @@ The primary development machine is an NVIDIA DGX Spark, but nothing in the
 codebase may require NVIDIA hardware, CUDA, or any NVIDIA-specific library.
 
 LLM serving is abstracted behind the `llm-router` crate, which speaks the
-OpenAI HTTP API. Local inference uses vLLM/SGLang on Linux and
-llama.cpp/Ollama on macOS — both work on non-NVIDIA hardware too.
+OpenAI-compatible HTTP API. Local inference typically uses vLLM/SGLang on
+Linux and llama.cpp/Ollama on macOS — any OpenAI-compatible server works,
+on any hardware. The optional guard-model service (`kastellan-guard`) offloads
+to a GPU when there is one and runs on the CPU otherwise.
 
 ---
 
 ## 5. Every worker invocation is sandboxed
 
-The `tool_host::dispatch()` function is the **only** path that spawns workers.
-It always applies a `SandboxPolicy`. There is no `spawn_unsandboxed` function;
-do not add one.
+Workers are spawned only through the configured `SandboxBackend`, and every
+tool call goes through `tool_host::dispatch()`. Every spawn applies a
+`SandboxPolicy`. There is no `spawn_unsandboxed` function and no "run this one
+unjailed" flag; do not add one. This holds for the opt-in micro-VM backends too
+— they are another `SandboxBackend`, not a bypass — and a backend that cannot
+run (a failed probe, a missing lockdown shim) fails closed rather than falling
+back to no sandbox.
 
 If you need to debug a worker without sandboxing, run the worker binary
 directly in a terminal — that is the appropriate development workflow.
 
 ---
 
-## 6. One audit-log write site
+## 6. Audit what matters, through the one insert path
 
-Every tool call, LLM call, channel message, and memory write that has
-security or privacy consequences must be logged to `audit_log`. The write
-happens inside `tool_host::dispatch()` — **not** in the caller, not in the
-worker, and not in a separate helper that some callers might skip.
+Every tool call, plan, verdict, channel message, memory write, egress decision
+and secret redemption that has security or privacy consequences must be
+logged to `audit_log`. Two rules keep that reliable:
 
-New entry points (channel adapters, scheduled routines) call into `dispatch()`
-rather than writing their own audit rows.
+- **Tool calls are audited by the chokepoint.** The `tool:<name>` row (and
+  any `policy / secret.redeemed` or `policy / injection.blocked` row) is
+  written inside `tool_host::dispatch()` — not by the caller, not by the
+  worker. A new entry point that runs a tool calls `dispatch()` rather than
+  writing its own row.
+- **Every audit row goes through `kastellan_db::audit::insert`.** That
+  function applies the NUL escape and the 4 KiB payload cap, and writes as the
+  runtime role whose `UPDATE`/`DELETE`/`TRUNCATE` grants are revoked. Do not
+  write `INSERT INTO audit_log` anywhere else.
+
+Audit rows are best-effort with respect to the action they describe (a failed
+insert does not undo a completed tool call), but a lost row is never silent:
+it is reported on stderr or in the tracing log.
 
 ---
 
 ## 7. Secrets never leave the host boundary unmasked
 
-Secrets are decrypted in the core process at the moment of injection into a
-worker call. They are never:
-- Written to any log (audit or JSONL mirror).
-- Sent to the LLM unmasked.
-- Readable from inside a worker outside of that single call.
+Secrets are stored encrypted (AES-256-GCM) and the planner only ever sees an
+opaque reference of the form `secret://<8-hex>`. Inside `tool_host::dispatch()`,
+immediately before the call, every parameter that is exactly such a reference
+is replaced with the plaintext (`core/src/secrets/substitute.rs`). Plaintext
+secrets are never:
+- Written to any log — the audit row records the request *before*
+  substitution, and redemption rows carry only a hash of the reference.
+- Sent to the LLM — the worker's result and error message are scrubbed of the
+  secrets materialized into that call before anyone sees them.
+- Sent out of a force-routed network worker unnoticed — the egress proxy scans
+  intercepted TLS traffic for that worker's own secrets.
 
-If you are building a feature that uses credentials, read from `db::secrets`
-inside the core and pass the decrypted value to the worker as a parameter —
-just for that call.
+If you are building a feature that uses credentials, take a `secret://`
+reference in the tool's parameters and let the chokepoint substitute it. Do not
+read the vault yourself and pass plaintext around, and a failed redemption
+must stop the call (it does today: the worker is never called).
 
 ---
 
 ## 8. Dispatcher chokepoint — no side doors
 
-`WorkerCommand` is a module-private struct. Only `tool_host.rs` can construct
-one. Only `tool_host.rs` can call `worker.call()`. This is enforced by Rust's
-visibility rules, not by convention.
+`WorkerCommand` (the sealed JSON-RPC request) has module-private fields and a
+module-private constructor, and `SupervisedWorker::call` is module-private too.
+Only the `tool_host` module (`tool_host.rs` and the files under `tool_host/`)
+can build a request or call a worker. This is enforced by Rust's visibility
+rules — a sibling module that tries fails to compile, and a `compile_fail`
+doctest pins it — not by convention.
 
 If you find yourself wanting to bypass this, reconsider the design. Every
 new capability should go through the chokepoint so the audit log, policy gate,
@@ -124,6 +165,9 @@ Before opening a PR, confirm:
 - [ ] No Python in the Rust core process.
 - [ ] Feature works (or is stubbed) on both Linux and macOS.
 - [ ] No NVIDIA-specific code without a non-NVIDIA path.
-- [ ] Every new worker call goes through `tool_host::dispatch()`.
-- [ ] Any audit-relevant action writes to `audit_log`.
-- [ ] No secret is written to a log or sent to the LLM.
+- [ ] Every new worker call goes through `tool_host::dispatch()`; no
+      unsandboxed spawn path.
+- [ ] Any audit-relevant action writes to `audit_log` via
+      `kastellan_db::audit::insert`.
+- [ ] Credentials arrive as `secret://` references; no secret is written to a
+      log or sent to the LLM.

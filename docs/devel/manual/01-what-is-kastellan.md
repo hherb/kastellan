@@ -2,7 +2,7 @@
 
 ## The one-sentence version
 
-kastellan is a always-on personal AI agent that runs on your own machine,
+kastellan is an always-on personal AI agent that runs on your own machine,
 sandboxes every tool it uses at the OS level, reviews its own plans before
 acting, and never trusts its own LLM output.
 
@@ -49,62 +49,74 @@ record to the wrong person". CASSANDRA reviews each *plan*, not each syscall.
 
 ## Current status
 
-The project is in active development. As of late July 2026 (v0.2.0):
+The project is in active development. As of early November 2026 (workspace
+version 0.2.0, 27 crates):
 
-- The full parent-side sandbox stack works on both Linux (bwrap +
-  cgroup v2) and macOS (Seatbelt). Both platforms also have an **opt-in
-  micro-VM backend** for workers that need hardware-level isolation: a
-  **Firecracker** micro-VM on Linux and Apple's `container` micro-VM on
-  macOS. The Firecracker backend has grown into a substantial subsystem —
-  host-directory sharing, a warm/idle reuse lifecycle, a vsock egress
-  transport, unprivileged-VMM confinement, and long-lived persistent-VM
-  workers with a persistent RW store that survives a VM respawn.
-  Worker-side defence-in-depth on Linux (Landlock + seccomp) is shipped,
-  including for the pure-Python workers via a `lock_down()`-then-`execve`
-  exec shim (`kastellan-worker-lockdown-exec`).
-- The scheduler, memory store (semantic + lexical + graph lanes with RRF
-  fusion, L0/L1/L3 layers), CASSANDRA review pipeline (real constitutional
-  + deterministic rules + a per-tool worker-output prompt-injection guard),
-  audit log + JSONL mirror, LLM router, opaque secret references (`Vault`),
-  the L3 skill lifecycle (crystallise → approve → pin → invoke, for both
-  templated and agent-authored Python skills), the large-tool-result
-  handoff cache, and a substantial CLI are all functional.
-- **The egress proxy is shipped** — a per-worker sandboxed CONNECT proxy
-  enforcing a host:port allowlist + SSRF guard, with force-routing **on by
-  default** so a net worker reaches its allowlist only through its own
-  egress sidecar (TLS-intercept MITM, credential-leak scanner, and SPKI
-  pinning are all implemented behind it).
-- **Workers in the workspace today (Rust):** `prelude` (shared init +
-  lockdown shim), `shell-exec`, `web-common` (shared net-egress helpers),
-  `web-fetch`, `web-search`, `web-research` (composite search → fetch →
-  chunk → BM25-rank passages), `python-exec` (curated-stdlib executor for
-  agent-authored Python), `egress-proxy`, `embed-broker` / `search-broker`
-  (trusted sidecars bridging a jailed worker's UDS to the operator's
-  embedding backend / a SearxNG backend), `mail` (six read-only `mail.*`
-  tools against a localmail archive), `email-in` (inbound poller for the
-  email failover channel), `matrix` / `matrix-wire`
-  (the Matrix channel worker), the Firecracker micro-VM support
-  crates `microvm-run` (the launcher) / `microvm-init` (the guest PID 1
-  vsock-stdio adapter), and the demo workers `kv-demo` (a long-lived
-  persistent-store demo + integration fixture) / `net-demo` (network
-  egress inside a persistent VM).
-- **Python workers (built with `uv`, outside the Cargo workspace, driven
-  from core over JSON-RPC):** `gliner-relex` (entity/relation extraction)
-  and `browser-driver` (headless Chromium render). Each has a Rust-side
-  manifest under `core/src/workers/`.
-- **Channel:** Matrix (self-hosted, single-user, federation off, E2E) is
-  the primary channel. The inbound worker is live: a `LiveSdk` backed by
-  `matrix-rust-sdk` (feature-gated behind `live-matrix`) does the real
-  restore-or-login, sync, poll, and send, routed through the worker's own
-  egress sidecar. The email failover channel shipped inbound-only
-  (slice 1): the sandboxed `email-in` worker polls a localmail `/v1`
-  endpoint behind a core-side DMARC + pairing-token gate; outbound
-  replies (SMTP) land with slice 2. The `workers/mail` worker is shipped
-  too — six read-only `mail.*` tools, live-verified against a
-  37k-message archive.
+- **Sandboxing.** The full parent-side sandbox stack works on both Linux
+  (bwrap + a `systemd-run --scope` cgroup) and macOS (Seatbelt), with
+  worker-side defence-in-depth on Linux (Landlock + seccomp, including for
+  the pure-Python workers via the `kastellan-worker-lockdown-exec` shim).
+  Both platforms also have an **opt-in micro-VM backend**: **Firecracker** on
+  Linux (sha256-pinned guest kernel verified at every boot, unprivileged VMM
+  confinement, warm/idle reuse, persistent-VM workers with a store that
+  survives a respawn) and Apple's `container` on macOS. Micro-VM mode is off
+  by default and switched on per worker.
+- **Agent loop.** A Postgres-backed scheduler runs plan → CASSANDRA review →
+  dispatcher chokepoint → sandboxed step, with audit rows at every
+  transition and crash recovery. Channel tasks carry **conversational
+  continuity**: a follow-up in the same conversation sees the last few turns.
+  A second planner loop, the **task notebook** (the model keeps its own step
+  list and findings, plus a `sift` step for going through long lists), is
+  shipped but **opt-in** (`KASTELLAN_PLANNER_MODE=notebook`; the default is
+  `classic`).
+- **CASSANDRA.** Constitutional and deterministic data-classification stages,
+  a per-tool worker-output prompt-injection guard, and an **escalation path**:
+  a step that needs a human is asked of the operator (in their Matrix room,
+  or via `kastellan-cli inbox`) instead of being silently blocked. An
+  optional model-based guard tier (Shieldstral, served by llama.cpp's
+  `llama-server` as a supervised `kastellan-guard` unit) can tighten the
+  injection guard's verdict; it fails open, so it is not a security
+  boundary. The LLM-based plan-review stages are **not built yet**.
+- **Memory.** Four-lane recall (semantic + lexical + graph +
+  entity-similarity, fused with RRF); layered prompt assembly (L0 meta-rules,
+  the always-in-context L1 index, recalled memories, L3 approved skills); the
+  L3 skill lifecycle (crystallise → approve → pin → invoke, for templated and
+  agent-authored Python skills) and the large-tool-result handoff cache.
+  L4 (episodic digests) is declared but not yet written by anything.
+- **Egress.** A per-worker sandboxed egress proxy (host:port allowlist, SSRF
+  guard, TLS interception with a credential-leak scanner, certificate
+  pinning) that every networked worker is **force-routed through by
+  default**.
+- **Channels.** Matrix (self-hosted, single-user, federation off, E2E) is the
+  primary channel and is live end-to-end. The email failover is
+  **inbound-only and off by default**: the sandboxed `email-in` worker polls
+  a localmail `/v1` endpoint behind a core-side DMARC + pairing-token gate.
+  Outbound email (SMTP replies) is not built yet.
+- **Workers in the workspace (Rust):** `prelude` (shared lock-down + the exec
+  shim), `shell-exec`, `web-common` (shared net-egress library), `web-fetch`,
+  `web-search`, `web-research` (search → fetch → rank passages in one call),
+  `mail` (six read-only `mail.*` tools against a localmail archive),
+  `email-in`, `python-exec` (no network, curated stdlib), `egress-proxy`,
+  `embed-broker` / `search-broker` (trusted sidecars bridging a jailed worker
+  to the embedding / SearxNG backend), `matrix` / `matrix-wire`,
+  `microvm-run` / `microvm-init` (Firecracker launcher and guest PID 1), and
+  the demo workers `kv-demo` / `net-demo`.
+- **Python workers** (outside the Cargo workspace, driven over JSON-RPC, each
+  with a Rust-side manifest under `core/src/workers/`): `gliner-relex`
+  (entity/relation extraction) and `browser-driver` (headless Chromium
+  render, opt-in).
+- **Operations.** `kastellan-cli install` brings up a supervised per-user
+  deployment (`kastellan.target` under `systemd --user` or launchd: Postgres,
+  the core and, when configured, the guard backend) in one command; a second
+  full-project security audit was completed and remediated in September 2026.
 
-See `docs/devel/ROADMAP.md` for the phased feature list and the latest
-`docs/devel/handovers/HANDOVER.md` for what shipped most recently.
+Still on the roadmap: outbound email, the CASSANDRA LLM review stages,
+TLS inspection of browser and email-channel traffic, L4 digests, the
+frontier-egress worker and the Phase 5 frontier-escalation policy gate.
+
+See [`docs/devel/ROADMAP.md`](../ROADMAP.md) for the phased feature list and
+the latest [`docs/devel/handovers/HANDOVER.md`](../handovers/HANDOVER.md) for
+what shipped most recently.
 
 ---
 
