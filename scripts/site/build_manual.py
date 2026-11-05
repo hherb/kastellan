@@ -38,7 +38,7 @@ MANIFEST: list[tuple[str, list[str]]] = [
     ]),
     ("Subsystem deep dives", [
         "11-cassandra-pipeline", "12-memory-and-recall", "13-llm-router",
-        "14-test-lift-refactors",
+        "14-test-lift-refactors", "15-planner", "16-channels",
     ]),
 ]
 
