@@ -336,3 +336,81 @@ Cell format: `turns / seconds`, then the outcome.
   forced answer whose body holds its own markdown table above the attached one shows two tables. Q1's sift
   being repeated and Q6's moving answer are model variance, already seen in #11.
 - **Reproduce:** as #12; `bash ~/q960.sh 350 356`.
+
+## 2026-11-05 #14 — a stashed read reaches the sorter as its text (PR #971) (tasks 357–363)
+
+- **Build:** `main` at acb187f4 (#971), deployed with `upgrade_from_git.sh` (`kastellan.env` identical after
+  install). #972's prompt wording is **not** deployed: `agent_notebook` is still `ef4a9233…` (loaded 2026-11-04).
+  Knobs as #6.
+- **Hypothesis:** a sift read over 64 KiB is sorted from its stashed text, not its placeholder (#968); over-cap
+  `plan.formulate` rows carry `task_id` (#967).
+- **Results:**
+  - Q1 4 / 414, table, `limit` 5 of 9 rows, newest first, price and GST on all 5. 15 kept of 50, 2 duplicates.
+    Two itineraries show twice, once per leg's destination (same price).
+  - Q2 4 / 329, a chain of two (42 + 8 looked at). Body "29 invoices" = the table's 29 rows (40 kept, 11
+    duplicates). One finding withheld by the guard.
+  - Q3 2 / 170, **no list at all**: no sift ran, and the answer's table named `sb:emails_with_attachments`, so
+    the body was one line plus the refusal line. The #960 show-back could not fire (it needs an answer with no
+    `table` after a sift that kept rows; this one named a table, and no sift ran).
+    Filed as #973.
+  - Q4 7 / 307, right (total 9943, conditions).
+  - Q5 3 / 376: a table of 12 with a forwarded payment chase first (criterion judgement).
+  - Q6 3 / 229: Coffs Harbour → Sydney, a 2027 booking (as #11/#13, the answer moves between bookings).
+  - Q7 5 / 933: three sifts (64 + 36 read, then 35 over the kept rows), 19 rows, some from 2016–2022: the
+    sorter judged "currently due" loosely.
+  - Total 2758 s. No forced answer (every final `plan.formulate` row has `reasoning_chars` > 0); no
+    `plan.formulate_failed` row.
+- **Learned:** whether the #968 path came up is not known: the daemon's log holds no `notebook`/`sift` lines at its
+  level, and the sift rows do not say which reads were stashed. A table
+  can be named with no sift behind it: filed as #973, fixed in PR #974 by showing such an answer back once.
+- **Reproduce:** as #12, on `main` acb187f4; `bash ~/q960.sh 357 363`. Log `~/requery7.log.971a`.
+
+## 2026-11-05 #15 — PR #971, second run (tasks 364–370)
+
+- **Build:** as #14, run straight after it.
+- **Hypothesis:** as #14.
+- **Results:**
+  - Q1 3 / 347, table, `limit` 5 of 9, newest first; one row has no origin or price. 15 kept of 50, 3 duplicates.
+  - Q2 6 / 771, three sifts (the first two over earlier rows, no reads). Body "44 distinct invoices" = the
+    table's 44 rows (45 kept, 1 duplicate). Dates are written three ways (`2026-09-20T13:45:33+00:00`,
+    `2026-10-06 23:01`, `2026-08-14`); the order still holds, as each starts `YYYY-MM-DD`.
+  - Q3 2 / 152, a numbered list of 10 (as #12/#13). The #973 shape did not recur.
+  - Q4 4 / 167: the fee items and conditions right, but **"a total is not explicitly stated"** (9943 in every
+    run since #949). Model variance on one read.
+  - Q5 3 / 710, **forced** (`reasoning_chars` 0 on its last row; one `plan.formulate_failed`), with its table:
+    the same 11 rows as #14.
+  - Q6 3 / 96: Coffs Harbour → Sydney, as #14.
+  - Q7 5 / 914: 19 rows, mostly 2017–2025 bills and receipts. The last sift's 31 items were all `unread` and
+    were decided on their hits. The sorter's "currently due" is loose in both runs.
+  - Total 3157 s (#14: 2758).
+- **Learned:** across the two runs every sift table's count matched its body, and the one forced answer had its
+  table. What is still wrong is judgement, not code: Q7's "currently due" (both runs), Q4's total (once), Q6's
+  booking. #973 (#14's Q3) is fixed in PR #974; to be measured.
+- **Reproduce:** as #14; `bash ~/q960.sh 364 370`. Log `~/requery7.log.971b`.
+
+## 2026-11-06 #16 — an answer table naming no scrapbook ref is shown back (PR #974) (tasks 371–377)
+
+- **Build:** PR #974 at b707f8e4 (on `main` 9ea85fc4, so #972's prompt wording is in too), branch-deployed with
+  `~/deploy-branch.sh` (`kastellan.env` identical after install, `NRestarts` 0, Matrix up on the first try).
+  `agent_notebook` `1658ca9a…` (new: #972). Knobs as #6.
+- **Hypothesis:** #973's shape (a table named with no sift behind it) is shown back and answered with a list; #972's
+  wording changes nothing measurable.
+- **Results:**
+  - Q1 **failed**, 1 / 90. The first reply wrote its call without the `call` wrapper (`{"step": 2, "tool": "sift",
+    …}`: `unknown field step`, as in #13). The #945 re-ask (thinking off) then wrote invalid JSON: it copied the
+    prompt's `"filename": "{attachments.*}"` as a key with no value. Filed as #980.
+  - Q2 10 / 980: six sifts and one refused (`from` 27 past a list of 23, #962). Body "64 distinct invoices" = the
+    table's 64 rows (75 kept of 100, 11 duplicates); some rows are dated before the asked range (#960 item 4).
+  - Q3 2 / 143, a numbered list of 10, right. #973's shape did not recur, so its show-back was not exercised.
+  - Q4 4 / 221: fee items and conditions right, **no total** again (as #15).
+  - Q5 5 / 135, prose with no sift: a different invoice from #14/#15's (the same day, another sender).
+  - Q6 5 / 347: Coffs Harbour → Learmonth (5NQ5P9), the booking from #11/#13.
+  - Q7 4 / 699: 37 rows, about 20 of them Qantas Hotels booking confirmations (as #13): "currently due" judged
+    loosely again.
+  - Total 2615 s.
+- **Learned:** 6/7. The one failure is a pre-existing reply shape the re-ask could not rescue (#980), not #974. Q4's
+  "no total" is now 2 of the last 3 runs (9943 in every run before #15). That came with the #972 wording only in
+  this run, so it is model variance until shown otherwise. #973's path still needs a live hit; its loop wiring
+  is the #960 show-back's.
+- **Reproduce:** `~/deploy-branch.sh` on `fix/973-table-names-no-scrapbook` (b707f8e4), then `bash ~/requery7.sh`;
+  `bash ~/q960.sh 371 377`. Log `~/requery7.log.974a`.

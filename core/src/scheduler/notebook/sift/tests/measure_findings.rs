@@ -121,27 +121,60 @@ pub(super) async fn an_answer_without_the_table_is_shown_back_once(pool: &sqlx::
     }
 }
 
+/// #973 (DGX task 359): with no sift run, an answer whose table names no
+/// scrapbook ref is shown back once, saying to write the items in `body`.
+/// The re-asked reply is used as it is: in prose, or the same bad table,
+/// which shows its refusal line.
+pub(super) async fn an_answer_table_naming_no_scrapbook_is_shown_back_once(pool: &sqlx::PgPool) {
+    let made_up = json!({"tick": tick(1, "listed"), "answer": {"body": "Here:", "table": {"scrapbook": "sb:emails_with_attachments"}}});
+    for again in ["prose", "same"] {
+        let mut turns = vec![json!({"steps": steps(&[1]), "call": search(1, hits(&["m1"]))}), made_up.clone()];
+        turns.push(match again {
+            "prose" => json!({"tick": tick(1, "listed"), "answer": {"body": "Here: m1."}}),
+            _ => made_up.clone(),
+        });
+        let script = Script::new(&turns);
+        let r = run(pool, &script, new_task(pool, 5).await).await;
+        let reasks = script.reasks.lock().unwrap().clone();
+        assert_eq!(reasks.len(), 1, "{reasks:?}");
+        assert!(reasks[0].contains("sb:emails_with_attachments") && reasks[0].contains("`body`"), "{reasks:?}");
+        let b = body(&r.result);
+        match again {
+            "prose" => assert_eq!(b, "Here: m1."),
+            _ => assert!(b.starts_with("Here:") && b.contains("could not be included"), "{b}"),
+        }
+        assert_eq!(r.result.failed_llm_calls, 0, "{again}");
+    }
+}
+
 /// #960 (DGX tasks 335, 342): the forced-answer turn is never shown back,
 /// and twice it answered with no table after a sift that kept rows. On that
 /// turn code attaches the newest sift's table: no re-ask, no extra model call.
 pub(super) async fn a_forced_answer_without_the_table_gets_it_by_code(pool: &sqlx::PgPool) {
-    // max_plans 1 → a cap of 2 turns (search, sift): the third is forced.
-    let script = Script::new(&[
-        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}),
-        json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
-        // DGX task 351: the body also held the model's own partial table.
-        json!({"tick": tick(2, "sorted"), "answer": {"body": "Two invoices.\n\n| amount |\n|---|\n| 20 |"}}),
-    ])
-    .sorting(&[keep(10), keep(20)]);
-    let r = run(pool, &script, new_task(pool, 1).await).await;
-    assert!(script.reasks.lock().unwrap().is_empty(), "the forced turn is not shown back");
-    let b = body(&r.result);
-    assert!(b.starts_with("Two invoices.\n\n| amount | source |") && b.contains("| 20 | m2 |"), "{b}");
-    assert_eq!(b.matches("| amount").count(), 1, "one table, the code's: {b}");
-    assert!(b.contains(OWN_TABLE_NOTE), "{b}");
-    // The steps are Personal too, so this pins the ceiling, not the rows' share
-    // in it (the `Secret` table case in sift/tests.rs pins that).
-    assert_eq!(last_ceiling(pool, r.task_id).await, json!("Personal"), "the answer's ceiling");
+    // DGX task 351: the body also held the model's own partial table. A
+    // table naming no refs (`[]`) is no table either.
+    let mut answer = json!({"body": "Two invoices.\n\n| amount |\n|---|\n| 20 |"});
+    for table in [None, Some(json!({"scrapbook": []}))] {
+        if let Some(t) = table {
+            answer["table"] = t;
+        }
+        // max_plans 1 → a cap of 2 turns (search, sift): the third is forced.
+        let script = Script::new(&[
+            json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}),
+            json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
+            json!({"tick": tick(2, "sorted"), "answer": answer.clone()}),
+        ])
+        .sorting(&[keep(10), keep(20)]);
+        let r = run(pool, &script, new_task(pool, 1).await).await;
+        assert!(script.reasks.lock().unwrap().is_empty(), "the forced turn is not shown back");
+        let b = body(&r.result);
+        assert!(b.starts_with("Two invoices.\n\n| amount | source |") && b.contains("| 20 | m2 |"), "{b}");
+        assert_eq!(b.matches("| amount").count(), 1, "one table, the code's: {b}");
+        assert!(b.contains(OWN_TABLE_NOTE), "{b}");
+        // The steps are Personal too, so this pins the ceiling, not the rows' share
+        // in it (the `Secret` table case in sift/tests.rs pins that).
+        assert_eq!(last_ceiling(pool, r.task_id).await, json!("Personal"), "the answer's ceiling");
+    }
 }
 
 /// #964 (DGX task 337): a 68 KB search was handoff-stashed, so its step's

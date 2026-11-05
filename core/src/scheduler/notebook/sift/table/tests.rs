@@ -315,3 +315,25 @@ fn a_column_differing_only_in_case_finds_its_field() {
     let t = render(&both, &cols(&["date"]), None, &counts(1, 1));
     assert!(t.contains("| lower |") && !t.contains("upper"), "{t}");
 }
+
+/// #970: the note names the order's column as the header spells it, not as
+/// the model typed it; an order by a column not shown keeps its own spelling.
+#[test]
+fn the_note_names_the_order_s_column_as_the_header_does() {
+    let rows = [row(1, RowKind::Kept, json!({"date": "2026-01-02"})), row(2, RowKind::Kept, json!({"date": "2026-03-01"}))];
+    let typed = OrderBy { column: "Date".into(), desc: true };
+    let t = render_table(&rows, &cols(&["date"]), Some(&typed), Some(1), &counts(2, 2)).0;
+    assert!(t.ends_with("showing the first 1 of 2 rows, by `date` descending."), "{t}");
+    let t = render_table(&rows, &cols(&["source"]), Some(&typed), Some(1), &counts(2, 2)).0;
+    assert!(t.ends_with("by `Date` descending."), "not a shown column: as typed: {t}");
+}
+
+/// The note names the header the sort used: with `date` and `Date` both
+/// shown, an order by `Date` is by `Date`, as `cell_text` sorts it.
+#[test]
+fn an_exact_header_wins_the_note_over_one_differing_in_case() {
+    let rows = [row(1, RowKind::Kept, json!({"date": "a", "Date": "2026-01-02"})), row(2, RowKind::Kept, json!({"date": "b", "Date": "2026-03-01"}))];
+    let typed = OrderBy { column: "Date".into(), desc: true };
+    let t = render_table(&rows, &cols(&["date", "Date"]), Some(&typed), Some(1), &counts(2, 2)).0;
+    assert!(t.ends_with("by `Date` descending."), "{t}");
+}

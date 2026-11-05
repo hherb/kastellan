@@ -253,9 +253,10 @@ pub(crate) async fn run_notebook_to_terminal(
                 if let Some(t) = &forced {
                     tracing::info!(task_id = ctx.task_id, scrapbook = ?t.scrapbook.refs(), "notebook: forced answer names no table; attached by code");
                 }
-                let body = match a.table.as_ref().or(forced.as_ref()) {
+                // `forced` is only ever set when the answer's table names no refs.
+                let body = match forced.as_ref().or(a.table.as_ref()) {
                     Some(t) => {
-                        let (body, class) = sift::answer::with_table(pool, &ctx, &a.body, t, a.table.is_none()).await;
+                        let (body, class) = sift::answer::with_table(pool, &ctx, &a.body, t, forced.is_some()).await;
                         touched.push(class);
                         body
                     }

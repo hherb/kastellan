@@ -556,7 +556,7 @@ fn every_rootfs_an_e2e_boots_is_registered() {
     let mut checked = 0usize;
     for entry in std::fs::read_dir(&dir).expect("core/tests must exist") {
         let path = entry.expect("dirent").path();
-        if path.extension().is_none_or(|e| e != "rs") {
+        if path.extension().map_or(true, |e| e != "rs") {
             continue;
         }
         let body = std::fs::read_to_string(&path).expect("read test source");
