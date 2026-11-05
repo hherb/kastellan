@@ -206,14 +206,18 @@ the items that match, with the facts you name, in the task's **scrapbook**:
   `handoff.fetch`; a refused read names the allowed ones. `read` may be one
   read or a list of up to 3: each item takes the **first that applies** to
   it — above, its attachments, or the message itself when it has none to
-  read. Without `read`, each item is decided on the hit itself.
+  read. Which read applies is decided from the item's fields before any
+  read runs: a read that runs and fails (a scanned PDF) counts in
+  `failed_reads`, and the next read is not tried for that item. Without
+  `read`, each item is decided on the hit itself.
 - `keep_if` — what an item must contain to be kept (at most 1024
   characters). `fields` — the facts to extract from each kept item (1–16
   names, each at most 64 characters).
 
 Its result tells you `scrapbook` (its name), `criterion`, `fields`,
-`looked_at`, `kept`, `distinct` (the kept items once each, as the table will
-show them), `withheld`, `undecided`, `failed_reads`, `reads`, `unread`,
+`looked_at`, `kept`, `distinct` (the kept items once each, as a table of this
+sift alone will show them; a table naming several scrapbooks merges their
+rows, so it can show fewer), `withheld`, `undecided`, `failed_reads`, `reads`, `unread`,
 `remaining` and a `sample` of up to 3 kept items. `unread` counts
 items decided without a read, because no read applied: a `"{name}"` named no
 field of the item or a `{name.*}` list held nothing readable. With a list of

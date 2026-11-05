@@ -23,7 +23,8 @@ pub(crate) struct Batch {
 /// item's reads stay together. A first item with more reads than `cap` alone
 /// keeps its first `cap` (the rest counted in `cut`), so a sift always makes
 /// progress. Each item's reads come from the first of `read` that applies
-/// to it. Pure.
+/// to it, chosen here from the item's fields: a read that then fails is not
+/// replaced by the next (#965 item 3 — 15 of 2302 live reads failed). Pure.
 pub(crate) fn plan_reads(read: &[ReadTemplate], items: &[Value], cap: usize) -> Batch {
     let mut batch = Batch { reads: Vec::new(), per_item: Vec::new(), cut: 0 };
     for item in items {
