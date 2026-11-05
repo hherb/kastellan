@@ -56,7 +56,13 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-05, latest): #971 deployed from `main`; #967 checked; #965 items 3/8 (prompt wording)
+### This session (2026-11-05, latest): both manuals brought up to date (docs only, PR #975)
+
+- `docs/user/manual/` and `docs/devel/manual/` rewritten against the current tree (they dated from v0.2.0, late July). New dev chapters **15 (planner)** and **16 (channels)**, registered in `scripts/site/build_manual.py` `MANIFEST` and `check-manual.sh` — ⚠️ **a new manual chapter must be added to both, or the docs build fails.**
+- Doc fixes outside the manuals: `docs/deploy/matrix-homeserver.md` named `KASTELLAN_MATRIX_HOMESERVER` (the daemon reads `_URL`); `docs/workers/mail.md` said localmail `api_minor` ≥ 3 (code: 6).
+- **Found, not fixed (code/doc drift):** `kastellan-cli` help text omits `tasks correct`, `pair issue-token`, `memory l3 show/approve/pin/revoke/run`, both `reembed`s; `docs/threat-model.md` still calls force-routing opt-in and the email-in path a plain tunnel; `cassandra/mod.rs` / `observation/mod.rs` / `channel/mod.rs` header comments are stale ("stubs", pairing "ships the seam"); `KASTELLAN_DATA_DIR` means the PG data dir to the daemon/CLI but the share root to the gliner/browser-driver resolvers. No shipped review stage emits `Verdict::Escalate` yet — the manuals say so.
+
+### Previous (2026-11-05): #971 deployed from `main`; #967 checked; #965 items 3/8 (prompt wording)
 
 - **#971 deployed** (`kastellan.env` identical, `NRestarts=0`, Matrix up). **#967 check passed:** over-cap `plan.formulate` rows of tasks 357/358 carry `task_id`; pre-deploy rows stay bare.
 - **#965 item 3 kept as is, documented:** which read applies is decided from the item's fields before any read runs; a read that fails is not replaced. Live: **15 of 2302 reads failed** (2 of 61 sifts), so a second reviewed plan per sift isn't worth it. Item 8: `distinct` is per sift (a table naming a continuing sift shows the chain; review round: and a failed read's item is still decided on its hit). Prompt + `reads.rs` doc only; the DGX still runs the old prompt (copy it to `~/.local/share/kastellan/prompts/` + restart core, or deploy).

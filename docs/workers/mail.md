@@ -121,8 +121,11 @@ the one requested (a server ignoring it would serve page one forever), or a
 ### localmail version
 
 Search and both attachment tools first ask `GET /v1/version` and refuse — naming
-the upgrade — unless localmail reports `api_major` 1 and `api_minor` ≥ 3 (slice
-D's index routes and paging, slice E's `fields`/`snippet_chars`). There is no
+the upgrade — unless localmail reports `api_major` 1 and `api_minor` ≥ 6
+(`MIN_API_MINOR` in `workers/mail/src/localmail_contract.rs`: 3 brought slice E's
+`fields`/`snippet_chars`, 4 the web-search query syntax, 5 the `attachments` hit
+field, 6 `date_local` and `filters.attachment_name`; slice D's index routes and
+paging predate them). There is no
 fallback to the older routes: an older server answers the index route with the
 same 404 as a missing message and ignores paging, so trying would give wrong
 answers rather than an error. The other three tools keep working against an

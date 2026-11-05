@@ -202,7 +202,8 @@ not guess and does not quietly refuse. Instead:
 1. the task **pauses** (it stops holding any working slot while it waits);
 2. a short question goes to **your Matrix room**, describing what the agent
    wants to do and carrying a **one-time code**;
-3. you reply `/approve <code>` or `/deny <code>` — or answer from the
+3. you reply with the command and the code, e.g. `/approve 7f3a9c2e1b` or
+   `/deny 7f3a9c2e1b` — or answer from the
    command line with `kastellan-cli inbox`;
 4. on approval the task resumes, and goes ahead **only with exactly the plan
    you approved** — if the agent then comes up with a different plan, you
