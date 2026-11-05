@@ -112,6 +112,8 @@ async fn the_sift_loop() {
     a_forced_answer_without_the_table_gets_it_by_code(&pool).await;
     a_sift_over_a_stashed_search_reads_the_stash(&pool).await;
     a_sift_over_a_purged_stash_says_how_and_the_call_is_made_again(&pool).await;
+    a_stashed_read_reaches_the_sorter_as_its_text(&pool).await;
+    an_evicted_stashed_read_is_a_failed_read(&pool).await;
     a_table_with_no_order_named_is_newest_first(&pool).await;
     an_item_with_no_attachment_takes_the_next_read(&pool).await;
 }
