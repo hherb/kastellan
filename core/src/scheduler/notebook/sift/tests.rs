@@ -294,12 +294,13 @@ async fn an_answer_table_renders_every_kept_row_after_the_body(pool: &sqlx::PgPo
     let script = Script::new(&[
         json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2", "m3"]))}),
         json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
-        json!({"tick": tick(2, "sorted"), "answer": {"body": "Your invoices:", "table": table}}),
+        // A body table beside a named one is not a copy of its rows (totals): it stays.
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "Your invoices:\n\n| total |\n|---|\n| 40 |", "table": table}}),
     ])
     .sorting(&[keep(10), no(), keep(30)]);
     let r = run(pool, &script, ctx).await;
     let b = body(&r.result);
-    assert!(b.starts_with("Your invoices:\n\n| amount | source |"), "{b}");
+    assert!(b.starts_with("Your invoices:\n\n| total |\n|---|\n| 40 |\n\n| amount | source |"), "{b}");
     let (hi, lo) = (b.find("| 30 | m3 |").expect(&b), b.find("| 10 | m1 |").expect(&b));
     assert!(hi < lo, "ordered by amount, descending: {b}");
     assert!(b.ends_with("2 kept of 3 looked at."), "{b}");
