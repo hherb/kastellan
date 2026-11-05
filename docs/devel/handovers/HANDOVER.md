@@ -22,8 +22,8 @@
 > (#923's session, the 225–231 re-measure and #937's OpenShell notes in full; older detail is named in that snapshot's header).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-05 (#969 merged + deployed from `main`; a PR for #968: a stashed sift read reaches the sorter as its text) ·
-**Recent PRs, newest first:** the #968 PR (stashed sift read), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-05 (#969 merged + deployed from `main`; PR #971 (#968): a stashed sift read reaches the sorter as its text) ·
+**Recent PRs, newest first:** [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs `main` with #969 (`upgrade_from_git.sh`, 2026-11-05) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
@@ -56,7 +56,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-05, latest): #969 deployed from `main`; a PR for #968 (a stashed sift read), not deployed
+### This session (2026-11-05, latest): #969 deployed from `main`; PR #971 (#968, a stashed sift read), not deployed
 
 - **#968:** a sift read over 64 KiB (`DEFAULT_RESULT_BYTE_CAP`) came back as its handoff placeholder, so the sorter saw a 1 KiB `summary_head`. `sift/run.rs` now reads it back with `StepDispatcher::stashed` and renders it through `sorter_view` like any read: **the decision is "a bounded head"**, the same head a 63 KiB read gets (`SORTER_ITEM_CAP / (1 + reads)`), screened at that cap (K4). A stash gone mid-sift (should not happen: the stash lives for the loop call) falls back to the placeholder. Loop test `a_stashed_read_reaches_the_sorter_as_its_text` (harness: an `id` read with `"stash": true` returns 2 KiB of filler then its text); red before the fix.
 - **#969's deploy:** `kastellan.env` identical, core/guard/Matrix up. **Owed:** the #967 check (`select id, payload->>'task_id' from audit_log where action='plan.formulate' and payload ? '_truncated' order by id desc limit 5`): a row written after 2026-11-05 must carry `task_id`. Needs a notebook answer turn with a table first.
@@ -243,7 +243,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `ssh dgx '…'`: the pattern matches the remote shell's own command line [[pgrep-wait-loops-match-themselves]].
    #909 + #906 are deployed and **reboot-proven** (2026-10-29) — nothing owed.
 
-1. **#922 next: merge the #968 PR, then a plain `upgrade_from_git.sh`** (with the HTTPS override in the header; no
+1. **#922 next: merge PR #971, then a plain `upgrade_from_git.sh`** (with the HTTPS override in the header; no
    migration) and the #967 check in this session's section. Then #965's items 3, 4, 6–8, then slice 2 (`kastellan-cli session`). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
    **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to
