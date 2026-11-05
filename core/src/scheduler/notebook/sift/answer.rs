@@ -144,12 +144,34 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
 /// something ([`missing_table`]). The loop applies it to a turn's first
 /// reply only: the reply re-asked is used either way, so the model can
 /// still answer without one. Pure.
+///
+/// #973 (DGX task 359): an answer whose `table` names no ref that is a
+/// scrapbook ref at all (`sb:emails_with_attachments`, with no sift run)
+/// shows nothing but a refusal line, so it is shown back the same way.
 pub(crate) fn table_left_out(reply: &NotebookReply, plans: &[PlanRecord]) -> Result<(), String> {
+    if let Some(named) = table_of_no_scrapbook(reply) {
+        let fix = match newest_kept(plans) {
+            Some((name, kept)) => format!("sift {name} kept {kept} items; to show them, name `\"scrapbook\": \"{name}\"`"),
+            None => "no sift here has rows to show, so write the items in `body` and leave `table` out".into(),
+        };
+        return Err(format!(
+            "the `answer`'s `table` names {}, but a table shows a `sift`'s rows, named `sb:<task>:<sift>`: {fix}",
+            named.join(", ")
+        ));
+    }
     let Some((name, kept)) = missing_table(reply, plans) else { return Ok(()) };
     Err(format!(
         "the `answer` shows no `table`, but sift {name} kept {kept} items. To show them, add \
 `\"table\": {{\"scrapbook\": \"{name}\"}}` to the `answer`; to answer without them, send the same answer again"
     ))
+}
+
+/// The refs `reply`'s answer table names, when none of them parses as a
+/// scrapbook ref. A well-formed ref is left to [`with_table`]. Pure.
+fn table_of_no_scrapbook(reply: &NotebookReply) -> Option<&[String]> {
+    let refs = reply.answer.as_ref()?.table.as_ref()?.scrapbook.refs();
+    // An empty list shows the body alone, with no refusal line: nothing to show back.
+    (!refs.is_empty() && refs.iter().all(|r| ScrapRef::parse(r).is_err())).then_some(refs)
 }
 
 /// #960 (DGX tasks 335, 342): the forced-answer turn (a planner timeout, the
@@ -171,6 +193,12 @@ fn missing_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<(String,
     if !reply.answer.as_ref().is_some_and(|a| a.table.is_none() && a.refused.is_none()) {
         return None;
     }
+    newest_kept(plans)
+}
+
+/// This run's newest sift's scrapbook and its table's row count, when it
+/// (or the chain it ends) kept something. Pure.
+fn newest_kept(plans: &[PlanRecord]) -> Option<(String, u64)> {
     let s = chain::last_sift(plans)?;
     // The table's rows (`distinct`), as the prompt has the body quote them.
     let count = |v: &serde_json::Value| v["distinct"].as_u64().or_else(|| v["kept"].as_u64());
@@ -349,6 +377,30 @@ mod tests {
         assert_eq!(forced_table(&plain, &[kept(0)]), None, "nothing kept");
         assert_eq!(forced_table(&answer(serde_json::json!({"table": {"scrapbook": "sb:9:1"}})), &[kept(21)]), None, "its own table");
         assert_eq!(forced_table(&answer(serde_json::json!({"refused": {"principle": 1, "reason": "harm"}})), &[kept(21)]), None, "a refusal");
+    }
+
+    /// #973 (DGX task 359): no sift ran, and the answer's table named
+    /// `sb:emails_with_attachments`, so the operator got one refusal line and
+    /// no list. A table none of whose refs is a scrapbook ref is shown back
+    /// once, naming the newest sift that kept rows when there is one.
+    #[test]
+    fn an_answer_whose_table_names_no_scrapbook_ref_is_refused() {
+        use super::super::chain::tests::{params, sift_record};
+        let with_table = |refs: serde_json::Value| {
+            serde_json::from_value::<NotebookReply>(serde_json::json!({"answer": {"body": "Here they are:", "table": {"scrapbook": refs}}})).unwrap()
+        };
+        let made_up = with_table(serde_json::json!("sb:emails_with_attachments"));
+        let why = table_left_out(&made_up, &[]).unwrap_err();
+        assert!(why.contains("sb:emails_with_attachments") && why.contains("`body`") && !why.contains("kept"), "{why}");
+        let kept = sift_record(params(0, "x"), serde_json::json!({"scrapbook": "sb:9:3", "kept": 4}));
+        let why = table_left_out(&made_up, std::slice::from_ref(&kept)).unwrap_err();
+        assert!(why.contains("sb:9:3") && why.contains("kept 4"), "names the sift that kept rows: {why}");
+        assert!(table_left_out(&with_table(serde_json::json!(["bad", "worse"])), &[]).is_err(), "every ref malformed");
+        assert_eq!(table_left_out(&with_table(serde_json::json!(["bad", "sb:9:3"])), &[kept]), Ok(()), "one ref shows rows");
+        assert_eq!(table_left_out(&with_table(serde_json::json!("sb:9:3")), &[]), Ok(()), "a well-formed ref is with_table's to judge");
+        assert_eq!(table_left_out(&with_table(serde_json::json!([])), &[]), Ok(()), "no refs: the body alone");
+        // The forced turn is never shown back; code attaches no table to an answer that names one.
+        assert_eq!(forced_table(&made_up, &[]), None);
     }
 
     #[test]
