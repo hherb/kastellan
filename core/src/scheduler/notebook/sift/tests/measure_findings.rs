@@ -185,6 +185,25 @@ pub(super) async fn a_stashed_read_reaches_the_sorter_as_its_text(pool: &sqlx::P
     assert!(!sorted[0].contains("handoff_ref"), "not the placeholder: {}", sorted[0]);
 }
 
+/// #968 review: a stashed read evicted before the sift reads it back is a
+/// failed read, not its placeholder's head sorted as the read.
+pub(super) async fn an_evicted_stashed_read_is_a_failed_read(pool: &sqlx::PgPool) {
+    let mut call = sift(2, Some(("mail", "mail.read")));
+    call["parameters"]["read"]["parameters"]["stash"] = json!("gone");
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1"]))}),
+        json!({"tick": tick(1, "listed"), "call": call}),
+        json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "seen"}}),
+    ])
+    .sorting(&[keep(10)]);
+    run(pool, &script, new_task(pool, 5).await).await;
+    let sorted = script.sorted.lock().unwrap().clone();
+    assert_eq!(sorted.len(), 1);
+    assert!(!sorted[0].contains("handoff_ref"), "not the placeholder: {}", sorted[0]);
+    let seen = summary_seen(&script, 2);
+    assert_eq!(seen["failed_reads"], json!(1), "{seen}");
+}
+
 /// #964 review: a stash is purged whenever the loop returns, a suspend too,
 /// so a resumed sift over a stashed step finds it gone. The sift says how
 /// to get it back — the same call under a new id — and the repeat guard

@@ -155,11 +155,19 @@ pub(crate) async fn run_sift(
             match (outcomes.get(i), read_tools.get(i)) {
                 // A read over the dispatch cap came back as its handoff
                 // placeholder (#968): read it back whole, so the sorter sees
-                // the read's own head at its cap, as for any long read.
-                (Some(StepOutcome::Ok(v)), Some(tool)) => {
-                    let whole = handoff::placeholder_ref(v).and_then(|h| r.dispatcher.stashed(task_id, &h));
-                    view(tool, whole.as_ref().unwrap_or(v))
-                }
+                // it rendered at its cap, as for any long read.
+                (Some(StepOutcome::Ok(v)), Some(tool)) => match handoff::placeholder_ref(v) {
+                    None => view(tool, v),
+                    Some(h) => match r.dispatcher.stashed(task_id, &h) {
+                        Some(whole) => view(tool, &whole),
+                        // Evicted (past the task's stash budget): sorting the
+                        // placeholder's head as the read would be a silent wrong "no".
+                        None => {
+                            tracing::warn!(task_id, handoff_ref = h.as_str(), "sift: a stashed read is no longer held; counted as a failed read");
+                            failed_reads += 1;
+                        }
+                    },
+                },
                 (Some(StepOutcome::Err { .. }), _) => failed_reads += 1,
                 _ => {}
             }
