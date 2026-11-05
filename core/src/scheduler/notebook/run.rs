@@ -255,7 +255,7 @@ pub(crate) async fn run_notebook_to_terminal(
                 }
                 let body = match a.table.as_ref().or(forced.as_ref()) {
                     Some(t) => {
-                        let (body, class) = sift::answer::with_table(pool, &ctx, &a.body, t).await;
+                        let (body, class) = sift::answer::with_table(pool, &ctx, &a.body, t, a.table.is_none()).await;
                         touched.push(class);
                         body
                     }

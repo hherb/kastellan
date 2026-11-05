@@ -18,8 +18,10 @@ pub(crate) const TABLE_REFS_MAX: usize = crate::scheduler::conversation::record:
 /// `body`, then the table `t` names, and the highest class of its rows. A
 /// ref names its whole chain ([`table_refs`]). A ref that is malformed,
 /// unreadable here (K11), unreadable from the database or empty is not
-/// shown: a line says so instead, and the rest still render.
-pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: &TableSpec) -> (String, DataClass) {
+/// shown: a line says so instead, and the rest still render. `strip_own`:
+/// `t` was attached by code to a forced answer ([`forced_table`]), so a
+/// table in `body` is the model's copy of those rows ([`without_own_tables`]).
+pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: &TableSpec, strip_own: bool) -> (String, DataClass) {
     let mut rows: Vec<Row> = Vec::new();
     let mut counts = Counts::default();
     let mut fields: Option<Vec<String>> = None;
@@ -65,7 +67,17 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
         c.push(SOURCE_COLUMN.into());
         c
     });
-    let mut out = body.to_string();
+    // The prompt says never to copy the rows into `body`; a model that did
+    // showed two tables, its own partial one first (DGX task 351). Only on
+    // the forced answer: a table the model named may sit beside a body table
+    // that is not a copy (totals), and only when the code's table has rows
+    // to take its place (review findings).
+    let own = (strip_own && !rows.is_empty()).then(|| without_own_tables(body)).flatten();
+    if own.is_some() {
+        tracing::info!(task_id = ctx.task_id, "answer table: the body's own markdown table taken out");
+        refused.push(OWN_TABLE_NOTE.into());
+    }
+    let mut out = own.unwrap_or_else(|| body.to_string());
     if included {
         out.push_str("\n\n");
         // The model names an order only sometimes (#960), and sometimes one
@@ -93,6 +105,35 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
         out.push_str(&line);
     }
     (out, class)
+}
+
+/// The line under a table when the body's own table was taken out.
+pub(crate) const OWN_TABLE_NOTE: &str = "(a table written in the answer is left out: its rows are in the table above)";
+
+/// `body` without the markdown tables the model wrote into it, or `None`
+/// when it has none. A table is a run of lines starting with `|` whose
+/// second line is a delimiter row (`|---|:--:|`). Only called when code
+/// renders the scrapbook's table, which is the faithful one. Pure.
+pub(crate) fn without_own_tables(body: &str) -> Option<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let piped = |l: &str| l.trim_start().starts_with('|');
+    let delimiter = |l: &str| {
+        let t = l.trim();
+        t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    };
+    let (mut kept, mut cut, mut i) = (Vec::with_capacity(lines.len()), false, 0);
+    while i < lines.len() {
+        if piped(lines[i]) && lines.get(i + 1).is_some_and(|l| piped(l) && delimiter(l)) {
+            cut = true;
+            while i < lines.len() && piped(lines[i]) {
+                i += 1;
+            }
+            continue;
+        }
+        kept.push(lines[i]);
+        i += 1;
+    }
+    cut.then(|| kept.join("\n").trim_end().to_string())
 }
 
 /// #960 item 2 (DGX task 314): after a sift that kept 21 items the model
@@ -308,6 +349,20 @@ mod tests {
         assert_eq!(forced_table(&plain, &[kept(0)]), None, "nothing kept");
         assert_eq!(forced_table(&answer(serde_json::json!({"table": {"scrapbook": "sb:9:1"}})), &[kept(21)]), None, "its own table");
         assert_eq!(forced_table(&answer(serde_json::json!({"refused": {"principle": 1, "reason": "harm"}})), &[kept(21)]), None, "a refusal");
+    }
+
+    #[test]
+    fn a_body_s_own_markdown_table_is_taken_out() {
+        let body = "Six of them:\n\n| date | amount |\n|---|---:|\n| 1 May | 20 |\n\nSee below.";
+        assert_eq!(without_own_tables(body), Some("Six of them:\n\n\nSee below.".into()));
+        let indented = "a\n  | x |\n  | :-- |\n  | 1 |";
+        assert_eq!(without_own_tables(indented), Some("a".into()), "indented, and at the end");
+        assert_eq!(without_own_tables("| a |\n|---|\n| 1 |\nAfter."), Some("After.".into()), "prose right after the table stays");
+        assert_eq!(without_own_tables("| a |\n|---|\n\nmid\n\n| b |\n|---|\nend"), Some("\nmid\n\nend".into()), "every table, not only the first");
+        assert_eq!(without_own_tables("a | b\n| not | a table |\nc"), None, "no delimiter row");
+        assert_eq!(without_own_tables("| x |\n| y |"), None, "a second row is not a delimiter");
+        assert_eq!(without_own_tables("|---|"), None, "a delimiter alone");
+        assert_eq!(without_own_tables("plain prose"), None);
     }
 
     #[test]
