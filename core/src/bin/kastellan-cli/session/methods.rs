@@ -6,7 +6,7 @@
 //! Errors: bad params are `INVALID_PARAMS` (-32602); a request the state of
 //! the world refuses (no such task, not running, already answered) is
 //! `OPERATION_FAILED` (-32002) with the reason; a database failure is
-//! `INTERNAL_ERROR` (-32603).
+//! `INTERNAL_ERROR` (-32603), so a client may retry it.
 
 use kastellan_core::cli_audit::{
     cancel_and_audit, correct_and_audit, submit_and_audit, CancelOutcome, CorrectOutcome,
@@ -25,8 +25,8 @@ fn internal(e: impl std::fmt::Display) -> RpcError {
     RpcError::new(codes::INTERNAL_ERROR, e.to_string())
 }
 
-/// Every method name the session serves, `task.follow` included — so a
-/// client (and the unknown-method error) can list them.
+/// Every method name the session serves, `task.follow` included — for the
+/// unknown-method error to list.
 pub(super) const METHODS: [&str; 7] =
     ["task.submit", "task.follow", "task.correct", "task.cancel", "task.status", "inbox.list", "inbox.answer"];
 
@@ -76,7 +76,7 @@ async fn cancel(pool: &PgPool, task_id: i64) -> Result<Value, RpcError> {
     }
 }
 
-/// `task.status` → `{task_id, state, lane, plan_count, result, notebook}`,
+/// `task.status` → `{task_id, state, lane, plan_count, result, notebook, notebook_error}`,
 /// where `notebook` is the fold (`notebook::view::fold_view`). A notebook
 /// the fold refuses is `notebook: null` with `notebook_error` saying why —
 /// the task's state is still worth answering.
@@ -122,10 +122,15 @@ async fn inbox_list(pool: &PgPool, limit: i64) -> Result<Value, RpcError> {
     Ok(json!({"asks": asks}))
 }
 
-/// `inbox.answer` → `{task_id, audited}`; the task returns to the queue.
+/// `inbox.answer` → `{task_id, audited, audit_error}`; the task returns to
+/// the queue. `audit_error` says why the `ask.resolved` row was lost.
 async fn inbox_answer(pool: &PgPool, a: params::Answer) -> Result<Value, RpcError> {
+    use crate::inbox::ResolveError;
     let r = crate::inbox::resolve_and_audit(pool, a.ask_id, &a.choice, a.note.as_deref())
         .await
-        .map_err(refused)?;
-    Ok(json!({"task_id": r.task_id, "audited": r.audited}))
+        .map_err(|e| match e {
+            ResolveError::Refused(m) => refused(m),
+            ResolveError::Db(m) => internal(m),
+        })?;
+    Ok(json!({"task_id": r.task_id, "audited": r.audit_error.is_none(), "audit_error": r.audit_error}))
 }

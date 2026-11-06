@@ -257,9 +257,8 @@ pub(crate) fn submission_payload(
     let mut payload = serde_json::json!({"instruction": instruction, "kind": "ask"});
 
     // Resolve floor + source + signals via the pure helper. The closure
-    // captures `floor` so we can render its PascalCase string for the
-    // warn line when inference would have elevated above the operator's
-    // pinned value.
+    // records what inference would have elevated to when the operator's
+    // pinned floor overrode it, for the warn line below.
     let mut suppressed: Option<(kastellan_core::cassandra::DataClass, Vec<&'static str>)> = None;
     let (resolved_floor, resolved_source, resolved_signals) =
         resolve_floor_for_submission(instruction, floor, &mut |c, s| {
@@ -270,7 +269,7 @@ pub(crate) fn submission_payload(
             inferred_class = inferred_class.as_pascal_str(),
             inferred_signals = ?inferred_sigs,
             operator_floor = floor.map(|f| f.as_pascal_str()).unwrap_or(""),
-            "--classification-floor explicitly suppressed an elevation the keyword classifier would have made"
+            "an operator classification floor (--classification-floor / classification_floor) suppressed an elevation the keyword classifier would have made"
         );
     }
     if let serde_json::Value::Object(ref mut m) = payload {
@@ -298,11 +297,20 @@ pub(crate) fn submission_payload(
     payload
 }
 
+/// Why a task ended without an answer, in the scheduler's words: a failed
+/// task's `detail`, a refusal's `body` (the text meant for the user), or a
+/// blocked / denied / refused task's `reason`. Shared with `session`'s
+/// `task.finished`.
+pub(crate) fn ended_detail(result: Option<&serde_json::Value>) -> Option<&str> {
+    let field = |key: &str| result.and_then(|r| r.get(key)).and_then(|v| v.as_str());
+    field("detail").or_else(|| field("body")).or_else(|| field("reason"))
+}
+
 /// What `ask` prints for a task that did not complete: the state, then the
 /// task's own `detail` when it left one, which is the plain-words reason the
 /// scheduler wrote (#923) and the only part a user can act on.
 fn ended_line(state: &str, result: Option<&serde_json::Value>) -> String {
-    match result.and_then(|r| r.get("detail")).and_then(|d| d.as_str()) {
+    match ended_detail(result) {
         Some(detail) => format!("ask: task ended in state '{state}': {detail}"),
         None => format!("ask: task ended in state '{state}'"),
     }
@@ -319,6 +327,12 @@ mod ended_line_tests {
             ended_line("failed", Some(&r)),
             "ask: task ended in state 'failed': The language model answered with something that is not a plan."
         );
+    }
+
+    #[test]
+    fn a_blocked_task_says_its_reason() {
+        let r = serde_json::json!({"kind": "blocked", "principle": "P1", "reason": "would mail a stranger"});
+        assert_eq!(ended_line("blocked", Some(&r)), "ask: task ended in state 'blocked': would mail a stranger");
     }
 
     #[test]
@@ -414,5 +428,30 @@ mod resolve_floor_for_submission_tests {
         assert_eq!(src, Src::Operator);
         assert!(sigs.is_empty());
         assert!(!suppressed, "matching operator value is not a suppression");
+    }
+}
+
+#[cfg(test)]
+mod submission_payload_tests {
+    use super::submission_payload;
+    use kastellan_core::cassandra::DataClass;
+
+    // The keys and casing the scheduler's runner reads back.
+    #[test]
+    fn an_operator_floor_is_stored_as_the_operators() {
+        let p = submission_payload("find the invoice", Some(DataClass::Personal));
+        assert_eq!(p["instruction"], "find the invoice");
+        assert_eq!(p["kind"], "ask");
+        assert_eq!(p["classification_floor"], "Personal");
+        assert_eq!(p["classification_floor_source"], "operator");
+        assert!(p.get("classification_floor_signals").is_none(), "{p}");
+    }
+
+    #[test]
+    fn an_unpinned_floor_is_inferred_with_its_signals() {
+        let p = submission_payload("Translate the patient's pathology report.", None);
+        assert_eq!(p["classification_floor_source"], "cli_inferred", "{p}");
+        assert_ne!(p["classification_floor"], "Public", "{p}");
+        assert!(p["classification_floor_signals"].as_array().is_some_and(|a| !a.is_empty()), "{p}");
     }
 }

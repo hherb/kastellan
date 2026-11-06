@@ -188,7 +188,9 @@ It serves `task.submit`, `task.follow`, `task.correct`, `task.cancel`,
 and `inbox.answer`, each through the same helper as the one-shot command. A
 follow answers at once and streams `notebook.entry`, `task.awaiting_operator`
 and `task.finished` notifications in the background; it reads the task's state
-**before** its entries (so a terminal state means every entry is visible), and
+**before** its entries (so a state the planner sets means every entry is visible; for a
+cancel, which lands first, the follow waits up to 120 s for the planner's
+`cancelled` entry), and
 its 3 s poll tick, not the NOTIFYs, is what makes it correct: `PgListener` drops
 notifications on reconnect, and nothing notifies a task parking. A dropped
 session cancels nothing; a new one resumes with `after_seq`.

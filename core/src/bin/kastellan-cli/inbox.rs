@@ -9,7 +9,9 @@
 //! Resolves by row **id**, using `db::asks::resolve` rather than
 //! `resolve_with_nonce`. An id has no unforgeability property, which is safe
 //! only because this caller is the operator's own local binary; any caller
-//! reachable from an untrusted transport must use the nonce form (slice 2).
+//! reachable from an untrusted transport must use the nonce form (#564
+//! slice 2). `session`'s `inbox.answer` qualifies for the same reason: it is
+//! this binary, run locally or over ssh as the operator's own OS user.
 
 use std::process::ExitCode;
 
@@ -169,10 +171,10 @@ async fn inbox_resolve(args: &[String]) -> ExitCode {
     };
 
     match resolve_and_audit(&pool, ask_id, choice, note.as_deref()).await {
-        Ok(Resolved { task_id, audited }) => {
+        Ok(Resolved { task_id, audit_error }) => {
             println!("ask {ask_id} resolved '{choice}'; task {task_id} returned to the queue");
-            if !audited {
-                eprintln!("warning: ask.resolved audit row failed; the answer stands");
+            if let Some(e) = audit_error {
+                eprintln!("warning: ask.resolved audit row failed: {e}; the answer stands");
             }
             ExitCode::SUCCESS
         }
@@ -181,10 +183,28 @@ async fn inbox_resolve(args: &[String]) -> ExitCode {
 }
 
 /// An ask answered by [`resolve_and_audit`]: the task it belonged to (now
-/// back in the queue), and whether its `ask.resolved` row was written.
+/// back in the queue), and why its `ask.resolved` row was not written, if
+/// it was not.
 pub(crate) struct Resolved {
     pub task_id: i64,
-    pub audited: bool,
+    pub audit_error: Option<String>,
+}
+
+/// Why [`resolve_and_audit`] resolved nothing.
+#[derive(Debug)]
+pub(crate) enum ResolveError {
+    /// No such ask, or a lost race (already answered, expired, cancelled).
+    Refused(String),
+    /// The database failed; the ask may still be open.
+    Db(String),
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::Refused(m) | ResolveError::Db(m) => f.write_str(m),
+        }
+    }
 }
 
 /// Answer ask `ask_id` with `choice` as the operator at this terminal, and
@@ -192,23 +212,22 @@ pub(crate) struct Resolved {
 /// resolve` and `session`'s `inbox.answer`. `choice` must already be one of
 /// [`CHOICES`]; the database checks it against the ask's own options too.
 ///
-/// `Err` is the operator-facing reason nothing was resolved: no such ask,
-/// a lost race (already answered, expired, cancelled), or a database error.
-/// The audit insert is best-effort — the answer has already landed — and a
-/// lost row is reported as `audited: false`.
+/// `Err` is the operator-facing reason nothing was resolved. The audit
+/// insert is best-effort — the answer has already landed — and a lost row
+/// is reported in `audit_error`.
 pub(crate) async fn resolve_and_audit(
     pool: &sqlx::PgPool,
     ask_id: i64,
     choice: &str,
     note: Option<&str>,
-) -> Result<Resolved, String> {
+) -> Result<Resolved, ResolveError> {
     // Read the ask first for its `task_id`: every other `task.*` / `ask.*`
     // audit row is keyed on it, and a row without it cannot be joined to
     // the task the decision was about.
     let task_id = match kastellan_db::asks::get(pool, ask_id).await {
         Ok(Some(a)) => a.task_id,
-        Ok(None) => return Err(format!("no ask with id {ask_id}")),
-        Err(e) => return Err(format!("inbox resolve: {e}")),
+        Ok(None) => return Err(ResolveError::Refused(format!("no ask with id {ask_id}"))),
+        Err(e) => return Err(ResolveError::Db(format!("inbox resolve: {e}"))),
     };
 
     // Free text is carried for the record and shown to the operator; it is
@@ -225,12 +244,12 @@ pub(crate) async fn resolve_and_audit(
         // reporting success here would tell the operator their answer
         // stood when someone else's did.
         Ok(false) => {
-            return Err(format!(
+            return Err(ResolveError::Refused(format!(
                 "ask {ask_id} was not resolvable — already answered, expired, cancelled, \
                  or past its deadline. Nothing was written."
-            ))
+            )))
         }
-        Err(e) => return Err(format!("inbox resolve: {e}")),
+        Err(e) => return Err(ResolveError::Db(format!("inbox resolve: {e}"))),
     }
 
     // `via` names the answering SURFACE, and both surfaces write it (#564
@@ -246,12 +265,10 @@ pub(crate) async fn resolve_and_audit(
         "free_text": note,
         "via": "cli",
     });
-    let audited = match kastellan_db::audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_ASK_RESOLVED, payload).await {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!(ask_id, error = %e, "ask.resolved audit insert failed (answer already landed)");
-            false
-        }
-    };
-    Ok(Resolved { task_id, audited })
+    // Returned, not logged: a session client sees only its stdout.
+    let audit_error = kastellan_db::audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_ASK_RESOLVED, payload)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    Ok(Resolved { task_id, audit_error })
 }

@@ -14,10 +14,14 @@
 //!    sends only what came after.
 //! 3. A follow of a task that parks on an operator ask says so, and the
 //!    inbox methods list and answer the ask.
+//! 4. A follow of a cancelled task waits for the planner's `cancelled`
+//!    entry before it finishes.
+//! 5. The follow cap, an over-cap line, and a dropped session leaving its
+//!    tasks alone.
 //!
 //! Skips with `[SKIP]` on hosts without Postgres or a supervisor (run with
 //! `-- --nocapture` to see it), like `cli_inbox_e2e.rs`, whose PG bring-up
-//! and CLI env this copies.
+//! and CLI env this copies. Once Postgres is up a failure fails.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -53,8 +57,8 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     );
     probe_run(&cluster.conn_spec, "core", "startup", json!({"test": format!("cli_session_e2e-{label}")}))
         .await
-        .ok()?;
-    let pool = connect_runtime_pool(&cluster.conn_spec).await.ok()?;
+        .expect("probe run");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("runtime pool");
     Some((pool, cluster))
 }
 
@@ -124,6 +128,15 @@ impl Session {
         }
     }
 
+    /// Assert nothing arrives for `d`.
+    fn quiet_for(&self, d: Duration) {
+        match self.lines.recv_timeout(d) {
+            Err(RecvTimeoutError::Timeout) => {}
+            Ok(v) => panic!("expected nothing for {d:?}, got {v}"),
+            Err(RecvTimeoutError::Disconnected) => panic!("the session closed its stdout"),
+        }
+    }
+
     /// Send a request and return its response, which must come next.
     fn call(&mut self, method: &str, params: Value) -> Value {
         let id = self.request(method, params);
@@ -180,7 +193,7 @@ async fn submit_status_cancel_and_the_errors_a_client_can_make() {
     let Some((pool, cluster)) = bring_up_pg("submit").await else { return };
     let mut s = Session::start(&cluster);
 
-    let r = s.ok("task.submit", json!({"instruction": "find the invoice", "lane": "long"}));
+    let r = s.ok("task.submit", json!({"instruction": "find the invoice", "lane": "long", "classification_floor": "personal"}));
     let task_id = r["task_id"].as_i64().expect("a task id");
     assert_eq!(r["lane"], "long");
     let task = tasks::get(&pool, task_id).await.unwrap().expect("the row");
@@ -188,6 +201,8 @@ async fn submit_status_cancel_and_the_errors_a_client_can_make() {
     assert_eq!(task.lane, Lane::Long);
     assert_eq!(task.payload["instruction"], "find the invoice");
     assert_eq!(task.payload["kind"], "ask", "the same payload as `kastellan-cli ask`");
+    assert_eq!(task.payload["classification_floor"], "Personal", "the operator's floor reaches the task");
+    assert_eq!(task.payload["classification_floor_source"], "operator");
     let submitted: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_log WHERE actor = 'cli' AND action = 'task.submitted' \
          AND (payload->>'task_id')::bigint = $1",
@@ -202,11 +217,23 @@ async fn submit_status_cancel_and_the_errors_a_client_can_make() {
     assert_eq!(st["state"], "pending");
     assert_eq!(st["notebook"]["last_seq"], 0, "no entries yet: {st}");
 
+    // A notebook the fold refuses still answers the task's state.
+    let bad = insert_pending(&pool, Lane::Fast, json!({"instruction": "y"})).await.expect("insert");
+    notebook::append(&pool, bad, EntryKind::Tick, tick_payload()).await.unwrap();
+    let st = s.ok("task.status", json!({"task_id": bad}));
+    assert_eq!(st["state"], "pending");
+    assert_eq!(st["notebook"], Value::Null, "{st}");
+    assert!(st["notebook_error"].as_str().is_some_and(|e| e.contains("no step 1")), "{st}");
+
     // A garbage line is answered with a null id, and the session goes on.
     s.send_line("this is not json");
     let resp = s.next();
     assert_eq!(resp["error"]["code"], -32700, "{resp}");
     assert_eq!(resp["id"], Value::Null);
+    // JSON that is not a request keeps its id, so the client can match it.
+    s.send_line(r#"{"id": 77, "method": "task.status", "params": {"task_id": 1}}"#);
+    let resp = s.next();
+    assert_eq!((resp["error"]["code"].clone(), resp["id"].clone()), (json!(-32600), json!(77)), "{resp}");
     assert_eq!(s.error_code("task.nope", json!({})), -32601);
     assert_eq!(s.error_code("task.submit", json!({"instruction": "  "})), -32602);
     assert_eq!(s.error_code("task.status", json!({"task_id": task_id + 1000})), -32002);
@@ -308,7 +335,7 @@ async fn a_parked_task_is_announced_and_the_inbox_answers_it() {
     assert_eq!(s.error_code("inbox.answer", json!({"ask_id": raised.ask_id, "choice": "maybe"})), -32602);
     assert_eq!(
         s.ok("inbox.answer", json!({"ask_id": raised.ask_id, "choice": "approve", "note": "fine"})),
-        json!({"task_id": task_id, "audited": true})
+        json!({"task_id": task_id, "audited": true, "audit_error": null})
     );
     assert_eq!(tasks::observe_state(&pool, task_id).await.unwrap(), "pending");
     let resolved: i64 = sqlx::query_scalar(
@@ -321,5 +348,52 @@ async fn a_parked_task_is_announced_and_the_inbox_answers_it() {
     .unwrap();
     assert_eq!(resolved, 1, "one ask.resolved row, actor=cli");
     assert_eq!(s.error_code("inbox.answer", json!({"ask_id": raised.ask_id, "choice": "deny"})), -32002, "a lost race is refused");
+    assert_eq!(s.error_code("inbox.answer", json!({"ask_id": raised.ask_id + 1000, "choice": "deny"})), -32002, "no such ask");
     s.finish();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_follow_waits_for_the_planners_cancelled_entry() {
+    let Some((pool, cluster)) = bring_up_pg("cancel").await else { return };
+    let task_id = seed_running_task(&pool).await;
+    notebook::append(&pool, task_id, EntryKind::Steps, steps_payload()).await.unwrap();
+    let mut s = Session::start(&cluster);
+    s.ok("task.follow", json!({"task_id": task_id}));
+    assert_entry(&s.next(), task_id, 1, "steps");
+
+    // The cancel lands first; the planner writes its entry only when it
+    // next looks. Longer than a poll tick, so a follow that finished on the
+    // state alone would have said so by now.
+    assert_eq!(s.ok("task.cancel", json!({"task_id": task_id}))["state"], "cancelled");
+    s.quiet_for(Duration::from_secs(5));
+    notebook::append(&pool, task_id, EntryKind::Cancelled, json!({})).await.unwrap();
+    assert_entry(&s.next(), task_id, 2, "cancelled");
+    let fin = s.next();
+    assert_eq!((fin["method"].clone(), fin["params"]["state"].clone()), (json!("task.finished"), json!("cancelled")), "{fin}");
+
+    // Resumed past that entry, a follow does not wait for it again.
+    s.ok("task.follow", json!({"task_id": task_id, "after_seq": 2}));
+    assert_eq!(s.next()["method"], "task.finished");
+    s.finish();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn follows_are_capped_and_a_dropped_session_leaves_its_tasks_alone() {
+    let Some((pool, cluster)) = bring_up_pg("cap").await else { return };
+    let task_id = insert_pending(&pool, Lane::Fast, json!({"instruction": "x"})).await.expect("insert");
+    let mut s = Session::start(&cluster);
+    // A pending task's follow sends nothing, so each stays live.
+    for _ in 0..8 {
+        s.ok("task.follow", json!({"task_id": task_id}));
+    }
+    assert_eq!(s.error_code("task.follow", json!({"task_id": task_id})), -32002, "the ninth is refused");
+
+    // An over-cap line: answered -32600, then the session ends, follows and all.
+    let mut big = vec![b'a'; kastellan_protocol::MAX_RECORD_BYTES + 1];
+    big.push(b'\n');
+    let _ = s.stdin.write_all(&big); // the session may stop reading mid-line
+    let resp = s.next();
+    assert_eq!((resp["error"]["code"].clone(), resp["id"].clone()), (json!(-32600), Value::Null), "{resp}");
+    s.finish();
+    assert_eq!(tasks::observe_state(&pool, task_id).await.unwrap(), "pending", "a dropped session cancels nothing");
 }

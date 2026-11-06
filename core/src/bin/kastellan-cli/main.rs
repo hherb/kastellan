@@ -185,6 +185,16 @@ mod tasks;
 mod tools_allowlist;
 
 fn main() -> ExitCode {
+    // Without a subscriber every library `tracing::warn!` (a lost audit row,
+    // a suppressed classification elevation) is dropped. stderr, never
+    // stdout: `session` owns stdout for JSON-RPC.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("{}", help_text());

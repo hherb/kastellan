@@ -67,15 +67,25 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - `core/src/bin/kastellan-cli/session.rs` (+ `session/{params,methods,follow}.rs`): JSON-RPC 2.0 on stdin/stdout, local
   or over ssh, no listener. Methods `task.submit|follow|correct|cancel|status`, `inbox.list|answer`; the method and
   notification table is the module doc. Each method calls the one-shot command's helper: `ask::submission_payload`
-  and `inbox::resolve_and_audit` were extracted for it (the first a byte-identical move; the second returns its refusal text instead of printing it); `task.status` returns the fold through
+  and `inbox::resolve_and_audit` were extracted for it (the first a move, unchanged in behaviour; the second returns a typed `ResolveError` — refused vs database — and the audit failure's text, instead of printing them); `task.status` returns the fold through
   the new public `scheduler::notebook::view::fold_view`.
-- ⚠️ **A follow reads the task's state BEFORE its entries** (then a terminal state means every entry is visible), and
+- ⚠️ **A follow reads the task's state BEFORE its entries** (then a state the planner sets means every entry is visible;
+  a **cancel** lands first and the planner's `cancelled` entry later, so a follow of a cancelled task with a notebook
+  waits up to 120 s for that entry), and
   **its 3 s poll tick, not the NOTIFYs, is what makes it correct** (`PgListener` drops notifies on reconnect; nothing
   notifies a task parking in `awaiting_operator`). A follow answers first, then streams; a dropped session cancels nothing.
 - Tests: `core/tests/cli_session_e2e.rs` (3, PG only, no daemon: the test plays the scheduler). Mutation-checked
   **5 of 5** (no poll tick, never finished, `after_seq` ignored, `last_seq` not advanced, lane ignored). ⚠️ The
   no-tick mutant first SURVIVED: raising the ask right after the follow's *response* raced the follow's first read;
   the test now waits for an entry before raising. Deferred: `ask` printing entries to stderr (#985).
+- Review round (4 agents): the cancel wait above (its mutant — finish on the state alone — caught); follows capped at
+  8 a session, each holding a pool connection (one shared listener: #987); `inbox.answer` maps a DB error to -32603,
+  not -32002; `task.finished`'s `detail` (and `ask`'s end line) falls back to a refusal's `body`, then `reason`; JSON
+  that is not a request is -32600 with its id; ⚠️ **`kastellan-cli` now installs a warn-level stderr tracing
+  subscriber** — before it, every library `warn!` (lost audit rows, floor suppression) went nowhere; the PG e2es fail
+  instead of skipping silently once PG is up, and `cli_inbox_e2e` + `cli_session_e2e` joined the `pg` gate profile.
+  `cli_session_e2e` now 5 tests, kastellan-cli bin 118. Left: #988 (follow_failed / second-parking tests, submit and
+  cancel results without `audited`).
 
 ### Previous (2026-11-06): #965 items 4, 6, 7 — tests only (PR #984, merged)
 
@@ -389,7 +399,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#986) | `feat/922-cli-session` on `9607c218` | **5527 / 0 / 52**, **201** summaries, `TEST_EXIT=0`, primary checkout's own `target/`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-922s2.log`. vs #984's row (5507): +20 exactly as predicted — core lib +4 (`notebook::view`), `kastellan-cli` bin +13 (`session::params` 8, `session::follow` 5), new `cli_session_e2e` +3 (the +1 summary) | **cold**, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-session`, 27 `Checking kastellan`, clean | **23** (container service not running) |
+| **Mac** (#986) | `feat/922-cli-session`, working tree over `9607c218`, **before** the review round (which adds +9: bin +7, `cli_session_e2e` +2, not re-swept; those suites run green under `KASTELLAN_PG_REQUIRE_E2E=1`) | **5527 / 0 / 52**, **201** summaries, `TEST_EXIT=0`, primary checkout's own `target/`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-922s2.log`. vs #984's row (5507): +20 exactly as predicted — core lib +4 (`notebook::view`), `kastellan-cli` bin +13 (`session::params` 8, `session::follow` 5), new `cli_session_e2e` +3 (the +1 summary) | **cold**, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-session`, 27 `Checking kastellan`, clean | **23** (container service not running) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.

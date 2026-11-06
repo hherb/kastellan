@@ -5,14 +5,23 @@
 //!
 //! 1. read the task's state;
 //! 2. send every notebook entry after the last one sent (`notebook.entry`);
-//! 3. if the state is terminal, send `task.finished` and stop;
+//! 3. if the state is terminal (and, for a cancel, the notebook has closed —
+//!    below), send `task.finished` and stop;
 //! 4. if the task just parked on an operator ask, send
 //!    `task.awaiting_operator` (once per parking);
 //! 5. sleep until a NOTIFY for this task or the next poll tick.
 //!
-//! Reading the state **before** the entries is what makes step 3 safe: the
-//! planner appends its last entry before it marks the task terminal, so once
-//! a terminal state is visible every entry written before it is too.
+//! Reading the state **before** the entries is what makes step 3 safe when
+//! the planner ends the task itself: it appends its last entry before it
+//! marks the task terminal, so once that state is visible every entry is too.
+//!
+//! A cancel is the exception: `task.cancel` sets `cancelled` first, and the
+//! planner writes its `cancelled` entry (after the turn in flight, which may
+//! write one more) only when it next looks. So a follow that sees
+//! `cancelled` on a task with a notebook keeps going until that entry has
+//! been sent, for at most [`CANCEL_GRACE`] — a planner that died never
+//! writes it. A task cancelled before its first entry finishes at once;
+//! anything its planner writes later is in `task.status`.
 //!
 //! The NOTIFYs (`task_notebook`, `tasks_completed`) only make it prompt; the
 //! poll tick is what makes it correct. `PgListener` drops notifications
@@ -32,8 +41,13 @@ use tokio::sync::mpsc::Sender;
 
 use crate::ask::SUSPEND_POLL_SECS;
 
-/// The `tasks_completed` NOTIFY channel (migration 0005): payload is the id.
+/// The `tasks_completed` NOTIFY channel (migration 0005, trigger since 0012):
+/// payload is the id.
 const COMPLETED_CHANNEL: &str = "tasks_completed";
+
+/// How long a follow of a cancelled task waits for the planner's
+/// `cancelled` entry: one model turn, generously.
+const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// A JSON-RPC 2.0 notification: a message with no `id`, which the client
 /// does not answer.
@@ -62,14 +76,18 @@ pub(super) fn entry_notification(e: &Entry) -> Value {
 
 /// `task.finished {task_id, state, answer, detail, result}`. `answer` is
 /// the text an `ask` would print (a `kind: "text"` result's body), `detail`
-/// the scheduler's reason for a task that did not complete (#923); either
-/// is `null` when the result has none. `result` is the whole result, for
-/// a kind neither covers.
+/// the scheduler's reason for a task that did not complete, as `ask` prints
+/// it ([`crate::ask::ended_detail`], #923); either is `null` when the result
+/// has none. `result` is the whole result, for a kind neither covers.
 pub(super) fn finished_notification(t: &Task) -> Value {
     let field = |key: &str| t.result.as_ref().and_then(|r| r.get(key)).and_then(Value::as_str);
     let answer = match field("kind") {
         Some("text") => field("body"),
         _ => None,
+    };
+    let detail = match answer {
+        Some(_) => None,
+        None => crate::ask::ended_detail(t.result.as_ref()),
     };
     notification(
         "task.finished",
@@ -77,7 +95,7 @@ pub(super) fn finished_notification(t: &Task) -> Value {
             "task_id": t.id,
             "state": t.state,
             "answer": answer,
-            "detail": field("detail"),
+            "detail": detail,
             "result": t.result,
         }),
     )
@@ -117,15 +135,23 @@ async fn follow_inner(pool: &PgPool, task_id: i64, last_seq: &mut i64, out: &Sen
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(SUSPEND_POLL_SECS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut parked = false;
+    let mut cancel_deadline = None;
     loop {
         let task = tasks::get(pool, task_id).await.map_err(|e| e.to_string())?.ok_or(format!("task {task_id} disappeared"))?;
+        // Decided before the entries are read, like the state: the notebook
+        // only grows, so a `cancelled` entry this check saw is sent below.
+        let finished = REPLIED_STATES.contains(&task.state.as_str())
+            && (task.state != "cancelled" || {
+                let deadline = *cancel_deadline.get_or_insert_with(|| tokio::time::Instant::now() + CANCEL_GRACE);
+                cancel_closed(pool, task_id).await? || tokio::time::Instant::now() >= deadline
+            });
         for e in notebook::entries(pool, task_id, *last_seq).await.map_err(|e| e.to_string())? {
             if out.send(entry_notification(&e)).await.is_err() {
                 return Ok(());
             }
             *last_seq = e.seq;
         }
-        if REPLIED_STATES.contains(&task.state.as_str()) {
+        if finished {
             let _ = out.send(finished_notification(&task)).await;
             return Ok(());
         }
@@ -151,6 +177,14 @@ async fn follow_inner(pool: &PgPool, task_id: i64, last_seq: &mut i64, out: &Sen
             }
         }
     }
+}
+
+/// Whether a cancelled task's notebook is closed: it has none (nothing will
+/// write one), or its `cancelled` entry is in. Every entry is read, not just
+/// the unsent ones: a follow resumed past that entry must not wait for it.
+async fn cancel_closed(pool: &PgPool, task_id: i64) -> Result<bool, String> {
+    let all = notebook::entries(pool, task_id, 0).await.map_err(|e| e.to_string())?;
+    Ok(all.is_empty() || all.iter().any(|e| e.kind == notebook::EntryKind::Cancelled))
 }
 
 #[cfg(test)]
@@ -217,5 +251,15 @@ mod tests {
         assert_eq!(n["params"]["result"], r);
         let n = finished_notification(&task("cancelled", None));
         assert_eq!(n["params"]["result"], Value::Null);
+    }
+
+    #[test]
+    fn a_blocked_or_refused_task_finishes_with_its_reason() {
+        let r = json!({"kind": "blocked", "principle": "P1", "reason": "would mail a stranger"});
+        assert_eq!(finished_notification(&task("blocked", Some(r)))["params"]["detail"], "would mail a stranger");
+        let r = json!({"kind": "refused", "principle": "P2", "reason": "internal", "body": "I can't do that."});
+        let n = finished_notification(&task("refused", Some(r)));
+        assert_eq!(n["params"]["detail"], "I can't do that.", "a refusal's body is the text meant for the user");
+        assert_eq!(n["params"]["answer"], Value::Null);
     }
 }
