@@ -64,8 +64,10 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
         serde_json::json!({"test": format!("cli_inbox_e2e-{label}")}),
     )
     .await
-    .ok()?;
-    let pool = connect_runtime_pool(&cluster.conn_spec).await.ok()?;
+    // Postgres is up: a failure from here on is a defect, not a missing
+    // precondition, so it fails rather than skipping with nothing said.
+    .expect("probe run");
+    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("runtime pool");
     Some((pool, cluster))
 }
 

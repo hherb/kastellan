@@ -15,6 +15,7 @@
 //! * [`thinking`] — which turns think (planning, replanning, writing the answer).
 //! * [`sift`] — one step over every item of a list, keeping the matches in
 //!   the task's scrapbook.
+//! * [`view`] — the operator's JSON view of the fold (`kastellan-cli session`).
 //! * [`run`] — the loop: one step per turn, every call reviewed and dispatched
 //!   by the classic loop's own code.
 //!
@@ -32,3 +33,4 @@ pub(crate) mod state;
 #[cfg(test)]
 pub(crate) mod test_harness;
 pub(crate) mod thinking;
+pub mod view;

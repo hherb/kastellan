@@ -427,6 +427,17 @@ the reviewer checks every later step against; it only has an effect in
 `tasks fail <id>` marks a running task as crashed by hand, for one that is
 stuck.
 
+**For a front end (or a script):** `kastellan-cli session` keeps one
+connection open instead of one command per task. It reads JSON-RPC requests on
+stdin and answers on stdout, locally or as `ssh <host> kastellan-cli session`:
+submit a task, follow its notebook live as the steps tick off, correct or
+cancel it, check its status, and answer its questions from the inbox. The live
+notebook and corrections need the notebook planner (as for `tasks correct`
+above); under the default classic planner a follow only reports how the task
+ended. Closing
+the session does not stop the tasks it started. The methods and messages are
+listed at the top of `core/src/bin/kastellan-cli/session.rs`.
+
 ---
 
 ## Step 8 — See exactly what it did (the audit log)

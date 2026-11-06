@@ -178,8 +178,22 @@ and **append-only for the runtime role**. Its current state is a pure fold
 (`notebook::state::fold`). An operator steers a running task with
 `kastellan-cli tasks correct <id> <text>` (the correction is appended to the
 instruction the reviewer sees) and stops it with `tasks cancel`. Both take
-effect between turns. The planned `kastellan-cli session` (a long-lived
-JSON-RPC link for live follow) is **not built yet**.
+effect between turns.
+
+`kastellan-cli session` (`core/src/bin/kastellan-cli/session.rs`) is the
+long-lived link for a front end: JSON-RPC 2.0 over stdin/stdout, run locally or
+over ssh (no listener; trust is ssh plus the operator's OS user, as for `ask`).
+It serves `task.submit`, `task.follow`, `task.correct`, `task.cancel`,
+`task.status` (the fold, rendered by `notebook::view::fold_view`), `inbox.list`
+and `inbox.answer`, each through the same helper as the one-shot command. A
+follow answers at once and streams `notebook.entry`, `task.awaiting_operator`
+and `task.finished` notifications in the background; it reads the task's state
+**before** its entries (so a state the planner sets means every entry is visible; for a
+cancel, which lands first, the follow waits up to 120 s for the planner's
+`cancelled` entry), and
+its 3 s poll tick, not the NOTIFYs, is what makes it correct: `PgListener` drops
+notifications on reconnect, and nothing notifies a task parking. A dropped
+session cancels nothing; a new one resumes with `after_seq`.
 
 ### `sift` and the scrapbook
 
