@@ -140,9 +140,42 @@ impl NotebookReply {
     }
 }
 
+/// The fields of a [`CallSpec`]: the ones a model writes at a reply's top
+/// level when it leaves out the `call` wrapper (#980).
+const CALL_FIELDS: [&str; 7] = ["step", "tool", "method", "parameters", "returns", "done_when", "classification"];
+
 /// Parse a raw reply, tolerating a fence or a preamble like a classic plan.
+///
+/// A reply with no `call` key that names a `tool` and a `method` at its top
+/// level is a call written without its wrapper (DGX tasks 350 and 371,
+/// #980): the model mirrors the shapes it is shown, so its call fields are
+/// read as `call` and the other keys (`steps`, `tick`) stay. Any other
+/// refusal over a stray field only a call has (not `tool` or `done_when`,
+/// which a step has too) names the fix, which the re-ask passes on to the
+/// model.
 pub(crate) fn parse_reply(raw: &str) -> Result<NotebookReply, String> {
-    parse_json_lenient::<NotebookReply>(raw).map_err(|e| format!("not a notebook reply: {e}"))
+    let refused = |e: &dyn std::fmt::Display, hint: bool| {
+        let hint = if hint { " (a tool call goes inside `call`: {\"call\": {\"step\": …, \"tool\": …}})" } else { "" };
+        format!("not a notebook reply: {e}{hint}")
+    };
+    let strict = match parse_json_lenient::<NotebookReply>(raw) {
+        Ok(reply) => return Ok(reply),
+        Err(e) => e,
+    };
+    let Ok(serde_json::Value::Object(mut top)) = parse_json_lenient::<serde_json::Value>(raw) else {
+        return Err(refused(&strict, false));
+    };
+    // `tool` and `done_when` are step fields too: a step left out of its list is not told to use `call`.
+    let stray = CALL_FIELDS.iter().any(|f| !matches!(*f, "tool" | "done_when") && top.contains_key(*f));
+    if top.contains_key("call") || !top.contains_key("tool") || !top.contains_key("method") {
+        return Err(refused(&strict, stray));
+    }
+    let call: serde_json::Map<_, _> = CALL_FIELDS.iter().filter_map(|f| top.remove_entry(*f)).collect();
+    top.insert("call".into(), call.into());
+    let reply: NotebookReply = serde_json::from_value(top.into()).map_err(|e| refused(&e, false))?;
+    // The audit row keeps the plan, not the raw reply: this line is the only record that the lift fired.
+    tracing::info!("notebook reply wrote its call without the `call` wrapper; read as `call` (#980)");
+    Ok(reply)
 }
 
 /// A replan that leaves out the pending step the same reply calls keeps it,

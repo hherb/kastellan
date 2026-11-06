@@ -414,3 +414,29 @@ Cell format: `turns / seconds`, then the outcome.
   is the #960 show-back's.
 - **Reproduce:** `~/deploy-branch.sh` on `fix/973-table-names-no-scrapbook` (b707f8e4), then `bash ~/requery7.sh`;
   `bash ~/q960.sh 371 377`. Log `~/requery7.log.974a`.
+
+## 2026-11-06 #17 — a call written without its wrapper is read as `call` (#980) (tasks 378–384)
+
+- **Build:** `fix/980-bare-call-shape` at 1b61fe10 (= `main` 9fe99923, #974 merged, + #980's fix), branch-deployed with
+  `~/deploy-branch.sh` (`NRestarts` 0, Matrix up on the first try). Prompt unchanged from #16. Knobs as #6.
+- **Hypothesis:** the #13/#16 reply shape (`{"step": 2, "tool": …}` with no `call`) no longer fails a turn; a refusal over
+  a stray call field names the fix in the re-ask. Also the second #974 run owed (#16 was the first).
+- **Results:**
+  - Q1 3 / 324, table, `limit` 5 of 9, newest first. 2 of 5 rows have origin, price and GST; 3 are "prepare for
+    your flight" / booking-update emails with no figures (sorter judgement). 16 kept of 50, 3 duplicates.
+  - Q2 4 / 374, a chain of two (63 + 47 read). Body "38 distinct invoices" = the table's 38 rows, every one dated in
+    the asked range (#16 had some before it); some are the operator's own sent invoices.
+  - Q3 2 / 144, a numbered list of 10, right.
+  - Q4 4 / 122: fee items, **total 9943** and the conditions, all right (no total in #15/#16).
+  - Q5 8 / 374, prose: "Accounts Team, 2026-11-05, $12,540.00" — the newest is a DNA Recruit *remittance*
+    (Q3's list), so "invoice" is judged loosely.
+  - Q6 4 / 371: Coffs Harbour → Sydney (FJGPFY, a 2027 booking), with a table of the 16 flight emails.
+  - Q7 3 / 429: 44 rows, again with ~15 Qantas Hotels confirmations and 2020–2025 items; "currently due" still loose.
+  - Total 2138 s (#16: 2615). **No `plan.formulate_failed` row in any task.**
+- **Learned:** 7/7, the first run since #14 with no failed formulation. Whether the bare-call lift fired is **not
+  visible**: a successful `plan.formulate` row keeps the plan, not the raw reply. #973's show-back did not come up
+  (no table named without a sift). Task 371 (#16) would **not** have been rescued by this fix alone: its first reply
+  also wrote `"attachments.*"` as a key with no value, which the parse never reached because it stopped at `step`.
+  What is wrong is judgement again (Q1's figure-less rows, Q5's remittance, Q7).
+- **Reproduce:** `~/deploy-branch.sh` on `fix/980-bare-call-shape` (1b61fe10), then `bash ~/requery7.sh`;
+  `bash ~/q960.sh 378 384`. Log `~/requery7.log` → renamed `~/requery7.log.980a`.

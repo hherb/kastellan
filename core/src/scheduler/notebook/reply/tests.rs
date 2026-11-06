@@ -275,3 +275,63 @@ fn a_call_whose_returns_forges_the_sift_reads_marker_is_rejected() {
     c["returns"] = json!("the sift reads list");
     assert!(check(json!({"call": c}), &two_steps()).is_ok(), "the words elsewhere are fine");
 }
+
+/// DGX tasks 350 and 371 (#980): the call written at the top level, with no
+/// `call` wrapper. Its fields are read as `call`; the other keys stay.
+#[test]
+fn a_call_written_without_its_wrapper_is_read_as_call() {
+    let r = check(call(1), &two_steps()).expect("a bare call");
+    assert_eq!(r.call, check(json!({"call": call(1)}), &two_steps()).unwrap().call);
+    // In a fence, as the model writes it, and beside the step list of a first turn.
+    let mut first = call(1);
+    first["steps"] = json!([step(1)]);
+    let fenced = format!("```json\n{first}\n```");
+    let r = parse_reply(&fenced).unwrap();
+    validate(&r, &NotebookState::default()).expect("steps plus a bare first call");
+    assert_eq!((r.steps.unwrap().len(), r.call.unwrap().step), (1, 1));
+    // Beside a tick: the tick's own `step` is nested, so it is not touched.
+    let mut ticked = call(2);
+    ticked["tick"] = tick(1);
+    let r = check(ticked, &two_steps()).unwrap();
+    assert_eq!((r.tick.unwrap().step, r.call.unwrap().step), (1, 2));
+}
+
+/// A bare call that is still not a usable call is refused for what it
+/// lacks, not for its shape, and a `call` written once is never merged with
+/// stray top-level fields.
+#[test]
+fn a_bare_call_that_is_still_wrong_is_refused_for_what_it_lacks() {
+    let mut c = call(1);
+    c.as_object_mut().unwrap().remove("returns");
+    assert!(check(c, &two_steps()).unwrap_err().contains("missing field `returns`"));
+    // Both a wrapper and a stray call field: refused, and the fix named.
+    let err = check(json!({"call": call(1), "step": 1}), &two_steps()).unwrap_err();
+    assert!(err.contains("unknown field `step`") && err.contains("goes inside `call`"), "{err}");
+    // An unknown field that is no call field gets no hint.
+    let err = check(json!({"call": call(1), "plan": 1}), &two_steps()).unwrap_err();
+    assert!(err.contains("unknown field `plan`") && !err.contains("inside `call`"), "{err}");
+    // A whole second call beside the wrapper: refused, never swapped in for it.
+    let mut both = json!({"call": call(1)});
+    for (k, v) in call(2).as_object().unwrap() {
+        both[k] = v.clone();
+    }
+    let err = check(both, &two_steps()).unwrap_err();
+    assert!(err.contains("goes inside `call`"), "{err}");
+    // No wrapper and no `method`: not lifted, and the fix is named.
+    let err = check(json!({"tool": "mail", "step": 1}), &two_steps()).unwrap_err();
+    assert!(err.contains("goes inside `call`"), "{err}");
+    // A step written outside its list shares `tool`/`done_when` with a call: no `call` hint.
+    let err = check(step(1), &two_steps()).unwrap_err();
+    assert!(err.contains("unknown field") && !err.contains("inside `call`"), "{err}");
+}
+
+/// `CALL_FIELDS` is `CallSpec`'s fields, every one: a field it misses would stay at the top level.
+#[test]
+fn call_fields_are_every_call_spec_field() {
+    let spec: CallSpec = serde_json::from_value(call(1)).unwrap();
+    let mut keys: Vec<String> = serde_json::to_value(&spec).unwrap().as_object().unwrap().keys().cloned().collect();
+    let mut fields: Vec<String> = CALL_FIELDS.iter().map(|f| f.to_string()).collect();
+    keys.sort();
+    fields.sort();
+    assert_eq!(keys, fields);
+}
