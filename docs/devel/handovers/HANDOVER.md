@@ -4,6 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
+> [`archive/handover_20261106_983_pre-prune.md`](archive/handover_20261106_983_pre-prune.md)
+> (#983's session, its review round and 79/0 sift run in full),
 > [`archive/handover_20261106_981_pre-prune.md`](archive/handover_20261106_981_pre-prune.md)
 > (#980's session and its 378–384 measure in full),
 > [`archive/handover_20261106_980_pre-prune.md`](archive/handover_20261106_980_pre-prune.md)
@@ -71,6 +73,9 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   already returns a scripted `""`/`"  "` as a blank completion.
 - Mutation-checked, **6 of 6** (each compiled): reads screened as the list's tool / all `Strict`; an unparseable or
   unreadable link counted; the blank retry removed / run with thinking suppressed. #965 is done (all 8 items).
+- Review round (3 agents) added 2 more, both caught: a read's profile taken by template index (`p.read[i]`, the url-less
+  hit now comes first so read and template order differ) and the blank retry hardcoded to `Allow` (a blank routine
+  turn now keeps `RouterDefault`). Left: the `chain_distinct` → `totals` pass-through at `sift/run.rs:230` is untested.
 
 ### Previous (2026-11-06): #981 + #970's last testable item (PR #983, merged, not deployed)
 
@@ -78,7 +83,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   once (malformed, outside the conversation, or this task's own with no sift of this run). ⚠️ A resume whose history
   would not decode restores `ctx.plans` empty: a real own ref then costs one re-ask (accepted, pinned).
 - **#970 keeps only its "known limits"** (operator to close or keep). ⚠️ **Not done:** the forced turn attaches no code
-  table to an answer naming a table that shows nothing. Prose: PR #983.
+  table to an answer naming a table that shows nothing. Prose: the `983` snapshot.
 
 ### Previous (2026-11-05 → 06): #980 (PR #982, deployed DGX, measured 378–384: 7/7), manuals (PR #975), #974 — what still binds
 

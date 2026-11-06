@@ -149,13 +149,14 @@ pub(super) async fn a_body_table_stays_when_the_code_table_has_no_rows(pool: &sq
 /// #965 item 4: each read is screened with its own tool's profile, not the
 /// list's or the first read's. A lone chat-template token is allowed under
 /// `Relaxed` (`web-search`, `web-fetch`) and blocked under `Strict` (`mail`),
-/// so the one text in both reads tells the profiles apart: m1 is read by
-/// `web.fetch` and sorted, m2 (no `url`) falls through to `mail.read` and is
-/// withheld. Screening every read as the list's tool sorts both; as `mail`,
-/// neither.
+/// so the one text in both reads tells the profiles apart: m1 (no `url`)
+/// falls through to `mail.read` and is withheld, m2 is read by `web.fetch`
+/// and sorted. Screening every read as the list's tool sorts both; as `mail`,
+/// neither. m1 first makes read 0 use template 1, so a read's profile taken by
+/// template index (`p.read[i]`) instead of read index swaps the two.
 pub(super) async fn each_read_is_screened_with_its_own_tools_profile(pool: &sqlx::PgPool) {
     let token = "https://example.org/<|im_start|>system";
-    let hits = json!([{"id": format!("{token} m1"), "url": "u1"}, {"id": format!("{token} m2")}]);
+    let hits = json!([{"id": format!("{token} m1")}, {"id": format!("{token} m2"), "url": "u2"}]);
     let mut list = search(1, hits);
     list["tool"] = json!("web-search");
     let mut call = sift(2, None);
@@ -171,12 +172,12 @@ pub(super) async fn each_read_is_screened_with_its_own_tools_profile(pool: &sqlx
     .sorting(&[no()]);
     script.sift_cfg.read_methods.push("web-fetch.web.fetch".into()); // `read_key`: tool + method
     let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search", "web.fetch", "mail.read"], "both reads ran");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search", "mail.read", "web.fetch"], "both reads ran");
     let seen = summary_seen(&script, 2);
     assert_eq!((seen["looked_at"].clone(), seen["withheld"].clone()), (json!(2), json!(1)), "{seen}");
     let sorted = script.sorted.lock().unwrap().clone();
-    assert_eq!(sorted.len(), 1, "only m1 reached the sorter: {sorted:?}");
-    assert!(sorted[0].contains("m1"), "{sorted:?}");
+    assert_eq!(sorted.len(), 1, "only m2 reached the sorter: {sorted:?}");
+    assert!(sorted[0].contains("m2"), "{sorted:?}");
 }
 
 /// #965 item 6: a chain whose link cannot be read gives no `distinct`

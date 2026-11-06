@@ -472,6 +472,15 @@ async fn an_empty_completion_is_asked_again_once(pool: &sqlx::PgPool) {
     assert_eq!(thinking[0], thinking[1], "the retry thinks as the turn did: {thinking:?}");
     assert_eq!(script.messages()[0], script.messages()[1], "the same turn, asked again");
 
+    // A blank routine turn: its retry keeps `RouterDefault`, not the plan's `Allow`.
+    let answer = json!({"steps": steps(&[1]), "call": call(1, "a")}).to_string();
+    let script = Script::raw(&[answer, "  ".into(), json!({"tick": tick(1, "A"), "answer": {"body": "A"}}).to_string()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(body(&r.result), "A");
+    use ThinkingPolicy::*;
+    assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault, RouterDefault]);
+    assert_eq!(script.messages()[1], script.messages()[2], "the same turn, asked again");
+
     let script = Script::raw(&["".into(), "".into()]);
     let r = run(pool, &script, new_task(pool, 5).await).await;
     match &r.result.outcome {
@@ -479,4 +488,5 @@ async fn an_empty_completion_is_asked_again_once(pool: &sqlx::PgPool) {
         o => panic!("expected Failed, got {o:?}"),
     }
     assert_eq!(r.result.failed_llm_calls, 2, "the blank reply and its retry");
+    assert!(script.reasks.lock().unwrap().is_empty(), "a blank retry is never shown back");
 }
