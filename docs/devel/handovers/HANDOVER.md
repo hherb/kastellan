@@ -26,11 +26,11 @@
 > (#923's session, the 225–231 re-measure and #937's OpenShell notes in full; older detail is named in that snapshot's header).
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-06 (#981: a table ref to no sift this conversation ran is shown back; #970's gate pinned) ·
-**Recent PRs, newest first:** [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-06 (#965's last three test gaps: items 4, 6, 7 — #965 done) ·
+**Recent PRs, newest first:** [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs #982's tree (deployed from its branch with `~/deploy-branch.sh` 2026-11-06; = `main` since #982 merged; #983 not deployed) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
+**The DGX runs #982's tree (deployed from its branch with `~/deploy-branch.sh` 2026-11-06; #983 merged but not deployed; #984 is tests only) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -60,37 +60,33 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-06, latest): #981 + #970's last testable item (PR #983, not deployed)
+### This session (2026-11-06, latest): #965 items 4, 6, 7 — tests only (PR #984)
+
+- Item 4: `each_read_is_screened_with_its_own_tools_profile` (sift suite) — a `web-search` list read by `web.fetch`
+  then `mail.read`; one chat-template token is allowed under `Relaxed`, withheld under `Strict`. ⚠️ A sift read's
+  allowlist key is `read_key(tool, method)`: `web-fetch` + `web.fetch` is **`web-fetch.web.fetch`**.
+- Item 6: `a_chain_link_that_cannot_be_read_gives_no_distinct` calls `run::chain_distinct` (now `pub(super)`) with a
+  link name that does not parse and a lazy pool on `127.0.0.1:1`; a live-pool control returns `Some`.
+- Item 7: `an_empty_completion_is_asked_again_once` (notebook loop suite). The issue's premise was stale: the harness
+  already returns a scripted `""`/`"  "` as a blank completion.
+- Mutation-checked, **6 of 6** (each compiled): reads screened as the list's tool / all `Strict`; an unparseable or
+  unreadable link counted; the blank retry removed / run with thinking suppressed. #965 is done (all 8 items).
+
+### Previous (2026-11-06): #981 + #970's last testable item (PR #983, merged, not deployed)
 
 - `sift::answer::table_left_out` takes the `TaskContext`: a table **none of whose refs can show rows** is shown back
-  once (as #973) — each ref malformed, outside the conversation (K11), or this task's own with **no sift of this run**
-  (`chain::summary_of`). An earlier turn's ref stays `with_table`'s. Safe because `ctx.plans` holds every sift the task
-  ran (a resume restores them; a crashed task is never re-run) — **except** a resume whose history would not decode
-  (`restore_resume_state` restores it empty and warns): a real own ref then costs one re-ask (accepted; pinned in the
-  unit test). Mutation-checked, 3 of 3.
-- Review round (3 agents): comments/log strings brought up to #981's rule; the #970 test now asserts the
-  included-but-empty path (a drifted fixture fails it; measured); the PG show-back test also runs an own-task
-  `sb:<task>:7`. Sift tests 79/0 with `KASTELLAN_PG_REQUIRE_E2E=1` (PG + supervisor `[E2E]`, no `[SKIP]`).
-- #970: the strip gate's empty-rows half is pinned (`a_body_table_stays_when_the_code_table_has_no_rows`: an own sift
-  that kept 0, no read fault). The order-note casing was already done in #974. **Left on #970: only its "known limits"**
-  (blank-separated rows, GFM rows with no leading pipe) — operator to close or keep.
-- `answer.rs` 521 → 341: its tests moved to `answer/tests.rs` (movement-only commit, byte-identity diff + negative control).
-- ⚠️ **Not done (scope):** the forced turn still attaches no code table to an answer naming a table that shows
-  nothing (#973's test pins `forced_table` → `None`); the operator then sees refusal lines and no rows.
+  once (malformed, outside the conversation, or this task's own with no sift of this run). ⚠️ A resume whose history
+  would not decode restores `ctx.plans` empty: a real own ref then costs one re-ask (accepted, pinned).
+- **#970 keeps only its "known limits"** (operator to close or keep). ⚠️ **Not done:** the forced turn attaches no code
+  table to an answer naming a table that shows nothing. Prose: PR #983.
 
-### Previous (2026-11-06): #980 (PR #982, merged, deployed DGX) — a call written without its `call` wrapper is read as `call`
+### Previous (2026-11-05 → 06): #980 (PR #982, deployed DGX, measured 378–384: 7/7), manuals (PR #975), #974 — what still binds
 
-- `notebook::reply::parse_reply` lifts a top-level `tool`+`method` under `call` (logs `info!`); a stray call field's
-  refusal says "a tool call goes inside `call`" (only for fields a step lacks). Measured 378–384 (log #17): **7/7, 2138 s,
-  no `plan.formulate_failed`**. ⚠️ Task 371's first reply also had a value-less `"attachments.*"` key — not rescued.
-  ⚠️ A lifted call is invisible in audit (`plan.formulate` keeps the plan, not the raw reply). Prose: the `981` snapshot.
-
-### Previous (2026-11-05): manuals (PR #975, merged); #971 measured (357–370); PR #974 (#973 + #970 items, merged)
-
-- ⚠️ **A new manual chapter must be added to both `scripts/site/build_manual.py` `MANIFEST` and `check-manual.sh`.**
-  Filed from the manuals pass: #976 (`KASTELLAN_DATA_DIR` two meanings, bug), #977 (threat-model), #978 (CLI help), #979.
-- ⚠️ **`Option::is_none_or` is Rust 1.82 > MSRV 1.78** — use `map_or(true, …)`. ⚠️ The DGX daemon log has **no
-  notebook/sift INFO lines**; the audit rows are the only record. Full prose: the `980` snapshot.
+- A top-level `tool`+`method` is lifted under `call` (`notebook::reply::parse_reply`). ⚠️ A lifted call is invisible
+  in audit (`plan.formulate` keeps the plan, not the raw reply); a value-less `"attachments.*"` key is not rescued.
+- ⚠️ **A new manual chapter goes in both `scripts/site/build_manual.py` `MANIFEST` and `check-manual.sh`.** Filed:
+  #976 (bug), #977, #978, #979. ⚠️ **`Option::is_none_or` is Rust 1.82 > MSRV 1.78.** ⚠️ The DGX daemon log has **no
+  notebook/sift INFO lines**; the audit rows are the only record. Prose: the `981`/`980` snapshots.
 
 ### Previous (2026-11-03 → 05): `sift` + the scrapbook and its fixes (PRs #955 … #971, merged, deployed) — what still binds (prose: the `966`/`980` snapshots)
 
@@ -254,9 +250,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **#922 next: review + merge PR #983 (#981; deploy + one re-measure optional — the show-back it widens was not seen
-   live).** Then #965's items 4, 6, 7 (test gaps; need harness work: per-tool screen profiles, `chain_distinct` → `None`,
-   a scripted empty completion), then slice 2 (`kastellan-cli session`). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
+1. **#922 next: slice 2 (`kastellan-cli session`)** — review + merge PR #984 first (tests only). Deploying #983 + one
+   re-measure is optional (the show-back it widens was not seen live). #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
    **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to
    `api_minor` 6.
@@ -388,7 +383,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#983) | `fix/981-970-sift-answer-refs` at `5e946aa4` | **5507 / 0 / 52**, **200** summaries, `TEST_EXIT=0`, primary checkout's own `target/`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-981.log`. vs #980's row (5506 at `1b61fe10`): per-suite diff is core lib only, +1 = #982's review-round test (landed after `1b61fe10`); #981/#970 add assertions, no tests | warm, private target dir, `-p kastellan-core --all-targets` clean | **23** (container service not running) |
+| **Mac** (#984) | `test/965-sift-test-gaps` on `e8ce875a` | **5507 / 0 / 52**, **200** summaries, `TEST_EXIT=0`, primary checkout's own `target/`, `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-965.log`. vs #983's row (5507): delta 0 — the three new cases run inside the existing `the_sift_loop` / `the_notebook_loop` tests | warm, private target dir, `-p kastellan-core --all-targets` clean | **23** (container service not running) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
@@ -473,6 +468,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#983** (#981, #970) — merged 2026-11-06, not deployed: a table ref to no sift this conversation ran is shown back.
 - **#982** (#980) — merged 2026-11-06, deployed DGX, measured 378–384 (log #17, 7/7): a call without its `call` wrapper is read as `call`.
 - **#975** (manuals) — merged 2026-11-06: both manuals brought up to date, dev chapters 15 (planner) and 16 (channels).
 - **#974** (#973, #970 items) — merged 2026-11-06, deployed DGX, measured 371–384 (log #16/#17): an answer table naming no scrapbook ref is shown back once.

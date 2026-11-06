@@ -118,6 +118,8 @@ async fn the_sift_loop() {
     a_table_with_no_order_named_is_newest_first(&pool).await;
     an_item_with_no_attachment_takes_the_next_read(&pool).await;
     a_body_table_stays_when_the_code_table_has_no_rows(&pool).await;
+    each_read_is_screened_with_its_own_tools_profile(&pool).await;
+    a_chain_link_that_cannot_be_read_gives_no_distinct(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {

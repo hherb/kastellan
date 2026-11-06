@@ -259,7 +259,7 @@ pub(crate) async fn run_sift(
 /// The chain's table rows ([`distinct_kept`]): every earlier link's kept rows
 /// — read back, since one booking emailed twice can sit in two links — and
 /// this sift's own. `None` if a link's rows cannot be read.
-async fn chain_distinct(pool: &PgPool, ctx: &TaskContext, prev: &str, own: &[NewRow]) -> Option<usize> {
+pub(super) async fn chain_distinct(pool: &PgPool, ctx: &TaskContext, prev: &str, own: &[NewRow]) -> Option<usize> {
     let mut fields: Vec<Value> = Vec::new();
     for name in super::chain::expand(&ctx.plans, prev) {
         let Ok(r) = ScrapRef::parse(&name) else {
