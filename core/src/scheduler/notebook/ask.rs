@@ -78,12 +78,12 @@ pub(super) async fn ask(
     // It passed every check, so it is no failed call, and a re-ask that fails
     // keeps it: a missing table never fails a turn.
     if let (true, Ok((reply, _, raw))) = (wants_table, &first) {
-        if let Err(reason) = sift::answer::table_left_out(reply, &ctx.plans) {
+        if let Err(reason) = sift::answer::table_left_out(reply, ctx) {
             tracing::info!(task_id = ctx.task_id, %reason, "notebook answer's table is missing or names no scrapbook; shown back once");
             match check(nb.notebook_turn(ctx, msg, Some((raw, &reason)), ThinkingPolicy::Suppress).await) {
                 Ok(again) => {
                     // Info, not warn: #960's reason invites sending the same answer again.
-                    if let Err(still) = sift::answer::table_left_out(&again.0, &ctx.plans) {
+                    if let Err(still) = sift::answer::table_left_out(&again.0, ctx) {
                         tracing::info!(task_id = ctx.task_id, reason = %still, "the re-asked answer's table is still missing or names no scrapbook; used as it is");
                     }
                     first = Ok(again);
