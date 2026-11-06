@@ -310,4 +310,28 @@ fn a_bare_call_that_is_still_wrong_is_refused_for_what_it_lacks() {
     // An unknown field that is no call field gets no hint.
     let err = check(json!({"call": call(1), "plan": 1}), &two_steps()).unwrap_err();
     assert!(err.contains("unknown field `plan`") && !err.contains("inside `call`"), "{err}");
+    // A whole second call beside the wrapper: refused, never swapped in for it.
+    let mut both = json!({"call": call(1)});
+    for (k, v) in call(2).as_object().unwrap() {
+        both[k] = v.clone();
+    }
+    let err = check(both, &two_steps()).unwrap_err();
+    assert!(err.contains("goes inside `call`"), "{err}");
+    // No wrapper and no `method`: not lifted, and the fix is named.
+    let err = check(json!({"tool": "mail", "step": 1}), &two_steps()).unwrap_err();
+    assert!(err.contains("goes inside `call`"), "{err}");
+    // A step written outside its list shares `tool`/`done_when` with a call: no `call` hint.
+    let err = check(step(1), &two_steps()).unwrap_err();
+    assert!(err.contains("unknown field") && !err.contains("inside `call`"), "{err}");
+}
+
+/// `CALL_FIELDS` is `CallSpec`'s fields, every one: a field it misses would stay at the top level.
+#[test]
+fn call_fields_are_every_call_spec_field() {
+    let spec: CallSpec = serde_json::from_value(call(1)).unwrap();
+    let mut keys: Vec<String> = serde_json::to_value(&spec).unwrap().as_object().unwrap().keys().cloned().collect();
+    let mut fields: Vec<String> = CALL_FIELDS.iter().map(|f| f.to_string()).collect();
+    keys.sort();
+    fields.sort();
+    assert_eq!(keys, fields);
 }

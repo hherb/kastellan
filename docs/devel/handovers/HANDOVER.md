@@ -63,11 +63,16 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - `notebook::reply::parse_reply`: a reply with no `call` key that has `tool` + `method` at its top level has its
   `CallSpec` fields moved under `call` (other keys, e.g. `steps`, stay); any other refusal over a stray call field
   says "a tool call goes inside `call`", which the re-ask (`reformat_directive`) passes on. +2 unit tests.
+- **Review round (same PR, +1 unit test, 24/24 `notebook::reply`, clippy clean on core):** the hint fires only on a
+  field a step does not also have (`tool`/`done_when` are `StepSpec` fields too: a step left out of its list was told
+  to use `call`); a wrapper beside a whole stray call is pinned refused (the guard was untested — mutation-checked,
+  as was the hint narrowing); a test pins `CALL_FIELDS` = `CallSpec`'s fields; a lift now logs an `info!` (not yet
+  deployed or seen live — the daemon defaults to `info`, but check the DGX `RUST_LOG` given the note below).
 - ⚠️ **#980 as filed was incomplete:** task 371's **first** reply also wrote `"attachments.*"` as a key with no value;
   the parse stopped at `step` (line 2) before reaching it. This fix rescues task 350's shape, **not 371**.
 - **Measured** ([log #17](../notes/notebook-experiments.md), tasks 378–384): **7/7, 2138 s, no
-  `plan.formulate_failed` row** (first time since #14); Q4's 9943 total back. ⚠️ **A lifted bare call is invisible
-  live** — a successful `plan.formulate` row keeps the plan, not the raw reply. This is #974's second run too.
+  `plan.formulate_failed` row** (first time since #14); Q4's 9943 total back. ⚠️ **A lifted bare call was invisible
+  live** — a successful `plan.formulate` row keeps the plan, not the raw reply (hence the review round's `info!`). This is #974's second run too.
   Wrong by judgement: Q1's figure-less rows, Q5 a remittance as "invoice", Q7 "currently due".
 
 ### Previous (2026-11-05): manuals (PR #975, merged); #971 measured (357–370); PR #974 (#973 + #970 items, merged)
