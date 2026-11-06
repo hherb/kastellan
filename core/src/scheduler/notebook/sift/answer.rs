@@ -167,8 +167,9 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
 /// ref that is a scrapbook ref at all (`sb:emails_with_attachments`, with no
 /// sift run) shows its body and a refusal line but no rows, so it is shown
 /// back the same way. A table naming no refs at all (`[]`) is no table.
-/// #981: so is one whose well-formed refs name nothing to show either — a
-/// sift this run never ran, or a task outside the conversation.
+/// #981: so is one whose refs are each malformed, outside the conversation
+/// (K11), or this task's but no sift of this run; an earlier turn's ref is
+/// [`with_table`]'s to judge.
 pub(crate) fn table_left_out(reply: &NotebookReply, ctx: &TaskContext) -> Result<(), String> {
     let plans = &ctx.plans;
     if let Some(named) = table_of_no_scrapbook(reply, ctx) {
@@ -188,12 +189,16 @@ pub(crate) fn table_left_out(reply: &NotebookReply, ctx: &TaskContext) -> Result
     ))
 }
 
-/// The refs `reply`'s answer table names, when none of them can show rows:
+/// The refs `reply`'s answer table names, when none of them can be shown:
 /// each is malformed, outside the conversation (K11), or this task's own but
-/// no sift of this run wrote it (a resumed run has its plans back, and a
+/// no sift of this run wrote it. A resumed run has its plans back and a
 /// crashed task is never re-run, so `ctx.plans` holds every sift the task
-/// ran). An earlier turn's ref is left to [`with_table`]; a refusal is never
-/// shown back, nor told to list items instead. Pure.
+/// ran — unless the resume history would not decode
+/// ([`restore_resume_state`](crate::scheduler::asks::restore_resume_state)
+/// restores it empty and warns): then a real own ref is shown back once, and
+/// the re-asked reply is used either way. An earlier turn's ref is left to
+/// [`with_table`]; a refusal is never shown back, nor told to list items
+/// instead. Pure.
 fn table_of_no_scrapbook<'a>(reply: &'a NotebookReply, ctx: &TaskContext) -> Option<&'a [String]> {
     let refs = reply.answer.as_ref().filter(|a| a.refused.is_none())?.table.as_ref()?.scrapbook.refs();
     let may_show = |raw: &String| {

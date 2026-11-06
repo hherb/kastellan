@@ -65,7 +65,12 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - `sift::answer::table_left_out` takes the `TaskContext`: a table **none of whose refs can show rows** is shown back
   once (as #973) — each ref malformed, outside the conversation (K11), or this task's own with **no sift of this run**
   (`chain::summary_of`). An earlier turn's ref stays `with_table`'s. Safe because `ctx.plans` holds every sift the task
-  ran (a resume restores them; a crashed task is never re-run). Mutation-checked, 3 of 3.
+  ran (a resume restores them; a crashed task is never re-run) — **except** a resume whose history would not decode
+  (`restore_resume_state` restores it empty and warns): a real own ref then costs one re-ask (accepted; pinned in the
+  unit test). Mutation-checked, 3 of 3.
+- Review round (3 agents): comments/log strings brought up to #981's rule; the #970 test now asserts the
+  included-but-empty path (a drifted fixture fails it; measured); the PG show-back test also runs an own-task
+  `sb:<task>:7`. Sift tests 79/0 with `KASTELLAN_PG_REQUIRE_E2E=1` (PG + supervisor `[E2E]`, no `[SKIP]`).
 - #970: the strip gate's empty-rows half is pinned (`a_body_table_stays_when_the_code_table_has_no_rows`: an own sift
   that kept 0, no read fault). The order-note casing was already done in #974. **Left on #970: only its "known limits"**
   (blank-separated rows, GFM rows with no leading pipe) — operator to close or keep.

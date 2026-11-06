@@ -73,18 +73,18 @@ pub(super) async fn ask(
     let mut first = check(nb.notebook_turn(ctx, msg, None, thinking).await);
     let mut retried = false;
     let mut reasked = false;
-    // #960/#973: a first reply that answers with no table after a sift that
-    // kept rows, or whose table names no scrapbook ref, is shown back once.
+    // #960/#973/#981: a first reply that answers with no table after a sift
+    // that kept rows, or whose table names no ref it can show, is shown back once.
     // It passed every check, so it is no failed call, and a re-ask that fails
     // keeps it: a missing table never fails a turn.
     if let (true, Ok((reply, _, raw))) = (wants_table, &first) {
         if let Err(reason) = sift::answer::table_left_out(reply, ctx) {
-            tracing::info!(task_id = ctx.task_id, %reason, "notebook answer's table is missing or names no scrapbook; shown back once");
+            tracing::info!(task_id = ctx.task_id, %reason, "notebook answer's table is missing or names nothing it can show; shown back once");
             match check(nb.notebook_turn(ctx, msg, Some((raw, &reason)), ThinkingPolicy::Suppress).await) {
                 Ok(again) => {
                     // Info, not warn: #960's reason invites sending the same answer again.
                     if let Err(still) = sift::answer::table_left_out(&again.0, ctx) {
-                        tracing::info!(task_id = ctx.task_id, reason = %still, "the re-asked answer's table is still missing or names no scrapbook; used as it is");
+                        tracing::info!(task_id = ctx.task_id, reason = %still, "the re-asked answer's table is still missing or names nothing it can show; used as it is");
                     }
                     first = Ok(again);
                     retried = true;

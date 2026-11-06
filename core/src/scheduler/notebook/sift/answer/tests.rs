@@ -99,8 +99,9 @@ fn an_answer_without_the_table_of_a_sift_that_kept_rows_is_refused() {
 
 /// #973 (DGX task 359): no sift ran, and the answer's table named
 /// `sb:emails_with_attachments`, so the operator got one refusal line and
-/// no list. A table none of whose refs is a scrapbook ref is shown back
-/// once, naming the newest sift when it kept rows. A refusal is not.
+/// no list. A table none of whose refs can be shown (malformed; #981: or
+/// this task's but no sift of this run, or outside the conversation) is
+/// shown back once, naming the newest sift when it kept rows. A refusal is not.
 #[test]
 fn an_answer_whose_table_names_no_scrapbook_ref_is_refused() {
     use super::super::chain::tests::{params, sift_record};
@@ -119,6 +120,8 @@ fn an_answer_whose_table_names_no_scrapbook_ref_is_refused() {
     // the conversation, shows nothing either; an earlier turn's is with_table's.
     let why = table_left_out(&tabled(serde_json::json!("sb:9:7")), &ctx(vec![kept()])).unwrap_err();
     assert!(why.contains("sb:9:7") && why.contains("sb:9:3") && why.contains("kept 4"), "{why}");
+    // Also a resumed run whose history would not decode (restored empty): a
+    // real own ref costs one re-ask, the accepted price of a pure check.
     assert!(table_left_out(&tabled(serde_json::json!("sb:9:3")), &ctx(vec![])).is_err(), "its own task, no sift ran");
     assert!(table_left_out(&tabled(serde_json::json!(["bad", "sb:9:7"])), &ctx(vec![])).is_err(), "one malformed, one to nowhere");
     assert!(table_left_out(&tabled(serde_json::json!("sb:6:2")), &ctx(vec![])).is_err(), "not from this conversation");
