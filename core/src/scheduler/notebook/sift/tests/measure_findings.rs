@@ -124,26 +124,31 @@ pub(super) async fn an_answer_without_the_table_is_shown_back_once(pool: &sqlx::
 /// #973 (DGX task 359): with no sift run, an answer whose table names no
 /// scrapbook ref is shown back once, saying to write the items in `body`.
 /// The re-asked reply is used as it is: in prose, or the same bad table,
-/// which shows its refusal line.
+/// which shows its refusal line. #981: so is a well-formed ref to a sift of
+/// its own task that never ran.
 pub(super) async fn an_answer_table_naming_no_scrapbook_is_shown_back_once(pool: &sqlx::PgPool) {
-    let made_up = json!({"tick": tick(1, "listed"), "answer": {"body": "Here:", "table": {"scrapbook": "sb:emails_with_attachments"}}});
-    for again in ["prose", "same"] {
-        let mut turns = vec![json!({"steps": steps(&[1]), "call": search(1, hits(&["m1"]))}), made_up.clone()];
-        turns.push(match again {
-            "prose" => json!({"tick": tick(1, "listed"), "answer": {"body": "Here: m1."}}),
-            _ => made_up.clone(),
-        });
-        let script = Script::new(&turns);
-        let r = run(pool, &script, new_task(pool, 5).await).await;
-        let reasks = script.reasks.lock().unwrap().clone();
-        assert_eq!(reasks.len(), 1, "{reasks:?}");
-        assert!(reasks[0].contains("sb:emails_with_attachments") && reasks[0].contains("`body`"), "{reasks:?}");
-        let b = body(&r.result);
-        match again {
-            "prose" => assert_eq!(b, "Here: m1."),
-            _ => assert!(b.starts_with("Here:") && b.contains("could not be included"), "{b}"),
+    for own in [false, true] {
+        for again in ["prose", "same"] {
+            let ctx = new_task(pool, 5).await;
+            let named = if own { format!("sb:{}:7", ctx.task_id) } else { "sb:emails_with_attachments".into() };
+            let made_up = json!({"tick": tick(1, "listed"), "answer": {"body": "Here:", "table": {"scrapbook": named}}});
+            let mut turns = vec![json!({"steps": steps(&[1]), "call": search(1, hits(&["m1"]))}), made_up.clone()];
+            turns.push(match again {
+                "prose" => json!({"tick": tick(1, "listed"), "answer": {"body": "Here: m1."}}),
+                _ => made_up.clone(),
+            });
+            let script = Script::new(&turns);
+            let r = run(pool, &script, ctx).await;
+            let reasks = script.reasks.lock().unwrap().clone();
+            assert_eq!(reasks.len(), 1, "{named}: {reasks:?}");
+            assert!(reasks[0].contains(&named) && reasks[0].contains("`body`"), "{reasks:?}");
+            let b = body(&r.result);
+            match again {
+                "prose" => assert_eq!(b, "Here: m1."),
+                _ => assert!(b.starts_with("Here:") && b.contains("could not be included"), "{b}"),
+            }
+            assert_eq!(r.result.failed_llm_calls, 0, "{named} {again}");
         }
-        assert_eq!(r.result.failed_llm_calls, 0, "{again}");
     }
 }
 

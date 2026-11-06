@@ -126,3 +126,22 @@ pub(super) async fn an_ordinary_plan_stops_at_its_first_failed_step(pool: &sqlx:
         assert_eq!(ctx.plans.last().unwrap().outcomes().len(), ran, "{policy:?}");
     }
 }
+
+/// #970: a body's own table is taken out only when the code's table has rows
+/// to take its place. A sift of this run that kept nothing still renders its
+/// (empty) table and counts, so the model's table stays.
+pub(super) async fn a_body_table_stays_when_the_code_table_has_no_rows(pool: &sqlx::PgPool) {
+    use crate::scheduler::notebook::reply::{Refs, TableSpec};
+    use crate::scheduler::notebook::sift::answer::{with_table, OWN_TABLE_NOTE};
+    use crate::scheduler::notebook::sift::chain::tests::{params, sift_record};
+    let mut ctx = new_task(pool, 5).await;
+    let name = format!("sb:{}:2", ctx.task_id);
+    ctx.plans.push(sift_record(params(0, "x"), json!({"scrapbook": name, "looked_at": 1, "kept": 0})));
+    let spec = TableSpec { scrapbook: Refs::One(name), columns: None, order_by: None, limit: None };
+    let body = "Two invoices.\n\n| amount |\n|---|\n| 20 |";
+    let (out, _) = with_table(pool, &ctx, body, &spec, true).await;
+    assert!(out.starts_with(body) && !out.contains(OWN_TABLE_NOTE), "{out}");
+    // The included-but-empty path, not the "has no rows" refusal: else an
+    // `&& included` strip gate would pass this too.
+    assert!(!out.contains("has no rows") && out.contains("looked at"), "{out}");
+}
