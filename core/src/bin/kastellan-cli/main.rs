@@ -12,7 +12,7 @@
 //!   scheduler, LISTEN for the completion NOTIFY, then print the
 //!   result. Ctrl-C cancels the pending/running task.
 //!
-//! * `tasks list|status|cancel|fail|tail` — inspect and manage
+//! * `tasks list|status|cancel|correct|fail|tail` — inspect and manage
 //!   tasks in the scheduler DB.
 //!
 //! * `inbox list|show|resolve` — the operator's answer surface for
@@ -21,6 +21,11 @@
 //!   task. `resolve` writes one `actor='cli' action='ask.resolved'`
 //!   audit row on success; a lost race (already resolved) or an
 //!   unoffered choice writes nothing and exits non-zero.
+//!
+//! * `session` — a long-lived JSON-RPC 2.0 session on stdin/stdout for a
+//!   front end (bottie) or a terminal, local or over ssh: submit a task,
+//!   follow its notebook live, correct, cancel, status, and the inbox
+//!   (#922 slice 2). Methods and notifications: `session.rs`.
 //!
 //! * `tools allowlist add|remove|list` — manage the per-tool argv0
 //!   allowlist stored in `tool_allowlists`. Add/remove emit one
@@ -175,6 +180,7 @@ mod relations;
 mod relations_kinds;
 mod relations_show;
 mod secret;
+mod session;
 mod tasks;
 mod tools_allowlist;
 
@@ -195,6 +201,7 @@ fn main() -> ExitCode {
         "ask"         => ask::run_ask(&args[2..]),
         "tasks"       => tasks::run_tasks(&args[2..]),
         "inbox"       => inbox::run_inbox(&args[2..]),
+        "session"     => session::run_session(&args[2..]),
         "guard"       => guard_calibrate::run_guard(&args[2..]),
         "tools"       => tools_allowlist::run_tools(&args[2..]),
         "memory"      => memory_l1::run_memory(&args[2..]),
@@ -225,11 +232,13 @@ usage:
     kastellan-cli tasks list   [--lane fast|long] [--state <state>] [-n 20]
     kastellan-cli tasks status <id>
     kastellan-cli tasks cancel <id>
+    kastellan-cli tasks correct <id> <text>
     kastellan-cli tasks fail   <id>
     kastellan-cli tasks tail   <id>
     kastellan-cli inbox list                 [-n N]
     kastellan-cli inbox show    <ask-id>
     kastellan-cli inbox resolve <ask-id> approve|deny [--note \"<text>\"]
+    kastellan-cli session                    # JSON-RPC 2.0 on stdin/stdout (submit, follow, correct, cancel, status, inbox)
     kastellan-cli tools allowlist add    <tool> <argv0>
     kastellan-cli tools allowlist remove <tool> <argv0>
     kastellan-cli tools allowlist list   [--tool <name>]

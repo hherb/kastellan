@@ -38,7 +38,7 @@ pub(crate) fn run_inbox(args: &[String]) -> ExitCode {
 /// reads as a usage error (exit 2) rather than as a database refusal —
 /// `db::asks::resolve` validates against the ask's own `options` too, and
 /// that check is the authoritative one.
-const CHOICES: [&str; 2] = ["approve", "deny"];
+pub(crate) const CHOICES: [&str; 2] = ["approve", "deny"];
 
 async fn inbox_list(args: &[String]) -> ExitCode {
     use kastellan_db::pool::connect_runtime_pool;
@@ -168,38 +168,69 @@ async fn inbox_resolve(args: &[String]) -> ExitCode {
         Err(e) => { eprintln!("connect: {e}"); return ExitCode::from(1); }
     };
 
+    match resolve_and_audit(&pool, ask_id, choice, note.as_deref()).await {
+        Ok(Resolved { task_id, audited }) => {
+            println!("ask {ask_id} resolved '{choice}'; task {task_id} returned to the queue");
+            if !audited {
+                eprintln!("warning: ask.resolved audit row failed; the answer stands");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => { eprintln!("{e}"); ExitCode::from(1) }
+    }
+}
+
+/// An ask answered by [`resolve_and_audit`]: the task it belonged to (now
+/// back in the queue), and whether its `ask.resolved` row was written.
+pub(crate) struct Resolved {
+    pub task_id: i64,
+    pub audited: bool,
+}
+
+/// Answer ask `ask_id` with `choice` as the operator at this terminal, and
+/// write one `actor='cli' action='ask.resolved'` row. Shared by `inbox
+/// resolve` and `session`'s `inbox.answer`. `choice` must already be one of
+/// [`CHOICES`]; the database checks it against the ask's own options too.
+///
+/// `Err` is the operator-facing reason nothing was resolved: no such ask,
+/// a lost race (already answered, expired, cancelled), or a database error.
+/// The audit insert is best-effort — the answer has already landed — and a
+/// lost row is reported as `audited: false`.
+pub(crate) async fn resolve_and_audit(
+    pool: &sqlx::PgPool,
+    ask_id: i64,
+    choice: &str,
+    note: Option<&str>,
+) -> Result<Resolved, String> {
     // Read the ask first for its `task_id`: every other `task.*` / `ask.*`
     // audit row is keyed on it, and a row without it cannot be joined to
     // the task the decision was about.
-    let task_id = match kastellan_db::asks::get(&pool, ask_id).await {
+    let task_id = match kastellan_db::asks::get(pool, ask_id).await {
         Ok(Some(a)) => a.task_id,
-        Ok(None) => { eprintln!("no ask with id {ask_id}"); return ExitCode::from(1); }
-        Err(e) => { eprintln!("inbox resolve: {e}"); return ExitCode::from(1); }
+        Ok(None) => return Err(format!("no ask with id {ask_id}")),
+        Err(e) => return Err(format!("inbox resolve: {e}")),
     };
 
     // Free text is carried for the record and shown to the operator; it is
     // never interpolated into a plan (spec D10). Shaped by `db::asks` so
     // this surface and the channel resolver cannot drift on the key names.
-    let resolution = kastellan_db::asks::resolution(choice, note.as_deref());
+    let resolution = kastellan_db::asks::resolution(choice, note);
     let resolved_by = std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "operator".to_string());
 
-    match kastellan_db::asks::resolve(&pool, ask_id, &resolved_by, &resolution).await {
-        Ok(true) => {
-            println!("ask {ask_id} resolved '{choice}'; task {task_id} returned to the queue");
-        }
+    match kastellan_db::asks::resolve(pool, ask_id, &resolved_by, &resolution).await {
+        Ok(true) => {}
+        // NOT a success. First-responder-wins is a database property;
+        // reporting success here would tell the operator their answer
+        // stood when someone else's did.
         Ok(false) => {
-            // NOT a success. First-responder-wins is a database property;
-            // printing success here would tell the operator their answer
-            // stood when someone else's did.
-            eprintln!(
+            return Err(format!(
                 "ask {ask_id} was not resolvable — already answered, expired, cancelled, \
                  or past its deadline. Nothing was written."
-            );
-            return ExitCode::from(1);
+            ))
         }
-        Err(e) => { eprintln!("inbox resolve: {e}"); return ExitCode::from(1); }
+        Err(e) => return Err(format!("inbox resolve: {e}")),
     }
 
     // `via` names the answering SURFACE, and both surfaces write it (#564
@@ -215,10 +246,12 @@ async fn inbox_resolve(args: &[String]) -> ExitCode {
         "free_text": note,
         "via": "cli",
     });
-    if let Err(e) =
-        kastellan_db::audit::insert(&pool, CLI_AUDIT_ACTOR, ACTION_ASK_RESOLVED, payload).await
-    {
-        eprintln!("warning: ask.resolved audit row failed: {e}");
-    }
-    ExitCode::SUCCESS
+    let audited = match kastellan_db::audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_ASK_RESOLVED, payload).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(ask_id, error = %e, "ask.resolved audit insert failed (answer already landed)");
+            false
+        }
+    };
+    Ok(Resolved { task_id, audited })
 }
