@@ -18,6 +18,9 @@
 //!    entry before it finishes.
 //! 5. The follow cap, an over-cap line, and a dropped session leaving its
 //!    tasks alone.
+//! 6. A second parking is announced again; a follow whose reads fail says
+//!    which `seq` it got to; submit and cancel report a lost audit row and
+//!    a suppressed floor (#988).
 //!
 //! Skips with `[SKIP]` on hosts without Postgres or a supervisor (run with
 //! `-- --nocapture` to see it), like `cli_inbox_e2e.rs`, whose PG bring-up
@@ -25,168 +28,16 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::io::Write;
+use std::time::Duration;
 
 use kastellan_db::notebook::{self, EntryKind};
-use kastellan_db::pool::connect_runtime_pool;
-use kastellan_db::probe::run as probe_run;
 use kastellan_db::tasks::{self, insert_pending, Lane};
-use kastellan_tests_common::{
-    bring_up_pg_cluster, cli_binary, current_username, pg_bin_dir_or_skip, skip_if_no_supervisor,
-    unique_suffix, PgCluster,
-};
 use serde_json::{json, Value};
 
-/// Long enough for a follow's 3 s poll tick plus a slow CI host.
-const WAIT: Duration = Duration::from_secs(30);
-
-async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
-    if skip_if_no_supervisor() {
-        return None;
-    }
-    let bin_dir = pg_bin_dir_or_skip()?;
-    let suffix = unique_suffix();
-    let cluster = bring_up_pg_cluster(
-        &bin_dir,
-        "ss-d",
-        "ss-l",
-        &format!("kastellan-postgres-cli-session-e2e-{label}-{suffix}"),
-    );
-    probe_run(&cluster.conn_spec, "core", "startup", json!({"test": format!("cli_session_e2e-{label}")}))
-        .await
-        .expect("probe run");
-    let pool = connect_runtime_pool(&cluster.conn_spec).await.expect("runtime pool");
-    Some((pool, cluster))
-}
-
-/// A task in `running`, as a claimed one is.
-async fn seed_running_task(pool: &sqlx::PgPool) -> i64 {
-    let id = insert_pending(pool, Lane::Fast, json!({"instruction": "x", "max_plans": 3})).await.expect("insert");
-    tasks::claim_one(pool, Lane::Fast, 60).await.expect("claim").expect("a task");
-    id
-}
-
-/// The real `kastellan-cli session`, with a line reader on its stdout.
-struct Session {
-    child: Child,
-    stdin: ChildStdin,
-    lines: Receiver<Value>,
-    next_id: i64,
-}
-
-impl Session {
-    fn start(cluster: &PgCluster) -> Session {
-        let user = std::env::var("USER").unwrap_or_else(|_| current_username());
-        let mut cmd = Command::new(cli_binary());
-        cmd.arg("session")
-            .env_clear()
-            .env("KASTELLAN_DATA_DIR", &cluster.data_dir)
-            .env("USER", user)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        if let Some(home) = std::env::var_os("HOME") {
-            cmd.env("HOME", home);
-        }
-        let mut child = cmd.spawn().expect("spawn kastellan-cli session");
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let (tx, lines) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("not JSON: {line:?}: {e}"));
-                if tx.send(v).is_err() {
-                    return;
-                }
-            }
-        });
-        Session { child, stdin, lines, next_id: 0 }
-    }
-
-    fn send_line(&mut self, line: &str) {
-        writeln!(self.stdin, "{line}").expect("write to session");
-        self.stdin.flush().unwrap();
-    }
-
-    /// Send a request; return its id.
-    fn request(&mut self, method: &str, params: Value) -> i64 {
-        self.next_id += 1;
-        let req = json!({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params});
-        self.send_line(&req.to_string());
-        self.next_id
-    }
-
-    /// The next message, whatever it is.
-    fn next(&self) -> Value {
-        match self.lines.recv_timeout(WAIT) {
-            Ok(v) => v,
-            Err(RecvTimeoutError::Timeout) => panic!("no message from the session within {WAIT:?}"),
-            Err(RecvTimeoutError::Disconnected) => panic!("the session closed its stdout"),
-        }
-    }
-
-    /// Assert nothing arrives for `d`.
-    fn quiet_for(&self, d: Duration) {
-        match self.lines.recv_timeout(d) {
-            Err(RecvTimeoutError::Timeout) => {}
-            Ok(v) => panic!("expected nothing for {d:?}, got {v}"),
-            Err(RecvTimeoutError::Disconnected) => panic!("the session closed its stdout"),
-        }
-    }
-
-    /// Send a request and return its response, which must come next.
-    fn call(&mut self, method: &str, params: Value) -> Value {
-        let id = self.request(method, params);
-        let resp = self.next();
-        assert_eq!(resp["id"], id, "expected the response to {method} next, got {resp}");
-        resp
-    }
-
-    fn ok(&mut self, method: &str, params: Value) -> Value {
-        let resp = self.call(method, params);
-        assert!(resp.get("error").is_none(), "{method} failed: {resp}");
-        resp["result"].clone()
-    }
-
-    fn error_code(&mut self, method: &str, params: Value) -> i64 {
-        let resp = self.call(method, params);
-        resp["error"]["code"].as_i64().unwrap_or_else(|| panic!("{method} should have failed: {resp}"))
-    }
-
-    /// Close stdin and expect a clean exit.
-    fn finish(mut self) {
-        drop(self.stdin);
-        let deadline = Instant::now() + WAIT;
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                assert!(status.success(), "session must exit 0 at EOF: {status}");
-                return;
-            }
-            assert!(Instant::now() < deadline, "session did not exit at EOF");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
-
-fn steps_payload() -> Value {
-    json!({"steps": [{"id": 1, "purpose": "find it", "tool": "mail", "done_when": "found"}]})
-}
-
-fn tick_payload() -> Value {
-    json!({"step": 1, "note": "found", "findings": [{"text": "invoice 42", "source": "msg 7"}],
-           "summary": "one invoice", "classification": "Public"})
-}
-
-/// Assert `msg` is a `notebook.entry` for `seq` of `kind`.
-fn assert_entry(msg: &Value, task_id: i64, seq: i64, kind: &str) {
-    assert_eq!(msg["method"], "notebook.entry", "expected an entry, got {msg}");
-    assert_eq!(msg["params"]["task_id"], task_id, "{msg}");
-    assert_eq!(msg["params"]["seq"], seq, "{msg}");
-    assert_eq!(msg["params"]["kind"], kind, "{msg}");
-}
+#[path = "cli_session_e2e/support.rs"]
+mod support;
+use support::{assert_entry, bring_up_pg, seed_running_task, steps_payload, tick_payload, Session};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn submit_status_cancel_and_the_errors_a_client_can_make() {
@@ -349,6 +200,90 @@ async fn a_parked_task_is_announced_and_the_inbox_answers_it() {
     assert_eq!(resolved, 1, "one ask.resolved row, actor=cli");
     assert_eq!(s.error_code("inbox.answer", json!({"ask_id": raised.ask_id, "choice": "deny"})), -32002, "a lost race is refused");
     assert_eq!(s.error_code("inbox.answer", json!({"ask_id": raised.ask_id + 1000, "choice": "deny"})), -32002, "no such ask");
+
+    // The task runs again and parks a second time: announced again (#988).
+    // Two entries, the second written only once the first arrived, prove a
+    // whole poll has read the task out of `awaiting_operator` before the
+    // second ask — so a parked latch that never resets fails here.
+    tasks::claim_one(&pool, Lane::Fast, 60).await.expect("claim").expect("the resumed task");
+    notebook::append(&pool, task_id, EntryKind::Correction, json!({"text": "a"})).await.unwrap();
+    assert_entry(&s.next(), task_id, 2, "correction");
+    notebook::append(&pool, task_id, EntryKind::Correction, json!({"text": "b"})).await.unwrap();
+    assert_entry(&s.next(), task_id, 3, "correction");
+    kastellan_db::asks::raise(
+        &pool,
+        task_id,
+        "plan_approval",
+        "and this one too",
+        &json!(["approve", "deny"]),
+        Some("digest-b"),
+        time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+        None,
+    )
+    .await
+    .expect("second raise");
+    assert_eq!(s.next(), json!({"jsonrpc": "2.0", "method": "task.awaiting_operator", "params": {"task_id": task_id}}));
+    s.finish();
+}
+
+/// #988: a follow whose reads start failing says so, with the last `seq` it
+/// sent — not the `after_seq` it started from — so the client resumes there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_follow_that_loses_its_task_says_where_it_stopped() {
+    let Some((pool, cluster)) = bring_up_pg("follow-failed").await else { return };
+    let task_id = seed_running_task(&pool).await;
+    notebook::append(&pool, task_id, EntryKind::Steps, steps_payload()).await.unwrap();
+    notebook::append(&pool, task_id, EntryKind::Tick, tick_payload()).await.unwrap();
+    let mut s = Session::start(&cluster);
+    s.ok("task.follow", json!({"task_id": task_id}));
+    assert_entry(&s.next(), task_id, 1, "steps");
+    assert_entry(&s.next(), task_id, 2, "tick");
+
+    // The runtime role can't drop a table; hiding it as admin makes the
+    // follow's next read fail the way a lost database does.
+    let admin = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec).await.expect("admin pool");
+    sqlx::query("ALTER TABLE tasks RENAME TO tasks_hidden").execute(&admin).await.expect("hide tasks");
+    let failed = s.next();
+    assert_eq!(failed["method"], "task.follow_failed", "{failed}");
+    assert_eq!(failed["params"]["task_id"], task_id);
+    assert_eq!(failed["params"]["last_seq"], 2, "the last seq sent, not the after_seq (0) it began at: {failed}");
+    assert!(failed["params"]["error"].as_str().is_some_and(|e| !e.is_empty()), "{failed}");
+    sqlx::query("ALTER TABLE tasks_hidden RENAME TO tasks").execute(&admin).await.expect("restore tasks");
+    s.finish();
+}
+
+/// #988: `task.submit` and `task.cancel` say when their audit row was lost
+/// (the WARN goes to stderr, which a front end never reads), and `task.submit`
+/// says when the client's floor suppressed what the keywords would have set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submit_and_cancel_report_a_lost_audit_row_and_a_suppressed_floor() {
+    let Some((pool, cluster)) = bring_up_pg("audited").await else { return };
+    let mut s = Session::start(&cluster);
+    let clinical = json!({"instruction": "Translate the patient's pathology report.", "classification_floor": "public"});
+
+    let r = s.ok("task.submit", clinical.clone());
+    assert_eq!(r["audited"], true, "{r}");
+    assert_eq!(r["floor_suppressed"]["inferred_class"], "ClinicalConfidential", "{r}");
+    assert!(r["floor_suppressed"]["inferred_signals"].as_array().is_some_and(|a| a.iter().any(|v| v == "patient")), "{r}");
+    assert_eq!(s.ok("task.cancel", json!({"task_id": r["task_id"]}))["audited"], true);
+    let r = s.ok("task.submit", json!({"instruction": "find the invoice"}));
+    assert_eq!(r["floor_suppressed"], Value::Null, "nothing pinned, nothing suppressed: {r}");
+    // Out of the queue, so the `claim_one` below takes the task it means to.
+    s.ok("task.cancel", json!({"task_id": r["task_id"]}));
+
+    let admin = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec).await.expect("admin pool");
+    sqlx::query("ALTER TABLE audit_log RENAME TO audit_log_hidden").execute(&admin).await.expect("hide audit_log");
+    let r = s.ok("task.submit", clinical);
+    assert_eq!(r["audited"], false, "the task is in, its row is not: {r}");
+    let c = s.ok("task.cancel", json!({"task_id": r["task_id"]}));
+    assert_eq!((c["state"].clone(), c["audited"].clone()), (json!("cancelled"), json!(false)), "{c}");
+    // A running task's cancel writes only its lifecycle row (the scheduler
+    // writes the finalize), so this one is lost on its own.
+    let r = s.ok("task.submit", json!({"instruction": "find the invoice"}));
+    let claimed = tasks::claim_one(&pool, Lane::Fast, 60).await.expect("claim").expect("a task");
+    assert_eq!(json!(claimed.id), r["task_id"]);
+    assert_eq!(s.ok("task.cancel", json!({"task_id": r["task_id"]}))["audited"], false);
+    sqlx::query("ALTER TABLE audit_log_hidden RENAME TO audit_log").execute(&admin).await.expect("restore audit_log");
     s.finish();
 }
 

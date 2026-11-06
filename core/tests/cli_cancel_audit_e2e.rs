@@ -128,9 +128,12 @@ fn cancel_pending_task_writes_lifecycle_and_finalize_rows() {
 
         // Outcome shape: Cancelled(task) with the post-update row data.
         let task = match outcome {
-            CancelOutcome::Cancelled(t) => t,
+            CancelOutcome::Cancelled { task, audited } => {
+                assert!(audited, "every cancel audit row was written");
+                task
+            }
             CancelOutcome::NotCancellable => {
-                panic!("expected Cancelled(_), got NotCancellable for fresh pending task")
+                panic!("expected Cancelled, got NotCancellable for fresh pending task")
             }
         };
         assert_eq!(task.id, id, "outcome row id must match");
@@ -355,7 +358,7 @@ fn cancel_already_terminal_task_writes_no_audit_row() {
         // First cancel: succeeds, writes one row.
         let first = cancel_and_audit(&pool, id).await.expect("first cancel");
         assert!(
-            matches!(first, CancelOutcome::Cancelled(_)),
+            matches!(first, CancelOutcome::Cancelled { .. }),
             "first call must be Cancelled"
         );
 
@@ -482,9 +485,12 @@ fn cancel_running_task_does_not_write_producer_finalize() {
         // Producer-cancel the running task.
         let outcome = cancel_and_audit(&pool, id).await.expect("cancel running");
         let task = match outcome {
-            CancelOutcome::Cancelled(t) => t,
+            CancelOutcome::Cancelled { task, audited } => {
+                assert!(audited, "every cancel audit row was written");
+                task
+            }
             CancelOutcome::NotCancellable => {
-                panic!("expected Cancelled(_) for running task")
+                panic!("expected Cancelled for running task")
             }
         };
         assert_eq!(task.state, "cancelled");
@@ -621,7 +627,10 @@ fn cancel_awaiting_operator_task_writes_producer_finalize_and_ask_row() {
 
         let outcome = cancel_and_audit(&pool, id).await.expect("cancel suspended");
         let task = match outcome {
-            CancelOutcome::Cancelled(t) => t,
+            CancelOutcome::Cancelled { task, audited } => {
+                assert!(audited, "every cancel audit row was written");
+                task
+            }
             CancelOutcome::NotCancellable => panic!("a suspended task must be cancellable"),
         };
         assert_eq!(task.state, "cancelled");

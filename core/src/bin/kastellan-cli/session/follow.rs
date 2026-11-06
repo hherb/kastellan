@@ -115,7 +115,7 @@ pub(super) fn wakes(channel: &str, payload: &str, task_id: i64) -> bool {
 
 /// Follow `task_id` from `after_seq`, sending to `out` until the task ends,
 /// the follow fails, or the client is gone (`out` closed).
-pub(super) async fn follow(pool: PgPool, task_id: i64, after_seq: i64, out: Sender<Value>) {
+pub(crate) async fn follow(pool: PgPool, task_id: i64, after_seq: i64, out: Sender<Value>) {
     let mut last_seq = after_seq;
     if let Err(error) = follow_inner(&pool, task_id, &mut last_seq, &out).await {
         let params = json!({"task_id": task_id, "last_seq": last_seq, "error": error});

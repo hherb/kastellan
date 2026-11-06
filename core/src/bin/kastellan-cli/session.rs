@@ -12,10 +12,10 @@
 //!
 //! | Method | Params | Result |
 //! | --- | --- | --- |
-//! | `task.submit` | `{instruction, lane?: "fast"\|"long", classification_floor?}` | `{task_id, lane}` |
+//! | `task.submit` | `{instruction, lane?: "fast"\|"long", classification_floor?}` | `{task_id, lane, audited, floor_suppressed}` |
 //! | `task.follow` | `{task_id, after_seq?}` | `{task_id, after_seq}`, then notifications |
 //! | `task.correct` | `{task_id, text}` | `{seq, audited}` |
-//! | `task.cancel` | `{task_id}` | `{state}` |
+//! | `task.cancel` | `{task_id}` | `{state, audited}` |
 //! | `task.status` | `{task_id}` | `{task_id, state, lane, plan_count, result, notebook, notebook_error}` |
 //! | `inbox.list` | `{limit?}` | `{asks: [{ask_id, task_id, kind, question, options, deadline_at}]}` |
 //! | `inbox.answer` | `{ask_id, choice: "approve"\|"deny", note?}` | `{task_id, audited, audit_error}` |
@@ -51,7 +51,7 @@
 //! line over the record cap (answered with -32600 first). It exits 2 when
 //! given any argument and 1 when it cannot reach the database.
 
-mod follow;
+pub(crate) mod follow;
 mod methods;
 mod params;
 

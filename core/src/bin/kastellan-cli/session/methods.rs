@@ -49,12 +49,21 @@ pub(super) async fn call(pool: &PgPool, method: &str, p: Value) -> Result<Value,
     }
 }
 
-/// `task.submit` → `{task_id, lane}`. The same payload and audit row as
-/// `kastellan-cli ask` (operator trust: the operator's own OS user).
+/// `task.submit` → `{task_id, lane, audited, floor_suppressed}`. The same
+/// payload and audit row as `kastellan-cli ask` (operator trust: the
+/// operator's own OS user). `audited` is false when the `task.submitted` row
+/// was lost; `floor_suppressed` is `{inferred_class, inferred_signals}` when
+/// the client's `classification_floor` is below what the instruction's
+/// keywords would have set, else `null` (#988).
 async fn submit(pool: &PgPool, s: params::Submit) -> Result<Value, RpcError> {
-    let payload = crate::ask::submission_payload(&s.instruction, s.floor);
-    let task_id = submit_and_audit(pool, s.lane, payload).await.map_err(internal)?;
-    Ok(json!({"task_id": task_id, "lane": s.lane.as_sql()}))
+    let (payload, floor_suppressed) = crate::ask::submission_payload(&s.instruction, s.floor);
+    let submitted = submit_and_audit(pool, s.lane, payload).await.map_err(internal)?;
+    Ok(json!({
+        "task_id": submitted.id,
+        "lane": s.lane.as_sql(),
+        "audited": submitted.audited,
+        "floor_suppressed": floor_suppressed,
+    }))
 }
 
 /// `task.correct` → `{seq, audited}`. Only a running task takes one, and
@@ -66,10 +75,11 @@ async fn correct(pool: &PgPool, task_id: i64, text: &str) -> Result<Value, RpcEr
     }
 }
 
-/// `task.cancel` → `{state}` (the task's state after the cancel).
+/// `task.cancel` → `{state, audited}` (the task's state after the cancel;
+/// `audited` false when one of its audit rows was lost).
 async fn cancel(pool: &PgPool, task_id: i64) -> Result<Value, RpcError> {
     match cancel_and_audit(pool, task_id).await.map_err(internal)? {
-        CancelOutcome::Cancelled(t) => Ok(json!({"state": t.state})),
+        CancelOutcome::Cancelled { task, audited } => Ok(json!({"state": task.state, "audited": audited})),
         CancelOutcome::NotCancellable => {
             Err(refused(format!("task {task_id} does not exist or has already ended")))
         }

@@ -91,6 +91,8 @@ fn submit_and_audit_emits_producer_task_submitted_row() {
         let fast_id = submit_and_audit(&pool, Lane::Fast, fast_payload.clone())
             .await
             .expect("submit_and_audit fast");
+        assert!(fast_id.audited, "the task.submitted row was written");
+        let fast_id = fast_id.id;
 
         // ── 2. Submit on Lane::Long ────────────────────────────────────
         let long_payload =
@@ -98,6 +100,8 @@ fn submit_and_audit_emits_producer_task_submitted_row() {
         let long_id = submit_and_audit(&pool, Lane::Long, long_payload.clone())
             .await
             .expect("submit_and_audit long");
+        assert!(long_id.audited, "the task.submitted row was written");
+        let long_id = long_id.id;
 
         assert_ne!(fast_id, long_id, "two inserts must produce distinct ids");
 
