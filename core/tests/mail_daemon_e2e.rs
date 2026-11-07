@@ -136,6 +136,10 @@ fn bring_up_mail_daemon(
     // setter says the same thing without depending on it.
     if let Some(model) = model_override {
         spec = spec.llm_model(model);
+    } else {
+        // The scripted leg's draft-then-answer script needs thinking off
+        // (the router default); state it rather than inherit it.
+        spec = spec.env("KASTELLAN_LLM_DISABLE_THINKING", "1");
     }
     let (daemon, guards) = bring_up_daemon(&spec);
 

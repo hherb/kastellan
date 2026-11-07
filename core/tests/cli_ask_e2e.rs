@@ -1,5 +1,5 @@
 //! End-to-end integration test for the `kastellan-cli ask` happy path
-//! and the plan-iteration-cap failure path (Task 4.4).
+//! and the turn-cap failure path (Task 4.4).
 //!
 //! This is the regression pin that none of the other scheduler tests
 //! satisfy: it spawns the **real `kastellan-cli` subprocess**, which
@@ -29,7 +29,8 @@ use kastellan_tests_common::{
 use kastellan_tests_common::serial_lock;
 
 /// The fast lane's turn cap, which the failure-path test runs into: its plan
-/// cap times the notebook's turns per plan (#922 C5).
+/// cap times the notebook's turns per plan (#922 C5) — `2` mirrors the
+/// crate-private `scheduler::notebook::run::NOTEBOOK_TURNS_PER_PLAN`.
 const CAP: usize = kastellan_db::tasks::DEFAULT_MAX_PLANS_FAST as usize * 2;
 
 use kastellan_tests_common::scripted_llm::{
@@ -96,6 +97,9 @@ fn daemon_spec(data_dir: &Path, mock_base_url: &str) -> DaemonSpec {
         "KASTELLAN_SHELL_EXEC_BIN",
         shell_exec_worker_binary().to_string_lossy().into_owned(),
     )
+    // The happy path's draft-then-answer script needs thinking off (the
+    // router default); state it rather than inherit it.
+    .env("KASTELLAN_LLM_DISABLE_THINKING", "1")
 }
 
 /// The notebook reply that runs `echo <text>` as step 1.
@@ -319,9 +323,9 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         // PgRecallBuilder calls embed_query once per turn before the
         // chat-completion: 3 turns → 3 embed audit rows.
         assert_eq!(m.get(&("llm:router".into(), "embed".into())), Some(&3),
-                   "expected 2× llm:router/embed (one per recall+plan iteration); multiset = {m:?}");
+                   "expected 3× llm:router/embed (one per turn); multiset = {m:?}");
         assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&2),
-                   "expected 2× cassandra:chain/verdict (one per plan); multiset = {m:?}");
+                   "expected 2× cassandra:chain/verdict (the call and the answer); multiset = {m:?}");
         assert_eq!(m.get(&("tool:shell-exec".into(), "shell.exec".into())), Some(&1),
                    "expected 1× tool:shell-exec/shell.exec (the echo step); multiset = {m:?}");
         assert_eq!(m.get(&("scheduler".into(), "plan.outcome".into())), Some(&1),
@@ -374,7 +378,7 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         assert_eq!(fp["total_llm_calls"], 3,
                    "task.finalize.total_llm_calls should be 3; got {fp:?}");
         assert_eq!(fp["total_dispatch_calls"], 1,
-                   "task.finalize.total_dispatch_calls should be 1 (single echo step under plan A); got {fp:?}");
+                   "task.finalize.total_dispatch_calls should be 1 (the echo call on turn 1); got {fp:?}");
         assert!(fp["total_duration_ms"].is_number(),
                 "task.finalize.total_duration_ms must be a number; got {fp:?}");
         assert!(fp["started_at"].is_string(),
@@ -447,8 +451,9 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
         chat_dialed, 3,
         "expected daemon to dial mock chat endpoint exactly 3× in happy path; got {chat_dialed}",
     );
-    // First chat-completion must carry the cached planner prompt. With URL routing this is `chat_requests[0]`, regardless
-    // of how the embed dials interleave.
+    // First chat-completion must carry the cached planner prompt. With URL
+    // routing this is `chat_requests[0]`, regardless of how the embed dials
+    // interleave.
     let chat_captured = mock.chat_requests.lock().unwrap();
     let first_chat_body = &chat_captured[0];
     assert!(
@@ -466,7 +471,7 @@ fn ask_subprocess_completes_planned_task_end_to_end() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2 — plan-iteration-cap failure path
+// Test 2 — turn-cap failure path
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -506,8 +511,8 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
     // forced-synthesis turn, and the fast lane's 15-minute ceiling is
     // never near.
     //
-    // Each plan iteration: (1) embed request for recall, (2) chat
-    // completion for plan generation, so `CAP` of each.
+    // Each turn: (1) embed request for recall, (2) chat completion for
+    // the reply, so `CAP` of each.
     // A failed step is re-listed, which reopens it, so one reply serves
     // every turn; the repeat guard skips only a call that succeeded.
     let denied_plan = envelope_for(&cat_passwd_call());
@@ -582,7 +587,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         assert_eq!(state, "failed", "task state must be 'failed'; got {state}");
         assert_eq!(*plan_count, CAP as i32, "plan_count must equal the cap ({CAP}); got {plan_count}");
 
-        // Each iteration dispatched the denied step, so
+        // Each turn dispatched the denied step, so
         // we expect `CAP` tool:shell-exec rows whose payload carries an
         // `err` string mentioning the JSON-RPC POLICY_DENIED code
         // (`-32001`).
@@ -631,10 +636,10 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
                    "expected 1× cli/task.submitted (producer-side row from kastellan-cli ask); multiset = {m:?}");
         assert_eq!(m.get(&("agent".into(), "plan.formulate".into())), Some(&CAP),
                    "expected {CAP}× agent/plan.formulate (one per LLM call before cap); multiset = {m:?}");
-        // PgRecallBuilder calls embed_query once per plan iteration before
-        // the chat-completion: one embed audit row per plan iteration.
+        // PgRecallBuilder calls embed_query once per turn before the
+        // chat-completion: one embed audit row per turn.
         assert_eq!(m.get(&("llm:router".into(), "embed".into())), Some(&CAP),
-                   "expected {CAP}× llm:router/embed (one per recall+plan iteration); multiset = {m:?}");
+                   "expected {CAP}× llm:router/embed (one per turn); multiset = {m:?}");
         assert_eq!(m.get(&("cassandra:chain".into(), "verdict".into())), Some(&CAP),
                    "expected {CAP}× cassandra:chain/verdict (one per plan); multiset = {m:?}");
         assert_eq!(m.get(&("tool:shell-exec".into(), "shell.exec".into())), Some(&CAP),
@@ -644,7 +649,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
         assert_eq!(m.get(&("scheduler".into(), "task.running".into())), Some(&1),
                    "expected 1× scheduler/task.running (claim_one transition); multiset = {m:?}");
         assert_eq!(m.get(&("scheduler".into(), "task.failed".into())), Some(&1),
-                   "expected 1× scheduler/task.failed (plan-cap exhaustion terminal); multiset = {m:?}");
+                   "expected 1× scheduler/task.failed (turn-cap exhaustion terminal); multiset = {m:?}");
         assert_eq!(m.get(&("scheduler".into(), "task.finalize".into())), Some(&1),
                    "expected 1× scheduler/task.finalize (per-task summary); multiset = {m:?}");
 
@@ -715,7 +720,7 @@ fn ask_subprocess_fails_after_plan_iteration_cap() {
     });
 
     // Mock dial count: `CAP` embeds + `CAP` chat-completions, one of each per
-    // plan iteration before the cap fires. Per-endpoint assertions
+    // turn before the cap fires. Per-endpoint assertions
     // catch a stray extra dial to either side directly.
     let embed_dialed = mock.embed_requests.lock().unwrap().len();
     let chat_dialed = mock.chat_requests.lock().unwrap().len();

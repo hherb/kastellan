@@ -23,8 +23,9 @@ fn step_one(tool: &str) -> Value {
 ///
 /// Fine for every turn of a script, not just the first: re-listing a step
 /// that **failed** reopens it, so the same reply retries a denied call (the
-/// failure-path tests send it until the turn cap). A step that succeeded is
-/// done and is never reopened — answer after it instead.
+/// failure-path tests send it until the turn cap). A call that succeeded is
+/// not made again: the repeat guard sets the resend aside (`plan.discarded`,
+/// `repeated_call`) and the next turn replans — answer after it instead.
 pub fn notebook_call_json(tool: &str, method: &str, parameters: Value) -> String {
     json!({
         "steps": [step_one(tool)],
@@ -46,9 +47,10 @@ pub fn notebook_call_json(tool: &str, method: &str, parameters: Value) -> String
 /// ⚠️ On the daemon's default config (`KASTELLAN_LLM_DISABLE_THINKING`
 /// unset, so thinking is off) the answer a routine turn writes is set aside
 /// (a `plan.discarded` row) and the next turn writes it again, thinking — so
-/// a script after a call needs **two** of these: the draft, then the answer
-/// the task ends with. The rewrite turn must not tick, which is why this
-/// reply never does.
+/// a script after a call that **succeeded** needs **two** of these: the
+/// draft, then the answer the task ends with. (After a failed call the next
+/// turn is a replan, which thinks, so one answer ends it.) The loop drops
+/// any tick or steps on the rewrite turn, so this reply carries none.
 pub fn notebook_answer_json(body: &str) -> String {
     json!({"answer": {"body": body}}).to_string()
 }

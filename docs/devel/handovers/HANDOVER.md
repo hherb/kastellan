@@ -250,7 +250,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    on the notebook) is PR #995. **Next:** deploy #994+ to the DGX and do the **one classic comparison run**
    the issue asks for (`KASTELLAN_PLANNER_MODE=classic` in `.local`, `~/requery7.sh`, then back), then sort the ~10
    in-process classic suites (shared `inner_loop/execute.rs` tests stay; classic formulation/summary tests go —
-   `plan_json` users: `router_agent_mock_e2e`, `observation_replay{,_cli}_e2e`), then delete; #940 folds in. bottie's substring
+   classic-`Plan`-shaped fixtures in `router_agent_mock_e2e`, `observation_replay{,_cli}_e2e`; the shared
+   `scripted_llm::plan_json` builder went in #995), then delete; #940 folds in. bottie's substring
    match on the parking line is [hherb/bottie#242](https://github.com/hherb/bottie/issues/242).
    #983/#986 are on the DGX (in #989's tree); one re-measure is optional. #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
