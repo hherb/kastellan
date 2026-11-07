@@ -16,7 +16,7 @@
 **Recent PRs, newest first:** [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs #989's tree (deployed from its branch with `~/deploy-branch.sh` 2026-11-07, both env files identical after install, `NRestarts=0`, Matrix up, live `ask` task 385 printed its plan/step lines; it includes #983 and #986) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
+**The DGX runs #989's tree before its review round (deployed from its branch with `~/deploy-branch.sh` 2026-11-07, both env files identical after install, `NRestarts=0`, Matrix up, live `ask` task 385 printed its plan/step lines; it includes #983 and #986) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -50,16 +50,30 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 - **`ask` prints one stderr line per notebook entry** (`ask/progress.rs` `entry_line`, pure; control chars blanked,
   160-char cap; `answer`/`cancelled` print nothing). `ask`'s own LISTEN/poll loop is gone: it spawns the session's
-  `follow()` (now `pub(crate)`) and prints what it sends. ⚠️ Two behaviour changes inherited from `follow`: a DB read
-  failure ends `ask` (exit 1, `lost track of task N`), and a task cancelled **by someone else** waits ≤ 120 s for the
-  planner's `cancelled` entry. The `submitted task N` and `waiting for an operator decision` lines bottie parses are
-  unchanged.
+  `follow()` (now `pub(crate)`) and prints what it sends. The `submitted task N` and `waiting for an operator
+  decision` lines bottie parses are unchanged.
 - **#988:** `submit_and_audit` → `Submitted { id, audited }`; `CancelOutcome::Cancelled { task, audited }`;
   `task.submit` → `{task_id, lane, audited, floor_suppressed}`, `task.cancel` → `{state, audited}`. Tests:
   `follow_failed`'s `last_seq` (rename `tasks` as admin mid-follow), a second parking, lost audit rows (rename
-  `audit_log`) + suppressed floor; new `cli_ask_follow_e2e` (in the `pg` profile). The session harness moved
-  byte-identically to `cli_session_e2e/support.rs`. Mutation-checked **7 of 7**. ⚠️ A test that `claim_one`s must not
+  `audit_log`) + suppressed floor; new `cli_ask_follow_e2e` (in the `pg` profile). The session harness moved to
+  `cli_session_e2e/support.rs`, unchanged but for `pub` and a module doc. Mutation-checked **7 of 7**. ⚠️ A test that `claim_one`s must not
   leave an older task pending: it claimed the wrong one in the full sweep (fixed).
+- **Review round (4 reviewers).** `ask` took over policies `follow` has for a session client that can resume. Fixes:
+  - **A failed follow is resumed** from its `last_seq`, up to 5 times in a row, 3 s apart. Only after that does `ask`
+    exit 1 with `lost track of task N: …; it may still be running: …` (before the fix, one DB blip ended `ask`).
+  - `follow` takes a `cancel_grace`: the session passes 120 s and `ask` passes zero, so a task someone else cancelled
+    ends `ask` at once.
+  - SIGINT is caught by a unix `signal()` installed before the submit, so there is no window in which Ctrl-C kills
+    `ask` and leaves the task running. Ctrl-C now says what the cancel actually did (cancelled / had already ended /
+    cancel failed).
+  - `progress::clean` also blanks bidi and zero-width characters, and a plan lists at most 8 steps.
+  - New e2es: parked (exit 0 + the line), resumed follow, give-up, Ctrl-C (exit 130), cancel from elsewhere. A
+    `BEFORE INSERT` trigger now pins the finalize and `ask.cancelled` `audited` flags, which the PR had called
+    untestable. `cli_{submit,cancel}_audit_e2e` joined the `pg` profile (118 tests, 0 `[SKIP]`).
+  - 6 new mutants, all killed.
+  - ⚠️ **bottie matches the parking marker by substring**, so a progress line carrying the phrase can pass for it.
+    That is [hherb/bottie#242](https://github.com/hherb/bottie/issues/242); kastellan pins that no note starts
+    `ask: task `.
 
 ### Previous (2026-11-06): #922 slice 2 — `kastellan-cli session` (PR #986, merged)
 
@@ -250,7 +264,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `kastellan-cli session` per request, live progress, Stop, Correct; worktree `~/src/bottie-wt-session` off bottie
    `main`). Live round trip to the DGX passed (task 386); **not yet clicked through in the running app** — do that
    before merging. Next: slice 4 (notebook default, classic retires). #987 (one shared LISTEN) is small.
-   Deploying #983 + one re-measure is optional. #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
+   #983/#986 are on the DGX (in #989's tree); one re-measure is optional. #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
    **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to
    `api_minor` 6.
@@ -467,8 +481,8 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#986** (#922 slice 2) — merged 2026-11-06, not deployed: `kastellan-cli session`, JSON-RPC over stdio/ssh.
-- **#984 / #983** (#965 items 4/6/7; #981, #970) — merged 2026-11-06, #983 not deployed: tests only (#965 done); a table ref to no sift this conversation ran is shown back.
+- **#986** (#922 slice 2) — merged 2026-11-06, deployed DGX 2026-11-07 (in #989's tree): `kastellan-cli session`, JSON-RPC over stdio/ssh.
+- **#984 / #983** (#965 items 4/6/7; #981, #970) — merged 2026-11-06, deployed DGX 2026-11-07 (in #989's tree): tests only (#965 done); a table ref to no sift this conversation ran is shown back.
 - **#982** (#980) — merged 2026-11-06, deployed DGX, measured 378–384 (log #17, 7/7): a call without its `call` wrapper is read as `call`. **#975** (manuals): both manuals up to date, dev chapters 15/16.
 - **#974** (#973, #970 items) — merged 2026-11-06, deployed DGX, measured 371–384 (log #16/#17): an answer table naming no scrapbook ref is shown back once.
 - **#972 / #971 / #969** (merged + deployed DGX 2026-11-05, measured 357–370): prompt wording (#965 items 3/8); a stashed sift read reaches the sorter as its text (#968); an over-cap row keeps `task_id`, a forced answer's own table taken out (#967).

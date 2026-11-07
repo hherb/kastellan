@@ -15,8 +15,8 @@
 //!        never claimed), and zero counters/duration (the task ran zero
 //!        plan iterations and zero step dispatches — these are *known*
 //!        zeros, not the unknowable-null shape used for crashed tasks).
-//!    * returns `CancelOutcome::Cancelled(Task)` with the freshly-updated
-//!      row data so the caller can display it.
+//!    * returns `CancelOutcome::Cancelled { task, audited }` with the
+//!      freshly-updated row data so the caller can display it.
 //!
 //! 2. [`kastellan_core::cli_audit::cancel_and_audit`] on an already-terminal
 //!    task (here: a task that has just been cancelled): returns
@@ -126,7 +126,7 @@ fn cancel_pending_task_writes_lifecycle_and_finalize_rows() {
             .await
             .expect("cancel_and_audit");
 
-        // Outcome shape: Cancelled(task) with the post-update row data.
+        // Outcome shape: Cancelled { task, audited } with the post-update row data.
         let task = match outcome {
             CancelOutcome::Cancelled { task, audited } => {
                 assert!(audited, "every cancel audit row was written");

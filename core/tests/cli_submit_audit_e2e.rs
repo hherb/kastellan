@@ -10,8 +10,8 @@
 //!      `{task_id, lane, plan_count}` — same shape as the scheduler's
 //!      `task.<state>` rows so observation SQL `WHERE action LIKE 'task.%'`
 //!      captures the full lifecycle from submit through terminal,
-//!    * returns the new task id (same shape as the underlying
-//!      `tasks::insert_pending`).
+//!    * returns `Submitted { id, audited }`: the new task id and whether
+//!      that row was written.
 //!
 //! ## Why the test exists
 //!

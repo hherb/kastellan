@@ -9,8 +9,8 @@
 //!   see [`kastellan_core::audit_mirror`]).
 //!
 //! * `ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]` — submit a task to the
-//!   scheduler, LISTEN for the completion NOTIFY, then print the
-//!   result. Ctrl-C cancels the pending/running task.
+//!   scheduler, follow it (its notebook entries as stderr lines), then
+//!   print the result. Ctrl-C cancels the pending/running task.
 //!
 //! * `tasks list|status|cancel|correct|fail|tail` — inspect and manage
 //!   tasks in the scheduler DB.

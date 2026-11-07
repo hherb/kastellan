@@ -24,7 +24,7 @@
 //!
 //! Skips with `[SKIP]` on hosts without Postgres or a supervisor (run with
 //! `-- --nocapture` to see it), like `cli_inbox_e2e.rs`, whose PG bring-up
-//! and CLI env this copies. Once Postgres is up a failure fails.
+//! and CLI env `support.rs` copies. Once Postgres is up a failure fails.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -284,6 +284,51 @@ async fn submit_and_cancel_report_a_lost_audit_row_and_a_suppressed_floor() {
     assert_eq!(json!(claimed.id), r["task_id"]);
     assert_eq!(s.ok("task.cancel", json!({"task_id": r["task_id"]}))["audited"], false);
     sqlx::query("ALTER TABLE audit_log_hidden RENAME TO audit_log").execute(&admin).await.expect("restore audit_log");
+    s.finish();
+}
+
+/// Each of a cancel's rows counts on its own: losing only the producer
+/// finalize (a pending task's) or only the `ask.cancelled` row (a parked
+/// task's) still reports `audited: false`. A trigger rejects just that row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_that_loses_any_one_of_its_rows_says_so() {
+    let Some((pool, cluster)) = bring_up_pg("audited-rows").await else { return };
+    let admin = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec).await.expect("admin pool");
+    sqlx::query(
+        "CREATE FUNCTION reject_one_action() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+         IF NEW.action = TG_ARGV[0] THEN RAISE EXCEPTION 'rejected %', NEW.action; END IF; RETURN NEW; END $$",
+    )
+    .execute(&admin)
+    .await
+    .expect("create function");
+    let reject = |trigger: &'static str| {
+        let admin = admin.clone();
+        async move {
+            sqlx::query("DROP TRIGGER IF EXISTS reject_one ON audit_log").execute(&admin).await.expect("drop");
+            sqlx::query(trigger).execute(&admin).await.expect("create trigger");
+        }
+    };
+    let mut s = Session::start(&cluster);
+
+    reject("CREATE TRIGGER reject_one BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_one_action('task.finalize')").await;
+    let r = s.ok("task.submit", json!({"instruction": "find the invoice"}));
+    assert_eq!(s.ok("task.cancel", json!({"task_id": r["task_id"]}))["audited"], false, "a pending cancel's finalize");
+
+    reject("CREATE TRIGGER reject_one BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_one_action('ask.cancelled')").await;
+    let task_id = seed_running_task(&pool).await;
+    kastellan_db::asks::raise(
+        &pool,
+        task_id,
+        "plan_approval",
+        "this sends mail to a stranger",
+        &json!(["approve", "deny"]),
+        Some("digest-a"),
+        time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+        None,
+    )
+    .await
+    .expect("raise");
+    assert_eq!(s.ok("task.cancel", json!({"task_id": task_id}))["audited"], false, "a parked cancel's ask row");
     s.finish();
 }
 

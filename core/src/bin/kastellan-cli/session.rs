@@ -127,7 +127,7 @@ async fn session_async() -> ExitCode {
                     if out.send(to_value(reply)).await.is_err() {
                         break;
                     }
-                    follows.spawn(follow::follow(pool.clone(), f.task_id, f.after_seq, out.clone()));
+                    follows.spawn(follow::follow(pool.clone(), f.task_id, f.after_seq, follow::CANCEL_GRACE, out.clone()));
                     continue;
                 }
                 Err(e) => err_response(req.id, e),
