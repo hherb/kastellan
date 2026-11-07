@@ -83,6 +83,10 @@ supported; a value needing either is out of contract on both platforms.
   results the task gathers;
 - `classic` — one growing plan history per task. Kept opt-in until it retires.
 
+The default changed in #922 slice 4a (it was `classic`): an install that never
+set the key runs the notebook after its next upgrade. Set
+`KASTELLAN_PLANNER_MODE=classic` in `kastellan.env.local` to keep the old loop.
+
 Any other value (the match is exact and lower-case: `Notebook` is refused) stops
 the daemon at boot, naming the key. While a notebook task runs,
 `kastellan-cli tasks correct <id> "<text>"` adds an operator correction: the next

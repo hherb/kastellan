@@ -839,7 +839,7 @@ mod tests {
         assert!(s.contains("KASTELLAN_DATA_DIR=/home/u/.local/share/kastellan/pg/data\n"));
         // Planner timezone documented (commented — unset uses the host tz).
         assert!(s.contains("# KASTELLAN_TIMEZONE=Australia/Sydney\n"), "{s}");
-        // Planner mode documented (commented — the classic loop).
+        // Planner mode documented (commented — classic is the opt-out).
         assert!(s.contains("# KASTELLAN_PLANNER_MODE=classic\n"), "{s}");
         // The sift's two knobs documented (commented — the defaults).
         assert!(s.contains("# KASTELLAN_SIFT_MAX_READS=64\n"), "{s}");

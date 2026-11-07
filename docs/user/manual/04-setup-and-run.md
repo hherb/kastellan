@@ -707,6 +707,11 @@ repository root **with the same flags as before** — including the two
 a clean upgrade: it stops the services, swaps in the new programs, and starts
 them again.
 
+**Planner mode.** Since #922 slice 4a an unset `KASTELLAN_PLANNER_MODE` means
+`notebook`, so an install that never set it switches loops on its next upgrade.
+To keep the older loop, put `KASTELLAN_PLANNER_MODE=classic` in
+`kastellan.env.local` before upgrading.
+
 ---
 
 ## Uninstalling
