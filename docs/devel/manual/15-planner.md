@@ -216,7 +216,7 @@ scrapbook only if that turn is in its conversation window.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `KASTELLAN_PLANNER_MODE` | `classic` | `classic` or `notebook`, per daemon (every lane and channel task). Any other value stops the daemon at boot. |
+| `KASTELLAN_PLANNER_MODE` | `notebook` | `notebook` or `classic`, per daemon (every lane and channel task). Any other value stops the daemon at boot. |
 | `KASTELLAN_SIFT_MAX_READS` | `64` | Most reads (and items) one sift takes. Must be > 0. |
 | `KASTELLAN_SIFT_READ_METHODS` | `mail.get_message,mail.get_attachment_text,handoff.fetch` | Methods a sift may read with. An unadvertised method, a sift or a skill stops the daemon at boot. |
 | `KASTELLAN_PROMPTS_DIR` | `prompts` (relative to CWD) | Where prompt files are loaded from; the installer sets it to `~/.local/share/kastellan/prompts`. |

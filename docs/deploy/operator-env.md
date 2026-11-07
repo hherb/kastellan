@@ -77,10 +77,11 @@ supported; a value needing either is out of contract on both platforms.
 
 `KASTELLAN_PLANNER_MODE` picks the loop every task plans with (#922):
 
-- `classic` (the default, also when unset) — one growing plan history per task;
-- `notebook` — the planner writes its own step list, works one step per turn,
-  and keeps its notes and findings in the `task_notebook` table. Each turn's
-  prompt stays bounded however many tool results the task gathers.
+- `notebook` (the default, also when unset) — the planner writes its own step
+  list, works one step per turn, and keeps its notes and findings in the
+  `task_notebook` table. Each turn's prompt stays bounded however many tool
+  results the task gathers;
+- `classic` — one growing plan history per task. Kept opt-in until it retires.
 
 Any other value (the match is exact and lower-case: `Notebook` is refused) stops
 the daemon at boot, naming the key. While a notebook task runs,

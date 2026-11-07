@@ -190,8 +190,7 @@ What works today:
 
   The thinking/reasoning switch is per backend (`KASTELLAN_LLM_THINKING_SWITCH`).
 - **Two planner modes** (`KASTELLAN_PLANNER_MODE`):
-  - `classic` (the default) keeps one growing plan.
-  - `notebook` is external working memory for the planner. The model writes its
+  - `notebook` (the default) is external working memory for the planner. The model writes its
     own step list and works one step per turn. It ticks off each step with a
     note and keeps *findings*: facts together with their source. It writes the
     answer from those findings. A `sift` step runs its reads as one reviewed
@@ -290,7 +289,7 @@ Not built yet (see the roadmap):
 - **An LLM plan-review stage in CASSANDRA.** The constitutional and
   data-classification stages are deterministic rules; the guard model screens
   *content*, not plans.
-- **Notebook as the default planner mode**, retiring `classic`.
+- **Retiring the `classic` planner mode** (the notebook became the default in #922 slice 4).
 - **Good-netizen behaviour in the web workers** — rate limiting, backoff,
   `robots.txt` — required before any release.
 - **Context-window resets** from memory and the task list, and L4 session
@@ -457,7 +456,7 @@ installer and its values win. See
 Check health with `systemctl --user status kastellan.target` and
 `kastellan-cli secret list`.
 
-The overlay also holds the optional settings: `KASTELLAN_PLANNER_MODE=notebook`,
+The overlay also holds the optional settings: `KASTELLAN_PLANNER_MODE=classic`,
 `KASTELLAN_TIMEZONE`, and the guard model's `KASTELLAN_LLM_GUARD_*` keys. Set
 `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` as well and the next `install` adds a
 supervised `kastellan-guard` unit.

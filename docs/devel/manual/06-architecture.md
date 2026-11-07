@@ -138,9 +138,9 @@ crashed task is not silently retried.
 
 `KASTELLAN_PLANNER_MODE` selects one loop for the whole daemon:
 
-- **`classic`** (the default) — the planner re-reads a growing history of its
-  plans and their results every turn.
-- **`notebook`** (opt-in) — the planner keeps its own working memory in a
+- **`classic`** (opt-in, until it retires) — the planner re-reads a growing
+  history of its plans and their results every turn.
+- **`notebook`** (the default) — the planner keeps its own working memory in a
   per-task notebook (`task_notebook` table): it writes a step list, works one
   step per turn, and ticks each step off with the facts it found. A `sift`
   step runs one read over every item in a list and keeps the matches.

@@ -82,8 +82,8 @@ core/src/
                          The classic per-task replanning loop: execute, the
                          data-class ceiling/floor, result views, the
                          over-budget summary, LLM-failure handling
-    notebook/            The task-notebook planner loop (opt-in via
-                         KASTELLAN_PLANNER_MODE=notebook): state, render,
+    notebook/            The task-notebook planner loop (the default;
+                         KASTELLAN_PLANNER_MODE=classic opts out): state, render,
                          reply, formulator, run, repeat, thinking
       sift/              The `sift` step: go through every item of a list,
                          keep the matches in the task's scrapbook, render the

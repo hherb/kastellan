@@ -420,9 +420,10 @@ pub fn render_env_file(args: &InstallArgs, layout: &Layout) -> String {
     // date-relative questions from web-searching for the current date. Unset →
     // host system tz; invalid → UTC. Commented by default so the host tz is used.
     s.push_str("# KASTELLAN_TIMEZONE=Australia/Sydney\n");
-    // Which loop plans (#922): `classic` (the default) or `notebook`, where the
-    // planner keeps its working memory in a per-task notebook and works one
-    // step per turn. Anything else stops the daemon at boot.
+    // Which loop plans (#922): `notebook` (the default), where the planner
+    // keeps its working memory in a per-task notebook and works one step per
+    // turn, or `classic` (one growing plan history, until it retires).
+    // Anything else stops the daemon at boot.
     s.push_str("# KASTELLAN_PLANNER_MODE=classic\n");
     // `sift` (notebook mode, #922): how many reads one sift may make, and the
     // read-only methods it may read with. Commented → the defaults; a bad

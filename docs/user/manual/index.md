@@ -117,10 +117,10 @@ A handful of words appear throughout. Here they are in one place.
   Python program the agent wrote) that the agent saved for re-use. A skill
   is unusable until you approve it, and the agent may use it on its own
   only once you have also *pinned* it.
-- **Notebook mode** — an optional planning style in which the agent writes
+- **Notebook mode** — the default planning style, in which the agent writes
   its own step list, works one step at a time, and keeps notes and
-  findings, instead of re-reading the whole task history every turn. The
-  default style is called *classic*.
+  findings, instead of re-reading the whole task history every turn (the
+  older, opt-in style is called *classic*).
 - **Sift** — a notebook-mode step for "find every…" questions: it checks a
   whole list of candidates in one go, keeps the true matches in a per-task
   *scrapbook*, and lets the answer show them as a table.
