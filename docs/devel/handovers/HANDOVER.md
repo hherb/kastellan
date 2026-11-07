@@ -52,8 +52,14 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   NOTIFY (`woken_task`, pure); each follow subscribes **before it is spawned** and keeps its own poll tick. A dropped
   listener connection reconnects inside `recv` and the follows poll on — it no longer fails them. `MAX_FOLLOWS` 8 → **64**
   (bounds poll load now). The cap e2e runs 64 follows + checks **one** `LISTEN` in `pg_stat_activity`; the streaming e2e
-  pins NOTIFY promptness (< 2 s — without it every follow test passes on the 3 s tick). 2 of 2 mutants killed.
+  pins NOTIFY promptness (without it every follow test passes on the 3 s tick). 2 of 2 mutants killed.
   Two follows of one task still each send every entry (documented, not refused).
+- Review round (`/finalcheck`): the pump says on stderr when the listener fails and when it recovers (an `Err` sqlx keeps
+  the connection through can repeat for good — follows fall back to the tick); the wake decision is a pure `on_wake`
+  (unit-tested: own id, other id, lag, closed); a follow's interval first ticks one period out (the immediate tick
+  re-read for nothing and could pick up an entry with no NOTIFY), so the e2es now assert arrival **before the follow's
+  first possible tick** — exact under any host load — for an entry **and** the `tasks_completed` finish; a new e2e kills
+  the listener's backend (`pg_terminate_backend`) and sees it re-LISTEN and wake a follow (sqlx reconnects inside `recv`).
 
 ### Previous (2026-11-07): #985 + #988 (PR #989, merged) — what still binds
 

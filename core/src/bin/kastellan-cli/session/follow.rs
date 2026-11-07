@@ -146,19 +146,38 @@ impl Listener {
         let (wakes, _) = broadcast::channel(WAKE_QUEUE);
         let tx = wakes.clone();
         let pump = tokio::spawn(async move {
+            // Whether the last `recv` failed, so each change is said once.
+            let mut degraded = false;
             loop {
                 match listener.recv().await {
-                    // No follow subscribed is not an error: nobody to wake.
                     Ok(n) => {
+                        if degraded {
+                            eprintln!("kastellan-cli: notify listener recovered; follows are woken promptly again");
+                            degraded = false;
+                        }
+                        // No follow subscribed is not an error: nobody to wake.
                         if let Some(id) = woken_task(n.channel(), n.payload()) {
                             let _ = tx.send(id);
                         }
                     }
-                    // `recv` reconnects (and re-LISTENs) on its next call; the
-                    // NOTIFYs sent meanwhile are lost, which every follow's
-                    // poll tick covers. The wait keeps a database that is down
-                    // from being retried in a hot loop.
-                    Err(_) => tokio::time::sleep(Duration::from_secs(SUSPEND_POLL_SECS)).await,
+                    // sqlx reconnects (and re-LISTENs) inside `recv` when the
+                    // connection is lost, so an `Err` here is a reconnect
+                    // that failed (the database is down) or an error sqlx
+                    // keeps the connection through, which can repeat for
+                    // good. Either way the NOTIFYs are lost and every follow
+                    // falls back to its poll tick: still correct, only
+                    // slower, so it is said on stderr (stdout is the
+                    // client's) rather than failing the follows. The wait
+                    // keeps a database that is down from a hot retry loop.
+                    Err(e) => {
+                        if !degraded {
+                            eprintln!(
+                                "kastellan-cli: notify listener failed ({e}); follows poll every {SUSPEND_POLL_SECS} s until it recovers"
+                            );
+                            degraded = true;
+                        }
+                        tokio::time::sleep(Duration::from_secs(SUSPEND_POLL_SECS)).await
+                    }
                 }
             }
         });
@@ -207,7 +226,10 @@ async fn follow_inner(
     cancel_grace: Duration,
     out: &Sender<Value>,
 ) -> Result<(), String> {
-    let mut tick = tokio::time::interval(Duration::from_secs(SUSPEND_POLL_SECS));
+    // First tick one period out: the loop's first read needs no tick, and
+    // an immediate one would re-read at once for nothing.
+    let poll = Duration::from_secs(SUSPEND_POLL_SECS);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + poll, poll);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut parked = false;
     let mut cancel_deadline = None;
@@ -242,18 +264,42 @@ async fn follow_inner(
         // Sleep until something about this task, or the tick.
         loop {
             tokio::select! {
-                w = wakes.recv() => match w {
-                    Ok(id) if id == task_id => break,
-                    Ok(_) => {}
-                    // Fell behind: a missed wake-up may have been this task's.
-                    Err(RecvError::Lagged(_)) => break,
-                    Err(RecvError::Closed) => return Err("the listener stopped".into()),
+                w = wakes.recv() => match on_wake(w, task_id) {
+                    Wake::Reread => break,
+                    Wake::Ignore => {}
+                    Wake::ListenerGone => return Err("the listener stopped".into()),
                 },
                 _ = tick.tick() => break,
                 // The client left: stop polling for it.
                 _ = out.closed() => return Ok(()),
             }
         }
+    }
+}
+
+/// What a follow does with one message from its wake-up queue.
+#[derive(Debug, PartialEq)]
+enum Wake {
+    /// Read the task again now.
+    Reread,
+    /// Another task's wake-up: keep waiting.
+    Ignore,
+    /// The queue is closed: stop the follow with an error.
+    ListenerGone,
+}
+
+/// Decide what one wake-up message means for the follow of `task_id`.
+fn on_wake(w: Result<i64, RecvError>, task_id: i64) -> Wake {
+    match w {
+        Ok(id) if id == task_id => Wake::Reread,
+        Ok(_) => Wake::Ignore,
+        // Fell behind: a missed wake-up may have been this task's.
+        Err(RecvError::Lagged(_)) => Wake::Reread,
+        // The `Listener` holds a sender itself, so this happens only once it
+        // is dropped, when its owner is done with the follows (`session` aborts
+        // them first; `ask` has stopped reading them). It is an error so a
+        // follow can never wait on a queue nobody fills.
+        Err(RecvError::Closed) => Wake::ListenerGone,
     }
 }
 
@@ -287,6 +333,14 @@ mod tests {
         assert_eq!(woken_task("task_notebook", "99:9"), Some(99));
         assert_eq!(woken_task("task_notebook", "9"), None, "a payload without its seq is not 0028's");
         assert_eq!(woken_task("task_notebook", "x:3"), None);
+    }
+
+    #[test]
+    fn a_follow_rereads_on_its_own_wake_or_a_lag_and_ignores_others() {
+        assert_eq!(on_wake(Ok(9), 9), Wake::Reread);
+        assert_eq!(on_wake(Ok(19), 9), Wake::Ignore, "another task's wake-up");
+        assert_eq!(on_wake(Err(RecvError::Lagged(3)), 9), Wake::Reread, "a dropped wake-up may have been ours");
+        assert_eq!(on_wake(Err(RecvError::Closed), 9), Wake::ListenerGone);
     }
 
     #[test]
