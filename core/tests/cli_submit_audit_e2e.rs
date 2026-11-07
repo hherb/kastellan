@@ -10,8 +10,8 @@
 //!      `{task_id, lane, plan_count}` — same shape as the scheduler's
 //!      `task.<state>` rows so observation SQL `WHERE action LIKE 'task.%'`
 //!      captures the full lifecycle from submit through terminal,
-//!    * returns the new task id (same shape as the underlying
-//!      `tasks::insert_pending`).
+//!    * returns `Submitted { id, audited }`: the new task id and whether
+//!      that row was written.
 //!
 //! ## Why the test exists
 //!
@@ -91,6 +91,8 @@ fn submit_and_audit_emits_producer_task_submitted_row() {
         let fast_id = submit_and_audit(&pool, Lane::Fast, fast_payload.clone())
             .await
             .expect("submit_and_audit fast");
+        assert!(fast_id.audited, "the task.submitted row was written");
+        let fast_id = fast_id.id;
 
         // ── 2. Submit on Lane::Long ────────────────────────────────────
         let long_payload =
@@ -98,6 +100,8 @@ fn submit_and_audit_emits_producer_task_submitted_row() {
         let long_id = submit_and_audit(&pool, Lane::Long, long_payload.clone())
             .await
             .expect("submit_and_audit long");
+        assert!(long_id.audited, "the task.submitted row was written");
+        let long_id = long_id.id;
 
         assert_ne!(fast_id, long_id, "two inserts must produce distinct ids");
 

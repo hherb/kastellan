@@ -145,7 +145,7 @@ async fn tasks_cancel(args: &[String]) -> ExitCode {
     // action='task.cancelled'` audit row when the UPDATE flips a row.
     // No row is written when the task is already terminal or absent.
     match cancel_and_audit(&pool, id).await {
-        Ok(CancelOutcome::Cancelled(_))   => { println!("cancelled task {id}"); ExitCode::from(0) }
+        Ok(CancelOutcome::Cancelled { .. }) => { println!("cancelled task {id}"); ExitCode::from(0) }
         Ok(CancelOutcome::NotCancellable) => { eprintln!("task {id} not in cancellable state"); ExitCode::from(1) }
         Err(e)                            => { eprintln!("{e}"); ExitCode::from(1) }
     }

@@ -3,7 +3,7 @@
 //!
 //! This is the regression pin that none of the other scheduler tests
 //! satisfy: it spawns the **real `kastellan-cli` subprocess**, which
-//! INSERTs a `tasks` row and LISTENs for the completion NOTIFY, while
+//! INSERTs a `tasks` row and follows it to completion, while
 //! the **real `kastellan` daemon** runs under `systemd --user` (Linux)
 //! or `launchctl` (macOS), the **real sandboxed worker** runs under
 //! bwrap (Linux) or sandbox-exec (macOS), and only the **LLM is

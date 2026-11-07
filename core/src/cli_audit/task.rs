@@ -20,8 +20,8 @@ use crate::scheduler::audit::{
 
 /// Outcome of [`cancel_and_audit`].
 ///
-/// `Cancelled(Task)` carries the post-update row so callers can display
-/// the new state without re-fetching. `NotCancellable` means the row
+/// `Cancelled` carries the post-update row so callers can display the new
+/// state without re-fetching, and whether every audit row was written. `NotCancellable` means the row
 /// was already in a terminal state or does not exist; no SQL UPDATE
 /// happened and no audit row was written.
 #[derive(Debug)]
@@ -29,8 +29,10 @@ pub enum CancelOutcome {
     /// Row was flipped to `cancelled`. One `actor='cli'
     /// action='task.cancelled'` audit row was attempted (best-effort:
     /// a DB error on the audit insert is logged but the outcome stays
-    /// `Cancelled` — the SQL UPDATE already committed).
-    Cancelled(Task),
+    /// `Cancelled` — the SQL UPDATE already committed). `audited` is
+    /// false when any of the cancel's rows could not be written, so a
+    /// caller whose user never sees the log (a front end, #988) can say so.
+    Cancelled { task: Task, audited: bool },
     /// Row does not exist, or is already in a terminal state. No SQL
     /// UPDATE, no audit row. Returned even for the bogus-id case
     /// because the two are indistinguishable from one SQL UPDATE: the
@@ -80,14 +82,14 @@ pub async fn cancel_and_audit(pool: &PgPool, task_id: i64) -> Result<CancelOutco
     let Some(cancellation) = mark_cancelled(pool, task_id).await? else {
         return Ok(CancelOutcome::NotCancellable);
     };
-    emit_cancel_audit_rows(
+    let audited = emit_cancel_audit_rows(
         pool,
         &cancellation.task,
         &cancellation.previous_state,
         cancellation.asks_cancelled,
     )
     .await;
-    Ok(CancelOutcome::Cancelled(cancellation.task))
+    Ok(CancelOutcome::Cancelled { task: cancellation.task, audited })
 }
 
 /// Like [`cancel_and_audit`], but cancels **only if the task is still
@@ -112,8 +114,8 @@ pub async fn cancel_if_pending_and_audit(
     // Pending-only by construction, so the pre-cancel state is `pending`
     // and there can be no ask: `raise` only ever suspends a `running`
     // task, so a never-claimed task has none.
-    emit_cancel_audit_rows(pool, &task, "pending", 0).await;
-    Ok(CancelOutcome::Cancelled(task))
+    let audited = emit_cancel_audit_rows(pool, &task, "pending", 0).await;
+    Ok(CancelOutcome::Cancelled { task, audited })
 }
 
 /// Does the scheduler's inner loop have a live observer that will write
@@ -157,16 +159,18 @@ fn scheduler_will_emit_finalize(previous_state: &str) -> bool {
 ///
 /// All inserts are best-effort (chokepoint posture): a DB error is logged
 /// via `tracing::warn!` and swallowed so a transient audit failure cannot
-/// mask the successful SQL UPDATE.
+/// mask the successful SQL UPDATE. Returns whether every row was written.
 async fn emit_cancel_audit_rows(
     pool: &PgPool,
     task: &Task,
     previous_state: &str,
     asks_cancelled: u64,
-) {
+) -> bool {
+    let mut audited = true;
     let action = action_task_terminal("cancelled");
     let payload = build_lifecycle_payload(task.id, task.lane, task.plan_count);
     if let Err(e) = audit::insert(pool, CLI_AUDIT_ACTOR, &action, payload).await {
+        audited = false;
         tracing::warn!(
             task_id = task.id,
             error = %e,
@@ -174,7 +178,7 @@ async fn emit_cancel_audit_rows(
         );
     }
     if !scheduler_will_emit_finalize(previous_state) {
-        emit_producer_cancel_finalize(pool, task, previous_state).await;
+        audited &= emit_producer_cancel_finalize(pool, task, previous_state).await;
     }
     if asks_cancelled > 0 {
         let ask_payload = serde_json::json!({
@@ -185,6 +189,7 @@ async fn emit_cancel_audit_rows(
         if let Err(e) =
             audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_ASK_CANCELLED, ask_payload).await
         {
+            audited = false;
             tracing::warn!(
                 task_id = task.id,
                 asks_cancelled,
@@ -194,6 +199,7 @@ async fn emit_cancel_audit_rows(
             );
         }
     }
+    audited
 }
 
 /// `action` for the row recording that cancelling a task destroyed the
@@ -204,7 +210,7 @@ pub const ACTION_ASK_CANCELLED: &str = "ask.cancelled";
 
 /// Insert one `actor='cli' action='task.finalize'` row for a
 /// producer-cancelled `pending` task. Best-effort, same posture as the
-/// lifecycle row in [`cancel_and_audit`].
+/// lifecycle row in [`cancel_and_audit`]; returns whether it was written.
 ///
 /// The counters and duration are pinned to **known zeros** inside
 /// [`build_producer_cancel_finalize_payload`] — the task ran zero
@@ -226,7 +232,7 @@ pub const ACTION_ASK_CANCELLED: &str = "ask.cancelled";
 /// Wire shape: [`build_producer_cancel_finalize_payload`], including the
 /// `provenance="producer_cancel_pending"` discriminator added in issue
 /// #50 schema-v2.
-async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task, previous_state: &str) {
+async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task, previous_state: &str) -> bool {
     let finished_at = task.finished_at.unwrap_or_else(|| {
         tracing::error!(
             task_id = task.id,
@@ -260,7 +266,9 @@ async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task, previous_stat
             error = %e,
             "cli_audit::cancel_and_audit: finalize audit insert failed (cancel itself succeeded)",
         );
+        return false;
     }
+    true
 }
 
 /// Producer-side task submission with audit-row emission.
@@ -272,7 +280,8 @@ async fn emit_producer_cancel_finalize(pool: &PgPool, task: &Task, previous_stat
 /// submit time — included for shape parity with the rest of the
 /// `task.<state>` family so consumers don't need a special case).
 ///
-/// On success returns the new task id. The audit insert is best-effort:
+/// On success returns the new task id, and whether its audit row was
+/// written ([`Submitted`]). The audit insert is best-effort:
 /// a transient DB issue is logged at WARN but the id still propagates,
 /// because the SQL INSERT already committed and the task is now a real
 /// row in the `tasks` table — failing the call would be strictly worse
@@ -306,19 +315,30 @@ pub async fn submit_and_audit(
     pool: &PgPool,
     lane: Lane,
     payload: serde_json::Value,
-) -> Result<i64, DbError> {
+) -> Result<Submitted, DbError> {
     let id = insert_pending(pool, lane, payload).await?;
 
     let row_payload = build_lifecycle_payload(id, lane, 0);
-    if let Err(e) =
-        audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_TASK_SUBMITTED, row_payload).await
-    {
-        tracing::warn!(
-            task_id = id,
-            error = %e,
-            "cli_audit::submit_and_audit: audit insert failed (task itself was submitted)",
-        );
-    }
+    let audited = match audit::insert(pool, CLI_AUDIT_ACTOR, ACTION_TASK_SUBMITTED, row_payload).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                task_id = id,
+                error = %e,
+                "cli_audit::submit_and_audit: audit insert failed (task itself was submitted)",
+            );
+            false
+        }
+    };
 
-    Ok(id)
+    Ok(Submitted { id, audited })
+}
+
+/// What [`submit_and_audit`] did: the new task's `id`, and whether its
+/// `task.submitted` row was written (`false` = logged at WARN only, which
+/// a front end reading stdout never sees, #988).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Submitted {
+    pub id: i64,
+    pub audited: bool,
 }

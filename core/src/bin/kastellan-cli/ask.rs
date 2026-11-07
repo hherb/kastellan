@@ -1,21 +1,31 @@
 //! `ask "<instruction>" [--fast|--long] [--classification-floor <DataClass>]`
-//! — submit a task to the scheduler, LISTEN for the completion NOTIFY,
-//! then print the result. Ctrl-C cancels the pending/running task.
+//! — submit a task to the scheduler, follow it, then print the result.
+//! Ctrl-C cancels the pending/running task.
+//!
+//! While it runs, each notebook entry but the answer and a cancel is printed
+//! to stderr as one short line (#985, [`progress`]); stdout carries only the
+//! answer. A classic-mode task has no notebook, so
+//! it prints nothing new.
 //!
 //! A task can also stop short of any terminal state: CASSANDRA escalates
 //! its plan, an operator ask is raised, and the task parks in
-//! `awaiting_operator` until somebody answers (#564 slice 1b). No NOTIFY
-//! fires for that, so the wait loop polls for it and tells the operator
-//! where their own question is waiting — see the comment on the loop.
+//! `awaiting_operator` until somebody answers (#564 slice 1b). `ask` then
+//! tells the operator where their own question is waiting and exits 0.
+//!
+//! The waiting is the session's `task.follow` (`session/follow.rs`), not a
+//! second copy of it.
+
+mod progress;
 
 use std::process::ExitCode;
 
 use crate::common::{parse_classification_floor, resolve_connect_spec, with_runtime};
 
-/// How often the wait loop checks whether the task suspended itself on an
+/// How often a follow (`session/follow.rs`, which `ask` uses) re-reads its
+/// task, and so how soon it sees the task suspend itself on an
 /// operator ask. Short enough that the operator is told within a few
 /// seconds of the escalation; long enough that a task running for minutes
-/// costs a trivial number of one-row reads.
+/// costs only a few reads per tick.
 pub(crate) const SUSPEND_POLL_SECS: u64 = 3;
 
 pub(crate) fn run_ask(args: &[String]) -> ExitCode {
@@ -60,11 +70,10 @@ pub(crate) fn run_ask(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    // `with_runtime` builds a multi-thread runtime so `block_in_place`
-    // is available if any sqlx internals need it; PgListener::recv does
-    // not require it today but the shape is consistent with the rest of
-    // the DB code. Deferred until here so an arg parse/validation error
-    // above never pays for a runtime it won't use (Issue #97 posture).
+    // `with_runtime` builds a multi-thread runtime: the follow `ask` spawns
+    // runs beside the loop that prints what it sends. Deferred until here
+    // so an arg parse/validation error above never pays for a runtime it
+    // won't use (Issue #97 posture).
     with_runtime("ask", ask_async(lane, instruction, floor))
 }
 
@@ -121,10 +130,14 @@ async fn ask_async(
     instruction: String,
     floor: Option<kastellan_core::cassandra::DataClass>,
 ) -> ExitCode {
-    use kastellan_core::cli_audit::{cancel_and_audit, submit_and_audit};
+    use std::time::Duration;
+
+    use kastellan_core::cli_audit::{cancel_and_audit, submit_and_audit, CancelOutcome};
     use kastellan_db::pool::connect_runtime_pool;
-    use kastellan_db::tasks::get;
-    use sqlx::postgres::PgListener;
+    use serde_json::Value;
+    use tokio::signal::unix::{signal, SignalKind};
+
+    use crate::session::follow::follow;
 
     let spec = match resolve_connect_spec() {
         Ok(s) => s,
@@ -135,98 +148,136 @@ async fn ask_async(
         Err(e) => { eprintln!("ask: db connect failed: {e}"); return ExitCode::from(1); }
     };
 
-    // LISTEN BEFORE INSERT to avoid the race where the NOTIFY arrives
-    // before we start listening.
-    let mut listener = match PgListener::connect_with(&pool).await {
-        Ok(l) => l,
-        Err(e) => { eprintln!("ask: listener connect failed: {e}"); return ExitCode::from(1); }
+    let (payload, _suppressed) = submission_payload(&instruction, floor);
+    // Installed before the submit, so a Ctrl-C from the moment the task
+    // exists cancels it (`tokio::signal::ctrl_c()` registers only on its
+    // first poll, and SIGINT's default action would kill `ask` and leave the
+    // task running). Not before the connect: a hung connect stays killable.
+    let mut sigint = match signal(SignalKind::interrupt()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("ask: cannot catch Ctrl-C ({e}); Ctrl-C will not cancel the task, `kastellan-cli tasks cancel <id>` will");
+            None
+        }
     };
-    if let Err(e) = listener.listen("tasks_completed").await {
-        eprintln!("ask: listen failed: {e}");
-        return ExitCode::from(1);
-    }
-
-    let payload = submission_payload(&instruction, floor);
+    // A lost audit row is a WARN line on stderr already (the CLI's tracing
+    // subscriber), which is where an `ask` user looks.
     let id = match submit_and_audit(&pool, lane, payload).await {
-        Ok(i) => i,
+        Ok(s) => s.id,
         Err(e) => { eprintln!("ask: insert failed: {e}"); return ExitCode::from(1); }
     };
 
     eprintln!("ask: submitted task {id} (lane={}); waiting for completion…", lane.as_sql());
 
-    // Wait for a terminal-state NOTIFY for our id, OR ctrl-C, OR the task
-    // suspending on an operator ask.
-    //
-    // That third case needs a poll, and the reason is structural: a task
-    // CASSANDRA escalates moves `running -> awaiting_operator`, which fires
-    // neither `tasks_completed` (not a terminal state) nor `tasks_resumed`
-    // (that trigger is `awaiting_operator -> pending`, i.e. the way back
-    // OUT). There is no NOTIFY for going in, so nothing can be listened for
-    // — adding one would be a migration plus a third channel, for a
-    // condition a single-row `SELECT state` answers exactly. A tick every
-    // few seconds against a local socket costs nothing next to a command
-    // whose alternative is sitting silent for the full 24 h ask deadline.
-    tokio::pin! {
-        let sigint = tokio::signal::ctrl_c();
-    }
-    let mut suspend_poll =
-        tokio::time::interval(std::time::Duration::from_secs(SUSPEND_POLL_SECS));
-    // The first tick completes immediately; burn it so the very first check
-    // happens one interval in, by which time the scheduler has had a chance
-    // to claim the task at all.
-    suspend_poll.tick().await;
-    loop {
-        tokio::select! {
-            n = listener.recv() => match n {
-                Ok(notif) => {
-                    if notif.payload() == id.to_string() { break; }
-                }
-                Err(e) => { eprintln!("ask: listener.recv: {e}"); return ExitCode::from(1); }
-            },
-            _ = suspend_poll.tick() => {
-                // A read failure here is not the command's business: the
-                // task is still running and the NOTIFY is still coming.
-                // Keep waiting rather than reporting a state we did not see.
-                if let Ok("awaiting_operator") =
-                    kastellan_db::tasks::observe_state(&pool, id).await.as_deref()
-                {
-                    // NOT a failure, and deliberately exit 0: the task is
-                    // alive and suspended on a question the operator — the
-                    // very person at this terminal — has to answer. Exiting
-                    // non-zero would tell a script the submission failed,
-                    // which is untrue and would send it into a retry loop
-                    // against a task that is merely waiting for its author.
-                    eprintln!(
-                        "ask: task {id} is waiting for an operator decision. \
-                         Run `kastellan-cli inbox list` to see the question, then \
-                         `kastellan-cli inbox resolve <id> approve|deny` to answer it. \
-                         Re-run `kastellan-cli tasks status {id}` afterwards for the result."
-                    );
-                    return ExitCode::from(0);
-                }
-            }
-            result = &mut sigint => {
-                if result.is_ok() {
-                    // Best-effort: even if the UPDATE or audit insert
-                    // hiccups, the SIGINT path still exits 130 — the
-                    // user has signalled they want out. On success the
-                    // helper emits the producer-side
-                    // `actor='cli' action='task.cancelled'` row.
-                    let _ = cancel_and_audit(&pool, id).await;
-                    eprintln!("ask: cancelled (task id {id})");
-                    return ExitCode::from(130);  // standard SIGINT exit code
-                }
-            }
-        }
-    }
-
-    let task = match get(&pool, id).await {
-        Ok(Some(t)) => t,
-        Ok(None) => { eprintln!("ask: task {id} disappeared"); return ExitCode::from(1); }
-        Err(e) => { eprintln!("ask: get failed: {e}"); return ExitCode::from(1); }
+    // The session's follow (`session/follow.rs`) does the waiting: it reads
+    // the task's state and its notebook from the start, so starting it after
+    // the INSERT misses nothing, and its poll tick sees a task parking on an
+    // operator ask, which no NOTIFY announces. `ask` prints what it sends.
+    // Zero cancel grace: `ask` prints no `cancelled` entry, so a task someone
+    // else cancelled ends at once instead of waiting for the planner's.
+    // Each follow gets its own channel, so one that panics closes `rx`.
+    let start_follow = |after_seq: i64, delay: Duration| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Value>(64);
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            follow(pool, id, after_seq, Duration::ZERO, tx).await;
+        });
+        rx
     };
+    let mut rx = start_follow(0, Duration::ZERO);
+    let mut failures = 0;
+    loop {
+        let message = tokio::select! {
+            m = rx.recv() => m,
+            // `None` is a signal driver shutting down, not a Ctrl-C.
+            Some(()) = async { sigint.as_mut().expect("guarded").recv().await }, if sigint.is_some() => {
+                // Exit 130 whatever the cancel did — the user wants out —
+                // but say what it did. A cancel writes the producer-side
+                // `actor='cli' action='task.cancelled'` row itself.
+                match cancel_and_audit(&pool, id).await {
+                    Ok(CancelOutcome::Cancelled { .. }) => eprintln!("ask: cancelled (task id {id})"),
+                    Ok(CancelOutcome::NotCancellable) => {
+                        eprintln!("ask: task {id} had already ended; `kastellan-cli tasks status {id}` shows how")
+                    }
+                    Err(e) => eprintln!(
+                        "ask: cancelling task {id} failed ({e}); it may still be running: \
+                         retry with `kastellan-cli tasks cancel {id}`"
+                    ),
+                }
+                return ExitCode::from(130);  // standard SIGINT exit code
+            }
+        };
+        // `follow` always ends with `task.finished` or `task.follow_failed`.
+        let Some(message) = message else {
+            eprintln!("ask: lost track of task {id}; {}", still_running(id));
+            return ExitCode::from(1);
+        };
+        let params = &message["params"];
+        match message["method"].as_str() {
+            Some("task.follow_failed") => {
+                // A blip (a Postgres restart, a pool timeout) must not end
+                // `ask` while its task runs on: a retrying caller would
+                // submit it twice. Resume from the last entry printed.
+                let error = params["error"].as_str().unwrap_or("");
+                failures += 1;
+                if failures > FOLLOW_RETRIES {
+                    eprintln!("ask: lost track of task {id}: {error}; {}", still_running(id));
+                    return ExitCode::from(1);
+                }
+                eprintln!("ask: lost track of task {id} ({error}); retrying");
+                let after_seq = params["last_seq"].as_i64().unwrap_or(0);
+                rx = start_follow(after_seq, Duration::from_secs(SUSPEND_POLL_SECS));
+                continue;
+            }
+            Some("notebook.entry") => {
+                if let Some(line) = progress::entry_line(params["kind"].as_str().unwrap_or(""), &params["payload"]) {
+                    eprintln!("{line}");
+                }
+            }
+            Some("task.awaiting_operator") => {
+                // NOT a failure, and deliberately exit 0: the task is
+                // alive and suspended on a question the operator — the
+                // very person at this terminal — has to answer. Exiting
+                // non-zero would tell a script the submission failed,
+                // which is untrue and would send it into a retry loop
+                // against a task that is merely waiting for its author.
+                // bottie (hherb/bottie) reads this line by its wording.
+                eprintln!(
+                    "ask: task {id} is waiting for an operator decision. \
+                     Run `kastellan-cli inbox list` to see the question, then \
+                     `kastellan-cli inbox resolve <id> approve|deny` to answer it. \
+                     Re-run `kastellan-cli tasks status {id}` afterwards for the result."
+                );
+                return ExitCode::from(0);
+            }
+            Some("task.finished") => {
+                let state = params["state"].as_str().unwrap_or("");
+                let result = Some(&params["result"]).filter(|r| !r.is_null());
+                return print_finished(state, result);
+            }
+            _ => {}
+        }
+        failures = 0; // a message from the follow: the database answers again
+    }
+}
 
-    match (task.state.as_str(), task.result) {
+/// How many follows in a row may fail before `ask` gives up on its task:
+/// with [`SUSPEND_POLL_SECS`] between them, a database gone ~15 s or more.
+const FOLLOW_RETRIES: u32 = 5;
+
+/// The second half of a give-up line: the task was never cancelled.
+fn still_running(id: i64) -> String {
+    format!(
+        "it may still be running: `kastellan-cli tasks status {id}` shows it, \
+         `kastellan-cli tasks cancel {id}` stops it"
+    )
+}
+
+/// Print how a task ended: a completed task's answer on stdout (a text
+/// result's body, any other kind as JSON), anything else as the end line.
+fn print_finished(state: &str, result: Option<&serde_json::Value>) -> ExitCode {
+    match (state, result) {
         ("completed", Some(r)) => {
             if r.get("kind").and_then(|v| v.as_str()) == Some("text") {
                 if let Some(b) = r.get("body").and_then(|v| v.as_str()) {
@@ -235,11 +286,11 @@ async fn ask_async(
                 }
             }
             // Unknown kind: dump JSON.
-            println!("{}", serde_json::to_string_pretty(&r).unwrap());
+            println!("{}", serde_json::to_string_pretty(r).unwrap());
             ExitCode::from(0)
         }
         (state, result) => {
-            eprintln!("{}", ended_line(state, result.as_ref()));
+            eprintln!("{}", ended_line(state, result));
             ExitCode::from(1)
         }
     }
@@ -250,10 +301,15 @@ async fn ask_async(
 /// (and matched signals, when inferred). Shared by `ask` and `session`'s
 /// `task.submit`, so the two operator surfaces cannot drift on what the
 /// scheduler reads.
+///
+/// The second value is `Some({inferred_class, inferred_signals})` when the
+/// operator's pinned floor is lower than what the keyword classifier would
+/// have set — logged at WARN here, and returned so `task.submit` can tell a
+/// front end that only reads stdout (#988).
 pub(crate) fn submission_payload(
     instruction: &str,
     floor: Option<kastellan_core::cassandra::DataClass>,
-) -> serde_json::Value {
+) -> (serde_json::Value, Option<serde_json::Value>) {
     let mut payload = serde_json::json!({"instruction": instruction, "kind": "ask"});
 
     // Resolve floor + source + signals via the pure helper. The closure
@@ -294,7 +350,10 @@ pub(crate) fn submission_payload(
             );
         }
     }
-    payload
+    let suppressed = suppressed.map(|(class, signals)| {
+        serde_json::json!({"inferred_class": class.as_pascal_str(), "inferred_signals": signals})
+    });
+    (payload, suppressed)
 }
 
 /// Why a task ended without an answer, in the scheduler's words: a failed
@@ -439,7 +498,8 @@ mod submission_payload_tests {
     // The keys and casing the scheduler's runner reads back.
     #[test]
     fn an_operator_floor_is_stored_as_the_operators() {
-        let p = submission_payload("find the invoice", Some(DataClass::Personal));
+        let (p, suppressed) = submission_payload("find the invoice", Some(DataClass::Personal));
+        assert_eq!(suppressed, None, "nothing clinical to suppress");
         assert_eq!(p["instruction"], "find the invoice");
         assert_eq!(p["kind"], "ask");
         assert_eq!(p["classification_floor"], "Personal");
@@ -449,9 +509,19 @@ mod submission_payload_tests {
 
     #[test]
     fn an_unpinned_floor_is_inferred_with_its_signals() {
-        let p = submission_payload("Translate the patient's pathology report.", None);
+        let (p, suppressed) = submission_payload("Translate the patient's pathology report.", None);
+        assert_eq!(suppressed, None, "an inferred floor suppresses nothing");
         assert_eq!(p["classification_floor_source"], "cli_inferred", "{p}");
         assert_ne!(p["classification_floor"], "Public", "{p}");
         assert!(p["classification_floor_signals"].as_array().is_some_and(|a| !a.is_empty()), "{p}");
+    }
+
+    #[test]
+    fn a_pinned_floor_below_the_inferred_one_is_reported() {
+        let (p, suppressed) = submission_payload("Translate the patient's pathology report.", Some(DataClass::Public));
+        assert_eq!(p["classification_floor"], "Public", "the operator still wins");
+        let s = suppressed.expect("the suppression is reported");
+        assert_eq!(s["inferred_class"], "ClinicalConfidential", "{s}");
+        assert!(s["inferred_signals"].as_array().is_some_and(|a| a.iter().any(|v| v == "patient")), "{s}");
     }
 }

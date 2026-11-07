@@ -228,7 +228,7 @@ pub(super) async fn memory_l3_run(args: &[String]) -> ExitCode {
         "execute": execute,
     });
     let task_id = match submit_and_audit(&pool, Lane::Long, payload).await {
-        Ok(i) => i,
+        Ok(s) => s.id,
         Err(e) => { eprintln!("memory l3 run: submit failed: {e}"); return ExitCode::from(1); }
     };
     eprintln!("memory l3 run: submitted task {task_id} (lane=long); waiting for the daemon…");
@@ -442,7 +442,7 @@ async fn cancel_pending_or_proceed(
     use kastellan_core::cli_audit::{cancel_if_pending_and_audit, CancelOutcome};
 
     match cancel_if_pending_and_audit(pool, task_id).await {
-        Ok(CancelOutcome::Cancelled(_)) => {
+        Ok(CancelOutcome::Cancelled { .. }) => {
             eprintln!("memory l3 run: {reason}. Cancelled task {task_id}.");
             Err(std::process::ExitCode::from(1))
         }

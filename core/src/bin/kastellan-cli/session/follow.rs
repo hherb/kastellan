@@ -19,18 +19,23 @@
 //! planner writes its `cancelled` entry (after the turn in flight, which may
 //! write one more) only when it next looks. So a follow that sees
 //! `cancelled` on a task with a notebook keeps going until that entry has
-//! been sent, for at most [`CANCEL_GRACE`] — a planner that died never
-//! writes it. A task cancelled before its first entry finishes at once;
-//! anything its planner writes later is in `task.status`.
+//! been sent, for at most its cancel grace (the session's is
+//! [`CANCEL_GRACE`]) — a planner that died never writes it. A task cancelled
+//! before its first entry, or followed with a zero grace (`ask`, which
+//! prints no `cancelled` entry), finishes at once; anything its planner
+//! writes later is in `task.status`.
 //!
 //! The NOTIFYs (`task_notebook`, `tasks_completed`) only make it prompt; the
 //! poll tick is what makes it correct. `PgListener` drops notifications
 //! while it reconnects, and nothing notifies a task parking in
-//! `awaiting_operator` (see `ask.rs`), so a follow that trusted the NOTIFYs
-//! alone could miss an entry or wait forever.
+//! `awaiting_operator` (`running -> awaiting_operator` fires neither
+//! `tasks_completed` nor `tasks_resumed`), so a follow that trusted the
+//! NOTIFYs alone could miss an entry or wait forever.
 //!
 //! A follow that fails (the database went away) sends `task.follow_failed`
 //! with the last `seq` it sent; the client resumes with `after_seq`.
+
+use std::time::Duration;
 
 use kastellan_db::notebook::{self, Entry};
 use kastellan_db::tasks::{self, reply_claim::REPLIED_STATES, Task};
@@ -45,9 +50,9 @@ use crate::ask::SUSPEND_POLL_SECS;
 /// payload is the id.
 const COMPLETED_CHANNEL: &str = "tasks_completed";
 
-/// How long a follow of a cancelled task waits for the planner's
+/// How long a session's follow of a cancelled task waits for the planner's
 /// `cancelled` entry: one model turn, generously.
-const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+pub(super) const CANCEL_GRACE: Duration = Duration::from_secs(120);
 
 /// A JSON-RPC 2.0 notification: a message with no `id`, which the client
 /// does not answer.
@@ -114,10 +119,11 @@ pub(super) fn wakes(channel: &str, payload: &str, task_id: i64) -> bool {
 }
 
 /// Follow `task_id` from `after_seq`, sending to `out` until the task ends,
-/// the follow fails, or the client is gone (`out` closed).
-pub(super) async fn follow(pool: PgPool, task_id: i64, after_seq: i64, out: Sender<Value>) {
+/// the follow fails, or the client is gone (`out` closed). A cancelled task
+/// waits at most `cancel_grace` for its planner's `cancelled` entry.
+pub(crate) async fn follow(pool: PgPool, task_id: i64, after_seq: i64, cancel_grace: Duration, out: Sender<Value>) {
     let mut last_seq = after_seq;
-    if let Err(error) = follow_inner(&pool, task_id, &mut last_seq, &out).await {
+    if let Err(error) = follow_inner(&pool, task_id, &mut last_seq, cancel_grace, &out).await {
         let params = json!({"task_id": task_id, "last_seq": last_seq, "error": error});
         let _ = out.send(notification("task.follow_failed", params)).await;
     }
@@ -125,14 +131,20 @@ pub(super) async fn follow(pool: PgPool, task_id: i64, after_seq: i64, out: Send
 
 /// `Err` is the reason the follow stopped early. A closed `out` is not one:
 /// the client left, so there is no one to tell.
-async fn follow_inner(pool: &PgPool, task_id: i64, last_seq: &mut i64, out: &Sender<Value>) -> Result<(), String> {
+async fn follow_inner(
+    pool: &PgPool,
+    task_id: i64,
+    last_seq: &mut i64,
+    cancel_grace: Duration,
+    out: &Sender<Value>,
+) -> Result<(), String> {
     // LISTEN before the first read, so nothing landing in between is missed.
     let mut listener = PgListener::connect_with(pool).await.map_err(|e| format!("listener connect: {e}"))?;
     listener
         .listen_all([notebook::NOTIFY_CHANNEL, COMPLETED_CHANNEL])
         .await
         .map_err(|e| format!("listen: {e}"))?;
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(SUSPEND_POLL_SECS));
+    let mut tick = tokio::time::interval(Duration::from_secs(SUSPEND_POLL_SECS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut parked = false;
     let mut cancel_deadline = None;
@@ -142,8 +154,8 @@ async fn follow_inner(pool: &PgPool, task_id: i64, last_seq: &mut i64, out: &Sen
         // only grows, so a `cancelled` entry this check saw is sent below.
         let finished = REPLIED_STATES.contains(&task.state.as_str())
             && (task.state != "cancelled" || {
-                let deadline = *cancel_deadline.get_or_insert_with(|| tokio::time::Instant::now() + CANCEL_GRACE);
-                cancel_closed(pool, task_id).await? || tokio::time::Instant::now() >= deadline
+                let deadline = *cancel_deadline.get_or_insert_with(|| tokio::time::Instant::now() + cancel_grace);
+                tokio::time::Instant::now() >= deadline || cancel_closed(pool, task_id).await?
             });
         for e in notebook::entries(pool, task_id, *last_seq).await.map_err(|e| e.to_string())? {
             if out.send(entry_notification(&e)).await.is_err() {
