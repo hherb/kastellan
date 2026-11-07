@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+mod notebook;
+pub use notebook::{notebook_answer_json, notebook_call_json};
+
 /// Hard cap on inbound request bytes the mock will buffer before
 /// giving up. Real chat-completion requests are a few KiB; 1 MiB is
 /// generous headroom that defends against a buggy client pinning the
@@ -338,8 +341,9 @@ fn header_content_length(headers: &str) -> Option<usize> {
     None
 }
 
-/// Wrap `plan_json` in an OpenAI-compatible chat-completion envelope.
-pub fn envelope_for(plan_json_string: &str) -> String {
+/// Wrap an assistant reply (e.g. a notebook reply) in an OpenAI-compatible
+/// chat-completion envelope.
+pub fn envelope_for(content: &str) -> String {
     serde_json::json!({
         "id": "chatcmpl-mock",
         "object": "chat.completion",
@@ -347,7 +351,7 @@ pub fn envelope_for(plan_json_string: &str) -> String {
         "model": "test-local-model",
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": plan_json_string},
+            "message": {"role": "assistant", "content": content},
             "finish_reason": "stop"
         }],
         "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
@@ -382,10 +386,10 @@ pub fn props_envelope(n_ctx: u64) -> String {
 /// Build an OpenAI-compatible embedding response envelope.
 ///
 /// `PgRecallBuilder::build` calls `embed_query` (→ `router.embed`) once
-/// per plan iteration, BEFORE the chat-completion call. The mock now
+/// per planner turn, BEFORE the chat-completion call. The mock now
 /// dispatches by URL path, so the embed queue holds one envelope per
 /// expected embed dial and the chat queue holds one envelope per
-/// expected plan-iteration — independent of call ordering.
+/// expected turn — independent of call ordering.
 ///
 /// `embed_query` Matryoshka-truncates the returned embedding to
 /// `EMBEDDING_DIM` (256) elements; a vector at least that long succeeds
@@ -406,30 +410,6 @@ pub fn embedding_envelope() -> String {
         "model": "test-local-model"
     })
     .to_string()
-}
-
-/// Convenience JSON builder for the plan body the planner emits as the
-/// assistant message content.
-pub fn plan_json(
-    decision: &str,
-    steps: serde_json::Value,
-    result: Option<serde_json::Value>,
-) -> String {
-    let mut obj = serde_json::json!({
-        "context":      "test context",
-        "decision":     decision,
-        "rationale":    "test rationale",
-        "steps":        steps,
-        "data_ceiling": "Public",
-    });
-    if let Some(r) = result {
-        obj.as_object_mut().unwrap().insert("result".into(), r);
-    } else {
-        obj.as_object_mut()
-            .unwrap()
-            .insert("result".into(), serde_json::Value::Null);
-    }
-    obj.to_string()
 }
 
 // ---------------------------------------------------------------------------
