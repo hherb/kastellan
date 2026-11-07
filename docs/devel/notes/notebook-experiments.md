@@ -440,3 +440,27 @@ Cell format: `turns / seconds`, then the outcome.
   What is wrong is judgement again (Q1's figure-less rows, Q5's remittance, Q7).
 - **Reproduce:** `~/deploy-branch.sh` on `fix/980-bare-call-shape` (1b61fe10), then `bash ~/requery7.sh`;
   `bash ~/q960.sh 378 384`. Log `~/requery7.log` → renamed `~/requery7.log.980a`.
+
+## 2026-11-08 #18 — the one classic comparison run #993 asks for (tasks 387–393)
+
+- **Build:** `main` dd814896 (#994 + #995 merged), deployed with `scripts/upgrade_from_git.sh` (both env files
+  identical after install, `NRestarts` 0, Matrix up). Ollama 0.40.13, `gemma4:26b-a4b-it-q8_0-ctx64k`, thinking ON
+  (`reasoning_effort`). **`KASTELLAN_PLANNER_MODE=classic`** in `.local` for this run only, confirmed in
+  `/proc/<pid>/environ`, and set back to `notebook` by the same script afterwards (confirmed the same way).
+- **Hypothesis:** none to test — #993 keeps classic working for one run on the post-#994 tree before deletion, so the
+  record shows what retiring it gives up. Compare with #17 (notebook, 378–384, same questions).
+- **Results** (turns are `plan_count`):
+  - Q1 6 / 534: a table of 5, **every row with price and GST** (#17: 2 of 5).
+  - Q2 4 / 605: a list of 30 invoices (#17: a 38-row table, all in range).
+  - Q3 2 / 123: a numbered list of 10, right.
+  - Q4 4 / 156: fee items and conditions; **no total** ("not explicitly stated"; #17: 9943).
+  - Q5 4 / 309: Mackay Marina Village, 30 Oct 2026, $1,124.15.
+  - Q6 5 / 151: Coffs Harbour → Learmonth (the 5NQ5P9 booking of #11/#13/#16).
+  - Q7 5 / 282: overdue and upcoming payments, prose lists.
+  - Total 2160 s (#17: 2138). **No `plan.formulate_failed` row in any task.**
+- **Learned:** on this tree classic is not worse by count: 7/7 and about the same wall time. It wins Q1's figures, and
+  loses Q4's total and Q2's table. Single run, so per-question differences are within the variance seen across #14–#17.
+  The case for retiring it is not quality but upkeep: one loop, one prompt, one set of tests. The five plan features only
+  classic can produce (#996) are not exercised by these questions.
+- **Reproduce:** `~/classic993.sh` on the DGX (it switches `.local`, runs `bash ~/requery7.sh`, switches back);
+  `bash ~/q960.sh 387 393`; bodies in `~/classic993.bodies`. Log `~/requery7.log` → renamed `~/requery7.log.classic993`.

@@ -4,19 +4,19 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
+> [`archive/handover_20261108_993s2_pre-prune.md`](archive/handover_20261108_993s2_pre-prune.md)
+> (every section below in full before this prune, incl. the 2026-10 "Previous" arcs compressed here),
 > [`archive/handover_20261107_922s4_pre-prune.md`](archive/handover_20261107_922s4_pre-prune.md)
-> (#987's and the README session in full, and every section below in full before this prune),
+> (#987's and the README session in full) and
 > [`archive/handover_20261107_986_pre-prune.md`](archive/handover_20261107_986_pre-prune.md)
-> (#986's session and review round) and
-> [`archive/handover_20261106_983_pre-prune.md`](archive/handover_20261106_983_pre-prune.md)
-> (#983's session, its review round and 79/0 sift run in full); each snapshot's header names the older ones.
+> (#986's session and review round); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-07 (#993 step 1: the daemon e2es run the notebook; the `DaemonSpec` classic pin is gone) ·
-**Recent PRs, newest first:** [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-08 (#993 step 2: the classic comparison run; the in-process scheduler suites run the notebook; #996 filed) ·
+**Recent PRs, newest first:** this session's PR (#993 step 2), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs #989's tree before its review round (deployed from its branch with `~/deploy-branch.sh` 2026-11-07, both env files identical after install, `NRestarts=0`, Matrix up, live `ask` task 385 printed its plan/step lines; it includes #983 and #986) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
+**The DGX runs `main` with #995 (deployed with `upgrade_from_git.sh` 2026-11-08, both env files identical after install, `NRestarts=0`, Matrix up) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`, now redundant since #994** (classic ran once for #993, tasks 387–393, experiment #18: 7/7, 2160 s; backups `~/kastellan.env*.bak-pre993`. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -46,15 +46,26 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-07, latest): #993 step 1 — the daemon e2es run the notebook
+### This session (2026-11-08, latest): #993 step 2 — classic comparison run; in-process suites on the notebook
 
-- `tests_common::scripted_llm::{notebook_call_json, notebook_answer_json}` (`scripted_llm/notebook.rs`): one step,
-  id 1. **The `DaemonSpec` pin is gone** — every daemon e2e runs the daemon default. Only `cli_ask_e2e` and
-  `mail_daemon_e2e` script the planner; the other four never did.
-- ⚠️ **The router default is `disable_thinking: true`**, so a routine turn's answer is set aside (`plan.discarded`)
-  and rewritten by a thinking turn: a scripted happy path is **3 turns** (call, draft, answer) and the answer
-  builder never ticks. The failure path runs `DEFAULT_MAX_PLANS_FAST × 2` turns (one identical reply: a re-listed
-  failed step reopens). Exact audit counts reconciled in both tests.
+- **DGX:** `main` dd814896 deployed (`upgrade_from_git.sh`, both env files identical, `NRestarts=0`), then the one
+  classic comparison run #993 asks for (`~/classic993.sh`: `.local` → `classic`, `requery7.sh`, back to
+  `notebook`; tasks 387–393). Experiment #18: **7/7, 2160 s** (notebook #17: 7/7, 2138 s); classic won Q1's
+  figures, lost Q4's total — single-run variance. Retiring it is about upkeep, not quality.
+- **Census** of every classic-loop test is on #993 (62 classic-only, 41 to port, 50 keep, 4 covered). ⚠️ **Five
+  classic `Plan` features have no notebook path** (`floor_request`, `l1_insight`, `l3_skill`, `python_skill`,
+  `invoke_skill`: `call_plan`/`answer_plan` set them `None`). **Operator: port them before deleting** → #996.
+- `tests_common::scripted_notebook::ScriptedNotebook` — a public scripted notebook formulator for `spawn_scheduler`
+  (a closure picks each reply from `ctx`, usually `ctx.plans.len()`, so a resume re-derives the same digest).
+  ⚠️ Every `call_reply` lists its own fresh step id (a replan replaces the pending one); `answer_reply` lists a
+  step too, because a **first reply without `steps` is refused** (the first port failed 6 of 9 tests on exactly that).
+- Moved onto it in place: `scheduler_ask_path_e2e` (9), `scheduler_ask_expiry_e2e`, `scheduler_lanes_e2e`,
+  `conversation_continuity_e2e` (+ asserts the rendered message). Refusal precedence ×3 →
+  `notebook/run/refusal_tests.rs` (called from `the_notebook_loop`, so **no libtest count**); `notebook_turn` twins
+  in `router_agent_mock_e2e`; the notebook prompt's `allowed:` line pinned. ⚠️ The classic loop has lost these
+  suites' coverage: it is opt-in and on its way out.
+
+### Previous (2026-11-07): #993 step 1 (PR #995, merged) — the daemon e2es script notebook replies (`scripted_llm/notebook.rs`). ⚠️ **The router default is `disable_thinking: true`**: a routine turn's answer is set aside and rewritten by a thinking turn, so a scripted daemon happy path is **3 turns** (call, draft, answer). (`ScriptedNotebook` thinks by default: no rewrite turn.)
 
 ### Previous (2026-11-07): #922 slice 4a (PR #994, merged) — `planner_mode`: unset / empty / `notebook` → notebook;
 `classic` opt-in until #993 retires it. ⚠️ **Deploy:** the DGX's `.local` `notebook` is now redundant; **the Mac flips to
@@ -113,7 +124,6 @@ subscribes before it is spawned and keeps its own 3 s tick; a dropped listener r
 
 ### Previous (2026-10-30): #921 (PR #927), the #773 re-measure (PR #924) — over budget, outputs are **water-filled to an even share** (`inner_loop/summary/budget.rs`); **thinking stays ON**; measure with `kastellan-cli ask --classification-floor Public "<q>"`, one question at a time. ⚠️ localmail sync can stall with the unit `active` (#925). ⚠️ A new `AgentError::Decode` field breaks 7 fakes in `core/tests/`.
 
-### Previous (2026-10-29): #704 + #705 (PR #920, merged) — ⚠️ view **key** markers can't be spelled by a worker, string markers can (by design); **never prune a rendered view twice**; `summary_head` is rendered once and never shows part of a string the view shows whole. Prose: the `773remeasure` snapshot.
 
 ### Previous (2026-10-26 → 29): the boot arc — #909, #906, #913/#911, #915 (PRs #910, #912, #914, #916, merged) — what still binds
 
@@ -122,21 +132,15 @@ subscribes before it is spawned and keeps its own 3 s tick; a dropped listener r
   [[async-fakes-must-yield-like-io]]. A guard boot refusal is a thinned `guard_tier.boot_refused` row; ⚠️ a new guard
   key must name itself in its error. ⚠️ The daemon's JSON log is **stdout**, a boot refusal **stderr**.
 
-### Previous (2026-10-24 → 25): #609 (PR #908) — ⚠️ guard port/alias are **derived** from `KASTELLAN_LLM_GUARD_URL`/`_MODEL` and read **at install time**; `scripted_llm`'s default **503s `/props`** (a guard e2e waits 60 s). Open: #907.
-### Previous (2026-10-23 → 24): the supervisor arc — #904, #900/#902, #896, #898 (PRs #905, #903, #901, #899, merged) — what still binds
+### Earlier (2026-10-17 → 29): #920, #908, the supervisor arc (#905 … #899), sidecar/drain + gate counts (#893 … #879), #875 … #860 — one line each (prose: the `993s2`/`906` snapshots)
 
-- ⚠️ systemd `show` answers an unknown unit with clean defaults — `LoadState=not-found` is the tell; **unknown state
-  words read `Transitioning`** [[guard-shares-the-census-blind-spot]]. `uninstall` keeps the unit file / plist on a
-  failed stop. ⚠️ **A squash commit auto-closed #898** — run the closing regex over the squash message too
+- Never prune a rendered view twice (#920). Guard port/alias are **derived** from `KASTELLAN_LLM_GUARD_URL`/`_MODEL` at
+  install; `scripted_llm`'s default **503s `/props`** (#908). systemd `show`: `LoadState=not-found` is the tell for an
+  unknown unit; unknown state words read `Transitioning` [[guard-shares-the-census-blind-spot]].
+- ⚠️ **After `ECHILD` never kill** a sidecar; a torn-down pty is `EIO` on Linux, **EOF on macOS** (#891 open). Gate
+  `IGNORED`/`FILTERED_OUT` are exact (`worker-report` **13**, `microvm` **4**). ⚠️ **Any `Cargo.lock` mtime change makes
+  `python-exec:dev` stale** (this session's PR changes it). A squash commit can auto-close an issue
   [[pr-body-not-fixed-autocloses-issue]].
-
-### Earlier (2026-10-19 → 21): sidecar/drain fixes (PRs #893, #889, #887) and the gate's exact counts (PRs #886 … #879) — what still binds (prose: the `906` snapshot)
-
-- ⚠️ **After `ECHILD` never kill** a sidecar. A torn-down pty is `EIO` on Linux, **EOF on macOS**. Open: #891.
-- Gate: **`IGNORED`** and **`FILTERED_OUT`** are exact (`worker-report` = **13**, `microvm` = **4**); ⚠️ a name filter
-  after the profile name fails the verdict; ⚠️ a 0-byte gate script exits 0 [[ssh-stdin-copy-can-write-zero-bytes]].
-
-### Earlier (2026-10-17 → 19): #875 … #860 — ⚠️ any `Cargo.lock` mtime change makes `python-exec:dev` stale (`scripts/workers/python-exec/build-image.sh`); never put the launchd wait in `stop` [[mac-sysv-shm-exhaustion-from-killed-postgres]]; `report_unsaid_lost_rows()` — call once.
 ### Previous (2026-10-08 → 17): thinning (#829, #858/#861, #837/#859/#864/#865), #810, and the Matrix inbound path (#835, #852, #853, #825, #832, #846, #827/#826) — what still binds (prose: the `867`/`825`/`815` snapshots)
 
 - **Thinning:** pure `kastellan_core::audit_thinning` (⚠️ `#[doc(hidden)] pub`, binary-only); one
@@ -246,12 +250,12 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **#922 slice 4b = [#993](https://github.com/hherb/kastellan/issues/993)** (retire classic). Step 1 (daemon e2es
-   on the notebook) is PR #995. **Next:** deploy #994+ to the DGX and do the **one classic comparison run**
-   the issue asks for (`KASTELLAN_PLANNER_MODE=classic` in `.local`, `~/requery7.sh`, then back), then sort the ~10
-   in-process classic suites (shared `inner_loop/execute.rs` tests stay; classic formulation/summary tests go —
-   classic-`Plan`-shaped fixtures in `router_agent_mock_e2e`, `observation_replay{,_cli}_e2e`; the shared
-   `scripted_llm::plan_json` builder went in #995), then delete; #940 folds in. bottie's substring
+1. **#922 slice 4b = [#993](https://github.com/hherb/kastellan/issues/993)** (retire classic). Steps 1–2 done
+   (#995, this session's PR). **Next: [#996](https://github.com/hherb/kastellan/issues/996)** — port the five
+   agent-authored plan features to the notebook reply, one PR each (each prompt change ≥ 2 DGX runs). **Then the
+   deletion**, with the re-points listed on #993 (≈19 per-step-view tests → `PlanRecord::last_step_view`, 7 timeout
+   cases, the outcome-shapes prompt pin, `user_text_cannot_forge_a_key`); `router_agent_mock_e2e` (~720 lines) shrinks
+   below the cap when its 3 classic tests go; #940 folds in. bottie's substring
    match on the parking line is [hherb/bottie#242](https://github.com/hherb/bottie/issues/242).
    #983/#986 are on the DGX (in #989's tree); one re-measure is optional. #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
@@ -385,7 +389,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#993 s1) | `feat/993-daemon-e2es-notebook` over `91f01549`, worktree `~/src/kastellan-wt-985` (own `target/`) | **5562 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-993.log`. vs #994's row (5560): +2, the two notebook builder tests (tests-common lib; the pin test was replaced 1:1) | warm, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-985`, clean | **26** (as before) |
+| **Mac** (#993 s2) | `feat/993-retire-classic` over `dd814896`, primary checkout | **5567 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-993s2.log`. vs #995's row (5562), per suite: tests-common lib 492 → 494, core lib 2811 → 2812 (the prompt pin; the 3 refusal ports run inside `the_notebook_loop`), `router_agent_mock_e2e` 5 → 7 | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-993`, clean, 27 `Checking kastellan` | **23** (−3 vs #995's worktree: the primary checkout has the gliner `.venv`) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
@@ -470,7 +474,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#994** (#922 slice 4a) — merged 2026-11-07: the notebook is the default planner mode; not yet deployed.
+- **#995 / #994** (#993 step 1; #922 slice 4a) — merged 2026-11-07, deployed DGX 2026-11-08: the daemon e2es run the notebook; the notebook is the default planner mode.
 - **#992 / #990** (README; #987) — merged 2026-11-07: the root README brought up to date (⚠️ it restates the user manual's chapter 4: change both together); one shared `LISTEN` connection for a process's follows, cap 64.
 - **#989** (#985, #988) — merged 2026-11-07: `ask` prints notebook entries and resumes a lost follow; session reports lost audit rows. **bottie#236** (slice 3) merged 2026-11-07.
 - **#986** (#922 slice 2) — merged 2026-11-06, deployed DGX 2026-11-07 (in #989's tree): `kastellan-cli session`, JSON-RPC over stdio/ssh.
@@ -478,8 +482,7 @@ Newest first; full prose in the [`archive/`](archive/) snapshots and git history
 - **#982 … #950** (merged + deployed DGX 2026-11-02 → 06, measured 301–384): `sift` + the scrapbook (0029), the notebook behind `KASTELLAN_PLANNER_MODE`, bounded planner calls, and the sift/table/forced-answer fixes of #957–#982 (one line each in the ROADMAP's #922 entry); manuals (#975).
 - **#949 … #920** (merged + deployed DGX 2026-10-29 → 11-01, re-measured 227/232–252): attachment names in search hits, localmail `api_minor` 6, the PG harness waits out `57P03` (#949); stable-first prompts (#943); the 15-minute fast-lane ceiling, caps 20/25 (#942); `plan_budget`, batched steps, coverage searches (#938); OpenShell survey (#937); an empty completion asked again once (#930); the even summary shrink (#927); a failed decode's row carries its cost (#924); worker-unforgeable view markers (#920).
 - **#919 … #908** (merged 2026-10-24 → 29, deployed both hosts): deploy docs; dependabot rustls (⚠️ makes `python-exec:dev` stale) and uv; #915's paused-clock pin; `boot_report::record_refusal` + the late-Postgres boot e2e (#914); a guard boot refusal is a thinned row (#912); core waits ≤ 60 s for Postgres (#910); the supervised `kastellan-guard` unit (#908). **#905 / #903 / #901 / #899** (2026-10-23 → 24): health-wait timeouts name the crash-loop evidence; `ServiceStatus::Transitioning`; `uninstall` keeps the unit file / plist on a failed stop; headless launchd `uninstall`, `$HOME` uid check.
-- **#897 … #879** (merged 2026-10-20 → 22): launchd `uninstall` keeps the plist on a failed bootout (#897); a failed sidecar exit poll retires the pair (#893); the broker's stdout drain warns, drains name their errno (#889, #887); the gate's per-binary summary/≥ 1-test/exact `IGNORED`/`FILTERED_OUT` checks (#886, #884, #883, #881, #879).
-- **#877 … #766** (merged 2026-10-08 → 19, thinning family **deployed both hosts 2026-10-18**): the Apple-`container` tier + `container` profile, launchd knob + `launchd` profile, `stop_target` waits for launchd, the audit-loss thinning family (#855–#869), undecodable poll batches (#851), Matrix held counts, reply claim at send / catch-up (0027), audit-sink close-out, `[audit-lost]`, reply queues + `[worker-refusal]`, the thinking switch, `UPSTREAM_AUTH_FAILED`, the live mail shape gate. One-liners in the `802`/`815`/`825`/`867` archive snapshots; earlier: git history.
+- **#897 … #766** (merged 2026-10-08 → 22, thinning family deployed both hosts 2026-10-18): launchd/systemd uninstall and stop fixes, sidecar drains, the gate's exact counts, the Apple-`container` tier, the audit-loss thinning family, Matrix reply claims (0027), `[audit-lost]`, the thinking switch, `UPSTREAM_AUTH_FAILED`, the live mail shape gate. One-liners in the `802`/`815`/`825`/`867`/`993s2` snapshots.
 
 ---
 
