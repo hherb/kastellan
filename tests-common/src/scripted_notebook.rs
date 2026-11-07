@@ -105,9 +105,9 @@ pub fn notebook_meta() -> FormulationMeta {
 /// it with `step`'s parameters, classified as `step` is.
 ///
 /// Listing the step on every call is a replan that replaces whatever step is
-/// still pending, so a script can call a fresh id each turn without ticking
-/// the one before. A done step is never re-listed (the loop refuses it), so
-/// use a new `id` for each call.
+/// still pending. A call reply carries no tick, so its step stays pending and
+/// the next call's list replaces it: a script never has to tick. The one rule
+/// is the loop's: a call on a step that was ticked (done) is refused.
 pub fn call_reply(id: u32, step: &PlannedStep) -> String {
     json!({
         "steps": [{"id": id, "purpose": "test step", "tool": step.tool, "done_when": step.done_when}],

@@ -42,12 +42,16 @@ pub(super) async fn a_refused_answer_ends_the_task_refused(pool: &sqlx::PgPool) 
     assert_eq!(r.result.outcome.final_state(), Some("refused"));
     let payload = r.result.outcome.result_payload().expect("Refused carries a payload");
     assert_eq!((payload["kind"].as_str(), payload["principle"].as_u64()), (Some("refused"), Some(1)));
+    assert_eq!(payload["reason"], "physical_harm");
+    assert!(payload["body"].as_str().unwrap().contains("physical harm"), "{payload}");
     assert_eq!(r.result.dispatch_count, 0, "a refusal dispatches nothing");
     let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
     assert_eq!(formulated.len(), 1, "{formulated:#?}");
     assert_eq!(formulated[0]["decision_kind"], "refused");
     assert_eq!(formulated[0]["refused"], json!({"principle": 1, "reason": "physical_harm"}));
     assert_eq!(formulated[0]["plan_step_count"], 0);
+    // The plan the row stores carries the refusal too (classic "slice A").
+    assert_eq!(formulated[0]["plan"]["refused"], json!({"principle": 1, "reason": "physical_harm"}));
 }
 
 /// The reviewer's constitutional block wins over the model's own refusal:

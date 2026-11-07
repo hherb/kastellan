@@ -167,8 +167,9 @@ fn step_with_param(n: u32) -> PlannedStep {
     }
 }
 
-/// The reply that lists step `n` and calls it with `{"n": n}`: a fresh step
-/// id per call, because the notebook never re-lists a done step.
+/// The reply that lists step `n` and calls it with `{"n": n}`. Nothing here
+/// ticks, so each call's step stays pending and the next call's list replaces
+/// it; the id just names the call.
 fn call_with_param(n: u32) -> String {
     call_reply(n, &step_with_param(n))
 }

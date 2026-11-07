@@ -145,7 +145,7 @@ async fn two_lanes_run_concurrently() {
     .await
     .unwrap();
 
-    // Each task's script: one sleeping step, then task_complete.
+    // Each task's script: one sleeping step, then an answer.
     // The SleepyDispatcher will sleep ~1 s per step.
     let formulator = Arc::new(ScriptedNotebook::new(sleep_then_answer));
 
@@ -193,6 +193,22 @@ async fn two_lanes_run_concurrently() {
 
     assert!(completed.contains(&id_fast), "fast task ({id_fast}) not in completed set");
     assert!(completed.contains(&id_long), "long task ({id_long}) not in completed set");
+
+    // `tasks_completed` fires on every terminal state, a failed one too. Two
+    // tasks that fail at once (a reply the notebook refuses) would beat the
+    // 1.7 s bound below without sleeping at all, so first prove each ran its
+    // step and answered.
+    for (id, body) in [(id_fast, "fast-done"), (id_long, "long-done")] {
+        let (state, result): (String, Option<serde_json::Value>) =
+            sqlx::query_as("SELECT state, result FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "completed", "task {id}: {result:?}");
+        assert_eq!(result.as_ref().and_then(|r| r["body"].as_str()), Some(body), "task {id}");
+    }
+    assert!(elapsed >= Duration::from_millis(800), "a step slept: elapsed={elapsed:.2?}");
 
     // If serial: ≥1.6 s. If concurrent: ≈0.8 s. Allow 1.7 s headroom.
     assert!(
