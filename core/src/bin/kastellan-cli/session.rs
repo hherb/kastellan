@@ -40,8 +40,8 @@
 //! and `task.correct` work while it runs. Its response is always written
 //! before its first notification. A dropped session does **not** cancel its
 //! tasks: they keep running, and a new session follows them from `after_seq`.
-//! At most [`MAX_FOLLOWS`] follows run at once (each holds a database
-//! connection); two follows of one task each send every entry.
+//! At most [`MAX_FOLLOWS`] follows run at once; they share one `LISTEN`
+//! connection (#987). Two follows of one task each send every entry.
 //!
 //! A line that is not JSON is `PARSE_ERROR` (-32700) with a null id; JSON
 //! that is not a request (no `id`, no `method`) is `INVALID_REQUEST`
@@ -70,12 +70,10 @@ use crate::common::{resolve_connect_spec, with_runtime};
 /// slow client then slows the follows down instead of growing memory.
 const OUT_QUEUE: usize = 256;
 
-/// How many follows one session may run at once. Each holds a pool
-/// connection for its `LISTEN` (the pool has 16), so an unbounded number
-/// would starve every other query in the session.
-/// shortcut: a listener per follow, capped; one shared listener fanning out
-/// by task id would cost one connection in all (#987).
-const MAX_FOLLOWS: usize = 8;
+/// How many follows one session may run at once. They share one `LISTEN`
+/// connection (#987), but each polls its task every few seconds through the
+/// session's pool (16 connections), so the cap bounds that load.
+const MAX_FOLLOWS: usize = 64;
 
 pub(crate) fn run_session(args: &[String]) -> ExitCode {
     if !args.is_empty() {
@@ -93,6 +91,11 @@ async fn session_async() -> ExitCode {
     let pool = match kastellan_db::pool::connect_runtime_pool(&spec).await {
         Ok(p) => p,
         Err(e) => { eprintln!("session: db connect failed: {e}"); return ExitCode::from(1); }
+    };
+    // Every follow's NOTIFYs, on one connection held for the whole session.
+    let listener = match follow::Listener::connect(&pool).await {
+        Ok(l) => l,
+        Err(e) => { eprintln!("session: {e}"); return ExitCode::from(1); }
     };
 
     // One writer owns stdout, so a response and a notification can never
@@ -127,7 +130,10 @@ async fn session_async() -> ExitCode {
                     if out.send(to_value(reply)).await.is_err() {
                         break;
                     }
-                    follows.spawn(follow::follow(pool.clone(), f.task_id, f.after_seq, follow::CANCEL_GRACE, out.clone()));
+                    let wakes = listener.subscribe();
+                    follows.spawn(follow::follow(
+                        pool.clone(), wakes, f.task_id, f.after_seq, follow::CANCEL_GRACE, out.clone(),
+                    ));
                     continue;
                 }
                 Err(e) => err_response(req.id, e),

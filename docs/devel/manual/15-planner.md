@@ -192,8 +192,10 @@ and `task.finished` notifications in the background; it reads the task's state
 cancel, which lands first, the follow waits up to 120 s for the planner's
 `cancelled` entry), and
 its 3 s poll tick, not the NOTIFYs, is what makes it correct: `PgListener` drops
-notifications on reconnect, and nothing notifies a task parking. A dropped
-session cancels nothing; a new one resumes with `after_seq`.
+notifications on reconnect, and nothing notifies a task parking. All of a
+session's follows (up to 64) share one `LISTEN` connection, `follow::Listener`,
+which broadcasts the task id of each NOTIFY (#987). A dropped session cancels
+nothing; a new one resumes with `after_seq`.
 
 ### `sift` and the scrapbook
 

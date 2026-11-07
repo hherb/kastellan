@@ -8,19 +8,22 @@
 //!
 //! 1. Submit/status/cancel, and the errors a client can make (a garbage
 //!    line, an unknown method, bad params) — none of which ends the session.
-//! 2. A follow sends the backlog, then each new entry as it lands (including
-//!    a correction made over the same session while the follow runs), then
-//!    `task.finished` with the answer; a second follow from `after_seq`
-//!    sends only what came after.
+//! 2. A follow sends the backlog, then each new entry as it lands, woken by
+//!    its NOTIFY rather than the poll tick (including a correction made over
+//!    the same session while the follow runs), then `task.finished` with the
+//!    answer, woken by the completion's NOTIFY; a second follow from
+//!    `after_seq` sends only what came after.
 //! 3. A follow of a task that parks on an operator ask says so, and the
 //!    inbox methods list and answer the ask.
 //! 4. A follow of a cancelled task waits for the planner's `cancelled`
 //!    entry before it finishes.
-//! 5. The follow cap, an over-cap line, and a dropped session leaving its
-//!    tasks alone.
+//! 5. The follow cap and the one LISTEN connection all follows share
+//!    (#987), an over-cap line, and a dropped session leaving its tasks
+//!    alone.
 //! 6. A second parking is announced again; a follow whose reads fail says
 //!    which `seq` it got to; submit and cancel report a lost audit row and
 //!    a suppressed floor (#988).
+//! 7. A killed listener connection comes back and wakes follows again.
 //!
 //! Skips with `[SKIP]` on hosts without Postgres or a supervisor (run with
 //! `-- --nocapture` to see it), like `cli_inbox_e2e.rs`, whose PG bring-up
@@ -29,7 +32,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kastellan_db::notebook::{self, EntryKind};
 use kastellan_db::tasks::{self, insert_pending, Lane};
@@ -38,6 +41,16 @@ use serde_json::{json, Value};
 #[path = "cli_session_e2e/support.rs"]
 mod support;
 use support::{assert_entry, bring_up_pg, seed_running_task, steps_payload, tick_payload, Session};
+
+/// The CLI's poll tick (`SUSPEND_POLL_SECS` in `kastellan-cli`).
+const POLL: Duration = Duration::from_secs(3);
+
+/// A follow begun at `followed` first ticks no earlier than `POLL` later, so
+/// a message in hand before then was woken by its NOTIFY.
+fn assert_woken_before_the_tick(followed: Instant, what: &str) {
+    let waited = followed.elapsed();
+    assert!(waited < POLL, "{what} came by the poll tick ({waited:?} after the follow began), not its NOTIFY");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn submit_status_cancel_and_the_errors_a_client_can_make() {
@@ -104,12 +117,17 @@ async fn a_follow_streams_the_backlog_then_live_entries_then_the_finish() {
     notebook::append(&pool, task_id, EntryKind::Steps, steps_payload()).await.unwrap();
     let mut s = Session::start(&cluster);
 
+    let followed = Instant::now();
     assert_eq!(s.ok("task.follow", json!({"task_id": task_id})), json!({"task_id": task_id, "after_seq": 0}));
     assert_entry(&s.next(), task_id, 1, "steps");
 
-    // An entry the planner writes now reaches the client unasked.
+    // An entry the planner writes now reaches the client unasked, woken by
+    // its NOTIFY. Before `POLL` has passed since the follow began, its poll
+    // tick cannot have fired, so a dead wake-up path (the shared listener,
+    // #987) fails this however slow the host is.
     notebook::append(&pool, task_id, EntryKind::Tick, tick_payload()).await.unwrap();
     assert_entry(&s.next(), task_id, 2, "tick");
+    assert_woken_before_the_tick(followed, "the tick entry");
 
     // A correction over the same session while the follow runs: its
     // response, then (from the follow) the entry it became.
@@ -131,15 +149,26 @@ async fn a_follow_streams_the_backlog_then_live_entries_then_the_finish() {
     assert_eq!(st["notebook"]["corrections"][0]["text"], "the other account");
     assert_eq!(st["notebook"]["last_seq"], 3);
 
+    // The finish is woken by the completion's own NOTIFY. A second follow,
+    // started now, has a known tick phase. Both follows send the answer
+    // entry first: each read the state (still `running`) before that entry,
+    // so the finalize after it can reach them only by `tasks_completed` or
+    // a tick, and the second follow's tick is `POLL` away.
+    let followed = Instant::now();
+    s.ok("task.follow", json!({"task_id": task_id, "after_seq": 3}));
     notebook::append(&pool, task_id, EntryKind::Answer, json!({"body": "the answer"})).await.unwrap();
+    assert_entry(&s.next(), task_id, 4, "answer");
+    assert_entry(&s.next(), task_id, 4, "answer");
     tasks::finalize(&pool, task_id, "completed", Some(json!({"kind": "text", "body": "the answer"})), None)
         .await
         .unwrap();
-    assert_entry(&s.next(), task_id, 4, "answer");
-    let fin = s.next();
-    assert_eq!(fin["method"], "task.finished", "{fin}");
-    assert_eq!(fin["params"]["state"], "completed");
-    assert_eq!(fin["params"]["answer"], "the answer");
+    for _ in 0..2 {
+        let fin = s.next();
+        assert_eq!(fin["method"], "task.finished", "{fin}");
+        assert_eq!(fin["params"]["state"], "completed");
+        assert_eq!(fin["params"]["answer"], "the answer");
+    }
+    assert_woken_before_the_tick(followed, "the finish");
 
     // A resumed follow sends only what came after its seq, then the finish.
     s.ok("task.follow", json!({"task_id": task_id, "after_seq": 2}));
@@ -362,11 +391,17 @@ async fn follows_are_capped_and_a_dropped_session_leaves_its_tasks_alone() {
     let Some((pool, cluster)) = bring_up_pg("cap").await else { return };
     let task_id = insert_pending(&pool, Lane::Fast, json!({"instruction": "x"})).await.expect("insert");
     let mut s = Session::start(&cluster);
-    // A pending task's follow sends nothing, so each stays live.
-    for _ in 0..8 {
+    // A pending task's follow sends nothing, so each stays live. 64 is more
+    // than the pool's 16 connections: with a LISTEN per follow (before
+    // #987) the 17th would have starved the session.
+    for _ in 0..64 {
         s.ok("task.follow", json!({"task_id": task_id}));
     }
-    assert_eq!(s.error_code("task.follow", json!({"task_id": task_id})), -32002, "the ninth is refused");
+    assert_eq!(s.error_code("task.follow", json!({"task_id": task_id})), -32002, "the 65th is refused");
+    s.ok("task.status", json!({"task_id": task_id})); // the pool still serves a request
+    let admin = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec).await.expect("admin pool");
+    let listening = listening_pids(&admin).await;
+    assert_eq!(listening.len(), 1, "every follow shares the session's one LISTEN connection (#987): {listening:?}");
 
     // An over-cap line: answered -32600, then the session ends, follows and all.
     let mut big = vec![b'a'; kastellan_protocol::MAX_RECORD_BYTES + 1];
@@ -376,4 +411,47 @@ async fn follows_are_capped_and_a_dropped_session_leaves_its_tasks_alone() {
     assert_eq!((resp["error"]["code"].clone(), resp["id"].clone()), (json!(-32600), Value::Null), "{resp}");
     s.finish();
     assert_eq!(tasks::observe_state(&pool, task_id).await.unwrap(), "pending", "a dropped session cancels nothing");
+}
+
+/// The backends whose last query was a `LISTEN`: the session's listener.
+async fn listening_pids(admin: &sqlx::PgPool) -> Vec<i32> {
+    sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE query LIKE 'LISTEN%'")
+        .fetch_all(admin)
+        .await
+        .expect("list listeners")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_shared_listener_comes_back_after_its_connection_is_killed() {
+    let Some((pool, cluster)) = bring_up_pg("relisten").await else { return };
+    let task_id = seed_running_task(&pool).await;
+    notebook::append(&pool, task_id, EntryKind::Steps, steps_payload()).await.unwrap();
+    let mut s = Session::start(&cluster);
+    s.ok("task.status", json!({"task_id": task_id})); // up, so its listener is
+    let admin = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec).await.expect("admin pool");
+    let old = listening_pids(&admin).await;
+    assert_eq!(old.len(), 1, "{old:?}");
+    sqlx::query("SELECT pg_terminate_backend($1)").bind(old[0]).execute(&admin).await.expect("terminate");
+
+    // sqlx reconnects and re-LISTENs on a new backend: inside `recv` (what a
+    // terminated backend gets, measured), or after the pump's `POLL` wait
+    // if that first reconnect fails.
+    let deadline = Instant::now() + 5 * POLL;
+    loop {
+        let now = listening_pids(&admin).await;
+        if now.len() == 1 && now[0] != old[0] {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the listener never came back: {now:?} (killed {})", old[0]);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // And it wakes a follow again: the entry beats the follow's first tick.
+    let followed = Instant::now();
+    s.ok("task.follow", json!({"task_id": task_id}));
+    assert_entry(&s.next(), task_id, 1, "steps");
+    notebook::append(&pool, task_id, EntryKind::Tick, tick_payload()).await.unwrap();
+    assert_entry(&s.next(), task_id, 2, "tick");
+    assert_woken_before_the_tick(followed, "an entry after the reconnect");
+    s.finish();
 }
