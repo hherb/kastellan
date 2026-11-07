@@ -147,8 +147,9 @@ pressure.
 
 - **No vendor lock-in.** Primary host is the NVIDIA DGX Spark, but
   nothing in the core requires NVIDIA, CUDA, or a specific cloud.
-  Local LLMs run via vLLM/SGLang on Linux or llama.cpp/Ollama on macOS
-  behind an OpenAI-compatible HTTP API.
+  Local LLMs run via Ollama (the installer's default), vLLM or SGLang on
+  Linux, and oMLX (the default), llama.cpp or Ollama on macOS — all behind
+  an OpenAI-compatible HTTP API.
 
 The full set of invariants — including secret handling, single-point
 egress inspection, and the "no in-process untrusted code" rule — lives
@@ -157,81 +158,146 @@ expected to refuse PRs that violate them.
 
 ## Status
 
-**Past scaffold. Phases 0–1 (sandboxed core, memory & loop) are complete; the
-egress boundary is fully built and force-routed by default; the Matrix channel
-is live end-to-end; the email failover's gated inbound half has shipped; and
-python-exec is live with operator-approved agent-authored Python skills.** The
-project is a Rust workspace of 27 crates (v0.2.0 on crates.io) with a working
-agent loop, real cross-platform sandboxing — including opt-in micro-VM backends
-on both OSes — persistent memory, net-egress workers behind a hardened egress
-proxy, and live Matrix + gated email-inbound channels.
+**Pre-release; deployed and in daily use on its primary host.** The sandboxed
+core, memory and agent loop are built. The egress boundary is complete and
+force-routed by default. The Matrix channel is live end-to-end, and so is the
+operator Inbox, where CASSANDRA's "a human must decide" verdicts reach you. The
+gated inbound half of the email failover has shipped. python-exec runs with
+operator-approved, agent-authored skills. An optional model-based guard screens
+tool output. The planner has a second, notebook-style mode for long tasks. The
+project is a Rust workspace of 27 crates (v0.2.0 on crates.io) with real
+cross-platform sandboxing, including opt-in micro-VM backends on both OSes.
 
 What works today:
 
-- **Sandboxing — double-contained, cross-platform.** `bubblewrap` + Landlock +
-  seccomp-bpf on Linux (wrapped in a `systemd-run --scope` cgroup for CPU/memory
-  caps), plus an opt-in Firecracker micro-VM backend (sha256-pinned guest
-  kernel, verified at every VM boot); `sandbox-exec` (Seatbelt) plus an opt-in
-  Apple `container` micro-VM backend on macOS. One OS process and one kernel
-  sandbox per worker, all driven from a single `SandboxPolicy`, with negative
-  tests asserting that denials deny.
+- **Sandboxing — double-contained, cross-platform.** On Linux, `bubblewrap` +
+  Landlock + seccomp-bpf, wrapped in a `systemd-run --scope` cgroup for CPU and
+  memory caps. Linux also has an opt-in Firecracker micro-VM backend whose guest
+  kernel is sha256-pinned and verified at every VM boot. On macOS,
+  `sandbox-exec` (Seatbelt), plus an opt-in Apple `container` micro-VM backend.
+  Each worker gets one OS process and one kernel sandbox. A single
+  `SandboxPolicy` drives every backend, and negative tests check that denials
+  actually deny.
 - **Agent loop + scheduler.** A Postgres-backed task queue (`LISTEN/NOTIFY`,
-  leased claims) running the LLM plan → **CASSANDRA** review → dispatcher
-  chokepoint → sandboxed-step loop, with append-only audit rows at every
-  lifecycle transition and a crash-recovery sweep.
-- **CASSANDRA oversight.** Constitutional and deterministic (data-classification)
-  policy stages with an offline replay/iteration harness; a worker-output
-  prompt-injection guard that redacts and audits blocked content.
-- **Memory.** Four-lane recall (pgvector semantic + `tsvector` lexical + graph +
-  entity-similarity) over L1/L2/L4, fused with Reciprocal Rank Fusion; layered
-  prompt assembly (L0 meta-rules, L1 always-in-context index, L3 approved
-  skills — each through its own gated block, never through recall); entity/relation extraction with a
-  quarantine-review CLI; a large-tool-result handoff cache.
-- **L3 skill arc.** Crystallise a successful trajectory → operator approve/pin →
-  surface in `<skills>` → re-invoke, with trust tiers and live re-validation at dispatch.
-- **Workers.** `shell-exec` (argv-allowlisted execve), `web-fetch` (HTTPS-only,
-  host-allowlisted, redirect/size-capped readable-text extraction), `web-search`
-  (SearxNG-backed query worker), `web-research` (composite search → fetch →
-  ranked-passages research in one call), `mail` (six read-only tools over a
-  local mail archive — search, read, attachments delivered to a durable
-  per-task folder; live-verified against a 37k-message archive), `gliner-relex`
-  (Python entity/relation extraction under the sandbox), `browser-driver`
-  (Playwright read-only render worker, opt-in), `python-exec` (the strictest
-  jail of any worker — `Net::Deny`, ephemeral scratch only, curated stdlib;
-  acceptance-green on both Linux and macOS), plus trusted `embed-broker` /
-  `search-broker` sidecars that bridge jailed workers to embedding and search
-  backends without widening their egress.
-- **Egress boundary.** A per-worker egress proxy that every networked worker is
-  **force-routed through by default** (private network namespace, no direct
-  route): host-allowlist + DNS-resolves-itself + SSRF rejection of
-  private/loopback/link-local IPs, TLS interception that scans the cleartext for
-  the worker's own secrets (credential-leak scanner), and server-certificate
-  pinning — every allow and block decision audited. An operator-configured
-  extra CA (`KASTELLAN_EGRESS_UPSTREAM_EXTRA_CA`) lets the inspection leg reach
-  a single private, self-signed origin (e.g. a local mail archive) — enforced
-  to exactly one private origin, fail-closed.
-- **Channels.** A live Matrix channel (self-hosted, single-user, federation off,
-  E2E — `matrix-rust-sdk` inside a sandboxed worker): the decision/message bus,
-  operator-issued single-use peer pairing (fail-closed), and inbound
-  prompt-injection screening. The email failover's gated inbound half is live
-  too (config-gated, off by default): a sandboxed `email-in` worker polls a
-  local mail archive, and a message is enqueued only after a DMARC verdict
-  stamped by the operator's own MX **plus** a per-pairing in-body token;
-  outbound email replies arrive with the next slice. Every inbound and outbound
-  message is audited.
-- **Supporting infrastructure.** OS-native supervisor units (`systemd --user` /
-  launchd) including an `kastellan.target`; AES-256-GCM secrets at rest with opaque
-  `secret://` references; an OpenAI-compatible, local-first LLM router; a
-  `kastellan-cli audit tail` viewer.
+  leased claims, fast and long lanes) runs the cycle: LLM plan → **CASSANDRA**
+  review → dispatcher chokepoint → sandboxed step. Every lifecycle transition
+  writes an append-only audit row, and a crash-recovery sweep picks up
+  interrupted work. Planner calls are bounded:
+  - a token cap (`max_tokens`) and a call timeout on every call;
+  - a `plan_budget` the model can see;
+  - a 15-minute ceiling on the fast lane;
+  - a re-ask when the model's reply is not a plan.
 
-Not built yet (see the roadmap): outbound email delivery (SMTP — replies to
-email are currently routed but not delivered, and audited as such), MITM
-inspection of browser and email-channel traffic (both ride the proxy as opaque
-tunnels today), the CASSANDRA LLM review stages (the constitutional and
-data-classification stages are deterministic rules today), the tiered
-delegation policy for agent-authored skills, the frontier-egress worker that
-the certificate-pinning path is waiting on, and the Phase-5
-frontier-escalation policy gate.
+  The thinking/reasoning switch is per backend (`KASTELLAN_LLM_THINKING_SWITCH`).
+- **Two planner modes** (`KASTELLAN_PLANNER_MODE`):
+  - `classic` (the default) keeps one growing plan.
+  - `notebook` is external working memory for the planner. The model writes its
+    own step list and works one step per turn. It ticks off each step with a
+    note and keeps *findings*: facts together with their source. It writes the
+    answer from those findings. A `sift` step runs its reads as one reviewed
+    plan into an append-only scrapbook, and answer tables are rendered by code,
+    not by the model.
+
+  Channel conversations keep their continuity across turns.
+- **CASSANDRA oversight.** The constitutional and deterministic
+  (data-classification) policy stages have an offline replay/iteration harness.
+  A worker-output prompt-injection guard redacts and audits blocked content.
+  An `Escalate` verdict suspends the task and puts a question in the **operator
+  Inbox**. You answer it in your Matrix room or with `kastellan-cli inbox`.
+  Answers come from a closed set (approve / deny), are matched by an
+  unforgeable per-ask nonce, and carry a mandatory deadline: an unanswered ask
+  fails the task closed.
+- **Guard tier (optional, advisory).** A small local safety model (Shieldstral
+  via `llama-server`) gives a second opinion on tool output that the pattern
+  screen let through. It can run as a supervised `kastellan-guard` unit that
+  starts before the agent. It is defence-in-depth, never a gate: nothing
+  downstream relaxes because it is on. But a misconfigured guard **stops the
+  daemon** rather than silently switching itself off.
+- **Memory.** Recall runs four lanes over L1/L2/L4 — pgvector semantic,
+  `tsvector` lexical, graph, and entity-similarity — fused with Reciprocal Rank
+  Fusion. The prompt is assembled in layers: L0 meta-rules, the L1
+  always-in-context index, and L3 approved skills, each through its own gated
+  block, never through recall. Entity/relation extraction feeds a
+  quarantine-review CLI. A handoff cache stashes oversized tool results whole.
+- **L3 skill arc.** Crystallise a successful trajectory → operator approve/pin →
+  surface in `<skills>` → re-invoke, with trust tiers and live re-validation at
+  dispatch.
+- **Workers.**
+  - `shell-exec`: argv-allowlisted execve.
+  - `web-fetch`: HTTPS-only, host-allowlisted, redirect- and size-capped
+    readable-text extraction.
+  - `web-search`: SearxNG-backed queries.
+  - `web-research`: composite search → fetch → ranked passages in one call.
+  - `mail`: read-only tools over a local [localmail](https://github.com/hherb/localmail)
+    archive (API 1.6+) — search with attachment names, read, and attachments
+    delivered to a durable per-task folder.
+  - `gliner-relex`: Python entity/relation extraction under the sandbox.
+  - `browser-driver`: opt-in, read-only Playwright render worker.
+  - `python-exec`: the strictest jail of any worker — `Net::Deny`, ephemeral
+    scratch only, curated stdlib; acceptance-green on Linux and macOS.
+
+  Two trusted sidecars, `embed-broker` and `search-broker`, connect jailed
+  workers to the embedding and search backends without widening their egress.
+- **Egress boundary.** Every networked worker is **force-routed by default**
+  through its own egress proxy. The worker sits in a private network namespace
+  with no direct route out. The proxy:
+  - enforces a host allowlist, resolves DNS itself, and rejects
+    private/loopback/link-local IPs (SSRF);
+  - intercepts TLS and scans the cleartext for the worker's own secrets (the
+    credential-leak scanner);
+  - pins server certificates;
+  - audits every allow and block decision.
+
+  An operator-configured extra CA (`KASTELLAN_EGRESS_UPSTREAM_EXTRA_CA`) lets
+  the inspection leg reach one private, self-signed origin, such as a local
+  mail archive. It is enforced to exactly one private origin and fails closed.
+- **Channels.**
+  - **Matrix (live):** self-hosted, single-user, federation off, end-to-end
+    encrypted; `matrix-rust-sdk` runs inside a sandboxed worker. It carries the
+    decision/message bus and the Inbox. Peer pairing is operator-issued,
+    single-use and fail-closed, and inbound messages are screened for prompt
+    injection.
+  - **Email failover, inbound half (live; config-gated, off by default):** a
+    sandboxed `email-in` worker polls a local mail archive through the
+    intercepting proxy. A message is enqueued only with **both** a DMARC
+    verdict stamped by the operator's own MX **and** a per-pairing in-body
+    token.
+
+  Every inbound and outbound message is audited. A reply that finished while
+  no channel was listening is delivered later by a catch-up sweep. A lost
+  audit row is reported, not dropped silently.
+- **Operator CLI (`kastellan-cli`).**
+  - `ask` submits a task and follows it live, printing each plan/step line.
+  - `tasks list|status|tail|correct|cancel` manages tasks.
+  - `inbox` answers the agent's questions.
+  - `session` is a JSON-RPC 2.0 link on stdin/stdout, so a front end (over
+    ssh, say) can submit, follow, correct and cancel tasks.
+  - Also: `pair`, `secret`, `tools allowlist`, `memory`, `entities` /
+    `relations` review, and `audit tail`.
+- **Supporting infrastructure.** OS-native supervisor units (`systemd --user`
+  / launchd) under a `kastellan.target`, with the core waiting out a
+  late-starting Postgres. Secrets are encrypted at rest (AES-256-GCM) and
+  referenced through opaque `secret://` handles. The LLM router is
+  OpenAI-compatible and local-first. A one-command per-user installer and an
+  upgrade script complete the set.
+
+Not built yet (see the roadmap):
+
+- **Outbound email** (SMTP, email-channel slice 2). Email replies are routed
+  but not yet delivered, and audited as such.
+- **MITM inspection of browser traffic.** It rides the proxy as an opaque
+  tunnel today.
+- **An LLM plan-review stage in CASSANDRA.** The constitutional and
+  data-classification stages are deterministic rules; the guard model screens
+  *content*, not plans.
+- **Notebook as the default planner mode**, retiring `classic`.
+- **Good-netizen behaviour in the web workers** — rate limiting, backoff,
+  `robots.txt` — required before any release.
+- **Context-window resets** from memory and the task list, and L4 session
+  digests.
+- **Tiered delegation** for agent-authored skills.
+- **The frontier-egress worker**, which the certificate-pinning path is
+  waiting on, and the Phase-5 frontier-escalation policy gate.
 
 Day-to-day state — what's green and the next task — lives in
 [`docs/devel/handovers/HANDOVER.md`](docs/devel/handovers/HANDOVER.md); the
@@ -244,10 +310,11 @@ sequenced build plan is [`docs/devel/ROADMAP.md`](docs/devel/ROADMAP.md). See al
 Rust workspace, 27 crates (plus two Python workers outside Cargo):
 
 ```
-core/                  kastellan-core: agent loop, scheduler, memory, CASSANDRA, audit,
-                       tool-host chokepoint, channel bus (Matrix + email), egress
-                       integration, handoff cache, installer; `kastellan` daemon +
-                       `kastellan-cli`
+core/                  kastellan-core: agent loop + scheduler (classic and notebook
+                       planners, sift), memory, CASSANDRA + guard tier, operator Inbox,
+                       audit, tool-host chokepoint, channel bus (Matrix + email),
+                       egress integration, handoff cache, secrets vault, installer;
+                       `kastellan` daemon + `kastellan-cli`
 db/                    kastellan-db: Postgres helpers + embedded migrations (pgvector +
                        tsvector/GIN + relational graph), secrets-at-rest, pairings, audit writer
 leak-scan/             kastellan-leak-scan: shared credential-leak scanner (egress proxy + core)
@@ -258,7 +325,8 @@ sandbox/               kastellan-sandbox: SandboxPolicy + per-OS backends
                        (bwrap / Seatbelt / Apple container / Firecracker micro-VM)
 supervisor/            kastellan-supervisor: systemd --user / launchd unit generation + drivers
 protocol/              kastellan-protocol: JSON-RPC 2.0 over stdio (MCP-stdio compatible)
-tests-common/          kastellan-tests-common: shared dev-dep test harness (Pg cluster, fixtures)
+tests-common/          kastellan-tests-common: shared dev-dep test harness (Pg cluster,
+                       fixtures, REQUIRE knobs + evidence markers for gated e2e tiers)
 workers/prelude/       Landlock + seccomp lock-down prelude (worker-side `serve_stdio`)
 workers/web-common/    shared HTTP/allowlist/proxy-connect/search/fetch/extract lib
                        for net-egress workers
@@ -283,11 +351,17 @@ workers/gliner-relex/  Python entity/relation extraction worker (sandboxed; non-
 workers/browser-driver/ Playwright read-only render worker (opt-in; non-Cargo)
 
 config/                example runtime policy + per-worker sandbox profiles
+prompts/               planner, notebook and sift-sorter system prompts
 seeds/                 L0 memory meta-rule seed data
-scripts/               host setup (AppArmor profile, Postgres install, SearxNG, Matrix,
-                       Firecracker/rootfs builds)
+tests/                 guard-model calibration corpus + observation-replay fixtures
+deploy/                Matrix homeserver deployment assets
+scripts/               build-release.sh (the one release build), run-e2e-gate.sh (gated
+                       e2e tiers as evidence), upgrade_from_git.sh, host setup (AppArmor
+                       profile, Postgres, Firecracker vsock, SearxNG, Matrix), worker
+                       images / micro-VM rootfs builds, mail live-shape gate, evals
 site/                  kastellan.dev website source (Cloudflare Pages, no build step)
-docs/                  architecture, threat-model, CASSANDRA design, roadmap, handovers,
+docs/                  architecture, threat-model, CASSANDRA design, security audits,
+                       operator env reference (docs/deploy), roadmap, handovers,
                        user manual (docs/user/manual), developer manual (docs/devel/manual)
 ```
 
@@ -314,6 +388,18 @@ If you skip this step, the agent will refuse to spawn workers and emit a
 clear error pointing back here. Other Linux distros without AppArmor user-ns
 restrictions don't need this script.
 
+**Optional — Firecracker micro-VMs** (`KASTELLAN_<WORKER>_USE_MICROVM=1`, e.g.
+`KASTELLAN_PYTHON_EXEC_USE_MICROVM=1`) need one more privileged step. It grants
+the worker user the vsock device, provisions `/var/lib/kastellan/microvm`, and
+installs the pinned guest kernel:
+
+```sh
+sudo scripts/linux/install-firecracker-vsock.sh
+```
+
+Without it the worker stays on bwrap (the backend's probe fails closed). The
+same script is a prerequisite for every `build-*-rootfs.sh`.
+
 ### Install (per-user, supervised)
 
 `kastellan-cli install` takes a freshly-built tree to a **running, supervised,
@@ -330,9 +416,15 @@ model library, so on macOS install the models there first. A memory-fit check
 runs on every platform and refuses a model this host cannot hold.
 
 ```sh
-cargo build --release --workspace
+bash scripts/build-release.sh                   # the ONLY supported release build — see below
 ./target/release/kastellan-cli install          # run from the repo root (assets come from ./prompts, ./seeds)
 ```
+
+Always build release binaries with `scripts/build-release.sh`, never with a
+hand-run `cargo build --release`. Cargo unifies features per invocation, so a
+narrower or bare build produces different bytes from the same source. The
+script also builds the Matrix worker with the `live-matrix` feature it needs.
+If you ran any `cargo build --release` afterwards, run the script again.
 
 This copies all binaries into `~/.local/lib/kastellan/`, assets into
 `~/.local/share/kastellan/`, initializes the cluster (idempotent), writes
@@ -344,9 +436,14 @@ new binaries/env take effect).
 
 ```
 kastellan-cli install [--llm-model <m>] [--llm-url <u>] [--embedding-model <m>]
-                      [--pg-bin-dir <d>] [--from <built-bin-dir>] [--no-start]
+                      [--pg-bin-dir <d>] [--from <built-bin-dir>]
+                      [--matrix-homeserver-url <url> --matrix-user <@bot:server>]
+                      [--no-start]
 kastellan-cli uninstall [--purge]               # --purge also deletes the cluster + secrets (typed confirm)
 ```
+
+The two `--matrix-…` flags enable the Matrix channel. Homeserver setup is in
+[`docs/deploy/matrix-homeserver.md`](docs/deploy/matrix-homeserver.md).
 
 Tune the LLM/prompt/data settings any time by editing
 `~/.config/kastellan/kastellan.env.local`, then apply it: on Linux
@@ -359,6 +456,55 @@ installer and its values win. See
 [`docs/deploy/operator-env.md`](docs/deploy/operator-env.md).
 Check health with `systemctl --user status kastellan.target` and
 `kastellan-cli secret list`.
+
+The overlay also holds the optional settings: `KASTELLAN_PLANNER_MODE=notebook`,
+`KASTELLAN_TIMEZONE`, and the guard model's `KASTELLAN_LLM_GUARD_*` keys. Set
+`KASTELLAN_GUARD_SERVER_{BIN,MODEL}` as well and the next `install` adds a
+supervised `kastellan-guard` unit.
+
+**Upgrading.** On Linux, `scripts/upgrade_from_git.sh` handles the whole
+upgrade. It pulls `main`, rebuilds with `build-release.sh`, re-installs
+(keeping your Matrix settings), restarts, and checks that the services and the
+Matrix channel came back. On macOS, run `bash scripts/build-release.sh`, then
+re-run `install` with the same flags as before.
+
+### Using it
+
+```sh
+kastellan-cli ask "Summarise the latest news on <topic>"    # submit, follow live, print the answer
+kastellan-cli tasks list                                    # recent tasks; also status|tail|correct|cancel <id>
+kastellan-cli inbox list                                    # questions the agent is waiting on
+kastellan-cli inbox resolve <ask-id> approve                # or: deny [--note "<why>"]
+kastellan-cli pair issue                                    # single-use code to pair your Matrix account
+kastellan-cli audit tail                                    # follow the audit log
+```
+
+Run `kastellan-cli help` for the full command list. The
+[User Manual](docs/user/manual/04-setup-and-run.md) walks through setup, Matrix
+pairing, tools, the guard model, micro-VMs and secrets step by step.
+
+### Tests
+
+```sh
+source "$HOME/.cargo/env"
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings      # enforced in CI
+```
+
+Many integration suites **skip as pass** when a fixture is missing — no
+Postgres, no user namespaces, no KVM — and print a `[SKIP]` line. A green run
+is not evidence until you check those lines. To run a gated tier *as
+evidence*, use the gate script. It turns that tier's skips into failures and
+checks floors on the passed-test and `[E2E]` marker counts:
+
+```sh
+bash scripts/run-e2e-gate.sh --list        # profiles and the knobs each sets
+bash scripts/run-e2e-gate.sh guard-tier    # e.g.
+```
+
+See [`CLAUDE.md`](CLAUDE.md) and the
+[developer manual](docs/devel/manual/index.md) for the full build/test
+workflow.
 
 ## License
 
