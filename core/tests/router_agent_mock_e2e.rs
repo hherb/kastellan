@@ -45,9 +45,10 @@ use kastellan_core::recall_assembly::{
 };
 use kastellan_core::scheduler::agent::{AgentError, PlanFormulator, RouterAgent};
 use kastellan_core::scheduler::inner_loop::TaskContext;
+use kastellan_core::scheduler::notebook::formulator::{NotebookFormulator, NOTEBOOK_PROMPT};
 use kastellan_core::scheduler::prompts::{PromptCache, PromptEntry};
 use kastellan_db::tasks::Lane;
-use kastellan_llm_router::{Router, RouterConfig};
+use kastellan_llm_router::{Router, RouterConfig, ThinkingPolicy};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -644,4 +645,73 @@ async fn formulate_reformat_shows_the_reply_and_asks_for_the_plan_with_thinking_
         "the re-ask suppresses thinking whatever the config: {}",
         served.body
     );
+}
+
+// ---------------------------------------------------------------------------
+// The notebook's door (#993). `RouterAgent::send_turn` serves both loops, so
+// the two pins above that are not about a classic plan are repeated for
+// `notebook_turn`, the door that outlives the classic loop.
+// ---------------------------------------------------------------------------
+
+/// A prompt cache holding only the notebook's prompt.
+fn prompts_with_agent_notebook() -> Arc<PromptCache> {
+    Arc::new(PromptCache::new_for_test(vec![(
+        NOTEBOOK_PROMPT.into(),
+        PromptEntry { sha256: PLANNER_PROMPT_SHA.into(), content: PLANNER_PROMPT_CONTENT.into() },
+    )]))
+}
+
+#[tokio::test]
+async fn a_notebook_turn_threads_extracted_seeds_into_recall_and_meta() {
+    let reply = r#"{"steps": [{"id": 1, "purpose": "p", "tool": "none", "done_when": "d"}], "answer": {"body": "pong"}}"#;
+    let (base_url, served_rx, _mock_join) = spawn_one_shot_mock(CannedResponse::ok_json(envelope_for(reply))).await;
+    let recall = CapturingRecallBuilder::default();
+    let captured = recall.captured.clone();
+    let seed_ids = vec![101_i64, 202, 303];
+    let agent = RouterAgent::new(
+        router_pointing_at(&base_url),
+        prompts_with_agent_notebook(),
+        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
+        Arc::new(recall),
+        Arc::new(StaticEntityExtractor::with_ids(seed_ids.clone())),
+    );
+
+    let task = ctx();
+    let (raw, meta) = agent
+        .notebook_turn(&task, &|_| "the turn".to_string(), None, ThinkingPolicy::RouterDefault)
+        .await
+        .expect("happy path");
+    assert_eq!(raw, reply, "the model's text comes back as it was sent");
+
+    // The extracted seeds reach recall verbatim, with the instruction as the
+    // query — drop the thread and the graph lane is a no-op — and the meta the
+    // `plan.formulate` row is written from.
+    let (seen_query, seen_seeds) = captured.lock().unwrap().clone().expect("recall builder must have been called");
+    assert_eq!((seen_query.as_str(), seen_seeds.as_slice()), (task.instruction.as_str(), seed_ids.as_slice()));
+    assert_eq!((meta.graph_seed_entity_ids, meta.graph_seed_count), (seed_ids.clone(), seed_ids.len() as u32));
+    assert!(matches!(meta.graph_seed_source, SeedSource::GlinerRelex), "{:?}", meta.graph_seed_source);
+    assert_eq!(meta.prompt_name, NOTEBOOK_PROMPT);
+    let _served = served_rx.await.expect("mock served the request");
+}
+
+#[tokio::test]
+async fn a_notebook_turn_with_no_prompt_never_dials_the_backend() {
+    let (base_url, served_rx, mock_join) = spawn_one_shot_mock(CannedResponse::ok_json(envelope_for("never sent"))).await;
+    let agent = RouterAgent::new(
+        router_pointing_at(&base_url),
+        empty_prompts(),
+        Arc::new(StaticSystemPromptBuilder::empty()),
+        Arc::new(StaticRecallBuilder::empty()),
+        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
+    );
+    let err = agent
+        .notebook_turn(&ctx(), &|_| "the turn".to_string(), None, ThinkingPolicy::RouterDefault)
+        .await
+        .expect_err("must fail");
+    assert!(matches!(err, AgentError::PromptMissing), "expected PromptMissing, got {err:?}");
+    // Empty iff the mock never accepted a connection (the send is awaited
+    // inline, as in the classic twin above).
+    let mut served_rx = served_rx;
+    assert!(matches!(served_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)), "dialed despite no prompt");
+    mock_join.abort();
 }

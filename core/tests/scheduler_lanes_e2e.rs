@@ -14,22 +14,20 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
-use kastellan_core::cassandra::types::{DataClass, Plan, PlannedStep};
+use kastellan_core::cassandra::types::{DataClass, PlannedStep};
 use kastellan_core::memory::embedder::NoOpEmbedder;
-use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
 use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
 use kastellan_core::scheduler::spawn_scheduler;
 use kastellan_db::tasks::{insert_pending, Lane};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster,
 };
+use kastellan_tests_common::scripted_notebook::{answer_reply, call_reply, ScriptedNotebook};
 use sqlx::postgres::PgListener;
 
 /// Async helper: bring up a PG cluster (via the shared
@@ -68,71 +66,6 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
 // Scripted stubs
 // ---------------------------------------------------------------------------
 
-/// Returns plans from per-task queues. Keyed by `ctx.task_id`.
-/// Out-of-script reads return `AgentError::Decode` to make bugs loud.
-struct ScriptedFormulator {
-    per_task: Mutex<HashMap<i64, VecDeque<Plan>>>,
-}
-
-impl ScriptedFormulator {
-    fn new_per_task(scripts: Vec<(i64, Vec<Plan>)>) -> Self {
-        Self {
-            per_task: Mutex::new(
-                scripts
-                    .into_iter()
-                    .map(|(id, plans)| (id, plans.into()))
-                    .collect(),
-            ),
-        }
-    }
-}
-
-#[async_trait]
-impl PlanFormulator for ScriptedFormulator {
-    async fn formulate_plan(
-        &self,
-        ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        let mut map = self.per_task.lock().unwrap();
-        let queue = map.get_mut(&ctx.task_id).ok_or(AgentError::Decode {
-            detail: format!("no script for task_id {}", ctx.task_id),
-            // Not blank: a blank raw is an empty completion, which is retried (#923).
-            raw: "<script exhausted>".into(),
-            usage: Default::default(),
-            latency_ms: 0,
-        })?;
-        let plan = queue.pop_front().ok_or(AgentError::Decode {
-            detail: format!("script exhausted for task_id {}", ctx.task_id),
-            // Not blank: a blank raw is an empty completion, which is retried (#923).
-            raw: "<script exhausted>".into(),
-            usage: Default::default(),
-            latency_ms: 0,
-        })?;
-        Ok((
-            plan,
-            FormulationMeta {
-                prompt_name: "agent_planner".into(),
-                prompt_sha256: "test".into(),
-                llm_model: "test-model".into(),
-                llm_backend: "local".into(),
-                latency_ms: 1,
-                retry_count: 0,
-                assembled_prompt_sha256: "test-assembled-sha".into(),
-                l0_count: 0,
-                l1_count: 0,
-                skill_count: 0,
-                recalled_memory_ids: Vec::new(),
-                recall_count: 0,
-                recall_query_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
-                graph_seed_entity_ids: Vec::new(),
-                graph_seed_count: 0,
-                graph_seed_source: kastellan_core::entity_extraction::SeedSource::None,
-                usage: Default::default(),
-            },
-        ))
-    }
-}
-
 /// A dispatcher that sleeps for a fixed delay before returning
 /// `StepOutcome::Ok`. Ignores `step.tool` and `step.method`.
 struct SleepyDispatcher {
@@ -148,48 +81,27 @@ impl StepDispatcher for SleepyDispatcher {
 }
 
 // ---------------------------------------------------------------------------
-// Plan-factory helpers
+// The planner
 // ---------------------------------------------------------------------------
 
-fn task_complete_plan(body: &str) -> Plan {
-    Plan {
-        context: "c".into(),
-        decision: "task_complete".into(),
-        rationale: "done".into(),
-        steps: vec![],
-        result: Some(serde_json::json!({"kind": "text", "body": body})),
-        data_ceiling: Some(DataClass::Public),
-        refused: None,
-        floor_request: None,
-        l1_insight: None,
-        l3_skill: None,
-        invoke_skill: None,
-        python_skill: None,
-    }
-}
-
-fn one_step_plan(tool: &str, method: &str) -> Plan {
-    Plan {
-        context: "c".into(),
-        decision: "act".into(),
-        rationale: "r".into(),
-        steps: vec![PlannedStep {
-            tool: tool.into(),
-            method: method.into(),
+/// Each task's script (#993: a notebook planner): one sleeping step, then an
+/// answer naming the task's lane.
+fn sleep_then_answer(ctx: &TaskContext) -> String {
+    if ctx.plans.is_empty() {
+        let step = PlannedStep {
+            tool: "sleep".into(),
+            method: "doit".into(),
             parameters: serde_json::json!({}),
             returns: "x".into(),
             done_when: "x".into(),
             classification: DataClass::Public,
-        }],
-        result: None,
-        data_ceiling: Some(DataClass::Public),
-        refused: None,
-        floor_request: None,
-        l1_insight: None,
-        l3_skill: None,
-        invoke_skill: None,
-        python_skill: None,
+        };
+        return call_reply(1, &step);
     }
+    answer_reply(match ctx.lane {
+        Lane::Fast => "fast-done",
+        Lane::Long => "long-done",
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -233,24 +145,9 @@ async fn two_lanes_run_concurrently() {
     .await
     .unwrap();
 
-    // Each task's script: one sleeping step, then task_complete.
+    // Each task's script: one sleeping step, then an answer.
     // The SleepyDispatcher will sleep ~1 s per step.
-    let formulator = Arc::new(ScriptedFormulator::new_per_task(vec![
-        (
-            id_fast,
-            vec![
-                one_step_plan("sleep", "doit"),
-                task_complete_plan("fast-done"),
-            ],
-        ),
-        (
-            id_long,
-            vec![
-                one_step_plan("sleep", "doit"),
-                task_complete_plan("long-done"),
-            ],
-        ),
-    ]));
+    let formulator = Arc::new(ScriptedNotebook::new(sleep_then_answer));
 
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
 
@@ -296,6 +193,22 @@ async fn two_lanes_run_concurrently() {
 
     assert!(completed.contains(&id_fast), "fast task ({id_fast}) not in completed set");
     assert!(completed.contains(&id_long), "long task ({id_long}) not in completed set");
+
+    // `tasks_completed` fires on every terminal state, a failed one too. Two
+    // tasks that fail at once (a reply the notebook refuses) would beat the
+    // 1.7 s bound below without sleeping at all, so first prove each ran its
+    // step and answered.
+    for (id, body) in [(id_fast, "fast-done"), (id_long, "long-done")] {
+        let (state, result): (String, Option<serde_json::Value>) =
+            sqlx::query_as("SELECT state, result FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "completed", "task {id}: {result:?}");
+        assert_eq!(result.as_ref().and_then(|r| r["body"].as_str()), Some(body), "task {id}");
+    }
+    assert!(elapsed >= Duration::from_millis(800), "a step slept: elapsed={elapsed:.2?}");
 
     // If serial: ≥1.6 s. If concurrent: ≈0.8 s. Allow 1.7 s headroom.
     assert!(

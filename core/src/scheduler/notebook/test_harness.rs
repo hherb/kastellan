@@ -197,6 +197,20 @@ impl ReviewStage for RecordingReview {
     }
 }
 
+/// Gives every plan the same verdict.
+pub(crate) struct FixedVerdict(pub(crate) Verdict);
+
+#[async_trait]
+impl ReviewStage for FixedVerdict {
+    fn name(&self) -> &str {
+        "fixed"
+    }
+
+    async fn review(&self, _plan: &Plan, _ctx: &ReviewStageContext<'_>) -> Verdict {
+        self.0.clone()
+    }
+}
+
 /// A step whose method is `fail` fails; a call with a `hits` parameter
 /// returns them as `{"results": hits}` (a search, for `sift`) — stashed in
 /// a real handoff cache, the planner seeing its placeholder, when the call
@@ -304,8 +318,16 @@ pub(crate) struct Ran {
 }
 
 pub(crate) async fn run(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext) -> Ran {
+    run_reviewed(pool, script, ctx, None).await
+}
+
+/// [`run`], with `verdict` (when set) given to every plan by a second review
+/// stage after the recorder: a reviewer that blocks an answer, say.
+pub(crate) async fn run_reviewed(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext, verdict: Option<Verdict>) -> Ran {
     let review = Arc::new(RecordingReview::default());
-    let chain = Arc::new(ChainReviewStage::new(vec![review.clone() as Arc<dyn ReviewStage>]));
+    let mut stages = vec![review.clone() as Arc<dyn ReviewStage>];
+    stages.extend(verdict.map(|v| Arc::new(FixedVerdict(v)) as Arc<dyn ReviewStage>));
+    let chain = Arc::new(ChainReviewStage::new(stages));
     let tools = Arc::new(Tools::default());
     let task_id = ctx.task_id;
     let result = run_notebook_to_terminal(pool, script, chain, tools.clone(), ctx, None).await.unwrap();

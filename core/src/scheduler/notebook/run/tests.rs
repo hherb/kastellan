@@ -82,6 +82,9 @@ async fn the_notebook_loop() {
     the_ceiling_counts_what_the_notebook_alone_records(&pool).await;
     a_cancelled_task_ends_cancelled_and_closes_its_notebook(&pool).await;
     an_empty_completion_is_asked_again_once(&pool).await;
+    super::refusal_tests::a_refused_answer_ends_the_task_refused(&pool).await;
+    super::refusal_tests::a_reviewer_constitutional_block_wins_over_a_refusal(&pool).await;
+    super::refusal_tests::a_block_on_a_refused_answer_does_not_loop(&pool).await;
 }
 
 async fn a_three_step_task_ticks_each_step_and_answers_from_findings(pool: &sqlx::PgPool) {
