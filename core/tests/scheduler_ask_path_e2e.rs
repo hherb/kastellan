@@ -1,7 +1,7 @@
 //! End-to-end: escalate -> suspend -> resolve -> resume, through the real
 //! lane runner (#564 slice 1b).
 //!
-//! Driven through `spawn_scheduler` rather than `run_to_terminal`, because
+//! Driven through `spawn_scheduler` rather than by calling the loop, because
 //! `drain_lane`'s non-finalize branch is half of what is under test and only
 //! the lane runner reaches it.
 //!
@@ -24,7 +24,7 @@ use kastellan_core::channel::ingest::build_channel_task_payload;
 use kastellan_core::channel::outbox::ChannelOutbox;
 use kastellan_core::channel::{ChannelId, ConversationId, IncomingMessage, PeerId};
 use kastellan_core::memory::embedder::NoOpEmbedder;
-use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
+use kastellan_core::scheduler::agent::PlanFormulator;
 use kastellan_core::scheduler::asks::delivery::{REASON_NO_CHANNEL, REASON_NO_ORIGIN};
 use kastellan_core::scheduler::audit::{
     ACTION_ASK_APPROVAL_APPLIED, ACTION_ASK_UNDELIVERED, ACTION_TASK_FINALIZE,
@@ -32,6 +32,7 @@ use kastellan_core::scheduler::audit::{
 use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
 use kastellan_core::scheduler::{spawn_scheduler, SchedulerHandle};
 use kastellan_db::tasks::{self, insert_pending, Lane};
+use kastellan_tests_common::scripted_notebook::{answer_reply, call_reply, ScriptedNotebook};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster,
 };
@@ -121,37 +122,6 @@ impl ReviewStage for ScriptedReview {
     }
 }
 
-/// Records `ctx.plans.len()` on every call, and picks its plan from that
-/// same number.
-///
-/// The recorded sequence is the assertion D11 actually earns: a resumed run
-/// must formulate against the history it already had, not against an empty
-/// one. Keying the plan off `ctx.plans.len()` (rather than a call counter)
-/// also means a run that restored its history walks FORWARD from where it
-/// stopped instead of re-deriving the plans it already ran.
-struct HistoryRecordingFormulator {
-    /// One entry per `formulate_plan` call: the number of completed plans
-    /// the context carried at that moment.
-    seen: Arc<Mutex<Vec<usize>>>,
-}
-
-#[async_trait]
-impl PlanFormulator for HistoryRecordingFormulator {
-    async fn formulate_plan(
-        &self,
-        ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        let n = ctx.plans.len();
-        self.seen.lock().unwrap().push(n);
-        let plan = match n {
-            0 => one_step_plan_with_param(1),
-            1 => one_step_plan_with_param(2),
-            _ => task_complete_plan("ok"),
-        };
-        Ok((plan, test_meta()))
-    }
-}
-
 /// Records the `parameters` of every step it is asked to dispatch, so a
 /// test can see whether a step ran twice.
 struct RecordingDispatcher {
@@ -178,142 +148,85 @@ impl StepDispatcher for NoopDispatcher {
     }
 }
 
-/// One formulator covering all three variants. `vary` makes each call
-/// return a plan differing in a field the digest INCLUDES; `calls` is the
-/// counter the denial test reads.
-struct TestFormulator {
-    vary: bool,
-    calls: Arc<Mutex<u32>>,
-}
+// The model is a [`ScriptedNotebook`] (#993: this suite ran on the classic
+// loop until it moved to the notebook, the default planner). Each formulator
+// below is a closure choosing that turn's notebook reply.
 
-#[async_trait]
-impl PlanFormulator for TestFormulator {
-    async fn formulate_plan(
-        &self,
-        _ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        let n = {
-            let mut c = self.calls.lock().unwrap();
-            *c += 1;
-            *c
-        };
-        // `parameters` is digested; `context` is not. Varying the former is
-        // what makes the replan a genuinely different plan.
-        let plan = if self.vary {
-            one_step_plan_with_param(n)
-        } else {
-            task_complete_plan("ok")
-        };
-        Ok((plan, test_meta()))
+/// The step every call in this file makes: `sleep.doit` with `{"n": n}`.
+/// `parameters` is one of the fields `plan_digest` INCLUDES, so two calls
+/// with different `n` produce two different digests — which is what makes
+/// the "a different replan re-escalates" test test anything.
+fn step_with_param(n: u32) -> PlannedStep {
+    PlannedStep {
+        tool: "sleep".into(),
+        method: "doit".into(),
+        parameters: serde_json::json!({"n": n}),
+        returns: "x".into(),
+        done_when: "x".into(),
+        classification: DataClass::Public,
     }
 }
 
-/// A formulator whose plan depends on the plan's INDEX WITHIN THE RUN —
-/// `ctx.plans.len()` — rather than on a call counter.
+/// The reply that lists step `n` and calls it with `{"n": n}`: a fresh step
+/// id per call, because the notebook never re-lists a done step.
+fn call_with_param(n: u32) -> String {
+    call_reply(n, &step_with_param(n))
+}
+
+/// Picks the reply from the plan's INDEX WITHIN THE RUN — `ctx.plans.len()`
+/// — rather than from a call counter: call 1, then call 2, then the answer.
 ///
 /// That distinction is the whole test. Keying on the index makes the
 /// digests STABLE: the index-0 plan is always plan A and the index-1 plan is
 /// always plan B, so a run that resumes at index 1 re-derives exactly the
 /// plan it was suspended on — the one whose steps never ran — and its
-/// digest matches the approval. A call counter (what
-/// `TestFormulator { vary: true }` uses) instead produces a brand-new digest
-/// every time, which is the separate "a different replan re-escalates" case.
+/// digest matches the approval. A call counter (what [`counting`] with
+/// `vary` uses) instead produces a brand-new digest every time, which is the
+/// separate "a different replan re-escalates" case.
 ///
 /// Since D11 a resumed run restores the plans it already completed, so it
-/// starts at the index it stopped at rather than back at 0.
+/// starts at the index it stopped at rather than back at 0. Index >= 2
+/// answers, so the task can actually finish once both escalations are
+/// covered.
+fn per_run_index(ctx: &TaskContext) -> String {
+    match ctx.plans.len() {
+        0 => call_with_param(1),
+        1 => call_with_param(2),
+        _ => answer_reply("ok"),
+    }
+}
+
+/// [`per_run_index`], recording `ctx.plans.len()` on every turn.
 ///
-/// Index >= 2 returns a terminal plan so the task can actually finish once
-/// both escalations are covered.
-struct PerRunIndexFormulator;
+/// The recorded sequence is the assertion D11 actually earns: a resumed run
+/// must formulate against the history it already had, not against an empty
+/// one. Keying the reply off `ctx.plans.len()` (rather than a call counter)
+/// also means a run that restored its history walks FORWARD from where it
+/// stopped instead of re-deriving the plans it already ran.
+fn history_recording(seen: Arc<Mutex<Vec<usize>>>) -> ScriptedNotebook {
+    ScriptedNotebook::new(move |ctx| {
+        seen.lock().unwrap().push(ctx.plans.len());
+        per_run_index(ctx)
+    })
+}
 
-#[async_trait]
-impl PlanFormulator for PerRunIndexFormulator {
-    async fn formulate_plan(
-        &self,
-        ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        let plan = match ctx.plans.len() {
-            0 => one_step_plan_with_param(1),
-            1 => one_step_plan_with_param(2),
-            _ => task_complete_plan("ok"),
+/// One formulator covering the other variants. `vary` makes each turn call
+/// with a parameter differing from the last (a field the digest INCLUDES);
+/// without it every turn answers. `calls` is the counter the denial test
+/// reads.
+fn counting(vary: bool, calls: Arc<Mutex<u32>>) -> ScriptedNotebook {
+    ScriptedNotebook::new(move |_ctx| {
+        let n = {
+            let mut c = calls.lock().unwrap();
+            *c += 1;
+            *c
         };
-        Ok((plan, test_meta()))
-    }
-}
-
-/// The `FormulationMeta` fixture, copied from `ScriptedFormulator` in
-/// `core/tests/scheduler_lanes_e2e.rs`. Nothing under test reads it; it
-/// only has to be well-formed enough for the `plan.formulate` audit row.
-fn test_meta() -> FormulationMeta {
-    FormulationMeta {
-        prompt_name: "agent_planner".into(),
-        prompt_sha256: "test".into(),
-        llm_model: "test-model".into(),
-        llm_backend: "local".into(),
-        latency_ms: 1,
-        retry_count: 0,
-        assembled_prompt_sha256: "test-assembled-sha".into(),
-        l0_count: 0,
-        l1_count: 0,
-        skill_count: 0,
-        recalled_memory_ids: Vec::new(),
-        recall_count: 0,
-        recall_query_sha256:
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
-        graph_seed_entity_ids: Vec::new(),
-        graph_seed_count: 0,
-        graph_seed_source: kastellan_core::entity_extraction::SeedSource::None,
-        usage: Default::default(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Plan factories (mirroring core/tests/scheduler_lanes_e2e.rs)
-// ---------------------------------------------------------------------------
-
-fn task_complete_plan(body: &str) -> Plan {
-    Plan {
-        context: "c".into(),
-        decision: "task_complete".into(),
-        rationale: "done".into(),
-        steps: vec![],
-        result: Some(serde_json::json!({"kind": "text", "body": body})),
-        data_ceiling: Some(DataClass::Public),
-        refused: None,
-        floor_request: None,
-        l1_insight: None,
-        l3_skill: None,
-        invoke_skill: None,
-        python_skill: None,
-    }
-}
-
-/// A non-terminal one-step plan whose `parameters` carry `n`. `parameters`
-/// is one of the fields `plan_digest` INCLUDES, so two calls with different
-/// `n` produce two different digests — which is what makes the "a different
-/// replan re-escalates" test test anything.
-fn one_step_plan_with_param(n: u32) -> Plan {
-    Plan {
-        context: "c".into(),
-        decision: "act".into(),
-        rationale: "r".into(),
-        steps: vec![PlannedStep {
-            tool: "sleep".into(),
-            method: "doit".into(),
-            parameters: serde_json::json!({"n": n}),
-            returns: "x".into(),
-            done_when: "x".into(),
-            classification: DataClass::Public,
-        }],
-        result: None,
-        data_ceiling: Some(DataClass::Public),
-        refused: None,
-        floor_request: None,
-        l1_insight: None,
-        l3_skill: None,
-        invoke_skill: None,
-        python_skill: None,
-    }
+        if vary {
+            call_with_param(n)
+        } else {
+            answer_reply("ok")
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -342,12 +255,12 @@ fn spawn_with(
 fn spawn_test_scheduler(pool: &sqlx::PgPool, review: Arc<ChainReviewStage>) -> SchedulerHandle {
     spawn_with(
         pool,
-        Arc::new(TestFormulator { vary: false, calls: Arc::new(Mutex::new(0)) }),
+        Arc::new(counting(false, Arc::new(Mutex::new(0)))),
         review,
     )
 }
 
-/// As above, plus the shared counter of `formulate_plan` calls.
+/// As above, plus the shared counter of planner turns.
 fn spawn_test_scheduler_counting(
     pool: &sqlx::PgPool,
     review: Arc<ChainReviewStage>,
@@ -355,7 +268,7 @@ fn spawn_test_scheduler_counting(
     let calls = Arc::new(Mutex::new(0));
     let h = spawn_with(
         pool,
-        Arc::new(TestFormulator { vary: false, calls: Arc::clone(&calls) }),
+        Arc::new(counting(false, Arc::clone(&calls))),
         review,
     );
     (h, calls)
@@ -368,7 +281,7 @@ fn spawn_test_scheduler_varying(
 ) -> SchedulerHandle {
     spawn_with(
         pool,
-        Arc::new(TestFormulator { vary: true, calls: Arc::new(Mutex::new(0)) }),
+        Arc::new(counting(true, Arc::new(Mutex::new(0)))),
         review,
     )
 }
@@ -379,7 +292,7 @@ fn spawn_test_scheduler_per_run_index(
     pool: &sqlx::PgPool,
     review: Arc<ChainReviewStage>,
 ) -> SchedulerHandle {
-    spawn_with(pool, Arc::new(PerRunIndexFormulator), review)
+    spawn_with(pool, Arc::new(ScriptedNotebook::new(per_run_index)), review)
 }
 
 /// Spawn with a history-recording formulator and a step-recording
@@ -393,7 +306,7 @@ fn spawn_test_scheduler_recording_history(
     let dispatched = Arc::new(Mutex::new(Vec::new()));
     let handle = spawn_scheduler(
         pool.clone(),
-        Arc::new(HistoryRecordingFormulator { seen: Arc::clone(&seen) }),
+        Arc::new(history_recording(Arc::clone(&seen))),
         review,
         Arc::new(RecordingDispatcher { dispatched: Arc::clone(&dispatched) }),
         Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
@@ -614,9 +527,9 @@ async fn a_channel_tasks_escalation_is_delivered_against_its_own_origin() {
 /// The test above deliberately spawns with `outbox: None` and asserts on
 /// the `reason` label, so it is insensitive to the outbox argument itself.
 /// That left a seven-hop thread — `main` → `spawn_scheduler` → `lane_loop`
-/// → `drain_lane` → `run_one` → `run_to_terminal` → `raise_and_suspend` →
+/// → `drain_lane` → `run_one` → the planner loop → `raise_and_suspend` →
 /// `deliver_ask` — with **no test anywhere passing `Some`**: all five
-/// `spawn_scheduler` call sites in tests and all 18 `run_to_terminal` call
+/// `spawn_scheduler` call sites in tests and all 18 classic-loop call
 /// sites passed `None`, and the one test proving delivery works calls
 /// `raise_and_suspend` directly, bypassing the runner entirely.
 ///
@@ -648,7 +561,7 @@ async fn a_raised_ask_travels_the_whole_runner_to_the_registered_channel() {
 
     let handle = spawn_scheduler(
         pool.clone(),
-        Arc::new(TestFormulator { vary: false, calls: Arc::new(Mutex::new(0)) }),
+        Arc::new(counting(false, Arc::new(Mutex::new(0)))),
         escalating(u32::MAX),
         Arc::new(NoopDispatcher),
         Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),

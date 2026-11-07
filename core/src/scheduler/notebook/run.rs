@@ -384,3 +384,6 @@ fn clamp(detail: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod refusal_tests;

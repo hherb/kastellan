@@ -30,6 +30,7 @@ kastellan-sandbox    = { path = "../sandbox" }
 # this crate via `[dev-dependencies]`, so the resulting cycle is dev-only and
 # Cargo permits it (the normal build graph stays acyclic: tests-common → core).
 kastellan-core       = { path = "../core" }
+kastellan-llm-router = { path = "../llm-router" }
 # `signal_death.rs` (#547): the three `python_exec_*_e2e` containment tests
 # assert on the #539 signal-death RPC error, which needs `ClientError`/`codes`
 # from the protocol crate and the zero-stdout predicate from the worker prelude

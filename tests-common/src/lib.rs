@@ -110,6 +110,7 @@ pub mod provisioning;
 pub mod require;
 pub mod sandbox;
 pub mod scripted_llm;
+pub mod scripted_notebook;
 pub mod serial;
 pub mod signal_death;
 pub mod skip;
