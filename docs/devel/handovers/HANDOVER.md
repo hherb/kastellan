@@ -12,7 +12,7 @@
 > (#980's session and its 378–384 measure in full); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-07 (#987: one shared LISTEN for a session's follows) ·
+**Last updated:** 2026-11-07 (root README brought up to date; before it #987: one shared LISTEN for a session's follows) ·
 **Recent PRs, newest first:** [#990](https://github.com/hherb/kastellan/pull/990) (#987), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
@@ -46,7 +46,14 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-07, latest): #987 — one shared LISTEN connection
+### This session (2026-11-07, latest): root `README.md` brought up to date (docs only)
+
+- Status/Layout/Setup now cover the Inbox, the guard tier, the notebook planner + sift, `ask`/`session`/`tasks`/`inbox`,
+  email-channel MITM, `build-release.sh` as the only release build, the Matrix install flags, `upgrade_from_git.sh`,
+  Firecracker setup and the gate script. No code changed; no ROADMAP line (docs-only). ⚠️ The README restates facts
+  from the user manual's chapter 4 — change both together.
+
+### Previous (2026-11-07): #987 — one shared LISTEN connection
 
 - `session/follow.rs` `Listener`: one `PgListener` per process (session **and** `ask`), broadcasting the task id of each
   NOTIFY (`woken_task`, pure); each follow subscribes **before it is spawned** and keeps its own poll tick. A dropped
