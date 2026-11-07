@@ -137,7 +137,7 @@ async fn ask_async(
     use serde_json::Value;
     use tokio::signal::unix::{signal, SignalKind};
 
-    use crate::session::follow::follow;
+    use crate::session::follow::{follow, Listener};
 
     let spec = match resolve_connect_spec() {
         Ok(s) => s,
@@ -146,6 +146,11 @@ async fn ask_async(
     let pool = match connect_runtime_pool(&spec).await {
         Ok(p) => p,
         Err(e) => { eprintln!("ask: db connect failed: {e}"); return ExitCode::from(1); }
+    };
+    // Before the submit, so a database that refuses it creates no task.
+    let listener = match Listener::connect(&pool).await {
+        Ok(l) => l,
+        Err(e) => { eprintln!("ask: {e}"); return ExitCode::from(1); }
     };
 
     let (payload, _suppressed) = submission_payload(&instruction, floor);
@@ -179,9 +184,10 @@ async fn ask_async(
     let start_follow = |after_seq: i64, delay: Duration| {
         let (tx, rx) = tokio::sync::mpsc::channel::<Value>(64);
         let pool = pool.clone();
+        let wakes = listener.subscribe();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            follow(pool, id, after_seq, Duration::ZERO, tx).await;
+            follow(pool, wakes, id, after_seq, Duration::ZERO, tx).await;
         });
         rx
     };

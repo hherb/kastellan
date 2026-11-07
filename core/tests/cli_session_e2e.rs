@@ -8,16 +8,17 @@
 //!
 //! 1. Submit/status/cancel, and the errors a client can make (a garbage
 //!    line, an unknown method, bad params) — none of which ends the session.
-//! 2. A follow sends the backlog, then each new entry as it lands (including
-//!    a correction made over the same session while the follow runs), then
-//!    `task.finished` with the answer; a second follow from `after_seq`
-//!    sends only what came after.
+//! 2. A follow sends the backlog, then each new entry as it lands, woken by
+//!    its NOTIFY rather than the poll tick (including a correction made over
+//!    the same session while the follow runs), then `task.finished` with the
+//!    answer; a second follow from `after_seq` sends only what came after.
 //! 3. A follow of a task that parks on an operator ask says so, and the
 //!    inbox methods list and answer the ask.
 //! 4. A follow of a cancelled task waits for the planner's `cancelled`
 //!    entry before it finishes.
-//! 5. The follow cap, an over-cap line, and a dropped session leaving its
-//!    tasks alone.
+//! 5. The follow cap and the one LISTEN connection all follows share
+//!    (#987), an over-cap line, and a dropped session leaving its tasks
+//!    alone.
 //! 6. A second parking is announced again; a follow whose reads fail says
 //!    which `seq` it got to; submit and cancel report a lost audit row and
 //!    a suppressed floor (#988).
@@ -107,9 +108,14 @@ async fn a_follow_streams_the_backlog_then_live_entries_then_the_finish() {
     assert_eq!(s.ok("task.follow", json!({"task_id": task_id})), json!({"task_id": task_id, "after_seq": 0}));
     assert_entry(&s.next(), task_id, 1, "steps");
 
-    // An entry the planner writes now reaches the client unasked.
+    // An entry the planner writes now reaches the client unasked, woken by
+    // its NOTIFY: the follow just read, so its next poll tick is ~3 s away,
+    // and a dead wake-up path (the shared listener, #987) would wait for it.
+    let appended = std::time::Instant::now();
     notebook::append(&pool, task_id, EntryKind::Tick, tick_payload()).await.unwrap();
     assert_entry(&s.next(), task_id, 2, "tick");
+    let waited = appended.elapsed();
+    assert!(waited < Duration::from_millis(2000), "the NOTIFY woke the follow, not the poll tick: {waited:?}");
 
     // A correction over the same session while the follow runs: its
     // response, then (from the follow) the entry it became.
@@ -362,11 +368,20 @@ async fn follows_are_capped_and_a_dropped_session_leaves_its_tasks_alone() {
     let Some((pool, cluster)) = bring_up_pg("cap").await else { return };
     let task_id = insert_pending(&pool, Lane::Fast, json!({"instruction": "x"})).await.expect("insert");
     let mut s = Session::start(&cluster);
-    // A pending task's follow sends nothing, so each stays live.
-    for _ in 0..8 {
+    // A pending task's follow sends nothing, so each stays live. 64 is more
+    // than the pool's 16 connections: before #987 each follow held one for
+    // its LISTEN, and the 17th starved the session.
+    for _ in 0..64 {
         s.ok("task.follow", json!({"task_id": task_id}));
     }
-    assert_eq!(s.error_code("task.follow", json!({"task_id": task_id})), -32002, "the ninth is refused");
+    assert_eq!(s.error_code("task.follow", json!({"task_id": task_id})), -32002, "the 65th is refused");
+    s.ok("task.status", json!({"task_id": task_id})); // the pool still serves a request
+    let admin = kastellan_db::pool::connect_admin_pool(&cluster.conn_spec).await.expect("admin pool");
+    let listening: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE query LIKE 'LISTEN%'")
+        .fetch_one(&admin)
+        .await
+        .expect("count listeners");
+    assert_eq!(listening, 1, "every follow shares the session's one LISTEN connection (#987)");
 
     // An over-cap line: answered -32600, then the session ends, follows and all.
     let mut big = vec![b'a'; kastellan_protocol::MAX_RECORD_BYTES + 1];

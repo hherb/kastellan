@@ -26,7 +26,9 @@
 //! writes later is in `task.status`.
 //!
 //! The NOTIFYs (`task_notebook`, `tasks_completed`) only make it prompt; the
-//! poll tick is what makes it correct. `PgListener` drops notifications
+//! poll tick is what makes it correct. One [`Listener`] per process receives
+//! them for every follow (#987), so following many tasks costs one
+//! connection, not one each. `PgListener` drops notifications
 //! while it reconnects, and nothing notifies a task parking in
 //! `awaiting_operator` (`running -> awaiting_operator` fires neither
 //! `tasks_completed` nor `tasks_resumed`), so a follow that trusted the
@@ -42,6 +44,7 @@ use kastellan_db::tasks::{self, reply_claim::REPLIED_STATES, Task};
 use serde_json::{json, Value};
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::mpsc::Sender;
 
 use crate::ask::SUSPEND_POLL_SECS;
@@ -106,24 +109,89 @@ pub(super) fn finished_notification(t: &Task) -> Value {
     )
 }
 
-/// Whether a NOTIFY on `channel` with `payload` concerns `task_id`. The
+/// The task a NOTIFY on `channel` with `payload` concerns, if any. The
 /// notebook's payload is `"<task_id>:<seq>"` (0028), the completion's the
 /// bare id (0005).
-pub(super) fn wakes(channel: &str, payload: &str, task_id: i64) -> bool {
-    let id = task_id.to_string();
+pub(super) fn woken_task(channel: &str, payload: &str) -> Option<i64> {
     match channel {
-        notebook::NOTIFY_CHANNEL => payload.split_once(':').is_some_and(|(t, _)| t == id),
-        COMPLETED_CHANNEL => payload == id,
-        _ => false,
+        notebook::NOTIFY_CHANNEL => payload.split_once(':')?.0.parse().ok(),
+        COMPLETED_CHANNEL => payload.parse().ok(),
+        _ => None,
+    }
+}
+
+/// How many wake-ups may queue for one follow. A follow that falls further
+/// behind re-reads its task, which is all a wake-up asks of it anyway.
+const WAKE_QUEUE: usize = 64;
+
+/// The one `LISTEN` connection every follow in this process shares (#987).
+/// A background task receives each NOTIFY and broadcasts the id of the task
+/// it concerns; each follow keeps the ids of its own task. Dropping the
+/// `Listener` stops that task and frees the connection.
+pub(crate) struct Listener {
+    wakes: broadcast::Sender<i64>,
+    pump: tokio::task::JoinHandle<()>,
+}
+
+impl Listener {
+    /// Connect and `LISTEN` on both channels. Call it before a follow's
+    /// first read (and [`Listener::subscribe`] before spawning the follow),
+    /// so a NOTIFY landing in between is not missed.
+    pub(crate) async fn connect(pool: &PgPool) -> Result<Self, String> {
+        let mut listener = PgListener::connect_with(pool).await.map_err(|e| format!("listener connect: {e}"))?;
+        listener
+            .listen_all([notebook::NOTIFY_CHANNEL, COMPLETED_CHANNEL])
+            .await
+            .map_err(|e| format!("listen: {e}"))?;
+        let (wakes, _) = broadcast::channel(WAKE_QUEUE);
+        let tx = wakes.clone();
+        let pump = tokio::spawn(async move {
+            loop {
+                match listener.recv().await {
+                    // No follow subscribed is not an error: nobody to wake.
+                    Ok(n) => {
+                        if let Some(id) = woken_task(n.channel(), n.payload()) {
+                            let _ = tx.send(id);
+                        }
+                    }
+                    // `recv` reconnects (and re-LISTENs) on its next call; the
+                    // NOTIFYs sent meanwhile are lost, which every follow's
+                    // poll tick covers. The wait keeps a database that is down
+                    // from being retried in a hot loop.
+                    Err(_) => tokio::time::sleep(Duration::from_secs(SUSPEND_POLL_SECS)).await,
+                }
+            }
+        });
+        Ok(Self { wakes, pump })
+    }
+
+    /// A receiver of every wake-up from now on, for one follow.
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<i64> {
+        self.wakes.subscribe()
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.pump.abort();
     }
 }
 
 /// Follow `task_id` from `after_seq`, sending to `out` until the task ends,
-/// the follow fails, or the client is gone (`out` closed). A cancelled task
-/// waits at most `cancel_grace` for its planner's `cancelled` entry.
-pub(crate) async fn follow(pool: PgPool, task_id: i64, after_seq: i64, cancel_grace: Duration, out: Sender<Value>) {
+/// the follow fails, or the client is gone (`out` closed). `wakes` is this
+/// follow's [`Listener::subscribe`], taken before it was spawned. A
+/// cancelled task waits at most `cancel_grace` for its planner's
+/// `cancelled` entry.
+pub(crate) async fn follow(
+    pool: PgPool,
+    wakes: broadcast::Receiver<i64>,
+    task_id: i64,
+    after_seq: i64,
+    cancel_grace: Duration,
+    out: Sender<Value>,
+) {
     let mut last_seq = after_seq;
-    if let Err(error) = follow_inner(&pool, task_id, &mut last_seq, cancel_grace, &out).await {
+    if let Err(error) = follow_inner(&pool, wakes, task_id, &mut last_seq, cancel_grace, &out).await {
         let params = json!({"task_id": task_id, "last_seq": last_seq, "error": error});
         let _ = out.send(notification("task.follow_failed", params)).await;
     }
@@ -133,17 +201,12 @@ pub(crate) async fn follow(pool: PgPool, task_id: i64, after_seq: i64, cancel_gr
 /// the client left, so there is no one to tell.
 async fn follow_inner(
     pool: &PgPool,
+    mut wakes: broadcast::Receiver<i64>,
     task_id: i64,
     last_seq: &mut i64,
     cancel_grace: Duration,
     out: &Sender<Value>,
 ) -> Result<(), String> {
-    // LISTEN before the first read, so nothing landing in between is missed.
-    let mut listener = PgListener::connect_with(pool).await.map_err(|e| format!("listener connect: {e}"))?;
-    listener
-        .listen_all([notebook::NOTIFY_CHANNEL, COMPLETED_CHANNEL])
-        .await
-        .map_err(|e| format!("listen: {e}"))?;
     let mut tick = tokio::time::interval(Duration::from_secs(SUSPEND_POLL_SECS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut parked = false;
@@ -179,12 +242,15 @@ async fn follow_inner(
         // Sleep until something about this task, or the tick.
         loop {
             tokio::select! {
-                n = listener.recv() => {
-                    let n = n.map_err(|e| format!("listener: {e}"))?;
-                    if wakes(n.channel(), n.payload(), task_id) { break; }
-                }
+                w = wakes.recv() => match w {
+                    Ok(id) if id == task_id => break,
+                    Ok(_) => {}
+                    // Fell behind: a missed wake-up may have been this task's.
+                    Err(RecvError::Lagged(_)) => break,
+                    Err(RecvError::Closed) => return Err("the listener stopped".into()),
+                },
                 _ = tick.tick() => break,
-                // The client left: stop holding a listener connection for it.
+                // The client left: stop polling for it.
                 _ = out.closed() => return Ok(()),
             }
         }
@@ -215,18 +281,20 @@ mod tests {
     }
 
     #[test]
-    fn a_notebook_notify_wakes_only_its_own_task() {
-        assert!(wakes("task_notebook", "9:3", 9));
-        assert!(!wakes("task_notebook", "19:3", 9), "a prefix of another id is not this task");
-        assert!(!wakes("task_notebook", "99:9", 9));
-        assert!(!wakes("task_notebook", "9", 9), "a payload without its seq is not 0028's");
+    fn a_notebook_notify_names_its_task() {
+        assert_eq!(woken_task("task_notebook", "9:3"), Some(9));
+        assert_eq!(woken_task("task_notebook", "19:3"), Some(19), "the id is the part before the colon");
+        assert_eq!(woken_task("task_notebook", "99:9"), Some(99));
+        assert_eq!(woken_task("task_notebook", "9"), None, "a payload without its seq is not 0028's");
+        assert_eq!(woken_task("task_notebook", "x:3"), None);
     }
 
     #[test]
-    fn a_completion_notify_wakes_only_its_own_task() {
-        assert!(wakes("tasks_completed", "9", 9));
-        assert!(!wakes("tasks_completed", "90", 9));
-        assert!(!wakes("tasks_resumed", "9", 9), "another channel never wakes a follow");
+    fn a_completion_notify_names_its_task() {
+        assert_eq!(woken_task("tasks_completed", "9"), Some(9));
+        assert_eq!(woken_task("tasks_completed", "90"), Some(90));
+        assert_eq!(woken_task("tasks_completed", "9:3"), None, "a completion's payload is the bare id");
+        assert_eq!(woken_task("tasks_resumed", "9"), None, "another channel never wakes a follow");
     }
 
     #[test]
