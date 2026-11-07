@@ -12,8 +12,8 @@
 > (#980's session and its 378–384 measure in full); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-07 (#985 + #988: `ask` prints entries, session reports lost audit rows) ·
-**Recent PRs, newest first:** [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-07 (#987: one shared LISTEN for a session's follows) ·
+**Recent PRs, newest first:** [#990](https://github.com/hherb/kastellan/pull/990) (#987), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs #989's tree before its review round (deployed from its branch with `~/deploy-branch.sh` 2026-11-07, both env files identical after install, `NRestarts=0`, Matrix up, live `ask` task 385 printed its plan/step lines; it includes #983 and #986) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
@@ -46,46 +46,39 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-07, latest): #985 + #988 (PR #989)
+### This session (2026-11-07, latest): #987 — one shared LISTEN connection
 
-- **`ask` prints one stderr line per notebook entry** (`ask/progress.rs` `entry_line`, pure; control chars blanked,
-  160-char cap; `answer`/`cancelled` print nothing). `ask`'s own LISTEN/poll loop is gone: it spawns the session's
-  `follow()` (now `pub(crate)`) and prints what it sends. The `submitted task N` and `waiting for an operator
-  decision` lines bottie parses are unchanged.
-- **#988:** `submit_and_audit` → `Submitted { id, audited }`; `CancelOutcome::Cancelled { task, audited }`;
-  `task.submit` → `{task_id, lane, audited, floor_suppressed}`, `task.cancel` → `{state, audited}`. Tests:
-  `follow_failed`'s `last_seq` (rename `tasks` as admin mid-follow), a second parking, lost audit rows (rename
-  `audit_log`) + suppressed floor; new `cli_ask_follow_e2e` (in the `pg` profile). The session harness moved to
-  `cli_session_e2e/support.rs`, unchanged but for `pub` and a module doc. Mutation-checked **7 of 7**. ⚠️ A test that `claim_one`s must not
-  leave an older task pending: it claimed the wrong one in the full sweep (fixed).
-- **Review round (4 reviewers).** `ask` took over policies `follow` has for a session client that can resume. Fixes:
-  - **A failed follow is resumed** from its `last_seq`, up to 5 times in a row, 3 s apart. Only after that does `ask`
-    exit 1 with `lost track of task N: …; it may still be running: …` (before the fix, one DB blip ended `ask`).
-  - `follow` takes a `cancel_grace`: the session passes 120 s and `ask` passes zero, so a task someone else cancelled
-    ends `ask` at once.
-  - SIGINT is caught by a unix `signal()` installed before the submit, so there is no window in which Ctrl-C kills
-    `ask` and leaves the task running. Ctrl-C now says what the cancel actually did (cancelled / had already ended /
-    cancel failed).
-  - `progress::clean` also blanks bidi and zero-width characters, and a plan lists at most 8 steps.
-  - New e2es: parked (exit 0 + the line), resumed follow, give-up, Ctrl-C (exit 130), cancel from elsewhere. A
-    `BEFORE INSERT` trigger now pins the finalize and `ask.cancelled` `audited` flags, which the PR had called
-    untestable. `cli_{submit,cancel}_audit_e2e` joined the `pg` profile (118 tests, 0 `[SKIP]`).
-  - 6 new mutants, all killed.
-  - ⚠️ **bottie matches the parking marker by substring**, so a progress line carrying the phrase can pass for it.
-    That is [hherb/bottie#242](https://github.com/hherb/bottie/issues/242); kastellan pins that no note starts
-    `ask: task `.
+- `session/follow.rs` `Listener`: one `PgListener` per process (session **and** `ask`), broadcasting the task id of each
+  NOTIFY (`woken_task`, pure); each follow subscribes **before it is spawned** and keeps its own poll tick. A dropped
+  listener connection reconnects inside `recv` and the follows poll on — it no longer fails them. `MAX_FOLLOWS` 8 → **64**
+  (bounds poll load now). The cap e2e runs 64 follows + checks **one** `LISTEN` in `pg_stat_activity`; the streaming e2e
+  pins NOTIFY promptness (without it every follow test passes on the 3 s tick). 2 of 2 mutants killed.
+  Two follows of one task still each send every entry (documented, not refused).
+- Review round (`/finalcheck`): the pump says on stderr when the listener fails and when it recovers (an `Err` sqlx keeps
+  the connection through can repeat for good — follows fall back to the tick); the wake decision is a pure `on_wake`
+  (unit-tested: own id, other id, lag, closed); a follow's interval first ticks one period out (the immediate tick
+  re-read for nothing and could pick up an entry with no NOTIFY), so the e2es now assert arrival **before the follow's
+  first possible tick** — exact under any host load — for an entry **and** the `tasks_completed` finish; a new e2e kills
+  the listener's backend (`pg_terminate_backend`) and sees it re-LISTEN and wake a follow (sqlx reconnects inside `recv`).
+
+### Previous (2026-11-07): #985 + #988 (PR #989, merged) — what still binds
+
+- `ask` prints one stderr line per entry (`ask/progress.rs`, pure) by running the session's `follow()`; the `submitted
+  task N` / `waiting for an operator decision` lines bottie parses are unchanged. A failed follow is resumed up to 5×,
+  3 s apart; `ask` passes zero `cancel_grace`; SIGINT is a unix `signal()` installed **before** the submit.
+- `audited` on `task.submit`/`task.cancel`, `floor_suppressed` on submit (#988). A `BEFORE INSERT` trigger pins the
+  finalize / `ask.cancelled` `audited` flags. ⚠️ A test that `claim_one`s must not leave an older task pending.
+- ⚠️ **bottie matches the parking marker by substring** ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242));
+  kastellan pins that no note starts `ask: task `.
 
 ### Previous (2026-11-06): #922 slice 2 — `kastellan-cli session` (PR #986, merged)
 
 - `session.rs` (+ `session/{params,methods,follow}.rs`): JSON-RPC 2.0 on stdin/stdout, no listener; method table in the
   module doc. ⚠️ **A follow reads state BEFORE entries; its 3 s poll tick, not the NOTIFYs, makes it correct**; a
-  dropped session cancels nothing; follows capped at 8 (one shared listener: #987). ⚠️ **`kastellan-cli` installs a
+  dropped session cancels nothing; follows capped at 64, one shared listener (#987). ⚠️ **`kastellan-cli` installs a
   warn-level stderr tracing subscriber** — PG e2es fail instead of skipping once PG is up.
 
-### Previous (2026-11-06): #965 items 4, 6, 7 — tests only (PR #984, merged)
-
-- ⚠️ A sift read's allowlist key is `read_key(tool, method)`: `web-fetch` + `web.fetch` is **`web-fetch.web.fetch`**.
-  Left: the `chain_distinct` → `totals` pass-through at `sift/run.rs:230` is untested. #965 is done.
+### Previous (2026-11-06): #965 items 4, 6, 7 (PR #984, merged) — ⚠️ a sift read's allowlist key is `read_key(tool, method)` (**`web-fetch.web.fetch`**); the `chain_distinct` → `totals` pass-through (`sift/run.rs:230`) is untested.
 
 ### Previous (2026-11-05 → 06): #981 (PR #983), #980 (PR #982, deployed DGX, measured 378–384: 7/7), manuals (PR #975), #974 — what still binds (prose: the `983`/`981`/`980` snapshots)
 
@@ -113,8 +106,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   `~/.local/share/kastellan/prompts/`, restart core, check `agent_prompts`. ⚠️ A table naming an **earlier turn's**
   chain is not expanded (#956). `~/q960.sh <from> <to>` and `~/deploy-branch.sh` are on the DGX.
 
-### Previous (2026-11-02): #941 + the task notebook, slice 1 (PR #951, merged, deployed DGX 2026-11-03) — what still binds
-
+### Previous (2026-11-02): #941 + the task notebook, slice 1 (PR #951, merged, deployed DGX 2026-11-03)
 - `max_tokens` 16384 + a call timeout on every planner call (#941); `KASTELLAN_PLANNER_MODE=classic|notebook`; migration
   **0028** (⚠️ **applied on the DGX: never edit it**). ⚠️ Any key added to the render must be accepted in the reply.
 
@@ -260,10 +252,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **#922: review + merge PR #989; slice 3 is [hherb/bottie#236](https://github.com/hherb/bottie/pull/236)** (one
-   `kastellan-cli session` per request, live progress, Stop, Correct; worktree `~/src/bottie-wt-session` off bottie
-   `main`). Live round trip to the DGX passed (task 386); **not yet clicked through in the running app** — do that
-   before merging. Next: slice 4 (notebook default, classic retires). #987 (one shared LISTEN) is small.
+1. **#922: review + merge PR #990 (#987), then slice 4** (notebook becomes the default, classic retires; #940 folds in).
+   Slice 3 ([hherb/bottie#236](https://github.com/hherb/bottie/pull/236)) and PR #989 are merged. bottie's substring
+   match on the parking line is [hherb/bottie#242](https://github.com/hherb/bottie/issues/242).
    #983/#986 are on the DGX (in #989's tree); one re-measure is optional. #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
    **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to
@@ -396,7 +387,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#989) | `feat/985-ask-follow` over `f0ed81fd`, worktree `~/src/kastellan-wt-985` (own `target/`) | **5546 / 1 / 52**, **202** summaries; the 1 was #989's own new test (`claim_one` took a leftover pending task), fixed and re-run green ×3 under `KASTELLAN_PG_REQUIRE_E2E=1`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-985.log`. vs #986's row (5527 + 9 review): +11 — bin +8 (`progress` 7, `submission_payload` 1), `cli_session_e2e` +2, new `cli_ask_follow_e2e` +1 | **cold**, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-985`, 27 `Checking kastellan`, clean | **26** (23 + 3 gliner: no `.venv` in a fresh worktree) |
+| **Mac** (#987) | `feat/987-shared-listen` over `942ae4b2`, worktree `~/src/kastellan-wt-985` (own `target/`) | **5559 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-990-finalcheck.log`. vs #989's row (5546 passed): +13 — +11 is #989's review round (`cli_ask_follow_e2e` 1 → 6, `cli_session_e2e` 6 → 8, bin 126 → 130), +2 this PR's review round (`on_wake` unit test, the listener-reconnect e2e) | warm, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-985`, clean | **26** (23 + 3 gliner: no `.venv` in a fresh worktree) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
@@ -481,6 +472,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#989** (#985, #988) — merged 2026-11-07: `ask` prints notebook entries and resumes a lost follow; session reports lost audit rows. **bottie#236** (slice 3) merged 2026-11-07.
 - **#986** (#922 slice 2) — merged 2026-11-06, deployed DGX 2026-11-07 (in #989's tree): `kastellan-cli session`, JSON-RPC over stdio/ssh.
 - **#984 / #983** (#965 items 4/6/7; #981, #970) — merged 2026-11-06, deployed DGX 2026-11-07 (in #989's tree): tests only (#965 done); a table ref to no sift this conversation ran is shown back.
 - **#982** (#980) — merged 2026-11-06, deployed DGX, measured 378–384 (log #17, 7/7): a call without its `call` wrapper is read as `call`. **#975** (manuals): both manuals up to date, dev chapters 15/16.
