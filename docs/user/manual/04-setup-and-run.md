@@ -302,10 +302,10 @@ Two settings worth knowing about from the start:
 
 - `KASTELLAN_TIMEZONE=Europe/Berlin` (any IANA zone name) — the time zone the
   agent uses for "today"; unset means the machine's own.
-- `KASTELLAN_PLANNER_MODE=classic` or `notebook` — how the agent works
-  through a task. `classic` (the default) keeps one growing plan; `notebook`
-  has the agent write its own step list, work one step per turn and keep
-  notes as it goes, which keeps long tasks manageable. Any other value stops
+- `KASTELLAN_PLANNER_MODE=notebook` or `classic` — how the agent works
+  through a task. `notebook` (the default) has the agent write its own step
+  list, work one step per turn and keep notes as it goes, which keeps long
+  tasks manageable; `classic` keeps one growing plan. Any other value stops
   the daemon at startup, naming the setting.
 
 The complete reference, including the exact file grammar, is
@@ -433,8 +433,8 @@ stdin and answers on stdout, locally or as `ssh <host> kastellan-cli session`:
 submit a task, follow its notebook live as the steps tick off, correct or
 cancel it, check its status, and answer its questions from the inbox. The live
 notebook and corrections need the notebook planner (as for `tasks correct`
-above); under the default classic planner a follow only reports how the task
-ended. Closing
+above); under `KASTELLAN_PLANNER_MODE=classic` a follow only reports how the
+task ended. Closing
 the session does not stop the tasks it started. The methods and messages are
 listed at the top of `core/src/bin/kastellan-cli/session.rs`.
 
@@ -706,6 +706,11 @@ repository root **with the same flags as before** — including the two
 `--matrix-…` flags, or the chat channel is switched off. Re-running install is
 a clean upgrade: it stops the services, swaps in the new programs, and starts
 them again.
+
+**Planner mode.** Since #922 slice 4a an unset `KASTELLAN_PLANNER_MODE` means
+`notebook`, so an install that never set it switches loops on its next upgrade.
+To keep the older loop, put `KASTELLAN_PLANNER_MODE=classic` in
+`kastellan.env.local` before upgrading.
 
 ---
 

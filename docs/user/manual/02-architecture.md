@@ -384,10 +384,10 @@ email does not yet carry conversation history from one message to the next.
 The planning loop can work in one of two styles, chosen with one setting
 for the whole agent:
 
-- **Classic** (the default). The AI model sees the whole history of the
+- **Classic** (older, opt-in). The AI model sees the whole history of the
   task so far each time it decides the next move. Simple, but on long
   tasks that history grows large and slow, and the model can lose track.
-- **Notebook** (opt-in, newer). The model writes its own **step list** at
+- **Notebook** (the default). The model writes its own **step list** at
   the start, works through **one step at a time**, and ticks each one off
   with a short note and any **findings** — facts together with where they
   came from. Each turn it reads only what that turn needs, so a long task
@@ -407,8 +407,9 @@ lists what was actually found, not what the model remembers finding.
 Either way, nothing about safety changes: every step in both styles goes
 through the same CASSANDRA review, the same allowlists and the same
 sandboxes, and notes the model writes to itself are screened like any
-other text. Notebook mode is still being tuned on real questions, which is
-why classic remains the default.
+other text. Notebook mode answered all seven of the project's test
+questions, so it became the default; classic stays available until it is
+retired.
 
 ---
 

@@ -65,10 +65,10 @@ version 0.2.0, 27 crates):
   dispatcher chokepoint → sandboxed step, with audit rows at every
   transition and crash recovery. Channel tasks carry **conversational
   continuity**: a follow-up in the same conversation sees the last few turns.
-  A second planner loop, the **task notebook** (the model keeps its own step
-  list and findings, plus a `sift` step for going through long lists), is
-  shipped but **opt-in** (`KASTELLAN_PLANNER_MODE=notebook`; the default is
-  `classic`).
+  The **default** planner loop is the **task notebook** (the model keeps its
+  own step list and findings, plus a `sift` step for going through long
+  lists); the older `classic` loop is opt-in
+  (`KASTELLAN_PLANNER_MODE=classic`) until it retires.
 - **CASSANDRA.** Constitutional and deterministic data-classification stages,
   a per-tool worker-output prompt-injection guard, and an **escalation path**:
   a step that needs a human is asked of the operator (in their Matrix room,

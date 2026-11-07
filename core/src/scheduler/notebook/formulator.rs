@@ -38,13 +38,14 @@ pub enum PlannerMode {
     Notebook,
 }
 
-/// Read `KASTELLAN_PLANNER_MODE`. Unset, empty or `classic` → classic;
-/// `notebook` → notebook; anything else is an error naming the key, so the
+/// Read `KASTELLAN_PLANNER_MODE`. Unset, empty or `notebook` → notebook (the
+/// default since #922 slice 4); `classic` → classic, kept opt-in until the
+/// classic loop retires; anything else is an error naming the key, so the
 /// daemon refuses to start rather than guess which loop was meant.
 pub fn planner_mode(value: Option<&str>) -> Result<PlannerMode, String> {
     match value.map(str::trim) {
-        None | Some("") | Some("classic") => Ok(PlannerMode::Classic),
-        Some("notebook") => Ok(PlannerMode::Notebook),
+        None | Some("") | Some("notebook") => Ok(PlannerMode::Notebook),
+        Some("classic") => Ok(PlannerMode::Classic),
         Some(other) => Err(format!(
             "KASTELLAN_PLANNER_MODE={other:?} is not a planner mode (expected `classic` or `notebook`)"
         )),

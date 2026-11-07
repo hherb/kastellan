@@ -283,7 +283,7 @@ yourself. An installed daemon reads `~/.config/kastellan/kastellan.env`
 | `KASTELLAN_LLM_THINKING_SWITCH` | `chat_template_kwargs` | Set `reasoning_effort` on Ollama |
 | `KASTELLAN_LLM_TIMEOUT_MS` | `180000` | LLM request timeout |
 | `KASTELLAN_LLM_GUARD_URL` / `_MODEL` | (unset ⇒ guard tier off) | The optional guard-model endpoint |
-| `KASTELLAN_PLANNER_MODE` | `classic` | `notebook` opts into the task-notebook planner |
+| `KASTELLAN_PLANNER_MODE` | `notebook` | `classic` opts out, into the older planner loop (daemon e2es pin it via `DaemonSpec`) |
 | `KASTELLAN_PG_BIN_DIR` | (auto-detected) | Postgres `bin/` the **tests** use |
 | `KASTELLAN_STATE_DIR` | `~/.local/state/kastellan` | Audit JSONL mirror directory |
 | `KASTELLAN_PROMPTS_DIR` / `KASTELLAN_L0_RULES_FILE` | `prompts` / `seeds/memory/l0_meta_rules.toml` (relative to the working dir) | Where the daemon loads prompts and L0 seeds |

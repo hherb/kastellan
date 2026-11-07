@@ -178,7 +178,7 @@ async fn tasks_correct(args: &[String]) -> ExitCode {
             if seq == 1 {
                 eprintln!(
                     "warning: task {id} had no notebook entries yet — a daemon in classic mode \
-                     (KASTELLAN_PLANNER_MODE unset or classic) never reads this correction"
+                     (KASTELLAN_PLANNER_MODE=classic) never reads this correction"
                 );
             }
             if !audited {

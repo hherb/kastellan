@@ -30,9 +30,10 @@ fn the_reformat_directive_names_the_reason() {
 
 #[test]
 fn planner_mode_rejects_an_unknown_value() {
-    assert_eq!(planner_mode(None), Ok(PlannerMode::Classic));
-    assert_eq!(planner_mode(Some("")), Ok(PlannerMode::Classic));
-    assert_eq!(planner_mode(Some("classic")), Ok(PlannerMode::Classic));
+    // Since #922 slice 4 an unset or empty value is the notebook; classic is opt-in.
+    assert_eq!(planner_mode(None), Ok(PlannerMode::Notebook));
+    assert_eq!(planner_mode(Some("")), Ok(PlannerMode::Notebook));
+    assert_eq!(planner_mode(Some(" classic ")), Ok(PlannerMode::Classic));
     assert_eq!(planner_mode(Some(" notebook ")), Ok(PlannerMode::Notebook));
     let err = planner_mode(Some("Notebook")).unwrap_err();
     assert!(err.contains("KASTELLAN_PLANNER_MODE") && err.contains("\"Notebook\""), "{err}");

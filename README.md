@@ -164,7 +164,7 @@ force-routed by default. The Matrix channel is live end-to-end, and so is the
 operator Inbox, where CASSANDRA's "a human must decide" verdicts reach you. The
 gated inbound half of the email failover has shipped. python-exec runs with
 operator-approved, agent-authored skills. An optional model-based guard screens
-tool output. The planner has a second, notebook-style mode for long tasks. The
+tool output. The planner works from a per-task notebook by default. The
 project is a Rust workspace of 27 crates (v0.2.0 on crates.io) with real
 cross-platform sandboxing, including opt-in micro-VM backends on both OSes.
 
@@ -190,13 +190,13 @@ What works today:
 
   The thinking/reasoning switch is per backend (`KASTELLAN_LLM_THINKING_SWITCH`).
 - **Two planner modes** (`KASTELLAN_PLANNER_MODE`):
-  - `classic` (the default) keeps one growing plan.
-  - `notebook` is external working memory for the planner. The model writes its
-    own step list and works one step per turn. It ticks off each step with a
-    note and keeps *findings*: facts together with their source. It writes the
-    answer from those findings. A `sift` step runs its reads as one reviewed
-    plan into an append-only scrapbook, and answer tables are rendered by code,
-    not by the model.
+  - `notebook` (the default) is external working memory for the planner. The
+    model writes its own step list and works one step per turn. It ticks off
+    each step with a note and keeps *findings*: facts together with their
+    source. It writes the answer from those findings. A `sift` step runs its
+    reads as one reviewed plan into an append-only scrapbook, and answer
+    tables are rendered by code, not by the model.
+  - `classic` keeps one growing plan. It is opt-in until it retires.
 
   Channel conversations keep their continuity across turns.
 - **CASSANDRA oversight.** The constitutional and deterministic
@@ -290,7 +290,7 @@ Not built yet (see the roadmap):
 - **An LLM plan-review stage in CASSANDRA.** The constitutional and
   data-classification stages are deterministic rules; the guard model screens
   *content*, not plans.
-- **Notebook as the default planner mode**, retiring `classic`.
+- **Retiring the `classic` planner mode** (the notebook became the default in #922 slice 4).
 - **Good-netizen behaviour in the web workers** — rate limiting, backoff,
   `robots.txt` — required before any release.
 - **Context-window resets** from memory and the task list, and L4 session
@@ -457,7 +457,7 @@ installer and its values win. See
 Check health with `systemctl --user status kastellan.target` and
 `kastellan-cli secret list`.
 
-The overlay also holds the optional settings: `KASTELLAN_PLANNER_MODE=notebook`,
+The overlay also holds the optional settings: `KASTELLAN_PLANNER_MODE=classic`,
 `KASTELLAN_TIMEZONE`, and the guard model's `KASTELLAN_LLM_GUARD_*` keys. Set
 `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` as well and the next `install` adds a
 supervised `kastellan-guard` unit.

@@ -151,8 +151,9 @@ pub trait PlanFormulator: Send + Sync {
     }
 
     /// The notebook loop's door (#922), when this formulator runs in
-    /// notebook mode (`KASTELLAN_PLANNER_MODE=notebook`). `None`, the
-    /// default, runs the task on the classic loop.
+    /// notebook mode (the daemon's default since #922 slice 4). `None`
+    /// runs the task on the classic loop (`KASTELLAN_PLANNER_MODE=classic`,
+    /// and every formulator that does not override this).
     fn notebook(&self) -> Option<&dyn super::notebook::formulator::NotebookFormulator> {
         None
     }
