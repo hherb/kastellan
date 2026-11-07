@@ -14,7 +14,7 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -67,14 +67,17 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
 // ---------------------------------------------------------------------------
 
 /// A dispatcher that sleeps for a fixed delay before returning
-/// `StepOutcome::Ok`. Ignores `step.tool` and `step.method`.
+/// `StepOutcome::Ok`, recording which task each step was for. Ignores
+/// `step.tool` and `step.method`.
 struct SleepyDispatcher {
     delay: Duration,
+    task_ids: Arc<Mutex<Vec<i64>>>,
 }
 
 #[async_trait]
 impl StepDispatcher for SleepyDispatcher {
-    async fn dispatch_step(&self, _task_id: i64, _step: &PlannedStep) -> StepOutcome {
+    async fn dispatch_step(&self, task_id: i64, _step: &PlannedStep) -> StepOutcome {
+        self.task_ids.lock().unwrap().push(task_id);
         tokio::time::sleep(self.delay).await;
         StepOutcome::Ok(serde_json::json!("done"))
     }
@@ -109,8 +112,8 @@ fn sleep_then_answer(ctx: &TaskContext) -> String {
 // ---------------------------------------------------------------------------
 
 /// Two pending tasks (one per lane) must complete within 1.7 s when
-/// running concurrently. Each task has one ~1 s sleeping step, so the
-/// sequential time would be ~2 s+. Receiving both `tasks_completed`
+/// running concurrently. Each task has one 800 ms sleeping step, so the
+/// sequential time would be ≥ 1.6 s. Receiving both `tasks_completed`
 /// NOTIFYs within 1.7 s proves the two lane loops ran in parallel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_lanes_run_concurrently() {
@@ -146,14 +149,15 @@ async fn two_lanes_run_concurrently() {
     .unwrap();
 
     // Each task's script: one sleeping step, then an answer.
-    // The SleepyDispatcher will sleep ~1 s per step.
     let formulator = Arc::new(ScriptedNotebook::new(sleep_then_answer));
 
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
 
-    // ~1 s sleep per step; two tasks in parallel → both done ~1 s.
+    // 800 ms sleep per step; two tasks in parallel → both done in ~0.8 s.
+    let task_ids = Arc::new(Mutex::new(Vec::new()));
     let dispatcher = Arc::new(SleepyDispatcher {
         delay: Duration::from_millis(800),
+        task_ids: Arc::clone(&task_ids),
     });
 
     let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
@@ -208,6 +212,13 @@ async fn two_lanes_run_concurrently() {
         assert_eq!(state, "completed", "task {id}: {result:?}");
         assert_eq!(result.as_ref().and_then(|r| r["body"].as_str()), Some(body), "task {id}");
     }
+    // Each task slept its own step: a lane whose call was refused would still
+    // answer, and one 800 ms step alone beats the bound below serially.
+    let mut ran = task_ids.lock().unwrap().clone();
+    ran.sort_unstable();
+    let mut want = vec![id_fast, id_long];
+    want.sort_unstable();
+    assert_eq!(ran, want, "one dispatched step per task");
     assert!(elapsed >= Duration::from_millis(800), "a step slept: elapsed={elapsed:.2?}");
 
     // If serial: ≥1.6 s. If concurrent: ≈0.8 s. Allow 1.7 s headroom.

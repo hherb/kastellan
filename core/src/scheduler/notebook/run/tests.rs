@@ -85,6 +85,7 @@ async fn the_notebook_loop() {
     super::refusal_tests::a_refused_answer_ends_the_task_refused(&pool).await;
     super::refusal_tests::a_reviewer_constitutional_block_wins_over_a_refusal(&pool).await;
     super::refusal_tests::a_block_on_a_refused_answer_does_not_loop(&pool).await;
+    super::refusal_tests::an_answer_row_carries_refused_as_null(&pool).await;
 }
 
 async fn a_three_step_task_ticks_each_step_and_answers_from_findings(pool: &sqlx::PgPool) {

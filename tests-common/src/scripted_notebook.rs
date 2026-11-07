@@ -31,8 +31,11 @@ type Pick = dyn Fn(&TaskContext) -> String + Send + Sync;
 ///
 /// It thinks by default (`thinks_by_default` is `true`), so an answer is the
 /// task's answer as written — no thinking rewrite turn to script around.
+/// [`Self::not_thinking`] is the router's default backend instead: an answer
+/// on a routine turn is discarded and written again on a thinking turn.
 pub struct ScriptedNotebook {
     pick: Box<Pick>,
+    thinks: bool,
     /// The rendered user message of every turn, oldest first.
     pub messages: Mutex<Vec<String>>,
 }
@@ -40,7 +43,13 @@ pub struct ScriptedNotebook {
 impl ScriptedNotebook {
     /// Each turn replies `pick(ctx)`.
     pub fn new(pick: impl Fn(&TaskContext) -> String + Send + Sync + 'static) -> Self {
-        Self { pick: Box::new(pick), messages: Mutex::new(Vec::new()) }
+        Self { pick: Box::new(pick), thinks: true, messages: Mutex::new(Vec::new()) }
+    }
+
+    /// As a backend that does not think by default (`disable_thinking`).
+    pub fn not_thinking(mut self) -> Self {
+        self.thinks = false;
+        self
     }
 
     /// The rendered user message of every turn so far.
@@ -60,6 +69,10 @@ impl NotebookFormulator for ScriptedNotebook {
     ) -> Result<(String, FormulationMeta), AgentError> {
         self.messages.lock().unwrap().push(user_msg(None));
         Ok(((self.pick)(ctx), notebook_meta()))
+    }
+
+    fn thinks_by_default(&self) -> bool {
+        self.thinks
     }
 }
 

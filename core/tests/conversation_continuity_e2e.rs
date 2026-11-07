@@ -14,8 +14,7 @@
 //! supervisor; export `KASTELLAN_PG_BIN_DIR` to run it live on a Mac.
 //! `cargo test -- --nocapture` to see the skips.
 //!
-//! Bring-up recipe copied from `core/tests/scheduler_lanes_e2e.rs`, which is
-//! the existing per-task-scripted-formulator harness.
+//! Bring-up recipe copied from `core/tests/scheduler_lanes_e2e.rs`.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -87,9 +86,12 @@ impl Capturing {
         let nb = ScriptedNotebook::new(move |ctx: &TaskContext| {
             s.lock().unwrap().entry(ctx.task_id).or_insert_with(|| ctx.conversation.clone());
             f.lock().unwrap().insert(ctx.task_id, ctx.classification_floor);
-            let replies = scripts.get(&ctx.task_id).unwrap_or_else(|| panic!("no script for task {}", ctx.task_id));
-            // Past the script: a reply the loop cannot use, so the task fails loudly.
-            replies.get(ctx.plans.len()).cloned().unwrap_or_else(|| "out of script".into())
+            // Past (or without) a script: a reply the loop cannot use, so the
+            // task fails with it, rather than panicking inside the lane.
+            scripts
+                .get(&ctx.task_id)
+                .and_then(|r| r.get(ctx.plans.len()).cloned())
+                .unwrap_or_else(|| format!("out of script for task {}", ctx.task_id))
         });
         Self { nb: Arc::new(nb), seen, floor_seen }
     }

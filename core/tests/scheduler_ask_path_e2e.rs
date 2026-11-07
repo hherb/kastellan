@@ -149,8 +149,8 @@ impl StepDispatcher for NoopDispatcher {
 }
 
 // The model is a [`ScriptedNotebook`] (#993: this suite ran on the classic
-// loop until it moved to the notebook, the default planner). Each formulator
-// below is a closure choosing that turn's notebook reply.
+// loop until it moved to the notebook, the default planner). Each helper
+// below builds the closure that picks that turn's notebook reply.
 
 /// The step every call in this file makes: `sleep.doit` with `{"n": n}`.
 /// `parameters` is one of the fields `plan_digest` INCLUDES, so two calls
@@ -252,7 +252,7 @@ fn spawn_with(
     )
 }
 
-/// Returns the same terminal plan on every call.
+/// Answers "ok" on every turn (the same answer plan, so the same digest).
 fn spawn_test_scheduler(pool: &sqlx::PgPool, review: Arc<ChainReviewStage>) -> SchedulerHandle {
     spawn_with(
         pool,
@@ -297,24 +297,26 @@ fn spawn_test_scheduler_per_run_index(
 }
 
 /// Spawn with a history-recording formulator and a step-recording
-/// dispatcher, returning both records.
+/// dispatcher, returning both records and the formulator (for the rendered
+/// messages).
 #[allow(clippy::type_complexity)]
 fn spawn_test_scheduler_recording_history(
     pool: &sqlx::PgPool,
     review: Arc<ChainReviewStage>,
-) -> (SchedulerHandle, Arc<Mutex<Vec<usize>>>, Arc<Mutex<Vec<serde_json::Value>>>) {
+) -> (SchedulerHandle, Arc<Mutex<Vec<usize>>>, Arc<Mutex<Vec<serde_json::Value>>>, Arc<ScriptedNotebook>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let nb = Arc::new(history_recording(Arc::clone(&seen)));
     let handle = spawn_scheduler(
         pool.clone(),
-        Arc::new(history_recording(Arc::clone(&seen))),
+        Arc::clone(&nb) as Arc<dyn PlanFormulator>,
         review,
         Arc::new(RecordingDispatcher { dispatched: Arc::clone(&dispatched) }),
         Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
         Arc::new(NoOpEmbedder::new()),
         None,
     );
-    (handle, seen, dispatched)
+    (handle, seen, dispatched, nb)
 }
 
 /// A reviewer chain of one [`ScriptedReview`] playing `verdicts` in order,
@@ -625,7 +627,20 @@ async fn a_raised_ask_travels_the_whole_runner_to_the_registered_channel() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_approval_lets_the_same_plan_through_on_resume() {
-    let Some((pool, _cluster)) = bring_up_pg("approve").await else {
+    approval_resumes("approve", true).await;
+}
+
+/// The same on a backend that does not think by default (the router's
+/// default). The resumed run's first turn is routine, so its answer is
+/// discarded and written again on a thinking turn before it is reviewed:
+/// the approval must survive that extra turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_approval_survives_the_answer_rewrite_on_resume() {
+    approval_resumes("approve-nothink", false).await;
+}
+
+async fn approval_resumes(label: &str, thinks: bool) {
+    let Some((pool, _cluster)) = bring_up_pg(label).await else {
         return; // [SKIP]
     };
     let task_id = seed_task(&pool).await;
@@ -637,7 +652,9 @@ async fn an_approval_lets_the_same_plan_through_on_resume() {
     // whether or not the arm ever consults the operator's approval. Here
     // the replan escalates again, so the only way the task can complete is
     // the digest matching the resolved ask.
-    let handle = spawn_test_scheduler(&pool, escalating(u32::MAX));
+    let nb = counting(false, Arc::new(Mutex::new(0)));
+    let nb = if thinks { nb } else { nb.not_thinking() };
+    let handle = spawn_with(&pool, Arc::new(nb), escalating(u32::MAX));
 
     assert_eq!(
         await_state(&pool, task_id, "awaiting_operator", 20).await,
@@ -684,6 +701,18 @@ async fn an_approval_lets_the_same_plan_through_on_resume() {
         "the row must carry the digest of the plan that ran, and it must be the \
          digest the operator approved — that binding is the whole point",
     );
+
+    // The first turn plans (and so thinks); only the resumed routine turn's
+    // answer is rewritten, and only on a backend that does not think.
+    let rewritten: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action = 'plan.discarded' \
+         AND payload->>'reason' = 'answer_rewritten' AND payload->>'task_id' = $1::text",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count answer_rewritten rows");
+    assert_eq!(rewritten, if thinks { 0 } else { 1 }, "thinks = {thinks}");
 
     handle.shutdown().await;
 }
@@ -899,7 +928,7 @@ async fn a_resumed_run_formulates_against_the_history_it_had_at_suspend_time() {
     // Approve plan 1 so its step actually runs, then escalate on plan 2 so
     // the suspension has a non-empty history to carry. Everything after is
     // approved, so the resumed run is free to walk forward.
-    let (handle, seen, dispatched) = spawn_test_scheduler_recording_history(
+    let (handle, seen, dispatched, nb) = spawn_test_scheduler_recording_history(
         &pool,
         scripted(vec![
             Verdict::Approve,
@@ -941,6 +970,18 @@ async fn a_resumed_run_formulates_against_the_history_it_had_at_suspend_time() {
         *seen.lock().unwrap(),
         vec![0, 1, 1, 2],
         "the resumed run's FIRST formulation must see the one plan the task had already          completed; a leading 0 there means it started from an empty history and          re-formulated work it had already done",
+    );
+
+    // What the model is SHOWN on resume is the restored notebook, too: the
+    // first resumed turn works on the step it was suspended on (2), which is
+    // still pending.
+    let resumed: serde_json::Value =
+        serde_json::from_str(&nb.messages()[2]).expect("a rendered turn is JSON");
+    assert_eq!(resumed["current_step"]["id"], 2, "{resumed}");
+    let steps = resumed["notebook"]["steps"].as_array().expect("the notebook lists its steps");
+    assert!(
+        steps.iter().any(|s| s["id"] == 2 && s["status"] == "pending"),
+        "the escalated step is restored as pending, got {resumed}",
     );
 
     // The consequence that makes the property worth having: plan 1's step

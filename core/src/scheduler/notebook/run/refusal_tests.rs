@@ -8,12 +8,13 @@ use serde_json::json;
 use crate::cassandra::types::Verdict;
 use crate::scheduler::notebook::test_harness::*;
 
-/// An answer carrying a refusal (`"refused"`), with every reviewer approving.
+/// An answer carrying a refusal (`"refused"`). The verdict is the caller's:
+/// `run` approves, `run_reviewed` adds one.
 fn refusal(body: &str, principle: u8, reason: &str) -> serde_json::Value {
     json!({"steps": steps(&[1]), "answer": {"body": body, "refused": {"principle": principle, "reason": reason}}})
 }
 
-/// The task's audit rows with `action`, oldest first.
+/// The task's audit rows with `actor` and `action`, oldest first.
 async fn rows(pool: &sqlx::PgPool, task_id: i64, actor: &str, action: &str) -> Vec<serde_json::Value> {
     sqlx::query_scalar(
         "SELECT payload FROM audit_log WHERE actor = $1 AND action = $2 \
@@ -50,8 +51,23 @@ pub(super) async fn a_refused_answer_ends_the_task_refused(pool: &sqlx::PgPool) 
     assert_eq!(formulated[0]["decision_kind"], "refused");
     assert_eq!(formulated[0]["refused"], json!({"principle": 1, "reason": "physical_harm"}));
     assert_eq!(formulated[0]["plan_step_count"], 0);
-    // The plan the row stores carries the refusal too (classic "slice A").
+    // The plan the row stores carries the refusal too, with the task's floor.
     assert_eq!(formulated[0]["plan"]["refused"], json!({"principle": 1, "reason": "physical_harm"}));
+    assert_eq!(formulated[0]["classification_floor"], "Public");
+    // Present as JSON null, so a JSONB `?` query finds the key on every row.
+    assert!(formulated[0].get("l1_insight").is_some_and(|v| v.is_null()), "{:#?}", formulated[0]);
+}
+
+/// An ordinary answer's `plan.formulate` row carries `refused` as JSON null
+/// (present, not absent), so observation queries can rely on the key.
+pub(super) async fn an_answer_row_carries_refused_as_null(pool: &sqlx::PgPool) {
+    let script = Script::new(&[json!({"steps": steps(&[1]), "answer": {"body": "done"}})]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(r.result.outcome.final_state(), Some("completed"), "{:?}", r.result.outcome);
+    let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
+    assert_eq!(formulated.len(), 1, "{formulated:#?}");
+    assert_eq!(formulated[0]["decision_kind"], "task_complete");
+    assert!(formulated[0].get("refused").is_some_and(|v| v.is_null()), "{:#?}", formulated[0]);
 }
 
 /// The reviewer's constitutional block wins over the model's own refusal:

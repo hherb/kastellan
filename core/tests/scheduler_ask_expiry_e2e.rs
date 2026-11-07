@@ -5,7 +5,7 @@
 //! not one more `#[tokio::test]` appended there. This test's whole point is
 //! to set `KASTELLAN_ASK_DEADLINE_S=1` so its ask expires almost
 //! immediately — but `std::env::set_var` is process-global, and
-//! `scheduler_ask_path_e2e.rs` runs five tests in parallel inside one
+//! `scheduler_ask_path_e2e.rs` runs its tests in parallel inside one
 //! process. A leaked one-second deadline would give THEIR asks a one-second
 //! deadline too, and the periodic sweep this file exists to exercise would
 //! then expire those asks and fail those tasks mid-test — a genuine flake,
@@ -116,7 +116,8 @@ impl StepDispatcher for NoopDispatcher {
     }
 }
 
-/// Spawn the scheduler with the stub formulator + the given review chain.
+/// Spawn the scheduler with an always-answering [`ScriptedNotebook`] + the
+/// given review chain.
 fn spawn_test_scheduler(pool: &sqlx::PgPool, review: Arc<ChainReviewStage>) -> SchedulerHandle {
     spawn_scheduler(
         pool.clone(),

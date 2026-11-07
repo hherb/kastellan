@@ -59,11 +59,16 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   (a closure picks each reply from `ctx`, usually `ctx.plans.len()`, so a resume re-derives the same digest).
   ⚠️ Every `call_reply` lists its own fresh step id (a replan replaces the pending one); `answer_reply` lists a
   step too, because a **first reply without `steps` is refused** (the first port failed 6 of 9 tests on exactly that).
-- Moved onto it in place: `scheduler_ask_path_e2e` (9), `scheduler_ask_expiry_e2e`, `scheduler_lanes_e2e`,
+- Moved onto it in place: `scheduler_ask_path_e2e` (9, then 10), `scheduler_ask_expiry_e2e`, `scheduler_lanes_e2e`,
   `conversation_continuity_e2e` (+ asserts the rendered message). Refusal precedence ×3 →
   `notebook/run/refusal_tests.rs` (called from `the_notebook_loop`, so **no libtest count**); `notebook_turn` twins
   in `router_agent_mock_e2e`; the notebook prompt's `allowed:` line pinned. ⚠️ The classic loop has lost these
   suites' coverage: it is opt-in and on its way out.
+- **/finalcheck review round:** `ScriptedNotebook::not_thinking()` (the router default) and
+  `an_approval_survives_the_answer_rewrite_on_resume` (the resumed routine turn's answer is rewritten, then matches
+  the approval; asserts 1 `answer_rewritten` row vs 0 thinking) → ask_path **10**; D11 also checks the resumed
+  turn's render (`current_step` 2, pending); lanes pins one dispatch per task; the refusal port gained the classic
+  audit-row checks (`classification_floor`, null `l1_insight`, null `refused` on an ordinary answer, a 4th case).
 
 ### Previous (2026-11-07): #993 step 1 (PR #995, merged) — the daemon e2es script notebook replies (`scripted_llm/notebook.rs`). ⚠️ **The router default is `disable_thinking: true`**: a routine turn's answer is set aside and rewritten by a thinking turn, so a scripted daemon happy path is **3 turns** (call, draft, answer). (`ScriptedNotebook` thinks by default: no rewrite turn.)
 
@@ -255,9 +260,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    agent-authored plan features to the notebook reply, one PR each (each prompt change ≥ 2 DGX runs). **Then the
    deletion**, with the re-points listed on #993 (≈19 per-step-view tests → `PlanRecord::last_step_view`, 7 timeout
    cases, the outcome-shapes prompt pin, `user_text_cannot_forge_a_key`); `router_agent_mock_e2e` (~720 lines) shrinks
-   below the cap when its 3 classic tests go; #940 folds in. bottie's substring
+   below the cap when its 5 classic-door tests go (2 already have notebook twins); #940 folds in. bottie's substring
    match on the parking line is [hherb/bottie#242](https://github.com/hherb/bottie/issues/242).
-   #983/#986 are on the DGX (in #989's tree); one re-measure is optional. #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
+   #983/#986 are on the DGX (in `main`); one re-measure is optional. #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
    **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to
    `api_minor` 6.
