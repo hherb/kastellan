@@ -12,8 +12,8 @@
 > (#983's session, its review round and 79/0 sift run in full); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-07 (#922 slice 4a: the notebook is the default planner mode) ·
-**Recent PRs, newest first:** [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-07 (#993 step 1: the daemon e2es run the notebook; the `DaemonSpec` classic pin is gone) ·
+**Recent PRs, newest first:** #993 step 1 (this session's PR), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs #989's tree before its review round (deployed from its branch with `~/deploy-branch.sh` 2026-11-07, both env files identical after install, `NRestarts=0`, Matrix up, live `ask` task 385 printed its plan/step lines; it includes #983 and #986) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`** (`kastellan.env` identical after install. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
@@ -46,35 +46,31 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-07, latest): #922 slice 4a — the notebook is the default (PR [#994](https://github.com/hherb/kastellan/pull/994))
+### This session (2026-11-07, latest): #993 step 1 — the daemon e2es run the notebook
 
-- `notebook::formulator::planner_mode`: unset / empty / `notebook` → notebook; `classic` stays **opt-in** until it
-  retires ([#993](https://github.com/hherb/kastellan/issues/993), slice 4b, with the census of what classic still owns).
-  Operator's call (2026-11-07): flip the default only, retire separately.
-- ⚠️ **`tests_common::daemon::DaemonSpec` pins `KASTELLAN_PLANNER_MODE=classic`** — every daemon e2e scripts
-  classic-shaped plan replies; a test may override with `.env(…, "notebook")` (last wins). The pin goes with #993.
-- ⚠️ **Deploy:** the DGX already has `notebook` in `.local` (now redundant). **The Mac flips to notebook on its next
-  install** unless `.local` says `classic`. Install template, docs and both manuals name the new default.
+- `tests_common::scripted_llm::{notebook_call_json, notebook_answer_json}` (`scripted_llm/notebook.rs`): one step,
+  id 1. **The `DaemonSpec` pin is gone** — every daemon e2e runs the daemon default. Only `cli_ask_e2e` and
+  `mail_daemon_e2e` script the planner; the other four never did.
+- ⚠️ **The router default is `disable_thinking: true`**, so a routine turn's answer is set aside (`plan.discarded`)
+  and rewritten by a thinking turn: a scripted happy path is **3 turns** (call, draft, answer) and the answer
+  builder never ticks. The failure path runs `DEFAULT_MAX_PLANS_FAST × 2` turns (one identical reply: a re-listed
+  failed step reopens). Exact audit counts reconciled in both tests.
+
+### Previous (2026-11-07): #922 slice 4a (PR #994, merged) — `planner_mode`: unset / empty / `notebook` → notebook;
+`classic` opt-in until #993 retires it. ⚠️ **Deploy:** the DGX's `.local` `notebook` is now redundant; **the Mac flips to
+notebook on its next install** unless `.local` says `classic`.
 
 ### Previous (2026-11-07): #987 (PR #990, merged) — one `PgListener` per process (session **and** `ask`); each follow
 subscribes before it is spawned and keeps its own 3 s tick; a dropped listener reconnects inside `recv`; `MAX_FOLLOWS`
 **64**. ⚠️ A follow's interval first ticks one period out — the e2es assert arrival before it. Prose: the `922s4` snapshot.
 
-### Previous (2026-11-07): #985 + #988 (PR #989, merged) — what still binds
+### Previous (2026-11-06 → 07): #985 + #988 (PR #989), `kastellan-cli session` (PR #986), merged — what still binds
 
-- `ask` prints one stderr line per entry (`ask/progress.rs`) via the session's `follow()`, resumed up to 5× 3 s apart;
-  bottie's `submitted task N` lines are unchanged; SIGINT is a unix `signal()` installed **before** the submit.
-- `audited` on `task.submit`/`task.cancel`, `floor_suppressed` on submit (#988). A `BEFORE INSERT` trigger pins the
-  finalize / `ask.cancelled` `audited` flags. ⚠️ A test that `claim_one`s must not leave an older task pending.
-- ⚠️ **bottie matches the parking marker by substring** ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242));
-  kastellan pins that no note starts `ask: task `.
-
-### Previous (2026-11-06): #922 slice 2 — `kastellan-cli session` (PR #986, merged)
-
-- `session.rs` (+ `session/{params,methods,follow}.rs`): JSON-RPC 2.0 on stdin/stdout, no listener; method table in the
-  module doc. ⚠️ **A follow reads state BEFORE entries; its 3 s poll tick, not the NOTIFYs, makes it correct**; a
-  dropped session cancels nothing; follows capped at 64, one shared listener (#987). ⚠️ **`kastellan-cli` installs a
-  warn-level stderr tracing subscriber** — PG e2es fail instead of skipping once PG is up.
+- `ask` prints one stderr line per entry via the session's `follow()`; SIGINT handler installed **before** the submit.
+  ⚠️ **bottie matches the parking marker by substring** ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242)).
+  ⚠️ A test that `claim_one`s must not leave an older task pending.
+- ⚠️ **A follow reads state BEFORE entries; its 3 s poll tick, not the NOTIFYs, makes it correct.** ⚠️ **`kastellan-cli`
+  installs a warn-level stderr tracing subscriber** — PG e2es fail instead of skipping once PG is up.
 
 ### Previous (2026-11-06): #965 items 4, 6, 7 (PR #984, merged) — ⚠️ a sift read's allowlist key is `read_key(tool, method)` (**`web-fetch.web.fetch`**); the `chain_distinct` → `totals` pass-through (`sift/run.rs:230`) is untested.
 
@@ -250,8 +246,11 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **#922: review + merge PR [#994](https://github.com/hherb/kastellan/pull/994) (slice 4a, the notebook default), then slice 4b = [#993](https://github.com/hherb/kastellan/issues/993)**
-   (retire classic: port the daemon e2es off the `DaemonSpec` pin first, then delete; #940 folds in). bottie's substring
+1. **#922 slice 4b = [#993](https://github.com/hherb/kastellan/issues/993)** (retire classic). Step 1 (daemon e2es
+   on the notebook) is this session's PR. **Next:** deploy #994+ to the DGX and do the **one classic comparison run**
+   the issue asks for (`KASTELLAN_PLANNER_MODE=classic` in `.local`, `~/requery7.sh`, then back), then sort the ~10
+   in-process classic suites (shared `inner_loop/execute.rs` tests stay; classic formulation/summary tests go —
+   `plan_json` users: `router_agent_mock_e2e`, `observation_replay{,_cli}_e2e`), then delete; #940 folds in. bottie's substring
    match on the parking line is [hherb/bottie#242](https://github.com/hherb/bottie/issues/242).
    #983/#986 are on the DGX (in #989's tree); one re-measure is optional. #970: operator to close or keep (known limits only). Re-measure with `bash ~/requery7.sh` (move `~/requery7.log`
    aside), one log entry per run, ≥ 2 runs per change; `~/q960.sh <from> <to>` dumps the tasks.
@@ -385,7 +384,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#922 s4a) | `feat/922-notebook-default` over `0091581f`, worktree `~/src/kastellan-wt-985` (own `target/`) | **5560 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-922s4.log`. vs #987's row (5559): +1, the `DaemonSpec` planner-mode pin test (tests-common lib) | warm, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-985`, clean | **26** (as before) |
+| **Mac** (#993 s1) | `feat/993-daemon-e2es-notebook` over `91f01549`, worktree `~/src/kastellan-wt-985` (own `target/`) | **5562 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-993.log`. vs #994's row (5560): +2, the two notebook builder tests (tests-common lib; the pin test was replaced 1:1) | warm, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-985`, clean | **26** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
@@ -470,6 +469,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#994** (#922 slice 4a) — merged 2026-11-07: the notebook is the default planner mode; not yet deployed.
 - **#992 / #990** (README; #987) — merged 2026-11-07: the root README brought up to date (⚠️ it restates the user manual's chapter 4: change both together); one shared `LISTEN` connection for a process's follows, cap 64.
 - **#989** (#985, #988) — merged 2026-11-07: `ask` prints notebook entries and resumes a lost follow; session reports lost audit rows. **bottie#236** (slice 3) merged 2026-11-07.
 - **#986** (#922 slice 2) — merged 2026-11-06, deployed DGX 2026-11-07 (in #989's tree): `kastellan-cli session`, JSON-RPC over stdio/ssh.

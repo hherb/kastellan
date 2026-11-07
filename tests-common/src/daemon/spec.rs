@@ -378,13 +378,6 @@ impl DaemonSpec {
             self.llm_timeout_ms.clone(),
         ));
 
-        // The daemon's default planner is the notebook (#922 slice 4), but
-        // every daemon e2e scripts classic-shaped plan replies. Porting them
-        // is part of retiring the classic loop; until then they pin it here.
-        // A caller's `env` still wins (last-wins, below).
-        spec.env
-            .push(("KASTELLAN_PLANNER_MODE".into(), "classic".into()));
-
         // Only on the opt-out path: `core_service_spec` already pushed
         // the `1`, so re-stating it would add a second `Environment=`
         // line saying what the first one says. See `force_routing`.

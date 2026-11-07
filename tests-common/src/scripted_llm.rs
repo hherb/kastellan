@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+mod notebook;
+pub use notebook::{notebook_answer_json, notebook_call_json};
+
 /// Hard cap on inbound request bytes the mock will buffer before
 /// giving up. Real chat-completion requests are a few KiB; 1 MiB is
 /// generous headroom that defends against a buggy client pinning the

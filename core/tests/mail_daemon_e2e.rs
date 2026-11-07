@@ -26,7 +26,7 @@ use kastellan_tests_common::daemon::{
 };
 use kastellan_tests_common::mock_localmail::{spawn_mock_localmail, MockLocalmail};
 use kastellan_tests_common::scripted_llm::{
-    embedding_envelope, envelope_for, plan_json, spawn_scripted_llm,
+    embedding_envelope, envelope_for, notebook_answer_json, notebook_call_json, spawn_scripted_llm,
 };
 use kastellan_tests_common::{
     bring_up_pg_cluster, cli_binary, core_binary, current_username, pg_bin_dir_or_skip,
@@ -34,16 +34,9 @@ use kastellan_tests_common::{
     PgCluster,
 };
 
-/// The single plan step that calls the mail tool.
-fn mail_search_step() -> serde_json::Value {
-    serde_json::json!([{
-        "tool":           "mail",
-        "method":         "mail.search",
-        "parameters":     {"query": "invoice"},
-        "returns":        "results",
-        "done_when":      "true",
-        "classification": "Public",
-    }])
+/// The notebook reply that calls the mail tool as step 1.
+fn mail_search_call() -> String {
+    notebook_call_json("mail", "mail.search", serde_json::json!({"query": "invoice"}))
 }
 
 /// `true` (caller should `return`) when any prerequisite binary / host facility
@@ -209,18 +202,17 @@ fn daemon_planner_dispatches_mail_search_end_to_end() {
         .build()
         .expect("build multi-threaded tokio runtime");
 
-    // Same 2-iteration shape as cli_ask_e2e's happy path: one embed + one plan
-    // per iteration; plan A executes the mail.search step (result=None), plan B
-    // is terminal.
+    // Same 3-turn shape as cli_ask_e2e's happy path: one embed + one notebook
+    // reply per turn; turn 1 calls mail.search, turn 2 drafts an answer that
+    // is set aside, turn 3 writes it.
     let scripted = rt.block_on(spawn_scripted_llm(
-        vec![embedding_envelope(), embedding_envelope()],
+        vec![embedding_envelope(); 3],
         vec![
-            envelope_for(&plan_json("act", mail_search_step(), None)),
-            envelope_for(&plan_json(
-                "task_complete",
-                serde_json::json!([]),
-                Some(serde_json::json!({"kind": "text", "body": "done"})),
-            )),
+            envelope_for(&mail_search_call()),
+            // Thinking is off by default: the routine turn's answer is a
+            // draft, rewritten by the next turn.
+            envelope_for(&notebook_answer_json("draft")),
+            envelope_for(&notebook_answer_json("done")),
         ],
     ));
 
@@ -244,7 +236,7 @@ fn daemon_planner_dispatches_mail_search_end_to_end() {
                 .await
                 .expect("select task");
         assert_eq!(state, "completed", "task must complete; got {state}");
-        assert_eq!(plan_count, 2, "expected 2 plan rounds; got {plan_count}");
+        assert_eq!(plan_count, 3, "expected 3 turns (call, draft, answer); got {plan_count}");
 
         // The planner advertised mail in its <tools> block.
         let chat0 = scripted.chat_requests.lock().unwrap().first().cloned().unwrap_or_default();
