@@ -211,3 +211,97 @@ pub(super) async fn a_repeated_calls_floor_request_still_raises_the_floor(pool: 
     assert_eq!(answer["classification_floor_source"], "agent_raised", "{formulated:#?}");
     assert_eq!(last_ceiling(pool, r.task_id).await, "ClinicalConfidential");
 }
+
+/// Pin a two-step skill over the harness's `mail` calls — `"a"`, then a read
+/// of `{"id": q}` (which fails for `q` = `"bad"`) — as an operator would; its
+/// id.
+async fn seed_pinned_skill(pool: &sqlx::PgPool, name: &str) -> i64 {
+    use kastellan_db::memories::{insert_memory_at_layer, set_skill_trust, MemoryLayer};
+    let template = json!({
+        "name": name, "description": "d",
+        "parameters": [{"name": "q", "description": "the search"}],
+        "steps": [{"tool": "mail", "method": "a", "parameters": {"q": "{{q}}"}},
+                  {"tool": "mail", "method": "b", "parameters": {"id": "{{q}}"}}],
+    });
+    let metadata = json!({"template": template, "trust": "pinned", "body_sha256": "deadbeef"});
+    let id = insert_memory_at_layer(pool, "skill body", &metadata, None, MemoryLayer::Skill).await.unwrap();
+    set_skill_trust(pool, id, "pinned").await.unwrap();
+    id
+}
+
+/// A call for step 1 that runs the skill `name` with `q`.
+fn invoke_call(name: &str, q: &str) -> serde_json::Value {
+    json!({"step": 1, "invoke_skill": {"name": name, "args": {"q": q}},
+           "returns": "r", "done_when": "d", "classification": "Personal"})
+}
+
+/// The `scheduler / <action>` rows naming skill `name` (they carry no task id).
+async fn invoke_rows(pool: &sqlx::PgPool, action: &str, name: &str) -> Vec<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT payload FROM audit_log WHERE actor = 'scheduler' AND action = $1 \
+         AND payload->>'skill_name' = $2 ORDER BY id",
+    )
+    .bind(action)
+    .bind(name)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// A call's `invoke_skill` runs the pinned skill's steps (the notebook twin
+/// of the classic `agent_invoke_pinned_skill_expands_and_dispatches`): the
+/// reviewer sees the concrete steps, the next turn sees every step's result,
+/// and the lifecycle is audited. The answer's `l3_skill` is then dropped
+/// (`invoke_driven_task_suppresses_recrystallisation`'s twin): a task that
+/// ran a skill never crystallises one.
+pub(super) async fn an_invoked_skill_runs_its_steps(pool: &sqlx::PgPool) {
+    let memory_id = seed_pinned_skill(pool, "fetch_invoices").await;
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": invoke_call("fetch_invoices", "invoices")}),
+        json!({"tick": tick(1, "invoices A and B"), "answer": {"body": "A and B", "l3_skill": skill()}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "A and B");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"]);
+    assert_eq!(r.review.plans.lock().unwrap()[0], ["a", "b"], "reviewed as the skill's steps");
+    let next = &script.messages()[1];
+    assert!(next.contains("output of a") && next.contains("text of invoices"), "every step's result is shown: {next}");
+    assert_eq!(r.result.terminal_l3_skill, None, "an invoke-driven task never re-crystallises");
+    let invoked = invoke_rows(pool, "l3.invoked", "fetch_invoices").await;
+    assert_eq!(invoked.len(), 1, "{invoked:#?}");
+    assert_eq!(invoked[0]["memory_id"], memory_id);
+    let outcome = invoke_rows(pool, "l3.invoke_outcome", "fetch_invoices").await;
+    assert_eq!(outcome.len(), 1, "{outcome:#?}");
+    assert_eq!(outcome[0]["steps_executed"], 2, "{outcome:#?}");
+
+    // A later step that fails fails the call's step, though the first ran:
+    // the next turn replans from it.
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": invoke_call("fetch_invoices", "bad")}),
+        json!({"answer": {"body": "the read failed"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "the read failed");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"]);
+    assert!(kinds(pool, r.task_id).await.contains(&kastellan_db::notebook::EntryKind::FailedStep));
+    assert!(script.messages()[1].contains("last_failure"), "{}", script.messages()[1]);
+}
+
+/// A skill that is not pinned (here: none of that name) is refused before
+/// review (`agent_invoke_unknown_skill_refuses_then_replans`'s twin): nothing
+/// runs, the refusal is audited and shown back, the step fails, and the next
+/// turn replans.
+pub(super) async fn an_unknown_skill_is_refused_and_the_next_turn_replans(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": invoke_call("no_such_skill", "invoices")}),
+        json!({"answer": {"body": "no skill to run"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "no skill to run");
+    assert!(r.tools.dispatched.lock().unwrap().is_empty(), "a refused invoke runs nothing");
+    assert!(r.review.plans.lock().unwrap().iter().all(|p| p.is_empty()), "never reviewed as steps");
+    assert_eq!(invoke_rows(pool, "l3.invoke_rejected", "no_such_skill").await.len(), 1);
+    let next = &script.messages()[1];
+    assert!(next.contains("invoke_rejected"), "the refusal is shown back: {next}");
+    assert!(kinds(pool, r.task_id).await.contains(&kastellan_db::notebook::EntryKind::FailedStep));
+}

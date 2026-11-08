@@ -148,7 +148,12 @@ The keys:
     `"floor_request": "<class>"` to the call: it raises the task's floor
     from this call on (it never lowers it), and a call classified below the
     raised floor is blocked — so classify it at least that high. Not on a
-    `sift`. A call this task
+    `sift`. To run a skill tagged `[invocable]` in `<skills>`, write
+    `"invoke_skill": {"name": "<skill>", "args": {"<param>": "<value>"}}`
+    in the call **in place of** `tool`, `method` and `parameters`: `args`
+    holds exactly the skill's `params`, each a single line. Its steps are
+    reviewed and run, and `last_result` is then a list, one per step. A
+    skill without the tag is refused. A call this task
     already made **successfully**, with the same parameters, is not run
     again — its result is the one you already had; a call that **failed** may
     be retried.

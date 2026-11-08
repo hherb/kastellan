@@ -193,7 +193,7 @@ fn current_step_view(cur: &CurrentStep<'_>) -> String {
     if let Some(doc) = &cur.tool_doc {
         fields.push(("tool_doc", json!(doc).to_string()));
     }
-    if let Some(view) = cur.last.and_then(PlanRecord::last_step_view) {
+    if let Some(view) = cur.last.and_then(PlanRecord::last_result_view) {
         fields.push(("last_result", view.to_string()));
     }
     obj(&fields)

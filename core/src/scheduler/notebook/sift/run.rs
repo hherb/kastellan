@@ -339,6 +339,8 @@ async fn resolve_over(
                 .iter()
                 .rev()
                 .filter(|rec| notebook_step_of(&rec.plan) == Some(*n) && !is_sift_plan(&rec.plan))
+                // shortcut: a step that ran an invoked skill (#996) is sifted over its skill's
+                // FIRST step's result only; widen when a skill's later step is one worth sifting.
                 .find(|rec| matches!(rec.outcomes().first(), Some(StepOutcome::Ok(_))))
                 .ok_or_else(|| format!("step {n} has no successful result to sift"))?;
             let (Some(StepOutcome::Ok(result)), Some(step)) = (record.outcomes().first(), record.plan.steps.first()) else {

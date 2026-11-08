@@ -325,7 +325,9 @@ pub(crate) async fn run_notebook_to_terminal(
                 let Some(call) = &reply.call else { continue };
                 let prev = last_call.filter(|l| l.step == call.step && !l.failed).map(|l| l.classification);
                 let classification = prev.map_or(call.classification, |p| p.max(call.classification));
-                let failed = match ctx.plans.last().and_then(|r| r.outcomes().first()) {
+                // The last outcome: a failed step ends its plan, and an
+                // invoked skill's plan has several (#996).
+                let failed = match ctx.plans.last().and_then(|r| r.outcomes().last()) {
                     Some(StepOutcome::Err { code, detail }) => {
                         let payload =
                             FailedStepPayload { step: call.step, code: code.clone(), detail: clamp(detail), classification };
