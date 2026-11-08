@@ -23,6 +23,23 @@ fn the_notebook_prompt_documents_every_reply_key() {
     assert!(prompt.contains(crate::scheduler::inner_loop::WITHHELD_MARKER), "the withheld marker is shown as rendered");
 }
 
+/// The tools block shows an operator allowlist as an `allowed:` line with each
+/// value between backticks (`prompt_assembly`). The prompt must bind that
+/// line, or the advertisement carries no authority, and say the backticks are
+/// not part of a value, or the planner sends them (#993: ported from the
+/// classic prompt's test).
+#[test]
+fn the_notebook_prompt_binds_the_allowed_line() {
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop();
+    p.push(format!("prompts/{NOTEBOOK_PROMPT}.md"));
+    let prompt = std::fs::read_to_string(&p).expect("agent_notebook.md readable");
+    // Whitespace collapsed: the needles must not depend on where a line wraps.
+    let prompt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(prompt.contains("An `allowed:` line is the operator's allowlist"), "the line is bound");
+    assert!(prompt.contains("(the backticks are not part of it)"), "the backticks are delimiters");
+}
+
 #[test]
 fn the_reformat_directive_names_the_reason() {
     assert!(reformat_directive("`tick.step` 2 is not the current step 1").contains("not the current step 1"));

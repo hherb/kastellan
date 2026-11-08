@@ -2396,6 +2396,7 @@ dependencies = [
  "jiff",
  "kastellan-core",
  "kastellan-db",
+ "kastellan-llm-router",
  "kastellan-protocol",
  "kastellan-sandbox",
  "kastellan-supervisor",

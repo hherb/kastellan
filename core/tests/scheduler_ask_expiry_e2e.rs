@@ -5,7 +5,7 @@
 //! not one more `#[tokio::test]` appended there. This test's whole point is
 //! to set `KASTELLAN_ASK_DEADLINE_S=1` so its ask expires almost
 //! immediately — but `std::env::set_var` is process-global, and
-//! `scheduler_ask_path_e2e.rs` runs five tests in parallel inside one
+//! `scheduler_ask_path_e2e.rs` runs its tests in parallel inside one
 //! process. A leaked one-second deadline would give THEIR asks a one-second
 //! deadline too, and the periodic sweep this file exists to exercise would
 //! then expire those asks and fail those tasks mid-test — a genuine flake,
@@ -28,14 +28,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kastellan_core::cassandra::review::{ChainReviewStage, ReviewStage, ReviewStageContext};
-use kastellan_core::cassandra::types::{DataClass, Plan, PlannedStep, Severity, Verdict};
+use kastellan_core::cassandra::types::{Plan, PlannedStep, Severity, Verdict};
 use kastellan_core::memory::embedder::NoOpEmbedder;
-use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
 use kastellan_core::scheduler::asks::ASK_DEADLINE_ENV;
 use kastellan_core::scheduler::audit::{
     action_task_terminal, ACTION_TASK_FINALIZE, FINALIZE_PROVENANCE_ASK_EXPIRY,
 };
-use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
+use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
+use kastellan_tests_common::scripted_notebook::{answer_reply, ScriptedNotebook};
 use kastellan_core::scheduler::{spawn_scheduler, SchedulerHandle};
 use kastellan_db::tasks::{self, insert_pending, Lane};
 use kastellan_tests_common::{
@@ -116,68 +116,14 @@ impl StepDispatcher for NoopDispatcher {
     }
 }
 
-/// Returns the same terminal plan on every call — this test needs only
-/// enough of a plan for the review stage to escalate it.
-struct StubFormulator;
-
-#[async_trait]
-impl PlanFormulator for StubFormulator {
-    async fn formulate_plan(
-        &self,
-        _ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        Ok((task_complete_plan("ok"), test_meta()))
-    }
-}
-
-/// The `FormulationMeta` fixture, copied from `scheduler_ask_path_e2e.rs`.
-/// Nothing under test reads it; it only has to be well-formed enough for
-/// the `plan.formulate` audit row.
-fn test_meta() -> FormulationMeta {
-    FormulationMeta {
-        prompt_name: "agent_planner".into(),
-        prompt_sha256: "test".into(),
-        llm_model: "test-model".into(),
-        llm_backend: "local".into(),
-        latency_ms: 1,
-        retry_count: 0,
-        assembled_prompt_sha256: "test-assembled-sha".into(),
-        l0_count: 0,
-        l1_count: 0,
-        skill_count: 0,
-        recalled_memory_ids: Vec::new(),
-        recall_count: 0,
-        recall_query_sha256:
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
-        graph_seed_entity_ids: Vec::new(),
-        graph_seed_count: 0,
-        graph_seed_source: kastellan_core::entity_extraction::SeedSource::None,
-        usage: Default::default(),
-    }
-}
-
-fn task_complete_plan(body: &str) -> Plan {
-    Plan {
-        context: "c".into(),
-        decision: "task_complete".into(),
-        rationale: "done".into(),
-        steps: vec![],
-        result: Some(serde_json::json!({"kind": "text", "body": body})),
-        data_ceiling: Some(DataClass::Public),
-        refused: None,
-        floor_request: None,
-        l1_insight: None,
-        l3_skill: None,
-        invoke_skill: None,
-        python_skill: None,
-    }
-}
-
-/// Spawn the scheduler with the stub formulator + the given review chain.
+/// Spawn the scheduler with an always-answering [`ScriptedNotebook`] + the
+/// given review chain.
 fn spawn_test_scheduler(pool: &sqlx::PgPool, review: Arc<ChainReviewStage>) -> SchedulerHandle {
     spawn_scheduler(
         pool.clone(),
-        Arc::new(StubFormulator),
+        // Answers every turn (#993: a notebook planner): the review stage
+        // escalates the answer, which is all this test needs of a plan.
+        Arc::new(ScriptedNotebook::new(|_| answer_reply("ok"))),
         review,
         Arc::new(NoopDispatcher),
         Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
