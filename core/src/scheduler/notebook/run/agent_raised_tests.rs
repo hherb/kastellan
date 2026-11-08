@@ -97,3 +97,44 @@ pub(super) async fn a_forced_answers_l3_skill_is_dropped(pool: &sqlx::PgPool) {
     assert_eq!(body(&r.result), "f and g");
     assert_eq!(r.result.terminal_l3_skill, None);
 }
+
+/// A Python skill: the code of a task's `python-exec` call, kept verbatim.
+fn python_skill() -> serde_json::Value {
+    json!({"name": "sum_ints", "description": "Sum the integers", "code": "print(sum([1, 2]))\n"})
+}
+
+/// A completed answer's `python_skill`, after a call was dispatched, reaches
+/// `terminal_python_skill`, which the runner crystallises from, and its
+/// `plan.formulate` row. The notebook twin of the classic
+/// `inner_loop/tests.rs::terminal_python_skill_captured_under_grounding_gate`.
+pub(super) async fn an_answers_python_skill_reaches_the_runner(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A", "python_skill": python_skill()}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(r.result.terminal_python_skill.map(|s| s.name).as_deref(), Some("sum_ints"));
+    let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
+    // No compact top-level key as `l3_skill` has: the row's whole `plan` carries it.
+    assert_eq!(formulated.last().unwrap()["plan"]["python_skill"]["name"], "sum_ints", "{formulated:#?}");
+}
+
+/// The grounding gate: an answer on the first turn made no call, so its
+/// Python skill is dropped; so is a forced answer's (`synth_turn`).
+pub(super) async fn an_ungrounded_or_forced_python_skill_is_dropped(pool: &sqlx::PgPool) {
+    let script = Script::new(&[json!({"steps": steps(&[1]), "answer": {"body": "A", "python_skill": python_skill()}})]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(r.result.terminal_python_skill, None);
+
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f"), "call": call(2, "b")}),
+        json!({"tick": tick(2, "g"), "answer": {"body": "f and g", "python_skill": python_skill()}}),
+    ]);
+    // max_plans 1 → 2 turns; turn 3 is the forced answer.
+    let r = run(pool, &script, new_task(pool, 1).await).await;
+    assert_eq!(body(&r.result), "f and g");
+    assert_eq!(r.result.terminal_python_skill, None);
+}

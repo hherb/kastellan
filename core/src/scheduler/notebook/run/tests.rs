@@ -91,6 +91,8 @@ async fn the_notebook_loop() {
     super::agent_raised_tests::a_rewritten_answer_keeps_only_its_own_insight(&pool).await;
     super::agent_raised_tests::an_answers_l3_skill_reaches_the_runner(&pool).await;
     super::agent_raised_tests::a_forced_answers_l3_skill_is_dropped(&pool).await;
+    super::agent_raised_tests::an_answers_python_skill_reaches_the_runner(&pool).await;
+    super::agent_raised_tests::an_ungrounded_or_forced_python_skill_is_dropped(&pool).await;
 }
 
 async fn a_three_step_task_ticks_each_step_and_answers_from_findings(pool: &sqlx::PgPool) {

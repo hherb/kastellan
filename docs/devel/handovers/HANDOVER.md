@@ -14,8 +14,8 @@
 > (#986's session and review round); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-08 (#996 2 of 5: the notebook answer carries `l3_skill`) ·
-**Recent PRs, newest first:** [#1002](https://github.com/hherb/kastellan/pull/1002) (#996 `l3_skill`), [#998](https://github.com/hherb/kastellan/pull/998) (#996 `l1_insight`, merged), [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2, merged), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-08 (#996 3 of 5: the notebook answer carries `python_skill`) ·
+**Recent PRs, newest first:** #996 `python_skill` (this session's PR), [#1002](https://github.com/hherb/kastellan/pull/1002) (#996 `l3_skill`, merged), [#998](https://github.com/hherb/kastellan/pull/998) (#996 `l1_insight`, merged), [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2, merged), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs `main` with #995 (deployed with `upgrade_from_git.sh` 2026-11-08, both env files identical after install, `NRestarts=0`, Matrix up) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`, now redundant since #994** (classic ran once for #993, tasks 387–393, experiment #18: 7/7, 2160 s; backups `~/kastellan.env*.bak-pre993`. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
@@ -48,24 +48,24 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-08, latest): #996 2 of 5 — `answer.l3_skill` on the notebook (PR #1002)
+### This session (2026-11-08, latest): #996 3 of 5 — `answer.python_skill` on the notebook
 
-- `AnswerSpec.l3_skill` (optional `L3SkillCandidate`) → the terminal plan (`run.rs`, beside `l1_insight`). The shared
-  `execute` gate is unchanged: completed, `dispatch_count >= 1`, no `invoke_skill`, not the forced answer (the
-  notebook's `answer_turn` is `synth_turn`). Prompt text in `agent_notebook.md`'s `answer` bullet ("rarely", the
-  shape in words, **no worked example** [[notebook-model-mirrors-rendered-shape]]), pinned.
-- Tests: `reply/tests.rs::an_answer_may_carry_an_l3_skill`; `agent_raised_tests.rs` reaches `terminal_l3_skill`, and
-  a forced answer's skill is dropped. **`memory_l3_crystallise_e2e`'s four scheduler tests now run the notebook**
-  (`ScriptedNotebook`) through the real runner write (insert, dedup, grounding, invalid) and assert the task
-  `completed` with its body (a failed task fires `tasks_completed` too); 685 → ~580 lines. Mutants caught: carry
-  dropped, `!synth_turn` dropped.
-- Review round: a **mis-shaped** `l3_skill` (missing `parameters`, wrong type) is now dropped with a WARN
-  (`reply.rs::skill_or_drop`), not the reply — it must not cost the answer, least of all on the forced turn
-  (`a_malformed_l3_skill_drops_the_skill_not_the_answer`; classic still fails its parse). Also pinned: the skill on the
-  `plan.formulate` row, and `completion_skill` on a refused plan. `python_skill` (3 of 5) wants the same helper.
-  ⚠️ **Owed: ≥ 2
-  DGX runs** of `requery7.sh` on this tree (prompt changed; #998's runs are owed too, one pair covers both).
-  ⚠️ **Not prompt-only** (`deny_unknown_fields`): deploy the build.
+- `AnswerSpec.python_skill` (optional `PythonSkillCandidate`) → the terminal plan (`run.rs`, beside `l3_skill`); the same
+  `execute` grounding gate. `reply.rs::skill_or_drop` is now **generic**: a mis-shaped `python_skill` drops with a WARN,
+  not the answer. Prompt text in `agent_notebook.md`'s `answer` bullet (no worked example), pinned. ⚠️ **The classic
+  prompt never documented `python_skill`** — on classic it only ran if the model guessed the key, so the notebook
+  prompt is its first real exposure. ⚠️ `plan.formulate` has **no compact top-level `python_skill` key** (`l3_skill`
+  has one): the row's whole `plan` object carries it.
+- Tests: `reply/tests.rs::an_answer_may_carry_a_python_skill` (+ mis-shaped drops); `agent_raised_tests.rs` (reaches
+  `terminal_python_skill` + the `plan.formulate` row; ungrounded and forced answers drop it);
+  `completion_helpers_return_none_on_a_refused_plan` covers it; and **the first runner-level test of the Python-skill
+  write** (`python_skill_crystallise_e2e::a_notebook_answers_python_skill_is_crystallised_by_the_runner`: memory row
+  `kind: python` untrusted, `l3.crystallised` audit `inserted`). Mutant caught: carry dropped. ⚠️ **A `PgListener`
+  from the pool must be dropped before `pool.close()`** — close waits on its connection forever (cost a 40-min hang).
+- ⚠️ **Owed: ≥ 2 DGX runs** of `requery7.sh` on this tree (prompt changed; #998's and #1002's runs too, one pair covers
+  all three). ⚠️ **Not prompt-only** (`deny_unknown_fields`): deploy the build.
+
+### Previous (2026-11-08): #996 2 of 5 (PR #1002, merged) — `AnswerSpec.l3_skill` → the terminal plan; a mis-shaped skill drops with a WARN (`skill_or_drop`). `memory_l3_crystallise_e2e`'s four scheduler tests run the notebook (`ScriptedNotebook`) through the real runner write.
 
 ### Previous (2026-11-08): #996 1 of 5 (PR #998, merged) — `AnswerSpec.l1_insight` → the terminal plan; `Plan::completion_{insight,skill,python_skill}` return `None` on a **refused** terminal plan. Tests in **`notebook/run/agent_raised_tests.rs`** (the home for all five ports, called from `the_notebook_loop`, so **no libtest count**). Filed: issue 999 (runner-level L1 write untested), 1000 (300 characters vs 512 bytes), 1001 (L1 insights cross classification).
 
@@ -256,9 +256,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 1. **#922 slice 4b = [#993](https://github.com/hherb/kastellan/issues/993)** (retire classic). Steps 1–2 done
    (#995, #997). **Next: [#996](https://github.com/hherb/kastellan/issues/996)** — port the five
    agent-authored plan features to the notebook reply, one PR each (each prompt change ≥ 2 DGX runs).
-   **Done: `l1_insight` (PR #998), `l3_skill` (PR #1002); next: `python_skill` (on `answer`, the same
-   grounding gate; its classic test is `inner_loop/tests.rs::terminal_python_skill_captured_under_grounding_gate`), then
-   `floor_request` and `invoke_skill` (on `call`).** Tests go in `notebook/run/agent_raised_tests.rs`. **Then the
+   **Done: `l1_insight` (PR #998), `l3_skill` (PR #1002), `python_skill` (this session); next: `floor_request` and
+   `invoke_skill` (on `call`, not `answer`: the reply's `CallSpec` and `call_plan`).** Tests go in `notebook/run/agent_raised_tests.rs`. **Then the
    deletion**, with the re-points listed on #993 (≈19 per-step-view tests → `PlanRecord::last_step_view`, 7 timeout
    cases, the outcome-shapes prompt pin, `user_text_cannot_forge_a_key`); `router_agent_mock_e2e` (~720 lines) shrinks
    below the cap when its 5 classic-door tests go (2 already have notebook twins); #940 folds in. bottie's substring
@@ -395,7 +394,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#996 l3) | `feat/996-l3-skill` over `2e9fa226`, primary checkout | **5571 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-996l3.log`. vs `sweep-996l1.log`, per suite: only core lib 2813 → 2815 (+1 `an_answer_may_carry_an_l3_skill`, +1 #998's review-round `completion_helpers_return_none_on_a_refused_plan`, after that log); the loop tests run inside `the_notebook_loop`; `memory_l3_crystallise_e2e` stays 7 | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-996l3`, clean, 27 `Checking kastellan` | **23** (as before) |
+| **Mac** (#996 py) | `feat/996-python-skill` over `7d870a8b`, primary checkout | **5574 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-996py.log`. vs `sweep-996l3.log`, per suite: core lib 2815 → 2817 (+1 `an_answer_may_carry_a_python_skill`, +1 #1002's review-round `a_malformed_l3_skill_drops_the_skill_not_the_answer`, after that log), `python_skill_crystallise_e2e` 1 → 2; the loop tests run inside `the_notebook_loop` | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-996py`, clean, 27 `Checking kastellan` | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
