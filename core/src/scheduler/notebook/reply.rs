@@ -70,7 +70,8 @@ pub(crate) struct CallSpec {
     /// An agent-raised classification floor (#996): the task touches data
     /// above `classification_floor`. `execute`'s `apply_floor_raise` raises
     /// the task's floor before this call is reviewed, for this and every
-    /// later turn; a request at or below the floor changes nothing.
+    /// later turn (a repeated call, never dispatched, still raises it: see
+    /// `run`); a request at or below the floor changes nothing.
     #[serde(default)]
     pub floor_request: Option<DataClass>,
 }

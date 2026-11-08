@@ -67,7 +67,7 @@ impl ClassificationFloorSource {
 /// `ctx.classification_floor_source` to `AgentRaised` and clears
 /// `ctx.classification_floor_signals` (the signals explained the
 /// original CLI inference, not the elevated floor).
-pub(super) fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
+pub(crate) fn apply_floor_raise(ctx: &mut TaskContext, plan: &Plan) -> bool {
     if let Some(req) = plan.floor_request {
         if req.rank() > ctx.classification_floor.rank() {
             ctx.classification_floor = req;

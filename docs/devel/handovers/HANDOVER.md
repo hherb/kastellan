@@ -58,7 +58,11 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - Tests: `reply/tests.rs::{a_call_may_raise_the_floor, a_sift_call_may_not_raise_the_floor}`; loop tests in
   `agent_raised_tests.rs` under the real `DeterministicPolicy` (new harness `run_policed`): the raise reaches both rows
   + the render + the answer's ceiling; a call classified below its raised floor is blocked by I2, never dispatched
-  (the classic `agent_floor_raise_chain_blocks_low_classification_step`'s twin). Mutant caught: carry dropped.
+  (the classic `agent_floor_raise_chain_blocks_low_classification_step`'s twin), and the raise survives the block.
+  Mutant caught: carry dropped.
+- ⚠️ **A repeated call (#922, not dispatched) still raises the floor** — found by the finalcheck review: the repeat
+  guard in `notebook/run.rs` `continue`s before `execute`, so it now calls `apply_floor_raise` itself (made
+  `pub(crate)`). Pinned by `a_repeated_calls_floor_request_still_raises_the_floor` (red before the fix).
 - ⚠️ **A raise does not survive a suspend/resume** — #713 (commented: now reachable on the default planner; cheap
   partial fix = re-apply `apply_floor_raise` over the restored `ctx.plans` in `runner/task_exec.rs`).
 - ⚠️ **Owed: ≥ 2 DGX runs** of `requery7.sh` on this tree (#998's, #1002's, #1003's and this prompt change: one pair

@@ -182,7 +182,32 @@ pub(super) async fn a_call_below_its_raised_floor_is_blocked(pool: &sqlx::PgPool
     assert_eq!(body(&r.result), "blocked");
     assert!(r.tools.dispatched.lock().unwrap().is_empty(), "a blocked call is not dispatched");
     let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
-    assert_eq!(formulated[0]["classification_floor_source"], "agent_raised", "{formulated:#?}");
+    assert_eq!(formulated.len(), 2, "{formulated:#?}");
+    // The block keeps the raise: the answer after it is reviewed at it.
+    for row in &formulated {
+        assert_eq!(row["classification_floor"], "ClinicalConfidential", "{row:#?}");
+        assert_eq!(row["classification_floor_source"], "agent_raised", "{row:#?}");
+    }
+    assert_eq!(last_ceiling(pool, r.task_id).await, "ClinicalConfidential");
     let next = &script.messages()[1];
     assert!(next.contains("step_classification_below_floor"), "the block is shown back: {next}");
+}
+
+/// A repeated call is not dispatched (#922), but its `floor_request` still
+/// raises the floor: the raise only tightens review, and dropping it would
+/// let the answer go out below the class the agent declared.
+pub(super) async fn a_repeated_calls_floor_request_still_raises_the_floor(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call(1, "a")}),
+        json!({"call": raising_call("ClinicalConfidential")}),
+        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A"}}),
+    ]);
+    let r = run_policed(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a"], "the repeat never ran");
+    let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
+    let answer = formulated.last().unwrap();
+    assert_eq!(answer["classification_floor"], "ClinicalConfidential", "{formulated:#?}");
+    assert_eq!(answer["classification_floor_source"], "agent_raised", "{formulated:#?}");
+    assert_eq!(last_ceiling(pool, r.task_id).await, "ClinicalConfidential");
 }
