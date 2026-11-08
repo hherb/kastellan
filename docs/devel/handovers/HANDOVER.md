@@ -59,7 +59,11 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   (`ScriptedNotebook`) through the real runner write (insert, dedup, grounding, invalid) and assert the task
   `completed` with its body (a failed task fires `tasks_completed` too); 685 → ~580 lines. Mutants caught: carry
   dropped, `!synth_turn` dropped.
-- ⚠️ A malformed `l3_skill` (wrong type) fails the whole reply's parse → one re-ask, as on classic. ⚠️ **Owed: ≥ 2
+- Review round: a **mis-shaped** `l3_skill` (missing `parameters`, wrong type) is now dropped with a WARN
+  (`reply.rs::skill_or_drop`), not the reply — it must not cost the answer, least of all on the forced turn
+  (`a_malformed_l3_skill_drops_the_skill_not_the_answer`; classic still fails its parse). Also pinned: the skill on the
+  `plan.formulate` row, and `completion_skill` on a refused plan. `python_skill` (3 of 5) wants the same helper.
+  ⚠️ **Owed: ≥ 2
   DGX runs** of `requery7.sh` on this tree (prompt changed; #998's runs are owed too, one pair covers both).
   ⚠️ **Not prompt-only** (`deny_unknown_fields`): deploy the build.
 

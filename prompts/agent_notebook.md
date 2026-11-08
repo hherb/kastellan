@@ -162,8 +162,9 @@ The keys:
     Rarely, after a **multi-step** task you expect to recur, add
     `"l3_skill"`: your calls turned into a reusable template, stored for the
     operator to review (never run by itself). Its keys: `name` (snake_case,
-    ≤ 64 characters), `description` (one line), `parameters` (a list of
-    `{"name", "description"}`, one per value that changes between runs) and
+    ≤ 64 characters), `description` (one line), `parameters` (a list, `[]`
+    if none, of ≤ 16 `{"name", "description"}` with snake_case names, one
+    per value that changes between runs) and
     `steps` (1–32 of `{"tool", "method", "parameters"}`, as in your calls,
     with `{{param_name}}` where a declared parameter's value goes; every
     placeholder must be declared and every parameter used). Leave it out

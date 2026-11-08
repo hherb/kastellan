@@ -70,7 +70,8 @@ fn skill() -> serde_json::Value {
 }
 
 /// A completed answer's `l3_skill`, after a call was dispatched, reaches
-/// `terminal_l3_skill`, which the runner crystallises from.
+/// `terminal_l3_skill`, which the runner crystallises from, and its
+/// `plan.formulate` row.
 pub(super) async fn an_answers_l3_skill_reaches_the_runner(pool: &sqlx::PgPool) {
     let script = Script::new(&[
         json!({"steps": steps(&[1]), "call": call(1, "a")}),
@@ -79,6 +80,8 @@ pub(super) async fn an_answers_l3_skill_reaches_the_runner(pool: &sqlx::PgPool) 
     let r = run(pool, &script, new_task(pool, 3).await).await;
     assert_eq!(body(&r.result), "A");
     assert_eq!(r.result.terminal_l3_skill.map(|s| s.name).as_deref(), Some("list_invoices"));
+    let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
+    assert_eq!(formulated.last().unwrap()["l3_skill"]["name"], "list_invoices", "{formulated:#?}");
 }
 
 /// The forced answer is a wrap-up under the turn cap, not a procedure shown

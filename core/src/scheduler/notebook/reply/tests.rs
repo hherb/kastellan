@@ -186,6 +186,22 @@ fn an_answer_may_carry_an_l3_skill() {
     assert_eq!(p.completion_skill(), Some(&s));
 }
 
+/// A mis-shaped `l3_skill` (here no `parameters`) is dropped, not the answer:
+/// the skill is optional and operator-reviewed, the answer is the task's
+/// result, and on the forced turn there is no re-ask left to spend.
+#[test]
+fn a_malformed_l3_skill_drops_the_skill_not_the_answer() {
+    for bad in [
+        json!({"name": "x", "description": "d", "steps": [{"tool": "t", "method": "m", "parameters": {}}]}),
+        json!({"name": "x", "description": "d", "parameters": {}, "steps": []}),
+        json!("read_readme"),
+    ] {
+        let r = check(json!({"answer": {"body": "b", "l3_skill": bad}}), &two_steps()).unwrap();
+        let a = r.answer.unwrap();
+        assert_eq!((a.body.as_str(), a.l3_skill), ("b", None), "{bad}");
+    }
+}
+
 /// DGX task 264: a tick and a call for the same step is progress — the
 /// findings are kept and the step stays open for the call.
 #[test]

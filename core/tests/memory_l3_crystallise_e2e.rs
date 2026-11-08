@@ -217,8 +217,7 @@ async fn run_task_through_scheduler(
 // Scenario 1 — agent-raised happy path inserts L3 row and audit row
 // ---------------------------------------------------------------------------
 
-/// Drive a task with one non-terminal step + a terminal plan carrying
-/// `l3_skill`. Assert: one `layer=3` memory row, correct body/metadata;
+/// Drive a task with one call turn, then an answer carrying `l3_skill`. Assert: one `layer=3` memory row, correct body/metadata;
 /// one `actor='scheduler' action='l3.crystallised'` audit row with
 /// `action='inserted'`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -337,7 +336,7 @@ async fn agent_raised_dedup_skips_second() {
 // Scenario 3 — grounding gate drops pure-text task (0 dispatches)
 // ---------------------------------------------------------------------------
 
-/// Drive a task whose FIRST plan is already terminal (no step was ever
+/// Drive a task that answers on its FIRST turn (no step was ever
 /// dispatched, so `dispatch_count == 0`). The grounding gate in the inner
 /// loop must suppress the l3_skill. Assert: ZERO layer-3 rows; ZERO
 /// `l3.crystallised` audit rows.
@@ -375,7 +374,7 @@ async fn grounding_gate_drops_pure_text_task() {
 // Scenario 4 — invalid skill: validation failure, no row written
 // ---------------------------------------------------------------------------
 
-/// Drive a task with >= 1 dispatched step, but the terminal plan carries
+/// Drive a task with >= 1 dispatched step, but the answer carries
 /// an invalid l3_skill (undeclared placeholder). The `write_l3_crystallised_row`
 /// helper in `runner.rs` catches the validation error (WARN-only) and
 /// writes nothing.

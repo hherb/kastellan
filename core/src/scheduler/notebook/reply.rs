@@ -91,9 +91,18 @@ pub(crate) struct AnswerSpec {
     /// reusable template, stored untrusted for the operator to review. Kept
     /// only by `execute`'s grounding gate (completed, ≥ 1 call dispatched, no
     /// skill invoked, not the forced answer); the runner validates and
-    /// dedups it on write.
-    #[serde(default)]
+    /// dedups it on write. A mis-shaped one is dropped with a WARN rather
+    /// than failing the reply: it must not cost the answer it rides on.
+    #[serde(default, deserialize_with = "skill_or_drop")]
     pub l3_skill: Option<L3SkillCandidate>,
+}
+
+fn skill_or_drop<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<L3SkillCandidate>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|e| {
+        tracing::warn!("notebook answer's l3_skill is mis-shaped, dropped: {e}");
+        None
+    }))
 }
 
 /// `answer.table`: one scrapbook ref or a list of them (one per sift of the
