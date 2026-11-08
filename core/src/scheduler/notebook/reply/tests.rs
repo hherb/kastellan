@@ -146,6 +146,38 @@ fn the_call_plan_is_one_reviewable_step() {
     assert_eq!(p.data_ceiling, Some(DataClass::Personal), "the call's own class");
     let p = call_plan(&r, r.call.as_ref().unwrap(), DataClass::Secret);
     assert_eq!(p.data_ceiling, Some(DataClass::Secret), "never below the floor");
+    assert_eq!(p.floor_request, None);
+}
+
+/// A call may raise the task's floor (#996): the plan carries the request for
+/// `execute`'s `apply_floor_raise`, and its ceiling covers the raised floor,
+/// or I1 (ceiling below floor) would refuse the plan the raise was for.
+#[test]
+fn a_call_may_raise_the_floor() {
+    let mut c = call(1);
+    c["floor_request"] = json!("ClinicalConfidential");
+    let r = check(json!({"call": c}), &two_steps()).unwrap();
+    let p = call_plan(&r, r.call.as_ref().unwrap(), DataClass::Public);
+    assert_eq!(p.floor_request, Some(DataClass::ClinicalConfidential));
+    assert_eq!(p.data_ceiling, Some(DataClass::ClinicalConfidential));
+    // A request below the floor lowers nothing.
+    let mut c = call(1);
+    c["floor_request"] = json!("Public");
+    let r = check(json!({"call": c}), &two_steps()).unwrap();
+    let p = call_plan(&r, r.call.as_ref().unwrap(), DataClass::Secret);
+    assert_eq!(p.data_ceiling, Some(DataClass::Secret));
+}
+
+/// A sift builds its own reads plan from the call, so a `floor_request` on it
+/// would be dropped unseen: refused, with the fix named.
+#[test]
+fn a_sift_call_may_not_raise_the_floor() {
+    let mut c = call(1);
+    c["tool"] = json!(crate::scheduler::notebook::sift::SIFT_TOOL);
+    assert!(check(json!({"call": c.clone()}), &two_steps()).is_ok());
+    c["floor_request"] = json!("Secret");
+    let err = check(json!({"call": c}), &two_steps()).unwrap_err();
+    assert!(err.contains("floor_request") && err.contains("not on a `sift`"), "{err}");
 }
 
 #[test]

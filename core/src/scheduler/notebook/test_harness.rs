@@ -324,9 +324,19 @@ pub(crate) async fn run(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext) 
 /// [`run`], with `verdict` (when set) given to every plan by a second review
 /// stage after the recorder: a reviewer that blocks an answer, say.
 pub(crate) async fn run_reviewed(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext, verdict: Option<Verdict>) -> Ran {
+    run_staged(pool, script, ctx, verdict.map(|v| Arc::new(FixedVerdict(v)) as Arc<dyn ReviewStage>)).await
+}
+
+/// [`run`], with the production classification screen
+/// (`DeterministicPolicy`: I1–I3 against the task floor) after the recorder.
+pub(crate) async fn run_policed(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext) -> Ran {
+    run_staged(pool, script, ctx, Some(Arc::new(crate::cassandra::review::DeterministicPolicy))).await
+}
+
+async fn run_staged(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext, extra: Option<Arc<dyn ReviewStage>>) -> Ran {
     let review = Arc::new(RecordingReview::default());
     let mut stages = vec![review.clone() as Arc<dyn ReviewStage>];
-    stages.extend(verdict.map(|v| Arc::new(FixedVerdict(v)) as Arc<dyn ReviewStage>));
+    stages.extend(extra);
     let chain = Arc::new(ChainReviewStage::new(stages));
     let tools = Arc::new(Tools::default());
     let task_id = ctx.task_id;
