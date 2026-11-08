@@ -18,7 +18,7 @@ fn the_notebook_prompt_documents_every_reply_key() {
         "withheld", "undecided", "failed_reads", "reads", "unread", "remaining", "next_from", "stopped", "sample", "table", "columns",
         "order_by", "distinct", "chain", "items_per_read",
         // The agent-raised plan features (#996).
-        "l1_insight", "l3_skill", "python_skill",
+        "l1_insight", "l3_skill", "python_skill", "floor_request",
     ] {
         assert!(prompt.contains(&format!("`{key}`")) || prompt.contains(&format!("\"{key}\"")), "missing `{key}`");
     }

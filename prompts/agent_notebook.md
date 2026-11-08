@@ -143,7 +143,12 @@ The keys:
     exactly as a `<tools>` line shows them: for
     `- mail (method: mail.search): …` that is `"tool": "mail"`,
     `"method": "mail.search"` — never the method in `tool`. `classification`
-    is the most sensitive class of data the call touches. A call this task
+    is the most sensitive class of data the call touches. If you find the
+    task involves data more sensitive than `classification_floor`, add
+    `"floor_request": "<class>"` to the call: it raises the task's floor
+    from this call on (it never lowers it), and a call classified below the
+    raised floor is blocked — so classify it at least that high. Not on a
+    `sift`. A call this task
     already made **successfully**, with the same parameters, is not run
     again — its result is the one you already had; a call that **failed** may
     be retried.

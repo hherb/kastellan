@@ -67,6 +67,13 @@ pub(crate) struct CallSpec {
     pub returns: String,
     pub done_when: String,
     pub classification: DataClass,
+    /// An agent-raised classification floor (#996): the task touches data
+    /// above `classification_floor`. `execute`'s `apply_floor_raise` raises
+    /// the task's floor before this call is reviewed, for this and every
+    /// later turn (a repeated call, never dispatched, still raises it: see
+    /// `run`); a request at or below the floor changes nothing.
+    #[serde(default)]
+    pub floor_request: Option<DataClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -180,7 +187,8 @@ impl NotebookReply {
 
 /// The fields of a [`CallSpec`]: the ones a model writes at a reply's top
 /// level when it leaves out the `call` wrapper (#980).
-const CALL_FIELDS: [&str; 7] = ["step", "tool", "method", "parameters", "returns", "done_when", "classification"];
+const CALL_FIELDS: [&str; 8] =
+    ["step", "tool", "method", "parameters", "returns", "done_when", "classification", "floor_request"];
 
 /// Parse a raw reply, tolerating a fence or a preamble like a classic plan.
 ///
@@ -274,6 +282,11 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
         if call.returns.trim_start().starts_with(super::sift::SIFT_READS_DECISION.trim_end()) {
             return Err(format!("`call.returns` may not begin `{}`", super::sift::SIFT_READS_DECISION.trim_end()));
         }
+        // A sift builds its own reads plan from the call (`sift::run`), so a
+        // request on it would be dropped unseen.
+        if call.tool == super::sift::SIFT_TOOL && call.floor_request.is_some() {
+            return Err("`floor_request` goes on a tool call, not on a `sift`".into());
+        }
     }
     Ok(())
 }
@@ -320,10 +333,13 @@ pub(crate) fn notebook_step_of(plan: &Plan) -> Option<u32> {
 
 /// The one-step plan for `call`, reviewed and dispatched like any plan. Its
 /// `data_ceiling` is the call's classification, raised to the task's
-/// `floor`: left unset, it would resolve to the floor alone, and a call that
-/// touches more than the floor would then be refused as touching more than
-/// its own plan declared.
+/// `floor` (and to a `floor_request`, which `execute` applies before review):
+/// left unset, it would resolve to the floor alone, and a call that touches
+/// more than the floor would then be refused as touching more than its own
+/// plan declared; below a requested floor, I1 would refuse the very plan
+/// that raised it.
 pub(crate) fn call_plan(reply: &NotebookReply, call: &CallSpec, floor: DataClass) -> Plan {
+    let floor = call.floor_request.map_or(floor, |r| r.max(floor));
     Plan {
         context: reply.tick.as_ref().map(|t| t.summary.clone()).unwrap_or_default(),
         decision: call.returns.clone(),
@@ -339,7 +355,7 @@ pub(crate) fn call_plan(reply: &NotebookReply, call: &CallSpec, floor: DataClass
         result: None,
         data_ceiling: Some(call.classification.max(floor)),
         refused: None,
-        floor_request: None,
+        floor_request: call.floor_request,
         l1_insight: None,
         l3_skill: None,
         invoke_skill: None,

@@ -236,6 +236,10 @@ pub(crate) async fn run_notebook_to_terminal(
                 let held = |h: &crate::handoff::HandoffRef| dispatcher.stashed(ctx.task_id, h).is_some();
                 if let Some(s) = repeated.filter(|s| repeat::already_made(&ctx.plans, s, held)) {
                     tracing::info!(task_id = ctx.task_id, method = %s.method, "notebook: repeated call not dispatched");
+                    // Not dispatched, but its `floor_request` still binds: a
+                    // raise only tightens review, and dropping it would let
+                    // the answer go out below the class the agent declared.
+                    crate::scheduler::inner_loop::apply_floor_raise(&mut ctx, &plan);
                     audit_discarded_turn(pool, &ctx, "repeated_call", Some(&s.method), &meta).await;
                     ctx.blocks.push(repeat::repeated_call_reason(&s.method));
                     replan_due = true;

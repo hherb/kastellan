@@ -139,3 +139,75 @@ pub(super) async fn an_ungrounded_or_forced_python_skill_is_dropped(pool: &sqlx:
     assert_eq!(body(&r.result), "f and g");
     assert_eq!(r.result.terminal_python_skill, None);
 }
+
+/// `call(1, "a")` with a `floor_request` and its own `classification`.
+fn raising_call(class: &str) -> serde_json::Value {
+    let mut c = call(1, "a");
+    c["floor_request"] = json!("ClinicalConfidential");
+    c["classification"] = json!(class);
+    c
+}
+
+/// A call's `floor_request` raises the task floor before review (the
+/// notebook twin of the classic `agent_floor_request_higher_than_producer_
+/// elevates_ctx`): its `plan.formulate` row, and the answer's after it, carry
+/// the raised floor and `agent_raised`; the answer's ceiling covers it.
+pub(super) async fn a_calls_floor_request_raises_the_task_floor(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": raising_call("ClinicalConfidential")}),
+        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A"}}),
+    ]);
+    let r = run_policed(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a"]);
+    let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
+    assert_eq!(formulated.len(), 2, "{formulated:#?}");
+    for row in &formulated {
+        assert_eq!(row["classification_floor"], "ClinicalConfidential", "{row:#?}");
+        assert_eq!(row["classification_floor_source"], "agent_raised", "{row:#?}");
+    }
+    assert_eq!(last_ceiling(pool, r.task_id).await, "ClinicalConfidential");
+    assert!(script.messages()[1].contains(r#""classification_floor":"ClinicalConfidential""#), "the render shows it");
+}
+
+/// The classic `agent_floor_raise_chain_blocks_low_classification_step` on
+/// the notebook: a call that raises the floor but classifies itself below it
+/// is blocked by I2 under the real `DeterministicPolicy`, and never runs.
+pub(super) async fn a_call_below_its_raised_floor_is_blocked(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": raising_call("Personal")}),
+        json!({"answer": {"body": "blocked"}}),
+    ]);
+    let r = run_policed(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "blocked");
+    assert!(r.tools.dispatched.lock().unwrap().is_empty(), "a blocked call is not dispatched");
+    let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
+    assert_eq!(formulated.len(), 2, "{formulated:#?}");
+    // The block keeps the raise: the answer after it is reviewed at it.
+    for row in &formulated {
+        assert_eq!(row["classification_floor"], "ClinicalConfidential", "{row:#?}");
+        assert_eq!(row["classification_floor_source"], "agent_raised", "{row:#?}");
+    }
+    assert_eq!(last_ceiling(pool, r.task_id).await, "ClinicalConfidential");
+    let next = &script.messages()[1];
+    assert!(next.contains("step_classification_below_floor"), "the block is shown back: {next}");
+}
+
+/// A repeated call is not dispatched (#922), but its `floor_request` still
+/// raises the floor: the raise only tightens review, and dropping it would
+/// let the answer go out below the class the agent declared.
+pub(super) async fn a_repeated_calls_floor_request_still_raises_the_floor(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call(1, "a")}),
+        json!({"call": raising_call("ClinicalConfidential")}),
+        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A"}}),
+    ]);
+    let r = run_policed(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a"], "the repeat never ran");
+    let formulated = rows(pool, r.task_id, "agent", "plan.formulate").await;
+    let answer = formulated.last().unwrap();
+    assert_eq!(answer["classification_floor"], "ClinicalConfidential", "{formulated:#?}");
+    assert_eq!(answer["classification_floor_source"], "agent_raised", "{formulated:#?}");
+    assert_eq!(last_ceiling(pool, r.task_id).await, "ClinicalConfidential");
+}

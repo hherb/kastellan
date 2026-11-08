@@ -17,7 +17,7 @@ use crate::scheduler::audit::{
     build_l3_invoke_outcome_payload, ACTION_L3_INVOKE_OUTCOME, SCHEDULER_AUDIT_ACTOR,
 };
 
-use self::floor::apply_floor_raise;
+pub(crate) use self::floor::apply_floor_raise;
 pub use self::floor::ClassificationFloorSource;
 use self::invoke_expand::{expand_invoke_skill, InvokeExpansion};
 use self::summary::render_plans_summary;
