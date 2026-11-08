@@ -55,6 +55,10 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   five #996 ports, called from `the_notebook_loop`, so **no libtest count**): reaches the runner + `plan.formulate` row,
   dropped on a refusal, a rewritten answer keeps only its own. The audit-row helper `rows` moved to `test_harness`.
   Mutant (carry dropped) caught.
+- Review round: `Plan::completion_{insight,skill,python_skill}` now return `None` on a **refused** terminal plan (was safe
+  only because `execute` returns `Refused` first); a rewrite with no lesson does not inherit the draft's. Filed, not
+  fixed here: issue 999 (runner-level L1 write untested), issue 1000 (prompt "300 characters" vs validator 512 bytes),
+  issue 1001 (L1 insights cross classification: a Confidential task's lesson reaches every prompt).
 - ⚠️ **Owed: ≥ 2 DGX runs** of `requery7.sh` on this tree (the prompt changed). ⚠️ **Not prompt-only:** the parser is
   `deny_unknown_fields`, so an old binary refuses a reply with `l1_insight` — deploy the build, not just the prompt.
 

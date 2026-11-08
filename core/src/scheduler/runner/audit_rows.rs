@@ -305,8 +305,9 @@ mod tests {
     #[test]
     fn write_l1_promoted_row_signature_compile_pin() {
         // Compile-only: the function exists with the widened signature
-        // (pool, extractor, embedder, task_id, insight). Full DB-backed coverage is in
-        // core/tests/scheduler_lanes_e2e.rs.
+        // (pool, extractor, embedder, task_id, insight). `promote_l1` itself is
+        // DB-tested in core/tests/memory_l1_promote_e2e.rs; this wrapper's
+        // runner call site is not (https://github.com/hherb/kastellan/issues/999).
         fn _signature_pin<'a>(
             pool: &'a sqlx::PgPool,
             extractor: &'a crate::entity_extraction::NoOpEntityExtractor,
