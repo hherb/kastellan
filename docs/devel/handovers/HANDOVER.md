@@ -12,8 +12,8 @@
 > (#986's session and review round); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-08 (#993 step 2: the classic comparison run; the in-process scheduler suites run the notebook; #996 filed) ·
-**Recent PRs, newest first:** [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-08 (#996 1 of 5: the notebook answer carries `l1_insight`) ·
+**Recent PRs, newest first:** [#998](https://github.com/hherb/kastellan/pull/998) (#996 `l1_insight`), [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2, merged), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
 **The DGX runs `main` with #995 (deployed with `upgrade_from_git.sh` 2026-11-08, both env files identical after install, `NRestarts=0`, Matrix up) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`, now redundant since #994** (classic ran once for #993, tasks 387–393, experiment #18: 7/7, 2160 s; backups `~/kastellan.env*.bak-pre993`. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
@@ -46,29 +46,19 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-08, latest): #993 step 2 — classic comparison run; in-process suites on the notebook
+### This session (2026-11-08, latest): #996 1 of 5 — `answer.l1_insight` on the notebook (PR #998)
 
-- **DGX:** `main` dd814896 deployed (`upgrade_from_git.sh`, both env files identical, `NRestarts=0`), then the one
-  classic comparison run #993 asks for (`~/classic993.sh`: `.local` → `classic`, `requery7.sh`, back to
-  `notebook`; tasks 387–393). Experiment #18: **7/7, 2160 s** (notebook #17: 7/7, 2138 s); classic won Q1's
-  figures, lost Q4's total — single-run variance. Retiring it is about upkeep, not quality.
-- **Census** of every classic-loop test is on #993 (62 classic-only, 41 to port, 50 keep, 4 covered). ⚠️ **Five
-  classic `Plan` features have no notebook path** (`floor_request`, `l1_insight`, `l3_skill`, `python_skill`,
-  `invoke_skill`: `call_plan`/`answer_plan` set them `None`). **Operator: port them before deleting** → #996.
-- `tests_common::scripted_notebook::ScriptedNotebook` — a public scripted notebook formulator for `spawn_scheduler`
-  (a closure picks each reply from `ctx`, usually `ctx.plans.len()`, so a resume re-derives the same digest).
-  ⚠️ Every `call_reply` lists its own fresh step id (a replan replaces the pending one); `answer_reply` lists a
-  step too, because a **first reply without `steps` is refused** (the first port failed 6 of 9 tests on exactly that).
-- Moved onto it in place: `scheduler_ask_path_e2e` (9, then 10), `scheduler_ask_expiry_e2e`, `scheduler_lanes_e2e`,
-  `conversation_continuity_e2e` (+ asserts the rendered message). Refusal precedence ×3 →
-  `notebook/run/refusal_tests.rs` (called from `the_notebook_loop`, so **no libtest count**); `notebook_turn` twins
-  in `router_agent_mock_e2e`; the notebook prompt's `allowed:` line pinned. ⚠️ The classic loop has lost these
-  suites' coverage: it is opt-in and on its way out.
-- **/finalcheck review round:** `ScriptedNotebook::not_thinking()` (the router default) and
-  `an_approval_survives_the_answer_rewrite_on_resume` (the resumed routine turn's answer is rewritten, then matches
-  the approval; asserts 1 `answer_rewritten` row vs 0 thinking) → ask_path **10**; D11 also checks the resumed
-  turn's render (`current_step` 2, pending); lanes pins one dispatch per task; the refusal port gained the classic
-  audit-row checks (`classification_floor`, null `l1_insight`, null `refused` on an ordinary answer, a 4th case).
+- `AnswerSpec.l1_insight` (optional) → the terminal plan's `l1_insight` (`run.rs`: `Plan { l1_insight, ..answer_plan(..) }`);
+  the shared `execute` captures it on `Completed` only, the runner promotes it (`write_l1_promoted_row` validates). Prompt
+  text in `agent_notebook.md`'s `answer` bullet, pinned in `the_notebook_prompt_documents_every_reply_key`.
+- Tests: `reply/tests.rs::an_answer_may_carry_an_l1_insight`; new **`notebook/run/agent_raised_tests.rs`** (the home for all
+  five #996 ports, called from `the_notebook_loop`, so **no libtest count**): reaches the runner + `plan.formulate` row,
+  dropped on a refusal, a rewritten answer keeps only its own. The audit-row helper `rows` moved to `test_harness`.
+  Mutant (carry dropped) caught.
+- ⚠️ **Owed: ≥ 2 DGX runs** of `requery7.sh` on this tree (the prompt changed). ⚠️ **Not prompt-only:** the parser is
+  `deny_unknown_fields`, so an old binary refuses a reply with `l1_insight` — deploy the build, not just the prompt.
+
+### Previous (2026-11-08): #993 step 2 (PR #997, merged) — `tests_common::scripted_notebook::ScriptedNotebook` (a closure picks each reply from `ctx`, usually `ctx.plans.len()`); ⚠️ a **first reply without `steps` is refused**, and every `call_reply` lists its own fresh step id. Classic comparison run #18: 7/7, 2160 s. ⚠️ **Five classic `Plan` features have no notebook path** → #996 (operator: port before deleting). The runner-level ask/expiry/lanes/conversation suites run the notebook; the classic loop lost their coverage.
 
 ### Previous (2026-11-07): #993 step 1 (PR #995, merged) — the daemon e2es script notebook replies (`scripted_llm/notebook.rs`). ⚠️ **The router default is `disable_thinking: true`**: a routine turn's answer is set aside and rewritten by a thinking turn, so a scripted daemon happy path is **3 turns** (call, draft, answer). (`ScriptedNotebook` thinks by default: no rewrite turn.)
 
@@ -257,7 +247,9 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 1. **#922 slice 4b = [#993](https://github.com/hherb/kastellan/issues/993)** (retire classic). Steps 1–2 done
    (#995, #997). **Next: [#996](https://github.com/hherb/kastellan/issues/996)** — port the five
-   agent-authored plan features to the notebook reply, one PR each (each prompt change ≥ 2 DGX runs). **Then the
+   agent-authored plan features to the notebook reply, one PR each (each prompt change ≥ 2 DGX runs).
+   **1 of 5 done: `l1_insight` (PR #998); left: `l3_skill`, `python_skill` (both on `answer`, behind the
+   grounding gate), `floor_request` and `invoke_skill` (on `call`).** Tests go in `notebook/run/agent_raised_tests.rs`. **Then the
    deletion**, with the re-points listed on #993 (≈19 per-step-view tests → `PlanRecord::last_step_view`, 7 timeout
    cases, the outcome-shapes prompt pin, `user_text_cannot_forge_a_key`); `router_agent_mock_e2e` (~720 lines) shrinks
    below the cap when its 5 classic-door tests go (2 already have notebook twins); #940 folds in. bottie's substring
@@ -394,7 +386,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#993 s2) | `feat/993-retire-classic` over `dd814896`, primary checkout | **5567 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-993s2.log`. vs #995's row (5562), per suite: tests-common lib 492 → 494, core lib 2811 → 2812 (the prompt pin; the 3 refusal ports run inside `the_notebook_loop`), `router_agent_mock_e2e` 5 → 7 | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-993`, clean, 27 `Checking kastellan` | **23** (−3 vs #995's worktree: the primary checkout has the gliner `.venv`) |
+| **Mac** (#996 l1) | `feat/996-l1-insight` over `c9278dcb`, primary checkout | **5569 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-996l1.log`. vs `sweep-993s2.log`, per suite: core lib 2812 → 2813 (the parser test; the 3 loop tests run inside `the_notebook_loop`), `scheduler_ask_path_e2e` 9 → 10 (#997's review round, after that log) | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-996`, clean, 27 `Checking kastellan` | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
@@ -479,6 +471,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
+- **#997** (#993 step 2) — merged 2026-11-08: `ScriptedNotebook`; the in-process scheduler suites run the notebook.
 - **#995 / #994** (#993 step 1; #922 slice 4a) — merged 2026-11-07, deployed DGX 2026-11-08: the daemon e2es run the notebook; the notebook is the default planner mode.
 - **#992 / #990** (README; #987) — merged 2026-11-07: the root README brought up to date (⚠️ it restates the user manual's chapter 4: change both together); one shared `LISTEN` connection for a process's follows, cap 64.
 - **#989** (#985, #988) — merged 2026-11-07: `ask` prints notebook entries and resumes a lost follow; session reports lost audit rows. **bottie#236** (slice 3) merged 2026-11-07.

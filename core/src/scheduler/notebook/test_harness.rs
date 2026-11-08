@@ -358,6 +358,20 @@ pub(crate) async fn last_ceiling(pool: &sqlx::PgPool, task_id: i64) -> Value {
     row["plan"]["data_ceiling"].clone()
 }
 
+/// The task's audit rows with `actor` and `action`, oldest first.
+pub(crate) async fn rows(pool: &sqlx::PgPool, task_id: i64, actor: &str, action: &str) -> Vec<Value> {
+    sqlx::query_scalar(
+        "SELECT payload FROM audit_log WHERE actor = $1 AND action = $2 \
+         AND (payload->>'task_id')::bigint = $3 ORDER BY id",
+    )
+    .bind(actor)
+    .bind(action)
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
 /// The task's `agent / plan.discarded` rows, oldest first.
 pub(crate) async fn discarded(pool: &sqlx::PgPool, task_id: i64) -> Vec<Value> {
     sqlx::query_scalar(

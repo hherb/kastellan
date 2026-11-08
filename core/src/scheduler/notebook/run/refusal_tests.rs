@@ -14,20 +14,6 @@ fn refusal(body: &str, principle: u8, reason: &str) -> serde_json::Value {
     json!({"steps": steps(&[1]), "answer": {"body": body, "refused": {"principle": principle, "reason": reason}}})
 }
 
-/// The task's audit rows with `actor` and `action`, oldest first.
-async fn rows(pool: &sqlx::PgPool, task_id: i64, actor: &str, action: &str) -> Vec<serde_json::Value> {
-    sqlx::query_scalar(
-        "SELECT payload FROM audit_log WHERE actor = $1 AND action = $2 \
-         AND (payload->>'task_id')::bigint = $3 ORDER BY id",
-    )
-    .bind(actor)
-    .bind(action)
-    .bind(task_id)
-    .fetch_all(pool)
-    .await
-    .unwrap()
-}
-
 /// A refused answer ends the task `Refused` with the model's principle,
 /// reason and body, dispatching nothing; its `plan.formulate` row says so.
 pub(super) async fn a_refused_answer_ends_the_task_refused(pool: &sqlx::PgPool) {

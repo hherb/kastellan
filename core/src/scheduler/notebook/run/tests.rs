@@ -86,6 +86,9 @@ async fn the_notebook_loop() {
     super::refusal_tests::a_reviewer_constitutional_block_wins_over_a_refusal(&pool).await;
     super::refusal_tests::a_block_on_a_refused_answer_does_not_loop(&pool).await;
     super::refusal_tests::an_answer_row_carries_refused_as_null(&pool).await;
+    super::agent_raised_tests::an_answers_l1_insight_reaches_the_runner(&pool).await;
+    super::agent_raised_tests::a_refused_answers_l1_insight_is_dropped(&pool).await;
+    super::agent_raised_tests::a_rewritten_answer_keeps_only_its_own_insight(&pool).await;
 }
 
 async fn a_three_step_task_ticks_each_step_and_answers_from_findings(pool: &sqlx::PgPool) {
