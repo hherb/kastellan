@@ -329,14 +329,15 @@ impl Plan {
     /// `Outcome::Completed` AND carries an `l1_insight`. Encapsulates
     /// the agent-raised L1-promotion gate so the inner-loop call site
     /// stays small. `is_terminal()` is the existing check
-    /// (`decision == DECISION_TERMINAL && steps.is_empty() && result.is_some()`).
+    /// (`decision == DECISION_TERMINAL && steps.is_empty() && result.is_some()`);
+    /// a refused answer is terminal too but ends `Refused`, so it is excluded.
     ///
     /// Named `completion_insight` (noun form) rather than
     /// `is_completion_with_insight` to follow Rust convention that
     /// `is_*` methods return `bool` — contrast with the sibling helpers
     /// `is_terminal()` and `is_refused()`.
     pub fn completion_insight(&self) -> Option<&str> {
-        if self.is_terminal() {
+        if self.is_terminal() && !self.is_refused() {
             self.l1_insight.as_deref()
         } else {
             None
@@ -348,7 +349,7 @@ impl Plan {
     /// ANDs in the `dispatch_count >= 1` grounding gate at the call
     /// site. Mirrors [`Plan::completion_insight`].
     pub fn completion_skill(&self) -> Option<&L3SkillCandidate> {
-        if self.is_terminal() {
+        if self.is_terminal() && !self.is_refused() {
             self.l3_skill.as_ref()
         } else {
             None
@@ -360,7 +361,7 @@ impl Plan {
     /// ANDs in the `dispatch_count >= 1` grounding gate at the call site.
     /// Mirrors [`Plan::completion_skill`].
     pub fn completion_python_skill(&self) -> Option<&PythonSkillCandidate> {
-        if self.is_terminal() {
+        if self.is_terminal() && !self.is_refused() {
             self.python_skill.as_ref()
         } else {
             None

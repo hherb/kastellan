@@ -153,6 +153,12 @@ The keys:
     steps do not have to be done. After a `sift`, add `"table": {"scrapbook":
     "<its scrapbook>"}` to show every kept item as a table under your `body`
     (see `sift` below); never copy the rows into `body` yourself.
+    Optionally add `"l1_insight": "<one short line>"` (≤ 300 characters, no
+    newlines): a **generalizable lesson** for *future* tasks, not a summary
+    of this one — e.g. "mail.search without a date range pages the whole
+    archive". Leave it out when there is no such lesson: insights fill a
+    small always-shown block every later task reads, and a weak one pushes
+    out a useful one. It is kept only if the task completes.
   - `infeasible` — `{"reason": "<why the task cannot be done>"}`, when no
     listed tool can do it or a step failed in a way no replan can fix. The
     user gets the reason as the answer.

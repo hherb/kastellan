@@ -286,6 +286,30 @@ fn completion_insight_returns_some_when_terminal_and_insight_present() {
     assert_eq!(plan.completion_insight(), Some("shell-exec /bin/ls works for dirs"));
 }
 
+/// A refused answer is terminal but ends `Refused`, never `Completed`, so it
+/// teaches no lesson — whatever order `execute` checks things in.
+#[test]
+fn completion_helpers_return_none_on_a_refused_plan() {
+    let mut plan = Plan {
+        context: "".into(),
+        decision: DECISION_TERMINAL.into(),
+        rationale: "".into(),
+        steps: vec![],
+        result: Some(serde_json::json!({"kind": "text", "body": "no"})),
+        data_ceiling: Some(DataClass::Public),
+        refused: None,
+        floor_request: None,
+        l1_insight: Some("a lesson".into()),
+        l3_skill: None,
+        invoke_skill: None,
+        python_skill: None,
+    };
+    assert!(plan.is_terminal() && plan.completion_insight().is_some());
+    plan.refused = Some(RefusedReason { principle: 1, reason: "physical_harm".into() });
+    assert!(plan.is_terminal());
+    assert_eq!(plan.completion_insight(), None);
+}
+
 #[test]
 fn completion_insight_returns_none_when_not_terminal() {
     let plan = Plan {

@@ -81,6 +81,12 @@ pub(crate) struct AnswerSpec {
     /// K10): the model never retypes the rows.
     #[serde(default)]
     pub table: Option<TableSpec>,
+    /// An agent-raised L1 insight (#996): one generalizable lesson for later
+    /// tasks. Kept only when the task ends `Completed` (`execute` reads
+    /// `Plan::completion_insight`, which excludes a refusal); the runner
+    /// promotes it, and that write validates and screens it.
+    #[serde(default)]
+    pub l1_insight: Option<String>,
 }
 
 /// `answer.table`: one scrapbook ref or a list of them (one per sift of the

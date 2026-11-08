@@ -52,7 +52,7 @@ use super::repeat;
 use super::sift::{self, run::SiftRun, SIFT_TOOL};
 use super::thinking::{self, TurnKind};
 use crate::cassandra::review::ChainReviewStage;
-use crate::cassandra::types::DataClass;
+use crate::cassandra::types::{DataClass, Plan};
 use crate::scheduler::inner_loop::execute::{self, ExecState, Executed};
 use crate::scheduler::inner_loop::{
     ceiling, turn_record_for, InnerLoopError,
@@ -262,7 +262,8 @@ pub(crate) async fn run_notebook_to_terminal(
                     }
                     None => a.body.clone(),
                 };
-                answer_plan(&body, answer_ceiling(ctx.classification_floor, &touched, a.data_ceiling), a.refused.clone())
+                let plan = answer_plan(&body, answer_ceiling(ctx.classification_floor, &touched, a.data_ceiling), a.refused.clone());
+                Plan { l1_insight: a.l1_insight.clone(), ..plan }
             }
             (None, None, Some(i)) => {
                 answer_plan(&i.reason, answer_ceiling(ctx.classification_floor, &touched(&after, &ctx.plans), None), None)
@@ -387,3 +388,6 @@ mod tests;
 
 #[cfg(test)]
 mod refusal_tests;
+
+#[cfg(test)]
+mod agent_raised_tests;

@@ -157,6 +157,17 @@ fn a_refusal_rides_on_the_answer() {
     assert!(p.is_refused() && p.is_terminal());
 }
 
+/// An answer may carry an agent-raised L1 insight (#996); the terminal plan
+/// built from it keeps it, so the shared `execute` captures it on completion.
+#[test]
+fn an_answer_may_carry_an_l1_insight() {
+    let r = check(json!({"answer": {"body": "b", "l1_insight": "mail.search needs a date range"}}), &two_steps()).unwrap();
+    let a = r.answer.unwrap();
+    assert_eq!(a.l1_insight.as_deref(), Some("mail.search needs a date range"));
+    let p = Plan { l1_insight: a.l1_insight, ..answer_plan(&a.body, DataClass::Public, None) };
+    assert_eq!(p.completion_insight(), Some("mail.search needs a date range"));
+}
+
 /// DGX task 264: a tick and a call for the same step is progress — the
 /// findings are kept and the step stays open for the call.
 #[test]
