@@ -25,7 +25,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::state::{FindingSpec, NotebookState, StepSpec, StepStatus, TickPayload};
-use crate::cassandra::types::{DataClass, L3SkillCandidate, Plan, PlannedStep, RefusedReason, DECISION_TERMINAL};
+use crate::cassandra::types::{
+    DataClass, L3SkillCandidate, Plan, PlannedStep, PythonSkillCandidate, RefusedReason, DECISION_TERMINAL,
+};
 use crate::scheduler::plan_parser::parse_json_lenient;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,12 +97,26 @@ pub(crate) struct AnswerSpec {
     /// than failing the reply: it must not cost the answer it rides on.
     #[serde(default, deserialize_with = "skill_or_drop")]
     pub l3_skill: Option<L3SkillCandidate>,
+    /// An agent-raised Python skill (#996): the code of a `python-exec` call
+    /// kept verbatim, stored untrusted for the operator to read and approve.
+    /// The same grounding gate and the same lenient parse as `l3_skill`.
+    #[serde(default, deserialize_with = "skill_or_drop")]
+    pub python_skill: Option<PythonSkillCandidate>,
 }
 
-fn skill_or_drop<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<L3SkillCandidate>, D::Error> {
+/// Parse an optional skill, or drop a mis-shaped one with a WARN: a skill is
+/// optional and operator-reviewed, while the answer it rides on is the
+/// task's result (and on the forced turn there is no re-ask left).
+fn skill_or_drop<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
     let v = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value(v).unwrap_or_else(|e| {
-        tracing::warn!("notebook answer's l3_skill is mis-shaped, dropped: {e}");
+        // The bare type name (`L3SkillCandidate`, `PythonSkillCandidate`) names the key: one type per field.
+        let ty = std::any::type_name::<T>().rsplit("::").next().unwrap_or_default();
+        tracing::warn!("notebook answer's {ty} is mis-shaped, dropped: {e}");
         None
     }))
 }

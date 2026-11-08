@@ -307,13 +307,15 @@ fn completion_helpers_return_none_on_a_refused_plan() {
             steps: vec![],
         }),
         invoke_skill: None,
-        python_skill: None,
+        python_skill: Some(PythonSkillCandidate { name: "p".into(), description: "d".into(), code: "pass\n".into() }),
     };
     assert!(plan.is_terminal() && plan.completion_insight().is_some() && plan.completion_skill().is_some());
+    assert!(plan.completion_python_skill().is_some());
     plan.refused = Some(RefusedReason { principle: 1, reason: "physical_harm".into() });
     assert!(plan.is_terminal());
     assert_eq!(plan.completion_insight(), None);
     assert_eq!(plan.completion_skill(), None);
+    assert_eq!(plan.completion_python_skill(), None);
 }
 
 #[test]

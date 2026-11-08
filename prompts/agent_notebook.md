@@ -169,6 +169,11 @@ The keys:
     with `{{param_name}}` where a declared parameter's value goes; every
     placeholder must be declared and every parameter used). Leave it out
     for one-off tasks; it is dropped if the task made no call.
+    Likewise, rarely, when Python you ran with `python-exec` is worth
+    keeping, add `"python_skill"`: `{"name", "description", "code"}` —
+    `name` snake_case (≤ 64 characters), `description` one line, `code` the
+    Python verbatim (no `secret://` reference). It is stored for the
+    operator to read and approve, never run by itself.
   - `infeasible` — `{"reason": "<why the task cannot be done>"}`, when no
     listed tool can do it or a step failed in a way no replan can fix. The
     user gets the reason as the answer.

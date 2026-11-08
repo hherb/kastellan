@@ -202,6 +202,26 @@ fn a_malformed_l3_skill_drops_the_skill_not_the_answer() {
     }
 }
 
+/// `answer.python_skill` (#996) parses as the classic plan's candidate, and
+/// the terminal plan built from it keeps it for `execute`'s grounding gate.
+/// A mis-shaped one (no `code`, a bare string) is dropped, not the answer.
+#[test]
+fn an_answer_may_carry_a_python_skill() {
+    let skill = json!({"name": "sum_ints", "description": "Sum the integers", "code": "print(1)\n"});
+    let r = check(json!({"answer": {"body": "b", "python_skill": skill}}), &two_steps()).unwrap();
+    let a = r.answer.unwrap();
+    let s = a.python_skill.clone().expect("the skill is parsed");
+    assert_eq!((s.name.as_str(), s.code.as_str()), ("sum_ints", "print(1)\n"));
+    let p = Plan { python_skill: a.python_skill, ..answer_plan(&a.body, DataClass::Public, None) };
+    assert_eq!(p.completion_python_skill(), Some(&s));
+
+    for bad in [json!({"name": "x", "description": "d"}), json!("sum_ints")] {
+        let r = check(json!({"answer": {"body": "b", "python_skill": bad}}), &two_steps()).unwrap();
+        let a = r.answer.unwrap();
+        assert_eq!((a.body.as_str(), a.python_skill), ("b", None), "{bad}");
+    }
+}
+
 /// DGX task 264: a tick and a call for the same step is progress — the
 /// findings are kept and the step stays open for the call.
 #[test]
