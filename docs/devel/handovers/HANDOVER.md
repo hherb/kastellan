@@ -62,6 +62,10 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   write** (`python_skill_crystallise_e2e::a_notebook_answers_python_skill_is_crystallised_by_the_runner`: memory row
   `kind: python` untrusted, `l3.crystallised` audit `inserted`). Mutant caught: carry dropped. ⚠️ **A `PgListener`
   from the pool must be dropped before `pool.close()`** — close waits on its connection forever (cost a 40-min hang).
+  Finalcheck added the invalid twin (`a_notebook_answers_invalid_python_skill_writes_nothing`: a `secret://` in
+  `code` → no row, no audit, the answer kept). Filed: issue 1004 (**nothing checks a `python_skill`'s code ever ran**
+  — any dispatched call grounds it), 1005 (`bring_up_pg`'s `.ok()?` is a silent green even under PG REQUIRE; the
+  crystallise suites are in no gate profile), 1006 (a resume resets `dispatch_count`: a post-resume skill drops).
 - ⚠️ **Owed: ≥ 2 DGX runs** of `requery7.sh` on this tree (prompt changed; #998's and #1002's runs too, one pair covers
   all three). ⚠️ **Not prompt-only** (`deny_unknown_fields`): deploy the build.
 

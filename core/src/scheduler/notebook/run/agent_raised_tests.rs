@@ -98,7 +98,8 @@ pub(super) async fn a_forced_answers_l3_skill_is_dropped(pool: &sqlx::PgPool) {
     assert_eq!(r.result.terminal_l3_skill, None);
 }
 
-/// A Python skill: the code of a task's `python-exec` call, kept verbatim.
+/// A Python skill. These scripts' calls are `mail` ones: the grounding gate
+/// needs a dispatched call, not a `python-exec` call of this code.
 fn python_skill() -> serde_json::Value {
     json!({"name": "sum_ints", "description": "Sum the integers", "code": "print(sum([1, 2]))\n"})
 }

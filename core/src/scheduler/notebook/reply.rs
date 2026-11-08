@@ -114,7 +114,9 @@ where
 {
     let v = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value(v).unwrap_or_else(|e| {
-        tracing::warn!("notebook answer's {} is mis-shaped, dropped: {e}", std::any::type_name::<T>());
+        // The bare type name (`L3SkillCandidate`, `PythonSkillCandidate`) names the key: one type per field.
+        let ty = std::any::type_name::<T>().rsplit("::").next().unwrap_or_default();
+        tracing::warn!("notebook answer's {ty} is mis-shaped, dropped: {e}");
         None
     }))
 }

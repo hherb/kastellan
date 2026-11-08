@@ -134,25 +134,23 @@ impl StepDispatcher for OkDispatcher {
     }
 }
 
-/// The scheduler path: a notebook task makes one call, then answers with
-/// `python_skill`; the runner stores it untrusted and audits it as `python`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_notebook_answers_python_skill_is_crystallised_by_the_runner() {
-    let Some((pool, _cluster)) = bring_up_pg("pyr").await else {
-        return; // [SKIP]
-    };
+/// Run one notebook task through the scheduler: one `python-exec` call (of
+/// [`cand`]'s code, whatever `skill` is), then an answer carrying `skill`.
+/// The task must complete with that answer whatever the skill is
+/// (`tasks_completed` fires on a failed task too, hence the state check).
+async fn run_notebook_answering(pool: &sqlx::PgPool, skill: PythonSkillCandidate) {
     // Subscribe BEFORE inserting so the NOTIFY is not missed.
-    let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await.expect("PgListener connect");
+    let mut listener = sqlx::postgres::PgListener::connect_with(pool).await.expect("PgListener connect");
     listener.listen("tasks_completed").await.expect("LISTEN tasks_completed");
     let task_id = kastellan_db::tasks::insert_pending(
-        &pool,
+        pool,
         kastellan_db::tasks::Lane::Fast,
         serde_json::json!({"instruction": "test", "max_plans": 10}),
     )
     .await
     .expect("insert_pending");
 
-    let notebook = ScriptedNotebook::new(|ctx| {
+    let notebook = ScriptedNotebook::new(move |ctx| {
         if ctx.plans.is_empty() {
             let step = PlannedStep {
                 tool: "python-exec".into(),
@@ -165,7 +163,7 @@ async fn a_notebook_answers_python_skill_is_crystallised_by_the_runner() {
             return call_reply(1, &step);
         }
         let mut reply: serde_json::Value = serde_json::from_str(&answer_reply("done")).unwrap();
-        reply["answer"]["python_skill"] = serde_json::to_value(cand()).unwrap();
+        reply["answer"]["python_skill"] = serde_json::to_value(&skill).unwrap();
         reply.to_string()
     });
     let scheduler = spawn_scheduler(
@@ -181,32 +179,67 @@ async fn a_notebook_answers_python_skill_is_crystallised_by_the_runner() {
         .await
         .expect("timed out waiting for tasks_completed NOTIFY")
         .expect("PgListener recv error");
-    // The listener holds a pooled connection: `pool.close()` below would wait on it forever.
+    // The listener holds a pooled connection: `pool.close()` would wait on it forever.
     drop(listener);
     scheduler.shutdown().await;
 
-    // `tasks_completed` fires on a failed task too.
     let (state, result): (String, Option<serde_json::Value>) =
-        sqlx::query_as("SELECT state, result FROM tasks WHERE id = $1").bind(task_id).fetch_one(&pool).await.unwrap();
+        sqlx::query_as("SELECT state, result FROM tasks WHERE id = $1").bind(task_id).fetch_one(pool).await.unwrap();
     assert_eq!(state, "completed", "{result:?}");
+    assert_eq!(result.as_ref().and_then(|r| r["body"].as_str()), Some("done"), "{result:?}");
+}
 
+async fn skill_rows(pool: &sqlx::PgPool) -> Vec<serde_json::Value> {
     let rows: Vec<(serde_json::Value,)> = sqlx::query_as("SELECT metadata FROM memories WHERE layer = $1")
         .bind(MemoryLayer::Skill.as_db())
-        .fetch_all(&pool)
+        .fetch_all(pool)
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1, "one layer-3 row");
-    assert_eq!(rows[0].0["kind"], "python");
-    assert_eq!(rows[0].0["trust"], "untrusted");
-    assert_eq!(rows[0].0["python"]["code"], cand().code.as_str());
+    rows.into_iter().map(|(m,)| m).collect()
+}
 
-    let audit = kastellan_db::audit::fetch_since(&pool, 0, 100).await.unwrap();
-    let crystallised: Vec<_> =
-        audit.iter().filter(|r| r.actor == "scheduler" && r.action == "l3.crystallised").collect();
+async fn crystallised_rows(pool: &sqlx::PgPool) -> Vec<serde_json::Value> {
+    let audit = kastellan_db::audit::fetch_since(pool, 0, 100).await.unwrap();
+    audit.into_iter().filter(|r| r.actor == "scheduler" && r.action == "l3.crystallised").map(|r| r.payload).collect()
+}
+
+/// The scheduler path: a notebook task makes one call, then answers with
+/// `python_skill`; the runner stores it untrusted and audits it as `python`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_notebook_answers_python_skill_is_crystallised_by_the_runner() {
+    let Some((pool, _cluster)) = bring_up_pg("pyr").await else {
+        return; // [SKIP]
+    };
+    run_notebook_answering(&pool, cand()).await;
+
+    let rows = skill_rows(&pool).await;
+    assert_eq!(rows.len(), 1, "one layer-3 row");
+    assert_eq!(rows[0]["kind"], "python");
+    assert_eq!(rows[0]["trust"], "untrusted");
+    assert_eq!(rows[0]["python"]["code"], cand().code.as_str());
+
+    let crystallised = crystallised_rows(&pool).await;
     assert_eq!(crystallised.len(), 1, "one l3.crystallised row");
-    let p = &crystallised[0].payload;
+    let p = &crystallised[0];
     assert_eq!((p["kind"].as_str(), p["action"].as_str()), (Some("python"), Some("inserted")), "{p}");
     assert_eq!(p["skill_name"], "sum_stdin");
+
+    pool.close().await;
+}
+
+/// The runner's validation on the notebook path: a skill whose code holds a
+/// `secret://` reference writes no layer-3 row and no `l3.crystallised` row,
+/// and the task still completes with its answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_notebook_answers_invalid_python_skill_writes_nothing() {
+    let Some((pool, _cluster)) = bring_up_pg("pyi").await else {
+        return; // [SKIP]
+    };
+    let bad = PythonSkillCandidate { code: "print('secret://api_key')\n".into(), ..cand() };
+    run_notebook_answering(&pool, bad).await;
+
+    assert_eq!(skill_rows(&pool).await, Vec::<serde_json::Value>::new(), "no layer-3 row");
+    assert_eq!(crystallised_rows(&pool).await, Vec::<serde_json::Value>::new(), "no l3.crystallised row");
 
     pool.close().await;
 }
