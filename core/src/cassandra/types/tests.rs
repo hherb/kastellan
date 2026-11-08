@@ -300,14 +300,20 @@ fn completion_helpers_return_none_on_a_refused_plan() {
         refused: None,
         floor_request: None,
         l1_insight: Some("a lesson".into()),
-        l3_skill: None,
+        l3_skill: Some(L3SkillCandidate {
+            name: "s".into(),
+            description: "d".into(),
+            parameters: vec![],
+            steps: vec![],
+        }),
         invoke_skill: None,
         python_skill: None,
     };
-    assert!(plan.is_terminal() && plan.completion_insight().is_some());
+    assert!(plan.is_terminal() && plan.completion_insight().is_some() && plan.completion_skill().is_some());
     plan.refused = Some(RefusedReason { principle: 1, reason: "physical_harm".into() });
     assert!(plan.is_terminal());
     assert_eq!(plan.completion_insight(), None);
+    assert_eq!(plan.completion_skill(), None);
 }
 
 #[test]

@@ -25,7 +25,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::state::{FindingSpec, NotebookState, StepSpec, StepStatus, TickPayload};
-use crate::cassandra::types::{DataClass, Plan, PlannedStep, RefusedReason, DECISION_TERMINAL};
+use crate::cassandra::types::{DataClass, L3SkillCandidate, Plan, PlannedStep, RefusedReason, DECISION_TERMINAL};
 use crate::scheduler::plan_parser::parse_json_lenient;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,6 +87,22 @@ pub(crate) struct AnswerSpec {
     /// promotes it, and that write validates and screens it.
     #[serde(default)]
     pub l1_insight: Option<String>,
+    /// An agent-raised L3 skill (#996): the task's calls abstracted into a
+    /// reusable template, stored untrusted for the operator to review. Kept
+    /// only by `execute`'s grounding gate (completed, ≥ 1 call dispatched, no
+    /// skill invoked, not the forced answer); the runner validates and
+    /// dedups it on write. A mis-shaped one is dropped with a WARN rather
+    /// than failing the reply: it must not cost the answer it rides on.
+    #[serde(default, deserialize_with = "skill_or_drop")]
+    pub l3_skill: Option<L3SkillCandidate>,
+}
+
+fn skill_or_drop<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<L3SkillCandidate>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|e| {
+        tracing::warn!("notebook answer's l3_skill is mis-shaped, dropped: {e}");
+        None
+    }))
 }
 
 /// `answer.table`: one scrapbook ref or a list of them (one per sift of the

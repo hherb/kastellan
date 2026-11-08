@@ -159,6 +159,16 @@ The keys:
     archive". Leave it out when there is no such lesson: insights fill a
     small always-shown block every later task reads, and a weak one pushes
     out a useful one. It is kept only if the task completes.
+    Rarely, after a **multi-step** task you expect to recur, add
+    `"l3_skill"`: your calls turned into a reusable template, stored for the
+    operator to review (never run by itself). Its keys: `name` (snake_case,
+    ≤ 64 characters), `description` (one line), `parameters` (a list, `[]`
+    if none, of ≤ 16 `{"name", "description"}` with snake_case names, one
+    per value that changes between runs) and
+    `steps` (1–32 of `{"tool", "method", "parameters"}`, as in your calls,
+    with `{{param_name}}` where a declared parameter's value goes; every
+    placeholder must be declared and every parameter used). Leave it out
+    for one-off tasks; it is dropped if the task made no call.
   - `infeasible` — `{"reason": "<why the task cannot be done>"}`, when no
     listed tool can do it or a step failed in a way no replan can fix. The
     user gets the reason as the answer.

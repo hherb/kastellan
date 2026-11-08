@@ -445,7 +445,8 @@ async fn drain_lane(
 
         // Agent-raised L3 skill crystallisation. Best-effort, same
         // posture as the L1 hook. terminal_l3_skill is Some only on
-        // Outcome::Completed + dispatch_count >= 1 (the grounding gate);
+        // Outcome::Completed + dispatch_count >= 1 + no skill invoked + not
+        // the forced answer (the grounding gate, `execute.rs`);
         // all other outcomes leave it None, so this is a no-op for them.
         if let Some(skill) = result.terminal_l3_skill.as_ref() {
             write_l3_crystallised_row(pool, claimed.id, skill).await;

@@ -168,6 +168,40 @@ fn an_answer_may_carry_an_l1_insight() {
     assert_eq!(p.completion_insight(), Some("mail.search needs a date range"));
 }
 
+/// `answer.l3_skill` (#996) parses as the classic plan's candidate, and the
+/// terminal plan built from it keeps it for `execute`'s grounding gate.
+#[test]
+fn an_answer_may_carry_an_l3_skill() {
+    let skill = json!({
+        "name": "read_readme",
+        "description": "Read a repo's README",
+        "parameters": [{"name": "repo", "description": "absolute path"}],
+        "steps": [{"tool": "shell-exec", "method": "shell.exec", "parameters": {"argv": ["cat", "{{repo}}/README.md"]}}],
+    });
+    let r = check(json!({"answer": {"body": "b", "l3_skill": skill}}), &two_steps()).unwrap();
+    let a = r.answer.unwrap();
+    let s = a.l3_skill.clone().expect("the skill is parsed");
+    assert_eq!((s.name.as_str(), s.steps.len()), ("read_readme", 1));
+    let p = Plan { l3_skill: a.l3_skill, ..answer_plan(&a.body, DataClass::Public, None) };
+    assert_eq!(p.completion_skill(), Some(&s));
+}
+
+/// A mis-shaped `l3_skill` (here no `parameters`) is dropped, not the answer:
+/// the skill is optional and operator-reviewed, the answer is the task's
+/// result, and on the forced turn there is no re-ask left to spend.
+#[test]
+fn a_malformed_l3_skill_drops_the_skill_not_the_answer() {
+    for bad in [
+        json!({"name": "x", "description": "d", "steps": [{"tool": "t", "method": "m", "parameters": {}}]}),
+        json!({"name": "x", "description": "d", "parameters": {}, "steps": []}),
+        json!("read_readme"),
+    ] {
+        let r = check(json!({"answer": {"body": "b", "l3_skill": bad}}), &two_steps()).unwrap();
+        let a = r.answer.unwrap();
+        assert_eq!((a.body.as_str(), a.l3_skill), ("b", None), "{bad}");
+    }
+}
+
 /// DGX task 264: a tick and a call for the same step is progress — the
 /// findings are kept and the step stays open for the call.
 #[test]

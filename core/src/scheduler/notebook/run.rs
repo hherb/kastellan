@@ -263,7 +263,7 @@ pub(crate) async fn run_notebook_to_terminal(
                     None => a.body.clone(),
                 };
                 let plan = answer_plan(&body, answer_ceiling(ctx.classification_floor, &touched, a.data_ceiling), a.refused.clone());
-                Plan { l1_insight: a.l1_insight.clone(), ..plan }
+                Plan { l1_insight: a.l1_insight.clone(), l3_skill: a.l3_skill.clone(), ..plan }
             }
             (None, None, Some(i)) => {
                 answer_plan(&i.reason, answer_ceiling(ctx.classification_floor, &touched(&after, &ctx.plans), None), None)
