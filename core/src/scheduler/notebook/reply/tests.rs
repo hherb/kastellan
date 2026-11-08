@@ -168,6 +168,24 @@ fn an_answer_may_carry_an_l1_insight() {
     assert_eq!(p.completion_insight(), Some("mail.search needs a date range"));
 }
 
+/// `answer.l3_skill` (#996) parses as the classic plan's candidate, and the
+/// terminal plan built from it keeps it for `execute`'s grounding gate.
+#[test]
+fn an_answer_may_carry_an_l3_skill() {
+    let skill = json!({
+        "name": "read_readme",
+        "description": "Read a repo's README",
+        "parameters": [{"name": "repo", "description": "absolute path"}],
+        "steps": [{"tool": "shell-exec", "method": "shell.exec", "parameters": {"argv": ["cat", "{{repo}}/README.md"]}}],
+    });
+    let r = check(json!({"answer": {"body": "b", "l3_skill": skill}}), &two_steps()).unwrap();
+    let a = r.answer.unwrap();
+    let s = a.l3_skill.clone().expect("the skill is parsed");
+    assert_eq!((s.name.as_str(), s.steps.len()), ("read_readme", 1));
+    let p = Plan { l3_skill: a.l3_skill, ..answer_plan(&a.body, DataClass::Public, None) };
+    assert_eq!(p.completion_skill(), Some(&s));
+}
+
 /// DGX task 264: a tick and a call for the same step is progress — the
 /// findings are kept and the step stays open for the call.
 #[test]

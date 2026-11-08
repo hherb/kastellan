@@ -1,7 +1,8 @@
 //! End-to-end DB integration coverage for L3 skill crystallisation —
 //! [`kastellan_core::memory::l3_crystallise`] (direct path) and the
 //! scheduler-driven path via `runner::drain_lane` (which writes the
-//! `actor='scheduler' action='l3.crystallised'` audit row).
+//! `actor='scheduler' action='l3.crystallised'` audit row). The scheduler
+//! runs the notebook planner, whose `answer` carries the skill (#996).
 //!
 //! Seven scenarios, each with its own PG cluster so no state leaks:
 //!
@@ -18,27 +19,25 @@
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use kastellan_core::cassandra::review::{ChainReviewStage, NoopReviewStage};
-use kastellan_core::cassandra::types::{DataClass, L3SkillCandidate, L3Param, L3TemplateStep, Plan, PlannedStep};
+use kastellan_core::cassandra::types::{DataClass, L3SkillCandidate, L3Param, L3TemplateStep, PlannedStep};
 use kastellan_core::cli_audit::l3_remove_and_audit;
 use kastellan_core::entity_extraction::NoOpEntityExtractor;
 use kastellan_core::memory::embedder::NoOpEmbedder;
 use kastellan_core::memory::l1_promote::{promote_l1, L1Source};
 use kastellan_core::memory::l3_crystallise::{crystallise_l3, list_l3, L3Source};
-use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
-use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome, TaskContext};
+use kastellan_core::scheduler::inner_loop::{StepDispatcher, StepOutcome};
 use kastellan_core::scheduler::spawn_scheduler;
 use kastellan_db::memories::MemoryLayer;
 use kastellan_db::tasks::{insert_pending, Lane};
 use kastellan_tests_common::{
     bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster,
 };
+use kastellan_tests_common::scripted_notebook::{answer_reply, call_reply, ScriptedNotebook};
 use sqlx::postgres::PgListener;
 
 // ---------------------------------------------------------------------------
@@ -79,78 +78,8 @@ fn valid_skill_2() -> L3SkillCandidate {
 }
 
 // ---------------------------------------------------------------------------
-// Scripted stubs — mirror of scheduler_lanes_e2e.rs
+// Scripted notebook + dispatcher
 // ---------------------------------------------------------------------------
-
-/// Per-task scripted plan formulator. Keyed by `ctx.task_id`.
-/// Out-of-script reads return `AgentError::Decode` to make bugs loud.
-struct ScriptedFormulator {
-    per_task: Mutex<HashMap<i64, VecDeque<Plan>>>,
-}
-
-impl ScriptedFormulator {
-    fn new_per_task(scripts: Vec<(i64, Vec<Plan>)>) -> Self {
-        Self {
-            per_task: Mutex::new(
-                scripts
-                    .into_iter()
-                    .map(|(id, plans)| (id, plans.into()))
-                    .collect(),
-            ),
-        }
-    }
-}
-
-#[async_trait]
-impl PlanFormulator for ScriptedFormulator {
-    async fn formulate_plan(
-        &self,
-        ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        let mut map = self.per_task.lock().unwrap();
-        let queue = map.get_mut(&ctx.task_id).ok_or_else(|| AgentError::Decode {
-            detail: format!("no script for task_id {}", ctx.task_id),
-            // Not blank: a blank raw is an empty completion, which is retried (#923).
-            raw: "<script exhausted>".into(),
-            usage: Default::default(),
-            latency_ms: 0,
-        })?;
-        let plan = queue.pop_front().ok_or_else(|| AgentError::Decode {
-            detail: format!("script exhausted for task_id {}", ctx.task_id),
-            // Not blank: a blank raw is an empty completion, which is retried (#923).
-            raw: "<script exhausted>".into(),
-            usage: Default::default(),
-            latency_ms: 0,
-        })?;
-        Ok((
-            plan,
-            FormulationMeta {
-                prompt_name: "agent_planner".into(),
-                prompt_sha256: "test".into(),
-                llm_model: "test-model".into(),
-                llm_backend: "local".into(),
-                latency_ms: 1,
-                retry_count: 0,
-                // SHA-256 of empty string — stable sentinel
-                assembled_prompt_sha256:
-                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                        .into(),
-                l0_count: 0,
-                l1_count: 0,
-                skill_count: 0,
-                recalled_memory_ids: Vec::new(),
-                recall_count: 0,
-                recall_query_sha256:
-                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                        .into(),
-                graph_seed_entity_ids: Vec::new(),
-                graph_seed_count: 0,
-                graph_seed_source: kastellan_core::entity_extraction::SeedSource::None,
-                usage: Default::default(),
-            },
-        ))
-    }
-}
 
 /// Dispatcher that always returns `Ok` for any step.
 struct OkDispatcher;
@@ -162,51 +91,30 @@ impl StepDispatcher for OkDispatcher {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plan-factory helpers
-// ---------------------------------------------------------------------------
-
-/// A terminal `task_complete` plan carrying an `l3_skill`.
-fn complete_plan_with_skill(body: &str, skill: L3SkillCandidate) -> Plan {
-    Plan {
-        context: "c".into(),
-        decision: "task_complete".into(),
-        rationale: "done".into(),
-        steps: vec![],
-        result: Some(serde_json::json!({"kind": "text", "body": body})),
-        data_ceiling: Some(DataClass::Public),
-        refused: None,
-        floor_request: None,
-        l1_insight: None,
-        l3_skill: Some(skill),
-        invoke_skill: None,
-        python_skill: None,
+/// The one tool step a grounded task makes (so `dispatch_count` is 1).
+fn one_step() -> PlannedStep {
+    PlannedStep {
+        tool: "cat".into(),
+        method: "read".into(),
+        parameters: serde_json::json!({}),
+        returns: "content".into(),
+        done_when: "content".into(),
+        classification: DataClass::Public,
     }
 }
 
-/// A non-terminal plan with one tool step (so dispatch_count increments).
-fn one_step_plan() -> Plan {
-    Plan {
-        context: "c".into(),
-        decision: "act".into(),
-        rationale: "r".into(),
-        steps: vec![PlannedStep {
-            tool: "cat".into(),
-            method: "read".into(),
-            parameters: serde_json::json!({}),
-            returns: "content".into(),
-            done_when: "content".into(),
-            classification: DataClass::Public,
-        }],
-        result: None,
-        data_ceiling: Some(DataClass::Public),
-        refused: None,
-        floor_request: None,
-        l1_insight: None,
-        l3_skill: None,
-        invoke_skill: None,
-        python_skill: None,
-    }
+/// A notebook that calls [`one_step`] first when `grounded` (else answers on
+/// its first turn, a pure-text task), then answers `body` carrying `skill`
+/// as the answer's `l3_skill` (#996).
+fn notebook(grounded: bool, body: &'static str, skill: L3SkillCandidate) -> ScriptedNotebook {
+    ScriptedNotebook::new(move |ctx| {
+        if grounded && ctx.plans.is_empty() {
+            return call_reply(1, &one_step());
+        }
+        let mut reply: serde_json::Value = serde_json::from_str(&answer_reply(body)).unwrap();
+        reply["answer"]["l3_skill"] = serde_json::to_value(&skill).unwrap();
+        reply.to_string()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -245,15 +153,15 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     Some((pool, cluster))
 }
 
-/// Insert a task, run a scheduler with the given scripted plans, and
-/// wait for the `tasks_completed` NOTIFY. Returns the task id.
-///
-/// `scripts` is a closure that receives the task id and returns the
-/// script (plan queue) for that task. The scheduler is shut down before
-/// returning.
+/// Insert a task, run a scheduler on [`notebook`]`(grounded, body, skill)`,
+/// wait for the `tasks_completed` NOTIFY, and check the task completed with
+/// `body` as its answer. Returns the task id. The scheduler is shut down
+/// before returning.
 async fn run_task_through_scheduler(
     pool: &sqlx::PgPool,
-    plans: Vec<Plan>,
+    grounded: bool,
+    body: &'static str,
+    skill: L3SkillCandidate,
 ) -> i64 {
     // Subscribe BEFORE inserting so we don't miss the NOTIFY.
     let mut listener = PgListener::connect_with(pool)
@@ -272,7 +180,7 @@ async fn run_task_through_scheduler(
     .await
     .expect("insert_pending");
 
-    let formulator = Arc::new(ScriptedFormulator::new_per_task(vec![(task_id, plans)]));
+    let formulator = Arc::new(notebook(grounded, body, skill));
     let review = Arc::new(ChainReviewStage::new(vec![Arc::new(NoopReviewStage)]));
     let dispatcher = Arc::new(OkDispatcher);
     let entity_extractor: Arc<dyn kastellan_core::entity_extraction::EntityExtractor> =
@@ -291,6 +199,17 @@ async fn run_task_through_scheduler(
 
     scheduler.shutdown().await;
 
+    // `tasks_completed` fires on a failed task too: a refused reply would
+    // otherwise pass every "writes nothing" assertion below.
+    let (state, result): (String, Option<serde_json::Value>) =
+        sqlx::query_as("SELECT state, result FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(pool)
+            .await
+            .expect("read the task");
+    assert_eq!(state, "completed", "task {task_id}: {result:?}");
+    assert_eq!(result.as_ref().and_then(|r| r["body"].as_str()), Some(body), "task {task_id}");
+
     task_id
 }
 
@@ -308,11 +227,7 @@ async fn agent_raised_happy_inserts_l3_row_and_audit() {
         return; // [SKIP]
     };
 
-    let plans = vec![
-        one_step_plan(),
-        complete_plan_with_skill("done", valid_skill()),
-    ];
-    run_task_through_scheduler(&pool, plans).await;
+    run_task_through_scheduler(&pool, true, "done", valid_skill()).await;
 
     // --- memories table ---
     let rows: Vec<(i64, String, serde_json::Value)> = sqlx::query_as(
@@ -377,18 +292,10 @@ async fn agent_raised_dedup_skips_second() {
     };
 
     // First task — inserts.
-    let plans1 = vec![
-        one_step_plan(),
-        complete_plan_with_skill("done-1", valid_skill()),
-    ];
-    run_task_through_scheduler(&pool, plans1).await;
+    run_task_through_scheduler(&pool, true, "done-1", valid_skill()).await;
 
     // Second task — same skill template (same SHA), should dedup.
-    let plans2 = vec![
-        one_step_plan(),
-        complete_plan_with_skill("done-2", valid_skill()),
-    ];
-    run_task_through_scheduler(&pool, plans2).await;
+    run_task_through_scheduler(&pool, true, "done-2", valid_skill()).await;
 
     // Still exactly one layer-3 row.
     let count: i64 = sqlx::query_scalar(
@@ -440,9 +347,8 @@ async fn grounding_gate_drops_pure_text_task() {
         return; // [SKIP]
     };
 
-    // Single terminal plan with l3_skill — but zero tool steps executed.
-    let plans = vec![complete_plan_with_skill("pure-text", valid_skill())];
-    run_task_through_scheduler(&pool, plans).await;
+    // An answer with l3_skill on the first turn — zero tool steps executed.
+    run_task_through_scheduler(&pool, false, "pure-text", valid_skill()).await;
 
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM memories WHERE layer = $1",
@@ -496,11 +402,7 @@ async fn invalid_skill_writes_nothing() {
         }],
     };
 
-    let plans = vec![
-        one_step_plan(),
-        complete_plan_with_skill("done-bad", bad_skill),
-    ];
-    run_task_through_scheduler(&pool, plans).await;
+    run_task_through_scheduler(&pool, true, "done-bad", bad_skill).await;
 
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM memories WHERE layer = $1",

@@ -58,3 +58,39 @@ pub(super) async fn a_rewritten_answer_keeps_only_its_own_insight(pool: &sqlx::P
     assert_eq!(body(&r.result), "A");
     assert_eq!(r.result.terminal_l1_insight, None);
 }
+
+/// A skill over the `call` this test task makes (`mail`'s `"a"`).
+fn skill() -> serde_json::Value {
+    json!({
+        "name": "list_invoices",
+        "description": "List the invoices matching a query",
+        "parameters": [{"name": "q", "description": "the search"}],
+        "steps": [{"tool": "mail", "method": "a", "parameters": {"q": "{{q}}"}}],
+    })
+}
+
+/// A completed answer's `l3_skill`, after a call was dispatched, reaches
+/// `terminal_l3_skill`, which the runner crystallises from.
+pub(super) async fn an_answers_l3_skill_reaches_the_runner(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A", "l3_skill": skill()}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(r.result.terminal_l3_skill.map(|s| s.name).as_deref(), Some("list_invoices"));
+}
+
+/// The forced answer is a wrap-up under the turn cap, not a procedure shown
+/// to work, so its skill is dropped (`execute`'s `synth_turn` gate).
+pub(super) async fn a_forced_answers_l3_skill_is_dropped(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f"), "call": call(2, "b")}),
+        json!({"tick": tick(2, "g"), "answer": {"body": "f and g", "l3_skill": skill()}}),
+    ]);
+    // max_plans 1 → 2 turns; turn 3 is the forced answer.
+    let r = run(pool, &script, new_task(pool, 1).await).await;
+    assert_eq!(body(&r.result), "f and g");
+    assert_eq!(r.result.terminal_l3_skill, None);
+}
