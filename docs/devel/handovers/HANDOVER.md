@@ -62,9 +62,12 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   lifecycle rows, no re-crystallisation, a failing later step fails the step — and
   `an_unknown_skill_is_refused_and_the_next_turn_replans`). The harness `Tools::known_tools` is `{mail}`. 3 of 3
   mutants caught (carry dropped, last-step-only render, `.first()` outcome).
-- ⚠️ **Known limits:** a missing `parameters` on a tool call is now `null` (the worker refuses it, not the parse); a
-  `sift` over an invoked step reads its skill's **first** step only (`shortcut:` in `sift/run.rs`); the
-  `l3.invoke*` rows carry **no `task_id`** (pre-existing). The prompt documents `args` only, as classic does.
+- **finalcheck fixes:** `last_failure` lists **every** step too (a partly failed skill hid the steps that ran, which
+  the repeat guard then refused to re-make); the repeat guard covers invokes (`repeat::already_invoked`: same
+  name + args, every step `Ok` and still held); a tool call still needs `parameters` (`validate`); a `sift` over an
+  invoked step reads its skill's **last** step (documented in the prompt); a refused invoke's `FailedStep` keeps
+  **every** reason (was the last). Filed: issues 1010 (a Python skill drops `args`; `InvokeDirective` takes unknown
+  keys), 1011 (`invoke_used` set before review). ⚠️ The `l3.invoke*` rows carry **no `task_id`** (pre-existing).
 - ⚠️ **Owed: ≥ 2 DGX runs** of `requery7.sh` on this tree (covers #998, #1002, #1003, #1007 and this prompt
   change). ⚠️ **Not prompt-only** (`deny_unknown_fields`): deploy the build.
 

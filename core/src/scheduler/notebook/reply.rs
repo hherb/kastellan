@@ -214,7 +214,11 @@ const CALL_FIELDS: [&str; 9] = [
 /// model.
 pub(crate) fn parse_reply(raw: &str) -> Result<NotebookReply, String> {
     let refused = |e: &dyn std::fmt::Display, hint: bool| {
-        let hint = if hint { " (a tool call goes inside `call`: {\"call\": {\"step\": …, \"tool\": …}})" } else { "" };
+        let hint = if hint {
+            " (a tool call or `invoke_skill` goes inside `call`: {\"call\": {\"step\": …, \"tool\": …}})"
+        } else {
+            ""
+        };
         format!("not a notebook reply: {e}{hint}")
     };
     let strict = match parse_json_lenient::<NotebookReply>(raw) {
@@ -302,8 +306,10 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
             (Some(_), true) => {
                 return Err("`invoke_skill` goes in place of `tool`, `method` and `parameters`: the skill supplies them".into())
             }
-            (None, _) if call.tool.is_empty() || call.method.is_empty() => {
-                return Err("a `call` names its `tool` and `method` (or an `invoke_skill`)".into())
+            // `parameters` defaults only so an invoke may leave it out: a
+            // tool call without one would reach its worker as `null`.
+            (None, _) if call.tool.is_empty() || call.method.is_empty() || call.parameters.is_null() => {
+                return Err("a `call` names its `tool`, `method` and `parameters` (or an `invoke_skill`)".into())
             }
             _ => {}
         }

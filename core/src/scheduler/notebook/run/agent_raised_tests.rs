@@ -284,7 +284,21 @@ pub(super) async fn an_invoked_skill_runs_its_steps(pool: &sqlx::PgPool) {
     assert_eq!(body(&r.result), "the read failed");
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"]);
     assert!(kinds(pool, r.task_id).await.contains(&kastellan_db::notebook::EntryKind::FailedStep));
-    assert!(script.messages()[1].contains("last_failure"), "{}", script.messages()[1]);
+    let next = &script.messages()[1];
+    assert!(next.contains("last_failure") && next.contains("output of a"), "the step that ran is shown too: {next}");
+
+    // The same skill with the same args again is a repeat: not run, and the
+    // next turn is told why.
+    seed_pinned_skill(pool, "fetch_twice").await;
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": invoke_call("fetch_twice", "invoices")}),
+        json!({"call": invoke_call("fetch_twice", "invoices")}),
+        json!({"tick": tick(1, "invoices A and B"), "answer": {"body": "A and B"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "A and B");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "the repeat never ran");
+    assert!(script.messages()[2].contains("repeated call"), "{}", script.messages()[2]);
 }
 
 /// A skill that is not pinned (here: none of that name) is refused before

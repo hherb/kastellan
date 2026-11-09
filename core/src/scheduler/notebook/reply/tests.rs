@@ -218,7 +218,20 @@ fn a_call_names_a_tool_or_a_skill() {
     let mut neither = call(1);
     neither.as_object_mut().unwrap().remove("tool");
     let err = check(json!({"call": neither}), &two_steps()).unwrap_err();
-    assert!(err.contains("`tool` and `method`") && err.contains("invoke_skill"), "{err}");
+    assert!(err.contains("`tool`, `method` and `parameters`") && err.contains("invoke_skill"), "{err}");
+    // `parameters` defaults only for an invoke: a tool call still names it.
+    let mut no_params = call(1);
+    no_params.as_object_mut().unwrap().remove("parameters");
+    assert!(check(json!({"call": no_params}), &two_steps()).unwrap_err().contains("`parameters`"));
+}
+
+/// An invoke written without the `call` wrapper is pointed at `call`, by name.
+#[test]
+fn an_unwrapped_invoke_is_told_to_use_call() {
+    let mut top = invoke_call(1);
+    top["steps"] = json!([step(1)]);
+    let err = parse_reply(&top.to_string()).unwrap_err();
+    assert!(err.contains("`invoke_skill` goes inside `call`"), "{err}");
 }
 
 #[test]

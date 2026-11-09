@@ -19,7 +19,7 @@
 
 use serde_json::Value;
 
-use crate::cassandra::types::PlannedStep;
+use crate::cassandra::types::{InvokeDirective, PlannedStep};
 use crate::handoff::{self, HandoffRef};
 use crate::scheduler::inner_loop::{PlanRecord, StepOutcome};
 
@@ -45,6 +45,19 @@ pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep, held: impl 
             StepOutcome::Ok(v) => call_key(s) == key && handoff::placeholder_ref(v).map_or(true, |h| held(&h)),
             _ => false,
         })
+}
+
+/// Did this task already run skill `d` with the same args, every step
+/// succeeding with a result still to hand (#996)? An invoke plan has no step
+/// of its own to compare until `execute` expands it, so it is compared by
+/// its directive; one that failed partway may be run again. Pure.
+pub(crate) fn already_invoked(plans: &[PlanRecord], d: &InvokeDirective, held: impl Fn(&HandoffRef) -> bool) -> bool {
+    let same = |p: &InvokeDirective| p.name == d.name && p.args == d.args && textual(&p.params) == textual(&d.params);
+    plans.iter().filter(|r| r.plan.invoke_skill.as_ref().is_some_and(same)).any(|r| {
+        !r.outcomes().is_empty()
+            && r.outcomes().len() == r.plan.steps.len()
+            && r.outcomes().iter().all(|o| matches!(o, StepOutcome::Ok(v) if handoff::placeholder_ref(v).map_or(true, |h| held(&h))))
+    })
 }
 
 fn call_key(step: &PlannedStep) -> (String, String, Value) {
@@ -104,6 +117,36 @@ mod tests {
             python_skill: None,
         };
         PlanRecord::new(plan, outcomes)
+    }
+
+    fn invoked(name: &str, q: &str, outcomes: Vec<StepOutcome>) -> PlanRecord {
+        let mut plan = record(step("mail.a", json!({"q": q})), false).plan;
+        plan.steps.push(step("mail.b", json!({"id": q})));
+        plan.invoke_skill = Some(directive(name, q));
+        PlanRecord::new(plan, outcomes)
+    }
+
+    fn directive(name: &str, q: &str) -> InvokeDirective {
+        InvokeDirective { name: name.into(), args: [("q".to_string(), q.to_string())].into(), params: Value::Null }
+    }
+
+    /// The same skill with the same args is a repeat once every step ran,
+    /// while its results are held; other args, another skill, a run that
+    /// failed partway, or a purged stash are not.
+    #[test]
+    fn a_skill_run_whole_is_a_repeat() {
+        let ok = || StepOutcome::Ok(json!({}));
+        let plans = vec![invoked("s", "x", vec![ok(), ok()])];
+        assert!(already_invoked(&plans, &directive("s", "x"), |_| true));
+        assert!(!already_invoked(&plans, &directive("s", "y"), |_| true));
+        assert!(!already_invoked(&plans, &directive("t", "x"), |_| true));
+        let failed = StepOutcome::Err { code: "E".into(), detail: "d".into() };
+        assert!(!already_invoked(&[invoked("s", "x", vec![ok(), failed])], &directive("s", "x"), |_| true));
+        let cache = crate::handoff::HandoffCache::new();
+        let placeholder = cache.stash_if_oversized(1, &json!({"results": []}), 0).expect("cap 0").placeholder;
+        let stashed = vec![invoked("s", "x", vec![ok(), StepOutcome::Ok(placeholder)])];
+        assert!(already_invoked(&stashed, &directive("s", "x"), |_| true));
+        assert!(!already_invoked(&stashed, &directive("s", "x"), |_| false));
     }
 
     #[test]
