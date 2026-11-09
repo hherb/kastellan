@@ -211,7 +211,7 @@ fn a_screen_placeholder_reaches_the_planner_without_its_score_or_reason_codes() 
 /// Each planner prompt is its loop's only description of these shapes. A
 /// renderer change that leaves a prompt behind reproduces #536's failure mode,
 /// where the planner read advice about a shape it never saw. The notebook
-/// shows one call's outcome (`last_result`, `PlanRecord::last_step_view`),
+/// shows one call's outcomes (`last_result`, `PlanRecord::last_result_view`),
 /// which the summary budget never touches, so only the classic prompt must
 /// name the budget's `elided` shapes (#993).
 #[test]

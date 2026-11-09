@@ -53,8 +53,7 @@ fn plan_with_decision(decision: &str) -> crate::cassandra::types::Plan {
     }
 }
 
-/// Build a `PlannedStep` naming a given tool, for tests that exercise
-/// the per-tool render screen (`GuardProfile::for_tool`).
+/// Build a `PlannedStep` naming a given tool (the #701 turn-record test).
 fn step_with_tool(tool: &str) -> crate::cassandra::types::PlannedStep {
     crate::cassandra::types::PlannedStep {
         tool: tool.into(),

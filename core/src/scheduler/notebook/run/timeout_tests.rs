@@ -44,6 +44,25 @@ pub(super) async fn a_timeout_after_gathering_answers_from_what_was_gathered(poo
     assert!(failed_rows[0].get("llm_usage").is_none(), "a timeout got no completion to cost: {}", failed_rows[0]);
 }
 
+/// The forced-answer turn itself times out (classic case 3): it is not forced
+/// again, and the task fails in the timeout's words, naming what was gathered.
+pub(super) async fn a_timeout_on_the_answer_turn_fails_naming_what_was_gathered(pool: &sqlx::PgPool) {
+    let script = Script::raw(&[
+        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}).to_string(),
+        TIMEOUT.into(),
+        TIMEOUT.into(),
+    ]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let d = failed(&r.result);
+    assert!(d.starts_with("The language model ran out of time before it could write an answer"), "{d}");
+    assert!(d.contains("1 tool call (1 succeeded)"), "{d}");
+    assert_eq!(script.messages().len(), 3, "the answer turn was asked once, not again");
+    assert_eq!(r.result.failed_llm_calls, 2);
+    let failed_rows = rows(pool, r.task_id, "agent", "plan.formulate_failed").await;
+    assert_eq!(failed_rows.len(), 2, "{failed_rows:?}");
+    assert_eq!(failed_rows[1]["synth_turn"], true, "{}", failed_rows[1]);
+}
+
 /// A timeout before anything was gathered has nothing to answer from: the
 /// task fails in words, and no forced-answer turn is asked for.
 pub(super) async fn a_timeout_before_gathering_fails_in_words(pool: &sqlx::PgPool) {
@@ -72,7 +91,12 @@ pub(super) async fn a_re_ask_that_times_out_after_gathering_spends_the_answer_tu
     assert_eq!(r.result.failed_llm_calls, 2, "the prose and the re-ask's timeout");
     let failed_rows = rows(pool, r.task_id, "agent", "plan.formulate_failed").await;
     assert_eq!(failed_rows.len(), 2, "{failed_rows:?}");
+    assert!(failed_rows[0]["raw_head"].as_str().is_some_and(|h| h.starts_with("Sure!")), "{}", failed_rows[0]);
+    assert!(failed_rows[0].get("latency_ms").is_some(), "{}", failed_rows[0]);
     assert_eq!(failed_rows[1]["request_timeout"], true, "{}", failed_rows[1]);
+    assert_eq!(failed_rows[1]["thinking_suppressed_retry"], true, "{}", failed_rows[1]);
+    let thinking = script.thinking.lock().unwrap();
+    assert_eq!(thinking[2], kastellan_llm_router::ThinkingPolicy::Suppress, "the re-ask runs with thinking off: {thinking:?}");
 }
 
 /// The re-ask times out with nothing gathered: the task fails in the
@@ -82,6 +106,7 @@ pub(super) async fn a_re_ask_that_times_out_before_gathering_fails_in_words(pool
     let r = run(pool, &script, new_task(pool, 5).await).await;
     let d = failed(&r.result);
     assert!(d.starts_with("The language model's first reply could not be used, so it was asked again. "), "{d}");
+    assert!(d.contains("ran out of time before it finished planning"), "the timeout's own wording: {d}");
     assert!(d.contains("timed out"), "the timeout query still finds it: {d}");
     assert_eq!(r.result.failed_llm_calls, 2);
 }

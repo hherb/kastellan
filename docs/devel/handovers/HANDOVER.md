@@ -54,10 +54,14 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 - **Ports, tests only:** the 18 per-step render/sink tests read `PlanRecord::last_step_view`/`last_result_view`
   (`summary/step_view_tests.rs`); the outcome-shapes pin also checks `agent_notebook.md`
-  (`the_planner_prompts_document_every_outcome_shape`); `user_text_cannot_forge_a_key` is on `render_turn`; six
-  timeout/deadline cases run on the notebook (`notebook/run/timeout_tests.rs`, inside `the_notebook_loop`) with a
-  **real** request timeout — the harness `Script` has a `TIMEOUT` reply and a `turn_delay`. Classic case 14 is
-  `a_call_on_the_answer_turn_is_re_asked`. ⚠️ The notebook prompt omits the 255-char non-ASCII atomic limit (prompt change).
+  (`the_planner_prompts_document_every_outcome_shape`); `user_text_cannot_forge_a_key` is on `render_turn`; seven
+  timeout/deadline cases run on the notebook (`notebook/run/timeout_tests.rs`, inside `the_notebook_loop`); the
+  timeouts are **real** request timeouts — the harness `Script` has a `TIMEOUT` reply and a `turn_delay`. Classic case
+  14 is `a_call_on_the_answer_turn_is_re_asked` (both halves). Review round (/finalcheck): added the forced turn's own
+  timeout (case 3), a re-ask that calls again (case 14's failure half), the cut-off reply's wording (case 22), the
+  re-ask's thinking-off and decode-row fields; 4 of 4 `ask.rs` mutants killed. The classic cases left without a
+  notebook twin (2, 4, 6, 10, 11, 17, 18) have no notebook door by design. Filed issue 1019 (a call on the forced
+  re-ask fails as "not a plan"). ⚠️ The notebook prompt omits the 255-char non-ASCII atomic limit (prompt change).
 - **DGX:** `main` 32452ccb (#1014) deployed with `upgrade_from_git.sh` (env identical, `NRestarts=0`, Matrix up);
   experiments #21–#22 → [log](../notes/notebook-experiments.md): **14 of 14 answered** (2343 s, 2542 s); #19's
   miss shape (an empty newest sift) answered with its kept rows. Two failed formulations, both recovered by the re-ask
@@ -247,7 +251,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    `apply_call_budget` + `prior_call_tests.rs` + the `elided` consts, `inner_loop/timeout_tests*`, the classic half of
    `llm_failure` (`formulate_turn`; keep what `notebook/ask.rs` calls), `agent/context.rs`'s classic serialiser and the
    classic prompt tests in `agent/tests.rs`, `prompts/agent_planner.md` (+ `prompts.rs` test, the bench scripts'
-   default), `PlannerMode::Classic` (main.rs arm, `task_exec`'s `None` arm), `core/tests/scheduler_inner_loop_e2e.rs`
+   default, and the `classic` branch of `summary/tests.rs::the_planner_prompts_document_every_outcome_shape`, which
+   panics on the missing file), `PlannerMode::Classic` (main.rs arm, `task_exec`'s `None` arm), `core/tests/scheduler_inner_loop_e2e.rs`
    (all classic) and `router_agent_mock_e2e`'s 5 classic-door tests. ⚠️ **Design call:** the runner should hold
    `Arc<dyn NotebookFormulator>` instead of `PlanFormulator` + `notebook() -> Option` (touches runner, main,
    `tests_common::scripted_notebook`, `scheduler_ask_path_e2e`). ⚠️ **Check for notebook twins first:**

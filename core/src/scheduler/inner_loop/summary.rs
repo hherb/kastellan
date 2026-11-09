@@ -29,7 +29,9 @@
 //! attachment or which bare line was the message id.
 //! `prompts/agent_planner.md` and `prompts/agent_notebook.md` document these shapes, and
 //! `the_planner_prompts_document_every_outcome_shape` fails if a prompt stops
-//! naming any key, reason or marker the renderer emits.
+//! naming any key, reason or marker the renderer emits. The notebook prompt is
+//! exempt from the budget's `elided` shapes and its non-ASCII limit, which the
+//! notebook never renders.
 
 use serde_json::json;
 
@@ -277,8 +279,8 @@ pub struct PlanRecord {
     /// `outcomes`.
     outcomes: Vec<StepOutcome>,
     /// Screened renders of `plan`'s step outcomes, one per outcome. Private:
-    /// the only consumers are [`render_plans_summary`] and
-    /// [`PlanRecord::sink_block_audit_payloads`], and the screened invariant
+    /// the only consumers are [`render_plans_summary`], the notebook's views
+    /// (`notebook_view.rs`) and [`PlanRecord::sink_block_audit_payloads`], and the screened invariant
     /// depends on nothing else being able to inject an unscreened
     /// `RenderedStep` (the budget's re-render goes through [`render_ok`]).
     rendered: Vec<RenderedStep>,
@@ -410,8 +412,8 @@ impl PlanRecord {
     /// [`PlanRecord::new`]; `scheduler::conversation::record` (#701) reads them
     /// only to tell `Ok` from `Err`, never their text.
     /// **Not** for building a planner prompt: these are unscreened, and
-    /// [`render_plans_summary`] is the only thing that turns an outcome into
-    /// planner-bound text.
+    /// [`render_plans_summary`] and the notebook's views (`notebook_view.rs`)
+    /// are the only things that turn an outcome into planner-bound text.
     pub fn outcomes(&self) -> &[StepOutcome] {
         &self.outcomes
     }

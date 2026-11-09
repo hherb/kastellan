@@ -3,16 +3,18 @@
 //! skill), the screened render the notebook's `last_result` and
 //! `last_failure` carry, plus the sink audit rows the same record yields.
 //!
-//! Moved here from `inner_loop/tests.rs` and `prior_call_tests.rs`, where they
-//! read the classic plan summary (`plans_so_far_summary`), so they outlive the
-//! classic loop (#993). Each assertion is the one it was; only the door to the
-//! render changed. The summary's own budget tests stay in `prior_call_tests.rs`.
+//! Moved here from `inner_loop/tests.rs` (which read the classic plan summary
+//! through `plans_so_far_summary`) and `prior_call_tests.rs` (which called
+//! `render_plans_summary`), so they outlive the classic loop (#993). The
+//! outcome assertions are unchanged; the summary-only `decision` checks were
+//! dropped, and the hostile-decision test reads the stored screened value.
+//! The summary's own budget tests stay in `prior_call_tests.rs`.
 
 use super::tests::plan_calling;
 use super::*;
 
 /// A plan with no steps: its outcomes render under the fail-closed Strict
-/// profile with no `call`, as a rebuilt record's would.
+/// profile with no `call`, as an outcome with no step behind it would.
 fn stepless() -> Plan {
     let mut plan = plan_calling("x", "m");
     plan.steps.clear();
@@ -211,7 +213,7 @@ fn a_handoff_head_is_pruned_once_so_its_omission_counts_are_true() {
     // Found by review of #705's first version, which rendered the head when the
     // result was stashed: the view prunes every result again, and that
     // second pass dropped the core's own `…omitted_keys` (not an identifier)
-    // and re-counted it as one dropped key. The head is rendered once, here.
+    // and re-counted it as one dropped key. The head is rendered once, by `PlanRecord::new`.
     let big = json!({"a b": "x", "c d": "y", "ok": 1});
     let placeholder = crate::handoff::build_handoff_placeholder(&big, &crate::handoff::HandoffRef::of(b"x"), 200000);
     let head = &stepless_view(StepOutcome::Ok(placeholder))["output"]["summary_head"];
