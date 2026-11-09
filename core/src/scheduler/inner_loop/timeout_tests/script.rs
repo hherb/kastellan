@@ -12,32 +12,7 @@ use super::super::*;
 use crate::cassandra::types::Plan;
 use crate::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
 
-/// A genuine request timeout out of the real router: the backend accepts
-/// the connection and never replies.
-pub(super) async fn real_request_timeout() -> AgentError {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-    let hold = tokio::spawn(async move {
-        let (sock, _) = listener.accept().await.expect("accept");
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        drop(sock);
-    });
-    let router = kastellan_llm_router::Router::new(kastellan_llm_router::RouterConfig {
-        local_url: url,
-        timeout: Duration::from_millis(150),
-        ..Default::default()
-    })
-    .expect("router");
-    let req = kastellan_llm_router::ChatRequest::new(
-        "m",
-        vec![kastellan_llm_router::ChatMessage::user("hi")],
-    );
-    let err = router.send(&req).await.expect_err("must time out");
-    hold.abort();
-    let err = AgentError::Router(err);
-    assert!(err.is_request_timeout(), "fixture must be a real request timeout: {err}");
-    err
-}
+pub(super) use crate::scheduler::notebook::test_harness::real_request_timeout;
 
 /// One scripted formulator call.
 pub(super) enum Next {

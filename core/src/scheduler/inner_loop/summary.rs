@@ -27,8 +27,8 @@
 //! `extract_scannable_text`'s flattening with every object key, number and
 //! boolean discarded, so the planner could not see which search hit had an
 //! attachment or which bare line was the message id.
-//! `prompts/agent_planner.md` documents these shapes, and
-//! `the_planner_prompt_documents_every_outcome_shape` fails if the prompt stops
+//! `prompts/agent_planner.md` and `prompts/agent_notebook.md` document these shapes, and
+//! `the_planner_prompts_document_every_outcome_shape` fails if a prompt stops
 //! naming any key, reason or marker the renderer emits.
 
 use serde_json::json;
@@ -548,3 +548,5 @@ fn with_call(mut outcome: serde_json::Value, call: Option<serde_json::Value>) ->
 mod tests;
 #[cfg(test)]
 mod prior_call_tests;
+#[cfg(test)]
+mod step_view_tests;

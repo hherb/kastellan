@@ -266,7 +266,7 @@ you add a field.
   them.** A new notebook `kind` is a new migration; the fold refuses kinds it
   does not know.
 - Prompt-pinning tests fail if a prompt stops documenting what the code
-  emits or accepts: `the_planner_prompt_documents_every_outcome_shape` and
+  emits or accepts: `the_planner_prompts_document_every_outcome_shape` and
   `the_notebook_prompt_documents_every_reply_key`. Change prompt and code
   together.
 
