@@ -55,8 +55,22 @@ impl PlanRecord {
     /// for a record with no outcomes. The notebook's current step shows this
     /// for the call made for it last turn.
     pub(crate) fn last_step_view(&self) -> Option<serde_json::Value> {
-        let i = self.rendered.len().checked_sub(1)?;
+        self.rendered.len().checked_sub(1).map(|i| self.step_view(i))
+    }
+
+    /// What the notebook's current step shows of the call made for it last
+    /// turn: [`Self::last_step_view`], or for a call that ran an invoked
+    /// skill's several steps (#996) every step's view, in order — the last
+    /// alone would hide what the earlier ones returned.
+    pub(crate) fn last_result_view(&self) -> Option<serde_json::Value> {
+        match self.rendered.len() {
+            0 | 1 => self.last_step_view(),
+            n => Some((0..n).map(|i| self.step_view(i)).collect()),
+        }
+    }
+
+    fn step_view(&self, i: usize) -> serde_json::Value {
         let call = self.calls.get(i).and_then(|c| c.as_ref()).map(|c| c.value.clone());
-        Some(with_call(self.rendered[i].value.clone(), call))
+        with_call(self.rendered[i].value.clone(), call)
     }
 }

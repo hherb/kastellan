@@ -148,8 +148,14 @@ The keys:
     `"floor_request": "<class>"` to the call: it raises the task's floor
     from this call on (it never lowers it), and a call classified below the
     raised floor is blocked — so classify it at least that high. Not on a
-    `sift`. A call this task
-    already made **successfully**, with the same parameters, is not run
+    `sift`. To run a skill tagged `[invocable]` in `<skills>`, write
+    `"invoke_skill": {"name": "<skill>", "args": {"<param>": "<value>"}}`
+    in the call **in place of** `tool`, `method` and `parameters`: `args`
+    holds exactly the skill's `params`, each a single line. Its steps are
+    reviewed and run, and `last_result` (or `last_failure`) is then a list,
+    one per step, for a skill of more than one. A skill without the tag is
+    refused. A call this task already made **successfully**, with the same
+    parameters (or the same skill with the same `args`), is not run
     again — its result is the one you already had; a call that **failed** may
     be retried.
   - `answer` — `{"body": "<the final answer>", "data_ceiling": "<class>"}`.
@@ -220,7 +226,7 @@ the items that match, with the facts you name, in the task's **scrapbook**:
 ```
 
 - `over` — the list: `{"step": n}` is the last result of step `n`'s call (a
-  search); `{"scrapbook": "sb:…"}` is an earlier scrapbook (a follow-up
+  search; for an `invoke_skill`, its last step's); `{"scrapbook": "sb:…"}` is an earlier scrapbook (a follow-up
   question: `conversation` lists each turn's `scrapbooks`).
 - `items` — where the list sits in that result (here `results`); leave it out
   when the result is the list itself. `from` — the first item (default 0).

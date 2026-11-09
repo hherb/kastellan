@@ -227,21 +227,32 @@ pub(crate) async fn run_notebook_to_terminal(
                 // it would be dispatched, so a namespace the model left out
                 // does not hide a repeat; the qualified name it then shows is
                 // an advertised method, never the model's own text.
-                let repeated = plan.steps.first().cloned().map(|mut s| {
-                    if let Some(m) = dispatcher.qualify_method(&s.tool, &s.method) {
-                        s.method = m;
-                    }
-                    s
-                });
                 let held = |h: &crate::handoff::HandoffRef| dispatcher.stashed(ctx.task_id, h).is_some();
-                if let Some(s) = repeated.filter(|s| repeat::already_made(&ctx.plans, s, held)) {
-                    tracing::info!(task_id = ctx.task_id, method = %s.method, "notebook: repeated call not dispatched");
+                // An invoke has no step until `execute` expands it: compared by
+                // its directive, or every repeat would re-run the skill (#996).
+                let repeated = match &plan.invoke_skill {
+                    Some(d) => repeat::already_invoked(&ctx.plans, d, held).then(|| format!("invoke_skill {}", d.name)),
+                    None => plan
+                        .steps
+                        .first()
+                        .cloned()
+                        .map(|mut s| {
+                            if let Some(m) = dispatcher.qualify_method(&s.tool, &s.method) {
+                                s.method = m;
+                            }
+                            s
+                        })
+                        .filter(|s| repeat::already_made(&ctx.plans, s, held))
+                        .map(|s| s.method),
+                };
+                if let Some(method) = repeated {
+                    tracing::info!(task_id = ctx.task_id, method = %method, "notebook: repeated call not dispatched");
                     // Not dispatched, but its `floor_request` still binds: a
                     // raise only tightens review, and dropping it would let
                     // the answer go out below the class the agent declared.
                     crate::scheduler::inner_loop::apply_floor_raise(&mut ctx, &plan);
-                    audit_discarded_turn(pool, &ctx, "repeated_call", Some(&s.method), &meta).await;
-                    ctx.blocks.push(repeat::repeated_call_reason(&s.method));
+                    audit_discarded_turn(pool, &ctx, "repeated_call", Some(&method), &meta).await;
+                    ctx.blocks.push(repeat::repeated_call_reason(&method));
                     replan_due = true;
                     continue;
                 }
@@ -281,6 +292,8 @@ pub(crate) async fn run_notebook_to_terminal(
             (None, None, None) => return finish!(Outcome::Failed("notebook reply had no call or answer".into())),
         };
 
+        // A refused invoke pushes one block per reason: the failed step keeps them all.
+        let blocks_before = ctx.blocks.len();
         let executed = match reply.call.as_ref().filter(|c| c.tool == SIFT_TOOL) {
             // A sift is run here, not dispatched: its reads are one reviewed
             // plan, and its sorter needs the router (K2).
@@ -309,7 +322,7 @@ pub(crate) async fn run_notebook_to_terminal(
             // replans.
             Executed::Again => {
                 if let Some(call) = &reply.call {
-                    let detail = ctx.blocks.last().cloned().unwrap_or_default();
+                    let detail = ctx.blocks.get(blocks_before..).unwrap_or_default().join("; ");
                     let payload = FailedStepPayload {
                         step: call.step,
                         code: "BLOCKED".into(),
@@ -325,7 +338,9 @@ pub(crate) async fn run_notebook_to_terminal(
                 let Some(call) = &reply.call else { continue };
                 let prev = last_call.filter(|l| l.step == call.step && !l.failed).map(|l| l.classification);
                 let classification = prev.map_or(call.classification, |p| p.max(call.classification));
-                let failed = match ctx.plans.last().and_then(|r| r.outcomes().first()) {
+                // The last outcome: a failed step ends its plan, and an
+                // invoked skill's plan has several (#996).
+                let failed = match ctx.plans.last().and_then(|r| r.outcomes().last()) {
                     Some(StepOutcome::Err { code, detail }) => {
                         let payload =
                             FailedStepPayload { step: call.step, code: code.clone(), detail: clamp(detail), classification };

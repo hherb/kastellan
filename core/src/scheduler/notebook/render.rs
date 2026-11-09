@@ -93,7 +93,9 @@ pub(crate) fn render_turn(
     if !ctx.blocks.is_empty() {
         fields.push(("blocks", json!(ctx.blocks).to_string()));
     }
-    if let Some(view) = last_failure.and_then(|(step, r)| Some((step, r.last_step_view()?))) {
+    // Every step of an invoked skill, the failed one last: the repeat guard
+    // counts the earlier ones as seen, so hiding them would strand their facts.
+    if let Some(view) = last_failure.and_then(|(step, r)| Some((step, r.last_result_view()?))) {
         fields.push(("last_failure", obj(&[("step", view.0.to_string()), ("result", view.1.to_string())])));
     }
     if let Some(cur) = current {
@@ -193,7 +195,7 @@ fn current_step_view(cur: &CurrentStep<'_>) -> String {
     if let Some(doc) = &cur.tool_doc {
         fields.push(("tool_doc", json!(doc).to_string()));
     }
-    if let Some(view) = cur.last.and_then(PlanRecord::last_step_view) {
+    if let Some(view) = cur.last.and_then(PlanRecord::last_result_view) {
         fields.push(("last_result", view.to_string()));
     }
     obj(&fields)

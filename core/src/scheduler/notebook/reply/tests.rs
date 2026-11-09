@@ -180,6 +180,60 @@ fn a_sift_call_may_not_raise_the_floor() {
     assert!(err.contains("floor_request") && err.contains("not on a `sift`"), "{err}");
 }
 
+/// A call for a step with no tool of its own: the skill supplies them.
+fn invoke_call(step: u32) -> Value {
+    json!({"step": step, "invoke_skill": {"name": "list_invoices", "args": {"q": "x"}},
+           "returns": "r", "done_when": "d", "classification": "Personal"})
+}
+
+/// A call may run a pinned skill (#996) in place of a tool call: its plan has
+/// no steps of its own and carries the directive, which the shared `execute`
+/// expands into the skill's steps before review (`validate_invoke` refuses a
+/// directive with steps beside it).
+#[test]
+fn a_call_may_invoke_a_skill() {
+    let r = check(json!({"call": invoke_call(1)}), &two_steps()).unwrap();
+    let p = call_plan(&r, r.call.as_ref().unwrap(), DataClass::Public);
+    assert!(p.steps.is_empty(), "{p:?}");
+    assert_eq!(p.invoke_skill.as_ref().map(|d| d.name.as_str()), Some("list_invoices"));
+    assert!(p.validate_invoke().is_ok());
+    assert_eq!(p.data_ceiling, Some(DataClass::Personal));
+    // A tool call carries none.
+    let r = check(json!({"call": call(1)}), &two_steps()).unwrap();
+    assert_eq!(call_plan(&r, r.call.as_ref().unwrap(), DataClass::Public).invoke_skill, None);
+}
+
+/// A call is either a tool call or a skill, never both and never neither:
+/// each refusal names the fix.
+#[test]
+fn a_call_names_a_tool_or_a_skill() {
+    let mut both = invoke_call(1);
+    both["tool"] = json!("mail");
+    both["method"] = json!("mail.search");
+    let err = check(json!({"call": both}), &two_steps()).unwrap_err();
+    assert!(err.contains("in place of `tool`"), "{err}");
+    let mut with_params = invoke_call(1);
+    with_params["parameters"] = json!({"q": "x"});
+    assert!(check(json!({"call": with_params}), &two_steps()).unwrap_err().contains("in place of `tool`"));
+    let mut neither = call(1);
+    neither.as_object_mut().unwrap().remove("tool");
+    let err = check(json!({"call": neither}), &two_steps()).unwrap_err();
+    assert!(err.contains("`tool`, `method` and `parameters`") && err.contains("invoke_skill"), "{err}");
+    // `parameters` defaults only for an invoke: a tool call still names it.
+    let mut no_params = call(1);
+    no_params.as_object_mut().unwrap().remove("parameters");
+    assert!(check(json!({"call": no_params}), &two_steps()).unwrap_err().contains("`parameters`"));
+}
+
+/// An invoke written without the `call` wrapper is pointed at `call`, by name.
+#[test]
+fn an_unwrapped_invoke_is_told_to_use_call() {
+    let mut top = invoke_call(1);
+    top["steps"] = json!([step(1)]);
+    let err = parse_reply(&top.to_string()).unwrap_err();
+    assert!(err.contains("`invoke_skill` goes inside `call`"), "{err}");
+}
+
 #[test]
 fn a_refusal_rides_on_the_answer() {
     let r = check(json!({"answer": {"body": "no", "refused": {"principle": 2, "reason": "impersonation"}}}), &two_steps())

@@ -227,6 +227,11 @@ pub(crate) struct Tools {
 
 #[async_trait]
 impl StepDispatcher for Tools {
+    /// The tools a pinned skill may name (the invoke path's live re-check).
+    fn known_tools(&self) -> std::collections::BTreeSet<String> {
+        ["mail".to_string()].into()
+    }
+
     /// `<m>-bare` stands for a method written without its namespace: it
     /// completes to `<m>`, as the registry completes `get_message`.
     fn qualify_method(&self, _tool: &str, method: &str) -> Option<String> {

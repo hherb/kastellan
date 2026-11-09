@@ -96,6 +96,8 @@ async fn the_notebook_loop() {
     super::agent_raised_tests::a_calls_floor_request_raises_the_task_floor(&pool).await;
     super::agent_raised_tests::a_call_below_its_raised_floor_is_blocked(&pool).await;
     super::agent_raised_tests::a_repeated_calls_floor_request_still_raises_the_floor(&pool).await;
+    super::agent_raised_tests::an_invoked_skill_runs_its_steps(&pool).await;
+    super::agent_raised_tests::an_unknown_skill_is_refused_and_the_next_turn_replans(&pool).await;
 }
 
 async fn a_three_step_task_ticks_each_step_and_answers_from_findings(pool: &sqlx::PgPool) {

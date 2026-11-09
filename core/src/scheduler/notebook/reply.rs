@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use super::state::{FindingSpec, NotebookState, StepSpec, StepStatus, TickPayload};
 use crate::cassandra::types::{
-    DataClass, L3SkillCandidate, Plan, PlannedStep, PythonSkillCandidate, RefusedReason, DECISION_TERMINAL,
+    DataClass, InvokeDirective, L3SkillCandidate, Plan, PlannedStep, PythonSkillCandidate, RefusedReason, DECISION_TERMINAL,
 };
 use crate::scheduler::plan_parser::parse_json_lenient;
 
@@ -56,13 +56,19 @@ pub(crate) struct TickSpec {
     pub summary: String,
 }
 
-/// The tool call for step `step`, in the fields a [`PlannedStep`] carries.
+/// The tool call for step `step`, in the fields a [`PlannedStep`] carries —
+/// or, with `invoke_skill`, a pinned skill run in its place (then `tool`,
+/// `method` and `parameters` stay empty: [`validate`] checks it is one or
+/// the other).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CallSpec {
     pub step: u32,
+    #[serde(default)]
     pub tool: String,
+    #[serde(default)]
     pub method: String,
+    #[serde(default)]
     pub parameters: serde_json::Value,
     pub returns: String,
     pub done_when: String,
@@ -74,6 +80,12 @@ pub(crate) struct CallSpec {
     /// `run`); a request at or below the floor changes nothing.
     #[serde(default)]
     pub floor_request: Option<DataClass>,
+    /// Run an operator-pinned L3 skill (#996) instead of one tool call:
+    /// `execute` expands it into the skill's steps before review (refusing
+    /// an unknown, unpinned or mis-argued one, which the next turn sees in
+    /// `blocks`), and a task that ran one never crystallises a new skill.
+    #[serde(default)]
+    pub invoke_skill: Option<InvokeDirective>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,8 +199,9 @@ impl NotebookReply {
 
 /// The fields of a [`CallSpec`]: the ones a model writes at a reply's top
 /// level when it leaves out the `call` wrapper (#980).
-const CALL_FIELDS: [&str; 8] =
-    ["step", "tool", "method", "parameters", "returns", "done_when", "classification", "floor_request"];
+const CALL_FIELDS: [&str; 9] = [
+    "step", "tool", "method", "parameters", "returns", "done_when", "classification", "floor_request", "invoke_skill",
+];
 
 /// Parse a raw reply, tolerating a fence or a preamble like a classic plan.
 ///
@@ -201,7 +214,11 @@ const CALL_FIELDS: [&str; 8] =
 /// model.
 pub(crate) fn parse_reply(raw: &str) -> Result<NotebookReply, String> {
     let refused = |e: &dyn std::fmt::Display, hint: bool| {
-        let hint = if hint { " (a tool call goes inside `call`: {\"call\": {\"step\": …, \"tool\": …}})" } else { "" };
+        let hint = if hint {
+            " (a tool call or `invoke_skill` goes inside `call`: {\"call\": {\"step\": …, \"tool\": …}})"
+        } else {
+            ""
+        };
         format!("not a notebook reply: {e}{hint}")
     };
     let strict = match parse_json_lenient::<NotebookReply>(raw) {
@@ -282,6 +299,20 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
         if call.returns.trim_start().starts_with(super::sift::SIFT_READS_DECISION.trim_end()) {
             return Err(format!("`call.returns` may not begin `{}`", super::sift::SIFT_READS_DECISION.trim_end()));
         }
+        // One or the other: a skill's steps come from the skill, and a
+        // tool beside one would be dropped unseen (`validate_invoke`).
+        let names_tool = !call.tool.is_empty() || !call.method.is_empty() || !call.parameters.is_null();
+        match (&call.invoke_skill, names_tool) {
+            (Some(_), true) => {
+                return Err("`invoke_skill` goes in place of `tool`, `method` and `parameters`: the skill supplies them".into())
+            }
+            // `parameters` defaults only so an invoke may leave it out: a
+            // tool call without one would reach its worker as `null`.
+            (None, _) if call.tool.is_empty() || call.method.is_empty() || call.parameters.is_null() => {
+                return Err("a `call` names its `tool`, `method` and `parameters` (or an `invoke_skill`)".into())
+            }
+            _ => {}
+        }
         // A sift builds its own reads plan from the call (`sift::run`), so a
         // request on it would be dropped unseen.
         if call.tool == super::sift::SIFT_TOOL && call.floor_request.is_some() {
@@ -337,28 +368,30 @@ pub(crate) fn notebook_step_of(plan: &Plan) -> Option<u32> {
 /// left unset, it would resolve to the floor alone, and a call that touches
 /// more than the floor would then be refused as touching more than its own
 /// plan declared; below a requested floor, I1 would refuse the very plan
-/// that raised it.
+/// that raised it. A call that invokes a skill has no step of its own:
+/// `execute` installs the skill's.
 pub(crate) fn call_plan(reply: &NotebookReply, call: &CallSpec, floor: DataClass) -> Plan {
     let floor = call.floor_request.map_or(floor, |r| r.max(floor));
+    let step = PlannedStep {
+        tool: call.tool.clone(),
+        method: call.method.clone(),
+        parameters: call.parameters.clone(),
+        returns: call.returns.clone(),
+        done_when: call.done_when.clone(),
+        classification: call.classification,
+    };
     Plan {
         context: reply.tick.as_ref().map(|t| t.summary.clone()).unwrap_or_default(),
         decision: call.returns.clone(),
         rationale: format!("{NOTEBOOK_STEP_RATIONALE}{}", call.step),
-        steps: vec![PlannedStep {
-            tool: call.tool.clone(),
-            method: call.method.clone(),
-            parameters: call.parameters.clone(),
-            returns: call.returns.clone(),
-            done_when: call.done_when.clone(),
-            classification: call.classification,
-        }],
+        steps: if call.invoke_skill.is_some() { vec![] } else { vec![step] },
         result: None,
         data_ceiling: Some(call.classification.max(floor)),
         refused: None,
         floor_request: call.floor_request,
         l1_insight: None,
         l3_skill: None,
-        invoke_skill: None,
+        invoke_skill: call.invoke_skill.clone(),
         python_skill: None,
     }
 }

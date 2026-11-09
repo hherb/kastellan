@@ -339,10 +339,14 @@ async fn resolve_over(
                 .iter()
                 .rev()
                 .filter(|rec| notebook_step_of(&rec.plan) == Some(*n) && !is_sift_plan(&rec.plan))
-                .find(|rec| matches!(rec.outcomes().first(), Some(StepOutcome::Ok(_))))
+                // A step that ran an invoked skill (#996) sifts its skill's last
+                // step, its product; a plan stops at its first error, so a last
+                // `Ok` means every step succeeded.
+                .find(|rec| matches!(rec.outcomes().last(), Some(StepOutcome::Ok(_))))
                 .ok_or_else(|| format!("step {n} has no successful result to sift"))?;
-            let (Some(StepOutcome::Ok(result)), Some(step)) = (record.outcomes().first(), record.plan.steps.first()) else {
-                unreachable!("the record was found by its first outcome being Ok, and outcomes follow steps")
+            let last = record.outcomes().len() - 1;
+            let (Some(StepOutcome::Ok(result)), Some(step)) = (record.outcomes().get(last), record.plan.steps.get(last)) else {
+                unreachable!("the record was found by its last outcome being Ok, and outcomes follow steps")
             };
             // A result too big for the planner was stashed whole (DGX task
             // 337, a 68 KB search): the sift reads it back. The stash was not
