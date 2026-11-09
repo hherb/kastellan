@@ -15,7 +15,7 @@
 //!    cut off at `max_tokens` after gathering spends the forced-answer turn;
 //!    and an answer with no table after a sift that kept rows is shown back
 //!    once too (#960), and kept if that re-ask fails — except on the
-//!    forced-answer turn, where code attaches the newest sift's table instead;
+//!    forced-answer turn, where code attaches the table of every sift that kept rows instead;
 //! 4. write the reply's `tick` and `steps` entries;
 //! 5. set aside, unreviewed, an answer a non-thinking turn wrote (the next
 //!    turn rewrites it, thinking) and a call this task already made

@@ -16,7 +16,7 @@
 > (#986's session and review round); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-09 (the owed DGX re-measure of #996's five ports, experiments #19–#20) ·
+**Last updated:** 2026-11-09 (the owed DGX re-measure of #996's five ports, experiments #19–#20; #1012: kept rows accumulate over a run's sifts) ·
 **Recent PRs, newest first:** [#1009](https://github.com/hherb/kastellan/pull/1009) (#996 `invoke_skill`, merged, deployed DGX 2026-11-09), [#1007](https://github.com/hherb/kastellan/pull/1007) (#996 `floor_request`, merged), [#1003](https://github.com/hherb/kastellan/pull/1003) (#996 `python_skill`, merged), [#1002](https://github.com/hherb/kastellan/pull/1002) (#996 `l3_skill`, merged), [#998](https://github.com/hherb/kastellan/pull/998) (#996 `l1_insight`, merged), [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2, merged), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
@@ -50,17 +50,21 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-09, latest): the owed DGX re-measure of #996 (experiments #19–#20, docs only)
+### This session (2026-11-09, latest): the owed DGX re-measure of #996 (experiments #19–#20, PR #1013) and #1012
 
-- Deployed `main` (#1009) to the DGX and ran `requery7.sh` twice (tasks 394–407, [log](../notes/notebook-experiments.md)
-  #19–#20): **13 of 14 answered**, 3161 s and 2252 s, **no `plan.formulate_failed`**, and **no agent-raised field in any
-  readable turn** (43 of 60; 17 over-cap rows stored truncated). The ports are neutral, and still **unexercised
-  live**: none of the seven questions calls for them.
-- The one miss (#19 Q5, task 398): four near-identical sifts; the last hit the 15-minute ceiling after its reads
-  (`stopped: "time"`, 0 sorter calls); the forced answer said nothing matched and got no table, because `newest_kept`
-  looks only at the newest sift → issue 1012 (a design call: fall back to the newest sift that kept rows?).
-- ⚠️ `requery7.sh` appends to `~/requery7.log`: move it aside between runs (now `.996a`/`.996b`). The audit
-  query for agent-raised fields: `plan.formulate` payload keys `l1_insight`/`l3_skill`/`invoke_skill` (non-null).
+- DGX on `main` (#1009), `requery7.sh` ×2 (tasks 394–407, [log](../notes/notebook-experiments.md) #19–#20): **13 of 14
+  answered**, no `plan.formulate_failed`, **no agent-raised field** in 43 readable turns of 60. The ports are neutral and
+  still **unexercised live**. ⚠️ Move `~/requery7.log` aside between runs (it appends).
+- The miss (task 398): its newest sift hit the ceiling having kept nothing, so the forced answer got no table → #1012.
+  **Operator: kept rows accumulate over the run.** `sift::answer::kept_sifts` (pure): every sift that kept rows, newest
+  first, a chain once by its last link; the forced table and the show-back name them all. Tests
+  `kept_rows_accumulate_over_the_run_s_sifts` (unit), `a_forced_answer_gets_the_rows_of_every_sift_that_kept_some`
+  (inside `the_sift_loop`); the newest-only mutant fails all three. Finalcheck: a joined table's columns are now
+  **every** included sift's fields, not the first's (`with_table`; the loop test's second sift asks for `vendor`, and
+  the first-only mutant fails it). Filed, not fixed: issue 1015 (the note sums looked_at/remaining across separate
+  sifts, and a 0-kept sift's `remaining` is dropped) and issue 1016 (`kept_sifts` uncapped past `TABLE_REFS_MAX`).
+  ⚠️ **Owed: ≥ 2 DGX runs** (deploy the build).
+  ⚠️ Notebook turn cap = `max_plans × NOTEBOOK_TURNS_PER_PLAN` (`new_task(pool, 2)`: 4 turns, the fifth forced).
 
 ### Previous (2026-11-08 → 09): #996 1–5 of 5 (PRs #998, #1002, #1003, #1007, #1009, merged) — what still binds (prose: the `996dgx` snapshot)
 
@@ -105,7 +109,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   **`task_scrapbook` (migration 0029, append-only — applied on the DGX: never edit it)**. Knobs
   `KASTELLAN_SIFT_MAX_READS` (64), `KASTELLAN_SIFT_READ_METHODS`. ⚠️ **The sift number is the turn (`plan_count`)**;
   a `returns` beginning `sift reads:` is refused (`SIFT_READS_DECISION`). Open minors: #956, #958, #959.
-- A forced answer with no table gets the newest sift's (`sift::answer::forced_table`); its own table is taken out
+- A forced answer with no table gets every sift's that kept rows (`sift::answer::forced_table`, #1012); its own table is taken out
   under it (`without_own_tables`). A stashed (over 64 KiB) step is read back with `StepDispatcher::stashed`; an evicted
   stash is a **failed read**. ⚠️ The stash is purged whenever the loop returns, **a suspend too**. A call on a done
   step is refused with the fix (`reply::not_pending`). `task_id`/`plan_count` are in `db::audit::PRESERVED_KEYS`.
@@ -383,7 +387,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#996 inv) | `feat/996-invoke-skill` over `b8672564`, primary checkout | **5579 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-996inv.log`. vs `sweep-996fr.log`, per suite: core lib 2819 → 2821 (the two reply tests); the loop tests run inside `the_notebook_loop` | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-996inv`, clean, 27 `Checking kastellan` | **23** (as before) |
+| **Mac** (#1012) | `fix/1012-kept-rows-accumulate` over `e80d9581` (#1009 + docs), primary checkout | **5582 / 0 / 52**, **202** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-1012.log`. vs `sweep-996inv.log`: core lib 2821 → 2824 passed (+2 from #1009's finalcheck, after its sweep; +1 `kept_rows_accumulate…`), no other suite moved | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-1012`, clean, 27 `Checking kastellan` | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.

@@ -182,6 +182,36 @@ pub(super) async fn a_forced_answer_without_the_table_gets_it_by_code(pool: &sql
     }
 }
 
+/// #1012 (DGX task 398): a later sift that kept nothing (there, it stopped
+/// on the ceiling) hid the rows an earlier one kept, and the forced answer
+/// said nothing matched with no table. Kept rows accumulate over the run,
+/// and the table's columns are every sift's fields (review finding).
+pub(super) async fn a_forced_answer_gets_the_rows_of_every_sift_that_kept_some(pool: &sqlx::PgPool) {
+    let later = |step: u32, keep_if: &str, field: &str| {
+        let mut s = sift(step, None);
+        s["parameters"]["keep_if"] = json!(keep_if);
+        s["parameters"]["fields"] = json!([field]);
+        s
+    };
+    // max_plans 2 → a cap of 4 turns (search and three sifts): the fifth is forced.
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3, 4]), "call": search(1, hits(&["m1", "m2"]))}),
+        json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
+        json!({"tick": tick(2, "sorted"), "call": later(3, "a receipt", "vendor")}),
+        json!({"tick": tick(3, "sorted"), "call": later(4, "a bill", "amount")}),
+        json!({"tick": tick(4, "sorted"), "answer": {"body": "None matched."}}),
+    ])
+    .sorting(&[keep(10), no(), no(), json!({"keep": true, "fields": {"vendor": "Acme"}}), no(), no()]);
+    let r = run(pool, &script, new_task(pool, 2).await).await;
+    let reasks = script.reasks.lock().unwrap().clone();
+    assert!(reasks.is_empty(), "the forced turn is not shown back: {reasks:?}");
+    let b = body(&r.result);
+    // Newest first: sift 3's `vendor`, then sift 2's `amount`.
+    assert!(b.starts_with("None matched.\n\n| vendor | amount | source |"), "every sift's fields: {b}");
+    assert!(b.contains("| 10 | m1 |") && b.contains("| Acme |"), "both sifts' rows: {b}");
+    assert!(!b.contains("could not be included"), "the empty sift is not named: {b}");
+}
+
 /// #964 (DGX task 337): a 68 KB search was handoff-stashed, so its step's
 /// result was the placeholder and the sift over it was refused ("the result
 /// has no results"). The sift reads the stash back whole.

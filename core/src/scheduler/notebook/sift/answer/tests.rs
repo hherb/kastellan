@@ -78,7 +78,7 @@ fn an_answer_without_the_table_of_a_sift_that_kept_rows_is_refused() {
     assert!(why.contains("sb:9:3") && why.contains("kept 21") && why.contains("\"table\""), "{why}");
     assert_eq!(table_left_out(&plain, &ctx(vec![kept(0)])), Ok(()), "nothing kept: no table to show");
     assert_eq!(table_left_out(&plain, &ctx(vec![])), Ok(()), "no sift");
-    assert_eq!(table_left_out(&plain, &ctx(vec![kept(21), kept(0)])), Ok(()), "the newest sift decides");
+    assert!(table_left_out(&plain, &ctx(vec![kept(21), kept(0)])).is_err(), "an older sift's rows still count (#1012)");
     let link = sift_record(params(2, "x"), serde_json::json!({"scrapbook": "sb:9:4", "kept": 0, "chain": {"kept": 5}}));
     assert!(table_left_out(&plain, &ctx(vec![link])).unwrap_err().contains("kept 5"), "a chain's kept");
     let link = sift_record(params(2, "x"), serde_json::json!({"scrapbook": "sb:9:4", "kept": 4, "distinct": 4, "chain": {"kept": 5, "distinct": 3}}));
@@ -139,6 +139,35 @@ fn an_answer_whose_table_names_no_scrapbook_ref_is_refused() {
     let empty = tabled(serde_json::json!([]));
     assert!(table_left_out(&empty, &ctx(vec![kept()])).unwrap_err().contains("shows no `table`"), "[] after a sift that kept rows");
     assert_eq!(forced_table(&empty, &[kept()]).map(|t| t.scrapbook.refs().to_vec()), Some(vec!["sb:9:3".to_string()]), "attached by code");
+}
+
+/// #1012 (DGX task 398): four separate sifts kept 12, 11, 30 and 0; the
+/// last stopped on the ceiling, and the forced answer got no table because
+/// only the newest sift was looked at. Kept rows accumulate over the run:
+/// every sift that kept rows is named, newest first, and a chain once, by
+/// its last link (which brings the rest).
+#[test]
+fn kept_rows_accumulate_over_the_run_s_sifts() {
+    use super::super::chain::tests::{params, sift_record};
+    let plain = serde_json::from_value::<NotebookReply>(serde_json::json!({"answer": {"body": "none"}})).unwrap();
+    let sift = |n: u32, kept: u64| sift_record(params(0, "x"), serde_json::json!({"scrapbook": format!("sb:9:{n}"), "kept": kept}));
+    let task_398 = vec![sift(2, 12), sift(4, 11), sift(6, 30), sift(8, 0)];
+    let refs = |plans: &[PlanRecord]| forced_table(&plain, plans).map(|t| t.scrapbook.refs().to_vec());
+    let names = |ns: &[&str]| Some(ns.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+    assert_eq!(refs(&task_398), names(&["sb:9:6", "sb:9:4", "sb:9:2"]), "every sift that kept rows, newest first");
+    assert_eq!(refs(&[sift(2, 0), sift(4, 0)]), None, "none kept anything");
+    let why = table_left_out(&plain, &ctx(task_398)).unwrap_err();
+    assert!(why.contains("sift sb:9:6 kept 30 items") && why.contains("sift sb:9:2 kept 12 items"), "{why}");
+    assert!(why.contains(r#"{"scrapbook": ["sb:9:6","sb:9:4","sb:9:2"]}"#), "the fix names them all: {why}");
+    // A chain is named once, by its last link: the table expands it.
+    let chain = vec![
+        sift_record(params(0, "x"), serde_json::json!({"scrapbook": "sb:9:2", "kept": 5, "next_from": 30})),
+        sift_record(params(30, "x"), serde_json::json!({"scrapbook": "sb:9:3", "kept": 0, "continues": "sb:9:2", "chain": {"kept": 5}})),
+        sift(5, 2),
+    ];
+    assert_eq!(refs(&chain), names(&["sb:9:5", "sb:9:3"]), "the link sb:9:2 comes with sb:9:3");
+    let one = table_left_out(&plain, &ctx(vec![sift(3, 4)])).unwrap_err();
+    assert!(one.contains(r#"{"scrapbook": "sb:9:3"}"#), "one sift: a plain ref, as before: {one}");
 }
 
 #[test]

@@ -24,7 +24,7 @@ pub(crate) const TABLE_REFS_MAX: usize = crate::scheduler::conversation::record:
 pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: &TableSpec, strip_own: bool) -> (String, DataClass) {
     let mut rows: Vec<Row> = Vec::new();
     let mut counts = Counts::default();
-    let mut fields: Option<Vec<String>> = None;
+    let mut fields: Vec<String> = Vec::new();
     let mut included = false;
     let (named, mut refused) = table_refs(&ctx.plans, t.scrapbook.refs());
     let mut links = Vec::new();
@@ -49,8 +49,12 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
                 let summary = own_summary(ctx, &r);
                 add_counts(&mut counts, &got, summary.as_ref());
                 links.push(Link::of(raw, summary.as_ref()));
-                if fields.is_none() {
-                    fields = summary.as_ref().and_then(summary_fields).or_else(|| first_row_fields(&got));
+                // Every included sift's fields, in order: separate sifts of a
+                // forced table (#1012) may each have asked for others.
+                for f in summary.as_ref().and_then(summary_fields).or_else(|| first_row_fields(&got)).unwrap_or_default() {
+                    if !fields.contains(&f) {
+                        fields.push(f);
+                    }
                 }
                 rows.extend(got);
             }
@@ -63,7 +67,7 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     counts.remaining = remaining(&links);
     let class = rows.iter().map(row_class).fold(ctx.classification_floor, DataClass::max);
     let columns = t.columns.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| {
-        let mut c = fields.unwrap_or_default();
+        let mut c = fields;
         c.push(SOURCE_COLUMN.into());
         c
     });
@@ -158,7 +162,7 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
 /// answered in prose ("I would need a further step") and named no table, so
 /// the rows never reached the operator. `Err` — the reason shown back with
 /// the #945 re-ask — when `reply` answers with no `table` (and no
-/// refusal) although this run's newest sift, or the chain it ends, kept
+/// refusal) although a sift of this run, or a chain one ends, kept
 /// something ([`missing_table`]). The loop applies it to a turn's first
 /// reply only: the reply re-asked is used either way, so the model can
 /// still answer without one. Pure.
@@ -173,19 +177,23 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
 pub(crate) fn table_left_out(reply: &NotebookReply, ctx: &TaskContext) -> Result<(), String> {
     let plans = &ctx.plans;
     if let Some(named) = table_of_no_scrapbook(reply, ctx) {
-        let fix = match newest_kept(plans) {
-            Some((name, kept)) => format!("sift {name} kept {kept} items; to show them, name `\"scrapbook\": \"{name}\"`"),
-            None => "this run's newest sift, if any, has no rows, so write the items in `body` and leave `table` out".into(),
+        let kept = kept_sifts(plans);
+        let fix = if kept.is_empty() {
+            "no sift of this run has rows, so write the items in `body` and leave `table` out".into()
+        } else {
+            format!("{}; to show them, name `\"scrapbook\": {}`", kept_lines(&kept), scrapbook_value(&kept))
         };
         return Err(format!(
             "the `answer`'s `table` names {}, but a table shows the rows of a `sift` this conversation ran, named `sb:<task>:<sift>`: {fix}",
             named.join(", ")
         ));
     }
-    let Some((name, kept)) = missing_table(reply, plans) else { return Ok(()) };
+    let Some(kept) = missing_table(reply, plans) else { return Ok(()) };
     Err(format!(
-        "the `answer` shows no `table`, but sift {name} kept {kept} items. To show them, add \
-`\"table\": {{\"scrapbook\": \"{name}\"}}` to the `answer`; to answer without them, send the same answer again"
+        "the `answer` shows no `table`, but {}. To show them, add \
+`\"table\": {{\"scrapbook\": {}}}` to the `answer`; to answer without them, send the same answer again",
+        kept_lines(&kept),
+        scrapbook_value(&kept)
     ))
 }
 
@@ -218,35 +226,57 @@ fn names_no_table(a: &AnswerSpec) -> bool {
 /// #960 (DGX tasks 335, 342): the forced-answer turn (a planner timeout, the
 /// turn cap, the fast lane's ceiling) is never shown back — its budget is
 /// spent — and twice it answered with no table after a sift that kept rows.
-/// On that turn the table is attached by code instead: the newest sift's
-/// scrapbook (and the chain it ends), with the default columns and order.
-/// `None` when the answer names a table, is a refusal, or the newest sift kept
-/// nothing. Pure.
+/// On that turn the table is attached by code instead: every scrapbook of
+/// this run that kept rows ([`kept_sifts`]), with the default columns and
+/// order. `None` when the answer names a table, is a refusal, or no sift
+/// kept anything. Pure.
 pub(crate) fn forced_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<TableSpec> {
-    let (name, _) = missing_table(reply, plans)?;
-    Some(TableSpec { scrapbook: Refs::One(name), columns: None, order_by: None, limit: None })
+    let mut names: Vec<String> = missing_table(reply, plans)?.into_iter().map(|(n, _)| n).collect();
+    let scrapbook = if names.len() == 1 { Refs::One(names.remove(0)) } else { Refs::Many(names) };
+    Some(TableSpec { scrapbook, columns: None, order_by: None, limit: None })
 }
 
-/// The newest sift's scrapbook and how many rows its table would show
-/// (`distinct`, the chain's when it continues one), when `reply` answers
-/// with no `table` (or one naming no refs) and no refusal and that sift kept
-/// something. Pure.
-fn missing_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<(String, u64)> {
+/// [`kept_sifts`], when `reply` answers with no `table` (or one naming no
+/// refs) and no refusal and some sift kept something. Pure.
+fn missing_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<Vec<(String, u64)>> {
     if !reply.answer.as_ref().is_some_and(|a| names_no_table(a) && a.refused.is_none()) {
         return None;
     }
-    newest_kept(plans)
+    Some(kept_sifts(plans)).filter(|k| !k.is_empty())
 }
 
-/// This run's newest sift's scrapbook and its table's row count, when it
-/// (or the chain it ends) kept something. Pure.
-fn newest_kept(plans: &[PlanRecord]) -> Option<(String, u64)> {
-    let s = chain::last_sift(plans)?;
+/// Every sift of this run that kept something, newest first, with the rows
+/// its table would show (`distinct`, the chain's when it continues one). Kept
+/// rows accumulate over the run: #1012 (DGX task 398) ran four separate sifts
+/// that kept 12, 11, 30 and 0, and looking at the newest alone lost all 53. A
+/// sift that a later one continues is left out, because a table names a chain
+/// by its last link and brings in the rest ([`chain::expand`]). Pure.
+fn kept_sifts(plans: &[PlanRecord]) -> Vec<(String, u64)> {
     // The table's rows (`distinct`), as the prompt has the body quote them.
     let count = |v: &serde_json::Value| v["distinct"].as_u64().or_else(|| v["kept"].as_u64());
-    let kept = count(&s["chain"]).or_else(|| count(s)).unwrap_or(0);
-    let name = s["scrapbook"].as_str().filter(|_| kept > 0)?;
-    Some((name.to_string(), kept))
+    let all: Vec<&serde_json::Value> = chain::summaries(plans).collect();
+    let continued: Vec<&str> = all.iter().filter_map(|s| s["continues"].as_str()).collect();
+    all.iter()
+        .filter_map(|s| {
+            let name = s["scrapbook"].as_str().filter(|n| !continued.contains(n))?;
+            let kept = count(&s["chain"]).or_else(|| count(s)).unwrap_or(0);
+            (kept > 0).then(|| (name.to_string(), kept))
+        })
+        .collect()
+}
+
+/// `sift sb:9:6 kept 30 items, sift sb:9:2 kept 12 items`. Pure.
+fn kept_lines(kept: &[(String, u64)]) -> String {
+    kept.iter().map(|(n, k)| format!("sift {n} kept {k} items")).collect::<Vec<_>>().join(", ")
+}
+
+/// The `scrapbook` value naming them all: `"sb:9:3"` for one,
+/// `["sb:9:6","sb:9:2"]` for several. Pure.
+fn scrapbook_value(kept: &[(String, u64)]) -> String {
+    match kept {
+        [(n, _)] => serde_json::json!(n).to_string(),
+        _ => serde_json::json!(kept.iter().map(|(n, _)| n).collect::<Vec<_>>()).to_string(),
+    }
 }
 
 /// The scrapbooks a table named `named` joins, each once, and a line for
