@@ -507,3 +507,48 @@ Cell format: `turns / seconds`, then the outcome.
   (none of the seven questions calls for a skill, an insight or a floor raise). Per-question differences (Q1's
   figures, Q2's count, Q6's booking) are within the spread of #14–#18. On this evidence #996 can close.
 - **Reproduce:** as #19; `bash ~/q960.sh 401 407` (→ `~/q996b.txt`). Log → `~/requery7.log.996b`.
+
+## 2026-11-09 #21 — #1012's fix: kept rows accumulate over a run's sifts, first run (tasks 408–414)
+
+- **Build:** `main` 32452ccb (#1014 merged), deployed with `scripts/upgrade_from_git.sh` (generated env byte-identical
+  to the backup, `NRestarts` 0, Matrix up; installed `agent_notebook.md` sha256-equal to the repo's,
+  `KASTELLAN_PLANNER_MODE=notebook` in `/proc/<pid>/environ`). Knobs as #19.
+- **Hypothesis:** a forced answer whose newest sift kept nothing (#19's Q5, task 398) now carries the rows the run's
+  earlier sifts kept; the other questions are unaffected. Compare with #19–#20.
+- **Results** (turns are `plan_count`, then seconds):
+  - Q1 3 / 339: a table of 5 (of 7 rows), 2027-06-02 first; one row without price and GST.
+  - Q2 11 / 1000: **the #1012 shape, recovered.** Five sifts (kept 25, 23, 29, 38, then 0 of 0 looked at, 50
+    remaining); the forced answer carries every kept row. ⚠️ **The joined table repeats a message once per sift** when
+    the sifts named their fields differently (`sender` vs `from.name`/`from.address` vs `from`): sparse columns, and
+    e.g. message 37491 in four rows. The body's own list (3 invoices) disagrees with the table.
+  - Q3 2 / 137: a numbered list of 10, right.
+  - Q4 4 / 160: fee items, **total 9943**, conditions — right (as #19–#20).
+  - Q5 3 / 140: Garmin, 2026-11-07, $20.00, with a 1-row table.
+  - Q6 5 / 204: Coffs Harbour → Learmonth (April 2027). **One `plan.formulate_failed`:** the call echoed the rendered
+    `tool_doc` key, refused by `deny_unknown_fields` (#1009), and the #945 re-ask recovered it.
+  - Q7 3 / 363: "36 distinct" = a 36-row table, again carrying 2016–2023 items and Qantas Hotels confirmations.
+  - Total 2343 s (#19: 3161, #20: 2252).
+- **Learned:** 7/7. #1012's fix does what it says: the run that ended with an empty newest sift still answered with a
+  table. Its cost is visible: a table joined over sifts with different field names is not deduplicated by message.
+- **Reproduce:** `bash ~/requery7.sh`; `bash ~/q960.sh 408 414` (→ `~/q1014a.txt`). Log → `~/requery7.log.1014a`.
+
+## 2026-11-09 #22 — #1012's fix, second run (tasks 415–421)
+
+- **Build, knobs, hypothesis:** as #21, run straight after it.
+- **Results:**
+  - Q1 3 / 395: a table of 5 (of 10 rows), **every row with price and GST**; the rows are 2027 flight dates, and one
+    reads Coffs Harbour → Perth.
+  - Q2 10 / 769: four sifts (kept 24, 22, 25, then 18 of 25); the answer names the last one: 17 invoices, one sender per
+    row, no cross-sift duplicates (the model chose its table; nothing was forced). One `plan.formulate_failed`: a
+    call on a step already done, refused and re-asked.
+  - Q3 2 / 120: a numbered list of 10, right.
+  - Q4 5 / 227: fee items, **total $9,943**, conditions — right.
+  - Q5 3 / 103: Garmin, 8 November 2026 01:35 AEDT, $20.00 (the local date; #21 gave the UTC date 2026-11-07).
+  - Q6 4 / 186: Coffs Harbour → Learmonth.
+  - Q7 5 / 742: "20 payments" = a 20-row table; again 2020–2024 items and Qantas Hotels confirmations.
+  - Total 2542 s.
+- **Learned:** 7/7. Over #21–#22: **14 of 14 answered** (#19–#20: 13 of 14), and the #1012 shape (#21's Q2)
+  answered with its kept rows. Two failed formulations, both recovered by the #945 re-ask: a mirrored `tool_doc`
+  key (#21's Q6) and a call on a done step (#22's Q2). The open defect is the forced join's duplicate rows (#1018).
+  Q7 still lists years-old items as "currently due" (the judgement problem of #14–#20).
+- **Reproduce:** as #21; `bash ~/q960.sh 415 421` (→ `~/q1014b.txt`). Log → `~/requery7.log.1014b`.
