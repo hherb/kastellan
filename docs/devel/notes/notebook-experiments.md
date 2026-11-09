@@ -464,3 +464,46 @@ Cell format: `turns / seconds`, then the outcome.
   classic can produce (#996) are not exercised by these questions.
 - **Reproduce:** `~/classic993.sh` on the DGX (it switches `.local`, runs `bash ~/requery7.sh`, switches back);
   `bash ~/q960.sh 387 393`; bodies in `~/classic993.bodies`. Log `~/requery7.log` → renamed `~/requery7.log.classic993`.
+
+## 2026-11-09 #19 — #996's five ports on the live tree, first run (tasks 394–400)
+
+- **Build:** `main` c209a8dd (#998, #1002, #1003, #1007, #1009 merged), deployed with `scripts/upgrade_from_git.sh`
+  (`NRestarts` 0, Matrix up; installed `agent_notebook.md` sha256-equal to the repo's). Knobs as #18 but
+  `KASTELLAN_PLANNER_MODE=notebook` (confirmed in `/proc/<pid>/environ`).
+- **Hypothesis:** the prompt and reply changes of #996 (`l1_insight`, `l3_skill`, `python_skill`, `floor_request`,
+  `invoke_skill`; `deny_unknown_fields` on the reply) do not cost the seven questions anything, and the planner does
+  not raise those fields where nothing calls for them. Compare with #17 (notebook) and #18 (classic).
+- **Results** (turns are `plan_count`):
+  - Q1 3 / 340: table, 5 of 18 rows; **1 of 5** with price and GST (#17: 2, #18: 5).
+  - Q2 9 / 787: four unchained sifts; a 36-row table, all in range; the body says "13" (the last sift's kept).
+  - Q3 2 / 214: a table of 10, right.
+  - Q4 4 / 216: fee items, **total 9943**, conditions — right.
+  - Q5 9 / 939: **no answer.** Four near-identical sifts (kept 12, 11, 30, 0). The fourth hit the 15-minute ceiling
+    after its reads (`stopped: "time"`, `sorter_calls: 0`). The forced answer said nothing matched, and got no table
+    because the newest sift kept none → issue 1012.
+  - Q6 4 / 136: Coffs Harbour → Learmonth (as #18).
+  - Q7 4 / 529: a 6-row table, again with 2020/2021 items.
+  - Total 3161 s (#17: 2138, #18: 2160). **No `plan.formulate_failed` row in any task.**
+- **Learned:** 6/7. The miss is the old judgement problem (repeat the search rather than answer from what is
+  kept), made visible by the ceiling, not the ports. **None of the 43 readable turns raised any of the five fields**
+  (17 more turns were over-cap rows, stored truncated with `_truncated`). No `l1.*`/`l3.*` rows.
+- **Reproduce:** `bash ~/requery7.sh`; `bash ~/q960.sh 394 400` (→ `~/q996a.txt`). Log → `~/requery7.log.996a`.
+
+## 2026-11-09 #20 — #996's five ports, second run (tasks 401–407)
+
+- **Build, knobs, hypothesis:** as #19, run straight after it.
+- **Results:**
+  - Q1 4 / 730: table, 5 of 13, **every row with price and GST** (first notebook run to match #18). The rows are the
+    newest *flight dates* (2027), and two sifts read the same 50 items.
+  - Q2 6 / 496: "35 distinct" = the 35-row table; one row dated 2024-12-05 (outside the asked range).
+  - Q3 2 / 145: a numbered list of 10, right.
+  - Q4 4 / 136: fee items, **total 9943**, conditions — right (both runs; #18 classic had no total).
+  - Q5 3 / 197: Garmin, 2026-11-07, $20.00, with a 5-row table.
+  - Q6 3 / 80: Coffs Harbour → Sydney (the FJGPFY 2027 booking, as #17).
+  - Q7 5 / 468: one overdue invoice ($19,431.18) plus a 3-row table carrying 2020 Qantas Hotels items.
+  - Total 2252 s. **No `plan.formulate_failed` row in any task.**
+- **Learned:** 7/7. Over #19–#20: 13 of 14 answered, no failed formulation, no agent-raised field anywhere. The
+  ports are neutral on these questions, which is what the hypothesis asked; they are still **unexercised live**
+  (none of the seven questions calls for a skill, an insight or a floor raise). Per-question differences (Q1's
+  figures, Q2's count, Q6's booking) are within the spread of #14–#18. On this evidence #996 can close.
+- **Reproduce:** as #19; `bash ~/q960.sh 401 407` (→ `~/q996b.txt`). Log → `~/requery7.log.996b`.
