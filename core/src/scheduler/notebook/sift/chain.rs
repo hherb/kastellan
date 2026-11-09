@@ -22,9 +22,9 @@ fn sifts(plans: &[PlanRecord]) -> impl Iterator<Item = (&Value, &Value)> {
     })
 }
 
-/// The summary this run's newest sift left, if one ran in this run.
-pub(crate) fn last_sift(plans: &[PlanRecord]) -> Option<&Value> {
-    sifts(plans).next().map(|(_, s)| s)
+/// The summaries this run's sifts left, newest first.
+pub(crate) fn summaries(plans: &[PlanRecord]) -> impl Iterator<Item = &Value> {
+    sifts(plans).map(|(_, s)| s)
 }
 
 /// The summary this run's sift `name` left, if it ran in this run.

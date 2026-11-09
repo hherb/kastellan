@@ -111,6 +111,7 @@ async fn the_sift_loop() {
     an_answer_without_the_table_is_shown_back_once(&pool).await;
     an_answer_table_naming_no_scrapbook_is_shown_back_once(&pool).await;
     a_forced_answer_without_the_table_gets_it_by_code(&pool).await;
+    a_forced_answer_gets_the_rows_of_every_sift_that_kept_some(&pool).await;
     a_sift_over_a_stashed_search_reads_the_stash(&pool).await;
     a_sift_over_a_purged_stash_says_how_and_the_call_is_made_again(&pool).await;
     a_stashed_read_reaches_the_sorter_as_its_text(&pool).await;
