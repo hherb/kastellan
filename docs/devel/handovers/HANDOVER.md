@@ -4,6 +4,8 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
+> [`archive/handover_20261109_996dgx_pre-prune.md`](archive/handover_20261109_996dgx_pre-prune.md)
+> (#1009's section and the #996 1–4 "Previous" blocks in full),
 > [`archive/handover_20261108_996l3_pre-prune.md`](archive/handover_20261108_996l3_pre-prune.md)
 > (#998's section and the 2026-11-07 "Previous" blocks in full),
 > [`archive/handover_20261108_993s2_pre-prune.md`](archive/handover_20261108_993s2_pre-prune.md)
@@ -14,11 +16,11 @@
 > (#986's session and review round); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-09 (#996 5 of 5: a notebook call may run a pinned skill, `invoke_skill`) ·
-**Recent PRs, newest first:** [#1009](https://github.com/hherb/kastellan/pull/1009) (#996 `invoke_skill`), [#1007](https://github.com/hherb/kastellan/pull/1007) (#996 `floor_request`, merged), [#1003](https://github.com/hherb/kastellan/pull/1003) (#996 `python_skill`, merged), [#1002](https://github.com/hherb/kastellan/pull/1002) (#996 `l3_skill`, merged), [#998](https://github.com/hherb/kastellan/pull/998) (#996 `l1_insight`, merged), [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2, merged), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-09 (the owed DGX re-measure of #996's five ports, experiments #19–#20) ·
+**Recent PRs, newest first:** [#1009](https://github.com/hherb/kastellan/pull/1009) (#996 `invoke_skill`, merged, deployed DGX 2026-11-09), [#1007](https://github.com/hherb/kastellan/pull/1007) (#996 `floor_request`, merged), [#1003](https://github.com/hherb/kastellan/pull/1003) (#996 `python_skill`, merged), [#1002](https://github.com/hherb/kastellan/pull/1002) (#996 `l3_skill`, merged), [#998](https://github.com/hherb/kastellan/pull/998) (#996 `l1_insight`, merged), [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2, merged), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs `main` with #995 (deployed with `upgrade_from_git.sh` 2026-11-08, both env files identical after install, `NRestarts=0`, Matrix up) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`, now redundant since #994** (classic ran once for #993, tasks 387–393, experiment #18: 7/7, 2160 s; backups `~/kastellan.env*.bak-pre993`. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
+**The DGX runs `main` with #1009 (deployed with `upgrade_from_git.sh` 2026-11-09, `NRestarts=0`, Matrix up, installed `agent_notebook.md` sha256-equal to the repo's) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`, now redundant since #994** (classic ran once for #993, tasks 387–393, experiment #18: 7/7, 2160 s; backups `~/kastellan.env*.bak-pre993`. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -48,50 +50,41 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-09, latest): #996 5 of 5 — `call.invoke_skill` on the notebook (PR #1009)
+### This session (2026-11-09, latest): the owed DGX re-measure of #996 (experiments #19–#20, docs only)
 
-- `CallSpec.invoke_skill` (an `InvokeDirective`) **in place of** `tool`/`method`/`parameters` (those are now
-  `serde(default)`; `validate` refuses both or neither, naming the fix). `call_plan` builds it with **no steps**
-  (`validate_invoke` refuses steps beside it); `execute`'s `expand_invoke_skill` installs the skill's before review,
-  audits `l3.invoked`/`l3.invoke_rejected`/`l3.invoke_outcome`, and `invoke_used` drops the answer's `l3_skill`.
-  `CALL_FIELDS` gained it (an unwrapped invoke is not lifted, only hinted).
-- A multi-step call's `last_result` is a **list**, one view per step (`PlanRecord::last_result_view`); the loop
-  reads a call's failure from its **last** outcome (was `.first()`: a skill's later failed step went unseen).
-- Tests: `reply/tests.rs::{a_call_may_invoke_a_skill, a_call_names_a_tool_or_a_skill}`; loop tests in
-  `agent_raised_tests.rs` (`an_invoked_skill_runs_its_steps` — reviewed as the skill's steps, both results shown,
-  lifecycle rows, no re-crystallisation, a failing later step fails the step — and
-  `an_unknown_skill_is_refused_and_the_next_turn_replans`). The harness `Tools::known_tools` is `{mail}`. 3 of 3
-  mutants caught (carry dropped, last-step-only render, `.first()` outcome).
-- **finalcheck fixes:** `last_failure` lists **every** step too (a partly failed skill hid the steps that ran, which
-  the repeat guard then refused to re-make); the repeat guard covers invokes (`repeat::already_invoked`: same
-  name + args, every step `Ok` and still held); a tool call still needs `parameters` (`validate`); a `sift` over an
-  invoked step reads its skill's **last** step (documented in the prompt); a refused invoke's `FailedStep` keeps
-  **every** reason (was the last). Filed: issues 1010 (a Python skill drops `args`; `InvokeDirective` takes unknown
-  keys), 1011 (`invoke_used` set before review). ⚠️ The `l3.invoke*` rows carry **no `task_id`** (pre-existing).
-- ⚠️ **Owed: ≥ 2 DGX runs** of `requery7.sh` on this tree (covers #998, #1002, #1003, #1007 and this prompt
-  change). ⚠️ **Not prompt-only** (`deny_unknown_fields`): deploy the build.
+- Deployed `main` (#1009) to the DGX and ran `requery7.sh` twice (tasks 394–407, [log](../notes/notebook-experiments.md)
+  #19–#20): **13 of 14 answered**, 3161 s and 2252 s, **no `plan.formulate_failed`**, and **no agent-raised field in any
+  readable turn** (43 of 60; 17 over-cap rows stored truncated). The ports are neutral, and still **unexercised
+  live**: none of the seven questions calls for them.
+- The one miss (#19 Q5, task 398): four near-identical sifts; the last hit the 15-minute ceiling after its reads
+  (`stopped: "time"`, 0 sorter calls); the forced answer said nothing matched and got no table, because `newest_kept`
+  looks only at the newest sift → issue 1012 (a design call: fall back to the newest sift that kept rows?).
+- ⚠️ `requery7.sh` appends to `~/requery7.log`: move it aside between runs (now `.996a`/`.996b`). The audit
+  query for agent-raised fields: `plan.formulate` payload keys `l1_insight`/`l3_skill`/`invoke_skill` (non-null).
 
-### Previous (2026-11-08): #996 4 of 5 (PR #1007, merged) — `CallSpec.floor_request`; `call_plan` raises the plan's ceiling to it; refused on a `sift`; a **repeated** call still applies the raise (`run.rs`). ⚠️ A raise does not survive a suspend/resume — #713.
+### Previous (2026-11-08 → 09): #996 1–5 of 5 (PRs #998, #1002, #1003, #1007, #1009, merged) — what still binds (prose: the `996dgx` snapshot)
 
-### Previous (2026-11-08): #996 3 of 5 (PR #1003, merged) — `AnswerSpec.python_skill` → the terminal plan; `skill_or_drop` is generic. ⚠️ The classic prompt never documented `python_skill`. ⚠️ `plan.formulate` has no compact top-level `python_skill` key (the row's `plan` carries it). ⚠️ **A `PgListener` from the pool must be dropped before `pool.close()`** (40-min hang). Filed: issues 1004 (nothing checks a `python_skill`'s code ran), 1005 (`bring_up_pg`'s `.ok()?` silent green under PG REQUIRE), 1006 (a resume resets `dispatch_count`).
+- The answer carries `l1_insight`/`l3_skill`/`python_skill` → the terminal plan (`Plan::completion_*` are `None` on a
+  **refused** plan); a call carries `floor_request` (raises the plan's ceiling; refused on a `sift`; ⚠️ lost on a
+  suspend/resume, #713) or `invoke_skill` **in place of** `tool`/`method`/`parameters` (no steps beside it; installs
+  the skill's steps before review; `invoke_used` drops the answer's `l3_skill`).
+- A multi-step call's `last_result` and `last_failure` list **every** step; the loop reads a call's failure from its
+  **last** outcome; a `sift` over an invoked step reads the skill's **last** step; the repeat guard covers invokes.
+- Tests in **`notebook/run/agent_raised_tests.rs`** (called from `the_notebook_loop`: **no libtest count**). ⚠️ **A
+  `PgListener` from the pool must be dropped before `pool.close()`** (40-min hang). ⚠️ The `l3.invoke*` rows carry
+  **no `task_id`**. ⚠️ `plan.formulate` has no compact top-level `python_skill` key. Filed: 999–1001, 1004–1006,
+  1010 (a Python skill drops `args`; `InvokeDirective` takes unknown keys), 1011 (`invoke_used` set before review).
 
-### Previous (2026-11-08): #996 1–2 of 5 (PRs #998, #1002, merged) — `l1_insight`/`l3_skill` → the terminal plan; `Plan::completion_{insight,skill,python_skill}` return `None` on a **refused** plan. Tests in **`notebook/run/agent_raised_tests.rs`** (called from `the_notebook_loop`: **no libtest count**). Filed: issues 999, 1000, 1001.
+### Previous (2026-11-06 → 08): #993 steps 1–2, #922 slices 2 and 4a, #987, #985/#988 (PRs #997, #995, #994, #990, #989, #986, merged) — what still binds
 
-### Previous (2026-11-08): #993 step 2 (PR #997, merged) — `tests_common::scripted_notebook::ScriptedNotebook` (a closure picks each reply from `ctx`, usually `ctx.plans.len()`); ⚠️ a **first reply without `steps` is refused**, and every `call_reply` lists its own fresh step id. Classic comparison run #18: 7/7, 2160 s. ⚠️ **Five classic `Plan` features have no notebook path** → #996 (operator: port before deleting). The runner-level ask/expiry/lanes/conversation suites run the notebook; the classic loop lost their coverage.
-
-### Previous (2026-11-07): #993 step 1 (PR #995), #922 slice 4a (PR #994), #987 (PR #990), merged — what still binds
-
-- ⚠️ **The router default is `disable_thinking: true`**: a routine turn's answer is rewritten by a thinking turn, so a
-  scripted daemon happy path is **3 turns** (`ScriptedNotebook` thinks by default). **The Mac flips to notebook on its
-  next install** unless `.local` says `classic`. One `PgListener` per process; `MAX_FOLLOWS` **64**. ⚠️ A follow's interval first ticks one period out.
-
-### Previous (2026-11-06 → 07): #985 + #988 (PR #989), `kastellan-cli session` (PR #986), merged — what still binds
-
-- `ask` prints one stderr line per entry via the session's `follow()`; SIGINT handler installed **before** the submit.
-  ⚠️ **bottie matches the parking marker by substring** ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242)).
-  ⚠️ A test that `claim_one`s must not leave an older task pending.
-- ⚠️ **A follow reads state BEFORE entries; its 3 s poll tick, not the NOTIFYs, makes it correct.** ⚠️ **`kastellan-cli`
-  installs a warn-level stderr tracing subscriber** — PG e2es fail instead of skipping once PG is up.
+- `ScriptedNotebook`: a closure picks each reply from `ctx`; ⚠️ a **first reply without `steps` is refused**; every
+  `call_reply` lists its own fresh step id. ⚠️ **The router default is `disable_thinking: true`**, so a scripted daemon
+  happy path is **3 turns**. **The Mac flips to notebook on its next install** unless `.local` says `classic`.
+- One `PgListener` per process, `MAX_FOLLOWS` **64**; ⚠️ a follow reads state **before** entries and its 3 s poll
+  tick, not the NOTIFYs, makes it correct. ⚠️ **`kastellan-cli` installs a warn-level stderr subscriber** — PG e2es
+  fail instead of skipping once PG is up. ⚠️ **bottie matches the parking marker by substring**
+  ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242)). ⚠️ A test that `claim_one`s must not leave an
+  older task pending.
 
 ### Previous (2026-11-06): #965 items 4, 6, 7 (PR #984, merged) — ⚠️ a sift read's allowlist key is `read_key(tool, method)` (**`web-fetch.web.fetch`**); the `chain_distinct` → `totals` pass-through (`sift/run.rs:230`) is untested.
 
@@ -253,7 +246,8 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    (#995, #997). **Next: [#996](https://github.com/hherb/kastellan/issues/996)** — port the five
    agent-authored plan features to the notebook reply, one PR each (each prompt change ≥ 2 DGX runs).
    **All five ported:** `l1_insight` (#998), `l3_skill` (#1002), `python_skill` (#1003), `floor_request` (#1007),
-   `invoke_skill` (#1009). **Next: the deletion** (operator to confirm #996 can close first), with the re-points listed on #993 (≈19 per-step-view tests → `PlanRecord::last_step_view`, 7 timeout
+   `invoke_skill` (#1009); deployed and re-measured on the DGX 2026-11-09 (#19–#20, neutral), #996 closed. **Next: the
+   deletion** (operator's go 2026-11-09), with the re-points listed on #993 (≈19 per-step-view tests → `PlanRecord::last_step_view`, 7 timeout
    cases, the outcome-shapes prompt pin, `user_text_cannot_forge_a_key`); `router_agent_mock_e2e` (~720 lines) shrinks
    below the cap when its 5 classic-door tests go (2 already have notebook twins); #940 folds in. bottie's substring
    match on the parking line is [hherb/bottie#242](https://github.com/hherb/bottie/issues/242).
@@ -474,7 +468,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#1007 / #1003 / #1002 / #998** (#996 4, 3, 2, 1 of 5) — merged 2026-11-08/09: the notebook call carries `floor_request`; the answer carries `python_skill`, `l3_skill`, `l1_insight`.
+- **#1009 / #1007 / #1003 / #1002 / #998** (#996 5 … 1 of 5) — merged 2026-11-08/09, deployed DGX 2026-11-09: the notebook call carries `invoke_skill`, `floor_request`; the answer carries `python_skill`, `l3_skill`, `l1_insight`.
 - **#997** (#993 step 2) — merged 2026-11-08: `ScriptedNotebook`; the in-process scheduler suites run the notebook.
 - **#995 / #994** (#993 step 1; #922 slice 4a) — merged 2026-11-07, deployed DGX 2026-11-08: the daemon e2es run the notebook; the notebook is the default planner mode.
 - **#992 / #990** (README; #987) — merged 2026-11-07: the root README brought up to date (⚠️ it restates the user manual's chapter 4: change both together); one shared `LISTEN` connection for a process's follows, cap 64.
