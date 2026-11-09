@@ -59,7 +59,11 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   **Operator: kept rows accumulate over the run.** `sift::answer::kept_sifts` (pure): every sift that kept rows, newest
   first, a chain once by its last link; the forced table and the show-back name them all. Tests
   `kept_rows_accumulate_over_the_run_s_sifts` (unit), `a_forced_answer_gets_the_rows_of_every_sift_that_kept_some`
-  (inside `the_sift_loop`); the newest-only mutant fails all three. ⚠️ **Owed: ≥ 2 DGX runs** (deploy the build).
+  (inside `the_sift_loop`); the newest-only mutant fails all three. Finalcheck: a joined table's columns are now
+  **every** included sift's fields, not the first's (`with_table`; the loop test's second sift asks for `vendor`, and
+  the first-only mutant fails it). Filed, not fixed: issue 1015 (the note sums looked_at/remaining across separate
+  sifts, and a 0-kept sift's `remaining` is dropped) and issue 1016 (`kept_sifts` uncapped past `TABLE_REFS_MAX`).
+  ⚠️ **Owed: ≥ 2 DGX runs** (deploy the build).
   ⚠️ Notebook turn cap = `max_plans × NOTEBOOK_TURNS_PER_PLAN` (`new_task(pool, 2)`: 4 turns, the fifth forced).
 
 ### Previous (2026-11-08 → 09): #996 1–5 of 5 (PRs #998, #1002, #1003, #1007, #1009, merged) — what still binds (prose: the `996dgx` snapshot)

@@ -24,7 +24,7 @@ pub(crate) const TABLE_REFS_MAX: usize = crate::scheduler::conversation::record:
 pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: &TableSpec, strip_own: bool) -> (String, DataClass) {
     let mut rows: Vec<Row> = Vec::new();
     let mut counts = Counts::default();
-    let mut fields: Option<Vec<String>> = None;
+    let mut fields: Vec<String> = Vec::new();
     let mut included = false;
     let (named, mut refused) = table_refs(&ctx.plans, t.scrapbook.refs());
     let mut links = Vec::new();
@@ -49,8 +49,12 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
                 let summary = own_summary(ctx, &r);
                 add_counts(&mut counts, &got, summary.as_ref());
                 links.push(Link::of(raw, summary.as_ref()));
-                if fields.is_none() {
-                    fields = summary.as_ref().and_then(summary_fields).or_else(|| first_row_fields(&got));
+                // Every included sift's fields, in order: separate sifts of a
+                // forced table (#1012) may each have asked for others.
+                for f in summary.as_ref().and_then(summary_fields).or_else(|| first_row_fields(&got)).unwrap_or_default() {
+                    if !fields.contains(&f) {
+                        fields.push(f);
+                    }
                 }
                 rows.extend(got);
             }
@@ -63,7 +67,7 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     counts.remaining = remaining(&links);
     let class = rows.iter().map(row_class).fold(ctx.classification_floor, DataClass::max);
     let columns = t.columns.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| {
-        let mut c = fields.unwrap_or_default();
+        let mut c = fields;
         c.push(SOURCE_COLUMN.into());
         c
     });
@@ -158,7 +162,7 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
 /// answered in prose ("I would need a further step") and named no table, so
 /// the rows never reached the operator. `Err` — the reason shown back with
 /// the #945 re-ask — when `reply` answers with no `table` (and no
-/// refusal) although this run's newest sift, or the chain it ends, kept
+/// refusal) although a sift of this run, or a chain one ends, kept
 /// something ([`missing_table`]). The loop applies it to a turn's first
 /// reply only: the reply re-asked is used either way, so the model can
 /// still answer without one. Pure.
