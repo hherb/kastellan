@@ -208,44 +208,54 @@ fn a_screen_placeholder_reaches_the_planner_without_its_score_or_reason_codes() 
     assert_eq!(output["handoff_ref"], "sha256:ab");
 }
 
-/// `prompts/agent_planner.md` is the planner's only description of these
-/// shapes. A renderer change that leaves the prompt behind reproduces #536's
-/// failure mode, where the planner read advice about a shape it never saw.
+/// Each planner prompt is its loop's only description of these shapes. A
+/// renderer change that leaves a prompt behind reproduces #536's failure mode,
+/// where the planner read advice about a shape it never saw. The notebook
+/// shows one call's outcomes (`last_result`, `PlanRecord::last_result_view`),
+/// which the summary budget never touches, so only the classic prompt must
+/// name the budget's `elided` shapes (#993).
 #[test]
-fn the_planner_prompt_documents_every_outcome_shape() {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // core/ -> workspace root
-    p.push("prompts/agent_planner.md");
-    let prompt = std::fs::read_to_string(&p).expect("agent_planner.md readable");
+fn the_planner_prompts_document_every_outcome_shape() {
+    for (file, classic) in [("agent_planner.md", true), ("agent_notebook.md", false)] {
+        let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.pop(); // core/ -> workspace root
+        p.push("prompts");
+        p.push(file);
+        let prompt = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{file} readable: {e}"));
 
-    for key in [STATUS_KEY, OUTPUT_KEY, WITHHELD_KEY, ELIDED_KEY, CODE_KEY, DETAIL_KEY, CALL_KEY] {
-        assert!(
-            prompt.contains(&format!("\"{key}\"")),
-            "the prompt never names the `{key}` key the renderer emits"
-        );
+        let budget_keys: &[&str] = if classic { &[ELIDED_KEY] } else { &[] };
+        for key in [STATUS_KEY, OUTPUT_KEY, WITHHELD_KEY, CODE_KEY, DETAIL_KEY, CALL_KEY].iter().chain(budget_keys) {
+            assert!(
+                prompt.contains(&format!("\"{key}\"")),
+                "{file} never names the `{key}` key the renderer emits"
+            );
+        }
+        let omitted = result_view::omitted_items_marker(12);
+        let mut values = vec![
+            WITHHELD_REASON,
+            WITHHELD_MARKER,
+            result_view::OMITTED_KEYS_KEY,
+            result_view::VIEW_UNAVAILABLE_KEY,
+            result_view::DEPTH_MARKER,
+            INJECTION_BLOCKED_KEY,
+            // Each prompt shows the marker with a count of 12.
+            omitted.as_str(),
+            "handoff_ref",
+            // The limit on uncut values, as the prompts spell it. Found by
+            // review of #702: the prompt promised such values were never cut at all.
+            "up to 1 KiB",
+        ];
+        if classic {
+            values.extend([ELIDED_REASON, ELIDED_OUTPUT_REASON, "up to 1 KiB (or 255"]);
+        }
+        for value in values {
+            assert!(prompt.contains(value), "{file} never mentions `{value}`");
+        }
+        for stale in ["\"ok: <output head>\"", "\"err: <CODE>: <detail>\"", "`err: …`"] {
+            assert!(!prompt.contains(stale), "{file} still teaches the pre-#677 shape {stale}");
+        }
     }
-    for value in [
-        WITHHELD_REASON,
-        WITHHELD_MARKER,
-        ELIDED_REASON,
-        ELIDED_OUTPUT_REASON,
-        result_view::OMITTED_KEYS_KEY,
-        result_view::VIEW_UNAVAILABLE_KEY,
-        result_view::DEPTH_MARKER,
-        INJECTION_BLOCKED_KEY,
-        // The prompt shows the marker with a count of 12.
-        result_view::omitted_items_marker(12).as_str(),
-        "handoff_ref",
-    ] {
-        assert!(prompt.contains(value), "the prompt never mentions `{value}`");
-    }
-    // The limits on uncut values, as the prompt spells them. Found by review of
-    // #702: the prompt promised such values were never cut at all.
     assert_eq!((result_view::ATOMIC_MAX, result_view::NON_ASCII_ATOMIC_MAX_CHARS), (1024, 255));
-    assert!(prompt.contains("up to 1 KiB (or 255"), "the prompt does not state the atomic limits");
-    for stale in ["\"ok: <output head>\"", "\"err: <CODE>: <detail>\"", "`err: …`"] {
-        assert!(!prompt.contains(stale), "the prompt still teaches the pre-#677 shape {stale}");
-    }
 }
 
 /// A block only the sink screen made is recorded (#702 review). Since #677 the

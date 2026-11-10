@@ -27,11 +27,6 @@ use self::summary::render_plans_summary;
 // directly. Without a public path it would be reachable only through the
 // leaked-type loophole.
 pub use self::summary::PlanRecord;
-// Re-exported only so the `#[cfg(test)] mod tests` below can reach these
-// `summary`-owned bounds via `use super::*`; no non-test code in this module
-// references them, hence the `cfg(test)` gate (else they read as unused).
-#[cfg(test)]
-pub(crate) use self::summary::STEP_OK_SUMMARY_MAX;
 // The notebook loop (#922) renders model text and step results through the
 // summary's own screens.
 pub(crate) use self::summary::{

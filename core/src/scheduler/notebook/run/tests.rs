@@ -98,6 +98,13 @@ async fn the_notebook_loop() {
     super::agent_raised_tests::a_repeated_calls_floor_request_still_raises_the_floor(&pool).await;
     super::agent_raised_tests::an_invoked_skill_runs_its_steps(&pool).await;
     super::agent_raised_tests::an_unknown_skill_is_refused_and_the_next_turn_replans(&pool).await;
+    super::timeout_tests::a_timeout_after_gathering_answers_from_what_was_gathered(&pool).await;
+    super::timeout_tests::a_timeout_on_the_answer_turn_fails_naming_what_was_gathered(&pool).await;
+    super::timeout_tests::a_timeout_before_gathering_fails_in_words(&pool).await;
+    super::timeout_tests::a_re_ask_that_times_out_after_gathering_spends_the_answer_turn(&pool).await;
+    super::timeout_tests::a_re_ask_that_times_out_before_gathering_fails_in_words(&pool).await;
+    super::timeout_tests::the_deadline_passing_after_a_gather_spends_the_answer_turn(&pool).await;
+    super::timeout_tests::the_deadline_with_nothing_gathered_fails_naming_the_ceiling(&pool).await;
 }
 
 async fn a_three_step_task_ticks_each_step_and_answers_from_findings(pool: &sqlx::PgPool) {
@@ -299,9 +306,12 @@ async fn a_runaway_reply_after_gathering_spends_the_answer_turn(pool: &sqlx::PgP
     assert_eq!(script.thinking.lock().unwrap().last(), Some(&ThinkingPolicy::Suppress));
 
     // Before anything was gathered there is nothing to answer from: it fails.
+    // A cut-off reply is not retried like an empty one (classic case 22).
     let script = Script::raw(&[RUNAWAY.into()]);
     let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert!(matches!(r.result.outcome, Outcome::Failed(_)), "{:?}", r.result.outcome);
+    let Outcome::Failed(d) = &r.result.outcome else { panic!("{:?}", r.result.outcome) };
+    assert!(d.starts_with("The language model used its whole reply budget"), "{d}");
+    assert_eq!(script.messages().len(), 1, "a cut-off reply is not asked again");
 }
 
 /// DGX task 273: on the forced-answer turn the model called again. That is
@@ -318,6 +328,19 @@ async fn a_call_on_the_answer_turn_is_re_asked(pool: &sqlx::PgPool) {
     assert_eq!(body(&r.result), "f and g");
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "the answer turn's call never ran");
     assert!(script.reasks.lock().unwrap()[0].contains("must end the task"), "{:?}", script.reasks.lock().unwrap());
+
+    // Called again on the re-ask (classic case 14): the task fails, and that call never runs either.
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f"), "call": call(2, "b")}),
+        json!({"tick": tick(2, "g"), "call": call(3, "c")}),
+        json!({"tick": tick(2, "g"), "call": call(3, "d")}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 1).await).await;
+    let Outcome::Failed(d) = &r.result.outcome else { panic!("{:?}", r.result.outcome) };
+    assert!(d.contains("must end the task"), "the detail carries the reason: {d}");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "neither answer-turn call ran");
+    assert_eq!(script.reasks.lock().unwrap().len(), 1, "re-asked once only");
 }
 
 /// With thinking off in the config, only the plan, the replan after a failed

@@ -22,7 +22,7 @@
 //! one is shown as [`WITHHELD_MARKER`]. A withheld finding is still counted
 //! (`withheld_findings`), so the answer can say a fact was withheld (C6).
 //! The step's last result is the summary's stored, screened view
-//! ([`PlanRecord::last_step_view`]). Corrections are the operator's own text.
+//! ([`PlanRecord::last_result_view`]). Corrections are the operator's own text.
 
 use serde_json::{json, Value};
 

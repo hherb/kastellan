@@ -99,7 +99,7 @@ fn the_conversation_key_carries_the_rendered_turns_in_order() {
 #[test]
 fn the_planner_prompt_documents_the_conversation_block() {
     // Drift guard, in the shape of #702's
-    // `the_planner_prompt_documents_every_outcome_shape`: every key and
+    // `the_planner_prompts_document_every_outcome_shape`: every key and
     // status the conversation renderer can emit must be named in the
     // prompt, or the planner is reading a shape nobody told it about.
     //

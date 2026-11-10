@@ -26,6 +26,35 @@ pub(crate) use crate::scheduler::notebook::sift::config::SiftConfig;
 use crate::scheduler::notebook::sift::sorter::Sorter;
 
 pub(crate) const RUNAWAY: &str = "<runaway>";
+/// A scripted reply that is a real request timeout ([`real_request_timeout`]).
+pub(crate) const TIMEOUT: &str = "<timeout>";
+
+/// A genuine request timeout out of the real router: the backend accepts
+/// the connection and never replies.
+pub(crate) async fn real_request_timeout() -> AgentError {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let hold = tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.expect("accept");
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        drop(sock);
+    });
+    let router = kastellan_llm_router::Router::new(kastellan_llm_router::RouterConfig {
+        local_url: url,
+        timeout: std::time::Duration::from_millis(150),
+        ..Default::default()
+    })
+    .expect("router");
+    let req = kastellan_llm_router::ChatRequest::new(
+        "m",
+        vec![kastellan_llm_router::ChatMessage::user("hi")],
+    );
+    let err = router.send(&req).await.expect_err("must time out");
+    hold.abort();
+    let err = AgentError::Router(err);
+    assert!(err.is_request_timeout(), "fixture must be a real request timeout: {err}");
+    err
+}
 
 // ── scripted model ──────────────────────────────────────────────────────
 
@@ -50,6 +79,8 @@ pub(crate) struct Script {
     pub(crate) sort_delay: std::time::Duration,
     /// Cancel this task during the first sorter call (an operator's cancel).
     pub(crate) cancel_during_sort: Option<(sqlx::PgPool, i64)>,
+    /// How long each model turn takes (a task run past its deadline).
+    pub(crate) turn_delay: std::time::Duration,
 }
 
 impl Script {
@@ -70,6 +101,7 @@ impl Script {
             sift_cfg: SiftConfig { max_reads: 64, read_methods: vec!["mail.read".into(), "esc.read".into()] },
             sort_delay: std::time::Duration::ZERO,
             cancel_during_sort: None,
+            turn_delay: std::time::Duration::ZERO,
         }
     }
 
@@ -106,6 +138,10 @@ impl NotebookFormulator for Script {
         // retried as a blank completion.
         let reply = self.replies.lock().unwrap().pop_front().unwrap_or_else(|| "out of script".into());
         self.thinking.lock().unwrap().push(thinking);
+        tokio::time::sleep(self.turn_delay).await;
+        if reply == TIMEOUT {
+            return Err(real_request_timeout().await);
+        }
         // `RUNAWAY` stands for a reply cut off at `max_tokens` with nothing said.
         if reply == RUNAWAY {
             let mut m = meta();
