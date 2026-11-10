@@ -1,13 +1,13 @@
-//! Per-task iterative replanning loop.
+//! The per-task state and the review-and-dispatch half every planner turn
+//! shares.
 //!
-//! Called by the lane runner once a task is claimed. Owns the
-//! per-task `Workspace` and the `TaskContext` that accumulates state
-//! across plan iterations.
-
-use std::sync::Arc;
+//! The loop itself is the notebook's (`super::notebook::run`, #922; the
+//! classic replanning loop retired in #993). This module holds what it
+//! plans against: the [`TaskContext`] that accumulates state across turns,
+//! the terminal [`Outcome`], the [`StepDispatcher`] door to the tools, and
+//! [`execute`], which reviews and dispatches one turn's plan.
 
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use thiserror::Error;
 
 use crate::cassandra::data_ceiling::{resolve_data_ceiling, DataCeilingSource};
@@ -20,7 +20,6 @@ use crate::scheduler::audit::{
 pub(crate) use self::floor::apply_floor_raise;
 pub use self::floor::ClassificationFloorSource;
 use self::invoke_expand::{expand_invoke_skill, InvokeExpansion};
-use self::summary::render_plans_summary;
 // `pub use` rather than a private import: `TaskContext::plans` is a public
 // field of this type, and the suspend/restore path
 // (`scheduler::asks::resume_state_from` / `restore_resume_state`) names it
@@ -32,7 +31,7 @@ pub use self::summary::PlanRecord;
 pub(crate) use self::summary::{
     notebook_block_audit_payload, screen_model_text, sorter_view, SinkBlock, STEP_ERR_DETAIL_MAX, WITHHELD_MARKER,
 };
-use super::agent::{AgentError, PlanFormulator};
+use super::agent::AgentError;
 use super::asks;
 
 /// Hard cap on tool dispatches a single plan iteration may request. Sized far
@@ -127,17 +126,6 @@ pub struct TaskContext {
     pub conversation_task_ids: Option<Vec<i64>>,
 }
 
-impl TaskContext {
-    /// Compact summary of completed plans, for inclusion in the agent's
-    /// input. Avoids dumping unbounded `serde_json::Value` blobs into the
-    /// prompt; gives just enough for the agent to reflect — including each
-    /// failed step's `code` + clamped `detail`. Rendering, screening, and the
-    /// global size budget all live in [`summary::render_plans_summary`].
-    pub fn plans_so_far_summary(&self) -> Vec<serde_json::Value> {
-        render_plans_summary(&self.plans)
-    }
-}
-
 /// The `tasks.turn_record` value for a finished task, or `None` when the task
 /// did not come from a channel (#701).
 ///
@@ -167,7 +155,7 @@ impl StepOutcome {
     pub fn is_err(&self) -> bool { matches!(self, StepOutcome::Err { .. }) }
 }
 
-/// Bundle returned by [`run_to_terminal`] so the lane runner can
+/// Bundle returned by the planner loop (`notebook::run`) so the lane runner can
 /// build the spec §7 `task.finalize` summary row without re-querying.
 ///
 /// `plan_count` is the final value of `TaskContext::plan_count` (one
@@ -339,7 +327,7 @@ pub trait StepDispatcher: Send + Sync {
     /// Drop any per-task state this dispatcher holds (e.g. the handoff
     /// cache) once the task reaches a terminal state. Default no-op; the
     /// production dispatcher overrides it. Called once per task by the lane
-    /// runner after [`run_to_terminal`].
+    /// runner after the planner loop returns.
     fn purge_task(&self, _task_id: i64) {}
 
     /// The whole result stashed under `r` for `task_id` in this dispatcher's
@@ -380,158 +368,5 @@ fn qualify_plan_methods(dispatcher: &dyn StepDispatcher, task_id: i64, steps: &m
     }
 }
 
-/// Run the inner loop until terminal. Returns an [`InnerLoopResult`]
-/// carrying the terminal [`Outcome`] plus the per-task counters the
-/// lane runner needs for the spec §7 `task.finalize` audit row.
-///
-/// `outbox` is where a raised ask is delivered (#564 slice 2, spec D13);
-/// `None` on a daemon built or configured without channels, in which case
-/// every escalation is undelivered but still durable — see
-/// `asks::deliver_ask`.
-pub async fn run_to_terminal(
-    pool: &PgPool,
-    formulator: Arc<dyn PlanFormulator>,
-    review: Arc<ChainReviewStage>,
-    dispatcher: Arc<dyn StepDispatcher>,
-    mut ctx: TaskContext,
-    outbox: Option<&crate::channel::outbox::ChannelOutbox>,
-) -> Result<InnerLoopResult, InnerLoopError> {
-    use kastellan_db::tasks;
-
-    // `dispatch_count`, `invoke_used` and `gathered`: the counters the
-    // review-and-dispatch half bumps; see `execute::ExecState`.
-    let mut st = execute::ExecState::default();
-
-    // Formulator calls that produced NO plan (#774, #923): a failed attempt
-    // the loop retried or recovered from, or the final failure. `plan_count` counts only
-    // the calls that produced a plan, so `task.finalize`'s `total_llm_calls`
-    // is `plan_count + failed_llm_calls`.
-    let mut failed_llm_calls: u32 = 0;
-
-    /// Local helper: wrap an `Outcome` with the counters captured so
-    /// far. Cuts the boilerplate at every early-return point.
-    /// `$insight` is the `terminal_l1_insight` value and `$skill` is
-    /// the `terminal_l3_skill` value — both `None` for all
-    /// non-Completed outcomes; the Completed arm passes
-    /// `captured_l1_insight` and `captured_l3_skill`.
-    macro_rules! finish {
-        ($outcome:expr, $insight:expr, $skill:expr, $pyskill:expr) => {
-            Ok(InnerLoopResult {
-                outcome: $outcome,
-                plan_count: ctx.plan_count,
-                dispatch_count: st.dispatch_count,
-                failed_llm_calls,
-                terminal_l1_insight: $insight,
-                terminal_l3_skill: $skill,
-                terminal_python_skill: $pyskill,
-                // Every `InnerLoopResult` is built here, so the record is
-                // built at each one from the plans accumulated so far —
-                // including the outcomes that are not `Completed`, whose calls
-                // are just as real a referent for the next turn.
-                //
-                // NOT every *exit*: the loop also has `?` propagations (a
-                // Postgres blip on `observe_state`, on an audit insert), which
-                // return past this macro and become `failed_result`, whose
-                // `turn_record` is `None` even though `ctx.plans` was
-                // populated. That loss is #710.
-                turn_record: turn_record_for(&ctx),
-            })
-        };
-        // 3-arg form (existing call sites): python skill None.
-        ($outcome:expr, $insight:expr, $skill:expr) => {
-            finish!($outcome, $insight, $skill, None)
-        };
-        // Convenience form for all non-Completed arms: all None.
-        ($outcome:expr) => {
-            finish!($outcome, None, None, None)
-        };
-    }
-
-    // Set true once the single forced-synthesis turn has been spent, so we
-    // never loop back into it (belt-and-suspenders — a synth turn always
-    // returns a terminal outcome anyway).
-    let mut synth_attempted = false;
-    // Set true when a planning call timed out after something was gathered
-    // (#774): the next iteration spends the forced-synthesis turn instead of
-    // the task failing with everything it gathered thrown away.
-    let mut force_synth = false;
-
-    loop {
-        // Cancellation poll — top of loop.
-        if tasks::observe_state(pool, ctx.task_id).await? == "cancelled" {
-            return finish!(Outcome::Cancelled);
-        }
-
-        // Plan-iteration cap. When the agent has already gathered at least
-        // one successful observation, spend ONE final "forced-synthesis"
-        // turn — instruct the model to stop gathering and answer from what
-        // it has — before failing. This converts the common
-        // kept-searching-never-answered cap-hit (e.g. an open-ended "what
-        // happened today?" news query, where a deterministic local planner
-        // keeps chasing fresher results) into a best-effort answer instead
-        // of a bare `plan_iteration_cap_exceeded` error. With nothing
-        // gathered (every step denied / errored / blocked-before-execution)
-        // there is nothing to synthesize, so the cap fails hard as before —
-        // which is why the existing cap tests are unaffected. The fast lane's
-        // wall-clock ceiling (#922) is handled exactly like the cap.
-        let exhausted = ceiling::exhausted(
-            ctx.plan_count, ctx.max_plans, ctx.deadline, std::time::Instant::now(),
-        );
-        let synth_turn = (exhausted.is_some() || force_synth) && st.gathered && !synth_attempted;
-        if let (Some(which), false) = (exhausted, synth_turn) {
-            return finish!(Outcome::Failed(ceiling::exhausted_detail(which, ctx.max_plans, false)));
-        }
-        if synth_turn {
-            synth_attempted = true;
-        }
-
-        // 1. Formulate plan (forced-synthesis variant on the synth turn).
-        //
-        // No general loop-level retry: replanning IS the retry shape (the
-        // agent sees the prior failure on the next iteration, bounded by
-        // `max_plans`). The two exceptions are a REQUEST TIMEOUT (#774), the
-        // failure a cheaper request can beat, and an EMPTY completion
-        // (#923), asked again once — `llm_failure::formulate_turn` owns that
-        // recovery, and the counting/audit of every failed call.
-        let turn = llm_failure::TurnState { synth_turn, gathered: st.gathered, synth_attempted };
-        let (plan, meta) = match llm_failure::formulate_turn(
-            pool, formulator.as_ref(), &ctx, turn, &mut failed_llm_calls,
-        ).await {
-            llm_failure::Turn::Planned(planned) => *planned,
-            llm_failure::Turn::ForceSynthesis => {
-                force_synth = true;
-                continue;
-            }
-            llm_failure::Turn::Failed(detail) => return finish!(Outcome::Failed(detail)),
-        };
-
-        ctx.plan_count += 1;
-        // Best-effort mirror — the in-memory `ctx.plan_count` is the
-        // source of truth, the DB column is for operator visibility
-        // (`tasks status`). A real DB error here doesn't change loop
-        // behaviour but is worth surfacing in the daemon log.
-        if let Err(e) = tasks::increment_plan_count(pool, ctx.task_id, ctx.plan_count as i32).await {
-            tracing::warn!(
-                task_id = ctx.task_id, plan_count = ctx.plan_count, error = %e,
-                "tasks::increment_plan_count failed (mirror only; loop continues)"
-            );
-        }
-
-        match execute::review_and_dispatch(
-            pool, review.as_ref(), dispatcher.as_ref(), &mut ctx, plan, &meta, synth_turn, exhausted, &mut st, outbox,
-            execute::StepPolicy::Plan,
-        )
-        .await?
-        {
-            execute::Executed::Finished(f) => return finish!(f.outcome, f.insight, f.skill, f.python_skill),
-            execute::Executed::Again | execute::Executed::Dispatched => {}
-        }
-        // loop back: agent reflects on the outcomes for the next plan
-    }
-}
-
-// `pub(crate)` so other scheduler tests can reuse `inner_loop_test_stubs`.
 #[cfg(test)]
-pub(crate) mod tests;
-#[cfg(test)]
-mod timeout_tests;
+mod tests;

@@ -1,37 +1,31 @@
-//! Rendering of the per-task plan summary that feeds the planner prompt.
+//! Rendering of a recorded plan's step outcomes for the planner prompt.
 //!
-//! Pure, I/O-free helpers lifted out of `inner_loop.rs` (which sat over the
-//! 500-LOC cap) into a focused, separately-testable module. The single entry
-//! point is [`render_plans_summary`], which `TaskContext::plans_so_far_summary`
-//! delegates to.
+//! Pure, I/O-free helpers lifted out of `inner_loop.rs` into a focused,
+//! separately-testable module. Each [`PlanRecord`] renders and screens its
+//! outcomes **once**, when it is built; the notebook loop (#922) shows them
+//! through [`PlanRecord::last_step_view`] / [`PlanRecord::last_result_view`]
+//! (`notebook_view.rs`).
 //!
 //! # The shape the planner reads (#677)
 //!
-//! Each plan renders as `{"decision", "step_outcomes"}`, and each step outcome
-//! is an object in one of four shapes, plus — since #699 — a `"call"` key
-//! holding `{"tool", "method", "parameters"}` of the step that produced it
-//! (see [`call`]). The call is kept when the budget elides the output: what
-//! the planner asked for is exactly what it needs to see to avoid asking
-//! again. Its `parameters` go only if the calls alone overrun the budget.
-//! `decision` and `call` are both screened (#700, #699) and become
+//! Each step outcome is an object in one of three shapes, plus — since #699 —
+//! a `"call"` key holding `{"tool", "method", "parameters"}` of the step that
+//! produced it (see [`call`]). The call is screened (#699) and becomes
 //! `"[withheld: failed injection screen]"` on a block.
 //!
 //! | Shape | When |
 //! | --- | --- |
 //! | `{"status": "ok", "output": <view>}` | success; `<view>` is [`result_view::render`]'s pruned, labelled copy of the result |
 //! | `{"status": "ok", "withheld": "failed injection screen"}` | success, but the sink screen blocked the view |
-//! | `{"status": "ok", "elided": "output retrieved, dropped from this summary for space"}` | a success whose output [`apply_summary_budget`] dropped |
 //! | `{"status": "err", "code": <CODE>, "detail": <clamped detail>}` | failure |
 //!
 //! Until #677 an outcome was the string `"ok: <head>"`, where the head was
 //! `extract_scannable_text`'s flattening with every object key, number and
 //! boolean discarded, so the planner could not see which search hit had an
 //! attachment or which bare line was the message id.
-//! `prompts/agent_planner.md` and `prompts/agent_notebook.md` document these shapes, and
-//! `the_planner_prompts_document_every_outcome_shape` fails if a prompt stops
-//! naming any key, reason or marker the renderer emits. The notebook prompt is
-//! exempt from the budget's `elided` shapes and its non-ASCII limit, which the
-//! notebook never renders.
+//! `prompts/agent_notebook.md` documents these shapes, and
+//! `the_planner_prompt_documents_every_outcome_shape` fails if it stops naming
+//! any key, reason or marker the renderer emits.
 
 use serde_json::json;
 
@@ -39,23 +33,20 @@ use super::result_view;
 use super::StepOutcome;
 use crate::cassandra::types::Plan;
 
-mod budget;
 mod call;
 mod notebook_view;
 mod sink;
 pub(crate) use notebook_view::{notebook_block_audit_payload, screen_model_text, sorter_view};
-use budget::apply_summary_budget;
-use call::{apply_call_budget, call_cost, render_call, render_decision, Screened, CALL_KEY};
+use call::{render_call, render_decision, Screened, CALL_KEY};
 pub(crate) use sink::TIER_SINK;
 pub(crate) use sink::SinkBlock;
 use sink::{clamp_audit_label, sink_screen, without_screen_audit_fields};
 #[cfg(test)]
 use sink::AUDIT_LABEL_MAX_CHARS;
 
-/// Max chars of a step error `detail` surfaced back to the agent in
-/// `plans_so_far_summary`. Long worker stderr / RPC messages are clamped so a
-/// single chatty failure can't blow up the always-in-context planner prompt;
-/// the `code` (always short) is never truncated. A truncated detail gets a
+/// Max chars of a step error `detail` surfaced back to the agent. Long worker
+/// stderr / RPC messages are clamped so a single chatty failure can't blow up
+/// the planner prompt; the `code` (always short) is never truncated. A truncated detail gets a
 /// trailing `…`, so the rendered detail is at most `STEP_ERR_DETAIL_MAX + 1`
 /// chars.
 ///
@@ -83,45 +74,13 @@ pub(crate) const STEP_OK_SUMMARY_MAX: usize = 16 * 1024;
 const BATCH_PER_QUERY_SUMMARY_BYTES: usize = 3 * 1024;
 
 /// Hard ceiling on a `web.search_batch` step's view, so a large batch cannot
-/// claim the entire [`PLANS_SUMMARY_BUDGET`]. 24 KiB = 8 (the default
-/// `KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES`) × [`BATCH_PER_QUERY_SUMMARY_BYTES`],
-/// a quarter of the 96 KiB total.
+/// claim the planner's whole context. 24 KiB = 8 (the default
+/// `KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES`) × [`BATCH_PER_QUERY_SUMMARY_BYTES`].
 ///
 /// The ceiling is deliberately **independent** of the operator's batch-query cap
 /// (`KASTELLAN_WEB_SEARCH_MAX_BATCH_QUERIES`, tunable up to 32): it bounds the
 /// planner-prompt cost regardless of how large a batch the operator allows.
 const STEP_OK_BATCH_SUMMARY_MAX: usize = 24 * 1024;
-
-/// Total byte budget for the whole rendered `plans_so_far_summary`, counted in
-/// serialised step-outcome and step-call (#699) bytes. 96 KiB since #677: six
-/// times the flat per-step budget, so five plans of one flat-budget step each
-/// are at most marginally pushed into elision by the ceiling alone —
-/// marginally, not never, because each outcome's `{"status", "output"}`
-/// wrapper and its call (up to ~1 KiB, since #699) are counted on top of the
-/// 16 KiB view. Plans with several steps, `web.search_batch` steps (up to
-/// 24 KiB each) or a long-lane task exceed it: every output larger than
-/// an even share is then shrunk to it, and only once a share would fall below
-/// `budget::MIN_SHRUNK_OUTPUT_BYTES` are the oldest dropped whole (#921; a
-/// shrunk view that fails the sink screen or overshoots is dropped too);
-/// if the calls alone overrun it, the oldest calls then lose their
-/// `parameters` (see `call::apply_call_budget`). In that case every elidable
-/// output is already gone, the newest included: the second pass frees room but
-/// does not bring one back, which keeps the two passes independent — a task
-/// that fills the budget with calls alone is one repeating itself, and the
-/// calls are what shows it that. What cannot be elided — error and withheld
-/// outcomes, and each call's clamped `tool`/`method` — can still exceed the
-/// budget on a pathological task. The planner's own `decision` strings are
-/// neither clamped nor counted (#729), so the serialised prompt is modestly
-/// larger than this value.
-///
-/// ⚠️ **Not raised with #922's longer fast lane, on measurement.** Live on the
-/// DGX (2026-10-31, task 233) a full 96 KiB summary already made a 57,885-token
-/// prompt — about 2 bytes a token — in a 65,536-token context that must also
-/// hold 4–7k tokens of thinking and answer. A bigger byte budget overflows the
-/// context, and the backend then cuts the prompt silently. A token-denominated
-/// budget against the model's real context is the fix (#940), not a
-/// bigger number.
-const PLANS_SUMMARY_BUDGET: usize = 96 * 1024;
 
 const _: () = {
     // `usize::clamp` panics when its lower bound exceeds its upper bound, and
@@ -174,83 +133,49 @@ const STATUS_OK: &str = "ok";
 const STATUS_ERR: &str = "err";
 const OUTPUT_KEY: &str = "output";
 const WITHHELD_KEY: &str = "withheld";
-const ELIDED_KEY: &str = "elided";
 const CODE_KEY: &str = "code";
 const DETAIL_KEY: &str = "detail";
 /// Why a successful step shows no output: the sink screen blocked it.
 const WITHHELD_REASON: &str = "failed injection screen";
-/// Why a call shows no `parameters`: the summary budget dropped them.
-const ELIDED_REASON: &str = "summary budget";
-/// Why a successful step shows no output: the summary budget dropped it. Says
-/// "retrieved" because "summary budget" alone was read as "not retrieved": the
-/// planner fetched the item again and told the user it could not be (#921).
-const ELIDED_OUTPUT_REASON: &str = "output retrieved, dropped from this summary for space";
 
 /// Replaces a failed step's `detail` when the sink screen blocks it. The
 /// `code` is an internal constant and is always kept, so the planner still
 /// learns why the step failed.
 pub(crate) const WITHHELD_MARKER: &str = "[withheld: failed injection screen]";
 
-/// The outcome that replaces a successful step dropped by
-/// [`apply_summary_budget`] (#339). A clear signal to the planner that output
-/// was dropped for size — distinct from the injection-screen `withheld` shape.
-fn elided_outcome() -> serde_json::Value {
-    json!({STATUS_KEY: STATUS_OK, ELIDED_KEY: ELIDED_OUTPUT_REASON})
-}
-
-/// One rendered step outcome, its serialised size, whether the budget may
-/// shrink it or replace it with [`elided_outcome`], and what the sink screen
-/// blocked in it.
+/// One rendered step outcome and what the sink screen blocked in it.
 ///
-/// Built only through the four named constructors, each of which owns its
-/// shape and its flag, so a withheld or failed step cannot be marked elidable
-/// by a call site passing the wrong `bool`. `bytes` is computed once, at
-/// construction, because it is the unit [`apply_summary_budget`] counts.
-///
-/// `Clone` so [`render_plans_summary`] can copy the memoized renders before the
-/// per-call budget elision mutates them (see [`PlanRecord`]); `Debug` so
+/// Built only through the three named constructors, each of which owns its
+/// shape. `Clone` so the notebook's views copy the stored render; `Debug` so
 /// [`PlanRecord`] (a field of the `Debug`-deriving `TaskContext`) can derive it.
 #[derive(Clone, Debug)]
 struct RenderedStep {
     value: serde_json::Value,
-    bytes: usize,
-    elidable: bool,
     sink_block: Option<SinkBlock>,
 }
 
 impl RenderedStep {
-    fn measured(value: serde_json::Value, elidable: bool, sink_block: Option<SinkBlock>) -> Self {
-        let bytes = result_view::serialised_len(&value);
-        Self { value, bytes, elidable, sink_block }
-    }
-
-    /// A successful step's view: the one shape the budget may shrink or elide.
+    /// A successful step's view.
     fn output(view: serde_json::Value) -> Self {
-        Self::measured(json!({STATUS_KEY: STATUS_OK, OUTPUT_KEY: view}), true, None)
+        Self { value: json!({STATUS_KEY: STATUS_OK, OUTPUT_KEY: view}), sink_block: None }
     }
 
-    /// A successful step whose view the sink screen blocked. Tiny and
-    /// load-bearing, so never elided.
+    /// A successful step whose view the sink screen blocked.
     fn withheld(block: SinkBlock) -> Self {
-        Self::measured(json!({STATUS_KEY: STATUS_OK, WITHHELD_KEY: WITHHELD_REASON}), false, Some(block))
+        Self { value: json!({STATUS_KEY: STATUS_OK, WITHHELD_KEY: WITHHELD_REASON}), sink_block: Some(block) }
     }
 
     /// A failed step, with `sink_block` set when the screen replaced its
-    /// detail. Never elided: the error is the signal.
+    /// detail.
     fn err(code: &str, detail: &str, sink_block: Option<SinkBlock>) -> Self {
-        Self::measured(json!({STATUS_KEY: STATUS_ERR, CODE_KEY: code, DETAIL_KEY: detail}), false, sink_block)
-    }
-
-    /// What [`apply_summary_budget`] puts in place of an elided output.
-    fn elided() -> Self {
-        Self::measured(elided_outcome(), false, None)
+        Self { value: json!({STATUS_KEY: STATUS_ERR, CODE_KEY: code, DETAIL_KEY: detail}), sink_block }
     }
 }
 
 /// A completed plan plus the screened, planner-bound render of its outcomes.
 ///
 /// `rendered` is computed **once**, at the sole append point
-/// ([`PlanRecord::new`], called from `inner_loop.rs`), rather than being
+/// ([`PlanRecord::new`], called from `execute.rs`), rather than being
 /// re-derived on every planner iteration. The sink screen
 /// ([`render_step_outcome`] → [`sink_screen`]) is a pure, deterministic
 /// function of `(tool, outcome)`, and both inputs are frozen the moment the
@@ -258,13 +183,9 @@ impl RenderedStep {
 /// every accumulated outcome on every loop was latent-quadratic in
 /// `max_plans` (which is operator-overridable and unbounded); memoizing at the
 /// push is observationally identical and drops it to linear. Issue #344.
-///
-/// One bounded exception: an output over the summary budget's even share is
-/// re-rendered and re-screened from `outcomes` on every turn (#921), at most
-/// `budget / MIN_SHRUNK_OUTPUT_BYTES` of them; see [`PlanRecord::shrunk_output`].
 #[derive(Debug)]
 pub struct PlanRecord {
-    /// The completed plan; its `decision` labels the summary object.
+    /// The completed plan.
     pub plan: Plan,
     /// The raw, unscreened outcomes this record was built from. Kept so a
     /// suspended run can be persisted and rebuilt (#564 slice 1b, D11):
@@ -279,10 +200,10 @@ pub struct PlanRecord {
     /// `outcomes`.
     outcomes: Vec<StepOutcome>,
     /// Screened renders of `plan`'s step outcomes, one per outcome. Private:
-    /// the only consumers are [`render_plans_summary`], the notebook's views
-    /// (`notebook_view.rs`) and [`PlanRecord::sink_block_audit_payloads`], and the screened invariant
+    /// the only consumers are the notebook's views (`notebook_view.rs`) and
+    /// [`PlanRecord::sink_block_audit_payloads`], and the screened invariant
     /// depends on nothing else being able to inject an unscreened
-    /// `RenderedStep` (the budget's re-render goes through [`render_ok`]).
+    /// `RenderedStep`.
     rendered: Vec<RenderedStep>,
     /// The screened call that produced each outcome, index-aligned with
     /// `rendered` (#699). `None` only when outcomes outnumber steps (not
@@ -377,33 +298,6 @@ impl PlanRecord {
         decision.into_iter().chain(steps).collect()
     }
 
-    /// Step `i`'s output re-rendered with its view at most `cap` bytes, for the
-    /// summary budget (#921). From the raw outcome, never from the stored view,
-    /// which a second prune would strip of the core's own markers; through
-    /// [`render_ok`], so it is screened as the full one was. A view with
-    /// nothing left to show at `cap` ([`result_view::fallback_view`]) becomes
-    /// the elided marker: "view unavailable" for a retrieved item is the
-    /// misreading #921 fixed.
-    fn shrunk_output(&self, i: usize, cap: usize) -> RenderedStep {
-        let (tool, _) = step_tool_and_method(&self.plan, i);
-        match &self.outcomes[i] {
-            StepOutcome::Ok(v) => {
-                let step = render_ok(tool, v, |_| cap);
-                if step.value.get(OUTPUT_KEY) == Some(&result_view::fallback_view()) {
-                    RenderedStep::elided()
-                } else {
-                    step
-                }
-            }
-            // Unreachable: the budget shrinks only an `output`, and only `Ok`
-            // renders one. Not a panic: release is `panic = "abort"`.
-            StepOutcome::Err { .. } => {
-                tracing::error!(step = i, "plan summary budget asked to shrink a failed step; shown as elided");
-                RenderedStep::elided()
-            }
-        }
-    }
-
     /// The raw outcomes this record was built from, in step order.
     ///
     /// Callers read these to reconstruct or to classify, never to render. The
@@ -411,9 +305,9 @@ impl PlanRecord {
     /// and these outcomes so the resumed run can rebuild the record with
     /// [`PlanRecord::new`]; `scheduler::conversation::record` (#701) reads them
     /// only to tell `Ok` from `Err`, never their text.
-    /// **Not** for building a planner prompt: these are unscreened, and
-    /// [`render_plans_summary`] and the notebook's views (`notebook_view.rs`)
-    /// are the only things that turn an outcome into planner-bound text.
+    /// **Not** for building a planner prompt: these are unscreened, and the
+    /// notebook's views (`notebook_view.rs`) are the only things that turn an
+    /// outcome into planner-bound text.
     pub fn outcomes(&self) -> &[StepOutcome] {
         &self.outcomes
     }
@@ -425,7 +319,7 @@ fn step_tool_and_method(plan: &Plan, i: usize) -> (&str, &str) {
     plan.steps.get(i).map(|s| (s.tool.as_str(), s.method.as_str())).unwrap_or(("", ""))
 }
 
-/// Render one [`StepOutcome`] for the planner's plan summary, screening the
+/// Render one [`StepOutcome`] for the planner, screening the
 /// exact content about to enter the prompt with `tool`'s guard profile.
 ///
 /// A successful step becomes `{"status":"ok","output":<view>}`, where `<view>`
@@ -457,9 +351,8 @@ fn render_step_outcome(tool: &str, method: &str, o: &StepOutcome) -> RenderedSte
 }
 
 /// A successful step's screened view, at most `cap(&v)` bytes, where `v` is
-/// the result without the source screen's audit fields. Shared by the first
-/// render and by the budget's re-render at a smaller share (#921), so a shrunk
-/// view is screened exactly as the full one was.
+/// the result without the source screen's audit fields. Shared with the sift's
+/// sorter view (`notebook_view::sorter_view`), so it is screened the same way.
 fn render_ok(tool: &str, v: &serde_json::Value, cap: impl FnOnce(&serde_json::Value) -> usize) -> RenderedStep {
     let v = without_screen_audit_fields(v);
     let view = result_view::render(&v, cap(&v));
@@ -467,73 +360,6 @@ fn render_ok(tool: &str, v: &serde_json::Value, cap: impl FnOnce(&serde_json::Va
         Some(block) => RenderedStep::withheld(block),
         None => RenderedStep::output(view),
     }
-}
-
-/// Build the compact per-plan summary for the planner prompt: one
-/// `{ "decision", "step_outcomes": [..] }` object per completed plan, each
-/// outcome in one of the shapes described in the module docs.
-///
-/// The step outcomes, calls and decisions were **already screened** when each
-/// [`PlanRecord`] was constructed at push time (issue #344), so this function
-/// clones the memoized renders and calls and runs the two size-budget passes
-/// over them (outputs first, then `parameters`). The only screening here is of
-/// the outputs the first pass shrinks, re-rendered from the raw outcome by
-/// [`PlanRecord::shrunk_output`] (#921). The clone is required because both
-/// passes rewrite in place and must not mutate the stored, immutable record.
-pub(super) fn render_plans_summary(plans: &[PlanRecord]) -> Vec<serde_json::Value> {
-    let mut rendered: Vec<Vec<RenderedStep>> =
-        plans.iter().map(|r| r.rendered.clone()).collect();
-
-    let mut calls: Vec<Vec<Option<serde_json::Value>>> = plans
-        .iter()
-        .map(|r| r.calls.iter().map(|c| c.as_ref().map(|c| c.value.clone())).collect())
-        .collect();
-
-    // Bound the accumulated size of the always-in-context summary (#339) in
-    // two passes. The calls are what stop the planner repeating itself (#699),
-    // so their bytes come off the budget first and the successful-step OUTPUTS
-    // are shrunk (or, past a floor, the oldest dropped) to fit what is left.
-    // Only if the calls alone still overrun it do the oldest calls lose their
-    // `parameters` (a task of several 64-step plans with near-cap parameters;
-    // found by review).
-    let call_bytes = calls.iter().flatten().flatten().fold(0usize, |t, c| t.saturating_add(call_cost(c)));
-    let fitted = apply_summary_budget(&mut rendered, PLANS_SUMMARY_BUDGET.saturating_sub(call_bytes), |p, i, cap| {
-        plans[p].shrunk_output(i, cap)
-    });
-    if fitted.blocked > 0 {
-        // Warn: a screen hit, not routine trimming, and not yet audited (#928).
-        tracing::warn!(
-            blocked = fitted.blocked,
-            "plan summary: the sink screen blocked a shrunk step output whose full view passed; shown as elided"
-        );
-    }
-    let outcome_bytes = rendered.iter().flatten().fold(0usize, |t, s| t.saturating_add(s.bytes));
-    let elided_calls = apply_call_budget(&mut calls, outcome_bytes.saturating_add(call_bytes), PLANS_SUMMARY_BUDGET);
-    if fitted.elided + fitted.shrunk + elided_calls > 0 {
-        // Debug, not warn: this runs on every planner iteration once a long
-        // task passes the budget, and the planner itself is told in-band.
-        tracing::debug!(
-            elided = fitted.elided,
-            shrunk = fitted.shrunk,
-            elided_calls,
-            budget = PLANS_SUMMARY_BUDGET,
-            "plan summary shrank or elided step outputs and/or elided call parameters"
-        );
-    }
-
-    plans
-        .iter()
-        .zip(rendered)
-        .zip(calls)
-        .map(|((r, steps), calls)| {
-            let step_outcomes: Vec<serde_json::Value> =
-                steps.into_iter().zip(calls).map(|(s, call)| with_call(s.value, call)).collect();
-            json!({
-                "decision":      r.decision.value,
-                "step_outcomes": step_outcomes,
-            })
-        })
-        .collect()
 }
 
 /// `outcome` with the screened `call` that produced it under [`CALL_KEY`].
@@ -548,7 +374,5 @@ fn with_call(mut outcome: serde_json::Value, call: Option<serde_json::Value>) ->
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod prior_call_tests;
 #[cfg(test)]
 mod step_view_tests;

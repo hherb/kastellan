@@ -33,7 +33,7 @@ fn make_text_plan() -> Plan {
 /// recall/sha256/count fields via `..make_default_meta()`.
 fn make_default_meta() -> FormulationMeta {
     FormulationMeta {
-        prompt_name: "agent_planner".into(),
+        prompt_name: "agent_notebook".into(),
         prompt_sha256: "p1".into(),
         llm_model: "lm".into(),
         llm_backend: "local".into(),

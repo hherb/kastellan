@@ -24,7 +24,7 @@ use kastellan_core::channel::ingest::build_channel_task_payload;
 use kastellan_core::channel::outbox::ChannelOutbox;
 use kastellan_core::channel::{ChannelId, ConversationId, IncomingMessage, PeerId};
 use kastellan_core::memory::embedder::NoOpEmbedder;
-use kastellan_core::scheduler::agent::PlanFormulator;
+use kastellan_core::scheduler::notebook::formulator::NotebookFormulator;
 use kastellan_core::scheduler::asks::delivery::{REASON_NO_CHANNEL, REASON_NO_ORIGIN};
 use kastellan_core::scheduler::audit::{
     ACTION_ASK_APPROVAL_APPLIED, ACTION_ASK_UNDELIVERED, ACTION_TASK_FINALIZE,
@@ -148,9 +148,8 @@ impl StepDispatcher for NoopDispatcher {
     }
 }
 
-// The model is a [`ScriptedNotebook`] (#993: this suite ran on the classic
-// loop until it moved to the notebook, the default planner). Each helper
-// below builds the closure that picks that turn's notebook reply.
+// The model is a [`ScriptedNotebook`]. Each helper below builds the closure
+// that picks that turn's notebook reply.
 
 /// The step every call in this file makes: `sleep.doit` with `{"n": n}`.
 /// `parameters` is one of the fields `plan_digest` INCLUDES, so two calls
@@ -238,7 +237,7 @@ fn counting(vary: bool, calls: Arc<Mutex<u32>>) -> ScriptedNotebook {
 /// differ in; everything else is a no-op stub.
 fn spawn_with(
     pool: &sqlx::PgPool,
-    formulator: Arc<dyn PlanFormulator>,
+    formulator: Arc<dyn NotebookFormulator>,
     review: Arc<ChainReviewStage>,
 ) -> SchedulerHandle {
     spawn_scheduler(
@@ -309,7 +308,7 @@ fn spawn_test_scheduler_recording_history(
     let nb = Arc::new(history_recording(Arc::clone(&seen)));
     let handle = spawn_scheduler(
         pool.clone(),
-        Arc::clone(&nb) as Arc<dyn PlanFormulator>,
+        Arc::clone(&nb) as Arc<dyn NotebookFormulator>,
         review,
         Arc::new(RecordingDispatcher { dispatched: Arc::clone(&dispatched) }),
         Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
@@ -532,8 +531,8 @@ async fn a_channel_tasks_escalation_is_delivered_against_its_own_origin() {
 /// That left a seven-hop thread — `main` → `spawn_scheduler` → `lane_loop`
 /// → `drain_lane` → `run_one` → the planner loop → `raise_and_suspend` →
 /// `deliver_ask` — with **no test anywhere passing `Some`**: all five
-/// `spawn_scheduler` call sites in tests and all 18 classic-loop call
-/// sites passed `None`, and the one test proving delivery works calls
+/// `spawn_scheduler` call sites in tests and all 18 (since retired)
+/// classic-loop call sites passed `None`, and the one test proving delivery works calls
 /// `raise_and_suspend` directly, bypassing the runner entirely.
 ///
 /// So `Some(outbox.clone())` in `main.rs`, or either `outbox.as_deref()` in

@@ -379,22 +379,21 @@ email does not yet carry conversation history from one message to the next.
 
 ---
 
-## How it plans: two working styles
+## How it plans: the notebook
 
-The planning loop can work in one of two styles, chosen with one setting
-for the whole agent:
+The planning loop works in **notebook mode**. The model writes its own
+**step list** at the start, works through **one step at a time**, and ticks
+each one off with a short note and any **findings** — facts together with
+where they came from. Each turn it reads only what that turn needs, so a
+long task stays quick and focused, and the final answer is written from the
+findings. While a task runs you can send it a **correction** from the
+command line ("the invoice is in the other account"), which it picks up at
+its next step.
 
-- **Classic** (older, opt-in). The AI model sees the whole history of the
-  task so far each time it decides the next move. Simple, but on long
-  tasks that history grows large and slow, and the model can lose track.
-- **Notebook** (the default). The model writes its own **step list** at
-  the start, works through **one step at a time**, and ticks each one off
-  with a short note and any **findings** — facts together with where they
-  came from. Each turn it reads only what that turn needs, so a long task
-  stays quick and focused, and the final answer is written from the
-  findings. While a notebook task runs you can send it a **correction**
-  from the command line ("the invoice is in the other account"), which it
-  picks up at its next step.
+An older style, called *classic*, showed the model the whole history of the
+task every turn; on long tasks that history grew large and slow, and the
+model lost track. It was retired once notebook mode answered all of the
+project's test questions.
 
 Notebook mode adds one more step type, **`sift`**, for "find every…"
 questions. Instead of examining candidates one by one, the agent makes one
@@ -404,12 +403,9 @@ it was asked for, in a per-task **scrapbook**. The answer can then show
 those matches as a table built directly from the scrapbook — so the table
 lists what was actually found, not what the model remembers finding.
 
-Either way, nothing about safety changes: every step in both styles goes
-through the same CASSANDRA review, the same allowlists and the same
-sandboxes, and notes the model writes to itself are screened like any
-other text. Notebook mode answered all seven of the project's test
-questions, so it became the default; classic stays available until it is
-retired.
+Nothing about safety is special to it: every step goes through the same
+CASSANDRA review, the same allowlists and the same sandboxes, and notes the
+model writes to itself are screened like any other text.
 
 ---
 

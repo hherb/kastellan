@@ -28,7 +28,7 @@ use super::pure::{planned_step_from_l3, prepare_invocation, InvokeRefusal};
 
 /// Dispatch each concrete step through the injected [`StepDispatcher`],
 /// collecting outcomes and stopping at the first [`StepOutcome::Err`]
-/// (mirrors `inner_loop::run_to_terminal`). No audit / DB here — the
+/// (as `inner_loop::execute` does for a plan). No audit / DB here — the
 /// per-step chokepoint rows are written inside `dispatch_step`; the
 /// envelope rows are the caller's job.
 pub async fn run_steps(

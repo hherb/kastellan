@@ -67,7 +67,7 @@ async fn prompt_hash_lands_in_ledger_and_audit_payload() {
 
     // Create a temporary directory with one prompt file.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let prompt_path = tmp.path().join("agent_planner.md");
+    let prompt_path = tmp.path().join("agent_notebook.md");
 
     // --- Version 1 ---
     let v1_content = "version 1 content\n";
@@ -80,8 +80,8 @@ async fn prompt_hash_lands_in_ledger_and_audit_payload() {
     // Cache entry must carry the correct sha and content.
     let v1_hash = hash_content(v1_content);
     let entry = cache
-        .get("agent_planner")
-        .expect("agent_planner missing from cache");
+        .get("agent_notebook")
+        .expect("agent_notebook missing from cache");
     assert_eq!(
         entry.sha256, v1_hash,
         "cache sha256 must match hash_content(v1)"
@@ -93,7 +93,7 @@ async fn prompt_hash_lands_in_ledger_and_audit_payload() {
 
     // DB must have exactly 1 row for this name after v1 load.
     let count_v1: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM agent_prompts WHERE name = 'agent_planner'",
+        "SELECT count(*) FROM agent_prompts WHERE name = 'agent_notebook'",
     )
     .fetch_one(&pool)
     .await
@@ -111,8 +111,8 @@ async fn prompt_hash_lands_in_ledger_and_audit_payload() {
     // Cache must now reflect the new sha.
     let v2_hash = hash_content(v2_content);
     let entry2 = cache2
-        .get("agent_planner")
-        .expect("agent_planner missing from cache after v2 load");
+        .get("agent_notebook")
+        .expect("agent_notebook missing from cache after v2 load");
     assert_eq!(
         entry2.sha256, v2_hash,
         "cache sha256 must match hash_content(v2)"
@@ -121,7 +121,7 @@ async fn prompt_hash_lands_in_ledger_and_audit_payload() {
 
     // DB must have 2 rows total (both versions persist — append-only by GRANT).
     let count_v2: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM agent_prompts WHERE name = 'agent_planner'",
+        "SELECT count(*) FROM agent_prompts WHERE name = 'agent_notebook'",
     )
     .fetch_one(&pool)
     .await

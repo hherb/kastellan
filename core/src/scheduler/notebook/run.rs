@@ -1,15 +1,14 @@
 //! The notebook loop (#922): one step per turn, working memory in
-//! `task_notebook`, every call reviewed and dispatched by the **same** code
-//! as a classic plan ([`execute::review_and_dispatch`]).
+//! `task_notebook`, every call reviewed and dispatched by the shared
+//! [`execute::review_and_dispatch`].
 //!
 //! Per turn:
 //!
-//! 1. cancel check, then the turn cap and the fast lane's ceiling — as the
-//!    classic loop does, including one forced-answer turn once something was
-//!    gathered;
+//! 1. cancel check, then the turn cap and the fast lane's ceiling, including
+//!    one forced-answer turn once something was gathered;
 //! 2. read and fold the notebook; append the operator's corrections to the
 //!    instruction the reviewer sees (D11);
-//! 3. render the turn ([`render_turn`]) and ask the model, with the classic
+//! 3. render the turn ([`render_turn`]) and ask the model, with its
 //!    recoveries: an empty answer is asked again once, a reply that is not a
 //!    usable notebook reply is shown back once (#945), a timeout or a reply
 //!    cut off at `max_tokens` after gathering spends the forced-answer turn;
@@ -30,7 +29,7 @@
 //!
 //! Every turn counts against one cap, `max_plans × NOTEBOOK_TURNS_PER_PLAN`
 //! (C5; a resumed run: the turns it carries plus that many more): the
-//! injection-bounding role of the classic plan cap is kept.
+//! injection-bounding role of the plan cap is kept.
 
 use std::sync::Arc;
 
@@ -59,8 +58,9 @@ use crate::scheduler::inner_loop::{
     InnerLoopResult, Outcome, PlanRecord, StepDispatcher, StepOutcome, TaskContext, STEP_ERR_DETAIL_MAX,
 };
 
-/// Turns per classic plan in the cap (C5): a notebook step costs about one
-/// turn, a classic plan often batched several.
+/// Turns per plan in the cap (C5): `max_plans` was sized for the retired
+/// classic loop, whose one plan often batched several steps; a notebook step
+/// costs about one turn.
 pub(crate) const NOTEBOOK_TURNS_PER_PLAN: u32 = 2;
 
 /// Replaces the turn counts on the single forced-answer turn.

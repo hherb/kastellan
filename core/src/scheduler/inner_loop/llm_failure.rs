@@ -1,5 +1,4 @@
-//! What the inner loop does when a planning call to the model fails
-//! (issue #774).
+//! What the loop does when a planning call to the model fails (issue #774).
 //!
 //! Before this, any error out of the formulator ended the task with
 //! `llm: <router error>`. On the DGX that threw away whole tasks: a mail
@@ -8,40 +7,35 @@
 //! `KASTELLAN_LLM_TIMEOUT_MS`, and the user got a raw transport error after
 //! nine minutes and nothing else.
 //!
-//! Three changes. [`formulate_turn`] is the thin async shell the loop calls
-//! (it talks to the formulator and writes audit rows); every *decision* it
-//! makes is a pure function here, testable without a model or a database:
+//! The notebook's `super::super::notebook::ask` is the thin async shell the
+//! loop calls (it talks to the model and writes audit rows); every
+//! *decision* it makes is a pure function here, testable without a model or
+//! a database:
 //!
 //! 1. **A timed-out planning call after tools have gathered results jumps
-//!    straight to the forced-synthesis turn** ([`should_force_synthesis`])
+//!    straight to the forced-answer turn** ([`should_force_synthesis`])
 //!    instead of failing: the work is in hand, so ask for an answer from it.
 //!    A reply cut off at `max_tokens` (#941) gets the same recovery, and
 //!    with nothing gathered fails in its own words ([`token_cap_failure_detail`]).
-//! 2. **A timed-out synthesis turn is retried once with thinking
-//!    suppressed** — only the formulator knows whether a cheaper attempt
-//!    exists (`PlanFormulator::formulate_synthesis_without_thinking`).
-//! 3. **A timeout that still ends the task says so in words**
+//! 2. **A timeout that still ends the task says so in words**
 //!    ([`timeout_failure_detail`]): the model ran out of time, what had been
 //!    gathered, and what to try. The raw router error stays on the end, both
 //!    for the operator and so the existing `detail like '%timed out%'` query
 //!    keeps finding these rows.
 //!
 //! An **empty completion** (#923: no content, and not cut off at `length`)
-//! is asked again once, through the same door, unless it is itself the
-//! turn's retry; a decode failure that still ends the task says so in words
-//! ([`decode_failure_detail`]). A **reply that is not a plan** (#945:
-//! complete, non-blank, not JSON in the plan's shape) is shown back to the
-//! model once with a request for the plan, thinking suppressed
-//! (`PlanFormulator::formulate_reformat`). At most one retry of any kind per
-//! turn: a retry's own failure is never retried. Every other formulator error (an HTTP
-//! status, a refused connection, a missing prompt) is unchanged,
-//! `llm: <error>`: this loop does not retry it.
+//! is asked again once; a decode failure that still ends the task says so in
+//! words ([`decode_failure_detail`]). A **reply that cannot be used** (#945)
+//! is shown back to the model once with the reason, thinking suppressed. At
+//! most one retry of any kind per turn: a retry's own failure is never
+//! retried. Every other model error (an HTTP status, a refused connection, a
+//! missing prompt) is `llm: <error>`: the loop does not retry it. Every
+//! failed call writes one `plan.formulate_failed` row
+//! ([`record_failed_formulation`]).
 
 use std::collections::BTreeMap;
 
-use super::{PlanRecord, StepOutcome, TaskContext};
-use crate::cassandra::types::Plan;
-use crate::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
+use super::{PlanRecord, StepOutcome};
 
 /// Should a failed planning call be answered by spending the
 /// forced-synthesis turn now, rather than failing the task?
@@ -249,190 +243,6 @@ pub(super) fn formulate_failed_payload(
         v["raw_chars"] = serde_json::json!(raw.chars().count());
     }
     v
-}
-
-/// What one planning turn produced.
-pub(super) enum Turn {
-    /// A plan to act on. Boxed: a `Plan` + `FormulationMeta` is far larger
-    /// than the other variants (`clippy::large_enum_variant`).
-    Planned(Box<(Plan, FormulationMeta)>),
-    /// The call timed out, or was cut off at `max_tokens` (#941), after tools
-    /// had gathered results: spend the forced-synthesis turn next instead of
-    /// failing ([`should_force_synthesis`]).
-    ForceSynthesis,
-    /// The task fails with this user-facing detail.
-    Failed(String),
-}
-
-/// The three loop facts the recovery decisions read.
-pub(super) struct TurnState {
-    /// This is the forced-synthesis turn.
-    pub synth_turn: bool,
-    /// At least one tool step has succeeded, so there is something to answer from.
-    pub gathered: bool,
-    /// The forced-synthesis turn has been spent (or is this one).
-    pub synth_attempted: bool,
-}
-
-/// Run one planning turn, with #774's timeout recovery, #923's empty-answer
-/// retry and #945's non-plan re-ask around it.
-///
-/// Every failed formulator call — the first attempt, and any retry
-/// — adds one to `failed_llm_calls` and writes exactly one
-/// `plan.formulate_failed` row; `failure_recorded` is what stops the final
-/// match from writing a second row for the one error already recorded on
-/// the no-retry path.
-pub(super) async fn formulate_turn(
-    pool: &sqlx::PgPool,
-    formulator: &dyn PlanFormulator,
-    ctx: &TaskContext,
-    state: TurnState,
-    failed_llm_calls: &mut u32,
-) -> Turn {
-    let TurnState { synth_turn, gathered, synth_attempted } = state;
-    let call = || async {
-        if synth_turn {
-            formulator.formulate_synthesis(ctx).await
-        } else {
-            formulator.formulate_plan(ctx).await
-        }
-    };
-    let first = call().await;
-    // A synthesis turn that ran out of time gets one more attempt with
-    // thinking suppressed, when the formulator has such an attempt; an empty
-    // answer gets the same call once more (#923); a reply that is not a plan
-    // is shown back to the model with a request for the plan, when the
-    // formulator can (#945). At most one retry per turn.
-    // Every failed call is counted and gets an audit row exactly once:
-    // `failure_recorded` stops the row below from repeating one already
-    // written here.
-    let mut retried = false;
-    let mut thinking_suppressed = false;
-    let mut failure_recorded = false;
-    let mut reasked = false;
-    let formulation = match first {
-        Err(e) if synth_turn && e.is_request_timeout() => {
-            *failed_llm_calls = failed_llm_calls.saturating_add(1);
-            record_failed_formulation(
-                pool, ctx.task_id, ctx.plan_count, true, false, &e,
-            ).await;
-            match formulator.formulate_synthesis_without_thinking(ctx).await {
-                Some(retry) => {
-                    tracing::warn!(
-                        task_id = ctx.task_id,
-                        plan_count = ctx.plan_count,
-                        retry_ok = retry.is_ok(),
-                        "forced-synthesis call timed out; retried once with thinking suppressed"
-                    );
-                    retried = true;
-                    thinking_suppressed = true;
-                    retry
-                }
-                None => {
-                    tracing::warn!(
-                        task_id = ctx.task_id,
-                        plan_count = ctx.plan_count,
-                        "forced-synthesis call timed out; no cheaper retry exists \
-                         (thinking is already suppressed by config)"
-                    );
-                    failure_recorded = true;
-                    Err(e)
-                }
-            }
-        }
-        Err(e) if e.is_empty_completion() => {
-            *failed_llm_calls = failed_llm_calls.saturating_add(1);
-            record_failed_formulation(
-                pool, ctx.task_id, ctx.plan_count, synth_turn, false, &e,
-            ).await;
-            tracing::warn!(
-                task_id = ctx.task_id,
-                plan_count = ctx.plan_count,
-                synth_turn,
-                "planning call returned an empty completion; asking again once"
-            );
-            retried = true;
-            call().await
-        }
-        Err(e) if e.non_plan_answer().is_some() => {
-            *failed_llm_calls = failed_llm_calls.saturating_add(1);
-            record_failed_formulation(
-                pool, ctx.task_id, ctx.plan_count, synth_turn, false, &e,
-            ).await;
-            let reply = e.non_plan_answer().expect("the arm's guard");
-            match formulator.formulate_reformat(ctx, synth_turn, reply).await {
-                Some(retry) => {
-                    tracing::warn!(
-                        task_id = ctx.task_id,
-                        plan_count = ctx.plan_count,
-                        synth_turn,
-                        retry_ok = retry.is_ok(),
-                        "planning call answered with something that is not a plan; \
-                         re-asked once with its reply and thinking suppressed"
-                    );
-                    retried = true;
-                    thinking_suppressed = true;
-                    reasked = true;
-                    retry
-                }
-                None => {
-                    failure_recorded = true;
-                    Err(e)
-                }
-            }
-        }
-        other => other,
-    };
-    let (plan, mut meta) = match formulation {
-        Ok(x) => x,
-        Err(e) => {
-            if !failure_recorded {
-                *failed_llm_calls = failed_llm_calls.saturating_add(1);
-                record_failed_formulation(
-                    pool, ctx.task_id, ctx.plan_count, synth_turn, thinking_suppressed, &e,
-                ).await;
-            }
-            let timed_out = e.is_request_timeout();
-            // A reply cut off by `max_tokens` (#941) ran out of room the way
-            // a timeout runs out of time: it gets the same recovery.
-            if should_force_synthesis(timed_out || e.ran_out_of_tokens(), gathered, synth_attempted) {
-                tracing::warn!(
-                    task_id = ctx.task_id,
-                    plan_count = ctx.plan_count,
-                    error = %e,
-                    "planning call ran out of time or tokens after tools had gathered results; \
-                     spending the forced-synthesis turn now instead of failing the task"
-                );
-                return Turn::ForceSynthesis;
-            }
-            let detail = if timed_out {
-                timeout_failure_detail(
-                    &GatheredWork::from_plans(&ctx.plans),
-                    &e.to_string(),
-                )
-            } else if e.ran_out_of_tokens() {
-                token_cap_failure_detail(&e.to_string())
-            } else if let AgentError::Decode { raw, .. } = &e {
-                decode_failure_detail(raw.trim().is_empty(), &e.to_string())
-            } else {
-                format!("llm: {e}")
-            };
-            // A re-ask that failed some other way would otherwise hide that
-            // the model had answered — in prose — the first time.
-            let detail = if reasked && e.non_plan_answer().is_none() {
-                format!("The language model's first answer was not a plan, so it was asked again. {detail}")
-            } else {
-                detail
-            };
-            return Turn::Failed(detail);
-        }
-    };
-    // A retry's `plan.formulate` row says it was one: the existing
-    // `retry_count` column, which the formulator itself leaves at 0.
-    if retried {
-        meta.retry_count = meta.retry_count.saturating_add(1);
-    }
-    Turn::Planned(Box::new((plan, meta)))
 }
 
 /// Write the `agent/plan.formulate_failed` row for one failed formulator

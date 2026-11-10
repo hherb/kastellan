@@ -205,10 +205,9 @@ development line):
 
 **Experimental or opt-in**
 
-- **The classic planner.** Notebook mode is the default; the older classic
-  planner is one setting away (`KASTELLAN_PLANNER_MODE=classic`) until it is
-  retired. Notebook mode and its "sweep a whole list" step, called `sift`,
-  are still being tuned on real questions.
+- **Notebook mode** and its "sweep a whole list" step, called `sift`, are
+  still being tuned on real questions. (The older classic planner has been
+  retired.)
 
 **Not built yet**
 

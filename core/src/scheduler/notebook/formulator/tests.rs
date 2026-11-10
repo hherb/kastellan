@@ -28,8 +28,7 @@ fn the_notebook_prompt_documents_every_reply_key() {
 /// The tools block shows an operator allowlist as an `allowed:` line with each
 /// value between backticks (`prompt_assembly`). The prompt must bind that
 /// line, or the advertisement carries no authority, and say the backticks are
-/// not part of a value, or the planner sends them (#993: ported from the
-/// classic prompt's test).
+/// not part of a value, or the planner sends them.
 #[test]
 fn the_notebook_prompt_binds_the_allowed_line() {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -48,13 +47,14 @@ fn the_reformat_directive_names_the_reason() {
 }
 
 #[test]
-fn planner_mode_rejects_an_unknown_value() {
-    // Since #922 slice 4 an unset or empty value is the notebook; classic is opt-in.
-    assert_eq!(planner_mode(None), Ok(PlannerMode::Notebook));
-    assert_eq!(planner_mode(Some("")), Ok(PlannerMode::Notebook));
-    assert_eq!(planner_mode(Some(" classic ")), Ok(PlannerMode::Classic));
-    assert_eq!(planner_mode(Some(" notebook ")), Ok(PlannerMode::Notebook));
-    let err = planner_mode(Some("Notebook")).unwrap_err();
+fn planner_mode_accepts_only_the_notebook() {
+    for ok in [None, Some(""), Some(" notebook ")] {
+        assert_eq!(check_planner_mode(ok), Ok(()), "{ok:?}");
+    }
+    // The retired loop is refused by name (#993), not run as the notebook.
+    let err = check_planner_mode(Some(" classic ")).unwrap_err();
+    assert!(err.contains("KASTELLAN_PLANNER_MODE=classic") && err.contains("retired"), "{err}");
+    let err = check_planner_mode(Some("Notebook")).unwrap_err();
     assert!(err.contains("KASTELLAN_PLANNER_MODE") && err.contains("\"Notebook\""), "{err}");
 }
 

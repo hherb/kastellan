@@ -1,8 +1,8 @@
 """Cold vs warm prefill, oMLX vs Ollama, same model family (Gemma 4 26B-A4B, 4-bit).
 
 Dev-only measurement script (stdlib only), not part of the product. Run:
-  python3 -I scripts/bench/prefill_bench.py prompts/agent_planner.md omlx gemma-4-26b-a4b-it-4bit 20,40,60
-  python3 -I scripts/bench/prefill_bench.py prompts/agent_planner.md ollama gemma4:26b-a4b-it-qat 20,40,60
+  python3 -I scripts/bench/prefill_bench.py prompts/agent_notebook.md omlx gemma-4-26b-a4b-it-4bit 20,40,60
+  python3 -I scripts/bench/prefill_bench.py prompts/agent_notebook.md ollama gemma4:26b-a4b-it-qat 20,40,60
 Results and method: docs/devel/notes/2026-10-31-prefill-cache-benchmark.md.
 
 Prints one JSON line per measurement, five kinds per size:

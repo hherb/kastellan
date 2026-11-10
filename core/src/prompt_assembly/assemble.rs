@@ -15,7 +15,7 @@
 //!
 //! ```text
 //! <base>
-//! {agent_planner.md verbatim}
+//! {agent_notebook.md verbatim}
 //! </base>
 //!
 //! <handoff>

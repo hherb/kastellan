@@ -581,7 +581,7 @@ async fn capture_all_fixtures_against_live_llm() {
     // this is purely for understanding *why* a capture turned out the
     // way it did when the audit-log slice doesn't tell the whole story
     // (e.g. plan_iterations=0 / total_llm_calls=0 — the daemon's tracing
-    // output is the only evidence of what failed in formulate_plan).
+    // output is the only evidence of what failed in a planner turn).
     dump_daemon_log("stdout", &daemon.stdout_path);
     dump_daemon_log("stderr", &daemon.stderr_path);
 

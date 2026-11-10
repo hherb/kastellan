@@ -77,13 +77,12 @@ core/src/
 
   scheduler/             The agent loop
     runner.rs, runner/   Per-lane runner loop + spawn_scheduler; task execution
-    agent.rs, agent/     LLM adapter: TaskContext → Plan
+    agent.rs, agent/     LLM adapter: one planner turn through the router
     inner_loop.rs, inner_loop/
-                         The classic per-task replanning loop: execute, the
-                         data-class ceiling/floor, result views, the
-                         over-budget summary, LLM-failure handling
-    notebook/            The task-notebook planner loop (the default;
-                         KASTELLAN_PLANNER_MODE=classic opts out): state, render,
+                         Shared per-task state and review-and-dispatch:
+                         execute, the data-class ceiling/floor, result views,
+                         LLM-failure decisions
+    notebook/            The task-notebook planner loop: state, render,
                          reply, formulator, run, repeat, thinking
       sift/              The `sift` step: go through every item of a list,
                          keep the matches in the task's scrapbook, render the
@@ -186,8 +185,8 @@ must call through `dispatch()` — never spawn a worker directly. On the way in,
 way out, worker *output* passes back through the same chokepoint where it is
 screened by `cassandra::injection_guard` (and, for python-exec, scrubbed of any
 materialized-secret fingerprints) before being handed back to the scheduler —
-see [chapter 11](./11-cassandra-pipeline.md). Both planner loops, classic and
-notebook, review and dispatch every step through the same code.
+see [chapter 11](./11-cassandra-pipeline.md). The planner loop reviews and
+dispatches every step through one path (`inner_loop/execute.rs`).
 
 ---
 
@@ -502,8 +501,7 @@ config/
   policy.yaml.example    Example runtime policy
   sandbox/               Example per-worker sandbox profile (shell-exec)
 prompts/
-  agent_planner.md       The classic planner's system prompt
-  agent_notebook.md      The notebook planner's system prompt
+  agent_notebook.md      The planner's system prompt
   sift_sorter.md         The sift sorter's per-item prompt
 seeds/memory/
   l0_meta_rules.toml     The L0 meta-rules, seeded into memory at daemon start

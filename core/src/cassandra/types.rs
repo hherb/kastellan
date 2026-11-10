@@ -81,7 +81,7 @@ pub struct PlannedStep {
 /// drives [`Outcome::Refused`] short-circuit in the inner loop and
 /// surfaces verbatim in the `agent/plan.formulate` audit-row payload.
 ///
-/// `principle` is the 1..=5 index from `prompts/agent_planner.md`.
+/// `principle` is the 1..=5 index from `prompts/agent_notebook.md`.
 /// `reason` is a short structured tag (lowercase snake_case) — the
 /// human-readable explanation lives in `Plan.result.body`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -243,7 +243,7 @@ pub struct Plan {
     /// `decision == "task_complete"`, `steps == []`, and an explanation
     /// in `result.body`. The inner loop honours the refusal even when
     /// the planner-shape is malformed (e.g. non-empty `steps`); see
-    /// [`super::inner_loop::run_to_terminal`].
+    /// `scheduler::inner_loop::execute`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<RefusedReason>,
     /// Agent-side request to raise the producer-set classification floor

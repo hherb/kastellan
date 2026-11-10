@@ -32,7 +32,7 @@ use super::state::{fold, StepStatus};
 ///  "last_seq": 4}
 /// ```
 ///
-/// An empty notebook (a classic-mode task, or one still on its first turn)
+/// An empty notebook (a task still on its first turn)
 /// renders as no steps and `last_seq: 0`. A notebook the fold refuses
 /// returns the fold's own error text, so the caller can say which entry is
 /// wrong instead of showing a half-read notebook.

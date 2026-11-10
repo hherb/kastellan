@@ -1,5 +1,5 @@
 //! A refused answer and the reviewer's verdict on it (#993: ported from the
-//! classic loop's `scheduler_inner_loop_e2e`). The precedence is the shared
+//! retired classic loop). The precedence is the shared
 //! `execute::review_and_dispatch`'s; these pin that the notebook reaches it.
 //! Each runs on the cluster `super::tests::the_notebook_loop` brings up.
 

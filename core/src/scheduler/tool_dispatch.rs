@@ -6,7 +6,7 @@
 //! The inner loop calls `dispatcher.dispatch_step(&step)` once per
 //! [`PlannedStep`] on an approved plan. In production, that dispatcher
 //! is a [`ToolHostStepDispatcher`]; in tests, it's a scripted stub
-//! (`scheduler_inner_loop_e2e` and friends construct closures).
+//! (the notebook harness, `notebook::test_harness::Tools`).
 //!
 //! For each call, this dispatcher:
 //!

@@ -172,15 +172,6 @@ async fn tasks_correct(args: &[String]) -> ExitCode {
     match correct_and_audit(&pool, id, &text).await {
         Ok(CorrectOutcome::Added { seq, audited }) => {
             println!("correction added to task {id} (notebook entry {seq})");
-            // Only a notebook-mode daemon reads it, and the CLI cannot see the
-            // mode: a notebook task writes its steps on its first turn, so an
-            // empty notebook is a classic task (or one still on that turn).
-            if seq == 1 {
-                eprintln!(
-                    "warning: task {id} had no notebook entries yet — a daemon in classic mode \
-                     (KASTELLAN_PLANNER_MODE=classic) never reads this correction"
-                );
-            }
             if !audited {
                 eprintln!("warning: the task.corrected audit row could not be written; the correction stands");
             }

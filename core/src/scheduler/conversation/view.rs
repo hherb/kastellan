@@ -26,9 +26,8 @@ use super::Turn;
 use crate::cassandra::injection_guard::{screen_with_profile, GuardProfile, InjectionDecision};
 use crate::scheduler::inner_loop::result_view;
 
-/// Total serialised bytes the conversation block may occupy, beside the
-/// existing 96 KiB `PLANS_SUMMARY_BUDGET`. Affordable because DGX plan latency
-/// is bound by generation, not context.
+/// Total serialised bytes the conversation block may occupy. Affordable
+/// because DGX plan latency is bound by generation, not context.
 pub(crate) const CONVERSATION_BUDGET: usize = 16 * 1024;
 
 /// Most bytes of one earlier user message.

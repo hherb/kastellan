@@ -1,6 +1,7 @@
-//! Lenient parse of an LLM response into a [`Plan`].
+//! Lenient parse of an LLM response into a JSON reply ([`parse_json_lenient`]):
+//! the notebook loop's replies (#922) and the sift sorter's verdicts.
 //!
-//! The agent's `RouterAgent::formulate_plan` originally called
+//! The retired classic planner (#993) originally called
 //! `serde_json::from_str` directly on the LLM's raw response. That works
 //! when the model emits bare JSON, but most instruction-tuned local
 //! models wrap their output in a ```json … ``` markdown fence by default
@@ -17,7 +18,7 @@
 //!    `serde_json::from_str` ran before this module existed; the
 //!    lenient extraction only kicks in when strict parsing fails.
 //! 2. **Lenient path on failure.** Find the first `{` in the input and
-//!    let `serde_json::Deserializer::from_str(...).into_iter::<Plan>()`
+//!    let `serde_json::Deserializer::from_str(...).into_iter::<T>()`
 //!    consume the first complete JSON value starting at that offset.
 //!    Surrounding prose (model preamble, ```json fence opener, trailing
 //!    explanations after the closing brace) is ignored.
@@ -62,42 +63,19 @@
 //!    on the DGX before the raw output was captured and the real error
 //!    (`missing field 'steps'`) became visible.
 
-use crate::cassandra::types::Plan;
-
-/// Pure function: turn an LLM response into a [`Plan`].
+/// Pure function: turn an LLM response into a `T`.
 ///
-/// Tries strict JSON parse first; on failure, finds the first `{` and
-/// asks `serde_json::Deserializer` to stream-parse one JSON value from
-/// that offset.
+/// Tries strict JSON parse first; on failure, finds the first `{` and asks
+/// `serde_json::Deserializer` to stream-parse one JSON value from that
+/// offset.
 ///
-/// On failure the returned error is the one that describes what
-/// actually went wrong: the *lenient*-path error when the input
-/// contained a `{` (so the useful "missing field …" / "invalid type …"
-/// diagnostic survives), and the strict-path error only when there was
-/// no `{` at all and the input therefore could not have been JSON.
-///
-/// A lenient error's reported line/column are relative to the first `{`
-/// — see contract point 5 in the module docs before quoting one at an
-/// operator.
-///
-/// # Examples
-///
-/// ```ignore
-/// // Bare JSON (the strict path):
-/// let raw = r#"{"context":"…","decision":"task_complete", …}"#;
-/// let plan = parse_plan_lenient(raw)?;
-///
-/// // Markdown-fenced (the lenient path):
-/// let raw = "```json\n{\"context\":\"…\", …}\n```";
-/// let plan = parse_plan_lenient(raw)?;
-/// ```
-pub fn parse_plan_lenient(raw: &str) -> Result<Plan, serde_json::Error> {
-    parse_json_lenient::<Plan>(raw)
-}
-
-/// [`parse_plan_lenient`]'s strict-then-first-`{` contract for any reply
-/// shape — the notebook loop's replies (#922) use it too, so both loops
-/// tolerate the same fences and preambles.
+/// On failure the returned error is the one that describes what actually
+/// went wrong: the *lenient*-path error when the input contained a `{` (so
+/// the useful "missing field …" / "invalid type …" diagnostic survives), and
+/// the strict-path error only when there was no `{` at all and the input
+/// therefore could not have been JSON. A lenient error's reported
+/// line/column are relative to the first `{` — see contract point 5 in the
+/// module docs before quoting one at an operator.
 pub(crate) fn parse_json_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     // Strict path: cheap, exact, no fallback artefacts.
     if let Ok(v) = serde_json::from_str::<T>(raw) {
@@ -128,7 +106,13 @@ pub(crate) fn parse_json_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cassandra::types::DataClass;
+    use crate::cassandra::types::{DataClass, Plan};
+
+    /// The contract pinned through a [`Plan`], the shape these tests were
+    /// written against: a typed reply with required and optional fields.
+    fn parse_plan_lenient(raw: &str) -> Result<Plan, serde_json::Error> {
+        parse_json_lenient::<Plan>(raw)
+    }
 
     /// A minimal well-formed plan in canonical wire shape.
     /// Used as the body the harness re-wraps in fences / prose to

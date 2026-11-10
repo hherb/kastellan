@@ -3,12 +3,8 @@
 //! skill), the screened render the notebook's `last_result` and
 //! `last_failure` carry, plus the sink audit rows the same record yields.
 //!
-//! Moved here from `inner_loop/tests.rs` (which read the classic plan summary
-//! through `plans_so_far_summary`) and `prior_call_tests.rs` (which called
-//! `render_plans_summary`), so they outlive the classic loop (#993). The
-//! outcome assertions are unchanged; the summary-only `decision` checks were
-//! dropped, and the hostile-decision test reads the stored screened value.
-//! The summary's own budget tests stay in `prior_call_tests.rs`.
+//! Moved here from the retired classic loop's plan-summary tests (#993); the
+//! outcome assertions are unchanged.
 
 use super::tests::plan_calling;
 use super::*;

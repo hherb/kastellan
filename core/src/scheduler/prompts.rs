@@ -2,8 +2,8 @@
 //!
 //! At daemon startup, every `prompts/*.md` file is read, hashed, and
 //! upserted into `agent_prompts` (idempotent on existing sha256). The
-//! runtime caches `name → (sha256, content)` in memory; the inner
-//! loop's `formulate_plan` reads from the cache, never from disk.
+//! runtime caches `name → (sha256, content)` in memory; the planner's
+//! `RouterAgent::send_turn` reads from the cache, never from disk.
 //!
 //! Editing a prompt is a commit + daemon restart. The next startup
 //! observes a new sha256 and inserts a new ledger row; old rows are
@@ -108,10 +108,10 @@ mod tests {
     #[test]
     fn cache_get_returns_entry() {
         let cache = PromptCache::new_for_test(vec![(
-            "agent_planner".into(),
+            "agent_notebook".into(),
             PromptEntry { sha256: "abc".into(), content: "hello".into() },
         )]);
-        let e = cache.get("agent_planner").unwrap();
+        let e = cache.get("agent_notebook").unwrap();
         assert_eq!(e.sha256, "abc");
         assert_eq!(e.content, "hello");
         assert!(cache.get("missing").is_none());

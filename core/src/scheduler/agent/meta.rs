@@ -12,8 +12,7 @@ pub struct FormulationMeta {
     pub retry_count: u32,
     /// SHA-256 (hex) of the *assembled* system prompt the model
     /// actually saw — distinct from `prompt_sha256`, which is the base
-    /// prompt file's hash only (`agent_planner.md`, or `agent_notebook.md`
-    /// in notebook mode).
+    /// prompt file's hash only (`agent_notebook.md`).
     pub assembled_prompt_sha256: String,
     /// Number of L0 rows the assembler folded in. Operator triage:
     /// 0 here on a clinical task means the L0 seeder didn't run.

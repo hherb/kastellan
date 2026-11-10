@@ -66,9 +66,8 @@ async fn bring_up_pg(label: &str) -> Option<(sqlx::PgPool, PgCluster)> {
     Some((pool, cluster))
 }
 
-/// The planner: a [`ScriptedNotebook`] answering from per-task scripts (#993:
-/// this suite ran on the classic loop until it moved to the notebook, the
-/// default planner), which **records the context it was handed for each
+/// The planner: a [`ScriptedNotebook`] answering from per-task scripts, which
+/// **records the context it was handed for each
 /// task** — the thing under test: what the planner can see.
 struct Capturing {
     nb: Arc<ScriptedNotebook>,

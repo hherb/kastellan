@@ -1,24 +1,19 @@
-//! Agent LLM adapter — produces a `Plan` from a `TaskContext` via
-//! the existing `kastellan_llm_router::Router`. Strict JSON parsing on
-//! the way out: a model that emits a malformed plan is treated as a
-//! decode-error, surfaced as `RouterError::DecodeResponse`, and the
-//! scheduler's retry policy applies (transient → backoff; decode →
-//! permanent fail). Two exceptions, each asked again once within the turn:
-//! an empty completion (#923), and a reply that is not a plan, which is shown
-//! back to the model with a request for the plan (#945).
+//! Agent LLM adapter — sends one planner turn for a `TaskContext` through
+//! the existing `kastellan_llm_router::Router` and returns the model's raw
+//! reply with its cost ([`RouterAgent::send_turn`]). Parsing the reply, and
+//! the recoveries when it is unusable (an empty completion, #923; a reply
+//! that is not the expected shape, #945), are the notebook loop's
+//! (`super::notebook::ask`).
 //!
-//! The trait `PlanFormulator` lets the inner-loop integration tests
-//! swap in a scripted stub without spinning up an LLM.
+//! The trait `super::notebook::formulator::NotebookFormulator` is the door
+//! the loop calls, so its tests swap in a scripted stub without an LLM.
 
-use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::cassandra::types::Plan;
 use kastellan_llm_router::messages::{ChatMessage, ChatRequest};
 use kastellan_llm_router::{Router, RouterError, ThinkingPolicy};
 
 use super::inner_loop::{ceiling, TaskContext};
-use super::plan_parser::parse_plan_lenient;
 use super::prompts::PromptCache;
 
 #[derive(Debug, Error)]
@@ -36,7 +31,7 @@ pub enum AgentError {
         usage: kastellan_llm_router::CompletionStats,
         latency_ms: u64,
     },
-    #[error("agent prompt (agent_planner or agent_notebook) not found in cache")]
+    #[error("agent prompt (agent_notebook) not found in cache")]
     PromptMissing,
     /// L0/L1 load failed under the [`SystemPromptBuilder`]; the scheduler's
     /// retry policy decides whether to retry or fail permanently.
@@ -96,90 +91,6 @@ impl AgentError {
     }
 }
 
-#[async_trait]
-pub trait PlanFormulator: Send + Sync {
-    async fn formulate_plan(
-        &self,
-        ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError>;
-
-    /// Forced-synthesis variant of [`formulate_plan`]: the same prompt
-    /// assembly, but the agent is instructed to STOP gathering and emit a
-    /// terminal `task_complete` answer synthesized from the observations
-    /// already in `ctx.plans_so_far`. The inner loop calls this for the
-    /// single fallback turn it spends when the plan-iteration cap is reached
-    /// with observations in hand (see [`super::inner_loop::run_to_terminal`]).
-    ///
-    /// The default delegates to `formulate_plan` so scripted test doubles —
-    /// which return plans by call order and ignore `ctx` — need no special
-    /// handling; the production [`RouterAgent`] overrides it to inject the
-    /// synthesis directive into the user message.
-    async fn formulate_synthesis(
-        &self,
-        ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        self.formulate_plan(ctx).await
-    }
-
-    /// A cheaper second attempt at the forced-synthesis turn, for when the
-    /// first one ran out of time (#774): the same synthesis request with the
-    /// model's thinking suppressed.
-    ///
-    /// `None` means "no cheaper attempt exists" — the inner loop then fails
-    /// the task as before. That is the default, so scripted test doubles
-    /// need nothing, and it is also the production answer when thinking is
-    /// **already** suppressed by config: resending the identical request
-    /// would only spend a second timeout.
-    async fn formulate_synthesis_without_thinking(
-        &self,
-        _ctx: &TaskContext,
-    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
-        None
-    }
-
-    /// The #945 re-ask: the same turn (`synth_turn` picks which), with the
-    /// model's non-plan `reply` and a request for the plan appended. `None`
-    /// means "no re-ask exists" — the default, so scripted test doubles need
-    /// nothing, and the loop then fails the task as before.
-    async fn formulate_reformat(
-        &self,
-        _ctx: &TaskContext,
-        _synth_turn: bool,
-        _reply: &str,
-    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
-        None
-    }
-
-    /// The notebook loop's door (#922), when this formulator runs in
-    /// notebook mode (the daemon's default since #922 slice 4). `None`
-    /// runs the task on the classic loop (`KASTELLAN_PLANNER_MODE=classic`,
-    /// and every formulator that does not override this).
-    fn notebook(&self) -> Option<&dyn super::notebook::formulator::NotebookFormulator> {
-        None
-    }
-}
-
-/// Appended to the agent's user message on the forced-synthesis turn. Tells
-/// the model to answer from what it already gathered rather than issue
-/// another tool call — the last chance to produce a best-effort answer
-/// before the inner loop fails at the plan-iteration cap.
-const SYNTHESIS_DIRECTIVE: &str = "You have reached your tool-step budget for \
-this task. Do NOT plan any more tool steps. Using ONLY the observations \
-already gathered in `plans_so_far`, emit a terminal plan now: `decision` \
-exactly \"task_complete\", `steps` [], and `result.body` = your best-effort \
-final answer synthesized from what you already have. If the gathered \
-information is incomplete, still emit task_complete and give the best answer \
-you can, briefly noting what remains uncertain. Do not issue another search \
-or tool call.";
-
-/// How much of a failed completion to put in the decode-failure
-/// `debug!` line. Enough to see whether the model emitted prose, a
-/// truncated object, or nothing at all — while keeping one bad plan
-/// from dominating the log. `debug!`, not `warn!`, because the text is
-/// user data; see the call site. The full text is still on
-/// `AgentError::Decode`.
-const RAW_HEAD_CHARS: usize = 600;
-
 /// Production adapter: calls the real `Router::send`.
 pub struct RouterAgent {
     pub(crate) router: std::sync::Arc<Router>,
@@ -187,10 +98,10 @@ pub struct RouterAgent {
     prompt_builder: std::sync::Arc<dyn crate::prompt_assembly::SystemPromptBuilder>,
     recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
     entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
-    /// Set in notebook mode (#922): the advertised tools, for the current
-    /// step's tool doc. `None` = the classic loop.
+    /// The advertised tools, for the current step's tool doc (#922), set by
+    /// `with_notebook`. `None` (a bare `new`, as tests build it): no tool docs.
     pub(crate) notebook_tools: Option<std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>>,
-    /// The operator's sift knobs (#922), set with the notebook mode.
+    /// The operator's sift knobs (#922), set by `with_notebook`.
     pub(crate) sift_cfg: super::notebook::sift::config::SiftConfig,
 }
 
@@ -214,132 +125,12 @@ impl RouterAgent {
     }
 }
 
-#[async_trait]
-impl PlanFormulator for RouterAgent {
-    async fn formulate_plan(
-        &self,
-        ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        self.formulate_inner(ctx, false, ThinkingPolicy::RouterDefault, None).await
-    }
-
-    async fn formulate_synthesis(
-        &self,
-        ctx: &TaskContext,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        self.formulate_inner(ctx, true, ThinkingPolicy::RouterDefault, None).await
-    }
-
-    async fn formulate_synthesis_without_thinking(
-        &self,
-        ctx: &TaskContext,
-    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
-        // Config already suppresses thinking: the retry would be the same
-        // request again. Whether suppression WORKS on this backend is the
-        // dialect's business (`KASTELLAN_LLM_THINKING_SWITCH`, #773) — a
-        // wrong dialect makes this retry think too, and the router's
-        // thinking-leak warning is what says so.
-        if self.router.config().disable_thinking {
-            return None;
-        }
-        Some(self.formulate_inner(ctx, true, ThinkingPolicy::Suppress, None).await)
-    }
-
-    async fn formulate_reformat(
-        &self,
-        ctx: &TaskContext,
-        synth_turn: bool,
-        reply: &str,
-    ) -> Option<Result<(Plan, FormulationMeta), AgentError>> {
-        // Thinking off: the answer is already written and only needs its
-        // shape (a thinking planner turn measured 222 s against 51 s without
-        // on the DGX, 2026-08).
-        Some(self.formulate_inner(ctx, synth_turn, ThinkingPolicy::Suppress, Some(reply)).await)
-    }
-
-    fn notebook(&self) -> Option<&dyn super::notebook::formulator::NotebookFormulator> {
-        self.notebook_tools.as_ref().map(|_| self as &dyn super::notebook::formulator::NotebookFormulator)
-    }
-}
-
 impl RouterAgent {
-    /// Shared assembly for every [`PlanFormulator`] door: a planning turn,
-    /// the synthesis turn, the timed-out synthesis retry and the re-ask.
-    /// `synthesize` selects whether the [`SYNTHESIS_DIRECTIVE`] is appended
-    /// to the user message — the only difference between a normal planning
-    /// turn and the forced-synthesis
-    /// turn (identical system prompt, recall, entity seeds, and audit meta).
-    /// `thinking` is passed through to the router unchanged; only the
-    /// timed-out synthesis retry and the re-ask set it to anything but the
-    /// default. `prior_reply` is the re-ask's: the reply that was not a plan,
-    /// appended with [`context::reformat_messages`].
-    async fn formulate_inner(
-        &self,
-        ctx: &TaskContext,
-        synthesize: bool,
-        thinking: ThinkingPolicy,
-        prior_reply: Option<&str>,
-    ) -> Result<(Plan, FormulationMeta), AgentError> {
-        let prior = prior_reply.map(context::reformat_messages);
-        let (raw, meta) = self
-            .send_turn("agent_planner", ctx, |now| serialise_context_for_agent(ctx, synthesize, now), prior, thinking)
-            .await?;
-        let (usage, latency_ms) = (meta.usage.clone(), meta.latency_ms);
-
-        // Tolerant of markdown-fenced JSON (```json … ```) and short
-        // model preambles before the JSON body. See
-        // `super::plan_parser::parse_plan_lenient` for the contract.
-        let plan: Plan = parse_plan_lenient(&raw).map_err(|e| {
-            // `AgentError::Decode` carries `raw`, but its `#[error(...)]`
-            // Display renders only `detail` — so without this the model
-            // output that actually failed to decode reaches nobody, and
-            // the operator cannot tell an EMPTY completion (a reasoning
-            // model that spent its whole budget thinking) from a merely
-            // non-JSON one. Both render as the same
-            // `expected value at line 1 column 1`.
-            tracing::warn!(
-                detail = %e,
-                raw_len = raw.len(),
-                has_brace = raw.contains('{'),
-                finish_reason = ?usage.finish_reason,
-                prompt_tokens = ?usage.prompt_tokens,
-                completion_tokens = ?usage.completion_tokens,
-                reasoning_chars = usage.reasoning_chars,
-                "plan decode failed"
-            );
-            // The model's own words are held at `debug!` on purpose. A
-            // planner completion restates recalled memories and prior
-            // step output verbatim — on the mail tasks this arc exists
-            // for, that is the user's correspondence — and the daemon
-            // log (`~/.local/state/kastellan/*.out`) is a plaintext file
-            // with none of the access control the `audit_log` table has.
-            // The `warn!` above already carries what actually broke the
-            // case open: `detail` now names the real error (the parser
-            // no longer masks it), and `raw_len`/`has_brace`/
-            // `finish_reason` separate an EMPTY completion from a merely
-            // non-JSON one. Raise the level only when those are not
-            // enough. Full fidelity stays on `AgentError::Decode.raw`.
-            tracing::debug!(
-                raw_head = %raw.chars().take(RAW_HEAD_CHARS).collect::<String>(),
-                "head of the raw model output that failed to decode"
-            );
-            AgentError::Decode {
-                detail: e.to_string(),
-                raw: raw.clone(),
-                usage: usage.clone(),
-                latency_ms,
-            }
-        })?;
-
-        Ok((plan, meta))
-    }
-
-    /// One planner request, for either loop: entity seeds, recall, the
-    /// assembled system prompt for `prompt_name`, the user message
-    /// `user_msg(now)` builds, then `prior` (a re-ask's two messages), sent
-    /// with both #941 bounds. Returns the raw reply and its cost; the caller
-    /// parses it. The classic loop's request bytes are unchanged by the split
-    /// (the notebook loop, #922, is the second caller).
+    /// One planner request: entity seeds, recall, the assembled system
+    /// prompt for `prompt_name`, the user message `user_msg(now)` builds,
+    /// then `prior` (a re-ask's two messages), sent with both #941 bounds.
+    /// Returns the raw reply and its cost; the caller (the notebook loop's
+    /// [`super::notebook::formulator::NotebookFormulator`] door) parses it.
     pub(crate) async fn send_turn(
         &self,
         prompt_name: &str,
@@ -483,12 +274,8 @@ impl RouterAgent {
     }
 }
 
-mod context;
 mod meta;
 pub use meta::FormulationMeta;
-use context::serialise_context_for_agent;
-#[cfg(test)]
-use context::{reformat_messages, REFORMAT_DIRECTIVE};
 
 #[cfg(test)]
 mod tests;

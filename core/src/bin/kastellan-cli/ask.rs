@@ -4,8 +4,7 @@
 //!
 //! While it runs, each notebook entry but the answer and a cancel is printed
 //! to stderr as one short line (#985, [`progress`]); stdout carries only the
-//! answer. A classic-mode task has no notebook, so
-//! it prints nothing new.
+//! answer.
 //!
 //! A task can also stop short of any terminal state: CASSANDRA escalates
 //! its plan, an operator ask is raised, and the task parks in

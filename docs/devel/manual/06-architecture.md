@@ -134,26 +134,24 @@ answer from what it has.
 has expired to `crashed` and writes a `task.crashed` audit row for each. A
 crashed task is not silently retried.
 
-### Classic and notebook planner modes
+### The planner loop: the task notebook
 
-`KASTELLAN_PLANNER_MODE` selects one loop for the whole daemon:
+The planner keeps its own working memory in a per-task notebook
+(`task_notebook` table): it writes a step list, works one step per turn, and
+ticks each step off with the facts it found. A `sift` step runs one read over
+every item in a list and keeps the matches. (The older `classic` loop, which
+re-read a growing history of its plans every turn, retired in #993;
+`KASTELLAN_PLANNER_MODE=classic` stops the daemon at boot.)
 
-- **`classic`** (opt-in, until it retires) — the planner re-reads a growing
-  history of its plans and their results every turn.
-- **`notebook`** (the default) — the planner keeps its own working memory in a
-  per-task notebook (`task_notebook` table): it writes a step list, works one
-  step per turn, and ticks each step off with the facts it found. A `sift`
-  step runs one read over every item in a list and keeps the matches.
-
-Both modes send every call through the **same** review-and-dispatch code
+Every call goes through one review-and-dispatch path
 (`scheduler/inner_loop/execute.rs`), so CASSANDRA, the audit rows and the
-dispatcher chokepoint apply identically. Any other value stops the daemon at
-boot. See [chapter 15](./15-planner.md) for the planner in depth.
+dispatcher chokepoint apply to every step. See [chapter 15](./15-planner.md)
+for the planner in depth.
 
 ### What the planner sees of a result
 
-Three mechanisms keep tool results useful without letting them swamp the
-prompt:
+Two mechanisms keep tool results useful without letting them swamp the
+prompt (and the notebook shows only the last call's result each turn):
 
 - **`result_view`** (`scheduler/inner_loop/result_view.rs`) — prunes a JSON
   result to size while keeping its structure: object keys, numbers and
@@ -165,10 +163,6 @@ prompt:
   placeholder carrying a screened 1 KiB head. The planner pulls slices back
   with the `handoff.fetch` built-in. The cache is purged when the task ends
   and does not survive a daemon restart.
-- **The summary budget** (`scheduler/inner_loop/summary/budget.rs`) — the
-  classic planner's accumulated plan summary is capped at 96 KiB. Over budget,
-  every output first gets an even share and is re-rendered smaller; only when
-  a share would drop below 2 KiB are the oldest outputs dropped whole.
 
 ---
 
