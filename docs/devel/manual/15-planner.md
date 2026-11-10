@@ -4,9 +4,11 @@ The scheduler turns a queued task into an answer. It claims the task from
 Postgres, asks the model for a plan, sends every step of that plan through
 the CASSANDRA review chain and the `tool_host` dispatcher, shows the model
 what came back, and repeats until the model answers, gives up, or a cap
-stops it. Two loops do this today: the **classic** loop, which re-reads a
-growing plan history every turn, and the **notebook** loop, which keeps
-the planner's working memory in Postgres and works one step per turn.
+stops it. One loop does this: the **notebook** loop, which keeps the
+planner's working memory in Postgres and works one step per turn. (The
+older **classic** loop, which re-read a growing plan history every turn,
+retired in #993; `KASTELLAN_PLANNER_MODE=classic` now stops the daemon at
+boot.)
 
 > **Design sources.** `docs/superpowers/specs/2026-05-10-scheduler-design.md`
 > (lanes, queue, audit rows) and
@@ -22,19 +24,19 @@ the planner's working memory in Postgres and works one step per turn.
 core/src/scheduler/
   mod.rs               spawn_scheduler, re-exports
   runner.rs            per-lane loop: LISTEN, claim, drain, finalize
-  runner/task_exec.rs  run_one: build TaskContext, pick the loop, purge caches
+  runner/task_exec.rs  run_one: build TaskContext, run the loop, purge caches
   runner/audit_rows.rs task.<state>, task.finalize, l1/l3 crystallisation rows
   crash_recovery.rs    startup sweep -> task.crashed rows
-  agent.rs, agent/     PlanFormulator trait + RouterAgent (the LLM adapter)
-  plan_parser.rs       lenient JSON -> Plan (tolerates a ```json fence)
+  agent.rs, agent/     RouterAgent (the LLM adapter: send_turn) + AgentError
+  plan_parser.rs       lenient JSON reply parse (tolerates a ```json fence)
   prompts.rs           load prompts/*.md into PromptCache + agent_prompts ledger
-  inner_loop.rs        TaskContext, Outcome, StepDispatcher, run_to_terminal (classic)
+  inner_loop.rs        TaskContext, Outcome, StepDispatcher
   inner_loop/
-    execute.rs         review_and_dispatch: shared by BOTH loops
-    llm_failure.rs     what to do when a planning call fails (retry/synthesis)
+    execute.rs         review_and_dispatch: every plan, call and sift read
+    llm_failure.rs     the decisions when a planning call fails (retry/forced answer)
     ceiling.rs         plan cap + fast-lane wall-clock ceiling
     result_view.rs     the planner's pruned, labelled view of one tool result
-    summary.rs, summary/  plans_so_far rendering, screening, size budget
+    summary.rs, summary/  a recorded call's screened render (PlanRecord)
   inner_loop_audit.rs  plan.formulate / plan.outcome / verdict audit rows
   tool_dispatch.rs     production StepDispatcher over tool_host::dispatch
   asks/                operator-ask (escalation) raise, deliver, resume
@@ -42,7 +44,7 @@ core/src/scheduler/
   notebook/            the notebook loop (see below)
     sift/              the `sift` built-in and the scrapbook
 core/src/handoff.rs    per-task cache for oversized tool results
-prompts/               agent_planner.md, agent_notebook.md, sift_sorter.md
+prompts/               agent_notebook.md, sift_sorter.md
 ```
 
 ---
@@ -75,57 +77,34 @@ Channel messages always land on the fast lane; `kastellan-cli ask` takes
 
 ---
 
-## The classic loop (`inner_loop::run_to_terminal`)
+## Review and dispatch (`inner_loop::execute`)
 
-Per iteration:
-
-1. **Cancellation poll** — `kastellan-cli tasks cancel <id>` takes effect here,
-   between plans.
-2. **Cap / ceiling check.** If the cap or the fast-lane ceiling is spent *and*
-   at least one tool call succeeded, spend **one forced-synthesis turn**:
-   the model is told to stop gathering and answer from what it has. With
-   nothing gathered the task fails with `plan_iteration_cap_exceeded`.
-3. **Formulate** a `Plan` (`decision`, `rationale`, `steps`, `result`,
-   `data_ceiling`, `refused`, `floor_request`, `l1_insight`, …).
-   `plan_parser` tries strict JSON first, then the first complete JSON
-   value after the first `{`. Failures are handled in `llm_failure.rs`,
-   with **at most one retry per turn**:
-   - an empty completion is asked again once;
-   - a reply that is not a plan is shown back once with a request for the
-     plan, thinking suppressed (`formulate_reformat`);
-   - a request timeout (or a reply cut off at `max_tokens`) after something
-     was gathered jumps to the forced-synthesis turn; a timed-out synthesis
-     turn is retried once without thinking;
-   - anything else fails the task as `llm: <error>`. There is no general
-     retry: **replanning is the retry** — the model sees the failure next turn.
-4. **Review and dispatch** (`execute::review_and_dispatch`). The plan goes
-   through `ChainReviewStage` (chapter 11), then each step through the
-   `StepDispatcher`. A plan may request at most `MAX_STEPS_PER_PLAN = 64`
-   dispatches. Omitted method namespaces are completed against the
-   registry *before* review, so review, audit and dispatch all see the name
-   that goes on the wire. A `Verdict::Escalate` raises an operator ask and
-   returns the non-terminal `Outcome::AwaitingOperator` (see
-   [chapter 16](./16-channels.md#operator-asks-escalation)).
-5. **Terminal plan** (`decision = "task_complete"`) → `Outcome::Completed`;
-   a self-declared refusal → `Refused`; a reviewer block → `Blocked`.
+Every `call` the model makes becomes a one-step `Plan` and goes through
+`execute::review_and_dispatch`: the floor raise, the ceiling resolution,
+the `plan.formulate` audit row, `invoke_skill` expansion, then
+`ChainReviewStage` (chapter 11) and each step through the `StepDispatcher`.
+A plan may request at most `MAX_STEPS_PER_PLAN = 64` dispatches. Omitted
+method namespaces are completed against the registry *before* review, so
+review, audit and dispatch all see the name that goes on the wire. A
+`Verdict::Escalate` raises an operator ask and returns the non-terminal
+`Outcome::AwaitingOperator` (see
+[chapter 16](./16-channels.md#operator-asks-escalation)). An answer is a
+terminal plan → `Outcome::Completed`; a self-declared refusal → `Refused`;
+a reviewer block → `Blocked`.
 
 ### What the model sees of a result
 
-`TaskContext::plans_so_far_summary` renders each earlier plan as
-`{"decision", "step_outcomes"}`, each outcome carrying the `call` that made it
-(tool, method, parameters) and one of four shapes: `ok` + `output`, `ok` +
-`withheld`, `ok` + `elided`, or `err` + `code` + clamped `detail`.
+`PlanRecord::last_result_view` renders the last call's outcomes, each
+carrying the `call` that made it (tool, method, parameters) and one of three
+shapes: `ok` + `output`, `ok` + `withheld`, or `err` + `code` + clamped
+`detail`.
 
 - **`result_view.rs`** keeps the result's *structure*: identifier-shaped keys,
   numbers and booleans survive; strings are trimmed to one "water level"
   found by binary search; an identifier-like string (no whitespace, ≤ 1 KiB —
   ids, URLs, paths) is shown whole or not at all. One successful step's view
   is capped at 16 KiB (`STEP_OK_SUMMARY_MAX`).
-- **`summary/budget.rs`** keeps the whole summary under 96 KiB by
-  **water-filling**: every output gets an even share, small ones stay whole and
-  their slack goes to the large ones, and only when a share would fall below
-  2 KiB are the oldest outputs dropped whole (their `call` stays).
-- Every view, decision and call is screened by the injection guard before it
+- Every view and call is screened by the injection guard before it
   re-enters a prompt; a block becomes `"[withheld: failed injection screen]"`.
   View *keys* use markers a worker cannot spell.
 - **The handoff cache** (`core/src/handoff.rs`): a result over 64 KiB is
@@ -139,9 +118,9 @@ Per iteration:
 
 ## The notebook loop (`notebook::run::run_notebook_to_terminal`)
 
-On a busy mail question the classic summary filled most of a 64k-token
-context and every turn re-read it. The notebook replaces the growing prompt
-with external working memory:
+On a busy mail question the classic loop's plan summary filled most of a
+64k-token context and every turn re-read it. The notebook replaces the
+growing prompt with external working memory:
 
 - **Turn 1** writes a step list. Every later turn sees only the goal (and
   conversation), the step list with each step's status and tick note, the
@@ -153,13 +132,15 @@ with external working memory:
   source, new summary) and `steps` (a replan), plus exactly one of `call`,
   `answer` or `infeasible`. A tick and the next call share one reply, so a
   step costs one LLM call.
-- **Every `call` becomes a one-step `Plan`** and goes through the same
-  `execute::review_and_dispatch` as a classic plan — no review is skipped. A
+- **Every `call` becomes a one-step `Plan`** and goes through
+  `execute::review_and_dispatch` (above) — no review is skipped. A
   refused or failed call becomes a `failed_step` entry and the next turn
   replans.
 - **One cap for every turn**: `max_plans × NOTEBOOK_TURNS_PER_PLAN` (2),
-  planning and replan turns included, plus the fast-lane ceiling and the
-  same single forced-answer turn.
+  planning and replan turns included, plus the fast-lane ceiling. Once the
+  cap or the ceiling is spent and something was gathered, **one
+  forced-answer turn** asks the model to answer from what it has; with
+  nothing gathered the task fails with `plan_iteration_cap_exceeded`.
 - **Repeats are not re-dispatched** (`repeat.rs`): a call identical to one
   that already succeeded (scalars compared as text) is set aside with a
   `plan.discarded` row and the model is told why.
@@ -200,7 +181,7 @@ nothing; a new one resumes with `after_seq`.
 ### `sift` and the scrapbook
 
 `sift` (tool `sift`, method `sift.run`; the name is reserved in
-`registry_build`) is a **core built-in available in notebook mode only**. One
+`registry_build`) is a **core built-in**. One
 call applies one criterion to every item of a candidate list: its reads are
 **one reviewed plan** (read-only methods only, capped), each item goes to a
 small "sorter" LLM call (`prompts/sift_sorter.md`, through `llm-router`), and
@@ -216,21 +197,20 @@ scrapbook only if that turn is in its conversation window.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `KASTELLAN_PLANNER_MODE` | `notebook` | `notebook` or `classic`, per daemon (every lane and channel task). Any other value stops the daemon at boot. |
+| `KASTELLAN_PLANNER_MODE` | `notebook` | Only `notebook` (or unset). `classic` — the retired loop (#993) — or any other value stops the daemon at boot. |
 | `KASTELLAN_SIFT_MAX_READS` | `64` | Most reads (and items) one sift takes. Must be > 0. |
 | `KASTELLAN_SIFT_READ_METHODS` | `mail.get_message,mail.get_attachment_text,handoff.fetch` | Methods a sift may read with. An unadvertised method, a sift or a skill stops the daemon at boot. |
 | `KASTELLAN_PROMPTS_DIR` | `prompts` (relative to CWD) | Where prompt files are loaded from; the installer sets it to `~/.local/share/kastellan/prompts`. |
 | `KASTELLAN_TIMEZONE` | host zone | IANA zone for the trusted `now` field in the prompt. |
 
-The sift knobs are read only in notebook mode. Model-side knobs
+Model-side knobs
 (`KASTELLAN_LLM_*`) are in [chapter 13](./13-llm-router.md).
 
 ---
 
 ## Prompts
 
-`prompts/agent_planner.md` (classic), `prompts/agent_notebook.md` (notebook)
-and `prompts/sift_sorter.md` are loaded once at boot by
+`prompts/agent_notebook.md` and `prompts/sift_sorter.md` are loaded once at boot by
 `prompts::load_prompts_from_dir`: each `.md` file is hashed and upserted into
 `agent_prompts` (append-only, so every version ever used stays on record),
 and every `plan.formulate` audit row carries the `prompt_sha256` it ran with.
@@ -243,8 +223,8 @@ prompt-only change on a deployed host, copy the file there and restart
 sha256. The next install puts the repo's version back, so commit what works.
 
 The user message is ordered **stable-first** for the backend's prompt cache:
-the system prompt, then what is fixed for the task, then the notebook (or
-summary), then what changes every turn, and `now` last. Keep that order when
+the system prompt, then what is fixed for the task, then the notebook,
+then what changes every turn, and `now` last. Keep that order when
 you add a field.
 
 ---
@@ -256,8 +236,8 @@ you add a field.
   copies the example. `NotebookReply` uses `deny_unknown_fields`, so any key
   you add to the render must also be accepted (and ignored) in the reply —
   see the `echoed_*` fields in `notebook/state.rs`.
-- **Both loops share `execute::review_and_dispatch`.** Never give the
-  notebook (or a sift) its own dispatch path.
+- **Every call, answer and sift read goes through `execute::review_and_dispatch`.**
+  Never give the notebook (or a sift) its own dispatch path.
 - **The plan cap bounds injection,** not just cost: an injected planner can
   loop on cheap plans. Don't remove it because the time ceiling binds first.
 - **`Outcome::final_state` returns `Option`.** `AwaitingOperator` is not
@@ -266,7 +246,7 @@ you add a field.
   them.** A new notebook `kind` is a new migration; the fold refuses kinds it
   does not know.
 - Prompt-pinning tests fail if a prompt stops documenting what the code
-  emits or accepts: `the_planner_prompts_document_every_outcome_shape` and
+  emits or accepts: `the_planner_prompt_documents_every_outcome_shape` and
   `the_notebook_prompt_documents_every_reply_key`. Change prompt and code
   together.
 
@@ -276,7 +256,6 @@ you add a field.
 
 ```sh
 cargo test -p kastellan-core scheduler::                     # unit tests (most need no Postgres)
-cargo test -p kastellan-core --test scheduler_inner_loop_e2e # classic loop on a real cluster
 cargo test -p kastellan-core --test scheduler_lanes_e2e
 cargo test -p kastellan-core --test scheduler_crash_recovery_e2e
 cargo test -p kastellan-db --test notebook_e2e --test scrapbook_e2e
@@ -304,11 +283,11 @@ questions, asked one at a time with
 - **Prompt wording** → `prompts/*.md`, then the pinning tests above, then a
   measured run.
 - **What a result looks like to the planner** → `inner_loop/result_view.rs`
-  and `inner_loop/summary/` (classic), `notebook/render.rs` (notebook).
+  and `inner_loop/summary/`, `notebook/render.rs`.
 - **Reply shape** → `notebook/reply.rs` + `notebook/state.rs`; mind the
   mirroring trap.
-- **Retry/recovery after a failed model call** → `inner_loop/llm_failure.rs`
-  (the notebook reuses its decisions via `notebook/ask.rs`).
+- **Retry/recovery after a failed model call** → `notebook/ask.rs` (the
+  shell) and `inner_loop/llm_failure.rs` (its decisions).
 - **Caps and ceilings** → `inner_loop/ceiling.rs`, `db/src/tasks.rs`
   defaults, `notebook/run.rs::turn_cap`.
 - **A new built-in like `sift` or `handoff`** → reserve its name in

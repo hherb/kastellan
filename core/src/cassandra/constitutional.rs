@@ -48,7 +48,7 @@
 /// Screen an instruction for unambiguous principle violations.
 ///
 /// Returns `Some((principle, reason))` when a hit fires, where
-/// `principle` is the 1..=5 index from `prompts/agent_planner.md` and
+/// `principle` is the 1..=5 index from `prompts/agent_notebook.md` and
 /// `reason` is a `snake_case` tag that round-trips into the
 /// `cassandra:chain/verdict` audit-row payload as the structured
 /// operator-visible signal. Returns `None` when no rule fires (the

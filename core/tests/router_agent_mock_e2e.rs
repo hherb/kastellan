@@ -1,23 +1,17 @@
 //! End-to-end test for the scheduler's `RouterAgent` against a
 //! hand-rolled mock HTTP backend.
 //!
-//! `RouterAgent::formulate_plan` is the only production path that
-//! turns a `TaskContext` into a `Plan`. Every other test in the
-//! scheduler suite swaps it out for a `ScriptedFormulator`, so this
-//! file is what pins:
+//! `RouterAgent::notebook_turn` is the only production path that turns a
+//! `TaskContext` into a planner request. Every other scheduler test swaps it
+//! out for a scripted double, so this file is what pins:
 //!
-//! 1. **Happy path** — backend returns a `choices[0].message.content`
-//!    that is a valid `Plan` JSON; `formulate_plan` returns
-//!    `Ok((plan, meta))` and `FormulationMeta` carries the prompt
-//!    name + sha256 the inner-loop audit row needs.
-//! 2. **Decode error** — backend returns a `choices[0].message.content`
-//!    that is *not* valid JSON; `formulate_plan` returns
-//!    `Err(AgentError::Decode { detail, raw, usage, .. })`, `usage` being
-//!    the failed completion's own `CompletionStats`. A silent default or
-//!    panic here would corrupt the audit trail and let bad plans
-//!    propagate.
+//! 1. **Happy path** — the reply text comes back verbatim, and
+//!    `FormulationMeta` carries the prompt name + sha256, the model and the
+//!    seeds the `plan.formulate` audit row needs.
+//! 2. **The re-ask** — the refused reply and the reason go on the wire after
+//!    the turn, with thinking suppressed.
 //! 3. **Missing prompt** — the in-memory `PromptCache` does not have
-//!    `agent_planner` loaded; `formulate_plan` returns
+//!    `agent_notebook` loaded; the turn returns
 //!    `Err(AgentError::PromptMissing)` without dialing the backend.
 //!
 //! Mock-server style matches `llm-router/tests/local_backend_e2e.rs`:
@@ -43,7 +37,7 @@ use kastellan_core::prompt_assembly::StaticSystemPromptBuilder;
 use kastellan_core::recall_assembly::{
     RecallBuilder, RecallError, RecalledContext, StaticRecallBuilder,
 };
-use kastellan_core::scheduler::agent::{AgentError, PlanFormulator, RouterAgent};
+use kastellan_core::scheduler::agent::{AgentError, RouterAgent};
 use kastellan_core::scheduler::inner_loop::TaskContext;
 use kastellan_core::scheduler::notebook::formulator::{NotebookFormulator, NOTEBOOK_PROMPT};
 use kastellan_core::scheduler::prompts::{PromptCache, PromptEntry};
@@ -92,7 +86,7 @@ const MOCK_MAX_REQUEST_BYTES: usize = 1 << 20;
 /// Returns the base URL, a oneshot that fires when the request body
 /// has been served, and the spawned task's `JoinHandle`. The handle
 /// matters for the "never-dialed" assertion in
-/// `prompt_missing_short_circuits_before_dialing_backend`: that test
+/// `a_notebook_turn_with_no_prompt_never_dials_the_backend`: that test
 /// must `abort()` the handle so the still-pending `accept().await`
 /// does not leak past the test boundary. Tests that *expect* the mock
 /// to serve a request can let the handle drop — the task exits
@@ -211,16 +205,6 @@ const PLANNER_PROMPT_CONTENT: &str = "you are a planner; emit a Plan JSON";
 const PLANNER_PROMPT_SHA: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn prompts_with_agent_planner() -> Arc<PromptCache> {
-    Arc::new(PromptCache::new_for_test(vec![(
-        "agent_planner".into(),
-        PromptEntry {
-            sha256: PLANNER_PROMPT_SHA.into(),
-            content: PLANNER_PROMPT_CONTENT.into(),
-        },
-    )]))
-}
-
 fn empty_prompts() -> Arc<PromptCache> {
     Arc::new(PromptCache::new_for_test(vec![]))
 }
@@ -270,7 +254,7 @@ fn envelope_for(plan_json_string: &str) -> String {
 type CapturedCall = Arc<std::sync::Mutex<Option<(String, Vec<i64>)>>>;
 
 /// A [`RecallBuilder`] that records the `(query, seeds)` it was called
-/// with so a test can assert what `RouterAgent::formulate_plan` passed
+/// with so a test can assert what `RouterAgent::notebook_turn` passed
 /// into [`RecallBuilder::build_with_seeds`].
 ///
 /// The production [`StaticRecallBuilder`] deliberately *discards* its
@@ -282,7 +266,7 @@ type CapturedCall = Arc<std::sync::Mutex<Option<(String, Vec<i64>)>>>;
 struct CapturingRecallBuilder {
     /// `Some((query, seeds))` after the first `build_with_seeds` call.
     /// `Arc<Mutex<_>>` so the test holds a clone and can read what the
-    /// agent passed once `formulate_plan` returns.
+    /// agent passed once `notebook_turn` returns.
     captured: CapturedCall,
 }
 
@@ -300,357 +284,7 @@ impl RecallBuilder for CapturingRecallBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn happy_path_decodes_plan_and_populates_meta() {
-    // The agent emits a valid Plan as its assistant-message content.
-    let plan_json = serde_json::json!({
-        "context":    "ping handler",
-        "decision":   "task_complete",
-        "rationale":  "trivial",
-        "steps":      [],
-        "result":     {"kind": "text", "body": "pong"},
-        "data_ceiling": "Public",
-    })
-    .to_string();
-
-    let (base_url, served_rx, _mock_join) =
-        spawn_one_shot_mock(CannedResponse::ok_json(envelope_for(&plan_json))).await;
-
-    let router = router_pointing_at(&base_url);
-    let prompts = prompts_with_agent_planner();
-    // StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT): no L0/L1 added,
-    // but the cached base prompt flows to the wire verbatim.
-    let agent = RouterAgent::new(
-        router,
-        prompts,
-        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
-        Arc::new(StaticRecallBuilder::empty()),
-        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
-    );
-
-    let (plan, meta) = agent.formulate_plan(&ctx()).await.expect("happy path");
-
-    // Plan decode round-trip — the terminal flag is checked structurally,
-    // so all three conditions must survive.
-    assert!(plan.is_terminal(), "plan should be terminal: {plan:?}");
-    assert_eq!(plan.decision, "task_complete");
-    assert_eq!(
-        plan.result.as_ref().and_then(|v| v.get("body")).and_then(|v| v.as_str()),
-        Some("pong"),
-    );
-
-    // FormulationMeta carries the prompt-traceability fields the inner
-    // loop writes into the `plan.formulate` audit-log payload. A
-    // regression on any of these breaks CASSANDRA correlation.
-    assert_eq!(meta.prompt_name, "agent_planner");
-    assert_eq!(meta.prompt_sha256, PLANNER_PROMPT_SHA);
-    assert_eq!(meta.llm_model, "test-local-model");
-    assert_eq!(meta.llm_backend, "local");
-    assert_eq!(meta.retry_count, 0);
-    // latency is non-deterministic; allow zero (sub-millisecond on fast
-    // hosts), but a value above the router timeout would mean the agent
-    // measured something unrelated to this call.
-    assert!(
-        meta.latency_ms < 60_000,
-        "latency_ms wildly out of range: {}",
-        meta.latency_ms
-    );
-
-    // Recall fields (slice D 2026-05-17): StaticRecallBuilder::empty()
-    // returns no rows + the canonical SHA-256 of the empty string.
-    assert!(meta.recalled_memory_ids.is_empty(),
-        "StaticRecallBuilder::empty() → no recalled ids; got {:?}", meta.recalled_memory_ids);
-    assert_eq!(meta.recall_count, 0,
-        "StaticRecallBuilder::empty() → recall_count 0; got {}", meta.recall_count);
-    assert_eq!(meta.recall_query_sha256.len(), 64,
-        "recall_query_sha256 must always be 64 hex chars; got len {}", meta.recall_query_sha256.len());
-
-    // The system prompt sent on the wire was the cached prompt content
-    // verbatim — pin via the served body. (We don't pin the full
-    // request shape because that's `local_backend_e2e.rs`'s job.)
-    let served = served_rx.await.expect("mock served the request");
-    assert!(
-        served.body.contains(PLANNER_PROMPT_CONTENT),
-        "system prompt missing from wire: {}",
-        served.body
-    );
-    // #941: every planner call caps its reply.
-    assert!(served.body.contains("\"max_tokens\":16384"), "max_tokens missing from wire: {}", served.body);
-}
-
-/// Pins the graph-lane production wiring: the entity extractor's seed
-/// ids flow through `formulate_plan` into **both**
-/// [`RecallBuilder::build_with_seeds`] (so the recall graph lane is
-/// actually seeded) and [`FormulationMeta`]'s `graph_seed_*` fields (so
-/// the `plan.formulate` audit row records what seeded the lane).
-///
-/// Every other `RouterAgent` test wires `NoOpEntityExtractor` (seeds =
-/// `[]`), so without this test a refactor could silently drop
-/// `&seeds.ids` from the recall call or the meta and every
-/// RouterAgent-layer test would stay green. This is regression coverage
-/// of behaviour that already ships (the wiring landed in the 2026-05-19
-/// entity-extraction-v2 / "Slice F" arc); its value was confirmed by
-/// mutation — replacing the seed argument with `&[]` in
-/// `agent.rs::formulate_plan` turns assertion (1) RED.
-#[tokio::test]
-async fn formulate_plan_threads_extracted_seeds_into_recall_and_meta() {
-    // Same terminal plan as the happy path — the plan content is
-    // irrelevant here; we only exercise the seed thread.
-    let plan_json = serde_json::json!({
-        "context":    "ping handler",
-        "decision":   "task_complete",
-        "rationale":  "trivial",
-        "steps":      [],
-        "result":     {"kind": "text", "body": "pong"},
-        "data_ceiling": "Public",
-    })
-    .to_string();
-
-    let (base_url, served_rx, _mock_join) =
-        spawn_one_shot_mock(CannedResponse::ok_json(envelope_for(&plan_json))).await;
-
-    let router = router_pointing_at(&base_url);
-    let prompts = prompts_with_agent_planner();
-
-    // Capturing recall builder: record the seeds the agent passes in.
-    let recall = CapturingRecallBuilder::default();
-    let captured = recall.captured.clone();
-
-    // Seed-producing extractor: three ids, SeedSource::GlinerRelex,
-    // model_version "test" (see StaticEntityExtractor::with_ids).
-    let seed_ids = vec![101_i64, 202, 303];
-    let extractor = StaticEntityExtractor::with_ids(seed_ids.clone());
-
-    let agent = RouterAgent::new(
-        router,
-        prompts,
-        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
-        Arc::new(recall),
-        Arc::new(extractor),
-    );
-
-    let task = ctx();
-    let (_plan, meta) = agent.formulate_plan(&task).await.expect("happy path");
-
-    // (1) The extracted seeds reached the recall builder verbatim, with
-    // the task instruction as the query text. This IS the graph-lane
-    // seed thread — drop it and the recall graph lane is a no-op.
-    let (seen_query, seen_seeds) = captured
-        .lock()
-        .expect("captured mutex poisoned")
-        .clone()
-        .expect("recall builder must have been called");
-    assert_eq!(
-        seen_query, task.instruction,
-        "build_with_seeds must receive the task instruction as the query",
-    );
-    assert_eq!(
-        seen_seeds, seed_ids,
-        "build_with_seeds must receive the extractor's seed ids verbatim",
-    );
-
-    // (2) The same seeds populate FormulationMeta so the plan.formulate
-    // audit row records what seeded the graph lane.
-    assert_eq!(
-        meta.graph_seed_entity_ids, seed_ids,
-        "graph_seed_entity_ids must mirror the extracted seeds",
-    );
-    assert_eq!(
-        meta.graph_seed_count,
-        seed_ids.len() as u32,
-        "graph_seed_count must equal the seed id count",
-    );
-    assert!(
-        matches!(meta.graph_seed_source, SeedSource::GlinerRelex),
-        "graph_seed_source must reflect the extractor's source; got {:?}",
-        meta.graph_seed_source,
-    );
-
-    // Drain the mock so the spawned task exits cleanly.
-    let _served = served_rx.await.expect("mock served the request");
-}
-
-#[tokio::test]
-async fn decode_error_when_assistant_content_is_not_a_plan() {
-    // Backend returns an envelope whose assistant message is plain
-    // text (not a JSON plan). `formulate_plan` must surface this as
-    // `AgentError::Decode`, NOT panic and NOT substitute a default
-    // plan — the inner loop's failure-handling depends on the typed
-    // error.
-    let envelope = envelope_for("not a plan, just chatter");
-    let (base_url, served_rx, _mock_join) =
-        spawn_one_shot_mock(CannedResponse::ok_json(envelope)).await;
-
-    let router = router_pointing_at(&base_url);
-    let prompts = prompts_with_agent_planner();
-    // StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT): no L0/L1 added,
-    // but the cached base prompt flows to the wire verbatim.
-    let agent = RouterAgent::new(
-        router,
-        prompts,
-        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
-        Arc::new(StaticRecallBuilder::empty()),
-        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
-    );
-
-    let err = agent
-        .formulate_plan(&ctx())
-        .await
-        .expect_err("malformed plan must surface as Decode");
-    match err {
-        AgentError::Decode { detail, raw, usage, .. } => {
-            assert!(
-                raw.contains("not a plan"),
-                "raw body must be preserved for triage: {raw:?}"
-            );
-            assert!(
-                !detail.is_empty(),
-                "detail must carry the underlying serde_json error: {detail:?}"
-            );
-            // The failed completion's own cost rides on the error, for the
-            // `plan.formulate_failed` row — not a default (DGX task 212).
-            assert_eq!(usage.completion_tokens, Some(2), "{usage:?}");
-            assert_eq!(usage.finish_reason.as_deref(), Some("stop"), "{usage:?}");
-        }
-        other => panic!("expected AgentError::Decode, got {other:?}"),
-    }
-
-    // Sanity: the agent reached the network before decoding failed —
-    // otherwise the Decode error would be masking a different bug
-    // (e.g. an early short-circuit that swallows the typed error).
-    let served = served_rx.await.expect("mock served the request");
-    assert!(
-        served.body.contains(PLANNER_PROMPT_CONTENT),
-        "system prompt missing from wire: {}",
-        served.body
-    );
-}
-
-#[tokio::test]
-async fn prompt_missing_short_circuits_before_dialing_backend() {
-    // No `agent_planner` in the cache → `formulate_plan` must return
-    // PromptMissing without touching the network. The mock's
-    // served_rx is the witness: if the agent dialed the backend
-    // anyway, the oneshot would fire.
-    let (base_url, served_rx, mock_join) = spawn_one_shot_mock(CannedResponse::ok_json(
-        envelope_for("never sent"),
-    ))
-    .await;
-
-    let router = router_pointing_at(&base_url);
-    let prompts = empty_prompts();
-    let agent = RouterAgent::new(
-        router,
-        prompts,
-        Arc::new(StaticSystemPromptBuilder::empty()),
-        Arc::new(StaticRecallBuilder::empty()),
-        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
-    );
-
-    let err = agent.formulate_plan(&ctx()).await.expect_err("must fail");
-    assert!(
-        matches!(err, AgentError::PromptMissing),
-        "expected PromptMissing, got {err:?}"
-    );
-
-    // `try_recv` returns Empty iff the mock's accept loop never
-    // received a connection — i.e. the agent never dialed.
-    //
-    // Invariant this relies on: `formulate_plan` is synchronous-to-
-    // completion w.r.t. the network — `router.send().await` is awaited
-    // inline, not spawned. If a future refactor moves dialing into a
-    // `tokio::spawn`, this assertion will silently false-pass; switch
-    // to a short timeout-bounded `recv` then.
-    let mut served_rx = served_rx;
-    assert!(
-        matches!(
-            served_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty),
-        ),
-        "RouterAgent dialed the backend despite missing prompt"
-    );
-
-    // The mock task is still parked in `accept().await`. Abort it so
-    // the still-pending listener does not leak past the test
-    // boundary. (For the other two tests the task exits naturally
-    // after serving + responding + shutting down the socket; no
-    // explicit abort is needed there.)
-    mock_join.abort();
-}
-
-/// Pins the request the #945 re-ask actually sends. The loop tests drive
-/// the re-ask through a scripted double, so without this a `RouterAgent`
-/// that lost `formulate_reformat` (the trait default turns the feature
-/// off), dropped the reply, or left thinking on would keep every test green.
-///
-/// The turn's two messages come first, then the model's own reply as the
-/// assistant's, then the request for the plan; thinking is suppressed even
-/// though this router's config lets the model think; and a synthesis turn's
-/// re-ask still carries the synthesis directive.
-#[tokio::test]
-async fn formulate_reformat_shows_the_reply_and_asks_for_the_plan_with_thinking_off() {
-    let plan_json = serde_json::json!({
-        "context":    "payments",
-        "decision":   "task_complete",
-        "rationale":  "reformatted",
-        "steps":      [],
-        "result":     {"kind": "text", "body": "two payments are due"},
-        "data_ceiling": "Public",
-    })
-    .to_string();
-    let (base_url, served_rx, _mock_join) =
-        spawn_one_shot_mock(CannedResponse::ok_json(envelope_for(&plan_json))).await;
-    let router = Arc::new(
-        Router::new(RouterConfig {
-            local_url: base_url,
-            local_model: "test-local-model".into(),
-            timeout: Duration::from_secs(2),
-            disable_thinking: false,
-            ..Default::default()
-        })
-        .expect("build router"),
-    );
-    let agent = RouterAgent::new(
-        router,
-        prompts_with_agent_planner(),
-        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
-        Arc::new(StaticRecallBuilder::empty()),
-        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
-    );
-
-    let reply = "Here are the payments due: …";
-    let (plan, _meta) = agent
-        .formulate_reformat(&ctx(), true, reply)
-        .await
-        .expect("RouterAgent has a re-ask")
-        .expect("the re-ask's plan decodes");
-    assert_eq!(plan.decision, "task_complete");
-
-    let served = served_rx.await.expect("mock served the request");
-    let body: serde_json::Value = serde_json::from_str(&served.body).expect("request is JSON");
-    let messages = body["messages"].as_array().expect("messages array");
-    let roles: Vec<&str> = messages.iter().map(|m| m["role"].as_str().unwrap()).collect();
-    assert_eq!(roles, ["system", "user", "assistant", "user"], "{}", served.body);
-    assert_eq!(messages[2]["content"], reply, "shown its own reply verbatim");
-    let ask = messages[3]["content"].as_str().unwrap();
-    assert!(ask.starts_with("Your previous reply was not a JSON plan"), "{ask}");
-    let turn: serde_json::Value =
-        serde_json::from_str(messages[1]["content"].as_str().unwrap()).expect("turn context is JSON");
-    assert!(turn.get("directive").is_some(), "a synthesis turn's re-ask keeps the directive: {turn}");
-    assert_eq!(
-        body["chat_template_kwargs"]["enable_thinking"], false,
-        "the re-ask suppresses thinking whatever the config: {}",
-        served.body
-    );
-}
-
-// ---------------------------------------------------------------------------
-// The notebook's door (#993). `RouterAgent::send_turn` serves both loops, so
-// the two pins above that are not about a classic plan are repeated for
-// `notebook_turn`, the door that outlives the classic loop.
+// Tests — the notebook's door, `RouterAgent::notebook_turn` (#922, #993).
 // ---------------------------------------------------------------------------
 
 /// A prompt cache holding only the notebook's prompt.
@@ -690,8 +324,60 @@ async fn a_notebook_turn_threads_extracted_seeds_into_recall_and_meta() {
     assert_eq!((seen_query.as_str(), seen_seeds.as_slice()), (task.instruction.as_str(), seed_ids.as_slice()));
     assert_eq!((meta.graph_seed_entity_ids, meta.graph_seed_count), (seed_ids.clone(), seed_ids.len() as u32));
     assert!(matches!(meta.graph_seed_source, SeedSource::GlinerRelex), "{:?}", meta.graph_seed_source);
+    // The prompt-traceability fields the `plan.formulate` row carries; a
+    // regression on any of these breaks CASSANDRA correlation.
     assert_eq!(meta.prompt_name, NOTEBOOK_PROMPT);
-    let _served = served_rx.await.expect("mock served the request");
+    assert_eq!(meta.prompt_sha256, PLANNER_PROMPT_SHA);
+    assert_eq!((meta.llm_model.as_str(), meta.llm_backend.as_str()), ("test-local-model", "local"));
+    assert_eq!(meta.retry_count, 0);
+    assert!(meta.latency_ms < 60_000, "latency_ms wildly out of range: {}", meta.latency_ms);
+    assert_eq!(meta.recall_query_sha256.len(), 64, "always 64 hex chars");
+    let served = served_rx.await.expect("mock served the request");
+    assert!(served.body.contains(PLANNER_PROMPT_CONTENT), "system prompt missing from wire: {}", served.body);
+    // #941: every planner call caps its reply.
+    assert!(served.body.contains("\"max_tokens\":16384"), "max_tokens missing from wire: {}", served.body);
+}
+
+/// The #945 re-ask on the wire: after the turn, the model's refused reply as
+/// the assistant's, then the reason and the request for the reply again; with
+/// `Suppress`, thinking is off even though this router's config lets the
+/// model think.
+#[tokio::test]
+async fn a_notebook_re_ask_shows_the_reply_and_the_reason_with_thinking_off() {
+    let (base_url, served_rx, _mock_join) = spawn_one_shot_mock(CannedResponse::ok_json(envelope_for("{}"))).await;
+    let router = Arc::new(
+        Router::new(RouterConfig {
+            local_url: base_url,
+            local_model: "test-local-model".into(),
+            timeout: Duration::from_secs(2),
+            disable_thinking: false,
+            ..Default::default()
+        })
+        .expect("build router"),
+    );
+    let agent = RouterAgent::new(
+        router,
+        prompts_with_agent_notebook(),
+        Arc::new(StaticSystemPromptBuilder::new(PLANNER_PROMPT_CONTENT)),
+        Arc::new(StaticRecallBuilder::empty()),
+        Arc::new(kastellan_core::entity_extraction::NoOpEntityExtractor::new()),
+    );
+    let reply = "Here are the payments due: …";
+    agent
+        .notebook_turn(&ctx(), &|_| "the turn".to_string(), Some((reply, "no `tick`")), ThinkingPolicy::Suppress)
+        .await
+        .expect("the re-ask is sent");
+
+    let served = served_rx.await.expect("mock served the request");
+    let body: serde_json::Value = serde_json::from_str(&served.body).expect("request is JSON");
+    let messages = body["messages"].as_array().expect("messages array");
+    let roles: Vec<&str> = messages.iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"], "{}", served.body);
+    assert_eq!(messages[1]["content"], "the turn");
+    assert_eq!(messages[2]["content"], reply, "shown its own reply verbatim");
+    let ask = messages[3]["content"].as_str().unwrap();
+    assert!(ask.starts_with("Your previous reply could not be used: no `tick`"), "{ask}");
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false, "thinking suppressed: {}", served.body);
 }
 
 #[tokio::test]
@@ -708,9 +394,12 @@ async fn a_notebook_turn_with_no_prompt_never_dials_the_backend() {
         .notebook_turn(&ctx(), &|_| "the turn".to_string(), None, ThinkingPolicy::RouterDefault)
         .await
         .expect_err("must fail");
-    assert!(matches!(err, AgentError::PromptMissing), "expected PromptMissing, got {err:?}");
+    assert!(
+        matches!(&err, AgentError::PromptMissing(name) if name == "agent_notebook"),
+        "expected PromptMissing naming the notebook prompt, got {err:?}"
+    );
     // Empty iff the mock never accepted a connection (the send is awaited
-    // inline, as in the classic twin above).
+    // inline).
     let mut served_rx = served_rx;
     assert!(matches!(served_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)), "dialed despite no prompt");
     mock_join.abort();

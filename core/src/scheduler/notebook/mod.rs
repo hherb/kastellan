@@ -17,7 +17,7 @@
 //!   the task's scrapbook.
 //! * [`view`] — the operator's JSON view of the fold (`kastellan-cli session`).
 //! * [`run`] — the loop: one step per turn, every call reviewed and dispatched
-//!   by the classic loop's own code.
+//!   by the shared `inner_loop::execute`.
 //!
 //! Design: `docs/superpowers/specs/2026-11-01-task-notebook-design.md`.
 

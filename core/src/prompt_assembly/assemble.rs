@@ -8,14 +8,14 @@
 //! in; `<tools>` changes with the registry; L0/L1/skills between tasks;
 //! `<recalled>` is queried from the instruction, so it changes between tasks or
 //! as memory grows. The current time changes every minute, so it is not here at
-//! all: it is the last key of the user message (`scheduler::agent`), which
+//! all: it is the last key of the user message (`scheduler::notebook::render`), which
 //! follows this one, so a new minute costs only the tail. Measured on the Mac
 //! (oMLX, Gemma 4 26B, 2026-10-31): a ~39k-token prompt took 69 s with its
 //! first bytes changed and 4.2 s with only its tail changed.
 //!
 //! ```text
 //! <base>
-//! {agent_planner.md verbatim}
+//! {agent_notebook.md verbatim}
 //! </base>
 //!
 //! <handoff>

@@ -202,6 +202,24 @@ fn a_forced_answer_turn_shows_the_directive_instead_of_the_counts() {
     assert_eq!(v["turn_budget"], json!({"directive": "answer now"}));
 }
 
+/// A deadline shows as whole `seconds_left` on a routine turn — the fast
+/// lane's only time signal — and never on the forced-answer turn.
+#[test]
+fn a_turn_with_a_deadline_says_how_many_seconds_are_left() {
+    let state = fold(&[steps(1)]).unwrap();
+    let mut c = ctx();
+    c.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(90));
+    let v: Value = serde_json::from_str(&render_turn(&c, &state, 0, None, None, BUDGET, None)).unwrap();
+    let left = v["turn_budget"]["seconds_left"].as_u64().expect("seconds_left shown");
+    assert!((85..=90).contains(&left), "{left}");
+    assert_eq!((v["turn_budget"]["this_turn"].clone(), v["turn_budget"]["max_turns"].clone()), (json!(2), json!(10)));
+    let forced = TurnBudget { directive: Some("answer now"), ..BUDGET };
+    let v: Value = serde_json::from_str(&render_turn(&c, &state, 0, None, None, forced, None)).unwrap();
+    assert_eq!(v["turn_budget"], json!({"directive": "answer now"}), "no budget on the answer turn");
+    let v: Value = serde_json::from_str(&render_turn(&ctx(), &state, 0, None, None, BUDGET, None)).unwrap();
+    assert!(v["turn_budget"].get("seconds_left").is_none(), "no deadline, no seconds_left");
+}
+
 #[test]
 fn a_failed_steps_result_is_shown_on_the_replan_turn() {
     use crate::cassandra::types::{Plan, PlannedStep};

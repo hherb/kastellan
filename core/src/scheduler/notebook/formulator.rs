@@ -28,26 +28,21 @@ final answer, put it in `answer.body`."
     )
 }
 
-/// Which loop the daemon plans with (`KASTELLAN_PLANNER_MODE`, C4): one
-/// setting per daemon, every lane and channel task alike.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlannerMode {
-    /// The classic planner: one growing plan history per task.
-    Classic,
-    /// The notebook loop (#922).
-    Notebook,
-}
-
-/// Read `KASTELLAN_PLANNER_MODE`. Unset, empty or `notebook` → notebook (the
-/// default since #922 slice 4); `classic` → classic, kept opt-in until the
-/// classic loop retires; anything else is an error naming the key, so the
-/// daemon refuses to start rather than guess which loop was meant.
-pub fn planner_mode(value: Option<&str>) -> Result<PlannerMode, String> {
+/// Check `KASTELLAN_PLANNER_MODE`. The notebook (#922) is the only loop
+/// since the classic one retired (#993): unset, empty or `notebook` is
+/// accepted. `classic` and anything else are an error naming the key, so a
+/// daemon still configured for another loop refuses to start rather than
+/// run a different one than the operator wrote.
+pub fn check_planner_mode(value: Option<&str>) -> Result<(), String> {
     match value.map(str::trim) {
-        None | Some("") | Some("notebook") => Ok(PlannerMode::Notebook),
-        Some("classic") => Ok(PlannerMode::Classic),
+        None | Some("") | Some("notebook") => Ok(()),
+        Some("classic") => Err(
+            "KASTELLAN_PLANNER_MODE=classic: the classic planner was retired (#993); unset the key \
+             or set it to `notebook`"
+                .into(),
+        ),
         Some(other) => Err(format!(
-            "KASTELLAN_PLANNER_MODE={other:?} is not a planner mode (expected `classic` or `notebook`)"
+            "KASTELLAN_PLANNER_MODE={other:?} is not a planner mode (expected `notebook`)"
         )),
     }
 }
@@ -95,16 +90,15 @@ pub trait NotebookFormulator: Send + Sync {
 }
 
 impl RouterAgent {
-    /// Run every task on the notebook loop (#922), showing each step the doc
-    /// of its tool from `tools`, and sifting with `sift` (the operator's
-    /// `KASTELLAN_SIFT_*` knobs, [`super::sift::config::sift_config`]).
+    /// Show each notebook step the doc of its tool from `tools` (#922), and
+    /// sift with `sift` (the operator's `KASTELLAN_SIFT_*` knobs, [`super::sift::config::sift_config`]).
     pub fn with_notebook(mut self, tools: std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>, sift: SiftConfig) -> Self {
         self.notebook_tools = Some(tools);
         self.sift_cfg = sift;
         self
     }
 
-    /// The doc of the advertised tool named `tool`, in notebook mode.
+    /// The doc of the advertised tool named `tool`.
     fn notebook_tool_doc(&self, tool: &str) -> Option<String> {
         let tools = self.notebook_tools.as_ref()?;
         tools.iter().find(|t| t.doc.name == tool).map(crate::prompt_assembly::assemble::render_tool_doc)

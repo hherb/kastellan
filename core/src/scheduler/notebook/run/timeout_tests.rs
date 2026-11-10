@@ -1,6 +1,6 @@
 //! A notebook turn that times out, and a task run past the fast lane's
 //! deadline (#993: ported from the classic loop's `timeout_tests` before it
-//! is retired). The timeouts are **real** `reqwest` request timeouts
+//! was retired). The timeouts are **real** `reqwest` request timeouts
 //! ([`real_request_timeout`]: a router pointed at a listener that accepts and
 //! never answers), because a hand-built error could satisfy
 //! `is_request_timeout` in a way production never produces. Each runs on the

@@ -23,10 +23,7 @@
 //! ## Notifications (no `id`), sent by `task.follow`
 //!
 //! * `notebook.entry {task_id, seq, kind, payload, created_at}` — each entry
-//!   with `seq > after_seq`, in order, then each new one as it lands. Only a
-//!   notebook-mode daemon (the default) writes entries: under
-//!   `KASTELLAN_PLANNER_MODE=classic` a follow sends only `task.finished`,
-//!   and a `task.correct` is stored but never read.
+//!   with `seq > after_seq`, in order, then each new one as it lands.
 //! * `task.awaiting_operator {task_id}` — the task parked on an operator ask;
 //!   `inbox.list` shows the question, `inbox.answer` answers it.
 //! * `task.finished {task_id, state, answer, detail, result}` — the last

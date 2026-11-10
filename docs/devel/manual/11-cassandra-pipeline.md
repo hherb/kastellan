@@ -42,8 +42,8 @@ path), and how to add a rule.
 Plan review runs in `core/src/scheduler/inner_loop/execute.rs`; the output
 screen runs in `core/src/tool_host/post_process.rs`; the sink screen in
 `core/src/scheduler/inner_loop/summary/sink.rs`. None of the three has a
-"skip review" flag, and the review chain is the same for the classic
-planner loop and the task-notebook mode (see [chapter 15](./15-planner.md)).
+"skip review" flag, and the planner loop reviews every call, answer and
+sift read through the same chain (see [chapter 15](./15-planner.md)).
 
 The one dispatch path with no plan to review is an operator running an
 already-approved L3 skill (`kastellan-cli memory l3 run <id>`): the
@@ -109,7 +109,7 @@ daemon builds the production chain in `core/src/main.rs`:
 
 - **Stage -1 — `ConstitutionalGuard`** (`constitutional.rs`). Screens the
   task instruction against the five constitutional principles
-  (`prompts/agent_planner.md`) with a small, English-only, case-insensitive
+  (`prompts/agent_notebook.md`) with a small, English-only, case-insensitive
   substring catalogue. Each principle needs two signals (a topic phrase and
   a context phrase) except P1, where one canonical weapon-manufacturing
   phrase suffices. A hit returns `Verdict::ConstitutionalBlock { principle,

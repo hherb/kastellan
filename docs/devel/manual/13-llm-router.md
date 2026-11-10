@@ -96,10 +96,11 @@ thought anyway, logs **one** WARN per process naming the setting to change.
 
 A caller can override the config per request with
 `ChatRequest::with_thinking(ThinkingPolicy::{RouterDefault, Suppress,
-Allow})`. The planner uses `Suppress` for its cheaper retries (the
-forced-synthesis retry after a timeout, the re-ask after a non-plan reply);
-notebook mode lets plan and answer turns think. Thinking-on vs. off is a
-measured choice per deployment: on the reference hosts planning completed
+Allow})`. The notebook picks it per turn (`scheduler::notebook::thinking`):
+`Suppress` for the forced-answer turn and for every re-ask (the #945 re-ask
+of an unusable reply, the table show-back); `Allow` for plan, replan and
+answer-rewrite turns; routine turns keep the router default. Thinking-on vs.
+off is a measured choice per deployment: on the reference hosts planning completed
 more reliably with thinking on, so they run `KASTELLAN_LLM_DISABLE_THINKING=0`
 with a much longer `KASTELLAN_LLM_TIMEOUT_MS` than the default.
 

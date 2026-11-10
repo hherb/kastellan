@@ -79,8 +79,8 @@ When fully set up, Kastellan can:
   it solved it as a reusable **skill** — including a small Python program
   it wrote. A skill does nothing until *you* approve it, and the agent may
   only use one on its own once you have also "pinned" it.
-- **Work through long, list-heavy questions.** In its default working
-  style, called **notebook mode**, it writes its own step list, works one
+- **Work through long, list-heavy questions.** In its working style,
+  called **notebook mode**, it writes its own step list, works one
   step at a time, and keeps notes and findings as it goes, so a long task
   doesn't lose track of what it has already found. For "find all the…"
   questions it can sweep a whole list of candidates in one step and hand
@@ -205,10 +205,9 @@ development line):
 
 **Experimental or opt-in**
 
-- **The classic planner.** Notebook mode is the default; the older classic
-  planner is one setting away (`KASTELLAN_PLANNER_MODE=classic`) until it is
-  retired. Notebook mode and its "sweep a whole list" step, called `sift`,
-  are still being tuned on real questions.
+- **Notebook mode** and its "sweep a whole list" step, called `sift`, are
+  still being tuned on real questions. (The older classic planner has been
+  retired.)
 
 **Not built yet**
 

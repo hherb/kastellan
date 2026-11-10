@@ -646,47 +646,9 @@
         assert!(!out.contains("allowed:"), "no allowed line: {out}");
     }
 
-    /// The rendered `allowed:` line only has authority because
-    /// `prompts/agent_planner.md` tells the planner to obey it — and the two are
-    /// hand-synced on two literals: the label `allowed:` and the fact that each
-    /// value is backtick-delimited. Rename the label here, or drop the backtick
-    /// gloss there, and the feature silently reverts to the measured 38% refusal
-    /// rate with every other test still green (#533's HANDOVER item 5 records
-    /// the near-miss where the whole change was inert for exactly this reason).
-    /// Reads the real file, the way `injection_guard_fixtures` does.
-    #[test]
-    fn the_planner_prompt_binds_the_allowed_line_this_renderer_emits() {
-        use crate::prompt_assembly::AdvertisedTool;
-        use crate::worker_manifest::ToolDoc;
-        use kastellan_db::tool_allowlists::EntryKind;
-        let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.pop(); // core/ -> workspace root
-        p.push("prompts/agent_planner.md");
-        let prompt = std::fs::read_to_string(&p).expect("agent_planner.md readable");
-
-        // The label, taken from the renderer rather than restated.
-        let tools = [AdvertisedTool::with_allowlist(
-            ToolDoc { name: "t", method: "t.run", summary: "s", params: &[] },
-            EntryKind::Argv0,
-            &["/usr/bin/ls".to_string()],
-        )];
-        let out =
-            assemble_system_prompt(&[], &[], &[], &RecalledContext::empty(), "BASE", &tools);
-        let label = "allowed:";
-        assert!(out.contains(label), "renderer emits the label: {out}");
-        assert!(
-            prompt.contains(label),
-            "agent_planner.md must bind the `{label}` line the renderer emits, or the \
-             advertisement carries no authority and the planner may ignore it"
-        );
-        // And it must say the backticks are delimiters, not part of the value —
-        // otherwise the planner emits `` `/usr/bin/python3` `` including them.
-        assert!(out.contains("`/usr/bin/ls`"), "values are backtick-delimited: {out}");
-        assert!(
-            prompt.contains("backticks delimit the value"),
-            "agent_planner.md must tell the planner the backticks are not part of the value"
-        );
-    }
+    // The prompt-side half of the `allowed:` line (the planner prompt binds
+    // the label and says the backticks are delimiters) is pinned against the
+    // real file in `scheduler::notebook::formulator::tests`.
 
     #[test]
     fn a_hostile_allowlist_entry_is_escaped_exactly_once_in_the_assembled_prompt() {

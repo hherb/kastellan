@@ -1,8 +1,8 @@
-//! Review and dispatch of one formulated plan — moved verbatim out of
-//! `run_to_terminal` (over the 500-line cap) so the notebook loop (#922)
-//! runs every call through the **same** floor raise, ceiling resolution,
-//! audit rows, invoke expansion, method qualification, CASSANDRA review,
-//! verdict handling, terminal check and dispatch as a classic plan.
+//! Review and dispatch of one formulated plan — moved verbatim out of the
+//! classic loop (retired in #993) so the notebook loop (#922) runs every
+//! call through the **same** floor raise, ceiling resolution, audit rows,
+//! invoke expansion, method qualification, CASSANDRA review, verdict
+//! handling, terminal check and dispatch.
 //!
 //! What was a `return finish!(…)` in the loop is [`Executed::Finished`];
 //! what was a `continue` is [`Executed::Again`]; falling off the end (the

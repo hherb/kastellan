@@ -76,11 +76,13 @@ async fn the_notebook_loop() {
     selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(&pool).await;
     a_repeated_call_is_not_dispatched_and_the_next_turn_replans(&pool).await;
     the_turn_cap_is_twice_max_plans(&pool).await;
+    the_turn_cap_with_nothing_gathered_fails_naming_the_cap(&pool).await;
     a_resumed_task_gets_only_its_fresh_turns(&pool).await;
     a_failed_call_may_be_retried(&pool).await;
     injected_step_text_is_audited_once(&pool).await;
     the_ceiling_counts_what_the_notebook_alone_records(&pool).await;
     a_cancelled_task_ends_cancelled_and_closes_its_notebook(&pool).await;
+    a_cancel_during_a_turn_ends_the_task_at_the_next_turn(&pool).await;
     an_empty_completion_is_asked_again_once(&pool).await;
     super::refusal_tests::a_refused_answer_ends_the_task_refused(&pool).await;
     super::refusal_tests::a_reviewer_constitutional_block_wins_over_a_refusal(&pool).await;
@@ -175,6 +177,9 @@ async fn an_invalid_reply_is_re_asked_once_then_fails_in_words(pool: &sqlx::PgPo
     assert_eq!(body(&r.result), "fixed");
     assert_eq!(r.result.failed_llm_calls, 1);
     assert!(script.reasks.lock().unwrap()[0].contains("not the current step 1"));
+    let retries: Vec<Value> =
+        rows(pool, r.task_id, "agent", "plan.formulate").await.iter().map(|p| p["retry_count"].clone()).collect();
+    assert_eq!(retries, [json!(0), json!(1)], "the re-asked turn's row says it was retried");
 
     // Twice unusable: the task fails, saying why.
     let script = Script::raw(&["no json here".into(), "still none".into()]);
@@ -252,6 +257,23 @@ async fn the_turn_cap_is_twice_max_plans(pool: &sqlx::PgPool) {
     assert_eq!(r.result.plan_count, 5);
     let last: Value = serde_json::from_str(script.messages().last().unwrap()).unwrap();
     assert_eq!(last["turn_budget"], json!({"directive": ANSWER_DIRECTIVE}));
+}
+
+/// Every call fails, so the cap arrives with nothing gathered: no
+/// forced-answer turn, and the failure names the (multiplied) cap.
+async fn the_turn_cap_with_nothing_gathered_fails_naming_the_cap(pool: &sqlx::PgPool) {
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call(1, "fail")}),
+        json!({"steps": steps(&[1]), "call": call(1, "fail")}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 1).await).await;
+    match &r.result.outcome {
+        Outcome::Failed(d) => assert_eq!(d, "plan_iteration_cap_exceeded (2>=2)"),
+        o => panic!("expected Failed, got {o:?}"),
+    }
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["fail", "fail"]);
+    assert_eq!(r.result.plan_count, 2);
+    assert_eq!(script.messages().len(), 2, "no forced-answer turn without findings");
 }
 
 /// C1: step 1's call touched Personal data, then the model replanned it away
@@ -497,6 +519,42 @@ async fn a_cancelled_task_ends_cancelled_and_closes_its_notebook(pool: &sqlx::Pg
     assert_eq!(kinds(pool, t).await, vec![EntryKind::Cancelled]);
 }
 
+/// The operator cancelled while the model was thinking. On the first turn
+/// the call it asked for never runs (the dispatcher looks before each step);
+/// after a dispatched turn, a turn that dispatches nothing is caught by the
+/// loop's own check, before another turn is asked.
+async fn a_cancel_during_a_turn_ends_the_task_at_the_next_turn(pool: &sqlx::PgPool) {
+    let ctx = new_task(pool, 5).await;
+    let t = ctx.task_id;
+    let mut script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "x"), "answer": {"body": "never asked"}}),
+    ]);
+    script.cancel_during_turn = Some((pool.clone(), t, 0));
+    let r = run(pool, &script, ctx).await;
+    assert!(matches!(r.result.outcome, Outcome::Cancelled), "{:?}", r.result.outcome);
+    assert_eq!(script.messages().len(), 1, "no turn after the cancel");
+    assert!(r.tools.dispatched.lock().unwrap().is_empty(), "the cancelled turn's call never ran");
+    assert_eq!(kinds(pool, t).await.last(), Some(&EntryKind::Cancelled));
+
+    // Mid-run: turn 1 dispatched; turn 2 repeats it (not dispatched) while
+    // the cancel lands, so only the top-of-loop check can end the task.
+    let ctx = new_task(pool, 5).await;
+    let t = ctx.task_id;
+    let mut script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}),
+        json!({"call": call(1, "a")}),
+        json!({"tick": tick(1, "x"), "answer": {"body": "never asked"}}),
+    ]);
+    script.cancel_during_turn = Some((pool.clone(), t, 1));
+    let r = run(pool, &script, ctx).await;
+    assert!(matches!(r.result.outcome, Outcome::Cancelled), "{:?}", r.result.outcome);
+    assert_eq!(script.messages().len(), 2, "no third turn after the cancel");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a"]);
+    assert_eq!((r.result.plan_count, r.result.dispatch_count), (2, 1));
+    assert_eq!(kinds(pool, t).await.last(), Some(&EntryKind::Cancelled));
+}
+
 /// #965 item 7 (#939): a blank completion is asked again once — the same
 /// turn, thinking as it was, not shown back as a reply to fix — and a second
 /// blank one fails saying the answer was empty.
@@ -510,6 +568,9 @@ async fn an_empty_completion_is_asked_again_once(pool: &sqlx::PgPool) {
     let thinking = script.thinking.lock().unwrap().clone();
     assert_eq!(thinking[0], thinking[1], "the retry thinks as the turn did: {thinking:?}");
     assert_eq!(script.messages()[0], script.messages()[1], "the same turn, asked again");
+    let retries: Vec<Value> =
+        rows(pool, r.task_id, "agent", "plan.formulate").await.iter().map(|p| p["retry_count"].clone()).collect();
+    assert_eq!(retries, [json!(1), json!(0)], "the asked-again turn's row says it was retried");
 
     // A blank routine turn: its retry keeps `RouterDefault`, not the plan's `Allow`.
     let answer = json!({"steps": steps(&[1]), "call": call(1, "a")}).to_string();

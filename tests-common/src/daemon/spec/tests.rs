@@ -598,9 +598,8 @@ fn force_routing_off_overrides_the_inherited_default() {
     assert_eq!(count_entries(&s, "KASTELLAN_EGRESS_FORCE_ROUTING"), 1);
 }
 
-/// The spec names no planner mode, so a daemon e2e runs the daemon's
-/// default — the notebook (#922 slice 4) — as production does; the classic
-/// pin went once the e2es scripted notebook replies (#993).
+/// The spec names no planner mode, so a daemon e2e runs the daemon's only
+/// loop, the notebook, as production does.
 #[test]
 fn the_planner_mode_is_left_to_the_daemon_default() {
     assert_eq!(count_entries(&built(&base_spec()), "KASTELLAN_PLANNER_MODE"), 0);

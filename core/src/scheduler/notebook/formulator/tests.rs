@@ -25,11 +25,36 @@ fn the_notebook_prompt_documents_every_reply_key() {
     assert!(prompt.contains(crate::scheduler::inner_loop::WITHHELD_MARKER), "the withheld marker is shown as rendered");
 }
 
+/// Drift guard for the conversation block (#711, ported from the retired
+/// planner prompt's guard, #993): every key and status the conversation
+/// renderer emits must be named in the prompt. Statuses and `_omitted_*`
+/// markers bind to the renderer's own constants; the plain key names are
+/// literals because `view.rs` spells them inline.
+#[test]
+fn the_notebook_prompt_documents_the_conversation_block() {
+    use crate::scheduler::conversation::view::{
+        OMITTED_CALLS_KEY, OMITTED_SCRAPBOOKS_KEY, OMITTED_TURNS_KEY, STATUS_TOO_LARGE, STATUS_UNCLASSIFIED,
+        STATUS_WITHHELD,
+    };
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop();
+    p.push(format!("prompts/{NOTEBOOK_PROMPT}.md"));
+    let prompt = std::fs::read_to_string(&p).expect("agent_notebook.md readable");
+    // Whitespace collapsed: a status may wrap across lines.
+    let prompt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    for marker in [
+        "`conversation`", "\"at\"", "\"calls\"", "\"answer\"", "\"user\"", "`scrapbooks`",
+        OMITTED_TURNS_KEY, OMITTED_CALLS_KEY, OMITTED_SCRAPBOOKS_KEY, STATUS_WITHHELD, STATUS_TOO_LARGE,
+        STATUS_UNCLASSIFIED,
+    ] {
+        assert!(prompt.contains(marker), "agent_notebook.md must document {marker}");
+    }
+}
+
 /// The tools block shows an operator allowlist as an `allowed:` line with each
 /// value between backticks (`prompt_assembly`). The prompt must bind that
 /// line, or the advertisement carries no authority, and say the backticks are
-/// not part of a value, or the planner sends them (#993: ported from the
-/// classic prompt's test).
+/// not part of a value, or the planner sends them.
 #[test]
 fn the_notebook_prompt_binds_the_allowed_line() {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -48,13 +73,14 @@ fn the_reformat_directive_names_the_reason() {
 }
 
 #[test]
-fn planner_mode_rejects_an_unknown_value() {
-    // Since #922 slice 4 an unset or empty value is the notebook; classic is opt-in.
-    assert_eq!(planner_mode(None), Ok(PlannerMode::Notebook));
-    assert_eq!(planner_mode(Some("")), Ok(PlannerMode::Notebook));
-    assert_eq!(planner_mode(Some(" classic ")), Ok(PlannerMode::Classic));
-    assert_eq!(planner_mode(Some(" notebook ")), Ok(PlannerMode::Notebook));
-    let err = planner_mode(Some("Notebook")).unwrap_err();
+fn planner_mode_accepts_only_the_notebook() {
+    for ok in [None, Some(""), Some(" notebook ")] {
+        assert_eq!(check_planner_mode(ok), Ok(()), "{ok:?}");
+    }
+    // The retired loop is refused by name (#993), not run as the notebook.
+    let err = check_planner_mode(Some(" classic ")).unwrap_err();
+    assert!(err.contains("KASTELLAN_PLANNER_MODE=classic") && err.contains("retired"), "{err}");
+    let err = check_planner_mode(Some("Notebook")).unwrap_err();
     assert!(err.contains("KASTELLAN_PLANNER_MODE") && err.contains("\"Notebook\""), "{err}");
 }
 

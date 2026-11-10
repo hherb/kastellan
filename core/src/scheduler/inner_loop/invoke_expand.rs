@@ -1,7 +1,7 @@
 //! Autonomous `invoke_skill` expansion for the inner loop.
 //!
-//! Pulled out of [`super::run_to_terminal`] so the loop body stays under the
-//! file-size cap. The single entry point [`expand_invoke_skill`] resolves a
+//! Pulled out of the (since retired, #993) classic loop body so it stayed
+//! under the file-size cap; [`super::execute`] calls it for every plan. The single entry point [`expand_invoke_skill`] resolves a
 //! plan's `invoke_skill` directive into either concrete executable steps or a
 //! refusal, and writes every audit row for the invoke lifecycle
 //! (`l3.invoke.rejected` / `l3.invoked`) itself. The caller only acts on the

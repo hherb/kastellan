@@ -184,19 +184,18 @@ What works today:
   writes an append-only audit row, and a crash-recovery sweep picks up
   interrupted work. Planner calls are bounded:
   - a token cap (`max_tokens`) and a call timeout on every call;
-  - a `plan_budget` the model can see;
+  - a `turn_budget` the model can see;
   - a 15-minute ceiling on the fast lane;
-  - a re-ask when the model's reply is not a plan.
+  - a re-ask when the model's reply cannot be used.
 
   The thinking/reasoning switch is per backend (`KASTELLAN_LLM_THINKING_SWITCH`).
-- **Two planner modes** (`KASTELLAN_PLANNER_MODE`):
-  - `notebook` (the default) is external working memory for the planner. The
-    model writes its own step list and works one step per turn. It ticks off
-    each step with a note and keeps *findings*: facts together with their
-    source. It writes the answer from those findings. A `sift` step runs its
-    reads as one reviewed plan into an append-only scrapbook, and answer
-    tables are rendered by code, not by the model.
-  - `classic` keeps one growing plan. It is opt-in until it retires.
+- **The task notebook planner**: external working memory for the planner.
+  The model writes its own step list and works one step per turn. It ticks
+  off each step with a note and keeps *findings*: facts together with their
+  source. It writes the answer from those findings. A `sift` step runs its
+  reads as one reviewed plan into an append-only scrapbook, and answer
+  tables are rendered by code, not by the model. (The older `classic` loop,
+  one growing plan, retired in #993.)
 
   Channel conversations keep their continuity across turns.
 - **CASSANDRA oversight.** The constitutional and deterministic
@@ -290,7 +289,6 @@ Not built yet (see the roadmap):
 - **An LLM plan-review stage in CASSANDRA.** The constitutional and
   data-classification stages are deterministic rules; the guard model screens
   *content*, not plans.
-- **Retiring the `classic` planner mode** (the notebook became the default in #922 slice 4).
 - **Good-netizen behaviour in the web workers** — rate limiting, backoff,
   `robots.txt` — required before any release.
 - **Context-window resets** from memory and the task list, and L4 session
@@ -310,8 +308,8 @@ sequenced build plan is [`docs/devel/ROADMAP.md`](docs/devel/ROADMAP.md). See al
 Rust workspace, 27 crates (plus two Python workers outside Cargo):
 
 ```
-core/                  kastellan-core: agent loop + scheduler (classic and notebook
-                       planners, sift), memory, CASSANDRA + guard tier, operator Inbox,
+core/                  kastellan-core: agent loop + scheduler (the notebook
+                       planner, sift), memory, CASSANDRA + guard tier, operator Inbox,
                        audit, tool-host chokepoint, channel bus (Matrix + email),
                        egress integration, handoff cache, secrets vault, installer;
                        `kastellan` daemon + `kastellan-cli`
@@ -457,8 +455,8 @@ installer and its values win. See
 Check health with `systemctl --user status kastellan.target` and
 `kastellan-cli secret list`.
 
-The overlay also holds the optional settings: `KASTELLAN_PLANNER_MODE=classic`,
-`KASTELLAN_TIMEZONE`, and the guard model's `KASTELLAN_LLM_GUARD_*` keys. Set
+The overlay also holds the optional settings: `KASTELLAN_TIMEZONE` and the
+guard model's `KASTELLAN_LLM_GUARD_*` keys. Set
 `KASTELLAN_GUARD_SERVER_{BIN,MODEL}` as well and the next `install` adds a
 supervised `kastellan-guard` unit.
 

@@ -27,7 +27,7 @@ fn tools() -> [AdvertisedTool; 2] {
 }
 
 #[test]
-fn render_tool_doc_matches_the_classic_block() {
+fn render_tool_doc_matches_the_tools_block() {
     let tools = tools();
     let joined: String = tools.iter().map(render_tool_doc).collect();
     assert_eq!(render_tools_block(&tools), format!("<tools>\n{joined}</tools>\n\n"));

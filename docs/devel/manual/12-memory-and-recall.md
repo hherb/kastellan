@@ -105,7 +105,7 @@ L1 and from conversational continuity (below).
 
 ## How memory reaches the planner
 
-Every planning turn, `RouterAgent::formulate_plan`
+Every notebook turn, `RouterAgent::send_turn`
 (`core/src/scheduler/agent.rs`) does three things:
 
 1. **Entity extraction** on the task instruction (gliner-relex, if

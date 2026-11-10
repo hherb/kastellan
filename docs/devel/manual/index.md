@@ -44,7 +44,7 @@ before writing your first line of code.
 | 12 | [Memory and recall](./12-memory-and-recall.md) | Adding a recall lane, changing promotion, debugging RRF results |
 | 13 | [LLM router](./13-llm-router.md) | Adding a backend, changing the wire shape, working on Phase 5 frontier escalation |
 | 14 | [Test-lift refactors](./14-test-lift-refactors.md) | Lifting an over-cap file's inline test block to a sibling `tests.rs`, proving zero behaviour change |
-| 15 | [The planner](./15-planner.md) | Changing the task queue, the classic or notebook planner loop, `sift`, or a planner prompt |
+| 15 | [The planner](./15-planner.md) | Changing the task queue, the notebook planner loop, `sift`, or a planner prompt |
 | 16 | [Channels](./16-channels.md) | Working on Matrix, email, pairing, operator asks in a chat, reply delivery, or channel audit rows |
 
 ---

@@ -31,7 +31,7 @@ use kastellan_db::tasks::{self, Lane, DEFAULT_DEADLINE_FAST_S, DEFAULT_DEADLINE_
 
 use crate::cassandra::review::ChainReviewStage;
 
-use super::agent::PlanFormulator;
+use super::notebook::formulator::NotebookFormulator;
 use super::audit::{action_task_terminal, ACTION_TASK_RUNNING};
 use super::inner_loop::StepDispatcher;
 
@@ -88,7 +88,7 @@ impl SchedulerHandle {
 /// the one registry the channel bus registers its queues into.
 pub fn spawn_scheduler(
     pool: PgPool,
-    formulator: Arc<dyn PlanFormulator>,
+    formulator: Arc<dyn NotebookFormulator>,
     review: Arc<ChainReviewStage>,
     dispatcher: Arc<dyn StepDispatcher>,
     entity_extractor: Arc<dyn EntityExtractor>,
@@ -146,7 +146,7 @@ async fn sweep_loop(pool: PgPool, mut shutdown: watch::Receiver<bool>) {
 #[allow(clippy::too_many_arguments)]
 async fn lane_loop(
     pool: PgPool,
-    formulator: Arc<dyn PlanFormulator>,
+    formulator: Arc<dyn NotebookFormulator>,
     review: Arc<ChainReviewStage>,
     dispatcher: Arc<dyn StepDispatcher>,
     entity_extractor: Arc<dyn EntityExtractor>,
@@ -238,7 +238,7 @@ async fn lane_loop(
 #[allow(clippy::too_many_arguments)]
 async fn drain_lane(
     pool: &PgPool,
-    formulator: Arc<dyn PlanFormulator>,
+    formulator: Arc<dyn NotebookFormulator>,
     review: Arc<ChainReviewStage>,
     dispatcher: Arc<dyn StepDispatcher>,
     entity_extractor: Arc<dyn EntityExtractor>,

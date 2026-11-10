@@ -26,9 +26,8 @@ use super::Turn;
 use crate::cassandra::injection_guard::{screen_with_profile, GuardProfile, InjectionDecision};
 use crate::scheduler::inner_loop::result_view;
 
-/// Total serialised bytes the conversation block may occupy, beside the
-/// existing 96 KiB `PLANS_SUMMARY_BUDGET`. Affordable because DGX plan latency
-/// is bound by generation, not context.
+/// Total serialised bytes the conversation block may occupy. Affordable
+/// because DGX plan latency is bound by generation, not context.
 pub(crate) const CONVERSATION_BUDGET: usize = 16 * 1024;
 
 /// Most bytes of one earlier user message.
@@ -90,6 +89,10 @@ pub(crate) const STATUS_UNCLASSIFIED: &str = "unclassified";
 /// The `calls` a turn dropped to fit its own record cap, surfaced to the
 /// planner so it knows the list it sees is partial.
 pub(crate) const OMITTED_CALLS_KEY: &str = "_omitted_calls";
+
+/// The `scrapbooks` a turn dropped to fit its own record cap, as
+/// [`OMITTED_CALLS_KEY`] is for its calls.
+pub(crate) const OMITTED_SCRAPBOOKS_KEY: &str = "_omitted_scrapbooks";
 
 /// The smallest budget for which [`render`]'s size bound holds. Below it the
 /// `STATUS_TOO_LARGE` fallback can itself exceed the budget, and the clamp
@@ -301,7 +304,7 @@ fn render_turn(turn: &Turn, user_cap: usize, answer_cap: usize, with_calls: bool
                 }
             }
             if record.omitted_scrapbooks > 0 {
-                obj.insert("_omitted_scrapbooks".into(), Value::from(record.omitted_scrapbooks));
+                obj.insert(OMITTED_SCRAPBOOKS_KEY.into(), Value::from(record.omitted_scrapbooks));
             }
         }
     }

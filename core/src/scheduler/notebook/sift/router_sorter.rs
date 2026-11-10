@@ -22,7 +22,7 @@ pub(crate) const SORTER_MAX_TOKENS: u32 = 1024;
 #[async_trait]
 impl Sorter for RouterAgent {
     async fn sort(&self, ctx: &TaskContext, user_msg: String) -> Result<String, AgentError> {
-        let prompt = self.prompts.get(SORTER_PROMPT).ok_or(AgentError::PromptMissing)?;
+        let prompt = self.prompts.get(SORTER_PROMPT).ok_or_else(|| AgentError::PromptMissing(SORTER_PROMPT.into()))?;
         let req = ChatRequest {
             model: self.router.config().local_model.clone(),
             messages: vec![ChatMessage::system(prompt.content.clone()), ChatMessage::user(user_msg)],

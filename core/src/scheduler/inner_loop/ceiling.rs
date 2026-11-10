@@ -68,7 +68,7 @@ pub(crate) fn exhausted(
     }
 }
 
-/// Whole seconds left before `deadline`, for the planner's `plan_budget`.
+/// Whole seconds left before `deadline`, for the notebook's `turn_budget`.
 /// Zero once it has passed; `None` when the task has no ceiling.
 pub(crate) fn seconds_left(deadline: Option<Instant>, now: Instant) -> Option<u64> {
     deadline.map(|d| d.saturating_duration_since(now).as_secs())

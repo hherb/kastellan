@@ -1,9 +1,9 @@
 //! `prompt_assembly` — build the LLM system message from L0 meta-rules,
-//! L1 insights, and the existing `agent_planner.md` base.
+//! L1 insights, and the planner prompt (`agent_notebook.md`) base.
 //!
 //! ## Role in the system
 //!
-//! `RouterAgent::formulate_plan` ([crate::scheduler::agent]) previously
+//! `RouterAgent::send_turn` ([crate::scheduler::agent]) previously
 //! sent the bare base prompt as the system message. Now it sends an
 //! assembled prompt that frames the L0 layer (hard agent constraints)
 //! and L1 layer (insight routing pointers) ahead of the base. The
@@ -24,8 +24,8 @@
 //!
 //! ## Why a trait instead of a free function
 //!
-//! Parallel to the existing
-//! [`PlanFormulator`](crate::scheduler::agent::PlanFormulator) seam.
+//! Parallel to the planner's own
+//! [`NotebookFormulator`](crate::scheduler::notebook::formulator::NotebookFormulator) seam.
 //! Tests swap in the static impl; production wires the PG impl
 //! through `RouterAgent::new`. A future recall-aware impl is a new
 //! type implementing the same trait, not a rewrite.
@@ -56,7 +56,7 @@ pub use pg_builder::{PgSystemPromptBuilder, StaticSystemPromptBuilder};
 /// memory loaders fail.
 ///
 /// The variant exists primarily so callers (specifically
-/// [`crate::scheduler::agent::RouterAgent::formulate_plan`]) can
+/// `crate::scheduler::agent::RouterAgent::send_turn`) can
 /// fail-closed on memory-load errors. Running with a degraded prompt
 /// (missing L0 → missing constitutional posture) is more dangerous than
 /// failing the plan iteration and letting the scheduler retry.
@@ -123,7 +123,7 @@ pub trait SystemPromptBuilder: Send + Sync {
     /// Assemble a system prompt by combining the loaded L0/L1 rows,
     /// the supplied `recalled` context, and `base`.
     ///
-    /// Production use site: `RouterAgent::formulate_plan` calls
+    /// Production use site: `RouterAgent::send_turn` calls
     /// `RecallBuilder::build(query)` first, then passes the result here.
     async fn build_with_recalled(
         &self,

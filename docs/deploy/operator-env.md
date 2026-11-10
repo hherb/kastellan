@@ -75,27 +75,21 @@ supported; a value needing either is out of contract on both platforms.
 
 ## The planner mode
 
-`KASTELLAN_PLANNER_MODE` picks the loop every task plans with (#922):
+The planner always runs the task notebook (#922): it writes its own step list,
+works one step per turn, and keeps its notes and findings in the
+`task_notebook` table. Each turn's prompt stays bounded however many tool
+results the task gathers. `KASTELLAN_PLANNER_MODE` may be unset (the usual
+case) or `notebook`. The older `classic` loop retired in #993:
+`KASTELLAN_PLANNER_MODE=classic` stops the daemon at boot, naming the
+retirement, rather than running a different loop than the file says. Any
+other value (the match is exact and lower-case: `Notebook` is refused) stops
+it too, naming the key.
 
-- `notebook` (the default, also when unset) — the planner writes its own step
-  list, works one step per turn, and keeps its notes and findings in the
-  `task_notebook` table. Each turn's prompt stays bounded however many tool
-  results the task gathers;
-- `classic` — one growing plan history per task. Kept opt-in until it retires.
+While a task runs, `kastellan-cli tasks correct <id> "<text>"` adds an operator
+correction: the next turn shows it to the planner, and it joins the instruction
+the reviewer checks every later call against.
 
-The default changed in #922 slice 4a (it was `classic`): an install that never
-set the key runs the notebook after its next upgrade. Set
-`KASTELLAN_PLANNER_MODE=classic` in `kastellan.env.local` to keep the old loop.
-
-Any other value (the match is exact and lower-case: `Notebook` is refused) stops
-the daemon at boot, naming the key. While a notebook task runs,
-`kastellan-cli tasks correct <id> "<text>"` adds an operator correction: the next
-turn shows it to the planner, and it joins the instruction the reviewer checks
-every later call against. The CLI accepts a correction for any running task, but
-a classic-mode daemon never reads it; when the task has no notebook entries yet
-the CLI warns that this may be the case.
-
-In notebook mode the planner can also `sift` a list (#922): one step that reads
+The planner can also `sift` a list (#922): one step that reads
 every candidate (each read reviewed, as one plan), keeps the ones a short
 per-item model call says match, with the fields it extracts, in the task's
 scrapbook, and lets the answer show them as a table built by code. Two knobs:
@@ -115,7 +109,6 @@ scrapbook, and lets the answer show them as a table built by code. Two knobs:
 
 A bad value of either stops the daemon at boot, naming the key. A key set to
 the empty string (`KASTELLAN_SIFT_MAX_READS=`) is a bad value, not unset.
-Classic mode never reads these keys.
 
 ## When it takes effect
 

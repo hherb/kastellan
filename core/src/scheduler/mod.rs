@@ -5,9 +5,10 @@
 //!
 //! Module split:
 //!   - `prompts`           — version-tracked agent prompts (PromptCache + ledger)
-//!   - `agent`             — formulate_plan LLM adapter
-//!   - `plan_parser`       — pure helper that turns an LLM response into a Plan, tolerant of markdown-fenced JSON
-//!   - `inner_loop`        — per-task iterative replanning (TaskContext + run_to_terminal)
+//!   - `agent`             — the planner's LLM adapter (`RouterAgent::send_turn`)
+//!   - `plan_parser`       — pure helper that turns an LLM response into a JSON reply, tolerant of markdown-fenced JSON
+//!   - `notebook`          — the planner loop (#922): one step per turn over a per-task notebook
+//!   - `inner_loop`        — shared per-task state (TaskContext) + the review-and-dispatch half
 //!   - `inner_loop_audit`  — pure builder + async writers for the inner loop's audit rows (issue #81 split)
 //!   - `runner`            — per-lane runner loop
 //!   - `tool_dispatch`     — production `StepDispatcher` wiring to `tool_host::dispatch`

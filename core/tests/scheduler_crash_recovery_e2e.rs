@@ -11,8 +11,7 @@
 //! reachable supervisor. `cargo test -- --nocapture` to see them.
 //!
 //! Issue #15 will eventually hoist the bring-up helpers into a shared
-//! fixture; until then we copy and adapt the recipe from
-//! `core/tests/scheduler_inner_loop_e2e.rs`.
+//! fixture; until then each suite carries its own copy of the recipe.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 

@@ -105,6 +105,7 @@ async fn the_sift_loop() {
     a_second_sift_over_the_same_step_walks_on_from_next_from(&pool).await;
     a_criterion_the_screen_blocks_leaves_the_ref_and_the_counts(&pool).await;
     an_ordinary_plan_stops_at_its_first_failed_step(&pool).await;
+    a_forced_answer_turn_never_dispatches_steps(&pool).await;
     a_table_naming_the_last_of_a_chain_shows_every_link(&pool).await;
     a_sift_from_past_the_end_is_refused_before_sorting(&pool).await;
     a_row_kept_in_two_links_counts_once_in_distinct(&pool).await;

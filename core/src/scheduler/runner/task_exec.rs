@@ -18,10 +18,10 @@ use kastellan_db::tasks::Task;
 use crate::cassandra::review::ChainReviewStage;
 use crate::cassandra::types::DataClass;
 use crate::channel::outbox::ChannelOutbox;
-use crate::scheduler::agent::PlanFormulator;
+use crate::scheduler::notebook::formulator::NotebookFormulator;
 use crate::scheduler::asks::{resolution_choice, Choice};
 use crate::scheduler::inner_loop::{
-    run_to_terminal, ClassificationFloorSource, InnerLoopResult, Outcome, StepDispatcher,
+    ClassificationFloorSource, InnerLoopResult, Outcome, StepDispatcher,
     TaskContext,
 };
 
@@ -102,7 +102,7 @@ pub(crate) fn lane_time_ceiling(lane: kastellan_db::tasks::Lane) -> Option<std::
 
 pub(super) async fn run_one(
     pool: &PgPool,
-    formulator: Arc<dyn PlanFormulator>,
+    formulator: Arc<dyn NotebookFormulator>,
     review: Arc<ChainReviewStage>,
     dispatcher: Arc<dyn StepDispatcher>,
     task: &Task,
@@ -307,14 +307,10 @@ pub(super) async fn run_one(
 
     let task_id = ctx.task_id;
     let dispatcher_for_purge = std::sync::Arc::clone(&dispatcher);
-    // The planner mode is the formulator's (`KASTELLAN_PLANNER_MODE`, #922):
-    // a notebook-mode formulator runs every task on the notebook loop.
-    let run = match formulator.notebook() {
-        Some(nb) => {
-            crate::scheduler::notebook::run::run_notebook_to_terminal(pool, nb, review, dispatcher, ctx, outbox).await
-        }
-        None => run_to_terminal(pool, formulator.clone(), review, dispatcher, ctx, outbox).await,
-    };
+    let run = crate::scheduler::notebook::run::run_notebook_to_terminal(
+        pool, formulator.as_ref(), review, dispatcher, ctx, outbox,
+    )
+    .await;
     let result = match run {
         Ok(r) => r,
         Err(e) => failed_result(format!("inner_loop: {e}")),

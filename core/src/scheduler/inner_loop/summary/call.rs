@@ -1,9 +1,8 @@
 //! What the planner is shown about its **own** earlier plans: the call each
 //! step made (#699) and the `decision` each plan stated (#700).
 //!
-//! Until #699 a completed plan reached the next prompt as
-//! `{decision, step_outcomes}` alone, so the planner saw what came back but not
-//! what it had asked for. In task 186 it searched with
+//! Until #699 a completed plan reached the next prompt without its calls, so
+//! the planner saw what came back but not what it had asked for. In task 186 it searched with
 //! `has_attachment: true`, then dropped that filter on the next search, and
 //! nothing in its prompt could have told it so. Each step outcome now carries
 //! the call beside it, under [`CALL_KEY`].
@@ -22,7 +21,7 @@
 use serde_json::{json, Value};
 
 use super::sink::{clamp_audit_label, sink_screen_with, SinkBlock};
-use super::{ELIDED_KEY, ELIDED_REASON, WITHHELD_MARKER};
+use super::WITHHELD_MARKER;
 use crate::cassandra::injection_guard::GuardProfile;
 use crate::cassandra::types::PlannedStep;
 use crate::scheduler::conversation::record::CALL_PARAMS_CAP;
@@ -34,10 +33,6 @@ pub(super) const CALL_KEY: &str = "call";
 
 /// The key under which a call's pruned parameters are shown.
 const PARAMETERS_KEY: &str = "parameters";
-
-/// What a call adds to its step outcome object beyond its own serialised
-/// value: the `"call":` key and the separating comma.
-const CALL_FRAMING_BYTES: usize = r#","call":"#.len();
 
 /// The profile both screens here use: planner-authored text is held to the
 /// fail-closed default whatever tool it names.
@@ -99,53 +94,8 @@ pub(super) fn render_call(step: &PlannedStep) -> Screened {
     )
 }
 
-/// What `call` adds to the serialised summary once it sits inside its step
-/// outcome object. The unit [`apply_call_budget`] and its caller count in.
-pub(super) fn call_cost(call: &Value) -> usize {
-    result_view::serialised_len(call).saturating_add(CALL_FRAMING_BYTES)
-}
-
-/// `call` with its `parameters` replaced by `"elided": "summary budget"`,
-/// keeping `tool` and `method`; `None` for a call with no parameters to drop
-/// (the withheld marker, or one already elided).
-fn without_parameters(call: &Value) -> Option<Value> {
-    let obj = call.as_object().filter(|o| o.contains_key(PARAMETERS_KEY))?;
-    let mut obj = obj.clone();
-    obj.remove(PARAMETERS_KEY);
-    obj.insert(ELIDED_KEY.into(), Value::from(ELIDED_REASON));
-    Some(Value::Object(obj))
-}
-
-/// Drop the oldest calls' `parameters` until `total` — the summary's current
-/// serialised size, calls included — is within `budget`. Returns how many
-/// calls lost their parameters.
-///
-/// The second pass of the summary budget, run after the step outputs have
-/// been shrunk or elided to fit: calls are what stop the planner repeating
-/// itself, so they go last, and even then `tool` and `method` stay. Oldest first (`calls[0]` is
-/// the first plan), stopping the moment the total fits, and only where
-/// dropping actually shrinks the call, so it is idempotent.
-pub(super) fn apply_call_budget(calls: &mut [Vec<Option<Value>>], mut total: usize, budget: usize) -> usize {
-    let mut elided = 0;
-    for call in calls.iter_mut().flatten().flatten() {
-        if total <= budget {
-            break;
-        }
-        let Some(smaller) = without_parameters(call) else { continue };
-        let (before, after) = (call_cost(call), call_cost(&smaller));
-        if after < before {
-            total = total.saturating_sub(before - after);
-            *call = smaller;
-            elided += 1;
-        }
-    }
-    elided
-}
-
-/// The plan's `decision`, screened (#700). Not clamped: it is not counted in
-/// the summary budget today (see `PLANS_SUMMARY_BUDGET`), and clamping it is
-/// a separate change from screening it — filed as #729, which also has the
-/// argument for why an unbounded always-in-context string wants a bound.
+/// The plan's `decision`, screened (#700); read by the sink audit rows. Not
+/// clamped: clamping it is a separate change from screening it (#729).
 pub(super) fn render_decision(decision: &str) -> Screened {
     Screened::screen(Value::from(decision), &[])
 }

@@ -705,17 +705,16 @@ async fn main() -> Result<()> {
         "planner now timezone resolved"
     );
 
-    // #922: which loop plans; an unknown value refuses to start.
+    // #922/#993: the notebook is the only loop; any other mode refuses to start.
     let planner_mode_var = match std::env::var("KASTELLAN_PLANNER_MODE") {
         Ok(v) => Some(v),
         Err(std::env::VarError::NotPresent) => None,
         Err(e) => anyhow::bail!("KASTELLAN_PLANNER_MODE: {e}"),
     };
-    let planner_mode = kastellan_core::scheduler::notebook::formulator::planner_mode(planner_mode_var.as_deref())
+    kastellan_core::scheduler::notebook::formulator::check_planner_mode(planner_mode_var.as_deref())
         .map_err(anyhow::Error::msg)?;
-    info!(?planner_mode, "planner mode");
 
-    // PlanFormulator — takes the extractor as 5th arg (Task 14 widened
+    // The planner's door — takes the extractor as 5th arg (Task 14 widened
     // the signature; Task 15 supplies the constructed extractor).
     let agent = kastellan_core::scheduler::agent::RouterAgent::new(
         router.clone(),
@@ -731,28 +730,24 @@ async fn main() -> Result<()> {
         )),
         entity_extractor.clone(),
     );
-    let formulator: Arc<dyn kastellan_core::scheduler::agent::PlanFormulator> = match planner_mode {
-        kastellan_core::scheduler::notebook::formulator::PlannerMode::Notebook => {
-            // #922 `sift`: its two knobs, checked against what is advertised;
-            // a bad value stops the daemon, naming the key.
-            let knob = |key: &str| match std::env::var(key) {
-                Ok(v) => Ok(Some(v)),
-                Err(std::env::VarError::NotPresent) => Ok(None),
-                Err(e) => Err(anyhow::anyhow!("{key}: {e}")),
-            };
-            let advertised: Vec<(String, String)> =
-                tool_docs.iter().map(|t| (t.doc.name.to_string(), t.doc.method.to_string())).collect();
-            let sift = kastellan_core::scheduler::notebook::sift::config::sift_config(
-                knob("KASTELLAN_SIFT_MAX_READS")?.as_deref(),
-                knob("KASTELLAN_SIFT_READ_METHODS")?.as_deref(),
-                &advertised,
-            )
-            .map_err(anyhow::Error::msg)?;
-            info!(max_reads = sift.max_reads, read_methods = ?sift.read_methods, "sift");
-            Arc::new(agent.with_notebook(tool_docs.clone(), sift))
-        }
-        kastellan_core::scheduler::notebook::formulator::PlannerMode::Classic => Arc::new(agent),
+    // #922 `sift`: its two knobs, checked against what is advertised; a bad
+    // value stops the daemon, naming the key.
+    let knob = |key: &str| match std::env::var(key) {
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("{key}: {e}")),
     };
+    let advertised: Vec<(String, String)> =
+        tool_docs.iter().map(|t| (t.doc.name.to_string(), t.doc.method.to_string())).collect();
+    let sift = kastellan_core::scheduler::notebook::sift::config::sift_config(
+        knob("KASTELLAN_SIFT_MAX_READS")?.as_deref(),
+        knob("KASTELLAN_SIFT_READ_METHODS")?.as_deref(),
+        &advertised,
+    )
+    .map_err(anyhow::Error::msg)?;
+    info!(max_reads = sift.max_reads, read_methods = ?sift.read_methods, "sift");
+    let formulator: Arc<dyn kastellan_core::scheduler::notebook::formulator::NotebookFormulator> =
+        Arc::new(agent.with_notebook(tool_docs.clone(), sift));
 
     // ── Bootstrap secret materialization vault (Item 31, slice 1). ──
     //

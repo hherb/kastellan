@@ -18,8 +18,8 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use kastellan_core::cassandra::types::{Plan, PlannedStep};
-use kastellan_core::scheduler::agent::{AgentError, FormulationMeta, PlanFormulator};
+use kastellan_core::cassandra::types::PlannedStep;
+use kastellan_core::scheduler::agent::{AgentError, FormulationMeta};
 use kastellan_core::scheduler::inner_loop::TaskContext;
 use kastellan_core::scheduler::notebook::formulator::{NotebookFormulator, UserMessage};
 use kastellan_llm_router::ThinkingPolicy;
@@ -73,20 +73,6 @@ impl NotebookFormulator for ScriptedNotebook {
 
     fn thinks_by_default(&self) -> bool {
         self.thinks
-    }
-}
-
-/// The scheduler takes a [`PlanFormulator`]; the notebook is behind its
-/// `notebook()` door, and the runner never calls the classic doors on a
-/// formulator that has one.
-#[async_trait]
-impl PlanFormulator for ScriptedNotebook {
-    async fn formulate_plan(&self, _ctx: &TaskContext) -> Result<(Plan, FormulationMeta), AgentError> {
-        unreachable!("a notebook formulator is never asked for a classic plan")
-    }
-
-    fn notebook(&self) -> Option<&dyn NotebookFormulator> {
-        Some(self)
     }
 }
 

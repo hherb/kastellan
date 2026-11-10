@@ -4,7 +4,7 @@
 //! ## Role in the system
 //!
 //! Sibling of [`crate::prompt_assembly`]. Both modules run inside
-//! `RouterAgent::formulate_plan` before each LLM call:
+//! `RouterAgent::send_turn` before each LLM call:
 //!
 //! 1. [`RecallBuilder::build`] (this module) — embeds the task
 //!    instruction, fans out to `recall(SEMANTIC | LEXICAL)`, and
@@ -50,7 +50,7 @@ pub use pg_builder::{PgRecallBuilder, StaticRecallBuilder};
 
 /// Errors returned by [`RecallBuilder::build`].
 ///
-/// Note: the caller in `RouterAgent::formulate_plan` is expected to
+/// Note: the caller in `RouterAgent::send_turn` is expected to
 /// **swallow** these (treat as [`RecalledContext::empty()`] and emit a
 /// `tracing::warn!`). The enum exists so impls can distinguish embed
 /// failures from DB failures in logs / tests, not so the agent can
@@ -96,7 +96,7 @@ pub struct RecalledContext {
     /// Always 64 hex chars (SHA-256 of any input, including empty).
     ///
     /// **Caveat on the degrade path:** when [`RecallBuilder::build`]
-    /// returns `Err` and the caller in `RouterAgent::formulate_plan`
+    /// returns `Err` and the caller in `RouterAgent::send_turn`
     /// substitutes [`Self::empty`], this field becomes the SHA-256 of
     /// the *empty string* — not the SHA-256 of the actual instruction
     /// that was being processed. Observation SQL that joins rows on
@@ -168,7 +168,7 @@ pub const L_RECALL_CAP_BYTES: usize = 4096;
 /// Tests: [`StaticRecallBuilder`] (fixed context, no I/O).
 ///
 /// **Degrade-and-warn contract:** callers (specifically
-/// `RouterAgent::formulate_plan`) are expected to swallow `Err`
+/// `RouterAgent::send_turn`) are expected to swallow `Err`
 /// returns and substitute `RecalledContext::empty()`. The async
 /// signature mirrors [`crate::prompt_assembly::SystemPromptBuilder`]
 /// so the agent can keep both calls structurally similar.
@@ -185,7 +185,7 @@ pub trait RecallBuilder: Send + Sync {
 
     /// Default-impl shim. Existing call sites that don't pass seeds
     /// still compile. Production code goes through `build_with_seeds`
-    /// via `RouterAgent::formulate_plan`; this shim is for test
+    /// via `RouterAgent::send_turn`; this shim is for test
     /// fixtures and any non-formulate caller.
     async fn build(&self, query: &str) -> Result<RecalledContext, RecallError> {
         self.build_with_seeds(query, &[]).await

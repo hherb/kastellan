@@ -28,9 +28,8 @@ pub(super) struct TurnGuard {
     pub kind: TurnKind,
 }
 
-/// Ask the model for one turn and check the reply, with the classic loop's
-/// recoveries (`llm_failure::formulate_turn`): an empty answer is asked again
-/// once; a reply that does not parse or breaks a rule is shown back once with
+/// Ask the model for one turn and check the reply, with its recoveries
+/// (the decisions are `llm_failure`'s): an empty answer is asked again once; a reply that does not parse or breaks a rule is shown back once with
 /// the reason (#945); an answer with no table after a sift that kept rows
 /// (#960), or whose table names no scrapbook ref (#973), is shown back once
 /// and kept if that fails; every failed call is
