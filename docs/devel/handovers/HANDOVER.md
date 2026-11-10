@@ -63,6 +63,12 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   `floor_resolved` case has no notebook door (the notebook always declares). `parse_plan_lenient` is a test helper now.
 - **Docs** done (dev 01/04/05/06/11/15, user 01/02/04, operator-env, README). #940: its byte budget is gone; item 3
   (a trace near `n_ctx`) still applies to the notebook — **operator to keep or close**.
+- **Finalcheck review fixes (same PR).** The conversation-block drift guard is ported to `agent_notebook.md`
+  (`formulator/tests.rs`); it caught a live gap: ⚠️ **the notebook prompt now documents `scrapbooks`, `_omitted_calls`,
+  `_omitted_scrapbooks`** (a prompt change; the DGX planner sees it on the next deploy). New tests cover
+  `retry_count` rows, the turn cap with nothing gathered, a cancel during a turn (first and mid-run), `seconds_left`,
+  and the shared forced-turn no-dispatch guard (a direct `review_and_dispatch` call). `AgentError::PromptMissing`
+  now names the missing prompt (`sift_sorter` was reported as `agent_notebook`).
 
 ### Previous (2026-11-09): #993 step 4 ports (PR #1017, merged) — the shared-code tests read `PlanRecord::last_step_view`/`last_result_view` (`summary/step_view_tests.rs`); seven timeout/deadline cases in `notebook/run/timeout_tests.rs` (real request timeouts: the harness `Script` has `TIMEOUT` + `turn_delay`). DGX experiments #21–#22: **14 of 14**. Filed 1018 (forced multi-sift table repeats a message per sift), 1019 (a call on the forced re-ask fails as "not a plan"). ⚠️ The notebook prompt omits the 255-char non-ASCII atomic limit.
 
@@ -80,7 +86,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 - `ScriptedNotebook`: a closure picks each reply from `ctx`; ⚠️ a **first reply without `steps` is refused**; every
   `call_reply` lists its own fresh step id. ⚠️ **The router default is `disable_thinking: true`**, so a scripted daemon
-  happy path is **3 turns**. **The Mac flips to notebook on its next install** unless `.local` says `classic`.
+  happy path is **3 turns**. Since #993 a `.local` that says `classic` **stops the daemon at boot**; neither host sets it.
 - One `PgListener` per process, `MAX_FOLLOWS` **64**; ⚠️ a follow reads state **before** entries and its 3 s poll
   tick, not the NOTIFYs, makes it correct. ⚠️ **`kastellan-cli` installs a warn-level stderr subscriber** — PG e2es
   fail instead of skipping once PG is up. ⚠️ **bottie matches the parking marker by substring**

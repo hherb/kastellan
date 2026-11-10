@@ -46,7 +46,7 @@ pub enum SeedSource {
     None,
 }
 
-/// What the extractor returns to `RouterAgent::formulate_plan`.
+/// What the extractor returns to `RouterAgent::send_turn`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntitySeeds {
     pub ids: Vec<i64>,
@@ -74,8 +74,8 @@ pub enum EntityExtractionError {
 
 /// Async seam: extracts entity ids for the recall graph lane.
 ///
-/// `RouterAgent::formulate_plan` invokes this BEFORE recall on every
-/// plan iteration; failure is degrade-and-warn (the caller substitutes
+/// `RouterAgent::send_turn` invokes this BEFORE recall on every
+/// notebook turn; failure is degrade-and-warn (the caller substitutes
 /// `EntitySeeds::empty()` and continues).
 #[async_trait]
 pub trait EntityExtractor: Send + Sync {

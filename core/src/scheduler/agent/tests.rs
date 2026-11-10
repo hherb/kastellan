@@ -16,7 +16,7 @@ fn only_a_decode_failure_carries_its_completion() {
     assert_eq!(got.completion_tokens, Some(48));
     assert_eq!(latency_ms, 18_976);
     assert_eq!(raw, "prose");
-    assert!(AgentError::PromptMissing.completion().is_none());
+    assert!(AgentError::PromptMissing("p".into()).completion().is_none());
 }
 
 /// #923: only an answer with nothing in it is worth a plain retry; a
@@ -33,7 +33,7 @@ fn only_a_blank_decode_failure_is_an_empty_completion() {
     assert!(decode(" \n\t").is_empty_completion());
     assert!(!decode("Sure! Here is the plan").is_empty_completion());
     assert!(!decode("{").is_empty_completion());
-    assert!(!AgentError::PromptMissing.is_empty_completion());
+    assert!(!AgentError::PromptMissing("p".into()).is_empty_completion());
     // Out of room is not transient: the same request runs out again.
     let out_of_room = |finish_reason: Option<&str>| AgentError::Decode {
         detail: "d".into(),
@@ -67,5 +67,5 @@ fn only_a_complete_non_blank_decode_failure_is_a_non_plan_answer() {
     assert_eq!(decode("{\"steps\": [}", None).non_plan_answer(), Some("{\"steps\": [}"));
     assert_eq!(decode(" \n", Some("stop")).non_plan_answer(), None);
     assert_eq!(decode(prose, Some("length")).non_plan_answer(), None);
-    assert_eq!(AgentError::PromptMissing.non_plan_answer(), None);
+    assert_eq!(AgentError::PromptMissing("p".into()).non_plan_answer(), None);
 }

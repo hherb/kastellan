@@ -42,12 +42,12 @@
 
 - **`prompts/agent_planner.md`** (retired with the classic loop in #993; the constitutional principles now live in `prompts/agent_notebook.md`) — planning protocol with constitutional principles; CASSANDRA terminal data_ceiling; `DECISION_TERMINAL` ("task_complete") shape.
 - **`core::scheduler::prompts`** — `PromptCache`, `load_prompts_from_dir` (reads `.md`, SHA-256-hashes, upserts into `agent_prompts` ledger, returns `Arc<PromptCache>`).
-- **`core::scheduler::agent`** — `PlanFormulator` trait (async, `async-trait`), `TaskContext` (task row + pool), `FormulationMeta` (prompt name/sha, model, backend, latency, retry count), `AgentError`.
+- **`core::scheduler::agent`** — `PlanFormulator` trait (retired in #993; the runner holds `NotebookFormulator`) (async, `async-trait`), `TaskContext` (task row + pool), `FormulationMeta` (prompt name/sha, model, backend, latency, retry count), `AgentError`.
 - **`core::scheduler::inner_loop`** — `run_to_terminal` (retired in #993; the loop is now `scheduler::notebook::run`) (claim → LLM plan → CASSANDRA review chain → dispatch steps → repeat), `Outcome` (Completed/Failed/Cancelled), `StepDispatcher` trait, `StepOutcome`. Plan-iteration cap = 10.
 - **`core::scheduler::runner`** — `LaneRunner` (per-lane `PgListener` wake-up + `claim_one` loop + spawn inner_loop), `ToolHostStepDispatcher` (NOT_IMPLEMENTED placeholder — see deferrals), `spawn_scheduler` (starts both lanes).
 - **`core/src/main.rs` wiring** — `spawn_scheduler` at daemon startup; `sweep_crashed` on boot; prompt load; `ChainReviewStage` with stub stages.
 - **`kastellan-cli` subcommands** — `ask` (LISTEN-before-INSERT completion signal, ctrl-C cancel), `tasks list`, `tasks status`, `tasks cancel`, `tasks fail`, `tasks tail`.
-- **Integration tests (skip-as-pass without PG):** `scheduler_inner_loop_e2e` (4 scenarios: happy path, tool-fail-recover, cap-exhausted, cancel); `scheduler_lanes_e2e` (concurrent fast+long claim timing); `scheduler_crash_recovery_e2e` (back-dated lease → sweep_crashed); `agent_prompts_e2e` (hash lands + both versions persist).
+- **Integration tests (skip-as-pass without PG):** `scheduler_inner_loop_e2e` (deleted in #993; notebook twins in `scheduler::notebook::run::tests`) (4 scenarios: happy path, tool-fail-recover, cap-exhausted, cancel); `scheduler_lanes_e2e` (concurrent fast+long claim timing); `scheduler_crash_recovery_e2e` (back-dated lease → sweep_crashed); `agent_prompts_e2e` (hash lands + both versions persist).
 - **ROADMAP** — scheduler entry marked `[x]` with commit range; 3.2.bis, 4.4, and real-stages follow-up entries added as unchecked items.
 
 ### Phase 1 — what shipped (15 commits)

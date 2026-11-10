@@ -8,8 +8,7 @@
 //! earlier ones; what earlier steps found survives as the model's own notes
 //! and findings. (`blocks` and `advisories` do grow, one line per block.)
 //!
-//! **Key order is the prompt cache's order** (#943), as in the classic
-//! `agent::context`: what is fixed for the task, then the notebook (which
+//! **Key order is the prompt cache's order** (#943): what is fixed for the task, then the notebook (which
 //! changes in place as steps finish), then what changes every turn, the turn
 //! budget, and `now` last.
 //! A `serde_json::Map` would sort the keys, so every level is built as
@@ -84,8 +83,7 @@ pub(crate) fn render_turn(
         let items: Vec<Value> = unseen.iter().map(|c| json!({"text": c.text})).collect();
         fields.push(("corrections", Value::Array(items).to_string()));
     }
-    // The reviewer's word on earlier calls, as the classic loop shows it:
-    // without `blocks` a blocked call would be tried again blind. Both only
+    // The reviewer's word on earlier calls: without `blocks` a blocked call would be tried again blind. Both only
     // grow, so they sit before the parts that change every turn.
     if !ctx.advisories.is_empty() {
         fields.push(("advisories", json!(ctx.advisories).to_string()));

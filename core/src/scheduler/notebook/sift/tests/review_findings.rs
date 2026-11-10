@@ -127,6 +127,65 @@ pub(super) async fn an_ordinary_plan_stops_at_its_first_failed_step(pool: &sqlx:
     }
 }
 
+/// The shared dispatcher's last line of defence: a forced-answer turn whose
+/// plan still carries steps never dispatches them. The notebook re-asks such
+/// a reply first (`reply::require_answer`), so only a direct call reaches it.
+pub(super) async fn a_forced_answer_turn_never_dispatches_steps(pool: &sqlx::PgPool) {
+    use crate::cassandra::review::ReviewStage;
+    use crate::cassandra::types::{Plan, PlannedStep};
+    use crate::scheduler::inner_loop::ceiling::Exhausted;
+    use crate::scheduler::inner_loop::execute::{self, ExecState, Executed, StepPolicy};
+
+    let review = std::sync::Arc::new(RecordingReview::default());
+    let chain = ChainReviewStage::new(vec![review as std::sync::Arc<dyn ReviewStage>]);
+    for (exhausted, want) in [
+        (Some(Exhausted::Plans), "plan_iteration_cap_exceeded (5>=5); forced synthesis did not produce a final answer"),
+        // A timeout forced it, not the cap, so the detail must not claim the cap.
+        (None, "ran out of time, so the task asked the language model to answer"),
+    ] {
+        let tools = Tools::default();
+        let mut ctx = new_task(pool, 5).await;
+        let plan = Plan {
+            context: String::new(),
+            decision: "one more step".into(),
+            rationale: "r".into(),
+            steps: vec![PlannedStep {
+                tool: "mail".into(),
+                method: "mail.search".into(),
+                parameters: json!({"q": 1}),
+                returns: "r".into(),
+                done_when: "d".into(),
+                classification: DataClass::Public,
+            }],
+            result: None,
+            data_ceiling: Some(DataClass::Public),
+            refused: None,
+            floor_request: None,
+            l1_insight: None,
+            l3_skill: None,
+            invoke_skill: None,
+            python_skill: None,
+        };
+        let mut st = ExecState::default();
+        let got = execute::review_and_dispatch(
+            pool, &chain, &tools, &mut ctx, plan, &meta(), true, exhausted, &mut st, None, StepPolicy::Plan,
+        )
+        .await
+        .unwrap();
+        match got {
+            Executed::Finished(f) => match f.outcome {
+                Outcome::Failed(d) => {
+                    assert!(d.contains(want), "{exhausted:?}: {d}");
+                    assert_eq!(d.contains("cap_exceeded"), exhausted.is_some(), "{d}");
+                }
+                o => panic!("{exhausted:?}: expected Failed, got {o:?}"),
+            },
+            _ => panic!("{exhausted:?}: a forced turn must finish the task"),
+        }
+        assert!(tools.dispatched.lock().unwrap().is_empty(), "{exhausted:?}: nothing dispatched");
+    }
+}
+
 /// #970: a body's own table is taken out only when the code's table has rows
 /// to take its place. A sift of this run that kept nothing still renders its
 /// (empty) table and counts, so the model's table stays.

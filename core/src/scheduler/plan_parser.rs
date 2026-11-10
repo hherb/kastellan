@@ -25,15 +25,15 @@
 //! 3. **No partial-recovery JSON repair.** We don't patch unbalanced
 //!    braces, smart-quotes, or trailing commas. If the model's JSON is
 //!    structurally broken, the error surfaces to the agent loop as
-//!    `AgentError::Decode` (same surface as the strict path) and the
-//!    inner loop counts it as a failed plan iteration.
+//!    `AgentError::Decode` (same surface as the strict path): the
+//!    notebook re-asks once (#945), then the task fails.
 //! 4. **First `{` wins.** The lenient path anchors on the *first* `{`
 //!    in the input. If a model emits prose that contains a `{`
 //!    character *before* the real JSON body (e.g. "expected shape is
 //!    `{tool, method, params}`: ```json\n{…real plan…}\n```"), the
 //!    stream-deserializer will try to parse from that earlier `{`,
 //!    fail, and the decode fails. The failure mode is "fail decode →
-//!    failed plan iteration", never "succeed with the wrong JSON value
+//!    re-ask", never "succeed with the wrong JSON value
 //!    picked from later in the response".
 //! 5. **The reported error describes the failure that matters.** When
 //!    the input contains no `{` at all it cannot be JSON, and the

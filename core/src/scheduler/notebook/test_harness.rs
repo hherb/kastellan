@@ -79,6 +79,9 @@ pub(crate) struct Script {
     pub(crate) sort_delay: std::time::Duration,
     /// Cancel this task during the first sorter call (an operator's cancel).
     pub(crate) cancel_during_sort: Option<(sqlx::PgPool, i64)>,
+    /// Cancel this task during model turn `n` (0-based): an operator's
+    /// cancel while the model thinks.
+    pub(crate) cancel_during_turn: Option<(sqlx::PgPool, i64, usize)>,
     /// How long each model turn takes (a task run past its deadline).
     pub(crate) turn_delay: std::time::Duration,
 }
@@ -101,6 +104,7 @@ impl Script {
             sift_cfg: SiftConfig { max_reads: 64, read_methods: vec!["mail.read".into(), "esc.read".into()] },
             sort_delay: std::time::Duration::ZERO,
             cancel_during_sort: None,
+            cancel_during_turn: None,
             turn_delay: std::time::Duration::ZERO,
         }
     }
@@ -125,13 +129,19 @@ impl NotebookFormulator for Script {
         prior: Option<(&str, &str)>,
         thinking: ThinkingPolicy,
     ) -> Result<(String, FormulationMeta), AgentError> {
-        let first = self.messages.lock().unwrap().is_empty();
+        let turn = self.messages.lock().unwrap().len();
+        let first = turn == 0;
         self.messages.lock().unwrap().push(user_msg(None));
         if let Some((_, reason)) = prior {
             self.reasks.lock().unwrap().push(reason.to_string());
         }
         if let (true, Some((pool, task, text))) = (first, &self.correction_during_first_turn) {
             db::append(pool, *task, EntryKind::Correction, json!({"text": text})).await.unwrap();
+        }
+        if let Some((pool, task, n)) = &self.cancel_during_turn {
+            if *n == turn {
+                kastellan_db::tasks::mark_cancelled(pool, *task).await.unwrap();
+            }
         }
         // Out of script: a non-blank reply that is not a notebook reply, so it
         // is re-asked once and then fails — never an empty one, which would be
@@ -177,7 +187,7 @@ impl Sorter for Script {
             kastellan_db::tasks::mark_cancelled(pool, *task).await.unwrap();
         }
         self.sorted.lock().unwrap().push(user_msg);
-        self.sorter_replies.lock().unwrap().pop_front().ok_or_else(|| AgentError::PromptMissing)
+        self.sorter_replies.lock().unwrap().pop_front().ok_or_else(|| AgentError::PromptMissing("out of script".into()))
     }
 }
 

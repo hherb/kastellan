@@ -394,7 +394,10 @@ async fn a_notebook_turn_with_no_prompt_never_dials_the_backend() {
         .notebook_turn(&ctx(), &|_| "the turn".to_string(), None, ThinkingPolicy::RouterDefault)
         .await
         .expect_err("must fail");
-    assert!(matches!(err, AgentError::PromptMissing), "expected PromptMissing, got {err:?}");
+    assert!(
+        matches!(&err, AgentError::PromptMissing(name) if name == "agent_notebook"),
+        "expected PromptMissing naming the notebook prompt, got {err:?}"
+    );
     // Empty iff the mock never accepted a connection (the send is awaited
     // inline).
     let mut served_rx = served_rx;

@@ -2,8 +2,8 @@
 //! for model-authored text, and the screened view of a record's last step.
 //!
 //! Kept here, beside the code it reuses, so the notebook shows tool output
-//! and model text through exactly the screens the classic summary uses —
-//! never a second copy that could drift (#669).
+//! and model text through exactly the screens `PlanRecord`'s own render and
+//! the sift sorter use — never a second copy that could drift (#669).
 
 use super::call::MODEL_AUTHORED_PROFILE;
 use super::sink::{sink_screen_with, SinkBlock};

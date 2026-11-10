@@ -184,9 +184,9 @@ What works today:
   writes an append-only audit row, and a crash-recovery sweep picks up
   interrupted work. Planner calls are bounded:
   - a token cap (`max_tokens`) and a call timeout on every call;
-  - a `plan_budget` the model can see;
+  - a `turn_budget` the model can see;
   - a 15-minute ceiling on the fast lane;
-  - a re-ask when the model's reply is not a plan.
+  - a re-ask when the model's reply cannot be used.
 
   The thinking/reasoning switch is per backend (`KASTELLAN_LLM_THINKING_SWITCH`).
 - **The task notebook planner**: external working memory for the planner.

@@ -7,7 +7,7 @@
 //! 2. Expand each item's reads (K3b), as many items as fit in
 //!    `KASTELLAN_SIFT_MAX_READS` reads — and never more items than that, read
 //!    or not — and review and dispatch them as
-//!    **one plan** through the classic loop's own code (K3) — a Block or an
+//!    **one plan** through the shared `inner_loop::execute::review_and_dispatch` (K3) — a Block or an
 //!    Escalate there behaves exactly as for any plan. A failed read does not
 //!    stop the others ([`StepPolicy::SiftReads`]).
 //! 3. Show each item (its hit, then its reads, each through the summary's own

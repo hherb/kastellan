@@ -31,8 +31,9 @@ pub enum AgentError {
         usage: kastellan_llm_router::CompletionStats,
         latency_ms: u64,
     },
-    #[error("agent prompt (agent_notebook) not found in cache")]
-    PromptMissing,
+    /// The named prompt (the notebook's or the sift sorter's) is not loaded.
+    #[error("agent prompt ({0}) not found in cache")]
+    PromptMissing(String),
     /// L0/L1 load failed under the [`SystemPromptBuilder`]; the scheduler's
     /// retry policy decides whether to retry or fail permanently.
     #[error("prompt assembly: {0}")]
@@ -99,7 +100,8 @@ pub struct RouterAgent {
     recall_builder: std::sync::Arc<dyn crate::recall_assembly::RecallBuilder>,
     entity_extractor: std::sync::Arc<dyn crate::entity_extraction::EntityExtractor>,
     /// The advertised tools, for the current step's tool doc (#922), set by
-    /// `with_notebook`. `None` (a bare `new`, as tests build it): no tool docs.
+    /// `with_notebook`. `None` (a bare `new`, as tests build it): the notebook
+    /// runs with no tool docs, so production must call `with_notebook`.
     pub(crate) notebook_tools: Option<std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>>,
     /// The operator's sift knobs (#922), set by `with_notebook`.
     pub(crate) sift_cfg: super::notebook::sift::config::SiftConfig,
@@ -140,7 +142,7 @@ impl RouterAgent {
         thinking: ThinkingPolicy,
     ) -> Result<(String, FormulationMeta), AgentError> {
         let entry = self.prompts.get(prompt_name)
-            .ok_or(AgentError::PromptMissing)?;
+            .ok_or_else(|| AgentError::PromptMissing(prompt_name.to_string()))?;
 
         let base = entry.content.clone();
 
@@ -204,9 +206,8 @@ impl RouterAgent {
             max_tokens: Some(ceiling::PLANNER_MAX_TOKENS),
             temperature: Some(0.0),
             // Left None so the router writes the thinking switch in its
-            // configured dialect (#773). Whether to suppress is `thinking`:
-            // the router's `disable_thinking` default on every turn except
-            // the timed-out synthesis retry (#774) and the re-ask (#945).
+            // configured dialect (#773). Whether to suppress is `thinking`,
+            // chosen per turn by the notebook (`notebook::thinking`).
             chat_template_kwargs: None,
             reasoning_effort: None,
             thinking,

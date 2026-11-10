@@ -90,6 +90,10 @@ pub(crate) const STATUS_UNCLASSIFIED: &str = "unclassified";
 /// planner so it knows the list it sees is partial.
 pub(crate) const OMITTED_CALLS_KEY: &str = "_omitted_calls";
 
+/// The `scrapbooks` a turn dropped to fit its own record cap, as
+/// [`OMITTED_CALLS_KEY`] is for its calls.
+pub(crate) const OMITTED_SCRAPBOOKS_KEY: &str = "_omitted_scrapbooks";
+
 /// The smallest budget for which [`render`]'s size bound holds. Below it the
 /// `STATUS_TOO_LARGE` fallback can itself exceed the budget, and the clamp
 /// candidates stop shrinking because [`clamp_text`] floors every cap at
@@ -300,7 +304,7 @@ fn render_turn(turn: &Turn, user_cap: usize, answer_cap: usize, with_calls: bool
                 }
             }
             if record.omitted_scrapbooks > 0 {
-                obj.insert("_omitted_scrapbooks".into(), Value::from(record.omitted_scrapbooks));
+                obj.insert(OMITTED_SCRAPBOOKS_KEY.into(), Value::from(record.omitted_scrapbooks));
             }
         }
     }

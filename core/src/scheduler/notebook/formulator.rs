@@ -90,16 +90,15 @@ pub trait NotebookFormulator: Send + Sync {
 }
 
 impl RouterAgent {
-    /// Run every task on the notebook loop (#922), showing each step the doc
-    /// of its tool from `tools`, and sifting with `sift` (the operator's
-    /// `KASTELLAN_SIFT_*` knobs, [`super::sift::config::sift_config`]).
+    /// Show each notebook step the doc of its tool from `tools` (#922), and
+    /// sift with `sift` (the operator's `KASTELLAN_SIFT_*` knobs, [`super::sift::config::sift_config`]).
     pub fn with_notebook(mut self, tools: std::sync::Arc<[crate::prompt_assembly::AdvertisedTool]>, sift: SiftConfig) -> Self {
         self.notebook_tools = Some(tools);
         self.sift_cfg = sift;
         self
     }
 
-    /// The doc of the advertised tool named `tool`, in notebook mode.
+    /// The doc of the advertised tool named `tool`.
     fn notebook_tool_doc(&self, tool: &str) -> Option<String> {
         let tools = self.notebook_tools.as_ref()?;
         tools.iter().find(|t| t.doc.name == tool).map(crate::prompt_assembly::assemble::render_tool_doc)

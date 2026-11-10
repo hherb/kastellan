@@ -1,5 +1,5 @@
 //! The agent-raised plan features on the notebook loop (#996: ported from
-//! the classic loop before it is retired, #993). The reply carries each one
+//! the classic loop before it was retired, #993). The reply carries each one
 //! on its `answer` (or `call`); the shared `execute::review_and_dispatch`
 //! acts on it exactly as on a classic plan. Each runs on the cluster
 //! `super::tests::the_notebook_loop` brings up.

@@ -43,8 +43,8 @@ use super::{PlanRecord, StepOutcome};
 /// Only for a **request timeout** (the model was reached and was slow —
 /// the case a shorter "just answer" request can beat), only once there is
 /// something to synthesize from (`gathered`: at least one successful tool
-/// observation), and only if the synthesis turn has not been spent — the
-/// synthesis turn's own timeout has its retry and then fails. Pure.
+/// observation), and only if the synthesis turn has not been spent — a
+/// timeout on the forced-answer turn itself fails the task. Pure.
 pub(crate) fn should_force_synthesis(timed_out: bool, gathered: bool, synth_attempted: bool) -> bool {
     timed_out && gathered && !synth_attempted
 }
@@ -206,9 +206,10 @@ const FAILED_ROW_RAW_HEAD_CHARS: usize = 512;
 /// without this the minutes it cost are visible only in the daemon log —
 /// and #774's point is that "why was this task slow?" is a query.
 /// `plan_count` is the count *before* the call (a failed call adds no
-/// plan); `thinking_suppressed_retry` marks a call made with thinking
-/// suppressed — the synthesis retry (#774) or the re-ask (#945); a
-/// `synth_turn: false` row with it set is the re-ask.
+/// plan); `thinking_suppressed_retry` marks a re-ask made with thinking
+/// suppressed — the #945 re-ask of an unusable reply, or a failed table
+/// show-back (#960/#973); the timed-out synthesis retry (#774) that also
+/// set it retired with the classic loop (#993).
 ///
 /// `completion` is the cost of the answer that failed to decode, when one
 /// came back ([`AgentError::completion`](crate::scheduler::agent::AgentError::completion)).

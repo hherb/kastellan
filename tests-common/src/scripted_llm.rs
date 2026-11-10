@@ -395,7 +395,7 @@ pub fn props_envelope(n_ctx: u64) -> String {
 /// `EMBEDDING_DIM` (256) elements; a vector at least that long succeeds
 /// (this 768-long filler mirrors embeddinggemma's native width), while
 /// a shorter one causes a `MemoryError::EmbeddingDimMismatch` that
-/// triggers the degrade-and-warn path in `formulate_plan`. The byte
+/// triggers the degrade-and-warn path in `RouterAgent::send_turn`. The byte
 /// values don't matter for these tests: the `memories` table is never
 /// seeded, so both recall lanes return 0 rows regardless of the query
 /// vector. Using `0.001` (a small non-zero value) keeps the embedding

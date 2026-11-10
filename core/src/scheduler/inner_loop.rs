@@ -35,7 +35,8 @@ use super::agent::AgentError;
 use super::asks;
 
 /// Hard cap on tool dispatches a single plan iteration may request. Sized far
-/// above any legitimate plan (the planner prompt asks for a handful of steps)
+/// above any legitimate plan (a notebook turn makes one call; an
+/// `invoke_skill` or a sift's reads make several)
 /// and well below the point where retained outcomes (up to 256 KiB each for a
 /// fetch) become a memory problem for the daemon.
 pub const MAX_STEPS_PER_PLAN: usize = 64;
@@ -64,7 +65,7 @@ pub struct TaskContext {
     pub instruction: String,
     pub classification_floor: DataClass,
     /// Provenance of `classification_floor`. Set at task entry by
-    /// `runner::run_inner_loop_for_task`; mutated to `AgentRaised` on
+    /// `runner::task_exec::run_one`; mutated to `AgentRaised` on
     /// successful agent floor-raise (see `apply_floor_raise`).
     pub classification_floor_source: ClassificationFloorSource,
     /// Matched signal tags from CLI keyword inference. Non-empty iff
