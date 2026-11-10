@@ -165,6 +165,9 @@ pub(super) async fn a_calls_floor_request_raises_the_task_floor(pool: &sqlx::PgP
     for row in &formulated {
         assert_eq!(row["classification_floor"], "ClinicalConfidential", "{row:#?}");
         assert_eq!(row["classification_floor_source"], "agent_raised", "{row:#?}");
+        // The notebook always declares a ceiling (the classic
+        // `a_declared_data_ceiling_is_audited_as_declared`'s twin).
+        assert_eq!(row["data_ceiling_source"], "declared", "{row:#?}");
     }
     assert_eq!(last_ceiling(pool, r.task_id).await, "ClinicalConfidential");
     assert!(script.messages()[1].contains(r#""classification_floor":"ClinicalConfidential""#), "the render shows it");
@@ -216,12 +219,18 @@ pub(super) async fn a_repeated_calls_floor_request_still_raises_the_floor(pool: 
 /// of `{"id": q}` (which fails for `q` = `"bad"`) — as an operator would; its
 /// id.
 async fn seed_pinned_skill(pool: &sqlx::PgPool, name: &str) -> i64 {
+    seed_pinned_skill_on(pool, name, "mail").await
+}
+
+/// [`seed_pinned_skill`] with its steps naming `tool` (the harness's
+/// dispatcher knows only `mail`).
+async fn seed_pinned_skill_on(pool: &sqlx::PgPool, name: &str, tool: &str) -> i64 {
     use kastellan_db::memories::{insert_memory_at_layer, set_skill_trust, MemoryLayer};
     let template = json!({
         "name": name, "description": "d",
         "parameters": [{"name": "q", "description": "the search"}],
-        "steps": [{"tool": "mail", "method": "a", "parameters": {"q": "{{q}}"}},
-                  {"tool": "mail", "method": "b", "parameters": {"id": "{{q}}"}}],
+        "steps": [{"tool": tool, "method": "a", "parameters": {"q": "{{q}}"}},
+                  {"tool": tool, "method": "b", "parameters": {"id": "{{q}}"}}],
     });
     let metadata = json!({"template": template, "trust": "pinned", "body_sha256": "deadbeef"});
     let id = insert_memory_at_layer(pool, "skill body", &metadata, None, MemoryLayer::Skill).await.unwrap();
@@ -318,4 +327,20 @@ pub(super) async fn an_unknown_skill_is_refused_and_the_next_turn_replans(pool: 
     let next = &script.messages()[1];
     assert!(next.contains("invoke_rejected"), "the refusal is shown back: {next}");
     assert!(kinds(pool, r.task_id).await.contains(&kastellan_db::notebook::EntryKind::FailedStep));
+
+    // A PINNED skill whose tool is no longer registered is refused at expand
+    // time too (`agent_invoke_pinned_skill_with_unregistered_tool_refuses`'s
+    // twin): the live re-check, after a row WAS loaded, so the rejection
+    // names it.
+    let memory_id = seed_pinned_skill_on(pool, "fetch_elsewhere", "web-fetch").await;
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": invoke_call("fetch_elsewhere", "invoices")}),
+        json!({"answer": {"body": "recovered"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(body(&r.result), "recovered");
+    assert!(r.tools.dispatched.lock().unwrap().is_empty(), "an unregistered tool runs nothing");
+    let rejected = invoke_rows(pool, "l3.invoke_rejected", "fetch_elsewhere").await;
+    assert_eq!(rejected.len(), 1, "{rejected:#?}");
+    assert_eq!(rejected[0]["memory_id"], memory_id, "the gate refusal names the loaded row");
 }
