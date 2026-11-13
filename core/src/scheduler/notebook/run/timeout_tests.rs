@@ -111,6 +111,23 @@ pub(super) async fn a_re_ask_that_times_out_before_gathering_fails_in_words(pool
     assert_eq!(r.result.failed_llm_calls, 2);
 }
 
+/// #1019: a timeout forced the answer turn, and the model called on it and on
+/// its re-ask. The task fails in the timeout-forced words, never "not a plan"
+/// (the reply was a plan) nor the cap's (the cap was never reached).
+pub(super) async fn a_call_on_a_timeout_forced_answer_turn_does_not_claim_the_cap(pool: &sqlx::PgPool) {
+    let script = Script::raw(&[
+        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}).to_string(),
+        TIMEOUT.into(),
+        json!({"tick": tick(1, "f"), "call": call(2, "b")}).to_string(),
+        json!({"tick": tick(1, "f"), "call": call(2, "c")}).to_string(),
+    ]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let d = failed(&r.result);
+    assert!(d.starts_with("A planning call ran out of time"), "{d}");
+    assert!(!d.contains("not a plan") && !d.contains("plan_iteration_cap_exceeded"), "{d}");
+    assert_eq!(r.result.dispatch_count, 1, "neither answer-turn call ran");
+}
+
 /// The fast lane's deadline passes during a gathering turn: the next turn is
 /// the forced answer, exactly as at the turn cap (#922), far below the cap.
 pub(super) async fn the_deadline_passing_after_a_gather_spends_the_answer_turn(pool: &sqlx::PgPool) {

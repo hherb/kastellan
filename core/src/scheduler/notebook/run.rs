@@ -167,7 +167,7 @@ pub(crate) async fn run_notebook_to_terminal(
                 let cur = current.map(|step| CurrentStep { step, tool_doc: tool_doc.clone(), last });
                 render_turn(&ctx, &state, seen_corrections, last_failure, cur, budget, now)
             };
-            let guard = TurnGuard { gathered: st.gathered, answer_attempted, answer_turn, kind };
+            let guard = TurnGuard { gathered: st.gathered, answer_attempted, answer_turn, exhausted, kind };
             ask(pool, nb, &ctx, &state, &msg, guard, &mut failed_llm_calls).await
         };
         seen_corrections = state.corrections.last().map_or(seen_corrections, |c| c.seq);

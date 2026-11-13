@@ -156,6 +156,35 @@ fn a_timeout_forced_synthesis_without_an_answer_does_not_claim_the_cap() {
         .contains("the 1 tool result already"));
 }
 
+// ── answer_turn_call_detail (#1019) ───────────────────────────────────────
+
+#[test]
+fn a_call_on_the_answer_turn_names_why_the_turn_had_to_answer() {
+    use super::super::ceiling::Exhausted;
+    let plans = vec![record(&["mail.search"], vec![ok()])];
+    let work = GatheredWork::from_plans(&plans);
+    let err = "plan decode failed: this turn must end the task";
+
+    // At the cap the row keeps the wording operators count (`5>=5`).
+    let cap = answer_turn_call_detail(Some(Exhausted::Plans), true, &work, 5, err);
+    assert!(
+        cap.starts_with("plan_iteration_cap_exceeded (5>=5); forced synthesis did not produce a final answer"),
+        "{cap}"
+    );
+    assert!(cap.ends_with(&format!("[llm: {err}]")), "{cap}");
+    let deadline = answer_turn_call_detail(Some(Exhausted::Time), true, &work, 5, err);
+    assert!(deadline.starts_with("plan_time_ceiling_exceeded; forced synthesis"), "{deadline}");
+    // Forced by a timeout: the cap was never reached.
+    let timeout = answer_turn_call_detail(None, true, &work, 5, err);
+    assert_eq!(timeout, forced_synthesis_no_answer_detail(&work));
+    // The rewrite turn (not a forced one) still says what happened.
+    let rewrite = answer_turn_call_detail(None, false, &work, 5, err);
+    assert!(rewrite.contains("asked for more tools"), "{rewrite}");
+    for d in [&cap, &deadline, &timeout, &rewrite] {
+        assert!(!d.contains("not a plan"), "the reply was a valid plan: {d}");
+    }
+}
+
 #[test]
 fn the_failed_call_row_carries_its_facts_and_a_clamped_error() {
     let long = "x".repeat(FAILED_ROW_ERROR_CHARS + 100);

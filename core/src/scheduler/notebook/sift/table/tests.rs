@@ -165,6 +165,35 @@ fn rows_alike_but_for_their_source_are_shown_once() {
     assert!(t.ends_with("3 kept of 3 looked at; 1 duplicate shown once."), "{t}");
 }
 
+/// #1018 (DGX task 409): a forced table joins every sift that kept rows, and
+/// each sift named its fields differently, so one message was a row per sift.
+/// Rows of one source from different sifts are one row: each cell is the
+/// first non-empty one (the newest sift's comes first), the source once.
+#[test]
+fn one_source_kept_by_several_sifts_is_one_row() {
+    let in_sift = |sift, n, source: &str, fields| Row { sift, ..sourced(n, source, fields) };
+    let rows = [
+        in_sift(3, 1, "m37491", json!({"sender": "Acme", "amount_due": ""})),
+        in_sift(3, 2, "m2", json!({"sender": "Bolt", "amount_due": "$9"})),
+        in_sift(2, 1, "m37491", json!({"from.name": "Acme Ltd", "amount_due": "$40"})),
+        in_sift(1, 1, "m37491", json!({"from": "Acme <a@x>", "sender": "ignored: a newer sift said it"})),
+    ];
+    let t = render(&rows, &cols(&["sender", "amount_due", "from.name", "from", "source"]), None, &counts(4, 4));
+    let lines: Vec<&str> = t.lines().skip(2).take_while(|l| l.starts_with('|')).collect();
+    assert_eq!(lines, ["| Acme | $40 | Acme Ltd | Acme <a@x> | m37491 |", "| Bolt | $9 |  |  | m2 |"], "{t}");
+    assert!(t.ends_with("2 duplicates shown once."), "{t}");
+
+    // Within one sift a source is not merged on (the summary's `distinct`
+    // counts by fields alone), nor is a withheld row ever.
+    let rows = [
+        in_sift(1, 1, "m1", json!({"a": "x"})),
+        in_sift(1, 2, "m1", json!({"a": "y"})),
+        Row { kind: RowKind::Withheld, ..in_sift(2, 1, "m1", json!({})) },
+    ];
+    let t = render(&rows, &cols(&["a", "source"]), None, &counts(3, 2));
+    assert_eq!(t.lines().skip(2).take_while(|l| l.starts_with('|')).count(), 3, "{t}");
+}
+
 #[test]
 fn withheld_rows_are_never_merged() {
     let rows = [row(1, RowKind::Withheld, json!({})), row(2, RowKind::Withheld, json!({}))];
