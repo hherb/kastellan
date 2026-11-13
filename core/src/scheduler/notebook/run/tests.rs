@@ -102,6 +102,7 @@ async fn the_notebook_loop() {
     super::agent_raised_tests::an_unknown_skill_is_refused_and_the_next_turn_replans(&pool).await;
     super::timeout_tests::a_timeout_after_gathering_answers_from_what_was_gathered(&pool).await;
     super::timeout_tests::a_timeout_on_the_answer_turn_fails_naming_what_was_gathered(&pool).await;
+    super::timeout_tests::a_call_on_a_timeout_forced_answer_turn_does_not_claim_the_cap(&pool).await;
     super::timeout_tests::a_timeout_before_gathering_fails_in_words(&pool).await;
     super::timeout_tests::a_re_ask_that_times_out_after_gathering_spends_the_answer_turn(&pool).await;
     super::timeout_tests::a_re_ask_that_times_out_before_gathering_fails_in_words(&pool).await;
@@ -361,6 +362,9 @@ async fn a_call_on_the_answer_turn_is_re_asked(pool: &sqlx::PgPool) {
     let r = run(pool, &script, new_task(pool, 1).await).await;
     let Outcome::Failed(d) = &r.result.outcome else { panic!("{:?}", r.result.outcome) };
     assert!(d.contains("must end the task"), "the detail carries the reason: {d}");
+    // #1019: the reply was a plan; the cap's wording, not "not a plan".
+    assert!(d.starts_with("plan_iteration_cap_exceeded (2>=2); forced synthesis did not produce"), "{d}");
+    assert!(!d.contains("not a plan"), "{d}");
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "neither answer-turn call ran");
     assert_eq!(script.reasks.lock().unwrap().len(), 1, "re-asked once only");
 }
@@ -404,6 +408,22 @@ async fn selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(po
     let r = run(pool, &script, new_task(pool, 5).await).await;
     assert_eq!(body(&r.result), "first");
     assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault]);
+
+    // The rewrite turn calls, and calls on the re-ask (#1019 review): the
+    // task fails saying so — not "not a plan" (the call even names a ticked
+    // step, so `validate` would refuse it too), nor "ran out of time".
+    let mut script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f"), "answer": {"body": "a quick draft"}}),
+        json!({"call": call(1, "b")}),
+        json!({"call": call(1, "c")}),
+    ]);
+    script.thinks = false;
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let Outcome::Failed(d) = &r.result.outcome else { panic!("{:?}", r.result.outcome) };
+    assert!(d.starts_with("The language model asked for more tools"), "{d}");
+    assert!(!d.contains("not a plan") && !d.contains("ran out of time"), "{d}");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a"], "neither rewrite-turn call ran");
 }
 
 /// DGX task 291: a non-thinking turn made the same call over and over. The

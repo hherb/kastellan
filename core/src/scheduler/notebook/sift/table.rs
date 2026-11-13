@@ -73,14 +73,31 @@ pub(crate) fn render_table(
 /// `rows` in groups, in order of first appearance: a kept row joins the
 /// first earlier group whose fields — every one, shown or not — are the
 /// same as its own and not all empty. Only the shown columns would merge
-/// twelve monthly invoices shown by vendor and amount (review finding). A
-/// withheld row is always a group of its own: its fields are not shown, so
-/// nothing says it is the same as another.
+/// twelve monthly invoices shown by vendor and amount (review finding). It
+/// also joins a group holding a row of the same source from another sift
+/// (#1018: a forced table joins every sift, and one message was a row per
+/// sift that kept it) — unless the group already holds a row of its own
+/// sift, so two rows of one sift are never merged on their source, even
+/// through a third. An empty source (`{}`: an item with no identifying key)
+/// names no item and joins nothing. Within one sift, then, the summary's
+/// `distinct` ([`distinct_kept`]) stays exact. A withheld row is always a
+/// group of its own: its fields are not shown, so nothing says it is the
+/// same as another.
 fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
     let mut groups: Vec<Vec<&Row>> = Vec::new();
     for &r in rows {
-        let same = (r.kind == RowKind::Kept && mergeable(&r.fields))
-            .then(|| groups.iter_mut().find(|g| g[0].kind == RowKind::Kept && g[0].fields == r.fields))
+        let sourced = r.source.as_object().is_some_and(|o| !o.is_empty());
+        let same_item = |g: &[&Row]| {
+            sourced
+                && g.iter().any(|x| x.source == r.source)
+                && g.iter().all(|x| (x.task_id, x.sift) != (r.task_id, r.sift))
+        };
+        let same = (r.kind == RowKind::Kept)
+            .then(|| {
+                groups.iter_mut().find(|g| {
+                    g[0].kind == RowKind::Kept && ((mergeable(&r.fields) && g[0].fields == r.fields) || same_item(g))
+                })
+            })
             .flatten();
         match same {
             Some(g) => g.push(r),
@@ -150,16 +167,24 @@ fn cell_order(a: &str, b: &str, desc: bool) -> std::cmp::Ordering {
 }
 
 /// A group's cell as shown: screened, then escaped so it cannot end the
-/// cell or row. Its `source` lists every row's, each screened alone so one
-/// blocked source does not hide the rest; the other cells are the first's.
+/// cell or row. Its `source` lists every distinct one, each screened alone
+/// so one blocked source does not hide the rest; any other cell is the first
+/// row's that is not empty (rows of one source from several sifts, #1018).
 fn shown(group: &[&Row], column: &str, blocks: &mut Vec<SinkBlock>) -> String {
     if group[0].kind == RowKind::Withheld {
         return WITHHELD_MARKER.into();
     }
     if column == SOURCE_COLUMN {
-        return group.iter().map(|r| screened(&cell_text(r, column), blocks)).collect::<Vec<_>>().join(", ");
+        let mut sources: Vec<String> = Vec::new();
+        for s in group.iter().map(|r| cell_text(r, column)) {
+            if !sources.contains(&s) {
+                sources.push(s);
+            }
+        }
+        return sources.iter().map(|s| screened(s, blocks)).collect::<Vec<_>>().join(", ");
     }
-    screened(&cell_text(group[0], column), blocks)
+    let first = group.iter().map(|r| cell_text(r, column)).find(|c| !c.is_empty());
+    screened(&first.unwrap_or_default(), blocks)
 }
 
 fn screened(text: &str, blocks: &mut Vec<SinkBlock>) -> String {

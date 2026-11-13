@@ -339,13 +339,16 @@ to make the call again with other parameters, list it in `steps` under a new id 
     format!("`call.step` {step} is not a pending step: {how}")
 }
 
+/// [`require_answer`]'s reason; `ask` matches it to word the failure (#1019).
+pub(crate) const MUST_ANSWER: &str = "this turn must end the task: reply with `answer` (or `infeasible`), not `call`";
+
 /// On the forced-answer turn a `call` is not a usable reply: the turn
 /// budget is spent. Refusing it here sends it through the same re-ask as any
 /// unusable reply, with the reason, instead of failing the task outright (DGX
 /// task 273 called again on that turn, with 17 turns of findings in hand).
 pub(crate) fn require_answer(reply: &NotebookReply) -> Result<(), String> {
     match reply.call {
-        Some(_) => Err("this turn must end the task: reply with `answer` (or `infeasible`), not `call`".into()),
+        Some(_) => Err(MUST_ANSWER.into()),
         None => Ok(()),
     }
 }

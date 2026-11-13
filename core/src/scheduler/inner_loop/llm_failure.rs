@@ -169,7 +169,7 @@ pub(crate) fn token_cap_failure_detail(decode_error: &str) -> String {
 /// Distinct from the cap's `plan_iteration_cap_exceeded` wording on
 /// purpose: the cap was never reached, and operators count cap-exceeded
 /// rows (#774 review).
-pub(super) fn forced_synthesis_no_answer_detail(work: &GatheredWork) -> String {
+pub(crate) fn forced_synthesis_no_answer_detail(work: &GatheredWork) -> String {
     format!(
         "A planning call ran out of time, so the task asked the language model to answer from \
          the {} tool result{} already gathered — and it asked for more tools instead of \
@@ -180,6 +180,34 @@ pub(super) fn forced_synthesis_no_answer_detail(work: &GatheredWork) -> String {
         work.succeeded,
         if work.succeeded == 1 { "" } else { "s" },
     )
+}
+
+/// The task's failure detail when a turn that had to answer (the notebook's
+/// forced-answer or rewrite turn) still asked for a tool, on the re-ask too
+/// (#1019). Pure. The reply was a valid plan, so never "not a plan":
+///
+/// - `exhausted` (the cap or the deadline forced the turn) keeps the cap row
+///   wording operators count, the decode error last in brackets;
+/// - a forced turn with no `exhausted` was forced by a timeout;
+/// - otherwise (the rewrite turn) plain words.
+///
+/// shortcut: a turn forced by a `max_tokens` cut-off (#941) also reads as a
+/// timeout here, as it did in the classic loop; split when that is seen live.
+pub(crate) fn answer_turn_call_detail(
+    exhausted: Option<super::ceiling::Exhausted>,
+    forced: bool,
+    work: &GatheredWork,
+    max_plans: u32,
+    decode_error: &str,
+) -> String {
+    match (exhausted, forced) {
+        (Some(which), _) => format!("{} [llm: {decode_error}]", super::ceiling::exhausted_detail(which, max_plans, true)),
+        (None, true) => forced_synthesis_no_answer_detail(work),
+        (None, false) => format!(
+            "The language model asked for more tools when it had to write its answer, so this task \
+             produced none. You can ask again. [llm: {decode_error}]"
+        ),
+    }
 }
 
 /// Audit action for a formulator call that produced no plan.

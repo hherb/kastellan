@@ -4,12 +4,12 @@ use kastellan_llm_router::ThinkingPolicy;
 use sqlx::PgPool;
 
 use super::formulator::NotebookFormulator;
-use super::reply::{keep_called_step, parse_reply, require_answer, validate, NotebookReply};
+use super::reply::{keep_called_step, parse_reply, require_answer, validate, NotebookReply, MUST_ANSWER};
 use super::sift;
 use super::state::NotebookState;
 use super::thinking::{self, TurnKind};
 use crate::scheduler::agent::{AgentError, FormulationMeta};
-use crate::scheduler::inner_loop::{llm_failure, TaskContext};
+use crate::scheduler::inner_loop::{ceiling::Exhausted, llm_failure, TaskContext};
 
 /// What a notebook turn produced.
 pub(super) enum Asked {
@@ -25,6 +25,8 @@ pub(super) struct TurnGuard {
     pub gathered: bool,
     pub answer_attempted: bool,
     pub answer_turn: bool,
+    /// The limit that forced this answer turn, if one did (else a timeout did).
+    pub exhausted: Option<Exhausted>,
     pub kind: TurnKind,
 }
 
@@ -58,8 +60,10 @@ pub(super) async fn ask(
                 keep_called_step(&mut r, state);
                 r
             })
-            .and_then(|r| validate(&r, state).map(|()| r))
-            .and_then(|r| if answer_only { require_answer(&r).map(|()| r) } else { Ok(r) });
+            // An answer turn's call is refused first, as that, even if it would
+            // not validate either: the reply is still a plan (#1019 review).
+            .and_then(|r| if answer_only { require_answer(&r).map(|()| r) } else { Ok(r) })
+            .and_then(|r| validate(&r, state).map(|()| r));
         match checked {
             Ok(reply) => Ok((reply, meta, raw)),
             Err(detail) => Err(AgentError::Decode { detail, raw, usage: meta.usage, latency_ms: meta.latency_ms }),
@@ -137,6 +141,9 @@ pub(super) async fn ask(
                 llm_failure::timeout_failure_detail(&llm_failure::GatheredWork::from_plans(&ctx.plans), &e.to_string())
             } else if e.ran_out_of_tokens() {
                 llm_failure::token_cap_failure_detail(&e.to_string())
+            } else if matches!(&e, AgentError::Decode { detail, .. } if detail == MUST_ANSWER) {
+                let work = llm_failure::GatheredWork::from_plans(&ctx.plans);
+                llm_failure::answer_turn_call_detail(guard.exhausted, guard.answer_turn, &work, ctx.max_plans, &e.to_string())
             } else if let AgentError::Decode { raw, .. } = &e {
                 llm_failure::decode_failure_detail(raw.trim().is_empty(), &e.to_string())
             } else {
