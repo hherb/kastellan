@@ -408,6 +408,22 @@ async fn selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(po
     let r = run(pool, &script, new_task(pool, 5).await).await;
     assert_eq!(body(&r.result), "first");
     assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault]);
+
+    // The rewrite turn calls, and calls on the re-ask (#1019 review): the
+    // task fails saying so — not "not a plan" (the call even names a ticked
+    // step, so `validate` would refuse it too), nor "ran out of time".
+    let mut script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call(1, "a")}),
+        json!({"tick": tick(1, "f"), "answer": {"body": "a quick draft"}}),
+        json!({"call": call(1, "b")}),
+        json!({"call": call(1, "c")}),
+    ]);
+    script.thinks = false;
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let Outcome::Failed(d) = &r.result.outcome else { panic!("{:?}", r.result.outcome) };
+    assert!(d.starts_with("The language model asked for more tools"), "{d}");
+    assert!(!d.contains("not a plan") && !d.contains("ran out of time"), "{d}");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a"], "neither rewrite-turn call ran");
 }
 
 /// DGX task 291: a non-thinking turn made the same call over and over. The

@@ -76,18 +76,26 @@ pub(crate) fn render_table(
 /// twelve monthly invoices shown by vendor and amount (review finding). It
 /// also joins a group holding a row of the same source from another sift
 /// (#1018: a forced table joins every sift, and one message was a row per
-/// sift that kept it); within one sift a source is not merged on, so the
-/// summary's `distinct` ([`distinct_kept`]) stays exact. A withheld row is
-/// always a group of its own: its fields are not shown, so nothing says it
-/// is the same as another.
+/// sift that kept it) — unless the group already holds a row of its own
+/// sift, so two rows of one sift are never merged on their source, even
+/// through a third. An empty source (`{}`: an item with no identifying key)
+/// names no item and joins nothing. Within one sift, then, the summary's
+/// `distinct` ([`distinct_kept`]) stays exact. A withheld row is always a
+/// group of its own: its fields are not shown, so nothing says it is the
+/// same as another.
 fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
     let mut groups: Vec<Vec<&Row>> = Vec::new();
     for &r in rows {
-        let same_item = |x: &&Row| !r.source.is_null() && x.source == r.source && (x.task_id, x.sift) != (r.task_id, r.sift);
+        let sourced = r.source.as_object().is_some_and(|o| !o.is_empty());
+        let same_item = |g: &[&Row]| {
+            sourced
+                && g.iter().any(|x| x.source == r.source)
+                && g.iter().all(|x| (x.task_id, x.sift) != (r.task_id, r.sift))
+        };
         let same = (r.kind == RowKind::Kept)
             .then(|| {
                 groups.iter_mut().find(|g| {
-                    g[0].kind == RowKind::Kept && ((mergeable(&r.fields) && g[0].fields == r.fields) || g.iter().any(same_item))
+                    g[0].kind == RowKind::Kept && ((mergeable(&r.fields) && g[0].fields == r.fields) || same_item(g))
                 })
             })
             .flatten();

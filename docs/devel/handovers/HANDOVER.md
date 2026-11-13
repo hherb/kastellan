@@ -66,6 +66,13 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   sifts** into one row; each cell is the group's first non-empty value (newest sift first), the source listed once.
   Within one sift nothing changes, so `distinct_kept` stays exact. The column union (`sender | from.name | from`)
   stays: name-variant folding was declined. Not yet re-measured on the DGX.
+- **Review round (`/finalcheck`):** an empty source (`{}`, an item with no identifying key) joins nothing (before,
+  every id-less row of two sifts collapsed into one); a group already holding a row of `r`'s own sift takes no
+  source join (two rows of one sift merged through a third); an answer turn's `call` is refused by `require_answer`
+  **before** `validate`, so a call naming a ticked step is not "not a plan" either; the rewrite-turn arm is pinned by
+  an integration case. Filed [#1022](https://github.com/hherb/kastellan/issues/1022) (a chain's `distinct` ignores
+  the source merge; bare `{"id": N}` sources merge across tools) and
+  [#1023](https://github.com/hherb/kastellan/issues/1023) (a rewrite turn that calls twice drops the draft answer).
 - **DGX** deployed to #1020 (header). This PR is **not deployed**.
 
 ### Previous (2026-11-10): #993 — the classic loop deleted (PR #1020, merged, deployed DGX 2026-11-14) — ⚠️ **`KASTELLAN_PLANNER_MODE=classic` stops the daemon at boot**; the notebook prompt now documents `scrapbooks`, `_omitted_calls`, `_omitted_scrapbooks`; #940 item 3 (a trace near `n_ctx`) still applies — **operator to keep or close**. Full section: the `1019` snapshot.
@@ -251,7 +258,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 1. **PR #1021 (#1019, #1018):** review, merge, deploy the DGX (`upgrade_from_git.sh` with the `GIT_CONFIG_*`
    https override, check `NRestarts=0`), then re-measure a multi-sift question (`bash ~/requery7.sh`, move
    `~/requery7.log` aside; ≥ 2 runs) to see #1018's merged rows live. Then the open notebook follow-ups: #1015 (the
-   counts note sums across sifts — now beside merged rows), #1016, #940 (above), #956/#958/#959. **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail
+   counts note sums across sifts — now beside merged rows), #1022, #1023 (operator: fall back to the draft?), #1016, #940 (above), #956/#958/#959. **Still owed:** a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail
    upgrade to `api_minor` 6; bottie's substring match on the parking line ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242)).
 
 2. **#702 follow-up #703** (#704/#705 done in PR #920). ⚠️ **The guard model never sees object keys** — any

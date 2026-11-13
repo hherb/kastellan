@@ -194,6 +194,37 @@ fn one_source_kept_by_several_sifts_is_one_row() {
     assert_eq!(t.lines().skip(2).take_while(|l| l.starts_with('|')).count(), 3, "{t}");
 }
 
+/// #1021 review: the source join must not merge what is not one item.
+#[test]
+fn a_source_join_merges_only_one_item_across_sifts() {
+    let in_sift = |sift, n, source: serde_json::Value, fields| Row { sift, source, ..row(n, RowKind::Kept, fields) };
+    let table_lines = |rows: &[Row], c: &[&str]| {
+        let t = render(rows, &cols(c), None, &counts(rows.len(), rows.len()));
+        t.lines().skip(2).take_while(|l| l.starts_with('|')).map(String::from).collect::<Vec<_>>()
+    };
+    // Items with no identifying key (`{}`) in two sifts are not one item.
+    let rows = [in_sift(2, 1, json!({}), json!({"a": "x"})), in_sift(1, 1, json!({}), json!({"a": "y"}))];
+    assert_eq!(table_lines(&rows, &["a"]).len(), 2);
+    // Two rows of one sift are not merged through a third of another sift.
+    let m1 = || json!({"message_id": "m1"});
+    let rows = [
+        in_sift(3, 1, m1(), json!({"a": "x"})),
+        in_sift(2, 1, m1(), json!({"a": "y"})),
+        in_sift(2, 2, m1(), json!({"a": "z"})),
+    ];
+    assert_eq!(table_lines(&rows, &["a"]), ["| x |", "| z |"]);
+    // A kept row never joins a withheld one, whose fields are not shown.
+    let rows = [Row { kind: RowKind::Withheld, ..in_sift(2, 1, m1(), json!({})) }, in_sift(1, 1, m1(), json!({"a": "x"}))];
+    assert_eq!(table_lines(&rows, &["a"]), [format!("| {WITHHELD_MARKER} |"), "| x |".into()]);
+    // The source may be any member's, not only the group's first.
+    let rows = [
+        in_sift(1, 1, m1(), json!({"v": "1"})),
+        in_sift(1, 2, json!({"message_id": "m2"}), json!({"v": "1"})),
+        in_sift(2, 1, json!({"message_id": "m2"}), json!({"v": "2"})),
+    ];
+    assert_eq!(table_lines(&rows, &["v"]), ["| 1 |"]);
+}
+
 #[test]
 fn withheld_rows_are_never_merged() {
     let rows = [row(1, RowKind::Withheld, json!({})), row(2, RowKind::Withheld, json!({}))];

@@ -60,8 +60,10 @@ pub(super) async fn ask(
                 keep_called_step(&mut r, state);
                 r
             })
-            .and_then(|r| validate(&r, state).map(|()| r))
-            .and_then(|r| if answer_only { require_answer(&r).map(|()| r) } else { Ok(r) });
+            // An answer turn's call is refused first, as that, even if it would
+            // not validate either: the reply is still a plan (#1019 review).
+            .and_then(|r| if answer_only { require_answer(&r).map(|()| r) } else { Ok(r) })
+            .and_then(|r| validate(&r, state).map(|()| r));
         match checked {
             Ok(reply) => Ok((reply, meta, raw)),
             Err(detail) => Err(AgentError::Decode { detail, raw, usage: meta.usage, latency_ms: meta.latency_ms }),
