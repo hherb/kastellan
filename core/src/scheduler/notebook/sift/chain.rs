@@ -32,6 +32,11 @@ pub(crate) fn summary_of<'a>(plans: &'a [PlanRecord], name: &str) -> Option<&'a 
     sifts(plans).find(|(_, s)| s["scrapbook"] == name).map(|(_, s)| s)
 }
 
+/// The parameters, as parsed, of this run's sift `name`, if it ran in this run.
+pub(crate) fn params_of(plans: &[PlanRecord], name: &str) -> Option<SiftParams> {
+    sifts(plans).find(|(_, s)| s["scrapbook"] == name).and_then(|(p, _)| parse_params(p).ok())
+}
+
 /// The scrapbook a sift with `params`, starting at `from`, continues: the
 /// newest earlier sift of this run whose parameters, as parsed, are the
 /// same but for `from` (so `"items": null` and no `items` are one) and

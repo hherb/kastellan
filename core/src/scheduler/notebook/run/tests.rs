@@ -410,8 +410,7 @@ async fn selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(po
     assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault]);
 
     // The rewrite turn calls, and calls on the re-ask (#1019 review): the
-    // task fails saying so — not "not a plan" (the call even names a ticked
-    // step, so `validate` would refuse it too), nor "ran out of time".
+    // draft it was to rewrite is the answer (#1023), its tick kept once.
     let mut script = Script::new(&[
         json!({"steps": steps(&[1]), "call": call(1, "a")}),
         json!({"tick": tick(1, "f"), "answer": {"body": "a quick draft"}}),
@@ -420,10 +419,20 @@ async fn selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(po
     ]);
     script.thinks = false;
     let r = run(pool, &script, new_task(pool, 5).await).await;
-    let Outcome::Failed(d) = &r.result.outcome else { panic!("{:?}", r.result.outcome) };
-    assert!(d.starts_with("The language model asked for more tools"), "{d}");
-    assert!(!d.contains("not a plan") && !d.contains("ran out of time"), "{d}");
+    assert_eq!(body(&r.result), "a quick draft");
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a"], "neither rewrite-turn call ran");
+    assert_eq!(kinds(pool, r.task_id).await, vec![Steps, Tick, Answer]);
+
+    // The rewrite turn times out: the draft is the answer, not a forced turn.
+    let mut script = Script::raw(&[
+        json!({"steps": steps(&[1]), "call": call(1, "a")}).to_string(),
+        json!({"tick": tick(1, "f"), "answer": {"body": "a quick draft"}}).to_string(),
+        TIMEOUT.into(),
+    ]);
+    script.thinks = false;
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(body(&r.result), "a quick draft");
+    assert_eq!(script.messages().len(), 3, "no forced-answer turn after the timed-out rewrite");
 }
 
 /// DGX task 291: a non-thinking turn made the same call over and over. The

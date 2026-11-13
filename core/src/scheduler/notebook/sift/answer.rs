@@ -4,7 +4,7 @@
 use kastellan_db::scrapbook::{self, Row, RowKind};
 use sqlx::PgPool;
 
-use super::params::ScrapRef;
+use super::params::{Over, ScrapRef, SiftParams};
 use super::table::{default_order, orders_anything, render_table, Counts, SOURCE_COLUMN};
 use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
@@ -25,6 +25,9 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     let mut rows: Vec<Row> = Vec::new();
     let mut counts = Counts::default();
     let mut fields: Vec<String> = Vec::new();
+    // A ref with no rows (a forced table's unfinished sift, #1015) adds
+    // columns only if no ref with rows names any: they would stay empty.
+    let mut empty_fields: Vec<String> = Vec::new();
     let mut included = false;
     let (named, mut refused) = table_refs(&ctx.plans, t.scrapbook.refs());
     let mut links = Vec::new();
@@ -48,12 +51,13 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
                 included = true;
                 let summary = own_summary(ctx, &r);
                 add_counts(&mut counts, &got, summary.as_ref());
-                links.push(Link::of(raw, summary.as_ref()));
+                links.push(Link::of(summary.as_ref(), chain::params_of(&ctx.plans, &r.to_string()), got.len()));
                 // Every included sift's fields, in order: separate sifts of a
                 // forced table (#1012) may each have asked for others.
+                let into = if got.is_empty() { &mut empty_fields } else { &mut fields };
                 for f in summary.as_ref().and_then(summary_fields).or_else(|| first_row_fields(&got)).unwrap_or_default() {
-                    if !fields.contains(&f) {
-                        fields.push(f);
+                    if !into.contains(&f) {
+                        into.push(f);
                     }
                 }
                 rows.extend(got);
@@ -64,7 +68,10 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
             }
         }
     }
-    counts.remaining = remaining(&links);
+    (counts.looked_at, counts.remaining) = coverage(&links);
+    if fields.is_empty() {
+        fields = empty_fields;
+    }
     let class = rows.iter().map(row_class).fold(ctx.classification_floor, DataClass::max);
     let columns = t.columns.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| {
         let mut c = fields;
@@ -176,8 +183,14 @@ pub(crate) fn without_own_tables(body: &str) -> Option<String> {
 /// [`with_table`]'s to judge.
 pub(crate) fn table_left_out(reply: &NotebookReply, ctx: &TaskContext) -> Result<(), String> {
     let plans = &ctx.plans;
+    // A table names at most [`TABLE_REFS_MAX`]: the fix never asks for
+    // more, or `with_table` would refuse the oldest (#1016). Newest first.
+    let capped = |mut k: Vec<(String, u64)>| {
+        k.truncate(TABLE_REFS_MAX);
+        k
+    };
     if let Some(named) = table_of_no_scrapbook(reply, ctx) {
-        let kept = kept_sifts(plans);
+        let kept = capped(kept_sifts(plans));
         let fix = if kept.is_empty() {
             "no sift of this run has rows, so write the items in `body` and leave `table` out".into()
         } else {
@@ -188,7 +201,7 @@ pub(crate) fn table_left_out(reply: &NotebookReply, ctx: &TaskContext) -> Result
             named.join(", ")
         ));
     }
-    let Some(kept) = missing_table(reply, plans) else { return Ok(()) };
+    let Some(kept) = missing_table(reply, plans).map(capped) else { return Ok(()) };
     Err(format!(
         "the `answer` shows no `table`, but {}. To show them, add \
 `\"table\": {{\"scrapbook\": {}}}` to the `answer`; to answer without them, send the same answer again",
@@ -228,10 +241,13 @@ fn names_no_table(a: &AnswerSpec) -> bool {
 /// spent — and twice it answered with no table after a sift that kept rows.
 /// On that turn the table is attached by code instead: every scrapbook of
 /// this run that kept rows ([`kept_sifts`]), with the default columns and
-/// order. `None` when the answer names a table, is a refusal, or no sift
-/// kept anything. Pure.
+/// order; then each that kept nothing but stopped with items unread, which
+/// adds no rows but its `remaining` to the note (#1015, DGX task 398's last
+/// sift stopped on the ceiling). `None` when the answer names a table, is a
+/// refusal, or no sift kept anything. Pure.
 pub(crate) fn forced_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<TableSpec> {
     let mut names: Vec<String> = missing_table(reply, plans)?.into_iter().map(|(n, _)| n).collect();
+    names.extend(last_links(plans).into_iter().filter(|l| l.kept == 0 && l.remaining > 0).map(|l| l.name));
     let scrapbook = if names.len() == 1 { Refs::One(names.remove(0)) } else { Refs::Many(names) };
     Some(TableSpec { scrapbook, columns: None, order_by: None, limit: None })
 }
@@ -252,6 +268,21 @@ fn missing_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<Vec<(Str
 /// sift that a later one continues is left out, because a table names a chain
 /// by its last link and brings in the rest ([`chain::expand`]). Pure.
 fn kept_sifts(plans: &[PlanRecord]) -> Vec<(String, u64)> {
+    last_links(plans).into_iter().filter(|l| l.kept > 0).map(|l| (l.name, l.kept)).collect()
+}
+
+/// A sift of this run that no later one continues: a chain's last link, or
+/// a sift of its own.
+struct LastLink {
+    name: String,
+    /// The rows its table would show (`distinct`, the chain's when it continues one).
+    kept: u64,
+    /// The items it did not reach.
+    remaining: u64,
+}
+
+/// Every [`LastLink`] of this run, newest first. Pure.
+fn last_links(plans: &[PlanRecord]) -> Vec<LastLink> {
     // The table's rows (`distinct`), as the prompt has the body quote them.
     let count = |v: &serde_json::Value| v["distinct"].as_u64().or_else(|| v["kept"].as_u64());
     let all: Vec<&serde_json::Value> = chain::summaries(plans).collect();
@@ -260,7 +291,7 @@ fn kept_sifts(plans: &[PlanRecord]) -> Vec<(String, u64)> {
         .filter_map(|s| {
             let name = s["scrapbook"].as_str().filter(|n| !continued.contains(n))?;
             let kept = count(&s["chain"]).or_else(|| count(s)).unwrap_or(0);
-            (kept > 0).then(|| (name.to_string(), kept))
+            Some(LastLink { name: name.to_string(), kept, remaining: s["remaining"].as_u64().unwrap_or(0) })
         })
         .collect()
 }
@@ -321,46 +352,88 @@ fn first_row_fields(rows: &[Row]) -> Option<Vec<String>> {
     Some(first.fields.as_object()?.keys().cloned().collect())
 }
 
-/// The note's counts: the sift's own when its summary is at hand, else what
-/// the rows themselves say — kept plus withheld, so an earlier turn's
-/// "looked at" is a lower bound. `remaining` is the chain's ([`remaining`]).
+/// The note's counts: the sift's own when its summary is at hand.
+/// `looked_at` and `remaining` are counted once per list ([`coverage`]).
 fn add_counts(c: &mut Counts, rows: &[Row], summary: Option<&serde_json::Value>) {
     let n = |k: &str| summary.and_then(|s| s[k].as_u64()).map(|v| v as usize);
     let kept = rows.iter().filter(|r| r.kind == RowKind::Kept).count();
     let withheld = rows.len() - kept;
     c.kept += kept;
     c.withheld += withheld;
-    c.looked_at += n("looked_at").unwrap_or(rows.len());
     c.undecided += n("undecided").unwrap_or(0);
     c.failed_reads += n("failed_reads").unwrap_or(0);
 }
 
-/// An included scrapbook: its name, its `remaining`, and the one it
-/// continues.
+/// An included scrapbook: the list it went over, the span of it it looked
+/// at, and what it left.
 struct Link {
-    name: String,
+    /// `over` and `items`: sifts with the same went through one list.
+    /// `None` for an earlier turn's ref (no parameters here): a list of its own.
+    list: Option<(Over, Option<String>)>,
+    from: usize,
+    looked_at: usize,
     remaining: usize,
-    continues: Option<String>,
 }
 
 impl Link {
-    fn of(name: &str, summary: Option<&serde_json::Value>) -> Self {
-        let get = |k: &str| summary.map(|s| s[k].clone()).unwrap_or_default();
+    /// From the sift's summary and parameters, when this run has them; an
+    /// earlier turn's ref says only its row count, so its "looked at" is
+    /// kept plus withheld, a lower bound.
+    fn of(summary: Option<&serde_json::Value>, params: Option<SiftParams>, rows: usize) -> Self {
+        let n = |k: &str| summary.and_then(|s| s[k].as_u64()).map(|v| v as usize);
         Link {
-            name: name.into(),
-            remaining: get("remaining").as_u64().unwrap_or(0) as usize,
-            continues: get("continues").as_str().map(String::from),
+            from: params.as_ref().map_or(0, |p| p.from),
+            list: params.map(|p| (p.over, p.items)),
+            looked_at: n("looked_at").unwrap_or(rows),
+            remaining: n("remaining").unwrap_or(0),
         }
     }
 }
 
-/// The items the table's scrapbooks did not look at: each link's
-/// `remaining`, except a link another included one continues — that one
-/// went on through them. A continuer left out (the table's cap, an
-/// unreadable link) leaves its link's `remaining` counted. Pure.
-fn remaining(links: &[Link]) -> usize {
-    let continued: Vec<&str> = links.iter().filter_map(|l| l.continues.as_deref()).collect();
-    links.iter().filter(|l| !continued.contains(&l.name.as_str())).map(|l| l.remaining).sum()
+/// The items the table's scrapbooks looked at and did not, each list
+/// counted once (#1015): two sifts over one 80-item list that each looked
+/// at its first 30 looked at 30, not 60, and left 50, not 100. A chain's
+/// links are adjacent spans of one list, so they add up; a link left out
+/// (the table's cap, an unreadable one) leaves its span unread. Pure.
+///
+/// shortcut: "one list" is the same `over` and `items`; a step re-run
+/// between two sifts makes them two lists (#959) that this counts as one —
+/// carry the list's identity in the summary if that is seen live.
+fn coverage(links: &[Link]) -> (usize, usize) {
+    let mut seen: Vec<&(Over, Option<String>)> = Vec::new();
+    let (mut looked, mut left) = (0, 0);
+    for l in links {
+        let group: Vec<&Link> = match &l.list {
+            None => vec![l],
+            Some(k) if seen.contains(&k) => continue,
+            Some(k) => {
+                seen.push(k);
+                links.iter().filter(|o| o.list.as_ref() == Some(k)).collect()
+            }
+        };
+        let (a, b) = list_coverage(&group);
+        looked += a;
+        left += b;
+    }
+    (looked, left)
+}
+
+/// One list's: the union of the spans its sifts looked at
+/// (`from..from + looked_at`), and the rest of the list, whose length is the
+/// longest any of them saw (`from + looked_at + remaining`). Pure.
+fn list_coverage(group: &[&Link]) -> (usize, usize) {
+    let len = group.iter().map(|l| l.from + l.looked_at + l.remaining).max().unwrap_or(0);
+    let mut spans: Vec<(usize, usize)> = group.iter().map(|l| (l.from, l.from + l.looked_at)).collect();
+    spans.sort_unstable();
+    let (mut looked, mut end) = (0, 0);
+    for (start, stop) in spans {
+        let start = start.max(end);
+        if stop > start {
+            looked += stop - start;
+            end = stop;
+        }
+    }
+    (looked, len.saturating_sub(looked))
 }
 
 /// A row's class; one that does not parse counts as the highest (fail

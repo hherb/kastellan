@@ -52,6 +52,7 @@ use super::sift::{self, run::SiftRun, SIFT_TOOL};
 use super::thinking::{self, TurnKind};
 use crate::cassandra::review::ChainReviewStage;
 use crate::cassandra::types::{DataClass, Plan};
+use crate::scheduler::agent::FormulationMeta;
 use crate::scheduler::inner_loop::execute::{self, ExecState, Executed};
 use crate::scheduler::inner_loop::{
     ceiling, turn_record_for, InnerLoopError,
@@ -104,6 +105,9 @@ pub(crate) async fn run_notebook_to_terminal(
     let mut replan_due = false;
     // A non-thinking turn chose to answer: the next turn rewrites it, thinking.
     let mut write_answer = false;
+    // That turn's answer, kept for the rewrite turn: if the rewrite produces
+    // no answer, the draft is used instead (#1023).
+    let mut draft: Option<Box<(NotebookReply, FormulationMeta)>> = None;
     let base_instruction = ctx.instruction.clone();
 
     macro_rules! finish {
@@ -175,6 +179,20 @@ pub(crate) async fn run_notebook_to_terminal(
         if kind == TurnKind::Replan {
             replan_due = false;
         }
+        // The rewrite turn failed, or ran out of time or room: the draft passed
+        // every check but "written thinking", so it is the answer (#1023).
+        let fell_back = kind == TurnKind::WriteAnswer && !matches!(turn, Asked::Reply(_));
+        let turn = match draft.take() {
+            Some(d) if fell_back => {
+                let why = match &turn {
+                    Asked::Failed(detail) => detail.as_str(),
+                    _ => "the rewrite ran out of time or room",
+                };
+                tracing::warn!(task_id = ctx.task_id, reason = %why, "notebook: the answer rewrite produced no answer; the draft is used");
+                Asked::Reply(d)
+            }
+            _ => turn,
+        };
         let (reply, meta) = match turn {
             Asked::Reply(b) => *b,
             Asked::ForceAnswer => {
@@ -216,6 +234,8 @@ pub(crate) async fn run_notebook_to_terminal(
         if reply.answer.is_some() && thinking::rewrite_answer(kind, nb.thinks_by_default()) {
             audit_discarded_turn(pool, &ctx, "answer_rewritten", None, &meta).await;
             write_answer = true;
+            // Its tick and steps are already in the notebook: kept without them.
+            draft = Some(Box::new((NotebookReply { tick: None, steps: None, ..reply }, meta)));
             continue;
         }
 
@@ -263,8 +283,9 @@ pub(crate) async fn run_notebook_to_terminal(
                 // rows' class joins the ceiling (C1, K7).
                 let mut touched = touched(&after, &ctx.plans);
                 // The forced answer is never shown back for a missing table
-                // (its budget is spent): code attaches it (#960).
-                let forced = (kind == TurnKind::ForcedAnswer).then(|| sift::answer::forced_table(&reply, &ctx.plans)).flatten();
+                // (its budget is spent): code attaches it (#960). Nor was a
+                // draft used in place of its rewrite (#1023).
+                let forced = (kind == TurnKind::ForcedAnswer || fell_back).then(|| sift::answer::forced_table(&reply, &ctx.plans)).flatten();
                 if let Some(t) = &forced {
                     tracing::info!(task_id = ctx.task_id, scrapbook = ?t.scrapbook.refs(), "notebook: forced answer names no table; attached by code");
                 }

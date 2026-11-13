@@ -210,6 +210,8 @@ pub(super) async fn a_forced_answer_gets_the_rows_of_every_sift_that_kept_some(p
     assert!(b.starts_with("None matched.\n\n| vendor | amount | source |"), "every sift's fields: {b}");
     assert!(b.contains("| 10 | m1 |") && b.contains("| Acme |"), "both sifts' rows: {b}");
     assert!(!b.contains("could not be included"), "the empty sift is not named: {b}");
+    // #1015: both sifts went over the same two hits: looked at 2, not 4.
+    assert!(b.contains("2 kept of 2 looked at"), "each list counted once: {b}");
 }
 
 /// #964 (DGX task 337): a 68 KB search was handoff-stashed, so its step's
