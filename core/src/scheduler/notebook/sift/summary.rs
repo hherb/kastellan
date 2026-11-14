@@ -5,7 +5,7 @@ use kastellan_db::scrapbook::{NewRow, RowKind};
 use serde_json::{json, Value};
 
 use super::params::{ScrapRef, SiftParams};
-use super::table::{distinct_kept, Counts};
+use super::table::{as_stored, distinct_kept, Counts};
 use super::SIFT_TOOL;
 use crate::scheduler::inner_loop::{screen_model_text, sorter_view, SinkBlock, WITHHELD_MARKER};
 
@@ -79,7 +79,7 @@ pub(crate) fn summary(
         "scrapbook": scrap.to_string(), "criterion": p.keep_if, "fields": p.fields,
         "looked_at": c.looked_at, "kept": c.kept, "withheld": c.withheld, "undecided": c.undecided,
         "failed_reads": c.failed_reads, "reads": reads.made, "unread": reads.unread,
-        "distinct": distinct_kept(rows.iter().filter(|r| r.kind == RowKind::Kept).map(|r| &r.fields)),
+        "distinct": distinct_kept(&as_stored(scrap.task_id, scrap.sift, rows)),
         "remaining": remaining, "sample": sample,
     });
     if remaining > 0 {

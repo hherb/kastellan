@@ -29,16 +29,41 @@ fn ctx(plans: Vec<PlanRecord>) -> TaskContext {
 #[test]
 fn coverage_counts_each_list_once() {
     let list = |step| Some((Over::Step(step), None));
-    let link = |step, from, looked_at, remaining| Link { list: list(step), from, looked_at, remaining };
+    let link = |step, from, looked_at, remaining| Link { name: String::new(), continues: None, list: list(step), from, looked_at, remaining };
     let chain = [link(1, 0, 30, 50), link(1, 30, 30, 20), link(1, 60, 20, 0)];
     assert_eq!(coverage(&chain), (80, 0));
     assert_eq!(coverage(&chain[..2]), (60, 20), "the last link left out: its span is unread");
     assert_eq!(coverage(&[link(1, 0, 30, 50), link(1, 0, 30, 50)]), (30, 50), "two sifts over one list's first 30");
     assert_eq!(coverage(&[link(1, 0, 30, 50), link(1, 50, 10, 20)]), (40, 40), "a gap stays unread");
     assert_eq!(coverage(&[link(1, 0, 30, 50), link(2, 0, 5, 75)]), (35, 125), "two lists");
-    let earlier = Link { list: None, from: 0, looked_at: 4, remaining: 0 };
+    let earlier = Link { name: String::new(), continues: None, list: None, from: 0, looked_at: 4, remaining: 0 };
     assert_eq!(coverage(&[link(1, 0, 30, 50), earlier]), (34, 50), "an earlier turn's ref: its own");
     assert_eq!(coverage(&[]), (0, 0));
+}
+
+/// Issue 1026 (d): sifts A, B and C each looked at all 50 items of step 1;
+/// D, another question over the same list, stopped on the ceiling having
+/// looked at none. Coverage says nothing is unread, so a line names D. A
+/// chain's earlier link stopped too — its next link went on — and a table
+/// of one question has the note's count alone.
+#[test]
+fn a_question_that_stopped_part_way_gets_its_own_line() {
+    let link = |n: u32, continues: Option<u32>, from, looked_at, remaining| Link {
+        name: format!("sb:9:{n}"),
+        continues: continues.map(|c| format!("sb:9:{c}")),
+        list: Some((Over::Step(1), None)),
+        from,
+        looked_at,
+        remaining,
+    };
+    let links = [link(1, None, 0, 50, 0), link(2, None, 0, 50, 0), link(3, None, 0, 50, 0), link(4, None, 0, 0, 50)];
+    assert_eq!(coverage(&links), (50, 0));
+    assert_eq!(stop_lines(&links), ["(sift sb:9:4 stopped after 0 of its 50 items)"]);
+
+    let chain = [link(5, None, 0, 30, 20), link(6, Some(5), 30, 10, 10), link(7, None, 0, 50, 0)];
+    assert_eq!(stop_lines(&chain), ["(sift sb:9:6 stopped after 40 of its 50 items)"], "the chain's last link, not its first");
+    assert!(stop_lines(&chain[..2]).is_empty(), "one question: the note says it");
+    assert!(stop_lines(&[]).is_empty());
 }
 
 /// Review finding: the cap is on the refs named, so the last of a chain

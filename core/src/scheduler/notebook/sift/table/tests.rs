@@ -181,10 +181,11 @@ fn one_source_kept_by_several_sifts_is_one_row() {
     let t = render(&rows, &cols(&["sender", "amount_due", "from.name", "from", "source"]), None, &counts(4, 4));
     let lines: Vec<&str> = t.lines().skip(2).take_while(|l| l.starts_with('|')).collect();
     assert_eq!(lines, ["| Acme | $40 | Acme Ltd | Acme <a@x> | m37491 |", "| Bolt | $9 |  |  | m2 |"], "{t}");
-    assert!(t.ends_with("2 duplicates shown once."), "{t}");
+    // One message kept by three sifts is one item, not two duplicates (issue 1026).
+    assert!(!t.contains("duplicate"), "{t}");
 
-    // Within one sift a source is not merged on (the summary's `distinct`
-    // counts by fields alone), nor is a withheld row ever.
+    // Within one sift a source is not merged on (a list can hold an item
+    // twice), nor is a withheld row ever merged with a kept one.
     let rows = [
         in_sift(1, 1, "m1", json!({"a": "x"})),
         in_sift(1, 2, "m1", json!({"a": "y"})),
@@ -230,6 +231,19 @@ fn withheld_rows_are_never_merged() {
     let rows = [row(1, RowKind::Withheld, json!({})), row(2, RowKind::Withheld, json!({}))];
     let t = render(&rows, &cols(&["a"]), None, &counts(2, 0));
     assert_eq!(t.matches(WITHHELD_MARKER).count(), 2, "{t}");
+}
+
+/// PR #1028 review: the note's `withheld` counts items, so one message the
+/// screen withheld in two sifts is one withheld row, as a kept one would be
+/// one kept row — never merged with a kept row, nor twice within one sift.
+#[test]
+fn one_source_withheld_by_two_sifts_is_one_row() {
+    let held = |sift, n, source: &str| Row { sift, kind: RowKind::Withheld, ..sourced(n, source, json!({})) };
+    let rows = [held(1, 1, "m1"), held(2, 1, "m1"), held(1, 2, "m1"), Row { sift: 2, ..sourced(2, "m1", json!({"a": "x"})) }];
+    let t = render(&rows, &cols(&["a"]), None, &Counts { withheld: items(rows[..3].iter()), ..counts(4, 1) });
+    assert_eq!(t.matches(WITHHELD_MARKER).count(), 2, "{t}");
+    assert_eq!(t.lines().skip(2).take_while(|l| l.starts_with('|')).count(), 3, "{t}");
+    assert!(t.contains("2 withheld") && !t.contains("duplicate"), "{t}");
 }
 
 /// DGX task 301 asked for the 5 most recent and got all 18: `limit` shows
@@ -340,9 +354,12 @@ fn distinct_kept_counts_rows_as_the_table_merges_them() {
     let a = json!({"vendor": "A", "amount": "10"});
     let b = json!({"vendor": "B", "amount": "10"});
     let empty = json!({"vendor": null, "amount": ""});
-    assert_eq!(distinct_kept([&a, &a, &b, &a]), 2);
-    assert_eq!(distinct_kept([&empty, &empty]), 2, "fields with nothing in them never merge");
-    assert_eq!(distinct_kept([]), 0);
+    let kept = |f: &[&serde_json::Value]| -> Vec<Row> { f.iter().enumerate().map(|(i, f)| row(i as i32 + 1, RowKind::Kept, (*f).clone())).collect() };
+    assert_eq!(distinct_kept(&kept(&[&a, &a, &b, &a])), 2);
+    assert_eq!(distinct_kept(&kept(&[&empty, &empty])), 2, "fields with nothing in them never merge");
+    assert_eq!(distinct_kept(&[]), 0);
+    let withheld = [row(1, RowKind::Withheld, json!({})), row(2, RowKind::Kept, a.clone())];
+    assert_eq!(distinct_kept(&withheld), 1, "only kept rows count");
     let rows = [
         row(1, RowKind::Kept, a.clone()),
         row(2, RowKind::Kept, a.clone()),
@@ -352,6 +369,48 @@ fn distinct_kept_counts_rows_as_the_table_merges_them() {
     ];
     let t = render(&rows, &cols(&["vendor", "amount"]), None, &counts(5, 5));
     assert_eq!(t.lines().filter(|l| l.starts_with("| ") && !l.contains("---")).count() - 1, 4, "the table agrees: {t}");
+}
+
+/// #1022 part 1: one message in two links of a paging chain (overlapping
+/// pages), its fields extracted differently in each, is one table row — so
+/// the chain's `distinct` is 1, not 2.
+#[test]
+fn distinct_kept_merges_one_source_across_sifts_as_the_table_does() {
+    let rows = [
+        Row { sift: 1, ..sourced(1, "m1", json!({"amount": "$10"})) },
+        Row { sift: 2, ..sourced(1, "m1", json!({"amount": "10"})) },
+        Row { sift: 2, ..sourced(2, "m2", json!({"amount": "7"})) },
+    ];
+    assert_eq!(distinct_kept(&rows), 2);
+    let t = render(&rows, &cols(&["amount"]), None, &counts(3, 3));
+    assert_eq!(t.lines().skip(2).take_while(|l| l.starts_with('|')).count(), 2, "the table agrees: {t}");
+
+    // A sift's rows in hand (`chain_distinct`'s own) join as stored ones do.
+    let own = |source: &str, amount: &str| kastellan_db::scrapbook::NewRow {
+        kind: RowKind::Kept,
+        source: json!({"message_id": source}),
+        fields: json!({"amount": amount}),
+        classification: "Personal".into(),
+    };
+    let mut chain = vec![rows[0].clone()];
+    chain.extend(as_stored(1, 2, &[own("m1", "10"), own("m2", "7")]));
+    assert_eq!(distinct_kept(&chain), 2);
+    assert_eq!((chain[1].task_id, chain[1].sift, chain[1].row, chain[2].row), (1, 2, 1, 2));
+}
+
+/// Issue 1026 (c): the note's `kept` is items, not rows. One source kept by
+/// several sifts is one item; one source twice in one sift is two (the list
+/// held it twice, and the table shows both); a row with no source is its own.
+#[test]
+fn items_count_one_source_once_across_sifts() {
+    let in_sift = |sift, n, source: &str| Row { sift, ..sourced(n, source, json!({"a": "x"})) };
+    let rows = [in_sift(1, 1, "m1"), in_sift(2, 1, "m1"), in_sift(3, 1, "m1"), in_sift(1, 2, "m2")];
+    assert_eq!(items(rows.iter()), 2);
+    let twice = [in_sift(1, 1, "m1"), in_sift(1, 2, "m1"), in_sift(2, 1, "m1")];
+    assert_eq!(items(twice.iter()), 2, "the most rows of one source in any one sift");
+    let bare = [Row { source: json!({}), ..in_sift(1, 1, "m1") }, Row { source: json!({}), ..in_sift(2, 1, "m1") }];
+    assert_eq!(items(bare.iter()), 2, "no source names no item: each row is one");
+    assert_eq!(items([].iter()), 0);
 }
 
 /// #965 item 1: `Date` for the field `date` — as a column or an order —
@@ -396,4 +455,16 @@ fn an_exact_header_wins_the_note_over_one_differing_in_case() {
     let typed = OrderBy { column: "Date".into(), desc: true };
     let t = render_table(&rows, &cols(&["date", "Date"]), Some(&typed), Some(1), &counts(2, 2)).0;
     assert!(t.ends_with("by `Date` descending."), "{t}");
+}
+
+/// #1022 part 2: the tool a bare `id` carries keeps two tools' items apart,
+/// but is not shown as where the item came from.
+#[test]
+fn a_bare_id_s_tool_keeps_rows_apart_but_is_not_shown() {
+    let from = |sift, tool: &str| Row { sift, source: json!({"id": 3, SOURCE_TOOL_KEY: tool}), ..row(1, RowKind::Kept, json!({"a": tool})) };
+    let rows = [from(1, "kv"), from(2, "notes")];
+    let t = render(&rows, &cols(&["a", "source"]), None, &counts(2, 2));
+    let lines: Vec<&str> = t.lines().skip(2).take_while(|l| l.starts_with('|')).collect();
+    assert_eq!(lines, ["| kv | 3 |", "| notes | 3 |"], "{t}");
+    assert_eq!(items(rows.iter()), 2);
 }

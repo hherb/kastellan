@@ -225,8 +225,11 @@ pub(super) async fn an_empty_unfinished_sift_adds_its_remaining_not_its_columns(
     let (out, _) = with_table(pool, &ctx, "Found:", &table(Refs::Many(vec![a, b.clone()])), true).await;
     assert!(out.contains("| amount | source |") && !out.contains("vendor"), "no empty column: {out}");
     assert!(out.contains("1 kept of 2 looked at") && out.contains("5 not yet looked at"), "its remaining is said: {out}");
+    // Issue 1026 (d): two questions, so the one that stopped is named.
+    assert!(out.ends_with(&format!("\n\n(sift {b} stopped after 0 of its 5 items)")), "{out}");
     let (out, _) = with_table(pool, &ctx, "Found:", &table(Refs::One(b)), true).await;
     assert!(out.contains("| vendor | source |"), "alone, its columns stay: {out}");
+    assert!(!out.contains("stopped after"), "one question: the note says it: {out}");
 }
 
 /// #965 item 4: each read is screened with its own tool's profile, not the
@@ -270,12 +273,12 @@ pub(super) async fn a_chain_link_that_cannot_be_read_gives_no_distinct(pool: &sq
     use crate::scheduler::notebook::sift::run::chain_distinct;
     let ctx = new_task(pool, 5).await;
     let own = [scrapbook::NewRow { kind: RowKind::Kept, source: json!({"id": "m1"}), fields: json!({"amount": 1}), classification: "Personal".into() }];
-    assert_eq!(chain_distinct(pool, &ctx, "not a ref", &own).await, None, "a link name that does not parse");
+    assert_eq!(chain_distinct(pool, &ctx, "not a ref", 2, &own).await, None, "a link name that does not parse");
     let link = format!("sb:{}:1", ctx.task_id);
-    assert_eq!(chain_distinct(pool, &ctx, &link, &own).await, Some(1), "control: the link read, empty, plus this sift's row");
+    assert_eq!(chain_distinct(pool, &ctx, &link, 2, &own).await, Some(1), "control: the link read, empty, plus this sift's row");
     let dead = sqlx::postgres::PgPoolOptions::new()
         .acquire_timeout(Duration::from_millis(500))
         .connect_lazy("postgres://kastellan@127.0.0.1:1/none")
         .expect("lazy pool");
-    assert_eq!(chain_distinct(&dead, &ctx, &link, &own).await, None, "a link whose rows cannot be read");
+    assert_eq!(chain_distinct(&dead, &ctx, &link, 2, &own).await, None, "a link whose rows cannot be read");
 }
