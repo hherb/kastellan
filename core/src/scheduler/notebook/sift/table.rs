@@ -51,9 +51,7 @@ pub(crate) fn render_table(
     // sorted by the cell each shows: `alike` is greedy, so grouping sorted rows
     // could make more table rows than `distinct` said (issue 1029).
     let mut groups = alike(&rows.iter().collect::<Vec<_>>());
-    if let Some(o) = order_by {
-        groups.sort_by(|a, b| cell_order(&first_cell(a, &o.column), &first_cell(b, &o.column), o.desc));
-    }
+    let misdated = order_by.map_or(0, |o| order_groups(&mut groups, o));
     let shown_rows = limit.filter(|n| *n > 0).map_or(groups.len(), |n| n.min(groups.len()));
     // Items merged, not rows: one message kept by three sifts is no duplicate (issue 1026).
     let merged = groups[..shown_rows].iter().map(|g| items(g.iter().copied()) - 1).sum();
@@ -73,7 +71,46 @@ pub(crate) fn render_table(
         let exact = columns.iter().find(|c| **c == o.column);
         (exact.or_else(|| columns.iter().find(|c| c.eq_ignore_ascii_case(&o.column))).unwrap_or(&o.column).as_str(), o.desc)
     });
-    (format!("{}\n\n{}", out.join("\n"), note(counts, merged, cut, by)), blocks)
+    (format!("{}\n\n{}", out.join("\n"), note(counts, merged, cut, by, misdated)), blocks)
+}
+
+/// Sorts `groups` by the cell each shows in `o`'s column, and says how many
+/// of those cells a date order could not place (#958). In a date column —
+/// one with a date name, or with at least half its non-empty cells read by
+/// [`dates::iso_key`] (one date among forty amounts does not make one) — the cells
+/// it reads sort by their date, whatever shape the sorter wrote (`3 Nov
+/// 2026`, `03.11.2026`), then the rest after them either way, by
+/// [`cell_order`] among themselves (`2025` and `2024` still order), and
+/// empty cells last: among the dates, as text or numbers, `Nov 3` would sort
+/// as the number 3. Any other column sorts by [`cell_order`]. Stable, so
+/// tied groups keep stored order.
+fn order_groups(groups: &mut Vec<Vec<&Row>>, o: &OrderBy) -> usize {
+    let cells: Vec<String> = groups.iter().map(|g| first_cell(g, &o.column)).collect();
+    let keys: Vec<Option<String>> = cells.iter().map(|c| dates::iso_key(c)).collect();
+    let filled = cells.iter().filter(|c| !c.is_empty()).count();
+    let read = keys.iter().filter(|k| k.is_some()).count();
+    if !(is_date_name(&o.column) || (read > 0 && 2 * read >= filled)) {
+        groups.sort_by(|a, b| cell_order(&first_cell(a, &o.column), &first_cell(b, &o.column), o.desc));
+        return 0;
+    }
+    let unread = cells.iter().zip(&keys).filter(|(c, k)| !c.is_empty() && k.is_none()).count();
+    // 0 a date, 1 a cell not read as one, 2 an empty cell.
+    let rank = |c: &str, k: &Option<String>| if k.is_some() { 0 } else if c.is_empty() { 2 } else { 1 };
+    let mut keyed: Vec<_> = cells.into_iter().zip(keys).zip(groups.drain(..)).collect();
+    keyed.sort_by(|((ca, ka), _), ((cb, kb), _)| {
+        rank(ca, ka).cmp(&rank(cb, kb)).then_with(|| match (ka, kb) {
+            (Some(a), Some(b)) => if o.desc { b.cmp(a) } else { a.cmp(b) },
+            _ => cell_order(ca, cb, o.desc),
+        })
+    });
+    groups.extend(keyed.into_iter().map(|(_, g)| g));
+    unread
+}
+
+/// Is `name` a date column's: `date` itself, or ending in the word (see
+/// [`ends_in_date_word`]), in any case?
+fn is_date_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("date") || ends_in_date_word(name)
 }
 
 /// `rows` in groups, in order of first appearance: a kept row joins the
@@ -173,17 +210,15 @@ pub(crate) fn as_stored(task_id: i64, sift: i32, rows: &[NewRow]) -> Vec<Row> {
 /// The order of a table that names none (#960): newest first by its date
 /// column — one named `date`, else the first whose last word is `date`
 /// (`due_date`, `due date`, `dueDate`; never `update` or `mandate`), in any
-/// case. Text order is date order only for `YYYY-MM-DD`, which the sorter is
-/// asked to write but may not: a cell of `rows` in that column written any
-/// other way (`03/11/2026`, or `2025`, which sorts as a number) keeps the
-/// order found (review finding), as does a table with no such column.
+/// case. The sorter is asked to write `YYYY-MM-DD` but may not: only when
+/// every non-empty cell of `rows` in that column reads as one day
+/// ([`dates::iso_key`]: `2026-11-03`, and since #958 `3 Nov 2026` too) is it
+/// ordered; one that does not (`03/11/2026`, `2025`) keeps the order found
+/// (review finding), as does a table with no such column.
 pub(crate) fn default_order(columns: &[String], rows: &[Row]) -> Option<OrderBy> {
     let column = columns.iter().find(|c| c.eq_ignore_ascii_case("date")).or_else(|| columns.iter().find(|c| ends_in_date_word(c)))?;
-    let iso = |c: &str| {
-        c.get(..10).is_some_and(|d| d.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }))
-    };
-    let all_iso = rows.iter().map(|r| cell_text(r, column)).filter(|c| !c.is_empty()).all(|c| iso(&c));
-    all_iso.then(|| OrderBy { column: column.clone(), desc: true })
+    let all_dates = rows.iter().map(|r| cell_text(r, column)).filter(|c| !c.is_empty()).all(|c| dates::iso_key(&c).is_some());
+    all_dates.then(|| OrderBy { column: column.clone(), desc: true })
 }
 
 /// Is `date` the last word of `name`: after a non-letter, or a camel-case
@@ -293,8 +328,9 @@ fn scalar(v: &Value) -> String {
 /// The counts, then what the table did to the rows: `merged` duplicates
 /// shown once, and `cut` = (shown, of) when a limit left rows out — with
 /// the `order` (column, descending) "the first" follows, which may be the
-/// default one nobody named (#965 item 2).
-fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>, order: Option<(&str, bool)>) -> String {
+/// default one nobody named (#965 item 2) — and `misdated`, the cells of an
+/// ordered date column it could not read as dates (#958).
+fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>, order: Option<(&str, bool)>, misdated: usize) -> String {
     let mut parts = vec![format!("{} kept of {} looked at", c.kept, c.looked_at)];
     if c.withheld > 0 {
         parts.push(format!("{} withheld by the safety screen", c.withheld));
@@ -315,8 +351,14 @@ fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>, order: Option<(&
         let by = order.map_or(String::new(), |(column, desc)| format!(", by `{column}` {}", if desc { "descending" } else { "ascending" }));
         parts.push(format!("showing the first {shown} of {of} rows{by}"));
     }
+    if let (Some((column, _)), 1..) = (order, misdated) {
+        let s = if misdated == 1 { " value" } else { " values" };
+        parts.push(format!("{misdated} `{column}`{s} not read as a date, so the order may be wrong"));
+    }
     format!("{}.", parts.join("; "))
 }
+
+mod dates;
 
 #[cfg(test)]
 mod tests;
