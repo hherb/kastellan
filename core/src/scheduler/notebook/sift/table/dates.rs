@@ -2,10 +2,12 @@
 //! where the sorter did not write `YYYY-MM-DD` as its prompt asks. Pure.
 
 /// `cell` as a sort key that orders as its date: `YYYY-MM-DD`, then
-/// whatever followed the date (a time, say), when the cell begins with a
-/// date in a shape that can only mean one day. `None` for anything else —
-/// no year (`Nov 3`), or a day and month that could be either way round
-/// (`03/11/2026`) — which a date order cannot place.
+/// ` HH:MM:SS` when a time follows the date (24-hour, and in UTC when it
+/// carries an offset), when the cell begins with a date in a shape that can
+/// only mean one day. Anything else after the date is not in the key. `None`
+/// for a cell that does not begin so — no year (`Nov 3`), or a day and
+/// month that could be either way round (`03/11/2026`) — which a date order
+/// cannot place.
 pub(super) fn iso_key(cell: &str) -> Option<String> {
     let mut t = tokens(cell);
     // A leading weekday says nothing the date does not (`Tue, 3 Nov 2026`, an email's `Date:`).
@@ -16,13 +18,59 @@ pub(super) fn iso_key(cell: &str) -> Option<String> {
     }
     let ((y, m, d), end) = numeric(&t).or_else(|| worded(&t))?;
     // Only a real day: `31 Nov 2026` and `2026-02-30` are none.
-    jiff::civil::Date::new(i16::try_from(y).ok()?, i8::try_from(m).ok()?, i8::try_from(d).ok()?).ok()?;
-    // What followed the date, kept so times still order: glued on (`T14:05`)
-    // or after one space (`, 14:05` is ` 14:05`).
-    let rest = &cell[end..];
-    let after = rest.trim_start_matches([' ', ',']);
-    let gap = if after.is_empty() || after.len() == rest.len() { "" } else { " " };
-    Some(format!("{y:04}-{m:02}-{d:02}{gap}{after}"))
+    let date = jiff::civil::Date::new(i16::try_from(y).ok()?, i8::try_from(m).ok()?, i8::try_from(d).ok()?).ok()?;
+    // A time is ordered as a time, not as the text it was written in (review
+    // finding: `T09:00` sorted after ` 14:05`, `9:00` after `10:00`); a time
+    // that does not read leaves the day alone, tied with the rest of it.
+    let Some((h, mi, s, offset)) = time(&cell[end..]) else {
+        return Some(date.to_string());
+    };
+    let Ok(at) = jiff::civil::DateTime::new(date.year(), date.month(), date.day(), h, mi, s, 0) else {
+        return Some(date.to_string());
+    };
+    // shortcut: a time with no offset is taken as UTC, so it orders against an
+    // offset one only to within the writer's zone; read a zone from the task if that matters.
+    let utc = offset
+        .and_then(|o| jiff::tz::Offset::from_seconds(o).ok())
+        .and_then(|o| at.to_zoned(jiff::tz::TimeZone::fixed(o)).ok())
+        .map_or(at, |z| z.with_time_zone(jiff::tz::TimeZone::UTC).datetime());
+    Some(utc.strftime("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+/// The time at the start of `rest`, what followed a date: (hour, minute,
+/// second, UTC offset in seconds) from `14:05`, `T14:05:00.250Z`,
+/// `, 9:00 AM`, `14:05:00 +1100`, `23:30 -08:00`. `None` when no
+/// `H:MM` starts it.
+fn time(rest: &str) -> Option<(i8, i8, i8, Option<i32>)> {
+    let r = rest.trim_start_matches([' ', ',']);
+    let r = r.strip_prefix(['T', 't']).unwrap_or(r);
+    let (h, r) = digits(r, 1, 2)?;
+    let (mi, r) = digits(r.strip_prefix(':')?, 2, 2)?;
+    let (s, r) = r.strip_prefix(':').and_then(|r| digits(r, 2, 2)).unwrap_or((0, r));
+    let r = r.strip_prefix('.').map_or(r, |f| f.trim_start_matches(|c: char| c.is_ascii_digit())).trim_start();
+    let half = r.get(..2).map(str::to_ascii_lowercase);
+    let (h, r) = match half.as_deref() {
+        Some(p @ ("am" | "pm")) if (1..=12).contains(&h) => (h % 12 + if p == "pm" { 12 } else { 0 }, r[2..].trim_start()),
+        _ => (h, r),
+    };
+    let offset = if r.starts_with(['Z', 'z']) || r.starts_with("UTC") || r.starts_with("GMT") {
+        Some(0)
+    } else if let Some((sign, r)) = r.strip_prefix('+').map(|r| (1, r)).or_else(|| r.strip_prefix('-').map(|r| (-1, r))) {
+        digits(r, 2, 2).map(|(oh, r)| {
+            let om = digits(r.strip_prefix(':').unwrap_or(r), 2, 2).map_or(0, |(m, _)| i32::from(m));
+            sign * (i32::from(oh) * 3600 + om * 60)
+        })
+    } else {
+        None
+    };
+    Some((h, mi, s, offset))
+}
+
+/// The number in the first `min..=max` digits of `s` (as many as there
+/// are, up to `max`), and what follows them.
+fn digits(s: &str, min: usize, max: usize) -> Option<(i8, &str)> {
+    let n = s.bytes().take(max).take_while(u8::is_ascii_digit).count();
+    (n >= min).then(|| (s[..n].parse().unwrap_or(0), &s[n..]))
 }
 
 /// A piece of a cell: a run of digits, a run of letters, or a `-`/`/`/`.`.
@@ -144,17 +192,27 @@ mod tests {
     fn shapes_that_name_one_day_read_as_iso() {
         for (cell, key) in [
             ("2026-11-03", "2026-11-03"),
-            ("2026-11-03T14:05", "2026-11-03T14:05"),
-            ("2026-11-03 14:05", "2026-11-03 14:05"),
+            ("2026-11-03T14:05", "2026-11-03 14:05:00"),
+            ("2026-11-03 14:05", "2026-11-03 14:05:00"),
             ("2026-1-5", "2026-01-05"),
             ("2026/11/03", "2026-11-03"),
             ("03.11.2026", "2026-11-03"),
             ("3. Nov. 2026", "2026-11-03"),
             ("3 November 2026", "2026-11-03"),
+            ("3rd November 2026", "2026-11-03"),
+            ("4th Nov 2026", "2026-11-04"),
             ("3-Sep-2026", "2026-09-03"),
             ("Sept 3rd, 2026", "2026-09-03"),
-            ("Nov 3, 2026, 14:05", "2026-11-03 14:05"),
-            ("Tue, 3 Nov 2026 14:05:00 +1100", "2026-11-03 14:05:00 +1100"),
+            ("Tue, 3rd Nov. 2026", "2026-11-03"),
+            ("3 Nov 2026,", "2026-11-03"),
+            ("Nov 3, 2026, 14:05", "2026-11-03 14:05:00"),
+            ("Nov 3, 2026, 9:00 AM", "2026-11-03 09:00:00"),
+            ("Nov 3, 2026, 12:30 am", "2026-11-03 00:30:00"),
+            ("Nov 3, 2026 2:00 PM", "2026-11-03 14:00:00"),
+            ("2026-11-03T14:05:00.250Z", "2026-11-03 14:05:00"),
+            ("Tue, 3 Nov 2026 14:05:00 +1100", "2026-11-03 03:05:00"),
+            ("Tue, 3 Nov 2026 23:30:00 -08:00", "2026-11-04 07:30:00"),
+            ("2026-11-03 (about)", "2026-11-03"),
             ("13/11/2026", "2026-11-13"),
             ("11/13/2026", "2026-11-13"),
         ] {
@@ -162,11 +220,42 @@ mod tests {
         }
     }
 
+    /// Review finding: keys of one day in different shapes order by time,
+    /// not by the text after the date (`T` sorts after a space, `9` after `1`).
+    #[test]
+    fn times_order_whatever_their_shape() {
+        let k = |c: &str| iso_key(c).unwrap();
+        assert!(k("2026-11-03T09:00") < k("3 Nov 2026 14:05"));
+        assert!(k("Nov 3, 2026, 9:00") < k("Nov 3, 2026, 10:00"));
+        assert!(k("Nov 3, 2026, 9:00 AM") < k("Nov 3, 2026, 2:00 PM"));
+        assert!(k("Wed, 4 Nov 2026 01:00:00 +0000") < k("Tue, 3 Nov 2026 23:30:00 -0800"));
+    }
+
     #[test]
     fn shapes_that_do_not_name_one_day_are_not_read() {
-        for cell in
-            ["", "Nov 3", "2025", "03/11/2026", "3-10", "5-10", "3 of 10", "1.5", "$1,200", "2026-02-30", "31 Nov 2026", "Novel 3 2026", "update"]
-        {
+        for cell in [
+            "",
+            "Nov 3",
+            "2025",
+            "03/11/2026",
+            "03-11-2026",
+            "03.11.26",
+            "11/03/26",
+            "3 Nov 26",
+            "3-10",
+            "5-10",
+            "3 of 10",
+            "3 of November 2026",
+            "Nov 3 of 2026",
+            "J 3 2026",
+            "Ma 3 2026",
+            "1.5",
+            "$1,200",
+            "2026-02-30",
+            "31 Nov 2026",
+            "Novel 3 2026",
+            "update",
+        ] {
             assert_eq!(iso_key(cell), None, "{cell}");
         }
     }

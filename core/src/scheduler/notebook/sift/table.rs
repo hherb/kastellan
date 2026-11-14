@@ -79,8 +79,9 @@ pub(crate) fn render_table(
 /// one with a date name, or with at least half its non-empty cells read by
 /// [`dates::iso_key`] (one date among forty amounts does not make one) — the cells
 /// it reads sort by their date, whatever shape the sorter wrote (`3 Nov
-/// 2026`, `03.11.2026`), and the rest (`Nov 3`, empty) after them as found,
-/// either way: as text or numbers they would sort among the dates, `Nov 3`
+/// 2026`, `03.11.2026`), then the rest after them either way, by
+/// [`cell_order`] among themselves (`2025` and `2024` still order), and
+/// empty cells last: among the dates, as text or numbers, `Nov 3` would sort
 /// as the number 3. Any other column sorts by [`cell_order`]. Stable, so
 /// tied groups keep stored order.
 fn order_groups(groups: &mut Vec<Vec<&Row>>, o: &OrderBy) -> usize {
@@ -93,8 +94,15 @@ fn order_groups(groups: &mut Vec<Vec<&Row>>, o: &OrderBy) -> usize {
         return 0;
     }
     let unread = cells.iter().zip(&keys).filter(|(c, k)| !c.is_empty() && k.is_none()).count();
-    let mut keyed: Vec<_> = keys.into_iter().zip(groups.drain(..)).collect();
-    keyed.sort_by(|(a, _), (b, _)| a.is_none().cmp(&b.is_none()).then_with(|| if o.desc { b.cmp(a) } else { a.cmp(b) }));
+    // 0 a date, 1 a cell not read as one, 2 an empty cell.
+    let rank = |c: &str, k: &Option<String>| if k.is_some() { 0 } else if c.is_empty() { 2 } else { 1 };
+    let mut keyed: Vec<_> = cells.into_iter().zip(keys).zip(groups.drain(..)).collect();
+    keyed.sort_by(|((ca, ka), _), ((cb, kb), _)| {
+        rank(ca, ka).cmp(&rank(cb, kb)).then_with(|| match (ka, kb) {
+            (Some(a), Some(b)) => if o.desc { b.cmp(a) } else { a.cmp(b) },
+            _ => cell_order(ca, cb, o.desc),
+        })
+    });
     groups.extend(keyed.into_iter().map(|(_, g)| g));
     unread
 }

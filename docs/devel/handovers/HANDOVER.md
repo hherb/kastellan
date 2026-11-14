@@ -61,12 +61,16 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 ### This session (2026-11-14, latest): #958, #1030's deploy
 
 - **#958 (operator's choice: rewrite recognisable shapes):** `table::dates::iso_key` reads a cell beginning with a
-  date that names one day — `YYYY-MM-DD`/`/`/`.`, `DD.MM.YYYY`, month names (`3 Nov 2026`, `Sept 3rd, 2026`, a
-  leading weekday: email `Date:`), `13/11/2026` — into an ISO sort key (the rest, e.g. a time, kept). A **date
-  column** (a date name, or ≥ half its non-empty cells read) sorts by that key (`table::order_groups`); cells it
-  cannot read (`Nov 3`, no year; `03/11/2026`, ambiguous) go **after** the dates either way, and the note says
-  `N `date` values not read as a date, so the order may be wrong`. `default_order` orders when every cell reads.
-  ⚠️ **The shown cell is unchanged** — only the sort key is ISO. English month names only. 3 tests, 7 mutants caught.
+  date that names one day — year first with `-`, `/` or `.`; `DD.MM.YYYY`; month names (`3 Nov 2026`,
+  `Sept 3rd, 2026`, a leading weekday: email `Date:`); `13/11/2026` — into an ISO sort key. A following time is
+  keyed as 24-hour `HH:MM:SS`, in UTC when it carries an offset (review finding: raw text sorted `T09:00` after
+  ` 14:05`); anything else after the date is not keyed. A **date column** (a date name, or ≥ half its non-empty
+  cells read) sorts by that key (`table::order_groups`). Cells it cannot read (`Nov 3`, no year; `03/11/2026`,
+  ambiguous) go **after** the dates either way, sorted among themselves by `cell_order` (so a `Date` column of
+  years still orders, review finding), with empty cells last. The note then says
+  ``N `date` values not read as a date, so the order may be wrong``. `default_order` orders when every cell
+  reads. ⚠️ **The shown cell is unchanged**: only the sort key is ISO. English month names only. A time with no
+  offset is taken as UTC (a `shortcut:` comment). 5 tests; 7 + 5 mutants caught.
 - **Deploy:** PR #1030 (issue 1029) on the DGX (`NRestarts=0`, Matrix up, env identical to `bak-pre1030`,
   installed `agent_notebook.md` sha256-equal to the repo's).
 
@@ -359,7 +363,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its new leg in `mail_live_shape_e2e/hit_fields.rs` (a `#[path]` module); move the next one there too, or split. ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-`core/src/scheduler/notebook/run/tests.rs` **555**: #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). `sift/table/tests.rs` **461** (+40 in #958; its date reader `table/dates.rs` 173, tests inline) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
+`core/src/scheduler/notebook/run/tests.rs` **555**: #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).
