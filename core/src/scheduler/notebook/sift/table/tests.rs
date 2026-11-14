@@ -109,36 +109,42 @@ fn numbers_sort_as_numbers() {
     assert!(t.find("2025-12-30").unwrap() < t.find("2026-01-02").unwrap(), "{t}");
 }
 
-/// #958: a date column sorts right only when every cell is `YYYY-MM-DD`,
-/// which only the sorter's prompt asks for. A date column (named one, or
-/// holding an ISO cell) ordered with cells written otherwise says how many,
-/// so "the first 2" does not read as exact; an all-ISO one says nothing.
+/// #958: a date column sorts by date whatever shape the sorter wrote its
+/// cells in, when the shape names one day (`03.11.2026`); the cells it
+/// cannot read (`Nov 3`: no year) go after the dates either way — not first,
+/// as the number 3 — and the note says how many, so "the first 2" does not
+/// read as exact. A date column is a named one or one at least half of
+/// whose cells are dates (the number/text case below has one in forty).
 #[test]
-fn an_ordered_date_column_names_the_cells_not_written_iso() {
+fn an_ordered_date_column_sorts_by_date_and_names_what_it_cannot_read() {
     let mixed = [
-        row(1, RowKind::Kept, json!({"date": "2026-11-01"})),
-        row(2, RowKind::Kept, json!({"date": "Nov 3"})),
-        row(3, RowKind::Kept, json!({"date": "03.11.2026"})),
-        row(4, RowKind::Kept, json!({"date": ""})),
+        row(1, RowKind::Kept, json!({"date": "Nov 3"})),
+        row(2, RowKind::Kept, json!({"date": "2026-11-01"})),
+        row(3, RowKind::Kept, json!({"date": ""})),
+        row(4, RowKind::Kept, json!({"date": "03.11.2026"})),
+        row(5, RowKind::Kept, json!({"date": "2 Nov 2026"})),
     ];
+    for (desc, want) in [(true, ["03.11.2026", "2 Nov 2026", "2026-11-01", "Nov 3", ""]), (false, ["2026-11-01", "2 Nov 2026", "03.11.2026", "Nov 3", ""])] {
+        let t = render(&mixed, &cols(&["date"]), Some(&OrderBy { column: "date".into(), desc }), &counts(5, 5));
+        let shown: Vec<&str> = t.lines().skip(2).take(5).map(|l| l.trim_matches('|').trim()).collect();
+        assert_eq!(shown, want, "desc {desc}: {t}");
+    }
     let order = OrderBy { column: "date".into(), desc: true };
-    let t = render_table(&mixed, &cols(&["date"]), Some(&order), Some(2), &counts(4, 4)).0;
-    assert!(
-        t.ends_with("showing the first 2 of 4 rows, by `date` descending; 2 `date` values not written YYYY-MM-DD, so the order may be wrong."),
-        "{t}"
-    );
-    let named = [row(1, RowKind::Kept, json!({"due_date": "3 Nov 2026"}))];
-    let t = render(&named, &cols(&["due_date"]), Some(&OrderBy { column: "due_date".into(), desc: false }), &counts(1, 1));
-    assert!(t.ends_with("; 1 `due_date` value not written YYYY-MM-DD, so the order may be wrong."), "a date name, no ISO cell: {t}");
-    let iso = [row(1, RowKind::Kept, json!({"d": "2026-01-02"})), row(2, RowKind::Kept, json!({"d": "2025-12-30 09:00"}))];
-    let t = render(&iso, &cols(&["d"]), Some(&OrderBy { column: "d".into(), desc: false }), &counts(2, 2));
-    assert!(!t.contains("YYYY-MM-DD"), "all ISO: {t}");
-    let unnamed = [row(1, RowKind::Kept, json!({"d": "2026-01-02"})), row(2, RowKind::Kept, json!({"d": "Jan 3"}))];
+    let t = render_table(&mixed, &cols(&["date"]), Some(&order), Some(2), &counts(5, 5)).0;
+    assert!(t.ends_with("showing the first 2 of 5 rows, by `date` descending; 1 `date` value not read as a date, so the order may be wrong."), "{t}");
+    let unnamed = [row(1, RowKind::Kept, json!({"d": "Jan 3"})), row(2, RowKind::Kept, json!({"d": "2 Jan 2026"}))];
     let t = render(&unnamed, &cols(&["d"]), Some(&OrderBy { column: "d".into(), desc: false }), &counts(2, 2));
-    assert!(t.ends_with("; 1 `d` value not written YYYY-MM-DD, so the order may be wrong."), "an ISO cell, no date name: {t}");
-    let amounts = [row(1, RowKind::Kept, json!({"amount": "30 EUR"}))];
-    let t = render(&amounts, &cols(&["amount"]), Some(&OrderBy { column: "amount".into(), desc: false }), &counts(1, 1));
-    assert!(!t.contains("YYYY-MM-DD"), "not a date column: {t}");
+    assert!(t.find("2 Jan 2026").unwrap() < t.find("Jan 3").unwrap(), "a cell read as a date makes a date column: {t}");
+    assert!(t.ends_with("; 1 `d` value not read as a date, so the order may be wrong."), "{t}");
+    let named = [row(1, RowKind::Kept, json!({"due_date": "soon"}))];
+    let t = render(&named, &cols(&["due_date"]), Some(&OrderBy { column: "due_date".into(), desc: false }), &counts(1, 1));
+    assert!(t.ends_with("; 1 `due_date` value not read as a date, so the order may be wrong."), "a date name, no date: {t}");
+    let read = [row(1, RowKind::Kept, json!({"d": "2026-01-02"})), row(2, RowKind::Kept, json!({"d": "30 Dec 2025, 09:00"}))];
+    let t = render(&read, &cols(&["d"]), Some(&OrderBy { column: "d".into(), desc: false }), &counts(2, 2));
+    assert!(t.find("30 Dec 2025").unwrap() < t.find("2026-01-02").unwrap() && !t.contains("not read"), "every cell read: {t}");
+    let amounts = [row(1, RowKind::Kept, json!({"amount": "30 EUR"})), row(2, RowKind::Kept, json!({"amount": "100 EUR"}))];
+    let t = render(&amounts, &cols(&["amount"]), Some(&OrderBy { column: "amount".into(), desc: false }), &counts(2, 2));
+    assert!(t.find("30 EUR").unwrap() < t.find("100 EUR").unwrap() && !t.contains("not read"), "not a date column: {t}");
 }
 
 /// Review finding: a column mixing numbers and text must sort without
@@ -373,9 +379,11 @@ fn with_no_order_named_a_date_column_orders_newest_first() {
     let dated = |d: &[&str]| d.iter().enumerate().map(|(i, d)| row(i as i32, RowKind::Kept, json!({"date": d}))).collect::<Vec<_>>();
     let date = cols(&["date"]);
     assert_eq!(default_order(&date, &dated(&["2026-01-05", "", "2025-12-24T09:00"])), date_desc("date"));
-    for other in ["03/11/2026", "2025", "Nov 3, 2026"] {
+    for other in ["03/11/2026", "2025", "Nov 3"] {
         assert_eq!(default_order(&date, &dated(&["2026-01-05", other])), None, "`{other}`: the order found");
     }
+    // #958: a cell in another shape that names one day orders too.
+    assert_eq!(default_order(&date, &dated(&["2026-01-05", "Nov 3, 2026"])), date_desc("date"));
 }
 
 /// Issue 1026 (c): the note's `kept` is items, not rows. One source kept by

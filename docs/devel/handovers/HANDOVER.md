@@ -60,11 +60,13 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### This session (2026-11-14, latest): #958, #1030's deploy
 
-- **#958:** a table whose `order_by` names a date column (a date name, `table::is_date_name`, or any `YYYY-MM-DD`
-  cell) with cells written otherwise adds a note part: `N `date` values not written YYYY-MM-DD, so the order may be
-  wrong` (`table::not_iso`, counted over every group's sort key, not just the shown ones). The ISO check is shared
-  with `default_order` (`table::is_iso_date`). ⚠️ **Not normalised** — `Nov 3` still sorts as the number 3; the note
-  only warns. 1 test, 1 mutant (the ISO-cell branch) caught.
+- **#958 (operator's choice: rewrite recognisable shapes):** `table::dates::iso_key` reads a cell beginning with a
+  date that names one day — `YYYY-MM-DD`/`/`/`.`, `DD.MM.YYYY`, month names (`3 Nov 2026`, `Sept 3rd, 2026`, a
+  leading weekday: email `Date:`), `13/11/2026` — into an ISO sort key (the rest, e.g. a time, kept). A **date
+  column** (a date name, or ≥ half its non-empty cells read) sorts by that key (`table::order_groups`); cells it
+  cannot read (`Nov 3`, no year; `03/11/2026`, ambiguous) go **after** the dates either way, and the note says
+  `N `date` values not read as a date, so the order may be wrong`. `default_order` orders when every cell reads.
+  ⚠️ **The shown cell is unchanged** — only the sort key is ISO. English month names only. 3 tests, 7 mutants caught.
 - **Deploy:** PR #1030 (issue 1029) on the DGX (`NRestarts=0`, Matrix up, env identical to `bak-pre1030`,
   installed `agent_notebook.md` sha256-equal to the repo's).
 
@@ -357,7 +359,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its new leg in `mail_live_shape_e2e/hit_fields.rs` (a `#[path]` module); move the next one there too, or split. ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-`core/src/scheduler/notebook/run/tests.rs` **555**: #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). `sift/table/tests.rs` **453** (+32 in #958) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
+`core/src/scheduler/notebook/run/tests.rs` **555**: #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). `sift/table/tests.rs` **461** (+40 in #958; its date reader `table/dates.rs` 173, tests inline) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).
@@ -394,7 +396,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#958) | `fix/958-ordered-date-note` over `f86fb22f` (#1030), primary checkout | **5530 / 0 / 51**, **201** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-958.log`. vs `sweep-1030-final.log` (5529): **+1** core lib — `an_ordered_date_column_names_the_cells_not_written_iso` (`sift/table/tests.rs`) | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-958`, clean, 27 `Checking kastellan` | **23** (as before) |
+| **Mac** (#958) | `fix/958-ordered-date-note` over `f86fb22f` (#1030), primary checkout | **5532 / 0 / 51**, **201** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-958b.log`. vs `sweep-1030-final.log` (5529): **+3** core lib — `an_ordered_date_column_sorts_by_date_and_names_what_it_cannot_read` (`sift/table/tests.rs`), `shapes_that_name_one_day_read_as_iso` and `shapes_that_do_not_name_one_day_are_not_read` (`sift/table/dates.rs`) | `CARGO_TARGET_DIR=$HOME/.cargo-clippy-958`, clean: cold 27 `Checking kastellan` on the first cut, then 5 re-checked after the date reader | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
