@@ -10,45 +10,71 @@
 
 use serde_json::{json, Value};
 
-use super::params::{parse_params, SiftParams};
+use super::is_sift_plan;
+use super::params::{parse_params, Over, SiftParams};
 use super::SIFT_TOOL;
 use crate::scheduler::inner_loop::{PlanRecord, StepOutcome};
+use crate::scheduler::notebook::reply::notebook_step_of;
 
-/// This run's sifts, newest first: each call's parameters and its summary.
-fn sifts(plans: &[PlanRecord]) -> impl Iterator<Item = (&Value, &Value)> {
-    plans.iter().rev().filter_map(|rec| match (rec.plan.steps.first(), rec.outcomes().first()) {
-        (Some(s), Some(StepOutcome::Ok(v))) if s.tool == SIFT_TOOL => Some((&s.parameters, v)),
+/// This run's sifts, newest first: each one's index in `plans`, its call's
+/// parameters and its summary.
+fn sifts(plans: &[PlanRecord]) -> impl Iterator<Item = (usize, &Value, &Value)> {
+    plans.iter().enumerate().rev().filter_map(|(i, rec)| match (rec.plan.steps.first(), rec.outcomes().first()) {
+        (Some(s), Some(StepOutcome::Ok(v))) if s.tool == SIFT_TOOL => Some((i, &s.parameters, v)),
         _ => None,
     })
 }
 
 /// The summaries this run's sifts left, newest first.
 pub(crate) fn summaries(plans: &[PlanRecord]) -> impl Iterator<Item = &Value> {
-    sifts(plans).map(|(_, s)| s)
+    sifts(plans).map(|(_, _, s)| s)
 }
 
 /// The summary this run's sift `name` left, if it ran in this run.
 pub(crate) fn summary_of<'a>(plans: &'a [PlanRecord], name: &str) -> Option<&'a Value> {
-    sifts(plans).find(|(_, s)| s["scrapbook"] == name).map(|(_, s)| s)
+    sifts(plans).find(|(_, _, s)| s["scrapbook"] == name).map(|(_, _, s)| s)
 }
 
 /// The parameters, as parsed, of this run's sift `name`, if it ran in this run.
 pub(crate) fn params_of(plans: &[PlanRecord], name: &str) -> Option<SiftParams> {
-    sifts(plans).find(|(_, s)| s["scrapbook"] == name).and_then(|(p, _)| parse_params(p).ok())
+    sifts(plans).find(|(_, _, s)| s["scrapbook"] == name).and_then(|(_, p, _)| parse_params(p).ok())
+}
+
+/// The index in `plans` of the record whose result is notebook step `n`'s
+/// list, which a sift `over: {"step": n}` goes through: the newest call made
+/// for that step that is not a sift's and whose every step succeeded (a plan
+/// stops at its first error, so a last `Ok` means all did).
+pub(crate) fn list_index(plans: &[PlanRecord], n: u32) -> Option<usize> {
+    plans.iter().rposition(|rec| {
+        notebook_step_of(&rec.plan) == Some(n)
+            && !is_sift_plan(&rec.plan)
+            && matches!(rec.outcomes().last(), Some(StepOutcome::Ok(_)))
+    })
 }
 
 /// The scrapbook a sift with `params`, starting at `from`, continues: the
 /// newest earlier sift of this run whose parameters, as parsed, are the
-/// same but for `from` (so `"items": null` and no `items` are one) and
-/// whose `next_from` is this one's `from`. Anything else — a new criterion,
-/// another list, a sift back over items already seen — is a sift of its own.
+/// same but for `from` (so `"items": null` and no `items` are one), whose
+/// `next_from` is this one's `from`, and that went over the list this one
+/// goes over. Anything else — a new criterion, another list, a sift back
+/// over items already seen — is a sift of its own.
+///
+/// "The same list" (#959): `over: {"step": n}` is step n's *newest* result,
+/// so if step n succeeded again after the earlier sift ran, this sift goes
+/// over that new list and linking it would join rows of two lists in one
+/// table. A scrapbook's rows are written once, so it is always the same list.
 pub(crate) fn continued(plans: &[PlanRecord], params: &Value, from: usize) -> Option<String> {
     if from == 0 {
         return None;
     }
     let mine = but_from(params)?;
-    let (_, prev) = sifts(plans)
-        .find(|(p, s)| s["next_from"].as_u64() == Some(from as u64) && but_from(p).as_ref() == Some(&mine))?;
+    let same_list = |sift: usize| match &mine.over {
+        Over::Step(n) => list_index(plans, *n).is_some_and(|list| list < sift),
+        Over::Scrapbook(_) => true,
+    };
+    let (_, _, prev) = sifts(plans).find(|(i, p, s)| {
+        s["next_from"].as_u64() == Some(from as u64) && but_from(p).as_ref() == Some(&mine) && same_list(*i)
+    })?;
     prev["scrapbook"].as_str().map(String::from)
 }
 
@@ -98,10 +124,21 @@ fn but_from(params: &Value) -> Option<SiftParams> {
 pub(crate) mod tests {
     use super::*;
     use crate::cassandra::types::{DataClass, Plan, PlannedStep};
+    use crate::scheduler::notebook::reply::NOTEBOOK_STEP_RATIONALE;
 
     pub(crate) fn sift_record(params: Value, summary: Value) -> PlanRecord {
+        record(SIFT_TOOL, String::new(), params, vec![StepOutcome::Ok(summary)])
+    }
+
+    /// The call that produced notebook step `step`'s list, with `outcome`.
+    fn search_record(step: u32, outcome: StepOutcome) -> PlanRecord {
+        record("web-search", format!("{NOTEBOOK_STEP_RATIONALE}{step}"), json!({"q": "invoices"}), vec![outcome])
+    }
+
+    /// One step per outcome, each the same call.
+    fn record(tool: &str, rationale: String, params: Value, outcomes: Vec<StepOutcome>) -> PlanRecord {
         let step = PlannedStep {
-            tool: SIFT_TOOL.into(),
+            tool: tool.into(),
             method: "sift.run".into(),
             parameters: params,
             returns: "kept".into(),
@@ -111,8 +148,8 @@ pub(crate) mod tests {
         let plan = Plan {
             context: String::new(),
             decision: "kept".into(),
-            rationale: String::new(),
-            steps: vec![step],
+            rationale,
+            steps: vec![step; outcomes.len()],
             result: None,
             data_ceiling: None,
             refused: None,
@@ -122,25 +159,29 @@ pub(crate) mod tests {
             invoke_skill: None,
             python_skill: None,
         };
-        PlanRecord::new(plan, vec![StepOutcome::Ok(summary)])
+        PlanRecord::new(plan, outcomes)
     }
 
     pub(crate) fn params(from: usize, keep_if: &str) -> Value {
         json!({"over": {"step": 1}, "keep_if": keep_if, "fields": ["amount"], "from": from})
     }
 
-    /// Three sifts down one list: 0..30, 30..60, 60..
+    /// Step 1's list, then three sifts down it: 0..30, 30..60, 60.. Each
+    /// sift is a call for step 1 too, as when the planner sifts its own
+    /// step's list, so a sift's record must never count as step 1's list.
     fn chain_of_three() -> Vec<PlanRecord> {
+        let sift = |p, s| record(SIFT_TOOL, format!("{NOTEBOOK_STEP_RATIONALE}1"), p, vec![StepOutcome::Ok(s)]);
         vec![
-            sift_record(params(0, "an invoice"), json!({"scrapbook": "sb:9:2", "next_from": 30})),
-            sift_record(params(30, "an invoice"), json!({"scrapbook": "sb:9:3", "next_from": 60, "continues": "sb:9:2"})),
-            sift_record(params(60, "an invoice"), json!({"scrapbook": "sb:9:4", "continues": "sb:9:3"})),
+            search_record(1, StepOutcome::Ok(json!([]))),
+            sift(params(0, "an invoice"), json!({"scrapbook": "sb:9:2", "next_from": 30})),
+            sift(params(30, "an invoice"), json!({"scrapbook": "sb:9:3", "next_from": 60, "continues": "sb:9:2"})),
+            sift(params(60, "an invoice"), json!({"scrapbook": "sb:9:4", "continues": "sb:9:3"})),
         ]
     }
 
     #[test]
     fn a_sift_from_the_last_ones_next_from_continues_it() {
-        let plans = &chain_of_three()[..1];
+        let plans = &chain_of_three()[..2];
         assert_eq!(continued(plans, &params(30, "an invoice"), 30).as_deref(), Some("sb:9:2"));
         let mut copied = params(30, "an invoice");
         copied["continues"] = json!("sb:9:1");
@@ -152,7 +193,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_new_criterion_another_start_or_the_first_sift_continues_nothing() {
-        let plans = &chain_of_three()[..1];
+        let plans = &chain_of_three()[..2];
         assert_eq!(continued(plans, &params(30, "a receipt"), 30), None, "another criterion");
         assert_eq!(continued(plans, &params(20, "an invoice"), 20), None, "not where the last one stopped");
         assert_eq!(continued(plans, &params(0, "an invoice"), 0), None, "from the start");
@@ -171,6 +212,31 @@ pub(crate) mod tests {
         assert_eq!(continued(&plans, &params(60, "an invoice"), 60).as_deref(), Some("sb:9:4"), "D, the newest at 60");
     }
 
+    /// #959: step 1 run again between two sifts is another list, so a sift
+    /// `from` the first one's `next_from` goes over items it never saw and
+    /// continues nothing. A re-run that failed, even after an `Ok` step (an
+    /// invoked skill, #996), left the list as it was; another step's call is
+    /// not step 1's list; and `over` a scrapbook is never cut by a re-run.
+    #[test]
+    fn a_rerun_of_the_listed_step_between_sifts_ends_the_chain() {
+        let mut plans = chain_of_three();
+        plans.truncate(2);
+        plans.push(search_record(1, StepOutcome::Err { code: "UPSTREAM".into(), detail: "down".into() }));
+        assert_eq!(continued(&plans, &params(30, "an invoice"), 30).as_deref(), Some("sb:9:2"), "a failed re-run");
+        let err = || StepOutcome::Err { code: "UPSTREAM".into(), detail: "down".into() };
+        let rationale = format!("{NOTEBOOK_STEP_RATIONALE}1");
+        plans.push(record("web-search", rationale, json!({"q": "invoices"}), vec![StepOutcome::Ok(json!(["x"])), err()]));
+        assert_eq!(continued(&plans, &params(30, "an invoice"), 30).as_deref(), Some("sb:9:2"), "a skill whose last step failed");
+        plans.push(search_record(2, StepOutcome::Ok(json!(["another step's list"]))));
+        assert_eq!(continued(&plans, &params(30, "an invoice"), 30).as_deref(), Some("sb:9:2"), "another step's call");
+        plans.push(search_record(1, StepOutcome::Ok(json!(["another list"]))));
+        assert_eq!(continued(&plans, &params(30, "an invoice"), 30), None, "a new list");
+        let over_sb = |from| json!({"over": {"scrapbook": "sb:9:2"}, "keep_if": "x", "fields": ["amount"], "from": from});
+        plans.push(sift_record(over_sb(0), json!({"scrapbook": "sb:9:5", "next_from": 30})));
+        plans.push(search_record(1, StepOutcome::Ok(json!([]))));
+        assert_eq!(continued(&plans, &over_sb(30), 30).as_deref(), Some("sb:9:5"), "a scrapbook's rows never change");
+    }
+
     #[test]
     fn the_last_name_expands_to_the_whole_chain_oldest_first() {
         let plans = chain_of_three();
@@ -185,12 +251,12 @@ pub(crate) mod tests {
     #[test]
     fn totals_add_every_link_and_this_sift() {
         let mut plans = chain_of_three();
-        plans[0] = sift_record(params(0, "an invoice"), json!({"scrapbook": "sb:9:2", "next_from": 30, "looked_at": 30, "kept": 4}));
-        plans[1] = sift_record(
+        plans[1] = sift_record(params(0, "an invoice"), json!({"scrapbook": "sb:9:2", "next_from": 30, "looked_at": 30, "kept": 4}));
+        plans[2] = sift_record(
             params(30, "an invoice"),
             json!({"scrapbook": "sb:9:3", "next_from": 60, "continues": "sb:9:2", "looked_at": 30, "kept": 5}),
         );
-        let plans = &plans[..2];
+        let plans = &plans[..3];
         assert_eq!(totals(plans, "sb:9:3", 12, 3, Some(10)), json!({"sifts": 3, "looked_at": 72, "kept": 12, "distinct": 10}));
         assert_eq!(totals(plans, "sb:9:2", 30, 5, None), json!({"sifts": 2, "looked_at": 60, "kept": 9}), "a two-link chain, rows unread");
     }
