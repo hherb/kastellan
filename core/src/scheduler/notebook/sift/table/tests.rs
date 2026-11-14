@@ -109,6 +109,38 @@ fn numbers_sort_as_numbers() {
     assert!(t.find("2025-12-30").unwrap() < t.find("2026-01-02").unwrap(), "{t}");
 }
 
+/// #958: a date column sorts right only when every cell is `YYYY-MM-DD`,
+/// which only the sorter's prompt asks for. A date column (named one, or
+/// holding an ISO cell) ordered with cells written otherwise says how many,
+/// so "the first 2" does not read as exact; an all-ISO one says nothing.
+#[test]
+fn an_ordered_date_column_names_the_cells_not_written_iso() {
+    let mixed = [
+        row(1, RowKind::Kept, json!({"date": "2026-11-01"})),
+        row(2, RowKind::Kept, json!({"date": "Nov 3"})),
+        row(3, RowKind::Kept, json!({"date": "03.11.2026"})),
+        row(4, RowKind::Kept, json!({"date": ""})),
+    ];
+    let order = OrderBy { column: "date".into(), desc: true };
+    let t = render_table(&mixed, &cols(&["date"]), Some(&order), Some(2), &counts(4, 4)).0;
+    assert!(
+        t.ends_with("showing the first 2 of 4 rows, by `date` descending; 2 `date` values not written YYYY-MM-DD, so the order may be wrong."),
+        "{t}"
+    );
+    let named = [row(1, RowKind::Kept, json!({"due_date": "3 Nov 2026"}))];
+    let t = render(&named, &cols(&["due_date"]), Some(&OrderBy { column: "due_date".into(), desc: false }), &counts(1, 1));
+    assert!(t.ends_with("; 1 `due_date` value not written YYYY-MM-DD, so the order may be wrong."), "a date name, no ISO cell: {t}");
+    let iso = [row(1, RowKind::Kept, json!({"d": "2026-01-02"})), row(2, RowKind::Kept, json!({"d": "2025-12-30 09:00"}))];
+    let t = render(&iso, &cols(&["d"]), Some(&OrderBy { column: "d".into(), desc: false }), &counts(2, 2));
+    assert!(!t.contains("YYYY-MM-DD"), "all ISO: {t}");
+    let unnamed = [row(1, RowKind::Kept, json!({"d": "2026-01-02"})), row(2, RowKind::Kept, json!({"d": "Jan 3"}))];
+    let t = render(&unnamed, &cols(&["d"]), Some(&OrderBy { column: "d".into(), desc: false }), &counts(2, 2));
+    assert!(t.ends_with("; 1 `d` value not written YYYY-MM-DD, so the order may be wrong."), "an ISO cell, no date name: {t}");
+    let amounts = [row(1, RowKind::Kept, json!({"amount": "30 EUR"}))];
+    let t = render(&amounts, &cols(&["amount"]), Some(&OrderBy { column: "amount".into(), desc: false }), &counts(1, 1));
+    assert!(!t.contains("YYYY-MM-DD"), "not a date column: {t}");
+}
+
 /// Review finding: a column mixing numbers and text must sort without
 /// panicking — comparing numbers as numbers and the rest as text, pairwise,
 /// is not a total order (`3 < 20 < 2026-01-02 < 3`), and `sort_by` may panic

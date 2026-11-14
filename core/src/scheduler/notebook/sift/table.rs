@@ -73,7 +73,32 @@ pub(crate) fn render_table(
         let exact = columns.iter().find(|c| **c == o.column);
         (exact.or_else(|| columns.iter().find(|c| c.eq_ignore_ascii_case(&o.column))).unwrap_or(&o.column).as_str(), o.desc)
     });
-    (format!("{}\n\n{}", out.join("\n"), note(counts, merged, cut, by)), blocks)
+    let misdated = order_by.map_or(0, |o| not_iso(&groups.iter().map(|g| first_cell(g, &o.column)).collect::<Vec<_>>(), &o.column));
+    (format!("{}\n\n{}", out.join("\n"), note(counts, merged, cut, by, misdated)), blocks)
+}
+
+/// How many of `cells` (a column's sort keys) a date order gets wrong (#958):
+/// in a date column — one with a date name, or any `YYYY-MM-DD` cell — the
+/// non-empty cells written any other way, which sort as text or even as
+/// numbers (`Nov 3` reads as 3). 0 for a column that is no date's.
+fn not_iso(cells: &[String], column: &str) -> usize {
+    let dated = is_date_name(column) || cells.iter().any(|c| is_iso_date(c));
+    if !dated {
+        return 0;
+    }
+    cells.iter().filter(|c| !c.is_empty() && !is_iso_date(c)).count()
+}
+
+/// Does `cell` begin `YYYY-MM-DD` (a time may follow), the one form whose
+/// text order is date order?
+fn is_iso_date(cell: &str) -> bool {
+    cell.get(..10).is_some_and(|d| d.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }))
+}
+
+/// Is `name` a date column's: `date` itself, or ending in the word (see
+/// [`ends_in_date_word`]), in any case?
+fn is_date_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("date") || ends_in_date_word(name)
 }
 
 /// `rows` in groups, in order of first appearance: a kept row joins the
@@ -179,10 +204,7 @@ pub(crate) fn as_stored(task_id: i64, sift: i32, rows: &[NewRow]) -> Vec<Row> {
 /// order found (review finding), as does a table with no such column.
 pub(crate) fn default_order(columns: &[String], rows: &[Row]) -> Option<OrderBy> {
     let column = columns.iter().find(|c| c.eq_ignore_ascii_case("date")).or_else(|| columns.iter().find(|c| ends_in_date_word(c)))?;
-    let iso = |c: &str| {
-        c.get(..10).is_some_and(|d| d.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }))
-    };
-    let all_iso = rows.iter().map(|r| cell_text(r, column)).filter(|c| !c.is_empty()).all(|c| iso(&c));
+    let all_iso = rows.iter().map(|r| cell_text(r, column)).filter(|c| !c.is_empty()).all(|c| is_iso_date(&c));
     all_iso.then(|| OrderBy { column: column.clone(), desc: true })
 }
 
@@ -293,8 +315,9 @@ fn scalar(v: &Value) -> String {
 /// The counts, then what the table did to the rows: `merged` duplicates
 /// shown once, and `cut` = (shown, of) when a limit left rows out — with
 /// the `order` (column, descending) "the first" follows, which may be the
-/// default one nobody named (#965 item 2).
-fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>, order: Option<(&str, bool)>) -> String {
+/// default one nobody named (#965 item 2) — and `misdated`, the cells of an
+/// ordered date column not written `YYYY-MM-DD` (#958).
+fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>, order: Option<(&str, bool)>, misdated: usize) -> String {
     let mut parts = vec![format!("{} kept of {} looked at", c.kept, c.looked_at)];
     if c.withheld > 0 {
         parts.push(format!("{} withheld by the safety screen", c.withheld));
@@ -314,6 +337,10 @@ fn note(c: &Counts, merged: usize, cut: Option<(usize, usize)>, order: Option<(&
     if let Some((shown, of)) = cut {
         let by = order.map_or(String::new(), |(column, desc)| format!(", by `{column}` {}", if desc { "descending" } else { "ascending" }));
         parts.push(format!("showing the first {shown} of {of} rows{by}"));
+    }
+    if let (Some((column, _)), 1..) = (order, misdated) {
+        let s = if misdated == 1 { " value" } else { " values" };
+        parts.push(format!("{misdated} `{column}`{s} not written YYYY-MM-DD, so the order may be wrong"));
     }
     format!("{}.", parts.join("; "))
 }
