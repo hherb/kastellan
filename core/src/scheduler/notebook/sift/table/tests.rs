@@ -398,6 +398,34 @@ fn distinct_kept_merges_one_source_across_sifts_as_the_table_does() {
     assert_eq!((chain[1].task_id, chain[1].sift, chain[1].row, chain[2].row), (1, 2, 1, 2));
 }
 
+/// Issue 1029: `alike` is greedy, so grouping rows after sorting them could
+/// group a chain's rows otherwise than `distinct_kept` does in stored order.
+/// One booking emailed twice (m1, m2) in sift 1, then m2 again in sift 2's
+/// overlapping page with a newer date: stored order makes one group of all
+/// three; sorted newest first, m2's newer row went first and m1 was left
+/// alone, so the table showed 2 rows under `distinct: 1`. The table groups in
+/// stored order too, then orders the groups by the cell each one shows.
+#[test]
+fn a_sorted_table_groups_rows_as_distinct_kept_counts_them() {
+    let booking = |d: &str| json!({"date": d, "to": "X"});
+    let rows = [
+        sourced(1, "m1", booking("2026-11-01")),
+        sourced(2, "m2", booking("2026-11-01")),
+        Row { sift: 2, ..sourced(1, "m2", booking("2026-11-05")) },
+        sourced(3, "m3", json!({"date": "2026-11-03", "to": "Y"})),
+    ];
+    assert_eq!(distinct_kept(&rows), 2);
+    let order = OrderBy { column: "date".into(), desc: true };
+    let t = render(&rows, &cols(&["date", "to", "source"]), Some(&order), &counts(4, 4));
+    let lines: Vec<&str> = t.lines().skip(2).take_while(|l| l.starts_with('|')).collect();
+    // A group sorts by the date it shows (its first row's), so m3's row goes first.
+    assert_eq!(lines, ["| 2026-11-03 | Y | m3 |", "| 2026-11-01 | X | m1, m2 |"], "{t}");
+    let up = OrderBy { column: "date".into(), desc: false };
+    let t = render(&rows, &cols(&["date", "to", "source"]), Some(&up), &counts(4, 4));
+    let lines: Vec<&str> = t.lines().skip(2).take_while(|l| l.starts_with('|')).collect();
+    assert_eq!(lines, ["| 2026-11-01 | X | m1, m2 |", "| 2026-11-03 | Y | m3 |"], "{t}");
+}
+
 /// Issue 1026 (c): the note's `kept` is items, not rows. One source kept by
 /// several sifts is one item; one source twice in one sift is two (the list
 /// held it twice, and the table shows both); a row with no source is its own.
