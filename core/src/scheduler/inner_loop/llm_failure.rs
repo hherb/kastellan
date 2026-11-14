@@ -230,6 +230,41 @@ const FAILED_ROW_ERROR_CHARS: usize = 512;
 /// "what did the model say?" is a query against the task, not a log grep.
 const FAILED_ROW_RAW_HEAD_CHARS: usize = 512;
 
+/// Chars of the model's reply an `agent/plan.formulate_failed` row keeps on
+/// each side of a decode error's position (`raw_at_error`, #1024). The same
+/// data caveat as [`FAILED_ROW_RAW_HEAD_CHARS`] applies.
+const FAILED_ROW_RAW_WINDOW_CHARS: usize = 120;
+
+/// The stretch of `raw` around the position a JSON decode error names
+/// (serde's `… at line L column C`), or `None` when the error names none or
+/// a line `raw` does not have. Pure.
+///
+/// `raw_head` shows only the start of the reply. DGX task 429's syntax error
+/// sat at line 25 of an 1852-char reply, past it, so the row could not show
+/// what the model wrote there (#1024). The position counts from the reply's
+/// first `{`, because [`parse_json_lenient`](crate::scheduler::plan_parser::parse_json_lenient)
+/// decodes from there (a reply with no `{` is decoded whole). serde counts
+/// the column in bytes, so the cut is moved back to a character boundary.
+fn raw_at_error(error: &str, raw: &str) -> Option<String> {
+    let (_, pos) = error.rsplit_once(" at line ")?;
+    let (line, rest) = pos.split_once(" column ")?;
+    // serde lines are 1-based; line 0 means "no position" (its Display omits it).
+    let line_index = line.parse::<usize>().ok()?.checked_sub(1)?;
+    let column: usize = rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
+    let base = raw.find('{').unwrap_or(0);
+    let line_start = match line_index {
+        0 => 0,
+        n => raw[base..].match_indices('\n').nth(n - 1)?.0 + 1,
+    };
+    let mut at = (base + line_start + column).min(raw.len());
+    while !raw.is_char_boundary(at) {
+        at -= 1;
+    }
+    let start = raw[..at].char_indices().rev().nth(FAILED_ROW_RAW_WINDOW_CHARS - 1).map_or(0, |(i, _)| i);
+    let end = raw[at..].char_indices().nth(FAILED_ROW_RAW_WINDOW_CHARS).map_or(raw.len(), |(i, _)| at + i);
+    Some(raw[start..end].to_string())
+}
+
 /// Payload for one `agent/plan.formulate_failed` row. Pure.
 ///
 /// A timed-out call writes no `plan.formulate` row (there is no plan), so
@@ -249,6 +284,9 @@ const FAILED_ROW_RAW_HEAD_CHARS: usize = 512;
 /// none did: a router failure, timeouts included, records no latency.
 /// With it go `raw_head`, the first [`FAILED_ROW_RAW_HEAD_CHARS`] chars of
 /// what the model said, and `raw_chars`, the reply's whole length (#945).
+/// When the error names a position, `raw_at_error` holds the text around it
+/// ([`raw_at_error`], #1024); the position is read from the whole error,
+/// before `error` is cut to [`FAILED_ROW_ERROR_CHARS`].
 pub(super) fn formulate_failed_payload(
     task_id: i64,
     plan_count: u32,
@@ -272,6 +310,9 @@ pub(super) fn formulate_failed_payload(
         v["latency_ms"] = serde_json::json!(latency_ms);
         v["raw_head"] = serde_json::json!(raw.chars().take(FAILED_ROW_RAW_HEAD_CHARS).collect::<String>());
         v["raw_chars"] = serde_json::json!(raw.chars().count());
+        if let Some(window) = raw_at_error(error, raw) {
+            v["raw_at_error"] = serde_json::json!(window);
+        }
     }
     v
 }
