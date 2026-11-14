@@ -184,8 +184,8 @@ fn one_source_kept_by_several_sifts_is_one_row() {
     // One message kept by three sifts is one item, not two duplicates (issue 1026).
     assert!(!t.contains("duplicate"), "{t}");
 
-    // Within one sift a source is not merged on (the summary's `distinct`
-    // counts by fields alone), nor is a withheld row ever.
+    // Within one sift a source is not merged on (a list can hold an item
+    // twice), nor is a withheld row ever merged with a kept one.
     let rows = [
         in_sift(1, 1, "m1", json!({"a": "x"})),
         in_sift(1, 2, "m1", json!({"a": "y"})),
@@ -231,6 +231,19 @@ fn withheld_rows_are_never_merged() {
     let rows = [row(1, RowKind::Withheld, json!({})), row(2, RowKind::Withheld, json!({}))];
     let t = render(&rows, &cols(&["a"]), None, &counts(2, 0));
     assert_eq!(t.matches(WITHHELD_MARKER).count(), 2, "{t}");
+}
+
+/// PR #1028 review: the note's `withheld` counts items, so one message the
+/// screen withheld in two sifts is one withheld row, as a kept one would be
+/// one kept row — never merged with a kept row, nor twice within one sift.
+#[test]
+fn one_source_withheld_by_two_sifts_is_one_row() {
+    let held = |sift, n, source: &str| Row { sift, kind: RowKind::Withheld, ..sourced(n, source, json!({})) };
+    let rows = [held(1, 1, "m1"), held(2, 1, "m1"), held(1, 2, "m1"), Row { sift: 2, ..sourced(2, "m1", json!({"a": "x"})) }];
+    let t = render(&rows, &cols(&["a"]), None, &Counts { withheld: items(rows[..3].iter()), ..counts(4, 1) });
+    assert_eq!(t.matches(WITHHELD_MARKER).count(), 2, "{t}");
+    assert_eq!(t.lines().skip(2).take_while(|l| l.starts_with('|')).count(), 3, "{t}");
+    assert!(t.contains("2 withheld") && !t.contains("duplicate"), "{t}");
 }
 
 /// DGX task 301 asked for the 5 most recent and got all 18: `limit` shows
@@ -371,6 +384,18 @@ fn distinct_kept_merges_one_source_across_sifts_as_the_table_does() {
     assert_eq!(distinct_kept(&rows), 2);
     let t = render(&rows, &cols(&["amount"]), None, &counts(3, 3));
     assert_eq!(t.lines().skip(2).take_while(|l| l.starts_with('|')).count(), 2, "the table agrees: {t}");
+
+    // A sift's rows in hand (`chain_distinct`'s own) join as stored ones do.
+    let own = |source: &str, amount: &str| kastellan_db::scrapbook::NewRow {
+        kind: RowKind::Kept,
+        source: json!({"message_id": source}),
+        fields: json!({"amount": amount}),
+        classification: "Personal".into(),
+    };
+    let mut chain = vec![rows[0].clone()];
+    chain.extend(as_stored(1, 2, &[own("m1", "10"), own("m2", "7")]));
+    assert_eq!(distinct_kept(&chain), 2);
+    assert_eq!((chain[1].task_id, chain[1].sift, chain[1].row, chain[2].row), (1, 2, 1, 2));
 }
 
 /// Issue 1026 (c): the note's `kept` is items, not rows. One source kept by

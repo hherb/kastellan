@@ -67,13 +67,16 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - **Issue 1026:** the note's `kept`/`withheld` are **items** (`table::items`: one source across sifts once, its most
   rows in any one sift), and "duplicates shown once" counts items merged, not rows. A table joining > 1 question gets
   `(sift sb:T:S stopped after X of its N items)` per question that stopped (`answer::stop_lines`). ⚠️ An id-less row
-  (`{}`) is one item each, so `kept` can still exceed `looked_at` for those.
+  (`{}`) is one item each, so `kept` can still exceed `looked_at` for those. Review round: a withheld row joins a
+  withheld row of its source from another sift (`alike`), so the table shows one row per withheld item, as the note
+  counts; filed [issue 1029](https://github.com/hherb/kastellan/issues/1029) (`alike` is order-dependent, so a
+  chain's `distinct` can differ from a **sorted** table's rows).
 - **Deploy:** PR #1027 (#1024) on the DGX (`NRestarts=0`, Matrix up, env identical to `bak-pre1027`). #1024 stays
   open for its second half (quote the line in the re-ask).
 
-### Previous (2026-11-14): #1024, #1023/#1015/#1016, #1019/#1018 (PRs #1027, #1025, #1021, merged, deployed DGX 2026-11-14) — full sections: the `1025`/`1023` snapshots
+### Previous (2026-11-14): #1024, #1023/#1015/#1016, #1019/#1018 (PRs #1027, #1025, #1021, merged, deployed DGX 2026-11-14) — full sections: the `1027`/`1025`/`1023` snapshots
 
-- **#1024 (PR #1027, merged, deployed DGX 2026-11-14):** a `plan.formulate_failed` row naming serde's `line`/`column` keeps `raw_at_error` (±120 chars; ⚠️ counted from the reply's **first `{`**, column in **bytes**). Closed #1015/#1016/#1023, #1018/#1019, #952.
+- **#1024 (PR #1027, merged, deployed DGX 2026-11-14):** a `plan.formulate_failed` row naming serde's `line`/`column` keeps `raw_at_error` (±120 chars, `inner_loop::llm_failure::raw_at_error`; ⚠️ counted from the reply's **first `{`**, where `parse_json_lenient` decodes from; column in **bytes**). Full section: the `1027` snapshot. Closed #1015/#1016/#1023, #1018/#1019, #952.
 - **#1023, #1015, #1016 (PR #1025, merged, deployed DGX 2026-11-14):** a failed rewrite answers with the draft (`answer_rewrite_failed_draft_used`, also when the draft spent the last turn); forced-table `looked_at`/`remaining` count each list once (`sift::answer::coverage`); the show-back names at most 8 refs. Full section: the `1025` snapshot.
 - **#1019 + #1018 (PR #1021, merged, deployed DGX 2026-11-14):** a forced turn's re-ask that calls fails in the cap's/timeout's words (`llm_failure::answer_turn_call_detail`); `table::alike` merges one source's rows across sifts (an empty source joins nothing). Filed #1022, #1023. Full section: the `1023` snapshot.
 
@@ -390,7 +393,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#1022) | `fix/1022-1026-sift-counts` over `a273aa8a` (#1027), primary checkout | **5525 / 0 / 51**, **201** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-1022.log`. vs `sweep-1024.log` (5520): **+5** core lib — `sift/table/tests.rs` +3, `sift/run/tests.rs` +1, `sift/answer/tests.rs` +1 (the new PG case runs inside `the_sift_loop`, no libtest count) | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-1022`, clean, 27 `Checking kastellan` | **23** (as before) |
+| **Mac** (#1022) | `fix/1022-1026-sift-counts` over `a273aa8a` (#1027), primary checkout | **5526 / 0 / 51** after the review round, **201** summaries; that run's `TEST_EXIT=101` was one PG-environment failure (`scheduler_ask_expiry_e2e`: the throwaway cluster's data files vanished mid-test, `could not open file "base/16384/2601"`), which passes rerun alone with `KASTELLAN_PG_REQUIRE_E2E=1`; first run 5525, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-1022.log`. vs `sweep-1024.log` (5520): **+5** core lib — `sift/table/tests.rs` +3, `sift/run/tests.rs` +1, `sift/answer/tests.rs` +1, review round `sift/table/tests.rs` +1 (the new PG case runs inside `the_sift_loop`, no libtest count) | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-1022`, clean, 27 `Checking kastellan` | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.

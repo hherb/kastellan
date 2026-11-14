@@ -83,9 +83,11 @@ pub(crate) fn render_table(
 /// sift that kept it) — unless the group already holds a row of its own
 /// sift, so two rows of one sift are never merged on their source, even
 /// through a third. An empty source (`{}`: an item with no identifying key)
-/// names no item and joins nothing. A withheld row is always a group of its
-/// own: its fields are not shown, so nothing says it is the same as another.
-/// The summary's `distinct` ([`distinct_kept`]) counts these groups.
+/// names no item and joins nothing. A withheld row joins only a withheld
+/// group, and only on its source: its fields are not shown, so nothing else
+/// says it is the same as another (PR #1028 review: the note counts withheld
+/// items). The summary's `distinct` ([`distinct_kept`]) counts the kept
+/// groups, in the rows' stored order (issue 1029).
 fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
     let mut groups: Vec<Vec<&Row>> = Vec::new();
     for &r in rows {
@@ -94,13 +96,8 @@ fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
                 && g.iter().any(|x| x.source == r.source)
                 && g.iter().all(|x| (x.task_id, x.sift) != (r.task_id, r.sift))
         };
-        let same = (r.kind == RowKind::Kept)
-            .then(|| {
-                groups.iter_mut().find(|g| {
-                    g[0].kind == RowKind::Kept && ((mergeable(&r.fields) && g[0].fields == r.fields) || same_item(g))
-                })
-            })
-            .flatten();
+        let same_fields = |g: &[&Row]| r.kind == RowKind::Kept && mergeable(&r.fields) && g[0].fields == r.fields;
+        let same = groups.iter_mut().find(|g| g[0].kind == r.kind && (same_fields(g) || same_item(g)));
         match same {
             Some(g) => g.push(r),
             None => groups.push(vec![r]),
@@ -123,16 +120,19 @@ fn sourced(r: &Row) -> bool {
 /// How many rows a table of `rows`' kept ones shows before any `limit`:
 /// [`alike`]'s groups. The summary gives it as `distinct` (#960: the body
 /// quoted `kept`, 45, above a table of 30 rows), a chain's over every link
-/// (#1022: one message in two overlapping pages is one row).
+/// (#1022: one message in two overlapping pages is one row). Grouped in
+/// stored order: a sorted table can group a chain's rows otherwise (issue
+/// 1029).
 pub(crate) fn distinct_kept(rows: &[Row]) -> usize {
     let kept: Vec<&Row> = rows.iter().filter(|r| r.kind == RowKind::Kept).collect();
     alike(&kept).len()
 }
 
-/// How many items `rows` are (issue 1026): rows of one source from
-/// different sifts are one item, as [`alike`] joins them; within one sift
-/// each row is its own (a list can hold an item twice), so a source counts
-/// its most rows in any one sift. A row with no source is one item.
+/// How many items `rows` (all of one kind) are (issue 1026): rows of one
+/// source from different sifts are one item, as [`alike`] joins them;
+/// within one sift each row is its own (a list can hold an item twice), so
+/// a source counts its most rows in any one sift. A row with no source is
+/// one item.
 pub(crate) fn items<'a>(rows: impl IntoIterator<Item = &'a Row>) -> usize {
     use std::collections::HashMap;
     let (mut per_sift, mut alone) = (HashMap::<(String, i64, i32), usize>::new(), 0);
@@ -241,9 +241,10 @@ fn escaped(text: &str) -> String {
 
 /// A cell's raw text: the field's value, or for [`SOURCE_COLUMN`] the
 /// row's source (an object's values, comma-separated, but for the
-/// [`SOURCE_TOOL_KEY`] tag, which keeps items apart rather than names one). A column with no
-/// field of its exact name takes one that differs only in case: `Date` for
-/// `date` left every cell empty, so the table's order did nothing (#965).
+/// [`SOURCE_TOOL_KEY`] tag, which keeps items apart rather than naming one).
+/// A column with no field of its exact name takes one that differs only in
+/// case: `Date` for `date` left every cell empty, so the table's order did
+/// nothing (#965).
 fn cell_text(row: &Row, column: &str) -> String {
     if column == SOURCE_COLUMN {
         return match &row.source {
