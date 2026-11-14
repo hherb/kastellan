@@ -5,7 +5,7 @@ use kastellan_db::scrapbook::{self, Row, RowKind};
 use sqlx::PgPool;
 
 use super::params::{Over, ScrapRef, SiftParams};
-use super::table::{default_order, orders_anything, render_table, Counts, SOURCE_COLUMN};
+use super::table::{default_order, items, orders_anything, render_table, Counts, SOURCE_COLUMN};
 use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
 use crate::scheduler::inner_loop::{notebook_block_audit_payload, PlanRecord, TaskContext};
@@ -51,8 +51,8 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
             Ok(got) => {
                 included = true;
                 let summary = own_summary(ctx, &r);
-                add_counts(&mut counts, &got, summary.as_ref());
-                links.push(Link::of(summary.as_ref(), chain::params_of(&ctx.plans, &r.to_string()), got.len()));
+                add_counts(&mut counts, summary.as_ref());
+                links.push(Link::of(r.to_string(), summary.as_ref(), chain::params_of(&ctx.plans, &r.to_string()), got.len()));
                 // Every included sift's fields, in order: separate sifts of a
                 // forced table (#1012) may each have asked for others.
                 let into = if got.is_empty() { &mut empty_fields } else { &mut fields };
@@ -70,6 +70,9 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
         }
     }
     (counts.looked_at, counts.remaining) = coverage(&links);
+    counts.kept = items(rows.iter().filter(|r| r.kind == RowKind::Kept));
+    counts.withheld = items(rows.iter().filter(|r| r.kind == RowKind::Withheld));
+    refused.extend(stop_lines(&links));
     if fields.is_empty() {
         fields = empty_fields;
     }
@@ -356,15 +359,12 @@ fn first_row_fields(rows: &[Row]) -> Option<Vec<String>> {
     Some(first.fields.as_object()?.keys().cloned().collect())
 }
 
-/// The note's counts: `kept` and `withheld` from the rows, `undecided` and
-/// `failed_reads` from the sift's summary when it is at hand (else 0).
-/// `looked_at` and `remaining` are counted once per list ([`coverage`]).
-fn add_counts(c: &mut Counts, rows: &[Row], summary: Option<&serde_json::Value>) {
+/// The note's `undecided` and `failed_reads`, from the sift's summary when
+/// it is at hand (else 0). `kept` and `withheld` are the table's items
+/// ([`items`], issue 1026); `looked_at` and `remaining` are counted once per
+/// list ([`coverage`]).
+fn add_counts(c: &mut Counts, summary: Option<&serde_json::Value>) {
     let n = |k: &str| summary.and_then(|s| s[k].as_u64()).map(|v| v as usize);
-    let kept = rows.iter().filter(|r| r.kind == RowKind::Kept).count();
-    let withheld = rows.len() - kept;
-    c.kept += kept;
-    c.withheld += withheld;
     c.undecided += n("undecided").unwrap_or(0);
     c.failed_reads += n("failed_reads").unwrap_or(0);
 }
@@ -372,6 +372,10 @@ fn add_counts(c: &mut Counts, rows: &[Row], summary: Option<&serde_json::Value>)
 /// An included scrapbook: the list it went over, the span of it it looked
 /// at, and what it left.
 struct Link {
+    /// Its ref, `sb:<task>:<sift>`.
+    name: String,
+    /// The link it continues, if it is a chain's later link.
+    continues: Option<String>,
     /// `over` and `items`: sifts with the same went through one list.
     /// `None` for an earlier turn's ref (no parameters here): a list of its own.
     list: Option<(Over, Option<String>)>,
@@ -384,9 +388,11 @@ impl Link {
     /// From the sift's summary and parameters, when this run has them; an
     /// earlier turn's ref says only its row count, so its "looked at" is
     /// kept plus withheld, a lower bound.
-    fn of(summary: Option<&serde_json::Value>, params: Option<SiftParams>, rows: usize) -> Self {
+    fn of(name: String, summary: Option<&serde_json::Value>, params: Option<SiftParams>, rows: usize) -> Self {
         let n = |k: &str| summary.and_then(|s| s[k].as_u64()).map(|v| v as usize);
         Link {
+            name,
+            continues: summary.and_then(|s| s["continues"].as_str()).map(String::from),
             from: params.as_ref().map_or(0, |p| p.from),
             list: params.map(|p| (p.over, p.items)),
             looked_at: n("looked_at").unwrap_or(rows),
@@ -403,9 +409,9 @@ impl Link {
 ///
 /// shortcut: "one list" is the same `over` and `items`; a step re-run
 /// between two sifts makes them two lists (#959) that this counts as one —
-/// carry the list's identity in the summary if that is seen live. `kept`
-/// is still summed per sift, and a sift's unread span that another covered
-/// is not counted (issue 1026, an operator decision).
+/// carry the list's identity in the summary if that is seen live. A sift's
+/// unread span that another covered is not counted here: [`stop_lines`]
+/// names it (issue 1026).
 fn coverage(links: &[Link]) -> (usize, usize) {
     let mut seen: Vec<&(Over, Option<String>)> = Vec::new();
     let (mut looked, mut left) = (0, 0);
@@ -441,6 +447,21 @@ fn list_coverage(group: &[&Link]) -> (usize, usize) {
         }
     }
     (looked, len.saturating_sub(looked))
+}
+
+/// Issue 1026 (d): when a table joins more than one question (sifts no
+/// later included link continues), a line for each that stopped with items
+/// unread — the note's "not yet looked at" is per list, so another question
+/// covering those items hides that this one never judged them. Pure.
+fn stop_lines(links: &[Link]) -> Vec<String> {
+    let last: Vec<&Link> = links.iter().filter(|l| !links.iter().any(|o| o.continues.as_ref() == Some(&l.name))).collect();
+    if last.len() < 2 {
+        return Vec::new();
+    }
+    last.iter()
+        .filter(|l| l.remaining > 0)
+        .map(|l| format!("(sift {} stopped after {} of its {} items)", l.name, l.from + l.looked_at, l.from + l.looked_at + l.remaining))
+        .collect()
 }
 
 /// A row's class; one that does not parse counts as the highest (fail

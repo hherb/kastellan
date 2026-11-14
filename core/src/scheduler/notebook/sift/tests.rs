@@ -113,6 +113,7 @@ async fn the_sift_loop() {
     an_answer_table_naming_no_scrapbook_is_shown_back_once(&pool).await;
     a_forced_answer_without_the_table_gets_it_by_code(&pool).await;
     a_forced_answer_gets_the_rows_of_every_sift_that_kept_some(&pool).await;
+    one_item_kept_by_two_sifts_counts_once(&pool).await;
     a_draft_used_for_its_rewrite_gets_the_table(&pool).await;
     a_sift_over_a_stashed_search_reads_the_stash(&pool).await;
     a_sift_over_a_purged_stash_says_how_and_the_call_is_made_again(&pool).await;
@@ -141,7 +142,7 @@ async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sq
     let kept = rows(pool, r.task_id, 2).await;
     assert_eq!(kept.iter().map(|k| k.fields.clone()).collect::<Vec<_>>(), [json!({"amount": 10}), json!({"amount": 30})]);
     assert!(kept.iter().all(|k| k.kind == RowKind::Kept && k.classification == "Personal"));
-    assert_eq!(kept[0].source, json!({"id": "m1"}));
+    assert_eq!(kept[0].source, json!({"id": "m1", "tool": "mail"}), "a bare id is written with its tool (#1022)");
 
     // Each item went to the sorter with its hit and its read.
     let sorted = script.sorted.lock().unwrap().clone();

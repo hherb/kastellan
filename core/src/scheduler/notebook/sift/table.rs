@@ -1,7 +1,7 @@
 //! The answer's table (#922, S5, K8, K10): a scrapbook rendered by code,
 //! never retyped by the model. Pure.
 
-use kastellan_db::scrapbook::{Row, RowKind};
+use kastellan_db::scrapbook::{NewRow, Row, RowKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -9,6 +9,9 @@ use crate::scheduler::inner_loop::{screen_model_text, SinkBlock, WITHHELD_MARKER
 
 /// The column that shows where a row came from (its `source`), not a field.
 pub(crate) const SOURCE_COLUMN: &str = "source";
+
+/// The key a bare-`id` source carries its tool under (#1022).
+pub(crate) const SOURCE_TOOL_KEY: &str = "tool";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,7 +53,8 @@ pub(crate) fn render_table(
     }
     let groups = alike(&ordered);
     let shown_rows = limit.filter(|n| *n > 0).map_or(groups.len(), |n| n.min(groups.len()));
-    let merged = groups[..shown_rows].iter().map(|g| g.len() - 1).sum();
+    // Items merged, not rows: one message kept by three sifts is no duplicate (issue 1026).
+    let merged = groups[..shown_rows].iter().map(|g| items(g.iter().copied()) - 1).sum();
     let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
     let mut blocks = Vec::new();
     let mut out = vec![
@@ -79,16 +83,14 @@ pub(crate) fn render_table(
 /// sift that kept it) — unless the group already holds a row of its own
 /// sift, so two rows of one sift are never merged on their source, even
 /// through a third. An empty source (`{}`: an item with no identifying key)
-/// names no item and joins nothing. Within one sift, then, the summary's
-/// `distinct` ([`distinct_kept`]) stays exact. A withheld row is always a
-/// group of its own: its fields are not shown, so nothing says it is the
-/// same as another.
+/// names no item and joins nothing. A withheld row is always a group of its
+/// own: its fields are not shown, so nothing says it is the same as another.
+/// The summary's `distinct` ([`distinct_kept`]) counts these groups.
 fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
     let mut groups: Vec<Vec<&Row>> = Vec::new();
     for &r in rows {
-        let sourced = r.source.as_object().is_some_and(|o| !o.is_empty());
         let same_item = |g: &[&Row]| {
-            sourced
+            sourced(r)
                 && g.iter().any(|x| x.source == r.source)
                 && g.iter().all(|x| (x.task_id, x.sift) != (r.task_id, r.sift))
         };
@@ -113,20 +115,57 @@ fn mergeable(fields: &Value) -> bool {
     fields.as_object().is_some_and(|o| o.values().any(|v| !scalar(v).is_empty()))
 }
 
-/// How many rows a table of kept rows with these `fields` shows before any
-/// `limit`: the rule [`alike`] merges by. The summary gives it as `distinct`
-/// (#960: the body quoted `kept`, 45, above a table of 30 rows).
-pub(crate) fn distinct_kept<'a>(fields: impl IntoIterator<Item = &'a Value>) -> usize {
-    let mut seen: Vec<&Value> = Vec::new();
-    let mut alone = 0;
-    for f in fields {
-        if !mergeable(f) {
+/// Does `r` name the item it came from? An empty source (`{}`) does not.
+fn sourced(r: &Row) -> bool {
+    r.source.as_object().is_some_and(|o| !o.is_empty())
+}
+
+/// How many rows a table of `rows`' kept ones shows before any `limit`:
+/// [`alike`]'s groups. The summary gives it as `distinct` (#960: the body
+/// quoted `kept`, 45, above a table of 30 rows), a chain's over every link
+/// (#1022: one message in two overlapping pages is one row).
+pub(crate) fn distinct_kept(rows: &[Row]) -> usize {
+    let kept: Vec<&Row> = rows.iter().filter(|r| r.kind == RowKind::Kept).collect();
+    alike(&kept).len()
+}
+
+/// How many items `rows` are (issue 1026): rows of one source from
+/// different sifts are one item, as [`alike`] joins them; within one sift
+/// each row is its own (a list can hold an item twice), so a source counts
+/// its most rows in any one sift. A row with no source is one item.
+pub(crate) fn items<'a>(rows: impl IntoIterator<Item = &'a Row>) -> usize {
+    use std::collections::HashMap;
+    let (mut per_sift, mut alone) = (HashMap::<(String, i64, i32), usize>::new(), 0);
+    for r in rows {
+        if sourced(r) {
+            *per_sift.entry((r.source.to_string(), r.task_id, r.sift)).or_default() += 1;
+        } else {
             alone += 1;
-        } else if !seen.contains(&f) {
-            seen.push(f);
         }
     }
-    seen.len() + alone
+    let mut most = HashMap::<String, usize>::new();
+    for ((source, ..), n) in per_sift {
+        let m = most.entry(source).or_default();
+        *m = (*m).max(n);
+    }
+    alone + most.values().sum::<usize>()
+}
+
+/// `rows` as stored for sift `sift` of `task_id` (numbered from 1), so a
+/// sift's rows in hand count by the rule its stored ones do.
+pub(crate) fn as_stored(task_id: i64, sift: i32, rows: &[NewRow]) -> Vec<Row> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| Row {
+            task_id,
+            sift,
+            row: i as i32 + 1,
+            kind: r.kind,
+            source: r.source.clone(),
+            fields: r.fields.clone(),
+            classification: r.classification.clone(),
+        })
+        .collect()
 }
 
 /// The order of a table that names none (#960): newest first by its date
@@ -201,13 +240,14 @@ fn escaped(text: &str) -> String {
 }
 
 /// A cell's raw text: the field's value, or for [`SOURCE_COLUMN`] the
-/// row's source (an object's values, comma-separated). A column with no
+/// row's source (an object's values, comma-separated, but for the
+/// [`SOURCE_TOOL_KEY`] tag, which keeps items apart rather than names one). A column with no
 /// field of its exact name takes one that differs only in case: `Date` for
 /// `date` left every cell empty, so the table's order did nothing (#965).
 fn cell_text(row: &Row, column: &str) -> String {
     if column == SOURCE_COLUMN {
         return match &row.source {
-            Value::Object(o) => o.values().map(scalar).collect::<Vec<_>>().join(", "),
+            Value::Object(o) => o.iter().filter(|(k, _)| *k != SOURCE_TOOL_KEY).map(|(_, v)| scalar(v)).collect::<Vec<_>>().join(", "),
             other => scalar(other),
         };
     }

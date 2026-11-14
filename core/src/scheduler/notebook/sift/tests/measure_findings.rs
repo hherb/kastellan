@@ -214,6 +214,28 @@ pub(super) async fn a_forced_answer_gets_the_rows_of_every_sift_that_kept_some(p
     assert!(b.contains("2 kept of 2 looked at"), "each list counted once: {b}");
 }
 
+/// Issue 1026 (c): two questions over one list that keep the same message
+/// count it once. Summed per sift, the note read "2 kept of 2 looked at"
+/// above one row; five sifts over a 50-item list read "115 kept of 50".
+pub(super) async fn one_item_kept_by_two_sifts_counts_once(pool: &sqlx::PgPool) {
+    let mut vendor = sift(3, None);
+    vendor["parameters"]["keep_if"] = json!("a receipt");
+    vendor["parameters"]["fields"] = json!(["vendor"]);
+    let ctx = new_task(pool, 5).await;
+    let refs = json!([format!("sb:{}:3", ctx.task_id), format!("sb:{}:2", ctx.task_id)]);
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": search(1, hits(&["m1", "m2"]))}),
+        json!({"tick": tick(1, "listed"), "call": sift(2, None)}),
+        json!({"tick": tick(2, "sorted"), "call": vendor}),
+        json!({"tick": tick(3, "sorted"), "answer": {"body": "Found:", "table": {"scrapbook": refs}}}),
+    ])
+    .sorting(&[keep(10), no(), json!({"keep": true, "fields": {"vendor": "Acme"}}), no()]);
+    let r = run(pool, &script, ctx).await;
+    let b = body(&r.result);
+    assert!(b.contains("| Acme | 10 | m1 |"), "one row: {b}");
+    assert!(b.ends_with("1 kept of 2 looked at."), "one item, not two: {b}");
+}
+
 /// #1023 review finding: a draft used in place of its rewrite was never
 /// shown back for a missing table (it was to be rewritten), so code attaches
 /// the table, as on a forced answer, and takes out the body's own copy.

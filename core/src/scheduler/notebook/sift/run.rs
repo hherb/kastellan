@@ -21,7 +21,7 @@
 
 use std::time::Instant;
 
-use kastellan_db::scrapbook::{self, NewRow, RowKind};
+use kastellan_db::scrapbook::{self, NewRow, Row, RowKind};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -29,7 +29,7 @@ use sqlx::PgPool;
 use super::params::{check_read, parse_params, read_key, Over, ScrapRef, SiftParams};
 use super::sorter::{parse_sort_reply, sorter_message, SortReply, SORTER_ITEM_CAP};
 use super::summary::{summary, Reads, Stop};
-use super::table::{distinct_kept, Counts};
+use super::table::{as_stored, distinct_kept, Counts, SOURCE_TOOL_KEY};
 use super::reads::plan_reads;
 use super::template::items_at;
 use super::answer::row_class;
@@ -172,7 +172,7 @@ pub(crate) async fn run_sift(
                 _ => {}
             }
         }
-        let row = |kind, fields| NewRow { kind, source: source_of(item), fields, classification: class.as_pascal_str().into() };
+        let row = |kind, fields| NewRow { kind, source: source_of(item, &over.tool), fields, classification: class.as_pascal_str().into() };
         if !blocks.is_empty() {
             // Screened at the sorter's own cap, which can block where the
             // planner's view of the same result did not: audit it here.
@@ -227,7 +227,7 @@ pub(crate) async fn run_sift(
     let (mut summary, blocks) = summary(&scrap, &p, &counts, &reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.
     if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {
-        let distinct = chain_distinct(r.pool, ctx, &prev, &rows).await;
+        let distinct = chain_distinct(r.pool, ctx, &prev, scrap.sift, &rows).await;
         summary["chain"] = super::chain::totals(&ctx.plans, &prev, counts.looked_at, counts.kept, distinct);
         summary["continues"] = json!(prev);
     }
@@ -256,27 +256,27 @@ pub(crate) async fn run_sift(
     Ok(Executed::Dispatched)
 }
 
-/// The chain's table rows ([`distinct_kept`]): every earlier link's kept rows
-/// — read back, since one booking emailed twice can sit in two links — and
-/// this sift's own. `None` if a link's name does not parse or its rows
-/// cannot be read.
-pub(super) async fn chain_distinct(pool: &PgPool, ctx: &TaskContext, prev: &str, own: &[NewRow]) -> Option<usize> {
-    let mut fields: Vec<Value> = Vec::new();
+/// The chain's table rows ([`distinct_kept`]): every earlier link's rows —
+/// read back, since one booking emailed twice can sit in two links — and
+/// this sift's own (`own`, sift `sift`). `None` if a link's name does not
+/// parse or its rows cannot be read.
+pub(super) async fn chain_distinct(pool: &PgPool, ctx: &TaskContext, prev: &str, sift: i32, own: &[NewRow]) -> Option<usize> {
+    let mut all: Vec<Row> = Vec::new();
     for name in super::chain::expand(&ctx.plans, prev) {
         let Ok(r) = ScrapRef::parse(&name) else {
             tracing::warn!(task_id = ctx.task_id, scrapbook = %name, "sift: a chain link's name does not parse; no `distinct`");
             return None;
         };
         match scrapbook::rows(pool, r.task_id, r.sift).await {
-            Ok(rows) => fields.extend(rows.into_iter().filter(|row| row.kind == RowKind::Kept).map(|row| row.fields)),
+            Ok(rows) => all.extend(rows),
             Err(e) => {
                 tracing::warn!(task_id = ctx.task_id, scrapbook = %r, error = %e, "sift: a chain link's rows not read; no `distinct`");
                 return None;
             }
         }
     }
-    let own = own.iter().filter(|row| row.kind == RowKind::Kept).map(|row| &row.fields);
-    Some(distinct_kept(fields.iter().chain(own)))
+    all.extend(as_stored(ctx.task_id, sift, own));
+    Some(distinct_kept(&all))
 }
 
 /// The list a sift goes through: the items, the tool whose output they are
@@ -418,16 +418,21 @@ fn plan(decision: String, step: u32, steps: Vec<PlannedStep>, class: DataClass) 
     }
 }
 
-/// Where an item came from: its identifying keys ([`SOURCE_KEYS`]); a
-/// scrapbook row's own `source`; or `{}`.
-fn source_of(item: &Value) -> Value {
+/// Where an item of `tool`'s output came from: its identifying keys
+/// ([`SOURCE_KEYS`]); a scrapbook row's own `source`; or `{}`. A bare `id`
+/// means something only within one tool, so it is written with the tool:
+/// otherwise `{"id": 3}` from two tools would be one table row (#1022).
+fn source_of(item: &Value, tool: &str) -> Value {
     if let (Some(source), Some(_)) = (item.get("source"), item.get("fields")) {
         return source.clone();
     }
-    let picked: Map<String, Value> = SOURCE_KEYS
+    let mut picked: Map<String, Value> = SOURCE_KEYS
         .iter()
         .filter_map(|k| item.get(*k).filter(|v| v.is_string() || v.is_number()).map(|v| (k.to_string(), v.clone())))
         .collect();
+    if picked.len() == 1 && picked.contains_key("id") {
+        picked.insert(SOURCE_TOOL_KEY.into(), Value::String(tool.into()));
+    }
     Value::Object(picked)
 }
 
