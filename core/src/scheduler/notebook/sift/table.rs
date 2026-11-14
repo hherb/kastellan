@@ -35,10 +35,10 @@ pub(crate) struct Counts {
 /// A markdown table of `rows` under `columns`, then a note with the counts.
 /// Rows alike in every field are shown once, their sources joined (one
 /// booking emailed three times, DGX task 301); the shown rows are then
-/// optionally ordered by one column, and `limit` keeps the first ones. Every row is
-/// shown unless a limit says otherwise, and the note says so (S5). Every
-/// cell is model-written from tool output, so each shown one is screened
-/// (K8): a blocked one — and every cell of a withheld row — shows
+/// optionally ordered by one column, and `limit` keeps the first ones.
+/// Every row is shown unless a limit says otherwise, and the note says so
+/// (S5). Every cell is model-written from tool output, so each shown one is
+/// screened (K8): a blocked one — and every cell of a withheld row — shows
 /// [`WITHHELD_MARKER`], and its block is returned for the audit row.
 pub(crate) fn render_table(
     rows: &[Row],

@@ -64,7 +64,9 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   **groups** by the cell each shows (`table::first_cell`, a group's first non-empty cell). A sorted table's kept rows
   now equal the summary's/chain's `distinct`. ⚠️ A merged group shows and sorts by its **earliest stored** row's
   cell, not by the row nearest the top of the order. Option 1 of the issue (order-independent components) was not
-  needed. `sift/table/tests.rs` is **498** lines: split it before the next test.
+  needed. Its review round (PR #1030) split `sift/table/tests.rs` (498 → **421**; the distinct/grouping cases
+  moved verbatim to `table/tests/distinct.rs`, **125**) and added two cases: a group whose first row lacks the order
+  column sorts by the cell it shows, and tied groups keep stored order (3 of 3 mutants caught).
 - **Deploy:** PR #1028 (#1022, issue 1026) on the DGX (`NRestarts=0`, Matrix up, env identical to `bak-pre1028`,
   installed `agent_notebook.md` sha256-equal to the repo's).
 
@@ -355,7 +357,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its new leg in `mail_live_shape_e2e/hit_fields.rs` (a `#[path]` module); move the next one there too, or split. ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-`core/src/scheduler/notebook/run/tests.rs` **555**: #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/table/tests.rs` **498** (+28 in issue 1029): split before the next test.
+`core/src/scheduler/notebook/run/tests.rs` **555**: #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). `sift/table/tests.rs` **421** after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).
@@ -392,7 +394,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (issue 1029) | `fix/1029-alike-stored-order` over `6ba1a5fe` (#1028), primary checkout | **5527 / 0 / 51**, **201** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-1029.log`. vs `sweep-1022.log` (5526): **+1** core lib — `sift/table/tests.rs` +1 (`a_sorted_table_groups_rows_as_distinct_kept_counts_them`) | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-1029`, clean, 27 `Checking kastellan` | **23** (as before) |
+| **Mac** (issue 1029, PR #1030 review) | `fix/1029-alike-stored-order` over `6ba1a5fe` (#1028), primary checkout | **5529 / 0 / 51**, **201** summaries, `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/.local/state/kastellan/gate-logs/sweep-1030-final.log`. vs `sweep-1022.log` (5526): **+3** core lib — `a_sorted_table_groups_rows_as_distinct_kept_counts_them`, then the review's `a_group_sorts_by_its_first_non_empty_cell` and `tied_groups_keep_stored_order_and_the_note_counts_the_shown_ones` (`sift/table/tests/distinct.rs`) | cold, `CARGO_TARGET_DIR=$HOME/.cargo-clippy-1029`, clean, 27 `Checking kastellan` | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
