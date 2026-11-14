@@ -73,8 +73,9 @@ pub(crate) fn rewrite_answer(kind: TurnKind, thinks_by_default: bool) -> bool {
 
 /// Is a missing answer table (or one naming no scrapbook ref, #973) shown
 /// back on a turn of `kind` (#960, `sift::answer::table_left_out`)? Not on
-/// the forced-answer turn — the
-/// budget is spent — nor for an answer about to be rewritten anyway. Pure.
+/// the forced-answer turn — the budget is spent — nor for an answer about to
+/// be rewritten (if the rewrite gives none, code attaches the draft's
+/// missing table, as a forced answer's, #1023). Pure.
 pub(crate) fn shows_back_a_missing_table(kind: TurnKind, thinks_by_default: bool) -> bool {
     kind != TurnKind::ForcedAnswer && !rewrite_answer(kind, thinks_by_default)
 }

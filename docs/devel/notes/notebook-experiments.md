@@ -552,3 +552,51 @@ Cell format: `turns / seconds`, then the outcome.
   key (#21's Q6) and a call on a done step (#22's Q2). The open defect is the forced join's duplicate rows (#1018).
   Q7 still lists years-old items as "currently due" (the judgement problem of #14–#20).
 - **Reproduce:** as #21; `bash ~/q960.sh 415 421` (→ `~/q1014b.txt`). Log → `~/requery7.log.1014b`.
+
+## 2026-11-14 #23 — #1021 deployed (#1019, #1018), first run (tasks 423–429)
+
+- **Build:** `main` at 602c18a5 (PR #1021), deployed with `scripts/upgrade_from_git.sh`; knobs as #21.
+- **Hypothesis:** a forced answer's table shows each message once, its sources merged (#1018); a call on the
+  forced re-ask fails in the cap's words, not "not a plan" (#1019).
+- **Results** (turns / seconds):
+  - Q1 7 / 922: a 50-item sift kept 14; two sifts were refused (`limit`, then a `read` with no `tool`) and two more
+    over the 14 read nothing (the attachment-only read applied to none). One `tick` on no current step, one request
+    timeout. The answer says price and GST were not found. Its table has 10 columns (three sifts' field names, joined)
+    and message 39152 in two rows: once merged with 39153, once alone.
+  - Q2 8 / 740: sifts kept 23 of 26, then 22 of 29; a `from: 29` sift over the 22-row scrapbook was refused, and a
+    sift over 21 of them kept 12. The answer gives those 12 ("12 kept of 21 looked at"): the earlier sifts' rows are
+    lost to a narrowing re-sift.
+  - Q3 2 / 98: a numbered list of 10, right.
+  - Q4 7 / 347: fee items, **total $9,943**, conditions — right.
+  - Q5 4 / 215: Mia Harper, 10 November 2026, $47.00 (message 39309).
+  - Q6 3 / 81: Cairns → Coffs Harbour.
+  - Q7 **failed** 3 / 704: sifts kept 39 of 50, then 3 of the 39. The next reply was malformed JSON (`expected ':'
+    at line 25 column 132`, `finish_reason: stop`); the thinking-off re-ask returned the same 1852 characters.
+  - Total 3107 s.
+- **Learned:** 6/7. One malformed-JSON reply survived the re-ask: the model repeated it exactly.
+
+## 2026-11-14 #24 — #1021, second run (tasks 430–436)
+
+- **Build, knobs, hypothesis:** as #23, run straight after it.
+- **Results:**
+  - Q1 4 / 736: two sifts over the same 50 kept 10 each. The answer's table has **5 rows with merged sources**
+    (`39153, 39152`; `38996, 38983, 38836`) and "10 kept of 50 looked at; 5 duplicates shown once" — #1018 live.
+    3 of 5 rows have price and GST.
+  - Q2 9 / 875: four sifts. The answer names a two-link chain (24 of 27, then 16 of 23, nothing remaining): a
+    38-row table, "40 kept of 50 looked at; 2 duplicates shown once". The prose says 40 (kept, not distinct). One
+    `floor_request` on a `sift`, refused and re-asked.
+  - Q3 2 / 125: a numbered list of 10, right.
+  - Q4 7 / 276: fee items, **total $9,943** — right. One `tick` on no current step, recovered.
+  - Q5 5 / 700: $47.00 on 10 November 2026, now from "Jutta Herb" (#23 said Mia Harper). One turn ran out of room:
+    16384 completion tokens of thinking, 408 s, re-asked.
+  - Q6 5 / 577: two 17 November flights (Cairns → Coffs Harbour, Brisbane → Sydney) and no pick. One turn ran out of
+    room, as in Q5.
+  - Q7 3 / 341: 13 rows "currently due or overdue", again including 2016–2024 items.
+  - Total 3630 s.
+- **Learned:** 7/7. Over #23–#24: **13 of 14** (#21–#22: 14 of 14). #1018 is visible in Q1 (#24). Defects seen:
+  - the forced join still shows a message twice when two sifts named their fields differently (#23 Q1);
+  - a narrowing re-sift drops the earlier rows (#23 Q2);
+  - two out-of-room thinking turns (#24 Q5, Q6), each about 400 s;
+  - the Q7 judgement problem (#14–#22).
+- **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 423 436` (→ `~/q1021.txt`). Logs →
+  `~/requery7.log.1021a`, `~/requery7.log.1021b`.

@@ -22,21 +22,23 @@ fn ctx(plans: Vec<PlanRecord>) -> TaskContext {
     }
 }
 
-/// Review finding: only an included continuer takes over a link's
-/// `remaining`; a chain cut short (the cap, an unreadable link) says
-/// what was not looked at.
+/// #1015: looked-at and not-yet-looked-at items are counted once per
+/// list. A chain's links add up; a chain cut short (the cap, an unreadable
+/// link) leaves its tail unread; separate sifts over one list overlap; a sift
+/// over another list, or an earlier turn's ref, counts on its own.
 #[test]
-fn remaining_counts_only_the_links_nothing_included_continues() {
-    let link = |name: &str, remaining, continues: Option<&str>| Link {
-        name: name.into(),
-        remaining,
-        continues: continues.map(String::from),
-    };
-    let whole = [link("a", 70, None), link("b", 40, Some("a")), link("c", 0, Some("b"))];
-    assert_eq!(remaining(&whole), 0);
-    assert_eq!(remaining(&whole[..2]), 40, "c left out: b's remaining stands");
-    assert_eq!(remaining(&[link("a", 70, None), link("x", 5, None)]), 75, "two separate sifts");
-    assert_eq!(remaining(&[]), 0);
+fn coverage_counts_each_list_once() {
+    let list = |step| Some((Over::Step(step), None));
+    let link = |step, from, looked_at, remaining| Link { list: list(step), from, looked_at, remaining };
+    let chain = [link(1, 0, 30, 50), link(1, 30, 30, 20), link(1, 60, 20, 0)];
+    assert_eq!(coverage(&chain), (80, 0));
+    assert_eq!(coverage(&chain[..2]), (60, 20), "the last link left out: its span is unread");
+    assert_eq!(coverage(&[link(1, 0, 30, 50), link(1, 0, 30, 50)]), (30, 50), "two sifts over one list's first 30");
+    assert_eq!(coverage(&[link(1, 0, 30, 50), link(1, 50, 10, 20)]), (40, 40), "a gap stays unread");
+    assert_eq!(coverage(&[link(1, 0, 30, 50), link(2, 0, 5, 75)]), (35, 125), "two lists");
+    let earlier = Link { list: None, from: 0, looked_at: 4, remaining: 0 };
+    assert_eq!(coverage(&[link(1, 0, 30, 50), earlier]), (34, 50), "an earlier turn's ref: its own");
+    assert_eq!(coverage(&[]), (0, 0));
 }
 
 /// Review finding: the cap is on the refs named, so the last of a chain
@@ -156,6 +158,12 @@ fn kept_rows_accumulate_over_the_run_s_sifts() {
     let names = |ns: &[&str]| Some(ns.iter().map(|n| n.to_string()).collect::<Vec<_>>());
     assert_eq!(refs(&task_398), names(&["sb:9:6", "sb:9:4", "sb:9:2"]), "every sift that kept rows, newest first");
     assert_eq!(refs(&[sift(2, 0), sift(4, 0)]), None, "none kept anything");
+    // #1015: task 398's last sift kept nothing but stopped with items unread:
+    // it joins, after the sifts with rows, for its `remaining`.
+    let stopped = || sift_record(params(0, "y"), serde_json::json!({"scrapbook": "sb:9:9", "kept": 0, "remaining": 40}));
+    let with_stop = vec![sift(2, 12), sift(4, 11), sift(6, 30), sift(8, 0), stopped()];
+    assert_eq!(refs(&with_stop), names(&["sb:9:6", "sb:9:4", "sb:9:2", "sb:9:9"]));
+    assert_eq!(refs(&[sift(2, 0), stopped()]), None, "nothing kept: still no table");
     let why = table_left_out(&plain, &ctx(task_398)).unwrap_err();
     assert!(why.contains("sift sb:9:6 kept 30 items") && why.contains("sift sb:9:2 kept 12 items"), "{why}");
     assert!(why.contains(r#"{"scrapbook": ["sb:9:6","sb:9:4","sb:9:2"]}"#), "the fix names them all: {why}");
@@ -166,6 +174,20 @@ fn kept_rows_accumulate_over_the_run_s_sifts() {
         sift(5, 2),
     ];
     assert_eq!(refs(&chain), names(&["sb:9:5", "sb:9:3"]), "the link sb:9:2 comes with sb:9:3");
+    // #1016: the fix never names more refs than a table takes, newest first.
+    let nine = || (1..=9).map(|n| sift(n, 1)).collect::<Vec<PlanRecord>>();
+    let why = table_left_out(&plain, &ctx(nine())).unwrap_err();
+    assert!(why.contains("sb:9:9") && why.contains("sb:9:2") && !why.contains("sb:9:1"), "the oldest is not named: {why}");
+    // The same on the other show-back, a table naming nothing it can show.
+    let unknown = serde_json::from_value::<NotebookReply>(serde_json::json!({"answer": {"body": "x", "table": {"scrapbook": "sb:9:99"}}})).unwrap();
+    let why = table_left_out(&unknown, &ctx(nine())).unwrap_err();
+    assert!(why.contains("sb:9:9") && why.contains("sb:9:2") && !why.contains("sb:9:1"), "a table of no scrapbook: {why}");
+    // Review finding: an unfinished empty sift joins a forced table only
+    // while there is room — never refused by name for one the model never chose.
+    let eight_and_stop: Vec<PlanRecord> = (1..=8).map(|n| sift(n, 1)).chain([stopped()]).collect();
+    let got = refs(&eight_and_stop).unwrap();
+    assert_eq!(got.len(), TABLE_REFS_MAX, "{got:?}");
+    assert!(!got.contains(&"sb:9:9".to_string()), "the stopped sift has no room: {got:?}");
     let one = table_left_out(&plain, &ctx(vec![sift(3, 4)])).unwrap_err();
     assert!(one.contains(r#"{"scrapbook": "sb:9:3"}"#), "one sift: a plain ref, as before: {one}");
 }

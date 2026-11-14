@@ -205,6 +205,30 @@ pub(super) async fn a_body_table_stays_when_the_code_table_has_no_rows(pool: &sq
     assert!(!out.contains("has no rows") && out.contains("looked at"), "{out}");
 }
 
+/// #1015 review finding: an unfinished sift that kept nothing joins a
+/// forced table for its `remaining`, but its fields are no columns while a
+/// sift with rows names some (they would stay empty); alone, it keeps them.
+/// It sifts another list here: over the same one, a finished sift's span
+/// absorbs its `remaining` (issue 1026).
+pub(super) async fn an_empty_unfinished_sift_adds_its_remaining_not_its_columns(pool: &sqlx::PgPool) {
+    use crate::scheduler::notebook::reply::{Refs, TableSpec};
+    use crate::scheduler::notebook::sift::answer::with_table;
+    use crate::scheduler::notebook::sift::chain::tests::sift_record;
+    let mut ctx = new_task(pool, 5).await;
+    let (a, b) = (format!("sb:{}:2", ctx.task_id), format!("sb:{}:3", ctx.task_id));
+    let over = |step: u32, keep_if: &str, field: &str| json!({"over": {"step": step}, "keep_if": keep_if, "fields": [field], "from": 0});
+    ctx.plans.push(sift_record(over(1, "x", "amount"), json!({"scrapbook": a, "looked_at": 2, "kept": 1, "remaining": 0, "fields": ["amount"]})));
+    ctx.plans.push(sift_record(over(2, "y", "vendor"), json!({"scrapbook": b, "looked_at": 0, "kept": 0, "remaining": 5, "fields": ["vendor"]})));
+    let row = scrapbook::NewRow { kind: RowKind::Kept, source: json!({"id": "m1"}), fields: json!({"amount": 10}), classification: "Personal".into() };
+    scrapbook::append_rows(pool, ctx.task_id, 2, &[row]).await.unwrap();
+    let table = |refs| TableSpec { scrapbook: refs, columns: None, order_by: None, limit: None };
+    let (out, _) = with_table(pool, &ctx, "Found:", &table(Refs::Many(vec![a, b.clone()])), true).await;
+    assert!(out.contains("| amount | source |") && !out.contains("vendor"), "no empty column: {out}");
+    assert!(out.contains("1 kept of 2 looked at") && out.contains("5 not yet looked at"), "its remaining is said: {out}");
+    let (out, _) = with_table(pool, &ctx, "Found:", &table(Refs::One(b)), true).await;
+    assert!(out.contains("| vendor | source |"), "alone, its columns stay: {out}");
+}
+
 /// #965 item 4: each read is screened with its own tool's profile, not the
 /// list's or the first read's. A lone chat-template token is allowed under
 /// `Relaxed` (`web-search`, `web-fetch`) and blocked under `Strict` (`mail`),
