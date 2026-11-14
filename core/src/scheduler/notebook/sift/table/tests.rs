@@ -247,9 +247,9 @@ fn one_source_withheld_by_two_sifts_is_one_row() {
 }
 
 /// DGX task 301 asked for the 5 most recent and got all 18: `limit` shows
-/// the first rows after ordering and merging, and the note says so.
+/// the first rows after merging and ordering, and the note says so.
 #[test]
-fn a_limit_shows_the_first_rows_after_order_and_merge() {
+fn a_limit_shows_the_first_rows_after_merge_and_order() {
     let rows = [
         sourced(1, "m1", json!({"d": "2026-01-01"})),
         sourced(2, "m2", json!({"d": "2026-03-01"})),
@@ -346,58 +346,6 @@ fn with_no_order_named_a_date_column_orders_newest_first() {
     }
 }
 
-/// #960, found in log #8 after it was filed (DGX tasks 316, 321): the
-/// body quoted `kept` (45, 8) above a table of 30 and 6 rows, because the
-/// table shows rows alike in every field once. `distinct_kept` counts the table's rows by the same rule.
-#[test]
-fn distinct_kept_counts_rows_as_the_table_merges_them() {
-    let a = json!({"vendor": "A", "amount": "10"});
-    let b = json!({"vendor": "B", "amount": "10"});
-    let empty = json!({"vendor": null, "amount": ""});
-    let kept = |f: &[&serde_json::Value]| -> Vec<Row> { f.iter().enumerate().map(|(i, f)| row(i as i32 + 1, RowKind::Kept, (*f).clone())).collect() };
-    assert_eq!(distinct_kept(&kept(&[&a, &a, &b, &a])), 2);
-    assert_eq!(distinct_kept(&kept(&[&empty, &empty])), 2, "fields with nothing in them never merge");
-    assert_eq!(distinct_kept(&[]), 0);
-    let withheld = [row(1, RowKind::Withheld, json!({})), row(2, RowKind::Kept, a.clone())];
-    assert_eq!(distinct_kept(&withheld), 1, "only kept rows count");
-    let rows = [
-        row(1, RowKind::Kept, a.clone()),
-        row(2, RowKind::Kept, a.clone()),
-        row(3, RowKind::Kept, b.clone()),
-        row(4, RowKind::Kept, empty.clone()),
-        row(5, RowKind::Kept, empty.clone()),
-    ];
-    let t = render(&rows, &cols(&["vendor", "amount"]), None, &counts(5, 5));
-    assert_eq!(t.lines().filter(|l| l.starts_with("| ") && !l.contains("---")).count() - 1, 4, "the table agrees: {t}");
-}
-
-/// #1022 part 1: one message in two links of a paging chain (overlapping
-/// pages), its fields extracted differently in each, is one table row — so
-/// the chain's `distinct` is 1, not 2.
-#[test]
-fn distinct_kept_merges_one_source_across_sifts_as_the_table_does() {
-    let rows = [
-        Row { sift: 1, ..sourced(1, "m1", json!({"amount": "$10"})) },
-        Row { sift: 2, ..sourced(1, "m1", json!({"amount": "10"})) },
-        Row { sift: 2, ..sourced(2, "m2", json!({"amount": "7"})) },
-    ];
-    assert_eq!(distinct_kept(&rows), 2);
-    let t = render(&rows, &cols(&["amount"]), None, &counts(3, 3));
-    assert_eq!(t.lines().skip(2).take_while(|l| l.starts_with('|')).count(), 2, "the table agrees: {t}");
-
-    // A sift's rows in hand (`chain_distinct`'s own) join as stored ones do.
-    let own = |source: &str, amount: &str| kastellan_db::scrapbook::NewRow {
-        kind: RowKind::Kept,
-        source: json!({"message_id": source}),
-        fields: json!({"amount": amount}),
-        classification: "Personal".into(),
-    };
-    let mut chain = vec![rows[0].clone()];
-    chain.extend(as_stored(1, 2, &[own("m1", "10"), own("m2", "7")]));
-    assert_eq!(distinct_kept(&chain), 2);
-    assert_eq!((chain[1].task_id, chain[1].sift, chain[1].row, chain[2].row), (1, 2, 1, 2));
-}
-
 /// Issue 1026 (c): the note's `kept` is items, not rows. One source kept by
 /// several sifts is one item; one source twice in one sift is two (the list
 /// held it twice, and the table shows both); a row with no source is its own.
@@ -468,3 +416,6 @@ fn a_bare_id_s_tool_keeps_rows_apart_but_is_not_shown() {
     assert_eq!(lines, ["| kv | 3 |", "| notes | 3 |"], "{t}");
     assert_eq!(items(rows.iter()), 2);
 }
+
+/// `distinct_kept` and the table count rows alike, sorted or not.
+mod distinct;

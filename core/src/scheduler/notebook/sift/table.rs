@@ -32,13 +32,13 @@ pub(crate) struct Counts {
     pub remaining: usize,
 }
 
-/// A markdown table of `rows` under `columns`, optionally ordered by one
-/// column, then a note with the counts. Rows alike in every field are shown
-/// once, their sources joined (one booking emailed three times, DGX task
-/// 301); then `limit` keeps the first rows. Every row is
-/// shown unless a limit says otherwise, and the note says so (S5). Every
-/// cell is model-written from tool output, so each shown one is screened
-/// (K8): a blocked one — and every cell of a withheld row — shows
+/// A markdown table of `rows` under `columns`, then a note with the counts.
+/// Rows alike in every field are shown once, their sources joined (one
+/// booking emailed three times, DGX task 301); the shown rows are then
+/// optionally ordered by one column, and `limit` keeps the first ones.
+/// Every row is shown unless a limit says otherwise, and the note says so
+/// (S5). Every cell is model-written from tool output, so each shown one is
+/// screened (K8): a blocked one — and every cell of a withheld row — shows
 /// [`WITHHELD_MARKER`], and its block is returned for the audit row.
 pub(crate) fn render_table(
     rows: &[Row],
@@ -47,11 +47,13 @@ pub(crate) fn render_table(
     limit: Option<usize>,
     counts: &Counts,
 ) -> (String, Vec<SinkBlock>) {
-    let mut ordered: Vec<&Row> = rows.iter().collect();
+    // Grouped in stored order, as `distinct_kept` groups them, then the groups
+    // sorted by the cell each shows: `alike` is greedy, so grouping sorted rows
+    // could make more table rows than `distinct` said (issue 1029).
+    let mut groups = alike(&rows.iter().collect::<Vec<_>>());
     if let Some(o) = order_by {
-        ordered.sort_by(|a, b| cell_order(&cell_text(a, &o.column), &cell_text(b, &o.column), o.desc));
+        groups.sort_by(|a, b| cell_order(&first_cell(a, &o.column), &first_cell(b, &o.column), o.desc));
     }
-    let groups = alike(&ordered);
     let shown_rows = limit.filter(|n| *n > 0).map_or(groups.len(), |n| n.min(groups.len()));
     // Items merged, not rows: one message kept by three sifts is no duplicate (issue 1026).
     let merged = groups[..shown_rows].iter().map(|g| items(g.iter().copied()) - 1).sum();
@@ -86,8 +88,9 @@ pub(crate) fn render_table(
 /// names no item and joins nothing. A withheld row joins only a withheld
 /// group, and only on its source: its fields are not shown, so nothing else
 /// says it is the same as another (PR #1028 review: the note counts withheld
-/// items). The summary's `distinct` ([`distinct_kept`]) counts the kept
-/// groups, in the rows' stored order (issue 1029).
+/// items). Greedy, so the grouping depends on the rows' order: both callers
+/// pass them in stored order, so the table shows as many kept rows as the
+/// summary's `distinct` ([`distinct_kept`]) says (issue 1029).
 fn alike<'a>(rows: &[&'a Row]) -> Vec<Vec<&'a Row>> {
     let mut groups: Vec<Vec<&Row>> = Vec::new();
     for &r in rows {
@@ -121,8 +124,7 @@ fn sourced(r: &Row) -> bool {
 /// [`alike`]'s groups. The summary gives it as `distinct` (#960: the body
 /// quoted `kept`, 45, above a table of 30 rows), a chain's over every link
 /// (#1022: one message in two overlapping pages is one row). Grouped in
-/// stored order: a sorted table can group a chain's rows otherwise (issue
-/// 1029).
+/// stored order, as [`render_table`] groups before it sorts (issue 1029).
 pub(crate) fn distinct_kept(rows: &[Row]) -> usize {
     let kept: Vec<&Row> = rows.iter().filter(|r| r.kind == RowKind::Kept).collect();
     alike(&kept).len()
@@ -222,8 +224,13 @@ fn shown(group: &[&Row], column: &str, blocks: &mut Vec<SinkBlock>) -> String {
         }
         return sources.iter().map(|s| screened(s, blocks)).collect::<Vec<_>>().join(", ");
     }
-    let first = group.iter().map(|r| cell_text(r, column)).find(|c| !c.is_empty());
-    screened(&first.unwrap_or_default(), blocks)
+    screened(&first_cell(group, column), blocks)
+}
+
+/// A group's first non-empty cell in `column`, unscreened: what [`shown`]
+/// shows for a column other than `source`, and what the group sorts by.
+fn first_cell(group: &[&Row], column: &str) -> String {
+    group.iter().map(|r| cell_text(r, column)).find(|c| !c.is_empty()).unwrap_or_default()
 }
 
 fn screened(text: &str, blocks: &mut Vec<SinkBlock>) -> String {
