@@ -237,3 +237,60 @@ fn a_non_json_answer_row_keeps_a_bounded_head_of_what_the_model_said() {
     assert_eq!(head.chars().count(), FAILED_ROW_RAW_HEAD_CHARS);
     assert_eq!(v["raw_chars"], reply.chars().count());
 }
+
+/// What the decoder says about `raw`, as the failed row's `error` carries it
+/// (`parse_reply` refuses with the lenient decoder's error).
+fn decode_error(raw: &str) -> String {
+    let e = crate::scheduler::plan_parser::parse_json_lenient::<serde_json::Value>(raw).unwrap_err();
+    format!("plan decode failed: not a notebook reply: {e}")
+}
+
+/// #1024 (DGX task 429): a syntax error at line 25 of an 1852-char reply sat
+/// past `raw_head`, so nothing showed what the model wrote there. The row now
+/// keeps the stretch around the decoder's position, counted from the reply's
+/// first `{` (where the lenient decoder starts), so a prose preamble does not
+/// shift it.
+#[test]
+fn a_syntax_error_past_the_head_keeps_the_text_around_it() {
+    // A preamble longer than the window: counted from 0, the window would miss the error.
+    let mut reply = "Some prose before the object, line by line.\n".repeat(6);
+    reply.push_str("{\n");
+    for i in 0..30 {
+        reply.push_str(&format!("  \"k{i}\": \"some filler value number {i}\",\n"));
+    }
+    reply.push_str("  \"bad\" \"MISSING_COLON\",\n  \"end\": 1\n}");
+    let error = decode_error(&reply);
+    assert!(error.contains(" at line 32 column "), "{error}");
+    let stats = kastellan_llm_router::CompletionStats::default();
+    let v = formulate_failed_payload(429, 3, false, false, false, &error, Some((&stats, 1, &reply)));
+    let window = v["raw_at_error"].as_str().unwrap();
+    assert!(window.contains("\"bad\" \"MISSING_COLON\""), "{window}");
+    assert!(!v["raw_head"].as_str().unwrap().contains("MISSING_COLON"), "the head alone cannot show it");
+    assert!(window.chars().count() <= 2 * FAILED_ROW_RAW_WINDOW_CHARS, "{window}");
+}
+
+/// No position in the error (an empty reply, a validation refusal): no key,
+/// rather than a window around a guess.
+#[test]
+fn an_error_with_no_position_adds_no_window() {
+    let stats = kastellan_llm_router::CompletionStats::default();
+    let v = formulate_failed_payload(1, 1, false, false, false, "plan decode failed: a step has no id", Some((&stats, 1, "{}")));
+    assert!(v.get("raw_at_error").is_none(), "{v}");
+    assert_eq!(raw_at_error("x at line 0 column 0", "abc"), None);
+}
+
+/// serde counts the column in bytes: a multi-byte reply must not panic on a
+/// cut inside a character, and the window is bounded in chars.
+#[test]
+fn the_window_never_cuts_a_character() {
+    let reply = format!("{{\"a\": \"{}\" \"b\": 1}}", "é".repeat(400));
+    let error = decode_error(&reply);
+    let window = raw_at_error(&error, &reply).unwrap();
+    assert!(window.starts_with('é') && window.ends_with("\"b\": 1}"), "{window}");
+    assert!(window.chars().count() <= 2 * FAILED_ROW_RAW_WINDOW_CHARS, "{window}");
+    // A position past the end (a stale or foreign error) clamps, it does not panic.
+    assert!(raw_at_error("e at line 9 column 999", &reply).is_none());
+    assert!(raw_at_error("e at line 1 column 999999", &reply).is_some());
+    // A column landing inside "é" (bytes 2..4) is moved back to its start.
+    assert_eq!(raw_at_error("e at line 1 column 3", "{\"é\"").as_deref(), Some("{\"é\""));
+}
