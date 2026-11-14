@@ -105,7 +105,10 @@ pub(crate) async fn run_sift(
 
     // The reads: one reviewed plan, dispatched past any failed read.
     let (mut outcomes, mut read_tools) = (Vec::new(), Vec::new());
-    if !batch.reads.is_empty() {
+    // A reply that came back past the deadline makes no reads: the sorter
+    // would stop at the first item anyway (#956).
+    let late = ctx.deadline.is_some_and(|d| Instant::now() >= d);
+    if !batch.reads.is_empty() && !late {
         let plan = reads_plan(call, &p, &batch.reads, class);
         let policy = StepPolicy::SiftReads { cap: cfg.max_reads };
         match execute::review_and_dispatch(
@@ -223,7 +226,7 @@ pub(crate) async fn run_sift(
     for range in batch.per_item.iter().take(counts.looked_at).filter(|r| !r.is_empty()) {
         per_read[batch.reads[range.start].0] += 1;
     }
-    let reads = Reads { made: batch.reads.len(), unread, cut: batch.cut, per_read };
+    let reads = Reads { made: outcomes.len(), unread, cut: batch.cut, per_read };
     let (mut summary, blocks) = summary(&scrap, &p, &counts, &reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.
     if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {

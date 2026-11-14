@@ -282,3 +282,45 @@ pub(super) async fn a_chain_link_that_cannot_be_read_gives_no_distinct(pool: &sq
         .expect("lazy pool");
     assert_eq!(chain_distinct(&dead, &ctx, &link, 2, &own).await, None, "a link whose rows cannot be read");
 }
+
+/// #956: a sift's tick carries the class the sift ran at — its declared
+/// class raised to the floor and to its list's — not the one the model
+/// declared. A `Public` sift over a `Personal` search wrote a `Public` tick,
+/// which a resume with no plans to read back would count as the ceiling.
+pub(super) async fn a_sift_ticks_at_the_class_it_ran_at(pool: &sqlx::PgPool) {
+    let mut call = sift(2, None);
+    call["classification"] = json!("Public");
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1"]))}),
+        json!({"tick": tick(1, "listed"), "call": call}),
+        json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "none kept"}}),
+    ])
+    .sorting(&[no()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let ticks: Vec<Value> = kastellan_db::notebook::entries(pool, r.task_id, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EntryKind::Tick)
+        .map(|e| e.payload)
+        .collect();
+    let classes: Vec<(Value, Value)> = ticks.iter().map(|t| (t["step"].clone(), t["classification"].clone())).collect();
+    assert_eq!(classes, [(json!(1), json!("Personal")), (json!(2), json!("Personal"))], "the list's class: {ticks:?}");
+}
+
+/// #956: a reply that arrives past the deadline runs no reads — before, it
+/// dispatched every one of them and then stopped at item 0 with `time`.
+pub(super) async fn a_sift_past_the_deadline_makes_no_reads(pool: &sqlx::PgPool) {
+    let mut script = Script::new(&three_turns(&["m1", "m2"], Some(("mail", "mail.read")))).sorting(&[keep(1), keep(2)]);
+    // Turn 1 ends at ~1 s and turn 2 starts before the deadline; its reply
+    // lands after it. 500 ms of slack each side for a loaded sweep.
+    script.turn_delay = Duration::from_millis(1000);
+    let mut ctx = new_task(pool, 5).await;
+    ctx.deadline = Some(Instant::now() + Duration::from_millis(1500));
+    let r = run(pool, &script, ctx).await;
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search"], "no read was made");
+    assert!(script.sorted.lock().unwrap().is_empty(), "nothing was sorted");
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["stopped"].clone(), seen["remaining"].clone()), (json!("time"), json!(2)), "{seen}");
+    assert_eq!(seen["reads"], json!(0), "the summary says none was made: {seen}");
+}

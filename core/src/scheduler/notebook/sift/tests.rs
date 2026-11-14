@@ -125,6 +125,8 @@ async fn the_sift_loop() {
     an_empty_unfinished_sift_adds_its_remaining_not_its_columns(&pool).await;
     each_read_is_screened_with_its_own_tools_profile(&pool).await;
     a_chain_link_that_cannot_be_read_gives_no_distinct(&pool).await;
+    a_sift_ticks_at_the_class_it_ran_at(&pool).await;
+    a_sift_past_the_deadline_makes_no_reads(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {
