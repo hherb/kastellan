@@ -33,7 +33,7 @@ use super::table::{as_stored, distinct_kept, Counts, SOURCE_TOOL_KEY};
 use super::reads::plan_reads;
 use super::template::items_at;
 use super::answer::row_class;
-use super::{is_sift_plan, may_read, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
+use super::{may_read, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
 use crate::cassandra::review::ChainReviewStage;
 use crate::handoff;
 use crate::cassandra::types::{DataClass, Plan, PlannedStep};
@@ -45,7 +45,7 @@ use crate::scheduler::inner_loop::{
     StepOutcome, TaskContext,
 };
 use crate::scheduler::notebook::formulator::NotebookFormulator;
-use crate::scheduler::notebook::reply::{notebook_step_of, CallSpec, NOTEBOOK_STEP_RATIONALE};
+use crate::scheduler::notebook::reply::{CallSpec, NOTEBOOK_STEP_RATIONALE};
 
 /// Audit actions (K12), actor `scheduler`.
 pub(crate) const ACTION_SIFT_STARTED: &str = "sift.started";
@@ -334,15 +334,10 @@ async fn resolve_over(
 ) -> Result<OverList, String> {
     match &p.over {
         Over::Step(n) => {
-            let record = ctx
-                .plans
-                .iter()
-                .rev()
-                .filter(|rec| notebook_step_of(&rec.plan) == Some(*n) && !is_sift_plan(&rec.plan))
-                // A step that ran an invoked skill (#996) sifts its skill's last
-                // step, its product; a plan stops at its first error, so a last
-                // `Ok` means every step succeeded.
-                .find(|rec| matches!(rec.outcomes().last(), Some(StepOutcome::Ok(_))))
+            // A step that ran an invoked skill (#996) sifts its skill's last
+            // step, its product.
+            let record = super::chain::list_index(&ctx.plans, *n)
+                .map(|i| &ctx.plans[i])
                 .ok_or_else(|| format!("step {n} has no successful result to sift"))?;
             let last = record.outcomes().len() - 1;
             let (Some(StepOutcome::Ok(result)), Some(step)) = (record.outcomes().get(last), record.plan.steps.get(last)) else {
