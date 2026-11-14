@@ -127,15 +127,16 @@ pub(crate) mod tests {
     use crate::scheduler::notebook::reply::NOTEBOOK_STEP_RATIONALE;
 
     pub(crate) fn sift_record(params: Value, summary: Value) -> PlanRecord {
-        record(SIFT_TOOL, String::new(), params, StepOutcome::Ok(summary))
+        record(SIFT_TOOL, String::new(), params, vec![StepOutcome::Ok(summary)])
     }
 
     /// The call that produced notebook step `step`'s list, with `outcome`.
     fn search_record(step: u32, outcome: StepOutcome) -> PlanRecord {
-        record("web-search", format!("{NOTEBOOK_STEP_RATIONALE}{step}"), json!({"q": "invoices"}), outcome)
+        record("web-search", format!("{NOTEBOOK_STEP_RATIONALE}{step}"), json!({"q": "invoices"}), vec![outcome])
     }
 
-    fn record(tool: &str, rationale: String, params: Value, outcome: StepOutcome) -> PlanRecord {
+    /// One step per outcome, each the same call.
+    fn record(tool: &str, rationale: String, params: Value, outcomes: Vec<StepOutcome>) -> PlanRecord {
         let step = PlannedStep {
             tool: tool.into(),
             method: "sift.run".into(),
@@ -148,7 +149,7 @@ pub(crate) mod tests {
             context: String::new(),
             decision: "kept".into(),
             rationale,
-            steps: vec![step],
+            steps: vec![step; outcomes.len()],
             result: None,
             data_ceiling: None,
             refused: None,
@@ -158,7 +159,7 @@ pub(crate) mod tests {
             invoke_skill: None,
             python_skill: None,
         };
-        PlanRecord::new(plan, vec![outcome])
+        PlanRecord::new(plan, outcomes)
     }
 
     pub(crate) fn params(from: usize, keep_if: &str) -> Value {
@@ -169,7 +170,7 @@ pub(crate) mod tests {
     /// sift is a call for step 1 too, as when the planner sifts its own
     /// step's list, so a sift's record must never count as step 1's list.
     fn chain_of_three() -> Vec<PlanRecord> {
-        let sift = |p, s| record(SIFT_TOOL, format!("{NOTEBOOK_STEP_RATIONALE}1"), p, StepOutcome::Ok(s));
+        let sift = |p, s| record(SIFT_TOOL, format!("{NOTEBOOK_STEP_RATIONALE}1"), p, vec![StepOutcome::Ok(s)]);
         vec![
             search_record(1, StepOutcome::Ok(json!([]))),
             sift(params(0, "an invoice"), json!({"scrapbook": "sb:9:2", "next_from": 30})),
@@ -213,13 +214,21 @@ pub(crate) mod tests {
 
     /// #959: step 1 run again between two sifts is another list, so a sift
     /// `from` the first one's `next_from` goes over items it never saw and
-    /// continues nothing; a re-run that failed left the list as it was.
+    /// continues nothing. A re-run that failed, even after an `Ok` step (an
+    /// invoked skill, #996), left the list as it was; another step's call is
+    /// not step 1's list; and `over` a scrapbook is never cut by a re-run.
     #[test]
     fn a_rerun_of_the_listed_step_between_sifts_ends_the_chain() {
         let mut plans = chain_of_three();
         plans.truncate(2);
         plans.push(search_record(1, StepOutcome::Err { code: "UPSTREAM".into(), detail: "down".into() }));
         assert_eq!(continued(&plans, &params(30, "an invoice"), 30).as_deref(), Some("sb:9:2"), "a failed re-run");
+        let err = || StepOutcome::Err { code: "UPSTREAM".into(), detail: "down".into() };
+        let rationale = format!("{NOTEBOOK_STEP_RATIONALE}1");
+        plans.push(record("web-search", rationale, json!({"q": "invoices"}), vec![StepOutcome::Ok(json!(["x"])), err()]));
+        assert_eq!(continued(&plans, &params(30, "an invoice"), 30).as_deref(), Some("sb:9:2"), "a skill whose last step failed");
+        plans.push(search_record(2, StepOutcome::Ok(json!(["another step's list"]))));
+        assert_eq!(continued(&plans, &params(30, "an invoice"), 30).as_deref(), Some("sb:9:2"), "another step's call");
         plans.push(search_record(1, StepOutcome::Ok(json!(["another list"]))));
         assert_eq!(continued(&plans, &params(30, "an invoice"), 30), None, "a new list");
         let over_sb = |from| json!({"over": {"scrapbook": "sb:9:2"}, "keep_if": "x", "fields": ["amount"], "from": from});

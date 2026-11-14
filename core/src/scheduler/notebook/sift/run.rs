@@ -334,11 +334,11 @@ async fn resolve_over(
 ) -> Result<OverList, String> {
     match &p.over {
         Over::Step(n) => {
-            // A step that ran an invoked skill (#996) sifts its skill's last
-            // step, its product.
             let record = super::chain::list_index(&ctx.plans, *n)
                 .map(|i| &ctx.plans[i])
                 .ok_or_else(|| format!("step {n} has no successful result to sift"))?;
+            // A step that ran an invoked skill (#996) sifts its skill's last
+            // step, its product.
             let last = record.outcomes().len() - 1;
             let (Some(StepOutcome::Ok(result)), Some(step)) = (record.outcomes().get(last), record.plan.steps.get(last)) else {
                 unreachable!("the record was found by its last outcome being Ok, and outcomes follow steps")

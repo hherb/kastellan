@@ -64,8 +64,10 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   went over: `chain::continued` refuses the link when step n succeeded again after it (a failed re-run leaves the
   list as it was; a scrapbook's rows never change, so `over` a scrapbook is unaffected). The lookup of step n's list
   is one pure fn, `chain::list_index`, shared with `run::resolve_over`. ⚠️ A re-run giving the **same** list also
-  ends the chain (conservative: the later sift tables on its own). 1 test; 4 of 4 mutants caught, one of them the
-  sift-record exclusion, unpinned before (the chain fixture's sifts are now stamped for step 1).
+  ends the chain (conservative: the later sift tables on its own). 1 test; 6 of 6 mutants caught, among them the
+  sift-record exclusion, the step filter and `last()` over `first()`, none pinned in unit tests before (the chain
+  fixture's sifts are now stamped for step 1; the review round added a `[Ok, Err]` skill re-run and another step's
+  call).
 - **Deploy:** PR #1031 (#958) on the DGX 2026-11-15 (`NRestarts=0`, Matrix up, env identical to `bak-pre1031`,
   installed `agent_notebook.md` sha256-equal to the repo's).
 
