@@ -113,6 +113,7 @@ async fn the_sift_loop() {
     an_answer_table_naming_no_scrapbook_is_shown_back_once(&pool).await;
     a_forced_answer_without_the_table_gets_it_by_code(&pool).await;
     a_forced_answer_gets_the_rows_of_every_sift_that_kept_some(&pool).await;
+    a_draft_used_for_its_rewrite_gets_the_table(&pool).await;
     a_sift_over_a_stashed_search_reads_the_stash(&pool).await;
     a_sift_over_a_purged_stash_says_how_and_the_call_is_made_again(&pool).await;
     a_stashed_read_reaches_the_sorter_as_its_text(&pool).await;
@@ -120,6 +121,7 @@ async fn the_sift_loop() {
     a_table_with_no_order_named_is_newest_first(&pool).await;
     an_item_with_no_attachment_takes_the_next_read(&pool).await;
     a_body_table_stays_when_the_code_table_has_no_rows(&pool).await;
+    an_empty_unfinished_sift_adds_its_remaining_not_its_columns(&pool).await;
     each_read_is_screened_with_its_own_tools_profile(&pool).await;
     a_chain_link_that_cannot_be_read_gives_no_distinct(&pool).await;
 }

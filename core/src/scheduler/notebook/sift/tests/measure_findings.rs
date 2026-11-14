@@ -214,6 +214,24 @@ pub(super) async fn a_forced_answer_gets_the_rows_of_every_sift_that_kept_some(p
     assert!(b.contains("2 kept of 2 looked at"), "each list counted once: {b}");
 }
 
+/// #1023 review finding: a draft used in place of its rewrite was never
+/// shown back for a missing table (it was to be rewritten), so code attaches
+/// the table, as on a forced answer, and takes out the body's own copy.
+pub(super) async fn a_draft_used_for_its_rewrite_gets_the_table(pool: &sqlx::PgPool) {
+    let mut script = Script::raw(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2"]))}).to_string(),
+        json!({"tick": tick(1, "listed"), "call": sift(2, None)}).to_string(),
+        json!({"tick": tick(2, "sorted"), "answer": {"body": "One invoice.\n\n| amount |\n|---|\n| 10 |"}}).to_string(),
+        TIMEOUT.into(),
+    ])
+    .sorting(&[keep(10), no()]);
+    script.thinks = false;
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let b = body(&r.result);
+    assert!(b.starts_with("One invoice.\n\n| amount | source |") && b.contains("| 10 | m1 |"), "the code's table: {b}");
+    assert!(b.contains(OWN_TABLE_NOTE) && b.contains("1 kept of 2 looked at"), "{b}");
+}
+
 /// #964 (DGX task 337): a 68 KB search was handoff-stashed, so its step's
 /// result was the placeholder and the sift over it was refused ("the result
 /// has no results"). The sift reads the stash back whole.

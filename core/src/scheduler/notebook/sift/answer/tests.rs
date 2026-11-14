@@ -175,9 +175,19 @@ fn kept_rows_accumulate_over_the_run_s_sifts() {
     ];
     assert_eq!(refs(&chain), names(&["sb:9:5", "sb:9:3"]), "the link sb:9:2 comes with sb:9:3");
     // #1016: the fix never names more refs than a table takes, newest first.
-    let nine: Vec<PlanRecord> = (1..=9).map(|n| sift(n, 1)).collect();
-    let why = table_left_out(&plain, &ctx(nine)).unwrap_err();
+    let nine = || (1..=9).map(|n| sift(n, 1)).collect::<Vec<PlanRecord>>();
+    let why = table_left_out(&plain, &ctx(nine())).unwrap_err();
     assert!(why.contains("sb:9:9") && why.contains("sb:9:2") && !why.contains("sb:9:1"), "the oldest is not named: {why}");
+    // The same on the other show-back, a table naming nothing it can show.
+    let unknown = serde_json::from_value::<NotebookReply>(serde_json::json!({"answer": {"body": "x", "table": {"scrapbook": "sb:9:99"}}})).unwrap();
+    let why = table_left_out(&unknown, &ctx(nine())).unwrap_err();
+    assert!(why.contains("sb:9:9") && why.contains("sb:9:2") && !why.contains("sb:9:1"), "a table of no scrapbook: {why}");
+    // Review finding: an unfinished empty sift joins a forced table only
+    // while there is room — never refused by name for one the model never chose.
+    let eight_and_stop: Vec<PlanRecord> = (1..=8).map(|n| sift(n, 1)).chain([stopped()]).collect();
+    let got = refs(&eight_and_stop).unwrap();
+    assert_eq!(got.len(), TABLE_REFS_MAX, "{got:?}");
+    assert!(!got.contains(&"sb:9:9".to_string()), "the stopped sift has no room: {got:?}");
     let one = table_left_out(&plain, &ctx(vec![sift(3, 4)])).unwrap_err();
     assert!(one.contains(r#"{"scrapbook": "sb:9:3"}"#), "one sift: a plain ref, as before: {one}");
 }

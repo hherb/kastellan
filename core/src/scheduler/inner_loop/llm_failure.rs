@@ -190,7 +190,8 @@ pub(crate) fn forced_synthesis_no_answer_detail(work: &GatheredWork) -> String {
 ///   wording operators count, the decode error last in brackets;
 /// - a forced turn with no `exhausted` was forced by a timeout;
 /// - otherwise (the rewrite turn) plain words. The notebook loop uses the
-///   draft instead (#1023), so this wording is shown only if that changes.
+///   draft instead (#1023), so this wording reaches only the fallback's WARN
+///   log, not the task's outcome, unless that changes.
 ///
 /// shortcut: a turn forced by a `max_tokens` cut-off (#941) also reads as a
 /// timeout here, as it did in the classic loop; split when that is seen live.

@@ -60,13 +60,20 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 - **#1023 (operator: fall back to the draft):** the routine turn's discarded draft is kept (without its tick/steps,
   already in the notebook). If the thinking rewrite turn fails, times out or runs out of room, the draft is the
-  answer, logged at WARN, and code attaches its table as on the forced turn. `answer_turn_call_detail`'s
-  rewrite-turn wording is now unreachable from the loop (kept, documented).
+  answer, logged at WARN, and code attaches its missing table as on the forced turn. A draft table naming
+  refs it cannot show is not repaired: it gets the forced answer's "could not be included" lines.
+  - **Review fixes:** when the draft spent the last turn (the cap or the deadline), it is used with no further call.
+    Before, the task failed or a forced turn replaced it. A fallback writes `plan.discarded`
+    `answer_rewrite_failed_draft_used` and does not count a turn.
+  - `answer_turn_call_detail`'s rewrite-turn wording now reaches only that WARN log (kept, documented).
 - **#1015 (operator: once per list):** under an answer table, `looked_at`/`remaining` are
   `sift::answer::coverage`: the union of `from..from+looked_at` spans per list (same `over` + `items`). A chain's
   links add up, so this replaces the old `remaining()`. A sift that kept 0 but stopped with items unread joins a
   forced table after the ones with rows, for its `remaining` (its fields become columns only if no ref with rows names any).
-  ⚠️ `kept` still sums across sifts, so two criteria over one list can read "45 kept of 30 looked at".
+  Only while the table has room under 8 refs (review fix).
+  ⚠️ **Issue 1026 (operator decision):** `kept` still sums across sifts, so two criteria over one list can read
+  "45 kept of 30 looked at". A stopped sift's unread span is not counted if another sift covered it. Per-question
+  counting would fix both but undo "once per list"; it was tried in the review and reverted.
   shortcut: a step re-run between two sifts (#959) is still "one list".
 - **#1016 (operator: cap the show-back):** the show-back fix line names at most `TABLE_REFS_MAX` (8), newest first.
   The forced path keeps its visible refusal line past 8.
@@ -351,7 +358,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its new leg in `mail_live_shape_e2e/hit_fields.rs` (a `#[path]` module); move the next one there too, or split. ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-⚠️ `core/src/scheduler/notebook/run/tests.rs` **621** (+9 in #1023): move the selective-thinking case out before it grows again.
+`core/src/scheduler/notebook/run/tests.rs` **555**: #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91).
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).

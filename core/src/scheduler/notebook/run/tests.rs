@@ -73,7 +73,7 @@ async fn the_notebook_loop() {
     tasks_correct_adds_to_a_running_task_only(&pool).await;
     a_runaway_reply_after_gathering_spends_the_answer_turn(&pool).await;
     a_call_on_the_answer_turn_is_re_asked(&pool).await;
-    selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(&pool).await;
+    super::rewrite_tests::selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(&pool).await;
     a_repeated_call_is_not_dispatched_and_the_next_turn_replans(&pool).await;
     the_turn_cap_is_twice_max_plans(&pool).await;
     the_turn_cap_with_nothing_gathered_fails_naming_the_cap(&pool).await;
@@ -367,72 +367,6 @@ async fn a_call_on_the_answer_turn_is_re_asked(pool: &sqlx::PgPool) {
     assert!(!d.contains("not a plan"), "{d}");
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "neither answer-turn call ran");
     assert_eq!(script.reasks.lock().unwrap().len(), 1, "re-asked once only");
-}
-
-/// With thinking off in the config, only the plan, the replan after a failed
-/// call and the answer think; the answer a routine (non-thinking) turn wrote
-/// is replaced by one a thinking turn writes, and its tick is kept.
-async fn selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(pool: &sqlx::PgPool) {
-    use crate::scheduler::notebook::thinking::WRITE_ANSWER_DIRECTIVE;
-    use ThinkingPolicy::*;
-    let mut script = Script::new(&[
-        json!({"steps": steps(&[1, 2, 3]), "call": call(1, "a")}),
-        json!({"tick": tick(1, "f1"), "call": call(2, "fail")}),
-        json!({"steps": steps(&[3]), "call": call(3, "c")}),
-        json!({"tick": tick(3, "f3"), "answer": {"body": "a quick draft"}}),
-        json!({"tick": tick(3, "again"), "answer": {"body": "the considered answer"}}),
-    ]);
-    script.thinks = false;
-    let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert_eq!(body(&r.result), "the considered answer");
-    assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault, Allow, RouterDefault, Allow]);
-    let last: Value = serde_json::from_str(script.messages().last().unwrap()).unwrap();
-    assert_eq!(last["turn_budget"], json!({"directive": WRITE_ANSWER_DIRECTIVE}));
-    use EntryKind::*;
-    assert_eq!(
-        kinds(pool, r.task_id).await,
-        vec![Steps, Tick, FailedStep, Steps, Tick, Answer],
-        "the draft's tick is kept; the rewrite's repeated tick is dropped"
-    );
-    let answer = db::entries(pool, r.task_id, 0).await.unwrap().pop().unwrap();
-    assert_eq!(answer.payload["body"], "the considered answer");
-    let rows = discarded(pool, r.task_id).await;
-    assert_eq!(rows.len(), 1, "the draft's turn is accounted for: {rows:?}");
-    assert_eq!(rows[0]["reason"], "answer_rewritten");
-
-    // A backend that thinks anyway: no rewrite, the first answer stands.
-    let script = Script::new(&[
-        json!({"steps": steps(&[1]), "call": call(1, "a")}),
-        json!({"tick": tick(1, "f"), "answer": {"body": "first"}}),
-    ]);
-    let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert_eq!(body(&r.result), "first");
-    assert_eq!(*script.thinking.lock().unwrap(), [Allow, RouterDefault]);
-
-    // The rewrite turn calls, and calls on the re-ask (#1019 review): the
-    // draft it was to rewrite is the answer (#1023), its tick kept once.
-    let mut script = Script::new(&[
-        json!({"steps": steps(&[1]), "call": call(1, "a")}),
-        json!({"tick": tick(1, "f"), "answer": {"body": "a quick draft"}}),
-        json!({"call": call(1, "b")}),
-        json!({"call": call(1, "c")}),
-    ]);
-    script.thinks = false;
-    let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert_eq!(body(&r.result), "a quick draft");
-    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a"], "neither rewrite-turn call ran");
-    assert_eq!(kinds(pool, r.task_id).await, vec![Steps, Tick, Answer]);
-
-    // The rewrite turn times out: the draft is the answer, not a forced turn.
-    let mut script = Script::raw(&[
-        json!({"steps": steps(&[1]), "call": call(1, "a")}).to_string(),
-        json!({"tick": tick(1, "f"), "answer": {"body": "a quick draft"}}).to_string(),
-        TIMEOUT.into(),
-    ]);
-    script.thinks = false;
-    let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert_eq!(body(&r.result), "a quick draft");
-    assert_eq!(script.messages().len(), 3, "no forced-answer turn after the timed-out rewrite");
 }
 
 /// DGX task 291: a non-thinking turn made the same call over and over. The

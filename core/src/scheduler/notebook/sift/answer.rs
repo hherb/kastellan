@@ -17,8 +17,9 @@ pub(crate) const TABLE_REFS_MAX: usize = crate::scheduler::conversation::record:
 
 /// `body`, then the table `t` names, and the highest class of its rows. A
 /// ref names its whole chain ([`table_refs`]). A ref that is malformed,
-/// unreadable here (K11), unreadable from the database or empty is not
-/// shown: a line says so instead, and the rest still render. `strip_own`:
+/// unreadable here (K11), unreadable from the database, or empty and not
+/// this run's (no summary to count) is not shown: a line says so instead,
+/// and the rest still render. `strip_own`:
 /// `t` was attached by code to a forced answer ([`forced_table`]), so a
 /// table in `body` is the model's copy of those rows ([`without_own_tables`]).
 pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: &TableSpec, strip_own: bool) -> (String, DataClass) {
@@ -243,11 +244,14 @@ fn names_no_table(a: &AnswerSpec) -> bool {
 /// this run that kept rows ([`kept_sifts`]), with the default columns and
 /// order; then each that kept nothing but stopped with items unread, which
 /// adds no rows but its `remaining` to the note (#1015, DGX task 398's last
-/// sift stopped on the ceiling). `None` when the answer names a table, is a
-/// refusal, or no sift kept anything. Pure.
+/// sift stopped on the ceiling) — only while the table has room under
+/// [`TABLE_REFS_MAX`], or one would be refused by name (review finding).
+/// `None` when the answer names a table, is a refusal, or no sift kept
+/// anything. Pure.
 pub(crate) fn forced_table(reply: &NotebookReply, plans: &[PlanRecord]) -> Option<TableSpec> {
     let mut names: Vec<String> = missing_table(reply, plans)?.into_iter().map(|(n, _)| n).collect();
-    names.extend(last_links(plans).into_iter().filter(|l| l.kept == 0 && l.remaining > 0).map(|l| l.name));
+    let room = TABLE_REFS_MAX.saturating_sub(names.len());
+    names.extend(last_links(plans).into_iter().filter(|l| l.kept == 0 && l.remaining > 0).map(|l| l.name).take(room));
     let scrapbook = if names.len() == 1 { Refs::One(names.remove(0)) } else { Refs::Many(names) };
     Some(TableSpec { scrapbook, columns: None, order_by: None, limit: None })
 }
@@ -352,7 +356,8 @@ fn first_row_fields(rows: &[Row]) -> Option<Vec<String>> {
     Some(first.fields.as_object()?.keys().cloned().collect())
 }
 
-/// The note's counts: the sift's own when its summary is at hand.
+/// The note's counts: `kept` and `withheld` from the rows, `undecided` and
+/// `failed_reads` from the sift's summary when it is at hand (else 0).
 /// `looked_at` and `remaining` are counted once per list ([`coverage`]).
 fn add_counts(c: &mut Counts, rows: &[Row], summary: Option<&serde_json::Value>) {
     let n = |k: &str| summary.and_then(|s| s[k].as_u64()).map(|v| v as usize);
@@ -398,7 +403,9 @@ impl Link {
 ///
 /// shortcut: "one list" is the same `over` and `items`; a step re-run
 /// between two sifts makes them two lists (#959) that this counts as one —
-/// carry the list's identity in the summary if that is seen live.
+/// carry the list's identity in the summary if that is seen live. `kept`
+/// is still summed per sift, and a sift's unread span that another covered
+/// is not counted (issue 1026, an operator decision).
 fn coverage(links: &[Link]) -> (usize, usize) {
     let mut seen: Vec<&(Over, Option<String>)> = Vec::new();
     let (mut looked, mut left) = (0, 0);

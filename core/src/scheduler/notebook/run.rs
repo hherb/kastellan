@@ -134,8 +134,11 @@ pub(crate) async fn run_notebook_to_terminal(
             return finish!(Outcome::Cancelled);
         }
         let exhausted = ceiling::exhausted(ctx.plan_count, ctx.max_plans, ctx.deadline, std::time::Instant::now());
-        let answer_turn = (exhausted.is_some() || force_answer) && st.gathered && !answer_attempted;
-        if let (Some(which), false) = (exhausted, answer_turn) {
+        // A draft still waiting for its rewrite when the cap or the deadline
+        // hits: no turn is left to rewrite it, so it is the answer (#1023).
+        let draft_due = exhausted.is_some() && draft.is_some();
+        let answer_turn = (exhausted.is_some() || force_answer) && st.gathered && !answer_attempted && !draft_due;
+        if let (Some(which), false) = (exhausted, answer_turn || draft_due) {
             return finish!(Outcome::Failed(ceiling::exhausted_detail(which, ctx.max_plans, false)));
         }
         if answer_turn {
@@ -151,7 +154,9 @@ pub(crate) async fn run_notebook_to_terminal(
         let kind = thinking::turn_kind(answer_turn, write_answer, state.steps.is_empty(), replan_due);
         // The turn's `now`, kept for a sift's sorter ("currently due").
         let turn_now = std::sync::Mutex::new(None::<String>);
-        let turn = {
+        let turn = if draft_due {
+            Asked::Failed("no turn was left to rewrite it".into())
+        } else {
             let current = state.current_step();
             let record = ctx.plans.last();
             let last_failure = last_call.filter(|l| l.failed).and_then(|l| Some((l.step, record?)));
@@ -179,8 +184,10 @@ pub(crate) async fn run_notebook_to_terminal(
         if kind == TurnKind::Replan {
             replan_due = false;
         }
-        // The rewrite turn failed, or ran out of time or room: the draft passed
-        // every check but "written thinking", so it is the answer (#1023).
+        // The rewrite turn failed, ran out of time or room, or had no turn
+        // left: the draft passed `validate` (only the table show-back, which
+        // a forced answer skips too, did not run on it), so it is the answer
+        // (#1023). Its missing table is attached below, as a forced answer's.
         let fell_back = kind == TurnKind::WriteAnswer && !matches!(turn, Asked::Reply(_));
         let turn = match draft.take() {
             Some(d) if fell_back => {
@@ -189,6 +196,8 @@ pub(crate) async fn run_notebook_to_terminal(
                     _ => "the rewrite ran out of time or room",
                 };
                 tracing::warn!(task_id = ctx.task_id, reason = %why, "notebook: the answer rewrite produced no answer; the draft is used");
+                // The `answer_rewritten` row said the draft was set aside: this one says it was not.
+                audit_discarded_turn(pool, &ctx, "answer_rewrite_failed_draft_used", None, &d.1).await;
                 Asked::Reply(d)
             }
             _ => turn,
@@ -202,9 +211,12 @@ pub(crate) async fn run_notebook_to_terminal(
             Asked::Failed(detail) => return finish!(Outcome::Failed(detail)),
         };
 
-        ctx.plan_count += 1;
-        if let Err(e) = tasks::increment_plan_count(pool, ctx.task_id, ctx.plan_count as i32).await {
-            tracing::warn!(task_id = ctx.task_id, error = %e, "tasks::increment_plan_count failed (mirror only)");
+        // A draft used in place of its rewrite was counted on its own turn.
+        if !fell_back {
+            ctx.plan_count += 1;
+            if let Err(e) = tasks::increment_plan_count(pool, ctx.task_id, ctx.plan_count as i32).await {
+                tracing::warn!(task_id = ctx.task_id, error = %e, "tasks::increment_plan_count failed (mirror only)");
+            }
         }
 
         // The reply's own entries, in the order `validate` checked them.
@@ -287,7 +299,7 @@ pub(crate) async fn run_notebook_to_terminal(
                 // draft used in place of its rewrite (#1023).
                 let forced = (kind == TurnKind::ForcedAnswer || fell_back).then(|| sift::answer::forced_table(&reply, &ctx.plans)).flatten();
                 if let Some(t) = &forced {
-                    tracing::info!(task_id = ctx.task_id, scrapbook = ?t.scrapbook.refs(), "notebook: forced answer names no table; attached by code");
+                    tracing::info!(task_id = ctx.task_id, scrapbook = ?t.scrapbook.refs(), draft = fell_back, "notebook: forced answer names no table; attached by code");
                 }
                 // `forced` is only ever set when the answer's table names no refs.
                 let body = match forced.as_ref().or(a.table.as_ref()) {
@@ -438,3 +450,5 @@ mod refusal_tests;
 mod agent_raised_tests;
 #[cfg(test)]
 mod timeout_tests;
+#[cfg(test)]
+mod rewrite_tests;
