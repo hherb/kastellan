@@ -654,6 +654,8 @@ async fn main() -> Result<()> {
     let prompts = kastellan_core::scheduler::prompts::load_prompts_from_dir(&pool, &prompts_dir)
         .await
         .with_context(|| format!("loading prompts from {:?}", prompts_dir))?;
+    kastellan_core::scheduler::notebook::formulator::check_prompts(&prompts)
+        .map_err(|e| anyhow::anyhow!("{e} in {prompts_dir:?}"))?;
 
     // Seed L0 (meta-rule) rows from the operator-edited TOML file.
     // Default: `seeds/memory/l0_meta_rules.toml` relative to CWD.

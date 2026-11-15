@@ -218,7 +218,7 @@ pub(super) const ACTION_FORMULATE_FAILED: &str = "plan.formulate_failed";
 /// Longest router-error text an `agent/plan.formulate_failed` row carries.
 /// The error can embed a backend's response body (already capped at 1 KiB
 /// by the router); the row needs the kind of failure, not the body.
-const FAILED_ROW_ERROR_CHARS: usize = 512;
+pub(crate) const FAILED_ROW_ERROR_CHARS: usize = 512;
 
 /// Longest head of the model's own reply an `agent/plan.formulate_failed`
 /// row carries (#945). Enough to tell a prose answer from a refusal or a

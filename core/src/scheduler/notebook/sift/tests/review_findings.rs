@@ -31,6 +31,9 @@ pub(super) async fn a_sorter_failure_stops_the_sift_and_its_item_is_next(pool: &
     // The answer named no table after a sift that kept a row, so it was shown
     // back once (#960); that answer was usable, so it is no failed call.
     assert_eq!(r.result.failed_llm_calls, 1, "the failed sorter call is counted, the shown-back answer not");
+    // The audit row says why it stopped (#956): the scripted sorter's error.
+    let finished = finished_row(pool, r.task_id).await;
+    assert!(finished["sorter_error"].as_str().is_some_and(|e| e.contains("out of script")), "{finished}");
 }
 
 /// Review finding: a sift's own records are stamped with its step, so a
@@ -355,7 +358,9 @@ pub(super) async fn failed_reads_count_items_and_read_errors_name_the_codes(pool
     assert_eq!((seen["reads"].clone(), seen["looked_at"].clone()), (json!(3), json!(2)), "{seen}");
     assert_eq!(seen["failed_reads"], json!(1), "one item, however many of its reads failed: {seen}");
     assert_eq!(seen["read_errors"], json!({"POLICY_DENIED": 2}), "{seen}");
-    assert_eq!(finished_row(pool, r.task_id).await["read_errors"], json!({"POLICY_DENIED": 2}));
+    let finished = finished_row(pool, r.task_id).await;
+    assert_eq!(finished["read_errors"], json!({"POLICY_DENIED": 2}));
+    assert_eq!(finished["sorter_error"], Value::Null, "a sorter that answered leaves no error: {finished}");
 }
 
 /// #956: when every read fails (a worker down, egress denied), no item is

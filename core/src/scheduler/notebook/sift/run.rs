@@ -38,6 +38,7 @@ use super::answer::row_class;
 use super::{may_read, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
 use crate::cassandra::review::ChainReviewStage;
 use crate::handoff;
+use crate::scheduler::inner_loop::llm_failure::FAILED_ROW_ERROR_CHARS;
 use crate::cassandra::types::{DataClass, Plan, PlannedStep};
 use crate::scheduler::agent::FormulationMeta;
 use crate::scheduler::audit::SCHEDULER_AUDIT_ACTOR;
@@ -135,6 +136,8 @@ pub(crate) async fn run_sift(
     // The sorter, one item at a time.
     let (mut counts, mut rows, mut stopped, mut sorter_calls) = (Counts::default(), Vec::new(), None, 0u32);
     let mut unread = 0usize;
+    // Why the sorter failed, for `sift.finished` (#956), capped like a `plan.formulate_failed` row's.
+    let mut sorter_error: Option<String> = None;
     // Each failed read's code, counted for the items looked at — or, on a
     // `ReadsFailed` stop, for every read made (#956).
     let mut read_errors = std::collections::BTreeMap::<String, usize>::new();
@@ -189,6 +192,7 @@ pub(crate) async fn run_sift(
                 *failed_llm_calls = failed_llm_calls.saturating_add(1);
                 tracing::warn!(task_id = ctx.task_id, error = %e, "sift: the sorter failed; stopping the sift");
                 stopped = Some(Stop::SorterFailed);
+                sorter_error = Some(e.to_string().chars().take(FAILED_ROW_ERROR_CHARS).collect());
                 break;
             }
         };
@@ -230,7 +234,7 @@ pub(crate) async fn run_sift(
         "looked_at": counts.looked_at, "kept": counts.kept, "withheld": counts.withheld,
         "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
         "unread": reads.unread, "read_errors": reads.errors, "reads_cut": reads.cut, "items_per_read": reads.per_read, "remaining": remaining,
-        "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls,
+        "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls, "sorter_error": sorter_error,
         "ms": started.elapsed().as_millis() as u64,
     });
     audit(r.pool, ACTION_SIFT_FINISHED, finished).await;
