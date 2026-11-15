@@ -4,6 +4,10 @@
 > session (likely a fresh Claude Code) can resume cold. Convention in
 > [`README.md`](README.md); full historical detail in the [`archive/`](archive/)
 > snapshots — most recently
+> [`archive/handover_20261115_959_pre-prune.md`](archive/handover_20261115_959_pre-prune.md)
+> (#959's session section and the #1022 block in full),
+> [`archive/handover_20261114_1027_pre-prune.md`](archive/handover_20261114_1027_pre-prune.md)
+> (#1024's session section in full),
 > [`archive/handover_20261114_1025_pre-prune.md`](archive/handover_20261114_1025_pre-prune.md)
 > (#1025's session section in full),
 > [`archive/handover_20261114_1023_pre-prune.md`](archive/handover_20261114_1023_pre-prune.md)
@@ -13,22 +17,14 @@
 > [`archive/handover_20261110_993d_pre-prune.md`](archive/handover_20261110_993d_pre-prune.md)
 > (#1017's section and the full #993 deletion map),
 > [`archive/handover_20261109_996dgx_pre-prune.md`](archive/handover_20261109_996dgx_pre-prune.md)
-> (#1009's section and the #996 1–4 "Previous" blocks in full),
-> [`archive/handover_20261108_996l3_pre-prune.md`](archive/handover_20261108_996l3_pre-prune.md)
-> (#998's section and the 2026-11-07 "Previous" blocks in full),
-> [`archive/handover_20261108_993s2_pre-prune.md`](archive/handover_20261108_993s2_pre-prune.md)
-> (the 2026-10 "Previous" arcs in full),
-> [`archive/handover_20261107_922s4_pre-prune.md`](archive/handover_20261107_922s4_pre-prune.md)
-> (#987's and the README session in full) and
-> [`archive/handover_20261107_986_pre-prune.md`](archive/handover_20261107_986_pre-prune.md)
-> (#986's session and review round); each snapshot's header names the older ones.
+> (#1009's section and the #996 1–4 "Previous" blocks in full); each snapshot's header names the older ones.
 > ⚠️ **Repoint this line in the same commit as the snapshot.** It has been stale twice.
 
-**Last updated:** 2026-11-15 (#959, #1031's deploy) ·
-**Recent PRs, newest first:** #959's PR (this session), [#1031](https://github.com/hherb/kastellan/pull/1031) (#958, merged, deployed DGX 2026-11-15), [#1030](https://github.com/hherb/kastellan/pull/1030) (issue 1029, merged, deployed DGX 2026-11-14), [#1028](https://github.com/hherb/kastellan/pull/1028) (#1022, issue 1026, merged, deployed DGX 2026-11-14), [#1027](https://github.com/hherb/kastellan/pull/1027) (#1024, merged, deployed DGX 2026-11-14), [#1025](https://github.com/hherb/kastellan/pull/1025) (#1023, #1015, #1016, merged, deployed DGX 2026-11-14), [#1021](https://github.com/hherb/kastellan/pull/1021) (#1019, #1018, merged, deployed DGX 2026-11-14), [#1020](https://github.com/hherb/kastellan/pull/1020) (#993 classic deletion, merged, deployed DGX 2026-11-14), [#1017](https://github.com/hherb/kastellan/pull/1017) (#993 step 4 ports, merged), [#1014](https://github.com/hherb/kastellan/pull/1014) (#1012, merged, deployed DGX 2026-11-09), [#1013](https://github.com/hherb/kastellan/pull/1013) (experiments #19–#20, merged), [#1009](https://github.com/hherb/kastellan/pull/1009) (#996 `invoke_skill`, merged, deployed DGX 2026-11-09), [#1007](https://github.com/hherb/kastellan/pull/1007) (#996 `floor_request`, merged), [#1003](https://github.com/hherb/kastellan/pull/1003) (#996 `python_skill`, merged), [#1002](https://github.com/hherb/kastellan/pull/1002) (#996 `l3_skill`, merged), [#998](https://github.com/hherb/kastellan/pull/998) (#996 `l1_insight`, merged), [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2, merged), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
+**Last updated:** 2026-11-15 (#956's sift tick class + late reads, #1032's deploy) ·
+**Recent PRs, newest first:** #956's PR (this session), [#1032](https://github.com/hherb/kastellan/pull/1032) (#959, merged, deployed DGX 2026-11-15), [#1031](https://github.com/hherb/kastellan/pull/1031) (#958, merged, deployed DGX 2026-11-15), [#1030](https://github.com/hherb/kastellan/pull/1030) (issue 1029, merged, deployed DGX 2026-11-14), [#1028](https://github.com/hherb/kastellan/pull/1028) (#1022, issue 1026, merged, deployed DGX 2026-11-14), [#1027](https://github.com/hherb/kastellan/pull/1027) (#1024, merged, deployed DGX 2026-11-14), [#1025](https://github.com/hherb/kastellan/pull/1025) (#1023, #1015, #1016, merged, deployed DGX 2026-11-14), [#1021](https://github.com/hherb/kastellan/pull/1021) (#1019, #1018, merged, deployed DGX 2026-11-14), [#1020](https://github.com/hherb/kastellan/pull/1020) (#993 classic deletion, merged, deployed DGX 2026-11-14), [#1017](https://github.com/hherb/kastellan/pull/1017) (#993 step 4 ports, merged), [#1014](https://github.com/hherb/kastellan/pull/1014) (#1012, merged, deployed DGX 2026-11-09), [#1013](https://github.com/hherb/kastellan/pull/1013) (experiments #19–#20, merged), [#1009](https://github.com/hherb/kastellan/pull/1009) (#996 `invoke_skill`, merged, deployed DGX 2026-11-09), [#1007](https://github.com/hherb/kastellan/pull/1007) (#996 `floor_request`, merged), [#1003](https://github.com/hherb/kastellan/pull/1003) (#996 `python_skill`, merged), [#1002](https://github.com/hherb/kastellan/pull/1002) (#996 `l3_skill`, merged), [#998](https://github.com/hherb/kastellan/pull/998) (#996 `l1_insight`, merged), [#997](https://github.com/hherb/kastellan/pull/997) (#993 step 2, merged), [#995](https://github.com/hherb/kastellan/pull/995) (#993 step 1, merged), [#994](https://github.com/hherb/kastellan/pull/994) (#922 slice 4a, merged), [#992](https://github.com/hherb/kastellan/pull/992) (README, merged), [#990](https://github.com/hherb/kastellan/pull/990) (#987, merged), [#989](https://github.com/hherb/kastellan/pull/989) (#985, #988, merged), [#986](https://github.com/hherb/kastellan/pull/986) (#922 slice 2, `kastellan-cli session`, merged), [#984](https://github.com/hherb/kastellan/pull/984) (#965 items 4/6/7, merged), [#983](https://github.com/hherb/kastellan/pull/983) (#981, #970, merged), [#982](https://github.com/hherb/kastellan/pull/982) (#980, merged), [#975](https://github.com/hherb/kastellan/pull/975) (manuals, merged), [#974](https://github.com/hherb/kastellan/pull/974) (#973, #970 items, merged), [#972](https://github.com/hherb/kastellan/pull/972) (#965 items 3/8, prompt wording, merged), [#971](https://github.com/hherb/kastellan/pull/971) (#968, stashed sift read, merged), [#969](https://github.com/hherb/kastellan/pull/969) (#967, own table, #965 item 2, merged), [#966](https://github.com/hherb/kastellan/pull/966) (#960 forced table, #964, merged), [#963](https://github.com/hherb/kastellan/pull/963) (#960 by code, merged), [#962](https://github.com/hherb/kastellan/pull/962) (#922 sift `from`, merged), [#961](https://github.com/hherb/kastellan/pull/961) (#922 chain totals, merged), [#957](https://github.com/hherb/kastellan/pull/957) (#922 sift fixes, merged), [#955](https://github.com/hherb/kastellan/pull/955) (#922 `sift`, merged), [#951](https://github.com/hherb/kastellan/pull/951) (#941, #922 slice 1, merged), [#950](https://github.com/hherb/kastellan/pull/950) (#945, merged), [#949](https://github.com/hherb/kastellan/pull/949) (#947, merged); #946 … #795 are in the `960code` and older snapshots.
 Older PRs are in the [`archive/`](archive/) snapshots; **`gh issue list --state open` is the live
 answer** and the only one worth trusting. ·
-**The DGX runs `main` with #1031 (deployed with `upgrade_from_git.sh` 2026-11-15, `NRestarts=0`, Matrix up, installed `agent_notebook.md` sha256-equal to the repo's, both env files identical to their backups `~/.config/kastellan/kastellan.env*.bak-pre1031`) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`, redundant but accepted (⚠️ `classic` there stops the daemon at boot)** (classic ran once for #993, tasks 387–393, experiment #18: 7/7, 2160 s; backups `~/kastellan.env*.bak-pre993`. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
+**The DGX runs `main` with #1032 (deployed with `upgrade_from_git.sh` 2026-11-15, `NRestarts=0`, Matrix up, installed `agent_notebook.md` sha256-equal to the repo's, both env files identical to their backups `~/.config/kastellan/kastellan.env*.bak-pre1032`) and `KASTELLAN_PLANNER_MODE=notebook` in `.local`, redundant but accepted (⚠️ `classic` there stops the daemon at boot)** (classic ran once for #993, tasks 387–393, experiment #18: 7/7, 2160 s; backups `~/kastellan.env*.bak-pre993`. ⚠️ Its `git pull` over SSH fails: run it with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:`; migration 0029 since #955; localmail `62bdec6`, `api_minor` 6) **on kernel 7.0.0-1019, pinned by name in `GRUB_DEFAULT`** — 7.0.0-1024 boot-loops (below); **the Mac runs #917's** (its localmail serves `api_minor` 4: after #949 the mail worker refuses there until it is upgraded). **DGX:**
 `kastellan-guard` active on GPU, core `After=` it; **reboot-proven 2026-10-25** on #908's tree (the
 one restart it cost was the Postgres race #909 fixes) and **again on #917's tree 2026-10-29** —
 core `NRestarts=0`, Postgres waited out in 1017 ms, guard after four `/props` waits, Matrix first try).
@@ -58,30 +54,27 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ## Current state
 
-### This session (2026-11-15, latest): #959, #1031's deploy
+### This session (2026-11-15, latest): two #956 items, #1032's deploy
 
-- **#959:** a sift `over: {"step": n}` continues an earlier sift only if step n's list is still the one that sift
-  went over: `chain::continued` refuses the link when step n succeeded again after it (a failed re-run leaves the
-  list as it was; a scrapbook's rows never change, so `over` a scrapbook is unaffected). The lookup of step n's list
-  is one pure fn, `chain::list_index`, shared with `run::resolve_over`. ⚠️ A re-run giving the **same** list also
-  ends the chain (conservative: the later sift tables on its own). 1 test; 6 of 6 mutants caught, among them the
-  sift-record exclusion, the step filter and `last()` over `first()`, none pinned in unit tests before (the chain
-  fixture's sifts are now stamped for step 1; the review round added a `[Ok, Err]` skill re-run and another step's
-  call).
-- **Deploy:** PR #1031 (#958) on the DGX 2026-11-15 (`NRestarts=0`, Matrix up, env identical to `bak-pre1031`,
-  installed `agent_notebook.md` sha256-equal to the repo's).
+- **A sift's tick carries the class it ran at** (`notebook/run.rs`, `Executed::Dispatched`): the class is now the
+  highest over the call's own record's steps and the declared one, so a `Public` sift over a `Personal` list ticks
+  `Personal` (it ticked `Public`; a resume with no plans to read back would have counted that as the ceiling). For a
+  plain call nothing changes; an invoked skill's tick now covers its steps' classes too.
+- **A sift reply that comes back past the deadline makes no reads** (`sift/run.rs`): it used to dispatch up to
+  `max_reads` and then stop at item 0. The summary's `reads` is now the reads **made** (`outcomes.len()`), not planned;
+  `sift.started`'s `reads` is still the plan's. 2 cases in `sift/tests/review_findings.rs` (inside `the_sift_loop`,
+  so **no libtest count**); the deadline one was mutation-checked (guard removed → "no read was made").
+- **Review fixes:** a late sift's `sift.started` carries `llm_usage`; an invoked skill ticks at its steps' class.
+- **Deploy:** PR #1032 (#959) on the DGX 2026-11-15 (`NRestarts=0`, Matrix up, env identical to `bak-pre1032`,
+  installed `agent_notebook.md` sha256-equal to the repo's). #956 stays open for its other items.
+
+### Previous (2026-11-15): #959 (PR #1032, merged, deployed DGX 2026-11-15) — `over: {"step": n}` continues an earlier sift only if step n's list is still the one it went over (`chain::continued`, `chain::list_index`). ⚠️ A re-run giving the **same** list also ends the chain. Full section: the `959` snapshot.
 
 ### Previous (2026-11-14): #958 (PR #1031, merged, deployed DGX 2026-11-15) — a date column sorts by `table::dates::iso_key` (year-first, `DD.MM.YYYY`, English month names, `13/11/2026`; a following time in UTC when it has an offset); unread cells (`Nov 3`, `03/11/2026`) sort after the dates and the note counts them. ⚠️ The shown cell is unchanged. Full section: this file at #1031 in git history.
 
 ### Previous (2026-11-14): issue 1029 (PR #1030, merged, deployed DGX 2026-11-14) — `render_table` groups rows in **stored** order (as `distinct_kept`), then sorts the groups by `table::first_cell`. ⚠️ A merged group sorts by its **earliest stored** row's cell. Full section: this file at #1030 in git history.
 
-### Previous (2026-11-14): #1022 + issue 1026 (PR #1028, merged, deployed DGX 2026-11-14) — full section: this file at #1028 in git history
-
-- A chain's `distinct` counts by the table's rule; a bare-`id` source carries its tool (`SOURCE_TOOL_KEY`; ⚠️ rows
-  written before have no tag and do not merge with newer ones); the note's `kept`/`withheld` are **items**
-  (`table::items`); a table joining > 1 question names each that stopped (`answer::stop_lines`). ⚠️ An id-less row
-  (`{}`) is one item each, so `kept` can still exceed `looked_at` for those. #1024 stays open for its second half
-  (quote the line in the re-ask).
+### Previous (2026-11-14): #1022 + issue 1026 (PR #1028, merged, deployed DGX 2026-11-14) — a bare-`id` source carries its tool (`SOURCE_TOOL_KEY`; ⚠️ older rows have no tag); `kept`/`withheld` count **items**; each stopped question named (`answer::stop_lines`). ⚠️ An id-less row is one item each. #1024 stays open for its second half (quote the line in the re-ask). Full block: the `959` snapshot.
 
 ### Previous (2026-11-14): #1024, #1023/#1015/#1016, #1019/#1018 (PRs #1027, #1025, #1021, merged, deployed DGX 2026-11-14) — full sections: the `1027`/`1025`/`1023` snapshots. ⚠️ `raw_at_error` is counted from the reply's **first `{`**, column in **bytes**; a failed rewrite answers with the draft; `table::alike` merges one source's rows across sifts (an empty source joins nothing).
 
@@ -97,18 +90,15 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   count**). ⚠️ **Drop a pool `PgListener` before `pool.close()`** (40-min hang). ⚠️ `l3.invoke*` rows carry no
   `task_id`. Filed: 999–1001, 1004–1006, 1010, 1011.
 
-### Previous (2026-11-06 → 08): #993 steps 1–2, #922 slices 2 and 4a, #987, #985/#988 (PRs #997, #995, #994, #990, #989, #986, merged) — what still binds
+### Previous (2026-11-06 → 08): #993 steps 1–2, #922 slices 2/4a, #987, #985/#988, #965 items 4/6/7 (PRs #997 … #984, merged) — what still binds
 
-- `ScriptedNotebook`: a closure picks each reply from `ctx`; ⚠️ a **first reply without `steps` is refused**; every
-  `call_reply` lists its own fresh step id. ⚠️ **The router default is `disable_thinking: true`**, so a scripted daemon
-  happy path is **3 turns**. Since #993 a `.local` that says `classic` **stops the daemon at boot**; neither host sets it.
-- One `PgListener` per process, `MAX_FOLLOWS` **64**; ⚠️ a follow reads state **before** entries and its 3 s poll
-  tick, not the NOTIFYs, makes it correct. ⚠️ **`kastellan-cli` installs a warn-level stderr subscriber** — PG e2es
-  fail instead of skipping once PG is up. ⚠️ **bottie matches the parking marker by substring**
-  ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242)). ⚠️ A test that `claim_one`s must not leave an
-  older task pending.
-
-### Previous (2026-11-06): #965 items 4, 6, 7 (PR #984, merged) — ⚠️ a sift read's allowlist key is `read_key(tool, method)` (**`web-fetch.web.fetch`**); the `chain_distinct` → `totals` pass-through (`sift/run.rs:230`) is untested.
+- `ScriptedNotebook`: ⚠️ a **first reply without `steps` is refused**; each `call_reply` lists a fresh step id; the
+  router default `disable_thinking: true` makes a scripted daemon happy path **3 turns**. One `PgListener` per process,
+  `MAX_FOLLOWS` **64**; ⚠️ a follow reads state before entries, and its 3 s poll tick, not the NOTIFYs, makes it
+  correct. ⚠️ **`kastellan-cli` installs a warn-level stderr subscriber** (PG e2es fail, not skip, once PG is up).
+  ⚠️ **bottie matches the parking marker by substring** ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242)).
+  ⚠️ A test that `claim_one`s must not leave an older task pending. ⚠️ A sift read's allowlist key is
+  `read_key(tool, method)` (**`web-fetch.web.fetch`**); the `chain_distinct` → `totals` pass-through is untested.
 
 ### Previous (2026-11-05 → 06): #981 (PR #983), #980 (PR #982, deployed DGX, measured 378–384: 7/7), manuals (PR #975), #974 — what still binds (prose: the `983`/`981`/`980` snapshots)
 
@@ -263,11 +253,12 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
 
 > Only *open* work is listed. Shipped items move to [Recently merged](#recently-merged) or the ROADMAP.
 
-1. **This session's PR (#959):** review, merge, deploy the DGX (`upgrade_from_git.sh` with the
+1. **This session's PR (#956 items):** review, merge, deploy the DGX (`upgrade_from_git.sh` with the
    `GIT_CONFIG_*` https override; back up both env files; check `NRestarts=0`). Live check owed from #1028: a forced
    multi-sift answer should show one `kept` per item and a stop line per unfinished question. On the next failed
    decode read `raw_at_error` (#1024).
-   Then the open notebook follow-ups: #940 (item 3, or close: operator), #956. **Owed:**
+   Then **#956's remaining items** (failed reads lose their reason, a sorter failure's own audit row, a reused sift
+   number across a resume, the prompt's hard-coded read allowlist, …) and #940 (item 3, or close: operator). **Owed:**
    a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to `api_minor` 6;
    bottie's substring match on the parking line ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242)).
 
@@ -399,7 +390,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#959) | `fix/959-chain-over-result`, primary checkout | **5535 / 0 / 51**, **201** summaries, `BUILD_EXIT=0` `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast`, `--nocapture`, `--test-threads=4`; `[WARN]` 0; log `~/sweep-959.log`. vs `gate-1031-sweep.log` (5534): **+1** core lib, `a_rerun_of_the_listed_step_between_sifts_ends_the_chain` (`sift/chain.rs`) | `CARGO_TARGET_DIR=$HOME/.cargo-clippy-959` (warm from #958's), clean: 5 re-checked `Checking kastellan` | **23** (as before) |
+| **Mac** (#956) | `fix/956-sift-tick-class-deadline`, primary checkout | **5535 / 0 / 51**, **201** summaries, `BUILD_EXIT=0` `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast`, `--nocapture`, `--test-threads=4`; `[WARN]` 0; log `~/sweep-956.log`. vs `~/sweep-959.log` (5535): **+0** — both new cases run inside `the_sift_loop` | `CARGO_TARGET_DIR=$HOME/.cargo-clippy-959` (warm), clean: 5 re-checked `Checking kastellan` | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
@@ -484,13 +475,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#1031** (#958) — merged + deployed DGX 2026-11-15: a date column sorts by date whatever shape names the day.
-- **#1030** (issue 1029) — merged + deployed DGX 2026-11-14: a sorted table groups rows in stored order, as `distinct` counts them.
-- **#1028** (#1022, issue 1026) — merged + deployed DGX 2026-11-14: table counts by item; a bare id carries its tool; each stopped question named.
-- **#1027** (#1024) — merged + deployed DGX 2026-11-14: a failed decode's row keeps `raw_at_error`.
-- **#1025** (#1023, #1015, #1016) — merged + deployed DGX 2026-11-14: a failed rewrite answers with the draft; forced-table counts once per list; the show-back names at most 8.
-- **#1021** (#1019, #1018) — merged 2026-11-13, deployed DGX 2026-11-14: a forced re-ask that calls is not "not a plan"; one source is one table row across sifts.
-- **#1020** (#993 classic deletion) — merged 2026-11-10, deployed DGX 2026-11-14: the classic planner loop is gone; `classic` stops the daemon at boot.
+- **#1032 … #1020** (merged 2026-11-10 → 15, deployed DGX by 2026-11-15; one-liners in the `959` snapshot): #959 a chain does not link across a re-run of the listed step; #958 a date column sorts by date; issue 1029 a sorted table groups in stored order; #1022/issue 1026 table counts by item, a bare id carries its tool; #1024 `raw_at_error`; #1023/#1015/#1016 a failed rewrite answers with the draft; #1019/#1018; #993 the classic loop deleted (`classic` stops the daemon at boot).
 - **#1017 … #984** (merged 2026-11-06 → 09, deployed DGX by 2026-11-09; one-liners in the `1023` snapshot): #993 steps 1, 2 and 4 ports (`ScriptedNotebook`; the daemon e2es and shared-code tests on the notebook); #1012 kept rows accumulate over a run's sifts; #996 1–5 (`invoke_skill`, `floor_request`, `python_skill`, `l3_skill`, `l1_insight`); #922 slices 2 and 4a (`kastellan-cli session`; notebook default); #987 one shared `LISTEN`, cap 64; README (⚠️ restates the manual's chapter 4: change both together); #985/#988; #965 items 4/6/7; #981/#970.
 - **#982 … #950** (merged + deployed DGX 2026-11-02 → 06, measured 301–384): `sift` + the scrapbook (0029), the notebook behind `KASTELLAN_PLANNER_MODE`, bounded planner calls, and the sift/table/forced-answer fixes of #957–#982 (one line each in the ROADMAP's #922 entry); manuals (#975).
 - **#949 … #908** (merged 2026-10-24 → 11-01; #949 … #920 one-liners in the `1019` snapshot, deployed both hosts): deploy docs; dependabot rustls (⚠️ makes `python-exec:dev` stale) and uv; #915's paused-clock pin; `boot_report::record_refusal` + the late-Postgres boot e2e (#914); a guard boot refusal is a thinned row (#912); core waits ≤ 60 s for Postgres (#910); the supervised `kastellan-guard` unit (#908). **#905 / #903 / #901 / #899** (2026-10-23 → 24): health-wait timeouts name the crash-loop evidence; `ServiceStatus::Transitioning`; `uninstall` keeps the unit file / plist on a failed stop; headless launchd `uninstall`, `$HOME` uid check.

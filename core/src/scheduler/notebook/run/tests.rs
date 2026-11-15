@@ -99,6 +99,7 @@ async fn the_notebook_loop() {
     super::agent_raised_tests::a_call_below_its_raised_floor_is_blocked(&pool).await;
     super::agent_raised_tests::a_repeated_calls_floor_request_still_raises_the_floor(&pool).await;
     super::agent_raised_tests::an_invoked_skill_runs_its_steps(&pool).await;
+    super::agent_raised_tests::an_invoked_skills_tick_carries_its_steps_class(&pool).await;
     super::agent_raised_tests::an_unknown_skill_is_refused_and_the_next_turn_replans(&pool).await;
     super::timeout_tests::a_timeout_after_gathering_answers_from_what_was_gathered(&pool).await;
     super::timeout_tests::a_timeout_on_the_answer_turn_fails_naming_what_was_gathered(&pool).await;

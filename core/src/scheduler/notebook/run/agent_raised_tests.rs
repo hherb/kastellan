@@ -257,6 +257,29 @@ async fn invoke_rows(pool: &sqlx::PgPool, action: &str, name: &str) -> Vec<serde
     .unwrap()
 }
 
+/// #956: an invoked skill's tick carries the class its steps ran at — the
+/// raised floor they are stamped with — not the call's declared `Personal`.
+pub(super) async fn an_invoked_skills_tick_carries_its_steps_class(pool: &sqlx::PgPool) {
+    seed_pinned_skill(pool, "fetch_raised").await;
+    let mut call = invoke_call("fetch_raised", "invoices");
+    call["floor_request"] = json!("ClinicalConfidential");
+    let script = Script::new(&[
+        json!({"steps": steps(&[1]), "call": call}),
+        json!({"tick": tick(1, "invoices A and B"), "answer": {"body": "A and B"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 3).await).await;
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"]);
+    let ticks: Vec<serde_json::Value> = kastellan_db::notebook::entries(pool, r.task_id, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == kastellan_db::notebook::EntryKind::Tick)
+        .map(|e| e.payload)
+        .collect();
+    assert_eq!(ticks.len(), 1, "{ticks:?}");
+    assert_eq!(ticks[0]["classification"], "ClinicalConfidential", "{ticks:?}");
+}
+
 /// A call's `invoke_skill` runs the pinned skill's steps (the notebook twin
 /// of the classic `agent_invoke_pinned_skill_expands_and_dispatches`): the
 /// reviewer sees the concrete steps, the next turn sees every step's result,
