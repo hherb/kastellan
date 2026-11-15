@@ -188,10 +188,13 @@ pub(crate) async fn run_sift(
             // A sorter that cannot be reached will not be reached for the
             // next item either: stop, rather than spend the deadline on it.
             // This item is not counted, so `next_from` is where it is.
+            // The call's timeout is cut to the time left, so a failure past
+            // the deadline is the deadline's stop (PR #1036 review).
             Err(e) => {
                 *failed_llm_calls = failed_llm_calls.saturating_add(1);
                 tracing::warn!(task_id = ctx.task_id, error = %e, "sift: the sorter failed; stopping the sift");
-                stopped = Some(Stop::SorterFailed);
+                let late = ctx.deadline.is_some_and(|d| Instant::now() >= d);
+                stopped = Some(if late { Stop::Time } else { Stop::SorterFailed });
                 sorter_error = Some(e.to_string().chars().take(FAILED_ROW_ERROR_CHARS).collect());
                 break;
             }

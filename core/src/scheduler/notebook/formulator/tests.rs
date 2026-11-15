@@ -91,16 +91,22 @@ fn planner_mode_accepts_only_the_notebook() {
 fn boot_names_each_missing_prompt() {
     use crate::scheduler::prompts::{PromptCache, PromptEntry};
     let sorter = crate::scheduler::notebook::sift::router_sorter::SORTER_PROMPT;
-    let cache = |names: &[&str]| {
+    let cache = |entries: &[(&str, &str)]| {
         PromptCache::new_for_test(
-            names.iter().map(|n| (n.to_string(), PromptEntry { sha256: String::new(), content: String::new() })).collect(),
+            entries
+                .iter()
+                .map(|(n, c)| (n.to_string(), PromptEntry { sha256: String::new(), content: c.to_string() }))
+                .collect(),
         )
     };
-    assert_eq!(check_prompts(&cache(&[NOTEBOOK_PROMPT, sorter])), Ok(()));
-    let err = check_prompts(&cache(&[NOTEBOOK_PROMPT])).unwrap_err();
+    assert_eq!(check_prompts(&cache(&[(NOTEBOOK_PROMPT, "p"), (sorter, "s")])), Ok(()));
+    let err = check_prompts(&cache(&[(NOTEBOOK_PROMPT, "p")])).unwrap_err();
     assert!(err.contains("sift_sorter.md") && !err.contains("agent_notebook.md"), "{err}");
     let err = check_prompts(&cache(&[])).unwrap_err();
     assert!(err.contains("agent_notebook.md, sift_sorter.md"), "{err}");
+    // A blank file is as good as none: the sorter would run on no prompt.
+    let err = check_prompts(&cache(&[(NOTEBOOK_PROMPT, "p"), (sorter, " \n")])).unwrap_err();
+    assert!(err.contains("sift_sorter.md") && !err.contains("agent_notebook.md"), "{err}");
 }
 
 /// The sorter learns its whole contract from its prompt: the two reply

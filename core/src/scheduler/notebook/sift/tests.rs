@@ -102,6 +102,7 @@ async fn the_sift_loop() {
     a_read_template_that_names_no_field_says_so(&pool).await;
     a_cancel_during_sorting_ends_the_task_and_keeps_the_rows(&pool).await;
     a_sorter_failure_stops_the_sift_and_its_item_is_next(&pool).await;
+    a_sorter_call_failing_past_the_deadline_is_a_time_stop(&pool).await;
     a_second_sift_over_the_same_step_walks_on_from_next_from(&pool).await;
     a_criterion_the_screen_blocks_leaves_the_ref_and_the_counts(&pool).await;
     an_ordinary_plan_stops_at_its_first_failed_step(&pool).await;

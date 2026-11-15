@@ -49,18 +49,19 @@ pub fn check_planner_mode(value: Option<&str>) -> Result<(), String> {
     }
 }
 
-/// Check that every prompt file the notebook runs on was loaded: its own and
-/// the sift sorter's (#956). Run at boot, so a missing file stops the daemon
-/// with its name instead of failing at the first turn or the first sift item.
+/// Check that every prompt file the notebook runs on was loaded and is not
+/// blank: its own and the sift sorter's (#956). Run at boot, so a missing or
+/// empty file stops the daemon with its name instead of failing at the first
+/// turn, or quietly leaving every sift item undecided.
 pub fn check_prompts(prompts: &PromptCache) -> Result<(), String> {
     let missing: Vec<String> = [NOTEBOOK_PROMPT, SORTER_PROMPT]
         .into_iter()
-        .filter(|n| prompts.get(n).is_none())
+        .filter(|n| !prompts.get(n).is_some_and(|e| !e.content.trim().is_empty()))
         .map(|n| format!("{n}.md"))
         .collect();
     match missing.is_empty() {
         true => Ok(()),
-        false => Err(format!("prompt files missing: {}", missing.join(", "))),
+        false => Err(format!("prompt files missing or empty: {}", missing.join(", "))),
     }
 }
 

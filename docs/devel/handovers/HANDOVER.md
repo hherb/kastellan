@@ -61,7 +61,13 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   read. Test: two assertions in the sift loop (`review_findings.rs`, **no libtest count**).
 - **The daemon checks at boot that `agent_notebook.md` and `sift_sorter.md` were loaded**
   (`notebook::formulator::check_prompts`, called in `main.rs` after the prompt load): a missing one stops the daemon
-  naming the file and the dir, instead of failing the first turn or every sift's first item. +1 unit test.
+  naming the file and the dir, instead of failing the first turn or every sift's first item. ⚠️ A **blank** file
+  counts as missing too (review round). +1 unit test.
+- **Review round:** a sorter call that fails after the deadline has passed stops the sift `time`, not
+  `sorter_failed` (the call's timeout is cut to the time left; `sorter_error` is still kept). Test:
+  `a_sorter_call_failing_past_the_deadline_is_a_time_stop` in the sift loop (no libtest count). Filed
+  [issue 1037](https://github.com/hherb/kastellan/issues/1037): a sorter non-answer (no choice, `max_tokens`, unparsed)
+  is counted as plain `undecided`.
 - **Deploy:** #1034 was already on the DGX at session start (installed 22:23 AEDT 2026-11-15, `NRestarts=0`, env
   identical to `bak-pre1034`, `agent_notebook.md` sha256-equal).
 

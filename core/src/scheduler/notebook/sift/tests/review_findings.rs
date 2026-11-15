@@ -36,6 +36,22 @@ pub(super) async fn a_sorter_failure_stops_the_sift_and_its_item_is_next(pool: &
     assert!(finished["sorter_error"].as_str().is_some_and(|e| e.contains("out of script")), "{finished}");
 }
 
+/// PR #1036 review: the sorter's request timeout is cut to the time left, so
+/// a call that fails once the deadline has passed is the deadline's stop, not
+/// a sorter that cannot be reached.
+pub(super) async fn a_sorter_call_failing_past_the_deadline_is_a_time_stop(pool: &sqlx::PgPool) {
+    // No sorter reply scripted: the first call errs, and only after the deadline.
+    let mut script = Script::new(&three_turns(&["m1", "m2", "m3"], None)).sorting(&[]);
+    script.sort_delay = Duration::from_millis(600);
+    let mut ctx = new_task(pool, 5).await;
+    ctx.deadline = Some(Instant::now() + Duration::from_millis(300));
+    let r = run(pool, &script, ctx).await;
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["stopped"].clone(), seen["remaining"].clone()), (json!("time"), json!(3)), "{seen}");
+    let finished = finished_row(pool, r.task_id).await;
+    assert!(finished["sorter_error"].as_str().is_some_and(|e| e.contains("out of script")), "{finished}");
+}
+
 /// Review finding: a sift's own records are stamped with its step, so a
 /// second sift over the step it ran in must still find the search, not the
 /// first sift's summary — the paging case. A sift with no read takes at
