@@ -9,6 +9,8 @@ use kastellan_llm_router::messages::ChatMessage;
 use kastellan_llm_router::ThinkingPolicy;
 
 use super::sift::config::SiftConfig;
+use super::sift::router_sorter::SORTER_PROMPT;
+use crate::scheduler::prompts::PromptCache;
 use super::sift::sorter::Sorter;
 use crate::scheduler::agent::{AgentError, FormulationMeta, RouterAgent};
 use crate::scheduler::inner_loop::TaskContext;
@@ -44,6 +46,22 @@ pub fn check_planner_mode(value: Option<&str>) -> Result<(), String> {
         Some(other) => Err(format!(
             "KASTELLAN_PLANNER_MODE={other:?} is not a planner mode (expected `notebook`)"
         )),
+    }
+}
+
+/// Check that every prompt file the notebook runs on was loaded and is not
+/// blank: its own and the sift sorter's (#956). Run at boot, so a missing or
+/// empty file stops the daemon with its name instead of failing at the first
+/// turn, or quietly leaving every sift item undecided.
+pub fn check_prompts(prompts: &PromptCache) -> Result<(), String> {
+    let missing: Vec<String> = [NOTEBOOK_PROMPT, SORTER_PROMPT]
+        .into_iter()
+        .filter(|n| !prompts.get(n).is_some_and(|e| !e.content.trim().is_empty()))
+        .map(|n| format!("{n}.md"))
+        .collect();
+    match missing.is_empty() {
+        true => Ok(()),
+        false => Err(format!("prompt files missing or empty: {}", missing.join(", "))),
     }
 }
 

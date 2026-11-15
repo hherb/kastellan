@@ -215,10 +215,11 @@ pub(crate) fn answer_turn_call_detail(
 /// Audit action for a formulator call that produced no plan.
 pub(super) const ACTION_FORMULATE_FAILED: &str = "plan.formulate_failed";
 
-/// Longest router-error text an `agent/plan.formulate_failed` row carries.
-/// The error can embed a backend's response body (already capped at 1 KiB
-/// by the router); the row needs the kind of failure, not the body.
-const FAILED_ROW_ERROR_CHARS: usize = 512;
+/// Longest router-error text an `agent/plan.formulate_failed` row, or a
+/// `sift.finished` row's `sorter_error`, carries. The error can embed a
+/// backend's response body (already capped at 1 KiB by the router); the row
+/// needs the kind of failure, not the body.
+pub(crate) const FAILED_ROW_ERROR_CHARS: usize = 512;
 
 /// Longest head of the model's own reply an `agent/plan.formulate_failed`
 /// row carries (#945). Enough to tell a prose answer from a refusal or a

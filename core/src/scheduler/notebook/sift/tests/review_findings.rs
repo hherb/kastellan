@@ -31,6 +31,25 @@ pub(super) async fn a_sorter_failure_stops_the_sift_and_its_item_is_next(pool: &
     // The answer named no table after a sift that kept a row, so it was shown
     // back once (#960); that answer was usable, so it is no failed call.
     assert_eq!(r.result.failed_llm_calls, 1, "the failed sorter call is counted, the shown-back answer not");
+    // The audit row says why it stopped (#956): the scripted sorter's error.
+    let finished = finished_row(pool, r.task_id).await;
+    assert!(finished["sorter_error"].as_str().is_some_and(|e| e.contains("out of script")), "{finished}");
+}
+
+/// PR #1036 review: the sorter's request timeout is cut to the time left, so
+/// a call that fails once the deadline has passed is the deadline's stop, not
+/// a sorter that cannot be reached.
+pub(super) async fn a_sorter_call_failing_past_the_deadline_is_a_time_stop(pool: &sqlx::PgPool) {
+    // No sorter reply scripted: the first call errs, and only after the deadline.
+    let mut script = Script::new(&three_turns(&["m1", "m2", "m3"], None)).sorting(&[]);
+    script.sort_delay = Duration::from_millis(600);
+    let mut ctx = new_task(pool, 5).await;
+    ctx.deadline = Some(Instant::now() + Duration::from_millis(300));
+    let r = run(pool, &script, ctx).await;
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["stopped"].clone(), seen["remaining"].clone()), (json!("time"), json!(3)), "{seen}");
+    let finished = finished_row(pool, r.task_id).await;
+    assert!(finished["sorter_error"].as_str().is_some_and(|e| e.contains("out of script")), "{finished}");
 }
 
 /// Review finding: a sift's own records are stamped with its step, so a
@@ -355,7 +374,9 @@ pub(super) async fn failed_reads_count_items_and_read_errors_name_the_codes(pool
     assert_eq!((seen["reads"].clone(), seen["looked_at"].clone()), (json!(3), json!(2)), "{seen}");
     assert_eq!(seen["failed_reads"], json!(1), "one item, however many of its reads failed: {seen}");
     assert_eq!(seen["read_errors"], json!({"POLICY_DENIED": 2}), "{seen}");
-    assert_eq!(finished_row(pool, r.task_id).await["read_errors"], json!({"POLICY_DENIED": 2}));
+    let finished = finished_row(pool, r.task_id).await;
+    assert_eq!(finished["read_errors"], json!({"POLICY_DENIED": 2}));
+    assert_eq!(finished["sorter_error"], Value::Null, "a sorter that answered leaves no error: {finished}");
 }
 
 /// #956: when every read fails (a worker down, egress denied), no item is
