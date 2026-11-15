@@ -44,3 +44,19 @@ fn the_list_is_trimmed_and_handoff_fetch_is_always_known() {
     assert_eq!(cfg.read_methods, vec!["mail.search", "handoff.fetch"]);
     assert!(sift_config(None, Some(" , "), &advertised()).is_err(), "an empty list");
 }
+
+#[test]
+fn unset_the_defaults_keep_only_what_is_advertised() {
+    // No mail worker: a default `mail.*` read would fail at dispatch on every item (#956).
+    assert_eq!(sift_config(None, None, &[]).unwrap().read_methods, vec!["handoff.fetch"]);
+    let one = [("mail".to_string(), "mail.get_message".to_string())];
+    assert_eq!(sift_config(None, None, &one).unwrap().read_methods, vec!["mail.get_message", "handoff.fetch"]);
+}
+
+#[test]
+fn the_sift_entry_in_tools_lists_the_reads_it_runs_with() {
+    let cfg = sift_config(None, Some("mail.search,handoff.fetch"), &advertised()).unwrap();
+    let doc = crate::prompt_assembly::assemble::render_tool_doc(&advertised_tool(&cfg));
+    assert!(doc.starts_with("- sift (method: sift.run): "), "{doc}");
+    assert!(doc.ends_with("  allowed: a read may use only: `mail.search`, `handoff.fetch`\n"), "{doc}");
+}

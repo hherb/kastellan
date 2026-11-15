@@ -103,9 +103,10 @@ scrapbook, and lets the answer show them as a table built by code. Two knobs:
   `mail.get_message,mail.get_attachment_text,handoff.fetch`) — the methods a
   sift may read with, comma-separated `tool.method`. Each must be an advertised
   method, except the built-in `handoff.fetch`; `sift` itself and skills are
-  never allowed. The default list is not checked against what is advertised.
-  The planner's prompt names the default list; a refused read tells it the
-  configured one.
+  never allowed. Unset, the default keeps only the methods that are
+  advertised (with no mail worker, just `handoff.fetch`). The planner sees the
+  list the daemon runs with, as the `sift` entry's `allowed` line in its
+  `<tools>`.
 
 A bad value of either stops the daemon at boot, naming the key. A key set to
 the empty string (`KASTELLAN_SIFT_MAX_READS=`) is a bad value, not unset.

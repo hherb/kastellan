@@ -235,12 +235,11 @@ the items that match, with the facts you name, in the task's **scrapbook**:
 - `read` (optional) — the call to make for each item, reviewed before any of
   them runs. A parameter value written `"{name}"` takes that field of the item
   (`{attachments.0}` the first attachment); `{attachments.*}` reads every
-  attachment, skipping images. Only methods the operator allows may be read
-  with — by default `mail.get_message`, `mail.get_attachment_text` and
-  `handoff.fetch`; a refused read names the allowed ones. `read` may be one
-  read or a list of up to 3: each item takes the **first that applies** to
-  it — above, its attachments, or the message itself when it has none to
-  read. Which read applies is decided from the item's fields before any
+  attachment, skipping images. Only the methods the `sift` entry in `<tools>`
+  lists as `allowed` may be read with. `read` may be one read or a list of up
+  to 3: each item takes the **first that applies** to it — above, its
+  attachments, or the message itself when it has none to read. Which read
+  applies is decided from the item's fields before any
   read runs: a read that runs and fails (a scanned PDF) counts its item in
   `failed_reads` and its error code in `read_errors`, and the next read is
   not tried: the item is decided on its hit and its reads that did not fail.

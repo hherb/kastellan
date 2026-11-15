@@ -1,6 +1,8 @@
 //! The sift's two operator knobs (#922, K3c), read once at boot.
 
 use super::params::read_key;
+use crate::prompt_assembly::AdvertisedTool;
+use crate::worker_manifest::ToolDoc;
 
 /// One sift's reads by default: the per-plan cap (security audit F5), so a
 /// sift is one reviewed plan no bigger than any other.
@@ -32,8 +34,11 @@ pub(crate) fn never_a_read(key: &str) -> bool {
 
 /// The config from `KASTELLAN_SIFT_MAX_READS` and `KASTELLAN_SIFT_READ_METHODS`
 /// (each `None` when unset), checked against the advertised `(tool, method)`
-/// pairs. `handoff.fetch` is a built-in, always known. Any bad value is an
-/// error naming its key: the daemon refuses to start rather than guess.
+/// pairs. `handoff.fetch` is a built-in, always known. Unset, the read
+/// methods are the defaults that are advertised: with no mail worker, a
+/// default `mail.*` read would fail at dispatch on every item (#956). Any bad
+/// value is an error naming its key: the daemon refuses to start rather than
+/// guess.
 pub fn sift_config(
     max_reads: Option<&str>,
     methods: Option<&str>,
@@ -46,8 +51,9 @@ pub fn sift_config(
             _ => return Err(format!("KASTELLAN_SIFT_MAX_READS={v:?} is not a whole number of reads above 0")),
         },
     };
+    let known = |m: &str| m == "handoff.fetch" || advertised.iter().any(|(t, am)| read_key(t, am) == m);
     let read_methods = match methods {
-        None => SiftConfig::default().read_methods,
+        None => DEFAULT_READ_METHODS.into_iter().filter(|m| known(m)).map(String::from).collect(),
         Some(v) => {
             let listed: Vec<String> = v.split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect();
             if listed.is_empty() {
@@ -57,8 +63,7 @@ pub fn sift_config(
                 if never_a_read(m) {
                     return Err(format!("KASTELLAN_SIFT_READ_METHODS: `{m}` can never be a sift's read (a sift or a skill)"));
                 }
-                let known = m == "handoff.fetch" || advertised.iter().any(|(t, am)| read_key(t, am) == *m);
-                if !known {
+                if !known(m) {
                     return Err(format!("KASTELLAN_SIFT_READ_METHODS: `{m}` is not an advertised method"));
                 }
             }
@@ -66,6 +71,19 @@ pub fn sift_config(
         }
     };
     Ok(SiftConfig { max_reads, read_methods })
+}
+
+/// The sift's entry in the planner's `<tools>` block (#956): its `allowed`
+/// line names the methods a `read` may use as the daemon runs with them, so
+/// the prompt need not hard-code the default list.
+pub fn advertised_tool(cfg: &SiftConfig) -> AdvertisedTool {
+    let doc = ToolDoc {
+        name: super::SIFT_TOOL,
+        method: super::SIFT_METHOD,
+        summary: "go through a list item by item and keep the items that match (see `sift` above)",
+        params: &[],
+    };
+    AdvertisedTool::with_permitted(doc, "a read may use only", &cfg.read_methods)
 }
 
 #[cfg(test)]
