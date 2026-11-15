@@ -14,7 +14,8 @@
 //!    screen) to the sorter. An item the screen blocks is withheld and never
 //!    sorted (K4). Stop early at the fast lane's deadline, at an operator's
 //!    cancel, or when the sorter fails; the item it failed on is not counted,
-//!    so `next_from` starts there.
+//!    so `next_from` starts there. When every read failed, nothing is sorted:
+//!    an item decided on its hit alone would read as a real answer (#956).
 //! 4. Write the kept and withheld items to the scrapbook (K6), and record the
 //!    sift as one step whose result is a summary of counts and a sample (K9):
 //!    that summary is all the planner sees.
@@ -31,6 +32,7 @@ use super::sorter::{parse_sort_reply, sorter_message, SortReply, SORTER_ITEM_CAP
 use super::summary::{summary, Reads, Stop};
 use super::table::{as_stored, distinct_kept, Counts, SOURCE_TOOL_KEY};
 use super::reads::plan_reads;
+use super::item_views::ReadsMade;
 use super::template::items_at;
 use super::answer::row_class;
 use super::{may_read, SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
@@ -41,8 +43,8 @@ use crate::scheduler::agent::FormulationMeta;
 use crate::scheduler::audit::SCHEDULER_AUDIT_ACTOR;
 use crate::scheduler::inner_loop::execute::{self, ExecState, Executed, StepPolicy};
 use crate::scheduler::inner_loop::{
-    notebook_block_audit_payload, sorter_view, InnerLoopError, Outcome, PlanRecord, SinkBlock, StepDispatcher,
-    StepOutcome, TaskContext,
+    notebook_block_audit_payload, InnerLoopError, Outcome, PlanRecord, SinkBlock, StepDispatcher, StepOutcome,
+    TaskContext,
 };
 use crate::scheduler::notebook::formulator::NotebookFormulator;
 use crate::scheduler::notebook::reply::{CallSpec, NOTEBOOK_STEP_RATIONALE};
@@ -108,7 +110,7 @@ pub(crate) async fn run_sift(
     audit(r.pool, ACTION_SIFT_STARTED, started_payload(ctx, &scrap, &p, items.len(), batch.reads.len(), !reads_run, meta)).await;
 
     // The reads: one reviewed plan, dispatched past any failed read.
-    let (mut outcomes, mut read_tools) = (Vec::new(), Vec::new());
+    let mut made = ReadsMade { outcomes: Vec::new(), tools: Vec::new() };
     if reads_run {
         let plan = reads_plan(call, &p, &batch.reads, class);
         let policy = StepPolicy::SiftReads { cap: cfg.max_reads };
@@ -126,16 +128,24 @@ pub(crate) async fn run_sift(
             }
         }
         let record = ctx.plans.last().expect("review_and_dispatch pushed the reads' record");
-        outcomes = record.outcomes().to_vec();
-        // Each read's tool selects its screen's profile: reads may differ.
-        read_tools = record.plan.steps.iter().map(|s| s.tool.clone()).collect();
+        made.outcomes = record.outcomes().to_vec();
+        made.tools = record.plan.steps.iter().map(|s| s.tool.clone()).collect();
     }
 
     // The sorter, one item at a time.
     let (mut counts, mut rows, mut stopped, mut sorter_calls) = (Counts::default(), Vec::new(), None, 0u32);
     let mut unread = 0usize;
-    let task_id = ctx.task_id;
-    for (item, reads) in items.iter().zip(&batch.per_item) {
+    // Each failed read's code, counted for the items looked at — or, on a
+    // `ReadsFailed` stop, for every read made (#956).
+    let mut read_errors = std::collections::BTreeMap::<String, usize>::new();
+    let mut sort_up_to = items.len();
+    // An item with no read to make is decided on its hit as ever: only a
+    // batch whose every item had a read, and none came back, stops.
+    if made.all_failed() && batch.per_item.iter().all(|r| !r.is_empty()) {
+        // Not one read came back: no item is looked at, `next_from` stays.
+        (stopped, sort_up_to, read_errors) = (Some(Stop::ReadsFailed), 0, made.error_codes());
+    }
+    for (item, reads) in items.iter().zip(&batch.per_item).take(sort_up_to) {
         if ctx.deadline.is_some_and(|d| Instant::now() >= d) {
             stopped = Some(Stop::Time);
             break;
@@ -149,47 +159,28 @@ pub(crate) async fn run_sift(
         // the list applied to it): say so, or the planner takes it as read.
         let unread_item = usize::from(!p.read.is_empty() && reads.is_empty());
         let cap = SORTER_ITEM_CAP / (1 + reads.len());
-        let (mut views, mut blocks, mut failed_reads) = (Vec::new(), Vec::new(), 0usize);
-        let mut view = |tool: &str, v: &Value| match sorter_view(tool, v, cap) {
-            Ok(v) => views.push(v),
-            Err(b) => blocks.push(b),
-        };
-        view(&over.tool, item);
-        for i in reads.clone() {
-            match (outcomes.get(i), read_tools.get(i)) {
-                // A read over the dispatch cap came back as its handoff
-                // placeholder (#968): read it back whole, so the sorter sees
-                // it rendered at its cap, as for any long read.
-                (Some(StepOutcome::Ok(v)), Some(tool)) => match handoff::placeholder_ref(v) {
-                    None => view(tool, v),
-                    Some(h) => match r.dispatcher.stashed(task_id, &h) {
-                        Some(whole) => view(tool, &whole),
-                        // Evicted (past the task's stash budget): sorting the
-                        // placeholder's head as the read would be a silent wrong "no".
-                        None => {
-                            tracing::warn!(task_id, handoff_ref = h.as_str(), "sift: a stashed read is no longer held; counted as a failed read");
-                            failed_reads += 1;
-                        }
-                    },
-                },
-                (Some(StepOutcome::Err { .. }), _) => failed_reads += 1,
-                _ => {}
+        let v = made.item_views(r.dispatcher, ctx.task_id, &over.tool, item, reads.clone(), cap);
+        // Counted only once the item is (below): the one the sorter fails on is not.
+        let mut count_item = |counts: &mut Counts| {
+            counts.looked_at += 1;
+            counts.failed_reads += usize::from(!v.failed.is_empty());
+            unread += unread_item;
+            for code in &v.failed {
+                *read_errors.entry(code.clone()).or_default() += 1;
             }
-        }
+        };
         let row = |kind, fields| NewRow { kind, source: source_of(item, &over.tool), fields, classification: class.as_pascal_str().into() };
-        if !blocks.is_empty() {
+        if !v.blocks.is_empty() {
             // Screened at the sorter's own cap, which can block where the
             // planner's view of the same result did not: audit it here.
-            audit_blocks(r.pool, ctx.task_id, call.step, "sift_item", &blocks).await;
-            counts.looked_at += 1;
-            counts.failed_reads += failed_reads;
-            unread += unread_item;
+            audit_blocks(r.pool, ctx.task_id, call.step, "sift_item", &v.blocks).await;
+            count_item(&mut counts);
             counts.withheld += 1;
             rows.push(row(RowKind::Withheld, json!({})));
             continue;
         }
         sorter_calls += 1;
-        let raw = match sorter.sort(ctx, sorter_message(&p.keep_if, &p.fields, r.now, &views)).await {
+        let raw = match sorter.sort(ctx, sorter_message(&p.keep_if, &p.fields, r.now, &v.views)).await {
             Ok(raw) => raw,
             // A sorter that cannot be reached will not be reached for the
             // next item either: stop, rather than spend the deadline on it.
@@ -201,9 +192,7 @@ pub(crate) async fn run_sift(
                 break;
             }
         };
-        counts.looked_at += 1;
-        counts.failed_reads += failed_reads;
-        unread += unread_item;
+        count_item(&mut counts);
         match parse_sort_reply(&raw, &p.fields) {
             SortReply::Yes(fields) => {
                 counts.kept += 1;
@@ -227,7 +216,7 @@ pub(crate) async fn run_sift(
     for range in batch.per_item.iter().take(counts.looked_at).filter(|r| !r.is_empty()) {
         per_read[batch.reads[range.start].0] += 1;
     }
-    let reads = Reads { made: outcomes.len(), unread, cut: batch.cut, per_read };
+    let reads = Reads { made: made.outcomes.len(), unread, cut: batch.cut, per_read, errors: read_errors };
     let (mut summary, blocks) = summary(&scrap, &p, &counts, &reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.
     if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {
@@ -240,7 +229,7 @@ pub(crate) async fn run_sift(
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "looked_at": counts.looked_at, "kept": counts.kept, "withheld": counts.withheld,
         "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
-        "unread": reads.unread, "reads_cut": reads.cut, "items_per_read": reads.per_read, "remaining": remaining,
+        "unread": reads.unread, "read_errors": reads.errors, "reads_cut": reads.cut, "items_per_read": reads.per_read, "remaining": remaining,
         "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls,
         "ms": started.elapsed().as_millis() as u64,
     });
