@@ -262,13 +262,13 @@ for none may have a wrong placeholder. If a placeholder is wrong, fix it and
 sift again. One sift looks at a limited number of items: when
 `remaining` is above 0, `sift` again with `from` set to `next_from`.
 `stopped` says why it ended early (`time`, or `sorter_failed`: sift again from
-`next_from`; `reads_failed`: every read failed, so nothing was sorted —
-`read_errors` says why: fix the read, or sift without `read`). `read_errors`
-(when present) counts the failed reads by their error `code`. `reads_cut`
-(when present) counts reads of one item that did not fit. When
-`sample_withheld` is true the safety screen withheld the sample, `criterion`
-and `fields`; the ref and the counts still hold. If the sample shows the
-criterion did not work, sift again with a better `keep_if`.
+`next_from`; `reads_failed`: every item had a read and every read failed, so
+nothing was sorted — `read_errors` says why: fix the read, or sift without
+`read`). `read_errors` (when present) counts the failed reads by their error
+`code`. `reads_cut` (when present) counts reads of one item that did not fit.
+When `sample_withheld` is true the safety screen withheld the sample,
+`criterion` and `fields`; the ref and the counts still hold. If the sample
+shows the criterion did not work, sift again with a better `keep_if`.
 A sift `from` the last one's `next_from`, with the same parameters
 otherwise, goes on with it: its result says `continues`, and in this task
 naming the last sift's scrapbook shows the whole chain. Its `chain` counts

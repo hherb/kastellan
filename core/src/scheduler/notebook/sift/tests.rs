@@ -129,6 +129,8 @@ async fn the_sift_loop() {
     a_sift_past_the_deadline_makes_no_reads(&pool).await;
     failed_reads_count_items_and_read_errors_name_the_codes(&pool).await;
     a_sift_whose_every_read_failed_sorts_nothing(&pool).await;
+    a_failed_only_read_beside_an_item_with_none_still_sorts(&pool).await;
+    the_item_the_sorter_failed_on_counts_no_read_error(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {

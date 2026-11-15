@@ -360,16 +360,51 @@ pub(super) async fn failed_reads_count_items_and_read_errors_name_the_codes(pool
 
 /// #956: when every read fails (a worker down, egress denied), no item is
 /// sorted on its hit alone — that would read as a real answer. The sift
-/// stops where it began and says why.
+/// stops where it began (`from`, not 0) and says why.
 pub(super) async fn a_sift_whose_every_read_failed_sorts_nothing(pool: &sqlx::PgPool) {
-    let script = Script::new(&three_turns(&["bad", "bad"], Some(("mail", "mail.read"))));
+    let mut turns = three_turns(&["m0", "bad", "bad"], Some(("mail", "mail.read")));
+    turns[1]["call"]["parameters"]["from"] = json!(1);
+    let script = Script::new(&turns);
     let r = run(pool, &script, new_task(pool, 5).await).await;
     assert!(script.sorted.lock().unwrap().is_empty(), "no item went to the sorter");
     let seen = summary_seen(&script, 2);
     assert_eq!(seen["stopped"], json!("reads_failed"), "{seen}");
-    assert_eq!((seen["looked_at"].clone(), seen["remaining"].clone(), seen["next_from"].clone()), (json!(0), json!(2), json!(0)), "{seen}");
+    assert_eq!((seen["looked_at"].clone(), seen["remaining"].clone(), seen["next_from"].clone()), (json!(0), json!(2), json!(1)), "{seen}");
     assert_eq!(seen["read_errors"], json!({"POLICY_DENIED": 2}), "{seen}");
+    assert_eq!(seen["failed_reads"], json!(0), "it counts items looked at, and none was: {seen}");
     assert!(rows(pool, r.task_id, 2).await.is_empty());
+}
+
+/// #1034 review: an item with no read to make is decided on its hit, so a
+/// batch whose only read failed still sorts — one scanned PDF in 40 mails
+/// must not stop every sift over them.
+pub(super) async fn a_failed_only_read_beside_an_item_with_none_still_sorts(pool: &sqlx::PgPool) {
+    let hits = json!([{"id": "m1", "subject": "about m1", "files": ["bad"]}, {"id": "m2", "subject": "about m2", "files": []}]);
+    let mut call = sift(2, None);
+    call["parameters"]["read"] = json!({"tool": "mail", "method": "mail.read", "parameters": {"id": "{files.*}"}});
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits)}),
+        json!({"tick": tick(1, "listed"), "call": call}),
+        json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "none kept"}}),
+    ])
+    .sorting(&[no(), no()]);
+    run(pool, &script, new_task(pool, 5).await).await;
+    let seen = summary_seen(&script, 2);
+    assert!(seen.get("stopped").is_none(), "{seen}");
+    assert_eq!((seen["reads"].clone(), seen["looked_at"].clone(), seen["unread"].clone()), (json!(1), json!(2), json!(1)), "{seen}");
+    assert_eq!((seen["failed_reads"].clone(), seen["read_errors"].clone()), (json!(1), json!({"POLICY_DENIED": 1})), "{seen}");
+}
+
+/// #1034 review: the item the sorter fails on is not looked at, so its
+/// failed read is in neither `failed_reads` nor `read_errors` — the next
+/// sift, from it, counts it.
+pub(super) async fn the_item_the_sorter_failed_on_counts_no_read_error(pool: &sqlx::PgPool) {
+    let script = Script::new(&three_turns(&["m1", "bad", "m3"], Some(("mail", "mail.read")))).sorting(&[keep(1)]);
+    run(pool, &script, new_task(pool, 5).await).await;
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["stopped"].clone(), seen["looked_at"].clone()), (json!("sorter_failed"), json!(1)), "{seen}");
+    assert_eq!(seen["failed_reads"], json!(0), "{seen}");
+    assert!(seen.get("read_errors").is_none(), "an empty `read_errors` is left out: {seen}");
 }
 
 /// The task's `sift.finished` audit row.

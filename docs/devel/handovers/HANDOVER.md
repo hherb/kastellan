@@ -56,16 +56,19 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### This session (2026-11-15, latest): #956's failed-read item, #1033's deploy
 
-- **A sift says why its reads failed** (`sift/item_views.rs`, new; moved out of `run.rs`, now 490): the summary and
+- **A sift says why its reads failed** (`sift/item_views.rs`, new; moved out of `run.rs`, now 494): the summary and
   `sift.finished` carry `read_errors` (each failed read's `code`, counted; an evicted stash is `HANDOFF_NOT_FOUND`).
   ⚠️ **`failed_reads` now counts items**, not reads (prompt updated).
 - **A sift whose every read failed sorts nothing** (`stopped: "reads_failed"`, `looked_at` 0, `next_from` = its
-  `from`): before, each item was decided on its hit alone, which reads as a real answer. ⚠️ A one-item list whose
-  single read fails now stops too; the planner can sift again without `read`. Not done: the dispatch still makes every
-  read when a worker is down (a stop-after-K in `execute.rs`'s `SiftReads` policy would be the place).
-- 2 new cases + 2 assertions in the sift loop (inside `the_sift_loop`, so **no libtest count** for those), 2 unit tests
-  in `item_views.rs`; both behaviours mutation-checked (all-failed stop off → "no item went to the sorter";
-  per-read count → `failed_reads` 2).
+  `from`): before, each item was decided on its hit alone, which reads as a real answer. Only when **every item had a
+  read**: one with no read to make is decided on its hit as ever, so one scanned PDF among 40 mails still sorts
+  (finalcheck review). ⚠️ A one-item list whose single read fails now stops too; the planner can sift again without
+  `read`. Not done: the dispatch still makes every read when a worker is down (a stop-after-K in `execute.rs`'s
+  `SiftReads` policy would be the place); a mostly-failed or all-evicted batch is still sorted hit-only
+  ([#1035](https://github.com/hherb/kastellan/issues/1035), a design call).
+- 4 new cases + 2 assertions in the sift loop (inside `the_sift_loop`, so **no libtest count** for those), 2 unit tests
+  in `item_views.rs`; mutation-checked (all-failed stop off → "no item went to the sorter"; per-read count →
+  `failed_reads` 2; the every-item-had-a-read guard off → the read-less-item case stops `reads_failed`).
 - **Deploy:** PR #1033 on the DGX 2026-11-15 (`NRestarts=0`, Matrix up, env identical to `bak-pre1033`, installed
   `agent_notebook.md` sha256-equal to the repo's).
 

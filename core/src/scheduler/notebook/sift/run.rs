@@ -135,10 +135,13 @@ pub(crate) async fn run_sift(
     // The sorter, one item at a time.
     let (mut counts, mut rows, mut stopped, mut sorter_calls) = (Counts::default(), Vec::new(), None, 0u32);
     let mut unread = 0usize;
-    // Each failed read's code, counted for the items looked at (#956).
+    // Each failed read's code, counted for the items looked at — or, on a
+    // `ReadsFailed` stop, for every read made (#956).
     let mut read_errors = std::collections::BTreeMap::<String, usize>::new();
     let mut sort_up_to = items.len();
-    if made.all_failed() {
+    // An item with no read to make is decided on its hit as ever: only a
+    // batch whose every item had a read, and none came back, stops.
+    if made.all_failed() && batch.per_item.iter().all(|r| !r.is_empty()) {
         // Not one read came back: no item is looked at, `next_from` stays.
         (stopped, sort_up_to, read_errors) = (Some(Stop::ReadsFailed), 0, made.error_codes());
     }
