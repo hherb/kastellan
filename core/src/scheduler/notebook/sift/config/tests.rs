@@ -58,5 +58,5 @@ fn the_sift_entry_in_tools_lists_the_reads_it_runs_with() {
     let cfg = sift_config(None, Some("mail.search,handoff.fetch"), &advertised()).unwrap();
     let doc = crate::prompt_assembly::assemble::render_tool_doc(&advertised_tool(&cfg));
     assert!(doc.starts_with("- sift (method: sift.run): "), "{doc}");
-    assert!(doc.ends_with("  allowed: a `read` may use only: `mail.search`, `handoff.fetch`\n"), "{doc}");
+    assert!(doc.ends_with("  allowed: a read may use only: `mail.search`, `handoff.fetch`\n"), "{doc}");
 }

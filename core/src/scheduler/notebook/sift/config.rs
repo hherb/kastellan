@@ -83,7 +83,7 @@ pub fn advertised_tool(cfg: &SiftConfig) -> AdvertisedTool {
         summary: "go through a list item by item and keep the items that match (see `sift` above)",
         params: &[],
     };
-    AdvertisedTool::with_permitted(doc, "a `read` may use only", &cfg.read_methods)
+    AdvertisedTool::with_permitted(doc, "a read may use only", &cfg.read_methods)
 }
 
 #[cfg(test)]

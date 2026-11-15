@@ -28,9 +28,12 @@
 //!
 //! That routing is enforced by the type, not by convention: `allowed` is a
 //! private field and [`render_allowed_values`] is module-private, so the only
-//! way to obtain an [`AdvertisedTool`] carrying a permitted set is
-//! [`AdvertisedTool::with_allowlist`], which escapes. A caller cannot hand the
-//! prompt raw `tool_allowlists` text even by mistake.
+//! constructors that put values on the line ([`AdvertisedTool::with_allowlist`]
+//! and [`AdvertisedTool::with_permitted`]) escape each one;
+//! [`AdvertisedTool::with_opaque_allowlist`] renders a count, no values. A
+//! caller cannot hand the prompt raw `tool_allowlists` text even by mistake.
+//! `with_permitted`'s `lead` is the one unescaped string: callers pass a
+//! compiled-in literal.
 //!
 //! One function does hand out raw text and is worth knowing about when auditing
 //! that invariant: [`select_advertised`]'s `withheld` half is deliberately
