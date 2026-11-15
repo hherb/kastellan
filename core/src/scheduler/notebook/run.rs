@@ -263,7 +263,7 @@ pub(crate) async fn run_notebook_to_terminal(
                 // An invoke has no step until `execute` expands it: compared by
                 // its directive, or every repeat would re-run the skill (#996).
                 let repeated = match &plan.invoke_skill {
-                    Some(d) => repeat::already_invoked(&ctx.plans, d, held).then(|| format!("invoke_skill {}", d.name)),
+                    Some(d) => repeat::already_invoked(&ctx.plans, d, held).then(|| (format!("invoke_skill {}", d.name), None)),
                     None => plan
                         .steps
                         .first()
@@ -274,17 +274,19 @@ pub(crate) async fn run_notebook_to_terminal(
                             }
                             s
                         })
-                        .filter(|s| repeat::already_made(&ctx.plans, s, held))
-                        .map(|s| s.method),
+                        .and_then(|s| match repeat::already_made(&ctx.plans, &s, held)? {
+                            repeat::Made::Shown => Some((s.method, None)),
+                            repeat::Made::Stashed(h) => Some((s.method, Some(h))),
+                        }),
                 };
-                if let Some(method) = repeated {
+                if let Some((method, stash)) = repeated {
                     tracing::info!(task_id = ctx.task_id, method = %method, "notebook: repeated call not dispatched");
                     // Not dispatched, but its `floor_request` still binds: a
                     // raise only tightens review, and dropping it would let
                     // the answer go out below the class the agent declared.
                     crate::scheduler::inner_loop::apply_floor_raise(&mut ctx, &plan);
                     audit_discarded_turn(pool, &ctx, "repeated_call", Some(&method), &meta).await;
-                    ctx.blocks.push(repeat::repeated_call_reason(&method));
+                    ctx.blocks.push(repeat::repeated_call_reason(&method, stash.as_ref()));
                     replan_due = true;
                     continue;
                 }
@@ -358,7 +360,7 @@ pub(crate) async fn run_notebook_to_terminal(
                     let detail = ctx.blocks.get(blocks_before..).unwrap_or_default().join("; ");
                     let payload = FailedStepPayload {
                         step: call.step,
-                        code: "BLOCKED".into(),
+                        code: again_code(ctx.blocks.get(blocks_before..).unwrap_or_default()).into(),
                         detail: clamp(&detail),
                         classification: ctx.classification_floor,
                     };
@@ -391,6 +393,20 @@ pub(crate) async fn run_notebook_to_terminal(
                 last_call = Some(LastCall { step: call.step, classification, failed });
             }
         }
+    }
+}
+
+/// The `failed_step` code for a call that was not run: a refused sift or a
+/// rejected invoke says so, rather than reading as a reviewer block (#956).
+/// `blocks` are the reasons this call pushed. Pure.
+fn again_code(blocks: &[String]) -> &'static str {
+    let all = |prefix: &str| !blocks.is_empty() && blocks.iter().all(|b| b.starts_with(prefix));
+    if all(sift::run::SIFT_REFUSED_BLOCK) {
+        "SIFT_REFUSED"
+    } else if all(execute::INVOKE_REJECTED_BLOCK) {
+        "INVOKE_REJECTED"
+    } else {
+        "BLOCKED"
     }
 }
 

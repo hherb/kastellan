@@ -349,7 +349,7 @@ pub(super) async fn an_unknown_skill_is_refused_and_the_next_turn_replans(pool: 
     assert_eq!(invoke_rows(pool, "l3.invoke_rejected", "no_such_skill").await.len(), 1);
     let next = &script.messages()[1];
     assert!(next.contains("invoke_rejected"), "the refusal is shown back: {next}");
-    assert!(kinds(pool, r.task_id).await.contains(&kastellan_db::notebook::EntryKind::FailedStep));
+    assert_eq!(failed_codes(pool, r.task_id).await, ["INVOKE_REJECTED"]);
 
     // A PINNED skill whose tool is no longer registered is refused at expand
     // time too (`agent_invoke_pinned_skill_with_unregistered_tool_refuses`'s

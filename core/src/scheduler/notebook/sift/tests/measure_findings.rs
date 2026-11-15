@@ -348,6 +348,29 @@ pub(super) async fn a_sift_over_a_purged_stash_says_how_and_the_call_is_made_aga
     assert_eq!(rows(pool, r.task_id, 5).await.len(), 1);
 }
 
+/// #956 (DGX Q6, 35 discarded turns): a repeat of a call whose result is
+/// stashed and still held is not run, and the reason names the stash rather
+/// than "its facts belong in your findings" — the model saw only the
+/// placeholder.
+pub(super) async fn a_repeat_of_a_held_stash_names_it(pool: &sqlx::PgPool) {
+    let mut first = search(1, hits(&["m1"]));
+    first["parameters"]["stash"] = json!(true);
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": first.clone()}),
+        json!({"call": first}),
+        json!({"infeasible": {"reason": "seen"}}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search"], "the repeat never ran");
+    // The ref the planner was shown with the first result.
+    let shown = &script.messages()[1];
+    let at = shown.find("sha256:").expect("the placeholder's ref is shown");
+    let stash = &shown[at..at + 7 + 64];
+    let v: Value = serde_json::from_str(&script.messages()[2]).unwrap();
+    let block = v["blocks"][0].as_str().unwrap();
+    assert!(block.starts_with("repeated call:") && block.contains(stash) && !block.contains("findings"), "{block}");
+}
+
 /// #960 item 1 (DGX tasks 308, 309, 316): a table named with no
 /// `order_by` came out in the order the items were found. With a `date`
 /// field it is newest first — and an `order_by` named still wins (review

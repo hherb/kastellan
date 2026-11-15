@@ -163,6 +163,7 @@ async fn a_blocked_call_is_a_failed_step(pool: &sqlx::PgPool) {
     use EntryKind::*;
     assert_eq!(kinds(pool, r.task_id).await, vec![Steps, FailedStep, Tick, Answer]);
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["ok"], "a blocked call never runs");
+    assert_eq!(failed_codes(pool, r.task_id).await, ["BLOCKED"]);
     let v: Value = serde_json::from_str(&script.messages()[1]).unwrap();
     assert_eq!(v["blocks"][0], "forbidden tool", "the replan turn sees why");
 }

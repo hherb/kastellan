@@ -14,6 +14,9 @@ use super::*;
 use crate::cassandra::types::Plan;
 use crate::scheduler::agent::FormulationMeta;
 
+/// How a rejected invoke's block begins; read by `notebook::run::again_code`.
+pub(crate) const INVOKE_REJECTED_BLOCK: &str = "invoke_rejected: ";
+
 /// The loop counters the moved code reads and bumps.
 #[derive(Debug, Default)]
 pub(crate) struct ExecState {
@@ -162,7 +165,7 @@ pub(crate) async fn review_and_dispatch(
         match expand_invoke_skill(pool, dispatcher, &plan, resolved.ceiling).await? {
             InvokeExpansion::Refused(reasons) => {
                 for r in &reasons {
-                    ctx.blocks.push(format!("invoke_rejected: {r}"));
+                    ctx.blocks.push(format!("{INVOKE_REJECTED_BLOCK}{r}"));
                 }
                 return Ok(Executed::Again); // bounded by plan_count cap on next iter
             }

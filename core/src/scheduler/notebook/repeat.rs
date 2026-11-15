@@ -15,7 +15,10 @@
 //!
 //! A call whose result was handoff-stashed and is no longer held (purged at
 //! a suspend, or evicted) is not a repeat: its result is gone, so making it
-//! again is the only way back to it (#964).
+//! again is the only way back to it (#964). One still held is named in the
+//! reason: the model saw only its placeholder, so "its facts belong in your
+//! findings" would send it looking for facts it never had (DGX Q6 discarded
+//! 35 turns that way, #956).
 
 use serde_json::Value;
 
@@ -23,17 +26,34 @@ use crate::cassandra::types::{InvokeDirective, PlannedStep};
 use crate::handoff::{self, HandoffRef};
 use crate::scheduler::inner_loop::{PlanRecord, StepOutcome};
 
-/// The block reason shown to the model for a repeated call.
-pub(crate) fn repeated_call_reason(method: &str) -> String {
-    format!(
-        "repeated call: `{method}` with these exact parameters was already made in this task, so it was not \
-         run again — its facts belong in your findings; continue from them, or make a different call"
-    )
+/// The block reason shown to the model for a repeated call. `stash` is the
+/// earlier result's handoff ref when it was stashed whole rather than shown.
+pub(crate) fn repeated_call_reason(method: &str, stash: Option<&HandoffRef>) -> String {
+    let head = format!("repeated call: `{method}` with these exact parameters was already made in this task, so it was not run again");
+    match stash {
+        None => format!("{head} — its facts belong in your findings; continue from them, or make a different call"),
+        Some(h) => format!(
+            "{head} — its result was too big to show and is stashed whole as handoff_ref `{}`: read the rest as \
+             the <handoff> block describes, or sift over that step's result",
+            h.as_str()
+        ),
+    }
+}
+
+/// How an earlier identical call's result reached the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Made {
+    /// Its result was shown.
+    Shown,
+    /// Its result was stashed whole and is still held: the model saw only
+    /// the placeholder.
+    Stashed(HandoffRef),
 }
 
 /// Was `step` already dispatched in this task, and did it succeed with a
-/// result still to hand? `held` says whether a stash is still held. Pure.
-pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep, held: impl Fn(&HandoffRef) -> bool) -> bool {
+/// result still to hand? `held` says whether a stash is still held. `None`
+/// means the call may be made. Pure.
+pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep, held: impl Fn(&HandoffRef) -> bool) -> Option<Made> {
     let key = call_key(step);
     // A sift's reads reached the planner only as the sift's counts, so they
     // do not count: reading one of those items is a first read.
@@ -41,9 +61,12 @@ pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep, held: impl 
         .iter()
         .filter(|r| !r.plan.decision.starts_with(crate::scheduler::notebook::sift::SIFT_READS_DECISION))
         .flat_map(|r| r.plan.steps.iter().zip(r.outcomes()))
-        .any(|(s, o)| match o {
-            StepOutcome::Ok(v) => call_key(s) == key && handoff::placeholder_ref(v).map_or(true, |h| held(&h)),
-            _ => false,
+        .find_map(|(s, o)| match o {
+            StepOutcome::Ok(v) if call_key(s) == key => match handoff::placeholder_ref(v) {
+                None => Some(Made::Shown),
+                Some(h) => held(&h).then_some(Made::Stashed(h)),
+            },
+            _ => None,
         })
 }
 
@@ -83,7 +106,7 @@ mod tests {
     use serde_json::json;
 
     fn made(plans: &[PlanRecord], step: &PlannedStep) -> bool {
-        already_made(plans, step, |_| true)
+        already_made(plans, step, |_| true).is_some()
     }
 
     fn step(method: &str, params: Value) -> PlannedStep {
@@ -198,8 +221,21 @@ mod tests {
         let cache = crate::handoff::HandoffCache::new();
         let search = step("mail.search", json!({"query": "invoice"}));
         let placeholder = cache.stash_if_oversized(1, &json!({"results": []}), 0).expect("cap 0").placeholder;
+        let h = crate::handoff::placeholder_ref(&placeholder).expect("a placeholder");
         let plans = vec![record_with(search.clone(), vec![StepOutcome::Ok(placeholder)])];
-        assert!(already_made(&plans, &search, |_| true), "held");
-        assert!(!already_made(&plans, &search, |_| false), "gone");
+        assert_eq!(already_made(&plans, &search, |_| true), Some(Made::Stashed(h)), "held");
+        assert_eq!(already_made(&plans, &search, |_| false), None, "gone");
+    }
+
+    /// #956: a held stash is named in the reason, because the model saw only
+    /// its placeholder and has no facts from it to continue from.
+    #[test]
+    fn the_reason_names_a_held_stash() {
+        let h = HandoffRef::of(b"x");
+        let stashed = repeated_call_reason("mail.search", Some(&h));
+        assert!(stashed.contains(h.as_str()) && stashed.contains("<handoff>"), "{stashed}");
+        assert!(!stashed.contains("findings"), "{stashed}");
+        let shown = repeated_call_reason("mail.search", None);
+        assert!(shown.contains("findings") && !shown.contains("handoff"), "{shown}");
     }
 }
