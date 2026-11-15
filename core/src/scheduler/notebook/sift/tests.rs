@@ -208,7 +208,8 @@ async fn a_blocked_sift_is_a_failed_step_and_writes_no_rows(pool: &sqlx::PgPool)
     ]);
     script.sift_cfg.read_methods.push("forbidden.read".into());
     let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert!(kinds(pool, r.task_id).await.contains(&EntryKind::FailedStep));
+    // A reviewer block on a sift's reads is a block, not a refused sift.
+    assert_eq!(failed_codes(pool, r.task_id).await, ["BLOCKED"]);
     assert!(rows(pool, r.task_id, 2).await.is_empty());
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search"], "no read of a blocked sift ran");
     assert!(script.sorted.lock().unwrap().is_empty());

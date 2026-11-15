@@ -62,11 +62,14 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   sees `blocks`): this is the record's correctness. Harness helper `failed_codes`.
 - **The repeat guard tells a held stash apart** (`repeat::already_made` → `Option<Made>`, `Made::Stashed(ref)`): the
   reason names the `handoff_ref` and how to read it, not "its facts belong in your findings" (DGX Q6: 35 discarded
-  turns). Invokes keep the old wording. +1 unit test (`the_reason_names_a_held_stash`); the integration case is inside
-  `the_sift_loop`. Both changes mutant-checked (each mutant red).
+  turns). A repeated `invoke_skill` with a held stashed step says the same (`repeat::already_invoked` →
+  `Option<Made>` too, review round). +3 unit tests (`the_reason_names_a_held_stash`,
+  `a_gone_stash_gives_way_to_a_later_identical_call`, `the_failed_step_code_names_why`); the integration case is
+  inside `the_sift_loop`, and a reviewer-blocked sift is pinned `BLOCKED`. Changes mutant-checked (each mutant red).
 - **Not done:** the mid-sift DB error item — `sift/run.rs` is **505**, split it first; and if the DB is failing, the
   `sift.finished` row most likely fails too. `inner_loop/execute.rs` 509 → **512** (one const).
-- **Deploy:** #1038 deployed to the DGX at session start; measured #25–#26 (below / the experiments notes).
+- **Deploy:** #1038 deployed to the DGX at session start. ⚠️ **Not re-measured yet**: its two `~/requery7.sh` runs
+  (experiments #25–#26) are owed.
 
 ### Previous (2026-11-15): #956 read allowlist (PR #1038, merged, deployed DGX 2026-11-16) — unset `KASTELLAN_SIFT_READ_METHODS` keeps only the advertised methods (`sift::config::sift_config`); the planner's `<tools>` lists the sift with its read methods (`sift::config::advertised_tool`), the prompt points there. `prompt_assembly/allowed_values.rs` 633 → 351 (tests moved). Full section: this file at #1038 in git history.
 
@@ -355,7 +358,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its new leg in `mail_live_shape_e2e/hit_fields.rs` (a `#[path]` module); move the next one there too, or split. ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-`core/src/scheduler/notebook/run/tests.rs` **555**: #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
+`core/src/scheduler/notebook/run/tests.rs` **557** (`run.rs` 487, its `again_code` test inline to keep it so): #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).
@@ -392,7 +395,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (#956 refused sift + repeat stash) | `fix/956-refused-sift-repeat-guard`, primary checkout | **5541 / 0 / 51**, **201** summaries, `BUILD_EXIT=0` `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast`, `--nocapture`, `--test-threads=4`; `[WARN]` 0; log `~/sweep-956e.log`. vs `~/sweep-956d.log` (5540): **+1**, `repeat::tests::the_reason_names_a_held_stash` (the new stash case runs inside `the_sift_loop`) | `CARGO_TARGET_DIR=$HOME/.cargo-clippy-959` (warm), clean: 5 re-checked `Checking kastellan`, `kastellan-core` among them | **23** (as before) |
+| **Mac** (#956 refused sift + repeat stash) | `fix/956-refused-sift-repeat-guard`, primary checkout | **5543 / 0 / 51**, **201** summaries, `BUILD_EXIT=0` `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast`, `--nocapture`, `--test-threads=4`; `[WARN]` 0; log `~/sweep-1040.log` (review round). vs `~/sweep-956d.log` (5540): **+3**, `repeat::tests::{the_reason_names_a_held_stash, a_gone_stash_gives_way_to_a_later_identical_call}` and `run::again_code_tests::the_failed_step_code_names_why` (the new stash case runs inside `the_sift_loop`) | `CARGO_TARGET_DIR=$HOME/.cargo-clippy-959` (warm), clean: 5 re-checked `Checking kastellan`, `kastellan-core` among them | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.
@@ -477,7 +480,7 @@ Postgres role, its own scratch FS, and the allowlisted endpoints for the *one* c
 
 Newest first; full prose in the [`archive/`](archive/) snapshots and git history.
 
-- **#1038 … #1020** (merged 2026-11-10 → 15, deployed DGX by 2026-11-16; one-liners in the `959` snapshot and this file's Previous lines): #1038 the sift's default reads are the advertised ones; #1036/#1034/#1033 five #956 items; #959 a chain does not link across a re-run of the listed step; #958 a date column sorts by date; issue 1029 a sorted table groups in stored order; #1022/issue 1026 table counts by item, a bare id carries its tool; #1024 `raw_at_error`; #1023/#1015/#1016 a failed rewrite answers with the draft; #1019/#1018; #993 the classic loop deleted (`classic` stops the daemon at boot).
+- **#1038 … #1020** (merged 2026-11-10 → 16, deployed DGX by 2026-11-16; one-liners in the `959` snapshot and this file's Previous lines): #1038 the sift's default reads are the advertised ones; #1036/#1034/#1033 five #956 items; #959 a chain does not link across a re-run of the listed step; #958 a date column sorts by date; issue 1029 a sorted table groups in stored order; #1022/issue 1026 table counts by item, a bare id carries its tool; #1024 `raw_at_error`; #1023/#1015/#1016 a failed rewrite answers with the draft; #1019/#1018; #993 the classic loop deleted (`classic` stops the daemon at boot).
 - **#1017 … #984** (merged 2026-11-06 → 09, deployed DGX by 2026-11-09; one-liners in the `1023` snapshot): #993 steps 1, 2 and 4 ports (`ScriptedNotebook`; the daemon e2es and shared-code tests on the notebook); #1012 kept rows accumulate over a run's sifts; #996 1–5 (`invoke_skill`, `floor_request`, `python_skill`, `l3_skill`, `l1_insight`); #922 slices 2 and 4a (`kastellan-cli session`; notebook default); #987 one shared `LISTEN`, cap 64; README (⚠️ restates the manual's chapter 4: change both together); #985/#988; #965 items 4/6/7; #981/#970.
 - **#982 … #950** (merged + deployed DGX 2026-11-02 → 06, measured 301–384): `sift` + the scrapbook (0029), the notebook behind `KASTELLAN_PLANNER_MODE`, bounded planner calls, and the sift/table/forced-answer fixes of #957–#982 (one line each in the ROADMAP's #922 entry); manuals (#975).
 - **#949 … #908** (merged 2026-10-24 → 11-01; #949 … #920 one-liners in the `1019` snapshot, deployed both hosts): deploy docs; dependabot rustls (⚠️ makes `python-exec:dev` stale) and uv; #915's paused-clock pin; `boot_report::record_refusal` + the late-Postgres boot e2e (#914); a guard boot refusal is a thinned row (#912); core waits ≤ 60 s for Postgres (#910); the supervised `kastellan-guard` unit (#908). **#905 / #903 / #901 / #899** (2026-10-23 → 24): health-wait timeouts name the crash-loop evidence; `ServiceStatus::Transitioning`; `uninstall` keeps the unit file / plist on a failed stop; headless launchd `uninstall`, `$HOME` uid check.

@@ -26,13 +26,13 @@ use crate::cassandra::types::{InvokeDirective, PlannedStep};
 use crate::handoff::{self, HandoffRef};
 use crate::scheduler::inner_loop::{PlanRecord, StepOutcome};
 
-/// The block reason shown to the model for a repeated call. `stash` is the
-/// earlier result's handoff ref when it was stashed whole rather than shown.
-pub(crate) fn repeated_call_reason(method: &str, stash: Option<&HandoffRef>) -> String {
+/// The block reason shown to the model for a repeated call: a result
+/// stashed whole is named, since the model saw only its placeholder.
+pub(crate) fn repeated_call_reason(method: &str, made: &Made) -> String {
     let head = format!("repeated call: `{method}` with these exact parameters was already made in this task, so it was not run again");
-    match stash {
-        None => format!("{head} — its facts belong in your findings; continue from them, or make a different call"),
-        Some(h) => format!(
+    match made {
+        Made::Shown => format!("{head} — its facts belong in your findings; continue from them, or make a different call"),
+        Made::Stashed(h) => format!(
             "{head} — its result was too big to show and is stashed whole as handoff_ref `{}`: read the rest as \
              the <handoff> block describes, or sift over that step's result",
             h.as_str()
@@ -73,13 +73,26 @@ pub(crate) fn already_made(plans: &[PlanRecord], step: &PlannedStep, held: impl 
 /// Did this task already run skill `d` with the same args, every step
 /// succeeding with a result still to hand (#996)? An invoke plan has no step
 /// of its own to compare until `execute` expands it, so it is compared by
-/// its directive; one that failed partway may be run again. Pure.
-pub(crate) fn already_invoked(plans: &[PlanRecord], d: &InvokeDirective, held: impl Fn(&HandoffRef) -> bool) -> bool {
+/// its directive; one that failed partway may be run again. A step stashed
+/// whole makes it `Made::Stashed` (the first such ref). Pure.
+pub(crate) fn already_invoked(plans: &[PlanRecord], d: &InvokeDirective, held: impl Fn(&HandoffRef) -> bool) -> Option<Made> {
     let same = |p: &InvokeDirective| p.name == d.name && p.args == d.args && textual(&p.params) == textual(&d.params);
-    plans.iter().filter(|r| r.plan.invoke_skill.as_ref().is_some_and(same)).any(|r| {
-        !r.outcomes().is_empty()
-            && r.outcomes().len() == r.plan.steps.len()
-            && r.outcomes().iter().all(|o| matches!(o, StepOutcome::Ok(v) if handoff::placeholder_ref(v).map_or(true, |h| held(&h))))
+    plans.iter().filter(|r| r.plan.invoke_skill.as_ref().is_some_and(same)).find_map(|r| {
+        let outcomes = r.outcomes();
+        if outcomes.is_empty() || outcomes.len() != r.plan.steps.len() {
+            return None;
+        }
+        let mut stash = None;
+        for o in outcomes {
+            let StepOutcome::Ok(v) = o else { return None };
+            if let Some(h) = handoff::placeholder_ref(v) {
+                if !held(&h) {
+                    return None;
+                }
+                stash.get_or_insert(h);
+            }
+        }
+        Some(stash.map_or(Made::Shown, Made::Stashed))
     })
 }
 
@@ -160,16 +173,19 @@ mod tests {
     fn a_skill_run_whole_is_a_repeat() {
         let ok = || StepOutcome::Ok(json!({}));
         let plans = vec![invoked("s", "x", vec![ok(), ok()])];
-        assert!(already_invoked(&plans, &directive("s", "x"), |_| true));
-        assert!(!already_invoked(&plans, &directive("s", "y"), |_| true));
-        assert!(!already_invoked(&plans, &directive("t", "x"), |_| true));
+        assert!(already_invoked(&plans, &directive("s", "x"), |_| true).is_some());
+        assert!(!already_invoked(&plans, &directive("s", "y"), |_| true).is_some());
+        assert!(!already_invoked(&plans, &directive("t", "x"), |_| true).is_some());
         let failed = StepOutcome::Err { code: "E".into(), detail: "d".into() };
-        assert!(!already_invoked(&[invoked("s", "x", vec![ok(), failed])], &directive("s", "x"), |_| true));
+        assert!(!already_invoked(&[invoked("s", "x", vec![ok(), failed])], &directive("s", "x"), |_| true).is_some());
         let cache = crate::handoff::HandoffCache::new();
         let placeholder = cache.stash_if_oversized(1, &json!({"results": []}), 0).expect("cap 0").placeholder;
+        let h = crate::handoff::placeholder_ref(&placeholder).expect("a placeholder");
         let stashed = vec![invoked("s", "x", vec![ok(), StepOutcome::Ok(placeholder)])];
-        assert!(already_invoked(&stashed, &directive("s", "x"), |_| true));
-        assert!(!already_invoked(&stashed, &directive("s", "x"), |_| false));
+        // #956: a held stash is named, as for a single call.
+        assert_eq!(already_invoked(&stashed, &directive("s", "x"), |_| true), Some(Made::Stashed(h)));
+        assert_eq!(already_invoked(&plans, &directive("s", "x"), |_| true), Some(Made::Shown));
+        assert!(!already_invoked(&stashed, &directive("s", "x"), |_| false).is_some());
     }
 
     #[test]
@@ -227,15 +243,31 @@ mod tests {
         assert_eq!(already_made(&plans, &search, |_| false), None, "gone");
     }
 
+    /// Made, purged, made again (#964): the gone stash is passed over and
+    /// the later call decides how the reason reads.
+    #[test]
+    fn a_gone_stash_gives_way_to_a_later_identical_call() {
+        let cache = crate::handoff::HandoffCache::new();
+        let search = step("mail.search", json!({"query": "invoice"}));
+        let stash = |n: u64| cache.stash_if_oversized(1, &json!({"results": [n]}), 0).expect("cap 0").placeholder;
+        let (gone, later) = (stash(1), stash(2));
+        let h2 = crate::handoff::placeholder_ref(&later).expect("a placeholder");
+        let only_h2 = |h: &HandoffRef| *h == h2;
+        let shown_after = vec![record_with(search.clone(), vec![StepOutcome::Ok(gone.clone())]), record(search.clone(), true)];
+        assert_eq!(already_made(&shown_after, &search, only_h2), Some(Made::Shown));
+        let stashed_after = vec![record_with(search.clone(), vec![StepOutcome::Ok(gone)]), record_with(search.clone(), vec![StepOutcome::Ok(later)])];
+        assert_eq!(already_made(&stashed_after, &search, only_h2), Some(Made::Stashed(h2.clone())));
+    }
+
     /// #956: a held stash is named in the reason, because the model saw only
     /// its placeholder and has no facts from it to continue from.
     #[test]
     fn the_reason_names_a_held_stash() {
         let h = HandoffRef::of(b"x");
-        let stashed = repeated_call_reason("mail.search", Some(&h));
+        let stashed = repeated_call_reason("mail.search", &Made::Stashed(h.clone()));
         assert!(stashed.contains(h.as_str()) && stashed.contains("<handoff>"), "{stashed}");
         assert!(!stashed.contains("findings"), "{stashed}");
-        let shown = repeated_call_reason("mail.search", None);
+        let shown = repeated_call_reason("mail.search", &Made::Shown);
         assert!(shown.contains("findings") && !shown.contains("handoff"), "{shown}");
     }
 }
