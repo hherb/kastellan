@@ -199,7 +199,7 @@ scrapbook only if that turn is in its conversation window.
 |----------|---------|--------|
 | `KASTELLAN_PLANNER_MODE` | `notebook` | Only `notebook` (or unset). `classic` — the retired loop (#993) — or any other value stops the daemon at boot. |
 | `KASTELLAN_SIFT_MAX_READS` | `64` | Most reads (and items) one sift takes. Must be > 0. |
-| `KASTELLAN_SIFT_READ_METHODS` | `mail.get_message,mail.get_attachment_text,handoff.fetch` | Methods a sift may read with. An unadvertised method, a sift or a skill stops the daemon at boot. |
+| `KASTELLAN_SIFT_READ_METHODS` | `mail.get_message,mail.get_attachment_text,handoff.fetch` | Methods a sift may read with. An unadvertised method, a sift or a skill stops the daemon at boot. Unset, the default keeps only the advertised ones. The planner sees the list in the `sift` entry of its `<tools>`. |
 | `KASTELLAN_PROMPTS_DIR` | `prompts` (relative to CWD) | Where prompt files are loaded from; the installer sets it to `~/.local/share/kastellan/prompts`. |
 | `KASTELLAN_TIMEZONE` | host zone | IANA zone for the trusted `now` field in the prompt. |
 

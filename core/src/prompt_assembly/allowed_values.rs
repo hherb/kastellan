@@ -155,6 +155,15 @@ impl AdvertisedTool {
         Self { doc, allowed: Some(render_opaque_allowlist(configured)) }
     }
 
+    /// Advertise a built-in whose permitted values come from a boot-time knob,
+    /// not from `tool_allowlists` rows (the sift's read methods, #956): `lead`,
+    /// then each value escaped and quoted, in the given order. No cap: the
+    /// values are already checked against the advertised methods.
+    pub fn with_permitted(doc: ToolDoc, lead: &str, values: &[String]) -> Self {
+        let quoted: Vec<String> = values.iter().map(|v| format!("`{}`", escape_untrusted_body(v))).collect();
+        Self { doc, allowed: Some(format!("{lead}: {}", quoted.join(ENTRY_SEPARATOR))) }
+    }
+
     /// Advertise a tool whose worker declares no allowlist at all — no
     /// `allowed:` line is rendered for it.
     pub fn without_allowlist(doc: ToolDoc) -> Self {

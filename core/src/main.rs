@@ -554,6 +554,25 @@ async fn main() -> Result<()> {
     // registered — `dispatch_step` then returns `UNKNOWN_TOOL`.
     let (registry, loaded_tool_records, tool_docs) =
         kastellan_core::registry_build::build_tool_registry(&pool, exe_dir).await?;
+    // #922 `sift`: its two knobs, checked against what is advertised; a bad
+    // value stops the daemon, naming the key.
+    let knob = |key: &str| match std::env::var(key) {
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("{key}: {e}")),
+    };
+    let advertised: Vec<(String, String)> =
+        tool_docs.iter().map(|t| (t.doc.name.to_string(), t.doc.method.to_string())).collect();
+    let sift = kastellan_core::scheduler::notebook::sift::config::sift_config(
+        knob("KASTELLAN_SIFT_MAX_READS")?.as_deref(),
+        knob("KASTELLAN_SIFT_READ_METHODS")?.as_deref(),
+        &advertised,
+    )
+    .map_err(anyhow::Error::msg)?;
+    info!(max_reads = sift.max_reads, read_methods = ?sift.read_methods, "sift");
+    // The sift is a built-in: `<tools>` lists it with its read methods (#956).
+    let mut tool_docs = tool_docs;
+    tool_docs.push(kastellan_core::scheduler::notebook::sift::config::advertised_tool(&sift));
     let tool_docs: std::sync::Arc<[kastellan_core::prompt_assembly::AdvertisedTool]> =
         std::sync::Arc::from(tool_docs);
     let tool_registry = Arc::new(registry);
@@ -732,22 +751,6 @@ async fn main() -> Result<()> {
         )),
         entity_extractor.clone(),
     );
-    // #922 `sift`: its two knobs, checked against what is advertised; a bad
-    // value stops the daemon, naming the key.
-    let knob = |key: &str| match std::env::var(key) {
-        Ok(v) => Ok(Some(v)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(anyhow::anyhow!("{key}: {e}")),
-    };
-    let advertised: Vec<(String, String)> =
-        tool_docs.iter().map(|t| (t.doc.name.to_string(), t.doc.method.to_string())).collect();
-    let sift = kastellan_core::scheduler::notebook::sift::config::sift_config(
-        knob("KASTELLAN_SIFT_MAX_READS")?.as_deref(),
-        knob("KASTELLAN_SIFT_READ_METHODS")?.as_deref(),
-        &advertised,
-    )
-    .map_err(anyhow::Error::msg)?;
-    info!(max_reads = sift.max_reads, read_methods = ?sift.read_methods, "sift");
     let formulator: Arc<dyn kastellan_core::scheduler::notebook::formulator::NotebookFormulator> =
         Arc::new(agent.with_notebook(tool_docs.clone(), sift));
 
