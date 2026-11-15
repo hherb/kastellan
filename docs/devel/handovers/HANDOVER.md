@@ -68,8 +68,9 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   inside `the_sift_loop`, and a reviewer-blocked sift is pinned `BLOCKED`. Changes mutant-checked (each mutant red).
 - **Not done:** the mid-sift DB error item — `sift/run.rs` is **505**, split it first; and if the DB is failing, the
   `sift.finished` row most likely fails too. `inner_loop/execute.rs` 509 → **512** (one const).
-- **Deploy:** #1038 deployed to the DGX at session start. ⚠️ **Not re-measured yet**: its two `~/requery7.sh` runs
-  (experiments #25–#26) are owed.
+- **Deploy:** #1038 deployed to the DGX at session start; its two `~/requery7.sh` runs (experiments #25–#26) ran
+  2026-11-16, logs `~/requery7.log.1038a` / `.1038b` on the DGX (every ask exit 0). ⚠️ **Not yet written up** in
+  `notes/notebook-experiments.md` (per-question results, task ids): do that first.
 
 ### Previous (2026-11-15): #956 read allowlist (PR #1038, merged, deployed DGX 2026-11-16) — unset `KASTELLAN_SIFT_READ_METHODS` keeps only the advertised methods (`sift::config::sift_config`); the planner's `<tools>` lists the sift with its read methods (`sift::config::advertised_tool`), the prompt points there. `prompt_assembly/allowed_values.rs` 633 → 351 (tests moved). Full section: this file at #1038 in git history.
 
