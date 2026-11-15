@@ -337,3 +337,48 @@ pub(super) async fn a_sift_past_the_deadline_makes_no_reads(pool: &sqlx::PgPool)
     assert_eq!(started[0]["reads"], json!(2), "{}", started[0]);
     assert!(started[0].get("llm_usage").is_some(), "the late turn's cost is recorded: {}", started[0]);
 }
+
+/// #956: `failed_reads` counts items, and `read_errors` says why the reads
+/// failed: one code per failed read, counted.
+pub(super) async fn failed_reads_count_items_and_read_errors_name_the_codes(pool: &sqlx::PgPool) {
+    let hits = json!([{"id": "m1", "subject": "about m1", "files": ["bad", "bad"]}, {"id": "m2", "subject": "about m2", "files": ["ok"]}]);
+    let mut call = sift(2, None);
+    call["parameters"]["read"] = json!({"tool": "mail", "method": "mail.read", "parameters": {"id": "{files.*}"}});
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits)}),
+        json!({"tick": tick(1, "listed"), "call": call}),
+        json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "none kept"}}),
+    ])
+    .sorting(&[no(), no()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["reads"].clone(), seen["looked_at"].clone()), (json!(3), json!(2)), "{seen}");
+    assert_eq!(seen["failed_reads"], json!(1), "one item, however many of its reads failed: {seen}");
+    assert_eq!(seen["read_errors"], json!({"POLICY_DENIED": 2}), "{seen}");
+    assert_eq!(finished_row(pool, r.task_id).await["read_errors"], json!({"POLICY_DENIED": 2}));
+}
+
+/// #956: when every read fails (a worker down, egress denied), no item is
+/// sorted on its hit alone — that would read as a real answer. The sift
+/// stops where it began and says why.
+pub(super) async fn a_sift_whose_every_read_failed_sorts_nothing(pool: &sqlx::PgPool) {
+    let script = Script::new(&three_turns(&["bad", "bad"], Some(("mail", "mail.read"))));
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert!(script.sorted.lock().unwrap().is_empty(), "no item went to the sorter");
+    let seen = summary_seen(&script, 2);
+    assert_eq!(seen["stopped"], json!("reads_failed"), "{seen}");
+    assert_eq!((seen["looked_at"].clone(), seen["remaining"].clone(), seen["next_from"].clone()), (json!(0), json!(2), json!(0)), "{seen}");
+    assert_eq!(seen["read_errors"], json!({"POLICY_DENIED": 2}), "{seen}");
+    assert!(rows(pool, r.task_id, 2).await.is_empty());
+}
+
+/// The task's `sift.finished` audit row.
+async fn finished_row(pool: &sqlx::PgPool, task: i64) -> Value {
+    sqlx::query_scalar(
+        "SELECT payload FROM audit_log WHERE action = 'sift.finished' AND (payload->>'task_id')::bigint = $1",
+    )
+    .bind(task)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}

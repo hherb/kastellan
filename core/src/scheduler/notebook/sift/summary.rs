@@ -1,6 +1,8 @@
 //! The summary a sift leaves for the planner (#922, K9), and why a sift
 //! stopped early. Pure.
 
+use std::collections::BTreeMap;
+
 use kastellan_db::scrapbook::{NewRow, RowKind};
 use serde_json::{json, Value};
 
@@ -22,6 +24,8 @@ pub(crate) enum Stop {
     Cancelled,
     /// The sorter could not be reached.
     SorterFailed,
+    /// Every read failed, so no item was sorted (#956).
+    ReadsFailed,
     /// The reads plan was blocked, escalated or ended the task: nothing was
     /// sorted (the audit row only; the loop records the plan's own outcome).
     ReadsNotRun,
@@ -33,6 +37,7 @@ impl Stop {
             Stop::Time => "time",
             Stop::Cancelled => "cancelled",
             Stop::SorterFailed => "sorter_failed",
+            Stop::ReadsFailed => "reads_failed",
             Stop::ReadsNotRun => "reads_not_run",
         }
     }
@@ -44,11 +49,13 @@ impl Stop {
 /// to fit the cap. `per_read[i]`: the items looked at whose reads came from
 /// the sift's read `i` — a read before the one applied fell through, so a
 /// misspelled placeholder shows as a read used for no item (review finding).
+/// `errors`: each failed read's code, counted (#956).
 pub(crate) struct Reads {
     pub made: usize,
     pub unread: usize,
     pub cut: usize,
     pub per_read: Vec<usize>,
+    pub errors: BTreeMap<String, usize>,
 }
 
 /// What the planner is shown (K9): the ref, the criterion, the counts — with
@@ -87,6 +94,9 @@ pub(crate) fn summary(
     }
     if reads.per_read.len() > 1 {
         s["items_per_read"] = json!(reads.per_read);
+    }
+    if !reads.errors.is_empty() {
+        s["read_errors"] = json!(reads.errors);
     }
     if reads.cut > 0 {
         s["reads_cut"] = json!(reads.cut);

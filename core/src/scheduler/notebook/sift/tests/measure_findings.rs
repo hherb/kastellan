@@ -312,6 +312,7 @@ pub(super) async fn an_evicted_stashed_read_is_a_failed_read(pool: &sqlx::PgPool
     assert!(!sorted[0].contains("handoff_ref"), "not the placeholder: {}", sorted[0]);
     let seen = summary_seen(&script, 2);
     assert_eq!(seen["failed_reads"], json!(1), "{seen}");
+    assert_eq!(seen["read_errors"], json!({"HANDOFF_NOT_FOUND": 1}), "an eviction has its code: {seen}");
 }
 
 /// #964 review: a stash is purged whenever the loop returns, a suspend too,

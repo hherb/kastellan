@@ -127,6 +127,8 @@ async fn the_sift_loop() {
     a_chain_link_that_cannot_be_read_gives_no_distinct(&pool).await;
     a_sift_ticks_at_the_class_it_ran_at(&pool).await;
     a_sift_past_the_deadline_makes_no_reads(&pool).await;
+    failed_reads_count_items_and_read_errors_name_the_codes(&pool).await;
+    a_sift_whose_every_read_failed_sorts_nothing(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {
@@ -164,6 +166,7 @@ async fn a_failed_read_does_not_stop_the_sift(pool: &sqlx::PgPool) {
     assert_eq!(r.tools.dispatched.lock().unwrap().len(), 4, "every read ran, the failed one included");
     let seen = summary_seen(&script, 2);
     assert_eq!(seen["failed_reads"], json!(1), "{seen}");
+    assert_eq!(seen["read_errors"], json!({"POLICY_DENIED": 1}), "{seen}");
     assert_eq!(seen["looked_at"], json!(3), "the item whose read failed is still decided, on its hit");
     assert_eq!(rows(pool, r.task_id, 2).await.len(), 2);
 }

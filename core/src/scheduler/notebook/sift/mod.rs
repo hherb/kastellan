@@ -23,6 +23,7 @@
 pub mod config;
 pub(crate) mod params;
 pub mod router_sorter;
+pub(crate) mod item_views;
 pub(crate) mod reads;
 pub(crate) mod run;
 pub mod sorter;
