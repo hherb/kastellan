@@ -64,6 +64,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   `max_reads` and then stop at item 0. The summary's `reads` is now the reads **made** (`outcomes.len()`), not planned;
   `sift.started`'s `reads` is still the plan's. 2 cases in `sift/tests/review_findings.rs` (inside `the_sift_loop`,
   so **no libtest count**); the deadline one was mutation-checked (guard removed → "no read was made").
+- **Review fixes:** a late sift's `sift.started` carries `llm_usage`; an invoked skill ticks at its steps' class.
 - **Deploy:** PR #1032 (#959) on the DGX 2026-11-15 (`NRestarts=0`, Matrix up, env identical to `bak-pre1032`,
   installed `agent_notebook.md` sha256-equal to the repo's). #956 stays open for its other items.
 

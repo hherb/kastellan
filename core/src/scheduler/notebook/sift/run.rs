@@ -101,14 +101,15 @@ pub(crate) async fn run_sift(
     let batch = plan_reads(&p.read, &items, cfg.max_reads);
     let scrap = ScrapRef { task_id: ctx.task_id, sift: ctx.plan_count as i32 };
     let class = call.classification.max(ctx.classification_floor).max(over.class);
-    audit(r.pool, ACTION_SIFT_STARTED, started_payload(ctx, &scrap, &p, items.len(), batch.reads.len(), meta)).await;
-
-    // The reads: one reviewed plan, dispatched past any failed read.
-    let (mut outcomes, mut read_tools) = (Vec::new(), Vec::new());
     // A reply that came back past the deadline makes no reads: the sorter
     // would stop at the first item anyway (#956).
     let late = ctx.deadline.is_some_and(|d| Instant::now() >= d);
-    if !batch.reads.is_empty() && !late {
+    let reads_run = !batch.reads.is_empty() && !late;
+    audit(r.pool, ACTION_SIFT_STARTED, started_payload(ctx, &scrap, &p, items.len(), batch.reads.len(), !reads_run, meta)).await;
+
+    // The reads: one reviewed plan, dispatched past any failed read.
+    let (mut outcomes, mut read_tools) = (Vec::new(), Vec::new());
+    if reads_run {
         let plan = reads_plan(call, &p, &batch.reads, class);
         let policy = StepPolicy::SiftReads { cap: cfg.max_reads };
         match execute::review_and_dispatch(
@@ -468,16 +469,25 @@ async fn push_summary(pool: &PgPool, ctx: &mut TaskContext, call: &CallSpec, cla
     ctx.plans.push(record);
 }
 
-/// The `sift.started` row. With no reads there is no `plan.formulate` row
-/// for this turn, so this one carries the turn's model cost.
-fn started_payload(ctx: &TaskContext, scrap: &ScrapRef, p: &SiftParams, items: usize, reads: usize, meta: &FormulationMeta) -> Value {
+/// The `sift.started` row; `reads` is the plan's count. When no reads plan
+/// runs (`costed`: none planned, or the reply was late) there is no
+/// `plan.formulate` row for this turn, so this one carries the turn's model cost.
+fn started_payload(
+    ctx: &TaskContext,
+    scrap: &ScrapRef,
+    p: &SiftParams,
+    items: usize,
+    reads: usize,
+    costed: bool,
+    meta: &FormulationMeta,
+) -> Value {
     let mut v = json!({
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "criterion_sha256": format!("{:x}", Sha256::digest(p.keep_if.as_bytes())),
         "items": items, "reads": reads,
         "read_methods": p.read.iter().map(|t| read_key(&t.tool, &t.method)).collect::<Vec<_>>(),
     });
-    if reads == 0 {
+    if costed {
         v["latency_ms"] = json!(meta.latency_ms);
         v["llm_usage"] = serde_json::to_value(&meta.usage).expect("CompletionStats serialises");
     }

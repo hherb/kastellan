@@ -323,4 +323,17 @@ pub(super) async fn a_sift_past_the_deadline_makes_no_reads(pool: &sqlx::PgPool)
     let seen = summary_seen(&script, 2);
     assert_eq!((seen["stopped"].clone(), seen["remaining"].clone()), (json!("time"), json!(2)), "{seen}");
     assert_eq!(seen["reads"], json!(0), "the summary says none was made: {seen}");
+    // No reads plan ran, so no `plan.formulate` row: `sift.started` carries
+    // the late turn's model cost, and still reports the plan's reads.
+    let started: Vec<Value> = sqlx::query_scalar(
+        "SELECT payload FROM audit_log WHERE actor = 'scheduler' AND action = 'sift.started' \
+         AND (payload->>'task_id')::bigint = $1",
+    )
+    .bind(r.task_id)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["reads"], json!(2), "{}", started[0]);
+    assert!(started[0].get("llm_usage").is_some(), "the late turn's cost is recorded: {}", started[0]);
 }
