@@ -56,13 +56,21 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 ### This session (2026-11-16, latest): a zero-read sift says why (#956 item); #1041 deployed
 
-- **Split first:** `sift/run.rs` 505 → **413**; step 1 (`check`, `check_from`, `resolve_over`, `OverList`) moved to
+- **Split first:** `sift/run.rs` 505 → **406** by the split (**413** after the fix); step 1 (`check`, `check_from`, `resolve_over`, `OverList`) moved to
   `sift/run/check.rs` (115), identical by diff but for `pub(super)` and three `super::super::` paths.
 - **The fix** (tasks 438, 448): when every item looked at is `unread`, the summary and `sift.finished` carry
-  `unread_why`, each read's first placeholder that names nothing plus the first item's field names
-  (`template::unresolved` / `template::unread_why`, pure; names identifier-like only, ≤ 12, the rest counted; the
-  summary screen withholds it with the sample). `sift.started` carries `read_parameters` (the planner's templates).
-  Prompt: one sentence. +3 unit tests; the PG no-field sift test pins both (a mutant dropping the line fails it).
+  `unread_why`: for the first item looked at where a placeholder names nothing (named by its index, as `from`
+  counts), each read's first such placeholder plus that item's field names — else `NOTHING_READABLE` (every list
+  empty or images only) (`template::unresolved` / `template::unread_why`, pure; names identifier-like only, ≤ 12, the
+  rest counted; the summary screen withholds it with the sample). `sift.started` carries `read_parameters` (the
+  planner's templates). Prompt: one sentence. +4 unit tests; the PG no-field sift test pins summary, `sift.started`
+  and `sift.finished` (a mutant dropping the line fails it).
+- **Review round** (four agents): `unread_why` first looked only at item 0, so an empty first list hid a misspelled
+  `{atts.*.filename}` — it now walks every item looked at; a second `*` is named before an earlier missing path (as
+  `expand_reads` refuses it first); `{}` / unlistable keys no longer print `(its fields: )`. Tests: `unread_why`
+  absent when a read applied (the `all_unread = looked_at > 0` mutant now fails), stripped on a blocked summary,
+  `.all`/`.any` and empty-list-with-suffix cases, `_` and the 40-char bound; the prompt drift guard names
+  `unread_why`; the prompt paragraph is reflowed.
 - **Deploy:** #1041 to the DGX at session start (`NRestarts=0`, env identical to `bak-pre1041`). **Experiments
   #27–#28** (`requery7.sh` × 2, on #1041) started 14:41, log `~/requery7.log` (new file: it did not exist before).
 
@@ -263,7 +271,7 @@ the launcher has no env [[microvm-launcher-knobs-must-be-argv]]; release is `pan
    multi-sift answer should show one `kept` per item and a stop line per unfinished question. On the next failed
    decode read `raw_at_error` (#1024).
    Then **#956's remaining items** — a reused sift number across a resume, a mid-sift DB error, silent narrowing
-   (a fan-out's dropped elements uncounted), …) and #940 (item 3, or close: operator). **Owed:**
+   (a fan-out's dropped elements uncounted), … — and #940 (item 3, or close: operator). **Owed:**
    a revoked mail key once (ask first); #926, #939, #771, #538; the Mac's localmail upgrade to `api_minor` 6;
    bottie's substring match on the parking line ([hherb/bottie#242](https://github.com/hherb/bottie/issues/242)).
 
@@ -342,7 +350,7 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
 **before** the change that grows a file, in a movement-only commit, and **prove the movement rather
 than asserting it** — #730's split checked every moved region was **byte-identical** to its range on
 `main` and that the `fn`-name set matched (which a diff cannot show), and #750's added a **negative
-control** proving the checker can fail. ⚠️ `inner_loop/execute.rs` **512** (#956 items) — split before the next change (`sift/run.rs` was split to 413). Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
+control** proving the checker can fail. ⚠️ `inner_loop/execute.rs` **512** (#956 items) — split before the next change (`sift/run.rs` was split to 406; 413 now). Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
 1558+ (#639), `core/src/workers/gliner_relex/tests.rs`, `db/src/asks.rs`,
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
 `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
@@ -395,7 +403,7 @@ Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-pr
 | Host | Commit | Result | clippy `-D warnings` | `[SKIP]` |
 | --- | --- | --- | --- | --- |
 | **DGX** (#909) | #909's PR on `f59e6cb2` | **5366 / 0 / 84**, **196** summaries, `TEST_EXIT=0`, worktree `~/src/kastellan-wt-896` (detached at `origin/main` + the 4 changed files, sha256-checked), `KASTELLAN_PG_BIN_DIR` set, `--test-threads=4`, `--no-fail-fast`, `--nocapture`; `[WARN]` 0; log `~/sweep-909.log`. Per-suite vs `~/sweep-609.log`: `kastellan_db` lib 251 → 258 (+7 `boot_wait`), new `boot_waits_for_postgres_e2e` 1, core lib 2576 → 2584 (+8: #908's review round, which the #609 sweep predated — the same +8 on the Mac) | not re-run (Mac cold clippy covers the change; nothing Linux-only) | **7** (as before) |
-| **Mac** (zero-read sift) | `fix/956-zero-read-sift` on `995be593`, primary checkout | **5547 / 0 / 51**, **201** summaries, `BUILD_EXIT=0` `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast`, `--nocapture`, `--test-threads=4`; `[WARN]` 0; log `~/sweep-956z.log`. vs `~/sweep-tick.log` (5544): **+3**, the three `template::tests` cases for `unresolved`/`unread_why` | `CARGO_TARGET_DIR=$HOME/.cargo-clippy-959` (warm), clean: 5 re-checked `Checking kastellan`, `kastellan-core` among them | **23** (as before) |
+| **Mac** (zero-read sift, after its review round) | `fix/956-zero-read-sift` on `05ee5364` + the review fixes, primary checkout | **5548 / 0 / 51**, **201** summaries, `BUILD_EXIT=0` `TEST_EXIT=0`; `KASTELLAN_PG_BIN_DIR` set, `--no-fail-fast`, `--nocapture`, `--test-threads=4`; `[WARN]` 0; log `~/sweep-1043fc.log`. vs `~/sweep-tick.log` (5544): **+4**, the `template::tests` cases for `unresolved`/`unread_why` (the review's other asserts went into existing tests) | `CARGO_TARGET_DIR=$HOME/.cargo-clippy-959` (warm), clean: 5 re-checked `Checking kastellan`, `kastellan-core` among them | **23** (as before) |
 
 The DGX row predates #910's review round (+4 db lib), #906 (+4 core lib, +2 binaries),
 #913/#911 (+6 core lib, +1 e2e), #915 (+1 db lib), #920 (+13 core lib), #924 … #949, #945, #951, #955, #957, #961, #962, #963 and #966; all are platform-neutral and were not swept on the DGX. Older Mac rows (incl. #945, #922 nb, sift, sift-fix, chain totals) are in the `909deploy`/`921`/`922a`/`945`/`922nb`/`sift`/`960code` snapshots.

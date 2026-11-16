@@ -228,9 +228,9 @@ pub(crate) async fn run_sift(
     for range in batch.per_item.iter().take(counts.looked_at).filter(|r| !r.is_empty()) {
         per_read[batch.reads[range.start].0] += 1;
     }
-    // Every item looked at went unread: say why, from the first (#956).
+    // Every item looked at went unread: say why (#956).
     let all_unread = !p.read.is_empty() && counts.looked_at > 0 && unread == counts.looked_at;
-    let unread_why = items.first().filter(|_| all_unread).and_then(|item| unread_why(&p.read, item));
+    let unread_why = all_unread.then(|| unread_why(&p.read, &items[..counts.looked_at], p.from));
     let reads = Reads { made: made.outcomes.len(), unread, cut: batch.cut, per_read, errors: read_errors, unread_why };
     let (mut summary, blocks) = summary(&scrap, &p, &counts, &reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.

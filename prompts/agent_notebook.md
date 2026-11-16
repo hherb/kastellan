@@ -253,22 +253,26 @@ Its result tells you `scrapbook` (its name), `criterion`, `fields`,
 table naming a sift that continues a chain shows the whole chain, counted in
 its `chain`, and one naming several scrapbooks merges their rows, so it can
 show fewer), `withheld`, `undecided`, `failed_reads`, `reads`, `unread`,
-`remaining` and a `sample` of up to 3 kept items. `unread` counts
-items decided without a read, because no read applied: a `"{name}"` named no
-field of the item or a `{name.*}` list held nothing readable. With a list of
+`remaining` and a `sample` of up to 3 kept items. `unread` counts items
+decided without a read, because no read applied: a `"{name}"` named no field
+of the item or a `{name.*}` list held nothing readable. With a list of
 reads, `items_per_read` counts the items each read was used for: a read used
 for none may have a wrong placeholder. When every item looked at was
-`unread`, `unread_why` names each read's placeholder that named nothing and
-the first item's fields. If a placeholder is wrong, fix it and sift again. One sift looks at a limited number of items: when
-`remaining` is above 0, `sift` again with `from` set to `next_from`.
-`stopped` says why it ended early (`time`, or `sorter_failed`: sift again from
-`next_from`; `reads_failed`: every item had a read and every read failed, so
-nothing was sorted — `read_errors` says why: fix the read, or sift without
-`read`). `read_errors` (when present) counts the failed reads by their error
-`code`. `reads_cut` (when present) counts reads of one item that did not fit.
-When `sample_withheld` is true the safety screen withheld the sample,
-`criterion`, `fields` and `unread_why`; the ref and the counts still hold. If the sample
-shows the criterion did not work, sift again with a better `keep_if`.
+`unread`, `unread_why` says why: for the first item where a placeholder
+named nothing (by its place in the list, as `from` counts), each read's
+first such placeholder and that item's fields — or that every list was empty
+or held only images. If a placeholder is wrong, fix it and sift again. One
+sift looks at a limited number of items: when `remaining` is above 0, `sift`
+again with `from` set to `next_from`. `stopped` says why it ended early
+(`time`, or `sorter_failed`: sift again from `next_from`; `reads_failed`:
+every item had a read and every read failed, so nothing was sorted —
+`read_errors` says why: fix the read, or sift without `read`). `read_errors`
+(when present) counts the failed reads by their error `code`. `reads_cut`
+(when present) counts reads of one item that did not fit. When
+`sample_withheld` is true the safety screen withheld the sample,
+`criterion`, `fields` and `unread_why`; the ref and the counts still hold.
+If the sample shows the criterion did not work, sift again with a better
+`keep_if`.
 A sift `from` the last one's `next_from`, with the same parameters
 otherwise, goes on with it: its result says `continues`, and in this task
 naming the last sift's scrapbook shows the whole chain. Its `chain` counts
