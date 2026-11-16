@@ -46,9 +46,14 @@ fn a_reply_with_no_call_answer_or_infeasible_is_rejected() {
 fn ticking_a_step_that_is_not_current_is_rejected() {
     let err = check(json!({"tick": tick(2), "call": call(2)}), &two_steps()).unwrap_err();
     assert!(err.contains("the current step is 1"), "{err}");
+    assert!(err.contains("`tick.step` 2: it is pending but not the current step: tick the current step instead"), "{err}");
     let empty = NotebookState::default();
     let err = check(json!({"steps": [step(1)], "tick": tick(1), "call": call(1)}), &empty).unwrap_err();
+    assert!(err.contains("`tick.step` 1: it is not listed"), "{err}");
+    assert!(err.contains("leave out the `tick`"), "{err}");
     assert!(err.contains("no current step"), "{err}");
+    // Nothing has failed, so no retry hint.
+    assert!(!err.contains("retry"), "{err}");
 }
 
 #[test]
@@ -363,10 +368,11 @@ fn a_full_tick_may_close_a_failed_step() {
     assert!(check(json!({"tick": tick(1), "call": call(1)}), &failed).is_err());
 }
 
-/// DGX tasks 447/448: the model ticked a step it could not tick, and the
-/// re-ask, told only "not the current step 4 (nor a failed one)" about a
-/// step that HAD failed, sent the same reply back. Each refusal says what
-/// the step is and what to send instead.
+/// DGX tasks 447/448: the model ticked a step it could not tick and, told
+/// only "not the current step 4 (nor a failed one)" about a step that HAD
+/// failed (447) or "no current step to tick" about a done one (448), sent the
+/// same reply back. Each refusal says what the step is and what to send
+/// instead.
 #[test]
 fn a_refused_tick_says_what_to_send_instead() {
     let failed = fold(&[
@@ -388,7 +394,16 @@ fn a_refused_tick_says_what_to_send_instead() {
     .unwrap();
     let err = check(json!({"tick": tick(1), "steps": [step(3)], "call": call(3)}), &none_pending).unwrap_err();
     assert!(err.contains("`tick.step` 1: it is done, and a done step is never ticked again"), "{err}");
+    assert!(err.contains("there is no current step to tick (to retry a failed step"), "{err}");
+    // Every step failed: the retry advice is given once, by the step's own arm.
+    let all_failed = fold(&[
+        entry(1, EntryKind::Steps, json!({"steps": [step(1)]})),
+        entry(2, EntryKind::FailedStep, json!({"step": 1, "code": "E", "detail": "d", "classification": "Public"})),
+    ])
+    .unwrap();
+    let err = check(json!({"tick": tick(1), "steps": [step(1)], "call": call(1)}), &all_failed).unwrap_err();
     assert!(err.contains("there is no current step to tick"), "{err}");
+    assert_eq!(err.matches("again and call it").count(), 1, "{err}");
     // A step never listed.
     let err = check(json!({"tick": tick(9), "call": call(1)}), &two_steps()).unwrap_err();
     assert!(err.contains("`tick.step` 9: it is not listed"), "{err}");

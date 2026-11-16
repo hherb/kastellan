@@ -642,8 +642,8 @@ Cell format: `turns / seconds`, then the outcome.
   - Total 3042 s.
 - **Learned:** 5/7. Over #25–#26: **12 of 14** (#23–#24: 13 of 14). Both failures are a **refused `tick` the re-ask
   did not fix**: the refusal named neither the step's state nor what to send instead, so the model saw nothing to
-  change. Fixed by code on the next PR: each tick refusal says whether the step failed, is done or is not listed, what
-  to send instead, and which step is current (`notebook::reply::tick_refused`). Also seen: sifts that plan no reads
-  (#25 Q2, #26 Q5), and Q4, right in every earlier run, can now fail on an attachment filename.
+  change. Fixed by code in PR #1041: each tick refusal says whether the step failed, is done, is pending or is not
+  listed, what to send instead, and which step is current (`notebook::reply::tick_refused`). Also seen: sifts that
+  plan no reads (#25 Q2, #26 Q5), and Q4, right in every earlier run, can now fail on an attachment filename.
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 437 450` (→ `~/q1038.txt`). Logs →
   `~/requery7.log.1038a`, `~/requery7.log.1038b`.

@@ -337,22 +337,30 @@ to make the call again with other parameters, list it in `steps` under a new id 
 }
 
 /// Why [`validate`] refuses a tick for `step`, and what to send instead.
-/// The re-ask shows the model only this line, so it must name the step's
-/// state: told "not the current step (nor a failed one)" about a step that
-/// had failed, the model sent the same reply back (DGX tasks 447, 448).
+/// This line is the re-ask's only explanation, so it must name the step's
+/// state: told "not the current step 4 (nor a failed one)" about a step that
+/// had failed (DGX task 447), or "no current step to tick" about a done one
+/// (task 448), the model sent the same reply back.
 fn tick_refused(step: u32, state: &NotebookState) -> String {
-    let why = match state.steps.iter().find(|s| s.spec.id == step).map(|s| &s.status) {
+    let status = state.steps.iter().find(|s| s.spec.id == step).map(|s| &s.status);
+    let why = match status {
         // Only progress reaches here: `validate` accepts a full tick on a failed step.
         Some(StepStatus::Failed) => "it failed, and a failed step takes only a full tick that closes it, with no \
 call on it. To retry it, leave out the `tick`: list it in `steps` again and call it",
         Some(StepStatus::Done) => "it is done, and a done step is never ticked again: leave out the `tick`",
-        Some(StepStatus::Pending) => "it is not the step you are on: tick that one, or leave out the `tick`",
-        // A tick is read before the same reply's `steps`.
-        None => "it is not listed (a `tick` is read before the reply's `steps`)",
+        Some(StepStatus::Pending) => "it is pending but not the current step: tick the current step instead, or \
+leave out the `tick`",
+        // The tick is checked before the same reply's `steps` are added.
+        None => "it is not listed: a `tick` names only a step an earlier reply listed, so leave out the `tick`",
     };
     let at = match state.current_step() {
         Some(cur) => format!("the current step is {}", cur.id),
-        None => "there is no current step to tick (to retry a failed step, list it in `steps` again and call it)".into(),
+        None => {
+            let other_failed = status != Some(&StepStatus::Failed)
+                && state.steps.iter().any(|s| s.status == StepStatus::Failed);
+            let retry = if other_failed { " (to retry a failed step, list it in `steps` again and call it)" } else { "" };
+            format!("there is no current step to tick{retry}")
+        }
     };
     format!("`tick.step` {step}: {why}; {at}")
 }
