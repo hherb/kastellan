@@ -118,6 +118,7 @@ async fn the_sift_loop() {
     a_draft_used_for_its_rewrite_gets_the_table(&pool).await;
     a_sift_over_a_stashed_search_reads_the_stash(&pool).await;
     a_sift_over_a_purged_stash_says_how_and_the_call_is_made_again(&pool).await;
+    a_repeat_of_a_held_stash_names_it(&pool).await;
     a_stashed_read_reaches_the_sorter_as_its_text(&pool).await;
     an_evicted_stashed_read_is_a_failed_read(&pool).await;
     a_table_with_no_order_named_is_newest_first(&pool).await;
@@ -207,7 +208,8 @@ async fn a_blocked_sift_is_a_failed_step_and_writes_no_rows(pool: &sqlx::PgPool)
     ]);
     script.sift_cfg.read_methods.push("forbidden.read".into());
     let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert!(kinds(pool, r.task_id).await.contains(&EntryKind::FailedStep));
+    // A reviewer block on a sift's reads is a block, not a refused sift.
+    assert_eq!(failed_codes(pool, r.task_id).await, ["BLOCKED"]);
     assert!(rows(pool, r.task_id, 2).await.is_empty());
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search"], "no read of a blocked sift ran");
     assert!(script.sorted.lock().unwrap().is_empty());
@@ -239,7 +241,8 @@ async fn a_sift_over_a_non_list_is_refused_in_words(pool: &sqlx::PgPool) {
         json!({"infeasible": {"reason": "no list"}}),
     ]);
     let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert!(kinds(pool, r.task_id).await.contains(&EntryKind::FailedStep));
+    // #956: recorded as a refused sift, not as a reviewer block.
+    assert_eq!(failed_codes(pool, r.task_id).await, ["SIFT_REFUSED"]);
     let v: Value = serde_json::from_str(&script.messages()[2]).unwrap();
     let blocks = v["blocks"].to_string();
     assert!(blocks.contains("sift_refused") && blocks.contains("nope"), "{blocks}");

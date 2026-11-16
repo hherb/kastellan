@@ -399,6 +399,12 @@ pub(crate) async fn kinds(pool: &sqlx::PgPool, task_id: i64) -> Vec<EntryKind> {
     db::entries(pool, task_id, 0).await.unwrap().into_iter().map(|e| e.kind).collect()
 }
 
+/// Each `failed_step` entry's code, in order.
+pub(crate) async fn failed_codes(pool: &sqlx::PgPool, task_id: i64) -> Vec<String> {
+    let failed = db::entries(pool, task_id, 0).await.unwrap().into_iter().filter(|e| e.kind == EntryKind::FailedStep);
+    failed.map(|e| e.payload["code"].as_str().unwrap_or_default().to_string()).collect()
+}
+
 pub(crate) fn body(r: &InnerLoopResult) -> String {
     match &r.outcome {
         Outcome::Completed(v) => v["body"].as_str().unwrap_or_default().to_string(),

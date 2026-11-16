@@ -55,6 +55,10 @@ pub(crate) const ACTION_SIFT_STARTED: &str = "sift.started";
 pub(crate) const ACTION_SIFT_FINISHED: &str = "sift.finished";
 pub(crate) const ACTION_SIFT_REFUSED: &str = "sift.refused";
 
+/// How a refused sift's block reason begins; the loop reads it to record
+/// the step as `SIFT_REFUSED` rather than `BLOCKED`.
+pub(crate) const SIFT_REFUSED_BLOCK: &str = "sift_refused: ";
+
 /// Most characters of a refusal's reason in its audit row.
 const REFUSED_REASON_MAX_CHARS: usize = 512;
 
@@ -91,7 +95,7 @@ pub(crate) async fn run_sift(
         Err(why) => {
             let reason: String = why.chars().take(REFUSED_REASON_MAX_CHARS).collect();
             audit(r.pool, ACTION_SIFT_REFUSED, json!({"task_id": ctx.task_id, "plan_count": ctx.plan_count, "reason": reason})).await;
-            ctx.blocks.push(format!("sift_refused: {why}"));
+            ctx.blocks.push(format!("{SIFT_REFUSED_BLOCK}{why}"));
             return Ok(Executed::Again);
         }
     };
