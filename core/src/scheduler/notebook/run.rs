@@ -15,6 +15,8 @@
 //!    and an answer with no table after a sift that kept rows is shown back
 //!    once too (#960), and kept if that re-ask fails — except on the
 //!    forced-answer turn, where code attaches the table of every sift that kept rows instead;
+//!    and a forced-answer turn that fails anyway, with something found, is
+//!    answered by code from it ([`super::partial`], #1044);
 //! 4. write the reply's `tick` and `steps` entries;
 //! 5. set aside, unreviewed, an answer a non-thinking turn wrote (the next
 //!    turn rewrites it, thinking) and a call this task already made
@@ -108,6 +110,8 @@ pub(crate) async fn run_notebook_to_terminal(
     // That turn's answer, kept for the rewrite turn: if the rewrite produces
     // no answer, the draft is used instead (#1023).
     let mut draft: Option<Box<(NotebookReply, FormulationMeta)>> = None;
+    // The last usable turn's meta, for an answer code writes (#1044).
+    let mut last_meta: Option<FormulationMeta> = None;
     let base_instruction = ctx.instruction.clone();
 
     macro_rules! finish {
@@ -202,6 +206,20 @@ pub(crate) async fn run_notebook_to_terminal(
             }
             _ => turn,
         };
+        // #1044: the forced-answer turn failed with something found: code
+        // writes the answer from it, reviewed below like any answer.
+        let written = (matches!(turn, Asked::Failed(_)) && kind == TurnKind::ForcedAnswer)
+            .then(|| super::partial::partial_answer(&state, &ctx.plans).zip(last_meta.clone()))
+            .flatten();
+        let turn = match written {
+            Some((r, m)) => {
+                tracing::warn!(task_id = ctx.task_id, "notebook: the forced-answer turn produced no answer; code wrote one from what was found");
+                let m = FormulationMeta { latency_ms: 0, retry_count: 0, usage: Default::default(), ..m };
+                audit_discarded_turn(pool, &ctx, "forced_answer_failed_partial_used", None, &m).await;
+                Asked::Reply(Box::new((r, m)))
+            }
+            None => turn,
+        };
         let (reply, meta) = match turn {
             Asked::Reply(b) => *b,
             Asked::ForceAnswer => {
@@ -210,6 +228,7 @@ pub(crate) async fn run_notebook_to_terminal(
             }
             Asked::Failed(detail) => return finish!(Outcome::Failed(detail)),
         };
+        last_meta = Some(meta.clone());
 
         // A draft used in place of its rewrite was counted on its own turn.
         if !fell_back {
@@ -357,7 +376,7 @@ pub(crate) async fn run_notebook_to_terminal(
                     let detail = ctx.blocks.get(blocks_before..).unwrap_or_default().join("; ");
                     let payload = FailedStepPayload {
                         step: call.step,
-                        code: again_code(ctx.blocks.get(blocks_before..).unwrap_or_default()).into(),
+                        code: again::again_code(ctx.blocks.get(blocks_before..).unwrap_or_default()).into(),
                         detail: clamp(&detail),
                         classification: ctx.classification_floor,
                     };
@@ -390,20 +409,6 @@ pub(crate) async fn run_notebook_to_terminal(
                 last_call = Some(LastCall { step: call.step, classification, failed });
             }
         }
-    }
-}
-
-/// The `failed_step` code for a call that was not run: a refused sift or a
-/// rejected invoke says so, rather than reading as a reviewer block (#956).
-/// `blocks` are the reasons this call pushed. Pure.
-fn again_code(blocks: &[String]) -> &'static str {
-    let all = |prefix: &str| !blocks.is_empty() && blocks.iter().all(|b| b.starts_with(prefix));
-    if all(sift::run::SIFT_REFUSED_BLOCK) {
-        "SIFT_REFUSED"
-    } else if all(execute::INVOKE_REJECTED_BLOCK) {
-        "INVOKE_REJECTED"
-    } else {
-        "BLOCKED"
     }
 }
 
@@ -471,17 +476,4 @@ mod timeout_tests;
 #[cfg(test)]
 mod rewrite_tests;
 
-#[cfg(test)]
-mod again_code_tests {
-    /// #956: the code says why a call was not run; an empty or mixed set of
-    /// reasons stays a reviewer block.
-    #[test]
-    fn the_failed_step_code_names_why() {
-        let b = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(super::again_code(&b(&[])), "BLOCKED");
-        assert_eq!(super::again_code(&b(&["forbidden tool"])), "BLOCKED");
-        assert_eq!(super::again_code(&b(&["sift_refused: no list"])), "SIFT_REFUSED");
-        assert_eq!(super::again_code(&b(&["invoke_rejected: a", "invoke_rejected: b"])), "INVOKE_REJECTED");
-        assert_eq!(super::again_code(&b(&["sift_refused: no list", "forbidden tool"])), "BLOCKED");
-    }
-}
+mod again;

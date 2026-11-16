@@ -358,12 +358,28 @@ async fn a_call_on_the_answer_turn_is_re_asked(pool: &sqlx::PgPool) {
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "the answer turn's call never ran");
     assert!(script.reasks.lock().unwrap()[0].contains("must end the task"), "{:?}", script.reasks.lock().unwrap());
 
-    // Called again on the re-ask (classic case 14): the task fails, and that call never runs either.
+    // Called again on the re-ask (DGX task 464, #1044): that call never runs
+    // either, and code answers with the findings ticked so far, marked partial.
     let script = Script::new(&[
         json!({"steps": steps(&[1, 2, 3]), "call": call(1, "a")}),
         json!({"tick": tick(1, "f"), "call": call(2, "b")}),
         json!({"tick": tick(2, "g"), "call": call(3, "c")}),
         json!({"tick": tick(2, "g"), "call": call(3, "d")}),
+    ]);
+    let r = run(pool, &script, new_task(pool, 1).await).await;
+    use crate::scheduler::notebook::partial::PARTIAL_HEAD;
+    assert_eq!(body(&r.result), format!("{PARTIAL_HEAD}\n\n- f (msg-1)"), "only ticks the notebook took count");
+    assert_eq!(*r.tools.dispatched.lock().unwrap(), ["a", "b"], "neither answer-turn call ran");
+    let why: Vec<_> = discarded(pool, r.task_id).await.iter().map(|v| v["reason"].clone()).collect();
+    assert_eq!(why, [json!("forced_answer_failed_partial_used")]);
+    assert_eq!(kinds(pool, r.task_id).await.last(), Some(&EntryKind::Answer), "the notebook is closed");
+
+    // With nothing found (classic case 14) the task fails, and no call runs on the answer turn.
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2, 3]), "call": call(1, "a")}),
+        json!({"call": call(1, "b")}),
+        json!({"call": call(1, "c")}),
+        json!({"call": call(1, "d")}),
     ]);
     let r = run(pool, &script, new_task(pool, 1).await).await;
     let Outcome::Failed(d) = &r.result.outcome else { panic!("{:?}", r.result.outcome) };
