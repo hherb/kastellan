@@ -32,6 +32,7 @@ use super::sorter::{parse_sort_reply, sorter_message, SortReply, SORTER_ITEM_CAP
 use super::summary::{summary, Reads, Stop};
 use super::table::{as_stored, distinct_kept, Counts, SOURCE_TOOL_KEY};
 use super::reads::plan_reads;
+use super::template::unread_why;
 use super::item_views::ReadsMade;
 use super::{SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
 use crate::cassandra::review::ChainReviewStage;
@@ -227,7 +228,10 @@ pub(crate) async fn run_sift(
     for range in batch.per_item.iter().take(counts.looked_at).filter(|r| !r.is_empty()) {
         per_read[batch.reads[range.start].0] += 1;
     }
-    let reads = Reads { made: made.outcomes.len(), unread, cut: batch.cut, per_read, errors: read_errors };
+    // Every item looked at went unread: say why, from the first (#956).
+    let all_unread = !p.read.is_empty() && counts.looked_at > 0 && unread == counts.looked_at;
+    let unread_why = items.first().filter(|_| all_unread).and_then(|item| unread_why(&p.read, item));
+    let reads = Reads { made: made.outcomes.len(), unread, cut: batch.cut, per_read, errors: read_errors, unread_why };
     let (mut summary, blocks) = summary(&scrap, &p, &counts, &reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.
     if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {
@@ -240,7 +244,7 @@ pub(crate) async fn run_sift(
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "looked_at": counts.looked_at, "kept": counts.kept, "withheld": counts.withheld,
         "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
-        "unread": reads.unread, "read_errors": reads.errors, "reads_cut": reads.cut, "items_per_read": reads.per_read, "remaining": remaining,
+        "unread": reads.unread, "unread_why": reads.unread_why, "read_errors": reads.errors, "reads_cut": reads.cut, "items_per_read": reads.per_read, "remaining": remaining,
         "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls, "sorter_error": sorter_error,
         "ms": started.elapsed().as_millis() as u64,
     });
@@ -387,6 +391,9 @@ fn started_payload(
         "criterion_sha256": format!("{:x}", Sha256::digest(p.keep_if.as_bytes())),
         "items": items, "reads": reads,
         "read_methods": p.read.iter().map(|t| read_key(&t.tool, &t.method)).collect::<Vec<_>>(),
+        // The planner-written templates, in `read_methods`' order: without
+        // them a sift that made no reads cannot be diagnosed (#956).
+        "read_parameters": p.read.iter().map(|t| &t.parameters).collect::<Vec<_>>(),
     });
     if costed {
         v["latency_ms"] = json!(meta.latency_ms);

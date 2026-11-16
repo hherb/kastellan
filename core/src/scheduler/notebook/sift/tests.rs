@@ -454,6 +454,22 @@ async fn a_read_template_that_names_no_field_says_so(pool: &sqlx::PgPool) {
     assert_eq!(*r.tools.dispatched.lock().unwrap(), ["mail.search"]);
     let seen = summary_seen(&script, 2);
     assert_eq!((seen["reads"].clone(), seen["unread"].clone()), (json!(0), json!(2)), "{seen}");
+    // #956 (DGX tasks 438, 448): and why, so it can fix the placeholder.
+    assert_eq!(
+        seen["unread_why"],
+        json!("mail.read: `{messageid}` names nothing in the first item (its fields: id, subject)"),
+        "{seen}"
+    );
+    // The template the planner wrote is on `sift.started`, for diagnosis from the DB.
+    let started: Vec<Value> = sqlx::query_scalar(
+        "SELECT payload FROM audit_log WHERE actor = 'scheduler' AND action = 'sift.started' \
+         AND (payload->>'task_id')::bigint = $1",
+    )
+    .bind(r.task_id)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(started[0]["read_parameters"], json!([{"id": "{messageid}"}]), "{}", started[0]);
 }
 
 /// Review finding: an operator's cancel is seen between sorter calls.

@@ -72,6 +72,72 @@ pub(crate) fn first_reads(reads: &[ReadTemplate], item: &Value) -> Vec<(usize, V
         .unwrap_or_default()
 }
 
+/// The first placeholder of `t` that names nothing in `item`, as written
+/// (`` `{message_id}` ``), or a second `*`. A `*` placeholder names nothing
+/// when the path before the `*` is not a list, or no element of a non-empty
+/// list has the path after it. `None` when every placeholder resolves: an
+/// empty list, or one of images only, gives no reads with nothing misspelled.
+/// Mirrors [`expand_reads`]'s rules, so a sift that made no reads can say
+/// why (#956: DGX tasks 438 and 448 were told only `unread`).
+pub(crate) fn unresolved(t: &ReadTemplate, item: &Value) -> Option<String> {
+    let mut paths = Vec::new();
+    collect_paths(&t.parameters, &mut paths);
+    let mut stars = 0;
+    for path in paths {
+        let missing = if path.contains('*') {
+            stars += 1;
+            if stars > 1 {
+                return Some(format!("`{{{path}}}` is a second `*` (a read fans out over one list only)"));
+            }
+            let (prefix, suffix) = split_star(path);
+            match value_at(item, prefix).and_then(Value::as_array) {
+                None => true,
+                Some(list) => !suffix.is_empty() && !list.is_empty() && list.iter().all(|el| value_at(el, suffix).is_none()),
+            }
+        } else {
+            value_at(item, path).is_none()
+        };
+        if missing {
+            return Some(format!("`{{{path}}}`"));
+        }
+    }
+    None
+}
+
+/// Most of an item's field names [`unread_why`] lists.
+pub(crate) const WHY_MAX_FIELDS: usize = 12;
+
+/// Why none of `reads` applied to `item` (the first item looked at), for a
+/// sift whose every item went unread: each read's first placeholder that
+/// names nothing ([`unresolved`]), then the item's field names, so the
+/// planner can fix the placeholder (#956). The names are third-party
+/// text, so only short identifier-like ones are listed, at most
+/// [`WHY_MAX_FIELDS`]; the rest are counted. `None` when every read's
+/// placeholders resolve (each list was empty, or images only).
+pub(crate) fn unread_why(reads: &[ReadTemplate], item: &Value) -> Option<String> {
+    let parts: Vec<String> = reads
+        .iter()
+        .filter_map(|t| {
+            let what = unresolved(t, item)?;
+            Some(format!("{}: {what} names nothing in the first item", super::params::read_key(&t.tool, &t.method)))
+        })
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let fields = match item.as_object() {
+        None => "it is not an object".to_string(),
+        Some(o) => {
+            let named = |k: &&String| k.len() <= 40 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            let shown: Vec<&str> = o.keys().filter(named).take(WHY_MAX_FIELDS).map(String::as_str).collect();
+            let more = o.len() - shown.len();
+            let tail = if more > 0 { format!(", and {more} more") } else { String::new() };
+            format!("its fields: {}{tail}", shown.join(", "))
+        }
+    };
+    Some(format!("{} ({fields})", parts.join("; ")))
+}
+
 /// Is `name` an image, by its extension (case-insensitive)?
 pub(crate) fn is_image(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -94,10 +160,17 @@ fn split_star(path: &str) -> (&str, &str) {
 }
 
 fn collect_star_paths<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+    let mut all = Vec::new();
+    collect_paths(v, &mut all);
+    out.extend(all.into_iter().filter(|p| p.contains('*')));
+}
+
+/// Every placeholder's path in `v`, in [`fill`]'s order.
+fn collect_paths<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
     match v {
-        Value::String(s) => out.extend(placeholder(s).filter(|p| p.contains('*'))),
-        Value::Array(a) => a.iter().for_each(|x| collect_star_paths(x, out)),
-        Value::Object(o) => o.values().for_each(|x| collect_star_paths(x, out)),
+        Value::String(s) => out.extend(placeholder(s)),
+        Value::Array(a) => a.iter().for_each(|x| collect_paths(x, out)),
+        Value::Object(o) => o.values().for_each(|x| collect_paths(x, out)),
         _ => {}
     }
 }

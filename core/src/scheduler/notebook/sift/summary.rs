@@ -49,13 +49,16 @@ impl Stop {
 /// to fit the cap. `per_read[i]`: the items looked at whose reads came from
 /// the sift's read `i` — a read before the one applied fell through, so a
 /// misspelled placeholder shows as a read used for no item (review finding).
-/// `errors`: each failed read's code, counted (#956).
+/// `errors`: each failed read's code, counted (#956). `unread_why`: when
+/// every item looked at went unread, which placeholder named nothing
+/// ([`super::template::unread_why`], #956).
 pub(crate) struct Reads {
     pub made: usize,
     pub unread: usize,
     pub cut: usize,
     pub per_read: Vec<usize>,
     pub errors: BTreeMap<String, usize>,
+    pub unread_why: Option<String>,
 }
 
 /// What the planner is shown (K9): the ref, the criterion, the counts — with
@@ -101,13 +104,17 @@ pub(crate) fn summary(
     if reads.cut > 0 {
         s["reads_cut"] = json!(reads.cut);
     }
+    if let Some(why) = &reads.unread_why {
+        s["unread_why"] = json!(why);
+    }
     if let Some(why) = stopped {
         s["stopped"] = json!(why.as_str());
     }
     if let Err(block) = sorter_view(SIFT_TOOL, &s, SUMMARY_SCREEN_CAP) {
         blocks.push(block);
         if let Some(o) = s.as_object_mut() {
-            for k in ["sample", "criterion", "fields"] {
+            // `unread_why` lists the items' field names: tool output too.
+            for k in ["sample", "criterion", "fields", "unread_why"] {
                 o.remove(k);
             }
         }
