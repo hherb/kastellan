@@ -426,5 +426,6 @@ pub(super) async fn an_item_with_no_attachment_takes_the_next_read(pool: &sqlx::
     let seen = summary_seen(&script, 2);
     assert_eq!((seen["reads"].clone(), seen["unread"].clone()), (json!(2), json!(0)), "{seen}");
     assert_eq!(seen["items_per_read"], json!([1, 1]), "a fall-through is visible: {seen}");
+    assert!(seen.get("unread_why").is_none(), "{seen}");
     assert!(script.sorted.lock().unwrap()[1].contains("text of m2"), "m2 was read with the message read");
 }

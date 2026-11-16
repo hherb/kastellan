@@ -72,6 +72,85 @@ pub(crate) fn first_reads(reads: &[ReadTemplate], item: &Value) -> Vec<(usize, V
         .unwrap_or_default()
 }
 
+/// The first placeholder of `t` that names nothing in `item`, as written
+/// (`` `{message_id}` ``), or a second `*` — named first, as
+/// [`expand_reads`] refuses it before resolving anything. A `*`
+/// placeholder names nothing when the path before the `*` is not a list,
+/// or no element of a non-empty list has the path after it. `None` when
+/// every placeholder resolves: an empty list, or one of images only, gives
+/// no reads with nothing misspelled. Mirrors [`expand_reads`]'s rules, so a
+/// sift that made no reads can say why (#956: DGX tasks 438 and 448 were
+/// told only `unread`).
+pub(crate) fn unresolved(t: &ReadTemplate, item: &Value) -> Option<String> {
+    let mut paths = Vec::new();
+    collect_paths(&t.parameters, &mut paths);
+    if let Some(second) = paths.iter().filter(|p| p.contains('*')).nth(1) {
+        return Some(format!("`{{{second}}}` is a second `*` (a read fans out over one list only)"));
+    }
+    let missing = |path: &&&str| {
+        if !path.contains('*') {
+            return value_at(item, path).is_none();
+        }
+        let (prefix, suffix) = split_star(path);
+        match value_at(item, prefix).and_then(Value::as_array) {
+            None => true,
+            Some(list) => !suffix.is_empty() && !list.is_empty() && list.iter().all(|el| value_at(el, suffix).is_none()),
+        }
+    };
+    paths.iter().find(missing).map(|path| format!("`{{{path}}}`"))
+}
+
+/// Most of an item's field names [`unread_why`] lists.
+pub(crate) const WHY_MAX_FIELDS: usize = 12;
+
+/// [`unread_why`] when no placeholder named nothing in any item looked at.
+pub(crate) const NOTHING_READABLE: &str =
+    "every placeholder named something, but each list was empty or held only images";
+
+/// Why none of `reads` applied to `items` (the items looked at; `items[0]`
+/// is item `from` of the list), for a sift whose every item went unread:
+/// for the first item where any read's placeholder names nothing, each
+/// such read's first one ([`unresolved`]), then that item's field names,
+/// so the planner can fix the placeholder (#956). The names are
+/// third-party text, so only short identifier-like ones are listed, at
+/// most [`WHY_MAX_FIELDS`]; the rest are counted. [`NOTHING_READABLE`]
+/// when every placeholder resolves in every item.
+pub(crate) fn unread_why(reads: &[ReadTemplate], items: &[Value], from: usize) -> String {
+    items
+        .iter()
+        .enumerate()
+        .find_map(|(i, item)| item_why(reads, item, from + i))
+        .unwrap_or_else(|| NOTHING_READABLE.to_string())
+}
+
+fn item_why(reads: &[ReadTemplate], item: &Value, n: usize) -> Option<String> {
+    let parts: Vec<String> = reads
+        .iter()
+        .filter_map(|t| {
+            let what = unresolved(t, item)?;
+            Some(format!("{}: {what} names nothing in item {n}", super::params::read_key(&t.tool, &t.method)))
+        })
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let fields = match item.as_object() {
+        None => "it is not an object".to_string(),
+        Some(o) if o.is_empty() => "it has no fields".to_string(),
+        Some(o) => {
+            let named = |k: &&String| k.len() <= 40 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            let shown: Vec<&str> = o.keys().filter(named).take(WHY_MAX_FIELDS).map(String::as_str).collect();
+            let more = o.len() - shown.len();
+            match (shown.is_empty(), more) {
+                (true, _) => format!("its {more} fields have no listable names"),
+                (false, 0) => format!("its fields: {}", shown.join(", ")),
+                (false, _) => format!("its fields: {}, and {more} more", shown.join(", ")),
+            }
+        }
+    };
+    Some(format!("{} ({fields})", parts.join("; ")))
+}
+
 /// Is `name` an image, by its extension (case-insensitive)?
 pub(crate) fn is_image(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -94,10 +173,17 @@ fn split_star(path: &str) -> (&str, &str) {
 }
 
 fn collect_star_paths<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+    let mut all = Vec::new();
+    collect_paths(v, &mut all);
+    out.extend(all.into_iter().filter(|p| p.contains('*')));
+}
+
+/// Every placeholder's path in `v`, in [`fill`]'s order.
+fn collect_paths<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
     match v {
-        Value::String(s) => out.extend(placeholder(s).filter(|p| p.contains('*'))),
-        Value::Array(a) => a.iter().for_each(|x| collect_star_paths(x, out)),
-        Value::Object(o) => o.values().for_each(|x| collect_star_paths(x, out)),
+        Value::String(s) => out.extend(placeholder(s)),
+        Value::Array(a) => a.iter().for_each(|x| collect_paths(x, out)),
+        Value::Object(o) => o.values().for_each(|x| collect_paths(x, out)),
         _ => {}
     }
 }

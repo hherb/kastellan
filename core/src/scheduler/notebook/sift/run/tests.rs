@@ -1,4 +1,5 @@
 use super::*;
+use super::check::check_from;
 
 #[test]
 fn the_stop_reasons_are_the_words_the_prompt_names() {

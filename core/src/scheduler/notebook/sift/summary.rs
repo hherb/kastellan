@@ -49,13 +49,17 @@ impl Stop {
 /// to fit the cap. `per_read[i]`: the items looked at whose reads came from
 /// the sift's read `i` — a read before the one applied fell through, so a
 /// misspelled placeholder shows as a read used for no item (review finding).
-/// `errors`: each failed read's code, counted (#956).
+/// `errors`: each failed read's code, counted (#956). `unread_why`: when
+/// every item looked at went unread, which placeholder named nothing in
+/// which item, and that item's field names — or that every list was empty
+/// or images only ([`super::template::unread_why`], #956).
 pub(crate) struct Reads {
     pub made: usize,
     pub unread: usize,
     pub cut: usize,
     pub per_read: Vec<usize>,
     pub errors: BTreeMap<String, usize>,
+    pub unread_why: Option<String>,
 }
 
 /// What the planner is shown (K9): the ref, the criterion, the counts — with
@@ -63,9 +67,9 @@ pub(crate) struct Reads {
 /// sample of what was kept. The sample's values are model-written from tool
 /// output, so each is screened (shown as [`WITHHELD_MARKER`] if blocked), and
 /// if the whole summary would still fail the record's screen, the
-/// model-written parts go (`sample_withheld`): the ref and the counts must
-/// always get through, or the planner can neither show the sift nor run it
-/// again. Every block is returned for its audit row.
+/// model-written and tool-derived parts go (`sample_withheld`): the ref and
+/// the counts must always get through, or the planner can neither show the
+/// sift nor run it again. Every block is returned for its audit row.
 pub(crate) fn summary(
     scrap: &ScrapRef,
     p: &SiftParams,
@@ -101,13 +105,17 @@ pub(crate) fn summary(
     if reads.cut > 0 {
         s["reads_cut"] = json!(reads.cut);
     }
+    if let Some(why) = &reads.unread_why {
+        s["unread_why"] = json!(why);
+    }
     if let Some(why) = stopped {
         s["stopped"] = json!(why.as_str());
     }
     if let Err(block) = sorter_view(SIFT_TOOL, &s, SUMMARY_SCREEN_CAP) {
         blocks.push(block);
         if let Some(o) = s.as_object_mut() {
-            for k in ["sample", "criterion", "fields"] {
+            // `unread_why` lists an item's field names: tool output too.
+            for k in ["sample", "criterion", "fields", "unread_why"] {
                 o.remove(k);
             }
         }
