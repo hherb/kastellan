@@ -312,7 +312,18 @@ fn the_re_ask_quotes_the_line_a_syntax_error_is_on() {
     let line = line_at_error(&decode_error(&long), &long).unwrap();
     assert!(line.starts_with('…') && line.ends_with("\"b\": 1}"), "{line}");
     assert!(line.chars().count() <= REASK_LINE_BEFORE + REASK_LINE_AFTER + 2, "{line}");
+    // Each side is cut on its own: an early slip in a long minified line keeps
+    // REASK_LINE_AFTER chars after it, not the rest of the reply.
+    let long = format!("{{\"a\" 1, \"b\": \"{}\"}}", "x".repeat(400));
+    let line = line_at_error(&decode_error(&long), &long).unwrap();
+    assert_eq!(line, format!("{{\"a\" 1, \"b\": \"{}…", "x".repeat(REASK_LINE_AFTER - 8)));
+    // A raw newline inside a string errors at column 0 of the NEXT line; the
+    // slip is the line it breaks, not its continuation.
+    let raw = "{\"answer\": {\"body\": \"first para\nsecond para\"}}";
+    let line = line_at_error(&decode_error(raw), raw).unwrap();
+    assert_eq!(line, "{\"answer\": {\"body\": \"first para");
     // No position, or a blank line (an EOF error on trailing spaces): nothing to quote.
     assert_eq!(line_at_error("plan decode failed: a step has no id", "{}"), None);
     assert_eq!(line_at_error("e at line 2 column 2", "{\n   "), None);
+    assert_eq!(line_at_error("e at line 2 column 300", &format!("{{\n{}", " ".repeat(300))), None);
 }

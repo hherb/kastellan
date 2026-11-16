@@ -244,7 +244,9 @@ const FAILED_ROW_RAW_WINDOW_CHARS: usize = 120;
 /// [`parse_json_lenient`](crate::scheduler::plan_parser::parse_json_lenient)
 /// decodes from there (a reply with no `{` is decoded whole). serde counts
 /// the column in bytes, so the offset is moved back to a character boundary;
-/// a column past the end clamps to it.
+/// a column past the end clamps to it. Column 0 of a later line means the
+/// byte serde last read was the line break itself (a raw newline inside a
+/// string), so the offset is that `\n`: the end of the line the slip is on.
 fn error_offset(error: &str, raw: &str) -> Option<usize> {
     let (_, pos) = error.rsplit_once(" at line ")?;
     let (line, rest) = pos.split_once(" column ")?;
@@ -256,7 +258,8 @@ fn error_offset(error: &str, raw: &str) -> Option<usize> {
         0 => 0,
         n => raw[base..].match_indices('\n').nth(n - 1)?.0 + 1,
     };
-    let mut at = (base + line_start + column).min(raw.len());
+    let back = usize::from(column == 0 && line_index > 0);
+    let mut at = (base + line_start + column - back).min(raw.len());
     while !raw.is_char_boundary(at) {
         at -= 1;
     }
@@ -276,21 +279,23 @@ fn raw_at_error(error: &str, raw: &str) -> Option<String> {
     Some(raw[start..end].to_string())
 }
 
-/// Chars of the erroring line the re-ask quotes before and after the
-/// decode error's position ([`line_at_error`]).
+/// Chars of the erroring line the re-ask quotes before the decode error's
+/// position ([`line_at_error`]).
 const REASK_LINE_BEFORE: usize = 160;
+/// Chars of the erroring line the re-ask quotes after the position.
 const REASK_LINE_AFTER: usize = 40;
 
 /// The line of `raw` a JSON decode error points into, trimmed, for the
 /// re-ask to quote (#1024), or `None` when the error names no position or
-/// the line is blank. A line longer than [`REASK_LINE_BEFORE`] +
-/// [`REASK_LINE_AFTER`] chars around the position is cut there, each cut
+/// the line is blank. At most [`REASK_LINE_BEFORE`] chars before the
+/// position and [`REASK_LINE_AFTER`] after it are kept; each side's cut is
 /// marked `…`. Pure.
 ///
 /// The re-ask used to pass only serde's "expected `:` at line 20 column
-/// 132": a model cannot count to a column, and DGX tasks 429 and 457 sent
-/// the same bytes back. Shown the line (457's: a sift read's `parameters`
-/// ending `"attachments.*"}}`, a key with no value), it can see the slip.
+/// 132": a model cannot count to a column, and in DGX tasks 429 and 457 the
+/// re-ask came back the same length, still unusable. Shown the line (457's:
+/// a sift read's `parameters` ending `"attachments.*"}}`, a key with no
+/// value), it can see the slip.
 pub(crate) fn line_at_error(error: &str, raw: &str) -> Option<String> {
     let at = error_offset(error, raw)?;
     let line_start = raw[..at].rfind('\n').map_or(0, |i| i + 1);
@@ -299,9 +304,13 @@ pub(crate) fn line_at_error(error: &str, raw: &str) -> Option<String> {
     let after = &raw[at..line_end];
     let start = before.char_indices().rev().nth(REASK_LINE_BEFORE - 1).map_or(0, |(i, _)| i);
     let end = after.char_indices().nth(REASK_LINE_AFTER).map_or(after.len(), |(i, _)| i);
+    let text = format!("{}{}", &before[start..], &after[..end]);
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
     let cut = |yes: bool| if yes { "…" } else { "" };
-    let line = format!("{}{}{}{}", cut(start > 0), &before[start..], &after[..end], cut(end < after.len()));
-    Some(line.trim().to_string()).filter(|l| !l.is_empty())
+    Some(format!("{}{text}{}", cut(start > 0), cut(end < after.len())))
 }
 
 /// Payload for one `agent/plan.formulate_failed` row. Pure.

@@ -58,14 +58,17 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 - **Experiments #27–#28** (tasks 451–464, on #1041, [log](../notes/notebook-experiments.md)): **12 of 14**; both
   refused ticks recovered on #1041's words, both refused sifts read `SIFT_REFUSED`. Failures: task 457, a reply that is
-  not JSON (`raw_at_error`: a sift read's `"attachments.*"}}`, a key with no value) re-asked and sent back byte for
-  byte (task 429's shape); task 464, a forced answer turn that ticked and called on, filed as
+  not JSON (`raw_at_error`: a sift read's `"attachments.*"}}`, a key with no value) re-asked and sent back at the
+  same length, 1454 chars (task 429's shape); task 464, a forced answer turn that ticked and called on, filed as
   [#1044](https://github.com/hherb/kastellan/issues/1044). 7 of 21 sifts had every item unread (#1043's `unread_why`
   was not yet deployed).
 - **The fix:** `llm_failure::line_at_error` (pure) quotes the line a decode error points into (≤ 160 chars before the
   position, 40 after, cuts marked `…`; `None` for no position or a blank line); `notebook::ask` appends it to the
   re-ask reason as `That line reads: …`. Position math shared with `raw_at_error` (`error_offset`). +1 unit test; the
   PG re-ask test's unusable leg is now task 457's slip and pins the quote (a mutant dropping the line fails it).
+  `/finalcheck`: ⚠️ serde's **column 0** of a later line (a raw newline inside a string) now maps to the `\n` before
+  it, so the quote is the broken line, not its continuation; the `warn!` logs only the decode detail (the quoted line
+  is model text, which goes to the audit row, not the daemon log).
 - **Deploy:** #1043 to the DGX (`NRestarts=0`, env identical to `bak-pre1043`). **Experiments #29–#30**
   (`requery7.sh` × 2, on #1043) started 22:58, log `~/requery7.log` (#27–#28's: `~/requery7.log.1041ab`).
 
