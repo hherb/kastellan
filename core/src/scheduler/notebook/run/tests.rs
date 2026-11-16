@@ -179,7 +179,7 @@ async fn an_invalid_reply_is_re_asked_once_then_fails_in_words(pool: &sqlx::PgPo
     let r = run(pool, &script, new_task(pool, 5).await).await;
     assert_eq!(body(&r.result), "fixed");
     assert_eq!(r.result.failed_llm_calls, 1);
-    assert!(script.reasks.lock().unwrap()[0].contains("not the current step 1"));
+    assert!(script.reasks.lock().unwrap()[0].contains("the current step is 1"));
     let retries: Vec<Value> =
         rows(pool, r.task_id, "agent", "plan.formulate").await.iter().map(|p| p["retry_count"].clone()).collect();
     assert_eq!(retries, [json!(0), json!(1)], "the re-asked turn's row says it was retried");

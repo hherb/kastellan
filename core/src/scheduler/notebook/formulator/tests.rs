@@ -69,7 +69,8 @@ fn the_notebook_prompt_binds_the_allowed_line() {
 
 #[test]
 fn the_reformat_directive_names_the_reason() {
-    assert!(reformat_directive("`tick.step` 2 is not the current step 1").contains("not the current step 1"));
+    assert!(reformat_directive("`tick.step` 2: it is pending but not the current step; the current step is 1")
+        .contains("the current step is 1"));
 }
 
 #[test]
