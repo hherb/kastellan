@@ -600,3 +600,50 @@ Cell format: `turns / seconds`, then the outcome.
   - the Q7 judgement problem (#14–#22).
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 423 436` (→ `~/q1021.txt`). Logs →
   `~/requery7.log.1021a`, `~/requery7.log.1021b`.
+
+## 2026-11-16 #25 — #1038 deployed (the sift's default reads are the advertised ones), first run (tasks 437–443)
+
+- **Build:** `main` 55e900b3 (PR #1038), deployed with `scripts/upgrade_from_git.sh` (both env files identical to
+  their `bak-pre1038` backups, `NRestarts` 0, Matrix up, installed prompts sha256-equal to the repo's); knobs as #21.
+- **Hypothesis:** with `KASTELLAN_SIFT_READ_METHODS` unset, a sift's reads are the advertised methods and the planner
+  sees them in `<tools>`; no sift is refused for naming a read it was not offered.
+- **Results** (turns / seconds):
+  - Q1 8 / 907: a 100-item sift read 64 (kept 33, 36 remaining), then a 50-item sift looked at 16 (kept 5, 34 not
+    looked at). A 4-row table, "1 duplicate shown once", **price and GST empty** in every row; the prose says so.
+  - Q2 6 / 903: three sifts (kept 45 of 50, then 5 and 3 of 45) **made no reads** — every item counted `unread`. A
+    36-row table whose `total` column is empty; the prose says "3 invoices". One call on a done step (refused with the
+    fix, recovered), one request timeout.
+  - Q3 2 / 252: a numbered list of 10, right.
+  - Q4 5 / 180: fee items, **total $9,943**, conditions — right.
+  - Q5 3 / 240: one 20-item sift kept 11; $47.00 on 10 November 2026 (as #24).
+  - Q6 4 / 214: Cairns → Coffs Harbour, 17 November.
+  - Q7 3 / 288: a 28-row table, again with 2016–2024 items.
+  - Total 2984 s.
+- **Learned:** 7/7, no refused sift. Two answers are complete in shape and empty in content (Q1 price/GST, Q2 amounts):
+  in Q2 the sifts planned no reads at all, so the sorter decided every item on its hit.
+
+## 2026-11-16 #26 — #1038, second run (tasks 444–450)
+
+- **Build, knobs, hypothesis:** as #25, run straight after it.
+- **Results:**
+  - Q1 4 / 469: a 50-item sift read every item (kept 31), a re-sift kept 24; a 5-row table, **every row with price and
+    GST**, ordered by date ("showing the first 5 of 23 rows"). The best Q1 so far.
+  - Q2 6 / 606: two sifts over the same 29 of 50 (kept 24, 26; one sift refused between them), then the remaining 21
+    (kept 12). A 35-row table, every row with an amount; one row predates the asked date.
+  - Q3 2 / 141: a numbered list of 10, right.
+  - Q4 **failed** 4 / 132: the attachment read (step 3) failed `INVALID_PARAMS` (the filename), the next reply ticked
+    step 3 **and** called it again, re-listed. Refused as "`tick.step` 3 is not the current step 4 (nor a failed
+    one)" — step 3 *had* failed — and the re-ask sent the same reply back.
+  - Q5 **failed** 4 / 519: a 10-item sift kept 6, a sift over the 6 made no reads (kept 0, 6 unread), a sift was
+    refused (`not a list`, recorded `BLOCKED`: #1040 fixes the code), a call on done step 1 was refused with the fix,
+    then a tick on done step 1 with no step pending: "there is no current step to tick", re-asked, the same again.
+  - Q6 5 / 265: Cairns → Coffs Harbour.
+  - Q7 6 / 910: one 50-item sift kept 3; a 2-row answer.
+  - Total 3042 s.
+- **Learned:** 5/7. Over #25–#26: **12 of 14** (#23–#24: 13 of 14). Both failures are a **refused `tick` the re-ask
+  did not fix**: the refusal named neither the step's state nor what to send instead, so the model saw nothing to
+  change. Fixed by code on the next PR: each tick refusal says whether the step failed, is done or is not listed, what
+  to send instead, and which step is current (`notebook::reply::tick_refused`). Also seen: sifts that plan no reads
+  (#25 Q2, #26 Q5), and Q4, right in every earlier run, can now fail on an attachment filename.
+- **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 437 450` (→ `~/q1038.txt`). Logs →
+  `~/requery7.log.1038a`, `~/requery7.log.1038b`.

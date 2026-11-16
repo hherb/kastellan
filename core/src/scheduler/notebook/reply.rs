@@ -276,10 +276,7 @@ pub(crate) fn validate(reply: &NotebookReply, state: &NotebookState) -> Result<(
             Some(cur) if cur.id == tick.step => {}
             // A full tick may close a failed step it found another way.
             _ if failed && !progress => {}
-            Some(cur) => {
-                return Err(format!("`tick.step` {} is not the current step {} (nor a failed one)", tick.step, cur.id))
-            }
-            None => return Err(format!("`tick.step` {}: there is no current step to tick", tick.step)),
+            _ => return Err(tick_refused(tick.step, state)),
         }
         if let Some(payload) = reply.tick_payload(DataClass::Public) {
             after.apply_tick(payload)?;
@@ -337,6 +334,27 @@ to make the call again with other parameters, list it in `steps` under a new id 
         _ => "it is not listed. List it in `steps` first".into(),
     };
     format!("`call.step` {step} is not a pending step: {how}")
+}
+
+/// Why [`validate`] refuses a tick for `step`, and what to send instead.
+/// The re-ask shows the model only this line, so it must name the step's
+/// state: told "not the current step (nor a failed one)" about a step that
+/// had failed, the model sent the same reply back (DGX tasks 447, 448).
+fn tick_refused(step: u32, state: &NotebookState) -> String {
+    let why = match state.steps.iter().find(|s| s.spec.id == step).map(|s| &s.status) {
+        // Only progress reaches here: `validate` accepts a full tick on a failed step.
+        Some(StepStatus::Failed) => "it failed, and a failed step takes only a full tick that closes it, with no \
+call on it. To retry it, leave out the `tick`: list it in `steps` again and call it",
+        Some(StepStatus::Done) => "it is done, and a done step is never ticked again: leave out the `tick`",
+        Some(StepStatus::Pending) => "it is not the step you are on: tick that one, or leave out the `tick`",
+        // A tick is read before the same reply's `steps`.
+        None => "it is not listed (a `tick` is read before the reply's `steps`)",
+    };
+    let at = match state.current_step() {
+        Some(cur) => format!("the current step is {}", cur.id),
+        None => "there is no current step to tick (to retry a failed step, list it in `steps` again and call it)".into(),
+    };
+    format!("`tick.step` {step}: {why}; {at}")
 }
 
 /// [`require_answer`]'s reason; `ask` matches it to word the failure (#1019).

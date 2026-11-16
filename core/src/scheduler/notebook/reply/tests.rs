@@ -45,7 +45,7 @@ fn a_reply_with_no_call_answer_or_infeasible_is_rejected() {
 #[test]
 fn ticking_a_step_that_is_not_current_is_rejected() {
     let err = check(json!({"tick": tick(2), "call": call(2)}), &two_steps()).unwrap_err();
-    assert!(err.contains("not the current step 1"), "{err}");
+    assert!(err.contains("the current step is 1"), "{err}");
     let empty = NotebookState::default();
     let err = check(json!({"steps": [step(1)], "tick": tick(1), "call": call(1)}), &empty).unwrap_err();
     assert!(err.contains("no current step"), "{err}");
@@ -361,6 +361,37 @@ fn a_full_tick_may_close_a_failed_step() {
     assert_eq!(s.findings.len(), 1);
     // A tick for step 1 that also calls step 1 is progress, which a failed step cannot take.
     assert!(check(json!({"tick": tick(1), "call": call(1)}), &failed).is_err());
+}
+
+/// DGX tasks 447/448: the model ticked a step it could not tick, and the
+/// re-ask, told only "not the current step 4 (nor a failed one)" about a
+/// step that HAD failed, sent the same reply back. Each refusal says what
+/// the step is and what to send instead.
+#[test]
+fn a_refused_tick_says_what_to_send_instead() {
+    let failed = fold(&[
+        entry(1, EntryKind::Steps, json!({"steps": [step(1), step(2)]})),
+        entry(2, EntryKind::FailedStep, json!({"step": 1, "code": "E", "detail": "d", "classification": "Public"})),
+    ])
+    .unwrap();
+    // Task 447: progress on a failed step it retries in the same reply.
+    let err = check(json!({"tick": tick(1), "steps": [step(1)], "call": call(1)}), &failed).unwrap_err();
+    assert!(err.contains("`tick.step` 1: it failed"), "{err}");
+    assert!(err.contains("To retry it, leave out the `tick`"), "{err}");
+    assert!(err.contains("the current step is 2"), "{err}");
+    // Task 448: a done step ticked again, nothing pending (step 2 failed).
+    let none_pending = fold(&[
+        entry(1, EntryKind::Steps, json!({"steps": [step(1), step(2)]})),
+        entry(2, EntryKind::Tick, json!({"step": 1, "note": "n", "findings": [], "summary": "s", "classification": "Public"})),
+        entry(3, EntryKind::FailedStep, json!({"step": 2, "code": "E", "detail": "d", "classification": "Public"})),
+    ])
+    .unwrap();
+    let err = check(json!({"tick": tick(1), "steps": [step(3)], "call": call(3)}), &none_pending).unwrap_err();
+    assert!(err.contains("`tick.step` 1: it is done, and a done step is never ticked again"), "{err}");
+    assert!(err.contains("there is no current step to tick"), "{err}");
+    // A step never listed.
+    let err = check(json!({"tick": tick(9), "call": call(1)}), &two_steps()).unwrap_err();
+    assert!(err.contains("`tick.step` 9: it is not listed"), "{err}");
 }
 
 /// DGX task 292: a progress tick on step 1, a replan listing only the new
