@@ -647,3 +647,51 @@ Cell format: `turns / seconds`, then the outcome.
   plan no reads (#25 Q2, #26 Q5), and Q4, right in every earlier run, can now fail on an attachment filename.
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 437 450` (→ `~/q1038.txt`). Logs →
   `~/requery7.log.1038a`, `~/requery7.log.1038b`.
+
+## 2026-11-16 #27 — #1041 deployed (a refused tick says what to send instead), first run (tasks 451–457)
+
+- **Build:** `main` f4fbba8a + docs-only #1042 (PR #1041), deployed with `scripts/upgrade_from_git.sh` (both env files
+  identical to their `bak-pre1041` backups, `NRestarts` 0); knobs as #21.
+- **Hypothesis:** no task fails on a refused `tick`; #1040's codes read `SIFT_REFUSED`.
+- **Results** (turns / seconds):
+  - Q1 3 / 437: one 50-item sift read every item (kept 26); a 5-row table, price and GST in **one** row only.
+  - Q2 6 / 971: four sifts, **none made a read**: two planned none (`read_methods: []`), two planned reads that resolved
+    to nothing (38 of 38 `unread`). A 34-row table whose `total` column is empty; the prose says so. One request
+    timeout.
+  - Q3 2 / 142: a numbered list of 10, right.
+  - Q4 5 / 270: fee items, **total $9,943**, conditions — right (step 2's filename failed `INVALID_PARAMS`, recovered).
+  - Q5 3 / 586: a 10-item sift kept 6; "the amount is unknown" for each (one turn cut off by `max_tokens`).
+  - Q6 6 / 618: Cairns → Coffs Harbour. A sift refused (`missing field keep_if`, code `SIFT_REFUSED`), then a tick on
+    the failed step refused with #1041's words; the next reply was usable.
+  - Q7 **failed** 3 / 653: the reply after two sifts was not JSON, `expected ':' at line 20 column 132`.
+    `raw_at_error` (#1024) shows why: a sift read written `"parameters": {"message_id": "{message_id}",
+    "attachments.*"}}`, a key with no value. The thinking-off re-ask sent the **same 1454 chars** back (task 429's
+    shape).
+  - Total 3677 s.
+
+## 2026-11-16 #28 — #1041, second run (tasks 458–464)
+
+- **Build, knobs, hypothesis:** as #27, run straight after it.
+- **Results:**
+  - Q1 6 / 1009: a 50-item sift kept 18, then two sifts over them made no reads (every item `unread`), a fourth
+    stopped at the deadline after 0 of 50. A 14-row table with price and GST empty, and prose saying none was found.
+  - Q2 6 / 837: a 59-item sift (kept 22), one refused (`from` 26 past the end of 22 items, `SIFT_REFUSED`), a refused
+    tick recovered, then two 50-item sifts that read every item. A 36-row table, **every row with an amount**; one
+    row predates the asked date (as #26).
+  - Q3 2 / 151: a numbered list of 10, right.
+  - Q4 4 / 197: fee items, total $9,943, conditions — right.
+  - Q5 6 / 204: Mia Harper, 10 November 2026, $47.00 (as #24–#25).
+  - Q6 3 / 59: Cairns → Coffs Harbour.
+  - Q7 **failed** 7 / 982: a 50-item sift kept 7, then **three sifts in a row made no reads** (the model guessed the
+    cause, "'message_id' was not included in the extracted fields"), then single-message reads, then the time ceiling.
+    The forced answer turn sent a tick and no answer, then a tick and a `call`: failed with four sifts' kept rows in
+    hand ([#1044](https://github.com/hherb/kastellan/issues/1044)).
+  - Total 3439 s.
+- **Learned:** **12 of 14** (as #25–#26), but neither failure is a refused tick: both refused ticks (Q6 of #27, Q2 of
+  #28) recovered on #1041's words, and both refused sifts read `SIFT_REFUSED` (#1040). The failures are new shapes: (1)
+  a syntax error the re-ask could not fix because it named only a line and column — the re-ask now quotes the line (PR
+  for #1024's second half); (2) a forced answer turn that kept working (#1044). Zero-read sifts are frequent: of 21
+  sifts, seven planned reads that resolved for no item and three planned none. The model can only guess why: #1043's
+  `unread_why` (deployed after this run) names the placeholder.
+- **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 451 464` (→ `~/q1041.txt`). Log →
+  `~/requery7.log.1041ab`.

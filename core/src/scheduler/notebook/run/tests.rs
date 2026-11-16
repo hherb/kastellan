@@ -184,15 +184,19 @@ async fn an_invalid_reply_is_re_asked_once_then_fails_in_words(pool: &sqlx::PgPo
         rows(pool, r.task_id, "agent", "plan.formulate").await.iter().map(|p| p["retry_count"].clone()).collect();
     assert_eq!(retries, [json!(0), json!(1)], "the re-asked turn's row says it was retried");
 
-    // Twice unusable: the task fails, saying why.
-    let script = Script::raw(&["no json here".into(), "still none".into()]);
+    // Twice unusable: the task fails, saying why. The first is DGX task 457's
+    // slip, a key with no value: the re-ask quotes its line (#1024).
+    let slip = "{\"steps\": [],\n  \"call\": {\"step\": 1, \"parameters\": {\"a\": \"b\", \"attachments.*\"}}}";
+    let script = Script::raw(&[slip.into(), "still none".into()]);
     let r = run(pool, &script, new_task(pool, 5).await).await;
     match &r.result.outcome {
         Outcome::Failed(d) => assert!(!d.is_empty(), "a worded failure"),
         o => panic!("expected Failed, got {o:?}"),
     }
     assert_eq!(r.result.failed_llm_calls, 2, "the first reply and the re-ask");
-    assert_eq!(script.reasks.lock().unwrap().len(), 1, "re-asked exactly once");
+    let reasks = script.reasks.lock().unwrap().clone();
+    assert_eq!(reasks.len(), 1, "re-asked exactly once");
+    assert!(reasks[0].contains("That line reads: \"call\": {\"step\": 1"), "{reasks:?}");
     assert!(kinds(pool, r.task_id).await.is_empty(), "nothing usable was written");
 }
 

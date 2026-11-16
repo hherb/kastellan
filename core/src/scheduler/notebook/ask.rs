@@ -109,8 +109,12 @@ pub(super) async fn ask(
         Err(e) if e.non_plan_answer().is_some() => {
             record(pool, ctx, guard, failed_llm_calls, &e, false).await;
             let reply = e.non_plan_answer().unwrap_or_default().to_string();
+            // A syntax error's position alone is uncountable: quote its line (#1024).
             let reason = match &e {
-                AgentError::Decode { detail, .. } => detail.clone(),
+                AgentError::Decode { detail, raw, .. } => match llm_failure::line_at_error(detail, raw) {
+                    Some(line) => format!("{detail}. That line reads: {line}"),
+                    None => detail.clone(),
+                },
                 other => other.to_string(),
             };
             tracing::warn!(task_id = ctx.task_id, %reason, "notebook reply could not be used; re-asked once");
