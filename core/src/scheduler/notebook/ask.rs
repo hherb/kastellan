@@ -109,11 +109,18 @@ pub(super) async fn ask(
         Err(e) if e.non_plan_answer().is_some() => {
             record(pool, ctx, guard, failed_llm_calls, &e, false).await;
             let reply = e.non_plan_answer().unwrap_or_default().to_string();
-            let reason = match &e {
-                AgentError::Decode { detail, .. } => detail.clone(),
-                other => other.to_string(),
+            let (detail, line) = match &e {
+                AgentError::Decode { detail, raw, .. } => (detail.clone(), llm_failure::line_at_error(detail, raw)),
+                other => (other.to_string(), None),
             };
-            tracing::warn!(task_id = ctx.task_id, %reason, "notebook reply could not be used; re-asked once");
+            // Log the error, not the quoted line: model text goes to the audit row,
+            // not the daemon log (see FAILED_ROW_RAW_HEAD_CHARS).
+            tracing::warn!(task_id = ctx.task_id, %detail, "notebook reply could not be used; re-asked once");
+            // A decode error's position alone is uncountable: quote its line (#1024).
+            let reason = match line {
+                Some(line) => format!("{detail}. That line reads: {line}"),
+                None => detail,
+            };
             retried = true;
             reasked = true;
             check(nb.notebook_turn(ctx, msg, Some((&reply, &reason)), ThinkingPolicy::Suppress).await)

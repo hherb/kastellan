@@ -294,3 +294,36 @@ fn the_window_never_cuts_a_character() {
     // A column landing inside "é" (bytes 2..4) is moved back to its start.
     assert_eq!(raw_at_error("e at line 1 column 3", "{\"é\"").as_deref(), Some("{\"é\""));
 }
+
+/// #1024's second half (DGX tasks 429, 457): the re-ask named only "line 20
+/// column 132", and the thinking-off re-ask sent the same bytes back. The
+/// re-ask now quotes that line — here task 457's: a sift read with a key and
+/// no value (`"attachments.*"`), one line of a reply after a prose preamble.
+#[test]
+fn the_re_ask_quotes_the_line_a_syntax_error_is_on() {
+    let bad = r#"    {"tool": "mail", "method": "mail.get_attachment_text", "parameters": {"message_id": "{message_id}", "attachments.*"}}"#;
+    let reply = format!("Here is my reply.\n{{\n  \"steps\": [],\n  \"reads\": [\n{bad}\n  ]\n}}");
+    let error = decode_error(&reply);
+    let line = line_at_error(&error, &reply).unwrap();
+    assert!(line.contains(r#""{message_id}", "attachments.*"}"#), "{line}");
+    assert!(!line.contains('\n') && !line.starts_with(' '), "one trimmed line: {line:?}");
+    // A long line is cut around the position, marked, and never mid-character.
+    let long = format!("{{\"a\": \"{}\" \"b\": 1}}", "é".repeat(400));
+    let line = line_at_error(&decode_error(&long), &long).unwrap();
+    assert!(line.starts_with('…') && line.ends_with("\"b\": 1}"), "{line}");
+    assert!(line.chars().count() <= REASK_LINE_BEFORE + REASK_LINE_AFTER + 2, "{line}");
+    // Each side is cut on its own: an early slip in a long minified line keeps
+    // REASK_LINE_AFTER chars after it, not the rest of the reply.
+    let long = format!("{{\"a\" 1, \"b\": \"{}\"}}", "x".repeat(400));
+    let line = line_at_error(&decode_error(&long), &long).unwrap();
+    assert_eq!(line, format!("{{\"a\" 1, \"b\": \"{}…", "x".repeat(REASK_LINE_AFTER - 8)));
+    // A raw newline inside a string errors at column 0 of the NEXT line; the
+    // slip is the line it breaks, not its continuation.
+    let raw = "{\"answer\": {\"body\": \"first para\nsecond para\"}}";
+    let line = line_at_error(&decode_error(raw), raw).unwrap();
+    assert_eq!(line, "{\"answer\": {\"body\": \"first para");
+    // No position, or a blank line (an EOF error on trailing spaces): nothing to quote.
+    assert_eq!(line_at_error("plan decode failed: a step has no id", "{}"), None);
+    assert_eq!(line_at_error("e at line 2 column 2", "{\n   "), None);
+    assert_eq!(line_at_error("e at line 2 column 300", &format!("{{\n{}", " ".repeat(300))), None);
+}
