@@ -66,9 +66,12 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   `notebook::partial::partial_answer` (pure) writes `PARTIAL_HEAD` + one line per ticked finding; the loop attaches every
   sift's kept rows (`forced_table`) and reviews it like any answer; a `plan.discarded` row reads
   `forced_answer_failed_partial_used`. Nothing found (no finding, no kept rows) → fails as before. ⚠️ Only ticks the
-  notebook **took** count: the failed reply's own tick is not applied. ⚠️ The answer's `plan.formulate` row carries the
-  last usable turn's meta with latency/usage zeroed; a resumed run whose first turn is the forced one has none → fails.
-  `run.rs` 480 (`again_code` + its test moved verbatim to `run/again.rs`).
+  notebook **took** count: the failed reply's own tick is not applied. The answer's `plan.formulate` row carries
+  `partial::code_meta()` (`llm_model`/`llm_backend` = `code`, nothing recalled, zero cost), never an earlier turn's, so
+  a resumed run with no usable turn is answered too (finalcheck review); the warn log carries the forced turn's
+  failure. PG legs in `run/partial_tests.rs` (62): resumed kept-rows-only answer with the table, a routine turn failing
+  after a tick still fails, a reviewer block on it closes nothing (each mutant-checked). `run.rs` 482 (`again_code` +
+  its test moved verbatim to `run/again.rs`).
 - **Deploy:** #1045 to the DGX (`NRestarts=0`, env identical to `bak-pre1045`); its quoted line is unseen live.
 
 ### Previous (2026-11-16): a syntax error's re-ask quotes its line (#1024, PR #1045, merged, deployed DGX 2026-11-17) — `llm_failure::line_at_error` (pure) quotes the line a decode error points into; `notebook::ask` appends `That line reads: …` to the re-ask. ⚠️ serde's column 0 of a later line maps to the `\n` before it. Experiments #27–#28: 12 of 14 (task 457 syntax error, task 464 → #1044). Full section: the `1044` snapshot.
@@ -338,7 +341,7 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
 **before** the change that grows a file, in a movement-only commit, and **prove the movement rather
 than asserting it** — #730's split checked every moved region was **byte-identical** to its range on
 `main` and that the `fn`-name set matched (which a diff cannot show), and #750's added a **negative
-control** proving the checker can fail. ⚠️ `inner_loop/execute.rs` **512** (#956 items) — split before the next change (`sift/run.rs` was split to 406; 413 now; `notebook/run.rs` 480 after #1044 moved `again_code` out). Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
+control** proving the checker can fail. ⚠️ `inner_loop/execute.rs` **512** (#956 items) — split before the next change (`sift/run.rs` was split to 406; 413 now; `notebook/run.rs` 482 after #1044 moved `again_code` out). Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
 1558+ (#639), `core/src/workers/gliner_relex/tests.rs`, `db/src/asks.rs`,
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
 `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
@@ -354,7 +357,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its new leg in `mail_live_shape_e2e/hit_fields.rs` (a `#[path]` module); move the next one there too, or split. ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-`core/src/scheduler/notebook/run/tests.rs` **577** (+16 in #1044; the next leg goes in its own file): #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
+`core/src/scheduler/notebook/run/tests.rs` **580** (+19 in #1044; its review's legs went to `run/partial_tests.rs`; the next leg goes in its own file): #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).

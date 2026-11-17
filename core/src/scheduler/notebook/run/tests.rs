@@ -109,6 +109,9 @@ async fn the_notebook_loop() {
     super::timeout_tests::a_re_ask_that_times_out_before_gathering_fails_in_words(&pool).await;
     super::timeout_tests::the_deadline_passing_after_a_gather_spends_the_answer_turn(&pool).await;
     super::timeout_tests::the_deadline_with_nothing_gathered_fails_naming_the_ceiling(&pool).await;
+    super::partial_tests::a_resumed_run_with_no_usable_turn_answers_from_kept_rows(&pool).await;
+    super::partial_tests::a_routine_turn_that_fails_after_a_tick_still_fails(&pool).await;
+    super::partial_tests::a_blocked_partial_answer_is_not_the_answer(&pool).await;
 }
 
 async fn a_three_step_task_ticks_each_step_and_answers_from_findings(pool: &sqlx::PgPool) {

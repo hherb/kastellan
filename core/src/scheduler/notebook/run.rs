@@ -110,8 +110,6 @@ pub(crate) async fn run_notebook_to_terminal(
     // That turn's answer, kept for the rewrite turn: if the rewrite produces
     // no answer, the draft is used instead (#1023).
     let mut draft: Option<Box<(NotebookReply, FormulationMeta)>> = None;
-    // The last usable turn's meta, for an answer code writes (#1044).
-    let mut last_meta: Option<FormulationMeta> = None;
     let base_instruction = ctx.instruction.clone();
 
     macro_rules! finish {
@@ -208,13 +206,16 @@ pub(crate) async fn run_notebook_to_terminal(
         };
         // #1044: the forced-answer turn failed with something found: code
         // writes the answer from it, reviewed below like any answer.
-        let written = (matches!(turn, Asked::Failed(_)) && kind == TurnKind::ForcedAnswer)
-            .then(|| super::partial::partial_answer(&state, &ctx.plans).zip(last_meta.clone()))
-            .flatten();
+        let written = match &turn {
+            Asked::Failed(why) if kind == TurnKind::ForcedAnswer => {
+                super::partial::partial_answer(&state, &ctx.plans).map(|r| (r, why.clone()))
+            }
+            _ => None,
+        };
         let turn = match written {
-            Some((r, m)) => {
-                tracing::warn!(task_id = ctx.task_id, "notebook: the forced-answer turn produced no answer; code wrote one from what was found");
-                let m = FormulationMeta { latency_ms: 0, retry_count: 0, usage: Default::default(), ..m };
+            Some((r, why)) => {
+                tracing::warn!(task_id = ctx.task_id, reason = %why, "notebook: the forced-answer turn produced no answer; code wrote one from what was found");
+                let m = super::partial::code_meta();
                 audit_discarded_turn(pool, &ctx, "forced_answer_failed_partial_used", None, &m).await;
                 Asked::Reply(Box::new((r, m)))
             }
@@ -228,7 +229,6 @@ pub(crate) async fn run_notebook_to_terminal(
             }
             Asked::Failed(detail) => return finish!(Outcome::Failed(detail)),
         };
-        last_meta = Some(meta.clone());
 
         // A draft used in place of its rewrite was counted on its own turn.
         if !fell_back {
@@ -475,5 +475,8 @@ mod agent_raised_tests;
 mod timeout_tests;
 #[cfg(test)]
 mod rewrite_tests;
+
+#[cfg(test)]
+mod partial_tests;
 
 mod again;

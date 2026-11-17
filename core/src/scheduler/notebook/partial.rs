@@ -11,6 +11,8 @@
 use super::reply::{AnswerSpec, NotebookReply};
 use super::sift;
 use super::state::NotebookState;
+use crate::entity_extraction::SeedSource;
+use crate::scheduler::agent::FormulationMeta;
 use crate::scheduler::inner_loop::PlanRecord;
 
 /// The first line of a code-written answer: it says the answer is partial.
@@ -41,6 +43,35 @@ pub(crate) fn partial_answer(state: &NotebookState, plans: &[PlanRecord]) -> Opt
     // With no findings, the kept rows are the whole answer: no sift, no answer.
     let has_rows = sift::answer::forced_table(&reply, plans).is_some();
     (!lines.is_empty() || has_rows).then_some(reply)
+}
+
+/// The `llm_model` and `llm_backend` of the audit rows for a code-written answer.
+pub(crate) const CODE_AUTHOR: &str = "code";
+
+/// The meta for a code-written answer: no model wrote it, so it names none and
+/// costs nothing. It is not copied from an earlier turn: then the
+/// `plan.formulate` row would credit that turn's model and prompt, and a
+/// resumed run, which may have had no usable turn, would have none. Pure.
+pub(crate) fn code_meta() -> FormulationMeta {
+    FormulationMeta {
+        prompt_name: "partial_answer".into(),
+        prompt_sha256: String::new(),
+        llm_model: CODE_AUTHOR.into(),
+        llm_backend: CODE_AUTHOR.into(),
+        latency_ms: 0,
+        retry_count: 0,
+        assembled_prompt_sha256: String::new(),
+        l0_count: 0,
+        l1_count: 0,
+        skill_count: 0,
+        recalled_memory_ids: Vec::new(),
+        recall_count: 0,
+        recall_query_sha256: String::new(),
+        graph_seed_entity_ids: Vec::new(),
+        graph_seed_count: 0,
+        graph_seed_source: SeedSource::None,
+        usage: Default::default(),
+    }
 }
 
 #[cfg(test)]
