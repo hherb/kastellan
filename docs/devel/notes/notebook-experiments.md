@@ -695,3 +695,43 @@ Cell format: `turns / seconds`, then the outcome.
   `unread_why` (deployed after this run) names the placeholder.
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 451 464` (→ `~/q1041.txt`). Log →
   `~/requery7.log.1041ab`.
+
+## 2026-11-16 #29 — #1043 deployed (a zero-read sift says why), first run (tasks 465–471)
+
+- **Build:** `main` 5de5fed6 (PR #1043), deployed with `scripts/upgrade_from_git.sh` (both env files identical to their
+  `bak-pre1043` backups, `NRestarts` 0); knobs as #21.
+- **Hypothesis:** every zero-read sift carries `unread_why`, and the next reply fixes the placeholder it names.
+- **Results** (turns / seconds):
+  - Q1 4 / 588: a 50-item sift kept 17, a sift over them kept 13; a 5-row table, **price and GST in every row**.
+  - Q2 4 / 519: two chained sifts (58 then 57 reads); a 33-row table, every row with an amount.
+  - Q3 2 / 148: a numbered list of 10, right.
+  - Q4 4 / 151: fee items, total $9,943, conditions — right.
+  - Q5 3 / 238: Jutta Herb, 10 November 2026, $47.00 (as #24–#28).
+  - Q6 3 / 57: Cairns → Coffs Harbour.
+  - Q7 3 / 416: one 50-item sift kept 32; a 31-row table led by the overdue Dynamic Hydro bill, but with hotel booking
+    confirmations from 2020–2025 in it.
+  - Total 2117 s.
+
+## 2026-11-17 #30 — #1043, second run (tasks 472–478)
+
+- **Build, knobs, hypothesis:** as #29, run straight after it.
+- **Results:**
+  - Q1 3 / 465: a 50-item sift kept 21; a 5-row table, price and GST in **one** row only.
+  - Q2 4 / 410: two chained sifts (64 then 38 reads); a 35-row table, every row with an amount.
+  - Q3 2 / 134: a numbered list of 10, right.
+  - Q4 4 / 115: fee items, total $9,943, conditions — right.
+  - Q5 3 / 523: **no amount**. A 10-item sift read only `mail.get_message` (no attachment text), kept 7; the answer
+    names the likely invoice and says it would need to read the attachment. One turn hit `max_tokens` while thinking
+    (16384 tokens, empty reply, 397 s); the blank-completion re-ask recovered.
+  - Q6 5 / 679: booking EZLAQ7 (Coffs Harbour → Melbourne, 22 November), plus QF1891 Cairns → Coffs Harbour. The same
+    thinking runaway on one turn (410 s), recovered.
+  - Q7 3 / 385: one 50-item sift kept 27; a 27-row table, the same mix as #29 (hotel confirmations included).
+  - Total 2711 s.
+- **Learned:** **14 of 14** (#27–#28: 12 of 14), but the hypothesis was **not tested**: none of the 11 sifts had every
+  item unread (#28: 10 of 21), so `unread_why` never fired. Fewer sifts per task (at most 2) is the likelier cause than
+  any change the model could see. No syntax-error decode either, so #1045's quoted line is still untested live. New
+  weak spots: (1) a thinking turn can spend all 16384 tokens and answer nothing (2 turns, ~400 s each); (2) Q5's
+  sift chose not to read the attachment, so the answer had no amount; (3) Q7 counts booking confirmations as payments
+  due.
+- **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 465 478` (→ `~/q1043.txt`). Log →
+  `~/requery7.log.1043ab`.

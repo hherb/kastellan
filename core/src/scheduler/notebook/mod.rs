@@ -24,6 +24,7 @@
 pub(crate) mod ask;
 pub(crate) mod audit;
 pub mod formulator;
+pub(crate) mod partial;
 pub(crate) mod render;
 pub(crate) mod repeat;
 pub(crate) mod reply;
