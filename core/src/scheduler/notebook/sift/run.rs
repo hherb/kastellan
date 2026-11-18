@@ -32,7 +32,7 @@ use super::sorter::{parse_sort_reply, sorter_message, SortReply, SORTER_ITEM_CAP
 use super::summary::{summary, Reads, Stop};
 use super::table::{as_stored, distinct_kept, Counts, SOURCE_TOOL_KEY};
 use super::reads::plan_reads;
-use super::template::unread_why;
+use super::template::{scrap_parts, unread_why};
 use super::item_views::ReadsMade;
 use super::{SIFT_METHOD, SIFT_READS_DECISION, SIFT_TOOL};
 use crate::cassandra::review::ChainReviewStage;
@@ -323,11 +323,11 @@ fn plan(decision: String, step: u32, steps: Vec<PlannedStep>, class: DataClass) 
 }
 
 /// Where an item of `tool`'s output came from: its identifying keys
-/// ([`SOURCE_KEYS`]); a scrapbook row's own `source`; or `{}`. A bare `id`
+/// ([`SOURCE_KEYS`]); a scrapbook row's own `source` ([`scrap_parts`]); or `{}`. A bare `id`
 /// means something only within one tool, so it is written with the tool:
 /// otherwise `{"id": 3}` from two tools would be one table row (#1022).
 fn source_of(item: &Value, tool: &str) -> Value {
-    if let (Some(source), Some(_)) = (item.get("source"), item.get("fields")) {
+    if let Some((source, _)) = scrap_parts(item) {
         return source.clone();
     }
     let mut picked: Map<String, Value> = SOURCE_KEYS

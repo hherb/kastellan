@@ -31,7 +31,7 @@ pub(crate) fn value_at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
 
 /// An earlier sift's kept row as a sift `over` its scrapbook sees it:
 /// `(source, fields)`, or `None` for any other item.
-fn scrap_parts(item: &Value) -> Option<(&Value, &serde_json::Map<String, Value>)> {
+pub(crate) fn scrap_parts(item: &Value) -> Option<(&Value, &serde_json::Map<String, Value>)> {
     Some((item.get("source").filter(|s| s.is_object())?, item.get("fields")?.as_object()?))
 }
 
@@ -53,7 +53,7 @@ fn item_at<'a>(item: &'a Value, path: &str) -> Option<&'a Value> {
 
 /// The parameter objects of `item`'s reads: `t.parameters` with every
 /// placeholder filled from the item. A placeholder is a whole string value
-/// `"{path}"` and takes the item's value at that path, of whatever JSON type
+/// `"{path}"` and takes the item's value at that path ([`item_at`]), of whatever JSON type
 /// (a `"x {id}"` inside other text is left as written). One placeholder may
 /// fan out with a `*` segment (`{attachments.*}`): one read per element of
 /// that list, skipping image names. Any placeholder that does not resolve —
@@ -156,9 +156,12 @@ fn item_why(reads: &[ReadTemplate], item: &Value, n: usize) -> Option<String> {
     if parts.is_empty() {
         return None;
     }
-    // A scrapbook row is named by what [`item_at`] reads: its source's and fields' keys.
+    // A scrapbook row lists the names a placeholder is meant for: its source's
+    // keys, then its fields' (a key in both, once).
     let keys: Option<Vec<&String>> = match scrap_parts(item) {
-        Some((source, fields)) => Some(source.as_object().into_iter().flat_map(|s| s.keys()).chain(fields.keys()).collect()),
+        Some((source, fields)) => Some(
+            source.as_object().into_iter().flat_map(|s| s.keys()).chain(fields.keys().filter(|k| source.get(k.as_str()).is_none())).collect(),
+        ),
         None => item.as_object().map(|o| o.keys().collect()),
     };
     let fields = match keys {

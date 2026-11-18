@@ -68,8 +68,10 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   timeouts whose cause the row does not record).
 - **Fix (PR #1048, #956 item):** `sift::template::item_at` (pure) resolves a placeholder against the item, then, for a
   scrapbook row only, its `source`, then its `fields` (exact key first, since a kept field's name may hold a dot), so a
-  follow-up sift's reads work as written for the original items; `unread_why` lists a row's source and field names. 3
-  unit tests (`template/tests.rs`, 219), the dotted fallback mutant-checked. ⚠️ Unseen live: re-measure.
+  follow-up sift's reads work as written for the original items; `unread_why` lists a row's source and field names
+  (a shared key once), and `run.rs`'s `source_of` uses the same row test (`scrap_parts`). 4 unit tests
+  (`template/tests.rs`, 244); the review round pinned the lookup order (item, source, fields) and the non-object
+  `source`, 4 of 4 mutants caught. ⚠️ Unseen live: re-measure.
 
 ### Previous (2026-11-17): a failed forced-answer turn is answered by code (#1044, PR #1046, merged, deployed DGX 2026-11-18) — `notebook::partial::partial_answer` (pure) writes `PARTIAL_HEAD` + one line per ticked finding plus every sift's kept rows, reviewed like any answer; `plan.discarded` reads `forced_answer_failed_partial_used`; nothing found → fails as before. ⚠️ Only ticks the notebook **took** count; the answer's `plan.formulate` row carries `partial::code_meta()`. PG legs in `run/partial_tests.rs`. Full section: this file at #1046 in git history.
 
