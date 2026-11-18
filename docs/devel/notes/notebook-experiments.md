@@ -735,3 +735,47 @@ Cell format: `turns / seconds`, then the outcome.
   due.
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 465 478` (→ `~/q1043.txt`). Log →
   `~/requery7.log.1043ab`.
+
+## 2026-11-18 #31 — #1046 deployed (a failed forced-answer turn is answered by code), first run (tasks 479–485)
+
+- **Build:** `main` 737c5820 (PR #1046), deployed with `scripts/upgrade_from_git.sh` (both env files identical to their
+  `bak-pre1046` backups, `NRestarts` 0, prompt sha256s equal to `main`'s); knobs as #21.
+- **Hypothesis:** a forced-answer turn that fails is answered by code (`forced_answer_failed_partial_used`); still owed
+  from #29–#30: `unread_why` on a zero-read sift, and a syntax error's re-ask quoting its line.
+- **Results** (turns / seconds):
+  - Q1 4 / 938: two 50-item sifts kept 18 and 17; a table with route, price and GST, but the body says those fields
+    could not be extracted. One call hit the 600 s request timeout.
+  - Q2 3 / 232: a 14-row invoice table, most rows with an amount.
+  - Q3 2 / 166: a numbered list of 10, right.
+  - Q4 7 / 279: fee items and conditions, right.
+  - Q5 3 / 355: Optus, 17 November 2026, $106.25 (a newer invoice than #24–#30's), right.
+  - Q6 3 / 64: Coffs Harbour → Melbourne, QF1299, 22 November.
+  - Q7 7 / 991: three sifts (one refused: `from` 27 on an 11-item scrapbook, carried from a step-list sift) kept 6;
+    the answer says it cannot tell which are due. One request timeout.
+  - Total 3025 s.
+
+## 2026-11-18 #32 — #1046, second run (tasks 486–492)
+
+- **Build, knobs, hypothesis:** as #31, run straight after it.
+- **Results:**
+  - Q1 7 / 943: **wrong**: "no domestic Qantas bookings". Two sifts kept 41 then 28; a third, **over the second's
+    scrapbook**, wrote `{message_id}` / `{attachments.*}`, made no reads and kept 0 (`unread_why`: "names nothing in
+    item 0 (its fields: fields, source)"); a fourth over the search stopped on `time` after its 50 reads.
+  - Q2 5 / 940: 37 candidates, **no amounts**. The same shape: two sifts over the first's scrapbook named `{attachments.*}`
+    then `{message_id}` with `index: 0`; both read nothing (`unread_why` twice), and the model never found the path.
+    One turn refused (a call on done step 1), one request timeout.
+  - Q3 2 / 165: a numbered list of 10, right.
+  - Q4 5 / 170: fee items, right.
+  - Q5 4 / 145: Optus, $106.25, right.
+  - Q6 2 / 423: the first turn spent all 16384 tokens thinking (399 s, empty reply); the answer names QF1299 and QF1891
+    but not an origin.
+  - Q7 7 / 911: Dynamic Hydro $680 overdue and a $4,065 PAYG debt; the last sift stopped on `time`.
+  - Total 3697 s.
+- **Learned:** **14 of 14 completed, about 9 right.** No forced-answer turn failed, so `forced_answer_failed_partial_used`
+  is still unseen; no syntax-error decode either. `unread_why` **fired for the first time (3×), and exposed a code
+  defect rather than a model one**: a sift `over` a scrapbook sees items shaped `{"fields": …, "source": …}`, so the
+  placeholders the planner writes for the original items name nothing, and the listed names (`fields, source`) did not
+  tell it what to write. Fixed by code (placeholders fall back to a row's `source`, then its `fields`; the why lists
+  those names). The thinking runaway recurred → [#1047](https://github.com/hherb/kastellan/issues/1047), with three
+  600 s request timeouts whose cause is unrecorded.
+- **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 479 492` (→ `~/q1046.txt`). Log → `~/requery7.log.1046ab`.
