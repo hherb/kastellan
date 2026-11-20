@@ -779,3 +779,42 @@ Cell format: `turns / seconds`, then the outcome.
   those names). The thinking runaway recurred → [#1047](https://github.com/hherb/kastellan/issues/1047), with three
   600 s request timeouts whose cause is unrecorded.
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 479 492` (→ `~/q1046.txt`). Log → `~/requery7.log.1046ab`.
+
+## 2026-11-20 #33 — #1048 deployed (a follow-up sift reads its rows' source), first run (tasks 493–499)
+
+- **Build:** `main` fe62bbc1 (PR #1048), deployed with `scripts/upgrade_from_git.sh` (both env files identical to their
+  `bak-pre1048` backups, `NRestarts` 0, prompt sha256s equal to `main`'s); knobs as #21.
+- **Hypothesis:** a sift `over` a scrapbook now makes its reads (#32's Q1/Q2 read nothing); still owed:
+  `forced_answer_failed_partial_used`, a syntax error's re-ask quoting its line.
+- **Results** (turns / seconds):
+  - Q1 5 / 994: three sifts (50, then **28 and 28 reads over the scrapbook**, 0 unread): a 22-row route table, but no
+    price or GST in any row, and the body says so. One request timeout (pc 4).
+  - Q2 4 / 412: 35 invoices with amounts; the second sift read 39 over the first's 21 items.
+  - Q3 2 / 221: a numbered list of 10, right.
+  - Q4 4 / 188: fee items and conditions, right.
+  - Q5 4 / 292: DNA Recruit, 19 November, $4,029.43 (a newer invoice than #32's Optus).
+  - Q6 4 / 332: Coffs Harbour → Cairns (via Sydney, Brisbane), 15 January 2027, right.
+  - Q7 4 / 906: two sifts stopped at 63–64 of 100 reads; an 8-row table, half with amounts; the body says it cannot
+    tell which are due. One request timeout (pc 3).
+  - Total 3345 s.
+
+## 2026-11-20 #34 — #1048, second run (tasks 500–506)
+
+- **Build, knobs, hypothesis:** as #33, run straight after it.
+- **Results:**
+  - Q1 3 / 509: one sift, 15 kept; 5 rows, one with price and GST (113.44 / 10.31 AUD).
+  - Q2 4 / 444: 37 invoices with amounts; the second sift read 51 over the first's 22 items.
+  - Q3 2 / 219: a numbered list of 10, right.
+  - Q4 4 / 150: fee items and conditions, right.
+  - Q5 4 / 616: **the thinking runaway again** (pc 3: `length`, 0 chars, 400 541 ms); answered H & J Herb Nominees
+    $43,200 from the user's own "invoice Cooktown" email — arguably not *received*.
+  - Q6 4 / 225: Coffs Harbour → Cairns, 15 January 2027, as #33, right.
+  - Q7 4 / 628: **wrong**: one "overdue" Qantas hotel reminder dated 2020; the table is mostly paid receipts.
+  - Total 2985 s.
+- **Learned:** **14 of 14 completed, about 9 right** (Q1 ×2 and #34's Q7 not). **#1048 works live:** every follow-up
+  sift over a scrapbook made its reads (493: 28 + 28, 494: 39, 501: 51; no `unread_why`), and Q2 now has amounts in both
+  runs (#32: none). Q1's missing prices are the sorter's extraction now, not unread items. The runaway recurred once
+  (504) and two 600 s timeouts (493, 499) → [#1047](https://github.com/hherb/kastellan/issues/1047) fixed by code in PR
+  #1049 (a blank `length` reply on a thinking turn is asked again without thinking; failed rows carry `elapsed_ms` and
+  `thinking`). Still unseen: `forced_answer_failed_partial_used`, a syntax-error re-ask.
+- **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 493 506` (→ `~/q1048.txt`). Log → `~/requery7.log.1048ab`.
