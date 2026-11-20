@@ -39,6 +39,9 @@ pub(super) async fn a_thinking_runaway_is_asked_again_without_thinking(pool: &sq
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!((&failed[0]["thinking"], &failed[0]["thinking_suppressed_retry"]), (&json!(true), &json!(false)));
     assert_eq!(failed[0]["llm_usage"]["finish_reason"], "length");
+    let retries: Vec<Value> =
+        rows(pool, r.task_id, "agent", "plan.formulate").await.iter().map(|p| p["retry_count"].clone()).collect();
+    assert_eq!(retries, [json!(0), json!(1)], "the re-asked turn counts its retry");
 
     // Before anything was gathered the first turn is asked again too: the
     // plan is written without thinking, and later turns think again.
@@ -77,6 +80,43 @@ pub(super) async fn a_runaway_re_ask_that_runs_out_again_is_out_of_room(pool: &s
     let failed = failed_rows(pool, r.task_id).await;
     let flags: Vec<_> = failed.iter().map(|v| (v["thinking"].clone(), v["thinking_suppressed_retry"].clone())).collect();
     assert_eq!(flags, [(json!(true), json!(false)), (json!(false), json!(true))], "{failed:?}");
+}
+
+/// The re-ask without thinking came back unusable (prose, not a plan). The
+/// first call still ran out of room, so after gathering the forced-answer
+/// turn is spent, as it was before #1047 — the findings are not thrown away.
+pub(super) async fn a_runaway_re_ask_that_is_unusable_still_spends_the_answer_turn(pool: &sqlx::PgPool) {
+    let script = Script::raw(&[
+        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}).to_string(),
+        RUNAWAY.into(),
+        "Sure! Here is what I found.".into(),
+        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A"}}).to_string(),
+    ]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(r.result.failed_llm_calls, 2);
+    let last: Value = serde_json::from_str(script.messages().last().unwrap()).unwrap();
+    assert_eq!(last["turn_budget"], json!({"directive": ANSWER_DIRECTIVE}));
+}
+
+/// A routine turn on a backend configured not to think did not think, so its
+/// blank cut-off is no thinking runaway: asked again it would run out again
+/// (#923). After gathering it spends the forced-answer turn, unrepeated.
+pub(super) async fn a_blank_cut_off_that_did_not_think_is_not_asked_again(pool: &sqlx::PgPool) {
+    let mut script = Script::raw(&[
+        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}).to_string(),
+        RUNAWAY.into(),
+        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A"}}).to_string(),
+    ]);
+    script.thinks = false;
+    let r = run(pool, &script, new_task(pool, 5).await).await;
+    assert_eq!(body(&r.result), "A");
+    assert_eq!(script.messages().len(), 3, "not asked again");
+    let last: Value = serde_json::from_str(script.messages().last().unwrap()).unwrap();
+    assert_eq!(last["turn_budget"], json!({"directive": ANSWER_DIRECTIVE}));
+    let failed = failed_rows(pool, r.task_id).await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["thinking"], false, "a RouterDefault turn on a non-thinking backend");
 }
 
 /// The forced-answer turn never thinks, so a blank cut-off there is no

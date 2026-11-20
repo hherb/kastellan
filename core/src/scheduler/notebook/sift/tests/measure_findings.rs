@@ -118,6 +118,12 @@ pub(super) async fn an_answer_without_the_table_is_shown_back_once(pool: &sqlx::
         }
         let failed = u32::from(again == "unusable");
         assert_eq!(r.result.failed_llm_calls, failed, "{again}");
+        if again == "unusable" {
+            // #1047: the failed re-ask's row carries its own facts, not the first answer's.
+            let rows = crate::scheduler::notebook::test_harness::rows(pool, r.task_id, "agent", "plan.formulate_failed").await;
+            let flags: Vec<_> = rows.iter().map(|v| (v["thinking"].clone(), v["thinking_suppressed_retry"].clone())).collect();
+            assert_eq!(flags, [(json!(false), json!(true))], "{rows:?}");
+        }
     }
 }
 

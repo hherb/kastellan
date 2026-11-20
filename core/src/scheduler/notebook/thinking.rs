@@ -11,10 +11,10 @@
 //! budget, task 269).
 //!
 //! With thinking left on in the config, every turn thinks but the forced
-//! answer, the #945 re-ask and the re-ask of a turn that thought until
-//! `max_tokens` and said nothing (#1047; `notebook::ask` suppresses it
-//! there); the selection only changes anything when the config turns
-//! thinking off.
+//! answer, the #945 re-ask, the table show-back (#960/#973) and the re-ask
+//! of a turn that thought until `max_tokens` and said nothing (#1047;
+//! `notebook::ask` suppresses it there); the selection only changes
+//! anything when the config turns thinking off.
 
 use kastellan_llm_router::ThinkingPolicy;
 

@@ -811,10 +811,11 @@ Cell format: `turns / seconds`, then the outcome.
   - Q6 4 / 225: Coffs Harbour → Cairns, 15 January 2027, as #33, right.
   - Q7 4 / 628: **wrong**: one "overdue" Qantas hotel reminder dated 2020; the table is mostly paid receipts.
   - Total 2985 s.
-- **Learned:** **14 of 14 completed, about 9 right** (Q1 ×2 and #34's Q7 not). **#1048 works live:** every follow-up
-  sift over a scrapbook made its reads (493: 28 + 28, 494: 39, 501: 51; no `unread_why`), and Q2 now has amounts in both
-  runs (#32: none). Q1's missing prices are the sorter's extraction now, not unread items. The runaway recurred once
-  (504) and two 600 s timeouts (493, 499) → [#1047](https://github.com/hherb/kastellan/issues/1047) fixed by code in PR
-  #1049 (a blank `length` reply on a thinking turn is asked again without thinking; failed rows carry `elapsed_ms` and
-  `thinking`). Still unseen: `forced_answer_failed_partial_used`, a syntax-error re-ask.
+- **Learned:** **14 of 14 completed, about 9 right** (not: Q1 ×2, #33's Q7 (cannot tell which are due), #34's Q5
+  (arguably not received), #34's Q7). **#1048 works live:** every follow-up sift over a scrapbook made its reads (493:
+  28 + 28, 494: 39, 501: 51; no `unread_why`), and Q2 now has amounts in both runs (#32: none). Q1's missing prices are
+  the sorter's extraction now, not unread items. The runaway recurred once (504) and two 600 s timeouts (493, 499) →
+  [#1047](https://github.com/hherb/kastellan/issues/1047) fixed by code in PR #1049 (a blank `length` reply on a
+  thinking turn is asked again without thinking; failed rows carry `elapsed_ms` and `thinking`). Still unseen:
+  `forced_answer_failed_partial_used`, a syntax-error re-ask.
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 493 506` (→ `~/q1048.txt`). Log → `~/requery7.log.1048ab`.

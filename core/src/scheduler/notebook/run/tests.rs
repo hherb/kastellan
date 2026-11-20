@@ -73,6 +73,8 @@ async fn the_notebook_loop() {
     tasks_correct_adds_to_a_running_task_only(&pool).await;
     super::runaway_tests::a_thinking_runaway_is_asked_again_without_thinking(&pool).await;
     super::runaway_tests::a_runaway_re_ask_that_runs_out_again_is_out_of_room(&pool).await;
+    super::runaway_tests::a_runaway_re_ask_that_is_unusable_still_spends_the_answer_turn(&pool).await;
+    super::runaway_tests::a_blank_cut_off_that_did_not_think_is_not_asked_again(&pool).await;
     super::runaway_tests::a_runaway_forced_answer_turn_is_not_asked_again(&pool).await;
     super::runaway_tests::a_timed_out_calls_row_says_how_long_it_ran_and_whether_it_thought(&pool).await;
     a_call_on_the_answer_turn_is_re_asked(&pool).await;

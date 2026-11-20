@@ -31,13 +31,14 @@ pub(super) struct TurnGuard {
 }
 
 /// Ask the model for one turn and check the reply, with its recoveries
-/// (the decisions are `llm_failure`'s): an empty answer is asked again once,
-/// and so, with thinking suppressed, is a thinking turn that said nothing
-/// because it thought until `max_tokens` (#1047); a reply that does not parse or breaks a rule is shown back once with
-/// the reason (#945); an answer with no table after a sift that kept rows
-/// (#960), or whose table names no scrapbook ref (#973), is shown back once
-/// and kept if that fails; every failed call is
-/// counted and audited once.
+/// (the decisions are `llm_failure`'s, but for #1047's): an empty answer is
+/// asked again once, and so, with thinking suppressed, is a thinking turn
+/// that said nothing because it thought until `max_tokens` (#1047) — if that
+/// re-ask fails too, the turn is out of room as the first call was; a reply
+/// that does not parse or breaks a rule is shown back once with the reason
+/// (#945); an answer with no table after a sift that kept rows (#960), or
+/// whose table names no scrapbook ref (#973), is shown back once and kept if
+/// that fails; every failed call is counted and audited once.
 pub(super) async fn ask(
     pool: &PgPool,
     nb: &dyn NotebookFormulator,
@@ -73,7 +74,7 @@ pub(super) async fn ask(
     };
     // Which turns think: `thinking::turn_thinking`. The forced-answer turn
     // never does (DGX task 269 lost 408 s and its answer that way), nor does
-    // the #945 re-ask below.
+    // any re-ask below but the empty answer's.
     let thinking = thinking::turn_thinking(guard.kind);
     // `call` is always the latest call's facts: each `record` below is of
     // the call just made.
@@ -81,6 +82,7 @@ pub(super) async fn ask(
     let mut first = check(sent);
     let mut retried = false;
     let mut reasked = false;
+    let mut ran_away = false;
     // #960/#973/#981: a first reply that answers with no table after a sift
     // that kept rows, or whose table names no ref it can show, is shown back once.
     // It passed every check, so it is no failed call, and a re-ask that fails
@@ -122,6 +124,7 @@ pub(super) async fn ask(
             tracing::warn!(task_id = ctx.task_id, "notebook turn thought until max_tokens and said nothing; asking again once without thinking");
             retried = true;
             reasked = true;
+            ran_away = true;
             let (sent, facts) = send(nb, ctx, msg, None, ThinkingPolicy::Suppress).await;
             call = facts;
             check(sent)
@@ -161,8 +164,9 @@ pub(super) async fn ask(
             let timed_out = e.is_request_timeout();
             // A reply cut off by `max_tokens` (#941) ran out of room the way a
             // timeout runs out of time: the same request fails the same way,
-            // so after gathering it spends the forced-answer turn too.
-            let out_of_room = timed_out || e.ran_out_of_tokens();
+            // so after gathering it spends the forced-answer turn too. So does
+            // a failed #1047 re-ask, however it failed: the first call ran out.
+            let out_of_room = timed_out || e.ran_out_of_tokens() || ran_away;
             if llm_failure::should_force_synthesis(out_of_room, guard.gathered, guard.answer_attempted) {
                 return Asked::ForceAnswer;
             }

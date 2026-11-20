@@ -66,10 +66,14 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   600 s timeouts (493, 499). Still unseen: `forced_answer_failed_partial_used`, a syntax-error re-ask.
 - **Fix (PR #1049, #1047, operator's choice options 2 + 3):** `notebook::ask` re-asks a blank `length` reply
   (`AgentError::is_blank_cut_off`) once, the same turn, with thinking suppressed — only when that call let the model
-  think (`llm_failure::CallFacts.thinking`; never the forced answer); a re-ask that runs out again takes the old path.
-  Every `plan.formulate_failed` row carries `elapsed_ms` and `thinking` (⚠️ a timeout still has no token count — that
-  would need streaming). Legs in `notebook/run/runaway_tests.rs` (the old runaway leg moved there; `run/tests.rs` 580 →
-  558); 3 of 3 mutants killed; one review, no findings. ⚠️ Unseen live: re-measure. #1047 is left **open** for that.
+  think (`llm_failure::CallFacts.thinking`; never the forced answer); a re-ask that fails in any way (runs out again,
+  times out, or comes back unusable) takes the old out-of-room path, so after gathering the forced-answer turn is still
+  spent. Every `plan.formulate_failed` row carries `elapsed_ms` and `thinking` (⚠️ a timeout still has no token count —
+  that would need streaming). Legs in `notebook/run/runaway_tests.rs` (they replace the old runaway leg, whose
+  behaviour they invert; `run/tests.rs` 580 → 560); 3 of 3 mutants killed. Its finalcheck review round caught a
+  re-ask that came back unusable failing the task after gathering (findings thrown away), and added a runaway on a
+  backend configured not to think (not asked again) plus the re-ask rows' own `thinking`. ⚠️ Unseen live: re-measure.
+  #1047 is left **open** for that.
 
 ### Previous (2026-11-18): #1046 deployed, a follow-up sift reads its rows' source (#956 item, PR #1048, merged, deployed DGX 2026-11-20) — `sift::template::item_at` (pure) resolves a placeholder against the item, then a scrapbook row's `source`, then its `fields` (exact key first); `unread_why` lists a row's source and field names. Experiments #31–#32: 14 of 14, ~9 right. Full section: this file at #1048 in git history.
 
@@ -359,7 +363,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its new leg in `mail_live_shape_e2e/hit_fields.rs` (a `#[path]` module); move the next one there too, or split. ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-`core/src/scheduler/notebook/run/tests.rs` **558** (#1049 moved the runaway leg to `run/runaway_tests.rs`; the next leg goes in its own file): #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
+`core/src/scheduler/notebook/run/tests.rs` **560** (#1049 replaced the runaway leg with `run/runaway_tests.rs`, 159; the next leg goes in its own file): #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).

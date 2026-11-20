@@ -17,6 +17,9 @@
 //!    instead of failing: the work is in hand, so ask for an answer from it.
 //!    A reply cut off at `max_tokens` (#941) gets the same recovery, and
 //!    with nothing gathered fails in its own words ([`token_cap_failure_detail`]).
+//!    A thinking turn cut off having said nothing is first asked again once
+//!    with thinking suppressed (#1047, decided in `ask` on
+//!    [`CallFacts::thinking`]); only if that fails too does this apply.
 //! 2. **A timeout that still ends the task says so in words**
 //!    ([`timeout_failure_detail`]): the model ran out of time, what had been
 //!    gathered, and what to try. The raw router error stays on the end, both
