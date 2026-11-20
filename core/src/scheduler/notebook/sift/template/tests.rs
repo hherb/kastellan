@@ -175,3 +175,70 @@ fn why_lists_only_identifier_like_fields_capped() {
     assert!(why.contains("(its fields: a_id, k00, "), "an `_` is identifier-like: {why}");
     assert!(why.ends_with(", and 5 more)"), "{why}");
 }
+
+/// A kept row of task 487's first sift, as a sift `over` its scrapbook sees it.
+fn scrap_row() -> serde_json::Value {
+    json!({"source": {"message_id": "36478"},
+           "fields": {"date": "2025-11-17 11:42", "from.address": "h@example.com",
+                      "attachments": ["Invoice 11.pdf", "logo.png", "Invoice 12.pdf"]}})
+}
+
+/// DGX tasks 486/487: a sift over a scrapbook wrote `{message_id}` and
+/// `{attachments.*}` as for the mail items, and every item went unread.
+#[test]
+fn a_scrapbook_rows_placeholders_name_its_source_and_fields() {
+    let t = read(json!({"message_id": "{message_id}", "filename": "{attachments.*}"}));
+    assert_eq!(
+        expand_reads(&t, &scrap_row()),
+        vec![
+            json!({"message_id": "36478", "filename": "Invoice 11.pdf"}),
+            json!({"message_id": "36478", "filename": "Invoice 12.pdf"})
+        ]
+    );
+    let by_index = read(json!({"message_id": "{message_id}", "index": 0}));
+    assert_eq!(expand_reads(&by_index, &scrap_row()), vec![json!({"message_id": "36478", "index": 0})]);
+    assert_eq!(unresolved(&t, &scrap_row()), None);
+    // A kept field's own name may hold a dot; a path through the row's own
+    // `source` still works.
+    let dotted = read(json!({"to": "{from.address}", "id": "{source.message_id}", "first": "{attachments.0}"}));
+    assert_eq!(
+        expand_reads(&dotted, &scrap_row()),
+        vec![json!({"to": "h@example.com", "id": "36478", "first": "Invoice 11.pdf"})]
+    );
+}
+
+/// A key a row's `source` and `fields` share is the source's (a kept RFC
+/// `message_id` header would read no mail); the row's own keys come first;
+/// a path splits at its first dot only.
+#[test]
+fn a_scrapbook_rows_lookups_go_item_then_source_then_fields() {
+    let row = json!({"source": {"message_id": "36478"},
+                     "fields": {"message_id": "<abc@host>", "source": "newsletter",
+                                "attachments": [{"name": "a.pdf"}]}});
+    let t = read(json!({"message_id": "{message_id}", "from": "{source}", "file": "{attachments.0.name}"}));
+    assert_eq!(
+        expand_reads(&t, &row),
+        vec![json!({"message_id": "36478", "from": {"message_id": "36478"}, "file": "a.pdf"})]
+    );
+    let why = unread_why(&[read(json!({"x": "{x}"}))], &[row], 0);
+    assert!(why.contains("its fields: message_id, attachments, source)"), "a shared key once: {why}");
+}
+
+#[test]
+fn only_a_scrapbook_row_is_looked_into() {
+    let t = read(json!({"message_id": "{message_id}"}));
+    let not_a_row = json!({"source": {"message_id": "m1"}});
+    assert!(expand_reads(&t, &not_a_row).is_empty(), "no `fields`: not a scrapbook row");
+    assert_eq!(unresolved(&t, &not_a_row).as_deref(), Some("`{message_id}`"));
+    let x = read(json!({"x": "{x}"}));
+    let string_source = json!({"source": "inbox", "fields": {"x": 1}});
+    assert!(expand_reads(&x, &string_source).is_empty(), "a non-object `source`: not a row");
+    assert_eq!(unresolved(&x, &string_source).as_deref(), Some("`{x}`"));
+}
+
+#[test]
+fn why_lists_a_scrapbook_rows_own_field_names() {
+    let t = read(json!({"message_id": "{msg}"}));
+    let why = unread_why(&[t], &[scrap_row()], 0);
+    assert!(why.contains("its fields: message_id, attachments, date, and 1 more"), "{why}");
+}

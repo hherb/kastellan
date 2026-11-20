@@ -29,9 +29,31 @@ pub(crate) fn value_at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
     })
 }
 
+/// An earlier sift's kept row as a sift `over` its scrapbook sees it:
+/// `(source, fields)`, or `None` for any other item.
+pub(crate) fn scrap_parts(item: &Value) -> Option<(&Value, &serde_json::Map<String, Value>)> {
+    Some((item.get("source").filter(|s| s.is_object())?, item.get("fields")?.as_object()?))
+}
+
+/// The value a placeholder `path` names in `item`: [`value_at`] the item;
+/// for a scrapbook row, failing that, its `source` (the message id a mail
+/// read needs), then its `fields` — the exact key first, as a kept field's
+/// name may hold a dot (`from.address`). The planner writes a follow-up
+/// sift's reads as for the original items (DGX tasks 486/487: every item
+/// went unread on `{message_id}` and `{attachments.*}`).
+fn item_at<'a>(item: &'a Value, path: &str) -> Option<&'a Value> {
+    value_at(item, path).or_else(|| {
+        let (source, fields) = scrap_parts(item)?;
+        value_at(source, path).or_else(|| fields.get(path)).or_else(|| {
+            let (key, rest) = path.split_once('.')?;
+            value_at(fields.get(key)?, rest)
+        })
+    })
+}
+
 /// The parameter objects of `item`'s reads: `t.parameters` with every
 /// placeholder filled from the item. A placeholder is a whole string value
-/// `"{path}"` and takes the item's value at that path, of whatever JSON type
+/// `"{path}"` and takes the item's value at that path ([`item_at`]), of whatever JSON type
 /// (a `"x {id}"` inside other text is left as written). One placeholder may
 /// fan out with a `*` segment (`{attachments.*}`): one read per element of
 /// that list, skipping image names. Any placeholder that does not resolve —
@@ -44,7 +66,7 @@ pub(crate) fn expand_reads(t: &ReadTemplate, item: &Value) -> Vec<Value> {
         [] => fill(&t.parameters, item, None).into_iter().collect(),
         [path] => {
             let (prefix, suffix) = split_star(path);
-            let Some(list) = value_at(item, prefix).and_then(Value::as_array) else { return Vec::new() };
+            let Some(list) = item_at(item, prefix).and_then(Value::as_array) else { return Vec::new() };
             list.iter()
                 .filter_map(|el| {
                     let picked = if suffix.is_empty() { Some(el) } else { value_at(el, suffix) }?;
@@ -89,10 +111,10 @@ pub(crate) fn unresolved(t: &ReadTemplate, item: &Value) -> Option<String> {
     }
     let missing = |path: &&&str| {
         if !path.contains('*') {
-            return value_at(item, path).is_none();
+            return item_at(item, path).is_none();
         }
         let (prefix, suffix) = split_star(path);
-        match value_at(item, prefix).and_then(Value::as_array) {
+        match item_at(item, prefix).and_then(Value::as_array) {
             None => true,
             Some(list) => !suffix.is_empty() && !list.is_empty() && list.iter().all(|el| value_at(el, suffix).is_none()),
         }
@@ -134,12 +156,20 @@ fn item_why(reads: &[ReadTemplate], item: &Value, n: usize) -> Option<String> {
     if parts.is_empty() {
         return None;
     }
-    let fields = match item.as_object() {
+    // A scrapbook row lists the names a placeholder is meant for: its source's
+    // keys, then its fields' (a key in both, once).
+    let keys: Option<Vec<&String>> = match scrap_parts(item) {
+        Some((source, fields)) => Some(
+            source.as_object().into_iter().flat_map(|s| s.keys()).chain(fields.keys().filter(|k| source.get(k.as_str()).is_none())).collect(),
+        ),
+        None => item.as_object().map(|o| o.keys().collect()),
+    };
+    let fields = match keys {
         None => "it is not an object".to_string(),
         Some(o) if o.is_empty() => "it has no fields".to_string(),
         Some(o) => {
-            let named = |k: &&String| k.len() <= 40 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-            let shown: Vec<&str> = o.keys().filter(named).take(WHY_MAX_FIELDS).map(String::as_str).collect();
+            let named = |k: &&&String| k.len() <= 40 && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            let shown: Vec<&str> = o.iter().filter(named).take(WHY_MAX_FIELDS).map(|k| k.as_str()).collect();
             let more = o.len() - shown.len();
             match (shown.is_empty(), more) {
                 (true, _) => format!("its {more} fields have no listable names"),
@@ -194,7 +224,7 @@ fn fill(v: &Value, item: &Value, star: Option<&Value>) -> Option<Value> {
     Some(match v {
         Value::String(s) => match placeholder(s) {
             Some(p) if p.contains('*') => star?.clone(),
-            Some(p) => value_at(item, p)?.clone(),
+            Some(p) => item_at(item, p)?.clone(),
             None => v.clone(),
         },
         Value::Array(a) => Value::Array(a.iter().map(|x| fill(x, item, star)).collect::<Option<_>>()?),
