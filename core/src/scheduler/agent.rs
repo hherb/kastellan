@@ -66,6 +66,16 @@ impl AgentError {
         matches!(self, AgentError::Decode { usage, .. } if usage.finish_reason.as_deref() == Some("length"))
     }
 
+    /// Cut off at `max_tokens` having said nothing (#1047). On a turn that
+    /// thought, the whole budget went to thinking (DGX task 491: 16384
+    /// tokens, 44 032 reasoning chars, no reply), so the same turn with
+    /// thinking suppressed has the room [`Self::ran_out_of_tokens`] says the
+    /// request lacks.
+    pub fn is_blank_cut_off(&self) -> bool {
+        matches!(self, AgentError::Decode { raw, usage, .. }
+            if raw.trim().is_empty() && usage.finish_reason.as_deref() == Some("length"))
+    }
+
     /// The model's reply, when it is one the #945 re-ask can use: something
     /// was said (a blank answer is [`Self::is_empty_completion`]'s), and it
     /// was not cut off by `length` (asked again, it is cut off again).

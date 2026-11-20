@@ -9,7 +9,7 @@ use super::sift;
 use super::state::NotebookState;
 use super::thinking::{self, TurnKind};
 use crate::scheduler::agent::{AgentError, FormulationMeta};
-use crate::scheduler::inner_loop::{ceiling::Exhausted, llm_failure, TaskContext};
+use crate::scheduler::inner_loop::{ceiling::Exhausted, llm_failure, llm_failure::CallFacts, TaskContext};
 
 /// What a notebook turn produced.
 pub(super) enum Asked {
@@ -31,7 +31,9 @@ pub(super) struct TurnGuard {
 }
 
 /// Ask the model for one turn and check the reply, with its recoveries
-/// (the decisions are `llm_failure`'s): an empty answer is asked again once; a reply that does not parse or breaks a rule is shown back once with
+/// (the decisions are `llm_failure`'s): an empty answer is asked again once,
+/// and so, with thinking suppressed, is a thinking turn that said nothing
+/// because it thought until `max_tokens` (#1047); a reply that does not parse or breaks a rule is shown back once with
 /// the reason (#945); an answer with no table after a sift that kept rows
 /// (#960), or whose table names no scrapbook ref (#973), is shown back once
 /// and kept if that fails; every failed call is
@@ -73,7 +75,10 @@ pub(super) async fn ask(
     // never does (DGX task 269 lost 408 s and its answer that way), nor does
     // the #945 re-ask below.
     let thinking = thinking::turn_thinking(guard.kind);
-    let mut first = check(nb.notebook_turn(ctx, msg, None, thinking).await);
+    // `call` is always the latest call's facts: each `record` below is of
+    // the call just made.
+    let (sent, mut call) = send(nb, ctx, msg, None, thinking).await;
+    let mut first = check(sent);
     let mut retried = false;
     let mut reasked = false;
     // #960/#973/#981: a first reply that answers with no table after a sift
@@ -83,7 +88,9 @@ pub(super) async fn ask(
     if let (true, Ok((reply, _, raw))) = (wants_table, &first) {
         if let Err(reason) = sift::answer::table_left_out(reply, ctx) {
             tracing::info!(task_id = ctx.task_id, %reason, "notebook answer's table is missing or names nothing it can show; shown back once");
-            match check(nb.notebook_turn(ctx, msg, Some((raw, &reason)), ThinkingPolicy::Suppress).await) {
+            let (sent, facts) = send(nb, ctx, msg, Some((raw, &reason)), ThinkingPolicy::Suppress).await;
+            call = facts;
+            match check(sent) {
                 Ok(again) => {
                     // Info, not warn: #960's reason invites sending the same answer again.
                     if let Err(still) = sift::answer::table_left_out(&again.0, ctx) {
@@ -93,7 +100,7 @@ pub(super) async fn ask(
                     retried = true;
                 }
                 Err(e) => {
-                    record(pool, ctx, guard, failed_llm_calls, &e, true).await;
+                    record(pool, ctx, guard, failed_llm_calls, call, &e, true).await;
                     tracing::warn!(task_id = ctx.task_id, error = %e, "the table re-ask failed; the first answer is kept");
                 }
             }
@@ -101,13 +108,26 @@ pub(super) async fn ask(
     }
     let result = match first {
         Err(e) if e.is_empty_completion() => {
-            record(pool, ctx, guard, failed_llm_calls, &e, false).await;
+            record(pool, ctx, guard, failed_llm_calls, call, &e, false).await;
             tracing::warn!(task_id = ctx.task_id, "notebook turn returned an empty completion; asking again once");
             retried = true;
-            check(nb.notebook_turn(ctx, msg, None, thinking).await)
+            let (sent, facts) = send(nb, ctx, msg, None, thinking).await;
+            call = facts;
+            check(sent)
+        }
+        // #1047: the whole budget went to thinking. Without it the same turn
+        // has room to reply; asked with thinking on again, it runs out again.
+        Err(e) if e.is_blank_cut_off() && call.thinking => {
+            record(pool, ctx, guard, failed_llm_calls, call, &e, false).await;
+            tracing::warn!(task_id = ctx.task_id, "notebook turn thought until max_tokens and said nothing; asking again once without thinking");
+            retried = true;
+            reasked = true;
+            let (sent, facts) = send(nb, ctx, msg, None, ThinkingPolicy::Suppress).await;
+            call = facts;
+            check(sent)
         }
         Err(e) if e.non_plan_answer().is_some() => {
-            record(pool, ctx, guard, failed_llm_calls, &e, false).await;
+            record(pool, ctx, guard, failed_llm_calls, call, &e, false).await;
             let reply = e.non_plan_answer().unwrap_or_default().to_string();
             let (detail, line) = match &e {
                 AgentError::Decode { detail, raw, .. } => (detail.clone(), llm_failure::line_at_error(detail, raw)),
@@ -123,7 +143,9 @@ pub(super) async fn ask(
             };
             retried = true;
             reasked = true;
-            check(nb.notebook_turn(ctx, msg, Some((&reply, &reason)), ThinkingPolicy::Suppress).await)
+            let (sent, facts) = send(nb, ctx, msg, Some((&reply, &reason)), ThinkingPolicy::Suppress).await;
+            call = facts;
+            check(sent)
         }
         other => other,
     };
@@ -135,7 +157,7 @@ pub(super) async fn ask(
             Asked::Reply(Box::new((reply, meta)))
         }
         Err(e) => {
-            record(pool, ctx, guard, failed_llm_calls, &e, reasked).await;
+            record(pool, ctx, guard, failed_llm_calls, call, &e, reasked).await;
             let timed_out = e.is_request_timeout();
             // A reply cut off by `max_tokens` (#941) ran out of room the way a
             // timeout runs out of time: the same request fails the same way,
@@ -165,8 +187,22 @@ pub(super) async fn ask(
     }
 }
 
+/// One model call, timed, with whether it let the model think (#1047).
+async fn send(
+    nb: &dyn NotebookFormulator,
+    ctx: &TaskContext,
+    msg: &super::formulator::UserMessage<'_>,
+    prior: Option<(&str, &str)>,
+    thinking: ThinkingPolicy,
+) -> (Result<(String, FormulationMeta), AgentError>, CallFacts) {
+    let start = std::time::Instant::now();
+    let sent = nb.notebook_turn(ctx, msg, prior, thinking).await;
+    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    (sent, CallFacts { elapsed_ms, thinking: !thinking.suppresses(!nb.thinks_by_default()) })
+}
+
 /// Count one failed model call and write its `plan.formulate_failed` row.
-async fn record(pool: &PgPool, ctx: &TaskContext, guard: TurnGuard, failed: &mut u32, e: &AgentError, suppressed: bool) {
+async fn record(pool: &PgPool, ctx: &TaskContext, guard: TurnGuard, failed: &mut u32, call: CallFacts, e: &AgentError, suppressed: bool) {
     *failed = failed.saturating_add(1);
-    llm_failure::record_failed_formulation(pool, ctx.task_id, ctx.plan_count, guard.answer_turn, suppressed, e).await;
+    llm_failure::record_failed_formulation(pool, ctx.task_id, ctx.plan_count, guard.answer_turn, suppressed, call, e).await;
 }

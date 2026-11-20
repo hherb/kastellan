@@ -71,7 +71,10 @@ async fn the_notebook_loop() {
     infeasible_completes_with_the_reason(&pool).await;
     a_step_replanned_away_still_counts_toward_the_ceiling(&pool).await;
     tasks_correct_adds_to_a_running_task_only(&pool).await;
-    a_runaway_reply_after_gathering_spends_the_answer_turn(&pool).await;
+    super::runaway_tests::a_thinking_runaway_is_asked_again_without_thinking(&pool).await;
+    super::runaway_tests::a_runaway_re_ask_that_runs_out_again_is_out_of_room(&pool).await;
+    super::runaway_tests::a_runaway_forced_answer_turn_is_not_asked_again(&pool).await;
+    super::runaway_tests::a_timed_out_calls_row_says_how_long_it_ran_and_whether_it_thought(&pool).await;
     a_call_on_the_answer_turn_is_re_asked(&pool).await;
     super::rewrite_tests::selective_thinking_thinks_on_judgement_turns_and_rewrites_the_answer(&pool).await;
     a_repeated_call_is_not_dispatched_and_the_next_turn_replans(&pool).await;
@@ -319,31 +322,6 @@ async fn tasks_correct_adds_to_a_running_task_only(pool: &sqlx::PgPool) {
     assert_eq!(correct_and_audit(pool, pending, "x").await.unwrap(), CorrectOutcome::NotRunning);
     assert_eq!(correct_and_audit(pool, i64::MAX, "x").await.unwrap(), CorrectOutcome::NotRunning);
     assert!(db::entries(pool, pending, 0).await.unwrap().is_empty());
-}
-
-/// DGX task 269: a turn spent its whole `max_tokens` thinking and said
-/// nothing. With findings in hand that is the forced-answer turn, written
-/// with thinking off — not a failure that throws the findings away.
-async fn a_runaway_reply_after_gathering_spends_the_answer_turn(pool: &sqlx::PgPool) {
-    let script = Script::raw(&[
-        json!({"steps": steps(&[1, 2]), "call": call(1, "a")}).to_string(),
-        RUNAWAY.into(),
-        json!({"tick": tick(1, "invoice A"), "answer": {"body": "A"}}).to_string(),
-    ]);
-    let r = run(pool, &script, new_task(pool, 5).await).await;
-    assert_eq!(body(&r.result), "A");
-    assert_eq!(r.result.failed_llm_calls, 1);
-    let last: Value = serde_json::from_str(script.messages().last().unwrap()).unwrap();
-    assert_eq!(last["turn_budget"], json!({"directive": ANSWER_DIRECTIVE}));
-    assert_eq!(script.thinking.lock().unwrap().last(), Some(&ThinkingPolicy::Suppress));
-
-    // Before anything was gathered there is nothing to answer from: it fails.
-    // A cut-off reply is not retried like an empty one (classic case 22).
-    let script = Script::raw(&[RUNAWAY.into()]);
-    let r = run(pool, &script, new_task(pool, 5).await).await;
-    let Outcome::Failed(d) = &r.result.outcome else { panic!("{:?}", r.result.outcome) };
-    assert!(d.starts_with("The language model used its whole reply budget"), "{d}");
-    assert_eq!(script.messages().len(), 1, "a cut-off reply is not asked again");
 }
 
 /// DGX task 273: on the forced-answer turn the model called again. That is

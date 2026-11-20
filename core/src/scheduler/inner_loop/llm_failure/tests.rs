@@ -188,15 +188,20 @@ fn a_call_on_the_answer_turn_names_why_the_turn_had_to_answer() {
 #[test]
 fn the_failed_call_row_carries_its_facts_and_a_clamped_error() {
     let long = "x".repeat(FAILED_ROW_ERROR_CHARS + 100);
-    let v = formulate_failed_payload(7, 3, true, true, true, &long, None);
+    let call = CallFacts { elapsed_ms: 600_012, thinking: true };
+    let v = formulate_failed_payload(7, 3, true, true, true, call, &long, None);
     assert_eq!(v["task_id"], 7);
     assert_eq!(v["plan_count"], 3);
     assert_eq!(v["synth_turn"], true);
     assert_eq!(v["thinking_suppressed_retry"], true);
     assert_eq!(v["request_timeout"], true);
     assert_eq!(v["error"].as_str().unwrap().chars().count(), FAILED_ROW_ERROR_CHARS);
+    // #1047: what the call itself cost and asked for, on every row — a
+    // timeout has no completion, so these are all it can say.
+    assert_eq!(v["elapsed_ms"], 600_012);
+    assert_eq!(v["thinking"], true);
     // No completion came back (a timeout, a refused connection): no usage keys.
-    assert_eq!(v.as_object().unwrap().len(), 6, "{v}");
+    assert_eq!(v.as_object().unwrap().len(), 8, "{v}");
 }
 
 /// A decode failure DID get a completion back. Its cost and whether the
@@ -212,14 +217,14 @@ fn a_decode_failure_row_carries_the_completion_cost_under_the_plan_rows_keys() {
         finish_reason: Some("stop".into()),
         ..Default::default()
     };
-    let v = formulate_failed_payload(212, 2, false, false, false, "plan decode failed: EOF", Some((&stats, 18_976, "")));
+    let v = formulate_failed_payload(212, 2, false, false, false, CallFacts::default(), "plan decode failed: EOF", Some((&stats, 18_976, "")));
     assert_eq!(v["latency_ms"], 18_976);
     assert_eq!(v["llm_usage"]["completion_tokens"], 48);
     assert_eq!(v["llm_usage"]["reasoning_chars"], 170);
     assert_eq!(v["llm_usage"]["finish_reason"], "stop");
     assert_eq!(v["raw_head"], "");
     assert_eq!(v["raw_chars"], 0);
-    assert_eq!(v.as_object().unwrap().len(), 10, "{v}");
+    assert_eq!(v.as_object().unwrap().len(), 12, "{v}");
 }
 
 /// #945: three live failures (tasks 234, 245, 252) answered 461–2196 bytes
@@ -231,7 +236,7 @@ fn a_decode_failure_row_carries_the_completion_cost_under_the_plan_rows_keys() {
 fn a_non_json_answer_row_keeps_a_bounded_head_of_what_the_model_said() {
     let stats = kastellan_llm_router::CompletionStats::default();
     let reply = format!("Here are the payments due: {}", "é".repeat(FAILED_ROW_RAW_HEAD_CHARS));
-    let v = formulate_failed_payload(252, 5, false, false, false, "plan decode failed", Some((&stats, 1, &reply)));
+    let v = formulate_failed_payload(252, 5, false, false, false, CallFacts::default(), "plan decode failed", Some((&stats, 1, &reply)));
     let head = v["raw_head"].as_str().unwrap();
     assert!(head.starts_with("Here are the payments due: é"), "{head}");
     assert_eq!(head.chars().count(), FAILED_ROW_RAW_HEAD_CHARS);
@@ -262,7 +267,7 @@ fn a_syntax_error_past_the_head_keeps_the_text_around_it() {
     let error = decode_error(&reply);
     assert!(error.contains(" at line 32 column "), "{error}");
     let stats = kastellan_llm_router::CompletionStats::default();
-    let v = formulate_failed_payload(429, 3, false, false, false, &error, Some((&stats, 1, &reply)));
+    let v = formulate_failed_payload(429, 3, false, false, false, CallFacts::default(), &error, Some((&stats, 1, &reply)));
     let window = v["raw_at_error"].as_str().unwrap();
     assert!(window.contains("\"bad\" \"MISSING_COLON\""), "{window}");
     assert!(!v["raw_head"].as_str().unwrap().contains("MISSING_COLON"), "the head alone cannot show it");
@@ -274,7 +279,7 @@ fn a_syntax_error_past_the_head_keeps_the_text_around_it() {
 #[test]
 fn an_error_with_no_position_adds_no_window() {
     let stats = kastellan_llm_router::CompletionStats::default();
-    let v = formulate_failed_payload(1, 1, false, false, false, "plan decode failed: a step has no id", Some((&stats, 1, "{}")));
+    let v = formulate_failed_payload(1, 1, false, false, false, CallFacts::default(), "plan decode failed: a step has no id", Some((&stats, 1, "{}")));
     assert!(v.get("raw_at_error").is_none(), "{v}");
     assert_eq!(raw_at_error("x at line 0 column 0", "abc"), None);
 }

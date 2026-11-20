@@ -313,6 +313,19 @@ pub(crate) fn line_at_error(error: &str, raw: &str) -> Option<String> {
     Some(format!("{}{text}{}", cut(start > 0), cut(end < after.len())))
 }
 
+/// What a failed call itself cost and asked for (#1047), written on every
+/// `plan.formulate_failed` row. A timed-out call gets no body back, so no
+/// `llm_usage`: these are all its row can say about it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CallFacts {
+    /// Wall-clock time of the whole turn call, recall and prompt assembly
+    /// included (a completion's `latency_ms` times the model alone).
+    pub elapsed_ms: u64,
+    /// Whether the call let the model think (its policy against the
+    /// router's configured default).
+    pub thinking: bool,
+}
+
 /// Payload for one `agent/plan.formulate_failed` row. Pure.
 ///
 /// A timed-out call writes no `plan.formulate` row (there is no plan), so
@@ -322,7 +335,8 @@ pub(crate) fn line_at_error(error: &str, raw: &str) -> Option<String> {
 /// plan); `thinking_suppressed_retry` marks a re-ask made with thinking
 /// suppressed — the #945 re-ask of an unusable reply, or a failed table
 /// show-back (#960/#973); the timed-out synthesis retry (#774) that also
-/// set it retired with the classic loop (#993).
+/// set it retired with the classic loop (#993). `call` adds `elapsed_ms` and
+/// `thinking` ([`CallFacts`]) to every row.
 ///
 /// `completion` is the cost of the answer that failed to decode, when one
 /// came back ([`AgentError::completion`](crate::scheduler::agent::AgentError::completion)).
@@ -335,12 +349,14 @@ pub(crate) fn line_at_error(error: &str, raw: &str) -> Option<String> {
 /// When the error names a position, `raw_at_error` holds the text around it
 /// ([`raw_at_error`], #1024); the position is read from the whole error,
 /// before `error` is cut to [`FAILED_ROW_ERROR_CHARS`].
+#[allow(clippy::too_many_arguments)] // one flat row: each argument is one key
 pub(super) fn formulate_failed_payload(
     task_id: i64,
     plan_count: u32,
     synth_turn: bool,
     thinking_suppressed_retry: bool,
     request_timeout: bool,
+    call: CallFacts,
     error: &str,
     completion: Option<(&kastellan_llm_router::CompletionStats, u64, &str)>,
 ) -> serde_json::Value {
@@ -350,6 +366,8 @@ pub(super) fn formulate_failed_payload(
         "synth_turn": synth_turn,
         "thinking_suppressed_retry": thinking_suppressed_retry,
         "request_timeout": request_timeout,
+        "elapsed_ms": call.elapsed_ms,
+        "thinking": call.thinking,
         "error": error.chars().take(FAILED_ROW_ERROR_CHARS).collect::<String>(),
     });
     if let Some((usage, latency_ms, raw)) = completion {
@@ -374,6 +392,7 @@ pub(crate) async fn record_failed_formulation(
     plan_count: u32,
     synth_turn: bool,
     thinking_suppressed_retry: bool,
+    call: CallFacts,
     error: &crate::scheduler::agent::AgentError,
 ) {
     let payload = formulate_failed_payload(
@@ -382,6 +401,7 @@ pub(crate) async fn record_failed_formulation(
         synth_turn,
         thinking_suppressed_retry,
         error.is_request_timeout(),
+        call,
         &error.to_string(),
         error.completion(),
     );
