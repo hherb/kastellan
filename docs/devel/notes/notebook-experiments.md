@@ -833,7 +833,7 @@ Cell format: `turns / seconds`, then the outcome.
     table has totals for most rows, the body says the sender/date could not be read.
   - Q3 2 / 186: a numbered list of 10, right.
   - Q4 5 / 190: fee items, total $9,943, conditions, right.
-  - Q5 5 / 163: the user's own $51,041.05 invoice to himself — not *received* (as #34).
+  - Q5 5 / 163: a self-sent $51,041.05 invoice (the user's own) — not *received* (as #34).
   - Q6 7 / 907: **wrong**: "cannot determine". Turn 6 failed with `request_timeout: true` at `elapsed_ms` 207 567:
     the call was clamped to the task deadline (`ceiling::call_timeout`), not a hung backend — the new field shows it.
     Turn 7 was the forced answer.
@@ -854,12 +854,12 @@ Cell format: `turns / seconds`, then the outcome.
   - Q7 6 / 959: **wrong**: a 2026-08 invoice, a 2023 Starlink reminder, a 2020 Qantas hotel booking. **Runaway** at
     pc 2 (403 550 ms); re-ask 13 233 ms.
   - Total 3567 s.
-- **Learned:** **14 of 14 completed, about 7 right** (not: Q1 ×2 partial, #35's Q2/Q6/Q7, both Q5s, #36's Q7). **#1049
-  works live:** all three runaways (515, 519, 520) were followed by the suppressed re-ask (`thinking: true` on the failed
-  row, `reasoning_chars: 0` on the reply, 12–17 s) and each task went on to complete. The first ~400 s of each runaway
-  is still spent: option 1 of #1047 (cap or budget the reasoning) was not taken. The runaway rate was higher here (3 of
-  ~55 turns, all in #36). The one `request_timeout` was the task deadline, readable now from `elapsed_ms`. The
-  syntax-error re-ask recovered on its first live occurrence (507). Q5's self-sent invoice and Q7's stale "due" items
-  are model-side. Still unseen: `forced_answer_failed_partial_used`.
+- **Learned:** **14 of 14 completed, 6 right** (not: Q1 ×2 partial, #35's Q2/Q6/Q7, both Q5s, #36's Q7). **#1049 works
+  live:** all three runaways (515, 519, 520) were followed by the suppressed re-ask (`thinking: true` on the failed row,
+  `reasoning_chars: 0` on the reply, 12–17 s) and each task went on to complete. The first ~400 s of each runaway is
+  still spent: option 1 of #1047 (cap or budget the reasoning) was not taken. The runaway rate was higher here (3 of 59
+  turns, all in #36). The one `request_timeout` was the task deadline, readable now from `elapsed_ms`. The syntax-error
+  re-ask recovered on its first live occurrence (507). Q5's self-sent invoice and Q7's stale "due" items are
+  model-side. Still unseen: `forced_answer_failed_partial_used`.
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q1049.sh 507 520` (→ `~/q1049.txt`; `q960.sh` plus each failed
   formulation's `thinking`/`elapsed_ms`/`finish_reason`). Log → `~/requery7.log.1049ab`.

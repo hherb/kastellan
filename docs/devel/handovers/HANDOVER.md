@@ -60,7 +60,7 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 
 - **Deploy:** #1049 to the DGX 2026-11-21 20:07 (`NRestarts=0`, Matrix up, both env files identical to `bak-pre1049`,
   prompt sha256s equal to `main`'s). No code change this session.
-- **Experiments #35–#36** (tasks 507–520, [log](../notes/notebook-experiments.md)): 14 of 14 completed, ~7 right.
+- **Experiments #35–#36** (tasks 507–520, [log](../notes/notebook-experiments.md)): 14 of 14 completed, 6 right.
   **#1049 works live**: all three runaways (515, 519, 520; `thinking: true`, ~400 s) were followed by the suppressed
   re-ask (`reasoning_chars: 0`, 12–17 s) and each task completed. The first ~400 s is still spent (#1047's option 1, cap
   the reasoning, not taken). Task 512's `request_timeout` at `elapsed_ms` 207 567 was the task deadline clamping the call
