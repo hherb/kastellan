@@ -819,3 +819,47 @@ Cell format: `turns / seconds`, then the outcome.
   thinking turn is asked again without thinking; failed rows carry `elapsed_ms` and `thinking`). Still unseen:
   `forced_answer_failed_partial_used`, a syntax-error re-ask.
 - **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q960.sh 493 506` (→ `~/q1048.txt`). Log → `~/requery7.log.1048ab`.
+
+## 2026-11-21 #35 — #1049 deployed (a thinking runaway is asked again without thinking), first run (tasks 507–513)
+
+- **Build:** `main` 555d635d (PR #1049), deployed with `scripts/upgrade_from_git.sh` (both env files identical to their
+  `bak-pre1049` backups, `NRestarts` 0, prompt sha256s equal to `main`'s); knobs as #21.
+- **Hypothesis:** a runaway (`length`, 0 chars, ~400 s) now costs one thinking-suppressed re-ask, not a second thinking
+  turn; every `plan.formulate_failed` row carries `elapsed_ms` and `thinking`.
+- **Results** (turns / seconds):
+  - Q1 3 / 561: 5 rows, 3 with price and GST; the intro still says no prices could be found. Turn 1 was a **syntax
+    error** (`expected ':'`, the line `"attachments.*"}` with no value); the re-ask (#1045) made the next turn a call.
+  - Q2 5 / 937: three sifts (50 → 38 → 35 kept); the third, over the scrapbook, stopped on `time` at item 0; the
+    table has totals for most rows, the body says the sender/date could not be read.
+  - Q3 2 / 186: a numbered list of 10, right.
+  - Q4 5 / 190: fee items, total $9,943, conditions, right.
+  - Q5 5 / 163: a self-sent $51,041.05 invoice (the user's own) — not *received* (as #34).
+  - Q6 7 / 907: **wrong**: "cannot determine". Turn 6 failed with `request_timeout: true` at `elapsed_ms` 207 567:
+    the call was clamped to the task deadline (`ceiling::call_timeout`), not a hung backend — the new field shows it.
+    Turn 7 was the forced answer.
+  - Q7 4 / 733: Starlink, Garmin, Optus right; Jack Clark listed twice, a paid Mia Harper invoice beside an overdue one.
+  - Total 3677 s.
+
+## 2026-11-21 #36 — #1049, second run (tasks 514–520)
+
+- **Build, knobs, hypothesis:** as #35, run straight after it.
+- **Results:**
+  - Q1 3 / 492: 5 rows, no price or GST in any.
+  - Q2 4 / 824: 12 invoices with amounts, right. **Runaway** at pc 3 (`length`, 16384 tokens, `thinking: true`,
+    403 314 ms); the next turn answered in **17 372 ms** with `reasoning_chars: 0`, `retry_count: 1`.
+  - Q3 2 / 169: a numbered list of 10, right.
+  - Q4 4 / 138: fee items, total, conditions, right.
+  - Q5 5 / 212: the same self-sent invoice as #35.
+  - Q6 4 / 773: Melbourne → Coffs Harbour, 25 November 2026, right. **Runaway** at pc 2 (398 801 ms); re-ask 12 235 ms.
+  - Q7 6 / 959: **wrong**: a 2026-08 invoice, a 2023 Starlink reminder, a 2020 Qantas hotel booking. **Runaway** at
+    pc 2 (403 550 ms); re-ask 13 233 ms.
+  - Total 3567 s.
+- **Learned:** **14 of 14 completed, 6 right** (not: Q1 ×2 partial, #35's Q2/Q6/Q7, both Q5s, #36's Q7). **#1049 works
+  live:** all three runaways (515, 519, 520) were followed by the suppressed re-ask (`thinking: true` on the failed row,
+  `reasoning_chars: 0` on the reply, 12–17 s) and each task went on to complete. The first ~400 s of each runaway is
+  still spent: option 1 of #1047 (cap or budget the reasoning) was not taken. The runaway rate was higher here (3 of 59
+  turns, all in #36). The one `request_timeout` was the task deadline, readable now from `elapsed_ms`. The syntax-error
+  re-ask recovered on its first live occurrence (507). Q5's self-sent invoice and Q7's stale "due" items are
+  model-side. Still unseen: `forced_answer_failed_partial_used`.
+- **Reproduce:** `bash ~/requery7.sh` twice; `bash ~/q1049.sh 507 520` (→ `~/q1049.txt`; `q960.sh` plus each failed
+  formulation's `thinking`/`elapsed_ms`/`finish_reason`). Log → `~/requery7.log.1049ab`.
