@@ -52,10 +52,13 @@ impl Stop {
 /// `errors`: each failed read's code, counted (#956). `unread_why`: when
 /// every item looked at went unread, which placeholder named nothing in
 /// which item, and that item's field names — or that every list was empty
-/// or images only ([`super::template::unread_why`], #956).
+/// or images only ([`super::template::unread_why`], #956). `elements_unread`:
+/// list elements of the items looked at that their fan-out read skipped
+/// ([`super::template::elements_unread`], #956).
 pub(crate) struct Reads {
     pub made: usize,
     pub unread: usize,
+    pub elements_unread: usize,
     pub cut: usize,
     pub per_read: Vec<usize>,
     pub errors: BTreeMap<String, usize>,
@@ -104,6 +107,9 @@ pub(crate) fn summary(
     }
     if reads.cut > 0 {
         s["reads_cut"] = json!(reads.cut);
+    }
+    if reads.elements_unread > 0 {
+        s["elements_unread"] = json!(reads.elements_unread);
     }
     if let Some(why) = &reads.unread_why {
         s["unread_why"] = json!(why);

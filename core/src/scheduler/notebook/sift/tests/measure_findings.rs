@@ -433,5 +433,25 @@ pub(super) async fn an_item_with_no_attachment_takes_the_next_read(pool: &sqlx::
     assert_eq!((seen["reads"].clone(), seen["unread"].clone()), (json!(2), json!(0)), "{seen}");
     assert_eq!(seen["items_per_read"], json!([1, 1]), "a fall-through is visible: {seen}");
     assert!(seen.get("unread_why").is_none(), "{seen}");
+    assert!(seen.get("elements_unread").is_none(), "nothing dropped, nothing said: {seen}");
     assert!(script.sorted.lock().unwrap()[1].contains("text of m2"), "m2 was read with the message read");
+}
+
+/// #956: a fan-out element the path after the `*` names nothing in got no
+/// read, and the item still counted as read; the summary counts it.
+pub(super) async fn a_fan_out_element_without_the_path_is_counted(pool: &sqlx::PgPool) {
+    let hits = json!([{"id": "m1", "subject": "about m1", "files": [{"name": "a.pdf"}, {"size": 3}]}]);
+    let mut call = sift(2, None);
+    call["parameters"]["read"] =
+        json!([{"tool": "mail", "method": "mail.read", "parameters": {"id": "{id}", "file": "{files.*.name}"}}]);
+    let script = Script::new(&[
+        json!({"steps": steps(&[1, 2]), "call": search(1, hits)}),
+        json!({"tick": tick(1, "listed"), "call": call}),
+        json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "none kept"}}),
+    ])
+    .sorting(&[no()]);
+    run(pool, &script, new_task(pool, 5).await).await;
+    let seen = summary_seen(&script, 2);
+    assert_eq!((seen["reads"].clone(), seen["unread"].clone()), (json!(1), json!(0)), "{seen}");
+    assert_eq!(seen["elements_unread"], json!(1), "{seen}");
 }

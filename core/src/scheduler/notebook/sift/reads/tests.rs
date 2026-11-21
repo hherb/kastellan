@@ -40,3 +40,18 @@ fn a_first_item_over_the_cap_keeps_its_first_reads_and_says_how_many_were_cut() 
 fn a_zero_cap_still_takes_one_item() {
     assert_eq!(plan_reads(&[], &items(3), 0).per_item.len(), 1);
 }
+
+/// #956: per item taken, the fan-out elements that got no read, from the
+/// read that applied to it (a fallen-through read's drops do not count).
+#[test]
+fn each_item_counts_its_fan_out_elements_that_got_no_read() {
+    let t = read(json!({"file": "{files.*.name}"}));
+    let items = [
+        json!({"files": [{"name": "a.pdf"}, {"size": 1}, {"size": 2}]}),
+        json!({"files": [{"name": "b.pdf"}]}),
+        json!({"id": "m3", "files": [{"size": 3}]}),
+    ];
+    let b = plan_reads(&[t, read(json!({"id": "{id}"}))], &items, 64);
+    assert_eq!(b.per_item, [0..1, 1..2, 2..3]);
+    assert_eq!(b.elements_unread, [2, 0, 0], "item 3 fell through to the message read");
+}

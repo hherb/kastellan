@@ -79,6 +79,20 @@ fn an_item_with_no_attachments_has_no_reads() {
     assert!(expand_reads(&t, &json!({"attachments": ["x.jpg"]})).is_empty());
 }
 
+/// #956: a fan-out element the path after the `*` names nothing in gets no
+/// read, and is counted, so the planner is not told the item was read
+/// whole. An image is skipped on purpose and not counted; a template with
+/// no `*`, or none after it, drops nothing.
+#[test]
+fn fan_out_elements_without_the_suffix_are_counted() {
+    let t = read(json!({"filename": "{attachments.*.name}"}));
+    let item = json!({"attachments": [{"name": "a.pdf"}, {"size": 3}, {"name": "b.png"}, {"name": "c.pdf"}]});
+    assert_eq!(expand_reads(&t, &item), vec![json!({"filename": "a.pdf"}), json!({"filename": "c.pdf"})]);
+    assert_eq!(elements_unread(&t, &item), 1);
+    assert_eq!(elements_unread(&read(json!({"filename": "{attachments.*}"})), &item), 0);
+    assert_eq!(elements_unread(&read(json!({"id": "{id}"})), &json!({"id": "m1"})), 0);
+}
+
 #[test]
 fn image_names_are_recognised_case_insensitively() {
     for name in ["a.png", "b.JPG", "c.jpeg", "d.gif", "e.bmp", "f.WebP", "g.heic"] {

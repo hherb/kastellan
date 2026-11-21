@@ -17,6 +17,7 @@ fn the_notebook_prompt_documents_every_reply_key() {
         "sift", "sift.run", "over", "items", "from", "read", "keep_if", "fields", "scrapbook", "looked_at", "kept",
         "withheld", "undecided", "failed_reads", "reads", "unread", "remaining", "next_from", "stopped", "sample", "table", "columns",
         "order_by", "distinct", "chain", "items_per_read", "read_errors", "reads_failed", "unread_why",
+        "elements_unread",
         // The agent-raised plan features (#996).
         "l1_insight", "l3_skill", "python_skill", "floor_request", "invoke_skill",
     ] {

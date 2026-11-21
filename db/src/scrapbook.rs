@@ -114,6 +114,17 @@ pub async fn rows(pool: &PgPool, task_id: i64, sift: i32) -> Result<Vec<Row>, Db
         .collect()
 }
 
+/// The highest sift `task_id` has rows for, or `None` when it has none. A
+/// resumed run seeds its turn counter past it, because the sift number is
+/// the turn and the `tasks.plan_count` mirror can lag it (#956).
+pub async fn last_sift(pool: &PgPool, task_id: i64) -> Result<Option<i32>, DbError> {
+    sqlx::query_scalar("SELECT max(sift) FROM task_scrapbook WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| DbError::Query(format!("task_scrapbook last sift: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

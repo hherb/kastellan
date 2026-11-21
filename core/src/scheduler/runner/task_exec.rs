@@ -77,12 +77,18 @@ pub(crate) fn pre_plan_outcome(resolved: &[Ask]) -> Option<Outcome> {
 ///   is not the risk it looks like: each additional allowance costs one
 ///   human interaction.
 ///
+/// The count carried is also at least `last_sift`, the highest sift the
+/// task's scrapbook holds: the sift number is the turn, and the column is
+/// only a mirror whose write can fail (a warning, not an error), so a
+/// resume seeded from it alone gave a later sift a number already used —
+/// its rows then collided on row 1 and the task failed (#956).
+///
 /// A negative column value (impossible today; `plan_count` is a signed
 /// column with a non-negative writer) clamps to 0 rather than wrapping
 /// through `as u32` to ~4 billion, which would make the cap check pass
 /// forever.
-pub(crate) fn resume_budget(db_plan_count: i32, max_plans: u32) -> (u32, u32) {
-    let carried = u32::try_from(db_plan_count).unwrap_or(0);
+pub(crate) fn resume_budget(db_plan_count: i32, last_sift: Option<i32>, max_plans: u32) -> (u32, u32) {
+    let carried = u32::try_from(db_plan_count.max(last_sift.unwrap_or(0))).unwrap_or(0);
     (carried, carried.saturating_add(max_plans))
 }
 
@@ -206,7 +212,15 @@ pub(super) async fn run_one(
         };
     }
 
-    let (start_plan_count, max_plans_for_run) = resume_budget(task.plan_count, max_plans_override);
+    // shortcut: a sift that kept no rows leaves no trace here, so its number
+    // can still be reused; its summary then names the later sift's rows.
+    // Upgrade by recording the turn count transactionally if that is seen.
+    let last_sift = kastellan_db::scrapbook::last_sift(pool, task.id).await.unwrap_or_else(|e| {
+        // Not fatal: the column seeds alone, as before; a reused number fails at append.
+        tracing::warn!(task_id = task.id, error = %e, "could not read the task's last sift; seeding from plan_count");
+        None
+    });
+    let (start_plan_count, max_plans_for_run) = resume_budget(task.plan_count, last_sift, max_plans_override);
 
     // Restore the run this task was suspended in the middle of (spec D11).
     //
@@ -657,11 +671,15 @@ mod tests {
     #[test]
     fn resume_budget_carries_the_count_and_extends_the_allowance() {
         // A fresh task: nothing carried, budget is the lane default.
-        assert_eq!(resume_budget(0, 5), (0, 5));
+        assert_eq!(resume_budget(0, None, 5), (0, 5));
         // A task that escalated after 4 plans and was approved: the column
         // keeps its 4 (so `increment_plan_count`'s absolute write no longer
         // rewinds it to 1) and the approved plan gets a full 5 more.
-        assert_eq!(resume_budget(4, 5), (4, 9));
+        assert_eq!(resume_budget(4, None, 5), (4, 9));
+        // The mirror write failed after sift 6 (the column still says 4):
+        // the run resumes past the sift, never at a number it already used.
+        assert_eq!(resume_budget(4, Some(6), 5), (6, 11));
+        assert_eq!(resume_budget(4, Some(2), 5), (4, 9));
     }
 
     #[test]
@@ -675,9 +693,9 @@ mod tests {
     fn resume_budget_survives_impossible_column_values() {
         // plan_count is a signed column; a negative would make `as u32`
         // wrap to ~4 billion and the cap check pass forever.
-        assert_eq!(resume_budget(-1, 5), (0, 5));
+        assert_eq!(resume_budget(-1, None, 5), (0, 5));
         // And the extension must not overflow into a tiny budget.
-        assert_eq!(resume_budget(i32::MAX, u32::MAX).1, u32::MAX);
+        assert_eq!(resume_budget(i32::MAX, None, u32::MAX).1, u32::MAX);
     }
 
     #[test]

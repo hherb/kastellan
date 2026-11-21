@@ -2,7 +2,7 @@
 //! without a supervisor/PG; live on the DGX, and on a Mac that exports
 //! `KASTELLAN_PG_BIN_DIR`.
 
-use kastellan_db::scrapbook::{append_rows, rows, NewRow, RowKind};
+use kastellan_db::scrapbook::{append_rows, last_sift, rows, NewRow, RowKind};
 use kastellan_db::tasks::{insert_pending, Lane};
 use kastellan_tests_common::{bring_up_pg_cluster, pg_bin_dir_or_skip, skip_if_no_supervisor, unique_suffix, PgCluster};
 use serde_json::json;
@@ -107,6 +107,26 @@ fn a_second_append_to_the_same_sift_is_refused() {
         append_rows(&pool, task, 1, &[kept(1)]).await.unwrap();
         assert!(append_rows(&pool, task, 1, &[kept(2), kept(3)]).await.is_err());
         assert_eq!(rows(&pool, task, 1).await.unwrap().len(), 1, "the refused append wrote nothing");
+    });
+}
+
+/// The highest sift a task has rows for, which a resumed run seeds its turn
+/// counter past (#956: a failed `plan_count` mirror write left the column
+/// behind, so a later sift reused a number and collided on row 1). Another
+/// task's sifts do not count; a task with none reads `None`.
+#[test]
+fn last_sift_is_the_highest_sift_of_that_task() {
+    let Some(h) = harness("sb-last") else { return };
+    h.rt.block_on(async {
+        let pool = h.migrated_pool().await;
+        let task = a_task(&pool).await;
+        let other = a_task(&pool).await;
+        assert_eq!(last_sift(&pool, task).await.unwrap(), None);
+        append_rows(&pool, task, 2, &[kept(1)]).await.unwrap();
+        append_rows(&pool, task, 5, &[kept(2), kept(3)]).await.unwrap();
+        append_rows(&pool, other, 9, &[kept(4)]).await.unwrap();
+        assert_eq!(last_sift(&pool, task).await.unwrap(), Some(5));
+        assert_eq!(last_sift(&pool, other).await.unwrap(), Some(9));
     });
 }
 

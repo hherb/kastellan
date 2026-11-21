@@ -231,7 +231,8 @@ pub(crate) async fn run_sift(
     // Every item looked at went unread: say why (#956).
     let all_unread = !p.read.is_empty() && counts.looked_at > 0 && unread == counts.looked_at;
     let unread_why = all_unread.then(|| unread_why(&p.read, &items[..counts.looked_at], p.from));
-    let reads = Reads { made: made.outcomes.len(), unread, cut: batch.cut, per_read, errors: read_errors, unread_why };
+    let elements_unread = batch.elements_unread.iter().take(counts.looked_at).sum();
+    let reads = Reads { made: made.outcomes.len(), unread, elements_unread, cut: batch.cut, per_read, errors: read_errors, unread_why };
     let (mut summary, blocks) = summary(&scrap, &p, &counts, &reads, &rows, remaining, stopped);
     // Code-written, so it is never screened away with the sample.
     if let Some(prev) = super::chain::continued(&ctx.plans, &call.parameters, p.from) {
@@ -244,7 +245,7 @@ pub(crate) async fn run_sift(
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
         "looked_at": counts.looked_at, "kept": counts.kept, "withheld": counts.withheld,
         "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
-        "unread": reads.unread, "unread_why": reads.unread_why, "read_errors": reads.errors, "reads_cut": reads.cut, "items_per_read": reads.per_read, "remaining": remaining,
+        "unread": reads.unread, "unread_why": reads.unread_why, "read_errors": reads.errors, "reads_cut": reads.cut, "elements_unread": reads.elements_unread, "items_per_read": reads.per_read, "remaining": remaining,
         "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls, "sorter_error": sorter_error,
         "ms": started.elapsed().as_millis() as u64,
     });
