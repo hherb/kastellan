@@ -69,3 +69,25 @@ fn only_a_complete_non_blank_decode_failure_is_a_non_plan_answer() {
     assert_eq!(decode(prose, Some("length")).non_plan_answer(), None);
     assert_eq!(AgentError::PromptMissing("p".into()).non_plan_answer(), None);
 }
+
+/// #1047: a thinking turn that spent its whole `max_tokens` thinking says
+/// nothing and ends on `length`. Only that shape is re-asked with thinking
+/// suppressed: a reply cut off mid-text was not a thinking runaway.
+#[test]
+fn only_a_blank_length_decode_failure_is_cut_off_blank() {
+    let decode = |raw: &str, finish_reason: Option<&str>| AgentError::Decode {
+        detail: "d".into(),
+        raw: raw.into(),
+        usage: kastellan_llm_router::CompletionStats {
+            finish_reason: finish_reason.map(Into::into),
+            ..Default::default()
+        },
+        latency_ms: 0,
+    };
+    assert!(decode("", Some("length")).is_blank_cut_off());
+    assert!(decode(" \n", Some("length")).is_blank_cut_off());
+    assert!(!decode("{\"steps\": [", Some("length")).is_blank_cut_off(), "cut off mid-reply");
+    assert!(!decode("", Some("stop")).is_blank_cut_off(), "#923's empty completion");
+    assert!(!decode("", None).is_blank_cut_off());
+    assert!(!AgentError::PromptMissing("p".into()).is_blank_cut_off());
+}

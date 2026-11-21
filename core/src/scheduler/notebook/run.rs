@@ -479,4 +479,7 @@ mod rewrite_tests;
 #[cfg(test)]
 mod partial_tests;
 
+#[cfg(test)]
+mod runaway_tests;
+
 mod again;

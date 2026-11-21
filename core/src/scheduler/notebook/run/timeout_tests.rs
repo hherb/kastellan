@@ -95,6 +95,7 @@ pub(super) async fn a_re_ask_that_times_out_after_gathering_spends_the_answer_tu
     assert!(failed_rows[0].get("latency_ms").is_some(), "{}", failed_rows[0]);
     assert_eq!(failed_rows[1]["request_timeout"], true, "{}", failed_rows[1]);
     assert_eq!(failed_rows[1]["thinking_suppressed_retry"], true, "{}", failed_rows[1]);
+    assert_eq!(failed_rows[1]["thinking"], false, "the re-ask's own facts: {}", failed_rows[1]);
     let thinking = script.thinking.lock().unwrap();
     assert_eq!(thinking[2], kastellan_llm_router::ThinkingPolicy::Suppress, "the re-ask runs with thinking off: {thinking:?}");
 }
