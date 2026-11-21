@@ -438,9 +438,11 @@ pub(super) async fn an_item_with_no_attachment_takes_the_next_read(pool: &sqlx::
 }
 
 /// #956: a fan-out element the path after the `*` names nothing in got no
-/// read, and the item still counted as read; the summary counts it.
+/// read, and the item still counted as read; the summary counts it — summed
+/// over the items looked at only (the sorter fails on the third, PR #1051).
 pub(super) async fn a_fan_out_element_without_the_path_is_counted(pool: &sqlx::PgPool) {
-    let hits = json!([{"id": "m1", "subject": "about m1", "files": [{"name": "a.pdf"}, {"size": 3}]}]);
+    let hit = |id: &str| json!({"id": id, "subject": format!("about {id}"), "files": [{"name": "a.pdf"}, {"size": 3}]});
+    let hits = json!([hit("m1"), hit("m2"), hit("m3")]);
     let mut call = sift(2, None);
     call["parameters"]["read"] =
         json!([{"tool": "mail", "method": "mail.read", "parameters": {"id": "{id}", "file": "{files.*.name}"}}]);
@@ -449,9 +451,27 @@ pub(super) async fn a_fan_out_element_without_the_path_is_counted(pool: &sqlx::P
         json!({"tick": tick(1, "listed"), "call": call}),
         json!({"tick": tick(2, "sorted"), "infeasible": {"reason": "none kept"}}),
     ])
-    .sorting(&[no()]);
-    run(pool, &script, new_task(pool, 5).await).await;
+    .sorting(&[no(), no()]);
+    let r = run(pool, &script, new_task(pool, 5).await).await;
     let seen = summary_seen(&script, 2);
-    assert_eq!((seen["reads"].clone(), seen["unread"].clone()), (json!(1), json!(0)), "{seen}");
-    assert_eq!(seen["elements_unread"], json!(1), "{seen}");
+    assert_eq!((seen["stopped"].clone(), seen["looked_at"].clone()), (json!("sorter_failed"), json!(2)), "{seen}");
+    assert_eq!(seen["elements_unread"], json!(2), "m1 + m2, not m3 the sorter never reached: {seen}");
+    assert_eq!(super::finished_row(pool, r.task_id).await["elements_unread"], json!(2), "and on `sift.finished`");
+}
+
+/// PR #1051 review: a resume reads the scrapbook, not the column alone. The
+/// column lags at 4 (its mirror write failed) while sift 6 has rows, so the
+/// run seeds past 6 and its next sift is 7, never a reused 6.
+pub(super) async fn a_resume_seeds_past_the_last_sift_when_the_column_lags(pool: &sqlx::PgPool) {
+    use crate::scheduler::runner::task_exec::seeded_budget;
+    let task = new_task(pool, 5).await.task_id;
+    assert_eq!(seeded_budget(pool, task, 4, 5).await, (4, 9), "no rows: the column seeds");
+    let row = scrapbook::NewRow {
+        kind: scrapbook::RowKind::Withheld,
+        source: json!({"id": "m1"}),
+        fields: json!({}),
+        classification: "Personal".into(),
+    };
+    scrapbook::append_rows(pool, task, 6, &[row]).await.unwrap();
+    assert_eq!(seeded_budget(pool, task, 4, 5).await, (6, 11), "a withheld-only sift counts too");
 }

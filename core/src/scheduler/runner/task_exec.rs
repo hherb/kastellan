@@ -60,7 +60,7 @@ pub(crate) fn pre_plan_outcome(resolved: &[Ask]) -> Option<Outcome> {
 }
 
 /// `(starting plan_count, max_plans)` for a claimed task, given the value
-/// its DB column holds.
+/// its DB column holds and the highest sift its scrapbook has rows for.
 ///
 /// Two separable things the old code conflated by starting every run at 0
 /// (spec D6):
@@ -90,6 +90,21 @@ pub(crate) fn pre_plan_outcome(resolved: &[Ask]) -> Option<Outcome> {
 pub(crate) fn resume_budget(db_plan_count: i32, last_sift: Option<i32>, max_plans: u32) -> (u32, u32) {
     let carried = u32::try_from(db_plan_count.max(last_sift.unwrap_or(0))).unwrap_or(0);
     (carried, carried.saturating_add(max_plans))
+}
+
+/// [`resume_budget`] for `task_id`, reading its scrapbook's last sift.
+///
+/// shortcut: a sift that wrote no rows (none kept or withheld) leaves no trace
+/// here, so if the `plan_count` mirror write also failed its number can still
+/// be reused, and its summary then names the later sift's rows. Upgrade by
+/// recording the turn count transactionally if that is seen.
+pub(crate) async fn seeded_budget(pool: &PgPool, task_id: i64, db_plan_count: i32, max_plans: u32) -> (u32, u32) {
+    let last_sift = kastellan_db::scrapbook::last_sift(pool, task_id).await.unwrap_or_else(|e| {
+        // Not fatal: the column seeds alone, as before; a reused number fails at append.
+        tracing::warn!(task_id, error = %e, "could not read the task's last sift; seeding from plan_count");
+        None
+    });
+    resume_budget(db_plan_count, last_sift, max_plans)
 }
 
 /// The wall-clock ceiling on one run of a task on `lane` (#922 part A): the
@@ -212,15 +227,7 @@ pub(super) async fn run_one(
         };
     }
 
-    // shortcut: a sift that kept no rows leaves no trace here, so its number
-    // can still be reused; its summary then names the later sift's rows.
-    // Upgrade by recording the turn count transactionally if that is seen.
-    let last_sift = kastellan_db::scrapbook::last_sift(pool, task.id).await.unwrap_or_else(|e| {
-        // Not fatal: the column seeds alone, as before; a reused number fails at append.
-        tracing::warn!(task_id = task.id, error = %e, "could not read the task's last sift; seeding from plan_count");
-        None
-    });
-    let (start_plan_count, max_plans_for_run) = resume_budget(task.plan_count, last_sift, max_plans_override);
+    let (start_plan_count, max_plans_for_run) = seeded_budget(pool, task.id, task.plan_count, max_plans_override).await;
 
     // Restore the run this task was suspended in the middle of (spec D11).
     //

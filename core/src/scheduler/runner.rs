@@ -36,7 +36,7 @@ use super::audit::{action_task_terminal, ACTION_TASK_RUNNING};
 use super::inner_loop::StepDispatcher;
 
 mod audit_rows;
-mod task_exec;
+pub(super) mod task_exec;
 
 use audit_rows::{
     write_finalize_row, write_l1_promoted_row, write_l3_crystallised_row, write_lifecycle_row,

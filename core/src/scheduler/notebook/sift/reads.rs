@@ -16,8 +16,8 @@ pub(crate) struct Batch {
     pub per_item: Vec<std::ops::Range<usize>>,
     /// Reads of the first item dropped to fit `cap` (see [`plan_reads`]).
     pub cut: usize,
-    /// Per item taken, the fan-out elements its read got no read for
-    /// ([`elements_unread`]).
+    /// Per item taken, the fan-out elements the path after its read's `*`
+    /// named nothing in, images not counted ([`elements_unread`]).
     pub elements_unread: Vec<usize>,
 }
 

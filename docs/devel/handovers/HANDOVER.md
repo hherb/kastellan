@@ -61,13 +61,14 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - **A resumed run's turn starts past the scrapbook's last sift.** The sift number is the turn, and `tasks.plan_count` is a
   mirror whose write only warns on failure; a resume seeded from it alone reused a number and the next sift's rows collided
   on row 1 (task failed). `kastellan_db::scrapbook::last_sift` (max `sift`) feeds `runner::task_exec::resume_budget`'s new
-  `last_sift` arg; a failed read warns and seeds from the column as before. ⚠️ A sift that kept **no** rows leaves no
-  trace, so its number can still be reused (a `shortcut:` comment at the call site).
+  `last_sift` arg, through `task_exec::seeded_budget` (pinned by a PG leg of `the_sift_loop`); a failed read warns and
+  seeds from the column as before. ⚠️ A sift that wrote **no** rows (none kept or withheld) leaves no trace, so if the
+  mirror write also failed its number can still be reused (a `shortcut:` comment on `seeded_budget`).
 - **A fan-out's skipped elements are counted.** `{list.*.path}` gave no read for an element without `path`, silently;
   `template::elements_unread` (pure) counts them for the read that applied, `Batch.elements_unread` per item, summed over
   the items looked at into the summary's `elements_unread` (only when > 0) and `sift.finished`. Prompt paragraph added
   (**deploy: copy `prompts/agent_notebook.md`**, sha256-check). Images stay skipped uncounted.
-- `task_exec.rs` is **729** (was 711, already over; not split this session).
+- `task_exec.rs` is **736** (was 711, already over; not split this session).
 
 ### Previous (2026-11-21): #1049 deployed, experiments #35–#36 (tasks 507–520), #1047 closed — all three runaways (515, 519, 520; ~400 s thinking) recovered by the suppressed re-ask in 12–17 s; task 512's `request_timeout` was the task deadline clamping the call; wrong answers model-side (Q5 self-sent invoice, Q6 "cannot determine", Q7 stale "due"). `~/q1049.sh <from> <to>` on the DGX. Full section: this file at #1050 in git history.
 
@@ -336,13 +337,13 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
 **before** the change that grows a file, in a movement-only commit, and **prove the movement rather
 than asserting it** — #730's split checked every moved region was **byte-identical** to its range on
 `main` and that the `fn`-name set matched (which a diff cannot show), and #750's added a **negative
-control** proving the checker can fail. ⚠️ `inner_loop/execute.rs` **512** (#956 items) — split before the next change (`sift/run.rs` was split to 406; 413 now; `notebook/run.rs` 482 after #1044 moved `again_code` out). Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
+control** proving the checker can fail. ⚠️ `inner_loop/execute.rs` **512** (#956 items) — split before the next change (`sift/run.rs` was split to 406; 414 now; `notebook/run.rs` 485). Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
 1558+ (#639), `core/src/workers/gliner_relex/tests.rs`, `db/src/asks.rs`,
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
 `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,
 `workers/mail/src/ids.rs`, `tests-common/src/require.rs`,
 `llm-router/src/messages.rs`,
-`core/src/scheduler/runner/task_exec.rs` **729** (+18 in #1051), `core/src/main.rs` **935** (+3 in #956's allowlist PR; +7 in #810, +3 in #829, +6 in #862, +10 in #869's review), `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
+`core/src/scheduler/runner/task_exec.rs` **736** (+25 in #1051), `core/src/main.rs` **935** (+3 in #956's allowlist PR; +7 in #810, +3 in #829, +6 in #862, +10 in #869's review), `tests-common/src/microvm/{mod,container}.rs`, `sandbox/tests/macos_smoke.rs`,
 `core/src/channel/mod.rs` **569** (+10 in #849, +6 in #835, +16 in #836, +5 in #852, docs — the `actions` consts are the natural cut).
 Also over (grew in #818 without a split): `db/src/tasks.rs` **819** (+11 in #825: `CRASHED_DETAIL`),
 `db/src/graph.rs` **~935**, `core/src/entity_extraction/batch_upsert.rs` **~520**.

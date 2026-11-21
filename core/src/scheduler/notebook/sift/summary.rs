@@ -53,7 +53,8 @@ impl Stop {
 /// every item looked at went unread, which placeholder named nothing in
 /// which item, and that item's field names — or that every list was empty
 /// or images only ([`super::template::unread_why`], #956). `elements_unread`:
-/// list elements of the items looked at that their fan-out read skipped
+/// list elements of the items looked at that the path after their fan-out
+/// read's `*` named nothing in, images not counted
 /// ([`super::template::elements_unread`], #956).
 pub(crate) struct Reads {
     pub made: usize,
