@@ -18,7 +18,9 @@
 //!    an item decided on its hit alone would read as a real answer (#956).
 //! 4. Write the kept and withheld items to the scrapbook (K6), and record the
 //!    sift as one step whose result is a summary of counts and a sample (K9):
-//!    that summary is all the planner sees.
+//!    that summary is all the planner sees. An error that ends the task
+//!    mid-sift still writes the rows kept so far when it can, and
+//!    `sift.finished` with `stopped: "error"` (#956).
 
 use std::time::Instant;
 
@@ -76,6 +78,9 @@ pub(crate) struct SiftRun<'a> {
     pub nb: &'a dyn NotebookFormulator,
     pub outbox: Option<&'a crate::channel::outbox::ChannelOutbox>,
     pub now: Option<&'a str>,
+    /// This run's notebook calls review blocked or the loop rejected, which
+    /// left no record in `ctx.plans` (#956).
+    pub refused: &'a [super::chain::RefusedCall],
 }
 
 /// Run the sift `call` asked for. `Dispatched` means its summary is now the
@@ -105,9 +110,17 @@ pub(crate) async fn run_sift(
         // without today's date (DGX task 307 kept 2017 bills).
         tracing::warn!(task_id = ctx.task_id, "sift: the sorter is not told today's date (no planner timezone configured)");
     }
+    // Step n's newest call failed: this sift goes over its older success (#956).
+    let over_older = match p.over {
+        super::params::Over::Step(n) => super::chain::failed_since(&ctx.plans, r.refused, n)
+            .map(|code| format!("step {n}'s newest call failed ({code}): this sift went over its earlier successful result")),
+        super::params::Over::Scrapbook(_) => None,
+    };
     let items: Vec<Value> = over.items.into_iter().skip(p.from).collect();
     let batch = plan_reads(&p.read, &items, cfg.max_reads);
     let scrap = ScrapRef { task_id: ctx.task_id, sift: ctx.plan_count as i32 };
+    // What every early `sift.finished` row starts with.
+    let head = json!({"task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(), "over_older": over_older});
     let class = call.classification.max(ctx.classification_floor).max(over.class);
     // A reply that came back past the deadline makes no reads: the sorter
     // would stop at the first item anyway (#956).
@@ -120,16 +133,18 @@ pub(crate) async fn run_sift(
     if reads_run {
         let plan = reads_plan(call, &p, &batch.reads, class);
         let policy = StepPolicy::SiftReads { cap: cfg.max_reads };
-        match execute::review_and_dispatch(
+        let executed = execute::review_and_dispatch(
             r.pool, r.review, r.dispatcher, ctx, plan, meta, false, None, st, r.outbox, policy,
         )
-        .await?
-        {
-            Executed::Dispatched => {}
-            other => {
-                let stopped = Stop::ReadsNotRun.as_str();
-                audit(r.pool, ACTION_SIFT_FINISHED, json!({"task_id": ctx.task_id, "plan_count": ctx.plan_count,
-                    "scrapbook": scrap.to_string(), "stopped": stopped, "ms": started.elapsed().as_millis() as u64})).await;
+        .await;
+        match executed {
+            Err(e) => return Err(error_stop(r.pool, ctx, head, started, &Counts::default(), 0, e).await),
+            Ok(Executed::Dispatched) => {}
+            Ok(other) => {
+                let mut row = head;
+                row["stopped"] = json!(Stop::ReadsNotRun.as_str());
+                row["ms"] = json!(started.elapsed().as_millis() as u64);
+                audit(r.pool, ACTION_SIFT_FINISHED, row).await;
                 return Ok(other);
             }
         }
@@ -147,6 +162,9 @@ pub(crate) async fn run_sift(
     // `ReadsFailed` stop, for every read made (#956).
     let mut read_errors = std::collections::BTreeMap::<String, usize>::new();
     let mut sort_up_to = items.len();
+    // A failed cancel check stops sorting; the rows kept so far are still
+    // written before the task fails with it (#956).
+    let mut failure: Option<InnerLoopError> = None;
     // An item with no read to make is decided on its hit as ever: only a
     // batch whose every item had a read, and none came back, stops.
     if made.all_failed() && batch.per_item.iter().all(|r| !r.is_empty()) {
@@ -159,9 +177,16 @@ pub(crate) async fn run_sift(
             break;
         }
         // An operator's cancel is seen between items, as between steps.
-        if kastellan_db::tasks::observe_state(r.pool, ctx.task_id).await? == "cancelled" {
-            stopped = Some(Stop::Cancelled);
-            break;
+        match kastellan_db::tasks::observe_state(r.pool, ctx.task_id).await {
+            Ok(state) if state == "cancelled" => {
+                stopped = Some(Stop::Cancelled);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                failure = Some(e.into());
+                break;
+            }
         }
         // A read was asked for but none was made for this item (no read in
         // the list applied to it): say so, or the planner takes it as read.
@@ -219,7 +244,21 @@ pub(crate) async fn run_sift(
         }
     }
     if !rows.is_empty() {
-        scrapbook::append_rows(r.pool, ctx.task_id, scrap.sift, &rows).await?;
+        if let Err(e) = scrapbook::append_rows(r.pool, ctx.task_id, scrap.sift, &rows).await {
+            // The earlier failure, if any, is the cause the task fails with;
+            // this one is still logged, as it may not be the same outage.
+            let e = match failure {
+                Some(first) => {
+                    tracing::warn!(task_id = ctx.task_id, error = %e, "sift: the scrapbook write failed after an earlier error");
+                    first
+                }
+                None => e.into(),
+            };
+            return Err(error_stop(r.pool, ctx, head, started, &counts, rows.len(), e).await);
+        }
+    }
+    if let Some(e) = failure {
+        return Err(error_stop(r.pool, ctx, head, started, &counts, 0, e).await);
     }
 
     let remaining = items.len() - counts.looked_at;
@@ -240,6 +279,9 @@ pub(crate) async fn run_sift(
         summary["chain"] = super::chain::totals(&ctx.plans, &prev, counts.looked_at, counts.kept, distinct);
         summary["continues"] = json!(prev);
     }
+    if let Some(note) = &over_older {
+        summary["over_older"] = json!(note);
+    }
     audit_blocks(r.pool, ctx.task_id, call.step, "sift_summary", &blocks).await;
     let finished = json!({
         "task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(),
@@ -247,7 +289,7 @@ pub(crate) async fn run_sift(
         "undecided": counts.undecided, "failed_reads": counts.failed_reads, "reads": reads.made,
         "unread": reads.unread, "unread_why": reads.unread_why, "read_errors": reads.errors, "reads_cut": reads.cut, "elements_unread": reads.elements_unread, "items_per_read": reads.per_read, "remaining": remaining,
         "stopped": stopped.map(Stop::as_str), "sorter_calls": sorter_calls, "sorter_error": sorter_error,
-        "ms": started.elapsed().as_millis() as u64,
+        "over_older": over_older, "ms": started.elapsed().as_millis() as u64,
     });
     audit(r.pool, ACTION_SIFT_FINISHED, finished).await;
     if stopped == Some(Stop::Cancelled) {
@@ -401,6 +443,35 @@ fn started_payload(
         v["llm_usage"] = serde_json::to_value(&meta.usage).expect("CompletionStats serialises");
     }
     v
+}
+
+/// The `sift.finished` row of a sift an error ended (#956): without it a
+/// `sift.started` stands alone. `rows_unwritten` counts the kept and
+/// withheld rows the scrapbook did not get; `head` is the row's start (the
+/// task, the scrapbook, `over_older`). Returns `e`, for the caller to fail with.
+async fn error_stop(
+    pool: &PgPool,
+    ctx: &TaskContext,
+    mut head: Value,
+    started: Instant,
+    counts: &Counts,
+    rows_unwritten: usize,
+    e: InnerLoopError,
+) -> InnerLoopError {
+    let error: String = e.to_string().chars().take(FAILED_ROW_ERROR_CHARS).collect();
+    tracing::warn!(task_id = ctx.task_id, error = %error, rows_unwritten, "sift: an error ended the sift");
+    for (k, v) in [
+        ("stopped", json!(Stop::Error.as_str())),
+        ("error", json!(error)),
+        ("looked_at", json!(counts.looked_at)),
+        ("kept", json!(counts.kept)),
+        ("rows_unwritten", json!(rows_unwritten)),
+        ("ms", json!(started.elapsed().as_millis() as u64)),
+    ] {
+        head[k] = v;
+    }
+    audit(pool, ACTION_SIFT_FINISHED, head).await;
+    e
 }
 
 /// Best-effort, like the other loop rows: losing one must not fail the task.

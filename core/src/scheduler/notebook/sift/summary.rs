@@ -29,6 +29,9 @@ pub(crate) enum Stop {
     /// The reads plan was blocked, escalated or ended the task: nothing was
     /// sorted (the audit row only; the loop records the plan's own outcome).
     ReadsNotRun,
+    /// A database or loop error ended the task mid-sift (the audit row
+    /// only: the task fails, so the planner sees no summary, #956).
+    Error,
 }
 
 impl Stop {
@@ -39,6 +42,7 @@ impl Stop {
             Stop::SorterFailed => "sorter_failed",
             Stop::ReadsFailed => "reads_failed",
             Stop::ReadsNotRun => "reads_not_run",
+            Stop::Error => "error",
         }
     }
 }
