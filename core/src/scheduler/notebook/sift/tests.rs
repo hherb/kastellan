@@ -15,6 +15,8 @@ mod review_findings;
 use review_findings::*;
 mod measure_findings;
 use measure_findings::*;
+mod stop_findings;
+use stop_findings::*;
 
 fn search(step: u32, hits: Value) -> Value {
     json!({"step": step, "tool": "mail", "method": "mail.search", "parameters": {"hits": hits},
@@ -135,6 +137,8 @@ async fn the_sift_loop() {
     a_sift_whose_every_read_failed_sorts_nothing(&pool).await;
     a_failed_only_read_beside_an_item_with_none_still_sorts(&pool).await;
     the_item_the_sorter_failed_on_counts_no_read_error(&pool).await;
+    a_db_error_mid_sift_writes_its_finished_row(&pool).await;
+    a_sift_over_a_step_whose_newest_call_failed_says_so(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {

@@ -227,9 +227,11 @@ the items that match, with the facts you name, in the task's **scrapbook**:
  "returns": "the matching invoices", "done_when": "every hit sorted", "classification": "Personal"}
 ```
 
-- `over` — the list: `{"step": n}` is the last result of step `n`'s call (a
-  search; for an `invoke_skill`, its last step's); `{"scrapbook": "sb:…"}` is an earlier scrapbook (a follow-up
-  question: `conversation` lists each turn's `scrapbooks`).
+- `over` — the list: `{"step": n}` is the last successful result of step `n`'s
+  call (a search; for an `invoke_skill`, its last step's) — if a newer call
+  of step `n` failed, the sift's result says so in `over_older`;
+  `{"scrapbook": "sb:…"}` is an earlier scrapbook (a follow-up question:
+  `conversation` lists each turn's `scrapbooks`).
 - `items` — where the list sits in that result (here `results`); leave it out
   when the result is the list itself. `from` — the first item (default 0).
 - `read` (optional) — the call to make for each item, reviewed before any of

@@ -3,8 +3,8 @@ use super::check::check_from;
 
 #[test]
 fn the_stop_reasons_are_the_words_the_prompt_names() {
-    let words: Vec<&str> = [Stop::Time, Stop::Cancelled, Stop::SorterFailed, Stop::ReadsNotRun].map(Stop::as_str).to_vec();
-    assert_eq!(words, ["time", "cancelled", "sorter_failed", "reads_not_run"]);
+    let words: Vec<&str> = [Stop::Time, Stop::Cancelled, Stop::SorterFailed, Stop::ReadsNotRun, Stop::Error].map(Stop::as_str).to_vec();
+    assert_eq!(words, ["time", "cancelled", "sorter_failed", "reads_not_run", "error"]);
 }
 
 /// DGX task 322 (#960 re-measure #9): the model sifted a 27-row scrapbook

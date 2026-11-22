@@ -15,7 +15,7 @@ use super::audit::ACTION_PLAN_DISCARDED;
 use super::run::*;
 pub(crate) use crate::cassandra::review::ChainReviewStage;
 pub(crate) use crate::cassandra::types::DataClass;
-pub(crate) use crate::scheduler::inner_loop::{InnerLoopResult, Outcome, StepDispatcher, StepOutcome, TaskContext};
+pub(crate) use crate::scheduler::inner_loop::{InnerLoopError, InnerLoopResult, Outcome, StepDispatcher, StepOutcome, TaskContext};
 pub(crate) use crate::scheduler::notebook::formulator::NotebookFormulator;
 use crate::cassandra::review::{ReviewStage, ReviewStageContext};
 use crate::cassandra::types::{Plan, PlannedStep, Verdict};
@@ -382,6 +382,12 @@ pub(crate) async fn run_reviewed(pool: &sqlx::PgPool, script: &Script, ctx: Task
 /// (`DeterministicPolicy`: I1–I3 against the task floor) after the recorder.
 pub(crate) async fn run_policed(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext) -> Ran {
     run_staged(pool, script, ctx, Some(Arc::new(crate::cassandra::review::DeterministicPolicy))).await
+}
+
+/// [`run`] for a run expected to fail: the loop's own result, not unwrapped.
+pub(crate) async fn try_run(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext) -> Result<InnerLoopResult, InnerLoopError> {
+    let chain = Arc::new(ChainReviewStage::new(vec![Arc::new(RecordingReview::default()) as Arc<dyn ReviewStage>]));
+    run_notebook_to_terminal(pool, script, chain, Arc::new(Tools::default()), ctx, None).await
 }
 
 async fn run_staged(pool: &sqlx::PgPool, script: &Script, ctx: TaskContext, extra: Option<Arc<dyn ReviewStage>>) -> Ran {

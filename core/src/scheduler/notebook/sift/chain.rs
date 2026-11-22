@@ -52,6 +52,18 @@ pub(crate) fn list_index(plans: &[PlanRecord], n: u32) -> Option<usize> {
     })
 }
 
+/// The error code of notebook step `n`'s newest call (not a sift's) when that
+/// call failed: [`list_index`] then found an *older* success, so a sift
+/// `over` step `n` goes through a list the planner may think was replaced
+/// (#956). `None` when the newest call is that success, or there is none.
+pub(crate) fn failed_since(plans: &[PlanRecord], n: u32) -> Option<String> {
+    let newest = plans.iter().rev().find(|rec| notebook_step_of(&rec.plan) == Some(n) && !is_sift_plan(&rec.plan))?;
+    match newest.outcomes().last() {
+        Some(StepOutcome::Err { code, .. }) => Some(code.clone()),
+        _ => None,
+    }
+}
+
 /// The scrapbook a sift with `params`, starting at `from`, continues: the
 /// newest earlier sift of this run whose parameters, as parsed, are the
 /// same but for `from` (so `"items": null` and no `items` are one), whose
@@ -235,6 +247,27 @@ pub(crate) mod tests {
         plans.push(sift_record(over_sb(0), json!({"scrapbook": "sb:9:5", "next_from": 30})));
         plans.push(search_record(1, StepOutcome::Ok(json!([]))));
         assert_eq!(continued(&plans, &over_sb(30), 30).as_deref(), Some("sb:9:5"), "a scrapbook's rows never change");
+    }
+
+    /// #956: a sift `over` step 1 goes through step 1's newest *success*; when
+    /// a newer call for step 1 failed (a skill whose last step failed too),
+    /// the sift says so with that call's code. A sift's own record, or
+    /// another step's call, is not step 1's newest call.
+    #[test]
+    fn a_failed_call_after_the_listed_success_is_named() {
+        let err = |code: &str| StepOutcome::Err { code: code.into(), detail: "down".into() };
+        let mut plans = chain_of_three();
+        plans.truncate(2);
+        assert_eq!(failed_since(&plans, 1), None, "the newest call is the list, a sift's record is not a call");
+        plans.push(search_record(1, err("UPSTREAM")));
+        assert_eq!(failed_since(&plans, 1).as_deref(), Some("UPSTREAM"));
+        let rationale = format!("{NOTEBOOK_STEP_RATIONALE}1");
+        plans.push(record("web-search", rationale, json!({"q": "x"}), vec![StepOutcome::Ok(json!(["x"])), err("TIMEOUT")]));
+        assert_eq!(failed_since(&plans, 1).as_deref(), Some("TIMEOUT"), "a skill's last step");
+        plans.push(search_record(2, StepOutcome::Ok(json!([]))));
+        assert_eq!(failed_since(&plans, 1).as_deref(), Some("TIMEOUT"), "another step's call");
+        plans.push(search_record(1, StepOutcome::Ok(json!([]))));
+        assert_eq!(failed_since(&plans, 1), None, "a new success is the list");
     }
 
     #[test]
