@@ -64,8 +64,10 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   case as `cell_text` reads) → `answer::with_table` adds `(the column `x` is empty: …)` under the table, beside the
   #965 `order_by` line. PG leg: `a_table_with_no_order_named_is_newest_first`'s typo iteration (mutant caught).
 - **`as_number` reads European numbers.** A comma after the last dot, or one lone comma not before exactly 3 digits,
-  is decimal (`1.200,00` → 1200, `12,50` → 12.5); several dots group thousands. ⚠️ `1,200` / `1.200` keep the
-  English reading (1200 / 1.2): one separator before 3 digits cannot be told apart. Tests `table/tests/numbers.rs`.
+  is decimal (`1.200,00` → 1200, `12,50` → 12.5, and `0,125` / `1234,567`, which no thousands group fits); several
+  dots group thousands only as `1.234.567` (review finding: `1.2.10`, `192.168.1.10`, `02.01.2026` stay text). ⚠️
+  `1,200` / `1.200` keep the English reading (1200 / 1.2): one separator before 3 digits cannot be told apart. Tests
+  `table/tests/numbers.rs`.
 - **`from` past the end** (in #956's list) was already done by #962 (`a_sift_from_past_the_end_is_refused_before_sorting`).
 
 ### Previous (2026-11-22): mid-sift error row + `over_older` (#956 items, PR #1052, merged, deployed DGX 2026-11-22) — `sift/run.rs` `error_stop` writes `sift.finished` `stopped: "error"` with `rows_unwritten`; `chain::failed_since` → `over_older` names a newer failed or blocked call's code (⚠️ a resumed run starts `SiftRun.refused` empty). Untested arms: [issue 1053](https://github.com/hherb/kastellan/issues/1053). `sift/run.rs` **485**, `notebook/run.rs` **492**. Full section: this file at #1052 in git history.

@@ -3,8 +3,10 @@ use super::*;
 /// #956: `1.200,00` read as 1.2, so a column of European amounts sorted
 /// wrongly. A comma after the last dot, or one comma not followed by
 /// exactly three digits, is the decimal separator; several dots group
-/// thousands. One separator followed by three digits keeps the English
-/// reading (`1,200` is 1200, `1.200` is 1.2): no cell can tell them apart.
+/// thousands, but only grouped as `1.234.567`: a version, an address or a
+/// dotted date is no number. One separator followed by three digits keeps
+/// the English reading (`1,200` is 1200, `1.200` is 1.2), unless what is
+/// before it cannot be a thousands group (`0,125`, `1234,567`).
 #[test]
 fn european_numbers_read_as_their_value() {
     let read = [
@@ -18,11 +20,14 @@ fn european_numbers_read_as_their_value() {
         ("1,200.50", 1200.5),
         ("1,200", 1200.0),
         ("1.200", 1.2),
+        ("0,125", 0.125),
+        ("-0,750", -0.75),
+        ("1234,567", 1234.567),
     ];
     for (text, value) in read {
         assert_eq!(as_number(text), Some(value), "{text}");
     }
-    for text in ["1.200,000,00", "5-10", "3 of 10"] {
+    for text in ["1.200,000,00", "5-10", "3 of 10", "1.2.10", "192.168.1.10", "02.01.2026", "3.11.", "1234.567.890", "1.2,5"] {
         assert_eq!(as_number(text), None, "{text}");
     }
 }

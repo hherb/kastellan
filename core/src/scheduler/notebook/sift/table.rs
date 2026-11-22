@@ -326,23 +326,35 @@ pub(crate) fn empty_columns<'a>(columns: &'a [String], rows: &[Row]) -> Vec<&'a 
 /// dropped (`$1,200.00` is 1200, `30 EUR` is 30). A comma after the last dot,
 /// or one lone comma not followed by exactly three digits, is a decimal comma
 /// (`1.200,00` is 1200, `12,50` is 12.5, #956); several dots group thousands
-/// (`1.200.000`). A single separator before three digits keeps the English
-/// reading (`1,200` is 1200, `1.200` is 1.2). `None` when what is left is
-/// not one number — `3 of 10`, a range, an ISO date — which then sorts as text.
+/// (`1.200.000`), but only as `1.234.567`. A single separator before three
+/// digits keeps the English reading (`1,200` is 1200, `1.200` is 1.2), unless
+/// what is before a comma cannot be a thousands group (`0,125`, `1234,567`).
+/// `None` when what is left is not one number — `3 of 10`, a range, an ISO or
+/// dotted date, a version, an address — which then sorts as text.
 fn as_number(s: &str) -> Option<f64> {
     let core = s.trim_matches(|c: char| !(c.is_ascii_digit() || c == '-' || c == '.'));
     if !core.bytes().any(|b| b.is_ascii_digit()) {
         return None;
     }
     let decimal_comma = match (core.rfind(','), core.rfind('.')) {
-        (Some(comma), Some(dot)) => comma > dot,
-        (Some(comma), None) => core.matches(',').count() == 1 && core.len() - comma - 1 != 3,
-        _ => false,
+        (Some(comma), Some(dot)) => (comma > dot).then_some(comma),
+        (Some(comma), None) => {
+            let int = core[..comma].trim_start_matches('-');
+            let lone = core.matches(',').count() == 1;
+            (lone && (core.len() - comma - 1 != 3 || int == "0" || int.len() > 3)).then_some(comma)
+        }
+        _ => None,
     };
-    let plain = if decimal_comma {
-        core.replace('.', "").replace(',', ".")
+    // Dots group thousands only as `1.234.567`: `1.2.10` is a version and
+    // `02.01.2026` a date, and a number would sort them before every text.
+    let grouped = |int: &str| {
+        let mut groups = int.trim_start_matches('-').split('.');
+        !int.contains('.') || (groups.next().is_some_and(|g| (1..=3).contains(&g.len())) && groups.all(|g| g.len() == 3))
+    };
+    let plain = if let Some(comma) = decimal_comma {
+        grouped(&core[..comma]).then(|| core.replace('.', "").replace(',', "."))?
     } else if core.matches('.').count() > 1 {
-        core.replace(['.', ','], "")
+        grouped(core).then(|| core.replace(['.', ','], ""))?
     } else {
         core.replace(',', "")
     };
