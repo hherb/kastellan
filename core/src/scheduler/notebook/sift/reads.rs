@@ -4,7 +4,7 @@
 use serde_json::Value;
 
 use super::params::ReadTemplate;
-use super::template::first_reads;
+use super::template::{elements_unread, first_reads};
 
 /// The reads to make, and which of them belong to each item taken.
 #[derive(Debug, PartialEq)]
@@ -16,6 +16,9 @@ pub(crate) struct Batch {
     pub per_item: Vec<std::ops::Range<usize>>,
     /// Reads of the first item dropped to fit `cap` (see [`plan_reads`]).
     pub cut: usize,
+    /// Per item taken, the fan-out elements the path after its read's `*`
+    /// named nothing in, images not counted ([`elements_unread`]).
+    pub elements_unread: Vec<usize>,
 }
 
 /// Take items in list order while their reads fit in `cap`, and never more
@@ -26,12 +29,13 @@ pub(crate) struct Batch {
 /// to it, chosen here from the item's fields: a read that then fails is not
 /// replaced by the next (#965 item 3 — 15 of 2302 live reads failed). Pure.
 pub(crate) fn plan_reads(read: &[ReadTemplate], items: &[Value], cap: usize) -> Batch {
-    let mut batch = Batch { reads: Vec::new(), per_item: Vec::new(), cut: 0 };
+    let mut batch = Batch { reads: Vec::new(), per_item: Vec::new(), cut: 0, elements_unread: Vec::new() };
     for item in items {
         if batch.per_item.len() >= cap.max(1) {
             break;
         }
         let mut reads = first_reads(read, item);
+        let dropped = reads.first().map_or(0, |(i, _)| elements_unread(&read[*i], item));
         if batch.reads.len() + reads.len() > cap {
             if !batch.per_item.is_empty() {
                 break;
@@ -42,6 +46,7 @@ pub(crate) fn plan_reads(read: &[ReadTemplate], items: &[Value], cap: usize) -> 
         let start = batch.reads.len();
         batch.reads.extend(reads);
         batch.per_item.push(start..batch.reads.len());
+        batch.elements_unread.push(dropped);
     }
     batch
 }

@@ -81,6 +81,23 @@ pub(crate) fn expand_reads(t: &ReadTemplate, item: &Value) -> Vec<Value> {
     }
 }
 
+/// How many elements of `t`'s one `*` list in `item` [`expand_reads`]
+/// drops because the path after the `*` names nothing in them
+/// (`{attachments.*.name}` over an attachment with no `name`). Images are
+/// skipped on purpose and not counted. Asked only of the read that applied
+/// to the item, so its other elements were read: the summary says what was
+/// not, or the item reads as read whole (#956).
+pub(crate) fn elements_unread(t: &ReadTemplate, item: &Value) -> usize {
+    let mut stars = Vec::new();
+    collect_star_paths(&t.parameters, &mut stars);
+    let [path] = stars.as_slice() else { return 0 };
+    let (prefix, suffix) = split_star(path);
+    match item_at(item, prefix).and_then(Value::as_array) {
+        Some(list) if !suffix.is_empty() => list.iter().filter(|el| value_at(el, suffix).is_none()).count(),
+        _ => 0,
+    }
+}
+
 /// An item's reads from the first of `reads` that gives it any
 /// ([`expand_reads`]), each with that read's index: an attachment read
 /// yields nothing for a mail with no readable attachment, so the next read

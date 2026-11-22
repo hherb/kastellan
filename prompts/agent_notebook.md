@@ -268,7 +268,9 @@ again with `from` set to `next_from`. `stopped` says why it ended early
 every item had a read and every read failed, so nothing was sorted —
 `read_errors` says why: fix the read, or sift without `read`). `read_errors`
 (when present) counts the failed reads by their error `code`. `reads_cut`
-(when present) counts reads of one item that did not fit. When
+(when present) counts reads of one item that did not fit. `elements_unread`
+(when present) counts list elements a `{name.*.path}` read skipped because
+`path` named nothing in them: fix the path if they matter. When
 `sample_withheld` is true the safety screen withheld the sample,
 `criterion`, `fields` and `unread_why`; the ref and the counts still hold.
 If the sample shows the criterion did not work, sift again with a better

@@ -13,7 +13,7 @@ use crate::scheduler::notebook::test_harness::*;
 #[test]
 fn the_turn_cap_multiplies_only_the_fresh_allowance() {
     assert_eq!(turn_cap(0, 5), 10, "a fresh task: twice max_plans");
-    // Resumed after 4 turns with 5 more plans approved (`resume_budget(4, 5)`
+    // Resumed after 4 turns with 5 more plans approved (`resume_budget(4, None, 5)`
     // = (4, 9)): 10 more turns, not (4 + 5) × 2 − 4 = 14.
     assert_eq!(turn_cap(4, 9), 14);
     assert_eq!(turn_cap(7, 3), 7, "nothing left: no turns, never an underflow");

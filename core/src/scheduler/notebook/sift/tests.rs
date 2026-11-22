@@ -123,6 +123,8 @@ async fn the_sift_loop() {
     an_evicted_stashed_read_is_a_failed_read(&pool).await;
     a_table_with_no_order_named_is_newest_first(&pool).await;
     an_item_with_no_attachment_takes_the_next_read(&pool).await;
+    a_fan_out_element_without_the_path_is_counted(&pool).await;
+    a_resume_seeds_past_the_last_sift_when_the_column_lags(&pool).await;
     a_body_table_stays_when_the_code_table_has_no_rows(&pool).await;
     an_empty_unfinished_sift_adds_its_remaining_not_its_columns(&pool).await;
     each_read_is_screened_with_its_own_tools_profile(&pool).await;
