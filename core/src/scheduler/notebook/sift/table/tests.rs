@@ -492,3 +492,4 @@ fn a_bare_id_s_tool_keeps_rows_apart_but_is_not_shown() {
 
 /// `distinct_kept` and the table count rows alike, sorted or not.
 mod distinct;
+mod numbers;
