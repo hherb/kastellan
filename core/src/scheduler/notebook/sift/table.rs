@@ -305,16 +305,48 @@ pub(crate) fn orders_anything(o: &OrderBy, rows: &[Row]) -> bool {
     rows.iter().any(|r| !cell_text(r, &o.column).is_empty())
 }
 
+/// The columns of `columns`, but `source`, that every kept row of `rows`
+/// leaves empty (as [`cell_text`] reads them): a name the model typed that
+/// is no field shows an empty column, and the answer says so (#956). None
+/// when no row is kept: a withheld row has no fields to judge by. Pure.
+pub(crate) fn empty_columns<'a>(columns: &'a [String], rows: &[Row]) -> Vec<&'a str> {
+    let kept: Vec<&Row> = rows.iter().filter(|r| r.kind == RowKind::Kept).collect();
+    if kept.is_empty() {
+        return Vec::new();
+    }
+    columns
+        .iter()
+        .filter(|c| *c != SOURCE_COLUMN && kept.iter().all(|r| cell_text(r, c).is_empty()))
+        .map(String::as_str)
+        .collect()
+}
+
 /// A cell read as a number, so `order_by` puts 100 after 30: the cell
 /// with any currency or unit around it trimmed off and thousands separators
-/// dropped (`$1,200.00` is 1200, `30 EUR` is 30). `None` when what is left is
+/// dropped (`$1,200.00` is 1200, `30 EUR` is 30). A comma after the last dot,
+/// or one lone comma not followed by exactly three digits, is a decimal comma
+/// (`1.200,00` is 1200, `12,50` is 12.5, #956); several dots group thousands
+/// (`1.200.000`). A single separator before three digits keeps the English
+/// reading (`1,200` is 1200, `1.200` is 1.2). `None` when what is left is
 /// not one number — `3 of 10`, a range, an ISO date — which then sorts as text.
 fn as_number(s: &str) -> Option<f64> {
     let core = s.trim_matches(|c: char| !(c.is_ascii_digit() || c == '-' || c == '.'));
     if !core.bytes().any(|b| b.is_ascii_digit()) {
         return None;
     }
-    core.replace(',', "").parse().ok()
+    let decimal_comma = match (core.rfind(','), core.rfind('.')) {
+        (Some(comma), Some(dot)) => comma > dot,
+        (Some(comma), None) => core.matches(',').count() == 1 && core.len() - comma - 1 != 3,
+        _ => false,
+    };
+    let plain = if decimal_comma {
+        core.replace('.', "").replace(',', ".")
+    } else if core.matches('.').count() > 1 {
+        core.replace(['.', ','], "")
+    } else {
+        core.replace(',', "")
+    };
+    plain.parse().ok()
 }
 
 fn scalar(v: &Value) -> String {

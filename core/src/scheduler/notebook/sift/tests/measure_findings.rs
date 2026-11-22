@@ -381,6 +381,7 @@ pub(super) async fn a_repeat_of_a_held_stash_names_it(pool: &sqlx::PgPool) {
 /// `order_by` came out in the order the items were found. With a `date`
 /// field it is newest first — and an `order_by` named still wins (review
 /// finding), unless it names no field (#965: a typo is the default order).
+/// A `columns` name no kept row has is said under the table (#956).
 pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgPool) {
     for named in [None, Some("date"), Some("Datum")] {
         let ctx = new_task(pool, 5).await;
@@ -390,6 +391,10 @@ pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgP
         let mut table = json!({"scrapbook": format!("sb:{}:2", ctx.task_id)});
         if let Some(column) = named {
             table["order_by"] = json!({"column": column, "desc": false});
+        }
+        if named == Some("Datum") {
+            // #956: a column no kept row has is named under the table too.
+            table["columns"] = json!(["date", "vendor", "source"]);
         }
         let script = Script::new(&[
             json!({"steps": steps(&[1, 2]), "call": search(1, hits(&["m1", "m2", "m3"]))}),
@@ -406,6 +411,8 @@ pub(super) async fn a_table_with_no_order_named_is_newest_first(pool: &sqlx::PgP
         }
         let said = b.contains("the order named matches no column");
         assert_eq!(said, named == Some("Datum"), "a dropped order is said: {b}");
+        let empty = b.contains("the column `vendor` is empty") && !b.contains("the column `date`");
+        assert_eq!(empty, named == Some("Datum"), "only the empty column is named: {b}");
     }
 }
 

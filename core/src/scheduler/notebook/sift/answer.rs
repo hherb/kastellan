@@ -5,7 +5,7 @@ use kastellan_db::scrapbook::{self, Row, RowKind};
 use sqlx::PgPool;
 
 use super::params::{Over, ScrapRef, SiftParams};
-use super::table::{default_order, items, orders_anything, render_table, Counts, SOURCE_COLUMN};
+use super::table::{default_order, empty_columns, items, orders_anything, render_table, Counts, SOURCE_COLUMN};
 use super::{chain, may_read};
 use crate::cassandra::types::DataClass;
 use crate::scheduler::inner_loop::{notebook_block_audit_payload, PlanRecord, TaskContext};
@@ -102,6 +102,9 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
         if t.order_by.is_some() && asked.is_none() && !rows.is_empty() {
             tracing::info!(task_id = ctx.task_id, "answer table: order_by names no column; default order used");
             refused.push("(the order named matches no column: the table is in its default order)".into());
+        }
+        for c in empty_columns(&columns, &rows) {
+            refused.push(format!("(the column `{c}` is empty: no kept row has a value under that name)"));
         }
         let order = asked.or_else(|| default_order(&columns, &rows));
         let (table, blocks) = render_table(&rows, &columns, order.as_ref(), t.limit, &counts);
