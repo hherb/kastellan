@@ -78,6 +78,9 @@ pub(crate) struct SiftRun<'a> {
     pub nb: &'a dyn NotebookFormulator,
     pub outbox: Option<&'a crate::channel::outbox::ChannelOutbox>,
     pub now: Option<&'a str>,
+    /// This run's notebook calls review blocked or the loop rejected, which
+    /// left no record in `ctx.plans` (#956).
+    pub refused: &'a [super::chain::RefusedCall],
 }
 
 /// Run the sift `call` asked for. `Dispatched` means its summary is now the
@@ -109,13 +112,15 @@ pub(crate) async fn run_sift(
     }
     // Step n's newest call failed: this sift goes over its older success (#956).
     let over_older = match p.over {
-        super::params::Over::Step(n) => super::chain::failed_since(&ctx.plans, n)
+        super::params::Over::Step(n) => super::chain::failed_since(&ctx.plans, r.refused, n)
             .map(|code| format!("step {n}'s newest call failed ({code}): this sift went over its earlier successful result")),
         super::params::Over::Scrapbook(_) => None,
     };
     let items: Vec<Value> = over.items.into_iter().skip(p.from).collect();
     let batch = plan_reads(&p.read, &items, cfg.max_reads);
     let scrap = ScrapRef { task_id: ctx.task_id, sift: ctx.plan_count as i32 };
+    // What every early `sift.finished` row starts with.
+    let head = json!({"task_id": ctx.task_id, "plan_count": ctx.plan_count, "scrapbook": scrap.to_string(), "over_older": over_older});
     let class = call.classification.max(ctx.classification_floor).max(over.class);
     // A reply that came back past the deadline makes no reads: the sorter
     // would stop at the first item anyway (#956).
@@ -133,12 +138,13 @@ pub(crate) async fn run_sift(
         )
         .await;
         match executed {
-            Err(e) => return Err(error_stop(r.pool, ctx, &scrap, started, &Counts::default(), 0, e).await),
+            Err(e) => return Err(error_stop(r.pool, ctx, head, started, &Counts::default(), 0, e).await),
             Ok(Executed::Dispatched) => {}
             Ok(other) => {
-                let stopped = Stop::ReadsNotRun.as_str();
-                audit(r.pool, ACTION_SIFT_FINISHED, json!({"task_id": ctx.task_id, "plan_count": ctx.plan_count,
-                    "scrapbook": scrap.to_string(), "stopped": stopped, "ms": started.elapsed().as_millis() as u64})).await;
+                let mut row = head;
+                row["stopped"] = json!(Stop::ReadsNotRun.as_str());
+                row["ms"] = json!(started.elapsed().as_millis() as u64);
+                audit(r.pool, ACTION_SIFT_FINISHED, row).await;
                 return Ok(other);
             }
         }
@@ -239,13 +245,20 @@ pub(crate) async fn run_sift(
     }
     if !rows.is_empty() {
         if let Err(e) = scrapbook::append_rows(r.pool, ctx.task_id, scrap.sift, &rows).await {
-            // The earlier failure, if any, is the cause; these rows are lost either way.
-            let e = failure.unwrap_or_else(|| e.into());
-            return Err(error_stop(r.pool, ctx, &scrap, started, &counts, rows.len(), e).await);
+            // The earlier failure, if any, is the cause the task fails with;
+            // this one is still logged, as it may not be the same outage.
+            let e = match failure {
+                Some(first) => {
+                    tracing::warn!(task_id = ctx.task_id, error = %e, "sift: the scrapbook write failed after an earlier error");
+                    first
+                }
+                None => e.into(),
+            };
+            return Err(error_stop(r.pool, ctx, head, started, &counts, rows.len(), e).await);
         }
     }
     if let Some(e) = failure {
-        return Err(error_stop(r.pool, ctx, &scrap, started, &counts, 0, e).await);
+        return Err(error_stop(r.pool, ctx, head, started, &counts, 0, e).await);
     }
 
     let remaining = items.len() - counts.looked_at;
@@ -434,11 +447,12 @@ fn started_payload(
 
 /// The `sift.finished` row of a sift an error ended (#956): without it a
 /// `sift.started` stands alone. `rows_unwritten` counts the kept and
-/// withheld rows the scrapbook did not get. Returns `e`, for the caller to fail with.
+/// withheld rows the scrapbook did not get; `head` is the row's start (the
+/// task, the scrapbook, `over_older`). Returns `e`, for the caller to fail with.
 async fn error_stop(
     pool: &PgPool,
     ctx: &TaskContext,
-    scrap: &ScrapRef,
+    mut head: Value,
     started: Instant,
     counts: &Counts,
     rows_unwritten: usize,
@@ -446,10 +460,17 @@ async fn error_stop(
 ) -> InnerLoopError {
     let error: String = e.to_string().chars().take(FAILED_ROW_ERROR_CHARS).collect();
     tracing::warn!(task_id = ctx.task_id, error = %error, rows_unwritten, "sift: an error ended the sift");
-    audit(pool, ACTION_SIFT_FINISHED, json!({"task_id": ctx.task_id, "plan_count": ctx.plan_count,
-        "scrapbook": scrap.to_string(), "stopped": Stop::Error.as_str(), "error": error,
-        "looked_at": counts.looked_at, "kept": counts.kept, "rows_unwritten": rows_unwritten,
-        "ms": started.elapsed().as_millis() as u64})).await;
+    for (k, v) in [
+        ("stopped", json!(Stop::Error.as_str())),
+        ("error", json!(error)),
+        ("looked_at", json!(counts.looked_at)),
+        ("kept", json!(counts.kept)),
+        ("rows_unwritten", json!(rows_unwritten)),
+        ("ms", json!(started.elapsed().as_millis() as u64)),
+    ] {
+        head[k] = v;
+    }
+    audit(pool, ACTION_SIFT_FINISHED, head).await;
     e
 }
 

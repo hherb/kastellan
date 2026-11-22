@@ -67,6 +67,13 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
 - **`over: {"step": n}` after a newer failed call says so.** `chain::failed_since` (pure) → summary + `sift.finished`
   `over_older` naming the code. Prompt sentence added (**deploy: the install copies `prompts/agent_notebook.md`**).
 - PG legs in `sift/tests/stop_findings.rs`; `test_harness::try_run` returns the loop's `Result`. Both mutants caught.
+- **Review round (`/finalcheck`):** a newer call review *blocked* or the loop rejected (no `ctx.plans` record) is
+  named too: the notebook loop keeps `chain::RefusedCall`s and passes them in `SiftRun.refused` (⚠️ a resumed run
+  starts them empty); every early `sift.finished` (`reads_not_run`, `error`) carries `over_older`; an `append_rows`
+  error after a failed cancel check is logged, not dropped. New PG leg (blocked call) and a failed-sift assertion
+  pin `!is_sift_plan`; the error leg's counts differ (3/1/2). Untested arms + a cancel during reads labelled
+  `reads_not_run`: [issue 1053](https://github.com/hherb/kastellan/issues/1053). `sift/run.rs` **485**,
+  `notebook/run.rs` **492**.
 
 ### Previous (2026-11-22): two #956 items (PR #1051, merged, deployed DGX 2026-11-22) — a resumed run seeds its turn past the scrapbook's highest sift (`scrapbook::last_sift` → `task_exec::seeded_budget`; ⚠️ a sift that wrote **no** rows and a failed mirror write can still reuse a number); `template::elements_unread` counts fan-out elements skipped for want of the path. `task_exec.rs` **736**. Full section: this file at #1051 in git history.
 
@@ -337,7 +344,7 @@ unblocked its favoured option), with [#639](https://github.com/hherb/kastellan/i
 **before** the change that grows a file, in a movement-only commit, and **prove the movement rather
 than asserting it** — #730's split checked every moved region was **byte-identical** to its range on
 `main` and that the `fn`-name set matched (which a diff cannot show), and #750's added a **negative
-control** proving the checker can fail. ⚠️ `inner_loop/execute.rs` **512** (#956 items) — split before the next change (`sift/run.rs` was split to 406; **464** now; `notebook/run.rs` 485). Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
+control** proving the checker can fail. ⚠️ `inner_loop/execute.rs` **512** (#956 items) — split before the next change (`sift/run.rs` was split to 406; **485** now; `notebook/run.rs` 492). Over cap today, biggest first: `core/tests/guard_tier_e2e.rs`
 1558+ (#639), `core/src/workers/gliner_relex/tests.rs`, `db/src/asks.rs`,
 `sandbox/src/linux_firecracker/plan.rs` (DGX-gated), `core/src/channel/ask_message.rs`, `db/graph.rs`,
 `core/src/scheduler/asks.rs`, `core/src/tool_host.rs`,

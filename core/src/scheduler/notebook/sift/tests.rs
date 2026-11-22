@@ -139,6 +139,7 @@ async fn the_sift_loop() {
     the_item_the_sorter_failed_on_counts_no_read_error(&pool).await;
     a_db_error_mid_sift_writes_its_finished_row(&pool).await;
     a_sift_over_a_step_whose_newest_call_failed_says_so(&pool).await;
+    a_sift_over_a_step_whose_newest_call_was_blocked_says_so(&pool).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {

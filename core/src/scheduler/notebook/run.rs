@@ -103,6 +103,9 @@ pub(crate) async fn run_notebook_to_terminal(
     let mut answer_attempted = false;
     let mut seen_corrections: i64 = 0;
     let mut last_call: Option<LastCall> = None;
+    // Calls review blocked or the loop rejected, for a sift over their step (#956).
+    // shortcut: a resumed run starts this empty, so a refusal before the resume goes unnamed.
+    let mut refused: Vec<sift::chain::RefusedCall> = Vec::new();
     // A failed, blocked or repeated call: the next turn replans, and thinks.
     let mut replan_due = false;
     // A non-thinking turn chose to answer: the next turn rewrites it, thinking.
@@ -350,7 +353,7 @@ pub(crate) async fn run_notebook_to_terminal(
             // plan, and its sorter needs the router (K2).
             Some(call) => {
                 let now = turn_now.lock().expect("never poisoned").clone();
-                let r = SiftRun { pool, review: review.as_ref(), dispatcher: dispatcher.as_ref(), nb, outbox, now: now.as_deref() };
+                let r = SiftRun { pool, review: review.as_ref(), dispatcher: dispatcher.as_ref(), nb, outbox, now: now.as_deref(), refused: &refused };
                 sift::run::run_sift(r, &mut ctx, call, &meta, &mut st, &mut failed_llm_calls).await?
             }
             None => {
@@ -374,9 +377,13 @@ pub(crate) async fn run_notebook_to_terminal(
             Executed::Again => {
                 if let Some(call) = &reply.call {
                     let detail = ctx.blocks.get(blocks_before..).unwrap_or_default().join("; ");
+                    let code: String = again::again_code(ctx.blocks.get(blocks_before..).unwrap_or_default()).into();
+                    if call.tool != SIFT_TOOL {
+                        refused.push(sift::chain::RefusedCall { at: ctx.plans.len(), step: call.step, code: code.clone() });
+                    }
                     let payload = FailedStepPayload {
                         step: call.step,
-                        code: again::again_code(ctx.blocks.get(blocks_before..).unwrap_or_default()).into(),
+                        code,
                         detail: clamp(&detail),
                         classification: ctx.classification_floor,
                     };
