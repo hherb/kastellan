@@ -74,9 +74,9 @@ pub(crate) struct TurnRecord {
 
 /// One scrapbook a turn left: its ref, the criterion and fields it was made
 /// with, and how many rows it kept. The rows stay in the database. When the
-/// sift's summary was withheld by the screen, so were its criterion and
-/// fields: they are absent and `sample_withheld` says why (#956), the key
-/// the sift's own summary used.
+/// screen withheld the model-written parts of the sift's summary, its
+/// criterion and fields are absent here too and `sample_withheld` is true
+/// (#956), the key the summary itself used; the ref and count still hold.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TurnScrapbook {
     pub(crate) scrapbook: String,

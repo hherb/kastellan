@@ -259,17 +259,39 @@ fn a_row_class_that_does_not_parse_counts_as_secret() {
 
 /// #956: an earlier turn's table took its columns from the first row's
 /// keys, which come back alphabetical. The turn record keeps the sift's
-/// own order; a withheld or unlisted one is `None`.
+/// own order; a withheld or unlisted one is `None`. The conversation is
+/// rendered by the real view from a real record, so a renamed key on the
+/// writing side fails here rather than silently reverting to alphabetical.
 #[test]
 fn an_earlier_turn_s_fields_come_from_its_record_in_order() {
-    let conversation = [
-        serde_json::json!({"_omitted_turns": 1}),
-        serde_json::json!({"at": "t", "user": "u", "answer": "a",
-            "scrapbooks": [{"scrapbook": "sb:5:1", "rows": 2, "sample_withheld": true},
-                           {"scrapbook": "sb:5:2", "criterion": "c", "fields": ["vendor", "gross_amount", "id"], "rows": 2}]}),
-    ];
+    use crate::scheduler::conversation::record::{TurnRecord, TurnScrapbook};
+    use crate::scheduler::conversation::{view, Turn};
+    let scrapbook = |n: u32, fields: &[&str], withheld: bool| TurnScrapbook {
+        scrapbook: format!("sb:5:{n}"),
+        criterion: if withheld { String::new() } else { "an invoice".into() },
+        fields: fields.iter().map(|f| f.to_string()).collect(),
+        rows: 2,
+        sample_withheld: withheld,
+    };
+    let turn = Turn {
+        task_id: 5,
+        finished_at: time::OffsetDateTime::from_unix_timestamp(1_757_000_000).unwrap(),
+        user: "my invoices".into(),
+        answer: "here they are".into(),
+        data_class: Some(DataClass::Personal),
+        record: Some(TurnRecord {
+            calls: vec![],
+            omitted_calls: 0,
+            data_class: DataClass::Personal,
+            scrapbooks: vec![scrapbook(1, &[], true), scrapbook(2, &["vendor", "gross_amount", "id"], false)],
+            omitted_scrapbooks: 0,
+        }),
+    };
+    let conversation = view::render(&[turn], view::CONVERSATION_BUDGET).turns;
     assert_eq!(recorded_fields(&conversation, "sb:5:2").unwrap(), ["vendor", "gross_amount", "id"]);
     assert_eq!(recorded_fields(&conversation, "sb:5:1"), None, "withheld: no fields recorded");
     assert_eq!(recorded_fields(&conversation, "sb:5:3"), None, "not listed");
     assert_eq!(recorded_fields(&[], "sb:5:2"), None);
+    let blank = [serde_json::json!({"scrapbooks": [{"scrapbook": "sb:5:4", "fields": [], "rows": 0}]})];
+    assert_eq!(recorded_fields(&blank, "sb:5:4"), None, "an empty list is no order to keep");
 }

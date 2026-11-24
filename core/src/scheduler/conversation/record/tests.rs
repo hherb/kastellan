@@ -342,8 +342,8 @@ fn a_sift_leaves_its_scrapbook_and_its_reads_are_not_calls() {
 }
 
 /// #956: a summary the screen withheld has no criterion or fields. The
-/// record used to keep them blank, which the next turn could not tell from
-/// a sift made with none; it now says the summary was withheld instead.
+/// record used to keep them as blanks, which read as a sift with an empty
+/// criterion and no fields rather than a withheld one; it now says so.
 #[test]
 fn a_withheld_summary_leaves_its_ref_and_says_it_was_withheld() {
     use crate::scheduler::notebook::sift::{SIFT_METHOD, SIFT_TOOL};
