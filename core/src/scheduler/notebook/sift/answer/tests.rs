@@ -256,3 +256,20 @@ fn a_row_class_that_does_not_parse_counts_as_secret() {
     assert_eq!(row_class(&row("personal-ish")), DataClass::Secret);
     assert_eq!(row_class(&row("")), DataClass::Secret);
 }
+
+/// #956: an earlier turn's table took its columns from the first row's
+/// keys, which come back alphabetical. The turn record keeps the sift's
+/// own order; a withheld or unlisted one is `None`.
+#[test]
+fn an_earlier_turn_s_fields_come_from_its_record_in_order() {
+    let conversation = [
+        serde_json::json!({"_omitted_turns": 1}),
+        serde_json::json!({"at": "t", "user": "u", "answer": "a",
+            "scrapbooks": [{"scrapbook": "sb:5:1", "rows": 2, "sample_withheld": true},
+                           {"scrapbook": "sb:5:2", "criterion": "c", "fields": ["vendor", "gross_amount", "id"], "rows": 2}]}),
+    ];
+    assert_eq!(recorded_fields(&conversation, "sb:5:2").unwrap(), ["vendor", "gross_amount", "id"]);
+    assert_eq!(recorded_fields(&conversation, "sb:5:1"), None, "withheld: no fields recorded");
+    assert_eq!(recorded_fields(&conversation, "sb:5:3"), None, "not listed");
+    assert_eq!(recorded_fields(&[], "sb:5:2"), None);
+}

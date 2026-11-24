@@ -56,7 +56,8 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
                 // Every included sift's fields, in order: separate sifts of a
                 // forced table (#1012) may each have asked for others.
                 let into = if got.is_empty() { &mut empty_fields } else { &mut fields };
-                for f in summary.as_ref().and_then(summary_fields).or_else(|| first_row_fields(&got)).unwrap_or_default() {
+                let asked = summary.as_ref().and_then(summary_fields).or_else(|| recorded_fields(&ctx.conversation, &r.to_string()));
+                for f in asked.or_else(|| first_row_fields(&got)).unwrap_or_default() {
                     if !into.contains(&f) {
                         into.push(f);
                     }
@@ -355,8 +356,17 @@ fn summary_fields(v: &serde_json::Value) -> Option<Vec<String>> {
     serde_json::from_value(v["fields"].clone()).ok()
 }
 
-/// An earlier turn's sift left no summary here: its field names are the
-/// first kept row's keys.
+/// An earlier turn's sift's `fields`, in the order it asked for them, from
+/// the turn record the conversation shows (#956). `None` when no shown turn
+/// lists `name` with fields: a turn withheld or cut, or its sift's summary
+/// withheld. Pure.
+fn recorded_fields(conversation: &[serde_json::Value], name: &str) -> Option<Vec<String>> {
+    let entry = conversation.iter().filter_map(|t| t["scrapbooks"].as_array()).flatten().find(|s| s["scrapbook"] == name)?;
+    serde_json::from_value::<Vec<String>>(entry["fields"].clone()).ok().filter(|f| !f.is_empty())
+}
+
+/// No record names the sift's fields: the first kept row's keys, in the
+/// alphabetical order `serde_json` reads them back in, not the sift's.
 fn first_row_fields(rows: &[Row]) -> Option<Vec<String>> {
     let first = rows.iter().find(|r| r.kind == RowKind::Kept)?;
     Some(first.fields.as_object()?.keys().cloned().collect())

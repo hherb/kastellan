@@ -97,7 +97,9 @@ read the rest as the `<handoff>` block describes; never construct one. An
 `last_result.call` is the call you made, `{"tool", "method", "parameters"}`.
 
 `conversation` turns are `{"at", "user", "calls", "answer"}` (`calls` may be
-absent: not recorded; a turn that sifted also lists its `scrapbooks`), or
+absent: not recorded; a turn that sifted also lists its `scrapbooks`, where
+`"sample_withheld": true` means the screen withheld that sift's criterion and
+fields — its ref still holds), or
 `{"at", "status": "withheld" | "unclassified" | "too large for the conversation
 budget"}`; a leading `{"_omitted_turns": N}` means older turns did not fit, and
 `"_omitted_calls": N` or `"_omitted_scrapbooks": N` on a turn means it had N
