@@ -96,8 +96,8 @@ pub(crate) struct TurnScrapbook {
     /// The span of its list the sift judged: from item `from` (absent when
     /// 0), `looked_at` items, with `remaining` (absent when 0) left after
     /// them — code-written, so a later turn's table counts what the sift
-    /// looked at rather than the rows it kept (#956). `None` in a record
-    /// stored before these.
+    /// looked at rather than the rows it kept (#956). In a record stored
+    /// before these, `looked_at` is `None` (and the others 0).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) from: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]

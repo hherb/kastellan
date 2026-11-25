@@ -45,7 +45,8 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
             }
         };
         match scrapbook::rows(pool, r.task_id, r.sift).await {
-            Ok(got) if got.is_empty() && own_summary(ctx, &r).is_none() => {
+            // An empty ref counts only from a summary or an earlier turn's record of its counts (#956).
+            Ok(got) if got.is_empty() && own_summary(ctx, &r).is_none() && chain::recorded(&ctx.conversation, &r.to_string()).map_or(true, |e| e["looked_at"].is_null()) => {
                 refused.push(format!("(table {raw} could not be included: it has no rows)"));
             }
             Ok(got) => {
