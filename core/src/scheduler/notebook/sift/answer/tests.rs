@@ -273,6 +273,9 @@ fn an_earlier_turn_s_fields_come_from_its_record_in_order() {
         rows: 2,
         sample_withheld: withheld,
         continues: None,
+        from: 0,
+        looked_at: None,
+        remaining: 0,
     };
     let turn = Turn {
         task_id: 5,
@@ -295,4 +298,31 @@ fn an_earlier_turn_s_fields_come_from_its_record_in_order() {
     assert_eq!(recorded_fields(&[], "sb:5:2"), None);
     let blank = [serde_json::json!({"scrapbooks": [{"scrapbook": "sb:5:4", "fields": [], "rows": 0}]})];
     assert_eq!(recorded_fields(&blank, "sb:5:4"), None, "an empty list is no order to keep");
+}
+
+/// #956: an earlier turn's ref takes its counts from the conversation's
+/// record of it, not its row count; a chain's link that a later included
+/// link went on from leaves its rest to that link. A record without
+/// counts (stored before them) still counts its rows, a lower bound.
+#[test]
+fn an_earlier_turns_link_counts_from_its_record() {
+    let entry = serde_json::json!({"scrapbook": "sb:5:3", "rows": 1, "continues": "sb:5:2", "from": 30, "looked_at": 30, "remaining": 20});
+    let link = Link::of("sb:5:3".into(), Some(&entry), None, 1);
+    assert_eq!((link.continues.as_deref(), link.from, link.looked_at, link.remaining), (Some("sb:5:2"), 30, 30, 20));
+    let old = Link::of("sb:5:4".into(), Some(&serde_json::json!({"scrapbook": "sb:5:4", "rows": 2})), None, 2);
+    assert_eq!((old.from, old.looked_at, old.remaining), (0, 2, 0));
+
+    let earlier = |n: u32, continues: Option<u32>, from, looked_at, remaining| Link {
+        name: format!("sb:5:{n}"),
+        continues: continues.map(|c| format!("sb:5:{c}")),
+        list: None,
+        from,
+        looked_at,
+        remaining,
+    };
+    let chain = [earlier(2, None, 0, 30, 50), earlier(3, Some(2), 30, 30, 20)];
+    assert_eq!(coverage(&chain), (60, 20), "the rest is the last link's");
+    assert_eq!(coverage(&chain[..1]), (30, 50), "the last link left out: the first's rest stands");
+    let both = [earlier(2, None, 0, 30, 50), earlier(3, Some(2), 30, 30, 20), earlier(4, None, 0, 10, 5)];
+    assert_eq!(stop_lines(&both), ["(sift sb:5:3 stopped after 60 of its 80 items)", "(sift sb:5:4 stopped after 10 of its 15 items)"]);
 }

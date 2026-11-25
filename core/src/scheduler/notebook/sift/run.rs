@@ -142,7 +142,7 @@ pub(crate) async fn run_sift(
             Ok(Executed::Dispatched) => {}
             Ok(other) => {
                 let mut row = head;
-                row["stopped"] = json!(Stop::ReadsNotRun.as_str());
+                row["stopped"] = json!(not_run_stop(&other).as_str());
                 row["ms"] = json!(started.elapsed().as_millis() as u64);
                 audit(r.pool, ACTION_SIFT_FINISHED, row).await;
                 return Ok(other);
@@ -478,6 +478,16 @@ async fn error_stop(
 async fn audit(pool: &PgPool, action: &str, payload: Value) {
     if let Err(e) = kastellan_db::audit::insert(pool, SCHEDULER_AUDIT_ACTOR, action, payload).await {
         tracing::error!(error = %e, action, "sift audit insert failed");
+    }
+}
+
+/// Why a sift whose reads plan did not come back `Dispatched` stopped: an
+/// operator's cancel seen during the reads is a cancel (issue 1053), any
+/// other early end is `reads_not_run`. Pure.
+fn not_run_stop(e: &Executed) -> Stop {
+    match e {
+        Executed::Finished(f) if matches!(f.outcome, Outcome::Cancelled) => Stop::Cancelled,
+        _ => Stop::ReadsNotRun,
     }
 }
 

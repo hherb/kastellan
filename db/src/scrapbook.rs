@@ -6,6 +6,12 @@
 //! read back by code only ([`rows`]) — for the answer's table and for a
 //! follow-up that sifts an earlier turn's scrapbook. The runtime role may add
 //! and read rows but never rewrite or delete one (0029's grants).
+//!
+//! 0029's comment on those grants is wrong in one respect: its REVOKEs pin
+//! the intent, but a later `GRANT ALL` would not "have to delete" them — it
+//! simply overrides them. Keep a later grant from widening the role. The
+//! migration is applied, so it is never edited: a change alters its sqlx
+//! checksum (#956).
 
 use sqlx::PgPool;
 

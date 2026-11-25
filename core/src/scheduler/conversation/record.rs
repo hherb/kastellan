@@ -93,6 +93,17 @@ pub(crate) struct TurnScrapbook {
     /// shows every link (#956). Absent when it continues none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) continues: Option<String>,
+    /// The span of its list the sift judged: from item `from` (absent when
+    /// 0), `looked_at` items, with `remaining` (absent when 0) left after
+    /// them — code-written, so a later turn's table counts what the sift
+    /// looked at rather than the rows it kept (#956). `None` in a record
+    /// stored before these.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) from: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) looked_at: Option<usize>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) remaining: usize,
 }
 
 /// The scrapbook a sift's recorded result names, if `record` is a sift.
@@ -112,6 +123,9 @@ fn scrapbook_of(record: &PlanRecord) -> Option<TurnScrapbook> {
         rows: v["kept"].as_u64().unwrap_or(0) as usize,
         sample_withheld: v["sample_withheld"].as_bool().unwrap_or(false),
         continues: v["continues"].as_str().map(String::from),
+        from: step.parameters["from"].as_u64().unwrap_or(0) as usize,
+        looked_at: v["looked_at"].as_u64().map(|n| n as usize),
+        remaining: v["remaining"].as_u64().unwrap_or(0) as usize,
     })
 }
 
