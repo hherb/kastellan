@@ -347,6 +347,9 @@ fn a_turn_with_a_scrapbook_shows_it() {
         rows: 18,
         sample_withheld: false,
         continues: None,
+        from: 0,
+        looked_at: None,
+        remaining: 0,
     }];
     let out = render(&[t, turn(2, "q", "a")], CONVERSATION_BUDGET);
     assert_eq!(

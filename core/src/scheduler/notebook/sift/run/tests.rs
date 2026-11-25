@@ -35,3 +35,15 @@ fn a_bare_id_source_is_written_with_its_tool() {
     let row = json!({"source": {"id": 3, "tool": "kv"}, "fields": {}});
     assert_eq!(source_of(&row, "scrapbook"), json!({"id": 3, "tool": "kv"}));
 }
+
+/// Issue 1053 (3): an operator's cancel seen while the reads ran ends the
+/// sift before sorting, and its `sift.finished` read `reads_not_run`. A
+/// cancel is named as one; any other early end (a block, a refusal, another
+/// outcome) is still `reads_not_run`.
+#[test]
+fn a_cancel_during_the_reads_is_named_a_cancel() {
+    let finished = |outcome| Executed::Finished(Box::new(execute::Finished { outcome, insight: None, skill: None, python_skill: None }));
+    assert_eq!(not_run_stop(&finished(Outcome::Cancelled)), Stop::Cancelled);
+    assert_eq!(not_run_stop(&Executed::Again), Stop::ReadsNotRun);
+    assert_eq!(not_run_stop(&finished(Outcome::Failed("blocked".into()))), Stop::ReadsNotRun);
+}

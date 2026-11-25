@@ -45,14 +45,17 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
             }
         };
         match scrapbook::rows(pool, r.task_id, r.sift).await {
-            Ok(got) if got.is_empty() && own_summary(ctx, &r).is_none() => {
+            // An empty ref counts only from a summary or an earlier turn's record of its counts (#956).
+            Ok(got) if got.is_empty() && own_summary(ctx, &r).is_none() && chain::recorded(&ctx.conversation, &r.to_string()).map_or(true, |e| e["looked_at"].is_null()) => {
                 refused.push(format!("(table {raw} could not be included: it has no rows)"));
             }
             Ok(got) => {
                 included = true;
                 let summary = own_summary(ctx, &r);
                 add_counts(&mut counts, summary.as_ref());
-                links.push(Link::of(r.to_string(), summary.as_ref(), chain::params_of(&ctx.plans, &r.to_string()), got.len()));
+                // An earlier turn's sift has no summary here: its record does.
+                let facts = summary.as_ref().or_else(|| chain::recorded(&ctx.conversation, &r.to_string()));
+                links.push(Link::of(r.to_string(), facts, chain::params_of(&ctx.plans, &r.to_string()), got.len()));
                 // Every included sift's fields, in order: separate sifts of a
                 // forced table (#1012) may each have asked for others.
                 let into = if got.is_empty() { &mut empty_fields } else { &mut fields };
@@ -398,15 +401,15 @@ struct Link {
 }
 
 impl Link {
-    /// From the sift's summary and parameters, when this run has them; an
-    /// earlier turn's ref says only its row count, so its "looked at" is
-    /// kept plus withheld, a lower bound.
-    fn of(name: String, summary: Option<&serde_json::Value>, params: Option<SiftParams>, rows: usize) -> Self {
-        let n = |k: &str| summary.and_then(|s| s[k].as_u64()).map(|v| v as usize);
+    /// From `facts` (this run's summary, else an earlier turn's record, #956)
+    /// and the parameters this run has. A record stored before its counts
+    /// has only rows: "looked at" is kept plus withheld, a lower bound.
+    fn of(name: String, facts: Option<&serde_json::Value>, params: Option<SiftParams>, rows: usize) -> Self {
+        let n = |k: &str| facts.and_then(|s| s[k].as_u64()).map(|v| v as usize);
         Link {
             name,
-            continues: summary.and_then(|s| s["continues"].as_str()).map(String::from),
-            from: params.as_ref().map_or(0, |p| p.from),
+            continues: facts.and_then(|s| s["continues"].as_str()).map(String::from),
+            from: params.as_ref().map_or_else(|| n("from").unwrap_or(0), |p| p.from),
             list: params.map(|p| (p.over, p.items)),
             looked_at: n("looked_at").unwrap_or(rows),
             remaining: n("remaining").unwrap_or(0),
@@ -430,7 +433,14 @@ fn coverage(links: &[Link]) -> (usize, usize) {
     let (mut looked, mut left) = (0, 0);
     for l in links {
         let group: Vec<&Link> = match &l.list {
-            None => vec![l],
+            // An earlier turn's ref, its own list; a link another went on from leaves its rest to it.
+            None => {
+                looked += l.looked_at;
+                if !links.iter().any(|o| o.continues.as_ref() == Some(&l.name)) {
+                    left += l.remaining;
+                }
+                continue;
+            }
             Some(k) if seen.contains(&k) => continue,
             Some(k) => {
                 seen.push(k);

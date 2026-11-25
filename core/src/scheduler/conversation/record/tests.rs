@@ -335,6 +335,9 @@ fn a_sift_leaves_its_scrapbook_and_its_reads_are_not_calls() {
             rows: 2,
             sample_withheld: false,
             continues: None,
+            from: 0,
+            looked_at: None,
+            remaining: 0,
         }]
     );
     assert_eq!(record.data_class, DataClass::Personal, "the reads still raise the class");
@@ -411,4 +414,26 @@ fn a_sift_that_continues_another_records_the_link() {
     let shown = serde_json::to_value(from_plans(&[first, next], DataClass::Public).scrapbooks).unwrap();
     assert!(shown[0].get("continues").is_none(), "absent when it continues none: {shown}");
     assert_eq!(shown[1]["continues"], "sb:7:2");
+}
+
+/// #956: a later turn's table counted an earlier sift's rows as what it
+/// looked at. The record keeps the code-written `looked_at` and
+/// `remaining`, and the sift's `from`; the last two are absent when 0.
+#[test]
+fn a_sift_records_the_span_of_its_list_it_looked_at() {
+    use crate::scheduler::notebook::sift::{SIFT_METHOD, SIFT_TOOL};
+    let sift = |params, summary| {
+        let plan = plan_with(vec![step(SIFT_TOOL, SIFT_METHOD, params, DataClass::Personal)]);
+        PlanRecord::new(plan, vec![StepOutcome::Ok(summary)])
+    };
+    let first = sift(serde_json::json!({}), serde_json::json!({"scrapbook": "sb:7:2", "kept": 3, "looked_at": 30, "remaining": 50}));
+    let next = sift(serde_json::json!({"from": 30}), serde_json::json!({"scrapbook": "sb:7:3", "kept": 1, "looked_at": 50, "remaining": 0}));
+    let shown = serde_json::to_value(from_plans(&[first, next], DataClass::Public).scrapbooks).unwrap();
+    assert_eq!(shown[0]["looked_at"], 30);
+    assert_eq!(shown[0]["remaining"], 50);
+    assert!(shown[0].get("from").is_none(), "absent when 0: {shown}");
+    assert_eq!(shown[1]["from"], 30);
+    assert!(shown[1].get("remaining").is_none(), "absent when 0: {shown}");
+    let old: TurnScrapbook = serde_json::from_value(serde_json::json!({"scrapbook": "sb:7:2", "rows": 1})).unwrap();
+    assert_eq!(old.looked_at, None, "a record stored before the counts still parses, and says it has none");
 }
