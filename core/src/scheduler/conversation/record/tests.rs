@@ -328,9 +328,35 @@ fn a_sift_leaves_its_scrapbook_and_its_reads_are_not_calls() {
     assert_eq!(record.calls.iter().map(|c| c.method.as_str()).collect::<Vec<_>>(), [SIFT_METHOD]);
     assert_eq!(
         record.scrapbooks,
-        [TurnScrapbook { scrapbook: "sb:7:2".into(), criterion: "an invoice".into(), fields: vec!["amount".into()], rows: 2 }]
+        [TurnScrapbook {
+            scrapbook: "sb:7:2".into(),
+            criterion: "an invoice".into(),
+            fields: vec!["amount".into()],
+            rows: 2,
+            sample_withheld: false
+        }]
     );
     assert_eq!(record.data_class, DataClass::Personal, "the reads still raise the class");
+    let shown = serde_json::to_value(&record.scrapbooks[0]).unwrap();
+    assert!(shown.get("sample_withheld").is_none(), "absent unless true: {shown}");
+}
+
+/// #956: a summary the screen withheld has no criterion or fields. The
+/// record used to keep them as blanks, which read as a sift with an empty
+/// criterion and no fields rather than a withheld one; it now says so.
+#[test]
+fn a_withheld_summary_leaves_its_ref_and_says_it_was_withheld() {
+    use crate::scheduler::notebook::sift::{SIFT_METHOD, SIFT_TOOL};
+    let summary = serde_json::json!({"scrapbook": "sb:7:2", "kept": 1, "sample_withheld": true});
+    let sift = plan_with(vec![step(SIFT_TOOL, SIFT_METHOD, serde_json::json!({}), DataClass::Personal)]);
+    let record = from_plans(&[PlanRecord::new(sift, vec![StepOutcome::Ok(summary)])], DataClass::Public);
+    let shown = serde_json::to_value(&record.scrapbooks).unwrap();
+    assert_eq!(shown, serde_json::json!([{"scrapbook": "sb:7:2", "rows": 1, "sample_withheld": true}]));
+    let back: Vec<TurnScrapbook> = serde_json::from_value(shown).unwrap();
+    assert_eq!(back, record.scrapbooks, "a record stored this way reads back");
+    let old: TurnScrapbook =
+        serde_json::from_value(serde_json::json!({"scrapbook": "sb:7:2", "criterion": "", "fields": [], "rows": 1})).unwrap();
+    assert!(!old.sample_withheld, "a record stored before the flag still parses");
 }
 
 #[test]

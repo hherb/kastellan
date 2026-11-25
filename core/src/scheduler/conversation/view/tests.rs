@@ -345,6 +345,7 @@ fn a_turn_with_a_scrapbook_shows_it() {
         criterion: "an invoice".into(),
         fields: vec!["amount".into()],
         rows: 18,
+        sample_withheld: false,
     }];
     let out = render(&[t, turn(2, "q", "a")], CONVERSATION_BUDGET);
     assert_eq!(

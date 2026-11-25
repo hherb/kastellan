@@ -17,6 +17,8 @@ mod measure_findings;
 use measure_findings::*;
 mod stop_findings;
 use stop_findings::*;
+mod earlier_turn_findings;
+use earlier_turn_findings::*;
 
 fn search(step: u32, hits: Value) -> Value {
     json!({"step": step, "tool": "mail", "method": "mail.search", "parameters": {"hits": hits},
@@ -138,6 +140,7 @@ async fn the_sift_loop() {
     a_failed_only_read_beside_an_item_with_none_still_sorts(&pool).await;
     the_item_the_sorter_failed_on_counts_no_read_error(&pool).await;
     a_db_error_mid_sift_writes_its_finished_row(&pool).await;
+    an_earlier_turns_table_keeps_its_sifts_column_order(&pool).await;
     a_sift_over_a_step_whose_newest_call_failed_says_so(&pool).await;
     a_sift_over_a_step_whose_newest_call_was_blocked_says_so(&pool).await;
 }
