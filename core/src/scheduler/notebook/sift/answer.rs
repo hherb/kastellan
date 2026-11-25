@@ -30,7 +30,7 @@ pub(crate) async fn with_table(pool: &PgPool, ctx: &TaskContext, body: &str, t: 
     // columns only if no ref with rows names any: they would stay empty.
     let mut empty_fields: Vec<String> = Vec::new();
     let mut included = false;
-    let (named, mut refused) = table_refs(&ctx.plans, t.scrapbook.refs());
+    let (named, mut refused) = table_refs(&ctx.plans, &ctx.conversation, t.scrapbook.refs());
     let mut links = Vec::new();
     for raw in &named {
         let r = match ScrapRef::parse(raw) {
@@ -328,7 +328,7 @@ fn scrapbook_value(kept: &[(String, u64)]) -> String {
 /// without the one named (review finding). A ref is written canonically
 /// (`sb:9:04` is `sb:9:4`), so its chain is found; a malformed one is kept
 /// as written for its refusal. Pure.
-fn table_refs(plans: &[PlanRecord], named: &[String]) -> (Vec<String>, Vec<String>) {
+fn table_refs(plans: &[PlanRecord], conversation: &[serde_json::Value], named: &[String]) -> (Vec<String>, Vec<String>) {
     let canonical = |raw: &String| ScrapRef::parse(raw).map_or_else(|_| raw.clone(), |r| r.to_string());
     let mut distinct: Vec<String> = Vec::new();
     for r in named.iter().map(canonical) {
@@ -339,7 +339,7 @@ fn table_refs(plans: &[PlanRecord], named: &[String]) -> (Vec<String>, Vec<Strin
     let past = distinct.split_off(distinct.len().min(TABLE_REFS_MAX));
     let refused = past.iter().map(|r| format!("(table {r} could not be included: a table names at most {TABLE_REFS_MAX})")).collect();
     let mut refs: Vec<String> = Vec::new();
-    for r in distinct.iter().flat_map(|r| chain::expand(plans, r)) {
+    for r in distinct.iter().flat_map(|r| chain::expand(plans, conversation, r)) {
         if !refs.contains(&r) {
             refs.push(r);
         }
@@ -361,7 +361,7 @@ fn summary_fields(v: &serde_json::Value) -> Option<Vec<String>> {
 /// lists `name` with fields: a turn withheld or cut, or its sift's summary
 /// withheld. Pure.
 fn recorded_fields(conversation: &[serde_json::Value], name: &str) -> Option<Vec<String>> {
-    let entry = conversation.iter().filter_map(|t| t["scrapbooks"].as_array()).flatten().find(|s| s["scrapbook"] == name)?;
+    let entry = chain::recorded(conversation, name)?;
     serde_json::from_value::<Vec<String>>(entry["fields"].clone()).ok().filter(|f| !f.is_empty())
 }
 

@@ -2,11 +2,10 @@
 //! a long list takes several, each `from` the last one's `next_from`, and
 //! each writes its own scrapbook. A sift that goes on where an earlier one
 //! stopped **continues** it: its summary says `continues: <that ref>`, and
-//! an answer's table in the same task that names the last one shows the
-//! whole chain (a later turn's table sees only the sift it names). DGX
-//! tasks 302 and 307 tabled only the last of four and three sifts (9 of
-//! about 86 rows, and 16 of 52) although the prompt asked for every name.
-//! Pure.
+//! an answer's table that names the last one shows the whole chain (a later
+//! turn's too, from that turn's record, #956). DGX tasks 302 and 307 tabled
+//! only the last of four and three sifts (9 of about 86 rows, and 16 of 52)
+//! although the prompt asked for every name. Pure.
 
 use serde_json::{json, Value};
 
@@ -105,10 +104,28 @@ pub(crate) fn continued(plans: &[PlanRecord], params: &Value, from: usize) -> Op
     prev["scrapbook"].as_str().map(String::from)
 }
 
-/// `name` and the sifts it continues, oldest first.
-pub(crate) fn expand(plans: &[PlanRecord], name: &str) -> Vec<String> {
+/// The entry an earlier turn's record keeps for its sift `name`, from the
+/// `scrapbooks` the conversation shows, if a shown turn lists it.
+pub(crate) fn recorded<'a>(conversation: &'a [Value], name: &str) -> Option<&'a Value> {
+    conversation.iter().filter_map(|t| t["scrapbooks"].as_array()).flatten().find(|s| s["scrapbook"] == name)
+}
+
+/// The sift `name` continues: from its summary when this run wrote it, else
+/// from an earlier turn's record (#956).
+fn continues_of<'a>(plans: &'a [PlanRecord], conversation: &'a [Value], name: &str) -> Option<&'a str> {
+    match summary_of(plans, name) {
+        Some(s) => s["continues"].as_str(),
+        None => recorded(conversation, name)?["continues"].as_str(),
+    }
+}
+
+/// `name` and the sifts it continues, oldest first. An earlier turn's chain
+/// is read from its record in `conversation`, so a later turn's table naming
+/// its last link shows every link; a link the record does not list (dropped
+/// to fit its cap) ends the chain there.
+pub(crate) fn expand(plans: &[PlanRecord], conversation: &[Value], name: &str) -> Vec<String> {
     let mut chain = vec![name.to_string()];
-    while let Some(prev) = summary_of(plans, chain.last().expect("never empty")).and_then(|s| s["continues"].as_str()) {
+    while let Some(prev) = continues_of(plans, conversation, chain.last().expect("never empty")) {
         // Code writes the links, each to an earlier sift, so they cannot
         // loop; never spin if one somehow did.
         if chain.iter().any(|c| c == prev) {
@@ -128,7 +145,7 @@ pub(crate) fn expand(plans: &[PlanRecord], name: &str) -> Vec<String> {
 /// link's rows (a duplicate can sit in two links); `None` when they could not
 /// all be read, and then it is left out.
 pub(crate) fn totals(plans: &[PlanRecord], prev: &str, looked_at: usize, kept: usize, distinct: Option<usize>) -> Value {
-    let links: Vec<&Value> = expand(plans, prev).iter().filter_map(|n| summary_of(plans, n)).collect();
+    let links: Vec<&Value> = expand(plans, &[], prev).iter().filter_map(|n| summary_of(plans, n)).collect();
     let sum = |k: &str| links.iter().filter_map(|s| s[k].as_u64()).sum::<u64>();
     let mut t = json!({
         "sifts": links.len() + 1,
@@ -296,9 +313,26 @@ pub(crate) mod tests {
     #[test]
     fn the_last_name_expands_to_the_whole_chain_oldest_first() {
         let plans = chain_of_three();
-        assert_eq!(expand(&plans, "sb:9:4"), ["sb:9:2", "sb:9:3", "sb:9:4"]);
-        assert_eq!(expand(&plans, "sb:9:2"), ["sb:9:2"], "the first link continues nothing");
-        assert_eq!(expand(&plans, "sb:7:1"), ["sb:7:1"], "a ref this run did not write stands alone");
+        assert_eq!(expand(&plans, &[], "sb:9:4"), ["sb:9:2", "sb:9:3", "sb:9:4"]);
+        assert_eq!(expand(&plans, &[], "sb:9:2"), ["sb:9:2"], "the first link continues nothing");
+        assert_eq!(expand(&plans, &[], "sb:7:1"), ["sb:7:1"], "a ref no run or record names stands alone");
+    }
+
+    /// #956: an earlier turn's chain was not expanded, because only this
+    /// run's summaries were read. Its turn record keeps each link's
+    /// `continues`, so naming the last link brings in the rest; a link the
+    /// record does not list (dropped to fit) ends the chain there. This
+    /// run's summary wins over a record naming the same ref.
+    #[test]
+    fn an_earlier_turns_chain_expands_from_its_record() {
+        let conversation = [json!({"scrapbooks": [
+            {"scrapbook": "sb:5:3", "continues": "sb:5:2"},
+            {"scrapbook": "sb:5:4", "continues": "sb:5:3"},
+        ]})];
+        assert_eq!(expand(&[], &conversation, "sb:5:4"), ["sb:5:2", "sb:5:3", "sb:5:4"]);
+        assert_eq!(expand(&[], &conversation, "sb:5:2"), ["sb:5:2"], "unlisted: stands alone");
+        let mine = [json!({"scrapbooks": [{"scrapbook": "sb:9:3", "continues": "sb:9:1"}]})];
+        assert_eq!(expand(&chain_of_three(), &mine, "sb:9:3"), ["sb:9:2", "sb:9:3"], "this run's summary wins");
     }
 
     /// DGX tasks 308/309: the answer quoted the last link's `kept` (25, 15)
@@ -323,6 +357,6 @@ pub(crate) mod tests {
             sift_record(params(0, "x"), json!({"scrapbook": "sb:9:2", "continues": "sb:9:3"})),
             sift_record(params(0, "x"), json!({"scrapbook": "sb:9:3", "continues": "sb:9:2"})),
         ];
-        assert_eq!(expand(&plans, "sb:9:3"), ["sb:9:2", "sb:9:3"]);
+        assert_eq!(expand(&plans, &[], "sb:9:3"), ["sb:9:2", "sb:9:3"]);
     }
 }

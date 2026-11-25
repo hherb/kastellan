@@ -73,10 +73,11 @@ pub(crate) struct TurnRecord {
 }
 
 /// One scrapbook a turn left: its ref, the criterion and fields it was made
-/// with, and how many rows it kept. The rows stay in the database. When the
-/// screen withheld the model-written parts of the sift's summary, its
-/// criterion and fields are absent here too and `sample_withheld` is true
-/// (#956), the key the summary itself used; the ref and count still hold.
+/// with, how many rows it kept, and the sift it continues. The rows stay in
+/// the database. When the screen withheld the model-written parts of the
+/// sift's summary, its criterion and fields are absent here too and
+/// `sample_withheld` is true (#956), the key the summary itself used; the
+/// ref and count still hold.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TurnScrapbook {
     pub(crate) scrapbook: String,
@@ -87,6 +88,11 @@ pub(crate) struct TurnScrapbook {
     pub(crate) rows: usize,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) sample_withheld: bool,
+    /// The sift this one went on from (its summary's code-written
+    /// `continues`), so a later turn's table naming a chain's last link
+    /// shows every link (#956). Absent when it continues none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) continues: Option<String>,
 }
 
 /// The scrapbook a sift's recorded result names, if `record` is a sift.
@@ -105,6 +111,7 @@ fn scrapbook_of(record: &PlanRecord) -> Option<TurnScrapbook> {
         fields: fields.iter().map(|f| clamp_chars(f, FIELD_NAME_MAX_CHARS)).collect(),
         rows: v["kept"].as_u64().unwrap_or(0) as usize,
         sample_withheld: v["sample_withheld"].as_bool().unwrap_or(false),
+        continues: v["continues"].as_str().map(String::from),
     })
 }
 

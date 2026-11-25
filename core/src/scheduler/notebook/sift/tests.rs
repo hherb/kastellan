@@ -141,6 +141,7 @@ async fn the_sift_loop() {
     the_item_the_sorter_failed_on_counts_no_read_error(&pool).await;
     a_db_error_mid_sift_writes_its_finished_row(&pool).await;
     an_earlier_turns_table_keeps_its_sifts_column_order(&pool).await;
+    an_earlier_turns_chain_is_tabled_whole(&pool).await;
     a_sift_over_a_step_whose_newest_call_failed_says_so(&pool).await;
     a_sift_over_a_step_whose_newest_call_was_blocked_says_so(&pool).await;
 }

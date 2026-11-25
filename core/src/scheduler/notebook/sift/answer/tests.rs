@@ -79,13 +79,13 @@ fn the_cap_is_on_refs_named_and_a_chain_brings_every_link() {
         })
         .collect();
     let all: Vec<String> = (1..=9).map(|n| format!("sb:9:{n}")).collect();
-    assert_eq!(table_refs(&plans, &["sb:9:9".into()]), (all.clone(), vec![]));
-    assert_eq!(table_refs(&plans, &["sb:9:09".into(), "sb:9:9".into()]).0, all, "canonical, and once");
+    assert_eq!(table_refs(&plans, &[], &["sb:9:9".into()]), (all.clone(), vec![]));
+    assert_eq!(table_refs(&plans, &[], &["sb:9:09".into(), "sb:9:9".into()]).0, all, "canonical, and once");
     let named: Vec<String> = (1..=9).map(|n| format!("sb:7:{n}")).collect();
-    let (refs, refused) = table_refs(&plans, &named);
+    let (refs, refused) = table_refs(&plans, &[], &named);
     assert_eq!(refs, named[..TABLE_REFS_MAX]);
     assert_eq!(refused, ["(table sb:7:9 could not be included: a table names at most 8)"]);
-    assert_eq!(table_refs(&plans, &["bad".into()]).0, ["bad"], "kept as written for its refusal");
+    assert_eq!(table_refs(&plans, &[], &["bad".into()]).0, ["bad"], "kept as written for its refusal");
 }
 
 /// #960 item 2: an answer with no table after a sift that kept rows is
@@ -272,6 +272,7 @@ fn an_earlier_turn_s_fields_come_from_its_record_in_order() {
         fields: fields.iter().map(|f| f.to_string()).collect(),
         rows: 2,
         sample_withheld: withheld,
+        continues: None,
     };
     let turn = Turn {
         task_id: 5,
