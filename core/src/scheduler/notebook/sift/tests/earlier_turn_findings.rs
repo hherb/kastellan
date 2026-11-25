@@ -27,3 +27,29 @@ pub(super) async fn an_earlier_turns_table_keeps_its_sifts_column_order(pool: &s
     let b = body(&run(pool, &script, ctx).await.result);
     assert!(b.contains("| vendor | gross_amount | id | source |") && b.contains("| Acme | 120 | INV-7 | e1 |"), "{b}");
 }
+
+/// #956: a table naming an earlier turn's chain by its last link showed
+/// only that link's rows, because the chain was read from this run's
+/// summaries alone. The turn record keeps each link's `continues`.
+pub(super) async fn an_earlier_turns_chain_is_tabled_whole(pool: &sqlx::PgPool) {
+    let earlier = new_task(pool, 5).await.task_id;
+    for (sift, vendor) in [(2, "Acme"), (3, "Globex")] {
+        let row = scrapbook::NewRow {
+            kind: RowKind::Kept,
+            source: json!({"id": vendor}),
+            fields: json!({"vendor": vendor}),
+            classification: "Personal".into(),
+        };
+        scrapbook::append_rows(pool, earlier, sift, &[row]).await.unwrap();
+    }
+    let (first, last) = (format!("sb:{earlier}:2"), format!("sb:{earlier}:3"));
+    let mut ctx = new_task(pool, 5).await;
+    ctx.conversation_task_ids = Some(vec![earlier]);
+    ctx.conversation = vec![json!({"at": "t", "user": "my invoices", "answer": "a", "scrapbooks": [
+        {"scrapbook": first, "criterion": "an invoice", "fields": ["vendor"], "rows": 1},
+        {"scrapbook": last, "criterion": "an invoice", "fields": ["vendor"], "rows": 1, "continues": first},
+    ]})];
+    let script = Script::new(&[json!({"steps": steps(&[1]), "answer": {"body": "As before:", "table": {"scrapbook": last}}})]);
+    let b = body(&run(pool, &script, ctx).await.result);
+    assert!(b.contains("| Acme | Acme |") && b.contains("| Globex | Globex |"), "{b}");
+}

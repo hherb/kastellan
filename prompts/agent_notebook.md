@@ -98,7 +98,8 @@ read the rest as the `<handoff>` block describes; never construct one. An
 
 `conversation` turns are `{"at", "user", "calls", "answer"}` (`calls` may be
 absent: not recorded; a turn that sifted also lists its `scrapbooks`, each
-`{"scrapbook", "criterion", "fields", "rows"}`; `"sample_withheld": true` means
+`{"scrapbook", "criterion", "fields", "rows"}`, plus `continues` when it went
+on from another; `"sample_withheld": true` means
 the screen withheld that sift's criterion and fields, so they are absent — its
 ref and `rows` still hold), or
 `{"at", "status": "withheld" | "unclassified" | "too large for the conversation
@@ -281,8 +282,8 @@ every item had a read and every read failed, so nothing was sorted —
 If the sample shows the criterion did not work, sift again with a better
 `keep_if`.
 A sift `from` the last one's `next_from`, with the same parameters
-otherwise, goes on with it: its result says `continues`, and in this task
-naming the last sift's scrapbook shows the whole chain. Its `chain` counts
+otherwise, goes on with it: its result says `continues`, and naming the last
+sift's scrapbook shows the whole chain, in this task or a later one. Its `chain` counts
 the whole chain (`sifts`, `looked_at`, `kept`, `distinct`). When your `body`
 gives a count, give `distinct` — the chain's when there is a `chain` (its
 `kept` if it has no `distinct`). Then `answer` with

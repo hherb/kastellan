@@ -313,7 +313,7 @@ pub(crate) async fn run_sift(
 /// parse or its rows cannot be read.
 pub(super) async fn chain_distinct(pool: &PgPool, ctx: &TaskContext, prev: &str, sift: i32, own: &[NewRow]) -> Option<usize> {
     let mut all: Vec<Row> = Vec::new();
-    for name in super::chain::expand(&ctx.plans, prev) {
+    for name in super::chain::expand(&ctx.plans, &ctx.conversation, prev) {
         let Ok(r) = ScrapRef::parse(&name) else {
             tracing::warn!(task_id = ctx.task_id, scrapbook = %name, "sift: a chain link's name does not parse; no `distinct`");
             return None;

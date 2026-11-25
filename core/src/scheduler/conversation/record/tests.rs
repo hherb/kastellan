@@ -333,7 +333,8 @@ fn a_sift_leaves_its_scrapbook_and_its_reads_are_not_calls() {
             criterion: "an invoice".into(),
             fields: vec!["amount".into()],
             rows: 2,
-            sample_withheld: false
+            sample_withheld: false,
+            continues: None,
         }]
     );
     assert_eq!(record.data_class, DataClass::Personal, "the reads still raise the class");
@@ -393,4 +394,21 @@ fn scrapbooks_too_shrink_to_fit_the_byte_cap() {
     assert!(record.omitted_scrapbooks > 0 && !record.scrapbooks.is_empty());
     assert_eq!(record.scrapbooks.len() + record.omitted_scrapbooks, SCRAPBOOKS_PER_TURN);
     assert_eq!(record.scrapbooks.last().unwrap().scrapbook, format!("sb:7:{SCRAPBOOKS_PER_TURN}"), "the newest stay");
+}
+
+/// #956: a later turn's table naming a chain's last link shows the whole
+/// chain only if the record keeps each link's `continues`; absent when a
+/// sift continues none, as the summary has it.
+#[test]
+fn a_sift_that_continues_another_records_the_link() {
+    use crate::scheduler::notebook::sift::{SIFT_METHOD, SIFT_TOOL};
+    let sift = |summary| {
+        let plan = plan_with(vec![step(SIFT_TOOL, SIFT_METHOD, serde_json::json!({}), DataClass::Personal)]);
+        PlanRecord::new(plan, vec![StepOutcome::Ok(summary)])
+    };
+    let first = sift(serde_json::json!({"scrapbook": "sb:7:2", "kept": 3, "next_from": 30}));
+    let next = sift(serde_json::json!({"scrapbook": "sb:7:3", "kept": 1, "continues": "sb:7:2"}));
+    let shown = serde_json::to_value(from_plans(&[first, next], DataClass::Public).scrapbooks).unwrap();
+    assert!(shown[0].get("continues").is_none(), "absent when it continues none: {shown}");
+    assert_eq!(shown[1]["continues"], "sb:7:2");
 }
