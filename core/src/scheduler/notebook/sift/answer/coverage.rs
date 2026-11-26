@@ -14,7 +14,8 @@ pub(super) struct Link {
     pub(super) continues: Option<String>,
     /// Its list's key ([`SiftParams::list_key`]): sifts with the same went
     /// through one list. `None` for an earlier turn's ref whose record has
-    /// none (stored before issue 1058): a list of its own.
+    /// none (stored before issue 1058, or its parameters did not parse): a
+    /// list of its own.
     pub(super) list: Option<String>,
     pub(super) from: usize,
     pub(super) looked_at: usize,
@@ -49,9 +50,8 @@ impl Link {
 /// links are adjacent spans of one list, so they add up; a link left out
 /// (the table's cap, an unreadable one) leaves its span unread. Pure.
 ///
-/// shortcut: "one list" is the same `over` and `items`; a step re-run
-/// between two sifts makes them two lists (#959) that this counts as one —
-/// carry the list's identity in the summary if that is seen live. A sift's
+/// "One list" is one [`SiftParams::list_key`]; see its shortcut for a step
+/// re-run between two sifts (#959). A sift's
 /// unread span that another covered is not counted here: [`stop_lines`]
 /// names it (issue 1026).
 pub(super) fn coverage(links: &[Link]) -> (usize, usize) {

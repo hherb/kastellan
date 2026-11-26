@@ -56,7 +56,8 @@ impl SiftParams {
     /// task that ran it: sifts with the same key went through one list
     /// (#1015), in this run or an earlier turn's (issue 1058). A step's key
     /// names its task, since step numbers are each task's own; a
-    /// scrapbook's ref names one already. Pure.
+    /// scrapbook's ref names one already, and `items` is not read over a
+    /// scrapbook (`resolve_over`), so it is no part of that key. Pure.
     ///
     /// shortcut: one `over` and `items` is one list, even when the step was
     /// run again between two sifts (#959); carry the result's identity if
@@ -65,7 +66,7 @@ impl SiftParams {
         let items = self.items.as_deref().unwrap_or("");
         match &self.over {
             Over::Step(n) => format!("{task_id}:step {n}:{items}"),
-            Over::Scrapbook(r) => format!("{r}:{items}"),
+            Over::Scrapbook(r) => r.to_string(),
         }
     }
 }
@@ -126,12 +127,15 @@ struct RawParams {
     read: Option<serde_json::Value>,
     keep_if: String,
     fields: Vec<String>,
-    /// A summary's `continues` and `chain`, copied back by the model:
-    /// ignored (the chain is code's to say, [`super::chain`]).
+    /// A summary's `continues`, `chain` and `list`, copied back by the
+    /// model: ignored (the chain and the list are code's to say,
+    /// [`super::chain`], [`SiftParams::list_key`]).
     #[serde(default, rename = "continues")]
     _continues: Option<serde::de::IgnoredAny>,
     #[serde(default, rename = "chain")]
     _chain: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "list")]
+    _list: Option<serde::de::IgnoredAny>,
 }
 
 /// Parse and check a `sift.run` call's `parameters`: a non-blank criterion

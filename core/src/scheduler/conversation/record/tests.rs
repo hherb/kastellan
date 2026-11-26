@@ -457,4 +457,7 @@ fn a_sift_records_which_list_it_went_over() {
     assert_eq!(shown[1]["list"], shown[0]["list"], "another criterion, the same list");
     assert_eq!(shown[2]["list"], "7:step 2:hits");
     assert!(shown[3].get("list").is_none(), "unparsed parameters: no key: {shown}");
+    let long = serde_json::json!({"over": {"step": 1}, "items": "é".repeat(400), "keep_if": "x", "fields": ["a"]});
+    let shown = serde_json::to_value(from_plans(&[sift(long, "sb:7:6")], DataClass::Public).scrapbooks).unwrap();
+    assert!(shown[0]["list"].as_str().unwrap().chars().count() <= RETURNS_MAX_CHARS + 1, "a long `items` is clamped: {shown}");
 }

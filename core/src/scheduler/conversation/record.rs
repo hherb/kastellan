@@ -107,8 +107,8 @@ pub(crate) struct TurnScrapbook {
     /// The list the sift went over, as an opaque code-written key
     /// ([`SiftParams::list_key`](crate::scheduler::notebook::sift::params::SiftParams::list_key)):
     /// a later turn's table counts two sifts with the same key as one list
-    /// (issue 1058). Absent when the sift's parameters do not parse, and
-    /// in a record stored before it.
+    /// (issue 1058). Absent when the sift's parameters or its scrapbook's
+    /// name do not parse, and in a record stored before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) list: Option<String>,
 }
@@ -141,7 +141,8 @@ fn scrapbook_of(record: &PlanRecord) -> Option<TurnScrapbook> {
 /// (issue 1058); `None` when either does not parse.
 fn list_key(params: &serde_json::Value, name: &str) -> Option<String> {
     use crate::scheduler::notebook::sift::params::{parse_params, ScrapRef};
-    Some(parse_params(params).ok()?.list_key(ScrapRef::parse(name).ok()?.task_id))
+    // Clamped like `criterion`: a step's `items` path is as long as the tool's own key.
+    Some(clamp_chars(&parse_params(params).ok()?.list_key(ScrapRef::parse(name).ok()?.task_id), RETURNS_MAX_CHARS))
 }
 
 fn is_zero(n: &usize) -> bool {

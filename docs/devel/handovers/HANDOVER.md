@@ -65,13 +65,16 @@ Live: thinking **ON** (`reasoning_effort`, `TIMEOUT_MS=600000`). DGX rootfs imag
   The harness's `sql_during_sort` hides the `tasks` and `task_scrapbook` tables during the first sorter call, so the
   cancel check fails while `audit_log` still accepts rows. The 4 mutants the issue names now fail. ⚠️ Closing the whole
   pool instead let the deleted-trailing-check mutant survive: the loop's next cancel check fails with the same text.
-- **Issue 1058:** `SiftParams::list_key` (pure) gives `"<task>:step <n>:<items>"` or `"<sb ref>:<items>"`.
+- **Issue 1058:** `SiftParams::list_key` (pure) gives `"<task>:step <n>:<items>"` or `"<sb ref>"` (a scrapbook sift
+  never reads `items`; record copy clamped to 256 chars).
   `TurnScrapbook.list` gets it from the sift call's own parameters. `Link.list` is that key for this run and for earlier
   turns, and `coverage` groups on it; an old record without the key counts as its own list, as before. The prompt names
-  `list` ("never put it in a call"; RawParams refuses it in words). **Deploying copies `prompts/agent_notebook.md`.**
+  `list` ("never put it in a call"; a copied-back `list` is ignored like `continues`/`chain`). **Deploying copies
+  `prompts/agent_notebook.md`.**
   ⚠️ This is still one `over` + `items` = one list (a step re-run between two sifts, #959).
-- `sift/answer.rs` 500 → **401** (verbatim move of `Link`/`coverage`/`stop_lines` to `sift/answer/coverage.rs`, 114);
-  `sift/run.rs` **495** and `sift/tests.rs` **501**, so split either before its next change.
+- `sift/answer.rs` 500 → **401** (`Link`/`coverage`/`list_coverage`/`stop_lines` moved to `sift/answer/coverage.rs`,
+  114, with `Link.list` re-keyed to `list_key` in the same commit); `sift/run.rs` **495**, near the cap; ⚠️
+  `sift/tests.rs` **501**, over it (two leg calls), so split it before its next change.
 
 ### Previous (2026-11-22 → 25): twelve #956 items in six PRs (#1057, #1056, #1055, #1054, #1052, #1051, merged, deployed DGX by 2026-11-26) — **#1057:** `TurnScrapbook` keeps `looked_at`/`remaining`/`from`, so an earlier turn's table counts what its sifts looked at; a cancel during a sift's reads is `stopped: "cancelled"` (`run::not_run_stop`). **#1056:** `TurnScrapbook.continues`; `chain::expand` falls back to `chain::recorded` (⚠️ a link the record dropped to fit its cap ends the chain there). **#1055:** `sift::answer::recorded_fields` reads an earlier turn's sift `fields` order from the conversation's turn record; `TurnScrapbook.sample_withheld`. **#1054:** `table::empty_columns` says a `columns` name no kept row fills; `as_number` reads `1.200,00` / `12,50` (⚠️ `1,200` / `1.200` keep the English reading; tests `table/tests/numbers.rs`). **#1052:** `sift/run.rs` `error_stop` writes `sift.finished` `stopped: "error"` with `rows_unwritten`; `chain::failed_since` → `over_older` names a newer failed or blocked call's code (⚠️ a resumed run starts `SiftRun.refused` empty; untested arms: [issue 1053](https://github.com/hherb/kastellan/issues/1053)); `sift/run.rs` **485**, `notebook/run.rs` **492**. **#1051:** a resumed run seeds its turn past the scrapbook's highest sift (`scrapbook::last_sift` → `task_exec::seeded_budget`; ⚠️ a sift that wrote **no** rows and a failed mirror write can still reuse a number); `template::elements_unread` counts fan-out elements skipped for want of the path; `task_exec.rs` **736**. Full sections: this file at each PR in git history.
 
@@ -355,7 +358,7 @@ Also over: `core/src/memory/l3_surface.rs` 539 (+5 in #785, a doc paragraph), `c
 its new leg in `mail_live_shape_e2e/hit_fields.rs` (a `#[path]` module); move the next one there too, or split. ⚠️ `audit/truncate/tests.rs` is 833.
 Recent splits (the pattern to keep; list in the `867` snapshot): #905 `supervisor/src/lib.rs` 624 → 431, #869 `pg_events/{test_support,
 lost_rows/tests}.rs` and `audit_sink_thinning_tests.rs`, #849, #835, #806 — each proved byte-identical.
-`core/src/scheduler/notebook/run/tests.rs` **560** (#1049 replaced the runaway leg with `run/runaway_tests.rs`, 159; the next leg goes in its own file): #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/answer.rs` **500** and `sift/tests.rs` **499** (the next PG leg goes in a `sift/tests/*_findings.rs` file). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
+`core/src/scheduler/notebook/run/tests.rs` **560** (#1049 replaced the runaway leg with `run/runaway_tests.rs`, 159; the next leg goes in its own file): #1023's review moved the selective-thinking case to `run/rewrite_tests.rs` (91). ⚠️ `sift/tests.rs` **501**, over the cap (the next PG leg goes in a `sift/tests/*_findings.rs` file; split the leg list). ⚠️ `sift/table/tests.rs` **494**, near the cap (+73 in #958 with its review; its date reader `table/dates.rs` 262, tests inline; split before the next change grows it) after PR #1030 split its distinct/grouping cases into `table/tests/distinct.rs` (125).
 ⚠️ **At or near the cap:** `main/audit_sink.rs` **500**, `worker_stderr/report/delivery/tests.rs` **500**,
 `polled_driver.rs` **498**, `polled_driver/replies.rs` **478** — split before the next change grows them.
 Per-PR growth history: the [`785` snapshot](archive/handover_20260929_785_pre-prune.md).

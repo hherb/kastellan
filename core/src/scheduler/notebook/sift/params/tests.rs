@@ -113,6 +113,7 @@ fn a_copied_continues_or_chain_is_ignored() {
     let mut v = spec_example();
     v["continues"] = json!("sb:9:2");
     v["chain"] = json!({"sifts": 2, "looked_at": 60, "kept": 9});
+    v["list"] = json!("5:step 1:hits");
     assert!(parse_params(&v).is_ok());
 }
 
@@ -139,7 +140,7 @@ fn read_takes_one_read_or_a_list_of_them() {
 fn a_list_key_names_the_task_only_for_a_step() {
     let p = |over: Value| parse_params(&json!({"over": over, "items": "hits", "keep_if": "x", "fields": ["a"]})).unwrap();
     assert_eq!(p(json!({"step": 2})).list_key(7), "7:step 2:hits");
-    assert_eq!(p(json!({"scrapbook": "sb:301:1"})).list_key(7), "sb:301:1:hits");
+    assert_eq!(p(json!({"scrapbook": "sb:301:1"})).list_key(7), "sb:301:1", "`items` is not read over a scrapbook");
     let bare = parse_params(&json!({"over": {"step": 2}, "keep_if": "x", "fields": ["a"]})).unwrap();
     assert_eq!(bare.list_key(7), "7:step 2:", "no `items`: the result itself");
 }
