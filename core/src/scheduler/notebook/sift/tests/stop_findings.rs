@@ -80,3 +80,75 @@ pub(super) async fn a_sift_over_a_step_whose_newest_call_was_blocked_says_so(poo
     assert!(note.contains("BLOCKED") && note.contains("step 1"), "{note}");
     assert_eq!(finished_row(pool, r.task_id).await["over_older"], json!(note));
 }
+
+/// Issue 1053 item 1: an error from the reads plan's review and dispatch
+/// ends the sift with a `sift.finished` row. A trigger rejects only the
+/// reads plan's `plan.formulate` row (its decision starts `sift reads: `),
+/// so the row `error_stop` writes afterwards still lands.
+pub(super) async fn an_error_dispatching_the_reads_writes_its_finished_row(
+    pool: &sqlx::PgPool,
+    spec: &kastellan_db::conn::ConnectSpec,
+) {
+    let admin = kastellan_db::pool::connect_admin_pool(spec).await.expect("admin pool");
+    let ctx = new_task(pool, 5).await;
+    let task = ctx.task_id;
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION reject_sift_reads() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+         IF NEW.action = 'plan.formulate' AND NEW.payload->'plan'->>'decision' LIKE 'sift reads: %' \
+         THEN RAISE EXCEPTION 'rejected the sift reads'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&admin)
+    .await
+    .expect("create function");
+    // Any task's reads plan: the cases run one at a time, and it is dropped below.
+    sqlx::query(
+        "CREATE TRIGGER reject_sift_reads BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_sift_reads()",
+    )
+    .execute(&admin)
+    .await
+    .expect("create trigger");
+    let script = Script::new(&three_turns(&["m1"], Some(("mail", "mail.read"))));
+    let result = try_run(pool, &script, ctx).await;
+    sqlx::query("DROP TRIGGER reject_sift_reads ON audit_log").execute(&admin).await.expect("drop trigger");
+    let err = result.expect_err("the reads plan's audit row was rejected");
+    assert!(err.to_string().contains("rejected the sift reads"), "{err}");
+    let finished = finished_row(pool, task).await;
+    assert_eq!(finished["stopped"], json!("error"), "{finished}");
+    assert!(finished["error"].as_str().is_some_and(|e| e.contains("rejected the sift reads")), "{finished}");
+    assert!(script.sorted.lock().unwrap().is_empty(), "nothing is sorted after the error");
+}
+
+/// Issue 1053 item 2: a cancel check that fails stops the sorting, and the
+/// task fails with that error after `sift.finished` says so. During the
+/// first sorter call the `tasks` and `task_scrapbook` tables are hidden, so
+/// the next item's `observe_state` fails while `audit_log` still takes rows.
+/// With a kept row the scrapbook write fails too, and the cancel check's
+/// error is still the one reported; with none, it is returned on its own.
+pub(super) async fn a_failed_cancel_check_fails_the_task_with_its_error(
+    pool: &sqlx::PgPool,
+    spec: &kastellan_db::conn::ConnectSpec,
+) {
+    let admin = kastellan_db::pool::connect_admin_pool(spec).await.expect("admin pool");
+    for (first, unwritten) in [(keep(1), 1), (no(), 0)] {
+        let ctx = new_task(pool, 5).await;
+        let task = ctx.task_id;
+        let mut script = Script::new(&three_turns(&["m1", "m2"], None)).sorting(&[first.clone(), keep(2)]);
+        script.sql_during_sort = Some((
+            admin.clone(),
+            "ALTER TABLE tasks RENAME TO tasks_hidden; ALTER TABLE task_scrapbook RENAME TO task_scrapbook_hidden",
+        ));
+        let result = try_run(pool, &script, ctx).await;
+        sqlx::raw_sql(
+            "ALTER TABLE tasks_hidden RENAME TO tasks; ALTER TABLE task_scrapbook_hidden RENAME TO task_scrapbook",
+        )
+        .execute(&admin)
+        .await
+        .expect("restore the tables");
+        let err = result.expect_err("the cancel check failed");
+        assert!(err.to_string().contains("tasks observe_state"), "first reply {first}: {err}");
+        assert_eq!(script.sorted.lock().unwrap().len(), 1, "first reply {first}: no item sorted after the failure");
+        let finished = finished_row(pool, task).await;
+        assert_eq!(finished["stopped"], json!("error"), "first reply {first}: {finished}");
+        assert_eq!(finished["rows_unwritten"], json!(unwritten), "first reply {first}: {finished}");
+    }
+}
