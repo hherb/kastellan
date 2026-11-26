@@ -350,6 +350,7 @@ fn a_turn_with_a_scrapbook_shows_it() {
         from: 0,
         looked_at: None,
         remaining: 0,
+        list: None,
     }];
     let out = render(&[t, turn(2, "q", "a")], CONVERSATION_BUDGET);
     assert_eq!(

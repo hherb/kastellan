@@ -4,9 +4,10 @@
 use kastellan_db::scrapbook::{self, Row, RowKind};
 use sqlx::PgPool;
 
-use super::params::{Over, ScrapRef, SiftParams};
+use super::params::ScrapRef;
 use super::table::{default_order, empty_columns, items, orders_anything, render_table, Counts, SOURCE_COLUMN};
 use super::{chain, may_read};
+use coverage::{coverage, stop_lines, Link};
 use crate::cassandra::types::DataClass;
 use crate::scheduler::inner_loop::{notebook_block_audit_payload, PlanRecord, TaskContext};
 use crate::scheduler::notebook::reply::{AnswerSpec, NotebookReply, Refs, TableSpec};
@@ -385,108 +386,6 @@ fn add_counts(c: &mut Counts, summary: Option<&serde_json::Value>) {
     c.failed_reads += n("failed_reads").unwrap_or(0);
 }
 
-/// An included scrapbook: the list it went over, the span of it it looked
-/// at, and what it left.
-struct Link {
-    /// Its ref, `sb:<task>:<sift>`.
-    name: String,
-    /// The link it continues, if it is a chain's later link.
-    continues: Option<String>,
-    /// `over` and `items`: sifts with the same went through one list.
-    /// `None` for an earlier turn's ref (no parameters here): a list of its own.
-    list: Option<(Over, Option<String>)>,
-    from: usize,
-    looked_at: usize,
-    remaining: usize,
-}
-
-impl Link {
-    /// From `facts` (this run's summary, else an earlier turn's record, #956)
-    /// and the parameters this run has. A record stored before its counts
-    /// has only rows: "looked at" is kept plus withheld, a lower bound.
-    fn of(name: String, facts: Option<&serde_json::Value>, params: Option<SiftParams>, rows: usize) -> Self {
-        let n = |k: &str| facts.and_then(|s| s[k].as_u64()).map(|v| v as usize);
-        Link {
-            name,
-            continues: facts.and_then(|s| s["continues"].as_str()).map(String::from),
-            from: params.as_ref().map_or_else(|| n("from").unwrap_or(0), |p| p.from),
-            list: params.map(|p| (p.over, p.items)),
-            looked_at: n("looked_at").unwrap_or(rows),
-            remaining: n("remaining").unwrap_or(0),
-        }
-    }
-}
-
-/// The items the table's scrapbooks looked at and did not, each list
-/// counted once (#1015): two sifts over one 80-item list that each looked
-/// at its first 30 looked at 30, not 60, and left 50, not 100. A chain's
-/// links are adjacent spans of one list, so they add up; a link left out
-/// (the table's cap, an unreadable one) leaves its span unread. Pure.
-///
-/// shortcut: "one list" is the same `over` and `items`; a step re-run
-/// between two sifts makes them two lists (#959) that this counts as one —
-/// carry the list's identity in the summary if that is seen live. A sift's
-/// unread span that another covered is not counted here: [`stop_lines`]
-/// names it (issue 1026).
-fn coverage(links: &[Link]) -> (usize, usize) {
-    let mut seen: Vec<&(Over, Option<String>)> = Vec::new();
-    let (mut looked, mut left) = (0, 0);
-    for l in links {
-        let group: Vec<&Link> = match &l.list {
-            // An earlier turn's ref, its own list; a link another went on from leaves its rest to it.
-            None => {
-                looked += l.looked_at;
-                if !links.iter().any(|o| o.continues.as_ref() == Some(&l.name)) {
-                    left += l.remaining;
-                }
-                continue;
-            }
-            Some(k) if seen.contains(&k) => continue,
-            Some(k) => {
-                seen.push(k);
-                links.iter().filter(|o| o.list.as_ref() == Some(k)).collect()
-            }
-        };
-        let (a, b) = list_coverage(&group);
-        looked += a;
-        left += b;
-    }
-    (looked, left)
-}
-
-/// One list's: the union of the spans its sifts looked at
-/// (`from..from + looked_at`), and the rest of the list, whose length is the
-/// longest any of them saw (`from + looked_at + remaining`). Pure.
-fn list_coverage(group: &[&Link]) -> (usize, usize) {
-    let len = group.iter().map(|l| l.from + l.looked_at + l.remaining).max().unwrap_or(0);
-    let mut spans: Vec<(usize, usize)> = group.iter().map(|l| (l.from, l.from + l.looked_at)).collect();
-    spans.sort_unstable();
-    let (mut looked, mut end) = (0, 0);
-    for (start, stop) in spans {
-        let start = start.max(end);
-        if stop > start {
-            looked += stop - start;
-            end = stop;
-        }
-    }
-    (looked, len.saturating_sub(looked))
-}
-
-/// Issue 1026 (d): when a table joins more than one question (sifts no
-/// later included link continues), a line for each that stopped with items
-/// unread — the note's "not yet looked at" is per list, so another question
-/// covering those items hides that this one never judged them. Pure.
-fn stop_lines(links: &[Link]) -> Vec<String> {
-    let last: Vec<&Link> = links.iter().filter(|l| !links.iter().any(|o| o.continues.as_ref() == Some(&l.name))).collect();
-    if last.len() < 2 {
-        return Vec::new();
-    }
-    last.iter()
-        .filter(|l| l.remaining > 0)
-        .map(|l| format!("(sift {} stopped after {} of its {} items)", l.name, l.from + l.looked_at, l.from + l.looked_at + l.remaining))
-        .collect()
-}
-
 /// A row's class; one that does not parse counts as the highest (fail
 /// closed: the ceiling must never be too low).
 pub(crate) fn row_class(r: &Row) -> DataClass {
@@ -495,6 +394,8 @@ pub(crate) fn row_class(r: &Row) -> DataClass {
         DataClass::Secret
     })
 }
+
+mod coverage;
 
 #[cfg(test)]
 mod tests;

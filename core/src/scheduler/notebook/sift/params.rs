@@ -51,6 +51,25 @@ pub(crate) struct SiftParams {
     pub fields: Vec<String>,
 }
 
+impl SiftParams {
+    /// An opaque name for the list this sift goes over, `task_id` being the
+    /// task that ran it: sifts with the same key went through one list
+    /// (#1015), in this run or an earlier turn's (issue 1058). A step's key
+    /// names its task, since step numbers are each task's own; a
+    /// scrapbook's ref names one already. Pure.
+    ///
+    /// shortcut: one `over` and `items` is one list, even when the step was
+    /// run again between two sifts (#959); carry the result's identity if
+    /// that is seen live.
+    pub(crate) fn list_key(&self, task_id: i64) -> String {
+        let items = self.items.as_deref().unwrap_or("");
+        match &self.over {
+            Over::Step(n) => format!("{task_id}:step {n}:{items}"),
+            Over::Scrapbook(r) => format!("{r}:{items}"),
+        }
+    }
+}
+
 /// A scrapbook's name, `sb:<task_id>:<sift>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScrapRef {
