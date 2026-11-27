@@ -223,7 +223,7 @@ Only needed when you work on the matching channel or worker:
 
 | Service | Setup |
 |---------|-------|
-| SearxNG (for `web-search` / `web-research`) | `scripts/web-search/setup-searxng.sh` (runs the official container on loopback) |
+| SearxNG (for `web-search` / `web-research`) | `scripts/web-search/setup-searxng.sh` (runs the official container on loopback; prefers rootless podman over docker, `KASTELLAN_SEARXNG_RUNTIME=docker` to override) |
 | A local Matrix homeserver | `scripts/matrix/setup-conduwuit.sh` (loopback conduwuit), or `scripts/matrix/dev-e2e-bootstrap.sh` for the throwaway homeserver the live Matrix e2e uses; production setup is [`docs/deploy/matrix-homeserver.md`](../../deploy/matrix-homeserver.md) |
 | The guard model (Shieldstral on llama.cpp) | `sh scripts/eval/run-shieldstral-llamacpp.sh` measures it; see [chapter 3](./03-dev-env-macos.md#the-fallback-runtime-llamacpp) |
 
