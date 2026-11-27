@@ -3,23 +3,61 @@
 #
 # SearxNG serves plain HTTP on a loopback port and DISABLES the JSON format by
 # default — this script writes a settings.yml that enables JSON and runs the
-# official container bound to 127.0.0.1:8888. Cross-platform: Docker Desktop on
-# macOS, docker or podman on Linux. Dev convenience only; not part of the
-# worker's trust boundary.
+# official container bound to 127.0.0.1:8888. Cross-platform: podman or docker,
+# on Linux and macOS. Dev convenience only; not part of the worker's trust
+# boundary.
+#
+# podman is preferred when both are on PATH: rootless podman runs the container
+# in a user namespace as the invoking user, with no root daemon, which matches
+# kastellan's own `systemd --user` deployment. A docker daemon is root, and its
+# group is root-equivalent (docs/devel/notes/2026-11-16-kiri-survey.md).
+# KASTELLAN_SEARXNG_RUNTIME=docker|podman overrides the choice.
 set -euo pipefail
 
 PORT="${KASTELLAN_SEARXNG_PORT:-8888}"
 NAME="${KASTELLAN_SEARXNG_NAME:-kastellan-searxng}"
 STATE_DIR="${KASTELLAN_SEARXNG_STATE:-$HOME/.local/state/kastellan/searxng}"
-IMAGE="searxng/searxng:latest"
+# Fully qualified: podman refuses (or prompts for) a short name under
+# `short-name-mode = "enforcing"`; docker reads the same reference unchanged.
+IMAGE="docker.io/searxng/searxng:latest"
 
-# Pick a container runtime.
-if command -v docker >/dev/null 2>&1; then
-  RT=docker
-elif command -v podman >/dev/null 2>&1; then
-  RT=podman
-else
-  echo "error: need docker or podman on PATH to run SearxNG" >&2
+# Pick a container runtime: an explicit choice, else podman, else docker.
+RT="${KASTELLAN_SEARXNG_RUNTIME:-}"
+case "$RT" in
+  "")
+    if command -v podman >/dev/null 2>&1; then
+      RT=podman
+    elif command -v docker >/dev/null 2>&1; then
+      RT=docker
+    else
+      echo "error: need podman or docker on PATH to run SearxNG" >&2
+      exit 1
+    fi
+    ;;
+  podman|docker)
+    if ! command -v "$RT" >/dev/null 2>&1; then
+      echo "error: KASTELLAN_SEARXNG_RUNTIME=$RT, but $RT is not on PATH" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "error: KASTELLAN_SEARXNG_RUNTIME must be podman or docker, not '$RT'" >&2
+    exit 1
+    ;;
+esac
+echo "using $RT"
+
+# A host set up before podman was preferred may already run this container
+# under the OTHER runtime. Starting a second one would fail on the port (or,
+# on a different port, leave two instances), so stop here and say how to move.
+case "$RT" in podman) OTHER=docker ;; *) OTHER=podman ;; esac
+if command -v "$OTHER" >/dev/null 2>&1 \
+   && "$OTHER" ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$NAME"; then
+  cat >&2 <<MSG
+error: a container named $NAME already exists under $OTHER.
+  To move it to $RT:  $OTHER rm -f $NAME   and run this script again.
+  To keep it on $OTHER:  KASTELLAN_SEARXNG_RUNTIME=$OTHER $0
+MSG
   exit 1
 fi
 

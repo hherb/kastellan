@@ -74,7 +74,7 @@ containers.
 
 | Host | Recommendation | Why |
 | --- | --- | --- |
-| **Linux (DGX)** | **Rootless podman**, ideally as a quadlet `.container` unit under `systemd --user` | User namespaces, no root daemon, and it fits the supervisor model we already use. `setup-searxng.sh` handles podman but **prefers `docker` when both are on PATH**. Swapping that order is a one-line change. |
+| **Linux (DGX)** | **Rootless podman**, ideally as a quadlet `.container` unit under `systemd --user` | User namespaces, no root daemon, and it fits the supervisor model we already use. `setup-searxng.sh` prefers podman when both are on PATH (since 2026-11-27; `KASTELLAN_SEARXNG_RUNTIME` overrides). |
 | **macOS** | Apple `container` (already a dependency for python-exec's micro-VM backend, Apache-2.0), or whatever the operator already runs | Adds no new dependency. Needs a check that the installed `container` version publishes ports (`-p 127.0.0.1:8888:8080`). If it doesn't, Docker Desktop/OrbStack/Kiri all work unchanged via `docker`. |
 | **Either, longer term** | Run SearxNG **without a container**: a uv venv, launched under our own bwrap / Seatbelt policy as a supervised sidecar, egress through the egress proxy | Removes the container runtime for this service. It is Python outside a worker, so it needs its own design note; it is not a quick swap. |
 
